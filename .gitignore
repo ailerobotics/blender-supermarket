@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# File policy: ignore an artifact ONLY when its regeneration is both offline AND
+# cheap (seconds to ~a minute); anything needing the network, or costing
+# GPU-hours, stays committed. Full rationale, the regeneration command and the
+# MEASURED cost for every line below are in README.md ("File policy" + the
+# decision log). Each "ignored" cost was measured by regenerating into a scratch
+# path and comparing to the committed copy.
+#
+# Deliberately NOT ignored (versioned): scenes/supermarket_base.blend and
+# assets/textures/ (Poly Haven, network); report_assets/ (curated);
+# scripts/planogram.json (small stage interface); renders/ and
+# renders/walkthrough.mp4 (GPU-hours to render — the visible evidence);
+# report.html (the human-facing deliverable that presents the renders).
+# ---------------------------------------------------------------------------
+
+# Built scene — rebuilds in ~4 s, offline, from supermarket_base.blend + scripts:
+#   blender -b scenes/supermarket_base.blend --python scripts/build_supermarket.py -- --all --save scenes/supermarket.blend
+/scenes/supermarket.blend
+
+# Generated labels, price tags and signs — ~6.7 s deterministic PIL output, offline:
+#   python3 scripts/gen_labels.py
+/assets/labels/
+/assets/signs/
+
+# USD export (usdc + its textures) — ~26 s, from the built scene:
+#   blender -b scenes/supermarket.blend --python scripts/export_usd.py
+/export/
+
+# --- transient by nature ---------------------------------------------------
+
+# Blender's rolling autosave backups: a byte-for-byte stale copy of the file
+# next to it, regenerated on every save. 154 MB of pure duplication.
+*.blend1
+
+# Run logs. Useful while a build is in flight, meaningless once it has landed,
+# and they grow without bound.
+logs/
+
+# Python bytecode from the generator scripts.
+__pycache__/
+*.pyc

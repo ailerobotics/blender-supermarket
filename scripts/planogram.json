@@ -1,0 +1,11830 @@
+{
+ "store": {
+  "width": 26.0,
+  "depth": 22.0,
+  "height": 4.0
+ },
+ "fixture": {
+  "base_z": 0.17,
+  "base_depth": 0.57,
+  "shelf_depth": 0.47,
+  "shelf_t": 0.03,
+  "height": 2.0,
+  "upright_w": 0.05,
+  "back_t": 0.04,
+  "clearance": 0.045,
+  "endcap_w": 1.0
+ },
+ "bay_w": 1.25,
+ "gondolas": [
+  {
+   "id": "G1",
+   "x": -9.15,
+   "y0": -3.0,
+   "n_bays": 6,
+   "sides": {
+    "L": {
+     "cats": [
+      "cereal"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "cereal",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.33,
+         "items": [
+          [
+           "cereal_choco",
+           2
+          ],
+          [
+           "cereal_honey",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.575,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_muesli",
+           3
+          ],
+          [
+           "cereal_corn",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.95,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "cereal_granola",
+           6
+          ],
+          [
+           "cereal_oats",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.265,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_corn",
+           2
+          ],
+          [
+           "cereal_choco",
+           2
+          ],
+          [
+           "cereal_muesli",
+           2
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "cereal",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.33,
+         "items": [
+          [
+           "cereal_choco",
+           3
+          ],
+          [
+           "cereal_honey",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.575,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_muesli",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.95,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "cereal_granola",
+           6
+          ],
+          [
+           "cereal_oats",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.265,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_muesli",
+           6
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "cereal",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.33,
+         "items": [
+          [
+           "cereal_honey",
+           2
+          ],
+          [
+           "cereal_choco",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.575,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_corn",
+           4
+          ],
+          [
+           "cereal_muesli",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.95,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "cereal_granola",
+           3
+          ],
+          [
+           "cereal_oats",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.265,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_choco",
+           5
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "cereal",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.33,
+         "items": [
+          [
+           "cereal_choco",
+           4
+          ],
+          [
+           "cereal_honey",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.575,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_corn",
+           2
+          ],
+          [
+           "cereal_muesli",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.95,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "cereal_granola",
+           5
+          ],
+          [
+           "cereal_oats",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.265,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_corn",
+           5
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "cereal",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.33,
+         "items": [
+          [
+           "cereal_honey",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.575,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_muesli",
+           2
+          ],
+          [
+           "cereal_corn",
+           2
+          ],
+          [
+           "cereal_muesli",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.95,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "cereal_oats",
+           2
+          ],
+          [
+           "cereal_granola",
+           3
+          ],
+          [
+           "cereal_oats",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.265,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_corn",
+           5
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "cereal",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.33,
+         "items": [
+          [
+           "cereal_honey",
+           3
+          ],
+          [
+           "cereal_choco",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.575,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_corn",
+           3
+          ],
+          [
+           "cereal_muesli",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.95,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "cereal_granola",
+           6
+          ],
+          [
+           "cereal_oats",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.265,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "cereal_choco",
+           3
+          ],
+          [
+           "cereal_corn",
+           2
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    "R": {
+     "cats": [
+      "coffee_tea"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "coffee_tea",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "coffee_beans",
+           4
+          ],
+          [
+           "biscuit_digest",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "biscuit_choc",
+           4
+          ],
+          [
+           "coffee_ground",
+           2
+          ],
+          [
+           "biscuit_choc",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.16,
+         "items": [
+          [
+           "coffee_instant",
+           10
+          ],
+          [
+           "coffee_instant",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.08,
+         "items": [
+          [
+           "tea_black",
+           5
+          ],
+          [
+           "tea_green",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "coffee_beans",
+           6
+          ],
+          [
+           "tea_green",
+           2
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "coffee_tea",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "biscuit_digest",
+           9
+          ],
+          [
+           "coffee_beans",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "coffee_ground",
+           5
+          ],
+          [
+           "biscuit_choc",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.16,
+         "items": [
+          [
+           "coffee_instant",
+           6
+          ],
+          [
+           "coffee_instant",
+           5
+          ],
+          [
+           "coffee_instant",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.08,
+         "items": [
+          [
+           "tea_black",
+           6
+          ],
+          [
+           "tea_green",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "tea_black",
+           4
+          ],
+          [
+           "coffee_beans",
+           3
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "coffee_tea",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "biscuit_digest",
+           8
+          ],
+          [
+           "coffee_beans",
+           3
+          ],
+          [
+           "biscuit_digest",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "biscuit_choc",
+           2
+          ],
+          [
+           "coffee_ground",
+           3
+          ],
+          [
+           "biscuit_choc",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.16,
+         "items": [
+          [
+           "coffee_instant",
+           10
+          ],
+          [
+           "coffee_instant",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.08,
+         "items": [
+          [
+           "tea_black",
+           6
+          ],
+          [
+           "tea_green",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "tea_black",
+           6
+          ],
+          [
+           "tea_green",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "coffee_tea",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "coffee_beans",
+           6
+          ],
+          [
+           "biscuit_digest",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "biscuit_choc",
+           2
+          ],
+          [
+           "coffee_ground",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.16,
+         "items": [
+          [
+           "coffee_instant",
+           10
+          ],
+          [
+           "coffee_instant",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.08,
+         "items": [
+          [
+           "tea_black",
+           2
+          ],
+          [
+           "tea_green",
+           4
+          ],
+          [
+           "tea_black",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "tea_green",
+           2
+          ],
+          [
+           "coffee_beans",
+           4
+          ],
+          [
+           "tea_black",
+           2
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "coffee_tea",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "biscuit_digest",
+           8
+          ],
+          [
+           "coffee_beans",
+           2
+          ],
+          [
+           "biscuit_digest",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "coffee_ground",
+           6
+          ],
+          [
+           "biscuit_choc",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.16,
+         "items": [
+          [
+           "coffee_instant",
+           5
+          ],
+          [
+           "coffee_instant",
+           5
+          ],
+          [
+           "coffee_instant",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.08,
+         "items": [
+          [
+           "tea_green",
+           6
+          ],
+          [
+           "tea_black",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "tea_green",
+           5
+          ],
+          [
+           "coffee_beans",
+           2
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "coffee_tea",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "biscuit_digest",
+           6
+          ],
+          [
+           "coffee_beans",
+           4
+          ],
+          [
+           "biscuit_digest",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "biscuit_choc",
+           3
+          ],
+          [
+           "coffee_ground",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.16,
+         "items": [
+          [
+           "coffee_instant",
+           4
+          ],
+          [
+           "coffee_instant",
+           4
+          ],
+          [
+           "coffee_instant",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.08,
+         "items": [
+          [
+           "tea_black",
+           2
+          ],
+          [
+           "tea_green",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "coffee_beans",
+           5
+          ],
+          [
+           "tea_green",
+           3
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "G2",
+   "x": -6.1000000000000005,
+   "y0": -3.0,
+   "n_bays": 6,
+   "sides": {
+    "L": {
+     "cats": [
+      "snacks"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "snacks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "tortilla",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "chips_paprika",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.94,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pretzel",
+           5
+          ],
+          [
+           "pretzel",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.275,
+         "depth": 0.47,
+         "max_h": 0.13,
+         "items": [
+          [
+           "popcorn",
+           3
+          ],
+          [
+           "popcorn",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.555,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pretzel",
+           4
+          ],
+          [
+           "popcorn",
+           2
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "snacks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "chips_salt",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "chips_cheese",
+           2
+          ],
+          [
+           "chips_paprika",
+           2
+          ],
+          [
+           "chips_cheese",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.94,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pretzel",
+           3
+          ],
+          [
+           "pretzel",
+           2
+          ],
+          [
+           "pretzel",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.275,
+         "depth": 0.47,
+         "max_h": 0.13,
+         "items": [
+          [
+           "popcorn",
+           4
+          ],
+          [
+           "popcorn",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.555,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pretzel",
+           4
+          ],
+          [
+           "popcorn",
+           2
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "snacks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "chips_salt",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "chips_cheese",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.94,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pretzel",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.275,
+         "depth": 0.47,
+         "max_h": 0.13,
+         "items": [
+          [
+           "popcorn",
+           5
+          ],
+          [
+           "popcorn",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.555,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "popcorn",
+           5
+          ],
+          [
+           "pretzel",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "snacks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "chips_salt",
+           2
+          ],
+          [
+           "tortilla",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "chips_paprika",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.94,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pretzel",
+           5
+          ],
+          [
+           "pretzel",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.275,
+         "depth": 0.47,
+         "max_h": 0.13,
+         "items": [
+          [
+           "popcorn",
+           2
+          ],
+          [
+           "popcorn",
+           2
+          ],
+          [
+           "popcorn",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.555,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "popcorn",
+           4
+          ],
+          [
+           "pretzel",
+           2
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "snacks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "chips_salt",
+           3
+          ],
+          [
+           "tortilla",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "chips_paprika",
+           3
+          ],
+          [
+           "chips_cheese",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.94,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pretzel",
+           3
+          ],
+          [
+           "pretzel",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.275,
+         "depth": 0.47,
+         "max_h": 0.13,
+         "items": [
+          [
+           "popcorn",
+           5
+          ],
+          [
+           "popcorn",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.555,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pretzel",
+           5
+          ],
+          [
+           "popcorn",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "snacks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "chips_salt",
+           2
+          ],
+          [
+           "tortilla",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.3,
+         "items": [
+          [
+           "chips_cheese",
+           2
+          ],
+          [
+           "chips_paprika",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.94,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pretzel",
+           3
+          ],
+          [
+           "pretzel",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.275,
+         "depth": 0.47,
+         "max_h": 0.13,
+         "items": [
+          [
+           "popcorn",
+           5
+          ],
+          [
+           "popcorn",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.555,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pretzel",
+           5
+          ],
+          [
+           "popcorn",
+           1
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    "R": {
+     "cats": [
+      "confectionery"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "confectionery",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_mints",
+           7
+          ],
+          [
+           "candy_gummy",
+           2
+          ],
+          [
+           "candy_mints",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.07,
+         "items": [
+          [
+           "cookies_box",
+           4
+          ],
+          [
+           "cookies_box",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.012,
+         "items": [
+          [
+           "choc_milk",
+           5
+          ],
+          [
+           "choc_dark",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_gummy",
+           3
+          ],
+          [
+           "candy_mints",
+           5
+          ],
+          [
+           "choc_dark",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "choc_milk",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "choc_dark",
+           4
+          ],
+          [
+           "candy_mints",
+           4
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "confectionery",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_mints",
+           8
+          ],
+          [
+           "candy_gummy",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.07,
+         "items": [
+          [
+           "cookies_box",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.012,
+         "items": [
+          [
+           "choc_dark",
+           2
+          ],
+          [
+           "choc_milk",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_mints",
+           4
+          ],
+          [
+           "choc_dark",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "choc_milk",
+           5
+          ],
+          [
+           "candy_gummy",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "choc_dark",
+           6
+          ],
+          [
+           "candy_mints",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "confectionery",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_mints",
+           8
+          ],
+          [
+           "candy_gummy",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.07,
+         "items": [
+          [
+           "cookies_box",
+           5
+          ],
+          [
+           "cookies_box",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.012,
+         "items": [
+          [
+           "choc_milk",
+           4
+          ],
+          [
+           "choc_dark",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_gummy",
+           3
+          ],
+          [
+           "candy_mints",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_gummy",
+           4
+          ],
+          [
+           "choc_dark",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "choc_milk",
+           2
+          ],
+          [
+           "candy_mints",
+           7
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "confectionery",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_mints",
+           4
+          ],
+          [
+           "candy_gummy",
+           4
+          ],
+          [
+           "candy_mints",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.07,
+         "items": [
+          [
+           "cookies_box",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.012,
+         "items": [
+          [
+           "choc_milk",
+           3
+          ],
+          [
+           "choc_dark",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_mints",
+           6
+          ],
+          [
+           "choc_dark",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_gummy",
+           6
+          ],
+          [
+           "choc_milk",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "choc_dark",
+           6
+          ],
+          [
+           "candy_mints",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "confectionery",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_mints",
+           5
+          ],
+          [
+           "candy_gummy",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.07,
+         "items": [
+          [
+           "cookies_box",
+           2
+          ],
+          [
+           "cookies_box",
+           2
+          ],
+          [
+           "cookies_box",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.012,
+         "items": [
+          [
+           "choc_dark",
+           4
+          ],
+          [
+           "choc_milk",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_mints",
+           9
+          ],
+          [
+           "candy_gummy",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_gummy",
+           6
+          ],
+          [
+           "choc_milk",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "choc_milk",
+           2
+          ],
+          [
+           "candy_mints",
+           8
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "confectionery",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_gummy",
+           4
+          ],
+          [
+           "candy_mints",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.07,
+         "items": [
+          [
+           "cookies_box",
+           2
+          ],
+          [
+           "cookies_box",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.012,
+         "items": [
+          [
+           "choc_dark",
+           4
+          ],
+          [
+           "choc_milk",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_gummy",
+           6
+          ],
+          [
+           "candy_mints",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "candy_gummy",
+           2
+          ],
+          [
+           "choc_dark",
+           2
+          ],
+          [
+           "choc_milk",
+           2
+          ],
+          [
+           "candy_gummy",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "choc_milk",
+           6
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "G3",
+   "x": -3.0500000000000007,
+   "y0": -3.0,
+   "n_bays": 6,
+   "sides": {
+    "L": {
+     "cats": [
+      "soft_drinks"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "soft_drinks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "lemon_15l",
+           10
+          ],
+          [
+           "cola_15l",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "cola_can",
+           7
+          ],
+          [
+           "energy_can",
+           4
+          ],
+          [
+           "cola_can",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.845,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "cola_zero_can",
+           10
+          ],
+          [
+           "lemon_can",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.125,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "orange_can",
+           10
+          ],
+          [
+           "orange_can",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.405,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "energy_can",
+           6
+          ],
+          [
+           "cola_zero_can",
+           5
+          ],
+          [
+           "orange_can",
+           5
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "soft_drinks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "lemon_15l",
+           7
+          ],
+          [
+           "cola_15l",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "cola_can",
+           10
+          ],
+          [
+           "energy_can",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.845,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "lemon_can",
+           5
+          ],
+          [
+           "cola_zero_can",
+           10
+          ]
+         ]
+        },
+        {
+         "z": 1.125,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "orange_can",
+           7
+          ],
+          [
+           "orange_can",
+           6
+          ],
+          [
+           "orange_can",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.405,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "energy_can",
+           4
+          ],
+          [
+           "orange_can",
+           9
+          ],
+          [
+           "cola_zero_can",
+           2
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "soft_drinks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "cola_15l",
+           6
+          ],
+          [
+           "lemon_15l",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "cola_can",
+           10
+          ],
+          [
+           "energy_can",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.845,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "cola_zero_can",
+           9
+          ],
+          [
+           "lemon_can",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.125,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "orange_can",
+           7
+          ],
+          [
+           "orange_can",
+           8
+          ]
+         ]
+        },
+        {
+         "z": 1.405,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "cola_zero_can",
+           4
+          ],
+          [
+           "energy_can",
+           4
+          ],
+          [
+           "orange_can",
+           6
+          ],
+          [
+           "cola_zero_can",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "soft_drinks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "cola_15l",
+           4
+          ],
+          [
+           "lemon_15l",
+           4
+          ],
+          [
+           "cola_15l",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "energy_can",
+           6
+          ],
+          [
+           "cola_can",
+           9
+          ],
+          [
+           "energy_can",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.845,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "cola_zero_can",
+           7
+          ],
+          [
+           "lemon_can",
+           8
+          ]
+         ]
+        },
+        {
+         "z": 1.125,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "orange_can",
+           8
+          ],
+          [
+           "orange_can",
+           4
+          ],
+          [
+           "orange_can",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.405,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "energy_can",
+           6
+          ],
+          [
+           "cola_zero_can",
+           4
+          ],
+          [
+           "orange_can",
+           6
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "soft_drinks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "cola_15l",
+           4
+          ],
+          [
+           "lemon_15l",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "cola_can",
+           6
+          ],
+          [
+           "energy_can",
+           7
+          ],
+          [
+           "cola_can",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.845,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "cola_zero_can",
+           8
+          ],
+          [
+           "lemon_can",
+           6
+          ],
+          [
+           "cola_zero_can",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.125,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "orange_can",
+           10
+          ],
+          [
+           "orange_can",
+           4
+          ],
+          [
+           "orange_can",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.405,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "cola_zero_can",
+           9
+          ],
+          [
+           "orange_can",
+           6
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "soft_drinks",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "cola_15l",
+           7
+          ],
+          [
+           "lemon_15l",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "energy_can",
+           8
+          ],
+          [
+           "cola_can",
+           5
+          ],
+          [
+           "energy_can",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.845,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "cola_zero_can",
+           9
+          ],
+          [
+           "lemon_can",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.125,
+         "depth": 0.47,
+         "max_h": 0.115,
+         "items": [
+          [
+           "orange_can",
+           9
+          ],
+          [
+           "orange_can",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.405,
+         "depth": 0.47,
+         "max_h": 0.168,
+         "items": [
+          [
+           "orange_can",
+           7
+          ],
+          [
+           "energy_can",
+           8
+          ],
+          [
+           "cola_zero_can",
+           1
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    "R": {
+     "cats": [
+      "water_juice"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "water_juice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "water_sparkling",
+           6
+          ],
+          [
+           "water_15l",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "juice_orange",
+           7
+          ],
+          [
+           "water_05l",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.86,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "juice_apple",
+           7
+          ],
+          [
+           "juice_tropical",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 1.14,
+         "depth": 0.47,
+         "max_h": 0.32,
+         "items": [
+          [
+           "water_15l",
+           8
+          ],
+          [
+           "juice_tropical",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.535,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "juice_tropical",
+           9
+          ],
+          [
+           "juice_orange",
+           4
+          ],
+          [
+           "water_05l",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "water_juice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "water_15l",
+           4
+          ],
+          [
+           "water_sparkling",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "juice_orange",
+           9
+          ],
+          [
+           "water_05l",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.86,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "juice_tropical",
+           10
+          ],
+          [
+           "juice_apple",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.14,
+         "depth": 0.47,
+         "max_h": 0.32,
+         "items": [
+          [
+           "water_sparkling",
+           4
+          ],
+          [
+           "water_15l",
+           5
+          ],
+          [
+           "juice_tropical",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.535,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "juice_tropical",
+           7
+          ],
+          [
+           "juice_orange",
+           7
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "water_juice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "water_sparkling",
+           9
+          ],
+          [
+           "water_15l",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "water_05l",
+           7
+          ],
+          [
+           "juice_orange",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.86,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "juice_tropical",
+           5
+          ],
+          [
+           "juice_apple",
+           9
+          ]
+         ]
+        },
+        {
+         "z": 1.14,
+         "depth": 0.47,
+         "max_h": 0.32,
+         "items": [
+          [
+           "water_sparkling",
+           10
+          ],
+          [
+           "juice_tropical",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.535,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "water_05l",
+           5
+          ],
+          [
+           "juice_tropical",
+           5
+          ],
+          [
+           "juice_orange",
+           4
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "water_juice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "water_15l",
+           4
+          ],
+          [
+           "water_sparkling",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "juice_orange",
+           10
+          ],
+          [
+           "water_05l",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.86,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "juice_apple",
+           5
+          ],
+          [
+           "juice_tropical",
+           9
+          ]
+         ]
+        },
+        {
+         "z": 1.14,
+         "depth": 0.47,
+         "max_h": 0.32,
+         "items": [
+          [
+           "juice_tropical",
+           10
+          ],
+          [
+           "water_15l",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.535,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "juice_orange",
+           10
+          ],
+          [
+           "juice_tropical",
+           4
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "water_juice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "water_15l",
+           5
+          ],
+          [
+           "water_sparkling",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "water_05l",
+           7
+          ],
+          [
+           "juice_orange",
+           6
+          ],
+          [
+           "water_05l",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.86,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "juice_tropical",
+           10
+          ],
+          [
+           "juice_apple",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.14,
+         "depth": 0.47,
+         "max_h": 0.32,
+         "items": [
+          [
+           "juice_tropical",
+           9
+          ],
+          [
+           "water_15l",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.535,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "juice_orange",
+           4
+          ],
+          [
+           "water_05l",
+           9
+          ],
+          [
+           "juice_tropical",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "water_juice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.32,
+         "items": [
+          [
+           "water_sparkling",
+           6
+          ],
+          [
+           "water_15l",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.565,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "water_05l",
+           8
+          ],
+          [
+           "juice_orange",
+           4
+          ],
+          [
+           "water_05l",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.86,
+         "depth": 0.47,
+         "max_h": 0.2,
+         "items": [
+          [
+           "juice_tropical",
+           5
+          ],
+          [
+           "juice_apple",
+           7
+          ],
+          [
+           "juice_tropical",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.14,
+         "depth": 0.47,
+         "max_h": 0.32,
+         "items": [
+          [
+           "water_sparkling",
+           4
+          ],
+          [
+           "water_15l",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 1.535,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "juice_orange",
+           8
+          ],
+          [
+           "water_05l",
+           6
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "G4",
+   "x": -1.7763568394002505e-15,
+   "y0": -3.0,
+   "n_bays": 6,
+   "sides": {
+    "L": {
+     "cats": [
+      "canned"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "canned",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_tomato",
+           8
+          ],
+          [
+           "can_beans",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.45,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_chickpea",
+           7
+          ],
+          [
+           "can_corn",
+           5
+          ],
+          [
+           "can_chickpea",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.73,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_soup",
+           7
+          ],
+          [
+           "can_soup",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.01,
+         "depth": 0.47,
+         "max_h": 0.04,
+         "items": [
+          [
+           "can_tuna",
+           4
+          ],
+          [
+           "can_tuna",
+           7
+          ],
+          [
+           "can_tuna",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.29,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_corn",
+           9
+          ],
+          [
+           "can_tuna",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.57,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_tomato",
+           8
+          ],
+          [
+           "can_beans",
+           5
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "canned",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_beans",
+           7
+          ],
+          [
+           "can_tomato",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.45,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_chickpea",
+           4
+          ],
+          [
+           "can_corn",
+           9
+          ]
+         ]
+        },
+        {
+         "z": 0.73,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_soup",
+           7
+          ],
+          [
+           "can_soup",
+           5
+          ],
+          [
+           "can_soup",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.01,
+         "depth": 0.47,
+         "max_h": 0.04,
+         "items": [
+          [
+           "can_tuna",
+           7
+          ],
+          [
+           "can_tuna",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.29,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_beans",
+           7
+          ],
+          [
+           "can_tuna",
+           5
+          ],
+          [
+           "can_corn",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.57,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_beans",
+           6
+          ],
+          [
+           "can_tomato",
+           7
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "canned",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_tomato",
+           6
+          ],
+          [
+           "can_beans",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.45,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_corn",
+           6
+          ],
+          [
+           "can_chickpea",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.73,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_soup",
+           4
+          ],
+          [
+           "can_soup",
+           7
+          ],
+          [
+           "can_soup",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.01,
+         "depth": 0.47,
+         "max_h": 0.04,
+         "items": [
+          [
+           "can_tuna",
+           9
+          ],
+          [
+           "can_tuna",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.29,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_beans",
+           5
+          ],
+          [
+           "can_tuna",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 1.57,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_tuna",
+           10
+          ],
+          [
+           "can_tomato",
+           2
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "canned",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_beans",
+           5
+          ],
+          [
+           "can_tomato",
+           8
+          ]
+         ]
+        },
+        {
+         "z": 0.45,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_chickpea",
+           8
+          ],
+          [
+           "can_corn",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.73,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_soup",
+           5
+          ],
+          [
+           "can_soup",
+           5
+          ],
+          [
+           "can_soup",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.01,
+         "depth": 0.47,
+         "max_h": 0.04,
+         "items": [
+          [
+           "can_tuna",
+           9
+          ],
+          [
+           "can_tuna",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.29,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_tuna",
+           7
+          ],
+          [
+           "can_corn",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.57,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_beans",
+           5
+          ],
+          [
+           "can_tomato",
+           8
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "canned",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_beans",
+           10
+          ],
+          [
+           "can_tomato",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.45,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_chickpea",
+           6
+          ],
+          [
+           "can_corn",
+           4
+          ],
+          [
+           "can_chickpea",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.73,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_soup",
+           4
+          ],
+          [
+           "can_soup",
+           6
+          ],
+          [
+           "can_soup",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.01,
+         "depth": 0.47,
+         "max_h": 0.04,
+         "items": [
+          [
+           "can_tuna",
+           9
+          ],
+          [
+           "can_tuna",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.29,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_beans",
+           4
+          ],
+          [
+           "can_corn",
+           8
+          ],
+          [
+           "can_tuna",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.57,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_tuna",
+           4
+          ],
+          [
+           "can_beans",
+           9
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "canned",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_tomato",
+           10
+          ],
+          [
+           "can_beans",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.45,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_chickpea",
+           10
+          ],
+          [
+           "can_corn",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.73,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_soup",
+           10
+          ],
+          [
+           "can_soup",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.01,
+         "depth": 0.47,
+         "max_h": 0.04,
+         "items": [
+          [
+           "can_tuna",
+           6
+          ],
+          [
+           "can_tuna",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.29,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_corn",
+           4
+          ],
+          [
+           "can_beans",
+           8
+          ],
+          [
+           "can_tuna",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.57,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "can_tomato",
+           10
+          ],
+          [
+           "can_beans",
+           3
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    "R": {
+     "cats": [
+      "pasta_rice"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "pasta_rice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.27,
+         "items": [
+          [
+           "pasta_spag",
+           4
+          ],
+          [
+           "rice_basmati",
+           5
+          ],
+          [
+           "pasta_spag",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.515,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "rice_jasmine",
+           3
+          ],
+          [
+           "pasta_penne",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.85,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "pasta_fusilli",
+           3
+          ],
+          [
+           "pasta_fusilli",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.165,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "sauce_tomato",
+           8
+          ],
+          [
+           "sauce_pesto",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.445,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pasta_fusilli",
+           5
+          ],
+          [
+           "rice_jasmine",
+           3
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "pasta_rice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.27,
+         "items": [
+          [
+           "pasta_spag",
+           6
+          ],
+          [
+           "rice_basmati",
+           3
+          ],
+          [
+           "pasta_spag",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.515,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pasta_penne",
+           4
+          ],
+          [
+           "rice_jasmine",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.85,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "pasta_fusilli",
+           3
+          ],
+          [
+           "pasta_fusilli",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.165,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "sauce_tomato",
+           6
+          ],
+          [
+           "sauce_pesto",
+           4
+          ],
+          [
+           "sauce_tomato",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.445,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "sauce_pesto",
+           7
+          ],
+          [
+           "pasta_fusilli",
+           3
+          ],
+          [
+           "rice_jasmine",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "pasta_rice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.27,
+         "items": [
+          [
+           "pasta_spag",
+           6
+          ],
+          [
+           "rice_basmati",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.515,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "rice_jasmine",
+           6
+          ],
+          [
+           "pasta_penne",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.85,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "pasta_fusilli",
+           6
+          ],
+          [
+           "pasta_fusilli",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.165,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "sauce_pesto",
+           5
+          ],
+          [
+           "sauce_tomato",
+           9
+          ]
+         ]
+        },
+        {
+         "z": 1.445,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pasta_fusilli",
+           6
+          ],
+          [
+           "sauce_pesto",
+           4
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "pasta_rice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.27,
+         "items": [
+          [
+           "rice_basmati",
+           5
+          ],
+          [
+           "pasta_spag",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.515,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "rice_jasmine",
+           5
+          ],
+          [
+           "pasta_penne",
+           2
+          ],
+          [
+           "rice_jasmine",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.85,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "pasta_fusilli",
+           4
+          ],
+          [
+           "pasta_fusilli",
+           3
+          ],
+          [
+           "pasta_fusilli",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.165,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "sauce_pesto",
+           6
+          ],
+          [
+           "sauce_tomato",
+           8
+          ]
+         ]
+        },
+        {
+         "z": 1.445,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "pasta_fusilli",
+           5
+          ],
+          [
+           "rice_jasmine",
+           3
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "pasta_rice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.27,
+         "items": [
+          [
+           "pasta_spag",
+           7
+          ],
+          [
+           "rice_basmati",
+           3
+          ],
+          [
+           "pasta_spag",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.515,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "rice_jasmine",
+           5
+          ],
+          [
+           "pasta_penne",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.85,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "pasta_fusilli",
+           4
+          ],
+          [
+           "pasta_fusilli",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.165,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "sauce_pesto",
+           4
+          ],
+          [
+           "sauce_tomato",
+           9
+          ],
+          [
+           "sauce_pesto",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.445,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "sauce_pesto",
+           9
+          ],
+          [
+           "pasta_fusilli",
+           3
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "pasta_rice",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.27,
+         "items": [
+          [
+           "rice_basmati",
+           3
+          ],
+          [
+           "pasta_spag",
+           5
+          ],
+          [
+           "rice_basmati",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.515,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "rice_jasmine",
+           6
+          ],
+          [
+           "pasta_penne",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.85,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "pasta_fusilli",
+           6
+          ],
+          [
+           "pasta_fusilli",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.165,
+         "depth": 0.47,
+         "max_h": 0.14,
+         "items": [
+          [
+           "sauce_pesto",
+           10
+          ],
+          [
+           "sauce_tomato",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.445,
+         "depth": 0.47,
+         "max_h": 0.26,
+         "items": [
+          [
+           "sauce_pesto",
+           6
+          ],
+          [
+           "pasta_fusilli",
+           3
+          ],
+          [
+           "rice_jasmine",
+           2
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "G5",
+   "x": 3.049999999999999,
+   "y0": -3.0,
+   "n_bays": 6,
+   "sides": {
+    "L": {
+     "cats": [
+      "baking"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "baking",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.29,
+         "items": [
+          [
+           "oil_olive",
+           7
+          ],
+          [
+           "oil_sunflower",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.535,
+         "depth": 0.47,
+         "max_h": 0.23,
+         "items": [
+          [
+           "flour",
+           4
+          ],
+          [
+           "sugar",
+           3
+          ],
+          [
+           "flour",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.84,
+         "depth": 0.47,
+         "max_h": 0.1,
+         "items": [
+          [
+           "spice_paprika",
+           10
+          ],
+          [
+           "spice_pepper",
+           7
+          ],
+          [
+           "spice_paprika",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.12,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "spice_paprika",
+           7
+          ],
+          [
+           "sugar",
+           2
+          ],
+          [
+           "oil_sunflower",
+           5
+          ],
+          [
+           "spice_paprika",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.485,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "spice_pepper",
+           5
+          ],
+          [
+           "oil_olive",
+           5
+          ],
+          [
+           "flour",
+           3
+          ],
+          [
+           "spice_pepper",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "baking",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.29,
+         "items": [
+          [
+           "oil_sunflower",
+           5
+          ],
+          [
+           "oil_olive",
+           4
+          ],
+          [
+           "oil_sunflower",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.535,
+         "depth": 0.47,
+         "max_h": 0.23,
+         "items": [
+          [
+           "flour",
+           6
+          ],
+          [
+           "sugar",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.84,
+         "depth": 0.47,
+         "max_h": 0.1,
+         "items": [
+          [
+           "spice_pepper",
+           10
+          ],
+          [
+           "spice_paprika",
+           8
+          ],
+          [
+           "spice_pepper",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.12,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "oil_sunflower",
+           6
+          ],
+          [
+           "spice_paprika",
+           10
+          ]
+         ]
+        },
+        {
+         "z": 1.485,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "oil_olive",
+           6
+          ],
+          [
+           "spice_pepper",
+           8
+          ],
+          [
+           "flour",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "baking",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.29,
+         "items": [
+          [
+           "oil_sunflower",
+           8
+          ],
+          [
+           "oil_olive",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.535,
+         "depth": 0.47,
+         "max_h": 0.23,
+         "items": [
+          [
+           "sugar",
+           3
+          ],
+          [
+           "flour",
+           3
+          ],
+          [
+           "sugar",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.84,
+         "depth": 0.47,
+         "max_h": 0.1,
+         "items": [
+          [
+           "spice_pepper",
+           5
+          ],
+          [
+           "spice_paprika",
+           5
+          ],
+          [
+           "spice_pepper",
+           5
+          ],
+          [
+           "spice_paprika",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.12,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "sugar",
+           2
+          ],
+          [
+           "spice_paprika",
+           7
+          ],
+          [
+           "oil_sunflower",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.485,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "oil_olive",
+           6
+          ],
+          [
+           "spice_pepper",
+           4
+          ],
+          [
+           "flour",
+           3
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "baking",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.29,
+         "items": [
+          [
+           "oil_olive",
+           9
+          ],
+          [
+           "oil_sunflower",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.535,
+         "depth": 0.47,
+         "max_h": 0.23,
+         "items": [
+          [
+           "flour",
+           2
+          ],
+          [
+           "sugar",
+           3
+          ],
+          [
+           "flour",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.84,
+         "depth": 0.47,
+         "max_h": 0.1,
+         "items": [
+          [
+           "spice_pepper",
+           7
+          ],
+          [
+           "spice_paprika",
+           4
+          ],
+          [
+           "spice_pepper",
+           8
+          ],
+          [
+           "spice_paprika",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.12,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "sugar",
+           4
+          ],
+          [
+           "oil_sunflower",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 1.485,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "spice_pepper",
+           4
+          ],
+          [
+           "flour",
+           3
+          ],
+          [
+           "oil_olive",
+           6
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "baking",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.29,
+         "items": [
+          [
+           "oil_olive",
+           8
+          ],
+          [
+           "oil_sunflower",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.535,
+         "depth": 0.47,
+         "max_h": 0.23,
+         "items": [
+          [
+           "flour",
+           5
+          ],
+          [
+           "sugar",
+           2
+          ],
+          [
+           "flour",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.84,
+         "depth": 0.47,
+         "max_h": 0.1,
+         "items": [
+          [
+           "spice_paprika",
+           9
+          ],
+          [
+           "spice_pepper",
+           7
+          ],
+          [
+           "spice_paprika",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.12,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "oil_sunflower",
+           7
+          ],
+          [
+           "sugar",
+           2
+          ],
+          [
+           "spice_paprika",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.485,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "flour",
+           4
+          ],
+          [
+           "spice_pepper",
+           8
+          ],
+          [
+           "oil_olive",
+           2
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "baking",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.29,
+         "items": [
+          [
+           "oil_sunflower",
+           4
+          ],
+          [
+           "oil_olive",
+           5
+          ],
+          [
+           "oil_sunflower",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.535,
+         "depth": 0.47,
+         "max_h": 0.23,
+         "items": [
+          [
+           "sugar",
+           4
+          ],
+          [
+           "flour",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.84,
+         "depth": 0.47,
+         "max_h": 0.1,
+         "items": [
+          [
+           "spice_pepper",
+           10
+          ],
+          [
+           "spice_paprika",
+           10
+          ]
+         ]
+        },
+        {
+         "z": 1.12,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "spice_paprika",
+           8
+          ],
+          [
+           "sugar",
+           5
+          ],
+          [
+           "oil_sunflower",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.485,
+         "depth": 0.47,
+         "max_h": 0.29,
+         "items": [
+          [
+           "flour",
+           5
+          ],
+          [
+           "spice_pepper",
+           4
+          ],
+          [
+           "oil_olive",
+           3
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    "R": {
+     "cats": [
+      "condiments"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "condiments",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "ketchup",
+           7
+          ],
+          [
+           "mayo",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "honey",
+           9
+          ],
+          [
+           "peanut_butter",
+           4
+          ],
+          [
+           "honey",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "jam_straw",
+           6
+          ],
+          [
+           "mustard",
+           7
+          ],
+          [
+           "jam_straw",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "honey",
+           9
+          ],
+          [
+           "peanut_butter",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "peanut_butter",
+           7
+          ],
+          [
+           "mustard",
+           4
+          ],
+          [
+           "ketchup",
+           3
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "condiments",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "ketchup",
+           6
+          ],
+          [
+           "mayo",
+           4
+          ],
+          [
+           "ketchup",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "honey",
+           10
+          ],
+          [
+           "peanut_butter",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "jam_straw",
+           9
+          ],
+          [
+           "mustard",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "honey",
+           7
+          ],
+          [
+           "jam_straw",
+           4
+          ],
+          [
+           "peanut_butter",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "mustard",
+           8
+          ],
+          [
+           "peanut_butter",
+           6
+          ],
+          [
+           "ketchup",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "condiments",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "ketchup",
+           10
+          ],
+          [
+           "mayo",
+           3
+          ],
+          [
+           "ketchup",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "honey",
+           8
+          ],
+          [
+           "peanut_butter",
+           5
+          ],
+          [
+           "honey",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "mustard",
+           9
+          ],
+          [
+           "jam_straw",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "jam_straw",
+           9
+          ],
+          [
+           "peanut_butter",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "peanut_butter",
+           6
+          ],
+          [
+           "ketchup",
+           8
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "condiments",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "mayo",
+           8
+          ],
+          [
+           "ketchup",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "peanut_butter",
+           5
+          ],
+          [
+           "honey",
+           9
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "jam_straw",
+           7
+          ],
+          [
+           "mustard",
+           4
+          ],
+          [
+           "jam_straw",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "peanut_butter",
+           9
+          ],
+          [
+           "jam_straw",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "mustard",
+           7
+          ],
+          [
+           "peanut_butter",
+           7
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "condiments",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "ketchup",
+           7
+          ],
+          [
+           "mayo",
+           5
+          ],
+          [
+           "ketchup",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "peanut_butter",
+           7
+          ],
+          [
+           "honey",
+           5
+          ],
+          [
+           "peanut_butter",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "jam_straw",
+           10
+          ],
+          [
+           "mustard",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "honey",
+           6
+          ],
+          [
+           "peanut_butter",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "mustard",
+           10
+          ],
+          [
+           "peanut_butter",
+           4
+          ],
+          [
+           "ketchup",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "condiments",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.24,
+         "items": [
+          [
+           "ketchup",
+           10
+          ],
+          [
+           "mayo",
+           3
+          ],
+          [
+           "ketchup",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.485,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "honey",
+           10
+          ],
+          [
+           "peanut_butter",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.765,
+         "depth": 0.47,
+         "max_h": 0.11,
+         "items": [
+          [
+           "mustard",
+           8
+          ],
+          [
+           "jam_straw",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 1.045,
+         "depth": 0.47,
+         "max_h": 0.12,
+         "items": [
+          [
+           "honey",
+           8
+          ],
+          [
+           "peanut_butter",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.325,
+         "depth": 0.47,
+         "max_h": 0.24,
+         "items": [
+          [
+           "mustard",
+           7
+          ],
+          [
+           "peanut_butter",
+           6
+          ],
+          [
+           "ketchup",
+           1
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "G6",
+   "x": 6.1,
+   "y0": -3.0,
+   "n_bays": 6,
+   "sides": {
+    "L": {
+     "cats": [
+      "cleaning"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "cleaning",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.3,
+         "items": [
+          [
+           "bleach",
+           7
+          ],
+          [
+           "detergent",
+           2
+          ],
+          [
+           "bleach",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.545,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "powder",
+           2
+          ],
+          [
+           "spray_clean",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.9,
+         "depth": 0.47,
+         "max_h": 0.27,
+         "items": [
+          [
+           "softener",
+           2
+          ],
+          [
+           "dish_soap",
+           8
+          ],
+          [
+           "softener",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.245,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "spray_clean",
+           7
+          ],
+          [
+           "dish_soap",
+           6
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "cleaning",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.3,
+         "items": [
+          [
+           "bleach",
+           4
+          ],
+          [
+           "detergent",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.545,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "powder",
+           4
+          ],
+          [
+           "spray_clean",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.9,
+         "depth": 0.47,
+         "max_h": 0.27,
+         "items": [
+          [
+           "softener",
+           2
+          ],
+          [
+           "dish_soap",
+           10
+          ],
+          [
+           "softener",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.245,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "powder",
+           4
+          ],
+          [
+           "spray_clean",
+           3
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "cleaning",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.3,
+         "items": [
+          [
+           "detergent",
+           6
+          ],
+          [
+           "bleach",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.545,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "spray_clean",
+           5
+          ],
+          [
+           "powder",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.9,
+         "depth": 0.47,
+         "max_h": 0.27,
+         "items": [
+          [
+           "dish_soap",
+           9
+          ],
+          [
+           "softener",
+           2
+          ],
+          [
+           "dish_soap",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.245,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "spray_clean",
+           7
+          ],
+          [
+           "dish_soap",
+           5
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "cleaning",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.3,
+         "items": [
+          [
+           "detergent",
+           2
+          ],
+          [
+           "bleach",
+           4
+          ],
+          [
+           "detergent",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.545,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "spray_clean",
+           6
+          ],
+          [
+           "powder",
+           2
+          ],
+          [
+           "spray_clean",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.9,
+         "depth": 0.47,
+         "max_h": 0.27,
+         "items": [
+          [
+           "softener",
+           3
+          ],
+          [
+           "dish_soap",
+           5
+          ],
+          [
+           "softener",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.245,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "dish_soap",
+           5
+          ],
+          [
+           "powder",
+           3
+          ],
+          [
+           "spray_clean",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "cleaning",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.3,
+         "items": [
+          [
+           "detergent",
+           6
+          ],
+          [
+           "bleach",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.545,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "spray_clean",
+           7
+          ],
+          [
+           "powder",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.9,
+         "depth": 0.47,
+         "max_h": 0.27,
+         "items": [
+          [
+           "dish_soap",
+           5
+          ],
+          [
+           "softener",
+           5
+          ],
+          [
+           "dish_soap",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.245,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "powder",
+           4
+          ],
+          [
+           "dish_soap",
+           4
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "cleaning",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.3,
+         "items": [
+          [
+           "bleach",
+           10
+          ],
+          [
+           "detergent",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.545,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "powder",
+           5
+          ],
+          [
+           "spray_clean",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.9,
+         "depth": 0.47,
+         "max_h": 0.27,
+         "items": [
+          [
+           "dish_soap",
+           7
+          ],
+          [
+           "softener",
+           4
+          ],
+          [
+           "dish_soap",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.245,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "powder",
+           4
+          ],
+          [
+           "dish_soap",
+           4
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    "R": {
+     "cats": [
+      "paper",
+      "pet"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "paper",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.33,
+         "items": [
+          [
+           "toilet_paper",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.575,
+         "depth": 0.47,
+         "max_h": 0.09,
+         "items": [
+          [
+           "tissues",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 0.855,
+         "depth": 0.47,
+         "max_h": 0.33,
+         "items": [
+          [
+           "tissues",
+           3
+          ],
+          [
+           "toilet_paper",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.26,
+         "depth": 0.47,
+         "max_h": 0.33,
+         "items": [
+          [
+           "toilet_paper",
+           3
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "paper",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.33,
+         "items": [
+          [
+           "toilet_paper",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.575,
+         "depth": 0.47,
+         "max_h": 0.09,
+         "items": [
+          [
+           "tissues",
+           2
+          ],
+          [
+           "tissues",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.855,
+         "depth": 0.47,
+         "max_h": 0.33,
+         "items": [
+          [
+           "tissues",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.26,
+         "depth": 0.47,
+         "max_h": 0.33,
+         "items": [
+          [
+           "tissues",
+           5
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "paper",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.33,
+         "items": [
+          [
+           "toilet_paper",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.575,
+         "depth": 0.47,
+         "max_h": 0.09,
+         "items": [
+          [
+           "tissues",
+           3
+          ],
+          [
+           "tissues",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.855,
+         "depth": 0.47,
+         "max_h": 0.33,
+         "items": [
+          [
+           "tissues",
+           3
+          ],
+          [
+           "toilet_paper",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.26,
+         "depth": 0.47,
+         "max_h": 0.33,
+         "items": [
+          [
+           "kitchen_roll",
+           2
+          ],
+          [
+           "toilet_paper",
+           2
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "paper",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.33,
+         "items": [
+          [
+           "toilet_paper",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.575,
+         "depth": 0.47,
+         "max_h": 0.09,
+         "items": [
+          [
+           "tissues",
+           2
+          ],
+          [
+           "tissues",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.855,
+         "depth": 0.47,
+         "max_h": 0.33,
+         "items": [
+          [
+           "tissues",
+           2
+          ],
+          [
+           "toilet_paper",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.26,
+         "depth": 0.47,
+         "max_h": 0.33,
+         "items": [
+          [
+           "toilet_paper",
+           3
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "pet",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.42,
+         "items": [
+          [
+           "petfood_dog",
+           3
+          ],
+          [
+           "petfood_dog",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.665,
+         "depth": 0.47,
+         "max_h": 0.05,
+         "items": [
+          [
+           "petfood_cat",
+           10
+          ],
+          [
+           "petfood_cat",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.945,
+         "depth": 0.47,
+         "max_h": 0.42,
+         "items": [
+          [
+           "petfood_dog",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.44,
+         "depth": 0.47,
+         "max_h": 0.05,
+         "items": [
+          [
+           "petfood_cat",
+           8
+          ],
+          [
+           "petfood_cat",
+           5
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "pet",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.42,
+         "items": [
+          [
+           "petfood_dog",
+           3
+          ],
+          [
+           "petfood_dog",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.665,
+         "depth": 0.47,
+         "max_h": 0.05,
+         "items": [
+          [
+           "petfood_cat",
+           10
+          ],
+          [
+           "petfood_cat",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.945,
+         "depth": 0.47,
+         "max_h": 0.42,
+         "items": [
+          [
+           "petfood_dog",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.44,
+         "depth": 0.47,
+         "max_h": 0.05,
+         "items": [
+          [
+           "petfood_cat",
+           10
+          ],
+          [
+           "petfood_cat",
+           3
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "id": "G7",
+   "x": 9.149999999999997,
+   "y0": -3.0,
+   "n_bays": 6,
+   "sides": {
+    "L": {
+     "cats": [
+      "personal_care"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "personal_care",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shower_gel",
+           7
+          ],
+          [
+           "shampoo",
+           6
+          ],
+          [
+           "shower_gel",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "toothpaste",
+           8
+          ],
+          [
+           "hand_wash",
+           7
+          ],
+          [
+           "toothpaste",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.15,
+         "items": [
+          [
+           "deodorant",
+           4
+          ],
+          [
+           "soap_bar",
+           3
+          ],
+          [
+           "deodorant",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "deodorant",
+           8
+          ],
+          [
+           "hand_wash",
+           5
+          ],
+          [
+           "shower_gel",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shower_gel",
+           9
+          ],
+          [
+           "toothpaste",
+           6
+          ],
+          [
+           "deodorant",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.18,
+         "items": [
+          [
+           "hand_wash",
+           5
+          ],
+          [
+           "soap_bar",
+           2
+          ],
+          [
+           "deodorant",
+           4
+          ],
+          [
+           "hand_wash",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "personal_care",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shampoo",
+           4
+          ],
+          [
+           "shower_gel",
+           4
+          ],
+          [
+           "shampoo",
+           5
+          ],
+          [
+           "shower_gel",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "hand_wash",
+           7
+          ],
+          [
+           "toothpaste",
+           7
+          ],
+          [
+           "hand_wash",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.15,
+         "items": [
+          [
+           "deodorant",
+           8
+          ],
+          [
+           "soap_bar",
+           3
+          ],
+          [
+           "deodorant",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "hand_wash",
+           10
+          ],
+          [
+           "shower_gel",
+           4
+          ],
+          [
+           "deodorant",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "deodorant",
+           4
+          ],
+          [
+           "shower_gel",
+           9
+          ],
+          [
+           "toothpaste",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.18,
+         "items": [
+          [
+           "hand_wash",
+           7
+          ],
+          [
+           "deodorant",
+           5
+          ],
+          [
+           "soap_bar",
+           1
+          ],
+          [
+           "hand_wash",
+           1
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "personal_care",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shampoo",
+           8
+          ],
+          [
+           "shower_gel",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "toothpaste",
+           4
+          ],
+          [
+           "hand_wash",
+           7
+          ],
+          [
+           "toothpaste",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.15,
+         "items": [
+          [
+           "soap_bar",
+           2
+          ],
+          [
+           "deodorant",
+           10
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "deodorant",
+           9
+          ],
+          [
+           "shower_gel",
+           5
+          ],
+          [
+           "hand_wash",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "toothpaste",
+           4
+          ],
+          [
+           "deodorant",
+           10
+          ],
+          [
+           "shower_gel",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.18,
+         "items": [
+          [
+           "deodorant",
+           10
+          ],
+          [
+           "hand_wash",
+           7
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "personal_care",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shower_gel",
+           4
+          ],
+          [
+           "shampoo",
+           10
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "hand_wash",
+           8
+          ],
+          [
+           "toothpaste",
+           5
+          ],
+          [
+           "hand_wash",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.15,
+         "items": [
+          [
+           "soap_bar",
+           4
+          ],
+          [
+           "deodorant",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "hand_wash",
+           6
+          ],
+          [
+           "deodorant",
+           10
+          ],
+          [
+           "shower_gel",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shower_gel",
+           10
+          ],
+          [
+           "toothpaste",
+           5
+          ],
+          [
+           "deodorant",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.18,
+         "items": [
+          [
+           "deodorant",
+           5
+          ],
+          [
+           "soap_bar",
+           2
+          ],
+          [
+           "hand_wash",
+           6
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "personal_care",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shower_gel",
+           8
+          ],
+          [
+           "shampoo",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "hand_wash",
+           5
+          ],
+          [
+           "toothpaste",
+           6
+          ],
+          [
+           "hand_wash",
+           4
+          ],
+          [
+           "toothpaste",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.15,
+         "items": [
+          [
+           "deodorant",
+           8
+          ],
+          [
+           "soap_bar",
+           2
+          ],
+          [
+           "deodorant",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "deodorant",
+           7
+          ],
+          [
+           "hand_wash",
+           9
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shower_gel",
+           7
+          ],
+          [
+           "deodorant",
+           8
+          ],
+          [
+           "toothpaste",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.18,
+         "items": [
+          [
+           "deodorant",
+           9
+          ],
+          [
+           "soap_bar",
+           3
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "personal_care",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shampoo",
+           7
+          ],
+          [
+           "shower_gel",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "hand_wash",
+           4
+          ],
+          [
+           "toothpaste",
+           7
+          ],
+          [
+           "hand_wash",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.15,
+         "items": [
+          [
+           "deodorant",
+           7
+          ],
+          [
+           "soap_bar",
+           2
+          ],
+          [
+           "deodorant",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shower_gel",
+           4
+          ],
+          [
+           "hand_wash",
+           4
+          ],
+          [
+           "deodorant",
+           6
+          ],
+          [
+           "shower_gel",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "toothpaste",
+           5
+          ],
+          [
+           "shower_gel",
+           6
+          ],
+          [
+           "deodorant",
+           6
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.18,
+         "items": [
+          [
+           "soap_bar",
+           5
+          ],
+          [
+           "deodorant",
+           2
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    "R": {
+     "cats": [
+      "cleaning",
+      "personal_care"
+     ],
+     "bays": [
+      {
+       "index": 0,
+       "cat": "cleaning",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.3,
+         "items": [
+          [
+           "detergent",
+           5
+          ],
+          [
+           "bleach",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.545,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "powder",
+           2
+          ],
+          [
+           "spray_clean",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.9,
+         "depth": 0.47,
+         "max_h": 0.27,
+         "items": [
+          [
+           "dish_soap",
+           10
+          ],
+          [
+           "softener",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.245,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "spray_clean",
+           7
+          ],
+          [
+           "dish_soap",
+           6
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 1,
+       "cat": "cleaning",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.3,
+         "items": [
+          [
+           "bleach",
+           7
+          ],
+          [
+           "detergent",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.545,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "powder",
+           5
+          ],
+          [
+           "spray_clean",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.9,
+         "depth": 0.47,
+         "max_h": 0.27,
+         "items": [
+          [
+           "dish_soap",
+           6
+          ],
+          [
+           "softener",
+           5
+          ],
+          [
+           "dish_soap",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.245,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "dish_soap",
+           6
+          ],
+          [
+           "spray_clean",
+           5
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 2,
+       "cat": "cleaning",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.3,
+         "items": [
+          [
+           "detergent",
+           2
+          ],
+          [
+           "bleach",
+           4
+          ],
+          [
+           "detergent",
+           2
+          ],
+          [
+           "bleach",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.545,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "powder",
+           2
+          ],
+          [
+           "spray_clean",
+           7
+          ]
+         ]
+        },
+        {
+         "z": 0.9,
+         "depth": 0.47,
+         "max_h": 0.27,
+         "items": [
+          [
+           "softener",
+           3
+          ],
+          [
+           "dish_soap",
+           8
+          ],
+          [
+           "softener",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.245,
+         "depth": 0.47,
+         "max_h": 0.28,
+         "items": [
+          [
+           "dish_soap",
+           9
+          ],
+          [
+           "spray_clean",
+           4
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 3,
+       "cat": "personal_care",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shampoo",
+           6
+          ],
+          [
+           "shower_gel",
+           8
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "toothpaste",
+           10
+          ],
+          [
+           "hand_wash",
+           7
+          ],
+          [
+           "toothpaste",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.15,
+         "items": [
+          [
+           "deodorant",
+           8
+          ],
+          [
+           "soap_bar",
+           3
+          ],
+          [
+           "deodorant",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "hand_wash",
+           5
+          ],
+          [
+           "shower_gel",
+           9
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "soap_bar",
+           2
+          ],
+          [
+           "shower_gel",
+           6
+          ],
+          [
+           "shampoo",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "hand_wash",
+           4
+          ],
+          [
+           "toothpaste",
+           10
+          ],
+          [
+           "deodorant",
+           4
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 4,
+       "cat": "personal_care",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shower_gel",
+           10
+          ],
+          [
+           "shampoo",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "hand_wash",
+           8
+          ],
+          [
+           "toothpaste",
+           9
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.15,
+         "items": [
+          [
+           "deodorant",
+           4
+          ],
+          [
+           "soap_bar",
+           3
+          ],
+          [
+           "deodorant",
+           5
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "soap_bar",
+           4
+          ],
+          [
+           "hand_wash",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shampoo",
+           10
+          ],
+          [
+           "soap_bar",
+           1
+          ],
+          [
+           "shower_gel",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "hand_wash",
+           4
+          ],
+          [
+           "toothpaste",
+           5
+          ],
+          [
+           "deodorant",
+           9
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "index": 5,
+       "cat": "personal_care",
+       "shelves": [
+        {
+         "z": 0.17,
+         "depth": 0.57,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shower_gel",
+           4
+          ],
+          [
+           "shampoo",
+           9
+          ],
+          [
+           "shower_gel",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 0.465,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "hand_wash",
+           7
+          ],
+          [
+           "toothpaste",
+           7
+          ],
+          [
+           "hand_wash",
+           3
+          ]
+         ]
+        },
+        {
+         "z": 0.745,
+         "depth": 0.47,
+         "max_h": 0.15,
+         "items": [
+          [
+           "deodorant",
+           5
+          ],
+          [
+           "soap_bar",
+           4
+          ]
+         ]
+        },
+        {
+         "z": 1.025,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "soap_bar",
+           5
+          ],
+          [
+           "shower_gel",
+           2
+          ]
+         ]
+        },
+        {
+         "z": 1.32,
+         "depth": 0.47,
+         "max_h": 0.22,
+         "items": [
+          [
+           "shampoo",
+           5
+          ],
+          [
+           "soap_bar",
+           3
+          ],
+          [
+           "shower_gel",
+           1
+          ]
+         ]
+        },
+        {
+         "z": 1.615,
+         "depth": 0.47,
+         "max_h": 0.19,
+         "items": [
+          [
+           "toothpaste",
+           9
+          ],
+          [
+           "hand_wash",
+           4
+          ],
+          [
+           "deodorant",
+           5
+          ]
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   }
+  }
+ ],
+ "wall_units": [
+  {
+   "id": "W_left",
+   "x": -12.85,
+   "y0": -3.0,
+   "facing": "+X",
+   "n_bays": 6,
+   "cats": [
+    "beer_wine"
+   ],
+   "bays": [
+    {
+     "index": 0,
+     "cat": "beer_wine",
+     "shelves": [
+      {
+       "z": 0.17,
+       "depth": 0.57,
+       "max_h": 0.3,
+       "items": [
+        [
+         "wine_red",
+         8
+        ],
+        [
+         "wine_white",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 0.545,
+       "depth": 0.47,
+       "max_h": 0.23,
+       "items": [
+        [
+         "beer_bottle",
+         4
+        ],
+        [
+         "beer_can",
+         5
+        ],
+        [
+         "beer_bottle",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 0.85,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "wine_red",
+         4
+        ],
+        [
+         "beer_bottle",
+         5
+        ],
+        [
+         "beer_can",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 1.225,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_bottle",
+         10
+        ],
+        [
+         "wine_white",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.6,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_can",
+         4
+        ],
+        [
+         "beer_bottle",
+         4
+        ],
+        [
+         "wine_white",
+         6
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 1,
+     "cat": "beer_wine",
+     "shelves": [
+      {
+       "z": 0.17,
+       "depth": 0.57,
+       "max_h": 0.3,
+       "items": [
+        [
+         "wine_red",
+         5
+        ],
+        [
+         "wine_white",
+         5
+        ],
+        [
+         "wine_red",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 0.545,
+       "depth": 0.47,
+       "max_h": 0.23,
+       "items": [
+        [
+         "beer_can",
+         8
+        ],
+        [
+         "beer_bottle",
+         7
+        ]
+       ]
+      },
+      {
+       "z": 0.85,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_bottle",
+         4
+        ],
+        [
+         "wine_red",
+         7
+        ],
+        [
+         "beer_can",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 1.225,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_bottle",
+         7
+        ],
+        [
+         "beer_can",
+         4
+        ],
+        [
+         "wine_white",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 1.6,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_bottle",
+         8
+        ],
+        [
+         "wine_white",
+         6
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 2,
+     "cat": "beer_wine",
+     "shelves": [
+      {
+       "z": 0.17,
+       "depth": 0.57,
+       "max_h": 0.3,
+       "items": [
+        [
+         "wine_red",
+         9
+        ],
+        [
+         "wine_white",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.545,
+       "depth": 0.47,
+       "max_h": 0.23,
+       "items": [
+        [
+         "beer_bottle",
+         6
+        ],
+        [
+         "beer_can",
+         4
+        ],
+        [
+         "beer_bottle",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 0.85,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_can",
+         5
+        ],
+        [
+         "wine_red",
+         9
+        ]
+       ]
+      },
+      {
+       "z": 1.225,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_can",
+         10
+        ],
+        [
+         "beer_bottle",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 1.6,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_bottle",
+         7
+        ],
+        [
+         "beer_can",
+         8
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 3,
+     "cat": "beer_wine",
+     "shelves": [
+      {
+       "z": 0.17,
+       "depth": 0.57,
+       "max_h": 0.3,
+       "items": [
+        [
+         "wine_white",
+         5
+        ],
+        [
+         "wine_red",
+         7
+        ],
+        [
+         "wine_white",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.545,
+       "depth": 0.47,
+       "max_h": 0.23,
+       "items": [
+        [
+         "beer_bottle",
+         8
+        ],
+        [
+         "beer_can",
+         4
+        ],
+        [
+         "beer_bottle",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 0.85,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_bottle",
+         5
+        ],
+        [
+         "beer_can",
+         6
+        ],
+        [
+         "wine_red",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 1.225,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_bottle",
+         8
+        ],
+        [
+         "wine_white",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 1.6,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "wine_white",
+         10
+        ],
+        [
+         "beer_bottle",
+         4
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 4,
+     "cat": "beer_wine",
+     "shelves": [
+      {
+       "z": 0.17,
+       "depth": 0.57,
+       "max_h": 0.3,
+       "items": [
+        [
+         "wine_red",
+         9
+        ],
+        [
+         "wine_white",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.545,
+       "depth": 0.47,
+       "max_h": 0.23,
+       "items": [
+        [
+         "beer_can",
+         5
+        ],
+        [
+         "beer_bottle",
+         4
+        ],
+        [
+         "beer_can",
+         5
+        ],
+        [
+         "beer_bottle",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.85,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "wine_red",
+         8
+        ],
+        [
+         "beer_can",
+         5
+        ],
+        [
+         "beer_bottle",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.225,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_bottle",
+         5
+        ],
+        [
+         "beer_can",
+         10
+        ]
+       ]
+      },
+      {
+       "z": 1.6,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_can",
+         7
+        ],
+        [
+         "wine_white",
+         7
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 5,
+     "cat": "beer_wine",
+     "shelves": [
+      {
+       "z": 0.17,
+       "depth": 0.57,
+       "max_h": 0.3,
+       "items": [
+        [
+         "wine_red",
+         9
+        ],
+        [
+         "wine_white",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.545,
+       "depth": 0.47,
+       "max_h": 0.23,
+       "items": [
+        [
+         "beer_bottle",
+         10
+        ],
+        [
+         "beer_can",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 0.85,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_can",
+         7
+        ],
+        [
+         "beer_bottle",
+         4
+        ],
+        [
+         "wine_red",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 1.225,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "beer_can",
+         10
+        ],
+        [
+         "wine_white",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.6,
+       "depth": 0.47,
+       "max_h": 0.3,
+       "items": [
+        [
+         "wine_white",
+         6
+        ],
+        [
+         "beer_can",
+         8
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "W_back",
+   "x": -11.5,
+   "y0": 10.85,
+   "facing": "-Y",
+   "n_bays": 5,
+   "cats": [
+    "bakery",
+    "confectionery"
+   ],
+   "bays": [
+    {
+     "index": 0,
+     "cat": "bakery",
+     "shelves": [
+      {
+       "z": 0.17,
+       "depth": 0.57,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_whole",
+         4
+        ],
+        [
+         "bread_white",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.45,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_white",
+         2
+        ],
+        [
+         "bread_whole",
+         2
+        ],
+        [
+         "bread_white",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.73,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_whole",
+         2
+        ],
+        [
+         "bread_white",
+         2
+        ],
+        [
+         "bread_whole",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.01,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_white",
+         5
+        ],
+        [
+         "bread_whole",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 1.29,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_whole",
+         5
+        ],
+        [
+         "bread_white",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 1.57,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_whole",
+         4
+        ],
+        [
+         "bread_white",
+         4
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 1,
+     "cat": "bakery",
+     "shelves": [
+      {
+       "z": 0.17,
+       "depth": 0.57,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_white",
+         6
+        ],
+        [
+         "bread_whole",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 0.45,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_whole",
+         5
+        ],
+        [
+         "bread_white",
+         2
+        ],
+        [
+         "bread_whole",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.73,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_white",
+         6
+        ],
+        [
+         "bread_whole",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.01,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_whole",
+         3
+        ],
+        [
+         "bread_white",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 1.29,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_white",
+         6
+        ],
+        [
+         "bread_whole",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.57,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_whole",
+         4
+        ],
+        [
+         "bread_white",
+         4
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 2,
+     "cat": "bakery",
+     "shelves": [
+      {
+       "z": 0.17,
+       "depth": 0.57,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_white",
+         5
+        ],
+        [
+         "bread_whole",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 0.45,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_white",
+         6
+        ],
+        [
+         "bread_whole",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 0.73,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_whole",
+         2
+        ],
+        [
+         "bread_white",
+         4
+        ],
+        [
+         "bread_whole",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.01,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_white",
+         4
+        ],
+        [
+         "bread_whole",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.29,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_whole",
+         4
+        ],
+        [
+         "bread_white",
+         2
+        ],
+        [
+         "bread_whole",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.57,
+       "depth": 0.47,
+       "max_h": 0.11,
+       "items": [
+        [
+         "bread_whole",
+         4
+        ],
+        [
+         "bread_white",
+         4
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 3,
+     "cat": "confectionery",
+     "shelves": [
+      {
+       "z": 0.17,
+       "depth": 0.57,
+       "max_h": 0.22,
+       "items": [
+        [
+         "candy_gummy",
+         3
+        ],
+        [
+         "candy_mints",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 0.465,
+       "depth": 0.47,
+       "max_h": 0.07,
+       "items": [
+        [
+         "cookies_box",
+         2
+        ],
+        [
+         "cookies_box",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.745,
+       "depth": 0.47,
+       "max_h": 0.012,
+       "items": [
+        [
+         "choc_milk",
+         4
+        ],
+        [
+         "choc_dark",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.025,
+       "depth": 0.47,
+       "max_h": 0.22,
+       "items": [
+        [
+         "candy_gummy",
+         5
+        ],
+        [
+         "cookies_box",
+         1
+        ],
+        [
+         "choc_milk",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.32,
+       "depth": 0.47,
+       "max_h": 0.22,
+       "items": [
+        [
+         "cookies_box",
+         4
+        ],
+        [
+         "candy_mints",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.615,
+       "depth": 0.47,
+       "max_h": 0.22,
+       "items": [
+        [
+         "choc_milk",
+         5
+        ],
+        [
+         "cookies_box",
+         1
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 4,
+     "cat": "confectionery",
+     "shelves": [
+      {
+       "z": 0.17,
+       "depth": 0.57,
+       "max_h": 0.22,
+       "items": [
+        [
+         "candy_mints",
+         5
+        ],
+        [
+         "candy_gummy",
+         3
+        ],
+        [
+         "candy_mints",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.465,
+       "depth": 0.47,
+       "max_h": 0.07,
+       "items": [
+        [
+         "cookies_box",
+         4
+        ],
+        [
+         "cookies_box",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 0.745,
+       "depth": 0.47,
+       "max_h": 0.012,
+       "items": [
+        [
+         "choc_dark",
+         4
+        ],
+        [
+         "choc_milk",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.025,
+       "depth": 0.47,
+       "max_h": 0.22,
+       "items": [
+        [
+         "choc_milk",
+         3
+        ],
+        [
+         "candy_gummy",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 1.32,
+       "depth": 0.47,
+       "max_h": 0.22,
+       "items": [
+        [
+         "candy_mints",
+         9
+        ],
+        [
+         "cookies_box",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.615,
+       "depth": 0.47,
+       "max_h": 0.22,
+       "items": [
+        [
+         "choc_milk",
+         4
+        ],
+        [
+         "cookies_box",
+         2
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "chillers": [
+  {
+   "id": "C_right",
+   "x": 12.85,
+   "y0": -1.0,
+   "facing": "-X",
+   "n_bays": 8,
+   "cats": [
+    "dairy"
+   ],
+   "bays": [
+    {
+     "index": 0,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         8
+        ],
+        [
+         "milk_semi",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         10
+        ],
+        [
+         "milk_oat",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "yogurt_straw",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "butter",
+         5
+        ],
+        [
+         "cheese_cheddar",
+         3
+        ],
+        [
+         "butter",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         7
+        ],
+        [
+         "cheese_cheddar",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "butter",
+         3
+        ],
+        [
+         "eggs",
+         3
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 1,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         10
+        ],
+        [
+         "milk_whole",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         4
+        ],
+        [
+         "milk_oat",
+         9
+        ],
+        [
+         "milk_oat",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "yogurt_straw",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "butter",
+         2
+        ],
+        [
+         "cheese_cheddar",
+         3
+        ],
+        [
+         "butter",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         10
+        ],
+        [
+         "milk_whole",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         10
+        ],
+        [
+         "eggs",
+         1
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 2,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         4
+        ],
+        [
+         "milk_semi",
+         7
+        ],
+        [
+         "milk_whole",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         7
+        ],
+        [
+         "milk_oat",
+         7
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "yogurt_straw",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "butter",
+         3
+        ],
+        [
+         "cheese_cheddar",
+         2
+        ],
+        [
+         "butter",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         10
+        ],
+        [
+         "cheese_cheddar",
+         2
+        ],
+        [
+         "milk_whole",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "milk_semi",
+         1
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 3,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         10
+        ],
+        [
+         "milk_whole",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         7
+        ],
+        [
+         "milk_oat",
+         7
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "yogurt_greek",
+         2
+        ],
+        [
+         "yogurt_straw",
+         2
+        ],
+        [
+         "eggs",
+         2
+        ],
+        [
+         "yogurt_greek",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "cheese_cheddar",
+         6
+        ],
+        [
+         "butter",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         4
+        ],
+        [
+         "cheese_cheddar",
+         4
+        ],
+        [
+         "milk_semi",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "eggs",
+         2
+        ],
+        [
+         "butter",
+         3
+        ],
+        [
+         "milk_semi",
+         3
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 4,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         4
+        ],
+        [
+         "milk_semi",
+         4
+        ],
+        [
+         "milk_whole",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         7
+        ],
+        [
+         "milk_oat",
+         7
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "yogurt_greek",
+         6
+        ],
+        [
+         "yogurt_straw",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "cheese_cheddar",
+         3
+        ],
+        [
+         "butter",
+         4
+        ],
+        [
+         "cheese_cheddar",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         5
+        ],
+        [
+         "cheese_cheddar",
+         5
+        ],
+        [
+         "milk_whole",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         8
+        ],
+        [
+         "eggs",
+         1
+        ],
+        [
+         "butter",
+         2
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 5,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         7
+        ],
+        [
+         "milk_whole",
+         7
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         7
+        ],
+        [
+         "milk_oat",
+         4
+        ],
+        [
+         "milk_oat",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "yogurt_straw",
+         4
+        ],
+        [
+         "eggs",
+         2
+        ],
+        [
+         "yogurt_greek",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "cheese_cheddar",
+         4
+        ],
+        [
+         "butter",
+         3
+        ],
+        [
+         "cheese_cheddar",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         5
+        ],
+        [
+         "cheese_cheddar",
+         2
+        ],
+        [
+         "milk_semi",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "butter",
+         3
+        ],
+        [
+         "milk_semi",
+         10
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 6,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         9
+        ],
+        [
+         "milk_semi",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         9
+        ],
+        [
+         "milk_oat",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "yogurt_greek",
+         5
+        ],
+        [
+         "eggs",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "butter",
+         3
+        ],
+        [
+         "cheese_cheddar",
+         2
+        ],
+        [
+         "butter",
+         3
+        ],
+        [
+         "cheese_cheddar",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         8
+        ],
+        [
+         "milk_semi",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "butter",
+         4
+        ],
+        [
+         "milk_semi",
+         4
+        ],
+        [
+         "eggs",
+         1
+        ],
+        [
+         "butter",
+         1
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 7,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         10
+        ],
+        [
+         "milk_semi",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         4
+        ],
+        [
+         "milk_oat",
+         10
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "yogurt_straw",
+         4
+        ],
+        [
+         "yogurt_greek",
+         2
+        ],
+        [
+         "eggs",
+         1
+        ],
+        [
+         "yogurt_straw",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "butter",
+         5
+        ],
+        [
+         "cheese_cheddar",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         7
+        ],
+        [
+         "milk_whole",
+         7
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "butter",
+         6
+        ],
+        [
+         "eggs",
+         1
+        ],
+        [
+         "milk_semi",
+         2
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "C_back",
+   "x": -2.5,
+   "y0": 10.85,
+   "facing": "-Y",
+   "n_bays": 12,
+   "cats": [
+    "dairy",
+    "water_juice",
+    "soft_drinks"
+   ],
+   "bays": [
+    {
+     "index": 0,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         9
+        ],
+        [
+         "milk_whole",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         4
+        ],
+        [
+         "milk_oat",
+         7
+        ],
+        [
+         "milk_oat",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "yogurt_greek",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "cheese_cheddar",
+         4
+        ],
+        [
+         "butter",
+         4
+        ],
+        [
+         "cheese_cheddar",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "yogurt_greek",
+         3
+        ],
+        [
+         "cheese_cheddar",
+         5
+        ],
+        [
+         "milk_oat",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         9
+        ],
+        [
+         "eggs",
+         1
+        ],
+        [
+         "yogurt_straw",
+         1
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 1,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         6
+        ],
+        [
+         "milk_semi",
+         8
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         10
+        ],
+        [
+         "milk_oat",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "yogurt_greek",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "cheese_cheddar",
+         2
+        ],
+        [
+         "butter",
+         3
+        ],
+        [
+         "cheese_cheddar",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "yogurt_greek",
+         2
+        ],
+        [
+         "milk_oat",
+         5
+        ],
+        [
+         "cheese_cheddar",
+         2
+        ],
+        [
+         "yogurt_greek",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "yogurt_straw",
+         1
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 2,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         8
+        ],
+        [
+         "milk_whole",
+         5
+        ],
+        [
+         "milk_semi",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         7
+        ],
+        [
+         "milk_oat",
+         6
+        ],
+        [
+         "milk_oat",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "yogurt_straw",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "butter",
+         5
+        ],
+        [
+         "cheese_cheddar",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "yogurt_greek",
+         3
+        ],
+        [
+         "milk_oat",
+         4
+        ],
+        [
+         "cheese_cheddar",
+         2
+        ],
+        [
+         "yogurt_greek",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "milk_whole",
+         1
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 3,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         10
+        ],
+        [
+         "milk_semi",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         9
+        ],
+        [
+         "milk_oat",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "yogurt_greek",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "cheese_cheddar",
+         3
+        ],
+        [
+         "butter",
+         2
+        ],
+        [
+         "cheese_cheddar",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "cheese_cheddar",
+         2
+        ],
+        [
+         "milk_oat",
+         10
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "yogurt_straw",
+         1
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 4,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_whole",
+         6
+        ],
+        [
+         "milk_semi",
+         8
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         5
+        ],
+        [
+         "milk_oat",
+         9
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "yogurt_greek",
+         4
+        ],
+        [
+         "yogurt_straw",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "cheese_cheddar",
+         2
+        ],
+        [
+         "butter",
+         3
+        ],
+        [
+         "cheese_cheddar",
+         3
+        ],
+        [
+         "butter",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "cheese_cheddar",
+         4
+        ],
+        [
+         "yogurt_greek",
+         5
+        ],
+        [
+         "milk_oat",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "eggs",
+         4
+        ],
+        [
+         "milk_whole",
+         1
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 5,
+     "cat": "dairy",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_semi",
+         4
+        ],
+        [
+         "milk_whole",
+         6
+        ],
+        [
+         "milk_semi",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.4,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "milk_oat",
+         9
+        ],
+        [
+         "milk_oat",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 0.68,
+       "depth": 0.55,
+       "max_h": 0.09,
+       "items": [
+        [
+         "yogurt_straw",
+         5
+        ],
+        [
+         "eggs",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 0.96,
+       "depth": 0.55,
+       "max_h": 0.04,
+       "items": [
+        [
+         "cheese_cheddar",
+         3
+        ],
+        [
+         "butter",
+         4
+        ],
+        [
+         "cheese_cheddar",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.24,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "yogurt_greek",
+         6
+        ],
+        [
+         "cheese_cheddar",
+         3
+        ],
+        [
+         "milk_oat",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.52,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "yogurt_straw",
+         3
+        ],
+        [
+         "eggs",
+         3
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 6,
+     "cat": "water_juice",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "water_sparkling",
+         10
+        ],
+        [
+         "water_15l",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.515,
+       "depth": 0.55,
+       "max_h": 0.22,
+       "items": [
+        [
+         "juice_orange",
+         6
+        ],
+        [
+         "water_05l",
+         5
+        ],
+        [
+         "juice_orange",
+         3
+        ]
+       ]
+      },
+      {
+       "z": 0.81,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "juice_apple",
+         9
+        ],
+        [
+         "juice_tropical",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 1.09,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "water_15l",
+         10
+        ],
+        [
+         "juice_apple",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 1.485,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "juice_apple",
+         9
+        ],
+        [
+         "juice_tropical",
+         5
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 7,
+     "cat": "water_juice",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "water_15l",
+         5
+        ],
+        [
+         "water_sparkling",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 0.515,
+       "depth": 0.55,
+       "max_h": 0.22,
+       "items": [
+        [
+         "water_05l",
+         8
+        ],
+        [
+         "juice_orange",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 0.81,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "juice_tropical",
+         8
+        ],
+        [
+         "juice_apple",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 1.09,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "juice_orange",
+         5
+        ],
+        [
+         "juice_apple",
+         9
+        ]
+       ]
+      },
+      {
+       "z": 1.485,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "juice_tropical",
+         10
+        ],
+        [
+         "juice_orange",
+         4
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 8,
+     "cat": "water_juice",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "water_sparkling",
+         10
+        ],
+        [
+         "water_15l",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.515,
+       "depth": 0.55,
+       "max_h": 0.22,
+       "items": [
+        [
+         "juice_orange",
+         4
+        ],
+        [
+         "water_05l",
+         4
+        ],
+        [
+         "juice_orange",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 0.81,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "juice_apple",
+         9
+        ],
+        [
+         "juice_tropical",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 1.09,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "water_15l",
+         8
+        ],
+        [
+         "juice_orange",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 1.485,
+       "depth": 0.55,
+       "max_h": 0.2,
+       "items": [
+        [
+         "juice_apple",
+         9
+        ],
+        [
+         "juice_orange",
+         5
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 9,
+     "cat": "soft_drinks",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "cola_15l",
+         9
+        ],
+        [
+         "lemon_15l",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 0.515,
+       "depth": 0.55,
+       "max_h": 0.168,
+       "items": [
+        [
+         "energy_can",
+         5
+        ],
+        [
+         "cola_can",
+         10
+        ],
+        [
+         "energy_can",
+         1
+        ]
+       ]
+      },
+      {
+       "z": 0.795,
+       "depth": 0.55,
+       "max_h": 0.115,
+       "items": [
+        [
+         "cola_zero_can",
+         6
+        ],
+        [
+         "lemon_can",
+         7
+        ],
+        [
+         "cola_zero_can",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.075,
+       "depth": 0.55,
+       "max_h": 0.115,
+       "items": [
+        [
+         "orange_can",
+         9
+        ],
+        [
+         "orange_can",
+         4
+        ],
+        [
+         "orange_can",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.355,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "cola_15l",
+         7
+        ],
+        [
+         "orange_can",
+         5
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 10,
+     "cat": "soft_drinks",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "lemon_15l",
+         6
+        ],
+        [
+         "cola_15l",
+         5
+        ]
+       ]
+      },
+      {
+       "z": 0.515,
+       "depth": 0.55,
+       "max_h": 0.168,
+       "items": [
+        [
+         "cola_can",
+         6
+        ],
+        [
+         "energy_can",
+         10
+        ]
+       ]
+      },
+      {
+       "z": 0.795,
+       "depth": 0.55,
+       "max_h": 0.115,
+       "items": [
+        [
+         "cola_zero_can",
+         9
+        ],
+        [
+         "lemon_can",
+         6
+        ]
+       ]
+      },
+      {
+       "z": 1.075,
+       "depth": 0.55,
+       "max_h": 0.115,
+       "items": [
+        [
+         "orange_can",
+         6
+        ],
+        [
+         "orange_can",
+         7
+        ],
+        [
+         "orange_can",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 1.355,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "orange_can",
+         6
+        ],
+        [
+         "cola_15l",
+         5
+        ],
+        [
+         "lemon_15l",
+         1
+        ],
+        [
+         "orange_can",
+         1
+        ]
+       ]
+      }
+     ]
+    },
+    {
+     "index": 11,
+     "cat": "soft_drinks",
+     "shelves": [
+      {
+       "z": 0.12,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "cola_15l",
+         7
+        ],
+        [
+         "lemon_15l",
+         4
+        ]
+       ]
+      },
+      {
+       "z": 0.515,
+       "depth": 0.55,
+       "max_h": 0.168,
+       "items": [
+        [
+         "cola_can",
+         4
+        ],
+        [
+         "energy_can",
+         4
+        ],
+        [
+         "cola_can",
+         6
+        ],
+        [
+         "energy_can",
+         2
+        ]
+       ]
+      },
+      {
+       "z": 0.795,
+       "depth": 0.55,
+       "max_h": 0.115,
+       "items": [
+        [
+         "cola_zero_can",
+         5
+        ],
+        [
+         "lemon_can",
+         10
+        ]
+       ]
+      },
+      {
+       "z": 1.075,
+       "depth": 0.55,
+       "max_h": 0.115,
+       "items": [
+        [
+         "orange_can",
+         5
+        ],
+        [
+         "orange_can",
+         10
+        ]
+       ]
+      },
+      {
+       "z": 1.355,
+       "depth": 0.55,
+       "max_h": 0.32,
+       "items": [
+        [
+         "cola_15l",
+         5
+        ],
+        [
+         "orange_can",
+         8
+        ]
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "endcaps": [
+  {
+   "id": "G1_front",
+   "x": -9.15,
+   "y": -3.52,
+   "facing": "-Y",
+   "w": 1.0,
+   "sku": "chips_paprika",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.3,
+     "items": [
+      [
+       "chips_paprika",
+       3
+      ],
+      [
+       "chips_paprika",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 0.545,
+     "depth": 0.47,
+     "max_h": 0.3,
+     "items": [
+      [
+       "chips_paprika",
+       4
+      ]
+     ]
+    },
+    {
+     "z": 0.92,
+     "depth": 0.47,
+     "max_h": 0.3,
+     "items": [
+      [
+       "chips_paprika",
+       4
+      ]
+     ]
+    },
+    {
+     "z": 1.295,
+     "depth": 0.47,
+     "max_h": 0.3,
+     "items": [
+      [
+       "chips_paprika",
+       4
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G1_back",
+   "x": -9.15,
+   "y": 5.02,
+   "facing": "+Y",
+   "w": 1.0,
+   "sku": "cereal_honey",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.33,
+     "items": [
+      [
+       "cereal_honey",
+       3
+      ]
+     ]
+    },
+    {
+     "z": 0.575,
+     "depth": 0.47,
+     "max_h": 0.33,
+     "items": [
+      [
+       "cereal_honey",
+       3
+      ]
+     ]
+    },
+    {
+     "z": 0.98,
+     "depth": 0.47,
+     "max_h": 0.33,
+     "items": [
+      [
+       "cereal_honey",
+       3
+      ]
+     ]
+    },
+    {
+     "z": 1.385,
+     "depth": 0.47,
+     "max_h": 0.33,
+     "items": [
+      [
+       "cereal_honey",
+       3
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G2_front",
+   "x": -6.1000000000000005,
+   "y": -3.52,
+   "facing": "-Y",
+   "w": 1.0,
+   "sku": "cola_can",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.115,
+     "items": [
+      [
+       "cola_can",
+       8
+      ],
+      [
+       "cola_can",
+       3
+      ]
+     ]
+    },
+    {
+     "z": 0.45,
+     "depth": 0.47,
+     "max_h": 0.115,
+     "items": [
+      [
+       "cola_can",
+       7
+      ],
+      [
+       "cola_can",
+       4
+      ]
+     ]
+    },
+    {
+     "z": 0.73,
+     "depth": 0.47,
+     "max_h": 0.115,
+     "items": [
+      [
+       "cola_can",
+       4
+      ],
+      [
+       "cola_can",
+       6
+      ],
+      [
+       "cola_can",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 1.01,
+     "depth": 0.47,
+     "max_h": 0.115,
+     "items": [
+      [
+       "cola_can",
+       10
+      ],
+      [
+       "cola_can",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 1.29,
+     "depth": 0.47,
+     "max_h": 0.115,
+     "items": [
+      [
+       "cola_can",
+       4
+      ],
+      [
+       "cola_can",
+       6
+      ],
+      [
+       "cola_can",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 1.57,
+     "depth": 0.47,
+     "max_h": 0.115,
+     "items": [
+      [
+       "cola_can",
+       9
+      ],
+      [
+       "cola_can",
+       2
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G2_back",
+   "x": -6.1000000000000005,
+   "y": 5.02,
+   "facing": "+Y",
+   "w": 1.0,
+   "sku": "candy_gummy",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.22,
+     "items": [
+      [
+       "candy_gummy",
+       2
+      ],
+      [
+       "candy_gummy",
+       3
+      ]
+     ]
+    },
+    {
+     "z": 0.465,
+     "depth": 0.47,
+     "max_h": 0.22,
+     "items": [
+      [
+       "candy_gummy",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 0.76,
+     "depth": 0.47,
+     "max_h": 0.22,
+     "items": [
+      [
+       "candy_gummy",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 1.055,
+     "depth": 0.47,
+     "max_h": 0.22,
+     "items": [
+      [
+       "candy_gummy",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 1.35,
+     "depth": 0.47,
+     "max_h": 0.22,
+     "items": [
+      [
+       "candy_gummy",
+       3
+      ],
+      [
+       "candy_gummy",
+       2
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G3_front",
+   "x": -3.0500000000000007,
+   "y": -3.52,
+   "facing": "-Y",
+   "w": 1.0,
+   "sku": "water_15l",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.32,
+     "items": [
+      [
+       "water_15l",
+       7
+      ],
+      [
+       "water_15l",
+       2
+      ]
+     ]
+    },
+    {
+     "z": 0.565,
+     "depth": 0.47,
+     "max_h": 0.32,
+     "items": [
+      [
+       "water_15l",
+       5
+      ],
+      [
+       "water_15l",
+       4
+      ]
+     ]
+    },
+    {
+     "z": 0.96,
+     "depth": 0.47,
+     "max_h": 0.32,
+     "items": [
+      [
+       "water_15l",
+       7
+      ],
+      [
+       "water_15l",
+       2
+      ]
+     ]
+    },
+    {
+     "z": 1.355,
+     "depth": 0.47,
+     "max_h": 0.32,
+     "items": [
+      [
+       "water_15l",
+       9
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G3_back",
+   "x": -3.0500000000000007,
+   "y": 5.02,
+   "facing": "+Y",
+   "w": 1.0,
+   "sku": "juice_orange",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.2,
+     "items": [
+      [
+       "juice_orange",
+       8
+      ],
+      [
+       "juice_orange",
+       3
+      ]
+     ]
+    },
+    {
+     "z": 0.45,
+     "depth": 0.47,
+     "max_h": 0.2,
+     "items": [
+      [
+       "juice_orange",
+       4
+      ],
+      [
+       "juice_orange",
+       7
+      ]
+     ]
+    },
+    {
+     "z": 0.73,
+     "depth": 0.47,
+     "max_h": 0.2,
+     "items": [
+      [
+       "juice_orange",
+       10
+      ],
+      [
+       "juice_orange",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 1.01,
+     "depth": 0.47,
+     "max_h": 0.2,
+     "items": [
+      [
+       "juice_orange",
+       7
+      ],
+      [
+       "juice_orange",
+       4
+      ]
+     ]
+    },
+    {
+     "z": 1.29,
+     "depth": 0.47,
+     "max_h": 0.2,
+     "items": [
+      [
+       "juice_orange",
+       4
+      ],
+      [
+       "juice_orange",
+       6
+      ],
+      [
+       "juice_orange",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 1.57,
+     "depth": 0.47,
+     "max_h": 0.2,
+     "items": [
+      [
+       "juice_orange",
+       10
+      ],
+      [
+       "juice_orange",
+       1
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G4_front",
+   "x": -1.7763568394002505e-15,
+   "y": -3.52,
+   "facing": "-Y",
+   "w": 1.0,
+   "sku": "pasta_spag",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.27,
+     "items": [
+      [
+       "pasta_spag",
+       4
+      ],
+      [
+       "pasta_spag",
+       6
+      ]
+     ]
+    },
+    {
+     "z": 0.515,
+     "depth": 0.47,
+     "max_h": 0.27,
+     "items": [
+      [
+       "pasta_spag",
+       8
+      ],
+      [
+       "pasta_spag",
+       2
+      ]
+     ]
+    },
+    {
+     "z": 0.86,
+     "depth": 0.47,
+     "max_h": 0.27,
+     "items": [
+      [
+       "pasta_spag",
+       6
+      ],
+      [
+       "pasta_spag",
+       4
+      ]
+     ]
+    },
+    {
+     "z": 1.205,
+     "depth": 0.47,
+     "max_h": 0.27,
+     "items": [
+      [
+       "pasta_spag",
+       4
+      ],
+      [
+       "pasta_spag",
+       6
+      ]
+     ]
+    },
+    {
+     "z": 1.55,
+     "depth": 0.47,
+     "max_h": 0.27,
+     "items": [
+      [
+       "pasta_spag",
+       6
+      ],
+      [
+       "pasta_spag",
+       4
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G4_back",
+   "x": -1.7763568394002505e-15,
+   "y": 5.02,
+   "facing": "+Y",
+   "w": 1.0,
+   "sku": "can_tomato",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.11,
+     "items": [
+      [
+       "can_tomato",
+       5
+      ],
+      [
+       "can_tomato",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 0.45,
+     "depth": 0.47,
+     "max_h": 0.11,
+     "items": [
+      [
+       "can_tomato",
+       10
+      ]
+     ]
+    },
+    {
+     "z": 0.73,
+     "depth": 0.47,
+     "max_h": 0.11,
+     "items": [
+      [
+       "can_tomato",
+       10
+      ]
+     ]
+    },
+    {
+     "z": 1.01,
+     "depth": 0.47,
+     "max_h": 0.11,
+     "items": [
+      [
+       "can_tomato",
+       7
+      ],
+      [
+       "can_tomato",
+       3
+      ]
+     ]
+    },
+    {
+     "z": 1.29,
+     "depth": 0.47,
+     "max_h": 0.11,
+     "items": [
+      [
+       "can_tomato",
+       10
+      ]
+     ]
+    },
+    {
+     "z": 1.57,
+     "depth": 0.47,
+     "max_h": 0.11,
+     "items": [
+      [
+       "can_tomato",
+       4
+      ],
+      [
+       "can_tomato",
+       6
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G5_front",
+   "x": 3.049999999999999,
+   "y": -3.52,
+   "facing": "-Y",
+   "w": 1.0,
+   "sku": "oil_olive",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.29,
+     "items": [
+      [
+       "oil_olive",
+       5
+      ],
+      [
+       "oil_olive",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 0.535,
+     "depth": 0.47,
+     "max_h": 0.29,
+     "items": [
+      [
+       "oil_olive",
+       5
+      ],
+      [
+       "oil_olive",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 0.9,
+     "depth": 0.47,
+     "max_h": 0.29,
+     "items": [
+      [
+       "oil_olive",
+       7
+      ],
+      [
+       "oil_olive",
+       3
+      ]
+     ]
+    },
+    {
+     "z": 1.265,
+     "depth": 0.47,
+     "max_h": 0.29,
+     "items": [
+      [
+       "oil_olive",
+       10
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G5_back",
+   "x": 3.049999999999999,
+   "y": 5.02,
+   "facing": "+Y",
+   "w": 1.0,
+   "sku": "ketchup",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.24,
+     "items": [
+      [
+       "ketchup",
+       10
+      ],
+      [
+       "ketchup",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 0.485,
+     "depth": 0.47,
+     "max_h": 0.24,
+     "items": [
+      [
+       "ketchup",
+       4
+      ],
+      [
+       "ketchup",
+       6
+      ],
+      [
+       "ketchup",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 0.8,
+     "depth": 0.47,
+     "max_h": 0.24,
+     "items": [
+      [
+       "ketchup",
+       7
+      ],
+      [
+       "ketchup",
+       4
+      ]
+     ]
+    },
+    {
+     "z": 1.115,
+     "depth": 0.47,
+     "max_h": 0.24,
+     "items": [
+      [
+       "ketchup",
+       10
+      ],
+      [
+       "ketchup",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 1.43,
+     "depth": 0.47,
+     "max_h": 0.24,
+     "items": [
+      [
+       "ketchup",
+       7
+      ],
+      [
+       "ketchup",
+       4
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G6_front",
+   "x": 6.1,
+   "y": -3.52,
+   "facing": "-Y",
+   "w": 1.0,
+   "sku": "toilet_paper",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.33,
+     "items": [
+      [
+       "toilet_paper",
+       2
+      ]
+     ]
+    },
+    {
+     "z": 0.575,
+     "depth": 0.47,
+     "max_h": 0.33,
+     "items": [
+      [
+       "toilet_paper",
+       2
+      ]
+     ]
+    },
+    {
+     "z": 0.98,
+     "depth": 0.47,
+     "max_h": 0.33,
+     "items": [
+      [
+       "toilet_paper",
+       2
+      ]
+     ]
+    },
+    {
+     "z": 1.385,
+     "depth": 0.47,
+     "max_h": 0.33,
+     "items": [
+      [
+       "toilet_paper",
+       2
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G6_back",
+   "x": 6.1,
+   "y": 5.02,
+   "facing": "+Y",
+   "w": 1.0,
+   "sku": "detergent",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.3,
+     "items": [
+      [
+       "detergent",
+       5
+      ],
+      [
+       "detergent",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 0.545,
+     "depth": 0.47,
+     "max_h": 0.3,
+     "items": [
+      [
+       "detergent",
+       4
+      ],
+      [
+       "detergent",
+       2
+      ]
+     ]
+    },
+    {
+     "z": 0.92,
+     "depth": 0.47,
+     "max_h": 0.3,
+     "items": [
+      [
+       "detergent",
+       5
+      ],
+      [
+       "detergent",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 1.295,
+     "depth": 0.47,
+     "max_h": 0.3,
+     "items": [
+      [
+       "detergent",
+       4
+      ],
+      [
+       "detergent",
+       2
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G7_front",
+   "x": 9.149999999999997,
+   "y": -3.52,
+   "facing": "-Y",
+   "w": 1.0,
+   "sku": "choc_milk",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.012,
+     "items": [
+      [
+       "choc_milk",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 0.45,
+     "depth": 0.47,
+     "max_h": 0.012,
+     "items": [
+      [
+       "choc_milk",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 0.73,
+     "depth": 0.47,
+     "max_h": 0.012,
+     "items": [
+      [
+       "choc_milk",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 1.01,
+     "depth": 0.47,
+     "max_h": 0.012,
+     "items": [
+      [
+       "choc_milk",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 1.29,
+     "depth": 0.47,
+     "max_h": 0.012,
+     "items": [
+      [
+       "choc_milk",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 1.57,
+     "depth": 0.47,
+     "max_h": 0.012,
+     "items": [
+      [
+       "choc_milk",
+       5
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "G7_back",
+   "x": 9.149999999999997,
+   "y": 5.02,
+   "facing": "+Y",
+   "w": 1.0,
+   "sku": "shampoo",
+   "shelves": [
+    {
+     "z": 0.17,
+     "depth": 0.57,
+     "max_h": 0.22,
+     "items": [
+      [
+       "shampoo",
+       6
+      ],
+      [
+       "shampoo",
+       5
+      ]
+     ]
+    },
+    {
+     "z": 0.465,
+     "depth": 0.47,
+     "max_h": 0.22,
+     "items": [
+      [
+       "shampoo",
+       10
+      ],
+      [
+       "shampoo",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 0.76,
+     "depth": 0.47,
+     "max_h": 0.22,
+     "items": [
+      [
+       "shampoo",
+       4
+      ],
+      [
+       "shampoo",
+       6
+      ],
+      [
+       "shampoo",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 1.055,
+     "depth": 0.47,
+     "max_h": 0.22,
+     "items": [
+      [
+       "shampoo",
+       4
+      ],
+      [
+       "shampoo",
+       6
+      ],
+      [
+       "shampoo",
+       1
+      ]
+     ]
+    },
+    {
+     "z": 1.35,
+     "depth": 0.47,
+     "max_h": 0.22,
+     "items": [
+      [
+       "shampoo",
+       9
+      ],
+      [
+       "shampoo",
+       2
+      ]
+     ]
+    }
+   ]
+  }
+ ],
+ "aisles": [
+  {
+   "no": 1,
+   "x": -11.15,
+   "y": -4.2,
+   "left": [
+    "Beer & Wine"
+   ],
+   "right": [
+    "Cereal & Breakfast"
+   ]
+  },
+  {
+   "no": 2,
+   "x": -7.625,
+   "y": -4.2,
+   "left": [
+    "Coffee, Tea & Biscuits"
+   ],
+   "right": [
+    "Chips & Snacks"
+   ]
+  },
+  {
+   "no": 3,
+   "x": -4.575,
+   "y": -4.2,
+   "left": [
+    "Confectionery"
+   ],
+   "right": [
+    "Soft Drinks"
+   ]
+  },
+  {
+   "no": 4,
+   "x": -1.525,
+   "y": -4.2,
+   "left": [
+    "Water & Juice"
+   ],
+   "right": [
+    "Canned Goods"
+   ]
+  },
+  {
+   "no": 5,
+   "x": 1.525,
+   "y": -4.2,
+   "left": [
+    "Pasta, Rice & Sauces"
+   ],
+   "right": [
+    "Baking & Oils"
+   ]
+  },
+  {
+   "no": 6,
+   "x": 4.575,
+   "y": -4.2,
+   "left": [
+    "Condiments & Spreads"
+   ],
+   "right": [
+    "Laundry & Cleaning"
+   ]
+  },
+  {
+   "no": 7,
+   "x": 7.625,
+   "y": -4.2,
+   "left": [
+    "Paper Goods",
+    "Pet Food"
+   ],
+   "right": [
+    "Personal Care"
+   ]
+  },
+  {
+   "no": 8,
+   "x": 11.1,
+   "y": -4.2,
+   "left": [
+    "Laundry & Cleaning",
+    "Personal Care"
+   ],
+   "right": [
+    "Dairy & Eggs"
+   ]
+  }
+ ]
+}
