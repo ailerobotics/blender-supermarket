@@ -66,12 +66,37 @@ blender -b scenes/supermarket.blend --python scripts/export_usd.py            # 
 Z-up, metres, root prim `/Supermarket`, products instanced per SKU mesh, custom properties on every product prim (`userProperties:sku`, `category`, `brand`, `price`, `slot`, `facing`, `row`) and on fixtures (`fixture`, `gondola`, `side`, `bay`, `level`).
 In Isaac Sim: File ▸ Import / add reference to the `.usdc`; add colliders (Physics ▸ Colliders preset "convex hull" on `Products/*`, "triangle mesh" on `Fixtures/*`), lights are exported as USD lights.
 
+## 6a. Validate the USD offline (no Isaac, no GPU)
+Prove the export is loadable / Isaac-ready **without a GPU** — run it after every export
+and before any Isaac session. Needs only the CPU-only `usd-core` wheel:
+```bash
+cd ~/workspaces/blender-supermarket
+python3 -m venv .venv-usd && .venv-usd/bin/pip install usd-core       # one-off, ~30 MB, offline
+.venv-usd/bin/python scripts/validate_usd.py                          # exit 0 = pass, 1 = fail
+.venv-usd/bin/python scripts/validate_usd.py --json                   # + measured facts as JSON
+.venv-usd/bin/python scripts/validate_usd.py --selftest               # sanity check (no artifact needed)
+.venv-usd/bin/python scripts/validate_usd.py --repair-textures        # reconcile the CURRENT artifact's
+#   floor/wall textures from assets/textures/ into export/textures/ (offline, no Blender)
+```
+It checks: stage opens; up-axis Z; 1 m/unit; a default prim exists; **every texture /
+reference / payload / sublayer resolves** (no absolute build-machine paths, nothing
+outside `export/`); the prim paths + spawn camera `compose_robot_in_store.py` needs; and
+reports the physics/collider census (render-only by design — the composer adds physics).
+Tests: `env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-usd/bin/python -m pytest scripts/twin/tests/`
+(the `env -u`/autoload-off avoids a broken ROS `launch_testing` pytest plugin on `PYTHONPATH`).
+
+**Known defect (fixed in `export_usd.py`, needs a re-export to clear):** the current
+`export/supermarket.usdc` authors 6 dangling floor/wall textures — floor and walls load
+untextured in Isaac (cosmetic; does **not** block loading or robot placement). Re-export,
+or run `--repair-textures`, to clear it. Full write-up: `data/twin-usd-validate-v1/report.md`.
+
 ## 7. Where things are
 ```
 scripts/catalog.py          product catalog (SKU dims, colors, prices)      scripts/planogram.json   generated layout + shelf facings
 scripts/gen_planogram.py    layout generator                                 scripts/gen_labels.py    PIL label/tag/sign renderer
 scripts/build_supermarket.py Blender builder (staged)                        scripts/render_shots.py  stills
 scripts/render_walkthrough.py fly-through video                              scripts/export_usd.py    Isaac USD export
+scripts/validate_usd.py     offline USD validator (no GPU; §6a)              scripts/compose_robot_in_store.py  Isaac robot-in-store composer
 scripts/mcpcall.py          stdio MCP test client                            scripts/launch_blender.sh start GUI + MCP socket
 scenes/supermarket.blend    THE scene (25.7k objects, 24.9k product instances, 93 shared meshes)
 scenes/supermarket_base.blend  empty base: Poly Haven floor_tiles_08, white_plaster_02, HDRI wide_street_01 (fake-user pinned)
