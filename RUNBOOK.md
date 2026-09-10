@@ -90,6 +90,32 @@ Tests: `env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-usd/bin/python 
 untextured in Isaac (cosmetic; does **not** block loading or robot placement). Re-export,
 or run `--repair-textures`, to clear it. Full write-up: `data/twin-usd-validate-v1/report.md`.
 
+## 6b. Compose the robot into the store — OFFLINE (no Isaac, no GPU)
+Prove the robot-in-store composer works **before** any GPU session — safe beside the live
+Blender GUI. Uses the same CPU-only `usd-core` venv as §6a.
+```bash
+cd ~/workspaces/blender-supermarket
+# read-only facts / spawn pose / collider plan (JSON):
+.venv-usd/bin/python scripts/compose_robot_in_store.py --report-usd
+# full plan + what the GPU guard would decide right now (authors nothing, boots nothing):
+.venv-usd/bin/python scripts/compose_robot_in_store.py --dry-run
+# ACTUALLY author the composed stage with pure USD (still no GPU) and VALIDATE it:
+.venv-usd/bin/python scripts/compose_robot_in_store.py --author-offline --save /tmp/store_with_robot.usda
+#   -> exit 0 = composition is sane; 1 = a check failed. Add --json for the numbers.
+#   With no --robot-usd it references a faithful pedestal+arm STUB so the placement maths
+#   is exercised for real; the true robot mesh only comes from the URDF->USD import (Isaac).
+```
+`--author-offline` sublayers the committed store (read-only — never written), authors the
+`PhysicsScene`, the 702 triangle-mesh (static) + 197 convex-hull (product/tag) colliders, and
+places the robot at the aisle pose, then re-opens the result and proves: default prim + Z-up +
+1 m/unit, every product **prototype** inherits a collider (authored once on the shared source —
+never per-instance, never on the forbidden runtime prototype), the robot stands **on** the floor
+(pedestal bottom Z ≈ floor_z), at the intended aisle spot, inside an aisle gap (not inside a
+gondola), with instancing preserved. Tests (needs `usd-core`; pure-logic tests need nothing):
+```bash
+env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-usd/bin/python -m pytest scripts/twin/tests/
+```
+
 ## 7. Where things are
 ```
 scripts/catalog.py          product catalog (SKU dims, colors, prices)      scripts/planogram.json   generated layout + shelf facings
@@ -101,4 +127,63 @@ scripts/mcpcall.py          stdio MCP test client                            scr
 scenes/supermarket.blend    THE scene (25.7k objects, 24.9k product instances, 93 shared meshes)
 scenes/supermarket_base.blend  empty base: Poly Haven floor_tiles_08, white_plaster_02, HDRI wide_street_01 (fake-user pinned)
 assets/textures, assets/labels, assets/signs, renders/, export/, logs/
+scripts/twin/    compose.py (pure-USD composition core), usd_probe.py, geometry.py, colliders.py, gpu_guard.py, cli.py + tests/
 ```
+
+## 8. GPU session runbook — stand the robot in the store (Isaac Sim)
+
+The captain runs this **once**, in one sitting, on the RTX 3060 (12 GB) box. Everything up to
+the SimulationApp boot is already proven offline (§6b); this session verifies the three things
+only a real simulator can: the URDF→USD import, PhysX loading the colliders, and the robot
+resting under gravity. **Close/save Blender first** — the guard refuses beside it and won't
+`--force` past that (see [docs/isaac_robot_in_store.md](docs/isaac_robot_in_store.md)).
+
+**Pre-flight (safe with Blender still open — do these first, no GPU):**
+```bash
+cd ~/workspaces/blender-supermarket
+.venv-usd/bin/python scripts/validate_usd.py                                   # §6a — exit 0
+.venv-usd/bin/python scripts/compose_robot_in_store.py --author-offline --save /tmp/store_with_robot.usda
+#   -> expect: VERDICT: PASS — offline composition is sane. If this fails, DO NOT boot; fix first.
+```
+
+**The GPU session, in order:**
+```bash
+# 1. Close/save Blender (frees the ~12 GB GPU + lifts the guard's hard refusal).
+tmux kill-session -t blender          # or File ▸ Save in the GUI, then quit
+nvidia-smi                            # confirm no blender / heavy process; ~11 GB free
+
+# 2. Dry-run under Isaac's env to confirm the guard now PASSES (no boot yet):
+bash scripts/compose_robot_in_store.sh --dry-run
+#   -> the "GPU guard" block should read "GPU check passed: <N> MiB free". If it still names
+#      blender, Blender is not fully closed — stop and close it.
+
+# 3. THE real run — boots Isaac Sim, imports the URDF, authors colliders/physics, places the
+#    robot, steps, and writes the stage + a screenshot:
+bash scripts/compose_robot_in_store.sh \
+     --save /tmp/store_with_robot.usd --screenshot /tmp/store_with_robot.png
+```
+
+**What a good run prints (to stderr, in order):**
+- `GPU check passed: <N> MiB free of 12288.`
+- `[compose] imported robot -> /tmp/store_with_robot_robot.usd (prim /shelfbot…)`
+- `[compose] authored /tmp/store_with_robot.usd (702 tri + 197 convex colliders, 196/196 prototypes)`
+- `[compose] screenshot -> /tmp/store_with_robot.png` then `[compose] wrote /tmp/store_with_robot.usd`
+
+**What "good" looks like:** the screenshot shows the UR10 on its pedestal standing in the aisle
+(≈ X −1.5, Y 0.75), upright, feet on the floor, ~0.95 m clear of the shelves either side; the
+run exits 0. Re-open `/tmp/store_with_robot.usd` in the Isaac GUI to confirm nothing fell through
+the floor or exploded.
+
+**Most likely failures and the fix:**
+| Symptom | Cause | Fix |
+|---|---|---|
+| `REFUSING … a protected GPU session … blender` | Blender still holds the GPU | Close/save Blender; re-check `nvidia-smi`. `--force` will NOT override this. |
+| `REFUSING … only <N> MiB free` | another consumer (or a stale Isaac) holds VRAM | Free it; or `--force` to accept the OOM risk on a genuinely idle GPU. |
+| URDF import errors on `package://ur_description/…` | ROS package path not sourced | Use the `.sh` wrapper (it sources `/opt/ros/jazzy` + puts `ur_description`/`shelfbot` on the path); confirm `/opt/ros/jazzy/share/ur_description` exists. |
+| Isaac OOM-kills / crashes at boot | 12 GB is tight; RTX scene + import together | Retry with Blender fully closed and nothing else on the GPU; `--no-headless` is heavier — keep the default headless. |
+| Robot floats above / sinks into the floor after stepping | imported root convention differs from the pre-import estimate | The offline pose is measured (pedestal base at floor Z=0); if the imported root isn't the URDF `world` link, add a correction pass after `twin.compose.place_robot` (re-measure the pedestal prim and nudge) and re-run. Geometry is unchanged — no re-export needed. |
+
+**If it goes wrong:** nothing here writes to the repo (`scenes/`, `export/` untouched; outputs go
+to `/tmp`), so a failed run is safe to discard. Capture the stderr + `nvidia-smi`, `git stash`
+nothing, and re-run the offline `--author-offline` to confirm the *stage* is still sane before
+blaming the composer — a boot/OOM failure is an Isaac/VRAM problem, not a composition one.

@@ -4,21 +4,26 @@ Isaac Sim — standalone, modelled on ~/workspaces/shelfbot/tools/run_tray_scene
 
 Run under env_isaaclab (Isaac Sim 5.1). Booting Isaac Sim is a GPU session; on
 this 12 GB / low-RAM box, beside the captain's live Blender GUI, it can OOM-kill
-that window. So this script:
+that window. So the modes split by whether they need the simulator:
 
-  * ``--report-usd`` / ``--dry-run``  : read the store USD with the Isaac-bundled
-    pxr bindings (NO SimulationApp, NO RTX, NO GPU) and print the measured facts,
-    the geometry-derived spawn pose and the exact collider plan. Safe to run now.
-  * a real run (no --dry-run)         : refuses via the GPU guard if a protected /
+  * ``--report-usd`` / ``--dry-run``  : read the store USD with pure USD bindings
+    (NO SimulationApp, NO RTX, NO GPU) and print the measured facts, the
+    geometry-derived spawn pose and the exact collider plan. Safe to run now.
+  * ``--author-offline``              : ACTUALLY author the composed stage with pure
+    USD (still NO GPU boot) — sublayer the store, author PhysicsScene + colliders,
+    place the robot (a faithful stub unless ``--robot-usd`` is given), save it and
+    VALIDATE it. This is the offline proof that everything except the simulator
+    itself works. Exit 0 = sane, 1 = a check failed.
+  * a real run (no mode flag)         : refuses via the GPU guard if a protected /
     heavy GPU consumer is present, then boots SimulationApp, imports the URDF to
-    USD, references the store, authors PhysicsScene + colliders (triangle-mesh on
-    static scenery, convex hull on the ~196 instance PROTOTYPES — never per
-    instance), places the robot at the aisle pose, steps, saves the stage and a
-    screenshot.
+    USD, and calls the SAME pure-USD composition core (``twin.compose``) that
+    ``--author-offline`` exercises, then opens the composed stage, steps it and
+    writes a screenshot.
 
-The real-run authoring below has NOT been executed in this build (the GPU boot is
-the captain's decision, deliberately not taken). Blocks that require a booted
-simulator are marked `# UNVERIFIED (needs a simulator boot)`.
+The composition core (``twin/compose.py``) is fully exercised offline and unit
+tested. The ONLY code that stays unverified until the captain's GPU boot is the
+simulator itself — URDF→USD import, physics stepping and the screenshot. Those
+blocks are marked ``# UNVERIFIED (needs a simulator boot)``.
 """
 from __future__ import annotations
 
@@ -30,6 +35,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 
 from twin import cli  # noqa: E402  (pure; no pxr/isaacsim)
+from twin import compose  # noqa: E402  (pure USD; pxr imported lazily inside)
 from twin import gpu_guard  # noqa: E402
 from twin import usd_probe  # noqa: E402  (pxr imported lazily inside probe())
 
@@ -73,8 +79,65 @@ def run_dry_run(args) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Real run: everything below needs a booted simulator (a GPU session).        #
-# UNVERIFIED in this build — the boot is the captain's decision.              #
+# No-GPU path: actually author + validate the composed stage (pure USD).      #
+# --------------------------------------------------------------------------- #
+def run_author_offline(args) -> int:
+    """Drive the pure-USD composition core for real and validate the result. No
+    SimulationApp, no RTX, no GPU — safe beside the live Blender session."""
+    facts, spawn, plan, extras = usd_probe.probe(
+        args.store, spawn_aisle_cam=args.spawn_aisle,
+        spawn_xy=tuple(args.spawn_xy) if args.spawn_xy else None,
+        product_collider=args.product_collider, min_clearance=args.min_clearance)
+
+    # Robot: a caller-supplied USD, else a faithful pedestal+arm stub so the
+    # placement/transform maths is exercised for real (the true URDF→USD import
+    # needs Isaac and is only done in a real run).
+    if args.robot_usd:
+        robot_usd = args.robot_usd
+        robot_kind = "supplied --robot-usd"
+    else:
+        robot_usd = os.path.splitext(args.save)[0] + "_stub_robot.usda"
+        compose.build_stub_robot(robot_usd)
+        robot_kind = "faithful stub (no --robot-usd given)"
+
+    result = compose.build_composition(
+        store_path=args.store, robot_usd=robot_usd, out_path=args.save,
+        spawn=spawn, yaw_deg=args.yaw_deg, product_collider=args.product_collider)
+
+    rep = compose.validate_composition(
+        args.save, spawn=spawn, floor_z=facts["floor_z"], extras=extras,
+        product_collider=args.product_collider,
+        expect_triangle=facts["collider_targets"]["triangle_mesh_meshes"])
+
+    print("=" * 78)
+    print("compose_robot_in_store — AUTHOR OFFLINE (pure USD, nothing booted)")
+    print("=" * 78)
+    print(f"store (sublayered, read-only): {result.store_sublayer}")
+    print(f"robot referenced             : {robot_usd}  [{robot_kind}]")
+    print(f"composed stage written       : {result.out_path}")
+    print(f"  default prim   : {result.default_prim}")
+    print(f"  robot prim     : {result.robot_prim}  translate {tuple(round(v,3) for v in result.robot_translate)}")
+    print(f"  colliders      : {result.triangle_mesh} triangle-mesh (static) + "
+          f"{result.convex_hull} convex-hull (products/tags)")
+    print(f"  prototypes     : {result.prototypes_covered}/{result.prototypes_total} carry a collider")
+    print(f"  prim count     : {result.prim_count} (instancing preserved)")
+    print("-" * 78)
+    print(rep.render())
+    print("-" * 78)
+    verdict = "FAIL" if rep.failed else "PASS"
+    n_fail = sum(1 for s, _, _ in rep.checks if s == compose.ComposeReport.FAIL)
+    print(f"VERDICT: {verdict}" + (f"  ({n_fail} check(s) failed)" if rep.failed else
+                                   "  — offline composition is sane"))
+    if args.json:
+        print("-" * 78)
+        print(json.dumps({"result": vars(result), "facts": rep.facts}, indent=2, default=str))
+    return 1 if rep.failed else 0
+
+
+# --------------------------------------------------------------------------- #
+# Real run: boot the simulator, then reuse the pure-USD composition core.      #
+# The boot, URDF→USD import, stepping and screenshot are UNVERIFIED in this    #
+# build — the boot is the captain's decision.                                 #
 # --------------------------------------------------------------------------- #
 def run_compose(args) -> int:
     # 1. GPU guard FIRST — before importing/booting anything heavy.
@@ -89,38 +152,31 @@ def run_compose(args) -> int:
     from isaacsim import SimulationApp  # UNVERIFIED (needs a simulator boot)
     sim = SimulationApp({"headless": args.headless})
     try:
-        from isaacsim.core.utils.extensions import enable_extension  # noqa: E402
         import omni.usd  # noqa: E402
-        from pxr import Gf, Usd, UsdGeom, UsdPhysics, PhysxSchema  # noqa: E402
 
-        # 3. URDF -> USD (step 1 of the real pipeline; deferred here behind the boot).
+        # 3. URDF -> USD (Isaac-only; needs the booted Kit app). Deferred here
+        #    behind the boot — there is no pure-Python path (see docstring).
         robot_usd = args.robot_usd or _import_urdf_to_usd(args.robot_urdf, args.save)
 
-        # 4. Compose: reference the store, author physics + colliders, place robot.
-        omni.usd.get_context().new_stage()
-        stage = omni.usd.get_context().get_stage()
-        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
-        UsdGeom.SetStageMetersPerUnit(stage, 1.0)
-        store_ref = stage.DefinePrim("/World/Store", "Xform")
-        store_ref.GetReferences().AddReference(os.path.abspath(args.store))
-
-        _author_physics(stage, UsdPhysics)
-        _author_colliders(stage, Usd, UsdPhysics, PhysxSchema,
-                          author_products=(args.product_collider == "convex"))
-
-        # Re-probe the geometry (no GPU) for the spawn pose, then place + correct.
+        # 4. Probe geometry (no GPU) for the spawn pose, then author the whole
+        #    composed stage with the SAME pure-USD core the offline path uses.
         _facts, spawn, _plan, _extras = usd_probe.probe(
             args.store, spawn_aisle_cam=args.spawn_aisle,
             spawn_xy=tuple(args.spawn_xy) if args.spawn_xy else None,
             product_collider=args.product_collider, min_clearance=args.min_clearance)
-        _place_robot(stage, robot_usd, spawn, args.yaw_deg, Gf, UsdGeom)
+        result = compose.build_composition(
+            store_path=args.store, robot_usd=robot_usd, out_path=args.save,
+            spawn=spawn, yaw_deg=args.yaw_deg, product_collider=args.product_collider)
+        print(f"[compose] authored {result.out_path} "
+              f"({result.triangle_mesh} tri + {result.convex_hull} convex colliders, "
+              f"{result.prototypes_covered}/{result.prototypes_total} prototypes)", file=sys.stderr)
 
-        # 5. Step and save.
+        # 5. Open the composed stage in the simulator, step physics, screenshot.
+        omni.usd.get_context().open_stage(os.path.abspath(args.save))  # UNVERIFIED
         import omni.timeline  # noqa: E402
         omni.timeline.get_timeline_interface().play()
         for _ in range(args.steps):
             sim.update()
-        stage.Export(os.path.abspath(args.save))
         _screenshot(sim, cli.resolve_screenshot(args))
         print(f"[compose] wrote {args.save}", file=sys.stderr)
     finally:
@@ -156,67 +212,6 @@ def _import_urdf_to_usd(urdf_path: str, near_save: str) -> str:
     return out_usd
 
 
-def _author_physics(stage, UsdPhysics) -> None:
-    """PhysicsScene + gravity. UNVERIFIED (needs a simulator boot)."""
-    scene = UsdPhysics.Scene.Define(stage, "/World/physicsScene")
-    scene.CreateGravityDirectionAttr().Set((0.0, 0.0, -1.0))   # Z-up store
-    scene.CreateGravityMagnitudeAttr().Set(9.81)
-
-
-def _author_colliders(stage, Usd, UsdPhysics, PhysxSchema, author_products: bool) -> None:
-    """Apply colliders using the SAME policy as twin.colliders.classify:
-    triangle-mesh on static scenery, convex hull on instance PROTOTYPES (authored
-    once — never on the 24.9k instances). UNVERIFIED (needs a simulator boot)."""
-    from twin import colliders as C
-
-    def apply(prim, decision):
-        UsdPhysics.CollisionAPI.Apply(prim)
-        mesh_api = UsdPhysics.MeshCollisionAPI.Apply(prim)
-        mesh_api.CreateApproximationAttr().Set(decision.approximation)
-        # Static: NO RigidBodyAPI -> immovable collider (robot can't knock stock over).
-
-    store = stage.GetPrimAtPath("/World/Store")
-    root = store.GetPath()
-    # Static scenery under the referenced store.
-    for grp in C.STATIC_GROUPS:
-        grproot = stage.GetPrimAtPath(root.AppendChild(grp))
-        if not grproot:
-            continue
-        for p in Usd.PrimRange(grproot):
-            info = C.PrimInfo(path=str(p.GetPath()), type_name=str(p.GetTypeName()),
-                              top_group=grp, is_instance=p.IsInstance(),
-                              in_prototype=False, name=p.GetName())
-            d = C.classify(info)
-            if d.kind == C.TRIANGLE_MESH:
-                apply(p, d)
-    # Instance prototypes (convex, once each).
-    if author_products:
-        for proto in stage.GetPrototypes():
-            for p in Usd.PrimRange(proto):
-                if p.GetTypeName() == "Mesh":
-                    info = C.PrimInfo(path=str(p.GetPath()), type_name="Mesh",
-                                      top_group="__prototype__", is_instance=False,
-                                      in_prototype=True, name=p.GetName())
-                    apply(p, C.classify(info))
-
-
-def _place_robot(stage, robot_usd, spawn, yaw_deg, Gf, UsdGeom) -> None:
-    """Reference the robot USD and set its root xform to the estimated translate,
-    then re-measure the pedestal and correct so it lands at the aisle spot.
-    UNVERIFIED (needs a simulator boot)."""
-    robot = stage.DefinePrim("/World/Robot", "Xform")
-    robot.GetReferences().AddReference(os.path.abspath(robot_usd))
-    xf = UsdGeom.Xformable(robot)
-    xf.ClearXformOpOrder()
-    t = spawn.root_translate or (spawn.x, spawn.y, spawn.z)
-    xf.AddTranslateOp().Set(Gf.Vec3d(float(t[0]), float(t[1]), float(t[2])))
-    if yaw_deg:
-        xf.AddRotateZOp().Set(float(yaw_deg))
-    # Correction pass: measure where the pedestal actually landed (import root
-    # convention varies) and nudge so the pedestal base sits at (spawn.x, spawn.y).
-    # Left as a runtime check because it depends on the imported prim tree.
-
-
 def _screenshot(sim, path: str) -> None:
     """Capture a viewport screenshot. UNVERIFIED (needs a simulator boot)."""
     try:
@@ -235,6 +230,8 @@ def main(argv=None) -> int:
         return run_report_usd(args)
     if args.dry_run:
         return run_dry_run(args)
+    if args.author_offline:
+        return run_author_offline(args)
     return run_compose(args)
 
 
