@@ -1,0 +1,122 @@
+{
+  "_provenance": {
+    "produced_by": "scripts/compose_robot_in_store.py --report-usd",
+    "date": "2026-09-10",
+    "method": "USD pxr bindings bundled in Isaac Sim (USD 0.24.5) read WITHOUT booting SimulationApp \u2014 no RTX, no GPU session",
+    "store_usd_git_blob": "79603a914a037187bc968d7e10c43d7a43b7f06f",
+    "note": "Spawn clearance is the planar (XY) distance from the pedestal spot to the nearest fixture/product/wall footprint, from a 0.05 m occupancy grid; walls bound the domain (a wall ring's bbox would fill the floor) with a 0.30 m edge margin."
+  },
+  "facts": {
+    "store_usd": "/home/manishsaini/workspaces/blender-supermarket/export/supermarket.usdc",
+    "up_axis": "Z",
+    "meters_per_unit": 1.0,
+    "default_prim": "/Supermarket",
+    "floor_z": 0.0,
+    "floor_extent": {
+      "x": [
+        -13.0,
+        13.0
+      ],
+      "y": [
+        -11.0,
+        11.0
+      ]
+    },
+    "collider_targets": {
+      "structure": 10,
+      "fixtures": 674,
+      "signage": 18,
+      "triangle_mesh_meshes": 702,
+      "prototypes": 196,
+      "instances": 24927
+    }
+  },
+  "spawn": {
+    "x": -1.525,
+    "y": 0.75,
+    "z": 0.0,
+    "clearance_m": 0.95,
+    "label": "Cam_Aisle aisle",
+    "root_translate": [
+      -1.525,
+      1.95,
+      0.0
+    ]
+  },
+  "collider_plan": {
+    "triangle_mesh": 702,
+    "convex_hull": 197,
+    "skipped_instances": 24927,
+    "skipped_other": 0
+  },
+  "geometry": {
+    "gondola_x_ranges": [
+      [
+        -9.925,
+        -8.375
+      ],
+      [
+        -6.875,
+        -5.325
+      ],
+      [
+        -3.825,
+        -2.275
+      ],
+      [
+        -0.775,
+        0.775
+      ],
+      [
+        2.275,
+        3.825
+      ],
+      [
+        5.325,
+        6.875
+      ],
+      [
+        8.375,
+        9.925
+      ]
+    ],
+    "gondola_y_extent": [
+      -3.646,
+      5.146
+    ],
+    "aisle_centerlines": [
+      {
+        "center_x": -7.625,
+        "gap_width_m": 1.5
+      },
+      {
+        "center_x": -4.575,
+        "gap_width_m": 1.5
+      },
+      {
+        "center_x": -1.525,
+        "gap_width_m": 1.5
+      },
+      {
+        "center_x": 1.525,
+        "gap_width_m": 1.5
+      },
+      {
+        "center_x": 4.575,
+        "gap_width_m": 1.5
+      },
+      {
+        "center_x": 7.625,
+        "gap_width_m": 1.5
+      }
+    ],
+    "global_max_clearance": {
+      "x": 7.7,
+      "y": 7.45,
+      "z": 0.0,
+      "clearance_m": 2.499,
+      "label": "global_max_clearance",
+      "root_translate": null
+    }
+  }
+}
