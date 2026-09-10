@@ -161,6 +161,23 @@ read the stage and print the plan with **no GPU boot**. See
 [docs/isaac_robot_in_store.md](docs/isaac_robot_in_store.md) for the command
 sequence, the measured USD facts, and the candidate spawn pose.
 
+**Validate the export offline (no Isaac, no GPU).** `scripts/validate_usd.py` opens
+the stage with the CPU-only `usd-core` wheel and proves it is Isaac-loadable — up-axis,
+scale, default prim, that **every texture / reference / payload resolves** (no absolute
+build-machine paths, nothing outside `export/`), the prim paths the composer needs, and
+the physics census. Exit `0`/`1`; run it after every export. Commands in RUNBOOK §6a;
+the full pre-flight is [data/twin-usd-validate-v1/report.md](data/twin-usd-validate-v1/report.md).
+Current verified stage: Z-up, 1 m/unit, default prim `/Supermarket`, **54 150 prims**
+(24 927 instances, 196 prototypes), floor at z = 0 spanning the **26 × 22 m** shop floor,
+render-only geometry (the composer adds physics). **Known defect:** the export authors
+**6 dangling floor/wall textures** — floor (`floor_tiles_08`) and all five walls
+(`white_plaster_02`) load *untextured* in Isaac because the MCP-imported Poly Haven
+image datablocks are named `<map>.jpg` but backed by `tmp*.jpg` temp files, so the
+exporter writes the temp names while authoring the datablock names. It is **cosmetic
+only** (geometry, placement and physics-authoring are unaffected; the robot still
+stands). Fixed in `export_usd.py` (`_stage_textures_for_export()`) for the next export;
+clear it on the current artifact offline with `validate_usd.py --repair-textures`.
+
 ---
 
 ## Rebuilding from a fresh clone
@@ -258,6 +275,21 @@ than reproduced.
 ## Decision log
 
 Dated record of the choices baked into the repo. Newest first.
+
+### 2026-09-10 — Offline USD validator + floor/wall texture-export fix
+Pre-flighting the Isaac robot-in-store step **without a GPU** found the export authors
+**6 dangling floor/wall textures**: `polyhaven_mat()` reuses the MCP-imported Poly Haven
+materials, whose image datablocks are named `floor_tiles_08_*.jpg` / `white_plaster_02_*.jpg`
+but backed by `tmp*.jpg` temp downloads, so Blender's exporter writes the temp filenames
+into `export/textures/` while authoring the datablock names — floor and all five walls
+load untextured in Isaac (cosmetic; geometry, placement and the composer's physics
+authoring are unaffected). Fix in `export_usd.py` (`_stage_textures_for_export()` makes
+each image's backing basename equal its datablock name before export); the current
+artifact is repairable offline via `validate_usd.py --repair-textures` (the six exact
+names exist in the versioned `assets/textures/`). `scripts/validate_usd.py` is the
+repeatable check — CPU-only `usd-core` (no Isaac/GPU), exit 0/1, self-test + 7 pytest
+tests. Everything else verified clean: Z-up, 1 m/unit, default prim `/Supermarket`, all
+composer prim paths present. Full report: `data/twin-usd-validate-v1/report.md`.
 
 ### 2026-09-09 — File policy refined: ignore only what is offline AND cheap
 The repo was committed whole (b4bfa88) to stop untracked work being lost; this

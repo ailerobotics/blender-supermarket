@@ -31,6 +31,12 @@ repo's `scenes/`, `export/` or `renders/`.
   gated by a GPU guard that refuses beside the live Blender session. Pure logic is
   unit tested under `scripts/twin/tests/` (run under `env_isaaclab`; the
   Isaac-bundled `pxr` needs no simulator boot to read the stage).
+- **Validate the USD offline (no GPU)**: `scripts/validate_usd.py` (RUNBOOK §6a) opens
+  the export with a CPU-only `usd-core` venv and proves it is Isaac-loadable (up-axis,
+  scale, default prim, every texture/reference resolves, composer prim paths). Run it
+  after every `export_usd.py`. Known standing defect it flags: the export authors 6
+  dangling floor/wall textures (MCP Poly Haven maps backed by `tmp*.jpg`); fixed in
+  `export_usd.py`, needs a re-export — write-up in `data/twin-usd-validate-v1/report.md`.
 - **Path caveat**: the Blender-run scripts hardcode `~/workspaces/blender-supermarket`
   as the project root; the PIL scripts use script-relative paths.
 - Local-only project: **no git remote** — never push or open a PR.

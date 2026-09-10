@@ -39,3 +39,8 @@ logs/
 # Python bytecode from the generator scripts.
 __pycache__/
 *.pyc
+
+# Throwaway CPU-only venv for the offline USD validator (scripts/validate_usd.py):
+#   python3 -m venv .venv-usd && .venv-usd/bin/pip install usd-core   (offline, ~30 MB)
+.venv-usd/
+.venv/
