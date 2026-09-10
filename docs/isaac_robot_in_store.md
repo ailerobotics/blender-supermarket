@@ -23,10 +23,26 @@ session is **not** overridable by `--force` — close/save Blender first, then r
 ## Command sequence
 
 All commands run under `env_isaaclab`. The wrapper activates it and puts
-`ur_description` (`/opt/ros/jazzy/share`) and `shelfbot` (`~/workspaces/shelfbot`)
-on the ROS package path so the URDF's `package://` meshes resolve.
+`ur_description` (`/opt/ros/jazzy/share`) and `shelfbot` on the ROS package path so
+the URDF's `package://` meshes resolve. **Package `shelfbot` is
+`~/workspaces/shelfbot_newgripper`** — the repo that declares that ROS package name
+*and* carries the gripper meshes — **not** the older `~/workspaces/shelfbot`, which
+declares the same name but has no `description/gripper/meshes`. The wrapper builds a
+small symlink shim so `package://shelfbot/…` resolves there under any resolver model
+(`ROS_PACKAGE_PATH` entry/pkg, crawl-by-name, or ament `share/`). Isaac's URDF importer
+*imports even when a mesh is not found* (it logs an error and continues), so pointing at
+the wrong repo would silently import the arm with the gripper missing — prove it resolves
+offline first with `scripts/validate_robot_urdf.py` (see below).
 
 ```bash
+# 0. Prove the WHOLE chain offline in one command (store + robot + composer). NO GPU.
+#    exit 0 = nothing offline-detectable is left to fail.
+.venv-usd/bin/python scripts/preflight.py
+
+# 0b. Just the robot asset (URDF parses, every mesh resolves, masses/inertias/joint
+#     limits sane, and it fits the aisle). NO GPU.
+.venv-usd/bin/python scripts/validate_robot_urdf.py
+
 # 1. Read the store USD and print measured facts (NO GPU boot — safe any time,
 #    even with Blender open). This is how docs/twin_usd_facts.json was produced.
 bash scripts/compose_robot_in_store.sh --report-usd
@@ -156,10 +172,22 @@ the export already produces is exactly what makes a single shared collider possi
   needs the URDF→USD import); the transform, colliders, physics and stage structure are
   the real thing Isaac will load.
 - The GPU guard's refusal path — it correctly detects the Blender session and refuses.
+- **The robot asset itself** (`scripts/validate_robot_urdf.py`): the URDF parses into one
+  connected kinematic tree (26 links, 25 joints, root `world`); **every one of its 16 mesh
+  references resolves** to a real file (14 UR meshes → `/opt/ros/jazzy/share/ur_description`,
+  2 gripper OBJs → `~/workspaces/shelfbot_newgripper`) with no absolute build-machine paths;
+  all 12 dynamic links carry a positive mass and a positive-definite, triangle-inequality-valid
+  inertia; every movable joint has real limits + effort/velocity; UR links use dedicated
+  collision STLs (not the visual mesh); the URDF pedestal-mount offset **(0, −1.2)** equals the
+  composer's `geometry.PEDESTAL_OFFSET_FROM_ROOT`; and the arm's home-pose collision envelope
+  (from forward kinematics) reaches **0.552 m across-aisle** and **0.591 m** planar radius from
+  the pedestal — inside the 1.5 m aisle (≈0.198 m to the near shelf) and the store's 0.95 m
+  clearance. Two placeholder gripper inertias (implausibly large for 0.1 kg) are flagged as a
+  WARN — see below.
 - The pose maths, prototype-vs-instance collider selection, argument handling, the
-  dry-run output, the refusal logic, and the composition core — unit tested
-  (`scripts/twin/tests/`). The composition + validator tests need `usd-core`; the
-  pure-logic tests need nothing:
+  dry-run output, the refusal logic, the composition core, and the robot URDF probe/validator —
+  unit tested (`scripts/twin/tests/`). The composition + store-validator tests need `usd-core`;
+  the robot + pure-logic tests need only numpy:
   ```bash
   # offline (recommended): CPU-only usd-core venv (RUNBOOK §6a/§6b)
   env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-usd/bin/python -m pytest scripts/twin/tests/ -q
@@ -169,10 +197,20 @@ the export already produces is exactly what makes a single shared collider possi
   ```
 
 **NOT verified — needs the captain's GPU boot (the only untested links left):** the
-URDF→USD import (`isaacsim.asset.importer.urdf`), PhysX actually loading the authored
-colliders, the robot settling under gravity without penetration once stepped, and the
-screenshot. Those blocks are marked `# UNVERIFIED (needs a simulator boot)` in
-`compose_robot_in_store.py`; they have never executed, and whether Isaac Sim stays up on
-this 12 GB box is still the open question the earlier boot crash left. Everything the
-simulator *consumes* — the composed stage — is now proven offline; treat the first real
-run as a bring-up of the simulator link, not a regression check of the composition.
+*execution* of the URDF→USD import (`isaacsim.asset.importer.urdf` — its inputs are now
+proven: the URDF parses and every mesh resolves, so what remains is only that the importer
+runs and produces the expected articulation), PhysX actually loading the authored colliders,
+the robot settling under gravity without penetration once stepped, and the screenshot. Those
+blocks are marked `# UNVERIFIED (needs a simulator boot)` in `compose_robot_in_store.py`; they
+have never executed, and whether Isaac Sim stays up on this 12 GB box is still the open question
+the earlier boot crash left. Everything the simulator *consumes* — the composed stage and the
+robot description — is now proven offline; treat the first real run as a bring-up of the
+simulator link, not a regression check of the composition or the asset.
+
+**One upstream data-quality note (not a blocker, and not fixable here):** in the URDF the
+gripper links `cube_without_surface_plates` and `suction_cups` each carry a placeholder inertia
+of `ixx=iyy=izz=0.016667` for a 0.1 kg body — a radius of gyration of ~0.41 m on a ~0.29 m box,
+physically implausible. Both are rigidly attached by **fixed** joints so they will not
+destabilise the solver, but they inflate the composed end-effector inertia. The fix is in the
+robot description (`shelfbot_gripper_isaac.urdf`, the `<inertial>` of those two links), which
+lives in another repo — `validate_robot_urdf.py` flags it as a WARN so it is not forgotten.

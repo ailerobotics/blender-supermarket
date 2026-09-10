@@ -116,6 +116,33 @@ gondola), with instancing preserved. Tests (needs `usd-core`; pure-logic tests n
 env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-usd/bin/python -m pytest scripts/twin/tests/
 ```
 
+## 6c. Validate the robot URDF offline (no Isaac, no GPU)
+Prove the **robot asset itself** is Isaac-ready before any GPU session — the last of the three
+offline-checkable links. Same CPU-only venv (this side needs only numpy).
+```bash
+cd ~/workspaces/blender-supermarket
+.venv-usd/bin/python scripts/validate_robot_urdf.py                 # exit 0 = pass, 1 = fail
+.venv-usd/bin/python scripts/validate_robot_urdf.py --json          # + measured facts as JSON
+.venv-usd/bin/python scripts/validate_robot_urdf.py --selftest      # sanity check (no robot needed)
+```
+It reads `~/workspaces/shelfbot_newgripper/description/shelfbot_gripper_isaac.urdf` with pure
+`xml`+`numpy` and checks: it parses into one connected kinematic tree; **every `package://`
+mesh resolves** to a real file (no dangling meshes — the same defect class as the store
+textures; Isaac imports *even when a mesh is missing*, so this is the only warning you get);
+no absolute build-machine paths; every dynamic link has a positive mass + physically valid
+inertia; every movable joint has real limits + effort/velocity; and **store consistency** —
+the URDF's pedestal-mount XY offset equals the composer's `geometry.PEDESTAL_OFFSET_FROM_ROOT`,
+and the arm's home-pose collision envelope (forward-kinematics, real numbers) fits the 1.5 m
+aisle it stands in. Package `shelfbot` = `~/workspaces/shelfbot_newgripper` (the repo that
+declares that ROS name AND carries the gripper meshes — **not** the older `~/workspaces/shelfbot`,
+which has neither); the check flags the same-name ambiguity.
+
+**One command for all three (store + composer + robot)** — this is the pre-flight the captain
+runs before booting (see §8):
+```bash
+.venv-usd/bin/python scripts/preflight.py                          # exit 0 = whole chain OK
+```
+
 ## 7. Where things are
 ```
 scripts/catalog.py          product catalog (SKU dims, colors, prices)      scripts/planogram.json   generated layout + shelf facings
@@ -123,28 +150,37 @@ scripts/gen_planogram.py    layout generator                                 scr
 scripts/build_supermarket.py Blender builder (staged)                        scripts/render_shots.py  stills
 scripts/render_walkthrough.py fly-through video                              scripts/export_usd.py    Isaac USD export
 scripts/validate_usd.py     offline USD validator (no GPU; §6a)              scripts/compose_robot_in_store.py  Isaac robot-in-store composer
+scripts/validate_robot_urdf.py robot URDF pre-flight (no GPU; §6c)           scripts/preflight.py     one-command chain pre-flight (store+robot+composer)
 scripts/mcpcall.py          stdio MCP test client                            scripts/launch_blender.sh start GUI + MCP socket
 scenes/supermarket.blend    THE scene (25.7k objects, 24.9k product instances, 93 shared meshes)
 scenes/supermarket_base.blend  empty base: Poly Haven floor_tiles_08, white_plaster_02, HDRI wide_street_01 (fake-user pinned)
 assets/textures, assets/labels, assets/signs, renders/, export/, logs/
-scripts/twin/    compose.py (pure-USD composition core), usd_probe.py, geometry.py, colliders.py, gpu_guard.py, cli.py + tests/
+scripts/twin/    compose.py (pure-USD composition core), usd_probe.py, urdf_probe.py (robot URDF read), geometry.py, colliders.py, gpu_guard.py, cli.py + tests/
 ```
 
 ## 8. GPU session runbook — stand the robot in the store (Isaac Sim)
 
-The captain runs this **once**, in one sitting, on the RTX 3060 (12 GB) box. Everything up to
-the SimulationApp boot is already proven offline (§6b); this session verifies the three things
-only a real simulator can: the URDF→USD import, PhysX loading the colliders, and the robot
-resting under gravity. **Close/save Blender first** — the guard refuses beside it and won't
-`--force` past that (see [docs/isaac_robot_in_store.md](docs/isaac_robot_in_store.md)).
+The captain runs this **once**, in one sitting, on the RTX 3060 (12 GB) box. All three
+offline-checkable links are now proven: **store checked** (§6a), **composer checked** (§6b),
+**robot checked** (§6c). This session verifies only what a real simulator can: the URDF→USD
+import, PhysX loading the colliders, and the robot resting under gravity. **Close/save Blender
+first** — the guard refuses beside it and won't `--force` past that (see
+[docs/isaac_robot_in_store.md](docs/isaac_robot_in_store.md)).
 
-**Pre-flight (safe with Blender still open — do these first, no GPU):**
+**Pre-flight — ONE command checks the whole chain (safe with Blender still open, no GPU):**
 ```bash
 cd ~/workspaces/blender-supermarket
-.venv-usd/bin/python scripts/validate_usd.py                                   # §6a — exit 0
-.venv-usd/bin/python scripts/compose_robot_in_store.py --author-offline --save /tmp/store_with_robot.usda
-#   -> expect: VERDICT: PASS — offline composition is sane. If this fails, DO NOT boot; fix first.
+.venv-usd/bin/python scripts/preflight.py     # store + robot + composer; exit 0 = safe to boot
 ```
+It runs `validate_usd.py` (store), `validate_robot_urdf.py` (robot URDF + aisle fit) and the
+`--author-offline` composition, and prints one verdict. **Exit 0 → nothing offline-detectable
+is left to fail; boot.** Exit 1 → do NOT boot, read which of the three failed and fix first.
+The three still run standalone (`validate_usd.py`; `validate_robot_urdf.py`;
+`compose_robot_in_store.py --author-offline`) if you want them one at a time.
+
+> If `preflight.py` fails on **STORE only**, on the 6 floor/wall textures, that is the known
+> cosmetic export defect (§6a) — clear it with `validate_usd.py --repair-textures` or a
+> re-export; it does **not** block the URDF import or the robot placement.
 
 **The GPU session, in order:**
 ```bash
@@ -179,7 +215,8 @@ the floor or exploded.
 |---|---|---|
 | `REFUSING … a protected GPU session … blender` | Blender still holds the GPU | Close/save Blender; re-check `nvidia-smi`. `--force` will NOT override this. |
 | `REFUSING … only <N> MiB free` | another consumer (or a stale Isaac) holds VRAM | Free it; or `--force` to accept the OOM risk on a genuinely idle GPU. |
-| URDF import errors on `package://ur_description/…` | ROS package path not sourced | Use the `.sh` wrapper (it sources `/opt/ros/jazzy` + puts `ur_description`/`shelfbot` on the path); confirm `/opt/ros/jazzy/share/ur_description` exists. |
+| URDF import errors on `package://ur_description/…` | ROS package path not sourced | Use the `.sh` wrapper (it sources `/opt/ros/jazzy` + puts `ur_description` on the path); confirm `/opt/ros/jazzy/share/ur_description` exists. |
+| Robot imports but the **gripper is invisible** (arm only) | `package://shelfbot/…gripper meshes` didn't resolve — Isaac imports even when a mesh is missing | The gripper meshes live only in `~/workspaces/shelfbot_newgripper` (NOT `~/workspaces/shelfbot`). The `.sh` wrapper now builds a shim pointing package `shelfbot` there; `scripts/validate_robot_urdf.py` proves it offline **before** you boot. |
 | Isaac OOM-kills / crashes at boot | 12 GB is tight; RTX scene + import together | Retry with Blender fully closed and nothing else on the GPU; `--no-headless` is heavier — keep the default headless. |
 | Robot floats above / sinks into the floor after stepping | imported root convention differs from the pre-import estimate | The offline pose is measured (pedestal base at floor Z=0); if the imported root isn't the URDF `world` link, add a correction pass after `twin.compose.place_robot` (re-measure the pedestal prim and nudge) and re-run. Geometry is unchanged — no re-export needed. |
 

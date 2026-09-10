@@ -21,13 +21,27 @@ source "${CONDA_ROOT}/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV}"
 
 # ROS package path for package:// mesh resolution during URDF import.
-#   ur_description -> /opt/ros/jazzy/share ; shelfbot -> ~/workspaces/shelfbot
+#   ur_description -> /opt/ros/jazzy/share
+#   shelfbot       -> the repo that DECLARES ROS package `shelfbot` in its package.xml
+#                     AND carries the gripper meshes: ~/workspaces/shelfbot_newgripper.
+# NB: ~/workspaces/shelfbot (the older robot repo) ALSO declares name `shelfbot` but has
+# NO description/gripper/meshes — pointing at it silently imports the arm with the gripper
+# meshes missing (Isaac imports even when a mesh is not found). See scripts/validate_robot_urdf.py.
 if [ -d /opt/ros/jazzy ]; then
   # shellcheck source=/dev/null
   source /opt/ros/jazzy/setup.bash 2>/dev/null || true
 fi
-export AMENT_PREFIX_PATH="${HOME}/workspaces/shelfbot:${AMENT_PREFIX_PATH:-}"
-export ROS_PACKAGE_PATH="${HOME}/workspaces/shelfbot:/opt/ros/jazzy/share:${ROS_PACKAGE_PATH:-}"
+SHELFBOT_PKG="${SHELFBOT_PKG:-${HOME}/workspaces/shelfbot_newgripper}"
+# Build an ephemeral package-path shim so `package://shelfbot/...` resolves to
+# ${SHELFBOT_PKG} whatever resolution model the importer uses — ROS_PACKAGE_PATH
+# entry/pkg (<shim>/shelfbot/rel), crawl-by-package.xml-name, or ament share/
+# (<shim>/share/shelfbot). Symlinks only; nothing is written to the repo or committed.
+TWIN_ROS_SHIM="$(mktemp -d)/ros_pkgs"
+mkdir -p "${TWIN_ROS_SHIM}/share"
+ln -sfn "${SHELFBOT_PKG}" "${TWIN_ROS_SHIM}/shelfbot"
+ln -sfn "${SHELFBOT_PKG}" "${TWIN_ROS_SHIM}/share/shelfbot"
+export AMENT_PREFIX_PATH="${TWIN_ROS_SHIM}:${AMENT_PREFIX_PATH:-}"
+export ROS_PACKAGE_PATH="${TWIN_ROS_SHIM}:${TWIN_ROS_SHIM}/shelfbot:/opt/ros/jazzy/share:${ROS_PACKAGE_PATH:-}"
 
 # Absolute python path (a stray venv on PATH can shadow the conda env's isaacsim).
 exec "${CONDA_PREFIX}/bin/python" "${SCRIPT_DIR}/compose_robot_in_store.py" "$@"

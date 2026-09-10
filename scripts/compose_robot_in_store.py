@@ -191,8 +191,10 @@ def _import_urdf_to_usd(urdf_path: str, near_save: str) -> str:
     it only runs inside the booted Kit app — it CANNOT be done without a GPU
     session, which is why the whole conversion is deferred to here rather than
     done ahead of time. package:// meshes must resolve: ur_description
-    (/opt/ros/jazzy/share) and shelfbot (~/workspaces/shelfbot) on the ROS
-    package path (the wrapper sources ROS for this).
+    (/opt/ros/jazzy/share) and shelfbot (~/workspaces/shelfbot_newgripper — the repo
+    that declares package 'shelfbot' AND carries the gripper meshes, NOT the older
+    ~/workspaces/shelfbot) on the ROS package path (the wrapper builds a shim for this).
+    Prove it offline first with scripts/validate_robot_urdf.py.
     """
     import omni.kit.commands  # UNVERIFIED
     from isaacsim.core.utils.extensions import enable_extension
