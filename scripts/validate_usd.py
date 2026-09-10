@@ -92,7 +92,8 @@ class Report:
     PASS, FAIL, INFO, WARN = "PASS", "FAIL", "INFO", "WARN"
 
     def __init__(self):
-        self.checks = []   # (status, name, detail)
+        self.checks = []   # (status, name, detail) — kept 3-wide for callers that unpack it
+        self.cosmetic_names = set()  # names of FAILs that do NOT block booting the simulator
         self.facts = {}
 
     def add(self, status, name, detail=""):
@@ -101,8 +102,13 @@ class Report:
     def ok(self, name, detail=""):
         self.add(self.PASS, name, detail)
 
-    def fail(self, name, detail=""):
+    def fail(self, name, detail="", blocking=True):
+        """A hard failure. ``blocking=False`` marks it cosmetic — a real defect that
+        does NOT stop Isaac loading the stage or the robot standing in it (e.g. a
+        dangling *texture*: the floor/walls load untextured, geometry is intact)."""
         self.add(self.FAIL, name, detail)
+        if not blocking:
+            self.cosmetic_names.add(name)
 
     def info(self, name, detail=""):
         self.add(self.INFO, name, detail)
@@ -112,13 +118,27 @@ class Report:
 
     @property
     def failed(self):
+        """Any hard failure at all (blocking or cosmetic)."""
         return any(s == self.FAIL for s, _, _ in self.checks)
+
+    @property
+    def blocking_failed(self):
+        """A failure that stops the simulator booting — the real go/no-go signal."""
+        return any(s == self.FAIL and n not in self.cosmetic_names
+                   for s, n, _ in self.checks)
+
+    @property
+    def cosmetic_failed(self):
+        """A failure that is real but does NOT block booting (e.g. untextured walls)."""
+        return any(s == self.FAIL and n in self.cosmetic_names
+                   for s, n, _ in self.checks)
 
     def render(self):
         icon = {self.PASS: "PASS", self.FAIL: "FAIL", self.INFO: "····", self.WARN: "warn"}
         lines = []
         for status, name, detail in self.checks:
-            lines.append(f"[{icon[status]}] {name}" + (f": {detail}" if detail else ""))
+            tag = "COSMETIC" if (status == self.FAIL and name in self.cosmetic_names) else icon[status]
+            lines.append(f"[{tag}] {name}" + (f": {detail}" if detail else ""))
         return "\n".join(lines)
 
 
@@ -197,9 +217,30 @@ def check_assets(stage, store_path, rep):
     unresolved_names = {os.path.basename(u) for u in unresolved}
     if missing or unresolved:
         detail_lines = sorted({os.path.basename(a) for _, a, _ in missing} | unresolved_names)
+        # Severity: a dangling *texture* (an Asset-valued shader input) is cosmetic —
+        # the floor/walls load untextured but the geometry is intact, so Isaac still
+        # loads the stage and the robot still stands (see data/twin-usd-validate-v1).
+        # A dangling *composition arc* (reference / payload / sublayer) is blocking —
+        # that is missing geometry, so booting would load a broken stage. We classify
+        # as cosmetic only when every unresolved asset is a texture input and nothing
+        # from the layer-dependency graph is unresolved.
+        texture_bases = {os.path.basename(a) for _, a, _ in missing}
+        structural = sorted(n for n in unresolved_names if n not in texture_bases)
+        cosmetic = bool(texture_bases) and not structural
+        if cosmetic:
+            note = (" — cosmetic: these are texture maps, so floor/walls load "
+                    "untextured; geometry is intact, stage still loads, robot still "
+                    "stands. Repair offline with --repair-textures.")
+        else:
+            note = (f" — BLOCKING: {len(structural)} missing composition arc(s) "
+                    f"(reference/payload/sublayer) = missing geometry: "
+                    + ", ".join(structural))
         rep.fail("every asset path resolves",
-                 f"{len(detail_lines)} unresolved: " + ", ".join(detail_lines))
+                 f"{len(detail_lines)} unresolved: " + ", ".join(detail_lines) + note,
+                 blocking=not cosmetic)
         rep.facts["unresolved"] = detail_lines
+        rep.facts["unresolved_structural"] = structural
+        rep.facts["unresolved_cosmetic"] = cosmetic
         rep.facts["unresolved_attrs"] = [
             {"attr": a, "authored": auth} for a, auth, _ in missing]
     else:
@@ -464,6 +505,7 @@ def validate(store_path, repair=False):
                                           "no absolute build-machine paths",
                                           "all assets inside export/", "composition",
                                           "asset-valued attributes", "orphan texture files")]
+            rep.cosmetic_names.discard("every asset path resolves")
             check_assets(stage, store_path, rep)
     physics_census(stage, rep)
     return rep
@@ -495,7 +537,13 @@ def main(argv=None):
     print("-" * 78)
     verdict = "FAIL" if rep.failed else "PASS"
     n_fail = sum(1 for s, _, _ in rep.checks if s == Report.FAIL)
-    print(f"VERDICT: {verdict}" + (f"  ({n_fail} hard check(s) failed)" if rep.failed else ""))
+    if not rep.failed:
+        print("VERDICT: PASS")
+    elif rep.blocking_failed:
+        print(f"VERDICT: FAIL  ({n_fail} hard check(s) failed — BLOCKING: do NOT boot)")
+    else:
+        print(f"VERDICT: FAIL  ({n_fail} hard check(s) failed — all COSMETIC: stage still "
+              "loads and the robot still stands; fix with --repair-textures)")
     if args.json:
         import json
         print("-" * 78)

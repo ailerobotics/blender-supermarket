@@ -176,7 +176,8 @@ image datablocks are named `<map>.jpg` but backed by `tmp*.jpg` temp files, so t
 exporter writes the temp names while authoring the datablock names. It is **cosmetic
 only** (geometry, placement and physics-authoring are unaffected; the robot still
 stands). Fixed in `export_usd.py` (`_stage_textures_for_export()`) for the next export;
-clear it on the current artifact offline with `validate_usd.py --repair-textures`.
+on the current artifact the offline pre-flight (`scripts/preflight.py`, RUNBOOK §8) clears
+it automatically, and `validate_usd.py --repair-textures` does it standalone.
 
 ---
 
@@ -275,6 +276,33 @@ than reproduced.
 ## Decision log
 
 Dated record of the choices baked into the repo. Newest first.
+
+### 2026-09-10 — One-command pre-flight goes green; texture repair, not a commit
+The captain's go/no-go is a single command (`scripts/preflight.py`, RUNBOOK §8). It was
+coming back red for the known **cosmetic** floor/wall texture defect — a red that did not
+mean "do not boot", which is how a check gets ignored. Two changes fix that without
+suppressing anything:
+
+1. **The pre-flight repairs the current export in place before validating it** — copies
+   the 6 authored-but-missing textures from the versioned `assets/textures/` into the
+   gitignored `export/textures/` (offline, deterministic, no Blender). So the one command
+   is self-sufficient and green on a stale on-disk export.
+2. **The store check now grades a failure BLOCKING vs COSMETIC.** A dangling *texture*
+   (untextured surface, geometry intact) is cosmetic → verdict `PASS*`, exit 0, boot
+   anyway. A dangling *reference/payload/sublayer* or any structural defect (up-axis,
+   scale, default prim, floor, composer path) is blocking → `FAIL`, exit 1, do not boot.
+   A red pre-flight now always means "do not boot".
+
+**Artifact decision — repaired on demand, NOT committed.** `export/` stays gitignored
+per the file-policy rule above (regeneration is offline and cheap). The repair is part of
+that on-demand regeneration, reproducible by anyone running the one command. Cost basis
+(measured on this machine): the repair copies the 6 maps (**6.5 MB**, already versioned in
+`assets/textures/` — so it adds **0 new bytes to git**) and the validate+repair pass runs
+in **~7 s** offline. The alternative — committing the repaired artifact — would version
+**28 MB** of regenerable binary (`export/` = 4.6 MB `.usdc` + ~23 MB textures) in breach of
+the policy; the other alternative, a full re-export (**26.3 s** of Blender, and it needs the
+GUI-held scene), is exactly the GPU-adjacent work the pre-flight exists to avoid. The
+durable source-side fix for the *next* export already lives in `export_usd.py`.
 
 ### 2026-09-10 — Offline USD validator + floor/wall texture-export fix
 Pre-flighting the Isaac robot-in-store step **without a GPU** found the export authors
