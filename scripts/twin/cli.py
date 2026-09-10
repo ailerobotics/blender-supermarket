@@ -43,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save", default=DEFAULT_SAVE, help="Composed stage output (default: %(default)s).")
     p.add_argument("--screenshot", default=None,
                    help="Screenshot output (default: <save> with .png).")
+    p.add_argument("--json", action="store_true",
+                   help="With --author-offline, also emit the composed result + measured facts as JSON.")
     p.add_argument("--steps", type=int, default=60, help="Physics steps before saving (default: %(default)s).")
     # Modes
     p.add_argument("--dry-run", action="store_true",
@@ -50,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "exact plan, spawn pose and collider counts.")
     p.add_argument("--report-usd", action="store_true",
                    help="Probe the store USD (no GPU boot) and print measured facts as JSON, then exit.")
+    p.add_argument("--author-offline", action="store_true",
+                   help="Actually author the composed stage with pure USD (NO GPU boot): sublayer "
+                        "the store, author physics + colliders, place the robot (a faithful stub "
+                        "unless --robot-usd is given), save to --save and VALIDATE it. Exit 0 = the "
+                        "composition is sane, 1 = it failed a check. This is the offline proof that "
+                        "everything except the simulator itself works.")
     p.add_argument("--headless", dest="headless", action="store_true", default=True,
                    help="Headless SimulationApp (default).")
     p.add_argument("--no-headless", dest="headless", action="store_false",

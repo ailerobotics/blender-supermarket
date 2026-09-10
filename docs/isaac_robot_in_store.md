@@ -35,6 +35,11 @@ bash scripts/compose_robot_in_store.sh --report-usd
 #    now — authors nothing, boots nothing (safe with Blender open).
 bash scripts/compose_robot_in_store.sh --dry-run
 
+# 2b. ACTUALLY author + validate the composed stage with pure USD (still NO GPU boot).
+#     Proves colliders/physics/placement offline; exit 0 = sane. Prefer the CPU-only
+#     usd-core venv so it needs nothing from Isaac (RUNBOOK §6b):
+.venv-usd/bin/python scripts/compose_robot_in_store.py --author-offline --save /tmp/store_with_robot.usda
+
 # 3. REAL run — boots Isaac Sim (a GPU session). ONLY after the captain closes
 #    Blender. The guard still refuses if Blender (or a heavy consumer) is present.
 bash scripts/compose_robot_in_store.sh \
@@ -47,9 +52,11 @@ aisle), `--spawn-xy X Y` (explicit pedestal spot), `--product-collider none`
 low headroom / non-Blender heavy consumer — never the Blender gate).
 
 The real run, in order: GPU guard → boot `SimulationApp({'headless': True})` →
-**import the URDF to USD** (step 1, see below) → reference the store USD → author
-`PhysicsScene` + colliders → place the robot at the aisle pose → step → save the
-stage + a screenshot.
+**import the URDF to USD** (step 1, see below) → build the composed stage with the
+**shared pure-USD core** `twin/compose.py` (sublayer the store, author `PhysicsScene`
++ colliders, place the robot at the aisle pose) → open that stage in the sim → step →
+screenshot. The composition core is identical to what `--author-offline` runs, so it
+is already proven; only the boot / import / step / screenshot are new at GPU time.
 
 ## URDF → USD conversion cannot be done without a boot
 
@@ -105,32 +112,67 @@ Alternative wide-open spot (not an aisle): global-max clearance **2.5 m** at
 
 - **Static scenery** (walls, ceiling, floor, 674 fixture meshes, signage):
   triangle-mesh colliders (`UsdPhysics.MeshCollisionAPI` approximation `none`) —
-  concave geometry, immovable, no rigid body.
+  concave geometry, immovable, no rigid body. 702 meshes.
 - **Products & price tags**: convex-hull colliders authored on the **196 shared
-  prototypes**, so every one of the 24 927 instances inherits a collider *once*.
-  Authoring convex decomposition on 24 927 instances would blow VRAM — the guard
-  rail in `twin/colliders.py` refuses to author on any instanceable placement.
+  source meshes** (plus 1 loose price-tag mesh = 197), so every one of the 24 927
+  instances inherits a collider *once*. Authoring convex decomposition on 24 927
+  instances would blow VRAM — the guard rail in `twin/colliders.py` refuses to author
+  on any instanceable placement.
+
+### Where the shared collider is authored (the sublayer, not a nested reference)
+
+The store instances its products from source meshes held under the
+`/Supermarket/prototypes` **class** scope; each product placement is an `instanceable`
+prim that references one of those class prims, and USD then builds one runtime
+`/__Prototype_N` per unique source. Two facts drove the composer's design (both
+verified offline with `usd-core`):
+
+1. **You cannot author a collider on a runtime `/__Prototype_N` prim** — USD raises
+   *"authoring to an instancing prototype is not allowed."* So the collider is authored
+   on the **class source mesh** instead, and every prototype/instance inherits it.
+2. **An override authored on that class from *outside* the store's reference layer
+   stack does not reach the prototype either.** So the composer composes the store as a
+   **sublayer** of the output (not a nested `AddReference`), which puts the collider
+   overrides inside the store's own layer stack where they propagate into all 196
+   prototypes. The committed `export/supermarket.usdc` is only ever **sublayered
+   read-only** — never edited. (`--author-offline` asserts its SHA is unchanged.)
+
+This is a script-only fix — no Blender re-export is needed; the class-scope structure
+the export already produces is exactly what makes a single shared collider possible.
 
 ## What is verified vs not
 
 **Verified now (no simulator booted):**
 - The measured USD facts and spawn pose above — produced by a real run of
   `--report-usd` against the committed `export/supermarket.usdc`.
-- The GPU guard's refusal path — run live, it correctly detected the Blender
-  session and refused.
-- Pose maths, prototype-vs-instance collider selection, argument handling, the
-  dry-run output, and the refusal logic — unit tested (`scripts/twin/tests/`,
-  29 tests):
+- **The whole composition authored for real, offline** (`--author-offline`): the store
+  sublayered read-only, the `PhysicsScene`, all **702 triangle-mesh + 197 convex-hull**
+  colliders, **196/196 product prototypes** inheriting a collider (authored once on the
+  shared source — never per-instance, never on the forbidden runtime prototype), and the
+  robot placed via the real transform maths — **standing on the floor** (pedestal bottom
+  Z = 0.0), at the aisle spot **(−1.525, 0.75)**, **inside the aisle gap** (X ∈ ≈[−1.63,
+  −1.43], between gondolas G3 and G4), with instancing preserved (≈54 154 prims, not
+  de-instanced). The robot is a faithful pedestal+arm **stub** offline (the true mesh
+  needs the URDF→USD import); the transform, colliders, physics and stage structure are
+  the real thing Isaac will load.
+- The GPU guard's refusal path — it correctly detects the Blender session and refuses.
+- The pose maths, prototype-vs-instance collider selection, argument handling, the
+  dry-run output, the refusal logic, and the composition core — unit tested
+  (`scripts/twin/tests/`). The composition + validator tests need `usd-core`; the
+  pure-logic tests need nothing:
   ```bash
+  # offline (recommended): CPU-only usd-core venv (RUNBOOK §6a/§6b)
+  env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-usd/bin/python -m pytest scripts/twin/tests/ -q
+  # or under Isaac's env:
   conda activate env_isaaclab
-  env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-      python -m pytest scripts/twin/tests/ -q
+  env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest scripts/twin/tests/ -q
   ```
 
-**NOT verified (needs the captain's GPU boot):** the actual URDF→USD import, the
-collider/physics authoring against the live stage, the robot resting on the floor
-without penetration, and the screenshot. Those code paths are written and marked
-`# UNVERIFIED (needs a simulator boot)` in `compose_robot_in_store.py`; they have
-never executed, and whether Isaac Sim even stays up on this box is still the open
-question the boot crash left. Treat the first real run as a bring-up, not a
-regression check.
+**NOT verified — needs the captain's GPU boot (the only untested links left):** the
+URDF→USD import (`isaacsim.asset.importer.urdf`), PhysX actually loading the authored
+colliders, the robot settling under gravity without penetration once stepped, and the
+screenshot. Those blocks are marked `# UNVERIFIED (needs a simulator boot)` in
+`compose_robot_in_store.py`; they have never executed, and whether Isaac Sim stays up on
+this 12 GB box is still the open question the earlier boot crash left. Everything the
+simulator *consumes* — the composed stage — is now proven offline; treat the first real
+run as a bring-up of the simulator link, not a regression check of the composition.

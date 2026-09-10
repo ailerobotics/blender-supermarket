@@ -26,11 +26,19 @@ repo's `scenes/`, `export/` or `renders/`.
   costs) before adding or committing any large file.
 - **[docs/isaac_robot_in_store.md](docs/isaac_robot_in_store.md)** — standing the
   fleet's UR10 in the export under Isaac Sim (`scripts/compose_robot_in_store.py`).
-  Its `--report-usd` / `--dry-run` read the USD and author the collider/spawn plan
-  with **no GPU boot** (safe beside Blender); a real run boots Isaac Sim and is
-  gated by a GPU guard that refuses beside the live Blender session. Pure logic is
-  unit tested under `scripts/twin/tests/` (run under `env_isaaclab`; the
-  Isaac-bundled `pxr` needs no simulator boot to read the stage).
+  `--report-usd` / `--dry-run` / **`--author-offline`** all run with **no GPU boot**
+  (safe beside Blender): `--author-offline` actually authors + validates the whole
+  composed stage (physics, colliders, robot placement) with pure USD — the composition
+  core is `scripts/twin/compose.py`, shared verbatim with the real run so only the
+  boot / URDF→USD import / stepping / screenshot are new at GPU time. The GPU-session
+  runbook is **RUNBOOK §8**. A real run boots Isaac Sim, gated by a GPU guard that
+  hard-refuses beside the live Blender session. Sharp edge the composer works around:
+  **you cannot author a collider on a USD runtime prototype, nor reach it with an
+  override from outside the store's layer stack** — so product colliders are authored on
+  the `/Supermarket/prototypes` **class source** meshes with the store **sublayered**
+  (read-only) into the output. Unit tested under `scripts/twin/tests/`; the compose +
+  validator tests need `usd-core` (or `env_isaaclab`'s bundled `pxr`), the pure-logic
+  tests need nothing.
 - **Validate the USD offline (no GPU)**: `scripts/validate_usd.py` (RUNBOOK §6a) opens
   the export with a CPU-only `usd-core` venv and proves it is Isaac-loadable (up-axis,
   scale, default prim, every texture/reference resolves, composer prim paths). Run it
