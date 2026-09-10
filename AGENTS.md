@@ -42,9 +42,17 @@ repo's `scenes/`, `export/` or `renders/`.
 - **Validate the USD offline (no GPU)**: `scripts/validate_usd.py` (RUNBOOK §6a) opens
   the export with a CPU-only `usd-core` venv and proves it is Isaac-loadable (up-axis,
   scale, default prim, every texture/reference resolves, composer prim paths). Run it
-  after every `export_usd.py`. Known standing defect it flags: the export authors 6
-  dangling floor/wall textures (MCP Poly Haven maps backed by `tmp*.jpg`); fixed in
-  `export_usd.py`, needs a re-export — write-up in `data/twin-usd-validate-v1/report.md`.
+  after every `export_usd.py` — it's a **strict** check (exit 1 on any unresolved asset),
+  but its verdict grades the failure **BLOCKING** (missing reference/payload/sublayer =
+  missing geometry) vs **COSMETIC** (missing *texture* — untextured surface, geometry
+  intact). Known standing defect it flags: the export authors 6 dangling floor/wall
+  textures (MCP Poly Haven maps backed by `tmp*.jpg`) — COSMETIC. Fixed at source in
+  `export_usd.py` (needs a re-export); on the current artifact clear it with
+  `--repair-textures` (copies the 6 names from versioned `assets/textures/`). The
+  pre-flight (§8) does that repair automatically, so the captain's one command is green
+  without a re-export. Write-up: `data/twin-usd-validate-v1/report.md`; artifact decision +
+  cost basis in README's decision log (2026-09-10). `export/` stays gitignored (repaired
+  on demand, adds 0 git bytes) — do not commit it.
 - **Validate the ROBOT URDF offline (no GPU)**: `scripts/validate_robot_urdf.py`
   (RUNBOOK §6c) reads `shelfbot_gripper_isaac.urdf` with pure `xml`+`numpy` (core in
   `scripts/twin/urdf_probe.py`) and proves it is Isaac-ready: parses to one kinematic

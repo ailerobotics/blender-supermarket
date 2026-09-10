@@ -90,6 +90,43 @@ def test_repair_reconciles_from_assets_textures(tmp_path, monkeypatch):
     assert os.path.exists(os.path.join(os.path.dirname(store), "textures", "MISSING_floor.png"))
 
 
+def test_dangling_texture_is_cosmetic_not_blocking(tmp_path):
+    # A dangling *texture* is a real failure but must NOT block booting: the surface
+    # loads untextured, the geometry is intact. The boot gate keys off blocking_failed.
+    store = V.build_synthetic_stage(str(tmp_path / "bad"), good=False)
+    rep = _validate(store)
+    assert rep.failed              # it is a hard failure
+    assert rep.cosmetic_failed     # ... but classified cosmetic
+    assert not rep.blocking_failed  # ... so it does NOT block the boot gate
+    # and the render calls it out as such
+    assert "[COSMETIC]" in rep.render()
+
+
+def test_structural_failure_is_blocking(tmp_path):
+    # A missing default prim is a structural defect (the composer's AddReference has no
+    # target) — it MUST block booting.
+    store = V.build_synthetic_stage(str(tmp_path / "nodp"), good=True)
+    stage = Usd.Stage.Open(store)
+    stage.ClearDefaultPrim()
+    stage.GetRootLayer().Save()
+    rep = _validate(store)
+    assert rep.blocking_failed
+    assert not rep.cosmetic_failed
+
+
+def test_repaired_texture_leaves_no_failure(tmp_path, monkeypatch):
+    # After repair the cosmetic failure is gone entirely — neither blocking nor cosmetic.
+    store = V.build_synthetic_stage(str(tmp_path / "bad"), good=False)
+    fake_assets = tmp_path / "assets_textures"
+    fake_assets.mkdir()
+    (fake_assets / "MISSING_floor.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(V, "ASSETS_TEXTURES", str(fake_assets))
+    rep = _validate(store, repair=True)
+    assert not rep.failed
+    assert not rep.blocking_failed
+    assert not rep.cosmetic_failed
+
+
 def test_absolute_path_flagged(tmp_path):
     from pxr import UsdShade, Sdf
     store = V.build_synthetic_stage(str(tmp_path / "abs"), good=True)

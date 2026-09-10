@@ -85,10 +85,20 @@ reports the physics/collider census (render-only by design — the composer adds
 Tests: `env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv-usd/bin/python -m pytest scripts/twin/tests/`
 (the `env -u`/autoload-off avoids a broken ROS `launch_testing` pytest plugin on `PYTHONPATH`).
 
-**Known defect (fixed in `export_usd.py`, needs a re-export to clear):** the current
-`export/supermarket.usdc` authors 6 dangling floor/wall textures — floor and walls load
-untextured in Isaac (cosmetic; does **not** block loading or robot placement). Re-export,
-or run `--repair-textures`, to clear it. Full write-up: `data/twin-usd-validate-v1/report.md`.
+Standalone, `validate_usd.py` is a **strict** post-export check: it exits `1` on ANY
+unresolved asset (so a re-export that reintroduces the defect can't slip through), and its
+verdict line says whether the failure is **BLOCKING** (a missing reference/payload/sublayer
+= missing geometry) or **COSMETIC** (a missing *texture* — floor/walls load untextured but
+the stage still loads and the robot still stands). The boot go/no-go (`preflight.py`, §8)
+keys off that: cosmetic never blocks booting.
+
+**Known defect (fixed in `export_usd.py`, needs a re-export to clear at the source):** the
+current `export/supermarket.usdc` authors 6 dangling floor/wall textures. It is **COSMETIC**
+— does **not** block loading or robot placement — and the pre-flight (§8) now **repairs it
+automatically** in place from `assets/textures/`, so the captain's one command is green
+without a re-export. Clear it at the source with a re-export (the fixed `export_usd.py`
+authors resolvable paths); or on the current artifact with `--repair-textures`. Full
+write-up: `data/twin-usd-validate-v1/report.md`.
 
 ## 6b. Compose the robot into the store — OFFLINE (no Isaac, no GPU)
 Prove the robot-in-store composer works **before** any GPU session — safe beside the live
@@ -173,14 +183,32 @@ cd ~/workspaces/blender-supermarket
 .venv-usd/bin/python scripts/preflight.py     # store + robot + composer; exit 0 = safe to boot
 ```
 It runs `validate_usd.py` (store), `validate_robot_urdf.py` (robot URDF + aisle fit) and the
-`--author-offline` composition, and prints one verdict. **Exit 0 → nothing offline-detectable
-is left to fail; boot.** Exit 1 → do NOT boot, read which of the three failed and fix first.
+`--author-offline` composition, and prints one verdict. Before validating the store it
+**repairs the current export in place** (copies any authored-but-missing floor/wall texture
+from the versioned `assets/textures/` into the gitignored `export/textures/` — offline, no
+Blender), so the one command is self-sufficient on a stale on-disk export.
+
+**This is expected to be GREEN.** The steady state is:
+```
+  PASS    STORE    (export USD Isaac-loadable)
+  PASS    ROBOT    (URDF Isaac-ready + fits aisle)
+  PASS    COMPOSER (offline composition sane)
+VERDICT: PASS — ... Safe to boot (close Blender first).
+```
 The three still run standalone (`validate_usd.py`; `validate_robot_urdf.py`;
 `compose_robot_in_store.py --author-offline`) if you want them one at a time.
 
-> If `preflight.py` fails on **STORE only**, on the 6 floor/wall textures, that is the known
-> cosmetic export defect (§6a) — clear it with `validate_usd.py --repair-textures` or a
-> re-export; it does **not** block the URDF import or the robot placement.
+**Reading a red (or amber) result — a section is one of three states:**
+
+| Verdict / mark | Exit | Meaning | What to do |
+|---|---|---|---|
+| `PASS`  | 0 | clean | **Boot** (close Blender first). |
+| `PASS*` = **COSMETIC** | 0 | a real but non-blocking defect remains — e.g. a floor/wall texture that could **not** be repaired (missing from `assets/textures/`). The surface loads untextured; geometry, scale and placement are intact. | **Boot** — this does not block the URDF import, physics or placement. Fix the texture at leisure (restore the map in `assets/textures/`, re-run, or re-export). |
+| `FAIL` = **BLOCKING** | 1 | a structural defect — bad up-axis/scale, no default prim, no floor, a missing composer prim path, a dangling *reference/payload/sublayer* (missing geometry), or the robot/composer step failed. | **Do NOT boot.** Read which section failed; the per-check line names the cause. A store re-export or the named robot/composer fix is required first. |
+
+So a red pre-flight now always means "do not boot"; an untextured-surface defect shows as
+`PASS*`/exit 0, never as a boot-blocking red. `--no-repair` shows the raw on-disk state
+(the known dangling textures then surface as a `[COSMETIC]` line) without touching `export/`.
 
 **The GPU session, in order:**
 ```bash
