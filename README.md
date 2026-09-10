@@ -152,6 +152,15 @@ lights and cameras. RUNBOOK §6 has the import steps; the design intent:
   if RTX real-time looks noisy, swap their prototype material for an opaque tinted
   plastic in Blender and re-export.
 
+**Standing a robot in the store.** `scripts/compose_robot_in_store.py` (+ its
+`.sh` wrapper) composes the fleet's UR10 into this export under Isaac Sim: it
+authors the physics/colliders the export deliberately lacks, imports the robot
+URDF, and places it at a geometry-derived aisle pose. It **refuses to boot beside
+the captain's live Blender GUI** (VRAM/OOM risk). `--report-usd` / `--dry-run`
+read the stage and print the plan with **no GPU boot**. See
+[docs/isaac_robot_in_store.md](docs/isaac_robot_in_store.md) for the command
+sequence, the measured USD facts, and the candidate spawn pose.
+
 ---
 
 ## Rebuilding from a fresh clone

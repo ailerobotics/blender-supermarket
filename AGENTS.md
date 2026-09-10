@@ -24,6 +24,13 @@ repo's `scenes/`, `export/` or `renders/`.
   `scripts/planogram.json`, and the GPU-hour render evidence (`renders/`,
   `walkthrough.mp4`, `report.html`). See README's file-policy table (with measured
   costs) before adding or committing any large file.
+- **[docs/isaac_robot_in_store.md](docs/isaac_robot_in_store.md)** — standing the
+  fleet's UR10 in the export under Isaac Sim (`scripts/compose_robot_in_store.py`).
+  Its `--report-usd` / `--dry-run` read the USD and author the collider/spawn plan
+  with **no GPU boot** (safe beside Blender); a real run boots Isaac Sim and is
+  gated by a GPU guard that refuses beside the live Blender session. Pure logic is
+  unit tested under `scripts/twin/tests/` (run under `env_isaaclab`; the
+  Isaac-bundled `pxr` needs no simulator boot to read the stage).
 - **Path caveat**: the Blender-run scripts hardcode `~/workspaces/blender-supermarket`
   as the project root; the PIL scripts use script-relative paths.
 - Local-only project: **no git remote** — never push or open a PR.
