@@ -45,6 +45,18 @@ repo's `scenes/`, `export/` or `renders/`.
   after every `export_usd.py`. Known standing defect it flags: the export authors 6
   dangling floor/wall textures (MCP Poly Haven maps backed by `tmp*.jpg`); fixed in
   `export_usd.py`, needs a re-export — write-up in `data/twin-usd-validate-v1/report.md`.
+- **Validate the ROBOT URDF offline (no GPU)**: `scripts/validate_robot_urdf.py`
+  (RUNBOOK §6c) reads `shelfbot_gripper_isaac.urdf` with pure `xml`+`numpy` (core in
+  `scripts/twin/urdf_probe.py`) and proves it is Isaac-ready: parses to one kinematic
+  tree, every `package://` mesh resolves, masses/inertias/joint-limits sane, and the
+  home-pose FK envelope fits the aisle. `scripts/preflight.py` runs store + robot +
+  composer as **one** command (exit 0 = safe to boot; the §8 pre-flight). **Package
+  `shelfbot` = `~/workspaces/shelfbot_newgripper`** (declares that ROS name AND holds the
+  gripper meshes) — NOT the older `~/workspaces/shelfbot`, which declares the same name
+  but lacks the meshes; the wrapper builds a symlink shim to point there, since Isaac
+  imports even when a mesh is missing. Write-up: `data/twin-robot-preflight-v1/report.md`.
+  Standing upstream (URDF, another repo) WARN: placeholder inertias on the two gripper
+  links — report, don't edit.
 - **Path caveat**: the Blender-run scripts hardcode `~/workspaces/blender-supermarket`
   as the project root; the PIL scripts use script-relative paths.
 - Local-only project: **no git remote** — never push or open a PR.

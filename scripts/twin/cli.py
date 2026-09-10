@@ -99,7 +99,9 @@ def render_plan(plan: Mapping[str, Any]) -> str:
                  "(a GPU session). It CANNOT run without a simulator boot, so it is deferred "
                  "behind the same GPU guard.")
         L.append(f"                   package:// deps must resolve: ur_description "
-                 f"(/opt/ros/jazzy/share) and shelfbot (~/workspaces/shelfbot).")
+                 f"(/opt/ros/jazzy/share) and shelfbot (~/workspaces/shelfbot_newgripper — the "
+                 f"repo that declares package 'shelfbot' AND holds the gripper meshes; NOT the "
+                 f"older ~/workspaces/shelfbot). Run scripts/validate_robot_urdf.py to prove it.")
 
     facts = plan.get("usd_facts")
     if facts:
