@@ -172,6 +172,53 @@ def polyhaven_mat(name, uv_scale):
     m.use_fake_user = True
     return m
 
+def polish_floor(m):
+    """Turn the raw Poly Haven tile into a polished commercial-vinyl floor.
+
+    Real supermarket floors are buffed vinyl/porcelain that softly mirror the
+    ceiling LEDs and the product colours — the single biggest 'is this real?' cue
+    in an aisle shot. Three additions, all in-material so a rebuild reproduces them:
+      1. a low-roughness clear coat -> soft, streaky reflections of the lights;
+      2. a tighter, glossier base so those reflections read;
+      3. a procedural traffic-wear / grime layer (large-scale noise) so the floor
+         is neither perfectly clean nor perfectly uniform — scuffed lanes, dirt.
+    Idempotent: a marker node keeps a re-run from stacking duplicates.
+    """
+    nt = m.node_tree; bsdf = nt.nodes.get("Principled BSDF")
+    if not bsdf or any(n.label == "FLOOR_POLISH" for n in nt.nodes):
+        return m
+    marker = nt.nodes.new("ShaderNodeValue"); marker.label = "FLOOR_POLISH"; marker.location = (-1200, 600)
+    # 1+2 polished sheen: a glossy clear coat reflects the overhead LEDs
+    bsdf.inputs["Coat Weight"].default_value = 0.5
+    for k, v in (("Coat Roughness", 0.10), ("Specular IOR Level", 0.6)):
+        try: bsdf.inputs[k].default_value = v
+        except Exception: pass
+    # tighten the underlying roughness a touch (multiply the Rough map down, or set it)
+    if bsdf.inputs["Roughness"].is_linked:
+        rsrc = bsdf.inputs["Roughness"].links[0].from_socket
+        rmul = nt.nodes.new("ShaderNodeMath"); rmul.operation = 'MULTIPLY'; rmul.inputs[1].default_value = 0.7
+        rmul.location = (-300, -200); nt.links.new(rsrc, rmul.inputs[0]); nt.links.new(rmul.outputs[0], bsdf.inputs["Roughness"])
+    else:
+        bsdf.inputs["Roughness"].default_value = 0.32
+    # 3 traffic-wear / grime: large low-frequency noise darkens & desaturates worn lanes
+    tc = nt.nodes.new("ShaderNodeTexCoord"); tc.location = (-1200, -200)
+    wear = nt.nodes.new("ShaderNodeTexNoise"); wear.location = (-1000, -200)
+    wear.inputs["Scale"].default_value = 0.5; wear.inputs["Detail"].default_value = 4.0
+    try: wear.inputs["Roughness"].default_value = 0.75
+    except Exception: pass
+    nt.links.new(tc.outputs["Object"], wear.inputs["Vector"])
+    wramp = nt.nodes.new("ShaderNodeValToRGB"); wramp.location = (-800, -200)
+    wramp.color_ramp.elements[0].position = 0.42; wramp.color_ramp.elements[1].position = 0.72
+    nt.links.new(wear.outputs["Fac"], wramp.inputs["Fac"])
+    base_src = bsdf.inputs["Base Color"].links[0].from_socket if bsdf.inputs["Base Color"].is_linked else None
+    grime = nt.nodes.new("ShaderNodeMixRGB"); grime.blend_type = 'MULTIPLY'; grime.location = (-500, 200)
+    grime.inputs["Color2"].default_value = (0.5, 0.48, 0.45, 1)
+    nt.links.new(wramp.outputs["Color"], grime.inputs["Fac"])
+    if base_src: nt.links.new(base_src, grime.inputs["Color1"])
+    else: grime.inputs["Color1"].default_value = bsdf.inputs["Base Color"].default_value
+    nt.links.new(grime.outputs["Color"], bsdf.inputs["Base Color"])
+    return m
+
 def fixture_mats():
     return dict(
         steel=principled("FX_steel_painted", col("#d8d8d6"), 0.42, 0.25),
@@ -664,7 +711,7 @@ def build_signage(M):
 # ----------------------------------------------------------------------------- structure
 def build_structure(M):
     st = coll("Structure")
-    floor = polyhaven_mat("floor_tiles_08", 1.0)
+    floor = polish_floor(polyhaven_mat("floor_tiles_08", 1.0))
     wallm = polyhaven_mat("white_plaster_02", 1.0)
     # floor with UVs in metres/2 (one texture repeat = 2 m)
     bm = bmesh.new(); uv = bm.loops.layers.uv.verify()
