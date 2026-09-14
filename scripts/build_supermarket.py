@@ -77,14 +77,15 @@ def proto_collection(mesh):
         PROTO[mesh.name] = c
     return c
 
-def add_instance(name, mesh, collection, loc=(0, 0, 0), rot=(0, 0, 0), props=None):
+def add_instance(name, mesh, collection, loc=(0, 0, 0), rot=(0, 0, 0), props=None, scale=None):
     """Place a product: collection instance (default) or a linked-duplicate mesh object."""
     if INSTANCE_MODE != "collection":
-        return add_obj(name, mesh, collection, loc, rot, props=props)
+        return add_obj(name, mesh, collection, loc, rot, scale=scale, props=props)
     ob = bpy.data.objects.new(name, None)
     ob.instance_type = 'COLLECTION'; ob.instance_collection = proto_collection(mesh)
     ob.empty_display_type = 'PLAIN_AXES'; ob.empty_display_size = 0.02
     ob.location = loc; ob.rotation_euler = rot
+    if scale: ob.scale = scale
     collection.objects.link(ob)
     if props:
         for k, v in props.items(): ob[k] = v
@@ -217,6 +218,32 @@ def polish_floor(m):
     if base_src: nt.links.new(base_src, grime.inputs["Color1"])
     else: grime.inputs["Color1"].default_value = bsdf.inputs["Base Color"].default_value
     nt.links.new(grime.outputs["Color"], bsdf.inputs["Base Color"])
+    return m
+
+def add_instance_variation(m, val=0.09, sat=0.06):
+    """Break the 'cloned' look of a shelf: give a shared material a per-instance
+    brightness/saturation wobble driven by Object Info > Random, so 200 copies of
+    one SKU stop reading as one object stamped 200 times. Brand hue is preserved
+    (no hue shift); only value/saturation move, within a plausible print/lighting
+    spread. Works on collection instances (each gets its own Random). Idempotent."""
+    if not m or not m.node_tree: return m
+    nt = m.node_tree; bsdf = nt.nodes.get("Principled BSDF")
+    if not bsdf or any(n.label == "INST_VARY" for n in nt.nodes): return m
+    oi = nt.nodes.new("ShaderNodeObjectInfo"); oi.label = "INST_VARY"; oi.location = (-1100, -400)
+    mrv = nt.nodes.new("ShaderNodeMapRange"); mrv.location = (-850, -350)
+    mrv.inputs["To Min"].default_value = 1 - val; mrv.inputs["To Max"].default_value = 1 + val
+    nt.links.new(oi.outputs["Random"], mrv.inputs["Value"])
+    mrs = nt.nodes.new("ShaderNodeMapRange"); mrs.location = (-850, -550)
+    mrs.inputs["To Min"].default_value = 1 - sat; mrs.inputs["To Max"].default_value = 1 + sat
+    nt.links.new(oi.outputs["Random"], mrs.inputs["Value"])
+    hsv = nt.nodes.new("ShaderNodeHueSaturation"); hsv.location = (-550, 350)
+    nt.links.new(mrv.outputs["Result"], hsv.inputs["Value"])
+    nt.links.new(mrs.outputs["Result"], hsv.inputs["Saturation"])
+    if bsdf.inputs["Base Color"].is_linked:
+        nt.links.new(bsdf.inputs["Base Color"].links[0].from_socket, hsv.inputs["Color"])
+    else:
+        hsv.inputs["Color"].default_value = bsdf.inputs["Base Color"].default_value
+    nt.links.new(hsv.outputs["Color"], bsdf.inputs["Base Color"])
     return m
 
 def fixture_mats():
@@ -442,7 +469,10 @@ def tag_mesh(s):
 def build_library():
     t = time.time()
     for s in SKUS:
-        LIB[s["id"]] = product_mesh(s)
+        me = product_mesh(s); LIB[s["id"]] = me
+        for mat in me.materials:   # per-instance tonal wobble on the branded label so shelves stop looking cloned
+            if mat and "_label" in mat.name:
+                add_instance_variation(mat)
         TAGMESH[s["id"]] = tag_mesh(s)
     STATS["library_s"] = round(time.time() - t, 1)
     print(f"library: {len(LIB)} product meshes in {STATS['library_s']} s")
@@ -478,11 +508,15 @@ def place_products(collection, origin_xy, z, facing, width, depth, items, slot, 
             for ri in range(rows):
                 if empty or ri < missing_front: continue
                 for si in range(stack):
-                    jx = RNG.uniform(-0.004, 0.004); jr = RNG.uniform(-0.03, 0.03) if s["form"] in ("can", "bottle", "jar", "tub") else RNG.uniform(-0.02, 0.02)
-                    if RNG.random() < 0.02: jr += RNG.uniform(-0.25, 0.25)   # the odd knocked product
-                    pos = base + right * (x + w / 2 + jx) + front * (depth - front_gap - (ri + 0.5) * (d + 0.006)) + Vector((0, 0, si * h))
+                    round_form = s["form"] in ("can", "bottle", "jar", "tub")
+                    jx = RNG.uniform(-0.006, 0.006); jr = RNG.uniform(-0.05, 0.05) if round_form else RNG.uniform(-0.035, 0.035)
+                    if RNG.random() < 0.03: jr += RNG.uniform(-0.3, 0.3)   # the odd knocked / turned product
+                    # a small share lean very slightly (hand-placed, not machine-perfect)
+                    lx, ly = (RNG.uniform(-0.015, 0.015), RNG.uniform(-0.015, 0.015)) if RNG.random() < 0.18 else (0.0, 0.0)
+                    jf = RNG.uniform(-0.004, 0.008)   # not every facing pulled flush to the same line
+                    pos = base + right * (x + w / 2 + jx) + front * (depth - front_gap - (ri + 0.5) * (d + 0.006) - jf) + Vector((0, 0, si * h))
                     name = f"{sid}.{slot}_f{fi}_r{ri}" + (f"_s{si}" if stack > 1 else "")
-                    add_instance(name, LIB[sid], collection, loc=pos, rot=(0, 0, rot + jr),
+                    add_instance(name, LIB[sid], collection, loc=pos, rot=(lx, ly, rot + jr),
                                  props=dict(sku=sid, category=s["cat"], brand=s["brand"], price=s["price"], slot=slot, facing=fi, row=ri))
                     count += 1
             x += w + gap
@@ -893,6 +927,7 @@ def build_produce_bakery(M):
         for v in bm.verts: v.co.z *= 0.92
         me = bm_to_mesh(f"M_fruit_{nm}", bm, [mat])
         for p in me.polygons: p.use_smooth = True
+        add_instance_variation(mat, val=0.14, sat=0.12)   # real produce is never one uniform colour
         fruit_mesh[nm] = me
     crate_me = None
     for ti, (tx, ty) in enumerate([(7.5, -D2 + 2.6), (10.2, -D2 + 2.6), (7.5, -D2 + 4.8), (10.2, -D2 + 4.8)]):
@@ -914,9 +949,10 @@ def build_produce_bakery(M):
                 for ix in range(int(0.56 // (2 * r))):
                     for iy in range(int(0.36 // (2 * r))):
                         if layer == 1 and RNG.random() < 0.35: continue
+                        fsc = RNG.uniform(0.82, 1.18)   # graded produce is never one size
                         add_instance(f"{nm}.crate{ti}_{ci}_{k}", fruit_mesh[nm], pc,
-                                loc=(tx + cx - 0.28 + r + ix * 2 * r + RNG.uniform(-0.004, 0.004), ty + cy - 0.18 + r + iy * 2 * r + RNG.uniform(-0.004, 0.004), 0.88 + r * 0.92 + layer * 1.7 * r),
-                                rot=(RNG.uniform(0, 6.28), RNG.uniform(0, 6.28), RNG.uniform(0, 6.28)), props=dict(sku=nm, category="produce", slot=f"crate{ti}_{ci}"))
+                                loc=(tx + cx - 0.28 + r + ix * 2 * r + RNG.uniform(-0.006, 0.006), ty + cy - 0.18 + r + iy * 2 * r + RNG.uniform(-0.006, 0.006), 0.88 + r * 0.92 + layer * 1.7 * r),
+                                rot=(RNG.uniform(0, 6.28), RNG.uniform(0, 6.28), RNG.uniform(0, 6.28)), scale=(fsc, fsc, fsc), props=dict(sku=nm, category="produce", slot=f"crate{ti}_{ci}"))
                         k += 1
     # bakery counter (glass display) in the back-left corner
     bm = bmesh.new(); mats = [M["counter"], M["glass"], M["wood"]]
@@ -928,9 +964,11 @@ def build_produce_bakery(M):
     for v in bm.verts: v.co.x *= 1.6; v.co.z *= 0.7
     roll = bm_to_mesh("M_bread_roll", bm, [M["bread"]])
     for p in roll.polygons: p.use_smooth = True
+    add_instance_variation(M["bread"], val=0.12, sat=0.10)
     for k in range(40):
+        rsc = RNG.uniform(0.85, 1.15)
         add_instance(f"bread_roll.{k}", roll, pc, loc=(-7.5 - 1.0 + (k % 10) * 0.22, 8.4 - 0.2 + (k // 10) * 0.16, 0.95 + (0.05 if k // 10 in (1, 2) else 0.04)),
-                rot=(0, 0, RNG.uniform(0, 3.14)), props=dict(sku="bread_roll", category="bakery"))
+                rot=(0, 0, RNG.uniform(0, 3.14)), scale=(rsc, rsc, rsc), props=dict(sku="bread_roll", category="bakery"))
 
 # ----------------------------------------------------------------------------- lighting, cameras, render settings
 def build_lighting(M):
