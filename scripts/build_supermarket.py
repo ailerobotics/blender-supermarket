@@ -1026,6 +1026,21 @@ def build_cameras():
         for kp in fc.keyframe_points: kp.interpolation = 'BEZIER'; kp.easing = 'AUTO'
     sc.camera = bpy.data.objects["Cam_Entrance"]
 
+def setup_compositor(sc):
+    """A gentle photographic finish: fog-glow bloom off the bright LED fixtures so
+    highlights read as photographed rather than clipped-flat CG. Idempotent."""
+    sc.use_nodes = True
+    nt = sc.node_tree
+    if any(n.type == 'GLARE' for n in nt.nodes):
+        return
+    rl = next((n for n in nt.nodes if n.type == 'R_LAYERS'), None) or nt.nodes.new("CompositorNodeRLayers")
+    comp = next((n for n in nt.nodes if n.type == 'COMPOSITE'), None) or nt.nodes.new("CompositorNodeComposite")
+    glare = nt.nodes.new("CompositorNodeGlare")
+    glare.glare_type = 'FOG_GLOW'; glare.quality = 'MEDIUM'; glare.threshold = 1.0; glare.size = 7; glare.mix = -0.55
+    glare.location = (300, 300); comp.location = (600, 300)
+    nt.links.new(rl.outputs["Image"], glare.inputs["Image"])
+    nt.links.new(glare.outputs["Image"], comp.inputs["Image"])
+
 def setup_render():
     sc = bpy.context.scene
     sc.render.engine = 'CYCLES'
@@ -1038,7 +1053,8 @@ def setup_render():
     except Exception as e: print("cycles prefs:", e)
     sc.render.resolution_x, sc.render.resolution_y = 1920, 1080
     sc.render.fps = 24
-    sc.view_settings.view_transform = 'AgX'; sc.view_settings.look = 'AgX - Medium High Contrast'; sc.view_settings.exposure = -0.3
+    sc.view_settings.view_transform = 'AgX'; sc.view_settings.look = 'AgX - Medium High Contrast'; sc.view_settings.exposure = -0.35
+    setup_compositor(sc)
     try:
         sc.eevee.use_raytracing = True; sc.eevee.use_shadows = True; sc.eevee.taa_samples = 16
         sc.eevee.ray_tracing_options.resolution_scale = '2'
