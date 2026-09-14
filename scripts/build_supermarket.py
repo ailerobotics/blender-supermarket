@@ -15,7 +15,13 @@ price, slot) for downstream use in Isaac Sim.
 import bpy, bmesh, math, json, os, sys, random, time
 from mathutils import Vector
 
-ROOT = "/home/manishsaini/workspaces/blender-supermarket"
+# Project root: derive from this script's own location so the generator runs in any
+# checkout/worktree (env override wins). Falls back to the canonical path only when
+# executed without __file__ (e.g. the live GUI's `exec(open(...).read())` over MCP).
+try:
+    ROOT = os.environ.get("SUPERMARKET_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+except NameError:
+    ROOT = os.environ.get("SUPERMARKET_ROOT", "/home/manishsaini/workspaces/blender-supermarket")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 import importlib, catalog
 importlib.reload(catalog)

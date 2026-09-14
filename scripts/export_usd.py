@@ -7,7 +7,9 @@ Verify the result offline (no Blender, no GPU) with scripts/validate_usd.py.
 """
 import bpy, sys, os, time, shutil, tempfile
 
-ROOT = "/home/manishsaini/workspaces/blender-supermarket"   # same convention as build_supermarket.py
+# Derive the project root from this script's location so the export runs in any
+# checkout/worktree (env override wins); fall back to the canonical path.
+ROOT = os.environ.get("SUPERMARKET_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS_TEXTURES = os.path.join(ROOT, "assets", "textures")
 
 args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
