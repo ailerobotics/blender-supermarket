@@ -68,12 +68,14 @@ export (`export_usd.py`) — plus a self-contained HTML report (`gen_report.py`)
 `planogram.json` means you can skip stage 2 unless you have changed the layout
 tables. See *Rebuilding from a fresh clone* below.
 
-> **Path caveat.** `build_supermarket.py`, `export_usd.py`, `render_shots.py` and
-> `render_walkthrough.py` hardcode the absolute project root
-> `~/workspaces/blender-supermarket` (for `ROOT` and for default output paths).
-> `gen_planogram.py` and `gen_labels.py` use paths relative to the script and work
-> from any location. To rebuild in a clone at a different path, either check the
-> clone out at `~/workspaces/blender-supermarket` or adjust those absolute paths.
+> **Path caveat.** `build_supermarket.py`, `export_usd.py` and `render_shots.py`
+> derive `ROOT` from the script's own location (since 2026-09-14), so they run
+> self-contained in any checkout/worktree; set `SUPERMARKET_ROOT` to override, and
+> the live-GUI `exec(open(...).read())` path (no `__file__`) falls back to the
+> canonical `~/workspaces/blender-supermarket`. `gen_planogram.py` and
+> `gen_labels.py` have always used script-relative paths. **Still hardcoded:**
+> `render_walkthrough.py` (`ROOT = ~/workspaces/blender-supermarket`) — run it from
+> that checkout or adjust the path.
 
 ---
 
@@ -238,6 +240,7 @@ GPU) so the rule is auditable.
 | `scenes/supermarket_base.blend` | 32 MB | **versioned** | n/a (network) | Holds the Poly Haven materials + HDRI, which came from the network; no script rebuilds it. |
 | `assets/textures/` (Poly Haven PBR + HDRI) | 26 MB | **versioned** | n/a (network) | Downloaded from Poly Haven; externally linked by the base `.blend`. Not regenerable offline. |
 | `report_assets/*.jpg` | 1.4 MB | **versioned** | n/a (curated) | Hand-curated JPEG stills that `gen_report.py` inlines. No committed command produces them — inputs, not outputs. |
+| `data/twin-realism-v1/` (report + before/after JPEGs) | 2.3 MB | **versioned** | n/a (curated evidence) | The realism-pass v1 write-up and its before/after stills (JPEG, downscaled) — a curated deliverable like `report_assets/`. **No new texture assets**: the floor/label realism is procedural, so nothing was added under `assets/`. |
 | `scripts/**` (incl. `catalog.py`) | — | **versioned** | — | Source. |
 | `scripts/planogram.json` | 0.4 MB | **versioned** | 0.03 s | Cheap, but kept anyway: the small, diffable, deterministic interface between the planogram and label/scene stages; lets a rebuild skip stage 2. |
 | `renders/*.png` (8 Cycles stills) | ~ | **versioned** | **GPU-hours** — Cycles 200 samples, 1920×1080, ×8 cameras, OptiX (measured proxy: 34.6 s for one 640×360 EEVEE 16-sample still; full quality is orders of magnitude more and was not re-run) | Not cheap to reproduce, and the visible evidence of the project. `blender -b scenes/supermarket.blend --python scripts/render_shots.py -- --samples 200 --res 1920x1080` |
@@ -276,6 +279,34 @@ than reproduced.
 ## Decision log
 
 Dated record of the choices baked into the repo. Newest first.
+
+### 2026-09-14 — Realism pass v1 on the generated store
+Audited three representative cameras (`Cam_Entrance` / `Cam_Aisle` / `Cam_Shelf`)
+rendered from `main` at evidence quality, ranked the realism gaps, and fixed the top
+ones in the **generator** (all in `build_supermarket.py`, each its own commit, so a
+rebuild reproduces them):
+
+- **Floor** — the strongest "this is CG" cue: matte, no reflections. `polish_floor()`
+  turns the Poly Haven tile into polished commercial vinyl — a low-roughness clear
+  coat for soft reflections of the LEDs, tightened base roughness, and a procedural
+  traffic-wear / grime layer so it is scuffed, not showroom-perfect.
+- **Cloned products / plastic produce** — `add_instance_variation()` adds a
+  per-instance brightness/saturation wobble (Object Info › Random, brand hue
+  preserved) to every branded label, the fruit and the bread; `place_products()`
+  gains wider yaw/lean/depth jitter; produce/bakery gain per-instance size grading.
+- **Clipped-flat lighting** — a compositor fog-glow bloom on the LED fixtures and
+  exposure −0.3 → −0.35.
+
+Rendered on **CPU Cycles** (the RTX 3060 was held by the live `ur10-cumotion` Isaac
+stack; `render_shots.py` gained `--cpu`). **Pre-flight stays green**: re-exported the
+scene and `preflight.py` returns STORE / ROBOT / COMPOSER **PASS (exit 0)**. The new
+realism is *procedural*, so the USD export carries the same base textures as before —
+no new dangling references; the 6 floor/wall maps remain the **COSMETIC** standing
+defect (below), auto-repaired. Also made `ROOT` derive from each script's location so
+a headless rebuild is self-contained in any checkout/worktree (env `SUPERMARKET_ROOT`
+overrides; the live-GUI `exec()` path still falls back to the canonical path).
+Evidence, before/after and render costs: `data/twin-realism-v1/report.md`
+(+ `report.html`).
 
 ### 2026-09-10 — One-command pre-flight goes green; texture repair, not a commit
 The captain's go/no-go is a single command (`scripts/preflight.py`, RUNBOOK §8). It was

@@ -65,8 +65,16 @@ repo's `scenes/`, `export/` or `renders/`.
   imports even when a mesh is missing. Write-up: `data/twin-robot-preflight-v1/report.md`.
   Standing upstream (URDF, another repo) WARN: placeholder inertias on the two gripper
   links — report, don't edit.
-- **Path caveat**: the Blender-run scripts hardcode `~/workspaces/blender-supermarket`
-  as the project root; the PIL scripts use script-relative paths.
+- **Path caveat**: `build_supermarket.py`, `export_usd.py`, `render_shots.py` derive
+  `ROOT` from the script location (env `SUPERMARKET_ROOT` overrides; live-GUI `exec()`
+  with no `__file__` falls back to `~/workspaces/blender-supermarket`), so they run in
+  any worktree/clone. PIL scripts use script-relative paths. **`render_walkthrough.py`
+  still hardcodes** `~/workspaces/blender-supermarket`.
+- **Realism** of the generated look (floor reflections/wear, per-instance product &
+  produce variation, LED bloom, AgX) lives in `build_supermarket.py`
+  (`polish_floor`, `add_instance_variation`, `setup_compositor`, `setup_render`) — see
+  README decision log 2026-09-14 and `data/twin-realism-v1/report.md`. Render evidence
+  on CPU with `render_shots.py --cpu` when the GPU is held by the robot stack.
 - Local-only project: **no git remote** — never push or open a PR.
 
 ## Maintaining this file
