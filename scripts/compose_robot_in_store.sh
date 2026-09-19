@@ -28,8 +28,12 @@ conda activate "${CONDA_ENV}"
 # NO description/gripper/meshes — pointing at it silently imports the arm with the gripper
 # meshes missing (Isaac imports even when a mesh is not found). See scripts/validate_robot_urdf.py.
 if [ -d /opt/ros/jazzy ]; then
+  # ROS setup.bash references unbound vars; under `set -u` that aborts the whole
+  # shell (and `|| true` can't catch a fatal nounset error). Relax nounset around it.
+  set +u
   # shellcheck source=/dev/null
   source /opt/ros/jazzy/setup.bash 2>/dev/null || true
+  set -u
 fi
 SHELFBOT_PKG="${SHELFBOT_PKG:-${HOME}/workspaces/shelfbot_newgripper}"
 # Build an ephemeral package-path shim so `package://shelfbot/...` resolves to

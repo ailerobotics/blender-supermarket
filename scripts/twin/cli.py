@@ -45,7 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Screenshot output (default: <save> with .png).")
     p.add_argument("--json", action="store_true",
                    help="With --author-offline, also emit the composed result + measured facts as JSON.")
-    p.add_argument("--steps", type=int, default=60, help="Physics steps before saving (default: %(default)s).")
+    p.add_argument("--steps", type=int, default=180, help="Physics steps to run (default: %(default)s "
+                   "= 3 s at 60 Hz — enough for the arm to settle from its home pose).")
+    p.add_argument("--sample-every", type=int, default=6,
+                   help="Record the robot's world pose every N physics steps for the settle "
+                        "log / base-height verdict (default: %(default)s).")
     # Modes
     p.add_argument("--dry-run", action="store_true",
                    help="Author nothing and boot nothing: probe the USD (no GPU) and print the "

@@ -37,7 +37,10 @@ sys.path.insert(0, _HERE)
 from twin import cli  # noqa: E402  (pure; no pxr/isaacsim)
 from twin import compose  # noqa: E402  (pure USD; pxr imported lazily inside)
 from twin import gpu_guard  # noqa: E402
+from twin import settle  # noqa: E402  (pure; analyses the sampled pose series)
 from twin import usd_probe  # noqa: E402  (pxr imported lazily inside probe())
+
+PHYSICS_DT = 1.0 / 60.0  # Isaac Sim default physics step
 
 
 # --------------------------------------------------------------------------- #
@@ -171,17 +174,29 @@ def run_compose(args) -> int:
               f"({result.triangle_mesh} tri + {result.convex_hull} convex colliders, "
               f"{result.prototypes_covered}/{result.prototypes_total} prototypes)", file=sys.stderr)
 
-        # 5. Open the composed stage in the simulator, step physics, screenshot.
+        # 5. Open the composed stage in the simulator, step physics while sampling
+        #    the robot's world pose, then screenshot from the aisle camera.
         omni.usd.get_context().open_stage(os.path.abspath(args.save))  # UNVERIFIED
         import omni.timeline  # noqa: E402
+        stage = omni.usd.get_context().get_stage()
         omni.timeline.get_timeline_interface().play()
-        for _ in range(args.steps):
-            sim.update()
-        _screenshot(sim, cli.resolve_screenshot(args))
+
+        samples = _step_and_sample(sim, stage, result.robot_prim, args.steps,
+                                   max(1, args.sample_every))  # UNVERIFIED (needs a boot)
+        verdict = settle.analyze_settling(samples, floor_z=float(_facts["floor_z"]))
+        _write_settle_log(args.save, samples, verdict)
+        print(settle.format_verdict(verdict), file=sys.stderr)
+
+        cam_path = f"{result.default_prim}/GRP_Cameras/{args.spawn_aisle}"
+        _screenshot(sim, stage, cam_path, cli.resolve_screenshot(args))
         print(f"[compose] wrote {args.save}", file=sys.stderr)
     finally:
         sim.close()
-    return 0
+    # Non-zero exit if the robot did NOT rest on the floor (so the one command is a
+    # real go/no-go). A screenshot/log failure never fails the run — only the physics
+    # verdict does; an empty series (sampling could not read the pose) is inconclusive,
+    # not a hard fail, so it does not flip the exit code.
+    return 0 if (verdict.get("ok") or verdict.get("n_samples", 0) == 0) else 1
 
 
 def _import_urdf_to_usd(urdf_path: str, near_save: str) -> str:
@@ -214,11 +229,90 @@ def _import_urdf_to_usd(urdf_path: str, near_save: str) -> str:
     return out_usd
 
 
-def _screenshot(sim, path: str) -> None:
-    """Capture a viewport screenshot. UNVERIFIED (needs a simulator boot)."""
+def _step_and_sample(sim, stage, robot_path: str, steps: int, sample_every: int):
+    """Step physics ``steps`` times; every ``sample_every`` steps record the robot's
+    world-space axis-aligned bbox (pedestal foot Z, footprint centre XY, Z-extent).
+
+    UNVERIFIED (needs a simulator boot). Reads the composed robot prim's world bound
+    from the live stage after each ``sim.update()`` — PhysX writes settled poses back
+    to USD, so a fresh BBoxCache per sample reflects the current physics state. Defensive:
+    a read failure records a sentinel sample rather than crashing the run; a total failure
+    returns whatever was gathered (an empty series → the settle verdict is 'inconclusive',
+    not a hard fail)."""
+    samples = []
+    try:
+        from pxr import Usd, UsdGeom, Gf  # noqa: F401
+    except Exception as exc:  # pragma: no cover - only in a booted env
+        print(f"[compose] pose sampling unavailable ({exc!r}); stepping without a log",
+              file=sys.stderr)
+        for _ in range(steps):
+            sim.update()
+        return samples
+
+    for i in range(steps):
+        sim.update()
+        if i % sample_every and i != steps - 1:
+            continue
+        try:
+            prim = stage.GetPrimAtPath(robot_path)
+            # A fresh cache each sample so nothing is memoised across physics steps.
+            cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                      [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+            rng = cache.ComputeWorldBound(prim).ComputeAlignedRange()
+            mn, mx = rng.GetMin(), rng.GetMax()
+            rec = {"step": i, "t": round(i * PHYSICS_DT, 4),
+                   "min_z": float(mn[2]), "max_z": float(mx[2]),
+                   "cx": float((mn[0] + mx[0]) / 2.0), "cy": float((mn[1] + mx[1]) / 2.0),
+                   "z_ext": float(mx[2] - mn[2])}
+        except Exception as exc:  # record a sentinel; keep stepping
+            rec = {"step": i, "t": round(i * PHYSICS_DT, 4), "min_z": float("nan"),
+                   "max_z": float("nan"), "cx": float("nan"), "cy": float("nan"),
+                   "z_ext": float("nan"), "error": repr(exc)}
+        samples.append(rec)
+        print(f"[compose] step {i:4d} t={rec['t']:.2f}s  min_z={rec['min_z']:.4f}  "
+              f"centre=({rec['cx']:.3f},{rec['cy']:.3f})  z_ext={rec['z_ext']:.3f}",
+              file=sys.stderr)
+    return samples
+
+
+def _write_settle_log(save_path: str, samples, verdict) -> None:
+    """Write the sampled series (CSV) and the settle verdict (JSON) next to the stage.
+    Best-effort — a write failure never fails the run."""
+    base = os.path.splitext(save_path)[0]
+    try:
+        cols = ["step", "t", "min_z", "max_z", "cx", "cy", "z_ext"]
+        with open(base + "_base_height.csv", "w") as fh:
+            fh.write(",".join(cols) + "\n")
+            for s in samples:
+                fh.write(",".join(str(s.get(c, "")) for c in cols) + "\n")
+        with open(base + "_settle.json", "w") as fh:
+            json.dump({"verdict": verdict, "samples": samples}, fh, indent=2)
+        print(f"[compose] settle log -> {base}_base_height.csv / {base}_settle.json",
+              file=sys.stderr)
+    except Exception as exc:
+        print(f"[compose] settle log skipped: {exc!r}", file=sys.stderr)
+
+
+def _screenshot(sim, stage, camera_path: str, path: str) -> None:
+    """Capture a screenshot from the aisle camera. UNVERIFIED (needs a simulator boot).
+
+    Binds the active viewport to the store's aisle camera prim so the frame shows the
+    robot from the aisle (not the default perspective), then captures. Visual-only:
+    any failure is logged and swallowed — it never fails the run."""
     try:
         import omni.kit.viewport.utility as vp
-        vp.capture_viewport_to_file(vp.get_active_viewport(), path)
+        vport = vp.get_active_viewport()
+        try:
+            if vport is not None and stage is not None and \
+                    stage.GetPrimAtPath(camera_path).IsValid():
+                vport.set_active_camera(camera_path)
+                print(f"[compose] viewport camera -> {camera_path}", file=sys.stderr)
+        except Exception as exc:  # camera bind is best-effort; still capture the default view
+            print(f"[compose] aisle-camera bind skipped ({exc!r}); using default view",
+                  file=sys.stderr)
+        for _ in range(30):  # let the RTX frame converge on the new camera
+            sim.update()
+        vp.capture_viewport_to_file(vport, path)
         for _ in range(20):
             sim.update()
         print(f"[compose] screenshot -> {path}", file=sys.stderr)
