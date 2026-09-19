@@ -177,6 +177,33 @@ import, PhysX loading the colliders, and the robot resting under gravity. **Clos
 first** — the guard refuses beside it and won't `--force` past that (see
 [docs/isaac_robot_in_store.md](docs/isaac_robot_in_store.md)).
 
+> **Status (2026-09-19): the one-command run is PREPARED and WAITS for the owner. No
+> simulator boot has been performed.** The bounded run wrapper below, the base-height
+> settle log, the offline pre-flight and tests are all in place and green, but the Isaac
+> Sim boot is the repository owner's decision and was explicitly deferred ("not yet").
+> When the owner approves, the whole run is the single command
+> `bash scripts/run_robot_in_store_gpu.sh`. Prep write-up + PENDING boot sections:
+> [`data/twin-robot-in-store-v1/report.md`](data/twin-robot-in-store-v1/report.md).
+
+**The bounded one command (recommended) — `scripts/run_robot_in_store_gpu.sh`:** wraps the
+real run with a readiness gate (no Blender, ≥8 GB free VRAM, ≥12 GB RAM), a **hard 20-min
+wall-clock cap** (`TIMEOUT_S`), a **RAM watchdog** that stops only its own process group by
+PID if available RAM drops below 4 GB (`RAM_FLOOR_GB`), and a peak GPU/RAM sampler
+(`run_metrics.txt`). It passes `--store <this repo's export>` and never uses `--force`.
+```bash
+cd ~/workspaces/blender-supermarket
+bash scripts/run_robot_in_store_gpu.sh                 # bounded real run (once approved)
+HEAVY_MB=2500 bash scripts/run_robot_in_store_gpu.sh   # see the whispr note below
+```
+
+> **GPU-guard heavy-consumer OPTION (the guard default is unchanged):** the guard's default
+> heavy-consumer threshold stays **1500 MiB**. On this box the always-on `whispr` service
+> (`~/whispr/server.py`, ~2.2 GB VRAM, protected — never freed) exceeds that, so the guard
+> will **correctly refuse** the boot as-is. That is the safe default. To accept whispr as a
+> known-stable consumer, run with **`HEAVY_MB=2500`** (opt-in, raises `--heavy-threshold-mb`
+> for that run only) — this is **not** `--force`, and the real OOM protection (free VRAM
+> ≥ 8 GB) is unchanged. Do not bake 2500 in as the default.
+
 **Pre-flight — ONE command checks the whole chain (safe with Blender still open, no GPU):**
 ```bash
 cd ~/workspaces/blender-supermarket
