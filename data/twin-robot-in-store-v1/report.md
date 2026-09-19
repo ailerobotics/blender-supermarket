@@ -1,10 +1,12 @@
 # Twin robot-in-store v1 — first real Isaac Sim run
 
-**Status: PREPARED, BOOT PENDING OWNER APPROVAL.** Everything that needs no simulator
-boot is done and green; the Isaac Sim boot itself is gated on the repository owner's
-explicit approval token and has **not** been performed. This report is filled with the
-offline evidence now; the boot-only sections (peak GPU/RAM, boot time, screenshot, the
-stepped settle verdict) are marked **PENDING** and are completed after the approved run.
+**Status: PREPARATION ONLY — NO SIMULATOR BOOT HAS HAPPENED.** On 2026-09-19 the
+repository owner was asked and answered **"not yet"** on the Isaac Sim boot, so the boot
+was deliberately **not** performed and no approval token was granted. Everything that needs
+no simulator boot is done, committed and green; the one-command run is prepared and waits
+for the owner. The boot-only sections (peak GPU/RAM, boot time, screenshot, the stepped
+settle verdict) are marked **PENDING — not run** and will be completed when the owner
+approves a future run.
 
 Goal (RUNBOOK §8): stand the fleet's UR10 (`shelfbot_newgripper`) in the supermarket
 twin under Isaac Sim 5.1 (`env_isaaclab`) — import the URDF to USD, author physics +
@@ -49,20 +51,26 @@ stage + aisle-camera screenshot + a base-height log) that it rests on the floor.
 | Free GPU memory (`nvidia-smi`) | ≥ 8 GB | **9603 MiB free** of 12288 | ✅ |
 | Available RAM (`free -g`) | ≥ 12 GB | **27 GiB** available | ✅ |
 
-**GPU-guard caveat (folded into the boot decision):** a protected always-on service —
-`whispr` (`~/whispr/server.py`, pid 1334, **2184 MiB** VRAM) — sits above the guard's
-default heavy-consumer threshold (1500 MiB), so the guard **refuses** the boot as-is
-(confirmed by `--dry-run`). whispr must not be touched and will not free the GPU. The
-bounded run wrapper therefore passes **`--heavy-threshold-mb 2500`** (names whispr as a
-known-stable consumer) — this is **not** `--force`, and the real OOM protection (free
-VRAM ≥ 8 GB) is unchanged and satisfied. The hard Blender gate is never overridden.
+**GPU-guard caveat (documented OPTION — the guard default is unchanged):** a protected
+always-on service — `whispr` (`~/whispr/server.py`, pid 1334, **2184 MiB** VRAM) — sits
+above the guard's default heavy-consumer threshold (1500 MiB), so the guard **correctly
+refuses** the boot as-is (confirmed by `--dry-run`). That is the safe default and it stays.
+whispr must not be touched and will not free the GPU. To accept it as a known-stable
+consumer, run the wrapper with **`HEAVY_MB=2500`** (an opt-in that raises
+`--heavy-threshold-mb` for that run only) — this is **not** `--force`, and the real OOM
+protection (free VRAM ≥ 8 GB) is unchanged and satisfied. The guard's 1500 MiB default is
+**not** modified anywhere, and the hard Blender gate is never overridden.
 
 ## The one command that reproduces the run
 
 ```bash
 cd ~/workspaces/blender-supermarket      # (or this worktree)
-bash scripts/run_robot_in_store_gpu.sh
+bash scripts/run_robot_in_store_gpu.sh                 # bounded run — WHEN the owner approves
+HEAVY_MB=2500 bash scripts/run_robot_in_store_gpu.sh   # if whispr is resident (see caveat)
 ```
+
+**No simulator boot has been run.** The command above has never been executed in this task;
+it is prepared and validated only up to the point a real GPU boot begins.
 
 `scripts/run_robot_in_store_gpu.sh` (new) re-checks readiness (no Blender, ≥8 GB VRAM,
 ≥12 GB RAM) and, only if clean, launches `scripts/compose_robot_in_store.sh` inside its
@@ -71,7 +79,8 @@ own process group with:
 - a **RAM watchdog** that stops *this run only* (its own group, by PID) if available RAM
   drops below **4 GB** (`RAM_FLOOR_GB`);
 - a **peak GPU/RAM sampler** → `run_metrics.txt`;
-- `--heavy-threshold-mb 2500` and `--store <this repo's export>` (no `--force`).
+- `--store <this repo's export>` and no `--force`. The heavy-consumer threshold is left at
+  the guard default (1500 MiB) unless the owner opts in with `HEAVY_MB=2500` (see caveat).
 
 Outputs land in `data/twin-robot-in-store-v1/`: `store_with_robot.usd` (stage),
 `store_with_robot.png` (aisle-camera screenshot), `store_with_robot_base_height.csv`
@@ -97,7 +106,7 @@ the screenshot + settle CSV/JSON + this report are committed as portable evidenc
    themselves are simulator-only and stay UNVERIFIED until the boot.*
 3. Default `--steps` raised 60 → 180 (3 s at 60 Hz) so the arm settles from its home pose.
 
-## Boot-only results — PENDING (completed after the approved run)
+## Boot-only results — PENDING, NOT RUN (completed after a future owner-approved run)
 
 - [ ] Time to boot Isaac Sim: _pending_
 - [ ] Peak GPU / RAM during the run: _pending_ (from `run_metrics.txt`)

@@ -43,12 +43,13 @@
 <div class="wrap">
   <h1>Twin robot-in-store v1 — first real Isaac Sim run</h1>
   <p class="sub">Stand the fleet UR10 in the supermarket twin (Isaac Sim 5.1, <code>env_isaaclab</code>).
-     <span class="pill pend">BOOT PENDING OWNER APPROVAL</span></p>
+     <span class="pill pend">PREPARATION ONLY — NO BOOT</span></p>
 
   <div class="card">
-    Everything that needs no simulator boot is done and green. The Isaac Sim boot itself is
-    gated on the repository owner's explicit approval token and has <b>not</b> been performed.
-    Boot-only results below are marked <span class="pill pend">PENDING</span>.
+    On 2026-09-19 the repository owner answered <b>"not yet"</b> on the Isaac Sim boot, so the
+    boot was deliberately <b>not</b> performed. Everything that needs no simulator boot is done,
+    committed and green; the one-command run is prepared and waits for the owner. Boot-only
+    results below are marked <span class="pill pend">PENDING — not run</span>.
   </div>
 
   <h2>Readiness (measured)</h2>
@@ -59,10 +60,11 @@
     <div class="stat"><b>PASS</b><span>pre-flight (exit 0)</span></div>
   </div>
   <div class="card">
-    <b>GPU-guard caveat:</b> the always-on <code>whispr</code> service (pid 1334, 2184 MiB VRAM)
-    trips the guard's default heavy-consumer gate (1500 MiB). The bounded run passes
-    <code>--heavy-threshold-mb 2500</code> to name it a known-stable consumer — <b>not</b>
-    <code>--force</code>; the free-VRAM OOM budget (≥ 8 GB) is unchanged and satisfied.
+    <b>GPU-guard caveat (option, default unchanged):</b> the always-on <code>whispr</code>
+    service (pid 1334, 2184 MiB VRAM) trips the guard's default heavy-consumer gate (1500 MiB),
+    so the guard <b>correctly refuses</b> the boot as-is — the safe default, which stays. To
+    accept whispr as a known-stable consumer, run with <code>HEAVY_MB=2500</code> (opt-in) —
+    <b>not</b> <code>--force</code>; the free-VRAM OOM budget (≥ 8 GB) is unchanged.
   </div>
 
   <h2>What was verified offline</h2>
@@ -75,11 +77,13 @@
     <tr><td>Offline tests</td><td>77 passed (incl. new base-height settle verdict)</td></tr>
   </table>
 
-  <h2>The one command</h2>
+  <h2>The one command (prepared — not yet run)</h2>
   <pre>cd ~/workspaces/blender-supermarket
-bash scripts/run_robot_in_store_gpu.sh</pre>
+bash scripts/run_robot_in_store_gpu.sh                 # when the owner approves
+HEAVY_MB=2500 bash scripts/run_robot_in_store_gpu.sh   # if whispr is resident</pre>
   <p class="sub">Re-checks readiness, then runs bounded: 20-min wall-clock cap, RAM watchdog
-     (stops only this run's process group by PID at &lt; 4 GB free), peak GPU/RAM sampler.</p>
+     (stops only this run's process group by PID at &lt; 4 GB free), peak GPU/RAM sampler.
+     <b>This command has never been executed in this task.</b></p>
 
   <h2>Aisle-camera screenshot</h2>
   <div class="card">

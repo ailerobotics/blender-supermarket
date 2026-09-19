@@ -8,14 +8,17 @@
 #     system RAM drops below a floor (default 4 GB), so a runaway can't wedge the box;
 #   * a background sampler that records peak GPU and RAM for the run report.
 #
-# It does NOT pass --force and never overrides the guard's hard Blender gate. It DOES
-# raise --heavy-threshold-mb to 2500 so the long-running `whispr` service (~2.2 GB VRAM,
-# a protected always-on consumer that will never free the GPU) does not trip the soft
-# heavy-consumer gate; the real OOM protection — the free-VRAM budget (>= 8 GB) — is
-# unchanged. See data/twin-robot-in-store-v1/report.md and RUNBOOK section 8.
+# It does NOT pass --force and never overrides the guard's hard Blender gate, and by
+# default it does NOT touch the guard's heavy-consumer threshold — the guard default
+# (1500 MiB) stays authoritative. If the long-running `whispr` service (~2.2 GB VRAM, a
+# protected always-on consumer that never frees the GPU) is resident, the guard will
+# correctly REFUSE the boot; to accept whispr as a known-stable consumer, set
+# HEAVY_MB=2500 explicitly (an OPT-IN, not a --force, and the free-VRAM budget >= 8 GB is
+# unchanged). See data/twin-robot-in-store-v1/report.md and RUNBOOK section 8.
 #
 # Usage:
 #   bash scripts/run_robot_in_store_gpu.sh                 # default output dir + bounds
+#   HEAVY_MB=2500 bash scripts/run_robot_in_store_gpu.sh   # accept whispr (~2.2 GB) as stable
 #   TIMEOUT_S=900 RAM_FLOOR_GB=6 bash scripts/run_robot_in_store_gpu.sh
 #   bash scripts/run_robot_in_store_gpu.sh --steps 240     # extra args pass through
 #
@@ -37,7 +40,9 @@ TIMEOUT_S="${TIMEOUT_S:-1200}"        # 20 min hard wall-clock cap
 RAM_FLOOR_GB="${RAM_FLOOR_GB:-4}"     # stop our run if available RAM drops below this
 GPU_FLOOR_MB="${GPU_FLOOR_MB:-8000}"  # pre-boot: require this much free VRAM
 RAM_MIN_GB="${RAM_MIN_GB:-12}"        # pre-boot: require this much available RAM
-HEAVY_MB="${HEAVY_MB:-2500}"          # known-stable consumer allowance (NOT --force)
+HEAVY_MB="${HEAVY_MB:-}"              # OPT-IN heavy-consumer threshold; empty => leave the
+                                      # guard default (1500 MiB) in force. Set HEAVY_MB=2500
+                                      # to accept whispr (~2.2 GB) as a known-stable consumer.
 
 log() { echo "[run] $*"; }
 
@@ -64,7 +69,7 @@ if [ "${RAM_AVAIL_GB:-0}" -lt "$RAM_MIN_GB" ]; then
 fi
 log "readiness OK: no Blender, ${GPU_FREE} MiB VRAM free, ${RAM_AVAIL_GB} GiB RAM available."
 log "outputs -> stage=$STAGE  screenshot=$SHOT  log=$LOG  metrics=$METRICS"
-log "bounds  -> wall-clock ${TIMEOUT_S}s, RAM floor ${RAM_FLOOR_GB} GiB, heavy-threshold ${HEAVY_MB} MiB"
+log "bounds  -> wall-clock ${TIMEOUT_S}s, RAM floor ${RAM_FLOOR_GB} GiB, heavy-threshold ${HEAVY_MB:-<guard default 1500>} MiB"
 
 : > "$LOG"
 : > "$METRICS"
@@ -73,9 +78,11 @@ echo "gpu_free_pre_mb=$GPU_FREE ram_avail_pre_gb=$RAM_AVAIL_GB" >> "$METRICS"
 
 # --- Launch the real run in its OWN process group so we can tear down Isaac's whole
 #     child tree by PID (setsid: $! is the group leader, PGID == PID). ---
+HEAVY_ARGS=()
+[ -n "$HEAVY_MB" ] && HEAVY_ARGS=(--heavy-threshold-mb "$HEAVY_MB")
 setsid bash "$SCRIPT_DIR/compose_robot_in_store.sh" \
     --store "$STORE_USD" --save "$STAGE" --screenshot "$SHOT" \
-    --heavy-threshold-mb "$HEAVY_MB" "$@" \
+    ${HEAVY_ARGS[@]+"${HEAVY_ARGS[@]}"} "$@" \
     > "$LOG" 2>&1 &
 RUN_PID=$!
 log "launched Isaac run (process group $RUN_PID); tailing $LOG"

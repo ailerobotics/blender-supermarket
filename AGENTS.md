@@ -32,7 +32,14 @@ repo's `scenes/`, `export/` or `renders/`.
   core is `scripts/twin/compose.py`, shared verbatim with the real run so only the
   boot / URDF→USD import / stepping / screenshot are new at GPU time. The GPU-session
   runbook is **RUNBOOK §8**. A real run boots Isaac Sim, gated by a GPU guard that
-  hard-refuses beside the live Blender session. Sharp edge the composer works around:
+  hard-refuses beside the live Blender session. **The real boot is PREPARED but has NEVER
+  been run — the owner deferred it ("not yet", 2026-09-19).** The whole run is one bounded
+  command `scripts/run_robot_in_store_gpu.sh` (readiness gate + 20-min wall-clock cap + RAM
+  watchdog + peak sampler; logs a base-height *settle* verdict via `twin/settle.py`). The
+  GPU guard's heavy-consumer default (1500 MiB) is **unchanged**; the always-on `whispr`
+  service (~2.2 GB VRAM) trips it, so accept it only as the **opt-in** `HEAVY_MB=2500`
+  (never `--force`, never the hard Blender gate). Prep + PENDING boot sections:
+  `data/twin-robot-in-store-v1/report.md`. Sharp edge the composer works around:
   **you cannot author a collider on a USD runtime prototype, nor reach it with an
   override from outside the store's layer stack** — so product colliders are authored on
   the `/Supermarket/prototypes` **class source** meshes with the store **sublayered**

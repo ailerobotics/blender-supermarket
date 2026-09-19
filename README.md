@@ -280,6 +280,23 @@ than reproduced.
 
 Dated record of the choices baked into the repo. Newest first.
 
+### 2026-09-19 — Robot-in-store run prepared; owner deferred the Isaac boot
+Prepared the first real Isaac Sim run of RUNBOOK §8 (stand the UR10 in the store) up to —
+but **not including** — the GPU boot: asked, the owner answered **"not yet"**, so no
+simulator has been booted. Landed everything that needs no boot: re-generated the stale
+USD export headlessly from this HEAD (pre-flight **PASS**, 77 offline tests green); a
+bounded run wrapper `scripts/run_robot_in_store_gpu.sh` (readiness gate + hard 20-min
+wall-clock cap + RAM watchdog that stops only its own process group by PID + peak GPU/RAM
+sampler); base-height settle logging + verdict in `compose_robot_in_store.py`
+(pure logic in `twin/settle.py`, unit-tested) so the run proves *rests-on-floor*; and a
+fix to `compose_robot_in_store.sh` (source ROS `setup.bash` under `set +u`, else the
+wrapper aborted and the URDF import lost its ROS package path). **GPU-guard default is
+unchanged** (heavy-consumer threshold stays 1500 MiB): the always-on `whispr` service
+(~2.2 GB VRAM) trips it, so the guard correctly refuses beside it — accepted as an
+**opt-in** `HEAVY_MB=2500` on the wrapper, never a baked default and never `--force`.
+When the owner approves, the whole run is `bash scripts/run_robot_in_store_gpu.sh`.
+Write-up + PENDING boot sections: `data/twin-robot-in-store-v1/report.md` (+ `report.html`).
+
 ### 2026-09-14 — Realism pass v1 on the generated store
 Audited three representative cameras (`Cam_Entrance` / `Cam_Aisle` / `Cam_Shelf`)
 rendered from `main` at evidence quality, ranked the realism gaps, and fixed the top
