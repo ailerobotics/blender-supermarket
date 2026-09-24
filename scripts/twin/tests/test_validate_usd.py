@@ -139,3 +139,91 @@ def test_absolute_path_flagged(tmp_path):
     assert rep.failed
     names = [name for status, name, _ in rep.checks if status == V.Report.FAIL]
     assert "no absolute build-machine paths" in names
+
+
+# --------------------------------------------------------------------------- #
+# The *real* export defect — floor + walls (the 6 Poly Haven maps)             #
+# --------------------------------------------------------------------------- #
+# Blender's USD exporter authors each texture reference by image *datablock name*
+# but copies the *backing* file into export/textures/. For the two Poly Haven
+# materials the MCP tool imports from temp files, so the datablocks are named
+# `floor_tiles_08_Diffuse.jpg` … while the file on disk is a `tmp*.jpg` orphan —
+# the reference dangles. These are the exact 6 names the real export drops (see
+# data/twin-usd-validate-v1/report.md §2). The synthetic single-texture tests above
+# cover the mechanism; these tests pin the real signature and, crucially, prove the
+# versioned assets/textures/ can always repair it.
+REAL_DEFECT_TEXTURES = [
+    "floor_tiles_08_Diffuse.jpg",
+    "floor_tiles_08_Rough.jpg",
+    "floor_tiles_08_nor_gl.jpg",
+    "white_plaster_02_Diffuse.jpg",
+    "white_plaster_02_Rough.jpg",
+    "white_plaster_02_nor_gl.jpg",
+]
+
+
+def _build_real_defect_stage(dirpath):
+    """A store stage reproducing the real export defect: the floor and walls bind
+    materials whose UsdUVTexture inputs author `./textures/<datablock name>` for the 6
+    Poly Haven maps, while only orphan `tmp*.jpg` files exist on disk — exactly what
+    Blender emits before `_stage_textures_for_export()` (scripts/export_usd.py) fixes
+    the datablock names, or `--repair-textures` reconciles the artifact."""
+    from pxr import Usd, UsdGeom, UsdShade, Sdf
+    os.makedirs(os.path.join(dirpath, "textures"), exist_ok=True)
+    # The exporter copies the *backing* temp file, so tmp*.jpg orphans land on disk
+    # while the authored (datablock-name) references point at nothing.
+    for i in range(len(REAL_DEFECT_TEXTURES)):
+        with open(os.path.join(dirpath, "textures", f"tmp{i}orphan.jpg"), "wb") as f:
+            f.write(b"\xff\xd8\xff")  # jpeg magic — enough to exist on disk
+    path = os.path.join(dirpath, "store.usda")
+    stage = Usd.Stage.CreateNew(path)
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    root = UsdGeom.Xform.Define(stage, "/Supermarket")
+    stage.SetDefaultPrim(root.GetPrim())
+    for grp in V.COMPOSER_GROUPS:
+        UsdGeom.Xform.Define(stage, f"/Supermarket/{grp}")
+    for g in V.GONDOLA_FIXTURES + V.GONDOLA_PRODUCTS:
+        UsdGeom.Xform.Define(stage, f"/Supermarket/{g}")
+    UsdGeom.Xform.Define(stage, "/Supermarket/GRP_Cameras/Cam_Aisle")
+    floor = UsdGeom.Mesh.Define(stage, "/Supermarket/GRP_Structure/Floor")
+    floor.CreateExtentAttr([(-13, -11, 0), (13, 11, 0)])
+    for i, texname in enumerate(REAL_DEFECT_TEXTURES):
+        shd = UsdShade.Shader.Define(stage, f"/Supermarket/_materials/m{i}/tex")
+        shd.CreateIdAttr("UsdUVTexture")
+        shd.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(f"./textures/{texname}")
+    stage.GetRootLayer().Save()
+    return path
+
+
+def test_real_defect_signature_flagged_cosmetic(tmp_path):
+    # The validator must catch all 6 real dangling floor/wall maps, and classify them
+    # cosmetic (untextured surface, geometry intact) — never boot-blocking.
+    store = _build_real_defect_stage(str(tmp_path / "defect"))
+    rep = _validate(store)
+    assert rep.failed
+    assert rep.cosmetic_failed and not rep.blocking_failed, rep.render()
+    unresolved = set(rep.facts.get("unresolved", []))
+    assert set(REAL_DEFECT_TEXTURES) <= unresolved, unresolved
+
+
+def test_versioned_assets_textures_covers_defect_names():
+    # Regression guard for the repair safety net: --repair-textures (and preflight's
+    # in-place repair) can only close the gap if the committed assets/textures/ carries
+    # a file for every one of the 6 names the export authors. If any source map is
+    # renamed or deleted this fails loudly instead of silently un-repairing the store.
+    missing = [n for n in REAL_DEFECT_TEXTURES
+               if not os.path.exists(os.path.join(V.ASSETS_TEXTURES, n))]
+    assert not missing, f"assets/textures/ is missing repair sources: {missing}"
+
+
+def test_repair_textures_reconciles_real_defect_from_versioned_assets(tmp_path):
+    # End-to-end against the REAL versioned assets/textures/ (no monkeypatch): the 6
+    # dangling maps are copied in and the stage then validates clean — proving the
+    # documented remedy (validate_usd.py --repair-textures) actually clears the defect.
+    store = _build_real_defect_stage(str(tmp_path / "defect"))
+    rep = _validate(store, repair=True)
+    assert not rep.failed, rep.render()
+    texdir = os.path.join(os.path.dirname(store), "textures")
+    for name in REAL_DEFECT_TEXTURES:
+        assert os.path.exists(os.path.join(texdir, name)), f"repair did not place {name}"
