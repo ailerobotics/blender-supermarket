@@ -1,0 +1,2983 @@
+{
+ "camera": "view_1",
+ "frame": 0,
+ "time_s": 0.0,
+ "width": 128,
+ "height": 96,
+ "annotations": [
+  {
+   "id": "view_1:0:G1R_b2_s0_f0",
+   "entity_id": "G1R_b2_s0_f0",
+   "category": "biscuit_digest",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    26,
+    84,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    26.0,
+    83.94,
+    7.26,
+    15.68
+   ],
+   "center_px": [
+    29.78,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    -0.422,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.07,
+    0.24
+   ],
+   "pass_index": 1,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     2582,
+     5,
+     89,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     2,
+     2,
+     8,
+     9216
+    ]
+   },
+   "area_px": 63,
+   "visibility": 0.5534,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s0_f1",
+   "entity_id": "G1R_b2_s0_f1",
+   "category": "biscuit_digest",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    31,
+    84,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    31.36,
+    83.94,
+    6.83,
+    15.68
+   ],
+   "center_px": [
+    34.91,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    -0.34,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.07,
+    0.24
+   ],
+   "pass_index": 2,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     3062,
+     2,
+     92,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     8736
+    ]
+   },
+   "area_px": 62,
+   "visibility": 0.5789,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s0_f2",
+   "entity_id": "G1R_b2_s0_f2",
+   "category": "biscuit_digest",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    37,
+    84,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    36.71,
+    83.94,
+    6.4,
+    15.68
+   ],
+   "center_px": [
+    40.04,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    -0.258,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.07,
+    0.24
+   ],
+   "pass_index": 3,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     3637,
+     11,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     93,
+     3,
+     8160
+    ]
+   },
+   "area_px": 62,
+   "visibility": 0.6178,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s0_f3",
+   "entity_id": "G1R_b2_s0_f3",
+   "category": "biscuit_digest",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    42,
+    84,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    42.06,
+    83.94,
+    5.97,
+    15.68
+   ],
+   "center_px": [
+    45.17,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    -0.176,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.07,
+    0.24
+   ],
+   "pass_index": 4,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     4117,
+     8,
+     87,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     88,
+     8,
+     7680
+    ]
+   },
+   "area_px": 64,
+   "visibility": 0.6837,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s0_f4",
+   "entity_id": "G1R_b2_s0_f4",
+   "category": "biscuit_digest",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    47,
+    84,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    47.42,
+    83.94,
+    5.54,
+    15.68
+   ],
+   "center_px": [
+    50.3,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    -0.094,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.07,
+    0.24
+   ],
+   "pass_index": 5,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     4598,
+     2,
+     92,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     7200
+    ]
+   },
+   "area_px": 62,
+   "visibility": 0.7137,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s0_f5",
+   "entity_id": "G1R_b2_s0_f5",
+   "category": "biscuit_digest",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    53,
+    84,
+    5,
+    12
+   ],
+   "bbox_amodal": [
+    52.77,
+    83.94,
+    5.11,
+    15.68
+   ],
+   "center_px": [
+    55.43,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    -0.012,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.07,
+    0.24
+   ],
+   "pass_index": 6,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     5172,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     6720
+    ]
+   },
+   "area_px": 60,
+   "visibility": 0.7488,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s0_f6",
+   "entity_id": "G1R_b2_s0_f6",
+   "category": "biscuit_digest",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    58,
+    84,
+    5,
+    12
+   ],
+   "bbox_amodal": [
+    58.12,
+    83.94,
+    4.68,
+    15.68
+   ],
+   "center_px": [
+    60.56,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    0.07,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.07,
+    0.24
+   ],
+   "pass_index": 7,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     5652,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     6240
+    ]
+   },
+   "area_px": 60,
+   "visibility": 0.8176,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s0_f7",
+   "entity_id": "G1R_b2_s0_f7",
+   "category": "biscuit_digest",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    63,
+    84,
+    5,
+    12
+   ],
+   "bbox_amodal": [
+    63.48,
+    83.94,
+    4.57,
+    15.68
+   ],
+   "center_px": [
+    65.69,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    0.152,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.07,
+    0.24
+   ],
+   "pass_index": 8,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     6132,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     5760
+    ]
+   },
+   "area_px": 60,
+   "visibility": 0.8373,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s0_f8",
+   "entity_id": "G1R_b2_s0_f8",
+   "category": "coffee_beans",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    70,
+    83,
+    6,
+    13
+   ],
+   "bbox_amodal": [
+    68.44,
+    83.94,
+    8.88,
+    15.68
+   ],
+   "center_px": [
+    72.7,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    0.264,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.13,
+    0.24
+   ],
+   "pass_index": 9,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     6803,
+     13,
+     83,
+     13,
+     83,
+     13,
+     83,
+     13,
+     83,
+     13,
+     88,
+     2,
+     4998
+    ]
+   },
+   "area_px": 67,
+   "visibility": 0.4812,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s0_f9",
+   "entity_id": "G1R_b2_s0_f9",
+   "category": "coffee_beans",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    79,
+    83,
+    6,
+    13
+   ],
+   "bbox_amodal": [
+    76.97,
+    83.94,
+    9.62,
+    15.68
+   ],
+   "center_px": [
+    81.58,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    0.406,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.13,
+    0.24
+   ],
+   "pass_index": 10,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     7667,
+     13,
+     83,
+     13,
+     83,
+     13,
+     83,
+     13,
+     83,
+     13,
+     86,
+     10,
+     4128
+    ]
+   },
+   "area_px": 75,
+   "visibility": 0.4972,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s0_f10",
+   "entity_id": "G1R_b2_s0_f10",
+   "category": "coffee_beans",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    87,
+    83,
+    7,
+    13
+   ],
+   "bbox_amodal": [
+    85.5,
+    83.94,
+    10.37,
+    15.68
+   ],
+   "center_px": [
+    90.46,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    0.548,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.13,
+    0.24
+   ],
+   "pass_index": 11,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     8439,
+     9,
+     83,
+     13,
+     83,
+     13,
+     83,
+     13,
+     83,
+     13,
+     84,
+     12,
+     86,
+     10,
+     3264
+    ]
+   },
+   "area_px": 83,
+   "visibility": 0.5105,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s0_f11",
+   "entity_id": "G1R_b2_s0_f11",
+   "category": "biscuit_digest",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    94,
+    84,
+    7,
+    12
+   ],
+   "bbox_amodal": [
+    94.02,
+    83.94,
+    7.19,
+    15.68
+   ],
+   "center_px": [
+    97.47,
+    91.77
+   ],
+   "depth_m": 1.5915,
+   "world_center": [
+    -8.618,
+    0.66,
+    0.29
+   ],
+   "world_size": [
+    0.07,
+    0.07,
+    0.24
+   ],
+   "pass_index": 12,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     9116,
+     4,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     85,
+     8,
+     2595
+    ]
+   },
+   "area_px": 72,
+   "visibility": 0.6386,
+   "meta": {
+    "slot_id": "G1R_b2_s0",
+    "level": 0
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s1_f0",
+   "entity_id": "G1R_b2_s1_f0",
+   "category": "biscuit_choc",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    29,
+    65,
+    7,
+    15
+   ],
+   "bbox_amodal": [
+    26.77,
+    66.01,
+    10.78,
+    12.74
+   ],
+   "center_px": [
+    32.33,
+    72.4
+   ],
+   "depth_m": 1.597,
+   "world_center": [
+    -8.708,
+    -0.383,
+    0.585
+   ],
+   "world_size": [
+    0.05,
+    0.14,
+    0.2
+   ],
+   "pass_index": 13,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     2852,
+     8,
+     86,
+     14,
+     81,
+     15,
+     81,
+     15,
+     81,
+     15,
+     81,
+     13,
+     93,
+     1,
+     8852
+    ]
+   },
+   "area_px": 81,
+   "visibility": 0.5898,
+   "meta": {
+    "slot_id": "G1R_b2_s1",
+    "level": 1
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s1_f1",
+   "entity_id": "G1R_b2_s1_f1",
+   "category": "biscuit_choc",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    39,
+    65,
+    6,
+    15
+   ],
+   "bbox_amodal": [
+    36.56,
+    66.01,
+    10.17,
+    12.74
+   ],
+   "center_px": [
+    41.81,
+    72.4
+   ],
+   "depth_m": 1.597,
+   "world_center": [
+    -8.708,
+    -0.231,
+    0.585
+   ],
+   "world_size": [
+    0.05,
+    0.14,
+    0.2
+   ],
+   "pass_index": 14,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     3811,
+     12,
+     82,
+     15,
+     81,
+     15,
+     81,
+     15,
+     81,
+     13,
+     93,
+     1,
+     7988
+    ]
+   },
+   "area_px": 71,
+   "visibility": 0.548,
+   "meta": {
+    "slot_id": "G1R_b2_s1",
+    "level": 1
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s1_f2",
+   "entity_id": "G1R_b2_s1_f2",
+   "category": "coffee_ground",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    48,
+    65,
+    5,
+    15
+   ],
+   "bbox_amodal": [
+    46.35,
+    65.73,
+    8.4,
+    13.02
+   ],
+   "center_px": [
+    50.7,
+    72.24
+   ],
+   "depth_m": 1.6018,
+   "world_center": [
+    -8.713,
+    -0.089,
+    0.585
+   ],
+   "world_size": [
+    0.06,
+    0.12,
+    0.2
+   ],
+   "pass_index": 15,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     4675,
+     12,
+     82,
+     15,
+     81,
+     15,
+     81,
+     15,
+     81,
+     14,
+     7217
+    ]
+   },
+   "area_px": 71,
+   "visibility": 0.6492,
+   "meta": {
+    "slot_id": "G1R_b2_s1",
+    "level": 1
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s1_f3",
+   "entity_id": "G1R_b2_s1_f3",
+   "category": "coffee_ground",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    57,
+    65,
+    4,
+    15
+   ],
+   "bbox_amodal": [
+    54.85,
+    65.73,
+    7.83,
+    13.02
+   ],
+   "center_px": [
+    58.9,
+    72.24
+   ],
+   "depth_m": 1.6018,
+   "world_center": [
+    -8.713,
+    0.043,
+    0.585
+   ],
+   "world_size": [
+    0.06,
+    0.12,
+    0.2
+   ],
+   "pass_index": 16,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     5537,
+     15,
+     81,
+     15,
+     81,
+     15,
+     81,
+     15,
+     6448
+    ]
+   },
+   "area_px": 60,
+   "visibility": 0.5885,
+   "meta": {
+    "slot_id": "G1R_b2_s1",
+    "level": 1
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s1_f4",
+   "entity_id": "G1R_b2_s1_f4",
+   "category": "coffee_ground",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    65,
+    65,
+    4,
+    15
+   ],
+   "bbox_amodal": [
+    63.36,
+    65.73,
+    7.73,
+    13.02
+   ],
+   "center_px": [
+    67.11,
+    72.24
+   ],
+   "depth_m": 1.6018,
+   "world_center": [
+    -8.713,
+    0.175,
+    0.585
+   ],
+   "world_size": [
+    0.06,
+    0.12,
+    0.2
+   ],
+   "pass_index": 17,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     6305,
+     15,
+     81,
+     15,
+     81,
+     15,
+     81,
+     15,
+     5680
+    ]
+   },
+   "area_px": 60,
+   "visibility": 0.5962,
+   "meta": {
+    "slot_id": "G1R_b2_s1",
+    "level": 1
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s1_f5",
+   "entity_id": "G1R_b2_s1_f5",
+   "category": "biscuit_choc",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    74,
+    65,
+    4,
+    15
+   ],
+   "bbox_amodal": [
+    71.37,
+    66.01,
+    9.51,
+    12.74
+   ],
+   "center_px": [
+    75.97,
+    72.4
+   ],
+   "depth_m": 1.597,
+   "world_center": [
+    -8.708,
+    0.317,
+    0.585
+   ],
+   "world_size": [
+    0.05,
+    0.14,
+    0.2
+   ],
+   "pass_index": 18,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     7169,
+     14,
+     82,
+     15,
+     81,
+     15,
+     82,
+     14,
+     4816
+    ]
+   },
+   "area_px": 58,
+   "visibility": 0.4787,
+   "meta": {
+    "slot_id": "G1R_b2_s1",
+    "level": 1
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s1_f6",
+   "entity_id": "G1R_b2_s1_f6",
+   "category": "biscuit_choc",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    83,
+    65,
+    5,
+    15
+   ],
+   "bbox_amodal": [
+    80.55,
+    66.01,
+    10.12,
+    12.74
+   ],
+   "center_px": [
+    85.45,
+    72.4
+   ],
+   "depth_m": 1.597,
+   "world_center": [
+    -8.708,
+    0.469,
+    0.585
+   ],
+   "world_size": [
+    0.05,
+    0.14,
+    0.2
+   ],
+   "pass_index": 19,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     8033,
+     13,
+     83,
+     15,
+     81,
+     15,
+     81,
+     15,
+     83,
+     13,
+     3856
+    ]
+   },
+   "area_px": 71,
+   "visibility": 0.5507,
+   "meta": {
+    "slot_id": "G1R_b2_s1",
+    "level": 1
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s1_f7",
+   "entity_id": "G1R_b2_s1_f7",
+   "category": "biscuit_choc",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    92,
+    65,
+    6,
+    15
+   ],
+   "bbox_amodal": [
+    89.73,
+    66.01,
+    10.73,
+    12.74
+   ],
+   "center_px": [
+    94.92,
+    72.4
+   ],
+   "depth_m": 1.597,
+   "world_center": [
+    -8.708,
+    0.621,
+    0.585
+   ],
+   "world_size": [
+    0.05,
+    0.14,
+    0.2
+   ],
+   "pass_index": 20,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     8898,
+     11,
+     84,
+     14,
+     82,
+     15,
+     81,
+     15,
+     82,
+     14,
+     83,
+     12,
+     2897
+    ]
+   },
+   "area_px": 81,
+   "visibility": 0.5925,
+   "meta": {
+    "slot_id": "G1R_b2_s1",
+    "level": 1
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f0",
+   "entity_id": "G1R_b2_s2_f0",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    26,
+    51,
+    7,
+    12
+   ],
+   "bbox_amodal": [
+    25.95,
+    51.25,
+    7.45,
+    11.46
+   ],
+   "center_px": [
+    29.81,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    -0.403,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 21,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     2548,
+     6,
+     89,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     1,
+     8,
+     2,
+     9154
+    ]
+   },
+   "area_px": 69,
+   "visibility": 0.8082,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f1",
+   "entity_id": "G1R_b2_s2_f1",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    32,
+    51,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    31.8,
+    51.25,
+    7.02,
+    11.46
+   ],
+   "center_px": [
+    35.45,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    -0.316,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 22,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     3124,
+     8,
+     87,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     8673
+    ]
+   },
+   "area_px": 68,
+   "visibility": 0.8453,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f2",
+   "entity_id": "G1R_b2_s2_f2",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    38,
+    51,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    37.66,
+    51.25,
+    6.6,
+    11.46
+   ],
+   "center_px": [
+    41.08,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    -0.229,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 23,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     3700,
+     11,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     11,
+     8098
+    ]
+   },
+   "area_px": 70,
+   "visibility": 0.9255,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f3",
+   "entity_id": "G1R_b2_s2_f3",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    44,
+    51,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    43.51,
+    51.25,
+    6.17,
+    11.46
+   ],
+   "center_px": [
+    46.71,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    -0.142,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 24,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     4275,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     90,
+     4,
+     7523
+    ]
+   },
+   "area_px": 64,
+   "visibility": 0.9051,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f4",
+   "entity_id": "G1R_b2_s2_f4",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    49,
+    51,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    49.36,
+    51.25,
+    5.74,
+    11.46
+   ],
+   "center_px": [
+    52.35,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    -0.055,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 25,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     4756,
+     4,
+     91,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     7041
+    ]
+   },
+   "area_px": 64,
+   "visibility": 0.9729,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f5",
+   "entity_id": "G1R_b2_s2_f5",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    55,
+    51,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    55.22,
+    51.25,
+    5.32,
+    11.46
+   ],
+   "center_px": [
+    57.98,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    0.032,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 26,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     5332,
+     11,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     90,
+     4,
+     6467
+    ]
+   },
+   "area_px": 63,
+   "visibility": 1.0,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f6",
+   "entity_id": "G1R_b2_s2_f6",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    61,
+    51,
+    5,
+    12
+   ],
+   "bbox_amodal": [
+    61.07,
+    51.25,
+    5.05,
+    11.46
+   ],
+   "center_px": [
+    63.61,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    0.119,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 27,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     5907,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     5985
+    ]
+   },
+   "area_px": 60,
+   "visibility": 1.0,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f7",
+   "entity_id": "G1R_b2_s2_f7",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    67,
+    51,
+    5,
+    12
+   ],
+   "bbox_amodal": [
+    66.71,
+    51.25,
+    5.26,
+    11.46
+   ],
+   "center_px": [
+    69.24,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    0.206,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 28,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     6483,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     5409
+    ]
+   },
+   "area_px": 60,
+   "visibility": 0.9954,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f8",
+   "entity_id": "G1R_b2_s2_f8",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    72,
+    51,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    72.14,
+    51.25,
+    5.69,
+    11.46
+   ],
+   "center_px": [
+    74.88,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    0.293,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 29,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     6963,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     85,
+     9,
+     4835
+    ]
+   },
+   "area_px": 69,
+   "visibility": 1.0,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f9",
+   "entity_id": "G1R_b2_s2_f9",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    78,
+    51,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    77.57,
+    51.25,
+    6.11,
+    11.46
+   ],
+   "center_px": [
+    80.51,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    0.38,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 30,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     7539,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     85,
+     4,
+     4264
+    ]
+   },
+   "area_px": 64,
+   "visibility": 0.914,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f10",
+   "entity_id": "G1R_b2_s2_f10",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    83,
+    51,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    83.0,
+    51.25,
+    6.54,
+    11.46
+   ],
+   "center_px": [
+    86.14,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    0.467,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 31,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     8024,
+     6,
+     85,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     3777
+    ]
+   },
+   "area_px": 66,
+   "visibility": 0.8806,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f11",
+   "entity_id": "G1R_b2_s2_f11",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    89,
+    51,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    88.43,
+    51.25,
+    6.96,
+    11.46
+   ],
+   "center_px": [
+    91.78,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    0.554,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 32,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     8595,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     85,
+     11,
+     3201
+    ]
+   },
+   "area_px": 71,
+   "visibility": 0.8902,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s2_f12",
+   "entity_id": "G1R_b2_s2_f12",
+   "category": "coffee_instant",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    95,
+    51,
+    6,
+    12
+   ],
+   "bbox_amodal": [
+    93.86,
+    51.25,
+    7.39,
+    11.46
+   ],
+   "center_px": [
+    97.41,
+    56.93
+   ],
+   "depth_m": 1.5375,
+   "world_center": [
+    -8.7205,
+    0.641,
+    0.845
+   ],
+   "world_size": [
+    0.075,
+    0.075,
+    0.16
+   ],
+   "pass_index": 33,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     9171,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     84,
+     12,
+     85,
+     8,
+     2628
+    ]
+   },
+   "area_px": 68,
+   "visibility": 0.8029,
+   "meta": {
+    "slot_id": "G1R_b2_s2",
+    "level": 2
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s3_f0",
+   "entity_id": "G1R_b2_s3_f0",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    28,
+    38,
+    8,
+    8
+   ],
+   "bbox_amodal": [
+    26.82,
+    38.64,
+    11.4,
+    6.32
+   ],
+   "center_px": [
+    32.69,
+    41.75
+   ],
+   "depth_m": 1.4692,
+   "world_center": [
+    -8.718,
+    -0.337,
+    1.085
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 34,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     2728,
+     1,
+     94,
+     7,
+     89,
+     7,
+     88,
+     8,
+     88,
+     8,
+     88,
+     8,
+     88,
+     7,
+     89,
+     6,
+     8884
+    ]
+   },
+   "area_px": 52,
+   "visibility": 0.7217,
+   "meta": {
+    "slot_id": "G1R_b2_s3",
+    "level": 3
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s3_f1",
+   "entity_id": "G1R_b2_s3_f1",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    39,
+    38,
+    7,
+    8
+   ],
+   "bbox_amodal": [
+    37.44,
+    38.64,
+    10.77,
+    6.32
+   ],
+   "center_px": [
+    42.99,
+    41.75
+   ],
+   "depth_m": 1.4692,
+   "world_center": [
+    -8.718,
+    -0.185,
+    1.085
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 35,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     3784,
+     3,
+     92,
+     7,
+     88,
+     8,
+     88,
+     8,
+     88,
+     8,
+     88,
+     8,
+     88,
+     6,
+     7924
+    ]
+   },
+   "area_px": 48,
+   "visibility": 0.7052,
+   "meta": {
+    "slot_id": "G1R_b2_s3",
+    "level": 3
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s3_f2",
+   "entity_id": "G1R_b2_s3_f2",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    50,
+    38,
+    6,
+    8
+   ],
+   "bbox_amodal": [
+    48.07,
+    38.64,
+    10.15,
+    6.32
+   ],
+   "center_px": [
+    53.29,
+    41.75
+   ],
+   "depth_m": 1.4692,
+   "world_center": [
+    -8.718,
+    -0.033,
+    1.085
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 36,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     4840,
+     6,
+     88,
+     8,
+     88,
+     8,
+     88,
+     8,
+     88,
+     8,
+     88,
+     7,
+     6963
+    ]
+   },
+   "area_px": 45,
+   "visibility": 0.7015,
+   "meta": {
+    "slot_id": "G1R_b2_s3",
+    "level": 3
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s3_f3",
+   "entity_id": "G1R_b2_s3_f3",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    61,
+    38,
+    5,
+    8
+   ],
+   "bbox_amodal": [
+    58.69,
+    38.64,
+    9.78,
+    6.32
+   ],
+   "center_px": [
+    63.59,
+    41.75
+   ],
+   "depth_m": 1.4692,
+   "world_center": [
+    -8.718,
+    0.119,
+    1.085
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 37,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     5894,
+     8,
+     88,
+     8,
+     88,
+     8,
+     88,
+     8,
+     88,
+     8,
+     6002
+    ]
+   },
+   "area_px": 40,
+   "visibility": 0.6471,
+   "meta": {
+    "slot_id": "G1R_b2_s3",
+    "level": 3
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s3_f4",
+   "entity_id": "G1R_b2_s3_f4",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    71,
+    38,
+    6,
+    8
+   ],
+   "bbox_amodal": [
+    69.0,
+    38.64,
+    10.1,
+    6.32
+   ],
+   "center_px": [
+    73.89,
+    41.75
+   ],
+   "depth_m": 1.4692,
+   "world_center": [
+    -8.718,
+    0.271,
+    1.085
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 38,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     6854,
+     7,
+     89,
+     8,
+     88,
+     8,
+     88,
+     8,
+     88,
+     8,
+     89,
+     7,
+     4946
+    ]
+   },
+   "area_px": 46,
+   "visibility": 0.7206,
+   "meta": {
+    "slot_id": "G1R_b2_s3",
+    "level": 3
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s3_f5",
+   "entity_id": "G1R_b2_s3_f5",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    81,
+    38,
+    7,
+    8
+   ],
+   "bbox_amodal": [
+    78.99,
+    38.64,
+    10.72,
+    6.32
+   ],
+   "center_px": [
+    84.19,
+    41.75
+   ],
+   "depth_m": 1.4692,
+   "world_center": [
+    -8.718,
+    0.423,
+    1.085
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 39,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     7814,
+     6,
+     90,
+     8,
+     88,
+     8,
+     88,
+     8,
+     88,
+     8,
+     89,
+     7,
+     90,
+     5,
+     3891
+    ]
+   },
+   "area_px": 50,
+   "visibility": 0.738,
+   "meta": {
+    "slot_id": "G1R_b2_s3",
+    "level": 3
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s3_f6",
+   "entity_id": "G1R_b2_s3_f6",
+   "category": "tea_green",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    91,
+    38,
+    8,
+    8
+   ],
+   "bbox_amodal": [
+    88.99,
+    38.64,
+    11.35,
+    6.32
+   ],
+   "center_px": [
+    94.49,
+    41.75
+   ],
+   "depth_m": 1.4692,
+   "world_center": [
+    -8.718,
+    0.575,
+    1.085
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 40,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     8774,
+     6,
+     90,
+     7,
+     89,
+     8,
+     88,
+     8,
+     88,
+     8,
+     89,
+     7,
+     89,
+     7,
+     90,
+     2,
+     2838
+    ]
+   },
+   "area_px": 53,
+   "visibility": 0.7389,
+   "meta": {
+    "slot_id": "G1R_b2_s3",
+    "level": 3
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s4_f0",
+   "entity_id": "G1R_b2_s4_f0",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    26,
+    19,
+    9,
+    6
+   ],
+   "bbox_amodal": [
+    24.7,
+    19.17,
+    12.14,
+    6.05
+   ],
+   "center_px": [
+    30.96,
+    22.16
+   ],
+   "depth_m": 1.3923,
+   "world_center": [
+    -8.718,
+    -0.337,
+    1.365
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 41,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     2515,
+     2,
+     94,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     8999
+    ]
+   },
+   "area_px": 50,
+   "visibility": 0.6808,
+   "meta": {
+    "slot_id": "G1R_b2_s4",
+    "level": 4
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s4_f1",
+   "entity_id": "G1R_b2_s4_f1",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    38,
+    19,
+    7,
+    6
+   ],
+   "bbox_amodal": [
+    35.93,
+    19.17,
+    11.44,
+    6.05
+   ],
+   "center_px": [
+    41.83,
+    22.16
+   ],
+   "depth_m": 1.3923,
+   "world_center": [
+    -8.718,
+    -0.185,
+    1.365
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 42,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     3667,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     8039
+    ]
+   },
+   "area_px": 42,
+   "visibility": 0.6068,
+   "meta": {
+    "slot_id": "G1R_b2_s4",
+    "level": 4
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s4_f2",
+   "entity_id": "G1R_b2_s4_f2",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    49,
+    19,
+    7,
+    6
+   ],
+   "bbox_amodal": [
+    47.16,
+    19.17,
+    10.75,
+    6.05
+   ],
+   "center_px": [
+    52.7,
+    22.16
+   ],
+   "depth_m": 1.3923,
+   "world_center": [
+    -8.718,
+    -0.033,
+    1.365
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 43,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     4723,
+     3,
+     93,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     6983
+    ]
+   },
+   "area_px": 39,
+   "visibility": 0.5997,
+   "meta": {
+    "slot_id": "G1R_b2_s4",
+    "level": 4
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s4_f3",
+   "entity_id": "G1R_b2_s4_f3",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    61,
+    19,
+    5,
+    6
+   ],
+   "bbox_amodal": [
+    58.39,
+    19.17,
+    10.34,
+    6.05
+   ],
+   "center_px": [
+    63.57,
+    22.16
+   ],
+   "depth_m": 1.3923,
+   "world_center": [
+    -8.718,
+    0.119,
+    1.365
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 44,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     5875,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     6023
+    ]
+   },
+   "area_px": 30,
+   "visibility": 0.4796,
+   "meta": {
+    "slot_id": "G1R_b2_s4",
+    "level": 4
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s4_f4",
+   "entity_id": "G1R_b2_s4_f4",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    72,
+    19,
+    6,
+    6
+   ],
+   "bbox_amodal": [
+    69.27,
+    19.17,
+    10.69,
+    6.05
+   ],
+   "center_px": [
+    74.44,
+    22.16
+   ],
+   "depth_m": 1.3923,
+   "world_center": [
+    -8.718,
+    0.271,
+    1.365
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 45,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     6931,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     4871
+    ]
+   },
+   "area_px": 36,
+   "visibility": 0.5566,
+   "meta": {
+    "slot_id": "G1R_b2_s4",
+    "level": 4
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s4_f5",
+   "entity_id": "G1R_b2_s4_f5",
+   "category": "tea_black",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    82,
+    19,
+    7,
+    6
+   ],
+   "bbox_amodal": [
+    79.8,
+    19.17,
+    11.39,
+    6.05
+   ],
+   "center_px": [
+    85.31,
+    22.16
+   ],
+   "depth_m": 1.3923,
+   "world_center": [
+    -8.718,
+    0.423,
+    1.365
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 46,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     7891,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     3815
+    ]
+   },
+   "area_px": 42,
+   "visibility": 0.6095,
+   "meta": {
+    "slot_id": "G1R_b2_s4",
+    "level": 4
+   }
+  },
+  {
+   "id": "view_1:0:G1R_b2_s4_f6",
+   "entity_id": "G1R_b2_s4_f6",
+   "category": "tea_green",
+   "kind": "product",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    92,
+    19,
+    9,
+    6
+   ],
+   "bbox_amodal": [
+    90.33,
+    19.17,
+    12.09,
+    6.05
+   ],
+   "center_px": [
+    96.18,
+    22.16
+   ],
+   "depth_m": 1.3923,
+   "world_center": [
+    -8.718,
+    0.575,
+    1.365
+   ],
+   "world_size": [
+    0.07,
+    0.14,
+    0.08
+   ],
+   "pass_index": 47,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     8851,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     6,
+     90,
+     3,
+     2666
+    ]
+   },
+   "area_px": 51,
+   "visibility": 0.6972,
+   "meta": {
+    "slot_id": "G1R_b2_s4",
+    "level": 4
+   }
+  }
+ ],
+ "file_name": "frames/view_1/f0000.png"
+}

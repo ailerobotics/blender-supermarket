@@ -765,3 +765,36 @@ unimplemented native hooks, so the launch does not prove an empty generation,
 supply a real incorporation ack, commission the epoch, or bypass
 unknown/stale/clearance checks. Integration must then demonstrate actual departure
 and blocked-aisle stop/replan.
+
+## 15. Store-vision scenario datasets (synthetic labelled sequences)
+
+Renders labelled sequences (shelf depletion, floor spills, people movement, misplaced
+products, multi-view RGB-D) for store-vision development. Runs **headless in its own
+Blender process** — it never touches the running GUI, its MCP socket, or `scenes/`.
+Design + module map: `scripts/scenarios/README.md`; dataset format: `docs/scenario-format.md`.
+
+```bash
+cd ~/workspaces/blender-supermarket
+# one-command regenerate of the small default set (all five scenarios) -> ~/datasets/store-scenarios/
+# GPU is shared: check `nvidia-smi` first and wrap the run in the shared lock (>1 GB or >1 min).
+flock /tmp/aile-gpu.lock \
+  blender -b --python scripts/scenarios/generate.py -- \
+    --scenario all --out ~/datasets/store-scenarios --res 640x480 --samples 16 --device gpu
+
+# CPU-only (no GPU contention; slower) — the safe default when the card is busy:
+blender -b --python scripts/scenarios/generate.py -- --scenario all --device cpu
+# one scenario: --scenario depletion|spills|people|misplaced|multiview
+# tiny smoke set (few frames, for a quick check): add --smoke --res 256x192
+```
+
+Default set lives at `~/datasets/store-scenarios/<scenario>/` (outside git). Each holds
+`frames/`, `depth/` (multi-view), `annotations/`, `cameras/`, `coco.json`,
+`ground_truth.json`, `manifest.json`.
+
+```bash
+# offline tests + dataset validator (no Blender; needs .venv-scenarios — see the module README):
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= .venv-scenarios/bin/python -m pytest scripts/scenarios/tests/ -q
+# validate a generated dataset offline:
+.venv-scenarios/bin/python -c "import sys;sys.path[:0]=['scripts','scripts/scenarios'];\
+import dataset,os;print(dataset.validate_dataset(os.path.expanduser('~/datasets/store-scenarios'),'depletion_G1R'))"
+```

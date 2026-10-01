@@ -108,6 +108,18 @@ repo's `scenes/`, `export/` or `renders/`.
   RUNBOOK §10 documents scratch builds, CPU geometry checks and the semantic/static-map
   manifest. Source cases are static visual stock; scenario composition owns dynamic
   actors. `GRP_EnvironmentDecor` must remain nonphysical.
+- **Store-vision scenario generator** (`scripts/scenarios/`): renders labelled
+  synthetic sequences from the store (shelf depletion, floor spills, people movement,
+  misplaced products, multi-view RGB-D) for the store-vision suite. Runs **headless in
+  its own Blender process** (never the live GUI / `scenes/`); ground truth is *computed*
+  from the planogram, not inferred, so pixels and labels agree by construction. Entry +
+  one-command regenerate: **RUNBOOK §15**; design + module map: `scripts/scenarios/README.md`;
+  dataset format: `docs/scenario-format.md`. Offline tests (no Blender) validate a
+  committed smoke fixture — run with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=` to
+  dodge the box's ROS pytest plugins. Datasets write **outside git** (`~/datasets/store-scenarios/`).
+- GitHub remote is `ailerobotics/blender-supermarket` (origin); changes land via PR
+  (see the merged-PR history). Use **gh-axi** for GitHub operations; never push to or
+  merge into the default branch yourself.
 
 ## Maintaining this file
 

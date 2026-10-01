@@ -1,0 +1,96 @@
+{
+ "trajectories": {
+  "s_74bf20f876": {
+   "entity_id": "person_0",
+   "track": [
+    {
+     "frame": 0,
+     "x": 9.5,
+     "y": -10.0,
+     "heading": 2.847
+    },
+    {
+     "frame": 1,
+     "x": 6.75,
+     "y": -9.167,
+     "heading": 2.847
+    },
+    {
+     "frame": 2,
+     "x": 4.0,
+     "y": -8.333,
+     "heading": 2.847
+    },
+    {
+     "frame": 3,
+     "x": 11.5,
+     "y": -10.8,
+     "heading": -0.288
+    }
+   ]
+  },
+  "s_0251908fcd": {
+   "entity_id": "person_1",
+   "track": [
+    {
+     "frame": 0,
+     "x": 9.5,
+     "y": -10.0,
+     "heading": 2.847
+    },
+    {
+     "frame": 1,
+     "x": 6.75,
+     "y": -9.167,
+     "heading": 2.847
+    },
+    {
+     "frame": 2,
+     "x": 4.0,
+     "y": -8.333,
+     "heading": 2.847
+    },
+    {
+     "frame": 3,
+     "x": 11.5,
+     "y": -10.8,
+     "heading": -0.288
+    }
+   ]
+  },
+  "s_d9dcbd7a08": {
+   "entity_id": "person_2",
+   "track": [
+    {
+     "frame": 0,
+     "x": 9.5,
+     "y": -10.0,
+     "heading": 2.693
+    },
+    {
+     "frame": 1,
+     "x": 7.767,
+     "y": -9.167,
+     "heading": 2.693
+    },
+    {
+     "frame": 2,
+     "x": 6.033,
+     "y": -8.333,
+     "heading": 2.693
+    },
+    {
+     "frame": 3,
+     "x": 11.5,
+     "y": -10.8,
+     "heading": -0.225
+    }
+   ]
+  }
+ },
+ "sessions": [
+  "s_74bf20f876",
+  "s_0251908fcd",
+  "s_d9dcbd7a08"
+ ]
+}
