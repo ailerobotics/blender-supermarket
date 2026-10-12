@@ -195,8 +195,50 @@ runtime. `CadRestockRuntime` requires the existing shelfbot planner's cuRobo sta
 in its interpreter; alternatively integration must supply a process-separated
 motion port. Merely adding the shelfbot source directory does not install cuRobo.
 The existing planner node documents a separate cuRobo environment. No packages or
-shared environments were changed by this lane; the concrete assembly cannot yet
-be launched in the inspected Isaac environment.
+shared environments were changed by this lane. Use the process-separated path
+below for this installation; the direct assembly cannot launch in that interpreter.
+
+### Process-separated Isaac / Jazzy path
+
+`isaac_ros_graph.IsaacRosGraph` uses Isaac's native `ROS2Publisher`,
+`ROS2Subscriber` and domain-88 `ROS2Context` nodes. It imports no Python ROS,
+nvblox or cuRobo. Native Isaac SurfaceGripper and `IsaacCartonSensors` stay with
+the simulator. Feed that camera adapter a measured articulation/base feedback
+object (`IsaacMeasuredFeedback(articulation)`) whose `collision_time` is an actual mapper acknowledgement; no direct
+`IsaacCadMotion` or GPU planner construction is necessary on this path.
+
+`ros_host` runs in separate host Jazzy Python and instantiates the existing
+`RosMotionPort`, `RosTransferBridge`, controller and CAD wall policy using
+`ros_host_config.json`. RUNBOOK §9 has the exact launch. Sensor/job/status JSON
+is unchanged except status adds monotonic `sequence` and `job_id` for stale-message
+filtering. Native contact feedback is in `Sensors`; returned gripper controls call
+the native seal. `/restock_sim/manipulation/stop` is Bool and must latch arm hold
+and inhibit further trajectory commands until explicit recovery. Lost host
+heartbeat also latches hold. Never release a held unit as a watchdog fallback.
+
+Integration's existing Isaac ROS graphs supply `/clock`, registered RGB-D, current
+TF and joint-state/controller transport. Host-side MoveIt/cuMotion provides the
+three planning/execution endpoints below, `/restock_sim/apply_planning_scene`
+(`ApplyPlanningScene`) and `/restock_sim/attach_object` (`AttachObject`). These
+servers, sensor-updated mapper and NVIDIA ROS message overlay remain required;
+the adapter does not silently launch an external rig or substitute fixture servers.
+The current host lacks the NVIDIA attachment message overlay too: source the
+planner's compatible ROS overlay before payload operations. This is separate from
+the now-removed requirement to install host ROS into Isaac Python.
+
+`RosPayloadSync` runs its bounded acknowledgement clients on a separate executor:
+it checks measured native contact, converts the sensor-derived unit centre into
+the current TF-measured TCP frame, and waits for both MoveIt scene and cuMotion
+attachment acknowledgements. A missing package/server, timeout or partial update
+fails the transfer and retains the physical seal for recovery. It never moves a
+physics object. Sensor-map removal/segmentation of the carried unit must be enabled
+in the planner launch; neither acknowledgement alone proves that camera voxels
+were updated. `Sensors.collision_time` must still reflect that actual update.
+
+The CPU two-interpreter smoke runs Isaac Python3.11 → host Python3.12 → Isaac,
+roundtrips existing `Sensors` and `Result` with real ROS String/Bool serialization,
+and asserts fixture provenance and no retail count. It creates no DDS graph and
+does not validate native OmniGraph, GPU inference, attachment or motion execution.
 
 ## ROS wire contract
 

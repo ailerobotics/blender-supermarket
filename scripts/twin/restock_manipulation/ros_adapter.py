@@ -224,6 +224,7 @@ class RosTransferBridge:
         self.String, self.Bool = String, Bool
         self.last_packet_wall = time.monotonic()
         self.last_sim = None
+        self.sequence = 0
         self.status = node.create_publisher(String, '/restock_sim/manipulation/status', 10)
         self.gripper = node.create_publisher(Bool, '/restock_sim/gripper/enable', 10)
         self.subscriptions = [
@@ -234,7 +235,11 @@ class RosTransferBridge:
                                       clock=Clock(clock_type=ClockType.STEADY_TIME))
 
     def _emit(self, result):
-        self.status.publish(self.String(data=json.dumps(asdict(result), allow_nan=False)))
+        self.sequence += 1
+        data = asdict(result)
+        data['sequence'] = self.sequence
+        data['job_id'] = getattr(self.controller, 'job', {}).get('job_id')
+        self.status.publish(self.String(data=json.dumps(data, allow_nan=False)))
         for command in result.controls:
             if command['kind'] == 'gripper':
                 self.gripper.publish(self.Bool(data=command['enabled']))
