@@ -14,17 +14,21 @@ def main():
     inputs.add_argument('--scenario',type=Path,
                    help='JSON with bounds, obstacles, resolution and footprint fields')
     inputs.add_argument('--environment',type=Path,help='Exported schema-2 environment manifest')
+    p.add_argument('--integration-scenario',type=Path,help='Include staging support with --environment')
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--uncoupled',action='store_true')
     p.add_argument('--launch',action='store_true')
     p.add_argument('--articulated',action='store_true',help='Use with ArticulatedNav2Adapter FollowPath')
     args=p.parse_args()
+    if args.integration_scenario and not args.environment:
+        p.error('--integration-scenario requires --environment')
     from twin.mobile import MobileSpec
     import math
     if args.environment:
-        spec=json.loads(args.environment.read_text());b=spec['map_bounds']
-        grid=GridMap((b[0],b[2],b[1],b[3]),[(o['min'][0],o['min'][1],o['max'][0],o['max'][1])
-                     for o in spec['static_obstacles']])
+        from twin.navigation.scenario import environment_grid
+        spec=json.loads(args.environment.read_text())
+        scenario=json.loads(args.integration_scenario.read_text()) if args.integration_scenario else None
+        grid=environment_grid(spec,scenario)
         rig=MobileSpec()
         footprint=Footprint(rig.transport_radius,abs(rig.hitch_x),
             math.hypot(rig.cart_hitch_x+rig.cart_length/2,rig.cart_width/2),

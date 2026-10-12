@@ -20,13 +20,14 @@ from twin.navigation.sensors import Scan
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--environment',type=Path,required=True)
+    p.add_argument('--integration-scenario',type=Path,help='Include staging support obstacle')
     p.add_argument('--initial-pose',nargs=3,type=float,required=True,
                    help='Declared deployment prior for AMCL, not live world feedback')
     args=p.parse_args()
     require_isolation()
-    manifest=json.loads(args.environment.read_text());b=manifest['map_bounds']
-    grid=GridMap((b[0],b[2],b[1],b[3]),[(o['min'][0],o['min'][1],o['max'][0],o['max'][1])
-                 for o in manifest['static_obstacles']])
+    from twin.navigation.scenario import environment_grid
+    scenario=json.loads(args.integration_scenario.read_text()) if args.integration_scenario else None
+    grid=environment_grid(json.loads(args.environment.read_text()),scenario)
     controller=ArticulatedController(grid)
     adapter=ArticulatedNav2Adapter(controller)
     import rclpy

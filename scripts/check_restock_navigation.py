@@ -20,22 +20,30 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--environment',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--scenario',type=Path,help='Integration scenario: staging support and actual chassis goals')
     args=parser.parse_args()
     manifest=json.loads(args.environment.read_text())
-    bounds=manifest['map_bounds']  # Environment order: xmin,xmax,ymin,ymax.
-    grid=GridMap((bounds[0],bounds[2],bounds[1],bounds[3]),
-        [(o['min'][0],o['min'][1],o['max'][0],o['max'][1])
-         for o in manifest['static_obstacles']])
+    scenario=json.loads(args.scenario.read_text()) if args.scenario else None
+    from twin.navigation.scenario import environment_grid
+    grid=environment_grid(manifest,scenario)
+    poses=dict(manifest['poses'])
+    if scenario:
+        staging=scenario['initial_staging']
+        poses['robot_dock']=staging['robot_base_pose']
+        poses['cart_dock']=staging['cart_body_pose']
+        poses['shelf_approach']=staging['shelf_robot_pose']
     controller=ArticulatedController(grid,allow_test_fixtures=True,goal_timeout=250)
-    state=TrainState(*manifest['poses']['robot_dock'],manifest['poses']['cart_dock'][2])
+    state=TrainState(*poses['robot_dock'],poses['cart_dock'][2])
     report={'source':'test_fixture_quasistatic_not_physx',
         'environment_sha256':hashlib.sha256(args.environment.read_bytes()).hexdigest(),
         'obstacles':len(grid.obstacles),'geometry_margin':.05,'localization_allowance':.02,
         'minimum_turn_radius':1.5,'max_articulation_degrees':65,'legs':[]}
+    report['scenario_sha256']=hashlib.sha256(args.scenario.read_bytes()).hexdigest() if args.scenario else None
+    report['goals']=poses
     args.output.mkdir(parents=True,exist_ok=True)
     v=w=0.0
-    for name,goal in [('outbound',manifest['poses']['shelf_approach']),
-                      ('return',manifest['poses']['robot_dock'])]:
+    for name,goal in [('outbound',poses['shelf_approach']),
+                      ('return',poses['robot_dock'])]:
         controller.start(goal,True)
         trace=[];began=time.monotonic();peak_angle=0.0
         for tick in range(5200):
@@ -55,7 +63,8 @@ def main():
                               status=result.status,reason=result.reason))
             if result.status!='running':
                 break
-        leg=dict(name=name,status=result.status,reason=result.reason,
+        robot,cart=state.bodies(controller.spec)
+        leg=dict(cart_body_pose=vars(cart),robot_body_pose=vars(robot),name=name,status=result.status,reason=result.reason,
                  goal=goal,final=vars(state),simulation_seconds=now,
                  cpu_seconds=time.monotonic()-began,peak_articulation_degrees=math.degrees(peak_angle),
                  final_articulation_degrees=math.degrees(state.articulation))

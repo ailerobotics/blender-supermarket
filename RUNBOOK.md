@@ -346,6 +346,12 @@ Feed real wheel encoder and range samples through the adapter described in the
 navigation document. Never connect raw Nav2 `cmd_vel` to the base: the adapter
 returns the gated command. Missing Nav2 packages are a prerequisite failure;
 this script intentionally does not install/upgrade shared ROS or Isaac.
+For an integration scenario with staging support, add `--scenario "$RESTOCK_SCENARIO"`
+to `check_restock_navigation.py` and `--integration-scenario "$RESTOCK_SCENARIO"`
+to both `run_restock_nav2.py` and `run_articulated_nav2_bridge.py`.
+This includes the support obstacle and checks the scenario’s actual chassis goal;
+a successful environment-only route does not certify a different scenario.
+
 ## 9. Mobile UR10 and rollwagen (CPU)
 
 Interface and remaining simulator checks: [mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md).

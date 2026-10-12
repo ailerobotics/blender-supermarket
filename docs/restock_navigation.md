@@ -21,7 +21,7 @@ in-aisle turn still fails. Optional `start(..., goal_articulation=0.08)` request
 aligned final parking; default arrival permits any articulation below the rig
 limit. Shelf-facing arm yaw is separate from the chassis goal yaw.
 
-Planning and feedback fixtures now complete `robot_dock -> stock_G3_back ->
+For the environment manifest goal `[-3.05, 6.0, pi]`, planning and feedback fixtures complete `robot_dock -> stock_G3_back ->
 robot_dock` against the actual schema-2 map's 797 AABBs with **0.05 m geometry
 margin plus 0.02 m localization allowance**. The reproducible checker is
 `scripts/check_restock_navigation.py`; commands are in RUNBOOK §11. Both legs
@@ -29,7 +29,18 @@ stop within the chassis pose tolerances, with peak articulation about 46 degrees
 The cart remains coupled and articulated at arrival: this is not an aligned
 re-latch or exact restoration of the cart's initial body pose.
 
-The earlier timeout was a search failure: replaying the saved candidate proved
+The integration scenario can specify a different shelf pose and adds a staging
+support. Pass `--scenario` to the CPU checker and `--integration-scenario` to
+both Nav2 launch and the host bridge so all three use the same obstacle map.
+The checked scenario pose `[-3.05, 5.85, pi]` intersects `G3_back_frame` with the
+transport envelope at full margins, independently of cart angle; its route
+check stopped without moving. The successful Y=6.0 fixture above does **not**
+certify this scenario or its added support. Integration must select a pose that
+also meets manipulation reach and clearance. No smaller margin is substituted.
+Checker reports include input hashes and independent robot/cart body poses;
+use the observed cart yaw for manipulation, never the chassis goal yaw.
+
+The earlier timeout for the Y=6.0 goal was a search failure: replaying the saved candidate proved
 every segment clear at full margins. The planner now tries a cached or proposed
 route before full search. A proposal may omit localization inflation during
 search, but **acceptance always replays and collision-checks every primitive at
