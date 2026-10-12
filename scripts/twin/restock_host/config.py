@@ -1,6 +1,7 @@
 """CPU-only validation and a serializable launch contract for the real CAD robot."""
 import math
 import json
+import hashlib
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -42,7 +43,7 @@ def validate_config(config):
     """Require expanded CAD URDF, matching SRDF and nonempty collision XRDF."""
     import yaml
     allowed = {'urdf', 'srdf', 'xrdf', 'workspace_min', 'workspace_max',
-               'domain', 'namespace', 'frame', 'tcp', 'shelfbot_root', 'mobile_manifest'}
+               'domain', 'namespace', 'frame', 'tcp', 'shelfbot_root', 'mobile_manifest', 'asset_report'}
     if set(config) - allowed:
         raise ValueError(f'unknown configuration keys: {sorted(set(config)-allowed)}')
     for key, expected in [('domain', 88), ('namespace', NS), ('frame', FRAME), ('tcp', TCP)]:
@@ -165,6 +166,17 @@ def validate_config(config):
 def launch_plan(config):
     """The runtime converts only these allowlisted nodes into ROS launch actions."""
     c = validate_config(config)
+    static_errors = []
+    if c.get('asset_report'):
+        report = json.loads(Path(c['asset_report']).read_text())
+        for kind in ('urdf', 'srdf', 'xrdf'):
+            expected = report.get('generated_sha256', {}).get('mobile.' + kind)
+            if expected != hashlib.sha256(Path(c[kind]).read_bytes()).hexdigest():
+                raise ValueError('asset_report does not match generated ' + kind)
+        overlaps = report.get('transport_sphere_overlaps', [])
+        if overlaps:
+            static_errors.append(f'CAD sphere model has {len(overlaps)} nonexcluded transport overlaps; '
+                                 'refine conservative coverage or prove narrow exclusions; see ' + c['asset_report'])
     return {
         'environment': ENV, 'namespace': NS, 'frame': FRAME, 'tcp': TCP,
         'robot': {k: c[k] for k in ('urdf', 'srdf', 'xrdf')},
@@ -186,4 +198,5 @@ def launch_plan(config):
                               'arm_controller/follow_joint_trajectory with articulation feedback',
                               'parked station lifecycle: stop host, restart empty map, fresh ESDF ack'],
         'readiness': 'configuration only; graph, sensing and GPU execution unverified',
+        'static_errors': static_errors,
     }

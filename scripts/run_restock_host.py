@@ -32,6 +32,7 @@ def main():
             print(json.dumps(result, indent=2))
             return 2 if result['missing_endpoints'] else 0
         result = dependencies()
+        result['errors'].extend(plan['static_errors'])
         print(json.dumps({**result, 'runtime_verified': False,
                           'required_external': plan['required_external']}, indent=2), flush=True)
         if result['errors']:

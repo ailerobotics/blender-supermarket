@@ -1,5 +1,6 @@
 """CPU contract tests. The generated robot here is explicitly a test fixture."""
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ import yaml
 
 from twin.restock_host.config import (ENDPOINTS, ENV, FRAME, JOINTS, NS,
                                       isolated_environment, launch_plan)
-from twin.restock_host.preflight import dependencies, incorporated_time
+from twin.restock_host.preflight import dependencies, incorporated_time, link_errors
 from twin.restock_host.readiness import missing_endpoints
 
 
@@ -119,6 +120,23 @@ class HostTests(unittest.TestCase):
         result = dependencies(unavailable)
         self.assertTrue(any('isaac_ros_cumotion:' in e and 'task-local overlay' in e for e in result['errors']))
         self.assertTrue(any('nvblox_ros:' in e for e in result['errors']))
+
+    def test_missing_elf_dependency_fails_preflight(self):
+        with patch('twin.restock_host.preflight.subprocess.run',
+                   return_value=S(stdout='librequired.so => not found\n', stderr='', returncode=0)):
+            self.assertIn('librequired.so', link_errors('/fixture/component.so')[0])
+
+    def test_asset_diagnostics_are_hash_bound_and_block_known_overlaps(self):
+        report = {'generated_sha256': {'mobile.' + key: hashlib.sha256(Path(self.config[key]).read_bytes()).hexdigest()
+                                     for key in ('urdf', 'srdf', 'xrdf')},
+                  'transport_sphere_overlaps': [{'links': ['a', 'b']}]}
+        path = Path(self.temp.name) / 'asset-report.json'
+        path.write_text(json.dumps(report))
+        config = self.config | {'asset_report': str(path)}
+        self.assertIn('1 nonexcluded', launch_plan(config)['static_errors'][0])
+        Path(config['srdf']).write_text(Path(config['srdf']).read_text() + '\n')
+        with self.assertRaisesRegex(ValueError, 'does not match'):
+            launch_plan(config)
 
     @unittest.skipUnless(os.environ.get('RESTOCK_HOST_VALIDATE_INSTALLED') == '1',
                          'explicit CPU-only installed-image validation')
