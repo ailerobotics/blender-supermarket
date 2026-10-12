@@ -84,12 +84,13 @@ repo's `scenes/`, `export/` or `renders/`.
   on CPU with `render_shots.py --cpu` when the GPU is held by the robot stack.
 - **Mobile navigation**: `scripts/twin/navigation/` and
   [docs/restock_navigation.md](docs/restock_navigation.md) define sensor, footprint
-  and goal contracts; RUNBOOK §9 has CPU checks and isolated Nav2 launch. Coupled
+  and goal contracts; RUNBOOK §10 has CPU checks and isolated Nav2 launch. Coupled
   clearance uses the full cart swing envelope, so straight cart width alone does
   not prove aisle feasibility. Simulator/Nav2 execution still needs integration
   evidence; fixture tests must not be presented as a physics demonstration.
 - Git delivery: the repository now has an `origin` remote; follow the current
   task delivery contract rather than the former local-only assumption.
+- Mobile UR10/cart assets and control interfaces: [docs/mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md), commands in RUNBOOK §9. The generated mobile URDF replaces the fixed pedestal; import with a free base. CPU FK/schema checks do not establish PhysX towing stability.
 
 ## Maintaining this file
 
