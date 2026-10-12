@@ -83,7 +83,10 @@ repo's `scenes/`, `export/` or `renders/`.
   README decision log 2026-09-14 and `data/twin-realism-v1/report.md`. Render evidence
   on CPU with `render_shots.py --cpu` when the GPU is held by the robot stack.
 - Mobile UR10/cart assets and control interfaces: [docs/mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md), commands in RUNBOOK §9. The generated mobile URDF replaces the fixed pedestal; import with a free base. CPU FK/schema checks do not establish PhysX towing stability.
-- Local-only project: **no git remote** — never push or open a PR.
+- **Service environment**: `scripts/store_environment.py` adds the connected backroom;
+  RUNBOOK §10 documents scratch builds, CPU geometry checks and the semantic/static-map
+  manifest. Source cases are static visual stock; scenario composition owns dynamic
+  actors. `GRP_EnvironmentDecor` must remain nonphysical.
 
 ## Maintaining this file
 

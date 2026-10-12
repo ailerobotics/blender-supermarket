@@ -28,7 +28,7 @@ else:
     for d in prefs.devices: d.use = d.type != 'CPU'
 sc.render.image_settings.file_format = 'PNG'
 os.makedirs(out, exist_ok=True)
-hide_for_topdown = [o for o in bpy.data.objects if o.name in ("Ceiling",) or o.name.startswith(("LEDPanel_", "aisle_sign_", "sign_", "LEDLight_"))]
+hide_for_topdown = [o for o in bpy.data.objects if o.name in ("Ceiling", "Backroom_ceiling") or o.name.startswith(("LEDPanel_", "aisle_sign_", "sign_", "LEDLight_", "ServiceLED_", "ServiceLight_"))]
 for c in cams:
     ob = bpy.data.objects.get(c)
     if not ob: print("no camera", c); continue
