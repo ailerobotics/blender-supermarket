@@ -60,6 +60,9 @@ def classify(prim: PrimInfo) -> ColliderDecision:
     if prim.type_name != "Mesh":
         return ColliderDecision(SKIP, "", "not a Mesh")
 
+    if prim.top_group == "GRP_EnvironmentDecor":
+        return ColliderDecision(SKIP, "", "nonphysical environment decoration")
+
     # 3. Prototype meshes: the small, repeated products/price-tags. Convex hull is
     #    cheap and authored ONCE per prototype (~196), shared by every instance.
     if prim.in_prototype:
