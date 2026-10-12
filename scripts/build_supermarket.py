@@ -1111,10 +1111,11 @@ def clear_scene():
                 blk.remove(b)
     _MATS.clear(); LIB.clear(); TAGMESH.clear(); PROTO.clear()
 
-STAGES = ["clear", "structure", "library", "gondolas", "walls", "chillers", "front", "produce", "signage", "lighting", "cameras", "hierarchy", "render"]
+STAGES = ["clear", "structure", "library", "gondolas", "walls", "chillers", "front", "produce", "signage", "lighting", "cameras", "environment", "hierarchy", "render"]
 
 def build(stages=("all",), save=None):
     t0 = time.time()
+    RNG.seed(11)
     stages = STAGES if "all" in stages else list(stages)
     M = fixture_mats()
     for stg in stages:
@@ -1130,6 +1131,9 @@ def build(stages=("all",), save=None):
         elif stg == "signage": build_signage(M)
         elif stg == "lighting": build_lighting(M)
         elif stg == "cameras": build_cameras()
+        elif stg == "environment":
+            from store_environment import build_environment
+            build_environment(globals(), M)
         elif stg == "hierarchy": build_hierarchy()
         elif stg == "render": setup_render()
         print(f"[stage {stg}] {round(time.time() - t, 1)} s")
@@ -1147,3 +1151,6 @@ if __name__ == "__main__" and "--" in sys.argv:
     stages = ["all"] if "--all" in args else [a for a in args if not a.startswith("--") and a in STAGES]
     save = args[args.index("--save") + 1] if "--save" in args else None
     build(stages or ["all"], save=save)
+    if "--manifest" in args:
+        from store_environment import write_manifest
+        write_manifest(PLAN, args[args.index("--manifest") + 1], bpy.context.scene)

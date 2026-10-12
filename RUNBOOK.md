@@ -279,3 +279,52 @@ the floor or exploded.
 to `/tmp`), so a failed run is safe to discard. Capture the stderr + `nvidia-smi`, `git stash`
 nothing, and re-run the offline `--author-offline` to confirm the *stage* is still sane before
 blaming the composer — a boot/OOM failure is an Isaac/VRAM problem, not a composition one.
+
+## 9. Service backroom and environment contract
+
+The `environment` build stage adds an illustrative German grocery service area
+and keeps existing catalog/planogram assignments. Set `OUT` to an **absolute,
+on-RAM scratch directory**, outside the repo's scenes/export/renders directories:
+
+```bash
+python3 scripts/gen_labels.py
+blender -b scenes/supermarket_base.blend -t 4 --python-exit-code 1 \
+  --python scripts/build_supermarket.py -- --all --save "$OUT/store.blend" \
+  --manifest "$OUT/environment.json"
+blender -b "$OUT/store.blend" -t 4 --python-exit-code 1 \
+  --python scripts/check_environment.py -- --manifest "$OUT/environment.json" \
+  --out "$OUT/geometry-check.json"
+blender -b "$OUT/store.blend" -t 4 --python-exit-code 1 \
+  --python scripts/export_usd.py -- --out "$OUT/supermarket.usdc"
+.venv-usd/bin/python scripts/validate_usd.py --store "$OUT/supermarket.usdc" --repair-textures
+blender -b "$OUT/store.blend" -t 4 --python-exit-code 1 \
+  --python scripts/render_shots.py -- --cpu --samples 16 --res 960x540 \
+  --cams Cam_Aisle,Cam_Backroom --out "$OUT/previews"
+python3 -m unittest discover -s scripts/tests -v
+```
+
+The manifest uses metres, Z up, `map` world coordinates and planar `[x,y,yaw]`
+poses. `stocking_stations` reference existing shelf `slot` IDs and SKU lists;
+`backroom_stocks` list six case origins per source bin. `static_obstacles` are
+conservative world AABBs measured from the generated structure and fixtures,
+intersecting height band 0.02–2.6 m (floors and overhead structure excluded).
+This is a static map and scenario ground truth, **not perception evidence**.
+`layout(plan)` alone omits measured obstacles; request `--manifest` on a full
+build to obtain them. `poses`, `zones`, `portal`, `map_bounds`, and `route_hints`
+are available to scenario/navigation adapters. Route hints are not a planner.
+
+The rear opening is 2.5 m wide × 2.8 m high and meets the existing fixture gap.
+The backroom has a continuous floor at Z=0, racks, receiving staging, cart bays,
+and a 3.2 m turning zone. `check_environment.py` samples a 0.6 m circular
+footprint along the route to the G3/G4 aisle; it does **not** prove a coupled
+cart's swept turns or dynamics. Shelf approaches in 1.5 m aisles require backing
+out to the rear cross aisle instead of U-turning.
+
+Source cases are static visual stock, with `sku`, `stock_id`, and `units` custom
+properties. Scenario composition must explicitly promote/replace selected stock
+with dynamic actors and populate live inventory from its own observations.
+Movable robots/carts are authored by the robotics composer. Markers live under
+`GRP_EnvironmentMarkers`; decoration under `GRP_EnvironmentDecor` is excluded by
+the collider classifier. All solid service fixtures use the existing static
+structure/fixture collision groups. Labels/styles are illustrative, not an exact
+scan or an assertion of REWE store dimensions.

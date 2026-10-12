@@ -82,7 +82,10 @@ repo's `scenes/`, `export/` or `renders/`.
   (`polish_floor`, `add_instance_variation`, `setup_compositor`, `setup_render`) — see
   README decision log 2026-09-14 and `data/twin-realism-v1/report.md`. Render evidence
   on CPU with `render_shots.py --cpu` when the GPU is held by the robot stack.
-- Local-only project: **no git remote** — never push or open a PR.
+- **Service environment**: `scripts/store_environment.py` adds the connected backroom;
+  RUNBOOK §9 documents scratch builds, CPU geometry checks and the semantic/static-map
+  manifest. Source cases are static visual stock; scenario composition owns dynamic
+  actors. `GRP_EnvironmentDecor` must remain nonphysical.
 
 ## Maintaining this file
 
