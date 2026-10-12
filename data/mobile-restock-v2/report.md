@@ -2,8 +2,8 @@
 
 Status: incomplete, GPU bring-up blocked. No autonomous physics cycle or MP4 has
 been produced. The current branch contains CPU mission/inventory infrastructure;
-the landed mobile/cart code is integrated from origin/main 24d364a. Environment,
-navigation and manipulation corrections are still pending firstmate delivery.
+the landed mobile/cart code is integrated from origin/main 24d364a. Schema-2 environment source is also integrated. Navigation and manipulation
+corrections remain pending firstmate delivery.
 A controller dispatcher and guarded launcher now exist; a complete simulator
 bundle with actual sensor acquisition/planner/actuator wiring is still missing.
 
@@ -23,10 +23,10 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-125 combined CPU tests pass with the installed Isaac USD libraries exposed
-without booting Kit (including 22 mission/runtime and two stock-scene tests). These prove bookkeeping and failure handling, not
+136 combined CPU tests pass with the installed Isaac USD libraries exposed
+without booting Kit (including mission/runtime, recording, stock-scene and environment tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
-Reproduction is in RUNBOOK section 10. The shared firstmate interface contract was
+Reproduction is in RUNBOOK section 11. The shared firstmate interface contract was
 published before implementation so sibling lanes can align.
 
 ## Bounded GPU diagnosis (2026-10-12)
@@ -104,7 +104,7 @@ yet implemented or claimed compatible solely from this documentation.
   196/196 inherited prototype colliders. Its arm is explicitly a pedestal **stub**;
   that check does not validate the new mobile physics or gripping.
 - Mobile URDF/cart rebuilt from landed source using actual upstream CAD and home
-  FK. All 125 tests then passed including USD tests (none skipped).
+  FK. All 136 tests then passed including USD tests (none skipped).
 - CPU preview uses real generated URDF collision geometry at home FK and imported
   cart USD; 24-sample Cycles render on four CPU threads took about 23 seconds.
   This is an assembled static preview, not a simulator frame or physics evidence.
@@ -135,3 +135,28 @@ Version-matched vendor references for runtime-only helpers:
 [URDF importer](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/importer_exporter/import_urdf.html),
 [camera sensors](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/sensors/isaacsim_sensors_camera.html).
 Installed source confirms `set_fix_base` / `set_self_collision` importer methods.
+
+
+## Representative handling-unit feasibility check
+
+The approved initial slice is configured in `scripts/restock_scenario.json`:
+0.60 × 0.40 × 0.16 m shallow sealed handling unit, 0.45 kg, one simulated retail
+unit of `juice_orange`. Source support is centred at (-5.73,17.0), top Z=0.60;
+robot loading pose (-5.73,16,0), cart body (-7,16,0). Cart support top Z=0.225,
+load centre local X=+0.08. These are initial conditions, never a runtime relocation.
+
+The measured target shelf is approximately 0.94 m wide × 0.476 m deep; the tray
+fits its support and 0.28 m vertical shelf pitch. Source/cart contact and approach
+poses solve using the actual mobile URDF. The original shelf approach at robot
+Y=6.0 does not solve to tolerance; Y=5.85 permits all six IK targets with negligible
+endpoint error. This new pose and staging table still require articulated route
+and collision planning. They do not inherit the sibling route's validation.
+
+**The scenario is NOT yet viable despite the IK solutions.** At shelf contact,
+the actual URDF gripper-box world bounds are approximately X[-3.196,-2.906],
+Y[4.768,4.885], Z[0.915,1.165]. The next shelf spans X[-3.52,-2.58],
+Y[4.57,5.046], Z[0.974,1.016]. The rigid gripper housing intersects that shelf.
+Shrinking just the tray does not resolve the top-down tool access problem.
+A taller/open target bay or another physically supported grasp/insertion strategy
+is required. No obstructing fixture was removed, no collision was disabled, and
+no successful pick/place has been claimed. CPU IK is not collision planning.

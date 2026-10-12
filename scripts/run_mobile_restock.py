@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline contract validation or explicit guarded Isaac runtime (RUNBOOK §11)."""
 import argparse
+import hashlib
 import importlib
 import json
 import os
@@ -18,6 +19,8 @@ def check(args):
     manifest = json.loads(args.manifest.read_text())
     scenario = json.loads(args.scenario.read_text())
     report = validate(manifest, scenario)
+    report['input_sha256'] = {name: hashlib.sha256(path.read_bytes()).hexdigest()
+                             for name, path in (('manifest',args.manifest),('scenario',args.scenario))}
     root = Path(__file__).resolve().parent
     required = ['twin/navigation/core.py', 'twin/navigation/nav2.py',
                 'twin/mobile_runtime.py', 'twin/restock_manipulation/controller.py']

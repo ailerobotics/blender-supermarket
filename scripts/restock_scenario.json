@@ -1,10 +1,10 @@
 {
   "job": {
     "job_id": "restock-one",
-    "sku": "biscuit_choc",
+    "sku": "juice_orange",
     "quantity": 1,
     "source_bin": "backstock_00",
-    "shelf_id": "G1R_b0_s1"
+    "shelf_id": "G3_back_s2"
   },
   "inventory_unit": "sealed_handling_unit",
   "dynamic_stock_ready": false,
@@ -12,8 +12,76 @@
   "initial_inventory": [
     {
       "location": "backstock_00",
-      "sku": "biscuit_choc",
-      "quantity": 6
+      "sku": "juice_orange",
+      "quantity": 1
     }
-  ]
+  ],
+  "return_pose": "robot_dock",
+  "limitations": [
+    "NOT VIABLE: at solved G3_back_s2 contact pose, CAD gripper housing intersects G3_back_shelf3; bay or grasp strategy needs correction.",
+    "Kinematic and contact validation pending; no runtime teleport is permitted.",
+    "Articulated route must include the added backroom staging support obstacle.",
+    "Legacy circular preflight must be replaced when corrected navigation is landed."
+  ],
+  "handling_unit": {
+    "sku": "juice_orange",
+    "description": "Representative sealed shallow restock tray with one simulated retail unit",
+    "dimensions_m": [
+      0.6,
+      0.4,
+      0.16
+    ],
+    "mass_kg": 0.45,
+    "retail_units": 1,
+    "tcp_quaternion_xyzw": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "tcp_surface_offset_m": 0.00275,
+    "approach_m": 0.12,
+    "max_reach_m": 1.3
+  },
+  "initial_staging": {
+    "frame": "map",
+    "support_center_xy": [
+      -5.73,
+      17.0
+    ],
+    "support_dimensions_m": [
+      0.68,
+      0.48,
+      0.6
+    ],
+    "unit_bottom_z": 0.6,
+    "robot_base_pose": [
+      -5.73,
+      16,
+      0
+    ],
+    "cart_body_pose": [
+      -7,
+      16,
+      0
+    ],
+    "cart_load_center_body_xy": [
+      0.08,
+      0
+    ],
+    "cart_support_z_world": 0.225,
+    "target_surface_pose_world": [
+      -3.05,
+      4.826,
+      0.73,
+      0
+    ],
+    "target_initially_depleted": true,
+    "initial_conditions_only": true,
+    "shelf_robot_pose": [
+      -3.05,
+      5.85,
+      3.141592653589793
+    ]
+  }
 }

@@ -3,6 +3,20 @@ import math
 from .inventory import Job
 
 
+def poses_for_job(manifest, job, *, return_pose='robot_dock'):
+    """Convert schema-2 body frames to mission robot goals, never cart centres."""
+    poses, bodies = manifest['poses'], manifest['pose_bodies']
+    for name in ('pickup', 'robot_dock', return_pose):
+        if bodies.get(name) != 'robot_base':
+            raise ValueError(f'{name} must denote the robot base')
+    station = next((s for s in manifest['stocking_stations']
+                    if any(slot['id'] == job.shelf_id for slot in s['slots'])), None)
+    if station is None or station.get('pose_body') != 'robot_base':
+        raise ValueError('shelf station must specify a robot-base pose')
+    return dict(pickup=poses['pickup'], cart_dock=poses['robot_dock'],
+                shelf_approach=station['pose'], home=poses[return_pose])
+
+
 def validate(manifest, scenario):
     errors = []
     if (manifest.get('frame'), manifest.get('units'), manifest.get('up_axis')) != ('map', 'metres', 'Z'):
@@ -48,6 +62,11 @@ def validate(manifest, scenario):
         errors.append('initial inventory cannot satisfy job')
     if scenario.get('dynamic_stock_ready') is not True:
         errors.append('static backstock cases must be promoted to dynamic actors')
+    if manifest.get('schema_version') == 2:
+        try:
+            poses_for_job(manifest, job, return_pose=scenario.get('return_pose', 'robot_dock'))
+        except (KeyError, ValueError) as exc:
+            errors.append(str(exc))
     if not manifest.get('static_obstacles'):
         errors.append('missing measured static collision map')
     # Environment stores [xmin,xmax,ymin,ymax]; navigation uses [xmin,ymin,xmax,ymax].

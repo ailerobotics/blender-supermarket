@@ -124,3 +124,33 @@ class GuardTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class LaunchTests(unittest.TestCase):
+    def test_guard_refusal_records_failure_without_importing_factory(self):
+        import tempfile
+        from run_mobile_restock import run
+        with tempfile.TemporaryDirectory() as tmp:
+            output=Path(tmp)/'new-run'
+            args=NS(factory='must_not_import:factory',output=output,heavy_threshold_mb=1500)
+            scenario={'job':dict(job_id='j',sku='milk',quantity=1,source_bin='back',shelf_id='shelf'),
+                      'initial_inventory':[dict(location='back',sku='milk',quantity=1)]}
+            with patch('run_mobile_restock.gpu_slot',side_effect=RuntimeError('test guard refusal')):
+                with self.assertRaisesRegex(RuntimeError,'test guard refusal'):
+                    run(args,{},scenario)
+            import json
+            record=json.loads((output/'mission.json').read_text())
+            self.assertEqual(record['state'],'failed')
+            self.assertEqual(record['events'],[])
+            self.assertNotIn('must_not_import',sys.modules)
+            with self.assertRaises(FileExistsError):
+                run(args,{},scenario)
+
+    def test_schema2_uses_robot_dock_not_cart_pose(self):
+        from twin.restock.scenario import poses_for_job
+        manifest=dict(poses=dict(pickup=[1,2,0],robot_dock=[1,2,0],cart_dock=[-.27,2,0]),
+                      pose_bodies=dict(pickup='robot_base',robot_dock='robot_base',cart_dock='cart_body'),
+                      stocking_stations=[dict(pose=[3,4,0],pose_body='robot_base',slots=[dict(id='shelf')])])
+        poses=poses_for_job(manifest,Job('j','milk',1,'back','shelf'))
+        self.assertEqual(poses['cart_dock'],[1,2,0])
+        self.assertNotEqual(poses['cart_dock'],manifest['poses']['cart_dock'])

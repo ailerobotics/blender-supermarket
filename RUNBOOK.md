@@ -385,7 +385,8 @@ an autonomous robot demonstration. Current limitations and GPU diagnosis:
 [data/mobile-restock-v2/report.md](data/mobile-restock-v2/report.md).
 
 ```bash
-python3 -m unittest discover -s scripts/twin/tests -p 'test_restock*.py' -v
+python3 -m unittest discover -s scripts/twin/tests -p test_restock_mission.py -v
+python3 -m unittest discover -s scripts/twin/tests -p test_restock_runtime.py -v
 ```
 
 Runtime adapters implement `start(action, job)`, `step(dt) -> Result`, `stop()`
@@ -433,3 +434,15 @@ Repeat `--image 'Caption=PNG path'` to embed actual before/after environment
 renders. The resulting HTML includes all images, CSS and map geometry inline.
 Generated HTML is a cheap CPU artifact kept outside git; report source, evidence
 summary and generator are versioned. No MP4 exists until actual runtime capture.
+
+
+Actual-URDF reach check (NumPy/SciPy environment, CPU only). This solves six
+contact/approach endpoints but does **not** certify collision-free access:
+
+```bash
+python scripts/check_restock_reach.py --mobile-manifest "$TASK_OUTPUT/mobile_manifest.json" \
+  --scenario scripts/restock_scenario.json --output "$TASK_OUTPUT/reach-check.json"
+```
+
+The current G3 endcap candidate has a measured gripper/upper-shelf obstruction;
+see the report. A successful IK exit code must not be presented as task viability.
