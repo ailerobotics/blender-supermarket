@@ -4,7 +4,7 @@ No simulator imports or fabricated sensor data. A runtime port steps physics,
 acquires observations and applies gripper controls. The controllers supplied by
 the sibling modules are injected after a guarded simulator boot.
 """
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import math
 from typing import Protocol
 
@@ -54,10 +54,42 @@ class NavigationBridge:
         self.controller.cancel()
 
 
+class ManipulationBridge:
+    """Normalize sensor packets versus a runtime that owns camera/control I/O.
+
+    CAD runtime's motion port may cross a process boundary. This bridge neither
+    imports ROS/cuRobo into Isaac nor duplicates the runtime's gripper commands.
+    Station preparation must use calibrated frames and measured parked pose.
+    """
+    def __init__(self, controller, *, owns_sensor_io=False, prepare_station=None):
+        self.controller = controller
+        self.owns_sensor_io = owns_sensor_io
+        self.prepare_station = prepare_station
+        core = controller.controller if owns_sensor_io else controller
+        self.cart_location = core.cart_location
+
+    def start(self, operation, job):
+        if self.prepare_station is not None:
+            self.prepare_station(operation, job)
+        self.controller.start(operation, job)
+
+    def step(self, dt, packet):
+        if self.owns_sensor_io:
+            result = self.controller.step(dt, packet.simulation_time)
+            return replace(result, controls=())
+        return self.controller.step(dt, packet.manipulation)
+
+    def stop(self):
+        if self.owns_sensor_io:
+            self.controller.motion.stop()
+
+
 class RuntimeAdapter:
     def __init__(self, navigation, mobile, manipulation, port: Port, poses,
                  *, fixture_mode=False):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
+        if not isinstance(self.manip, ManipulationBridge):
+            self.manip = ManipulationBridge(self.manip)
         self.poses, self.fixture_mode = poses, fixture_mode
         for name in ('pickup', 'cart_dock', 'shelf_approach', 'home'):
             pose = poses.get(name, ())
@@ -84,7 +116,7 @@ class RuntimeAdapter:
     def stop(self):
         errors = []
         # Try every stop even when one adapter raises. Never command release.
-        for call in (self.mobile.park, self.nav.cancel, self.port.stop):
+        for call in (self.mobile.park, self.nav.cancel, self.manip.stop, self.port.stop):
             try:
                 call()
             except Exception as exc:
@@ -143,7 +175,7 @@ class RuntimeAdapter:
                 return Result('failed', reason='cart lost before transfer')
             return Result('succeeded', self._evidence(p, stationary=True))
         if self.action in ('collect', 'transfer'):
-            r = self.manip.step(dt, p.manipulation)
+            r = self.manip.step(dt, p)
             # MotionPort owns trajectory commands; port must only dispatch
             # gripper/stop controls, never issue a second trajectory for `move`.
             self.port.controls(r.controls)

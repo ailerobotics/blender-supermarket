@@ -1,7 +1,7 @@
 {
-  "CPU tests": "136 passed; includes USD, environment and failure fixtures",
+  "CPU tests": "140 passed; includes USD, initial depletion, sweep and runtime bridge fixtures",
   "Mobile assets": "Landed source; real CAD/FK static preview",
   "Environment": "USD and offline composition PASS; static source renders",
   "Physical autonomy": "NOT RUN; GPU driver coherence unresolved",
-  "Handling geometry": "Six IK endpoints solve; upper shelf blocks CAD tool"
+  "Handling geometry": "Side grasp: 12 IK poses solve at chassis Y6.0; no arm/tool overlap in conservative insertion sweeps. Support-contact bounds remain; transit/self collision/physics unverified."
 }

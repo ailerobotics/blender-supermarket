@@ -65,3 +65,30 @@ def test_physical_qr_label_decodes_without_semantic_metadata(tmp_path):
     assert not stage.GetPrimAtPath(path).HasAPI(UsdPhysics.CollisionAPI)
     with pytest.raises(ValueError,match='must be new'):
         label_stock(stage,'/Case','biscuit_choc',texture)
+
+
+def test_initial_scenario_depletes_only_exact_product_slot_and_refuses_replay(tmp_path):
+    import json
+    from pxr import Sdf
+    from twin.restock.scene import author_initial_scenario
+    scenario=json.loads((Path(__file__).resolve().parents[2]/'restock_scenario.json').read_text())
+    source=tmp_path/'source.usda'
+    original=Usd.Stage.CreateNew(str(source))
+    paths=['/Supermarket/GRP_Products/Target','/Supermarket/GRP_PriceTags/Tag',
+           '/Supermarket/GRP_Fixtures/Shelf','/Supermarket/GRP_Products/Other']
+    for path in paths:
+        prim=UsdGeom.Cube.Define(original,path).GetPrim()
+        prim.CreateAttribute('userProperties:slot',Sdf.ValueTypeNames.String).Set(
+            'other' if path.endswith('Other') else scenario['job']['shelf_id'])
+    original.GetRootLayer().Save()
+    before=source.read_bytes()
+    stage=Usd.Stage.CreateInMemory();stage.GetRootLayer().subLayerPaths.append(str(source))
+    result=author_initial_scenario(stage,scenario)
+    assert result['depleted_product_prims']==[paths[0]]
+    assert not stage.GetPrimAtPath(paths[0]).IsActive()
+    assert all(stage.GetPrimAtPath(path).IsActive() for path in paths[1:])
+    assert source.read_bytes()==before
+    assert UsdPhysics.RigidBodyAPI(stage.GetPrimAtPath(result['stock'])).GetRigidBodyEnabledAttr().Get()
+    assert not result['hidden_contents_counted']
+    with pytest.raises(ValueError,match='already authored'):
+        author_initial_scenario(stage,scenario)

@@ -446,3 +446,23 @@ python scripts/check_restock_reach.py --mobile-manifest "$TASK_OUTPUT/mobile_man
 
 The current G3 endcap candidate has a measured gripper/upper-shelf obstruction;
 see the report. A successful IK exit code must not be presented as task viability.
+# CPU side-contact candidate audit
+
+`scripts/restock_scenario.json` defines carton face/yaws and robot/cart poses.
+`scripts/check_restock_reach.py` checks the actual mobile URDF at source, cart,
+and shelf contact/approach/lift/preplace poses. Its JSON binds the scenario and
+URDF hashes. `scripts/check_restock_sweep.py` consumes that JSON with `--reach`,
+plus `--mobile-manifest`, `--scenario`, `--store`, repeated `--package-root`, and
+`--output`. Use the composed initial-scenario USD as the store input.
+
+The sweep is a conservative rejection test for joint-linear candidate segments,
+including all link collision geometry and a rigidly carried handling unit.
+Disconnected shelf-frame solids retain their openings. Bounds include at most
+2 mm of between-sample displacement. An overlap requires investigation; a clear
+result would still leave self collision, transit paths, actual planned trajectory,
+sensor perception and contact physics unverified. This command never boots Isaac.
+
+`restock.scene.author_initial_scenario` authors the shallow handling unit and
+support and deactivates only exact-slot product prims in the output layer before
+physics. It preserves fixtures, price tags and the input store. It refuses repeat
+authoring and does not create runtime motion or inventory observations.

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Actual-URDF CPU IK probe for representative poses; NOT a collision planner."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -30,8 +31,6 @@ def check(urdf, mobile_manifest, scenario):
     target=local([*staging['target_surface_pose_world'][:2],
                   staging['target_surface_pose_world'][2]+unit['dimensions_m'][2]],staging['shelf_robot_pose'])
     base_z=mobile_manifest['spec']['base_z']
-    quaternion=unit['tcp_quaternion_xyzw']
-    rotation=Rotation.from_quat(quaternion).as_matrix()
     home=np.array([config[j.name] for j in joints])
     bounds=(np.array([j.lower for j in joints]),np.array([j.upper for j in joints]))
     rng=np.random.default_rng(12)
@@ -41,8 +40,26 @@ def check(urdf, mobile_manifest, scenario):
         values=dict(config);values.update({j.name:float(v) for j,v in zip(joints,q)})
         return link_world_transforms(robot,values)['gripper_pad_tcp']
     for label,point in [('source',source),('cart',cart),('shelf',target)]:
-        for phase,dz in [('contact',unit['tcp_surface_offset_m']),('approach',unit['tcp_surface_offset_m']+unit['approach_m'])]:
-            goal=point+np.array([0,0,dz-base_z])
+        if unit.get('grasp_mode', 'top') == 'side':
+            wall = unit['local_wall']
+            robot_pose = staging['shelf_robot_pose'] if label == 'shelf' else staging['robot_base_pose']
+            angle = staging['unit_yaws_world'][label] + wall*np.pi/2 - robot_pose[2]
+            rotation = (Rotation.from_euler('z', angle) *
+                        Rotation.from_quat(unit['tcp_quaternion_xyzw'])).as_matrix()
+            normal = np.array([-np.cos(angle), -np.sin(angle), 0.])
+            half = unit['dimensions_m'][wall % 2]/2
+            contact = point + normal*(half+unit['tcp_surface_offset_m'])
+            contact[2] -= unit['dimensions_m'][2]/2 + base_z
+            phases = [('contact', contact),
+                      ('approach', contact+normal*unit['approach_m']),
+                      ('lift', contact+np.array([0,0,unit['lift_m']])),
+                      ('preplace', contact+normal*unit['approach_m']+np.array([0,0,unit['lift_m']]))]
+        else:
+            rotation = Rotation.from_quat(unit['tcp_quaternion_xyzw']).as_matrix()
+            phases = [(phase, point+np.array([0,0,dz-base_z])) for phase,dz in
+                      [('contact',unit['tcp_surface_offset_m']),
+                       ('approach',unit['tcp_surface_offset_m']+unit['approach_m'])]]
+        for phase,goal in phases:
             def residual(q):
                 actual=frame(q)
                 return np.r_[actual[:3,3]-goal,Rotation.from_matrix(rotation.T@actual[:3,:3]).as_rotvec()*.25]
@@ -59,8 +76,11 @@ def check(urdf, mobile_manifest, scenario):
             results[f'{label}_{phase}']=dict(position_error_m=float(np.linalg.norm(err[:3])),
                 angular_error_rad=float(np.linalg.norm(err[3:])/.25),
                 reachable=bool(np.linalg.norm(err[:3])<.002 and np.linalg.norm(err[3:])/.25<.01),
-                joints={j.name:float(v) for j,v in zip(joints,q)},goal_in_base_link=goal.tolist())
+                joints={j.name:float(v) for j,v in zip(joints,q)},goal_in_base_link=goal.tolist(),
+                quaternion_in_base_link=Rotation.from_matrix(rotation).as_quat().tolist())
     return dict(ok=all(v['reachable'] for v in results.values()),poses=results,
+                scenario_sha256=hashlib.sha256(json.dumps(scenario,sort_keys=True).encode()).hexdigest(),
+                urdf_sha256=hashlib.sha256(Path(urdf).read_bytes()).hexdigest(),
                 evidence='actual_urdf_cpu_inverse_kinematics_only',
                 collision_checked=False,physics_verified=False)
 

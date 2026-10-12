@@ -7,13 +7,30 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from twin.restock.runtime import Packet, RuntimeAdapter, NavigationBridge
+from twin.restock.runtime import Packet, RuntimeAdapter, NavigationBridge, ManipulationBridge
 from twin.restock.inventory import Job
 from twin.restock.scenario import validate
 from twin.restock import guard
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_owned_camera_runtime_receives_clock_and_does_not_repeat_gripper_command(self):
+        from dataclasses import dataclass
+        @dataclass(frozen=True)
+        class Reply:
+            controls: tuple = ({'kind':'gripper','enabled':True},)
+        calls=[]
+        runtime=NS(controller=NS(cart_location='rollwagen'),
+                   step=lambda dt,stamp:(calls.append((dt,stamp)) or Reply()),
+                   start=lambda op,job:None,
+                   motion=NS(stop=lambda:calls.append('stop')))
+        bridge=ManipulationBridge(runtime,owns_sensor_io=True)
+        result=bridge.step(.1,NS(simulation_time=4.2))
+        self.assertEqual(calls,[(.1,4.2)])
+        self.assertEqual(result.controls,())
+        bridge.stop()
+        self.assertEqual(calls[-1],'stop')
+
     def setUp(self):
         self.stops = []
         self.commands = []

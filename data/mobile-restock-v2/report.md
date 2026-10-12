@@ -23,7 +23,7 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-136 combined CPU tests pass with the installed Isaac USD libraries exposed
+140 combined CPU tests pass with the installed Isaac USD libraries exposed
 without booting Kit (including mission/runtime, recording, stock-scene and environment tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
 Reproduction is in RUNBOOK section 11. The shared firstmate interface contract was
@@ -140,23 +140,30 @@ Installed source confirms `set_fix_base` / `set_self_collision` importer methods
 ## Representative handling-unit feasibility check
 
 The approved initial slice is configured in `scripts/restock_scenario.json`:
-0.60 × 0.40 × 0.16 m shallow sealed handling unit, 0.45 kg, one simulated retail
-unit of `juice_orange`. Source support is centred at (-5.73,17.0), top Z=0.60;
+0.60 × 0.40 × 0.16 m shallow sealed handling unit, 0.45 kg, one inventory handling
+unit of `juice_orange`; hidden retail contents are not counted. Source support is centred at (-5.73,17.0), top Z=0.60;
 robot loading pose (-5.73,16,0), cart body (-7,16,0). Cart support top Z=0.225,
 load centre local X=+0.08. These are initial conditions, never a runtime relocation.
 
 The measured target shelf is approximately 0.94 m wide × 0.476 m deep; the tray
-fits its support and 0.28 m vertical shelf pitch. Source/cart contact and approach
-poses solve using the actual mobile URDF. The original shelf approach at robot
-Y=6.0 does not solve to tolerance; Y=5.85 permits all six IK targets with negligible
-endpoint error. This new pose and staging table still require articulated route
-and collision planning. They do not inherit the sibling route's validation.
+fits its support and 0.28 m vertical shelf pitch. The rejected top-down grasp
+intersected the upper shelf; the current candidate uses the actual side seal on
+carton-local wall3, with source yaw pi, cart yaw -pi/2 and shelf yaw0. Twelve
+contact/approach/lift/preplace IK stations solve at the navigation-clear robot
+pose (-3.05,6.0,pi). The rejected Y5.85 pose is no longer used.
 
-**The scenario is NOT yet viable despite the IK solutions.** At shelf contact,
-the actual URDF gripper-box world bounds are approximately X[-3.196,-2.906],
-Y[4.768,4.885], Z[0.915,1.165]. The next shelf spans X[-3.52,-2.58],
-Y[4.57,5.046], Z[0.974,1.016]. The rigid gripper housing intersects that shelf.
-Shrinking just the tray does not resolve the top-down tool access problem.
-A taller/open target bay or another physically supported grasp/insertion strategy
-is required. No obstructing fixture was removed, no collision was disabled, and
-no successful pick/place has been claimed. CPU IK is not collision planning.
+`check_restock_sweep.py` evaluates every URDF collision link and held payload
+along joint-linear candidate insertion segments, retaining all store/cart solids
+and bounding between-sample displacement by 2 mm. Disconnected frame and shelf
+solids preserve their openings. There are no arm/tool overlaps in this bounded
+check; wheel/floor and payload/support bounds remain recorded and the strict
+candidate verdict remains false. These contact bounds are not physics proof.
+Transit paths, self collision, actual planner trajectories and articulated cart
+configuration still require validation. No fixture was deleted or disabled.
+
+`scene.author_initial_scenario` now authors the support, dynamic shallow unit and
+exact-slot initial depletion in a scratch layer; 29 target product prims are
+deactivated, while price tags and fixtures remain. A rendered QR material labels
+the unit. Setup metadata is not an observation. `ManipulationBridge` supports
+the camera-owning CAD runtime and a separate planner process without issuing
+duplicate gripper commands. The actual runtime bundle remains incomplete.

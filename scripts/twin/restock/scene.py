@@ -32,7 +32,7 @@ def promote_stock(stage, path, sku, mass_kg):
 
 
 def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
-          stock_mass_kg, spec=MobileSpec()):
+          stock_mass_kg, spec=MobileSpec(), scenario=None):
     from pxr import Gf, UsdGeom, UsdPhysics, Usd
     store, robot_usd, output = map(lambda x: Path(x).resolve(), (store, robot_usd, output))
     if output.exists() or output in (store, robot_usd):
@@ -61,11 +61,12 @@ def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
         xform.ClearXformOpOrder()
         xform.AddTranslateOp().Set(Gf.Vec3d(pose[0],pose[1],z))
         xform.AddRotateZOp().Set(math.degrees(pose[2]))
-    stock = promote_stock(stage,stock_path,sku,stock_mass_kg)
+    initial = author_initial_scenario(stage, scenario) if scenario is not None else None
+    stock = initial['stock'] if initial else promote_stock(stage,stock_path,sku,stock_mass_kg)
     stage.GetRootLayer().Save()
     if any(hashlib.sha256(p.read_bytes()).hexdigest()!=digest for p,digest in hashes.items()):
         raise RuntimeError('input USD layer changed during composition')
-    return dict(stage=str(output),assets=assets,stock=stock,
+    return dict(stage=str(output),assets=assets,stock=stock,initial_scenario=initial,
                 static_colliders=static,product_colliders=products,
                 evidence='offline_usd_schema_only',physics_verified=False,
                 input_sha256={str(p):digest for p,digest in hashes.items()})
@@ -124,3 +125,59 @@ def label_stock(stage, stock_path, sku, texture_path, *, side_m=.12):
     mat.CreateSurfaceOutput().ConnectToSource(shader.CreateOutput('surface',Sdf.ValueTypeNames.Token))
     UsdShade.MaterialBindingAPI.Apply(label.GetPrim()).Bind(mat)
     return str(label.GetPath())
+
+
+def author_initial_scenario(stage, scenario):
+    """Author a depleted bay, support and one sealed unit before simulation.
+
+    Caller must invoke only during composition, before physics starts. Authored
+    transforms describe initial conditions, never motion or sensed inventory.
+    Only products tagged with the exact selected slot are deactivated; fixture
+    prims remain untouched. The input store layer stays read-only.
+    """
+    from pxr import Gf, Usd, UsdGeom, UsdPhysics
+    staging, unit = scenario['initial_staging'], scenario['handling_unit']
+    if not staging.get('initial_conditions_only') or not staging.get('target_initially_depleted'):
+        raise ValueError('explicit initial depleted scenario required')
+    if stage.GetPrimAtPath('/RestockScenario'):
+        raise ValueError('scenario already authored; runtime repositioning refused')
+    dimensions = unit['dimensions_m']
+    if (len(dimensions) != 3 or any(not math.isfinite(v) or v <= 0 for v in dimensions)
+            or not math.isfinite(unit['mass_kg']) or unit['mass_kg'] <= 0):
+        raise ValueError('finite positive handling unit dimensions/mass required')
+    slot = scenario['job']['shelf_id']
+    matches = []
+    for prim in Usd.PrimRange.Stage(stage):
+        attr = prim.GetAttribute('userProperties:slot')
+        if attr and attr.Get() == slot:
+            if '/GRP_Products/' not in str(prim.GetPath()):
+                continue  # Price tags retain the slot identity; fixtures are never depleted.
+            matches.append(prim.GetPath())
+    if not matches:
+        raise ValueError('target product slot not found; refusing unverified depletion')
+    for path in matches:
+        stage.OverridePrim(path).SetActive(False)
+    UsdGeom.Xform.Define(stage, '/RestockScenario')
+    support = UsdGeom.Cube.Define(stage, '/RestockScenario/Support')
+    support.CreateSizeAttr(1.)
+    size = staging['support_dimensions_m']
+    support.AddTranslateOp().Set(Gf.Vec3d(*staging['support_center_xy'],size[2]/2))
+    support.AddScaleOp().Set(Gf.Vec3f(*size))
+    UsdPhysics.CollisionAPI.Apply(support.GetPrim())
+    support.CreateDisplayColorAttr([Gf.Vec3f(.3,.32,.34)])
+    # Mesh is needed by the same collider and physical QR authoring used above.
+    mesh = UsdGeom.Mesh.Define(stage, '/RestockScenario/HandlingUnit')
+    x,y,z = [v/2 for v in dimensions]
+    mesh.CreatePointsAttr([(-x,-y,-z),(x,-y,-z),(x,y,-z),(-x,y,-z),
+                           (-x,-y,z),(x,-y,z),(x,y,z),(-x,y,z)])
+    mesh.CreateFaceVertexCountsAttr([4]*6)
+    mesh.CreateFaceVertexIndicesAttr([0,3,2,1,4,5,6,7,0,1,5,4,1,2,6,5,2,3,7,6,3,0,4,7])
+    mesh.CreateSubdivisionSchemeAttr('none')
+    mesh.CreateExtentAttr([(-x,-y,-z),(x,y,z)])
+    mesh.CreateDisplayColorAttr([Gf.Vec3f(.65,.42,.18)])
+    mesh.AddTranslateOp().Set(Gf.Vec3d(*staging['support_center_xy'],staging['unit_bottom_z']+z))
+    mesh.AddRotateZOp().Set(math.degrees(staging['unit_yaws_world']['source']))
+    stock = promote_stock(stage,str(mesh.GetPath()),unit['sku'],unit['mass_kg'])
+    return dict(stock=stock, depleted_product_prims=list(map(str,matches)),
+                support=str(support.GetPath()), evidence='initial_conditions_only',
+                counted_unit='sealed_handling_unit', hidden_contents_counted=False)
