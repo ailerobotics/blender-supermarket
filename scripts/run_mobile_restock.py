@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contract validation or explicit guarded Isaac runtime (RUNBOOK §9)."""
+"""Offline contract validation or explicit guarded Isaac runtime (RUNBOOK §10)."""
 import argparse
 import importlib
 import json

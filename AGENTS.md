@@ -82,8 +82,9 @@ repo's `scenes/`, `export/` or `renders/`.
   (`polish_floor`, `add_instance_variation`, `setup_compositor`, `setup_render`) — see
   README decision log 2026-09-14 and `data/twin-realism-v1/report.md`. Render evidence
   on CPU with `render_shots.py --cpu` when the GPU is held by the robot stack.
+- Mobile UR10/cart assets and control interfaces: [docs/mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md), commands in RUNBOOK §9. The generated mobile URDF replaces the fixed pedestal; import with a free base. CPU FK/schema checks do not establish PhysX towing stability.
 - Mobile restocking orchestration and transactional inventory live in
-  `scripts/twin/restock/`; CPU checks and adapter contract are in RUNBOOK §9.
+  `scripts/twin/restock/`; CPU checks and adapter contract are in RUNBOOK §10.
   `data/mobile-restock-v2/report.md` distinguishes fixture tests from the still
   unverified physical cycle and records the GPU driver diagnosis.
 - Git hosting: inspect the configured remote and current task delivery contract

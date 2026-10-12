@@ -280,7 +280,28 @@ to `/tmp`), so a failed run is safe to discard. Capture the stderr + `nvidia-smi
 nothing, and re-run the offline `--author-offline` to confirm the *stage* is still sane before
 blaming the composer — a boot/OOM failure is an Isaac/VRAM problem, not a composition one.
 
-## 9. Mobile restocking mission (CPU integration checkpoint)
+## 9. Mobile UR10 and rollwagen (CPU)
+
+Interface and remaining simulator checks: [mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md).
+Use a Python environment with `numpy` and `usd-core`; no Isaac boot is needed.
+`SOURCE_URDF`, `SHELFBOT_PACKAGE` and `TASK_OUTPUT` are caller-selected paths;
+`TASK_OUTPUT` must be a scratch directory, outside `scenes/`, `export/`, `renders/`.
+
+```bash
+python scripts/build_mobile_assets.py \
+  --source-urdf "$SOURCE_URDF" \
+  --package-root /opt/ros/jazzy/share --package-root "$SHELFBOT_PACKAGE" \
+  --output-dir "$TASK_OUTPUT"
+# Optional --config mobile-config.json accepts MobileSpec keyword overrides.
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest scripts/twin/tests/ -q
+```
+
+Import the generated mobile URDF with a free base and fixed frames preserved;
+install sensors and position-hold the manifest's transport joints before enabling
+wheel commands. Import and GPU verification belong to the integrated simulator
+run and remain subject to the existing protected-Blender/resource guard.
+
+## 10. Mobile restocking mission (CPU integration checkpoint)
 
 The mission/inventory core is independent of Isaac and ROS. Its fixtures test
 transactional stock state, evidence checks and fail-stop requests; they are not
@@ -288,11 +309,13 @@ an autonomous robot demonstration. Current limitations and GPU diagnosis:
 [data/mobile-restock-v2/report.md](data/mobile-restock-v2/report.md).
 
 ```bash
-python3 -m unittest discover -s scripts/twin/tests -p test_restock_mission.py -v
+python3 -m unittest discover -s scripts/twin/tests -p 'test_restock*.py' -v
 ```
 
 Runtime adapters implement `start(action, job)`, `step(dt) -> Result`, `stop()`
 from `scripts/twin/restock/mission.py`. Mission time starts at zero, so adapters
 must express evidence timestamps relative to that origin. Production rejects
-fixture and ground-truth provenance. There is no default runtime adapter or
-simulator launcher for this mission yet; do not interpret the unit tests as one.
+fixture and ground-truth provenance. `runtime.py` wires the controller ports;
+`run_mobile_restock.sh` performs CPU checks unless `--execute` is explicit.
+A reviewed simulator bundle factory providing actual sensors, controls, stage
+construction and recording is still required; no mock fallback is installed.
