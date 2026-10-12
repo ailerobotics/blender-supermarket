@@ -14,6 +14,7 @@ parser.add_argument('--out', required=True)
 parser.add_argument('--baseline', help='Optional pre-environment build for product invariance check')
 parser.add_argument('--radius', type=float, default=.65,
                     help='Uncoupled transport envelope radius in metres (mobile default: 0.65)')
+parser.add_argument('--mobile-module', help='Path to mobile.py for optional actual coupled-envelope check')
 args = parser.parse_args(sys.argv[sys.argv.index('--') + 1:])
 data = json.loads(Path(args.manifest).read_text())
 assert bpy.data.objects.get('Wall_back') is None, 'Solid rear wall still seals portal'
@@ -52,6 +53,45 @@ result = dict(status='passed', static_obstacles=len(obstacles), stocking_station
               limitation='Uncoupled circular clearance only; excludes cart sweep, controller feasibility and dynamics.',
               product_digest=hashlib.sha256(json.dumps(products).encode()).hexdigest(),
               product_and_tag_count=len(products))
+if args.mobile_module:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('checked_mobile', args.mobile_module)
+    mobile = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mobile
+    spec.loader.exec_module(mobile)
+
+    def overlaps(poly, obstacle):
+        """Separating-axis intersection against a conservative world AABB."""
+        lo, hi = obstacle['min'], obstacle['max']
+        rect = [(lo[0], lo[1]), (hi[0], lo[1]), (hi[0], hi[1]), (lo[0], hi[1])]
+        axes = [(1, 0), (0, 1)]
+        axes += [(-(b[1] - a[1]), b[0] - a[0]) for a, b in zip(poly, poly[1:] + poly[:1])]
+        for ax, ay in axes:
+            p = [ax * x + ay * y for x, y in poly]
+            r = [ax * x + ay * y for x, y in rect]
+            if max(p) < min(r) or max(r) < min(p):
+                return False
+        return True
+
+    station = next(s for s in data['stocking_stations'] if s['id'] == data['first_cycle_station'])
+    a, b = station['pull_through_robot_poses']
+    assert a[2] == b[2] == station['pose'][2]
+    assert (b[0] - a[0]) * math.cos(a[2]) + (b[1] - a[1]) * math.sin(a[2]) > 0
+    mobile_spec = mobile.MobileSpec()
+    separation = mobile_spec.cart_hitch_x - mobile_spec.hitch_x
+    assert abs(separation - station['cart_centre_separation']) < 1e-6
+    samples = []
+    for i in range(101):
+        robot = mobile.Pose2(a[0] + (b[0] - a[0]) * i / 100,
+                             a[1] + (b[1] - a[1]) * i / 100, a[2])
+        cart = mobile.Pose2(*robot.point(-separation), robot.yaw)
+        samples.append((robot, cart))
+    sweep = mobile.swept_envelope(samples, spec=mobile_spec, margin=.05)
+    for obstacle in obstacles:
+        assert not overlaps(sweep, obstacle), f"Endcap pull-through intersects {obstacle['id']}"
+    result['coupled_endcap_pull_through'] = dict(status='passed', station=station['id'],
+        samples=len(samples), margin_m=.05, robot_poses=[a, b],
+        limitation='Straight collinear kinematic sweep only; arrival/return turns, manipulation and dynamics unverified.')
 if args.baseline:
     after_products = {row[0]: row for row in products}
     # Undo only the documented Pallet_3 relocation before comparison.

@@ -309,6 +309,28 @@ poses. `stocking_stations` reference existing shelf `slot` IDs and SKU lists;
 conservative world AABBs measured from the generated structure and fixtures,
 intersecting height band 0.02–2.6 m (floors and overhead structure excluded).
 This is a static map and scenario ground truth, **not perception evidence**.
+Schema 2 defines every `poses` entry's body through `pose_bodies`:
+`cart_dock` is the cart body at [-7,16,0], while `robot_dock` and `pickup`
+are the robot base at [-5.73,16,0] (1.27 m aligned separation). Planar poses
+omit ground height: mobile base-link starts at Z=0.24 m, cart body at Z=0.20 m.
+Each stocking station's `pose` is the **chassis** pose (`pose_body=robot_base`);
+`arm_shelf_facing_yaw` is a separate desired world direction, not an arm joint
+target or permission to rotate the chassis. Ordinary aisle chassis headings
+are -pi/2, keeping a straight trailing cart along the aisle.
+
+`first_cycle_station=stock_G3_back` selects an endcap on the rear cross aisle:
+robot staging [-3.05,6,pi], arm facing -pi/2, with a westbound straight
+pull-through from [-1.525,6,pi] to [-7,6,pi]. The corresponding slots are
+`G3_back_s*`; `first_cycle_source_bin=backstock_00` carries
+`first_cycle_sku=juice_orange`. `pull_through_robot_poses` describes only that
+local forward segment, not a backroom-to-shelf trajectory. Navigation must
+plan arrival and return using independently predicted cart poses.
+
+To additionally check that segment with the actual mobile module (after it is
+available in the checkout), add `--mobile-module scripts/twin/mobile.py` to
+the geometry command. This tests its default-margin convex swept envelope
+against the measured static AABBs. It proves static straight-segment clearance,
+not turn feasibility, grasp reach, control tracking, or dynamics.
 `layout(plan)` alone omits measured obstacles; request `--manifest` on a full
 build to obtain them. `poses`, `zones`, `portal`, `map_bounds`, and `route_hints`
 are available to scenario/navigation adapters. Route hints are not a planner.

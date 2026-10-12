@@ -24,32 +24,52 @@ def layout(plan):
                 y = g['y0'] + (bay['index'] + .5) * plan['bay_w']
                 station_id = f"stock_{g['id']}{side}_b{bay['index']}"
                 stations.append(dict(id=station_id,
-                    pose=[g['x'] + direction * 1.525, y, math.pi if direction == 1 else 0],
+                    pose=[g['x'] + direction * 1.525, y, -math.pi / 2],
+                    pose_body='robot_base',
+                    arm_shelf_facing_yaw=math.pi if direction == 1 else 0,
                     slots=[dict(id=f"{g['id']}{side}_b{bay['index']}_s{i}",
                                 surface_z=s['z'],
                                 sku_ids=[item[0] for item in s['items']])
                            for i, s in enumerate(bay['shelves'])],
-                    approach='reverse out to rear cross aisle; no in-aisle U-turn'))
+                    approach='Chassis aligned down aisle; return requires uncoupling or a separately checked forward route.'))
+    endcap = next(e for e in plan['endcaps'] if e['id'] == 'G3_back')
+    first_cycle = dict(id='stock_G3_back', pose=[endcap['x'], 6.0, math.pi],
+        pose_body='robot_base', arm_shelf_facing_yaw=-math.pi / 2,
+        slots=[dict(id=f"G3_back_s{i}", surface_z=s['z'],
+                    sku_ids=[item[0] for item in s['items']])
+               for i, s in enumerate(endcap['shelves'])],
+        approach='Forward straight westbound pull-through; arrival and return turns require articulated planning.',
+        pull_through_robot_poses=[[-1.525, 6.0, math.pi], [-7.0, 6.0, math.pi]],
+        cart_centre_separation=1.27,
+        envelope_reference='MobileSpec defaults; independently predicted cart poses required outside the straight segment')
+    stations.append(first_cycle)
     sku_ids = sorted({sku for s in stations for slot in s['slots'] for sku in slot['sku_ids']})
+    sku_ids = [endcap['sku']] + [sku for sku in sku_ids if sku != endcap['sku']]
     stocks = [dict(id=f'backstock_{i:02d}', sku=sku_ids[i],
                    position=[-10.8 + i * 2.0, 18.45, 1.12],
                    case_positions=[[-10.8 + i * 2.0 + (j - .5) * .75, 18.45, z + .04]
                                    for z in [.16, 1.08, 2.0] for j in range(2)],
                    size=[.6, .4, .32], units=72, units_per_case=12, role='static_case_visual') for i in range(5)]
-    return dict(schema_version=1, frame='map', units='metres', up_axis='Z',
+    return dict(schema_version=2, frame='map', units='metres', up_axis='Z',
         source='illustrative German grocery layout, not a measured REWE scan',
         ground_truth_only=True, floor_z=0,
         backroom_bounds=list(BACKROOM),
         map_bounds=[-13.25, 13.25, -11.25, 19.5],
-        poses=dict(home=[PORTAL_X, 14, 0], pickup=[-7, 16, 0],
-                   cart_dock=[-7, 16, 0], shelf_approach=[-1.525, .125, math.pi]),
+        poses=dict(home=[PORTAL_X, 14, 0], pickup=[-5.73, 16, 0],
+                   robot_dock=[-5.73, 16, 0], cart_dock=[-7, 16, 0],
+                   shelf_approach=first_cycle['pose']),
+        pose_bodies=dict(home='robot_base', pickup='robot_base', robot_dock='robot_base',
+                         cart_dock='cart_body', shelf_approach='robot_base'),
+        first_cycle_station=first_cycle['id'],
+        first_cycle_source_bin='backstock_00',
+        first_cycle_sku=endcap['sku'],
         portal=dict(id='sales_backroom_portal', centre=[PORTAL_X, 11.125, 0],
                     clear_width=PORTAL_WIDTH, clear_height=2.8),
         zones=[dict(id='receiving_staging', centre=[-9, 14, 0], size=[3, 3]),
                dict(id='rollwagen_pickup', centre=[-7, 16, 0], size=[1.2, 2]),
                dict(id='rollwagen_parking', centre=[-9, 16, 0], size=[1.2, 2]),
                dict(id='backroom_turning', centre=[PORTAL_X, 14, 0], size=[3.2, 3.2])],
-        route_hints=[[-7, 16], [PORTAL_X, 16], [PORTAL_X, 14], [PORTAL_X, 11.125],
+        route_hints=[[-5.73, 16], [PORTAL_X, 16], [PORTAL_X, 14], [PORTAL_X, 11.125],
                      [PORTAL_X, 7.5], [-1.525, 7.5], [-1.525, .125]],
         route_policy='Hints only; navigation must plan and collision-check the actual coupled footprint.',
         stocking_stations=stations, backroom_stocks=stocks,
