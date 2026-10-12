@@ -75,10 +75,14 @@ class GridMap:
     Rectangles must include all non-traversable/unknown map regions. Static map
     geometry may come from the environment author; live obstacles must be sensed.
     """
-    def __init__(self, bounds, obstacles=(), resolution=0.20):
+    def __init__(self, bounds, obstacles=(), resolution=0.20, *, corridors=()):
         self.bounds = tuple(bounds)
         self.obstacles = tuple(tuple(r) for r in obstacles)
         self.resolution = resolution
+        # Map-derived passage centres and crossing headings are search hints only.
+        self.corridors = tuple(tuple(p) for p in corridors)
+        if any(len(p)!=3 or not all(math.isfinite(v) for v in p) for p in self.corridors):
+            raise ValueError('invalid corridor hint')
         if (len(self.bounds) != 4 or not math.isfinite(resolution) or resolution <= 0
                 or not all(math.isfinite(v) for v in self.bounds)
                 or self.bounds[2] <= self.bounds[0] or self.bounds[3] <= self.bounds[1]):

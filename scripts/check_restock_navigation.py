@@ -21,7 +21,11 @@ def main():
     parser.add_argument('--environment',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--scenario',type=Path,help='Integration scenario: staging support and actual chassis goals')
+    parser.add_argument('--position-uncertainty','--localization-allowance',type=float,default=.10,
+                        help='Fixture bound from localization evidence (default: MapLocalizer floor)')
     args=parser.parse_args()
+    if not math.isfinite(args.position_uncertainty) or args.position_uncertainty<.02:
+        parser.error('position uncertainty must be finite and at least 0.02 m')
     manifest=json.loads(args.environment.read_text())
     scenario=json.loads(args.scenario.read_text()) if args.scenario else None
     from twin.navigation.scenario import environment_grid
@@ -36,7 +40,7 @@ def main():
     state=TrainState(*poses['robot_dock'],poses['cart_dock'][2])
     report={'source':'test_fixture_quasistatic_not_physx',
         'environment_sha256':hashlib.sha256(args.environment.read_bytes()).hexdigest(),
-        'obstacles':len(grid.obstacles),'geometry_margin':.05,'localization_allowance':.02,
+        'obstacles':len(grid.obstacles),'geometry_margin':.05,'localization_allowance':args.position_uncertainty,
         'minimum_turn_radius':1.5,'max_articulation_degrees':65,'legs':[]}
     report['scenario_sha256']=hashlib.sha256(args.scenario.read_bytes()).hexdigest() if args.scenario else None
     report['goals']=poses
@@ -48,14 +52,14 @@ def main():
         trace=[];began=time.monotonic();peak_angle=0.0
         for tick in range(5200):
             now=(tick+1)*.05
-            odom=Odometry(state.pose,now,v,w,'test_fixture',.02)
+            odom=Odometry(state.pose,now,v,w,'test_fixture',args.position_uncertainty)
             obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
             result=controller.step(.05,odom,obs,now=now)
             v,w=result.velocity
             if v<0 or abs(w)*1.5>v+1e-9:
                 raise AssertionError('illegal towing command')
             next_state=advance(state,v*.05,w/v if v else 0,controller.spec)
-            if not controller.world.valid(next_state,extra_margin=.02):
+            if not controller.world.valid(next_state,extra_margin=args.position_uncertainty):
                 raise AssertionError('feedback trajectory collision')
             state=next_state
             peak_angle=max(peak_angle,abs(state.articulation))

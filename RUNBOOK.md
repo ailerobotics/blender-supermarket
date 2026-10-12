@@ -290,6 +290,7 @@ Isaac or commands a physical robot. The integration runner owns the simulator.
 # Deterministic CPU fixtures; no ROS/GPU required.
 python3 -m unittest discover -s scripts/twin/tests -p test_navigation.py -v
 python3 -m unittest discover -s scripts/twin/tests -p test_articulated_navigation.py -v
+python3 -m unittest discover -s scripts/twin/tests -p test_navigation_corridor.py -v
 
 # Optional host-Python Jazzy overlay, extracted only into task-owned storage.
 # Uses existing trusted apt indexes; no sudo, package install, or service restart.
@@ -299,6 +300,7 @@ source "$TASK_OUTPUT/nav2/env.sh"
 # Reproduce full-margin planning and feedback on the actual exported static map.
 # This is a TEST_FIXTURE controller check, not an Isaac/PhysX demonstration.
 python3 scripts/check_restock_navigation.py --environment "$ENVIRONMENT_MANIFEST" \
+  --scenario "$RESTOCK_SCENARIO" --position-uncertainty 0.10 \
   --output "$TASK_OUTPUT/navigation-proof"
 
 # In one isolated ROS shell, start the articulated FollowPath configuration.

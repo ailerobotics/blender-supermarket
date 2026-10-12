@@ -233,12 +233,17 @@ class ArticulatedPlanner:
         until validate_seed replays every segment at the requested full allowance.
         This changes search order without changing trajectory acceptance criteria.
         """
+        if len(goal)!=3 or not all(math.isfinite(v) for v in goal):
+            raise ValueError('goal must be finite [x,y,chassis_yaw]')
         if not self.world.valid(start,dynamic,extra_margin):
             return Route([],[],'invalid_start')
         for seed in self.seeds:
             checked=self.validate_seed(seed,start,goal,dynamic,extra_margin,goal_articulation)
             if checked.states:
                 return checked
+        corridor=self._corridor_route(start,goal,dynamic,extra_margin,goal_articulation)
+        if corridor.states:
+            return corridor
         if extra_margin>=0.02:
             proposer=ArticulatedPlanner(self.world,xy_resolution=self.xy_resolution,
                 yaw_bins=round(2*math.pi/self.yaw_step),primitive_length=self.length,
@@ -251,6 +256,61 @@ class ArticulatedPlanner:
                     checked.expanded=candidate.expanded
                     return checked
         return self._search(start,goal,dynamic,extra_margin,goal_articulation)
+
+    def _corridor_route(self,start,goal,dynamic,extra_margin,goal_articulation):
+        """Try map passage alignment before expensive unconstrained expansion.
+
+        Hints never declare free space: all Dubins arcs, the connecting straight,
+        and independent trailer states are swept at the requested full margin.
+        A blocked hint falls back to search, not relaxed collision acceptance.
+        """
+        deadline=time.monotonic()+min(5.0,self.timeout/4)
+        def extend(state,shot):
+            states=[];curves=[]
+            for length,k in shot:
+                if length<1e-6:
+                    continue
+                samples=self.world.rollout(state,length,k,dynamic,extra_margin)
+                if not samples:
+                    return None
+                states.extend(samples[1:]);curves.extend([k]*(len(samples)-1))
+                state=samples[-1]
+            return states,curves
+        for x,y,heading in self.world.grid.corridors:
+            axis=(math.cos(heading),math.sin(heading))
+            a=(start.x-x)*axis[0]+(start.y-y)*axis[1]
+            b=(goal[0]-x)*axis[0]+(goal[1]-y)*axis[1]
+            if a*b>=0:
+                continue
+            if b<0:
+                heading=wrap(heading+math.pi)
+            dx,dy=math.cos(heading),math.sin(heading)
+            for approach in (1.5,2.0,2.5,3.0):
+                entry=(x-approach*dx,y-approach*dy,heading)
+                for shot in dubins_connections(start,entry):
+                    if time.monotonic()>deadline:
+                        return Route([],[],'corridor_budget')
+                    first=extend(start,shot)
+                    if first is None or not first[0]:
+                        continue
+                    for departure in (.5,.625,.75,1.0,1.5,2.0,2.5,3.0):
+                        middle=extend(first[0][-1],[(approach+departure,0.0)])
+                        if middle is None:
+                            continue
+                        for final in dubins_connections(middle[0][-1],goal):
+                            if time.monotonic()>deadline:
+                                return Route([],[],'corridor_budget')
+                            last=extend(middle[0][-1],final)
+                            if last is None:
+                                continue
+                            candidate=Route([start]+first[0]+middle[0]+last[0],
+                                            first[1]+middle[1]+last[1],'corridor_hint')
+                            checked=self.validate_seed(candidate,start,goal,dynamic,
+                                                       extra_margin,goal_articulation)
+                            if checked.states:
+                                checked.reason='validated_corridor'
+                                return checked
+        return Route([],[],'no_corridor_route')
 
     def _search(self,start,goal,dynamic=(),extra_margin=0.02,goal_articulation=None):
         goal_articulation=self.world.spec.max_articulation if goal_articulation is None else goal_articulation
