@@ -82,7 +82,12 @@ repo's `scenes/`, `export/` or `renders/`.
   (`polish_floor`, `add_instance_variation`, `setup_compositor`, `setup_render`) — see
   README decision log 2026-09-14 and `data/twin-realism-v1/report.md`. Render evidence
   on CPU with `render_shots.py --cpu` when the GPU is held by the robot stack.
-- Local-only project: **no git remote** — never push or open a PR.
+- Mobile restocking orchestration and transactional inventory live in
+  `scripts/twin/restock/`; CPU checks and adapter contract are in RUNBOOK §9.
+  `data/mobile-restock-v2/report.md` distinguishes fixture tests from the still
+  unverified physical cycle and records the GPU driver diagnosis.
+- Git hosting: inspect the configured remote and current task delivery contract
+  before publishing; older local-only task notes predate the configured remote.
 
 ## Maintaining this file
 

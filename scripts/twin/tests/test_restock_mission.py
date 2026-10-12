@@ -1,0 +1,154 @@
+"""CPU fixtures test bookkeeping and failure handling, never simulated autonomy."""
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from twin.restock.inventory import Inventory, Job
+from twin.restock.mission import ACTIONS, Mission, Result
+
+
+class Fixture:
+    def __init__(self):
+        self.time = 0.
+        self.stopped = False
+        self.override = {}
+        self.status = 'succeeded'
+
+    def start(self, action, job):
+        self.action, self.job = action, job
+
+    def step(self, dt):
+        self.time += dt
+        evidence = dict(source='test_fixture', observation_id=f'{self.action}-{self.time}',
+                        simulation_time=self.time, loaded=True, coupled=True,
+                        arrived=True, stationary=True, released=True, home=True,
+                        sku=self.job.sku, quantity=self.job.quantity,
+                        location=self.job.shelf_id, transfer_confirmed=True)
+        evidence.update(self.override)
+        return Result(self.status, evidence, 'obstacle blocks path')
+
+    def stop(self):
+        self.stopped = True
+
+
+class MissionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = str(Path(self.tmp.name) / 'stock.sqlite')
+        self.inv = Inventory(self.path)
+        self.inv.seed('backroom', 'milk', 2)
+        self.job = Job('one', 'milk', 1, 'backroom', 'shelf')
+        self.adapter = Fixture()
+
+    def tearDown(self):
+        self.inv.close()
+        self.tmp.cleanup()
+
+    def mission(self, **kw):
+        m = Mission(self.inv, self.job, self.adapter, **kw)
+        m.start()
+        return m
+
+    def test_success_credits_only_after_verification(self):
+        m = self.mission(fixture_mode=True)
+        for action in ACTIONS:
+            self.assertEqual(m.state, action)
+            if action != 'return':
+                self.assertEqual(self.inv.count('shelf', 'milk'), 0)
+            m.tick(.1)
+        self.assertEqual(m.state, 'complete')
+        self.assertEqual(self.inv.count('backroom', 'milk'), 1)
+        self.assertEqual(self.inv.count('shelf', 'milk'), 1)
+        self.assertTrue(self.adapter.stopped)
+        m.tick(.1)
+        self.assertEqual(self.inv.count('shelf', 'milk'), 1)
+
+    def test_production_rejects_fixture_and_ground_truth(self):
+        m = self.mission()
+        m.tick(.1)
+        self.assertEqual(m.state, 'failed')
+        self.assertTrue(self.adapter.stopped)
+        self.assertEqual(self.inv.count('shelf', 'milk'), 0)
+
+    def test_timeout_retains_reservation(self):
+        m = self.mission(timeout_s=.2, fixture_mode=True)
+        self.adapter.status = 'running'
+        m.tick(.1)
+        m.tick(.2)
+        self.assertEqual(m.state, 'failed')
+        with self.assertRaises(ValueError):
+            self.inv.reserve(Job('two', 'milk', 2, 'backroom', 'shelf'))
+
+    def test_restart_refuses_replay(self):
+        self.mission(fixture_mode=True)
+        other = Inventory(self.path)
+        try:
+            with self.assertRaisesRegex(ValueError, 'reconciliation'):
+                other.reserve(self.job)
+        finally:
+            other.close()
+
+    def test_wrong_sku_and_stale_evidence_fail_without_credit(self):
+        m = self.mission(fixture_mode=True)
+        for _ in range(5):
+            m.tick(.1)
+        self.adapter.override = {'sku': 'wrong'}
+        m.tick(.1)
+        self.assertEqual(m.state, 'failed')
+        self.assertEqual(self.inv.count('shelf', 'milk'), 0)
+
+    def test_stale(self):
+        m = self.mission(fixture_mode=True)
+        self.adapter.override = {'simulation_time': -10}
+        m.tick(.1)
+        self.assertEqual(m.state, 'failed')
+
+    def test_missing_coupling_measurement(self):
+        m = self.mission(fixture_mode=True)
+        m.tick(.1)
+        self.adapter.override = {'coupled': False}
+        m.tick(.1)
+        self.assertEqual(m.state, 'failed')
+
+    def test_obstacle_failure_stops(self):
+        m = self.mission(fixture_mode=True)
+        for _ in range(2):
+            m.tick(.1)
+        self.adapter.status = 'failed'
+        m.tick(.1)
+        self.assertEqual(m.state, 'failed')
+        self.assertIn('obstacle', m.reason)
+        self.assertTrue(self.adapter.stopped)
+
+    def test_return_failure_preserves_verified_stock(self):
+        m = self.mission(fixture_mode=True)
+        for _ in range(6):
+            m.tick(.1)
+        self.adapter.status = 'failed'
+        m.tick(.1)
+        self.assertEqual(m.state, 'failed')
+        self.assertEqual(self.inv.count('shelf', 'milk'), 1)
+
+    def test_atomic_rollback_on_reused_observation(self):
+        m = self.mission(fixture_mode=True)
+        for _ in range(6):
+            m.tick(.1)
+        evidence = self.inv.events('one')[-2]['evidence']
+        job2 = Job('two', 'milk', 1, 'backroom', 'shelf')
+        self.inv.reserve(job2)
+        self.inv.record('two', 'verify', {})
+        with self.assertRaises(Exception):
+            self.inv.verify(job2, evidence)
+        self.assertEqual(self.inv.count('backroom', 'milk'), 1)
+        self.assertEqual(self.inv.count('shelf', 'milk'), 1)
+
+    def test_invalid_quantities(self):
+        for qty in (True, 0, -1, 1.2):
+            with self.assertRaises(ValueError):
+                Job('bad', 'milk', qty, 'backroom', 'shelf')
+
+
+if __name__ == '__main__':
+    unittest.main()

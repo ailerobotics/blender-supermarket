@@ -1,0 +1,79 @@
+# Mobile restocking integration checkpoint
+
+Status: incomplete, GPU bring-up blocked. No autonomous physics cycle or MP4 has
+been produced. The current branch contains CPU mission/inventory infrastructure;
+sibling environment, mobile/cart, navigation and manipulation modules have not
+been integrated or validated here. There is no production runtime adapter yet.
+
+## Implemented and tested
+
+`scripts/twin/restock/inventory.py` provides SQLite reservations, persistent action
+history, atomic source-to-shelf stock transfer and observation deduplication.
+Interrupted/failed jobs retain stock reservations and cannot automatically replay.
+There is deliberately no automatic recovery/release operation: physical stock and
+actuator state must be reconciled before adding one.
+
+`scripts/twin/restock/mission.py` drives collect, couple, outbound, park, transfer,
+verify and return through a small adapter protocol. Failure, invalid evidence and
+action timeout request stop. Shelf credit requires a matching observed transfer;
+a failed return preserves previously verified shelf stock. Simulation timestamps
+are relative to mission start. Adapter implementers must convert their sensor
+clock to that origin. Adapters remain responsible for sensor provenance and
+collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
+
+11 CPU fixture tests pass. These prove bookkeeping and failure handling, not
+robot movement, perception accuracy, coupling physics or collision avoidance.
+Reproduction is in RUNBOOK section 9. The shared firstmate interface contract was
+published before implementation so sibling lanes can align.
+
+## Bounded GPU diagnosis (2026-10-12)
+
+Expected: existing resource guard can query GPU headroom before an authorized
+Isaac run. Observed: `nvidia-smi` reports `Failed to initialize NVML:
+Driver/library version mismatch`, library version `580.178`.
+
+- Loaded `/proc/driver/nvidia/version`: open kernel module **580.173.02**.
+- Selected x86_64 NVML and CUDA libraries: **580.178.04**.
+- `/var/log/apt/history.log`: unattended upgrade on **2026-10-10,
+  06:32:44–06:34:41** replaced NVIDIA 580.173.02 packages with 580.178.04.
+- Read-only `ctypes` call to `libcuda.so.1` / `cuInit(0)` returned **804,
+  CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE**. No context or simulator created.
+- Bounded file inventory of system x86_64 libraries, CUDA location, apt archive
+  cache and the installed Isaac environment found no alternate 580.173 NVML/CUDA
+  libraries. This is not an exhaustive whole-machine search.
+- Initial available RAM: **23,356 MiB**. GPU free memory could not be measured.
+  Initial process/socket checks found no Blender match or listener on 9876;
+  those observations expire and must be checked again before any launch.
+- Installed Isaac distribution metadata identifies **5.1.0.0**. No upgrade done.
+
+Initiating trigger: the recorded driver-package upgrade. Exposing condition:
+new clients select the replaced user-space libraries while the older kernel
+module remains loaded. Visible symptom: telemetry refuses, so the GPU safety
+gate cannot authorize a boot. CUDA initialization also fails: this is not merely
+a broken telemetry executable. Already-running services may retain older mapped
+libraries; their survival is not proof that new Isaac processes can start.
+
+Counterfactual needed: repeat NVML and CUDA initialization with a coherent driver
+stack. No matching installed alternate was found in the bounded search, so that
+counterfactual was not run. The error does not establish whether Isaac would have
+additional compatibility or memory problems once the driver stack is coherent.
+
+Least disruptive action now: preserve live services and continue CPU work. A
+supervisor-coordinated maintenance reboot after protecting user sessions is the
+conventional way to load the updated kernel module; it is outside this worker's
+authority and was not attempted. Do not unload modules, restart services, install
+or downgrade drivers, or bypass the GPU guard for this task.
+
+## Remaining delivery gates
+
+Integrate actual landed sibling modules, implement the runtime adapter and
+bounded/flock-protected launcher, validate scene/robot offline, then run the
+sensor-to-control loop under the existing protected-Blender and resource gates.
+Prove stock collection, physical coupling, loaded turning/obstacle response,
+parking, transfer verification and return against final code. Record H.264 video
+and update the self-contained report from that actual run. No fixture animation
+may be substituted for the missing evidence.
+
+Vendor reference: NVIDIA's [Isaac Sim 5.1 standalone examples](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/introduction/examples.html)
+provide the version-matched standalone entrypoint pattern. Runtime wiring is not
+yet implemented or claimed compatible solely from this documentation.
