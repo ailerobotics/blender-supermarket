@@ -83,10 +83,21 @@ repo's `scenes/`, `export/` or `renders/`.
   README decision log 2026-09-14 and `data/twin-realism-v1/report.md`. Render evidence
   on CPU with `render_shots.py --cpu` when the GPU is held by the robot stack.
 - **Mobile restock manipulation**: sensor/ROS contracts and supported handling units
-  live in `docs/restock_manipulation.md`; CPU checks are in RUNBOOK §9.
+  live in `docs/restock_manipulation.md`; CPU checks are in RUNBOOK §12.
   Runtime inputs must come from sensors; fixtures cannot certify inventory.
-- Delivery: use the task-assigned branch and configured remote when explicitly
-  authorized; never push the default branch.
+- **Mobile navigation**: `scripts/twin/navigation/` and
+  [docs/restock_navigation.md](docs/restock_navigation.md) define sensor, footprint
+  and goal contracts; RUNBOOK §11 has CPU checks and isolated Nav2 launch. Coupled
+  clearance uses the independent base/cart swept envelope, so straight cart width alone does
+  not prove aisle feasibility. Simulator/Nav2 execution still needs integration
+  evidence; fixture tests must not be presented as a physics demonstration.
+- Git delivery: the repository now has an `origin` remote; follow the current
+  task delivery contract rather than the former local-only assumption.
+- Mobile UR10/cart assets and control interfaces: [docs/mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md), commands in RUNBOOK §9. The generated mobile URDF replaces the fixed pedestal; import with a free base. CPU FK/schema checks do not establish PhysX towing stability.
+- **Service environment**: `scripts/store_environment.py` adds the connected backroom;
+  RUNBOOK §10 documents scratch builds, CPU geometry checks and the semantic/static-map
+  manifest. Source cases are static visual stock; scenario composition owns dynamic
+  actors. `GRP_EnvironmentDecor` must remain nonphysical.
 
 ## Maintaining this file
 

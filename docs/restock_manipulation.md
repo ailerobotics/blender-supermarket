@@ -2,7 +2,7 @@
 
 `scripts/twin/restock_manipulation/` provides the manipulation lane for mobile
 restocking. It boots no simulator and opens no hardware driver. CPU checks and
-ROS environment commands are in [RUNBOOK §9](../RUNBOOK.md#9-mobile-restock-manipulation-cpu).
+ROS environment commands are in [RUNBOOK §12](../RUNBOOK.md#12-mobile-restock-manipulation-cpu).
 
 ## Supported operation and evidence boundary
 
@@ -209,7 +209,7 @@ object (`IsaacMeasuredFeedback(articulation)`) whose `collision_time` is an actu
 
 `ros_host` runs in separate host Jazzy Python and instantiates the existing
 `RosMotionPort`, `RosTransferBridge`, controller and CAD wall policy using
-`ros_host_config.json`. RUNBOOK §9 has the exact launch. Sensor/job/status JSON
+`ros_host_config.json`. RUNBOOK §12 has the exact launch. Sensor/job/status JSON
 is unchanged except status adds monotonic `sequence` and `job_id` for stale-message
 filtering. Native contact feedback is in `Sensors`; returned gripper controls call
 the native seal. `/restock_sim/manipulation/stop` is Bool and must latch arm hold

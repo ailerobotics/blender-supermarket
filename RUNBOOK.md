@@ -280,7 +280,176 @@ to `/tmp`), so a failed run is safe to discard. Capture the stderr + `nvidia-smi
 nothing, and re-run the offline `--author-offline` to confirm the *stage* is still sane before
 blaming the composer — a boot/OOM failure is an Isaac/VRAM problem, not a composition one.
 
-## 9. Mobile restock manipulation (CPU)
+## 9. Mobile UR10 and rollwagen (CPU)
+
+Interface and remaining simulator checks: [mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md).
+Use a Python environment with `numpy` and `usd-core`; no Isaac boot is needed.
+`SOURCE_URDF`, `SHELFBOT_PACKAGE` and `TASK_OUTPUT` are caller-selected paths;
+`TASK_OUTPUT` must be a scratch directory, outside `scenes/`, `export/`, `renders/`.
+
+```bash
+python scripts/build_mobile_assets.py \
+  --source-urdf "$SOURCE_URDF" \
+  --package-root /opt/ros/jazzy/share --package-root "$SHELFBOT_PACKAGE" \
+  --output-dir "$TASK_OUTPUT"
+# Optional --config mobile-config.json accepts MobileSpec keyword overrides.
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest scripts/twin/tests/ -q
+```
+
+Import the generated mobile URDF with a free base and fixed frames preserved;
+install sensors and position-hold the manifest's transport joints before enabling
+wheel commands. Import and GPU verification belong to the integrated simulator
+run and remain subject to the existing protected-Blender/resource guard.
+
+## 10. Service backroom and environment contract
+
+The `environment` build stage adds an illustrative German grocery service area
+and keeps existing catalog/planogram assignments. Set `OUT` to an **absolute,
+non-RAM scratch directory**, outside the repo's scenes/export/renders directories:
+
+```bash
+python3 scripts/gen_labels.py
+blender -b scenes/supermarket_base.blend -t 4 --python-exit-code 1 \
+  --python scripts/build_supermarket.py -- --all --save "$OUT/store.blend" \
+  --manifest "$OUT/environment.json"
+blender -b "$OUT/store.blend" -t 4 --python-exit-code 1 \
+  --python scripts/check_environment.py -- --manifest "$OUT/environment.json" \
+  --out "$OUT/geometry-check.json"
+blender -b "$OUT/store.blend" -t 4 --python-exit-code 1 \
+  --python scripts/export_usd.py -- --out "$OUT/supermarket.usdc"
+.venv-usd/bin/python scripts/validate_usd.py --store "$OUT/supermarket.usdc" --repair-textures
+blender -b "$OUT/store.blend" -t 4 --python-exit-code 1 \
+  --python scripts/render_shots.py -- --cpu --samples 16 --res 960x540 \
+  --cams Cam_Aisle,Cam_Backroom --out "$OUT/previews"
+python3 -m unittest discover -s scripts/tests -v
+```
+
+The manifest uses metres, Z up, `map` world coordinates and planar `[x,y,yaw]`
+poses. `stocking_stations` reference existing shelf `slot` IDs and SKU lists;
+`backroom_stocks` list six case origins per source bin. `static_obstacles` are
+conservative world AABBs measured from the generated structure and fixtures,
+intersecting height band 0.02–2.6 m (floors and overhead structure excluded).
+This is a static map and scenario ground truth, **not perception evidence**.
+Schema 2 defines every `poses` entry's body through `pose_bodies`:
+`cart_dock` is the cart body at [-7,16,0], while `robot_dock` and `pickup`
+are the robot base at [-5.73,16,0] (1.27 m aligned separation). Planar poses
+omit ground height: mobile base-link starts at Z=0.24 m, cart body at Z=0.20 m.
+Each stocking station's `pose` is the **chassis** pose (`pose_body=robot_base`);
+`arm_shelf_facing_yaw` is a separate desired world direction, not an arm joint
+target or permission to rotate the chassis. Ordinary aisle chassis headings
+are -pi/2, keeping a straight trailing cart along the aisle.
+
+`first_cycle_station=stock_G3_back` selects an endcap on the rear cross aisle:
+robot staging [-3.05,6,pi], arm facing -pi/2, with a westbound straight
+pull-through from [-1.525,6,pi] to [-7,6,pi]. The corresponding slots are
+`G3_back_s*`; `first_cycle_source_bin=backstock_00` carries
+`first_cycle_sku=juice_orange`. `pull_through_robot_poses` describes only that
+local forward segment, not a backroom-to-shelf trajectory. Navigation must
+plan arrival and return using independently predicted cart poses.
+
+To additionally check that segment with the actual mobile module (after it is
+available in the checkout), add `--mobile-module scripts/twin/mobile.py` to
+the geometry command. This tests its default-margin convex swept envelope
+against the measured static AABBs. It proves static straight-segment clearance,
+not turn feasibility, grasp reach, control tracking, or dynamics.
+`layout(plan)` alone omits measured obstacles; request `--manifest` on a full
+build to obtain them. `poses`, `zones`, `portal`, `map_bounds`, and `route_hints`
+are available to scenario/navigation adapters. Route hints are not a planner.
+
+The rear opening is 2.5 m wide × 2.8 m high and meets the existing fixture gap.
+The backroom has a continuous floor at Z=0, racks, receiving staging, cart bays,
+and a 3.2 m turning zone. `check_environment.py` samples a 0.65 m circular
+footprint along the route to the G3/G4 aisle; it does **not** prove a coupled
+cart's swept turns or dynamics. `--radius` can increase this check to include a
+planner's safety margin; values below the configured 0.65 m transport envelope
+are rejected. Shelf approaches require backing out to the rear cross aisle
+instead of U-turning. The mobile controller disables reverse towing, so this
+return guidance applies only when uncoupled. A feasible forward-only coupled
+route or a separate cart parking/uncoupling procedure must be planned and checked
+by integration; the route hints and 3.2 m zone do not establish one.
+
+Source cases are static visual stock, with `sku`, `stock_id`, and `units` custom
+properties. Scenario composition must explicitly promote/replace selected stock
+with dynamic actors and populate live inventory from its own observations.
+Movable robots/carts are authored by the robotics composer. Markers live under
+`GRP_EnvironmentMarkers`; decoration under `GRP_EnvironmentDecor` is excluded by
+the collider classifier. All solid service fixtures use the existing static
+structure/fixture collision groups. Labels/styles are illustrative, not an exact
+scan or an assertion of REWE store dimensions.
+
+## 11. Mobile restock navigation (CPU checks and isolated Nav2)
+
+Contracts, footprint limits and unverified simulator links:
+[docs/restock_navigation.md](docs/restock_navigation.md). No command here boots
+Isaac or commands a physical robot. The integration runner owns the simulator.
+
+```bash
+# Deterministic CPU fixtures; no ROS/GPU required.
+python3 -m unittest discover -s scripts/twin/tests -p test_navigation.py -v
+python3 -m unittest discover -s scripts/twin/tests -p test_articulated_navigation.py -v
+
+# Optional host-Python Jazzy overlay, extracted only into task-owned storage.
+# Uses existing trusted apt indexes; no sudo, package install, or service restart.
+python3 scripts/setup_restock_nav2.py --output "$TASK_OUTPUT/nav2"
+source "$TASK_OUTPUT/nav2/env.sh"
+
+# Reproduce full-margin planning and feedback on the actual exported static map.
+# This is a TEST_FIXTURE controller check, not an Isaac/PhysX demonstration.
+python3 scripts/check_restock_navigation.py --environment "$ENVIRONMENT_MANIFEST" \
+  --output "$TASK_OUTPUT/navigation-proof"
+
+# In one isolated ROS shell, start the articulated FollowPath configuration.
+python3 scripts/run_restock_nav2.py --environment "$ENVIRONMENT_MANIFEST" \
+  --articulated --output "$TASK_OUTPUT/nav2-map" --launch
+
+# In another shell with the same task-owned env.sh sourced, run the sensor bridge.
+# The pose is a declared deployment prior, supplied by the integration scenario.
+python3 scripts/run_articulated_nav2_bridge.py --environment "$ENVIRONMENT_MANIFEST" \
+  --initial-pose "$INITIAL_X" "$INITIAL_Y" "$INITIAL_YAW"
+
+# ROS-message handoff tests, after sourcing the task-owned Jazzy overlay.
+python3 -m unittest discover -s scripts/twin/tests -p test_nav2_handoff.py -v
+
+# With a compatible Jazzy/Nav2 environment already available, generate map/config.
+# scenario.json supplies bounds, obstacles, resolution and the measured footprint.
+# OUTPUT must be a task-owned scratch directory, outside scenes/export/renders.
+python3 scripts/run_restock_nav2.py --scenario scenario.json --output "$OUTPUT"
+
+# Start only the ROS navigation nodes; domain 88 must be reserved for this task.
+ROS_DOMAIN_ID=88 ROS_LOCALHOST_ONLY=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+  python3 scripts/run_restock_nav2.py --scenario scenario.json --output "$OUTPUT" --launch
+```
+
+Example **test-fixture** scenario schema (replace all dimensions with scene/rig
+measurements before runtime):
+
+```json
+{
+  "bounds": [-6, -6, 6, 6],
+  "obstacles": [[2, 2, 3, 3]],
+  "resolution": 0.2,
+  "footprint": {
+    "base_radius": 0.6,
+    "hitch_offset": 0.5,
+    "cart_hitch_to_farthest_corner": 1.2,
+    "margin": 0.1,
+    "min_turn_radius": 1.0,
+    "max_articulation": 1.1
+  }
+}
+```
+
+Feed real wheel encoder and range samples through the adapter described in the
+navigation document. Never connect raw Nav2 `cmd_vel` to the base: the adapter
+returns the gated command. Missing Nav2 packages are a prerequisite failure;
+this script intentionally does not install/upgrade shared ROS or Isaac.
+For an integration scenario with staging support, add `--scenario "$RESTOCK_SCENARIO"`
+to `check_restock_navigation.py` and `--integration-scenario "$RESTOCK_SCENARIO"`
+to both `run_restock_nav2.py` and `run_articulated_nav2_bridge.py`.
+This includes the support obstacle and checks the scenario’s actual chassis goal;
+a successful environment-only route does not certify a different scenario.
+
+## 12. Mobile restock manipulation (CPU)
 
 Contracts, dependencies and limits: [restock manipulation](docs/restock_manipulation.md).
 No simulator is started by these tests:
