@@ -538,3 +538,70 @@ sensor perception and contact physics unverified. This command never boots Isaac
 support and deactivates only exact-slot product prims in the output layer before
 physics. It preserves fixtures, price tags and the input store. It refuses repeat
 authoring and does not create runtime motion or inventory observations.
+
+## 13. Mobile restock manipulation (CPU)
+
+Contracts, dependencies and limits: [restock manipulation](docs/restock_manipulation.md).
+No simulator is started by these tests:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_manipulation.py scripts/twin/tests/test_cad_restock.py -q
+```
+
+Before integrating `RosTransferBridge` / `RosMotionPort` into an already running
+simulation executor, configure the isolated ROS process (and all task-owned
+planner/controller peers) and create its node with `use_sim_time=true`:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+export ROS_DOMAIN_ID=88
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+unset ROS_STATIC_PEERS
+```
+
+The integration launch owns the RGB-D preprocessing, current mobile-arm TF,
+collision world, simulated gripper/contact bridge and MoveIt/cuMotion servers.
+Missing sensing or adapters are a failure, not a fixture fallback. See the linked
+contract for topic schema and acknowledgement requirements. Full GPU execution
+remains subject to §8's resource guard and integration ownership.
+
+The CAD native-gripper/carton authoring tests additionally need `pxr`. Use the
+CPU USD Python configured in §6a (or the existing shelfbot USD-only wrapper):
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  bash "$SHELFBOT_ROOT/tools/usdpy" -m pytest scripts/twin/tests/test_cad_restock.py -q
+```
+
+Set `SHELFBOT_ROOT` to the read-only source checkout selected by integration.
+This wrapper loads USD libraries only; it does not boot Isaac. The direct
+`CadRestockRuntime` assembly/asset authoring order is documented in
+[Actual CAD gripper and concrete Isaac path](docs/restock_manipulation.md#actual-cad-gripper-and-concrete-isaac-path).
+
+For process-separated ROS, run the controller with **host Jazzy Python**, from
+the repository root, after sourcing the task's MoveIt/cuMotion ROS overlay:
+
+```bash
+python3 -m scripts.twin.restock_manipulation.ros_host \
+  --config scripts/twin/restock_manipulation/ros_host_config.json \
+  --urdf "$ROBOT_URDF" --shelfbot-root "$SHELFBOT_ROOT"
+```
+
+This launches domain-88 clients/controller only. Integration enables
+`isaacsim.ros2.bridge` in its existing guarded app and constructs `IsaacRosGraph`
+with real native contact and a **latched** simulated-arm hold callback. Call
+`start(operation, job)`, `publish_sensors(Sensors)`, and `poll()` each physics step.
+Publish fresh sensor acquisition packets only; call `poll()` even without images.
+The domain/loopback environment above also applies to Isaac. Start the host and
+allow DDS discovery before submitting the first job.
+
+Cross-interpreter CPU contract smoke (neither interpreter boots a ROS graph or GPU):
+
+```bash
+"$ISAAC_PYTHON" scripts/restock_ros_contract_smoke.py --ros-python "$ROS_PYTHON"
+```
+
+`ISAAC_PYTHON` selects the existing Isaac Python3.11 executable and `ROS_PYTHON`
+the sourced host Jazzy Python3.12 executable. This verifies fixture-only schema
+roundtrip and actual host ROS message serialization; it does not test DDS or
+OmniGraph. Runtime server and attachment requirements are in the manipulation doc.

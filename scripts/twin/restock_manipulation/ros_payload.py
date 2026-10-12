@@ -1,0 +1,127 @@
+"""Acknowledged MoveIt + cuMotion collision attachment in host ROS process.
+
+This never authors physics joints. The native CAD seal is already measured in
+Sensors before attach; loss of seal prevents a collision attachment request.
+"""
+import threading
+import numpy as np
+
+
+def relative_pose(base_object, base_tcp):
+    """Convert measured object centre from arm base to current measured TCP."""
+    p, t = np.asarray(base_object,float), np.asarray(base_tcp,float)
+    if p.shape != (7,) or t.shape != (7,) or not np.isfinite([p,t]).all():
+        raise ValueError('finite xyzw transforms required')
+    def multiply(a,b):
+        av,bv = a[:3],b[:3]
+        return np.r_[a[3]*bv+b[3]*av+np.cross(av,bv),a[3]*b[3]-av@bv]
+    if not all(np.isclose(np.linalg.norm(v[3:]),1) for v in (p,t)):
+        raise ValueError('unit quaternions required')
+    inverse = np.r_[-t[3:6],t[6]]
+    xyz = multiply(multiply(inverse,np.r_[p[:3]-t[:3],0.]),t[3:])[:3]
+    return tuple(np.r_[xyz,multiply(inverse,p[3:])])
+
+
+class RosPayloadSync:
+    def __init__(self):
+        import rclpy
+        from rclpy.parameter import Parameter
+        from rclpy.executors import SingleThreadedExecutor
+        from tf2_ros import Buffer, TransformListener
+        from moveit_msgs.srv import ApplyPlanningScene
+        self.node = rclpy.create_node('restock_payload',namespace='/restock_sim',
+                       parameter_overrides=[Parameter('use_sim_time',value=True)])
+        self.tf = Buffer()
+        self.listener = TransformListener(self.tf,self.node)
+        self.scene = self.node.create_client(ApplyPlanningScene,'/restock_sim/apply_planning_scene')
+        self.attach = None
+        self.controller = self.sensors = None
+        self.executor = SingleThreadedExecutor()
+        self.executor.add_node(self.node)
+        self.thread = threading.Thread(target=self.executor.spin,daemon=True)
+        self.thread.start()
+
+    @staticmethod
+    def _wait(future, timeout=1.):
+        event = threading.Event()
+        future.add_done_callback(lambda _:event.set())
+        if not event.wait(timeout):
+            raise TimeoutError('payload acknowledgement deadline exceeded')
+        return future.result()
+
+    def __call__(self, held, profile):
+        from rclpy.action import ActionClient
+        from rclpy.time import Time
+        from moveit_msgs.srv import ApplyPlanningScene
+        from moveit_msgs.msg import AttachedCollisionObject, CollisionObject
+        from shape_msgs.msg import SolidPrimitive
+        from geometry_msgs.msg import Pose
+        # NVIDIA messages belong in host/container ROS overlay, not Isaac Python.
+        from isaac_ros_cumotion_interfaces.action import AttachObject
+        s, c = self.sensors, self.controller
+        now = self.node.get_clock().now().nanoseconds*1e-9
+        if s is None or c is None or s.contact != held or not 0 <= now-s.feedback_time <= c.max_age:
+            return False
+        if not self.scene.service_is_ready():
+            return False
+        if self.attach is None:
+            self.attach = ActionClient(self.node,AttachObject,'/restock_sim/attach_object')
+        if not self.attach.server_is_ready():
+            return False
+        attached = AttachedCollisionObject()
+        attached.link_name = 'gripper_pad_tcp'
+        attached.touch_links = ['suction_cups']
+        attached.object.id = 'restock_carried_unit'
+        attached.object.header.frame_id = 'ur_base_link'
+        attached.object.operation = CollisionObject.ADD if held else CollisionObject.REMOVE
+        goal = AttachObject.Goal()
+        goal.attach_object = held
+        if held:
+            transform = self.tf.lookup_transform('ur_base_link','gripper_pad_tcp',Time())
+            stamp = transform.header.stamp.sec+transform.header.stamp.nanosec*1e-9
+            if not 0 <= now-stamp <= c.max_age:
+                return False
+            xyz, quat = transform.transform.translation, transform.transform.rotation
+            centre = (*c.source_pose[:2],c.source_pose[2]-profile.dimensions[2]/2,*c.source_pose[3:])
+            relative = relative_pose(centre,(xyz.x,xyz.y,xyz.z,quat.x,quat.y,quat.z,quat.w))
+            shape = SolidPrimitive(type=SolidPrimitive.BOX,dimensions=list(profile.dimensions))
+            pose = Pose()
+            pose.position.x,pose.position.y,pose.position.z = centre[:3]
+            pose.orientation.x,pose.orientation.y,pose.orientation.z,pose.orientation.w = centre[3:]
+            attached.object.primitives = [shape]
+            attached.object.primitive_poses = [pose]
+            marker = goal.object_config
+            marker.header.frame_id = 'gripper_pad_tcp'
+            marker.type = marker.CUBE
+            marker.scale.x,marker.scale.y,marker.scale.z = profile.dimensions
+            marker.pose.position.x,marker.pose.position.y,marker.pose.position.z = relative[:3]
+            marker.pose.orientation.x,marker.pose.orientation.y,marker.pose.orientation.z,marker.pose.orientation.w = relative[3:]
+        request = ApplyPlanningScene.Request()
+        request.scene.is_diff = True
+        request.scene.robot_state.is_diff = True
+        request.scene.robot_state.attached_collision_objects = [attached]
+        if not self._wait(self.scene.call_async(request)).success:
+            return False
+        pending = self.attach.send_goal_async(goal)
+        try:
+            accepted = self._wait(pending)
+        except TimeoutError:
+            def cancel_late(future):
+                handle = future.result()
+                if handle is not None and handle.accepted:
+                    handle.cancel_goal_async()
+            pending.add_done_callback(cancel_late)
+            raise
+        if not accepted.accepted:
+            return False
+        try:
+            result = self._wait(accepted.get_result_async())
+        except TimeoutError:
+            accepted.cancel_goal_async()
+            raise
+        return result.status == 4
+
+    def close(self):
+        self.executor.shutdown(timeout_sec=2.)
+        self.thread.join(timeout=2.)
+        self.node.destroy_node()
