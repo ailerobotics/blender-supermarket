@@ -2,7 +2,42 @@
 
 `scripts/twin/navigation/` adds two simulation navigation routes. Neither has
 been run against a moving Isaac robot yet. CPU tests are deterministic fixtures,
-not evidence of autonomous physics operation. Commands live in RUNBOOK §9.
+not evidence of autonomous physics operation. Commands live in RUNBOOK §11.
+
+## Articulated route revision (integration in progress)
+
+`articulated.ArticulatedController(grid, spec=MobileSpec())` replaces the
+full-swing-circle planner for coupled towing. Its `start`/`step` interface matches
+the reference controller. It uses the mobile module's actual `occupied_envelope`
+and local `swept_envelope`, separate base/cart yaw, forward Dubins/hybrid-A*
+primitives, minimum radius 1.5 m and the 65 degree articulation limit. The trailer
+model predicts cart yaw through an off-axle hitch equation; actual measured
+articulation initializes every runtime braking rollout. It is a quasi-static
+no-side-slip approximation, not a claim about free-caster PhysX dynamics.
+
+The 0.05 m geometry margin remains mandatory and localization uncertainty is
+added separately. Straight passage through a 2.5 m portal now passes, while an
+in-aisle turn still fails. Optional `start(..., goal_articulation=0.08)` requests
+aligned final parking; default arrival permits any articulation below the rig
+limit. Shelf-facing arm yaw is separate from the chassis goal yaw.
+
+Eight additional CPU fixtures cover these cases, including feedback control and
+aligned return in open space. Against the actual schema-2 environment, plans
+from `robot_dock` to `stock_G3_back` and back exist with the mobile geometry's
+default margin, but those endpoints have roughly 46 degrees of articulation.
+**The repeated endcap search with an additional 2 cm localization uncertainty
+timed out.** That route is not yet validated for execution. Do not substitute
+the zero-additional-uncertainty path or claim the CPU fixtures prove the full
+mission. The simple scan matcher below still supplies a larger uncertainty;
+this mismatch must be resolved with measured localization and a feasible route.
+
+`scripts/setup_restock_nav2.py` now supplies a task-owned Jazzy overlay by
+hash-verifying apt archives and extracting them without package installation or
+maintainer scripts. The overlay resolved 208 packages and the CPU Nav2 launch
+loaded successfully, then waited for missing sensor TF. No host upgrades or
+GPU job occurred. The existing Nav2 route below still uses its conservative
+circle; connecting Nav2 path following to the articulated planner remains an
+integration task. The new in-process articulated controller does not require ROS.
 
 ## Integration contract
 
