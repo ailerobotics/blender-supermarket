@@ -82,6 +82,9 @@ repo's `scenes/`, `export/` or `renders/`.
   (`polish_floor`, `add_instance_variation`, `setup_compositor`, `setup_render`) — see
   README decision log 2026-09-14 and `data/twin-realism-v1/report.md`. Render evidence
   on CPU with `render_shots.py --cpu` when the GPU is held by the robot stack.
+- **Mobile restock manipulation**: sensor/ROS contracts and supported handling units
+  live in `docs/restock_manipulation.md`; CPU checks are in RUNBOOK §12.
+  Runtime inputs must come from sensors; fixtures cannot certify inventory.
 - **Mobile navigation**: `scripts/twin/navigation/` and
   [docs/restock_navigation.md](docs/restock_navigation.md) define sensor, footprint
   and goal contracts; RUNBOOK §11 has CPU checks and isolated Nav2 launch. Coupled
