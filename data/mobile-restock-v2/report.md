@@ -23,7 +23,7 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-234 combined CPU tests pass with three dependency skips at the integration checkpoint, with the installed Isaac USD libraries exposed
+235 combined CPU tests pass with three dependency skips at the integration checkpoint, with the installed Isaac USD libraries exposed
 without booting Kit (including mission/runtime, recording, stock-scene and environment tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
 Reproduction is in RUNBOOK section 11. The shared firstmate interface contract was
@@ -207,6 +207,7 @@ interpolation checks all position, speed and acceleration extrema, rather than
 only waypoints. Six CPU numerical tests pass; DDS transport and physical tracking
 remain untested under the simulator hold. Start it only in the isolated host
 runtime with the generated mobile URDF, as documented in RUNBOOK §11.
+Installed Jazzy action/message fields were checked without creating a ROS context.
 
 Firstmate reports task-local NVML/CUDA/Vulkan probes succeeded with staged
 matching libraries; these were not run by this worker and do not establish Isaac
@@ -246,7 +247,8 @@ python3 scripts/check_restock_navigation.py --environment "$ENVIRONMENT_MANIFEST
 After missing components land, rerun reach/sweep/camera proofs against the exact
 new route and scenario hashes, then rerun the CPU suite. The future execution
 command is `scripts/run_mobile_restock.sh --manifest "$ENVIRONMENT_MANIFEST"
---scenario scripts/restock_scenario.json --execute --factory twin.restock.isaac_bundle:create
+--scenario scripts/restock_scenario.json --runtime-config "$RUNTIME_CONFIG"
+--execute --factory twin.restock.isaac_bundle:create
 --output "$NEW_RUN_OUTPUT"`; that factory is still incomplete, the scenario
 readiness flag remains false, and this command is **not runnable as a complete
 mission yet**. Execute only after explicit GPU release and fresh guards. No MP4

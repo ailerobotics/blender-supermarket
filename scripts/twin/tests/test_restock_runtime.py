@@ -165,13 +165,19 @@ if __name__ == '__main__':
 class LaunchTests(unittest.TestCase):
     def test_guard_refusal_records_failure_without_importing_factory(self):
         import tempfile
+        import json
         from run_mobile_restock import run
         with tempfile.TemporaryDirectory() as tmp:
             output=Path(tmp)/'new-run'
-            args=NS(factory='must_not_import:factory',output=output,heavy_threshold_mb=1500)
+            args=NS(factory='must_not_import:factory',output=output,heavy_threshold_mb=1500,
+                    runtime_config=Path(tmp)/'config.json')
             scenario={'job':dict(job_id='j',sku='milk',quantity=1,source_bin='back',shelf_id='shelf'),
                       'initial_inventory':[dict(location='back',sku='milk',quantity=1)]}
-            with patch('run_mobile_restock.gpu_slot',side_effect=RuntimeError('test guard refusal')):
+            scenario_path=Path(tmp)/'scenario.json'
+            scenario_path.write_text(json.dumps(scenario))
+            args.runtime_config.write_text(json.dumps({'scenario':str(scenario_path)}))
+            ready=patch('preflight_mobile_restock.check',return_value={'files_ready':True})
+            with ready, patch('run_mobile_restock.gpu_slot',side_effect=RuntimeError('test guard refusal')):
                 with self.assertRaisesRegex(RuntimeError,'test guard refusal'):
                     run(args,{},scenario)
             import json
@@ -179,8 +185,22 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(record['state'],'failed')
             self.assertEqual(record['events'],[])
             self.assertNotIn('must_not_import',sys.modules)
-            with self.assertRaises(FileExistsError):
-                run(args,{},scenario)
+            with patch('preflight_mobile_restock.check',return_value={'files_ready':True}):
+                with self.assertRaises(FileExistsError):
+                    run(args,{},scenario)
+
+    def test_missing_runtime_inputs_prevent_run_state_and_gpu_probe(self):
+        import tempfile
+        from run_mobile_restock import run
+        with tempfile.TemporaryDirectory() as tmp:
+            config=Path(tmp)/'config.json'
+            config.write_text('{}')
+            args=NS(factory='must_not_import:factory',output=Path(tmp)/'run',runtime_config=config)
+            with patch('run_mobile_restock.gpu_slot') as gpu:
+                with self.assertRaisesRegex(ValueError,'runtime inputs unresolved'):
+                    run(args,{}, {})
+                gpu.assert_not_called()
+            self.assertFalse(args.output.exists())
 
     def test_schema2_uses_robot_dock_not_cart_pose(self):
         from twin.restock.scenario import poses_for_job

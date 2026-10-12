@@ -1,5 +1,5 @@
 {
-  "CPU tests": "234 passed, 3 dependency skips at navigation/trajectory integration checkpoint; cross-interpreter ROS serialization passes",
+  "CPU tests": "235 passed, 3 dependency skips; unresolved-input launch refusal and cross-interpreter ROS serialization pass",
   "Mobile assets": "Landed source; real CAD/FK static preview",
   "Environment": "USD and offline composition PASS; static source renders",
   "Physical autonomy": "NOT RUN; explicit simulator hold remains, task-local driver workaround under firstmate review",

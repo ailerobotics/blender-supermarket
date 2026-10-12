@@ -498,8 +498,11 @@ requires reconciliation and restarting the task-owned executor.
 After a complete simulator bundle exists and preflight is green, `--execute`
 requires `--factory module:function` and a **new** `--output` scratch directory.
 Use `RESTOCK_PYTHON` for the installed Isaac Python interpreter. The bundle receives
-`app`, `manifest`, `scenario`, `output` and returns `adapter` plus `close()`; it owns
-actual sensor acquisition, controller setup and recording. `recording.Recorder`
+`app`, `manifest`, `scenario`, `config`, `output` and returns `adapter` plus `close()`; it owns
+actual sensor acquisition, controller setup and recording. `--runtime-config`
+supplies exact host/CAD/camera paths, checked before any GPU acquisition or run
+directory creation; its scenario must match the mission scenario.
+`recording.Recorder`
 accepts real rendered RGB with unique render IDs and regular simulation timestamps;
 its H.264 encoder uses a caller-supplied local ffmpeg executable. Missing frames
 are rejected, never replaced by an animated fixture. No ready bundle is currently

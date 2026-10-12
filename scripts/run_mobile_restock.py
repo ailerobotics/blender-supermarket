@@ -34,6 +34,16 @@ def run(args, manifest, scenario):
         raise ValueError('runtime requires --factory module:function; no mock fallback')
     if not args.output:
         raise ValueError('runtime requires an explicit scratch --output directory')
+    if not args.runtime_config:
+        raise ValueError('runtime requires --runtime-config with exact sensor/host/CAD inputs')
+    from preflight_mobile_restock import check as check_runtime_inputs
+    config=json.loads(args.runtime_config.read_text())
+    readiness=check_runtime_inputs(config)
+    if not readiness['files_ready']:
+        raise ValueError('runtime inputs unresolved: '+', '.join(readiness['unresolved_inputs']))
+    configured_scenario=json.loads(Path(config['scenario']).read_text())
+    if configured_scenario!=scenario:
+        raise ValueError('runtime configuration and mission scenario differ')
     # New output directory only: a restart must reconcile existing physical/job state.
     # Reject any existing path before loading the simulator.
     args.output.mkdir(parents=True, exist_ok=False)
@@ -69,7 +79,8 @@ def run(args, manifest, scenario):
                 # Factory authors stage, initializes sensors and returns an object with
                 # adapter (RuntimeAdapter), close(), and recording metadata. It must not
                 # create another app or issue commands outside the simulation domain.
-                bundle = factory(app=app, manifest=manifest, scenario=scenario, output=args.output)
+                bundle = factory(app=app, manifest=manifest, scenario=scenario,
+                                 config=config, output=args.output)
                 if getattr(bundle.adapter, 'fixture_mode', True):
                     raise RuntimeError('production runtime refuses fixture adapters')
                 mission = Mission(db, Job(**scenario['job']), bundle.adapter)
@@ -118,6 +129,7 @@ def main():
     parser.add_argument('--scenario', required=True, type=Path)
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--factory', help='installed, reviewed simulator bundle module:function')
+    parser.add_argument('--runtime-config',type=Path,help='exact host, CAD and camera runtime inputs')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--heavy-threshold-mb', type=int, choices=(1500,2500), default=1500)
     args = parser.parse_args()
