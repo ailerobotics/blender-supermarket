@@ -21,7 +21,7 @@ def main():
     parser.add_argument('--environment',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--scenario',type=Path,help='Integration scenario: staging support and actual chassis goals')
-    parser.add_argument('--localization-allowance',type=float,default=.10,
+    parser.add_argument('--localization-allowance','--position-uncertainty',type=float,default=.10,
                         help='Measured localizer uncertainty floor in metres (default .10)')
     args=parser.parse_args()
     if not math.isfinite(args.localization_allowance) or args.localization_allowance < .10:
