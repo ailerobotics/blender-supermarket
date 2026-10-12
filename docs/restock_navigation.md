@@ -21,9 +21,10 @@ in-aisle turn still fails. Optional `start(..., goal_articulation=0.08)` request
 aligned final parking; default arrival permits any articulation below the rig
 limit. Shelf-facing arm yaw is separate from the chassis goal yaw.
 
-For the environment manifest goal `[-3.05, 6.0, pi]`, planning and feedback fixtures complete `robot_dock -> stock_G3_back ->
-robot_dock` against the actual schema-2 map's 797 AABBs with **0.05 m geometry
-margin plus 0.02 m localization allowance**. The reproducible checker is
+For the scenario goal `[-3.05, 6.0, pi]` and staging support at `[-5.73, 17.1]`,
+planning and feedback fixtures complete `robot_dock -> stock_G3_back -> robot_dock`
+against all 798 AABBs with **0.05 m geometry margin plus 0.10 m localization
+allowance**, matching the calibrated MapLocalizer fixture output. The checker is
 `scripts/check_restock_navigation.py`; commands are in RUNBOOK §11. Both legs
 stop within the chassis pose tolerances, with peak articulation about 46 degrees.
 The cart remains coupled and articulated at arrival: this is not an aligned
@@ -42,26 +43,33 @@ Calibration does not reduce localization uncertainty. The in-process localizer
 retains its conservative 0.10 m floor, not a fitted covariance or a 0.02 m cap.
 An actual-map ideal-ray counterfactual at a 0.46 m sensor offset recovered the
 declared dock/shelf base poses with calibration; omitting calibration biased X
-by 0.10 m. At the resulting 0.10 m bound, the staging support 0.76 m north of the
-initial chassis intersects its full-margin transport envelope. The controller
-correctly stops; the earlier 0.02 m route fixture does not certify this pipeline.
-Integration must provide enough staging clearance and validate the resulting
-route with measured uncertainty. These CPU ray checks are not PhysX evidence.
+by 0.10 m. A staging support only 0.76 m north of the initial chassis intersects
+the full-margin transport envelope and correctly stops motion. The revised
+support leaves 0.86 m clearance. The earlier 0.02 m fixture cannot certify a
+0.10 m pipeline; the revised scenario was checked separately at that larger
+bound. CPU ray checks and quasistatic feedback are not PhysX evidence or a
+continuous sensor-pipeline demonstration.
 
 The integration scenario can specify a different shelf pose and adds a staging
 support. Pass `--scenario` to the CPU checker and `--integration-scenario` to
 both Nav2 launch and the host bridge so all three use the same obstacle map.
-The checked scenario pose `[-3.05, 5.85, pi]` intersects `G3_back_frame` with the
-transport envelope at full margins, independently of cart angle; its route
-check stopped without moving. The successful Y=6.0 fixture above does **not**
-certify this scenario or its added support. Integration must select a pose that
-also meets manipulation reach and clearance. No smaller margin is substituted.
+The earlier scenario pose `[-3.05, 5.85, pi]` intersects `G3_back_frame` with the
+transport envelope; use the validated scenario rather than that old pose.
 Checker reports include input hashes and independent robot/cart body poses;
 use the observed cart yaw for manipulation, never the chassis goal yaw.
 
-The earlier timeout for the Y=6.0 goal was a search failure: replaying the saved candidate proved
-every segment clear at full margins. The planner now tries a cached or proposed
-route before full search. A proposal may omit localization inflation during
+At the larger uncertainty, the old route really collides at portal/cabinet
+corners. A timeout does not prove the passage itself is infeasible.
+`environment_grid` derives passage direction from the manifest's portal centre
+and neighbouring route hints. The planner tries a Dubins entry, aligned straight
+passage and Dubins exit before unconstrained search, carrying independent cart
+yaw continuously through all segments. These are search hints only: every arc
+and swept envelope is validated at full margins against current obstacles.
+Blocked hints fall back to search. There is no store-specific waypoint embedded
+in the planner, no pose reset and no unchecked point-robot route.
+
+The planner also tries cached or proposed routes before full search. A proposal
+may omit localization inflation during
 search, but **acceptance always replays and collision-checks every primitive at
 the full requested allowance**, from the measured start. Teleports, stale start
 poses, invalid curvature, collisions and wrong goals reject a seed. Dynamic
@@ -71,8 +79,10 @@ checked curvature instead of cutting portal corners with a long lookahead.
 These are kinematic test fixtures, not PhysX or localization evidence. Runtime
 uses measured uncertainty, with a 2 cm minimum; it does not force uncertain
 localization down to 2 cm. The simple scan matcher below still supplies a larger
-uncertainty and may reject this tight route. AMCL must actually converge to the
-required accuracy, or integration must select a route with more clearance.
+uncertainty and can still reject a route when its measured residual increases.
+The checker defaults to 0.10 m; `--position-uncertainty` selects the evidence-backed
+fixture bound. Runtime always uses its current measured uncertainty. AMCL must
+actually converge to sufficient accuracy or select a route with more clearance.
 
 `scripts/setup_restock_nav2.py` now supplies a task-owned Jazzy overlay by
 hash-verifying apt archives and extracting them without package installation or
