@@ -296,6 +296,23 @@ python3 -m unittest discover -s scripts/twin/tests -p test_articulated_navigatio
 python3 scripts/setup_restock_nav2.py --output "$TASK_OUTPUT/nav2"
 source "$TASK_OUTPUT/nav2/env.sh"
 
+# Reproduce full-margin planning and feedback on the actual exported static map.
+# This is a TEST_FIXTURE controller check, not an Isaac/PhysX demonstration.
+python3 scripts/check_restock_navigation.py --environment "$ENVIRONMENT_MANIFEST" \
+  --output "$TASK_OUTPUT/navigation-proof"
+
+# In one isolated ROS shell, start the articulated FollowPath configuration.
+python3 scripts/run_restock_nav2.py --environment "$ENVIRONMENT_MANIFEST" \
+  --articulated --output "$TASK_OUTPUT/nav2-map" --launch
+
+# In another shell with the same task-owned env.sh sourced, run the sensor bridge.
+# The pose is a declared deployment prior, supplied by the integration scenario.
+python3 scripts/run_articulated_nav2_bridge.py --environment "$ENVIRONMENT_MANIFEST" \
+  --initial-pose "$INITIAL_X" "$INITIAL_Y" "$INITIAL_YAW"
+
+# ROS-message handoff tests, after sourcing the task-owned Jazzy overlay.
+python3 -m unittest discover -s scripts/twin/tests -p test_nav2_handoff.py -v
+
 # With a compatible Jazzy/Nav2 environment already available, generate map/config.
 # scenario.json supplies bounds, obstacles, resolution and the measured footprint.
 # OUTPUT must be a task-owned scratch directory, outside scenes/export/renders.

@@ -146,5 +146,12 @@ class IsaacRangeSensor:
 
 def observation(scan,localized,*,coupled,arm_transport,articulation=0.0):
     """Transform returns through estimated pose; caller supplies measured state."""
+    if (not math.isfinite(scan.range_max) or scan.range_max<=0
+            or not math.isfinite(scan.angle_min) or not math.isfinite(scan.angle_increment)
+            or scan.angle_increment<=0 or len(scan.ranges)<3
+            or any(math.isnan(r) or r<=0 or (math.isfinite(r) and r>scan.range_max)
+                   for r in scan.ranges)):
+        raise ValueError('invalid scan; unknown beams must not become free space')
+    coverage=scan.range_max if len(scan.ranges)*scan.angle_increment>=2*math.pi-.01 else 0.0
     return Observation(scan.stamp,scan.points(localized.pose),coupled,arm_transport,
-                       articulation,scan.source,scan.range_max)
+                       articulation,scan.source,coverage)

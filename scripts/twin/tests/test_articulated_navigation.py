@@ -93,5 +93,28 @@ class ArticulatedTests(unittest.TestCase):
             if result.status!='running': break
         self.assertEqual(result.status,'succeeded',result.reason)
 
+    def test_seed_replay_checks_full_margin_and_obstacles(self):
+        from twin.navigation.articulated import Route
+        state=TrainState(0,0,0,0)
+        states=[state]
+        for _ in range(50): states.append(advance(states[-1],.08,0,self.spec))
+        seed=Route(states,[0.0]*50,'fixture')
+        planner=ArticulatedPlanner(self.world)
+        checked=planner.validate_seed(seed,state,(4,0,0),extra_margin=.02)
+        self.assertTrue(checked.states)
+        rejected=planner.validate_seed(seed,state,(4,0,0),dynamic=((2,0),),extra_margin=.02)
+        self.assertEqual(rejected.reason,'seed_collision')
+        # A path valid without localization allowance is NOT silently accepted.
+        wall=ArticulatedMap(GridMap((-10,-10,10,10),((-10,.72,10,1.0),)))
+        self.assertTrue(ArticulatedPlanner(wall).validate_seed(seed,state,(4,0,0),extra_margin=0).states)
+        self.assertFalse(ArticulatedPlanner(wall).validate_seed(seed,state,(4,0,0),extra_margin=.02).states)
+
+    def test_seed_rejects_teleport(self):
+        from twin.navigation.articulated import Route
+        a=TrainState(0,0,0,0)
+        b=TrainState(0,.08,0,0)
+        result=ArticulatedPlanner(self.world).validate_seed(Route([a,b],[0],'fixture'),a,b.pose)
+        self.assertEqual(result.reason,'seed_kinematics_mismatch')
+
 
 if __name__=='__main__': unittest.main()

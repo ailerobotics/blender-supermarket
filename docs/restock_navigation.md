@@ -4,7 +4,7 @@
 been run against a moving Isaac robot yet. CPU tests are deterministic fixtures,
 not evidence of autonomous physics operation. Commands live in RUNBOOK §11.
 
-## Articulated route revision (integration in progress)
+## Articulated route
 
 `articulated.ArticulatedController(grid, spec=MobileSpec())` replaces the
 full-swing-circle planner for coupled towing. Its `start`/`step` interface matches
@@ -21,23 +21,51 @@ in-aisle turn still fails. Optional `start(..., goal_articulation=0.08)` request
 aligned final parking; default arrival permits any articulation below the rig
 limit. Shelf-facing arm yaw is separate from the chassis goal yaw.
 
-Eight additional CPU fixtures cover these cases, including feedback control and
-aligned return in open space. Against the actual schema-2 environment, plans
-from `robot_dock` to `stock_G3_back` and back exist with the mobile geometry's
-default margin, but those endpoints have roughly 46 degrees of articulation.
-**The repeated endcap search with an additional 2 cm localization uncertainty
-timed out.** That route is not yet validated for execution. Do not substitute
-the zero-additional-uncertainty path or claim the CPU fixtures prove the full
-mission. The simple scan matcher below still supplies a larger uncertainty;
-this mismatch must be resolved with measured localization and a feasible route.
+Planning and feedback fixtures now complete `robot_dock -> stock_G3_back ->
+robot_dock` against the actual schema-2 map's 797 AABBs with **0.05 m geometry
+margin plus 0.02 m localization allowance**. The reproducible checker is
+`scripts/check_restock_navigation.py`; commands are in RUNBOOK §11. Both legs
+stop within the chassis pose tolerances, with peak articulation about 46 degrees.
+The cart remains coupled and articulated at arrival: this is not an aligned
+re-latch or exact restoration of the cart's initial body pose.
+
+The earlier timeout was a search failure: replaying the saved candidate proved
+every segment clear at full margins. The planner now tries a cached or proposed
+route before full search. A proposal may omit localization inflation during
+search, but **acceptance always replays and collision-checks every primitive at
+the full requested allowance**, from the measured start. Teleports, stale start
+poses, invalid curvature, collisions and wrong goals reject a seed. Dynamic
+obstacles never inherit a cached clear verdict. The feedback tracker follows
+checked curvature instead of cutting portal corners with a long lookahead.
+
+These are kinematic test fixtures, not PhysX or localization evidence. Runtime
+uses measured uncertainty, with a 2 cm minimum; it does not force uncertain
+localization down to 2 cm. The simple scan matcher below still supplies a larger
+uncertainty and may reject this tight route. AMCL must actually converge to the
+required accuracy, or integration must select a route with more clearance.
 
 `scripts/setup_restock_nav2.py` now supplies a task-owned Jazzy overlay by
 hash-verifying apt archives and extracting them without package installation or
 maintainer scripts. The overlay resolved 208 packages and the CPU Nav2 launch
 loaded successfully, then waited for missing sensor TF. No host upgrades or
-GPU job occurred. The existing Nav2 route below still uses its conservative
-circle; connecting Nav2 path following to the articulated planner remains an
-integration task. The new in-process articulated controller does not require ROS.
+GPU job occurred. `ArticulatedNav2Adapter` now sends the validated articulated
+path directly to Nav2 `FollowPath`, publishes the measured combined footprint,
+and applies the articulated velocity/braking gate to Nav2 proposals. Generate
+its configuration with `--articulated`: Nav2's fixed-shape predictive collision
+check is disabled for this mode because the final gate predicts the separate
+cart yaw. Never send raw Nav2 commands to an actuator. The in-process articulated
+controller remains available without ROS.
+
+`scripts/run_articulated_nav2_bridge.py` runs with host Jazzy Python, avoiding
+the Isaac 3.11/host ROS 3.12 ABI mismatch. In isolated namespace `restock`, it
+subscribes to `encoder_odom` (`nav_msgs/Odometry`, odom/base_link), `scan_input`
+(`sensor_msgs/LaserScan`, base_link), and `measured_rig_state`
+(`Float64MultiArray`: simulation timestamp, coupled 0/1, arm-transport 0/1,
+measured articulation). Publish goals to `navigation_goal` as JSON String
+`{"pose":[x,y,chassis_yaw],"coupled":true}`. It publishes `safe_cmd_vel` and
+`navigation_status`. Missing/stale inputs produce zero, including wall-clock
+staleness when simulation timestamps stop advancing. The initial AMCL pose is
+an explicit deployment prior, retried only while localization is absent.
 
 ## Integration contract
 

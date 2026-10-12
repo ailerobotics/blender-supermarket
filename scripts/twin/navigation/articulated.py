@@ -181,17 +181,87 @@ class ArticulatedPlanner:
         self.yaw_step=2*math.pi/yaw_bins
         self.length=primitive_length
         self.max_expansions,self.timeout=max_expansions,timeout
+        self.seeds=[]
 
     def key(self,s):
         return (round(s.x/self.xy_resolution),round(s.y/self.xy_resolution),
                 round(wrap(s.yaw)/self.yaw_step),round(s.articulation/self.yaw_step))
 
-    def plan(self,start,goal,dynamic=(),extra_margin=0.0,goal_articulation=None):
+    def validate_seed(self, seed, start, goal, dynamic=(), extra_margin=0.02,
+                      goal_articulation=None):
+        """Replay controls from measured start; reject stale/colliding/invalid seeds.
+
+        A cached route is a planning hint, never a replacement for feedback. Its
+        world poses are not sent to actuators. Every replayed arc is collision
+        checked against the current static map and current obstacle observations.
+        """
+        limit=self.world.spec.max_articulation if goal_articulation is None else goal_articulation
+        if not seed.states or len(seed.curvatures)!=len(seed.states)-1:
+            return Route([],[],'invalid_seed')
+        initial=seed.states[0]
+        if (math.dist(initial.pose[:2],start.pose[:2])>0.10
+                or abs(wrap(initial.yaw-start.yaw))>0.03
+                or abs(wrap(initial.cart_yaw-start.cart_yaw))>0.10):
+            return Route([],[],'seed_start_mismatch')
+        if not self.world.valid(start,dynamic,extra_margin):
+            return Route([],[],'invalid_start')
+        states=[start]; curvatures=[]
+        for a,b,k in zip(seed.states,seed.states[1:],seed.curvatures):
+            ds=math.dist(a.pose[:2],b.pose[:2])
+            if not math.isfinite(k) or not 0<ds<=0.10:
+                return Route([],[],'invalid_seed_primitive')
+            expected=advance(a,ds,k,self.world.spec)
+            if (math.dist(expected.pose[:2],b.pose[:2])>1e-5
+                    or abs(wrap(expected.yaw-b.yaw))>1e-5
+                    or abs(wrap(expected.cart_yaw-b.cart_yaw))>1e-5):
+                return Route([],[],'seed_kinematics_mismatch')
+            samples=self.world.rollout(states[-1],ds,k,dynamic,extra_margin,step=0.10)
+            if not samples:
+                return Route([],[],'seed_collision')
+            states.extend(samples[1:]); curvatures.extend([k]*(len(samples)-1))
+        end=states[-1]
+        if (math.dist(end.pose[:2],goal[:2])>=0.07 or abs(wrap(end.yaw-goal[2]))>=0.07
+                or abs(end.articulation)>=limit):
+            return Route([],[],'seed_goal_mismatch')
+        return Route(states,curvatures,'validated_seed')
+
+    def plan(self,start,goal,dynamic=(),extra_margin=0.02,goal_articulation=None):
+        """Try verified cache, an independently checked proposal, then full search.
+
+        The proposal search keeps the mandatory body margin but omits localization
+        inflation only while finding a candidate. It cannot return that candidate
+        until validate_seed replays every segment at the requested full allowance.
+        This changes search order without changing trajectory acceptance criteria.
+        """
+        if not self.world.valid(start,dynamic,extra_margin):
+            return Route([],[],'invalid_start')
+        for seed in self.seeds:
+            checked=self.validate_seed(seed,start,goal,dynamic,extra_margin,goal_articulation)
+            if checked.states:
+                return checked
+        if extra_margin>=0.02:
+            proposer=ArticulatedPlanner(self.world,xy_resolution=self.xy_resolution,
+                yaw_bins=round(2*math.pi/self.yaw_step),primitive_length=self.length,
+                max_expansions=self.max_expansions,timeout=min(5.0,self.timeout/4))
+            candidate=proposer._search(start,goal,dynamic,0.0,goal_articulation)
+            if candidate.states:
+                checked=self.validate_seed(candidate,start,goal,dynamic,extra_margin,goal_articulation)
+                if checked.states:
+                    checked.reason='validated_proposal'
+                    checked.expanded=candidate.expanded
+                    return checked
+        return self._search(start,goal,dynamic,extra_margin,goal_articulation)
+
+    def _search(self,start,goal,dynamic=(),extra_margin=0.02,goal_articulation=None):
         goal_articulation=self.world.spec.max_articulation if goal_articulation is None else goal_articulation
         if len(goal)!=3 or not all(math.isfinite(v) for v in goal):
             raise ValueError('goal must be finite [x,y,chassis_yaw]')
         if not self.world.valid(start,dynamic,extra_margin):
             return Route([],[],'invalid_start')
+        for seed in self.seeds:
+            checked=self.validate_seed(seed,start,goal,dynamic,extra_margin,goal_articulation)
+            if checked.states:
+                return checked
         # Goal cart yaw is a state to solve for, not assumed attached collinearly.
         def heuristic(s):
             return max(math.hypot(s.x-goal[0],s.y-goal[1]),
@@ -275,7 +345,7 @@ class ArticulatedController(Controller):
         self.world=ArticulatedMap(grid,self.spec)
         self.planner=ArticulatedPlanner(self.world)
         super().__init__(grid,Footprint(self.spec.transport_radius,abs(self.spec.hitch_x),
-                         self.spec.cart_hitch_x+self.spec.cart_length/2,
+                         math.hypot(self.spec.cart_hitch_x+self.spec.cart_length/2,self.spec.cart_width/2),
                          margin=0.05,min_turn_radius=1.5,
                          max_articulation=self.spec.max_articulation),**kwargs)
         self.route=None
@@ -304,12 +374,13 @@ class ArticulatedController(Controller):
         state=TrainState(*odom.pose,wrap(odom.pose[2]-obs.articulation))
         speed=max(v,abs(odom.linear))
         stop=speed*self.stale_after+speed*speed/(2*self.brake_acceleration)
-        if obs.coverage_radius<self.footprint.radius(True)+stop:
+        if obs.coverage_radius<self.footprint.radius(True)+max(.02,odom.position_uncertainty)+stop:
             return Result(reason='insufficient_sensor_coverage')
-        if not self.world.valid(state,obs.obstacles,odom.position_uncertainty):
+        uncertainty=max(0.02,odom.position_uncertainty)
+        if not self.world.valid(state,obs.obstacles,uncertainty):
             return Result(reason='obstacle_stop')
         k=w/v if v>1e-6 else 0.0
-        if not self.world.rollout(state,stop,k,obs.obstacles,odom.position_uncertainty):
+        if not self.world.rollout(state,stop,k,obs.obstacles,uncertainty):
             return Result(reason='obstacle_stop')
         # During a command change braking follows measured curvature, too.
         if abs(odom.linear)>0.02:
@@ -317,7 +388,7 @@ class ArticulatedController(Controller):
             if abs(measured_k)>1/1.5+0.03:
                 return Result(reason='measured_turn_radius')
             if not self.world.rollout(state,stop,max(-1/1.5,min(1/1.5,measured_k)),
-                                      obs.obstacles,odom.position_uncertainty):
+                                      obs.obstacles,uncertainty):
                 return Result(reason='obstacle_stop')
         return Result(v,w,reason='tracking')
 
@@ -354,12 +425,15 @@ class ArticulatedController(Controller):
                 return Result(reason='planning_stop')
             if abs(odom.linear)>0.02 or abs(odom.angular)>0.03:
                 return Result(reason='waiting_stopped_for_plan')
-            self.route=self.planner.plan(state,self.goal,obs.obstacles,odom.position_uncertainty,
+            self.route=self.planner.plan(state,self.goal,obs.obstacles,max(0.02,odom.position_uncertainty),
                                          self.goal_articulation)
+            self.planned_obstacles=obs.obstacles
             self.index=0
             return Result(reason='route_ready' if self.route.states else self.route.reason)
         if not self.route.states:
-            self.route=None
+            if obs.obstacles!=self.planned_obstacles:
+                self.route=None
+                return Result(reason='replan_changed_observations')
             return self._wait(dt,'blocked_no_route')
         candidates=range(self.index,min(len(self.route.states),self.index+20))
         self.index=min(candidates,key=lambda i:math.hypot(self.route.states[i].x-state.x,
@@ -368,11 +442,21 @@ class ArticulatedController(Controller):
         if math.hypot(nearest.x-state.x,nearest.y-state.y)>0.25 or abs(wrap(nearest.cart_yaw-state.cart_yaw))>0.20:
             self.route=None
             return Result(reason='stop_replan_tracking_error')
-        target_index=min(len(self.route.states)-1,self.index+5)
-        target=self.route.states[target_index]
-        dx,dy=target.x-state.x,target.y-state.y
-        lateral=-math.sin(state.yaw)*dx+math.cos(state.yaw)*dy
-        curvature=2*lateral/max(0.05,dx*dx+dy*dy)
+        # Follow the checked curvature, rather than cutting tight portal corners
+        # with a long pure-pursuit lookahead. Project onto the closest local edge
+        # to avoid waypoint-quantization heading error.
+        choices=[]
+        for j in range(max(0,self.index-2),min(len(self.route.states)-1,self.index+3)):
+            a,b=self.route.states[j:j+2]
+            dx,dy=b.x-a.x,b.y-a.y
+            t=max(0.0,min(1.0,((state.x-a.x)*dx+(state.y-a.y)*dy)/max(1e-9,dx*dx+dy*dy)))
+            x,y=a.x+t*dx,a.y+t*dy
+            choices.append((math.hypot(state.x-x,state.y-y),j,t,x,y))
+        _,j,t,x,y=min(choices)
+        a,b=self.route.states[j:j+2]
+        ref_yaw=wrap(a.yaw+t*wrap(b.yaw-a.yaw))
+        lateral=-math.sin(ref_yaw)*(x-state.x)+math.cos(ref_yaw)*(y-state.y)
+        curvature=self.route.curvatures[j]+1.5*wrap(ref_yaw-state.yaw)+2*lateral
         curvature=max(-1/1.5,min(1/1.5,curvature))
         v=min(self.max_speed,max(0.03,distance*0.5))
         result=self.gate_velocity(now,odom,obs,v,v*curvature)

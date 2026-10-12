@@ -17,7 +17,7 @@ def require_isolation():
         raise RuntimeError('ROS discovery must be loopback only')
 
 
-def write_assets(directory,grid,footprint,*,coupled=True,template=None):
+def write_assets(directory,grid,footprint,*,coupled=True,template=None,articulated_spec=None):
     """Generate map, Nav2 params and a replan tree; no installs or simulator boot."""
     import yaml
     if template is None:
@@ -61,6 +61,14 @@ def write_assets(directory,grid,footprint,*,coupled=True,template=None):
         'allow_reversing':False,'use_collision_detection':True,
         'max_allowed_time_to_collision_up_to_carrot':2.0})
     radius=footprint.radius(coupled)+0.10  # localization allowance also checked at runtime
+    if articulated_spec is not None:
+        # Global costmap is advisory only for the FollowPath route. The actual
+        # base/cart path and every actuator command pass the articulated checker.
+        radius=(articulated_spec.transport_radius+0.05+0.02)/math.cos(math.pi/16)
+        params('controller_server')['FollowPath'].update(
+            lookahead_dist=0.10,min_lookahead_dist=0.10,max_lookahead_dist=0.10,
+            use_velocity_scaled_lookahead_dist=False,use_collision_detection=False,
+            use_cost_regulated_linear_velocity_scaling=False)
     for name in ('global_costmap','local_costmap'):
         p=config[name][name]['ros__parameters']
         p.update(use_sim_time=True,robot_base_frame='base_link',robot_radius=radius,
@@ -127,12 +135,16 @@ class Nav2Adapter:
         rclpy.init(context=self.context)
         self.node=rclpy.create_node('restock_navigation_adapter',namespace='restock',context=self.context,
             cli_args=['--ros-args','-r','/tf:=/restock/tf','-r','/tf_static:=/restock/tf_static'])
+        from rclpy.executors import SingleThreadedExecutor
+        self.executor=SingleThreadedExecutor(context=self.context)
+        self.executor.add_node(self.node)
         self.node.set_parameters([rclpy.parameter.Parameter('use_sim_time',value=True)])
         self.safe=safety_controller
         self.command=(0.0,0.0)
         self.command_stamp=-math.inf
         self.localization_stamp=-math.inf
         self.localization_uncertainty=math.inf
+        self.minimum_localization_uncertainty=0.10
         self.goal_handle=None
         self.goal_future=None
         self.outcome=None
@@ -199,7 +211,7 @@ class Nav2Adapter:
         msg.angle_max=float(scan.angle_min+(len(scan.ranges)-1)*scan.angle_increment)
         msg.range_min=0.001; msg.range_max=float(scan.range_max); msg.ranges=list(scan.ranges)
         self.scan_pub.publish(msg)
-        self.rclpy.spin_once(self.node,timeout_sec=0.0)
+        self.executor.spin_once(timeout_sec=0.0)
 
     def start(self,goal,coupled):
         from nav2_msgs.action import NavigateToPose
@@ -238,7 +250,7 @@ class Nav2Adapter:
     def step(self,dt,odometry,scan,*,coupled,arm_transport,articulation=0.0):
         if not math.isfinite(dt) or dt <= 0 or dt > self.safe.stale_after:
             return Result(reason='invalid_control_period')
-        self.rclpy.spin_once(self.node,timeout_sec=0.0)
+        self.executor.spin_once(timeout_sec=0.0)
         if self.safe.goal is None:
             return Result(status='failed',reason='no_goal')
         if self.safe.terminal:
@@ -259,7 +271,7 @@ class Nav2Adapter:
             if self.now-self.localization_stamp>1.0 or self.localization_uncertainty>0.25:
                 raise ValueError('localization missing or uncertain')
             odom=Odometry(pose,stamp,odometry.linear,odometry.angular,
-                          position_uncertainty=max(0.10,self.localization_uncertainty))
+                          position_uncertainty=max(self.minimum_localization_uncertainty,self.localization_uncertainty))
             obs=observation(scan,odom,coupled=coupled,arm_transport=arm_transport,articulation=articulation)
         except Exception:
             return self.safe._wait(dt,'localization_unavailable')
@@ -285,5 +297,118 @@ class Nav2Adapter:
 
     def close(self):
         self.cancel()
+        self.executor.shutdown()
         self.node.destroy_node()
         self.context.shutdown()
+
+
+class ArticulatedNav2Adapter(Nav2Adapter):
+    """Use Nav2 FollowPath on a fully validated articulated path, never NavigateToPose.
+
+    AMCL/TF/scan and the velocity gate are the same as Nav2Adapter. Construct with
+    ArticulatedController and generate assets with articulated_spec=controller.spec.
+    Missing localization stops before planning. The caller applies every returned
+    zero and keeps a watchdog; raw ROS cmd_vel must never connect to the wheels.
+    """
+    def __init__(self,safety_controller):
+        from .articulated import ArticulatedController
+        if not isinstance(safety_controller,ArticulatedController):
+            raise TypeError('ArticulatedController required')
+        super().__init__(safety_controller)
+        from rclpy.action import ActionClient
+        from nav2_msgs.action import FollowPath
+        from geometry_msgs.msg import Polygon
+        self.client.destroy()
+        self.client=ActionClient(self.node,FollowPath,'follow_path')
+        self.footprint_pub=self.node.create_publisher(Polygon,'local_costmap/footprint',10)
+        self.minimum_localization_uncertainty=0.02
+        self.pending=False
+        self.stop_sent=False
+
+    def start(self,goal,coupled):
+        if self.goal_future is not None or self.goal_handle is not None:
+            raise RuntimeError('wait for previous action result before starting another')
+        if not coupled:
+            raise ValueError('use Nav2Adapter for an uncoupled mission')
+        self.safe.start(goal,coupled)
+        self.outcome=None
+        self.command=(0.0,0.0)
+        self.command_stamp=-math.inf
+        self.pending=True
+        self.stop_sent=False
+
+    def _state(self,raw,scan,coupled,arm_transport,articulation):
+        tf=self.buffer.lookup_transform('map','base_link',self.rclpy.time.Time())
+        q=tf.transform.rotation
+        yaw=math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
+        stamp=tf.header.stamp.sec+tf.header.stamp.nanosec*1e-9
+        if self.now-self.localization_stamp>1.0 or self.localization_uncertainty>0.25:
+            raise ValueError('localization missing or uncertain')
+        odom=Odometry((tf.transform.translation.x,tf.transform.translation.y,yaw),
+                       stamp,raw.linear,raw.angular,
+                       position_uncertainty=max(.02,self.localization_uncertainty))
+        return odom,observation(scan,odom,coupled=coupled,arm_transport=arm_transport,
+                                 articulation=articulation)
+
+    def _publish_footprint(self,odom,obs):
+        from geometry_msgs.msg import Polygon,Point32
+        from .articulated import TrainState
+        from twin.mobile import occupied_envelope
+        s=TrainState(*odom.pose,wrap(odom.pose[2]-obs.articulation))
+        points=occupied_envelope(*s.bodies(self.safe.spec),self.safe.spec,
+                                  margin=.05+odom.position_uncertainty)
+        msg=Polygon()
+        for x,y in points:
+            dx,dy=x-s.x,y-s.y
+            msg.points.append(Point32(x=float(dx*math.cos(s.yaw)+dy*math.sin(s.yaw)),
+                                      y=float(-dx*math.sin(s.yaw)+dy*math.cos(s.yaw)),z=0.0))
+        self.footprint_pub.publish(msg)
+
+    def step(self,dt,odometry,scan,*,coupled,arm_transport,articulation=0.0):
+        if not math.isfinite(dt) or not 0<dt<=self.safe.stale_after:
+            return Result(reason='invalid_control_period')
+        if self.safe.terminal:
+            return self.safe.terminal
+        self.executor.spin_once(timeout_sec=0.0)
+        try:
+            odom,obs=self._state(odometry,scan,coupled,arm_transport,articulation)
+            reason=self.safe._inputs(self.now,odom,obs)
+            if reason:
+                return self.safe._wait(dt,reason)
+            self._publish_footprint(odom,obs)
+        except Exception:
+            return self.safe._wait(dt,'localization_unavailable')
+        if self.pending:
+            self.safe.elapsed+=dt
+            if self.safe.elapsed>self.safe.goal_timeout:
+                return self.cancel()
+            if not self.stop_sent:
+                self.stop_sent=True
+                return Result(reason='planning_stop')
+            if abs(odom.linear)>.02 or abs(odom.angular)>.03:
+                return Result(reason='waiting_stopped_for_plan')
+            if not self.client.server_is_ready():
+                return self.safe._wait(dt,'nav2_unavailable')
+            from .articulated import TrainState
+            state=TrainState(*odom.pose,wrap(odom.pose[2]-obs.articulation))
+            route=self.safe.planner.plan(state,self.safe.goal,obs.obstacles,odom.position_uncertainty)
+            if not route.states:
+                return self.safe._wait(dt,route.reason)
+            from nav2_msgs.action import FollowPath
+            from geometry_msgs.msg import PoseStamped
+            msg=FollowPath.Goal()
+            msg.path.header.frame_id='map'
+            msg.path.header.stamp=self.node.get_clock().now().to_msg()
+            for s in route.states:
+                pose=PoseStamped();pose.header=msg.path.header
+                self._pose(pose.pose,s.pose)
+                msg.path.poses.append(pose)
+            msg.controller_id='FollowPath'
+            msg.goal_checker_id='goal_checker'
+            self.safe.route=route
+            self.pending=False
+            self.goal_future=self.client.send_goal_async(msg)
+            self.goal_future.add_done_callback(self._accepted)
+            return Result(reason='articulated_path_submitted')
+        return super().step(dt,odometry,scan,coupled=coupled,
+                            arm_transport=arm_transport,articulation=articulation)

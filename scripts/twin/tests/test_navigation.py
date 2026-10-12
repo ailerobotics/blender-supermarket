@@ -178,5 +178,15 @@ class NavigationTests(unittest.TestCase):
         with patch.dict('os.environ',{'ROS_DOMAIN_ID':'42','ROS_LOCALHOST_ONLY':'1'}):
             with self.assertRaises(RuntimeError): require_isolation()
 
+    def test_invalid_and_partial_scans_do_not_certify_full_coverage(self):
+        from twin.navigation.sensors import observation
+        odom=Odometry((0,0,0),.1)
+        with self.assertRaises(ValueError):
+            observation(Scan(.1,(float('nan'),)*360,-math.pi,math.pi/180,10),
+                        odom,coupled=True,arm_transport=True)
+        partial=observation(Scan(.1,(10,)*180,-math.pi/2,math.pi/180,10),
+                            odom,coupled=True,arm_transport=True)
+        self.assertEqual(partial.coverage_radius,0)
+
 
 if __name__=='__main__': unittest.main()
