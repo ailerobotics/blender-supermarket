@@ -470,13 +470,30 @@ A reviewed simulator bundle factory providing actual sensors, controls, stage
 construction and recording is still required; no mock fallback is installed.
 
 The default preflight is CPU-only and never probes the GPU. Supply the environment
-worker's final manifest; the checked-in scenario is a deliberately unready
-starting point (static cases and legacy circular route gate), not a success demo.
+worker's final manifest; the checked-in scenario retains an explicit runtime
+readiness gate. The articulated route check must use the actual 0.10 m or larger
+localization uncertainty; earlier 0.02 m fixture evidence is insufficient.
 
 ```bash
 bash scripts/run_mobile_restock.sh --manifest "$ENVIRONMENT_MANIFEST" \
   --scenario scripts/restock_scenario.json
 ```
+
+The host arm executor runs in ROS host Python after sourcing the task-owned
+overlay. Launch only with the authorized domain-88 simulator session. It consumes
+planned trajectories, publishes stamped joint-drive targets, and checks measured
+feedback; it never commands physical hardware or writes joint state:
+
+```bash
+ROS_DOMAIN_ID=88 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST ROS_LOCALHOST_ONLY=1 \
+  PYTHONPATH=scripts python3 -m twin.restock.trajectory_host --urdf "$MOBILE_URDF"
+```
+
+Endpoint: `/restock_sim/arm_controller/follow_joint_trajectory`. Bounds are
+0.15 rad/s, 0.5 rad/s², 0.15 rad tracking error and 0.01 rad terminal error with
+measured speed at most 0.02 rad/s. Plans require explicit waypoint velocities,
+zero-time rest starts and rest ends. Faults/cancellation latch stop; recovery
+requires reconciliation and restarting the task-owned executor.
 
 After a complete simulator bundle exists and preflight is green, `--execute`
 requires `--factory module:function` and a **new** `--output` scratch directory.

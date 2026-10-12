@@ -184,6 +184,12 @@ uncertainty envelope. The new source IK and whole-link insertion sweep pass for
 arm/tool geometry; intended payload/support and wheel/floor bounds remain.
 Camera and full-route validation must consume this new scenario hash.
 
+The final north-shifted scenario was checked at the localizer's actual 0.10 m
+uncertainty floor after the sensor-extrinsic correction landed. Outbound planning
+failed with `blocked_no_route_timeout` before any fixture motion. Earlier 0.02 m
+route evidence does not validate this configuration. The required clearance is
+retained; the navigation owner has been notified for follow-up.
+
 `IsaacPort` acquires articulation encoders, rigid-body docking feedback, physical
 range scans, native seal, measured transport geometry and recording frames.
 Docking feedback is ideal simulated proprioception, separate from localized
@@ -194,6 +200,13 @@ Post-transfer stow uses a collision-planned joint goal and measured completion
 before two fresh inventory observations, preventing travel with the arm extended.
 `preflight_mobile_restock.py` lists unresolved files/modules and seven exact ROS
 service/action prerequisites without probing the held GPU.
+
+`twin.restock.trajectory_host` supplies the host FollowJointTrajectory endpoint
+with guarded stamped arm targets and measured goal completion. Its cubic
+interpolation checks all position, speed and acceleration extrema, rather than
+only waypoints. Six CPU numerical tests pass; DDS transport and physical tracking
+remain untested under the simulator hold. Start it only in the isolated host
+runtime with the generated mobile URDF, as documented in RUNBOOK §11.
 
 Firstmate reports task-local NVML/CUDA/Vulkan probes succeeded with staged
 matching libraries; these were not run by this worker and do not establish Isaac

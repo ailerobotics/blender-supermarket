@@ -83,7 +83,7 @@ def validate(manifest, scenario):
         errors.append('navigation must use the actual articulated train model')
     spec = MobileSpec()
     outline = occupied_envelope(Pose2(0,0,0),
-        Pose2(spec.hitch_x-spec.cart_hitch_x,0,0),spec,margin=.05+.02)
+        Pose2(spec.hitch_x-spec.cart_hitch_x,0,0),spec,margin=.05+.10)
     width = max(p[1] for p in outline)-min(p[1] for p in outline)
     portal = manifest.get('portal', {}).get('clear_width', 0)
     if not isinstance(portal,(int,float)) or not math.isfinite(portal) or width >= portal:

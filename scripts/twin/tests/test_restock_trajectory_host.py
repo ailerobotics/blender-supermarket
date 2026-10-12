@@ -1,0 +1,58 @@
+"""Numerical execution checks without ROS, GPU or a synthetic planner."""
+from types import SimpleNamespace as NS
+
+import numpy as np
+import pytest
+
+from twin.restock.trajectory_host import Plan
+from twin.restock_manipulation.cad_tool import ARM_JOINTS
+
+
+def trajectory(end=.1,duration=2.,velocity=0.):
+    def point(q,v,t):
+        return NS(positions=[q]*6,velocities=[v]*6,effort=[],
+                  time_from_start=NS(sec=int(t),nanosec=round((t-int(t))*1e9)))
+    return NS(joint_names=list(ARM_JOINTS),points=[point(0,0,0),point(end,velocity,duration)])
+
+
+def test_interpolation_and_terminal_hold():
+    plan=Plan(trajectory(),[0]*6,[(-1,1)]*6)
+    q,v=plan.sample(1)
+    assert np.allclose(q,.05)
+    assert np.allclose(v,.075)
+    assert np.allclose(plan.sample(5)[0],.1)
+    assert np.allclose(plan.sample(5)[1],0)
+
+
+def test_interior_speed_violation_despite_rest_endpoints():
+    with pytest.raises(ValueError,match='speed'):
+        Plan(trajectory(.14,1),[0]*6,[(-1,1)]*6)
+
+
+def test_acceleration_violation_despite_valid_peak_speed():
+    with pytest.raises(ValueError,match='acceleration'):
+        Plan(trajectory(.01,.2),[0]*6,[(-1,1)]*6)
+
+
+def test_interior_joint_limit_violation():
+    t=trajectory(.09,2)
+    t.points.insert(1,NS(positions=[.09]*6,velocities=[.1]*6,effort=[],
+                        time_from_start=NS(sec=1,nanosec=0)))
+    with pytest.raises(ValueError,match='joint limit'):
+        Plan(t,[0]*6,[(-.1,.1)]*6,max_speed=1,max_acceleration=10)
+
+
+def test_requires_measured_start_and_velocities():
+    with pytest.raises(ValueError,match='measured'):
+        Plan(trajectory(),[.2]*6,[(-1,1)]*6)
+    t=trajectory()
+    t.points[0].velocities=[]
+    with pytest.raises(ValueError,match='explicit'):
+        Plan(t,[0]*6,[(-1,1)]*6)
+
+
+def test_reorders_joint_names():
+    t=trajectory()
+    t.joint_names.reverse()
+    t.points[-1].positions=[.01,.02,.03,.04,.05,.06]
+    assert np.allclose(Plan(t,[0]*6,[(-1,1)]*6).end,[.06,.05,.04,.03,.02,.01])
