@@ -1,6 +1,6 @@
 # Mobile restocking integration checkpoint
 
-Status: incomplete, GPU bring-up blocked. No autonomous physics cycle or MP4 has
+Status: incomplete, simulator execution held pending explicit release. No autonomous physics cycle or MP4 has
 been produced. The current branch contains CPU mission/inventory infrastructure;
 the landed mobile/cart, schema-2 environment, articulated navigation and CAD
 manipulation components are integrated from origin/main.
@@ -23,7 +23,7 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-224 combined CPU tests pass with three dependency skips at the integration checkpoint, with the installed Isaac USD libraries exposed
+234 combined CPU tests pass with three dependency skips at the integration checkpoint, with the installed Isaac USD libraries exposed
 without booting Kit (including mission/runtime, recording, stock-scene and environment tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
 Reproduction is in RUNBOOK section 11. The shared firstmate interface contract was
@@ -56,16 +56,16 @@ gate cannot authorize a boot. CUDA initialization also fails: this is not merely
 a broken telemetry executable. Already-running services may retain older mapped
 libraries; their survival is not proof that new Isaac processes can start.
 
-Counterfactual needed: repeat NVML and CUDA initialization with a coherent driver
-stack. No matching installed alternate was found in the bounded search, so that
-counterfactual was not run. The error does not establish whether Isaac would have
-additional compatibility or memory problems once the driver stack is coherent.
+Firstmate subsequently ran the isolated counterfactual using task-local matching
+580.173.02 libraries: NVML, CUDA initialization (`cuInit=0`, driver API 13000,
+one RTX3060) and Vulkan probes passed without changing live services. These are
+supervisor-reported diagnostics, not this worker's simulator evidence. They
+supersede the earlier unavailable-counterfactual diagnosis. Isaac compatibility,
+memory headroom and simultaneous planner operation remain unproven.
 
-Least disruptive action now: preserve live services and continue CPU work. A
-supervisor-coordinated maintenance reboot after protecting user sessions is the
-conventional way to load the updated kernel module; it is outside this worker's
-authority and was not attempted. Do not unload modules, restart services, install
-or downgrade drivers, or bypass the GPU guard for this task.
+The simulator hold remains explicit pending firstmate's release and matching
+runtime environment. Preserve live services and the protected-Blender/resource
+guard; no driver installation, reboot, service restart or guard bypass occurred.
 
 ## Remaining delivery gates
 
@@ -211,3 +211,43 @@ runtime with the generated mobile URDF, as documented in RUNBOOK §11.
 Firstmate reports task-local NVML/CUDA/Vulkan probes succeeded with staged
 matching libraries; these were not run by this worker and do not establish Isaac
 compatibility. The explicit simulator hold remains in effect pending relay.
+
+## Runnable checkpoint and exact remaining inputs
+
+Draft review: https://github.com/ailerobotics/blender-supermarket/pull/15.
+The committed implementation includes merged environment/mobile/navigation/
+manipulation modules and integration mission/transport/execution code. CPU proofs
+are separated from all runtime claims above. `physics_setup.inputs` checks the
+actual generated CAD limits, initial-state flag and input hashes without importing
+Isaac. `physics_setup.assemble` provides the native import/composition/default-state/
+gripper/drive assembly for the guarded app; it is not yet simulator-tested.
+
+Host worker owns CAD SRDF/XRDF generation and coverage/hash evidence. Its task-local
+ROS overlay imports and component dependency checks passed; this does not prove
+GPU planner/mapper startup. Host and camera code must land before integration
+imports them. Remaining inputs are exact CAD collision assets, a passing route at
+actual uncertainty, a current-scenario camera configuration with sensed support
+and clearance, camera housing collision validation, mapper reset/incorporation
+acknowledgements, and the complete sensor-binding mission factory. Camera work
+currently reports loaded-support occlusion and insufficient shelf support ROI;
+these must be resolved with actual sensing, not enlarged or invented free space.
+
+Resume CPU validation from the isolated worktree (runtime config remains in the
+task artifact directory, with machine paths kept out of reusable source):
+
+```bash
+python3 scripts/preflight_mobile_restock.py --runtime-config "$RUNTIME_CONFIG" \
+  --output "$TASK_OUTPUT/runtime-preflight.json"
+python3 scripts/check_restock_navigation.py --environment "$ENVIRONMENT_MANIFEST" \
+  --scenario scripts/restock_scenario.json --localization-allowance .10 \
+  --output "$TASK_OUTPUT/navigation-current"
+```
+
+After missing components land, rerun reach/sweep/camera proofs against the exact
+new route and scenario hashes, then rerun the CPU suite. The future execution
+command is `scripts/run_mobile_restock.sh --manifest "$ENVIRONMENT_MANIFEST"
+--scenario scripts/restock_scenario.json --execute --factory twin.restock.isaac_bundle:create
+--output "$NEW_RUN_OUTPUT"`; that factory is still incomplete, the scenario
+readiness flag remains false, and this command is **not runnable as a complete
+mission yet**. Execute only after explicit GPU release and fresh guards. No MP4
+has been fabricated to fill the missing physics evidence.

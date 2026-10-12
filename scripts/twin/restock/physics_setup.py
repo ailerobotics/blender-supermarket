@@ -1,0 +1,136 @@
+"""Native Isaac stage and actuator assembly inside the caller's guarded app.
+
+This is the physical assembly half of the mission factory. It does not claim
+camera/mapper readiness. All reset-state authoring happens before any mission
+step; after construction callers receive drive targets and measured state only.
+"""
+from dataclasses import dataclass, fields
+import hashlib
+import json
+from pathlib import Path
+
+import numpy as np
+
+from twin.mobile import MobileSpec
+from twin.mobile_runtime import MobileController
+from twin.restock_manipulation.cad_tool import inspect_tool, author_native_gripper, NativePanelContact
+from twin.restock_manipulation.ros_adapter import require_sim_domain
+from .isaac_bootstrap import import_mobile, discover
+from .native_transport import ArmCommandGate, NativeTransport
+from .scene import build, label_stock
+
+
+def inputs(config, scenario):
+    """CPU-only exact generated asset validation, with no Isaac import."""
+    manifest_path=Path(config['mobile_manifest']).resolve()
+    mobile=json.loads(manifest_path.read_text())
+    urdf=Path(mobile['mobile_urdf']).resolve()
+    store=Path(config['store_usd']).resolve()
+    if not urdf.is_file() or not store.is_file():
+        raise ValueError('generated mobile URDF and exported store required')
+    spec=MobileSpec(**{f.name:mobile['spec'][f.name] for f in fields(MobileSpec)})
+    tool=inspect_tool(urdf)
+    positions=mobile['transport_positions']
+    if any(name not in positions or not lo<=positions[name]<=hi
+           for name,(lo,hi) in zip(tool.arm_joints,tool.arm_limits)):
+        raise ValueError('transport joints differ from actual CAD limits')
+    if not scenario['initial_staging']['initial_conditions_only']:
+        raise ValueError('scenario must declare initial-condition placements')
+    hashes={name:hashlib.sha256(path.read_bytes()).hexdigest()
+            for name,path in [('mobile_manifest',manifest_path),('mobile_urdf',urdf),('store_usd',store)]}
+    hashes['scenario']=hashlib.sha256(json.dumps(scenario,sort_keys=True).encode()).hexdigest()
+    return mobile,urdf,store,spec,tool,hashes
+
+
+@dataclass
+class PhysicsAssembly:
+    world: object
+    stage: object
+    robot: object
+    robot_body: object
+    cart_body: object
+    mobile: object
+    contact: object
+    command_gate: object
+    transport: object
+    paths: dict
+    evidence: dict
+
+    def hold(self):
+        self.mobile.park()
+        self.command_gate.hold()
+
+
+def assemble(*, app, config, scenario, output):
+    """Import actual mobile CAD, compose scratch USD and initialize drive control.
+
+    Does not create SimulationApp, acquire GPU permission or start a host service.
+    The calling launcher must hold the existing guard for this entire lifetime.
+    No physics stepping, body relocation or reset is exposed as a task action.
+    """
+    require_sim_domain()
+    mobile,urdf,store,spec,tool,hashes=inputs(config,scenario)
+    output=Path(output).resolve()
+    output.mkdir(parents=True,exist_ok=True)
+    from isaacsim.core.utils.extensions import enable_extension
+    from isaacsim.core.utils.stage import open_stage,is_stage_loading
+    for extension in ('isaacsim.ros2.bridge','isaacsim.robot.surface_gripper'):
+        enable_extension(extension)
+    robot_usd,_=import_mobile(urdf,output/'mobile-import.usd')
+    staging=scenario['initial_staging']
+    composition=build(store,robot_usd,output/'mission.usda',
+        robot_pose=staging['robot_base_pose'],cart_pose=staging['cart_body_pose'],
+        stock_path=None,sku=scenario['job']['sku'],
+        stock_mass_kg=scenario['handling_unit']['mass_kg'],spec=spec,scenario=scenario)
+    if not open_stage(composition['stage']):
+        raise RuntimeError('could not open task composed stage')
+    for _ in range(300):
+        app.update()
+        if not is_stage_loading():
+            break
+    else:
+        raise RuntimeError('stage loading exceeded bounded update budget')
+    import omni.usd
+    from pxr import UsdPhysics
+    from isaacsim.core.api import World
+    from isaacsim.core.prims import SingleArticulation,SingleRigidPrim
+    from isaacsim.core.utils.types import ArticulationAction
+    stage=omni.usd.get_context().get_stage()
+    paths=discover(stage)
+    label_stock(stage,composition['stock'],scenario['job']['sku'],output/'handling-unit-qr.png')
+    author_native_gripper(stage,tool=tool,tool0_path=paths['ur_tool0'],
+        body_path=paths['suction_cups'],gripper_path='/RestockPanelGripper')
+    cart_path=composition['assets']['cart']['body']
+    controller=MobileController(stage,paths['base_link'],cart_path,
+        [paths['left_wheel_joint'],paths['right_wheel_joint']],spec=spec)
+    scenes=[str(p.GetPath()) for p in stage.Traverse() if p.IsA(UsdPhysics.Scene)]
+    if len(scenes)!=1:
+        raise ValueError('one composed physics scene required')
+    world=World(physics_dt=1/60,rendering_dt=1/60,stage_units_in_meters=1.,physics_prim_path=scenes[0])
+    robot=world.scene.add(SingleArticulation(prim_path=paths['articulation'],name='restock_robot'))
+    robot_body=world.scene.add(SingleRigidPrim(prim_path=paths['base_link'],name='restock_base'))
+    cart_body=world.scene.add(SingleRigidPrim(prim_path=cart_path,name='restock_cart'))
+    world.reset()
+    # Establish documented spawn state before any mission or recorded step.
+    # This second reset applies joint defaults; it is never used during a mission.
+    positions=np.asarray(robot.get_joint_positions(),float).copy()
+    for name,value in mobile['transport_positions'].items():
+        positions[robot.get_dof_index(name)]=value
+    robot.set_joints_default_state(positions=positions,velocities=np.zeros(len(positions)))
+    world.reset()
+    actual=np.asarray(robot.get_joint_positions(),float)
+    if not np.isfinite(actual).all() or not np.allclose(actual,positions,atol=1e-5):
+        raise RuntimeError('initial articulation state did not apply')
+    def apply(q,v,indices):
+        robot.apply_action(ArticulationAction(joint_positions=q,joint_velocities=v,joint_indices=indices))
+    gate=ArmCommandGate(robot,tool.arm_limits,apply)
+    contact=NativePanelContact(stage,'/RestockPanelGripper')
+    transport=NativeTransport(stage=stage,articulation_path=paths['articulation'],
+        arm_base_path=paths['ur_base_link'],tf_paths=[paths['gripper_pad_tcp'],paths['gripper_tcp']],
+        command_gate=gate)
+    stage.GetRootLayer().Save()
+    evidence=dict(input_sha256=hashes,composition=composition,paths=paths,
+        initialization='declared initial joint state before mission; never runtime teleport',
+        physics_verified=False,camera_mapper_ready=False)
+    (output/'assembly.json').write_text(json.dumps(evidence,indent=2)+'\n')
+    return PhysicsAssembly(world,stage,robot,robot_body,cart_body,controller,contact,gate,transport,paths,evidence)

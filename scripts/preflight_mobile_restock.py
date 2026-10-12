@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """List concrete runtime inputs without a GPU probe, ROS graph or simulator boot."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -48,10 +49,25 @@ def check(config):
     root=Path(__file__).resolve().parent
     for name in ('run_restock_host.py','twin/restock_camera/__init__.py',
                  'twin/restock/isaac_bundle.py','twin/restock/native_transport.py',
-                 'twin/restock/trajectory_host.py'):
+                 'twin/restock/trajectory_host.py','twin/restock/physics_setup.py'):
         checks.append(dict(input=name,status='present' if (root/name).is_file() else 'missing'))
+    hashes={}
+    for key in FILES:
+        value=config.get(key)
+        if isinstance(value,str) and Path(value).is_file():
+            hashes[key]=hashlib.sha256(Path(value).read_bytes()).hexdigest()
+    assembly=None
+    if all(key in hashes for key in ('store_usd','mobile_manifest','scenario')):
+        try:
+            from twin.restock.physics_setup import inputs
+            assembly=inputs(config,json.loads(Path(config['scenario']).read_text()))[-1]
+            checks.append(dict(input='physical_assembly_inputs',status='present',
+                               evidence='actual CAD limits, declared spawn state and content hashes'))
+        except Exception as exc:
+            checks.append(dict(input='physical_assembly_inputs',status='invalid',reason=str(exc)))
     missing=[c['input'] for c in checks if c['status']!='present']
     return dict(files_ready=not missing,unresolved_inputs=missing,checks=checks,
+        input_file_sha256=hashes,physical_assembly_sha256=assembly,
         required_servers=SERVERS,runtime_verified=False,
         runtime_gates=['explicit GPU release and protected-Blender/resource guard',
                        'domain88 loopback-only service/action discovery',

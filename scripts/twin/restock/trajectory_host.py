@@ -186,6 +186,17 @@ def main():
                     if state['fault']:
                         raise RuntimeError(state['fault'])
                     measured=state['feedback']
+                    desired,desired_velocity=plan.sample(elapsed)
+                    feedback_message=FollowJointTrajectory.Feedback()
+                    feedback_message.header.stamp=node.get_clock().now().to_msg()
+                    feedback_message.joint_names=list(ARM_JOINTS)
+                    feedback_message.desired.positions=desired.tolist()
+                    feedback_message.desired.velocities=desired_velocity.tolist()
+                    feedback_message.actual.positions=measured[1].tolist()
+                    feedback_message.actual.velocities=measured[2].tolist()
+                    feedback_message.error.positions=(desired-measured[1]).tolist()
+                    feedback_message.error.velocities=(desired_velocity-measured[2]).tolist()
+                    handle.publish_feedback(feedback_message)
                     if elapsed>=plan.times[-1]:
                         if (now()-measured[0]<=.2 and time.monotonic()-state['received']<=.5
                                 and np.max(np.abs(measured[1]-plan.end))<=.01

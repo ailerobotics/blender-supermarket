@@ -45,7 +45,7 @@ def discover(stage,robot_root='/MobileRobot'):
     root=stage.GetPrimAtPath(robot_root)
     if not root:
         raise ValueError('mobile root absent')
-    names=('base_link','left_wheel_joint','right_wheel_joint','lidar_frame',
+    names=('base_link','ur_base_link','ur_tool0','left_wheel_joint','right_wheel_joint','lidar_frame',
            'front_camera_frame','imu_frame','gripper_pad_tcp','gripper_tcp','suction_cups')
     found={name:[] for name in names}
     articulations=[]
