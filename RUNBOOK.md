@@ -280,11 +280,32 @@ to `/tmp`), so a failed run is safe to discard. Capture the stderr + `nvidia-smi
 nothing, and re-run the offline `--author-offline` to confirm the *stage* is still sane before
 blaming the composer — a boot/OOM failure is an Isaac/VRAM problem, not a composition one.
 
-## 9. Service backroom and environment contract
+## 9. Mobile UR10 and rollwagen (CPU)
+
+Interface and remaining simulator checks: [mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md).
+Use a Python environment with `numpy` and `usd-core`; no Isaac boot is needed.
+`SOURCE_URDF`, `SHELFBOT_PACKAGE` and `TASK_OUTPUT` are caller-selected paths;
+`TASK_OUTPUT` must be a scratch directory, outside `scenes/`, `export/`, `renders/`.
+
+```bash
+python scripts/build_mobile_assets.py \
+  --source-urdf "$SOURCE_URDF" \
+  --package-root /opt/ros/jazzy/share --package-root "$SHELFBOT_PACKAGE" \
+  --output-dir "$TASK_OUTPUT"
+# Optional --config mobile-config.json accepts MobileSpec keyword overrides.
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest scripts/twin/tests/ -q
+```
+
+Import the generated mobile URDF with a free base and fixed frames preserved;
+install sensors and position-hold the manifest's transport joints before enabling
+wheel commands. Import and GPU verification belong to the integrated simulator
+run and remain subject to the existing protected-Blender/resource guard.
+
+## 10. Service backroom and environment contract
 
 The `environment` build stage adds an illustrative German grocery service area
 and keeps existing catalog/planogram assignments. Set `OUT` to an **absolute,
-on-RAM scratch directory**, outside the repo's scenes/export/renders directories:
+non-RAM scratch directory**, outside the repo's scenes/export/renders directories:
 
 ```bash
 python3 scripts/gen_labels.py
