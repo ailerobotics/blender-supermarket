@@ -23,7 +23,7 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-265 combined CPU tests pass with three dependency skips after the landed camera/navigation corrections, with the installed Isaac USD libraries exposed
+279 combined CPU tests and 14 subtests pass with four dependency skips after all landed host/camera/navigation corrections, with the installed Isaac USD libraries exposed
 without booting Kit (including mission/runtime, recording, stock-scene and environment tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
 Reproduction is in RUNBOOK section 11. The shared firstmate interface contract was
@@ -234,13 +234,19 @@ gripper/drive assembly for the guarded app; it is not yet simulator-tested.
 
 Host worker owns CAD SRDF/XRDF generation and coverage/hash evidence. Its task-local
 ROS overlay imports and component dependency checks passed; this does not prove
-GPU planner/mapper startup. Camera and navigation corrections are now merged;
-host launch code is still awaiting landing. Remaining inputs are exact CAD
-collision assets, a current-scenario camera configuration with sensed support
+GPU planner/mapper startup. Host, camera and navigation corrections are now merged.
+Exact CAD SRDF/XRDF assets exist, but strict host preflight rejects ten nonexcluded
+transport-pose sphere overlaps; coverage refinement or narrowly justified exclusions
+are still required. Remaining inputs include a current-scenario camera configuration with sensed support
 and clearance, camera housing collision validation, mapper reset/incorporation
 acknowledgements, and the complete sensor-binding mission factory. Camera work
 currently reports loaded-support occlusion and insufficient shelf support ROI;
 these must be resolved with actual sensing, not enlarged or invented free space.
+The camera lane's bounded 18-view search found four side-view candidates with full
+0.62×0.42 m support and top visibility, but none satisfies the current single-ROI
+support/label contract. Separate sensor-derived support and label masks, physical
+brackets and all-link clearance are required. A loaded cart still blocks fresh
+support sensing; the helper does not infer an unseen plane through the load.
 
 Resume CPU validation from the isolated worktree (runtime config remains in the
 task artifact directory, with machine paths kept out of reusable source):

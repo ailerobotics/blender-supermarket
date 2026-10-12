@@ -1,5 +1,5 @@
 {
-  "CPU tests": "265 passed, 3 dependency skips after camera/navigation merge; unresolved-input launch refusal and cross-interpreter ROS serialization pass",
+  "CPU tests": "279 passed, 14 subtests passed, 4 dependency skips after host/camera/navigation merge; no simulator execution",
   "Mobile assets": "Landed source; real CAD/FK static preview",
   "Environment": "USD and offline composition PASS; static source renders",
   "Physical autonomy": "NOT RUN; explicit simulator hold remains, task-local driver workaround under firstmate review",

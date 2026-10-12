@@ -57,6 +57,15 @@ def check(config):
         if isinstance(value,str) and Path(value).is_file():
             hashes[key]=hashlib.sha256(Path(value).read_bytes()).hexdigest()
     assembly=None
+    if 'host_config' in hashes:
+        try:
+            from twin.restock_host.config import launch_plan
+            host=launch_plan(json.loads(Path(config['host_config']).read_text()))
+            if host['static_errors']:
+                raise ValueError('; '.join(host['static_errors']))
+            checks.append(dict(input='host_cad_configuration',status='present'))
+        except Exception as exc:
+            checks.append(dict(input='host_cad_configuration',status='invalid',reason=str(exc)))
     if all(key in hashes for key in ('store_usd','mobile_manifest','scenario')):
         try:
             from twin.restock.physics_setup import inputs
