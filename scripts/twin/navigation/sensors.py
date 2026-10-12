@@ -16,9 +16,20 @@ class Scan:
     angle_increment: float
     range_max: float
     source: str = 'simulated_lidar'
+    sensor_to_base: tuple = (0.0, 0.0, 0.0)  # sensor origin x,y,yaw in base frame
+
+    def __post_init__(self):
+        if len(self.sensor_to_base) != 3 or not all(math.isfinite(v) for v in self.sensor_to_base):
+            raise ValueError('finite calibrated sensor-to-base pose required')
+
+    def sensor_pose(self, base_pose):
+        x,y,yaw = base_pose
+        dx,dy,da = self.sensor_to_base
+        return (x+dx*math.cos(yaw)-dy*math.sin(yaw),
+                y+dx*math.sin(yaw)+dy*math.cos(yaw),yaw+da)
 
     def points(self, pose):
-        x, y, yaw = pose
+        x, y, yaw = self.sensor_pose(pose)
         return tuple((x+r*math.cos(yaw+self.angle_min+i*self.angle_increment),
                       y+r*math.sin(yaw+self.angle_min+i*self.angle_increment))
                      for i,r in enumerate(self.ranges) if 0 < r < self.range_max)
@@ -99,8 +110,9 @@ class MapLocalizer:
             for dy in (-0.10,-0.05,0.0,0.05,0.10):
                 for da in (-0.04,-0.02,0.0,0.02,0.04):
                     p=(prior[0]+dx,prior[1]+dy,wrap(prior[2]+da))
-                    distances=sorted(self._distance((p[0]+r*math.cos(p[2]+scan.angle_min+i*scan.angle_increment),
-                                                    p[1]+r*math.sin(p[2]+scan.angle_min+i*scan.angle_increment)))
+                    sx,sy,sa=scan.sensor_pose(p)
+                    distances=sorted(self._distance((sx+r*math.cos(sa+scan.angle_min+i*scan.angle_increment),
+                                                    sy+r*math.sin(sa+scan.angle_min+i*scan.angle_increment)))
                                      for i,r in hits)
                     # Ignore up to 20% dynamic returns without accepting an empty fit.
                     score=sum(distances[:max(12,int(len(distances)*0.8))])/max(12,int(len(distances)*0.8))
@@ -123,11 +135,13 @@ class IsaacRangeSensor:
     Self hits stop rays and become range_min returns: occlusion never becomes
     invented free space. Mount outside self geometry or provide separate sensors.
     """
-    def __init__(self,get_sensor_pose,*,heights=(0.15,0.5,1.0),beams=360,range_max=10.0):
+    def __init__(self,get_sensor_pose,*,heights=(0.15,0.5,1.0),beams=360,range_max=10.0,
+                 sensor_to_base=(0.0,0.0,0.0)):
         from omni.physx import get_physx_scene_query_interface
         self.query=get_physx_scene_query_interface()
         self.get_pose=get_sensor_pose
         self.heights,self.beams,self.range_max=heights,beams,range_max
+        self.sensor_to_base=Scan(0,(),0,1,range_max,sensor_to_base=sensor_to_base).sensor_to_base
 
     def read(self,stamp):
         x,y,yaw=self.get_pose()
@@ -141,7 +155,8 @@ class IsaacRangeSensor:
                 if hit['hit']:
                     best=min(best,max(0.001,float(hit['distance'])))
             ranges.append(best)
-        return Scan(stamp,tuple(ranges),-math.pi,increment,self.range_max)
+        return Scan(stamp,tuple(ranges),-math.pi,increment,self.range_max,
+                    sensor_to_base=self.sensor_to_base)
 
 
 def observation(scan,localized,*,coupled,arm_transport,articulation=0.0):
@@ -152,6 +167,8 @@ def observation(scan,localized,*,coupled,arm_transport,articulation=0.0):
             or any(math.isnan(r) or r<=0 or (math.isfinite(r) and r>scan.range_max)
                    for r in scan.ranges)):
         raise ValueError('invalid scan; unknown beams must not become free space')
-    coverage=scan.range_max if len(scan.ranges)*scan.angle_increment>=2*math.pi-.01 else 0.0
+    # Range is measured about the sensor, not the chassis origin. The inscribed
+    # base-centred observation disk shrinks by the calibrated translation.
+    coverage=max(0.0,scan.range_max-math.hypot(*scan.sensor_to_base[:2])) if len(scan.ranges)*scan.angle_increment>=2*math.pi-.01 else 0.0
     return Observation(scan.stamp,scan.points(localized.pose),coupled,arm_transport,
                        articulation,scan.source,coverage)
