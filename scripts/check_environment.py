@@ -12,6 +12,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--manifest', required=True)
 parser.add_argument('--out', required=True)
 parser.add_argument('--baseline', help='Optional pre-environment build for product invariance check')
+parser.add_argument('--radius', type=float, default=.65,
+                    help='Uncoupled transport envelope radius in metres (mobile default: 0.65)')
 args = parser.parse_args(sys.argv[sys.argv.index('--') + 1:])
 data = json.loads(Path(args.manifest).read_text())
 assert bpy.data.objects.get('Wall_back') is None, 'Solid rear wall still seals portal'
@@ -21,7 +23,8 @@ assert len(data['static_obstacles']) > 600
 
 # Independent checks against generated meshes, not just nominal layout constants.
 obstacles = data['static_obstacles']
-radius = .6
+radius = args.radius
+assert math.isfinite(radius) and radius >= .65, 'Radius must cover the configured 0.65 m mobile envelope'
 points = data['route_hints']
 for a, b in zip(points, points[1:]):
     count = max(1, math.ceil(math.dist(a, b) / .05))
@@ -46,7 +49,7 @@ products = sorted((o.name, o.get('sku'), o.get('slot'), list(o.location), list(o
                   for o in bpy.data.objects if 'slot' in o and 'sku' in o)
 result = dict(status='passed', static_obstacles=len(obstacles), stocking_stations=len(data['stocking_stations']),
               route_checked_radius_m=radius, route_sample_spacing_m=.05,
-              limitation='Circular clearance check does not validate coupled-cart swept motion or dynamics.',
+              limitation='Uncoupled circular clearance only; excludes cart sweep, controller feasibility and dynamics.',
               product_digest=hashlib.sha256(json.dumps(products).encode()).hexdigest(),
               product_and_tag_count=len(products))
 if args.baseline:

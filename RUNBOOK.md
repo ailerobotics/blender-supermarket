@@ -315,10 +315,15 @@ are available to scenario/navigation adapters. Route hints are not a planner.
 
 The rear opening is 2.5 m wide × 2.8 m high and meets the existing fixture gap.
 The backroom has a continuous floor at Z=0, racks, receiving staging, cart bays,
-and a 3.2 m turning zone. `check_environment.py` samples a 0.6 m circular
+and a 3.2 m turning zone. `check_environment.py` samples a 0.65 m circular
 footprint along the route to the G3/G4 aisle; it does **not** prove a coupled
-cart's swept turns or dynamics. Shelf approaches in 1.5 m aisles require backing
-out to the rear cross aisle instead of U-turning.
+cart's swept turns or dynamics. `--radius` can increase this check to include a
+planner's safety margin; values below the configured 0.65 m transport envelope
+are rejected. Shelf approaches require backing out to the rear cross aisle
+instead of U-turning. The mobile controller disables reverse towing, so this
+return guidance applies only when uncoupled. A feasible forward-only coupled
+route or a separate cart parking/uncoupling procedure must be planned and checked
+by integration; the route hints and 3.2 m zone do not establish one.
 
 Source cases are static visual stock, with `sku`, `stock_id`, and `units` custom
 properties. Scenario composition must explicitly promote/replace selected stock
