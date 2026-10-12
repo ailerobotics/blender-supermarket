@@ -8,7 +8,7 @@
   },
   "inventory_unit": "sealed_handling_unit",
   "dynamic_stock_ready": false,
-  "coupled_navigation_radius_m": 1.9236756769993621,
+  "navigation_model": "articulated",
   "initial_inventory": [
     {
       "location": "backstock_00",
@@ -21,7 +21,7 @@
     "Side-contact candidate uses the same local carton wall; full arm/tool/payload swept clearance remains unverified.",
     "Kinematic and contact validation pending; no runtime teleport is permitted.",
     "Articulated route must include the added backroom staging support obstacle.",
-    "Legacy circular preflight must be replaced when corrected navigation is landed."
+    "Articulated route and final cart configuration require validation against this exact scenario."
   ],
   "handling_unit": {
     "sku": "juice_orange",

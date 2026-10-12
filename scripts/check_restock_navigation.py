@@ -44,7 +44,8 @@ def main():
     v=w=0.0
     for name,goal in [('outbound',poses['shelf_approach']),
                       ('return',poses['robot_dock'])]:
-        controller.start(goal,True)
+        articulation_limit = (scenario or {}).get('navigation_goal_articulation_rad', {}).get(name)
+        controller.start(goal,True,goal_articulation=articulation_limit)
         trace=[];began=time.monotonic();peak_angle=0.0
         for tick in range(5200):
             now=(tick+1)*.05
@@ -65,6 +66,7 @@ def main():
                 break
         robot,cart=state.bodies(controller.spec)
         leg=dict(cart_body_pose=vars(cart),robot_body_pose=vars(robot),name=name,status=result.status,reason=result.reason,
+                 goal_articulation_limit_rad=articulation_limit,
                  goal=goal,final=vars(state),simulation_seconds=now,
                  cpu_seconds=time.monotonic()-began,peak_articulation_degrees=math.degrees(peak_angle),
                  final_articulation_degrees=math.degrees(state.articulation))

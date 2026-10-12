@@ -83,6 +83,24 @@ class RuntimeTests(unittest.TestCase):
         self.adapter.start('return',self.job)
         self.assertEqual(self.adapter.step(.1).status,'failed')
 
+    def test_arrival_rejects_wrong_cart_alignment_even_if_navigation_says_success(self):
+        self.adapter.goal_articulation={'outbound':.1}
+        self.nav.start=lambda *a,**kw:None
+        self.p=replace(self.p,coupled=True,articulation=.8)
+        self.adapter.start('outbound',self.job)
+        result=self.adapter.step(.1)
+        self.assertEqual(result.status,'failed')
+        self.assertIn('articulation',result.reason)
+
+    def test_sensor_navigation_gets_encoder_scan_clock_and_latch_measurements(self):
+        calls=[]
+        controller=NS(step=lambda *a,**kw:calls.append((a,kw)))
+        packet=replace(self.p,odometry=(.1,.2),navigation='scan',coupled=True)
+        NavigationBridge(controller,sensor_navigation=True).step(.1,packet)
+        self.assertEqual(calls[0][0],(.1,(.1,.2),'scan'))
+        self.assertEqual(calls[0][1]['articulation'],0.)
+        self.assertTrue(calls[0][1]['coupled'])
+
     def test_navigation_bridge_passes_absolute_mission_clock(self):
         calls=[]
         bridge=NavigationBridge(NS(step=lambda *a,**kw:calls.append(kw)))
@@ -100,17 +118,18 @@ class ScenarioTests(unittest.TestCase):
             backroom_stocks=[dict(id='back',sku='milk')],
             stocking_stations=[dict(slots=[dict(id='shelf',sku_ids=['milk'])])],
             static_obstacles=[{'id':'wall'}],map_bounds=[-13,13,-11,19],
-            portal={'clear_width':2.5})
+            portal={'clear_width':1.3})
         scenario=dict(job=dict(job_id='j',sku='milk',quantity=1,source_bin='back',shelf_id='shelf'),
             inventory_unit='sealed_handling_unit',dynamic_stock_ready=True,
             initial_inventory=[dict(location='back',sku='milk',quantity=1)],
-            coupled_navigation_radius_m=1.92)
+            navigation_model='articulated')
         result=validate(manifest,scenario)
         self.assertEqual(result['navigation_bounds'],[-13,-11,13,19])
         self.assertFalse(result['ok'])
-        self.assertIn('coupled navigation envelope cannot fit backroom portal',result['errors'])
-        manifest['portal']['clear_width']=4.5
+        self.assertIn('aligned articulated envelope cannot fit backroom portal',result['errors'])
+        manifest['portal']['clear_width']=2.5
         self.assertTrue(validate(manifest,scenario)['ok'])
+        self.assertFalse(validate(manifest,scenario)['route_verified'])
 
 
 class GuardTests(unittest.TestCase):

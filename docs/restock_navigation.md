@@ -2,7 +2,7 @@
 
 `scripts/twin/navigation/` adds two simulation navigation routes. Neither has
 been run against a moving Isaac robot yet. CPU tests are deterministic fixtures,
-not evidence of autonomous physics operation. Commands live in RUNBOOK §11.
+not evidence of autonomous physics operation. Commands live in RUNBOOK §12.
 
 ## Articulated route
 
@@ -24,7 +24,7 @@ limit. Shelf-facing arm yaw is separate from the chassis goal yaw.
 For the environment manifest goal `[-3.05, 6.0, pi]`, planning and feedback fixtures complete `robot_dock -> stock_G3_back ->
 robot_dock` against the actual schema-2 map's 797 AABBs with **0.05 m geometry
 margin plus 0.02 m localization allowance**. The reproducible checker is
-`scripts/check_restock_navigation.py`; commands are in RUNBOOK §11. Both legs
+`scripts/check_restock_navigation.py`; commands are in RUNBOOK §12. Both legs
 stop within the chassis pose tolerances, with peak articulation about 46 degrees.
 The cart remains coupled and articulated at arrival: this is not an aligned
 re-latch or exact restoration of the cart's initial body pose.

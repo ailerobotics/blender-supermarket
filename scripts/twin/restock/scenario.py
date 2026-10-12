@@ -78,10 +78,17 @@ def validate(manifest, scenario):
             errors.append('invalid map bounds')
     else:
         errors.append('missing/invalid map bounds')
-    radius = scenario.get('coupled_navigation_radius_m')
-    if not isinstance(radius, (int,float)) or isinstance(radius,bool) or not math.isfinite(radius) or radius <= 0:
-        errors.append('missing conservative coupled navigation radius')
-    elif 2*radius >= manifest.get('portal', {}).get('clear_width', 0):
-        errors.append('coupled navigation envelope cannot fit backroom portal')
+    from twin.mobile import MobileSpec, Pose2, occupied_envelope
+    if scenario.get('navigation_model') != 'articulated':
+        errors.append('navigation must use the actual articulated train model')
+    spec = MobileSpec()
+    outline = occupied_envelope(Pose2(0,0,0),
+        Pose2(spec.hitch_x-spec.cart_hitch_x,0,0),spec,margin=.05+.02)
+    width = max(p[1] for p in outline)-min(p[1] for p in outline)
+    portal = manifest.get('portal', {}).get('clear_width', 0)
+    if not isinstance(portal,(int,float)) or not math.isfinite(portal) or width >= portal:
+        errors.append('aligned articulated envelope cannot fit backroom portal')
     return {'ok': not errors, 'errors': errors, 'navigation_bounds': bounds,
+            'aligned_train_width_m': width,
+            'route_verified': False,
             'provenance': 'offline_semantic_validation_not_physics'}

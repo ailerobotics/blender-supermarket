@@ -84,7 +84,7 @@ repo's `scenes/`, `export/` or `renders/`.
   on CPU with `render_shots.py --cpu` when the GPU is held by the robot stack.
 - **Mobile navigation**: `scripts/twin/navigation/` and
   [docs/restock_navigation.md](docs/restock_navigation.md) define sensor, footprint
-  and goal contracts; RUNBOOK §11 has CPU checks and isolated Nav2 launch. Coupled
+  and goal contracts; RUNBOOK §12 has CPU checks and isolated Nav2 launch. Coupled
   clearance uses the independent base/cart swept envelope, so straight cart width alone does
   not prove aisle feasibility. Simulator/Nav2 execution still needs integration
   evidence; fixture tests must not be presented as a physics demonstration.

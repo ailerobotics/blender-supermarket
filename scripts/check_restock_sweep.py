@@ -124,10 +124,13 @@ def audit(manifest, scenario, reach, store, package_roots, max_step=.015):
     support_half = np.array(staging['support_dimensions_m'])/2
     obstacles.append(('initial_staging_support',support_centre-support_half,support_centre+support_half))
     results = []
-    for location in ('source','cart','shelf'):
-        pose = staging['shelf_robot_pose'] if location == 'shelf' else staging['robot_base_pose']
+    locations = ('source','cart','cart_shelf','shelf') if 'shelf_cart_body_pose' in staging else ('source','cart','shelf')
+    for location in locations:
+        pose = staging['shelf_robot_pose'] if location in ('shelf','cart_shelf') else staging['robot_base_pose']
         world = transform(pose, manifest['spec']['base_z'])
-        if location == 'shelf':
+        if location in ('shelf','cart_shelf') and 'shelf_cart_body_pose' in staging:
+            cart_pose = staging['shelf_cart_body_pose']
+        elif location == 'shelf':
             sep = manifest['spec']['cart_hitch_x']-manifest['spec']['hitch_x']
             cart_xy = apply(transform(pose), np.array([[-sep,0,0]]))[0]
             cart_pose = [*cart_xy[:2],pose[2]]
@@ -180,7 +183,7 @@ def audit(manifest, scenario, reach, store, package_roots, max_step=.015):
         limitations=['AABB overlap may be a false positive; rejection requires refinement.',
                      'Candidate joint-linear paths are not cuRobo trajectories.',
                      'No source-to-cart or cart-to-shelf transit path certified.',
-                     'Shelf cart pose assumes aligned train and must match final navigation pose.',
+                     'Shelf cart pose uses navigation feedback only when supplied; otherwise assumes aligned train.',
                      'Support contacts remain visible in results; no fixture exclusions.'])
 
 
@@ -189,10 +192,15 @@ def main():
     for name in ('mobile-manifest','scenario','reach','store','output'):
         p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--package-root',action='append',required=True)
+    p.add_argument('--navigation-evidence',type=Path)
     a=p.parse_args()
     from twin.usd_probe import ensure_pxr_env
     ensure_pxr_env()
-    result=audit(json.loads(a.mobile_manifest.read_text()),json.loads(a.scenario.read_text()),
+    scenario=json.loads(a.scenario.read_text())
+    if a.navigation_evidence:
+        from check_restock_reach import with_navigation_arrival
+        scenario=with_navigation_arrival(scenario,json.loads(a.navigation_evidence.read_text()))
+    result=audit(json.loads(a.mobile_manifest.read_text()),scenario,
                  json.loads(a.reach.read_text()),a.store,a.package_root)
     a.output.write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps({k:v for k,v in result.items() if k!='segments'},indent=2))

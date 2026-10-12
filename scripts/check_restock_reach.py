@@ -2,6 +2,7 @@
 """Actual-URDF CPU IK probe for representative poses; NOT a collision planner."""
 import argparse
 import hashlib
+import copy
 import json
 from pathlib import Path
 
@@ -9,6 +10,24 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 from twin.urdf_probe import parse_urdf, link_world_transforms
+
+
+def with_navigation_arrival(scenario, navigation):
+    """Use measured CPU feedback poses for an explicitly labelled audit fixture."""
+    if navigation.get('source') != 'test_fixture_quasistatic_not_physx':
+        raise ValueError('expected explicit navigation evaluation fixture')
+    arrival = next(leg for leg in navigation['legs'] if leg['name'] == 'outbound')
+    if arrival['status'] != 'succeeded' or not np.allclose(
+            arrival['goal'], scenario['initial_staging']['shelf_robot_pose']):
+        raise ValueError('navigation arrival does not match scenario goal')
+    result = copy.deepcopy(scenario)
+    staging = result['initial_staging']
+    staging['shelf_robot_pose'] = [arrival['robot_body_pose'][k] for k in ('x','y','yaw')]
+    staging['shelf_cart_body_pose'] = [arrival['cart_body_pose'][k] for k in ('x','y','yaw')]
+    staging['unit_yaws_world']['cart_shelf'] = (staging['unit_yaws_world']['cart']
+        - staging['cart_body_pose'][2] + staging['shelf_cart_body_pose'][2])
+    result['audit_provenance'] = 'navigation_feedback_test_fixture_not_runtime_configuration'
+    return result
 
 
 def check(urdf, mobile_manifest, scenario):
@@ -39,10 +58,16 @@ def check(urdf, mobile_manifest, scenario):
     def frame(q):
         values=dict(config);values.update({j.name:float(v) for j,v in zip(joints,q)})
         return link_world_transforms(robot,values)['gripper_pad_tcp']
-    for label,point in [('source',source),('cart',cart),('shelf',target)]:
+    stations = [('source',source),('cart',cart),('shelf',target)]
+    if 'shelf_cart_body_pose' in staging:
+        pose = staging['shelf_cart_body_pose']
+        offset = Rotation.from_euler('z',pose[2]).apply([*staging['cart_load_center_body_xy'],0.])
+        point = np.array([*pose[:2],staging['cart_support_z_world']+unit['dimensions_m'][2]])+offset
+        stations.insert(2,('cart_shelf',local(point,staging['shelf_robot_pose'])))
+    for label,point in stations:
         if unit.get('grasp_mode', 'top') == 'side':
             wall = unit['local_wall']
-            robot_pose = staging['shelf_robot_pose'] if label == 'shelf' else staging['robot_base_pose']
+            robot_pose = staging['shelf_robot_pose'] if label in ('shelf','cart_shelf') else staging['robot_base_pose']
             angle = staging['unit_yaws_world'][label] + wall*np.pi/2 - robot_pose[2]
             rotation = (Rotation.from_euler('z', angle) *
                         Rotation.from_quat(unit['tcp_quaternion_xyzw'])).as_matrix()
@@ -81,6 +106,7 @@ def check(urdf, mobile_manifest, scenario):
     return dict(ok=all(v['reachable'] for v in results.values()),poses=results,
                 scenario_sha256=hashlib.sha256(json.dumps(scenario,sort_keys=True).encode()).hexdigest(),
                 urdf_sha256=hashlib.sha256(Path(urdf).read_bytes()).hexdigest(),
+                scenario=scenario,
                 evidence='actual_urdf_cpu_inverse_kinematics_only',
                 collision_checked=False,physics_verified=False)
 
@@ -90,8 +116,12 @@ def main():
     p.add_argument('--mobile-manifest',type=Path,required=True)
     p.add_argument('--scenario',type=Path,required=True)
     p.add_argument('--output',type=Path,required=True)
+    p.add_argument('--navigation-evidence',type=Path)
     a=p.parse_args();m=json.loads(a.mobile_manifest.read_text())
-    result=check(m['mobile_urdf'],m,json.loads(a.scenario.read_text()))
+    scenario=json.loads(a.scenario.read_text())
+    if a.navigation_evidence:
+        scenario=with_navigation_arrival(scenario,json.loads(a.navigation_evidence.read_text()))
+    result=check(m['mobile_urdf'],m,scenario)
     a.output.parent.mkdir(parents=True,exist_ok=True)
     a.output.write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps(result,indent=2))

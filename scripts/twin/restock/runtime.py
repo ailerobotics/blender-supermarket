@@ -35,13 +35,23 @@ class Port(Protocol):
 
 class NavigationBridge:
     """Normalize reference and Nav2 APIs without changing measurement provenance."""
-    def __init__(self, controller, *, nav2=False):
+    def __init__(self, controller, *, nav2=False, sensor_navigation=False):
         self.controller, self.nav2 = controller, nav2
+        self.sensor_navigation = sensor_navigation
+        if nav2 and sensor_navigation:
+            raise ValueError('select one navigation sensor adapter')
 
-    def start(self, goal, coupled):
-        self.controller.start(goal, coupled)
+    def start(self, goal, coupled, *, goal_articulation=None):
+        if goal_articulation is None:
+            self.controller.start(goal, coupled)
+        else:
+            self.controller.start(goal, coupled, goal_articulation=goal_articulation)
 
     def step(self, dt, packet):
+        if self.sensor_navigation:
+            return self.controller.step(dt, packet.odometry, packet.navigation,
+                now=packet.simulation_time, coupled=packet.coupled,
+                arm_transport=packet.transport_ready, articulation=packet.articulation)
         if self.nav2:
             self.controller.publish_sensors(packet.odometry, packet.navigation)
             return self.controller.step(dt, packet.odometry, packet.navigation,
@@ -86,11 +96,15 @@ class ManipulationBridge:
 
 class RuntimeAdapter:
     def __init__(self, navigation, mobile, manipulation, port: Port, poses,
-                 *, fixture_mode=False):
+                 *, fixture_mode=False, goal_articulation=None):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         if not isinstance(self.manip, ManipulationBridge):
             self.manip = ManipulationBridge(self.manip)
         self.poses, self.fixture_mode = poses, fixture_mode
+        self.goal_articulation = dict(goal_articulation or {})
+        if any(not math.isfinite(v) or not 0 < v <= math.radians(65)
+               for v in self.goal_articulation.values()):
+            raise ValueError('invalid goal articulation tolerance')
         for name in ('pickup', 'cart_dock', 'shelf_approach', 'home'):
             pose = poses.get(name, ())
             if len(pose) != 3 or not all(math.isfinite(v) for v in pose):
@@ -106,7 +120,9 @@ class RuntimeAdapter:
         if action in ('collect', 'couple', 'outbound', 'return'):
             goal = {'collect': 'pickup', 'couple': 'cart_dock',
                     'outbound': 'shelf_approach', 'return': 'home'}[action]
-            self.nav.start(self.poses[goal], action in ('outbound', 'return'))
+            kwargs = ({'goal_articulation':self.goal_articulation[action]}
+                      if action in self.goal_articulation else {})
+            self.nav.start(self.poses[goal], action in ('outbound', 'return'), **kwargs)
             self.phase = 'navigate'
         elif action == 'transfer':
             self.manip.start(action, asdict(job))
@@ -134,6 +150,7 @@ class RuntimeAdapter:
         sources = ('sensor', 'test_fixture') if self.fixture_mode else ('sensor',)
         if (p.source not in sources or not p.observation_id or
                 p.observation_id == self.last_packet_id or
+                not math.isfinite(p.articulation) or
                 not math.isfinite(p.simulation_time) or not 0 <= self.time-p.simulation_time <= .1):
             raise ValueError('missing, repeated, stale or unsupported sensor packet')
         self.last_packet_id = p.observation_id
@@ -153,6 +170,9 @@ class RuntimeAdapter:
             if self.action in ('outbound', 'return'):
                 if not p.coupled:
                     raise ValueError('cart lost at destination')
+                limit = self.goal_articulation.get(self.action)
+                if limit is not None and abs(p.articulation) >= limit:
+                    raise ValueError('cart articulation exceeds manipulation/return goal tolerance')
                 key = 'arrived' if self.action == 'outbound' else 'home'
                 return Result('succeeded', self._evidence(p, **{key: True}))
             self.phase = 'execute'

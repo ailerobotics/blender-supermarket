@@ -280,7 +280,7 @@ to `/tmp`), so a failed run is safe to discard. Capture the stderr + `nvidia-smi
 nothing, and re-run the offline `--author-offline` to confirm the *stage* is still sane before
 blaming the composer — a boot/OOM failure is an Isaac/VRAM problem, not a composition one.
 
-## 11. Mobile restock navigation (CPU checks and isolated Nav2)
+## 12. Mobile restock navigation (CPU checks and isolated Nav2)
 
 Contracts, footprint limits and unverified simulator links:
 [docs/restock_navigation.md](docs/restock_navigation.md). No command here boots
