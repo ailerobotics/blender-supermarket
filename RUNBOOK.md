@@ -279,3 +279,29 @@ the floor or exploded.
 to `/tmp`), so a failed run is safe to discard. Capture the stderr + `nvidia-smi`, `git stash`
 nothing, and re-run the offline `--author-offline` to confirm the *stage* is still sane before
 blaming the composer — a boot/OOM failure is an Isaac/VRAM problem, not a composition one.
+
+## 9. Mobile restock manipulation (CPU)
+
+Contracts, dependencies and limits: [restock manipulation](docs/restock_manipulation.md).
+No simulator is started by these tests:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_manipulation.py -q
+```
+
+Before integrating `RosTransferBridge` / `RosMotionPort` into an already running
+simulation executor, configure the isolated ROS process (and all task-owned
+planner/controller peers) and create its node with `use_sim_time=true`:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+export ROS_DOMAIN_ID=88
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+unset ROS_STATIC_PEERS
+```
+
+The integration launch owns the RGB-D preprocessing, current mobile-arm TF,
+collision world, simulated gripper/contact bridge and MoveIt/cuMotion servers.
+Missing sensing or adapters are a failure, not a fixture fallback. See the linked
+contract for topic schema and acknowledgement requirements. Full GPU execution
+remains subject to §8's resource guard and integration ownership.

@@ -82,7 +82,11 @@ repo's `scenes/`, `export/` or `renders/`.
   (`polish_floor`, `add_instance_variation`, `setup_compositor`, `setup_render`) — see
   README decision log 2026-09-14 and `data/twin-realism-v1/report.md`. Render evidence
   on CPU with `render_shots.py --cpu` when the GPU is held by the robot stack.
-- Local-only project: **no git remote** — never push or open a PR.
+- **Mobile restock manipulation**: sensor/ROS contracts and supported handling units
+  live in `docs/restock_manipulation.md`; CPU checks are in RUNBOOK §9.
+  Runtime inputs must come from sensors; fixtures cannot certify inventory.
+- Delivery: use the task-assigned branch and configured remote when explicitly
+  authorized; never push the default branch.
 
 ## Maintaining this file
 
