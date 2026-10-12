@@ -280,78 +280,6 @@ to `/tmp`), so a failed run is safe to discard. Capture the stderr + `nvidia-smi
 nothing, and re-run the offline `--author-offline` to confirm the *stage* is still sane before
 blaming the composer — a boot/OOM failure is an Isaac/VRAM problem, not a composition one.
 
-## 11. Mobile restock navigation (CPU checks and isolated Nav2)
-
-Contracts, footprint limits and unverified simulator links:
-[docs/restock_navigation.md](docs/restock_navigation.md). No command here boots
-Isaac or commands a physical robot. The integration runner owns the simulator.
-
-```bash
-# Deterministic CPU fixtures; no ROS/GPU required.
-python3 -m unittest discover -s scripts/twin/tests -p test_navigation.py -v
-python3 -m unittest discover -s scripts/twin/tests -p test_articulated_navigation.py -v
-
-# Optional host-Python Jazzy overlay, extracted only into task-owned storage.
-# Uses existing trusted apt indexes; no sudo, package install, or service restart.
-python3 scripts/setup_restock_nav2.py --output "$TASK_OUTPUT/nav2"
-source "$TASK_OUTPUT/nav2/env.sh"
-
-# Reproduce full-margin planning and feedback on the actual exported static map.
-# This is a TEST_FIXTURE controller check, not an Isaac/PhysX demonstration.
-python3 scripts/check_restock_navigation.py --environment "$ENVIRONMENT_MANIFEST" \
-  --output "$TASK_OUTPUT/navigation-proof"
-
-# In one isolated ROS shell, start the articulated FollowPath configuration.
-python3 scripts/run_restock_nav2.py --environment "$ENVIRONMENT_MANIFEST" \
-  --articulated --output "$TASK_OUTPUT/nav2-map" --launch
-
-# In another shell with the same task-owned env.sh sourced, run the sensor bridge.
-# The pose is a declared deployment prior, supplied by the integration scenario.
-python3 scripts/run_articulated_nav2_bridge.py --environment "$ENVIRONMENT_MANIFEST" \
-  --initial-pose "$INITIAL_X" "$INITIAL_Y" "$INITIAL_YAW"
-
-# ROS-message handoff tests, after sourcing the task-owned Jazzy overlay.
-python3 -m unittest discover -s scripts/twin/tests -p test_nav2_handoff.py -v
-
-# With a compatible Jazzy/Nav2 environment already available, generate map/config.
-# scenario.json supplies bounds, obstacles, resolution and the measured footprint.
-# OUTPUT must be a task-owned scratch directory, outside scenes/export/renders.
-python3 scripts/run_restock_nav2.py --scenario scenario.json --output "$OUTPUT"
-
-# Start only the ROS navigation nodes; domain 88 must be reserved for this task.
-ROS_DOMAIN_ID=88 ROS_LOCALHOST_ONLY=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
-  python3 scripts/run_restock_nav2.py --scenario scenario.json --output "$OUTPUT" --launch
-```
-
-Example **test-fixture** scenario schema (replace all dimensions with scene/rig
-measurements before runtime):
-
-```json
-{
-  "bounds": [-6, -6, 6, 6],
-  "obstacles": [[2, 2, 3, 3]],
-  "resolution": 0.2,
-  "footprint": {
-    "base_radius": 0.6,
-    "hitch_offset": 0.5,
-    "cart_hitch_to_farthest_corner": 1.2,
-    "margin": 0.1,
-    "min_turn_radius": 1.0,
-    "max_articulation": 1.1
-  }
-}
-```
-
-Feed real wheel encoder and range samples through the adapter described in the
-navigation document. Never connect raw Nav2 `cmd_vel` to the base: the adapter
-returns the gated command. Missing Nav2 packages are a prerequisite failure;
-this script intentionally does not install/upgrade shared ROS or Isaac.
-For an integration scenario with staging support, add `--scenario "$RESTOCK_SCENARIO"`
-to `check_restock_navigation.py` and `--integration-scenario "$RESTOCK_SCENARIO"`
-to both `run_restock_nav2.py` and `run_articulated_nav2_bridge.py`.
-This includes the support obstacle and checks the scenario’s actual chassis goal;
-a successful environment-only route does not certify a different scenario.
-
 ## 9. Mobile UR10 and rollwagen (CPU)
 
 Interface and remaining simulator checks: [mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md).
@@ -448,3 +376,142 @@ Movable robots/carts are authored by the robotics composer. Markers live under
 the collider classifier. All solid service fixtures use the existing static
 structure/fixture collision groups. Labels/styles are illustrative, not an exact
 scan or an assertion of REWE store dimensions.
+
+## 11. Mobile restock navigation (CPU checks and isolated Nav2)
+
+Contracts, footprint limits and unverified simulator links:
+[docs/restock_navigation.md](docs/restock_navigation.md). No command here boots
+Isaac or commands a physical robot. The integration runner owns the simulator.
+
+```bash
+# Deterministic CPU fixtures; no ROS/GPU required.
+python3 -m unittest discover -s scripts/twin/tests -p test_navigation.py -v
+python3 -m unittest discover -s scripts/twin/tests -p test_articulated_navigation.py -v
+
+# Optional host-Python Jazzy overlay, extracted only into task-owned storage.
+# Uses existing trusted apt indexes; no sudo, package install, or service restart.
+python3 scripts/setup_restock_nav2.py --output "$TASK_OUTPUT/nav2"
+source "$TASK_OUTPUT/nav2/env.sh"
+
+# Reproduce full-margin planning and feedback on the actual exported static map.
+# This is a TEST_FIXTURE controller check, not an Isaac/PhysX demonstration.
+python3 scripts/check_restock_navigation.py --environment "$ENVIRONMENT_MANIFEST" \
+  --output "$TASK_OUTPUT/navigation-proof"
+
+# In one isolated ROS shell, start the articulated FollowPath configuration.
+python3 scripts/run_restock_nav2.py --environment "$ENVIRONMENT_MANIFEST" \
+  --articulated --output "$TASK_OUTPUT/nav2-map" --launch
+
+# In another shell with the same task-owned env.sh sourced, run the sensor bridge.
+# The pose is a declared deployment prior, supplied by the integration scenario.
+python3 scripts/run_articulated_nav2_bridge.py --environment "$ENVIRONMENT_MANIFEST" \
+  --initial-pose "$INITIAL_X" "$INITIAL_Y" "$INITIAL_YAW"
+
+# ROS-message handoff tests, after sourcing the task-owned Jazzy overlay.
+python3 -m unittest discover -s scripts/twin/tests -p test_nav2_handoff.py -v
+
+# With a compatible Jazzy/Nav2 environment already available, generate map/config.
+# scenario.json supplies bounds, obstacles, resolution and the measured footprint.
+# OUTPUT must be a task-owned scratch directory, outside scenes/export/renders.
+python3 scripts/run_restock_nav2.py --scenario scenario.json --output "$OUTPUT"
+
+# Start only the ROS navigation nodes; domain 88 must be reserved for this task.
+ROS_DOMAIN_ID=88 ROS_LOCALHOST_ONLY=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+  python3 scripts/run_restock_nav2.py --scenario scenario.json --output "$OUTPUT" --launch
+```
+
+Example **test-fixture** scenario schema (replace all dimensions with scene/rig
+measurements before runtime):
+
+```json
+{
+  "bounds": [-6, -6, 6, 6],
+  "obstacles": [[2, 2, 3, 3]],
+  "resolution": 0.2,
+  "footprint": {
+    "base_radius": 0.6,
+    "hitch_offset": 0.5,
+    "cart_hitch_to_farthest_corner": 1.2,
+    "margin": 0.1,
+    "min_turn_radius": 1.0,
+    "max_articulation": 1.1
+  }
+}
+```
+
+Feed real wheel encoder and range samples through the adapter described in the
+navigation document. Never connect raw Nav2 `cmd_vel` to the base: the adapter
+returns the gated command. Missing Nav2 packages are a prerequisite failure;
+this script intentionally does not install/upgrade shared ROS or Isaac.
+For an integration scenario with staging support, add `--scenario "$RESTOCK_SCENARIO"`
+to `check_restock_navigation.py` and `--integration-scenario "$RESTOCK_SCENARIO"`
+to both `run_restock_nav2.py` and `run_articulated_nav2_bridge.py`.
+This includes the support obstacle and checks the scenario’s actual chassis goal;
+a successful environment-only route does not certify a different scenario.
+
+## 12. Mobile restock manipulation (CPU)
+
+Contracts, dependencies and limits: [restock manipulation](docs/restock_manipulation.md).
+No simulator is started by these tests:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_manipulation.py scripts/twin/tests/test_cad_restock.py -q
+```
+
+Before integrating `RosTransferBridge` / `RosMotionPort` into an already running
+simulation executor, configure the isolated ROS process (and all task-owned
+planner/controller peers) and create its node with `use_sim_time=true`:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+export ROS_DOMAIN_ID=88
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+unset ROS_STATIC_PEERS
+```
+
+The integration launch owns the RGB-D preprocessing, current mobile-arm TF,
+collision world, simulated gripper/contact bridge and MoveIt/cuMotion servers.
+Missing sensing or adapters are a failure, not a fixture fallback. See the linked
+contract for topic schema and acknowledgement requirements. Full GPU execution
+remains subject to §8's resource guard and integration ownership.
+
+The CAD native-gripper/carton authoring tests additionally need `pxr`. Use the
+CPU USD Python configured in §6a (or the existing shelfbot USD-only wrapper):
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  bash "$SHELFBOT_ROOT/tools/usdpy" -m pytest scripts/twin/tests/test_cad_restock.py -q
+```
+
+Set `SHELFBOT_ROOT` to the read-only source checkout selected by integration.
+This wrapper loads USD libraries only; it does not boot Isaac. The direct
+`CadRestockRuntime` assembly/asset authoring order is documented in
+[Actual CAD gripper and concrete Isaac path](docs/restock_manipulation.md#actual-cad-gripper-and-concrete-isaac-path).
+
+For process-separated ROS, run the controller with **host Jazzy Python**, from
+the repository root, after sourcing the task's MoveIt/cuMotion ROS overlay:
+
+```bash
+python3 -m scripts.twin.restock_manipulation.ros_host \
+  --config scripts/twin/restock_manipulation/ros_host_config.json \
+  --urdf "$ROBOT_URDF" --shelfbot-root "$SHELFBOT_ROOT"
+```
+
+This launches domain-88 clients/controller only. Integration enables
+`isaacsim.ros2.bridge` in its existing guarded app and constructs `IsaacRosGraph`
+with real native contact and a **latched** simulated-arm hold callback. Call
+`start(operation, job)`, `publish_sensors(Sensors)`, and `poll()` each physics step.
+Publish fresh sensor acquisition packets only; call `poll()` even without images.
+The domain/loopback environment above also applies to Isaac. Start the host and
+allow DDS discovery before submitting the first job.
+
+Cross-interpreter CPU contract smoke (neither interpreter boots a ROS graph or GPU):
+
+```bash
+"$ISAAC_PYTHON" scripts/restock_ros_contract_smoke.py --ros-python "$ROS_PYTHON"
+```
+
+`ISAAC_PYTHON` selects the existing Isaac Python3.11 executable and `ROS_PYTHON`
+the sourced host Jazzy Python3.12 executable. This verifies fixture-only schema
+roundtrip and actual host ROS message serialization; it does not test DDS or
+OmniGraph. Runtime server and attachment requirements are in the manipulation doc.
