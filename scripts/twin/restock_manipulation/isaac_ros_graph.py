@@ -61,6 +61,7 @@ class IsaacRosGraph:
         self.og, self.contact, self.hold = og, contact, hold
         self.root, self.timeout = root, timeout
         self.active, self.last_status = False, ''
+        self.last_sequence = -1
         self.faulted, self.job_id = False, None
         self.last_receive = time.monotonic()
         for key, topic in TOPICS.items():
@@ -120,11 +121,14 @@ class IsaacRosGraph:
         result = None
         if raw and raw != self.last_status:
             result = json.loads(raw)
-            if result.get('job_id') != self.job_id:
+            sequence = result.get('sequence')
+            if (not self.active or result.get('job_id') != self.job_id or
+                    type(sequence) is not int or sequence <= self.last_sequence):
                 result = None
             if result is None:
                 raw = ''
         if result is not None:
+            self.last_sequence = result['sequence']
             self.last_status, self.last_receive = raw, time.monotonic()
             for control in result.get('controls',[]):
                 if control.get('kind') == 'gripper':

@@ -9,12 +9,17 @@ class TransferController:
     def __init__(self, motion: MotionPort, profiles: dict[str, ProductProfile], *,
                  cart_location: str = 'rollwagen', max_age: float = 0.5,
                  phase_timeout: float = 30.0, fixture_mode: bool = False,
-                 frame: str = 'ur_base_link', pose_policy=None):
+                 frame: str = 'ur_base_link', pose_policy=None, transport_joints=None):
         if max_age <= 0 or phase_timeout <= 0:
             raise ValueError('timeouts must be positive')
         self.motion, self.profiles = motion, profiles
         self.frame = frame
         self.pose_policy = pose_policy
+        self.transport_joints = tuple(transport_joints) if transport_joints is not None else None
+        if self.transport_joints is not None and (len(self.transport_joints) != 6 or
+                not all(map(math.isfinite,self.transport_joints)) or
+                not callable(getattr(motion,'begin_joint_goal',None))):
+            raise ValueError('transport stow requires six finite joints and collision-planned joint goals')
         self.cart_location, self.max_age = cart_location, max_age
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
@@ -183,7 +188,8 @@ class TransferController:
                 return self._fail('invalid motion outcome')
             if outcome == 'succeeded':
                 next_phase = dict(approach='contact', contact='grasp', lift='preplace',
-                                  preplace='place', place='release', retreat='verify')
+                                  preplace='place', place='release',
+                                  retreat='stow' if self.transport_joints is not None else 'verify')
                 self._transition(next_phase[self.phase])
             return self._result()
         if self.phase == 'grasp':
@@ -206,6 +212,24 @@ class TransferController:
                 if not self.motion.update_payload(False, self.profile):
                     return self._fail('payload collision detachment not acknowledged')
                 self._transition('retreat')
+            return self._result()
+        if self.phase == 'stow':
+            if s.contact or self.held:
+                return self._fail('cannot stow with unexpected held payload')
+            if not self.issued:
+                self.motion.begin_joint_goal(self.transport_joints,s.joint_positions)
+                self.issued=True
+                return self._result()
+            outcome=self.motion.poll()
+            if outcome == 'failed':
+                return self._fail('collision-planned transport stow failed')
+            if outcome == 'succeeded':
+                if len(s.joint_positions) != 6 or max(abs(a-b) for a,b in
+                        zip(s.joint_positions,self.transport_joints)) > .01:
+                    return self._fail('transport joint feedback disagrees with execution')
+                self._transition('verify')
+            elif outcome != 'running':
+                return self._fail('invalid stow motion outcome')
             return self._result()
         if self.phase == 'verify':
             if s.contact:

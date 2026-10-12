@@ -20,3 +20,26 @@ def test_native_bridge_fault_latches_without_consuming_late_host_controls():
     assert holds == [True]
     with pytest.raises(RuntimeError,match='recovery'):
         bridge.start('transfer',{'job_id':'next'})
+
+
+def test_native_bridge_ignores_reordered_status_before_gripper_actuation():
+    import json
+    import time
+    from types import SimpleNamespace as NS
+    bridge=IsaacRosGraph.__new__(IsaacRosGraph)
+    commands=[]
+    reply=dict(job_id='j',sequence=2,status='running',controls=[dict(kind='gripper',enabled=False)])
+    def attribute(path):
+        return NS(get=lambda:False if '/stop/' in path else json.dumps(reply))
+    bridge.og=NS(Controller=NS(attribute=attribute))
+    bridge.root='/test'
+    bridge.faulted=False; bridge.active=True; bridge.job_id='j'
+    bridge.last_sequence=3; bridge.last_status=''
+    bridge.last_receive=time.monotonic(); bridge.timeout=5.
+    bridge.contact=NS(command=commands.append)
+    bridge.hold=lambda:None
+    assert bridge.poll() is None
+    assert commands==[]
+    reply['sequence']=4
+    assert bridge.poll()['sequence']==4
+    assert commands==[False]

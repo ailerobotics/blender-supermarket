@@ -15,6 +15,7 @@ from scripts.twin.restock_manipulation.ros_adapter import (
 class FixtureMotion:
     def __init__(self):
         self.moves, self.payloads, self.stops = [], [], 0
+        self.stows = []
         self.outcome, self.attach_ok = 'succeeded', True
 
     def begin(self, pose, joints):
@@ -22,6 +23,9 @@ class FixtureMotion:
 
     def poll(self):
         return self.outcome
+
+    def begin_joint_goal(self, goal, measured):
+        self.stows.append((goal,measured))
 
     def stop(self):
         self.stops += 1
@@ -90,6 +94,24 @@ def test_live_rejects_fixture_and_ground_truth():
         assert r.status == 'running'
     assert c.step(.1, s).status == 'failed'
     assert not m.moves
+
+
+def test_transport_stow_is_planned_before_fresh_inventory_verification():
+    c,m=make_controller(transport_joints=(0.,)*6)
+    t=run_to(c,'stow')
+    assert c.step(.1,packet(c,t)).status=='running'
+    assert m.stows==[((0.,)*6,(0.,)*6)]
+    assert c.step(.1,packet(c,t+.1)).status=='running'
+    assert c.phase=='verify' and not c.verify_ids
+
+
+def test_stow_executor_success_cannot_override_wrong_measured_joints():
+    c,m=make_controller(transport_joints=(.2,)*6)
+    t=run_to(c,'stow')
+    c.step(.1,packet(c,t))
+    result=c.step(.1,packet(c,t+.1))
+    assert result.status=='failed'
+    assert 'joint feedback' in result.reason
 
 
 @pytest.mark.parametrize('change,reason', [

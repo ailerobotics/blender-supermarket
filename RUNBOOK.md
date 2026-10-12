@@ -584,7 +584,8 @@ the repository root, after sourcing the task's MoveIt/cuMotion ROS overlay:
 ```bash
 python3 -m scripts.twin.restock_manipulation.ros_host \
   --config scripts/twin/restock_manipulation/ros_host_config.json \
-  --urdf "$ROBOT_URDF" --shelfbot-root "$SHELFBOT_ROOT"
+  --urdf "$ROBOT_URDF" --shelfbot-root "$SHELFBOT_ROOT" \
+  --mobile-manifest "$MOBILE_MANIFEST"
 ```
 
 This launches domain-88 clients/controller only. Integration enables

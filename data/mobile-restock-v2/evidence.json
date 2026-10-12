@@ -1,7 +1,8 @@
 {
-  "CPU tests": "140 passed; includes USD, initial depletion, sweep and runtime bridge fixtures",
+  "CPU tests": "224 passed, 3 dependency skips at integration checkpoint; cross-interpreter ROS serialization passes",
   "Mobile assets": "Landed source; real CAD/FK static preview",
   "Environment": "USD and offline composition PASS; static source renders",
-  "Physical autonomy": "NOT RUN; GPU driver coherence unresolved",
-  "Handling geometry": "Side grasp: 12 IK poses solve at chassis Y6.0; no arm/tool overlap in conservative insertion sweeps. Support-contact bounds remain; transit/self collision/physics unverified."
+  "Physical autonomy": "NOT RUN; explicit simulator hold remains, task-local driver workaround under firstmate review",
+  "Navigation": "Earlier 798-obstacle fixture passes; final north-shifted source requires revalidation at actual 0.10m localization uncertainty",
+  "Handling geometry": "Side grasp: 16 IK poses solve using actual articulated arrival; no arm/tool overlap in conservative insertion sweeps. Support-contact bounds remain; transit/self collision/physics unverified."
 }

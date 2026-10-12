@@ -85,7 +85,7 @@ def mesh_bounds(path, matrix=None):
     return result
 
 
-def audit(manifest, scenario, reach, store, package_roots, max_step=.015):
+def audit(manifest, scenario, reach, store, package_roots, max_step=.015, selected_locations=None):
     scenario_hash = hashlib.sha256(json.dumps(scenario,sort_keys=True).encode()).hexdigest()
     if reach.get('scenario_sha256') != scenario_hash:
         raise ValueError('IK evidence does not match the current scenario')
@@ -125,6 +125,10 @@ def audit(manifest, scenario, reach, store, package_roots, max_step=.015):
     obstacles.append(('initial_staging_support',support_centre-support_half,support_centre+support_half))
     results = []
     locations = ('source','cart','cart_shelf','shelf') if 'shelf_cart_body_pose' in staging else ('source','cart','shelf')
+    if selected_locations:
+        if not set(selected_locations) <= set(locations):
+            raise ValueError('unknown sweep station')
+        locations=tuple(name for name in locations if name in selected_locations)
     for location in locations:
         pose = staging['shelf_robot_pose'] if location in ('shelf','cart_shelf') else staging['robot_base_pose']
         world = transform(pose, manifest['spec']['base_z'])
@@ -193,6 +197,7 @@ def main():
         p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--package-root',action='append',required=True)
     p.add_argument('--navigation-evidence',type=Path)
+    p.add_argument('--location',action='append',help='Bounded station audit; omitted means all stations')
     a=p.parse_args()
     from twin.usd_probe import ensure_pxr_env
     ensure_pxr_env()
@@ -201,7 +206,7 @@ def main():
         from check_restock_reach import with_navigation_arrival
         scenario=with_navigation_arrival(scenario,json.loads(a.navigation_evidence.read_text()))
     result=audit(json.loads(a.mobile_manifest.read_text()),scenario,
-                 json.loads(a.reach.read_text()),a.store,a.package_root)
+                 json.loads(a.reach.read_text()),a.store,a.package_root,selected_locations=a.location)
     a.output.write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps({k:v for k,v in result.items() if k!='segments'},indent=2))
     return 0 if result['candidate_clear'] else 1

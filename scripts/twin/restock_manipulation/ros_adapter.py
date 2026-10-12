@@ -117,6 +117,40 @@ class RosMotionPort:
         future.add_done_callback(accepted)
         self.future, self.state = future, state
 
+    def begin_joint_goal(self, goal_joints, measured_joints):
+        """Collision-planned arm stow; never an unchecked joint command."""
+        from moveit_msgs.action import MoveGroup
+        from moveit_msgs.msg import Constraints, JointConstraint
+        if self.state not in ('idle','succeeded','failed'):
+            raise RuntimeError('motion already active')
+        if not self.plan.server_is_ready() or not self.execute.server_is_ready():
+            raise RuntimeError('simulated planner/executor unavailable')
+        for positions in (goal_joints,measured_joints):
+            if len(positions) != 6 or any(not math.isfinite(q) or not lo <= q <= hi
+                    for q,(lo,hi) in zip(positions,self.limits)):
+                raise ValueError('invalid joint goal or measured start')
+        self.start=tuple(measured_joints)
+        goal=MoveGroup.Goal()
+        req=goal.request
+        req.group_name=self.group
+        req.pipeline_id=self.pipeline
+        req.allowed_planning_time=5.
+        req.num_planning_attempts=1
+        req.max_velocity_scaling_factor=.05
+        req.max_acceleration_scaling_factor=.05
+        req.start_state.joint_state.name=list(JOINTS)
+        req.start_state.joint_state.position=list(self.start)
+        constraints=Constraints()
+        for name,position in zip(JOINTS,goal_joints):
+            constraints.joint_constraints.append(JointConstraint(joint_name=name,
+                position=float(position),tolerance_above=.001,tolerance_below=.001,weight=1.))
+        req.goal_constraints=[constraints]
+        goal.planning_options.plan_only=True
+        self.generation+=1
+        self.handle=None
+        self.deadline=time.monotonic()+self.timeout
+        self._send(self.plan,goal,'plan_accept')
+
     def poll(self):
         try:
             return self._poll()

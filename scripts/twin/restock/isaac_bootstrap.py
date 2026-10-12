@@ -26,7 +26,7 @@ def import_mobile(urdf, destination):
         raise RuntimeError('URDF import configuration failed')
     config.set_fix_base(False)
     config.set_merge_fixed_joints(False)
-    config.set_self_collision(False)
+    config.set_self_collision(True)
     config.set_make_default_prim(True)
     config.set_import_inertia_tensor(True)
     config.set_distance_scale(1.)

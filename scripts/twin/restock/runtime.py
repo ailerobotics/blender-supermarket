@@ -75,7 +75,8 @@ class ManipulationBridge:
         self.controller = controller
         self.owns_sensor_io = owns_sensor_io
         self.prepare_station = prepare_station
-        core = controller.controller if owns_sensor_io else controller
+        core = (controller.controller if owns_sensor_io and
+                not hasattr(controller, 'cart_location') else controller)
         self.cart_location = core.cart_location
 
     def start(self, operation, job):
@@ -91,7 +92,10 @@ class ManipulationBridge:
 
     def stop(self):
         if self.owns_sensor_io:
-            self.controller.motion.stop()
+            if hasattr(self.controller, 'stop'):
+                self.controller.stop()
+            else:
+                self.controller.motion.stop()
 
 
 class RuntimeAdapter:
