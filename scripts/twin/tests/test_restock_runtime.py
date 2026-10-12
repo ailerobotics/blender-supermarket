@@ -86,6 +86,7 @@ class ScenarioTests(unittest.TestCase):
             portal={'clear_width':2.5})
         scenario=dict(job=dict(job_id='j',sku='milk',quantity=1,source_bin='back',shelf_id='shelf'),
             inventory_unit='sealed_handling_unit',dynamic_stock_ready=True,
+            initial_inventory=[dict(location='back',sku='milk',quantity=1)],
             coupled_navigation_radius_m=1.92)
         result=validate(manifest,scenario)
         self.assertEqual(result['navigation_bounds'],[-13,-11,13,19])

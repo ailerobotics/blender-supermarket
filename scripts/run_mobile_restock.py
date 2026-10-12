@@ -98,6 +98,7 @@ def run(args, manifest, scenario):
                     if app is not None:
                         app.close()
     except Exception as exc:
+        summary['state'] = 'failed'
         summary['reason'] = str(exc)
         raise
     finally:

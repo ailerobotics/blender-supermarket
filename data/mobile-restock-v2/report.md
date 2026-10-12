@@ -2,8 +2,10 @@
 
 Status: incomplete, GPU bring-up blocked. No autonomous physics cycle or MP4 has
 been produced. The current branch contains CPU mission/inventory infrastructure;
-sibling environment, mobile/cart, navigation and manipulation modules have not
-been integrated or validated here. There is no production runtime adapter yet.
+the landed mobile/cart code is integrated from origin/main 24d364a. Environment,
+navigation and manipulation corrections are still pending firstmate delivery.
+A controller dispatcher and guarded launcher now exist; a complete simulator
+bundle with actual sensor acquisition/planner/actuator wiring is still missing.
 
 ## Implemented and tested
 
@@ -21,9 +23,10 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-11 CPU fixture tests pass. These prove bookkeeping and failure handling, not
+125 combined CPU tests pass with the installed Isaac USD libraries exposed
+without booting Kit (including 22 mission/runtime and two stock-scene tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
-Reproduction is in RUNBOOK section 9. The shared firstmate interface contract was
+Reproduction is in RUNBOOK section 10. The shared firstmate interface contract was
 published before implementation so sibling lanes can align.
 
 ## Bounded GPU diagnosis (2026-10-12)
@@ -66,8 +69,7 @@ or downgrade drivers, or bypass the GPU guard for this task.
 
 ## Remaining delivery gates
 
-Integrate actual landed sibling modules, implement the runtime adapter and
-bounded/flock-protected launcher, validate scene/robot offline, then run the
+Integrate corrected sibling modules and finish the simulator bundle, then run the
 sensor-to-control loop under the existing protected-Blender and resource gates.
 Prove stock collection, physical coupling, loaded turning/obstacle response,
 parking, transfer verification and return against final code. Record H.264 video
@@ -77,3 +79,59 @@ may be substituted for the missing evidence.
 Vendor reference: NVIDIA's [Isaac Sim 5.1 standalone examples](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/introduction/examples.html)
 provide the version-matched standalone entrypoint pattern. Runtime wiring is not
 yet implemented or claimed compatible solely from this documentation.
+
+
+## CPU integration checkpoint after mobile landing
+
+- `runtime.py` adapts actual sibling interfaces: mission-relative clocks, navigation
+  velocity gate, physical mobile latch, controller-owned arm motion and separate
+  inventory observations. Post-latch sensing is required before coupling succeeds.
+  Missing/repeated/stale packets stop all ports; held payloads are not released.
+- `guard.py` / `run_mobile_restock.py` / shell wrapper implement exclusive GPU flock,
+  protected Blender/process/socket checks, 8 GB VRAM and 12 GiB RAM preconditions,
+  4 GiB RAM watchdog, isolated ROS domain 88 and 20-minute wall timeout. These
+  safeguards are CPU-tested with mocked probes. **No new GPU probe was run after
+  firstmate's instruction to preserve the accepted driver diagnosis.**
+- A new scratch output directory is required; existing run/inventory directories
+  are refused. Interrupted reservations persist and are not automatically replayed.
+- `scene.py` composes input USD layers read-only and promotes the selected concrete
+  stock mesh to a positive-mass rigid body with convex-hull collision. Scene setup
+  poses and SKU metadata remain ground truth, never perception evidence.
+- `isaac_bootstrap.py` imports the free-base URDF with fixed frames retained and
+  discovers actual gripper/camera/lidar paths. Runtime-only code remains unexecuted.
+- Environment USD validation: PASS, all 226 asset attributes resolve. Offline
+  legacy store composition: PASS, 826 static colliders, 197 convex colliders,
+  196/196 inherited prototype colliders. Its arm is explicitly a pedestal **stub**;
+  that check does not validate the new mobile physics or gripping.
+- Mobile URDF/cart rebuilt from landed source using actual upstream CAD and home
+  FK. All 125 tests then passed including USD tests (none skipped).
+- CPU preview uses real generated URDF collision geometry at home FK and imported
+  cart USD; 24-sample Cycles render on four CPU threads took about 23 seconds.
+  This is an assembled static preview, not a simulator frame or physics evidence.
+
+The self-contained HTML embeds the environment worker's actual before/after aisle
+and backroom renders, the assembled CPU mobile/cart preview and a static collision
+map. It follows the repository report's paper/navy/yellow design without external
+font/network dependencies. It contains no rendered or fabricated motion video.
+
+## Cross-lane constraints still being corrected
+
+The original navigation disk (3.847 m diameter) cannot pass a 2.5 m portal, but
+this is an overly conservative orientation-independent bound. The actual straight
+train polygon measures about 2.434 × 1.427 m; the mobile measured home radius is
+0.620725 m and configured radius 0.65 m. Navigation is being corrected to test
+oriented articulated swept footprints without relaxing 1.5 m turning radius,
+65-degree articulation limit or forward-only towing. No loaded route has yet
+passed. A 0.714 m solo clearance result does not establish tow feasibility.
+
+The environment worker is clarifying which body `cart_dock` denotes, separating
+chassis heading from arm target orientation, and selecting a reachable pull-through
+restocking station. Manipulation is binding the real `gripper_pad_tcp` /
+`gripper_tcp`, suction panel and six prismatic tines to a contact-gated simulation
+actuator. URDF geometry alone does not implement suction. These pending changes
+are neither copied from mutable worktrees nor represented as integrated code.
+
+Version-matched vendor references for runtime-only helpers:
+[URDF importer](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/importer_exporter/import_urdf.html),
+[camera sensors](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/sensors/isaacsim_sensors_camera.html).
+Installed source confirms `set_fix_base` / `set_self_collision` importer methods.

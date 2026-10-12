@@ -319,3 +319,41 @@ fixture and ground-truth provenance. `runtime.py` wires the controller ports;
 `run_mobile_restock.sh` performs CPU checks unless `--execute` is explicit.
 A reviewed simulator bundle factory providing actual sensors, controls, stage
 construction and recording is still required; no mock fallback is installed.
+
+The default preflight is CPU-only and never probes the GPU. Supply the environment
+worker's final manifest; the checked-in scenario is a deliberately unready
+starting point (static cases and legacy circular route gate), not a success demo.
+
+```bash
+bash scripts/run_mobile_restock.sh --manifest "$ENVIRONMENT_MANIFEST" \
+  --scenario scripts/restock_scenario.json
+```
+
+After a complete simulator bundle exists and preflight is green, `--execute`
+requires `--factory module:function` and a **new** `--output` scratch directory.
+Use `RESTOCK_PYTHON` for the installed Isaac Python interpreter. The bundle receives
+`app`, `manifest`, `scenario`, `output` and returns `adapter` plus `close()`; it owns
+actual sensor acquisition, controller setup and recording. `recording.Recorder`
+accepts real rendered RGB with unique render IDs and regular simulation timestamps;
+its H.264 encoder uses a caller-supplied local ffmpeg executable. Missing frames
+are rejected, never replaced by an animated fixture. No ready bundle is currently
+shipped. The wrapper caps wall time at 20 minutes. GPU guard defaults stay intact;
+`--heavy-threshold-mb 2500` is the existing explicit whispr opt-in, never `--force`.
+
+CPU assembled preview (URDF collision geometry, **not** a physics screenshot):
+
+```bash
+blender -b --factory-startup --python scripts/preview_mobile_restock.py -- \
+  --manifest "$TASK_OUTPUT/mobile_manifest.json" \
+  --package-root /opt/ros/jazzy/share --package-root "$SHELFBOT_PACKAGE" \
+  --output "$TASK_OUTPUT/mobile-preview.png"
+python3 scripts/build_restock_report.py --manifest "$ENVIRONMENT_MANIFEST" \
+  --narrative data/mobile-restock-v2/report.md \
+  --evidence data/mobile-restock-v2/evidence.json --output "$REPORT_HTML" \
+  --image "Static mobile collision preview=$TASK_OUTPUT/mobile-preview.png"
+```
+
+Repeat `--image 'Caption=PNG path'` to embed actual before/after environment
+renders. The resulting HTML includes all images, CSS and map geometry inline.
+Generated HTML is a cheap CPU artifact kept outside git; report source, evidence
+summary and generator are versioned. No MP4 exists until actual runtime capture.

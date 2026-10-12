@@ -24,6 +24,28 @@ def validate(manifest, scenario):
         errors.append('initial manipulation supports one sealed handling unit only')
     if scenario.get('inventory_unit') != 'sealed_handling_unit':
         errors.append('inventory must count handling units, not visual-case retail contents')
+    inventory = scenario.get('initial_inventory', [])
+    seen = set()
+    available = 0
+    if not isinstance(inventory, list):
+        inventory = []
+    for row in inventory:
+        if not isinstance(row, dict):
+            errors.append('invalid initial inventory row')
+            continue
+        key = (row.get('location'), row.get('sku'))
+        quantity = row.get('quantity')
+        if (not all(isinstance(v, str) and v for v in key) or
+                type(quantity) is not int or quantity < 0):
+            errors.append('invalid initial inventory row')
+            continue
+        if key in seen:
+            errors.append('duplicate initial inventory row')
+        seen.add(key)
+        if key == (job.source_bin, job.sku):
+            available += quantity
+    if available < job.quantity:
+        errors.append('initial inventory cannot satisfy job')
     if scenario.get('dynamic_stock_ready') is not True:
         errors.append('static backstock cases must be promoted to dynamic actors')
     if not manifest.get('static_obstacles'):

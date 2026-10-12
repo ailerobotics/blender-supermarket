@@ -44,3 +44,6 @@ __pycache__/
 #   python3 -m venv .venv-usd && .venv-usd/bin/pip install usd-core   (offline, ~30 MB)
 .venv-usd/
 .venv/
+
+# Reproducible CPU report embeds; source/evidence/generator remain versioned.
+/data/mobile-restock-v2/report.html

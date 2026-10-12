@@ -1,0 +1,6 @@
+{
+  "CPU tests": "125 passed; includes USD, mission and failure fixtures",
+  "Mobile assets": "Landed source; real CAD/FK static preview",
+  "Environment": "USD and offline composition PASS; static source renders",
+  "Physical autonomy": "NOT RUN; GPU driver coherence unresolved"
+}
