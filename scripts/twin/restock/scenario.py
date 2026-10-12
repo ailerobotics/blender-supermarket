@@ -1,0 +1,46 @@
+"""Validate environment semantics without treating them as perception evidence."""
+import math
+from .inventory import Job
+
+
+def validate(manifest, scenario):
+    errors = []
+    if (manifest.get('frame'), manifest.get('units'), manifest.get('up_axis')) != ('map', 'metres', 'Z'):
+        errors.append('environment must use map frame, metres and Z up')
+    if manifest.get('ground_truth_only') is not True:
+        errors.append('environment provenance must be marked ground_truth_only')
+    try:
+        job = Job(**scenario['job'])
+    except (TypeError, KeyError, ValueError) as exc:
+        return {'ok': False, 'errors': errors + [str(exc)]}
+    sources = {s['id']: s for s in manifest.get('backroom_stocks', [])}
+    source = sources.get(job.source_bin)
+    if not source or source.get('sku') != job.sku:
+        errors.append('source bin/SKU does not exist in environment')
+    slots = {s['id']: s for station in manifest.get('stocking_stations', []) for s in station['slots']}
+    if job.shelf_id not in slots or job.sku not in slots[job.shelf_id]['sku_ids']:
+        errors.append('shelf slot does not accept requested SKU')
+    if job.quantity != 1:
+        errors.append('initial manipulation supports one sealed handling unit only')
+    if scenario.get('inventory_unit') != 'sealed_handling_unit':
+        errors.append('inventory must count handling units, not visual-case retail contents')
+    if scenario.get('dynamic_stock_ready') is not True:
+        errors.append('static backstock cases must be promoted to dynamic actors')
+    if not manifest.get('static_obstacles'):
+        errors.append('missing measured static collision map')
+    # Environment stores [xmin,xmax,ymin,ymax]; navigation uses [xmin,ymin,xmax,ymax].
+    raw = manifest.get('map_bounds', ())
+    bounds = None
+    if len(raw) == 4 and all(isinstance(x, (int,float)) and math.isfinite(x) for x in raw):
+        bounds = [raw[0], raw[2], raw[1], raw[3]]
+        if bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
+            errors.append('invalid map bounds')
+    else:
+        errors.append('missing/invalid map bounds')
+    radius = scenario.get('coupled_navigation_radius_m')
+    if not isinstance(radius, (int,float)) or isinstance(radius,bool) or not math.isfinite(radius) or radius <= 0:
+        errors.append('missing conservative coupled navigation radius')
+    elif 2*radius >= manifest.get('portal', {}).get('clear_width', 0):
+        errors.append('coupled navigation envelope cannot fit backroom portal')
+    return {'ok': not errors, 'errors': errors, 'navigation_bounds': bounds,
+            'provenance': 'offline_semantic_validation_not_physics'}

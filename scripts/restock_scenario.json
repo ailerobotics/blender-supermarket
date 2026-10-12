@@ -1,0 +1,19 @@
+{
+  "job": {
+    "job_id": "restock-one",
+    "sku": "biscuit_choc",
+    "quantity": 1,
+    "source_bin": "backstock_00",
+    "shelf_id": "G1R_b0_s1"
+  },
+  "inventory_unit": "sealed_handling_unit",
+  "dynamic_stock_ready": false,
+  "coupled_navigation_radius_m": 1.9236756769993621,
+  "initial_inventory": [
+    {
+      "location": "backstock_00",
+      "sku": "biscuit_choc",
+      "quantity": 6
+    }
+  ]
+}
