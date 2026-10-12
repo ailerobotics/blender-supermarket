@@ -279,3 +279,47 @@ the floor or exploded.
 to `/tmp`), so a failed run is safe to discard. Capture the stderr + `nvidia-smi`, `git stash`
 nothing, and re-run the offline `--author-offline` to confirm the *stage* is still sane before
 blaming the composer — a boot/OOM failure is an Isaac/VRAM problem, not a composition one.
+
+## 9. Mobile restock navigation (CPU checks and isolated Nav2)
+
+Contracts, footprint limits and unverified simulator links:
+[docs/restock_navigation.md](docs/restock_navigation.md). No command here boots
+Isaac or commands a physical robot. The integration runner owns the simulator.
+
+```bash
+# Deterministic CPU fixtures; no ROS/GPU required.
+python3 -m unittest discover -s scripts/twin/tests -p test_navigation.py -v
+
+# With a compatible Jazzy/Nav2 environment already available, generate map/config.
+# scenario.json supplies bounds, obstacles, resolution and the measured footprint.
+# OUTPUT must be a task-owned scratch directory, outside scenes/export/renders.
+python3 scripts/run_restock_nav2.py --scenario scenario.json --output "$OUTPUT"
+
+# Start only the ROS navigation nodes; domain 88 must be reserved for this task.
+ROS_DOMAIN_ID=88 ROS_LOCALHOST_ONLY=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+  python3 scripts/run_restock_nav2.py --scenario scenario.json --output "$OUTPUT" --launch
+```
+
+Example **test-fixture** scenario schema (replace all dimensions with scene/rig
+measurements before runtime):
+
+```json
+{
+  "bounds": [-6, -6, 6, 6],
+  "obstacles": [[2, 2, 3, 3]],
+  "resolution": 0.2,
+  "footprint": {
+    "base_radius": 0.6,
+    "hitch_offset": 0.5,
+    "cart_hitch_to_farthest_corner": 1.2,
+    "margin": 0.1,
+    "min_turn_radius": 1.0,
+    "max_articulation": 1.1
+  }
+}
+```
+
+Feed real wheel encoder and range samples through the adapter described in the
+navigation document. Never connect raw Nav2 `cmd_vel` to the base: the adapter
+returns the gated command. Missing Nav2 packages are a prerequisite failure;
+this script intentionally does not install/upgrade shared ROS or Isaac.
