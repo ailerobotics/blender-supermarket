@@ -29,6 +29,25 @@ stop within the chassis pose tolerances, with peak articulation about 46 degrees
 The cart remains coupled and articulated at arrival: this is not an aligned
 re-latch or exact restoration of the cart's initial body pose.
 
+For an offset lidar, construct `Scan(..., sensor_to_base=(x, y, yaw))` using its
+calibrated origin and heading in base coordinates. `Scan.points(base_pose)` and
+`MapLocalizer` apply this transform before projecting into the map.
+`IsaacRangeSensor` accepts the same keyword; its pose callback still supplies
+the physical **sensor** pose, so do not apply the offset twice. Full-circle
+coverage about the base is reduced by the offset distance. ROS consumers must
+preserve the sensor frame and calibrated TF; displaced polar ranges cannot be
+relabelled `base_link` or used with the base-origin ROS input contract unchanged.
+
+Calibration does not reduce localization uncertainty. The in-process localizer
+retains its conservative 0.10 m floor, not a fitted covariance or a 0.02 m cap.
+An actual-map ideal-ray counterfactual at a 0.46 m sensor offset recovered the
+declared dock/shelf base poses with calibration; omitting calibration biased X
+by 0.10 m. At the resulting 0.10 m bound, the staging support 0.76 m north of the
+initial chassis intersects its full-margin transport envelope. The controller
+correctly stops; the earlier 0.02 m route fixture does not certify this pipeline.
+Integration must provide enough staging clearance and validate the resulting
+route with measured uncertainty. These CPU ray checks are not PhysX evidence.
+
 The integration scenario can specify a different shelf pose and adds a staging
 support. Pass `--scenario` to the CPU checker and `--integration-scenario` to
 both Nav2 launch and the host bridge so all three use the same obstacle map.
