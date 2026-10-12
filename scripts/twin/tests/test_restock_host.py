@@ -1,0 +1,154 @@
+"""CPU contract tests. The generated robot here is explicitly a test fixture."""
+import copy
+import json
+import os
+from pathlib import Path
+from types import SimpleNamespace as S
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import yaml
+
+from twin.restock_host.config import (ENDPOINTS, ENV, FRAME, JOINTS, NS,
+                                      isolated_environment, launch_plan)
+from twin.restock_host.preflight import dependencies, incorporated_time
+from twin.restock_host.readiness import missing_endpoints
+
+
+def fixture(directory):
+    directory = Path(directory)
+    (directory / 'shelfbot/perception').mkdir(parents=True)
+    for name in ('object_segmenter', 'depth_mask'):
+        (directory / f'shelfbot/perception/{name}.py').write_text('# test fixture, never executed\n')
+    links = ['base_link', 'arm_mount', FRAME, 'suction_cups', 'gripper_pad_tcp']
+    links += ['link' + str(i) for i in range(6)]
+    joints = []
+    previous = FRAME
+    for i, name in enumerate(JOINTS):
+        child = 'link' + str(i)
+        joints.append(f'<joint name="{name}" type="revolute"><parent link="{previous}"/>'
+                      f'<child link="{child}"/><limit lower="-3" upper="3" velocity="1" effort="1"/></joint>')
+        previous = child
+    for name, parent, child in [('mount', 'base_link', 'arm_mount'),
+                                ('arm', 'arm_mount', FRAME),
+                                ('tool', previous, 'suction_cups'),
+                                ('tcp', 'suction_cups', 'gripper_pad_tcp')]:
+        joints.append(f'<joint name="{name}" type="fixed"><parent link="{parent}"/><child link="{child}"/></joint>')
+    (directory / 'robot.urdf').write_text('<robot name="test_fixture">' +
+        ''.join(f'<link name="{n}"/>' for n in links) + ''.join(joints) + '</robot>')
+    (directory / 'robot.srdf').write_text('<robot name="test_fixture"><group name="ur_manipulator">'
+        '<chain base_link="ur_base_link" tip_link="gripper_pad_tcp"/></group></robot>')
+    xrdf = {'format': 'xrdf', 'format_version': 1.0,
+            'modifiers': [{'set_base_frame': FRAME}],
+            'tool_frames': ['gripper_pad_tcp'],
+            'cspace': {'joint_names': list(JOINTS), 'acceleration_limits': [1.] * 6,
+                       'jerk_limits': [10.] * 6},
+            'geometry': {'cad': {'spheres': {n: [{'center': [0., 0., 0.], 'radius': .1}]
+                                           for n in links}}},
+            'collision': {'geometry': 'cad'}, 'self_collision': {'geometry': 'cad'}}
+    (directory / 'robot.xrdf').write_text(yaml.safe_dump(xrdf))
+    (directory / 'mobile.json').write_text(json.dumps({'transport_positions': dict.fromkeys(JOINTS, 0.)}))
+    return {name: str(directory / ('robot.' + name)) for name in ('urdf', 'srdf', 'xrdf')} | {
+        'workspace_min': [-2., -2., -1.], 'workspace_max': [2., 2., 2.],
+        'shelfbot_root': str(directory), 'mobile_manifest': str(directory / 'mobile.json')}
+
+
+class HostTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.config = fixture(self.temp.name)
+
+    def test_domain_and_loopback(self):
+        self.assertEqual(isolated_environment({}), ENV)
+        for key, value in [('ROS_DOMAIN_ID', '0'), ('ROS_DOMAIN_ID', '42'),
+                           ('ROS_STATIC_PEERS', 'robot'), ('ROS_LOCALHOST_ONLY', '0'),
+                           ('ROS_DISCOVERY_SERVER', 'server'), ('CYCLONEDDS_URI', 'file'),
+                           ('FASTDDS_DEFAULT_PROFILES_FILE', 'file')]:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                isolated_environment({key: value})
+
+    def test_names_frames_and_no_hardware(self):
+        plan = launch_plan(self.config)
+        self.assertEqual(plan['frame'], FRAME)
+        self.assertEqual(set(plan['endpoints']), {NS + '/' + n for n in ENDPOINTS})
+        self.assertIn('moveit_ros_move_group/move_group', plan['nodes'])
+        self.assertFalse(any('driver' in n or 'fake' in n for n in plan['nodes']))
+        self.assertIn('sensor-derived', ' '.join(plan['required_external']))
+        self.assertIn('--mobile-manifest', plan['integration_host_arguments'])
+
+    def test_manifest_stow_missing_or_out_of_bounds(self):
+        path = Path(self.config['mobile_manifest'])
+        for positions in ({}, dict.fromkeys(JOINTS, 100.)):
+            path.write_text(json.dumps({'transport_positions': positions}))
+            with self.assertRaisesRegex(ValueError, 'transport_positions'):
+                launch_plan(self.config)
+
+    def test_reject_unsafe_config(self):
+        for key, value in [('domain', 42), ('namespace', '/'), ('tcp', 'tool0'),
+                           ('frame', 'world'), ('workspace_max', [float('nan')] * 3),
+                           ('urdf', '/nonexistent/mobile.urdf'), ('unknown', 1)]:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                launch_plan(self.config | {key: value})
+
+    def test_reject_placeholder_and_missing_self_collision(self):
+        path = Path(self.config['xrdf'])
+        original = yaml.safe_load(path.read_text())
+        for section in ('collision', 'self_collision'):
+            invalid = copy.deepcopy(original)
+            invalid[section] = {'geometry': []}
+            path.write_text(yaml.safe_dump(invalid))
+            with self.assertRaisesRegex(ValueError, section):
+                launch_plan(self.config)
+        invalid = copy.deepcopy(original)
+        del invalid['geometry']['cad']['spheres']['suction_cups']
+        path.write_text(yaml.safe_dump(invalid))
+        with self.assertRaisesRegex(ValueError, 'suction_cups'):
+            launch_plan(self.config)
+
+    def test_reject_bad_srdf_and_chain(self):
+        path = Path(self.config['srdf'])
+        path.write_text(path.read_text().replace('ur_manipulator', 'manipulator'))
+        with self.assertRaisesRegex(ValueError, 'ur_manipulator'):
+            launch_plan(self.config)
+
+    def test_exact_dependency_failures(self):
+        def unavailable(package):
+            raise LookupError(package)
+        result = dependencies(unavailable)
+        self.assertTrue(any('isaac_ros_cumotion:' in e and 'task-local overlay' in e for e in result['errors']))
+        self.assertTrue(any('nvblox_ros:' in e for e in result['errors']))
+
+    @unittest.skipUnless(os.environ.get('RESTOCK_HOST_VALIDATE_INSTALLED') == '1',
+                         'explicit CPU-only installed-image validation')
+    def test_installed_launch_description_without_starting(self):
+        from twin.restock_host.launch import description
+        result = dependencies()
+        self.assertEqual(result['errors'], [])
+        launch = description(self.config)
+        self.assertEqual(len(launch.entities), 6)
+
+    def test_graph_requires_exact_types_and_all_servers(self):
+        services = [(NS + '/' + k, [v]) for k, v in ENDPOINTS.items() if '/srv/' in v]
+        actions = [(NS + '/' + k, [v]) for k, v in ENDPOINTS.items() if '/action/' in v]
+        self.assertEqual(missing_endpoints(services, actions), [])
+        self.assertTrue(missing_endpoints(actions, services))
+        self.assertTrue(any('attach_object' in e for e in missing_endpoints(services, [])))
+
+    def test_sensor_incorporation_not_receive_time(self):
+        response = S(success=True, header=S(frame_id=FRAME, stamp=S(sec=10, nanosec=100000000)),
+                     esdf_and_gradients=S(data=[1., 0., 0., 0.]), voxel_size_m=.02)
+        self.assertAlmostEqual(incorporated_time(response, now=10.2, parked_since=10.), 10.1)
+        for changes in ({'success': False}, {'voxel_size_m': 0.},
+                        {'esdf_and_gradients': S(data=[])},
+                        {'header': S(frame_id='map', stamp=response.header.stamp)}):
+            with self.assertRaises(ValueError):
+                incorporated_time(S(**(vars(response) | changes)), now=10.2, parked_since=10.)
+        for now, parked in [(11., 10.), (10., 9.), (10.2, 10.15)]:
+            with self.assertRaises(ValueError):
+                incorporated_time(response, now=now, parked_since=parked)
+
+
+if __name__ == '__main__':
+    unittest.main()
