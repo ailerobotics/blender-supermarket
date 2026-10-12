@@ -1,8 +1,8 @@
 {
-  "CPU tests": "235 passed, 3 dependency skips; unresolved-input launch refusal and cross-interpreter ROS serialization pass",
+  "CPU tests": "265 passed, 3 dependency skips after camera/navigation merge; unresolved-input launch refusal and cross-interpreter ROS serialization pass",
   "Mobile assets": "Landed source; real CAD/FK static preview",
   "Environment": "USD and offline composition PASS; static source renders",
   "Physical autonomy": "NOT RUN; explicit simulator hold remains, task-local driver workaround under firstmate review",
-  "Navigation": "Final north-shifted source at actual 0.10m localization uncertainty: outbound blocked_no_route_timeout before motion; earlier 0.02m fixture is insufficient",
+  "Navigation": "Merged corridor correction passes outbound/return at full .05+.10m margins, 798 obstacles, exact Y17.1 scenario; quasistatic CPU fixture only",
   "Handling geometry": "Side grasp: 16 IK poses solve using actual articulated arrival; no arm/tool overlap in conservative insertion sweeps. Support-contact bounds remain; transit/self collision/physics unverified."
 }

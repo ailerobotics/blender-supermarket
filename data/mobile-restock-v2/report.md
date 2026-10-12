@@ -23,7 +23,7 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-235 combined CPU tests pass with three dependency skips at the integration checkpoint, with the installed Isaac USD libraries exposed
+265 combined CPU tests pass with three dependency skips after the landed camera/navigation corrections, with the installed Isaac USD libraries exposed
 without booting Kit (including mission/runtime, recording, stock-scene and environment tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
 Reproduction is in RUNBOOK section 11. The shared firstmate interface contract was
@@ -184,11 +184,20 @@ uncertainty envelope. The new source IK and whole-link insertion sweep pass for
 arm/tool geometry; intended payload/support and wheel/floor bounds remain.
 Camera and full-route validation must consume this new scenario hash.
 
-The final north-shifted scenario was checked at the localizer's actual 0.10 m
-uncertainty floor after the sensor-extrinsic correction landed. Outbound planning
-failed with `blocked_no_route_timeout` before any fixture motion. Earlier 0.02 m
-route evidence does not validate this configuration. The required clearance is
-retained; the navigation owner has been notified for follow-up.
+The initial north-shifted scenario check at the actual 0.10 m uncertainty floor
+failed with `blocked_no_route_timeout`. This is historical diagnosis: the merged
+portal/corridor correction now passes outbound and return at 0.05+0.10 m margins
+against all 798 obstacles for scenario file hash
+`fbea2c7420ea7f4451cae27981fde897811f6ce7d6da1a09d1073ec3d1fc3a80`.
+Evidence is the navigation lane's `measured-margin-scenario/summary.json`.
+Integration reran IK against its exact independent robot/cart arrival: all
+16 poses solve (`reach-measured-margin.json`). This remains a quasistatic CPU
+fixture, not continuous sensing or PhysX proof. Earlier 0.02 m evidence remains
+insufficient and is not substituted for this result.
+The matching `sweep-measured-margin.json` checks all 16 insertion segments with
+the exact revised arrival. Only wheel/floor and held-payload/support overlap bounds
+remain; no arm/tool overlap was found. The strict `candidate_clear` is false,
+and transit, self collision and camera mounting geometry remain unverified.
 
 `IsaacPort` acquires articulation encoders, rigid-body docking feedback, physical
 range scans, native seal, measured transport geometry and recording frames.
@@ -225,9 +234,9 @@ gripper/drive assembly for the guarded app; it is not yet simulator-tested.
 
 Host worker owns CAD SRDF/XRDF generation and coverage/hash evidence. Its task-local
 ROS overlay imports and component dependency checks passed; this does not prove
-GPU planner/mapper startup. Host and camera code must land before integration
-imports them. Remaining inputs are exact CAD collision assets, a passing route at
-actual uncertainty, a current-scenario camera configuration with sensed support
+GPU planner/mapper startup. Camera and navigation corrections are now merged;
+host launch code is still awaiting landing. Remaining inputs are exact CAD
+collision assets, a current-scenario camera configuration with sensed support
 and clearance, camera housing collision validation, mapper reset/incorporation
 acknowledgements, and the complete sensor-binding mission factory. Camera work
 currently reports loaded-support occlusion and insufficient shelf support ROI;
