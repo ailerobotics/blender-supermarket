@@ -13,8 +13,9 @@ import time
 
 from .types import Observation, Sensors, Target
 
-JOINTS = ('shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
-          'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint')
+from .cad_tool import ARM_JOINTS
+
+JOINTS = ARM_JOINTS
 
 
 def require_sim_domain():
@@ -53,7 +54,7 @@ def validate_trajectory(trajectory, start, limits):
 
 class RosMotionPort:
     def __init__(self, node, *, joint_limits, payload_sync, emergency_stop,
-                 group='ur_manipulator', tcp='platform_tcp', namespace='/restock_sim',
+                 group='ur_manipulator', tcp='gripper_pad_tcp', namespace='/restock_sim',
                  pipeline='isaac_ros_cumotion', timeout=25.0):
         require_sim_domain()
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
@@ -94,7 +95,7 @@ class RosMotionPort:
         req.ik_request.timeout.sec = 2
         req.ik_request.robot_state.joint_state.name = list(JOINTS)
         req.ik_request.robot_state.joint_state.position = list(joints)
-        req.ik_request.pose_stamped.header.frame_id = 'base_link'
+        req.ik_request.pose_stamped.header.frame_id = 'ur_base_link'
         req.ik_request.pose_stamped.header.stamp = self.node.get_clock().now().to_msg()
         p = req.ik_request.pose_stamped.pose
         p.position.x, p.position.y, p.position.z = map(float, pose[:3])
@@ -266,3 +267,53 @@ class RosTransferBridge:
         if (self.controller.phase not in ('idle', 'failed', 'succeeded')
                 and time.monotonic() - self.last_packet_wall > self.watchdog_seconds):
             self._emit(self.controller._fail('sensor stream watchdog expired'))
+
+
+class NvbloxWorldBridge:
+    """Concrete task-only nvblox ESDF service client for IsaacCadMotion.
+
+    The nvblox mapper/TF must use ur_base_link during parked manipulation and
+    receive rendered depth. map_stamp is its last incorporated sensor timestamp,
+    supplied by integration's mapper acknowledgement, never wall-clock 'now'.
+    Missing nvblox_msgs is an explicit runtime dependency, not a fixture fallback.
+    """
+    def __init__(self, node, motion, origin, size):
+        require_sim_domain()
+        if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
+            raise RuntimeError('nvblox client must use isolated simulation clock/domain')
+        from nvblox_msgs.srv import EsdfAndGradients
+        self.service_type = EsdfAndGradients
+        self.node, self.motion = node, motion
+        self.origin, self.size = tuple(origin), tuple(size)
+        self.client = node.create_client(EsdfAndGradients, '/restock_sim/nvblox_node/get_esdf_and_gradient')
+        self.future = None
+
+    def request(self, map_stamp):
+        if self.future is not None and not self.future.done():
+            return
+        if not math.isfinite(map_stamp) or map_stamp < 0 or not self.client.service_is_ready():
+            raise RuntimeError('sensor mapper or incorporated-frame acknowledgement unavailable')
+        from geometry_msgs.msg import Point, Vector3
+        request = self.service_type.Request()
+        request.update_esdf, request.use_aabb = True, True
+        request.frame_id = 'ur_base_link'
+        request.aabb_min_m = Point(x=float(self.origin[0]), y=float(self.origin[1]), z=float(self.origin[2]))
+        request.aabb_size_m = Vector3(x=float(self.size[0]), y=float(self.size[1]), z=float(self.size[2]))
+        self.stamp = map_stamp
+        self.future = self.client.call_async(request)
+
+    def poll(self):
+        if self.future is None or not self.future.done():
+            return False
+        import numpy as np
+        response = self.future.result()
+        self.future = None
+        if response is None:
+            raise RuntimeError('nvblox ESDF request failed')
+        array = response.esdf_and_gradients
+        dims = {dimension.label:int(dimension.size) for dimension in array.layout.dim}
+        shape = tuple(dims[axis] for axis in ('x','y','z'))
+        grid = np.asarray(array.data, np.float32).reshape(shape)
+        origin = (response.origin_m.x, response.origin_m.y, response.origin_m.z)
+        self.motion.update_esdf(grid, origin, self.stamp)
+        return True

@@ -286,7 +286,7 @@ Contracts, dependencies and limits: [restock manipulation](docs/restock_manipula
 No simulator is started by these tests:
 
 ```bash
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_manipulation.py -q
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_manipulation.py scripts/twin/tests/test_cad_restock.py -q
 ```
 
 Before integrating `RosTransferBridge` / `RosMotionPort` into an already running
@@ -305,3 +305,16 @@ collision world, simulated gripper/contact bridge and MoveIt/cuMotion servers.
 Missing sensing or adapters are a failure, not a fixture fallback. See the linked
 contract for topic schema and acknowledgement requirements. Full GPU execution
 remains subject to §8's resource guard and integration ownership.
+
+The CAD native-gripper/carton authoring tests additionally need `pxr`. Use the
+CPU USD Python configured in §6a (or the existing shelfbot USD-only wrapper):
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  bash "$SHELFBOT_ROOT/tools/usdpy" -m pytest scripts/twin/tests/test_cad_restock.py -q
+```
+
+Set `SHELFBOT_ROOT` to the read-only source checkout selected by integration.
+This wrapper loads USD libraries only; it does not boot Isaac. The direct
+`CadRestockRuntime` assembly/asset authoring order is documented in
+[Actual CAD gripper and concrete Isaac path](docs/restock_manipulation.md#actual-cad-gripper-and-concrete-isaac-path).

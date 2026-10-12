@@ -8,10 +8,13 @@ from .types import MotionPort, ProductProfile, Result, Sensors
 class TransferController:
     def __init__(self, motion: MotionPort, profiles: dict[str, ProductProfile], *,
                  cart_location: str = 'rollwagen', max_age: float = 0.5,
-                 phase_timeout: float = 30.0, fixture_mode: bool = False):
+                 phase_timeout: float = 30.0, fixture_mode: bool = False,
+                 frame: str = 'ur_base_link', pose_policy=None):
         if max_age <= 0 or phase_timeout <= 0:
             raise ValueError('timeouts must be positive')
         self.motion, self.profiles = motion, profiles
+        self.frame = frame
+        self.pose_policy = pose_policy
         self.cart_location, self.max_age = cart_location, max_age
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
@@ -34,6 +37,8 @@ class TransferController:
             raise ValueError('missing job identifiers')
         self.profile = self.profiles[job['sku']]
         p = self.profile
+        if p.grasp_mode != 'top' and self.pose_policy is None:
+            raise ValueError('side grasp requires the actual CAD wall pose policy')
         if (len(p.dimensions) != 3 or not all(math.isfinite(x) and x > 0 for x in p.dimensions)
                 or len(p.tcp_quaternion) != 4
                 or not math.isclose(sum(x*x for x in p.tcp_quaternion), 1, abs_tol=1e-4)
@@ -60,7 +65,7 @@ class TransferController:
     def _provenance(self, item, now):
         allowed = ('sensor', 'test_fixture') if self.fixture_mode else ('sensor',)
         return (item.source in allowed and bool(item.observation_id)
-                and self._fresh(item.simulation_time, now) and item.frame == 'base_link')
+                and self._fresh(item.simulation_time, now) and item.frame == self.frame)
 
     def _pose_ok(self, pose):
         return (len(pose) == 7 and all(math.isfinite(x) for x in pose)
@@ -140,9 +145,11 @@ class TransferController:
                               lift=pose(source.pose, p.approach),
                               preplace=pose(target.pose, p.dimensions[2] + p.approach),
                               place=place, retreat=pose(target.pose, p.dimensions[2] + p.approach))
+            if self.pose_policy is not None:
+                self.poses = self.pose_policy.build(source, target, p)
             if not all(self._pose_ok(v) for v in self.poses.values()):
                 return self._fail('approach outside reach envelope')
-            self.target_pose = (*place[:2], place[2] - p.tcp_surface_offset, *place[3:])
+            self.target_pose = (*target.pose[:2], target.pose[2] + p.dimensions[2], *target.pose[3:])
             self.target_surface = target.pose
             self.source_pose = source.pose
             self.evidence.append(asdict(source))
@@ -153,12 +160,13 @@ class TransferController:
                                   if o.location == self.source and o.sku == self.job['sku']
                                   and self._provenance(o, now) and self._pose_ok(o.pose)
                                   and math.isfinite(o.confidence) and .9 <= o.confidence <= 1]
-                if (len(source_matches) != 1
-                        or math.dist(source_matches[0].pose[:3], self.source_pose[:3]) > .02):
+                if (len(source_matches) > 1 or (source_matches and
+                        math.dist(source_matches[0].pose[:3], self.source_pose[:3]) > .02)):
                     return self._fail('source pose lost or moved before grasp')
             # Check target vacancy up to the first placement movement. Once the
             # carried object enters the target ROI, it is expected to be occupied.
-            if self.phase in ('approach', 'contact', 'lift', 'preplace'):
+            if (self.phase in ('approach', 'contact', 'lift')
+                    or (self.phase == 'preplace' and not self.issued)):
                 t = s.target
                 if (not t or t.location != self.destination or not t.clear
                         or not self._provenance(t, now)

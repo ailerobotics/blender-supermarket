@@ -8,12 +8,14 @@ Pose = tuple[float, float, float, float, float, float, float]
 @dataclass(frozen=True)
 class ProductProfile:
     sku: str
-    # Only rigid, sealed boxes with a horizontal suctionable top are supported.
+    # Only rigid sealed cartons; the CAD slice selects a measured top or wall seal.
     dimensions: tuple[float, float, float]
     tcp_quaternion: tuple[float, float, float, float]
     tcp_surface_offset: float = 0.0
     approach: float = 0.12
     max_reach: float = 1.1
+    mass_kg: float = 0.5
+    grasp_mode: str = 'top'
 
 
 @dataclass(frozen=True)
@@ -27,7 +29,9 @@ class Observation:
     confidence: float
     quantity: int = 1              # one sealed handling unit, not contents count
     family: str = 'sealed_box'
-    frame: str = 'base_link'
+    frame: str = 'ur_base_link'
+    unit_kind: str = 'handling_unit'
+    retail_quantity: int | None = None  # sealed contents have not been counted
 
 
 @dataclass(frozen=True)
@@ -39,7 +43,7 @@ class Target:
     pose: Pose                    # observed support surface
     clear: bool
     free_dimensions: tuple[float, float, float]
-    frame: str = 'base_link'
+    frame: str = 'ur_base_link'
 
 
 @dataclass(frozen=True)
