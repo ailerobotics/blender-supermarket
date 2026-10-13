@@ -52,6 +52,24 @@ The support/inventory test forbids a second decode on the shared acquisition.
 No camera scene, physical layout or published configuration changes accompany
 this decoder update.
 
+RGB hashing snapshots all pixels into a contiguous C-order array on every
+decode and shared-result validation, then hashes its buffer directly. This
+preserves the original byte digest and mutation detection without the slower
+strided-array `tobytes()` serialization. No hash/validation success is cached;
+even contiguous inputs are copied to preserve independent snapshot semantics.
+The API, frame/session checks and 500 ms gates are unchanged.
+
+A bounded two-thread CPU comparison on the same six discovery frames (three
+paired repetitions per frame) measured median shared validation 57.3 → 32.6 ms
+and decode + validation + depth archive I/O + registration 470.2 → 428.7 ms.
+The corrected chain still reached 551.0 ms (p95 513.6 ms): **the complete 500 ms
+pipeline remains unproven**. All paired hashes, corners, identities and metric
+registrations matched. Sensor aggregation was not measurable from this loaded
+source capture alone: it lacks a genuine empty commissioning baseline. These
+component measurements exclude native acquisition, witness/clearance checks,
+sensor aggregation and action handoff; integration's final fresh-clock gate
+must still reject expired observations. No further tuning follows this pass.
+
 `restock_camera.sensed` separates dated rigid geometry from current vacancy.
 An actual empty commissioning RGB-D frame measures a full support quadrilateral
 and an independent visible plane witness. Paired physical QR markers establish

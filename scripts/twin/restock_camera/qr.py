@@ -16,7 +16,12 @@ def rgb_digest(rgb):
     pixels = np.asarray(rgb)
     if pixels.dtype != np.uint8 or pixels.ndim != 3 or pixels.shape[2] != 3:
         raise ValueError('QR observation requires original uint8 RGB pixels')
-    return hashlib.sha256(pixels.tobytes()).hexdigest()
+    # Snapshot on every call, including validation: never cache by array/frame
+    # identity. Packing strided RGBA->RGB views as an ndarray avoids the slower
+    # tobytes serializer; hashlib consumes the contiguous buffer directly.
+    # Always copy even contiguous inputs so hashing retains snapshot semantics.
+    snapshot = pixels.copy(order='C')
+    return hashlib.sha256(snapshot).hexdigest()
 
 
 def tile_origins(width, height):
