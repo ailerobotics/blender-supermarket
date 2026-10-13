@@ -27,7 +27,7 @@ checks. Detail + exact commands are in the per-topic sections below.
 | Source-station sensing (decode) | GREEN | native | `view-source-lit-01`: 3/3 markers decoded under the applied light rig |
 | Shelf-station sensing (decode) | RED (lit) | native | `view-shelf-lit-04` (PR#30 DiskLight): illumination FIXED (support max 4->217, 31% >=180) but decode still 0/2 — QR contrast/over-exposure (band 161-227, no dark), routed to camera worker |
 | Mapper construction | CONFIRMED | native | `mapper-evidence-construct-01` (PR#29 runtime closure): EvidenceProducerNode instantiated + advertised services/topic + 5893 ticks, GPU reclaimed; incorporation = sensor+handshake next |
-| Collision-map incorporation (mapper) | IN PROGRESS | native | sensor+handshake driver built; mapper+services launch, but EmptyGeneration returns 'native layer not empty' on the live mapper — producer emptiness-certification design question routed to host worker |
+| Collision-map incorporation (mapper) | RED (producer gate) | native | `incorp-01/02`, `incorp-probe-01/02/03`, `incorp-probe-noesdf2`: full sensor+handshake driver built + CPU-tested; mapper services discovered and RESPOND, but EmptyGeneration is refused `native layer not empty` on the earliest single-shot call (no sensor input/TF/clock, ESDF+decay+clearing timers off), and one refusal permanently Faults the one-shot producer — a static nvblox layer is non-empty at construction; native-producer-lane fix routed to host worker |
 | Full autonomous restock cycle | NOT RUN | — | gated on shelf sensing + mapper incorporation; the `isaac_bundle:create` factory is not built until those land |
 
 Source-station note: per the integration/camera contract the 3/3 native decode
@@ -56,6 +56,63 @@ incorporation binding (host PR #25). The CPU consumer tests (`test_navigation_ev
 `test_navigation_temporal`, `test_navigation_mapper_launch`) pass. This is a measured
 launch result, not a readiness claim: slice publication and incorporation stay gated on
 restoring the host GXF package and landing (b).
+
+## Incorporation driver built + run: producer emptiness gate unsatisfiable at construction (measured)
+
+The integration **sensor + handshake driver** that was missing (the mapper gate only
+proved node construction) is now built, CPU-tested and exercised natively under the GPU
+guard. Three parts, all integration/launch-owned:
+
+- `scripts/twin/restock_host/incorporation_driver.py` — a pure-logic handshake
+  **sequencer** mirroring `native/restock_mapper_evidence/state.hpp`: empty-certificate
+  echo, single admission, acquisitions strictly after the cutoff and fresh in both clocks
+  (0.3 s), strictly increasing per sensor. No ROS/GPU; deterministic under supplied clocks.
+- `scripts/twin/restock_host/sensor_handshake.py` — a ROS 2 node that publishes `/clock`,
+  the static `map->optical/base_link` TF and a synthetic depth + camera_info on the
+  generation input topics, drives `EmptyGeneration -> OpenAdmission -> RegisterAcquisition`,
+  then decodes the `EvidenceSnapshot` via `evidence_bridge` and feeds
+  `twin.navigation.temporal.TemporalMap`, recording the adopted incorporation identity.
+  The synthetic depth is a FIXTURE source (not Isaac perception); the Isaac depth source is
+  a drop-in seam. A `--probe-empty-count` diagnostic mode polls EmptyGeneration only.
+- `scripts/run_incorporation_identity_gpu.py` — guarded orchestrator launching the mapper
+  (`launch_evidence_mapper.py --execute`) + the driver under `/tmp/aile-gpu.lock`, >=8 GiB
+  VRAM / >=12 GiB RAM preflight, `--heavy-threshold-mb 2500`, bounded, torn down by PID group.
+
+CPU: 13 new tests (`test_incorporation_driver`) cover the sequencer invariants and the
+consumer float-identity the `accept_envelope` `ack in history` check depends on; 490 CPU
+tests pass, 10 dependency skips.
+
+Native (6 bounded guarded runs, `data/.../incorp-*`, GPU peaked ~0.8 GiB over the 2258 MiB
+whispr baseline, reclaimed to 9650 MiB free, whispr preserved, lock released each time):
+
+- **Service path works end to end** — a real advance over `construct-01`, whose external
+  probe false-negatived node discovery because it lacked the sourced overlay. Here the
+  driver sources the PR#29 runtime closure (`sim-restock-host-v2/nav-plugin/runtime-env.sh`)
+  so it discovers and successfully CALLS `empty_generation`/`open_admission`/
+  `register_acquisition`; the mapper responds with typed replies.
+- **EmptyGeneration is refused `native layer not empty`** on the earliest single-shot call
+  (`incorp-probe-03`, ~3 s after node construction) with **nothing published** — no `/clock`,
+  no TF, no depth — and again (`incorp-probe-noesdf2`) with the ESDF-update, decay and
+  map-clearing timers disabled (`--mapper-param update_esdf_rate_hz=0.0 decay_tsdf_rate_hz=0.0
+  map_clearing_radius_m=-1.0`). So a static nvblox layer carries >=1 allocated block from
+  construction, independent of sensor input and of every timer the driver or launch controls.
+- **The producer is one-shot**: `State::fail()` is `[[noreturn]]` and sets `Phase::Fault`, so
+  the first refusal poisons the generation — subsequent EmptyGeneration calls return
+  `invalid empty challenge` (`incorp-probe-02`: 1 x `native layer not empty` then 19 x
+  `invalid empty challenge`). A restart is a new producer instance that hits the same gate.
+
+Consequence: the producer's `verify_empty` (all of tsdf/esdf/color/freespace/occupancy
+`numAllocatedBlocks == 0`) is not satisfiable against the installed nvblox static mapper as
+launched. The embedded slice is emitted only from `processEsdf`, so the gate cannot simply be
+bypassed by disabling ESDF. This blocks incorporation identity -> source-station vacancy
+capture -> the full mission. It is a **native-producer-lane** issue (`native/restock_mapper_evidence`,
+host PR#25), not editable by integration concurrently. Minimal asks routed to that lane:
+(1) return the per-layer `LayerCount[]` in the EmptyGeneration **failure** response (currently
+populated only on success) so the exact non-empty layer/count is pinned without faulting the
+node; (2) make `verify_empty` baseline-aware of nvblox's construction-time allocation (measure
+the construction baseline, or exclude derived/preallocated layers from the sensor-emptiness
+check). The driver, sequencer, orchestrator and consumer path are complete and will produce a
+measured incorporation identity the moment the gate accepts an empty generation.
 
 ## Camera lighting applied: SOURCE decodes 3/3, SHELF still dark 0/2 (measured)
 
