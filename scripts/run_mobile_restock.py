@@ -44,6 +44,9 @@ def run(args, manifest, scenario):
     configured_scenario=json.loads(Path(config['scenario']).read_text())
     if configured_scenario!=scenario:
         raise ValueError('runtime configuration and mission scenario differ')
+    # Preserve the launch shell before SimulationApp mutates Python/native-library
+    # paths; the host ROS interpreter receives its own explicitly sourced overlay.
+    config['_launch_environment']=dict(os.environ)
     # New output directory only: a restart must reconcile existing physical/job state.
     # Reject any existing path before loading the simulator.
     args.output.mkdir(parents=True, exist_ok=False)

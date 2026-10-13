@@ -7,6 +7,34 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 
+def resolve_meshes(urdf, destination, package_roots):
+    """Expand every CAD mesh URI into a new task-owned import file, CPU only.
+
+    Isaac must not silently omit unresolved package meshes. Keep upstream files
+    read-only and retain the actual CAD geometry; no mesh substitution is allowed.
+    """
+    from twin.urdf_probe import resolve_package_uri
+    urdf,destination=Path(urdf).resolve(),Path(destination).resolve()
+    if destination.exists() or destination==urdf:
+        raise ValueError('resolved URDF output must be new')
+    tree=ET.parse(urdf)
+    for mesh in tree.getroot().findall('.//mesh'):
+        filename=mesh.get('filename','')
+        if filename.startswith('package://'):
+            resolved,_=resolve_package_uri(filename,package_roots)
+            path=Path(resolved) if resolved else None
+        else:
+            path=Path(filename.removeprefix('file://'))
+            if not path.is_absolute():
+                path=urdf.parent/path
+        if path is None or not path.is_file():
+            raise ValueError('unresolved actual CAD mesh: '+filename)
+        mesh.set('filename',str(path.resolve()))
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    tree.write(destination,encoding='utf-8',xml_declaration=True)
+    return destination
+
+
 def import_mobile(urdf, destination):
     """Import the generated free-base robot, preserving actual tool/sensor frames."""
     urdf,destination=Path(urdf).resolve(),Path(destination).resolve()

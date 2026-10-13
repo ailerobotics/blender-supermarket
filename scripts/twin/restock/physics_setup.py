@@ -15,7 +15,7 @@ from twin.mobile import MobileSpec
 from twin.mobile_runtime import MobileController
 from twin.restock_manipulation.cad_tool import inspect_tool, author_native_gripper, NativePanelContact
 from twin.restock_manipulation.ros_adapter import require_sim_domain
-from .isaac_bootstrap import import_mobile, discover
+from .isaac_bootstrap import import_mobile, discover,resolve_meshes
 from .native_transport import ArmCommandGate, NativeTransport
 from .scene import build, label_stock
 
@@ -76,7 +76,8 @@ def assemble(*, app, config, scenario, output):
     from isaacsim.core.utils.stage import open_stage,is_stage_loading
     for extension in ('isaacsim.ros2.bridge','isaacsim.robot.surface_gripper'):
         enable_extension(extension)
-    robot_usd,_=import_mobile(urdf,output/'mobile-import.usd')
+    resolved_urdf=resolve_meshes(urdf,output/'mobile-import.urdf',config['package_roots'])
+    robot_usd,_=import_mobile(resolved_urdf,output/'mobile-import.usd')
     staging=scenario['initial_staging']
     composition=build(store,robot_usd,output/'mission.usda',
         robot_pose=staging['robot_base_pose'],cart_pose=staging['cart_body_pose'],

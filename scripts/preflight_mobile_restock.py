@@ -15,6 +15,7 @@ FILES = {
     'xrdf':'actual CAD collision spheres, limits and attachment configuration',
     'camera_config':'validated physical source/cart/shelf camera mounts and views',
     'ffmpeg':'H.264 encoder executable',
+    'host_python':'explicit host ROS Python interpreter outside the Isaac environment',
 }
 DIRECTORIES = {'shelfbot_root':'upstream wall-grasp geometry',
                'pose_bridge_root':'upstream registered-depth pose pipeline',
@@ -30,6 +31,13 @@ SERVERS = {'/restock_sim/compute_ik':'moveit_msgs/srv/GetPositionIK',
 
 def check(config):
     checks=[]
+    try:
+        from twin.restock.host_session import validate_host_inputs
+        _,setups=validate_host_inputs(config)
+        checks.append(dict(input='host_process_inputs',status='present',
+                           setup_files=[str(p) for p in setups]))
+    except (ValueError,TypeError) as exc:
+        checks.append(dict(input='host_process_inputs',status='invalid',reason=str(exc)))
     for key,description in {**FILES,**DIRECTORIES}.items():
         value=config.get(key)
         path=Path(value).expanduser() if isinstance(value,str) and value else None
