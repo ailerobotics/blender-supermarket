@@ -93,7 +93,7 @@ def sample():
                 gpu_free_mib=free,ram_available_mib=available_ram_mb())
 
 
-def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False,coupling_only=False):
+def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False,coupling_only=False,towing_only=False):
     from isaacsim import SimulationApp
     app=SimulationApp({'headless':True,'width':640,'height':360,
         'renderer':'RayTracedLighting','anti_aliasing':0,'multi_gpu':False})
@@ -112,6 +112,13 @@ def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False,c
             result=run(app,config,output)
             write(output/'native-result.json',dict(status=result['status'],coupling=result,
                 evidence='native cart coupling diagnostic, not mission or video'))
+            return
+        if towing_only:
+            from twin.restock.towing_check import run
+            config=json.loads(Path(runtime_config).read_text())
+            result=run(app,config,output,ffmpeg=ffmpeg)
+            write(output/'native-result.json',dict(status=result['status'],towing=result,
+                evidence='native straight-towing diagnostic with VFR recording, not an autonomous mission'))
             return
         import numpy as np
         import omni.usd
@@ -241,21 +248,22 @@ def main():
     parser.add_argument('--view',choices=('source','cart','shelf'),default='source')
     parser.add_argument('--assembly-only',action='store_true',help='stationary native CAD/physics/hold diagnostic; no planner or video')
     parser.add_argument('--coupling-only',action='store_true',help='native dock+latch+hold diagnostic; no planner, towing or video')
+    parser.add_argument('--towing-only',action='store_true',help='native straight forward-towing diagnostic with VFR recording; no planner or steering')
     parser.add_argument('--heavy-threshold-mb',type=int,choices=(1500,2500),default=1500)
     parser.add_argument('--worker',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()
-    if args.assembly_only and args.coupling_only:
-        parser.error('choose one of --assembly-only / --coupling-only')
-    if (args.assembly_only or args.coupling_only) and not args.runtime_config:
-        parser.error('--assembly-only/--coupling-only requires --runtime-config')
+    if sum(bool(x) for x in (args.assembly_only,args.coupling_only,args.towing_only))>1:
+        parser.error('choose at most one of --assembly-only / --coupling-only / --towing-only')
+    if (args.assembly_only or args.coupling_only or args.towing_only) and not args.runtime_config:
+        parser.error('--assembly-only/--coupling-only/--towing-only requires --runtime-config')
     if args.worker:
-        worker(args.output,args.ffmpeg,args.runtime_config,args.view,args.assembly_only,args.coupling_only);return
+        worker(args.output,args.ffmpeg,args.runtime_config,args.view,args.assembly_only,args.coupling_only,args.towing_only);return
     if not args.isaac_python or not args.nvidia_runtime:
         parser.error('--isaac-python and --nvidia-runtime required')
     args.output=args.output.resolve()
     args.output.mkdir(parents=True,exist_ok=False)
     environment=runtime_environment(args.nvidia_runtime,args.output)
-    if args.assembly_only or args.coupling_only:
+    if args.assembly_only or args.coupling_only or args.towing_only:
         from twin.restock.native_environment import ros_environment
         environment=ros_environment(environment,args.isaac_python)
     os.environ.clear();os.environ.update(environment)
@@ -275,6 +283,8 @@ def main():
                 command.append('--assembly-only')
             if args.coupling_only:
                 command.append('--coupling-only')
+            if args.towing_only:
+                command.append('--towing-only')
             child=OwnedProcess(command,args.output/'isaac.log',env=environment)
             try:
                 child.start()
@@ -297,12 +307,16 @@ def main():
                     c=native.get('coupling',{})
                     complete=(c.get('settled') is True and c.get('coupled') is True
                               and c.get('hold_steps',0)>=120)
+                elif args.towing_only:
+                    t=native.get('towing',{})
+                    complete=(t.get('towed') is True and t.get('no_wheel_lift') is True
+                              and t.get('video',{}).get('frames',0)>=10)
                 else:
                     complete=native.get('video',{}).get('frames',0)>=(6 if args.runtime_config else 60)
                 if native.get('status')!='passed' or not complete:
                     raise RuntimeError('native result incomplete: '+native.get('reason','missing frames'))
                 # Decode the whole recorded video, not merely its container header.
-                if not (args.assembly_only or args.coupling_only):
+                if not (args.assembly_only or args.coupling_only or args.towing_only):
                     subprocess.run([str(args.ffmpeg),'-v','error','-nostdin','-i',
                         str(args.output/'native-render-smoke.mp4'),'-f','null','-'],
                         check=True,capture_output=True,timeout=30)

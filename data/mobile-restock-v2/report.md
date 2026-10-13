@@ -10,6 +10,32 @@ manipulation components are integrated from origin/main.
 A controller dispatcher and guarded launcher now exist; a complete simulator
 bundle with actual sensor acquisition/planner/actuator wiring is still missing.
 
+## Forward towing: TRAIN TOWS THROUGH THE PORTAL on native guarded GPU
+
+The third lighting-independent priority-3 step passed. `native-towing-02` docks the
+train at a portal-aligned pose, then commands a single constant forward crawl straight
+down the sales/backroom portal lane (x = -3.875, the home/portal corridor). The lead
+robot tows the coupled cart forward 0.378 m, reaching the portal centre (start
+y = 11.500 -> end y = 11.122, portal centre y = 11.125). Throughout, the cart follows
+through the physical hitch with **max articulation 0.39 deg** (well within the 46 deg
+limit) and **no cart wheel lift** (max wheel-centre height 0.0770 m vs the 0.075 m
+resting height - a 2 mm margin, under the 10 mm lift tolerance). The motion is recorded
+as a 270-frame **variable-frame-rate H.264** clip (`native-towing.mp4`) from a fixed map
+camera, with the same acquisition/encoding provenance as the render smoke (unique render
+IDs, strictly increasing acquisition timestamps, every presentation timestamp decoded
+and checked). Guards held: peak 4890 MiB GPU, 15630 MiB host RAM floor, services
+unchanged.
+
+Honest limits: the wheel drive is traction/force-limited, so the achieved crawl was
+about 0.045 m/s despite a 0.35 m/s command - enough to prove the towing dynamics and
+reach the portal plane, but a full multi-metre traverse, turning, and the jackknife
+guard under steering are navigation-lane behaviour not shown here; no planner, steering
+or sensing is exercised and a single forward velocity is commanded. The native validator
+is `scripts/twin/restock/towing_check.py`. Reproduce (guarded):
+`... run_restock_render_smoke.py --towing-only --runtime-config <towing config> ...`.
+Evidence: `~/datasets/twin-robot-in-store-boot-v1/native-towing-02/`
+(`native-result.json`, `towing-feedback.json`, `native-towing.mp4`, `run.json`).
+
 ## Cart coupling: LATCH HOLDS on native guarded GPU
 
 The second lighting-independent priority-3 step passed. `native-coupling-02` settles
