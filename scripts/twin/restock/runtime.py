@@ -119,6 +119,8 @@ class RuntimeAdapter:
 
     def start(self, action, job):
         self.mobile.park()
+        if hasattr(self.port,'begin_action'):
+            self.port.begin_action(action,job)
         self.action, self.job = action, job
         self.phase = 'execute'
         if action in ('collect', 'couple', 'outbound', 'return'):

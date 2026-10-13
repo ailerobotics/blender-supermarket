@@ -5,6 +5,7 @@ They never replace localized navigation or rendered inventory observations.
 No method sets a body pose, joint position, payload parent or collision flag.
 """
 import math
+import time
 
 import numpy as np
 
@@ -78,7 +79,8 @@ class MissionCamera:
 class IsaacPort:
     def __init__(self, *, world, robot, robot_body, cart_body, mobile, range_sensor,
                  transport, contact, hold_arm, verification, recording_camera=None,
-                 recorder=None, native_transport=None):
+                 recorder=None, native_transport=None, after_step=None,
+                 on_action=None, realtime=True):
         self.world,self.robot=world,robot
         self.robot_body,self.cart_body=robot_body,cart_body
         self.mobile,self.range_sensor=mobile,range_sensor
@@ -86,6 +88,9 @@ class IsaacPort:
         self.hold_arm,self.verification=hold_arm,verification
         self.recording_camera,self.recorder=recording_camera,recorder
         self.native_transport=native_transport
+        self.after_step,self.on_action=after_step,on_action
+        self.realtime=realtime
+        self.wall_origin=time.monotonic()
         self.origin=float(world.current_time)
         self.tick=0
         self.names=tuple(robot.dof_names)
@@ -97,6 +102,12 @@ class IsaacPort:
     def advance(self, dt):
         if not math.isclose(float(self.world.get_physics_dt()),dt,abs_tol=1e-8):
             raise ValueError('mission and physics step mismatch')
+        if self.realtime:
+            # ROS runs on a separate host interpreter; accelerated simulation can
+            # otherwise outrun fresh trajectory commands and map acknowledgements.
+            remaining=self.wall_origin+(self.tick+1)*dt-time.monotonic()
+            if remaining>0:
+                time.sleep(remaining)
         self.world.step(render=True)
         self.tick+=1
         now=float(self.world.current_time)-self.origin
@@ -115,6 +126,8 @@ class IsaacPort:
             float(rw[2]),float(cw[2]),age=0.)
         coupled=self.mobile.coupling_state(docking)['healthy']
         parked=bool(max(np.linalg.norm(v) for v in (rv,rw,cv,cw))<.005)
+        if self.after_step is not None:
+            self.after_step(now,parked)
         ready=self.transport.contains(positions) and not self.contact.read()
         scan=self.range_sensor.read(now)
         evidence=self.verification(now)
@@ -125,6 +138,10 @@ class IsaacPort:
         return Packet(f'physics:{self.tick}','sensor',now,
             tuple(float(joints[i]) for i in self.wheels),scan,docking,None,
             ready,coupled,wrap(r.yaw-c.yaw),parked,evidence)
+
+    def begin_action(self,action,job):
+        if self.on_action is not None:
+            self.on_action(action,job)
 
     def controls(self, controls):
         for control in controls:

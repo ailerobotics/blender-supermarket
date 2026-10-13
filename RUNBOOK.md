@@ -497,6 +497,27 @@ measured speed at most 0.02 rad/s. Plans require explicit waypoint velocities,
 zero-time rest starts and rest ends. Faults/cancellation latch stop; recovery
 requires reconciliation and restarting the task-owned executor.
 
+The integration station supervisor is a separate host-Python process, started
+only by the guarded runtime after GPU release. It listens on
+`/restock_sim/station/command` and publishes `/restock_sim/station/status`.
+`prepare`, `heartbeat` and `stop` carry monotonic parked epochs, sequence numbers
+and simulation timestamps. Each new station starts a fresh task-owned host
+planner/mapper session; stale/moving parking or process failure latches stop.
+Readiness requires exact ROS endpoints and the real NVIDIA ESDF incorporated-depth
+timestamp. The command is:
+
+```bash
+python3 -m twin.restock.station_host --config "$HOST_CONFIG" --output "$NEW_STATION_LOGS"
+```
+
+`restock.native_cameras` authors camera mounts and collision boxes from supplied
+calibration, acquires RGB plus registered depth, and switches one native ROS
+mapper stream at parked epochs. It reads actual OpenCV lens parameters because
+Isaac5.1's aperture-based `get_intrinsics_matrix` assumes a centred principal
+point. These runtime APIs have CPU contract tests but no rendered/DDS proof yet.
+Version-matched interfaces: [Camera API](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/py/source/extensions/isaacsim.sensors.camera/docs/index.html)
+and [native ROS camera helper](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/py/source/extensions/isaacsim.ros2.bridge/docs/ogn/OgnROS2CameraHelper.html).
+
 After a complete simulator bundle exists and preflight is green, `--execute`
 requires `--factory module:function` and a **new** `--output` scratch directory.
 Use `RESTOCK_PYTHON` for the installed Isaac Python interpreter. The bundle receives

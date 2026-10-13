@@ -25,13 +25,22 @@ class RosManipulationRuntime:
         self.source = job['source_bin'] if operation == 'collect' else self.cart_location
         self.destination = self.cart_location if operation == 'collect' else job['shelf_id']
         # Invalidate old ROIs, current arm-frame TF and mapper acknowledgement.
-        self.prepare_station(operation, job)
+        self.preparation = self.prepare_station(operation, job)
+        self.operation,self.job=operation,job
+        self.dispatched=False
         self.last_sensor_time = -1.
         self.latest = Result('running','observe')
-        self.graph.start(operation,job)
+        if self.preparation is None:
+            self.graph.start(operation,job)
+            self.dispatched=True
 
     def step(self, dt, simulation_time):
         try:
+            if not self.dispatched:
+                if not self.preparation.ready(simulation_time):
+                    return Result('running','prepare_station')
+                self.graph.start(self.operation,self.job)
+                self.dispatched=True
             packet = self.capture(simulation_time,self.source,self.destination)
             if packet is not None:
                 stamp = packet.simulation_time
