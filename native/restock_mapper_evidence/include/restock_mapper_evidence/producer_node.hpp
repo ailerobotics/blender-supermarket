@@ -75,6 +75,7 @@ private:
   std::string producer_nonce_;
   std::string steady_domain_;
   std::string issued_token_;
+  std::string global_frame_;
   float slice_height_{0.0f};
   float unknown_value_{1000.0f};
 

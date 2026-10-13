@@ -172,6 +172,27 @@ class EvidenceBindingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.gate.accept_envelope(bad)
 
+    def test_rejects_empty_slice_frame_id(self):
+        # Regression for the measured defect: the ESDF slice converter leaves the
+        # slice header default, so the stock producer published an empty frame_id
+        # and the landed consumer rejected the snapshot. The producer must set the
+        # slice frame to the mapper global frame.
+        bad = _slice()
+        bad.header = SimpleNamespace(frame_id='', stamp=_time(120, 300000000))
+        with self.assertRaisesRegex(ValueError, 'invalid native distance slice'):
+            envelope_from_message(_message(slice=bad))
+
+    def test_accepts_global_frame_slice_frame_id(self):
+        # The fix: slice.header.frame_id == mapper global frame -> the envelope
+        # decodes and the landed consumer accepts it, binding the slice frame.
+        good = _slice()
+        good.header = SimpleNamespace(frame_id='map', stamp=_time(120, 300000000))
+        env = envelope_from_message(_message(slice=good))
+        self.assertEqual(env.slice.frame, 'map')
+        self._observe(env)
+        self.gate.accept_envelope(env)
+        self.assertIs(self.gate.slice, env.slice)
+
 
 if __name__ == '__main__':
     unittest.main()

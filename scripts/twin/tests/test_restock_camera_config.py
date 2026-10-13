@@ -89,10 +89,9 @@ def test_marker_material_is_rtx_robust_emissive_qr(tmp_path):
             textures[marker['id']] = path
     author_camera_design(stage, config, parent_paths={'map': '/World', 'cart_chassis': '/Cart'},
                          marker_textures=textures)
-    # The native shelf render showed the diffuse QR texture unapplied (flat grey); the
-    # fiducial now also self-illuminates via emissive and declares its colour space so it
-    # decodes independent of lighting/exposure and a diffuse-only distillation quirk.
-    for name in ('source', 'shelf', 'cart'):
+    # Source and cart stay textured; the self-lit emissive + sRGB colour space hardens
+    # them against a diffuse-only distillation quirk. (The shelf markers are geometry now.)
+    for name in ('source', 'cart'):
         base = ('/Cart' if name == 'cart' else '/World') + f'/RestockCamera_{name}_marker_0'
         tex = UsdShade.Shader(stage.GetPrimAtPath(base + '/Material/Texture'))
         assert tex.GetInput('sourceColorSpace').Get() == 'sRGB'
@@ -100,3 +99,47 @@ def test_marker_material_is_rtx_robust_emissive_qr(tmp_path):
         for channel in ('diffuseColor', 'emissiveColor'):
             srcs = surf.GetInput(channel).GetConnectedSources()
             assert srcs and srcs[0][0].source.GetPrim().GetName() == 'Texture'
+
+
+def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
+    pytest.importorskip('pxr')
+    cv2 = pytest.importorskip('cv2')
+    from pxr import Usd, UsdGeom, UsdShade
+    from scripts.twin.restock_manipulation.isaac_sensors import write_carton_label
+    from scripts.twin.restock_camera.config import (marker_module_grid, decode_marker_render)
+    from scripts.twin.restock_camera.geometry import Intrinsics
+    config = design()
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.Xform.Define(stage, '/World'); UsdGeom.Xform.Define(stage, '/Cart')
+    textures = {}
+    for support in config['supports'].values():
+        for marker in support['markers']:
+            path = tmp_path / (marker['id'].replace(':', '_') + '.png')
+            write_carton_label(marker['id'], path)
+            textures[marker['id']] = path
+    author_camera_design(stage, config, parent_paths={'map': '/World', 'cart_chassis': '/Cart'},
+                         marker_textures=textures)
+    # The native render never sampled the shelf markers' texture, so they are geometry:
+    # a white base quad plus one black quad per module, constant-colour, no UsdUVTexture.
+    for index in (0, 1):
+        base = f'/World/RestockCamera_shelf_marker_{index}'
+        assert not stage.GetPrimAtPath(base + '/Material/Texture')          # no texture node
+        white = UsdGeom.Mesh(stage.GetPrimAtPath(base))
+        assert len(white.GetFaceVertexCountsAttr().Get()) == 1             # single white quad
+        black = UsdGeom.Mesh(stage.GetPrimAtPath(base + '/Modules'))
+        assert len(black.GetFaceVertexCountsAttr().Get()) > 50             # many black modules
+        white_surf = UsdShade.Shader(stage.GetPrimAtPath(base + '/Material/Surface'))
+        assert tuple(white_surf.GetInput('diffuseColor').Get()) == (1, 1, 1)
+        black_surf = UsdShade.Shader(stage.GetPrimAtPath(base + '/Modules/Material/Surface'))
+        assert tuple(black_surf.GetInput('diffuseColor').Get()) == (0, 0, 0)
+    # The geometry pattern decodes at the shelf camera pose and pixel size (rectified).
+    camera = config['cameras']['shelf']
+    world = np.array(camera['parent_from_optical']); k = Intrinsics(**camera['intrinsics'])
+    for marker in config['supports']['shelf']['markers']:
+        pixels = cv2.imread(str(textures[marker['id']]))
+        corners = cv2.QRCodeDetector().detectAndDecode(pixels)[1].reshape(4, 2)
+        edge = np.linalg.norm(np.roll(corners, -1, 0) - corners, axis=1)
+        half = marker['side_m'] * pixels.shape[0] / edge.mean() / 2
+        decoded, _ = decode_marker_render(marker_module_grid(marker['id']), half, world,
+                                          np.array(marker['parent_from_marker']), k)
+        assert decoded == marker['id']

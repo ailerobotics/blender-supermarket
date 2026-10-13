@@ -144,10 +144,23 @@ replay, missing/invalid depth, hidden witnesses and unknown identities refuse.
 `restock_camera.config.camera_config(scenario, manifest)` returns camera IDs,
 map/cart-chassis parents, optical transforms, pinhole intrinsics, collidable
 housing/bracket solids and paired physical fiducial layouts. `author_camera_design`
-authors those solids/cameras and actual printed marker textures in a supplied USD
-stage; it never boots an app. Marker side refers to decoded QR corners, with the
-texture quiet border accounted for in the physical plane size. Integration owns
-native camera initialization, rigid attachment and actual rendered commissioning.
+authors those solids/cameras and the printed QR markers in a supplied USD stage; it
+never boots an app. Marker side refers to decoded QR corners, with the quiet border
+accounted for in the physical plane size. Integration owns native camera
+initialization, rigid attachment and actual rendered commissioning.
+
+Shelf markers are authored as **geometry, not texture** (`marker_module_grid` +
+`marker_geometry_quads`): a white base quad plus one black quad per dark module,
+constant-colour with an emissive white base, same code content/size/pose as the
+textured marker but **no texture lookup** — the native RTX render never sampled the
+shelf markers' UsdUVTexture (flat grey) even though the identical source markers
+decoded (see `data/sim-restock-camera-v2/shelf-marker-render-diagnosis.md`). Source
+and cart markers stay textured (hardened with emissive + `sourceColorSpace=sRGB`).
+`scripts/plan_restock_marker_geometry.py` proves it offline: each geometry fiducial,
+projected through the exact pinhole at the shelf camera and rectified by its corners
+(as a registration pipeline does), decodes to its identity at ~15 px/module
+(`decode_marker_render`). A bare auto-detector reads only the less-sheared marker;
+rectification reads both. Not a render — integration confirms contrast/decode natively.
 
 Design sampling is 2560×1920 with cx=1280, cy=960 (the installed Isaac camera's
 width/2, height/2 principal-point API) and a .15–3.5 m range. Focal length is now
