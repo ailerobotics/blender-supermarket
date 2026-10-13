@@ -28,7 +28,8 @@ def mapper_plan(*,generation,camera_count,transport_height):
             'node':'nvblox_node','container':'navigation_mapper_'+generation,
             'component':'nvblox::NvbloxNode','parameters':params,'inputs':inputs,
             'slice_topic':SLICE_TOPIC,
-            'esdf_service':NAMESPACE+'/nvblox_node/get_esdf_and_gradient',
+            # Upstream service exits the node in 2D mode. Never use as a probe.
+            'forbidden_probe_services':[NAMESPACE+'/nvblox_node/get_esdf_and_gradient'],
             'commissioned':False,'map_load':False,
             'required_evidence':['empty native map before sensor admission',
                                  'snapshot-bound native incorporation provenance',

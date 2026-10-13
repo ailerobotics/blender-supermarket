@@ -26,6 +26,9 @@ class MapperLaunchTests(unittest.TestCase):
         self.assertFalse(plan['commissioned']);self.assertFalse(plan['map_load'])
         self.assertEqual(plan['frame'],'map')
         self.assertEqual(plan['slice_topic'],SLICE_TOPIC)
+        self.assertNotIn('esdf_service',plan)
+        self.assertEqual(plan['forbidden_probe_services'],
+                         ['/restock_sim/navigation/nvblox_node/get_esdf_and_gradient'])
         self.assertEqual(plan['parameters']['input_qos'],'SENSOR_DATA')
         self.assertGreater(plan['parameters']['static_mapper.esdf_slice_max_height'],1.9)
         self.assertNotIn('station',str(plan));self.assertNotIn('target_bbox',str(plan))

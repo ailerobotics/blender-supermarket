@@ -151,7 +151,9 @@ generation. The supplied launcher does not manufacture that binding.
 
 **Actual upstream API limitation:** the installed `DistanceMapSlice` definition
 has no generation or documented acquisition-incorporation field. The installed
-`EsdfAndGradients` response stamps latest incorporated depth for its own returned
+`EsdfAndGradients` service is **3D-only and exits the node in 2D mode**; never
+invoke it on this navigation mapper. In its supported mode, the response stamps
+latest incorporated depth for its own returned
 grid; it supplies no identifier linking that grid to a separately published
 slice. Matching publication times, FIFO assumptions or a later successful ESDF
 call therefore cannot satisfy the snapshot binding above. The inspected host

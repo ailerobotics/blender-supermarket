@@ -614,8 +614,9 @@ until empty-map evidence is established. Terminate only the exact task-owned
 process when reconstructing; never touch the parked manipulation mapper.
 
 Canonical output is `/restock_sim/navigation/nvblox_node/static_map_slice`;
-the plan prints generation-specific depth/CameraInfo inputs and native ESDF
-service. Feed registered, self-filtered native depth without manipulation target
+the plan prints generation-specific depth/CameraInfo inputs. **Never call
+`get_esdf_and_gradient` on this 2D mapper: upstream exits the node in 2D mode.**
+It is listed only under forbidden probes. Feed registered, self-filtered native depth without manipulation target
 removal. Publish `/clock` and acquisition-time TF into stable `map`.
 
 Before accepting any wheel command, satisfy the evidence table and unresolved
