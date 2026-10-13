@@ -284,3 +284,22 @@ refusal, ≥8 GiB VRAM / ≥12 GiB RAM, domain-88, ≤5 min, exact-PID teardown)
 measures construction + evidence-interface advertisement. Measured evidence and
 honest limits (a bound-slice still needs the integration sensor+handshake driver):
 `data/sim-restock-host-v2/runtime-closure-report.md`.
+
+### Empty generation is construction-baseline-aware (not zero-allocated-blocks)
+
+A freshly constructed nvblox layer is **non-empty from construction**: the producer
+reports 2048 preallocated blocks in every maintained layer (tsdf/esdf/color/freespace/
+occupancy) before any sensor input, because `numAllocatedBlocks()` reports nvblox's
+block pool, not sensor occupancy. "Empty" therefore means **zero sensor-observed
+voxels, never zero allocated blocks**. `EmptyGeneration` measures the per-layer
+allocation once at construction as a baseline (`State::set_construction_baseline`) and
+`verify_empty` refuses only on **growth beyond** that baseline (plus the non-empty
+queue / integration watermark / ledger / pending checks). An emptiness refusal is
+recoverable — it reports the exact per-layer `LayerCount[]` in the FAILURE response and
+does NOT fault the one-shot producer (only genuine protocol violations do), so a
+diagnostic probe never bricks the map. A genuine refusal after real depth integration
+still refuses (the integration watermark trips `empty evidence incomplete`). Verified on
+GPU in one bounded guarded job (`scripts/verify_empty_baseline_gpu.py` +
+`scripts/restock_runtime/empty_baseline_probe.py`): accept on a fresh construction with
+the 2048/layer baseline reported, refused after one synthetic depth frame actually
+integrated. Report: `data/sim-restock-host-v2/empty-baseline-report.md`.

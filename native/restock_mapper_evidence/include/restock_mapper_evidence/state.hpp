@@ -31,6 +31,16 @@ class State {
     }
   }
   Phase phase() const { return phase_; }
+  // The native producer measures nvblox's post-construction block allocation ONCE,
+  // before any sensor frame, and records it here as the emptiness baseline. nvblox
+  // preallocates/derives blocks at construction independent of any sensor input, so
+  // "empty" cannot mean zero allocated blocks; it means no growth beyond this
+  // baseline. Must be recorded while the generation is still Closed (pre-certify).
+  void set_construction_baseline(std::vector<uint64_t> blocks) {
+    if (phase_ != Phase::Closed) fail("baseline set after certification");
+    baseline_ = std::move(blocks);
+  }
+  const std::vector<uint64_t>& baseline() const { return baseline_; }
   const std::string& nonce() const { return nonce_; }
   const Identity& identity() const { return identity_; }
   const std::map<std::string, Acquisition>& ledger() const { return ledger_; }
@@ -108,15 +118,30 @@ class State {
   }
   uint64_t revision() const { return revision_; }
  private:
+  // A non-emptiness refusal is a recoverable "no": it reports the measured layers to
+  // the caller WITHOUT faulting the one-shot producer, so a diagnostic probe or a
+  // transient not-ready state never bricks a map that is otherwise admissible. Only
+  // genuine protocol violations (wrong phase/identity/challenge/clock) fail() hard.
+  [[noreturn]] static void refuse(const std::string& reason) { throw std::runtime_error(reason); }
   void verify_empty(const std::vector<uint64_t>& blocks, bool queues_empty, bool watermarks_empty) {
     if (blocks.empty() || !queues_empty || !watermarks_empty || !ledger_.empty() || !pending_.empty())
-      fail("empty evidence incomplete");
-    for (auto n : blocks) if (n) fail("native layer not empty");
+      refuse("empty evidence incomplete");
+    // "Empty" means zero SENSOR-observed voxels, never zero allocated blocks. Compare
+    // each layer against the construction baseline and refuse only on growth beyond
+    // it; preallocated/derived baseline blocks are excluded from the emptiness check.
+    // An unset baseline is treated as all-zero (fail-closed, pre-baseline behaviour).
+    if (!baseline_.empty() && baseline_.size() != blocks.size())
+      refuse("native layer set changed since construction");
+    for (size_t i = 0; i < blocks.size(); ++i) {
+      const uint64_t base = (i < baseline_.size()) ? baseline_[i] : 0;
+      if (blocks[i] > base) refuse("native layer not empty");
+    }
   }
   static constexpr int64_t freshness = 300000000, epoch = 600000000000;
   std::string nonce_, challenge_;
   Identity identity_;
   std::map<std::string, std::string> sensors_;
+  std::vector<uint64_t> baseline_;
   Phase phase_{Phase::Closed};
   std::map<std::string, Acquisition> registered_, ledger_;
   std::map<std::pair<std::string, int64_t>, Acquisition> pending_;
