@@ -1,12 +1,60 @@
 # Mobile restocking integration checkpoint
 
-Status: incomplete. Guarded GPU use was explicitly authorized on October 13;
-native RTX RGB-D rendering and VFR recording now pass. No autonomous physics cycle or mission MP4 has
-been produced. The current branch contains CPU mission/inventory infrastructure;
+Status: incomplete, but the previously blocking stationary-cart instability is now
+RESOLVED on the guarded GPU (see next section). Guarded GPU use was explicitly
+authorized on October 13; native RTX RGB-D rendering, VFR recording, and now a
+stationary native physics hold all pass. No autonomous physics cycle or mission MP4
+has been produced. The current branch contains CPU mission/inventory infrastructure;
 the landed mobile/cart, schema-2 environment, articulated navigation and CAD
 manipulation components are integrated from origin/main.
 A controller dispatcher and guarded launcher now exist; a complete simulator
 bundle with actual sensor acquisition/planner/actuator wiring is still missing.
+
+## Stationary cart/base: SETTLED on native guarded GPU (a11510f)
+
+The uncoupled cart no longer drifts out of the stationary native assembly diagnostic;
+it is now provably motionless. Run `native-assembly-stabilized-04` completed all 120
+steps (2 s) and PASSED: measured net cart displacement **0.000 m/s / 0.000 rad/s** and
+base **0.00079 m/s / 0.00019 rad/s** over the final 0.5 s window. Guards held: peak
+4764 MiB GPU, 16199 MiB host RAM floor, 7144 MiB GPU free, `/tmp/aile-gpu.lock`,
+protected whispr accepted via the `--heavy-threshold-mb 2500` opt-in, and all live
+services unchanged. This is a stationary physics hold, not an autonomous mission:
+no coupling, planner, navigation, sensing or wheel motion is exercised.
+
+Root cause and fix, established one offline hypothesis then one bounded native run
+at a time:
+
+- The backroom floor collider top is exactly z=0 and the wheels bottom at z=0, so
+  there is no geometric initial penetration. The failure was unstabilized resting
+  contact (a persistent ~55-70 mm/s reported +z velocity with ~0 z displacement)
+  rolled sideways by the cart's frictionless casters.
+- `enableStabilization` was authored on the scene but **Isaac's PhysicsContext
+  re-applies its `False` default at World construction**, silently clobbering the
+  USD value. Re-asserting it through `PhysicsContext.enable_stablization(True)`
+  before the first reset (the only path PhysX parses) is what actually engages it,
+  and alone cut drift from 50.6 mm to 11 mm (`native-assembly-stabilized-02`).
+- `physxJoint:jointFriction` is inert here: the schema restricts it to articulation
+  joints and the casters are maximal-coordinate (`excludeFromArticulation`). Bearing
+  and rolling resistance are therefore authored as rigid-body damping instead -
+  strong angular damping dominated by the low-inertia wheels (negligible tow torque)
+  plus mild linear damping on the 35 kg cage - which froze the cart's measured
+  position completely (`native-assembly-stabilized-03/04`).
+- The stationary verdict is gated on **actual net measured pose displacement** over
+  the final 0.5 s, not the TGS-reported instantaneous velocity. PhysX TGS reports a
+  velocity carrying a position/velocity solve bias that does not integrate to
+  displacement (the ~14 mm/s the cart reports while its measured position is frozen);
+  that biased value is retained in the result as a transparency diagnostic, not a
+  gate. Mass, inertia, collision geometry, gravity and the free revolute model are
+  untouched; the damping is a fidelity correction, not a positional brake.
+
+Reproduce (guarded): `PYTHONPATH=scripts python3 scripts/run_restock_render_smoke.py
+--assembly-only --runtime-config <config> --output <new dir> --ffmpeg <ffmpeg>
+--isaac-python <env_isaaclab python> --nvidia-runtime <matching runtime>
+--heavy-threshold-mb 2500`. CPU invariants are covered in
+`scripts/twin/tests/test_restock_physics_port.py` (391 CPU tests, 16 subtests pass).
+Evidence: `~/datasets/twin-robot-in-store-boot-v1/native-assembly-stabilized-04/`
+(`native-result.json`, `stationary-feedback.json`, `run.json`). Towing-phase damping
+values may need revisiting once the coupled mission is exercised.
 
 ## Latest passive-observer and CPU checkpoint
 
