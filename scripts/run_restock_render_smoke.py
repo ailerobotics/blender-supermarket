@@ -6,6 +6,7 @@ Parent holds the GPU guard while monitoring its exact task-owned child session.
 """
 import argparse
 from dataclasses import asdict
+from fractions import Fraction
 import hashlib
 import json
 import os
@@ -113,14 +114,17 @@ def worker(output,ffmpeg):
         for _ in range(90): world.step(render=True)
         recorder=Recorder(output/'frames',fps=60)
         last=None
+        last_native_time=None
         observed_frames=[]
+        (output/'depth-frames').mkdir()
         for _ in range(180):
             world.step(render=True)
             frame=camera.get_current_frame(clone=True)
             identity=frame.get('rendering_frame')
             if identity is None or identity==last: continue
-            observed_frames.append(dict(rendering_frame=identity,rendering_time=float(frame['rendering_time'])))
-            write(output/'observed-frames.json',observed_frames)
+            native_time=Fraction(identity['referenceTimeNumerator'],identity['referenceTimeDenominator'])
+            if last_native_time is not None and native_time<=last_native_time:
+                raise ValueError('native camera identity moved backwards')
             rgb=np.asarray(frame.get('rgb'))
             depth=np.asarray(frame.get('distance_to_image_plane'),float)
             if rgb.shape!=(360,640,4) or depth.shape!=(360,640):
@@ -128,12 +132,20 @@ def worker(output,ffmpeg):
             if np.std(rgb[:,:,:3])<2 or np.count_nonzero(np.isfinite(depth)&(depth>0))<1000:
                 raise ValueError('native RGB-D is empty or uniform')
             recorder.add(rgb[:,:,:3],render_id=str(identity),simulation_time=float(frame['rendering_time']))
+            depth_path=output/'depth-frames'/f'{len(recorder.frames)-1:06d}.npz'
+            np.savez_compressed(depth_path,depth=depth)
+            observed_frames.append(dict(rendering_frame=identity,rendering_time=float(frame['rendering_time']),
+                rgb_sha256=recorder.frames[-1]['sha256'],depth_file=str(depth_path.relative_to(output)),
+                depth_sha256=hashlib.sha256(depth_path.read_bytes()).hexdigest(),
+                rgb_depth_identity_model='same Camera render-product acquisition callback and cloned frame'))
+            write(output/'observed-frames.json',observed_frames)
             if not recorder.frames[:-1]:
                 np.save(output/'depth.npy',depth)
                 write(output/'camera.json',dict(spec=spec,intrinsics=camera.get_intrinsics_matrix().tolist(),
                     rendering_frame=identity,rendering_time=float(frame['rendering_time']),
                     finite_depth_pixels=int(np.count_nonzero(np.isfinite(depth)&(depth>0)))))
             last=identity
+            last_native_time=native_time
             if len(recorder.frames)>=60: break
         if len(recorder.frames)<60: raise RuntimeError('insufficient real rendered frames')
         video=recorder.encode(output/'native-render-smoke.mp4',ffmpeg=ffmpeg)
