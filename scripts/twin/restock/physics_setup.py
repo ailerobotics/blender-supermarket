@@ -74,8 +74,7 @@ def assemble(*, app, config, scenario, output):
     output.mkdir(parents=True,exist_ok=True)
     from isaacsim.core.utils.extensions import enable_extension
     from isaacsim.core.utils.stage import open_stage,is_stage_loading
-    for extension in ('isaacsim.ros2.bridge','isaacsim.robot.surface_gripper'):
-        enable_extension(extension)
+    enable_extension('isaacsim.robot.surface_gripper')
     resolved_urdf=resolve_meshes(urdf,output/'mobile-import.urdf',config['package_roots'])
     robot_usd,_=import_mobile(resolved_urdf,output/'mobile-import.usd')
     staging=scenario['initial_staging']
@@ -126,6 +125,11 @@ def assemble(*, app, config, scenario, output):
         robot.apply_action(ArticulationAction(joint_positions=q,joint_velocities=v,joint_indices=indices))
     gate=ArmCommandGate(robot,tool.arm_limits,apply)
     contact=NativePanelContact(stage,'/RestockPanelGripper')
+    # Register native ROS/image graph nodes only after the final scene has
+    # finished opening/resetting. A bridge loaded during import/reopen caused
+    # a native image-graph crash in the installed Isaac5.1 stack.
+    enable_extension('isaacsim.ros2.bridge')
+    app.update()
     transport=NativeTransport(stage=stage,articulation_path=paths['articulation'],
         arm_base_path=paths['ur_base_link'],tf_paths=[paths['gripper_pad_tcp'],paths['gripper_tcp']],
         command_gate=gate)
