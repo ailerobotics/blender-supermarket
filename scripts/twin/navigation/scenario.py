@@ -3,7 +3,36 @@ import math
 from .core import GridMap
 
 
-def environment_grid(manifest, scenario=None):
+def camera_mount_obstacles(camera_config):
+    """Conservative XY bounds of every fixed camera collider, including booms.
+
+    Moving parent mounts belong to the rig collision model, not this static map.
+    Do not filter elevated solids: the transport arm/cart can strike them.
+    """
+    import numpy as np
+    result=[]
+    for solid in camera_config['solids']:
+        if not solid.get('collision',False):
+            continue
+        if solid['parent'] not in ('map','robot_base','cart_chassis'):
+            raise ValueError('unknown camera solid parent')
+        matrix=np.asarray(solid['parent_from_solid'],float)
+        size=np.asarray(solid['dimensions_m'],float)
+        if (matrix.shape!=(4,4) or size.shape!=(3,) or not np.isfinite(matrix).all()
+                or not np.isfinite(size).all() or np.any(size<=0)
+                or not np.allclose(matrix[3],(0,0,0,1))
+                or not np.allclose(matrix[:3,:3].T@matrix[:3,:3],np.eye(3),atol=1e-6)
+                or not np.isclose(np.linalg.det(matrix[:3,:3]),1)):
+            raise ValueError('invalid camera collision solid')
+        if solid['parent']!='map':
+            continue
+        extent=np.abs(matrix[:3,:3])@(size/2)
+        lo=matrix[:3,3]-extent;hi=matrix[:3,3]+extent
+        result.append((float(lo[0]),float(lo[1]),float(hi[0]),float(hi[1])))
+    return result
+
+
+def environment_grid(manifest, scenario=None, camera_config=None):
     bounds = manifest['map_bounds']  # xmin,xmax,ymin,ymax
     obstacles = [(o['min'][0], o['min'][1], o['max'][0], o['max'][1])
                  for o in manifest['static_obstacles']]
@@ -14,6 +43,8 @@ def environment_grid(manifest, scenario=None):
         if dx <= 0 or dy <= 0:
             raise ValueError('staging support dimensions must be positive')
         obstacles.append((x-dx/2, y-dy/2, x+dx/2, y+dy/2))
+    if camera_config is not None:
+        obstacles.extend(camera_mount_obstacles(camera_config))
     corridors=[]
     portal=manifest.get('portal')
     hints=manifest.get('route_hints',[])

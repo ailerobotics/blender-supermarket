@@ -5,6 +5,7 @@ an untrusted proposal; only step() results may be sent to the mobile base.
 """
 import math
 import os
+from dataclasses import replace
 from pathlib import Path
 from .core import Odometry, Result, wrap
 from .sensors import observation
@@ -17,7 +18,8 @@ def require_isolation():
         raise RuntimeError('ROS discovery must be loopback only')
 
 
-def write_assets(directory,grid,footprint,*,coupled=True,template=None,articulated_spec=None):
+def write_assets(directory,grid,footprint,*,coupled=True,template=None,articulated_spec=None,
+                 nvblox_topic=None):
     """Generate map, Nav2 params and a replan tree; no installs or simulator boot."""
     import yaml
     if template is None:
@@ -84,6 +86,16 @@ def write_assets(directory,grid,footprint,*,coupled=True,template=None,articulat
             'clearing':True,'marking':True,'raytrace_max_range':10.0,'obstacle_max_range':10.0}}
         if 'obstacle_layer' not in p['plugins']:
             p['plugins'].insert(-1,'obstacle_layer')
+        if nvblox_topic is not None:
+            if not nvblox_topic.startswith('/restock_sim/navigation/'):
+                raise ValueError('navigation-scoped nvblox topic required')
+            p['nvblox_layer']={'plugin':'nvblox::nav2::NvbloxCostmapLayer',
+                'nvblox_map_slice_topic':nvblox_topic,
+                'nav2_costmap_global_frame':p['global_frame'],
+                'convert_to_binary_costmap':True}
+            p['plugins'].insert(-1,'nvblox_layer')
+            # The raw-slice actuator gate also checks unknown: layer maximum
+            # merging must never promote a static-map free cell over unknown.
     if 'velocity_smoother' in config:
         params('velocity_smoother').update(max_velocity=[0.25,0.0,0.35],
             min_velocity=[0.0,0.0,-0.35],max_accel=[0.4,0.0,0.5],
@@ -247,7 +259,7 @@ class Nav2Adapter:
             self.goal_handle.cancel_goal_async()
         return self.safe.cancel()
 
-    def step(self,dt,odometry,scan,*,coupled,arm_transport,articulation=0.0):
+    def step(self,dt,odometry,scan,*,coupled,arm_transport,articulation=0.0,temporal_map=None):
         if not math.isfinite(dt) or dt <= 0 or dt > self.safe.stale_after:
             return Result(reason='invalid_control_period')
         self.executor.spin_once(timeout_sec=0.0)
@@ -273,6 +285,7 @@ class Nav2Adapter:
             odom=Odometry(pose,stamp,odometry.linear,odometry.angular,
                           position_uncertainty=max(self.minimum_localization_uncertainty,self.localization_uncertainty))
             obs=observation(scan,odom,coupled=coupled,arm_transport=arm_transport,articulation=articulation)
+            if temporal_map is not None:obs=replace(obs,temporal_map=temporal_map)
         except Exception:
             return self.safe._wait(dt,'localization_unavailable')
         reason=self.safe._inputs(self.now,odom,obs)
@@ -336,6 +349,12 @@ class ArticulatedNav2Adapter(Nav2Adapter):
         self.command_stamp=-math.inf
         self.pending=True
         self.stop_sent=False
+        self.replan_requested=False
+        self.replan_cancel_sent=False
+
+    def _finished(self,future):
+        super()._finished(future)
+        if self.replan_requested:self.outcome=None
 
     def _state(self,raw,scan,coupled,arm_transport,articulation):
         tf=self.buffer.lookup_transform('map','base_link',self.rclpy.time.Time())
@@ -356,7 +375,8 @@ class ArticulatedNav2Adapter(Nav2Adapter):
         from twin.mobile import occupied_envelope
         s=TrainState(*odom.pose,wrap(odom.pose[2]-obs.articulation))
         points=occupied_envelope(*s.bodies(self.safe.spec),self.safe.spec,
-                                  margin=.05+odom.position_uncertainty)
+                                  margin=.05+max(.10 if obs.temporal_map is not None else .02,
+                                                 odom.position_uncertainty))
         msg=Polygon()
         for x,y in points:
             dx,dy=x-s.x,y-s.y
@@ -364,14 +384,33 @@ class ArticulatedNav2Adapter(Nav2Adapter):
                                       y=float(-dx*math.sin(s.yaw)+dy*math.cos(s.yaw)),z=0.0))
         self.footprint_pub.publish(msg)
 
-    def step(self,dt,odometry,scan,*,coupled,arm_transport,articulation=0.0):
+    def step(self,dt,odometry,scan,*,coupled,arm_transport,articulation=0.0,temporal_map=None):
         if not math.isfinite(dt) or not 0<dt<=self.safe.stale_after:
             return Result(reason='invalid_control_period')
         if self.safe.terminal:
             return self.safe.terminal
         self.executor.spin_once(timeout_sec=0.0)
+        if self.safe.require_temporal_map and temporal_map is None:
+            return self.safe._wait(dt,'missing_navigation_map')
+        if temporal_map is not None:
+            from .temporal import TemporalMap
+            if not isinstance(temporal_map,TemporalMap):
+                return self.safe._wait(dt,'invalid_navigation_map')
+        if self.replan_requested:
+            self.safe.elapsed+=dt
+            if self.safe.elapsed>self.safe.goal_timeout:return self.cancel()
+            self.command=(0.,0.)
+            if self.goal_future is not None:
+                return Result(reason='waiting_old_path_acceptance')
+            if self.goal_handle is not None:
+                if not self.replan_cancel_sent:
+                    self.goal_handle.cancel_goal_async();self.replan_cancel_sent=True
+                return Result(reason='waiting_old_path_cancellation')
+            self.pending=True;self.stop_sent=False;self.replan_requested=False
+            self.replan_cancel_sent=False;self.outcome=None;self.safe.route=None
         try:
             odom,obs=self._state(odometry,scan,coupled,arm_transport,articulation)
+            if temporal_map is not None:obs=replace(obs,temporal_map=temporal_map)
             reason=self.safe._inputs(self.now,odom,obs)
             if reason:
                 return self.safe._wait(dt,reason)
@@ -391,7 +430,10 @@ class ArticulatedNav2Adapter(Nav2Adapter):
                 return self.safe._wait(dt,'nav2_unavailable')
             from .articulated import TrainState
             state=TrainState(*odom.pose,wrap(odom.pose[2]-obs.articulation))
-            route=self.safe.planner.plan(state,self.safe.goal,obs.obstacles,odom.position_uncertainty)
+            if temporal_map is not None:
+                reason=temporal_map.readiness(self.now)
+                if reason:return self.safe._wait(dt,reason)
+            route=self.safe.plan_observed_route(state,obs,odom.position_uncertainty)
             if not route.states:
                 return self.safe._wait(dt,route.reason)
             from nav2_msgs.action import FollowPath
@@ -410,5 +452,10 @@ class ArticulatedNav2Adapter(Nav2Adapter):
             self.goal_future=self.client.send_goal_async(msg)
             self.goal_future.add_done_callback(self._accepted)
             return Result(reason='articulated_path_submitted')
-        return super().step(dt,odometry,scan,coupled=coupled,
-                            arm_transport=arm_transport,articulation=articulation)
+        result=super().step(dt,odometry,scan,coupled=coupled,
+                            arm_transport=arm_transport,articulation=articulation,temporal_map=temporal_map)
+        if temporal_map is not None and result.reason in ('occupied_navigation_cell','unknown_navigation_cell',
+                                                           'outside_navigation_map','obstacle_stop'):
+            self.replan_requested=True
+            self.command=(0.,0.)
+        return result

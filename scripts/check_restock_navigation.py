@@ -21,16 +21,17 @@ def main():
     parser.add_argument('--environment',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--scenario',type=Path,help='Integration scenario: staging support and actual chassis goals')
-    parser.add_argument('--localization-allowance','--position-uncertainty',type=float,default=.10,
-                        help='Measured localizer uncertainty floor in metres (default .10)')
+    parser.add_argument('--camera-config',type=Path,help='Physical camera config: include fixed mount colliders')
+    parser.add_argument('--position-uncertainty','--localization-allowance',type=float,default=.10,
+                        help='Fixture bound from localization evidence (default: MapLocalizer floor)')
     args=parser.parse_args()
-    if not math.isfinite(args.localization_allowance) or args.localization_allowance < .10:
-        parser.error('allowance must include the sensor localizer .10 m uncertainty floor')
-    uncertainty=args.localization_allowance
+    if not math.isfinite(args.position_uncertainty) or args.position_uncertainty<.02:
+        parser.error('position uncertainty must be finite and at least 0.02 m')
     manifest=json.loads(args.environment.read_text())
     scenario=json.loads(args.scenario.read_text()) if args.scenario else None
     from twin.navigation.scenario import environment_grid
-    grid=environment_grid(manifest,scenario)
+    cameras=json.loads(args.camera_config.read_text()) if args.camera_config else None
+    grid=environment_grid(manifest,scenario,cameras)
     poses=dict(manifest['poses'])
     if scenario:
         staging=scenario['initial_staging']
@@ -41,27 +42,27 @@ def main():
     state=TrainState(*poses['robot_dock'],poses['cart_dock'][2])
     report={'source':'test_fixture_quasistatic_not_physx',
         'environment_sha256':hashlib.sha256(args.environment.read_bytes()).hexdigest(),
-        'obstacles':len(grid.obstacles),'geometry_margin':.05,'localization_allowance':uncertainty,
+        'obstacles':len(grid.obstacles),'geometry_margin':.05,'localization_allowance':args.position_uncertainty,
         'minimum_turn_radius':1.5,'max_articulation_degrees':65,'legs':[]}
     report['scenario_sha256']=hashlib.sha256(args.scenario.read_bytes()).hexdigest() if args.scenario else None
+    report['camera_config_sha256']=hashlib.sha256(args.camera_config.read_bytes()).hexdigest() if args.camera_config else None
     report['goals']=poses
     args.output.mkdir(parents=True,exist_ok=True)
     v=w=0.0
     for name,goal in [('outbound',poses['shelf_approach']),
                       ('return',poses['robot_dock'])]:
-        articulation_limit = (scenario or {}).get('navigation_goal_articulation_rad', {}).get(name)
-        controller.start(goal,True,goal_articulation=articulation_limit)
+        controller.start(goal,True)
         trace=[];began=time.monotonic();peak_angle=0.0
         for tick in range(5200):
             now=(tick+1)*.05
-            odom=Odometry(state.pose,now,v,w,'test_fixture',uncertainty)
+            odom=Odometry(state.pose,now,v,w,'test_fixture',args.position_uncertainty)
             obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
             result=controller.step(.05,odom,obs,now=now)
             v,w=result.velocity
             if v<0 or abs(w)*1.5>v+1e-9:
                 raise AssertionError('illegal towing command')
             next_state=advance(state,v*.05,w/v if v else 0,controller.spec)
-            if not controller.world.valid(next_state,extra_margin=uncertainty):
+            if not controller.world.valid(next_state,extra_margin=args.position_uncertainty):
                 raise AssertionError('feedback trajectory collision')
             state=next_state
             peak_angle=max(peak_angle,abs(state.articulation))
@@ -71,7 +72,6 @@ def main():
                 break
         robot,cart=state.bodies(controller.spec)
         leg=dict(cart_body_pose=vars(cart),robot_body_pose=vars(robot),name=name,status=result.status,reason=result.reason,
-                 goal_articulation_limit_rad=articulation_limit,
                  goal=goal,final=vars(state),simulation_seconds=now,
                  cpu_seconds=time.monotonic()-began,peak_articulation_degrees=math.degrees(peak_angle),
                  final_articulation_degrees=math.degrees(state.articulation))

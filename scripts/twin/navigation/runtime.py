@@ -1,5 +1,6 @@
 """In-process sensor-to-command adapter; integration owns physics and actuators."""
 from .sensors import observation
+from dataclasses import replace
 
 
 class SensorNavigation:
@@ -24,7 +25,8 @@ class SensorNavigation:
     def cancel(self):
         return self.controller.cancel()
 
-    def step(self,dt,wheel_angles,scan,*,now,coupled,arm_transport,articulation=0.0):
+    def step(self,dt,wheel_angles,scan,*,now,coupled,arm_transport,articulation=0.0,
+             observed_space=None,temporal_map=None):
         if self.controller.terminal:
             return self.controller.terminal
         try:
@@ -32,6 +34,10 @@ class SensorNavigation:
             localized=self.localizer.update(raw,scan)
             sensed=observation(scan,localized,coupled=coupled,
                                arm_transport=arm_transport,articulation=articulation)
+            if observed_space is not None:
+                sensed=replace(sensed,observed_space=observed_space)
+            if temporal_map is not None:
+                sensed=replace(sensed,temporal_map=temporal_map)
         except (ValueError,TypeError,IndexError,AttributeError):
             self.last_localized=None
             return self.controller.step(dt,None,None,now=now)

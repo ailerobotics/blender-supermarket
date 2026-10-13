@@ -4,6 +4,9 @@
 been run against a moving Isaac robot yet. CPU tests are deterministic fixtures,
 not evidence of autonomous physics operation. Commands live in RUNBOOK §12.
 
+The controlled static-scene temporal-map handoff, required-map mode, epoch
+limits and remaining native checks are in [navigation_temporal_mapping.md](navigation_temporal_mapping.md).
+
 ## Articulated route
 
 `articulated.ArticulatedController(grid, spec=MobileSpec())` replaces the
