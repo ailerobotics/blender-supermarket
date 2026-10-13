@@ -187,7 +187,7 @@ Design sampling is 2560×1920 with cx=1280, cy=960 (the installed Isaac camera's
 width/2, height/2 principal-point API) and a .15–3.5 m range. Focal length is now
 per camera so the 60 mm paired QR markers (25-module v2) clear a decode-safe
 pixels-per-module margin while the full .62×.42 support stays framed: source
-fx=fy=2000, cart fx=fy=1500, shelf fx=fy=1280. Resolution is unchanged, so the
+fx=fy=2000, cart fx=fy=1500, shelf fx=fy=1050. Resolution is unchanged, so the
 bounded QR tile grid (hence decode latency) is unaffected — it is resolution-bound,
 not marker-size-bound. Pixel size and incidence are necessary, never sufficient,
 for decoding; lighting and contrast are separate (see Store light rig below).
@@ -232,7 +232,7 @@ both markers stay fully in frustum/range at every station:
 | Source | 81/81 | 81/81 | 25/25 | 25/25 | 6.0 @ 20° |
 | Cart pickup | 81/81 | 81/81 | 25/25 | 25/25 | 5.4 @ 34° |
 | Cart articulated arrival | 81/81 | 81/81 | 25/25 | 25/25 | 5.4 @ 34° |
-| Shelf | 81/81 | 81/81 | 25/25 | 25/25 | 13.1 @ 35° |
+| Shelf | 81/81 | 81/81 | 25/25 | 25/25 | 10.8 @ 35° |
 
 The added solids have no conservative overlap with 24 URDF collision links or
 held payload in 7,498 bounded samples over 16 local segments. This is only the
