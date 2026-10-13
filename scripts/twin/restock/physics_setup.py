@@ -88,18 +88,27 @@ def configure_scene_physics(stage, scene_path):
     return dict(path=str(prim.GetPath()),enable_stabilization=True,before=before)
 
 
-def configure_cart_bearings(stage, root):
-    """Author conservative caster bearing friction and body damping on the cart.
+LINEAR_DAMPING=0.5
+ANGULAR_DAMPING=3.0
 
-    The cart's four swivel/roll caster joints were authored frictionless and its
-    bodies undamped, unlike the robot's own URDF casters (damping 0.05, friction
-    0.01). Real caster bearings resist motion; a perfectly frictionless free-rolling
-    caster converts any sub-millimetre solver residual into unbounded sideways roll.
-    The values below match the robot's declared caster bearings and model bearing /
-    rolling resistance. They are a fidelity correction, not a holding brake: they
-    are far too small to resist a commanded tow (which produces orders-of-magnitude
-    larger joint torque), and they do not touch mass, inertia, collision geometry or
-    the free revolute model. Preserve every other authored attribute.
+
+def configure_cart_bearings(stage, root):
+    """Author rolling / bearing resistance as body damping on the cart.
+
+    The cart's four swivel/roll casters were authored with no resistance, so once
+    resting-contact jitter is removed the balanced cart still creeps: any residual
+    impulse rolls the frictionless wheels forever. The physically faithful remedy is
+    caster bearing + rolling resistance. PhysX ``jointFriction`` would be the natural
+    Coulomb model but it is inert here - the schema restricts it to articulation
+    joints and these casters are maximal-coordinate (excludeFromArticulation). So the
+    resistance is authored as rigid-body damping instead: strong ANGULAR damping on
+    the bodies (dominated by the four low-inertia wheels, where it opposes spin -
+    hence rolling - almost for free: wheel inertia ~1.7e-3 kg m^2, so even a large
+    coefficient is a negligible torque against a commanded tow) and mild LINEAR
+    damping on the 35 kg cage. This models bearing/rolling/air losses a real cart has;
+    it is not a positional brake (no drive, stiffness or target) and leaves mass,
+    inertia, collision geometry and the free revolute model untouched. Preserve every
+    other authored attribute.
     """
     from pxr import Usd, UsdPhysics, Sdf
     prim=stage.GetPrimAtPath(root)
@@ -108,17 +117,16 @@ def configure_cart_bearings(stage, root):
     joints,bodies=[],[]
     for p in Usd.PrimRange(prim):
         if p.IsA(UsdPhysics.RevoluteJoint):
-            p.AddAppliedSchema('PhysxJointAPI')
-            p.CreateAttribute('physxJoint:jointFriction',Sdf.ValueTypeNames.Float,False).Set(0.01)
-            joints.append(str(p.GetPath()))
+            joints.append(str(p.GetPath()))  # recorded for the 8-caster invariant only
         if p.HasAPI(UsdPhysics.RigidBodyAPI):
             p.AddAppliedSchema('PhysxRigidBodyAPI')
-            for name,value in (('linearDamping',0.05),('angularDamping',0.05)):
+            for name,value in (('linearDamping',LINEAR_DAMPING),('angularDamping',ANGULAR_DAMPING)):
                 p.CreateAttribute('physxRigidBody:'+name,Sdf.ValueTypeNames.Float,False).Set(value)
             bodies.append(str(p.GetPath()))
     if len(joints)!=8 or len(bodies)!=9:
         raise ValueError('expected eight caster joints and nine cart bodies')
-    return dict(joint_friction=0.01,linear_damping=0.05,angular_damping=0.05,
+    return dict(linear_damping=LINEAR_DAMPING,angular_damping=ANGULAR_DAMPING,
+                joint_friction='inert on maximal-coordinate casters; using body damping',
                 joints=joints,bodies=bodies)
 
 
@@ -193,6 +201,13 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
         raise ValueError('one composed physics scene required')
     scene_physics=configure_scene_physics(stage,scenes[0])
     world=World(physics_dt=1/60,rendering_dt=1/60,stage_units_in_meters=1.,physics_prim_path=scenes[0])
+    # World's PhysicsContext re-applies Isaac defaults at construction
+    # (enable_stablization(False)), silently clobbering the USD attribute authored
+    # above. Re-assert it through the context BEFORE the first reset so PhysX parses
+    # stabilization=True when it builds the live scene; the method only writes USD.
+    context=world.get_physics_context()
+    context.enable_stablization(True)
+    scene_physics['set_via']='isaacsim PhysicsContext.enable_stablization before world.reset'
     robot=world.scene.add(SingleArticulation(prim_path=paths['articulation'],name='restock_robot'))
     robot_body=world.scene.add(SingleRigidPrim(prim_path=paths['base_link'],name='restock_base'))
     cart_body=world.scene.add(SingleRigidPrim(prim_path=cart_path,name='restock_cart'))
@@ -207,6 +222,9 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     actual=np.asarray(robot.get_joint_positions(),float)
     if not np.isfinite(actual).all() or not np.allclose(actual,positions,atol=1e-5):
         raise RuntimeError('initial articulation state did not apply')
+    scene_physics['effective_after_reset']=bool(context.is_stablization_enabled())
+    if not scene_physics['effective_after_reset']:
+        raise RuntimeError('contact stabilization did not take effect after reset')
     def apply(q,v,indices):
         robot.apply_action(ArticulationAction(joint_positions=q,joint_velocities=v,joint_indices=indices))
     gate=ArmCommandGate(robot,tool.arm_limits,apply)

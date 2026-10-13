@@ -33,11 +33,10 @@ def test_cart_solver_tuning_preserves_physical_bodies_and_free_joints():
                    for p in stage.Traverse())
 
 
-def test_cart_bearings_add_friction_damping_without_touching_physical_model():
+def test_cart_bearings_add_damping_without_touching_physical_model():
     Usd=pytest.importorskip('pxr.Usd')
-    from pxr import UsdPhysics
     from twin.mobile_assets import author_cart
-    from twin.restock.physics_setup import configure_cart_bearings
+    from twin.restock.physics_setup import configure_cart_bearings, LINEAR_DAMPING, ANGULAR_DAMPING
     stage=Usd.Stage.CreateInMemory()
     cart=author_cart(stage)
     # Snapshot everything the fidelity correction must NOT change: mass, inertia,
@@ -48,15 +47,16 @@ def test_cart_bearings_add_friction_damping_without_touching_physical_model():
     assert len(result['joints'])==8 and len(result['bodies'])==9
     for (path,name),value in protected.items():
         assert stage.GetPrimAtPath(path).GetAttribute(name).Get()==value
-    # Friction authored on every caster joint; bodies carry mild damping only.
+    # Casters stay undriven maximal joints (jointFriction is inert there, so unset).
     for path in result['joints']:
         j=stage.GetPrimAtPath(path)
-        assert j.GetAttribute('physxJoint:jointFriction').Get()==pytest.approx(0.01)
-        assert not UsdPhysics.RevoluteJoint(j).GetBody1Rel().GetTargets()==[]  # still a real joint
+        assert not j.GetAttribute('physxJoint:jointFriction').HasAuthoredValueOpinion()
+        assert j.GetAttribute('physics:excludeFromArticulation').Get() is True
+    # Bodies carry bearing/rolling resistance as plain damping (no drive).
     for path in result['bodies']:
         b=stage.GetPrimAtPath(path)
-        assert b.GetAttribute('physxRigidBody:linearDamping').Get()==pytest.approx(0.05)
-        assert b.GetAttribute('physxRigidBody:angularDamping').Get()==pytest.approx(0.05)
+        assert b.GetAttribute('physxRigidBody:linearDamping').Get()==pytest.approx(LINEAR_DAMPING)
+        assert b.GetAttribute('physxRigidBody:angularDamping').Get()==pytest.approx(ANGULAR_DAMPING)
 
 
 def test_scene_physics_enables_stabilization_only():
