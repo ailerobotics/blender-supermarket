@@ -4,6 +4,8 @@ Configuration describes physical mounts, never observed stock or support. Camera
 calibration/label interpretation belongs to restock_camera and isaac_sensors.
 """
 import re
+import time
+import uuid
 
 import numpy as np
 
@@ -38,6 +40,26 @@ class RenderedCamera:
     """
     def __init__(self,camera):
         self.camera=camera
+        self.native_denominator=None
+
+    def get_current_frame(self,*args,**kwargs):
+        frame=dict(self.camera.get_current_frame(*args,**kwargs))
+        identity=frame.get('rendering_frame')
+        if isinstance(identity,dict):
+            numerator,denominator=identity.get('referenceTimeNumerator'),identity.get('referenceTimeDenominator')
+            if type(numerator) is not int or numerator<0 or type(denominator) is not int or denominator<=0:
+                raise ValueError('invalid native rendered-frame identity')
+            if self.native_denominator is not None and denominator!=self.native_denominator:
+                raise ValueError('native rendered-frame identity basis changed')
+            self.native_denominator=denominator
+            frame['native_rendering_frame']=dict(identity)
+            frame['rendering_frame']=numerator
+        acquisition=getattr(self.camera,'_restock_acquisition',None)
+        if acquisition is not None:
+            if acquisition['native_id']!=identity:
+                raise ValueError('camera acquisition clock belongs to another frame')
+            frame.update({k:v for k,v in acquisition.items() if k!='native_id'})
+        return frame
 
     def get_intrinsics_matrix(self):
         cx,cy,fx,fy,distortion=self.camera.get_opencv_pinhole_properties()
@@ -49,10 +71,42 @@ class RenderedCamera:
         return getattr(self.camera,name)
 
 
+def initialize_camera(path,k,*,name,frequency=-1,session_id=None,steady_domain=None):
+    """Initialize one authored optical view; clock metadata is captured in callback.
+
+    The Isaac5.1 acquisition callback supplies one render-product RGB/depth frame.
+    Recording the monotonic clock there avoids restamping cached frames on read.
+    Callers reuse steady_domain across commissioning and mission scene resets.
+    """
+    from isaacsim.sensors.camera import Camera
+    session_id=session_id or str(uuid.uuid4())
+    steady_domain=steady_domain or str(uuid.uuid4())
+    class AcquisitionCamera(Camera):
+        def _data_acquisition_callback(self,event):
+            began=time.monotonic()
+            super()._data_acquisition_callback(event)
+            native=self._current_frame.get('rendering_frame')
+            previous=getattr(self,'_restock_acquisition',None)
+            if isinstance(native,dict) and (previous is None or native!=previous['native_id']):
+                self._restock_acquisition=dict(native_id=dict(native),acquired_steady=began,
+                    session_id=session_id,steady_domain=steady_domain)
+    camera=AcquisitionCamera(prim_path=path,name=name,frequency=frequency,resolution=(k.width,k.height))
+    camera.set_clipping_range(k.near,k.far)
+    camera.set_focal_length(.02)
+    camera.set_horizontal_aperture(k.width*.02/k.fx)
+    camera.set_vertical_aperture(k.height*.02/k.fy)
+    camera.set_opencv_pinhole_properties(cx=k.cx,cy=k.cy,fx=k.fx,fy=k.fy,pinhole=[0.]*12)
+    camera.initialize()
+    camera.add_distance_to_image_plane_to_frame()
+    # Exact rendered prim IDs are used only to mark known rig pixels unknown.
+    # They must never supply product identity or clear occluded free space.
+    camera.add_instance_id_segmentation_to_frame(init_params={'colorize':False})
+    return RenderedCamera(camera)
+
+
 class CameraRig:
     def __init__(self, *, stage, specs, parent_paths, frequency=-1):
         from pxr import Gf,UsdGeom,UsdPhysics
-        from isaacsim.sensors.camera import Camera
         self.stage,self.cameras,self.optical_paths=stage,{},{}
         self.specs={}
         for spec in specs:
@@ -85,16 +139,7 @@ class CameraRig:
             # decimator can skip a step due to floating-point accumulation.
             # The mission recorder selects every second 60Hz physics render;
             # native ROS helpers independently use frameSkipCount=1.
-            camera=Camera(prim_path=camera_path,name='restock_'+name,
-                          frequency=frequency,resolution=(k.width,k.height))
-            camera.set_clipping_range(k.near,k.far)
-            camera.set_focal_length(.02)
-            camera.set_horizontal_aperture(k.width*.02/k.fx)
-            camera.set_vertical_aperture(k.height*.02/k.fy)
-            camera.set_opencv_pinhole_properties(cx=k.cx,cy=k.cy,fx=k.fx,fy=k.fy,pinhole=[0.]*12)
-            camera.initialize()
-            camera.add_distance_to_image_plane_to_frame()
-            self.cameras[name]=RenderedCamera(camera)
+            self.cameras[name]=initialize_camera(camera_path,k,name='restock_'+name,frequency=frequency)
             self.optical_paths[name]=root
             self.specs[name]=spec
 

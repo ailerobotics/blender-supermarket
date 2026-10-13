@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Bounded native RTX/RGB-D smoke, separate from the autonomous mission.
 
-One static cube, floor and physical camera mount. No robot, ROS node or planner.
+Default: one static cube, floor and physical camera mount. The optional full-store
+view includes static robot/cart CAD. Neither mode runs robot motion or a planner.
 Parent holds the GPU guard while monitoring its exact task-owned child session.
 """
 import argparse
@@ -79,7 +80,7 @@ def sample():
                 gpu_free_mib=free,ram_available_mib=available_ram_mb())
 
 
-def worker(output,ffmpeg):
+def worker(output,ffmpeg,runtime_config=None,view='source'):
     from isaacsim import SimulationApp
     app=SimulationApp({'headless':True,'width':640,'height':360,
         'renderer':'RayTracedLighting','anti_aliasing':0,'multi_gpu':False})
@@ -94,47 +95,71 @@ def worker(output,ffmpeg):
         world=World(physics_dt=1/60,rendering_dt=1/60,stage_units_in_meters=1.)
         stage=omni.usd.get_context().get_stage()
         UsdGeom.Xform.Define(stage,'/World')
-        floor=UsdGeom.Cube.Define(stage,'/World/Floor')
-        floor.CreateSizeAttr(1.);floor.AddScaleOp().Set(Gf.Vec3d(4,4,.02))
-        floor.AddTranslateOp().Set(Gf.Vec3d(0,0,-.5))
-        floor.CreateDisplayColorAttr([(0.25,0.3,0.35)])
-        cube=UsdGeom.Cube.Define(stage,'/World/StaticTestCube')
-        cube.CreateSizeAttr(.4);cube.AddTranslateOp().Set(Gf.Vec3d(0,0,.2))
-        cube.CreateDisplayColorAttr([(0.8,0.15,0.05)])
         light=UsdLux.DomeLight.Define(stage,'/World/Light')
         light.CreateIntensityAttr(1000.)
-        optical=look_at((1.5,-1.5,1.2),(0,0,.2))
-        mount=np.eye(4);mount[:3,3]=[1.5,-1.5,1.18]
-        spec=dict(id='smoke',parent='map',parent_from_optical=optical.tolist(),
-            intrinsics=dict(width=640,height=360,fx=500.,fy=500.,cx=320.,cy=180.,near=.05,far=10.),
-            collision_solids=[dict(parent_from_solid=mount.tolist(),size_m=[.04,.04,.03])])
-        rig=CameraRig(stage=stage,specs=[spec],parent_paths={'map':'/World'})
+        required_codes=set()
+        if runtime_config:
+            from twin.restock.view_scene import build
+            config=json.loads(Path(runtime_config).read_text())
+            camera,spec,required_codes=build(stage,config,output,view=view)
+            if view=='source':
+                required_codes.add(json.loads(Path(config['scenario']).read_text())['job']['sku'])
+        else:
+            floor=UsdGeom.Cube.Define(stage,'/World/Floor')
+            floor.CreateSizeAttr(1.);floor.AddScaleOp().Set(Gf.Vec3d(4,4,.02))
+            floor.AddTranslateOp().Set(Gf.Vec3d(0,0,-.5))
+            floor.CreateDisplayColorAttr([(0.25,0.3,0.35)])
+            cube=UsdGeom.Cube.Define(stage,'/World/StaticTestCube')
+            cube.CreateSizeAttr(.4);cube.AddTranslateOp().Set(Gf.Vec3d(0,0,.2))
+            cube.CreateDisplayColorAttr([(0.8,0.15,0.05)])
+            optical=look_at((1.5,-1.5,1.2),(0,0,.2))
+            mount=np.eye(4);mount[:3,3]=[1.5,-1.5,1.18]
+            spec=dict(id='smoke',parent='map',parent_from_optical=optical.tolist(),
+                intrinsics=dict(width=640,height=360,fx=500.,fy=500.,cx=320.,cy=180.,near=.05,far=10.),
+                collision_solids=[dict(parent_from_solid=mount.tolist(),size_m=[.04,.04,.03])])
+            rig=CameraRig(stage=stage,specs=[spec],parent_paths={'map':'/World'})
+            camera=rig.cameras['smoke']
         world.reset()
-        camera=rig.cameras['smoke']
         for _ in range(90): world.step(render=True)
         recorder=Recorder(output/'frames',fps=60)
         last=None
         last_native_time=None
         observed_frames=[]
+        decoded_codes=set()
+        target_frames=6 if runtime_config else 60
+        width,height=spec['intrinsics']['width'],spec['intrinsics']['height']
         (output/'depth-frames').mkdir()
         for _ in range(180):
             world.step(render=True)
             frame=camera.get_current_frame(clone=True)
-            identity=frame.get('rendering_frame')
+            identity=frame.get('native_rendering_frame',frame.get('rendering_frame'))
             if identity is None or identity==last: continue
             native_time=Fraction(identity['referenceTimeNumerator'],identity['referenceTimeDenominator'])
             if last_native_time is not None and native_time<=last_native_time:
                 raise ValueError('native camera identity moved backwards')
             rgb=np.asarray(frame.get('rgb'))
             depth=np.asarray(frame.get('distance_to_image_plane'),float)
-            if rgb.shape!=(360,640,4) or depth.shape!=(360,640):
+            if rgb.shape!=(height,width,4) or depth.shape!=(height,width):
                 raise ValueError('native RGB-D shape mismatch')
             if np.std(rgb[:,:,:3])<2 or np.count_nonzero(np.isfinite(depth)&(depth>0))<1000:
                 raise ValueError('native RGB-D is empty or uniform')
             recorder.add(rgb[:,:,:3],render_id=str(identity),simulation_time=float(frame['rendering_time']))
             depth_path=output/'depth-frames'/f'{len(recorder.frames)-1:06d}.npz'
-            np.savez_compressed(depth_path,depth=depth)
+            segmentation=frame.get('instance_id_segmentation',{})
+            ids=np.asarray(segmentation.get('data'))
+            paths=segmentation.get('info',{}).get('idToLabels',{})
+            if ids.shape!=depth.shape or ids.dtype!=np.uint32 or not paths:
+                raise ValueError('same-acquisition instance IDs/path mapping unavailable')
+            np.savez_compressed(depth_path,depth=depth,instance_ids=ids)
+            codes=[]
+            if required_codes:
+                import cv2
+                ok,codes,_,_=cv2.QRCodeDetector().detectAndDecodeMulti(cv2.cvtColor(rgb[:,:,:3],cv2.COLOR_RGB2BGR))
+                if ok: decoded_codes.update(codes)
             observed_frames.append(dict(rendering_frame=identity,rendering_time=float(frame['rendering_time']),
+                acquired_steady=frame.get('acquired_steady'),session_id=frame.get('session_id'),
+                steady_domain=frame.get('steady_domain'),decoded_codes=list(codes),
+                instance_id_to_path=paths,
                 rgb_sha256=recorder.frames[-1]['sha256'],depth_file=str(depth_path.relative_to(output)),
                 depth_sha256=hashlib.sha256(depth_path.read_bytes()).hexdigest(),
                 rgb_depth_identity_model='same Camera render-product acquisition callback and cloned frame'))
@@ -146,14 +171,18 @@ def worker(output,ffmpeg):
                     finite_depth_pixels=int(np.count_nonzero(np.isfinite(depth)&(depth>0)))))
             last=identity
             last_native_time=native_time
-            if len(recorder.frames)>=60: break
-        if len(recorder.frames)<60: raise RuntimeError('insufficient real rendered frames')
+            if len(recorder.frames)>=target_frames: break
+        if len(recorder.frames)<target_frames: raise RuntimeError('insufficient real rendered frames')
         video=recorder.encode(output/'native-render-smoke.mp4',ffmpeg=ffmpeg)
         stage.GetRootLayer().Export(str(output/'smoke.usda'))
         libraries=sorted({line.split()[-1] for line in Path('/proc/self/maps').read_text().splitlines()
                           if any(name in line for name in ('libcuda','libnvidia','libGLX_nvidia'))})
-        write(output/'native-result.json',dict(status='passed',evidence='static native RTX RGB-D smoke only',
-            robot_motion=False,autonomous_mission=False,video=video,nvidia_libraries=libraries))
+        missing=sorted(required_codes-decoded_codes)
+        write(output/'native-result.json',dict(status='failed' if missing else 'passed',
+            reason='required physical marker decode missing: '+','.join(missing) if missing else '',
+            evidence='static native RTX RGB-D optical bench only',required_codes=sorted(required_codes),
+            decoded_codes=sorted(decoded_codes),robot_motion=False,autonomous_mission=False,
+            video=video,nvidia_libraries=libraries))
     except BaseException as exc:
         # Kit shutdown may terminate the interpreter with zero even while Python
         # unwinds an exception. Persist the failure before entering app.close().
@@ -170,11 +199,13 @@ def main():
     parser.add_argument('--ffmpeg',required=True,type=Path)
     parser.add_argument('--isaac-python',type=Path)
     parser.add_argument('--nvidia-runtime',type=Path)
+    parser.add_argument('--runtime-config',type=Path,help='optional full-store static candidate camera bench')
+    parser.add_argument('--view',choices=('source','cart','shelf'),default='source')
     parser.add_argument('--heavy-threshold-mb',type=int,choices=(1500,2500),default=1500)
     parser.add_argument('--worker',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()
     if args.worker:
-        worker(args.output,args.ffmpeg);return
+        worker(args.output,args.ffmpeg,args.runtime_config,args.view);return
     if not args.isaac_python or not args.nvidia_runtime:
         parser.error('--isaac-python and --nvidia-runtime required')
     args.output=args.output.resolve()
@@ -191,6 +222,8 @@ def main():
             record['services_before']=services()
             command=[str(args.isaac_python),str(Path(__file__).resolve()),'--worker',
                      '--output',str(args.output),'--ffmpeg',str(args.ffmpeg)]
+            if args.runtime_config:
+                command.extend(['--runtime-config',str(args.runtime_config),'--view',args.view])
             child=OwnedProcess(command,args.output/'isaac.log',env=environment)
             try:
                 child.start()
@@ -206,7 +239,7 @@ def main():
                 record['exit_code']=child.process.returncode
                 if child.process.returncode: raise RuntimeError('native child failed; inspect isaac.log')
                 native=json.loads((args.output/'native-result.json').read_text())
-                if native.get('status')!='passed' or native.get('video',{}).get('frames',0)<30:
+                if native.get('status')!='passed' or native.get('video',{}).get('frames',0)<(6 if args.runtime_config else 60):
                     raise RuntimeError('native result incomplete: '+native.get('reason','missing frames'))
                 # Decode the whole recorded video, not merely its container header.
                 subprocess.run([str(args.ffmpeg),'-v','error','-nostdin','-i',

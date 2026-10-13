@@ -24,3 +24,18 @@ def test_camera_requires_real_mount_geometry():
     assert camera_spec(spec)[0]=='source'
     spec['parent_from_optical'][0][0]=-1
     with pytest.raises(ValueError,match='rigid'): camera_spec(spec)
+
+
+def test_native_identity_adaptation_keeps_original_clock_and_never_restamps():
+    raw=dict(rendering_frame={'referenceTimeNumerator':112,'referenceTimeDenominator':30},
+             rendering_time=1.48)
+    original=SimpleNamespace(get_current_frame=lambda:raw,
+        _restock_acquisition=dict(native_id=raw['rendering_frame'],acquired_steady=100.,
+                                  session_id='commission',steady_domain='process-clock'))
+    camera=RenderedCamera(original)
+    first=camera.get_current_frame();second=camera.get_current_frame()
+    assert first==second and first['rendering_frame']==112
+    assert first['acquired_steady']==100. and first['rendering_time']==1.48
+    assert isinstance(raw['rendering_frame'],dict)
+    raw['rendering_frame']={'referenceTimeNumerator':224,'referenceTimeDenominator':60}
+    with pytest.raises(ValueError,match='basis changed'): camera.get_current_frame()
