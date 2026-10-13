@@ -345,7 +345,13 @@ class SensorHandshakeDriver:
                     'ledger': [{'sensor': ac.sensor, 'optical_frame': ac.optical_frame,
                                 'sequence': int(ac.sequence)} for ac in snap.incorporated],
                     'slice': {'width': int(snap.slice.width), 'height': int(snap.slice.height),
-                              'resolution': float(snap.slice.resolution)},
+                              'resolution': float(snap.slice.resolution),
+                              'frame_id': snap.slice.header.frame_id,
+                              'data_len': len(snap.slice.data),
+                              'expected_len': int(snap.slice.width) * int(snap.slice.height),
+                              'unknown_value': float(snap.slice.unknown_value),
+                              'origin': [float(snap.slice.origin.x), float(snap.slice.origin.y),
+                                         float(snap.slice.origin.z)]},
                 }
                 envelope = evidence_bridge.envelope_from_message(snap)
                 tmap.accept_envelope(envelope)

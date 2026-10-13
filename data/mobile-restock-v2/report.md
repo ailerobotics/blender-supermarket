@@ -27,7 +27,7 @@ checks. Detail + exact commands are in the per-topic sections below.
 | Source-station sensing (decode) | GREEN | native | `view-source-lit-01`: 3/3 markers decoded under the applied light rig |
 | Shelf-station sensing (decode) | RED (lit) | native | `view-shelf-lit-04` (PR#30 DiskLight): illumination FIXED (support max 4->217, 31% >=180) but decode still 0/2 — QR contrast/over-exposure (band 161-227, no dark), routed to camera worker |
 | Mapper construction | CONFIRMED | native | `mapper-evidence-construct-01` (PR#29 runtime closure): EvidenceProducerNode instantiated + advertised services/topic + 5893 ticks, GPU reclaimed; incorporation = sensor+handshake next |
-| Collision-map incorporation (mapper) | RED (producer gate) | native | `incorp-01/02`, `incorp-probe-01/02/03`, `incorp-probe-noesdf2`: full sensor+handshake driver built + CPU-tested; mapper services discovered and RESPOND, but EmptyGeneration is refused `native layer not empty` on the earliest single-shot call (no sensor input/TF/clock, ESDF+decay+clearing timers off), and one refusal permanently Faults the one-shot producer — a static nvblox layer is non-empty at construction; native-producer-lane fix routed to host worker |
+| Collision-map incorporation (mapper) | NEAR-GREEN (1-line producer bug) | native | `incorp-identity-01/02`: under PR#32 baseline producer the full path runs — EmptyGeneration ACCEPTED (baseline 2048/layer) → admission open → 2 depth frames registered+integrated → EvidenceSnapshot PUBLISHED (index 1, rev 1, ledger front, slice 48×80 data_len 3840==expected). Consumer fails closed only because the producer leaves slice `header.frame_id`='' (should be global_frame 'map'); one-line host-lane fix in producer_node.cpp processEsdf |
 | Full autonomous restock cycle | NOT RUN | — | gated on shelf sensing + mapper incorporation; the `isaac_bundle:create` factory is not built until those land |
 
 Source-station note: per the integration/camera contract the 3/3 native decode
@@ -113,6 +113,26 @@ node; (2) make `verify_empty` baseline-aware of nvblox's construction-time alloc
 the construction baseline, or exclude derived/preallocated layers from the sensor-emptiness
 check). The driver, sequencer, orchestrator and consumer path are complete and will produce a
 measured incorporation identity the moment the gate accepts an empty generation.
+
+**UPDATE (both asks landed, host PR#32; pipeline now runs end to end).** PR#32 made
+`verify_empty` construction-baseline-aware (a fresh map reports 2048 preallocated blocks/layer;
+emptiness means zero sensor-observed growth over baseline) and made emptiness refusals
+non-faulting with `LayerCount[]` on the failure response. Re-running the driver against it
+(`incorp-identity-01/02`, bounded guarded GPU) the **full native path now succeeds**:
+EmptyGeneration ACCEPTED on a fresh construction (certificate echoed, baseline 2048/layer) →
+OpenAdmission opened → 2 synthetic depth acquisitions REGISTERED and INTEGRATED (nvblox ESDF
+revision advanced) → the mapper **PUBLISHED an EvidenceSnapshot** (snapshot_index 1,
+esdf_revision 1, admission OPEN, empty_state POPULATED, ledger `front`/`front_optical` seq 1,
+slice 48×80 @0.05 m, `data_len 3840 == width*height`). The consumer decode then fails closed
+with `invalid native distance slice` for one measured reason: the producer's `processEsdf`
+fills `env->slice` via `distanceMapSliceMsgFromSliceImage` but **never sets
+`env->slice.header.frame_id`** (measured `frame_id=""`), while the stock nvblox publish path sets
+it to the global frame and the consumer requires the slice frame be `map`. This is a one-line
+host-lane fix (`native/restock_mapper_evidence/src/producer_node.cpp` `processEsdf`: set
+`env->slice.header.frame_id = "map"` — the mapper's `global_frame` — before publish; optionally
+stamp the header too). Integration does not paper over it (an empty slice frame is correctly a
+fail-closed envelope). A measured incorporation identity, then source-station vacancy capture and
+the full mission, follow immediately once the producer stamps the slice frame.
 
 ## Camera lighting applied: SOURCE decodes 3/3, SHELF still dark 0/2 (measured)
 
