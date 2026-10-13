@@ -61,6 +61,8 @@ class BundlePlan:
     verification_source: str    # e.g. 'rollwagen'
     recording_fps: int
     package_roots: tuple
+    job_sku: str                # scenario job SKU (lane factories need it; call sig stays frozen)
+    job_quantity: int
 
 
 def plan_bundle(manifest, scenario, config):
@@ -114,9 +116,15 @@ def plan_bundle(manifest, scenario, config):
     if not isinstance(roots, (list, tuple)) or not roots or not all(isinstance(r, str) and r for r in roots):
         raise ValueError('config.package_roots must be a non-empty list of paths')
 
+    job = scenario.get('job')
+    if not isinstance(job, dict) or not isinstance(job.get('sku'), str) or not job['sku']:
+        raise ValueError('scenario.job.sku required')
+    if type(job.get('quantity')) is not int or job['quantity'] < 1:
+        raise ValueError('scenario.job.quantity must be a positive int')
+
     return BundlePlan(poses=poses, goal_articulation=goal_articulation, nav_mode=nav_mode,
                       verification_source=verification_source, recording_fps=int(fps),
-                      package_roots=tuple(roots))
+                      package_roots=tuple(roots), job_sku=job['sku'], job_quantity=int(job['quantity']))
 
 
 @dataclass

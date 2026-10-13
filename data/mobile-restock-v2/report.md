@@ -1,14 +1,17 @@
 # Mobile restocking integration checkpoint
 
-Status: incomplete, but the previously blocking stationary-cart instability is now
-RESOLVED on the guarded GPU (see next section). Guarded GPU use was explicitly
-authorized on October 13; native RTX RGB-D rendering, VFR recording, and now a
-stationary native physics hold all pass. No autonomous physics cycle or mission MP4
-has been produced. The current branch contains CPU mission/inventory infrastructure;
-the landed mobile/cart, schema-2 environment, articulated navigation and CAD
-manipulation components are integrated from origin/main.
-A controller dispatcher and guarded launcher now exist; a complete simulator
-bundle with actual sensor acquisition/planner/actuator wiring is still missing.
+Status: incomplete but materially advanced. Guarded GPU use was authorized on October 13;
+native RTX RGB-D rendering, VFR recording, stationary hold, coupling and forward towing all
+pass. **The native collision-map incorporation pipeline is now GREEN end to end**: the
+integration sensor+handshake driver drives EmptyGeneration→OpenAdmission→register→integrate→
+EvidenceSnapshot→consume and `TemporalMap.accept_envelope` adopts the slice, yielding a
+measured incorporation identity (`incorp-identity-03`, under the host producer fixes PR#32/#33).
+The `isaac_bundle:create` mission factory is built + CPU-tested, and the `manip_factory` is
+authored + CPU-tested (515 CPU tests). No autonomous moving-mission MP4 has been produced yet:
+the full recorded mission is gated on the lane-owned `nav_factory`/`sensing_factory` refs; shelf
+support decode stays RED (native-render marker visibility, routed to the camera worker). The
+landed mobile/cart, schema-2 environment, articulated navigation and CAD manipulation components
+are integrated from origin/main.
 
 ## Mission gate table (guarded native + CPU evidence)
 
@@ -25,10 +28,10 @@ checks. Detail + exact commands are in the per-topic sections below.
 | Host self-collision model | GREEN | CPU | `host-preflight-01`: 1930 spheres, zero transport overlaps, 7 separation proofs |
 | Navigation route preflight | GREEN | CPU fixture | `nav-preflight-01`: outbound + return succeed at 0.10 m uncertainty, peak ~46 deg; not a physics demo |
 | Source-station sensing (decode) | GREEN | native | `view-source-lit-01`: 3/3 markers decoded under the applied light rig |
-| Shelf-station sensing (decode) | RED (lit) | native | `view-shelf-lit-04` (PR#30 DiskLight): illumination FIXED (support max 4->217, 31% >=180) but decode still 0/2 — QR contrast/over-exposure (band 161-227, no dark), routed to camera worker |
+| Shelf-station sensing (decode) | RED (camera, native visibility) | native | `view-shelf-lit-06` under merged PR#34 geometry fiducials: still 0/2. Marker meshes authored + emissive in the stage but produce ZERO render signal (05b→06 abs-diff max 35/4px) → markers not visible to the shelf camera (occlusion/aim/placement), not texture/material; offline ~15px/module proof assumes visibility. Routed to camera worker; not a non-shelf blocker |
 | Mapper construction | CONFIRMED | native | `mapper-evidence-construct-01` (PR#29 runtime closure): EvidenceProducerNode instantiated + advertised services/topic + 5893 ticks, GPU reclaimed; incorporation = sensor+handshake next |
-| Collision-map incorporation (mapper) | NEAR-GREEN (1-line producer bug) | native | `incorp-identity-01/02`: under PR#32 baseline producer the full path runs — EmptyGeneration ACCEPTED (baseline 2048/layer) → admission open → 2 depth frames registered+integrated → EvidenceSnapshot PUBLISHED (index 1, rev 1, ledger front, slice 48×80 data_len 3840==expected). Consumer fails closed only because the producer leaves slice `header.frame_id`='' (should be global_frame 'map'); one-line host-lane fix in producer_node.cpp processEsdf |
-| Full autonomous restock cycle | BUNDLE BUILT, UNRUN | CPU + gated | `isaac_bundle:create` factory now exists (`twin/restock/isaac_bundle.py`): pure `plan_bundle` (mission poses/articulation/nav-mode/verification contract, 11 CPU tests) + `create()` assembling the validated `physics_setup.assemble` scene → measured `IsaacPort` → `RuntimeAdapter(fixture_mode=False)`, with nav/manip/sensing controllers resolved from lane-owned `module:function` runtime-config refs (no stubs). Source-station sensing wired via the sensing-factory into `InventoryVerifier`. Unrun: gated on the producer frame_id fix + the lane factory refs; one bounded run executes collect→couple→outbound→park→transfer→verify→return when they land |
+| Collision-map incorporation (mapper) | GREEN | native | `incorp-identity-03` under merged PR#33: full path EmptyGeneration ACCEPT → admission → 2 frames registered+integrated → EvidenceSnapshot (frame_id='map') → `accept_envelope` ADOPTED. Measured identity: gen mission_incorp_e, nonce+certificate echoed, index 1, rev 1, front→front_optical, slice_adopted true, full_height_certified false |
+| Full autonomous restock cycle | BUNDLE+MANIP READY, UNRUN | CPU + gated | `isaac_bundle:create` built + the `manip_factory` (twin.restock_manipulation.isaac_factory:create) authored + CPU-tested (515 CPU tests). Incorporation identity now GREEN. Remaining to run the full recorded mission: nav_factory + sensing_factory refs (navigation + camera workers). One bounded run then drives collect→couple→outbound→park→transfer→verify→return |
 
 Source-station note: per the integration/camera contract the 3/3 native decode
 (`view-source-lit-01`) is the accepted source-station sensing proof. The pre-capture

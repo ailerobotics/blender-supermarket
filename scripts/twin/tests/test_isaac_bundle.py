@@ -45,7 +45,7 @@ class PlanBundleTests(unittest.TestCase):
         self.assertAlmostEqual(p.goal_articulation['outbound'], math.radians(10))
 
     def test_nav_mode_override_and_default(self):
-        self.assertEqual(plan_bundle(MANIFEST, {'navigation_model': 'reference'},
+        self.assertEqual(plan_bundle(MANIFEST, {'navigation_model': 'reference', 'job': {'sku': 'x', 'quantity': 1}},
                                      base_config()).nav_mode, 'reference')
         self.assertEqual(plan_bundle(MANIFEST, SCENARIO, base_config(nav_mode='nav2')).nav_mode, 'nav2')
 
