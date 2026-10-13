@@ -19,7 +19,7 @@ import numpy as np
 from twin.restock_camera.config import camera_config
 from twin.restock_camera.geometry import pose_matrix, transform_points
 from twin.restock_camera.lights import (light_rig, store_fixtures, LightRigTuning,
-                                         rect_illuminance, sphere_illuminance,
+                                         rect_illuminance, lamp_illuminance,
                                          lamp_marker_occlusion)
 from twin.restock_camera.visibility import (ray_hits, sample_plane, usd_surfaces,
                                             box_surface)
@@ -121,8 +121,10 @@ def main():
                 blocked = lamp_marker_occlusion(lc, [pt], lamp_obstacles)
                 lamp_occlusion.setdefault(lamp['id'], {})[mid] = (
                     sorted({n.split('/')[-1] for n in blocked[0]}) if blocked else [])
+                # parent only translates map lamps; a cart lamp's facing would rotate too,
+                # but all current lamps are map-parented, so the stored emit_normal holds.
                 if not blocked and lc[2] > pt[2]:
-                    lamp_lux += sphere_illuminance(lc, lamp['radius'], pt, up, lamp['intensity_nits'])
+                    lamp_lux += lamp_illuminance(lamp, pt, up)
             marker_lux[mid] = dict(store_lux=round(store_lux, 1), lamp_lux=round(lamp_lux, 1),
                                    total_lux=round(store_lux + lamp_lux, 1))
         best_any = max((v['samples_reached'] for v in panel_reach.values()), default=0)

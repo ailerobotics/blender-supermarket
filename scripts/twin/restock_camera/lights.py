@@ -125,24 +125,37 @@ def task_fill_fixture(fixture_id, eye, target, *, width=0.18, height=0.06, power
                        world_from_light=tuple(map(tuple, pose.tolist())))
 
 
-def camera_lamp(lamp_id, parent, center, *, radius=0.03, power_w=4.0,
-                color=(1.0, 0.98, 0.95), tuning=None):
-    """An omnidirectional sphere lamp physically mounted at a camera (a ring light).
+def camera_lamp(lamp_id, parent, center, *, kind_type='disk', aim_at=None, radius=0.06,
+                power_w=8.0, color=(1.0, 0.98, 0.95), tuning=None):
+    """A camera-mounted ring lamp for recessed supports the store fixtures cannot reach.
 
-    Co-located with the lens, it lights exactly what the camera sees — recessed
-    supports (the shelf slot) that store fixtures cannot reach. A sphere radiates in
-    every direction, so unlike an aimed rect fill it has no orientation failure mode.
-    Intensity uses the SAME tuning as the store rig, so a single intensity_scale drives
-    lamp and fixtures together and the lamp/source illuminance ratio is scale-free.
+    ``kind_type`` is 'disk' (default, an aimed ring light), 'sphere' (omnidirectional)
+    or 'rect'. A disk/rect is an AREA light sampled like the store RectLights, which do
+    illuminate the native RTX render; a tiny SphereLight at the same nits emitted
+    essentially nothing there (see data/sim-restock-camera-v2/shelf-lamp-native-diagnosis.md),
+    so the disk is the default. An aimed lamp needs ``aim_at`` (usually the marker
+    centroid); ``usd_camera_transform(look_at(center, aim_at))`` gives a transform whose
+    local -Z, the UsdLux emission axis, points at the target. Intensity uses the SAME
+    tuning as the store rig, so one intensity_scale drives lamp and fixtures together and
+    the lamp/source illuminance ratio is scale-free. Keep the emitter below the shelf
+    tier plane; aim it into the slot.
     """
     tuning = tuning or LightRigTuning()
-    area = math.pi * radius ** 2            # projected (disk) area, as seen from the support
+    area = math.pi * radius ** 2            # emitting area (disk/sphere projected), m^2
     radiance = power_w / (area * math.pi)   # Lambertian radiance matching the radiant power
-    return dict(id=lamp_id, parent=parent, kind='camera_lamp', type='sphere',
+    lamp = dict(id=lamp_id, parent=parent, kind='camera_lamp', type=kind_type,
                 center=list(map(float, center)), radius=float(radius), power_w=float(power_w),
                 color=list(color), area_m2=float(area), radiance_w=float(radiance),
                 intensity_nits=float(tuning.luminous_efficacy_lm_per_w * radiance
                                      * tuning.intensity_scale))
+    if kind_type in ('disk', 'rect'):
+        if aim_at is None:
+            raise ValueError('an aimed camera lamp needs aim_at (e.g. the marker centroid)')
+        pose = usd_camera_transform(look_at(np.asarray(center, float), np.asarray(aim_at, float)))
+        lamp['aim_at'] = list(map(float, aim_at))
+        lamp['world_from_light'] = pose.tolist()
+        lamp['emit_normal'] = list(map(float, pose[:3, :3] @ [0, 0, -1.0]))
+    return lamp
 
 
 def sphere_illuminance(center, radius, point, normal, nits):
@@ -158,6 +171,32 @@ def sphere_illuminance(center, radius, point, normal, nits):
     u = d / dist
     cos_surf = max(0.0, float(np.asarray(normal, float) @ (-u)))
     return nits * math.pi * radius ** 2 * cos_surf / dist ** 2
+
+
+def aimed_illuminance(center, area, emit_normal, point, surface_normal, nits):
+    """Illuminance (lux) at ``point`` from an aimed area emitter (disk/rect).
+
+    E = nits * area * cos(emitter) * cos(surface) / d^2, with cos(emitter) from the lamp
+    facing (``emit_normal``, the -Z of its transform) and cos(surface) from the surface
+    normal. UsdLux Disk/RectLight intensity (normalize=False) is surface luminance.
+    """
+    d = np.asarray(point, float) - np.asarray(center, float)
+    dist = float(np.linalg.norm(d))
+    if dist == 0.0:
+        return float('inf')
+    u = d / dist
+    cos_src = max(0.0, float(np.asarray(emit_normal, float) @ u))
+    cos_surf = max(0.0, float(np.asarray(surface_normal, float) @ (-u)))
+    return nits * area * cos_src * cos_surf / dist ** 2
+
+
+def lamp_illuminance(lamp, point, surface_normal, nits=None):
+    """Dispatch to the right emitter model for a ``camera_lamp`` dict."""
+    nits = lamp['intensity_nits'] if nits is None else nits
+    if lamp['type'] == 'sphere':
+        return sphere_illuminance(lamp['center'], lamp['radius'], point, surface_normal, nits)
+    return aimed_illuminance(lamp['center'], lamp['area_m2'], lamp['emit_normal'],
+                             point, surface_normal, nits)
 
 
 def lamp_marker_occlusion(lamp_center, marker_points, surfaces):
@@ -305,10 +344,11 @@ def author_light_rig(stage, rig, *, parent_path='/World', tuning=None):
 
 
 def author_camera_lamps(stage, config, *, parent_paths, tuning=None):
-    """Author the camera-mounted sphere lamps in ``config['lamps']`` as UsdLux SphereLights.
+    """Author the camera-mounted lamps in ``config['lamps']`` as UsdLux lights.
 
     Parallel to ``config.author_camera_design``: ``parent_paths`` maps each lamp's parent
-    ('map'/'cart_chassis') to an existing prim path. Omnidirectional, so no orientation.
+    ('map'/'cart_chassis') to an existing prim path. A 'disk'/'rect' lamp is an aimed
+    area light (emission along local -Z toward its aim); 'sphere' is omnidirectional.
     ``tuning`` (if given) overrides the stored per-lamp nits (e.g. to re-scale). Returns
     the authored prim paths; idempotent per id.
     """
@@ -318,18 +358,33 @@ def author_camera_lamps(stage, config, *, parent_paths, tuning=None):
         parent = lamp['parent']
         if parent not in parent_paths or not stage.GetPrimAtPath(parent_paths[parent]):
             raise ValueError('camera lamp parent missing: ' + parent)
-        path = parent_paths[parent] + '/RestockLamp_' + lamp['id'].replace(':', '_').replace('-', 'm').replace('.', 'd')
-        sphere = UsdLux.SphereLight.Define(stage, path)
-        sphere.CreateRadiusAttr(float(lamp['radius']))
-        sphere.CreateColorAttr(Gf.Vec3f(*[float(c) for c in lamp['color']]))
-        if tuning is not None:
-            nits = (tuning.luminous_efficacy_lm_per_w * lamp['radiance_w'] * tuning.intensity_scale)
+        path = (parent_paths[parent] + '/RestockLamp_'
+                + lamp['id'].replace(':', '_').replace('-', 'm').replace('.', 'd'))
+        kind = lamp.get('type', 'sphere')
+        if kind == 'disk':
+            light = UsdLux.DiskLight.Define(stage, path)
+            light.CreateRadiusAttr(float(lamp['radius']))
+        elif kind == 'rect':
+            light = UsdLux.RectLight.Define(stage, path)
+            light.CreateWidthAttr(float(lamp['radius']) * 2)
+            light.CreateHeightAttr(float(lamp['radius']) * 2)
         else:
-            nits = lamp['intensity_nits']
-        sphere.CreateIntensityAttr(float(nits))
-        sphere.CreateNormalizeAttr(bool((tuning or LightRigTuning()).normalize))
-        prim = sphere.GetPrim()
-        UsdGeom.Xformable(prim).ClearXformOpOrder()
-        UsdGeom.Xformable(prim).AddTranslateOp().Set(Gf.Vec3d(*[float(c) for c in lamp['center']]))
+            light = UsdLux.SphereLight.Define(stage, path)
+            light.CreateRadiusAttr(float(lamp['radius']))
+        light.CreateColorAttr(Gf.Vec3f(*[float(c) for c in lamp['color']]))
+        nits = (tuning.luminous_efficacy_lm_per_w * lamp['radiance_w'] * tuning.intensity_scale
+                if tuning is not None else lamp['intensity_nits'])
+        light.CreateIntensityAttr(float(nits))
+        light.CreateNormalizeAttr(bool((tuning or LightRigTuning()).normalize))
+        prim = light.GetPrim()
+        xform = UsdGeom.Xformable(prim)
+        xform.ClearXformOpOrder()
+        if kind == 'sphere':
+            # Omnidirectional: translate only.
+            xform.AddTranslateOp().Set(Gf.Vec3d(*[float(c) for c in lamp['center']]))
+        else:
+            # Aimed: full transform whose -Z (UsdLux emission axis) points at the aim.
+            xform.AddTransformOp().Set(Gf.Matrix4d(
+                np.asarray(lamp['world_from_light'], float).T.tolist()))
         paths[lamp['id']] = str(prim.GetPath())
     return paths
