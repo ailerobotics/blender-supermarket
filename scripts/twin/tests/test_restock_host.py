@@ -14,6 +14,7 @@ from twin.restock_host.config import (ENDPOINTS, ENV, FRAME, JOINTS, NS,
                                       isolated_environment, launch_plan)
 from twin.restock_host.preflight import dependencies, incorporated_time, link_errors
 from twin.restock_host.readiness import missing_endpoints
+from twin.restock_host.evidence import COVERAGE_ABS_TOL, _assert_equivalent
 
 
 def fixture(directory):
@@ -131,6 +132,38 @@ class HostTests(unittest.TestCase):
         Path(self.config['srdf']).write_text(Path(self.config['srdf']).read_text() + '\n')
         with self.assertRaisesRegex(ValueError, 'does not match'):
             launch_plan(self.config)
+
+    def test_asset_report_tolerates_env_float_noise_but_not_real_change(self):
+        # The recompute is numerically env-dependent (scipy qhull/KDTree): a float
+        # leaf may drift at ~1e-17. A drift within tolerance must still validate; a
+        # physically meaningful change to the same float must still be rejected.
+        path = Path(self.config['asset_report'])
+        report = json.loads(path.read_text())
+        element = report['collision_elements'][0]
+        original_value = element['local_min'][0]
+        element['local_min'][0] = original_value + COVERAGE_ABS_TOL / 100.0
+        path.write_text(json.dumps(report))
+        launch_plan(self.config)  # within tolerance -> still validates under launch
+        element['local_min'][0] = original_value + 1e-3  # 1 mm: a real geometric change
+        path.write_text(json.dumps(report))
+        with self.assertRaisesRegex(ValueError, 'tolerance'):
+            launch_plan(self.config)
+
+    def test_equivalent_tolerates_floats_but_rejects_discrete_forgery(self):
+        base = {'count': 3, 'passed': True, 'reason': 'AdjacentKinematicAssemblies',
+                'pen': [0.015083112454027665], 'bounds': {'lo': -0.4, 'hi': 0.4}}
+        _assert_equivalent(dict(base), dict(base))  # identical
+        noisy = json.loads(json.dumps(base)); noisy['pen'][0] += 2.8e-17
+        _assert_equivalent(noisy, base)  # machine-epsilon float drift tolerated
+        for forged, pattern in (
+                ({**base, 'pen': [0.015083112454027665 + 1e-3]}, 'tolerance'),  # real float change
+                ({**base, 'count': 4}, 'differs'),                              # count forged
+                ({**base, 'passed': False}, 'verdict'),                         # verdict flipped
+                ({**base, 'reason': 'SameRigidAssembly'}, 'differs'),           # exclusion forged
+                ({**base, 'extra': 1}, 'structure'),                           # key added
+                ({**base, 'pen': [0.01, 0.02]}, 'structure')):                  # list length
+            with self.subTest(pattern=pattern), self.assertRaisesRegex(ValueError, pattern):
+                _assert_equivalent(forged, base)
 
     @unittest.skipUnless(os.environ.get('RESTOCK_HOST_VALIDATE_INSTALLED') == '1',
                          'explicit CPU-only installed-image validation')
