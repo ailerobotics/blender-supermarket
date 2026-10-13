@@ -39,6 +39,39 @@ coverage about the base is reduced by the offset distance. ROS consumers must
 preserve the sensor frame and calibrated TF; displaced polar ranges cannot be
 relabelled `base_link` or used with the base-origin ROS input contract unchanged.
 
+Native closest-hit queries must also identify self collision geometry. Pass
+`self_paths=(robot_root, cart_root)` to `IsaacRangeSensor`; these are exact USD
+subtree roots, not name substrings or spatial masks. Missing identity remains
+an external obstacle. Self hits terminate the ray: the adapter never queries
+through a robot/cart to invent visibility of the space behind it.
+The [PhysX closest-hit API](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/107.3/extensions/runtime/source/omni.physx/docs/api/python.html)
+supplies the collision and rigid-body paths used for this classification.
+
+`Scan.unknown` marks angles where **any** sampled height was self-occluded.
+Those polar ranges are NaN, not maximum range. Visible external hits at other
+heights remain in `Scan.external_returns` as `(beam_index, range)` pairs;
+`points()` and MapLocalizer retain them. Preserve both fields when adapting
+scans. A raw polar transport loses those extra obstacles and must not be used
+to certify coverage: NaNs without the explicit mask fail validation. Unknown
+sectors cannot be relabelled free even if another height sees over an obstacle.
+
+The present gate requires full-circle observed coverage. Any unknown angle
+therefore gives `coverage_radius=0`, and motion stops. This corrects false self
+obstacles without claiming that filtering creates a usable sensor layout.
+All-self scans also fail localization for insufficient external returns; mixed
+scans may localize but still fail coverage. Timestamp gates, the .10 m localizer
+floor and .05 m geometry margin are unchanged.
+
+Sensor heights are absolute world Z values. The default x=.46 ray column at
+z=.15 is inside the chassis (world z=.14..34), whereas the authored lidar_frame
+is at world z=.39. CPU source-derived box tests show all 360 sectors hidden
+with the default column. Using only z=.39 still leaves arm/cart occlusions;
+raising the sensor does not prove low-obstacle visibility. Integration must
+author and validate physically supported mounts and observed-space coverage
+before motion; neither this CPU fix nor the earlier map-only route fixtures
+certifies native navigation. `query=` injection is for deterministic CPU tests,
+not a replacement sensor in an autonomous demonstration.
+
 Calibration does not reduce localization uncertainty. The in-process localizer
 retains its conservative 0.10 m floor, not a fitted covariance or a 0.02 m cap.
 An actual-map ideal-ray counterfactual at a 0.46 m sensor offset recovered the

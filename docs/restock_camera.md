@@ -1,11 +1,161 @@
 # Restocking camera geometry and depth calibration
 
 `scripts/twin/restock_camera/` supplies bounded CPU geometry and support-calibration
-helpers for the existing `IsaacCartonSensors` and `SlotView` adapter. It does not
-boot Isaac, perform perception, or credit inventory. Offline ray checks are
+helpers and a fresh rendered-pixel binding for `IsaacCartonSensors` and `SlotView`.
+It does not boot Isaac or credit inventory from scene geometry. Offline ray checks are
 **geometric design predictions, not rendered RGB-D measurements**.
 
-## Frames and physical camera candidates
+## Current registered-support binding
+
+`restock_camera.sensed` separates dated rigid geometry from current vacancy.
+An actual empty commissioning RGB-D frame measures a full support quadrilateral
+and an independent visible plane witness. Paired physical QR markers establish
+support identity and pose. Every later frame must decode those same markers,
+fit their depth-backed metric layout, and reobserve the independent plane patch.
+The loaded carton may hide the original footprint; that never refreshes the
+empty scan or proves the hidden space empty. Required .62×.42 m dimensions are
+checked inside the measured quad with uncertainty margins, never inflated from
+a smaller inscribed image rectangle.
+
+`restock_camera.binding.RenderedSupportContext` provides the executable adapter:
+
+```python
+context = RenderedSupportContext(
+    camera_id="cart", intrinsics=k, slots=support_slots,
+    measure_context=measured_camera_context,
+    clearance_for_slot=independent_clearance,
+    clock_context=persistent_acquisition_clock,
+    depth_error_m=validated_depth_error, camera_revision="mount-revision")
+geometry = context.commission(empty_rgbd_frame, commissioning_now,
+                             observed_empty_quads, lifetime_s=600.)
+sensor = IsaacCartonSensors(camera, profiles=profiles,
+    pose_bridge_root=pose_bridge_root, camera_id="cart", context_provider=context)
+```
+
+`SupportSlot` supplies location, support identity/revision, primary and auxiliary
+marker identities, metric printed side and rigid offset, separate label search
+mask, and required dimensions. The label mask must be selected from the current
+sensed view; it is not evidence of support or clearance. The full support mask is
+projected from the measured quad registered into the current camera frame. Raw
+legacy `SlotView` constants alone now fail closed in the runtime sensor adapter.
+The original `calibrate_support` rectangular helper remains an offline/diagnostic
+API; its legacy `slot_view` is insufficient for the current runtime proof gates.
+
+Callbacks are deliberately native-runtime-free:
+
+- `measure_context(frame, now)` returns `(base_from_camera, transform_stamp,
+  epoch, parked)`. Stop both robot/cart and withdraw the arm for the capture.
+- `clock_context(frame, now)` returns `(session_id, steady_domain,
+  acquired_steady)`. Record acquisition time in one persistent monotonic clock
+  across commissioning and mission resets; never timestamp retrieval as capture.
+  Without it, a different simulation session cannot reuse commissioning geometry.
+- `clearance_for_slot(location, support_view, frame, now)` returns independently
+  measured `ClearanceEvidence`, or `None` for occupied/unknown volume. It runs
+  after the fresh witness fit, so occupied source recognition does not require
+  falsely claiming its volume free. Without clearance, target.clear is false
+  and certified free height is zero. Use the measured support pose/footprint,
+  uncertainty, current plane stamp and actual incorporated collision-map stamp.
+
+`CameraContext` adds optional session/acquisition-clock fields after its original
+five fields. `StationSensors` aggregates separately assigned cameras into the
+existing `Sensors` packet and refuses unsynchronized station images. Its
+`sensed_target_bboxes` are catalog volumes anchored to accepted current QR/depth
+poses, separate from label/support masks. Integration chooses the active target
+for mapper masking; multiple inventory cameras do not certify mapper coverage.
+
+Baseline identity, original render/session/frame and acquisition time are immutable.
+The 600 s default lifetime accommodates the current 158.03 s CPU timing estimate
+plus bounded commissioning/reset/planning overhead. Configuration is restricted
+to 1–900 s at commissioning. It cannot extend an existing record. Live RGB-D,
+marker, witness, TF and clearance freshness remain <=0.5 s (TF skew <=0.05 s).
+The unchanged 10 micrometre/s drift allowance, marker/depth uncertainty, 10 mm
+combined limit and full-footprint containment can reject earlier. These are
+bounded design policies requiring deployment validation, not measured accuracy.
+Unbolting/deformation, changed marker layout, lens/mount revision or calibration
+requires explicit invalidation and a new actual empty scan. Motion/localization
+changes need a new parking epoch and fresh measured transforms. Session/frame
+replay, missing/invalid depth, hidden witnesses and unknown identities refuse.
+
+## Executable physical design and CPU audit
+
+`restock_camera.config.camera_config(scenario, manifest)` returns camera IDs,
+map/cart-chassis parents, optical transforms, pinhole intrinsics, collidable
+housing/bracket solids and paired physical fiducial layouts. `author_camera_design`
+authors those solids/cameras and actual printed marker textures in a supplied USD
+stage; it never boots an app. Marker side refers to decoded QR corners, with the
+texture quiet border accounted for in the physical plane size. Integration owns
+native camera initialization, rigid attachment and actual rendered commissioning.
+
+Current design sampling is 2560×1920, fx=fy=1280, cx=1280, cy=960;
+this matches the installed Isaac camera's width/2, height/2 principal-point API.
+the field of view and .15–3.5 m optical range are unchanged. This increases
+sampling for the small paired support QR markers; actual decoding still needs
+render validation. The revised shelf view is target+(-.50,.30,.22), looking at
+target+(-.20,0,-.06) to retain both the top label and exposed support markers.
+Source and cart optical poses remain as in the historical table below. The source
+adds a rigid coplanar marker/witness tab behind the existing table; cart markers
+and witness occupy its exposed left strip; shelf markers use the exposed left
+strip of the actual shelf. These additions remain collision geometry and must
+be included in navigation/planning. No rail, lip, handle/post or shelf is removed.
+
+`scripts/plan_restock_sensed_views.py --help` is the current optional CPU helper.
+Supply current scenario, measured-margin navigation summary, matching IK report,
+mobile manifest, composed store, package roots and scratch output. It verifies
+scenario/arrival identity, composes the cart independently of the robot, checks
+sampled top/support/marker/witness rays against actual meshes plus new mounts,
+and checks every URDF collision link and held payload against the added solids
+over bounded joint-linear approach/contact/lift/preplace segments. Output hashes
+include inputs, composed USD layers, collision meshes and helper sources.
+
+An overlap rejects a candidate; a clear mount audit does not certify existing
+store/cart/self-collision, transit, physical towing or an actual planner trajectory.
+Geometric visibility does not certify QR decoding, error bounds or free volume.
+Use the reported rejections; `runtime_ready` remains false until integration has
+real sensor/physics evidence. CPU tests: `python3 -m pytest -q
+scripts/twin/tests/test_restock_sensed_views.py scripts/twin/tests/test_restock_camera_config.py
+scripts/twin/tests/test_restock_camera.py scripts/twin/tests/test_cad_restock.py`.
+USD authoring tests require the CPU USD environment described in RUNBOOK §6a.
+
+Current CPU design prediction (2026-10-13, no rendered sensor capture):
+
+| View | Top samples | Empty support | Loaded support | Loaded witness | Each support marker |
+|---|---:|---:|---:|---:|---:|
+| Source | 81/81 | 81/81 | 9/81 | 25/25 | 25/25 |
+| Cart pickup | 81/81 | 81/81 | 0/81 | 25/25 | 25/25 |
+| Cart articulated arrival | 81/81 | 81/81 | 0/81 | 25/25 | 25/25 |
+| Shelf | 81/81 | 81/81 | 17/81 | 25/25 | 25/25 |
+
+The added solids have no conservative overlap with 24 URDF collision links or
+held payload in 7,498 bounded samples over 16 local segments. This is only the
+new-mount audit, with <=2 mm intersample displacement padding; it excludes
+transit, self-collision and existing store/cart collisions. Shelf fit still needs
+a measured full-footprint quad with uncertainty margin; nominal placement is only
+4 mm from the flat shelf's front margin, so a sensed feasible center may shift
+rearward. The helper does not change the scenario or manufacture a larger shelf.
+
+Exact main input SHA-256 values for this prediction:
+
+- Current scenario: `fbea2c7420ea7f4451cae27981fde897811f6ce7d6da1a09d1073ec3d1fc3a80`
+- Measured-margin navigation: `0ccfb5d83f25b715fc031b9d6d6dda8f3377e4de34646b27b030bef4a08a35a5`
+- Matching IK: `e57419969ce2496d9eb95c071e18605e023ae701636732c90b597b1b9abb50ad`
+- Mobile URDF: `ac45b9f71360e0631ff79100f1a3c09772c773397cbee86c74fc26524d33d0e4`
+
+The complete layer/mesh/helper hash manifest is emitted by the offline command.
+Predicted marker image bounds are about 105×103 px at source, 121×120 and
+118×115 px on cart, and 254×131 and 413×352 px at shelf. These are projected
+quadrilateral bounding boxes, not a measured minimum module resolution.
+All current IDs fit the minimum 21-module QR grid. Shorter explicit decoded IDs
+are supported, but do not substitute a configured identity when decoding fails.
+An 80 mm QR needs about 126 mm substrate with this writer's quiet border. It is
+a possible lower-resolution fallback after moving source marker centers inward
+to +/-280 mm and shelf centers to X=targetX-405 mm; cart left-strip space already
+permits it. This alternative needs a new layout revision, geometric audit and
+actual rendered commissioning. Freshness/latency thresholds remain unchanged.
+
+## Historical single-ROI design (superseded runtime handoff)
+
+The following records the original checkpoint and its refusals. Use the current
+binding above for runtime integration, not the historical six-step handoff.
 
 All lengths are metres. Matrices use column vectors and `parent_from_child`.
 Optical axes are right/down/forward. Depth must be registered **distance to the
