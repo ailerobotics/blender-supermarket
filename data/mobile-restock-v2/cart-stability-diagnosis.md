@@ -1,6 +1,62 @@
-# Stationary cart diagnosis — offline, 2026-10-13
+# Stationary cart investigation record — 2026-10-13
+
+## Latest passive-observer baseline — FAILED
+
+The independent contact-observer audit found that late `SingleRigidPrim`
+construction in the matched pair changed transforms/sleep-related state. That
+limits interpretation of those runs. Original stationary runs03/04 predate these
+observers and remain failed evidence. No production cart or floor fix is established.
+
+Firstmate authorized one subsequent baseline at 5cc2d00, replacing only the late
+diagnostic wrappers with raw PhysX tensor views/getters. It failed at step119,
+simulation time2.033333s, with50.0166mm XY drift from the serialized initial state.
+The 50mm envelope, original floors, mass, friction, timestep,64/16 solver settings,
+physical joints and unbraked state were retained. No variant or sweep followed.
+
+`observer-attachment.json` records equality before/after attachment without a
+physics step: authored layer hashes, independent native rigid-body poses and sleep
+states, simulation time and chassis velocity. A second raw view also reproduced
+all copied tensor transforms, velocities, masses, COMs, inertias, gravity/simulation
+flags, materials and contact/rest offsets. Both guards passed before stepping.
+The installed vendor implementation was inspected: these raw getters bind backend
+handles and copy buffers; they do not invoke high-level wrapper initialization.
+This is a check of exposed state, not a proof about every hidden solver variable.
+
+Raw tensor inconsistency remains: wheel0 moved−49.718mm in X while integrating its
+reported X velocity gives+112.261mm. Its approximate Y rotation changed−0.664rad
+versus integrated angular velocity+1.721rad. Chassis Z changed+0.212mm versus
+integrated reported COM Z velocity+111.040mm. Integrals use consecutive sample
+trapezoids; COM velocity and body-origin position are explicitly distinguished.
+These observations do not justify claims of bouncing, energy gain, or a root cause.
+The wheel0 tensor shape slot0 reports contact offset0.005450001m, rest offset0,
+static/dynamic friction0.5/0.5 and restitution0. Other padded shape slots are not
+treated as real shapes. Ground effective offsets and friction-anchor impulses
+remain unmeasured; contact callbacks again reported no errors.
+
+The backend is explicitly **CPU PhysX**, TGS at60Hz, enableGPUDynamics=False and
+override−1; **GPU RTX rendering** is separate. No backend setting was changed.
+The replay took approximately53.5s, peaked at4745MiB GPU, and retained at least
+16042MiB RAM. Services were unchanged. Afterwards9669MiB GPU and20647MiB host RAM
+were available and the lock was confirmed free. GPU ownership was released.
+
+Exact replay evidence:
+`/home/manishsaini/datasets/twin-robot-in-store-boot-v1/native-passive-baseline-01/`
+contains `observer-attachment.json`, `pristine-authored.usda`, `measured-initial.json`,
+`stationary-feedback.json`, `contact-events.json`, `contact-provenance.json`,
+`native-result.json`, `run.json` and `isaac.log`. CPU reduction artifacts are
+`/home/manishsaini/firstmate/data/twin-robot-in-store-boot-v1/analyze_passive.py`,
+`passive-baseline-summary.json` and `passive-baseline.png` in that same task artifact
+directory. The earlier independent audit is `contact-observer-audit-2026-10-13.md`.
+
+Final CPU checkpoint65bd36e:390 tests passed,16 subtests,five optional skips after
+the confirmed camera latency merge. Its reported offline timing still has500ms
+overruns. The acquisition-to-use rejection gate remains unchanged; no native
+camera/map/planner/actuator commissioning or autonomous cycle is claimed.
 
 ## Authorized matched native follow-up — both failed
+
+Historical evidence warning: this pair used the subsequently identified mutating
+diagnostic wrappers. Read it with the passive replay and audit above.
 
 The original offline diagnosis below is retained as the pre-experiment record.
 Firstmate subsequently authorized exactly one matched pair at code d2441bb.

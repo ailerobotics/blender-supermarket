@@ -8,7 +8,27 @@ manipulation components are integrated from origin/main.
 A controller dispatcher and guarded launcher now exist; a complete simulator
 bundle with actual sensor acquisition/planner/actuator wiring is still missing.
 
-## Current matched-pair and CPU checkpoint
+## Latest passive-observer and CPU checkpoint
+
+At65bd36e,390 CPU tests and16 subtests pass, with five optional skips, including the
+confirmed merged camera latency update. Native latency still has no commissioning
+proof; reported offline processing includes500ms overruns and the strict rejection
+gate remains active.
+
+The independent audit found that late diagnostic body wrappers altered state in
+the earlier matched pair. The separately authorized passive baseline at5cc2d00
+replaced only that read path, proved equality of exposed authored/physical state
+on attachment without stepping, and still failed50mm at step119/time2.033333s.
+Measured drift was50.0166mm. Raw tensor pose/velocity disagreement persists.
+No cart, floor, mass, friction or backend fix is established. All historical failures
+remain available with their limitations; exact audit paths are in the diagnosis.
+
+This run used CPU PhysX(TGS60Hz), with GPU RTX rendering. It took53.5s, peaked at
+4745MiB GPU, retained16042MiB host RAM, and preserved services. GPU ownership was
+released; no further run was made. Navigation producer-side acquisition/generation
+binding and a native empty-map acknowledgement remain unproven.
+
+## Earlier matched-pair and CPU checkpoint
 
 At a446380, 380 CPU tests and 16 subtests pass, with five optional skips. The
 authorized native contact pair at d2441bb failed in both arms: baseline 50.269 mm
@@ -66,7 +86,7 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-380 combined CPU tests and 16 subtests pass with five optional skips at a446380, with the installed Isaac USD libraries exposed
+390 combined CPU tests and 16 subtests pass with five optional skips at65bd36e, with the installed Isaac USD libraries exposed
 without booting Kit (including mission/runtime, recording, stock-scene and environment tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
 Reproduction is in RUNBOOK section 11. The shared firstmate interface contract was

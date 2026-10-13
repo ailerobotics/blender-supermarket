@@ -1,14 +1,15 @@
 {
-  "CPU tests": "380 passed, 16 subtests passed, 5 optional skips at a446380; no GPU boot in this test suite",
+  "CPU tests": "390 passed,16 subtests passed,5 optional skips at65bd36e; no GPU boot in this test suite",
+  "Passive observer baseline": "FAILED at5cc2d00:119steps,2.033333s,50.0166mm drift. No-step authored/physical-state equality checks passed. Rawtensor pose/velocity disagreement persists; cause unresolved. CPU PhysX TGS60Hz, GPU RTX rendering; GPU released.",
   "Stationary native assembly": "FAILED: run03 crossed50mm at1.266667s; run04 with64/16 solver iterations crossed50mm at2.033333s. Cause unproven. No towing, coupling or manipulation tested.",
-  "Matched contact counterfactual": "BOTH FAILED at d2441bb: baseline50.269mm/1.550s; lower-ground-disabled variant50.788mm/1.683s. Baseline lower-ground contacts had zero reported impulse. Eliminating them did not fix drift; cause unresolved. GPU released, no production floor patch.",
+  "Matched contact counterfactual": "BOTH FAILED at d2441bb; later audit found mutating observer wrappers, limiting interpretation. Lower-floor contact elimination did not fix drift; zero reported lower-floor impulse. Passive follow-up also failed. No production floor patch.",
   "Camera integration gate": "500ms acquisition-to-use rejection implemented after processing/aggregation and before motion or queued gripper dispatch; delayed-processing CPU tests pass. Runtime remains UNCOMMISSIONED without native latency validation.",
   "Mobile assets": "Landed source; real CAD/FK static preview",
   "Environment": "USD and offline composition PASS; static source renders",
   "Physical autonomy": "NOT RUN; guarded GPU use authorized. Native static rendering passed, full moving mission remains gated on actual sensing/map/coverage.",
   "Native GPU evidence": "60 real640x360 RGB-D frames, verified VFR H264; peak3989MiB total GPU, minimum17171MiB available RAM, services unchanged. Static cube smoke only.",
   "Full-store source view": "Six real2560x1920 RGB-D frames at6ecb5c5; all3 QR codes together in only1/6 frames, not robust registration. Exact rig instance paths verified; peak6465MiB GPU/min16196MiB RAM; services unchanged. Static CAD bench, no dynamics or autonomy.",
-  "Navigation": "Full-margin geometric route fixture passes; sensor self-occlusion remains unresolved. NVIDIA mapper integration assigned /restock_sim/navigation on domain88; native plugin prerequisite missing, no runtime or sensing-ready claim.",
+  "Navigation": "Mapper plugin compile/load closure reported passed; producer-side acquisition/generation binding and native empty-map acknowledgement remain unproven. /restock_sim/navigation on domain88; no runtime readiness claim.",
   "Host collision model": "Merged refinement: 1930 spheres, zero nonexcluded transport overlaps, seven full-motion exclusion proofs. Strict installed host preflight passes; native planner capacity untested.",
   "Handling geometry": "Side grasp: 16 IK poses solve using actual articulated arrival; no arm/tool overlap in conservative insertion sweeps. Support-contact bounds remain; transit/self collision/physics unverified."
 }
