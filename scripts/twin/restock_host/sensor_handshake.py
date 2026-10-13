@@ -180,14 +180,10 @@ class SensorHandshakeDriver:
             return tfm
 
         try:
-            # Prime sim clock + static TF before anything looks it up.
-            for _ in range(5):
-                publish_clock()
-                tf_static_pub.publish(tf_message(sim_ns[0]))
-                tf_pub.publish(tf_message(sim_ns[0]))
-                spin(0.1)
-            self.log('clock_tf_primed', sim_ns=sim_ns[0])
-
+            # Certify emptiness FIRST: publish no clock/TF/depth yet, so nothing can
+            # allocate a native layer block before the empty-generation + admission
+            # checks (both run State::verify_empty). Only after admission is open do
+            # we start the clock, TF and synthetic depth that populate the map.
             for cli, name in ((empty_cli, 'empty'), (open_cli, 'open'), (reg_cli, 'register')):
                 if not cli.wait_for_service(timeout_sec=a.service_timeout):
                     self.record['measured']['service_available'] = False
@@ -195,12 +191,30 @@ class SensorHandshakeDriver:
                     raise RuntimeError(f'{name} service not available')
             self.record['measured']['service_available'] = True
 
-            # ---- EmptyGeneration ----
+            # ---- optional diagnostic: poll EmptyGeneration to time map emptiness ----
+            if a.probe_empty_count > 0:
+                probe = []
+                for i in range(a.probe_empty_count):
+                    req = m['EmptyGeneration'].Request()
+                    req.challenge = f'probe-{i}'
+                    req.expected_identity = self._identity_msg(m, identity)
+                    r = wait_future(empty_cli.call_async(req), a.service_timeout)
+                    probe.append({'i': i, 'wall': round(time.monotonic(), 3),
+                                  'success': bool(r.success) if r else None,
+                                  'reason': getattr(r, 'failure_reason', 'timeout') if r else 'timeout',
+                                  'layers': [{'name': lc.layer_name, 'blocks': int(lc.allocated_blocks)}
+                                             for lc in r.layers] if (r and r.success) else []})
+                    spin(a.probe_interval)
+                self.record['measured']['empty_probe'] = probe
+                self.record['measured']['ever_empty'] = any(p['success'] for p in probe)
+                self.log('empty_probe_done', ever_empty=self.record['measured']['ever_empty'])
+                return self.record
+
+            # ---- EmptyGeneration (map still empty: nothing published yet) ----
             req = m['EmptyGeneration'].Request()
             er = seq.empty_request()
             req.challenge = er['challenge']
             req.expected_identity = self._identity_msg(m, identity)
-            publish_clock()
             resp = wait_future(empty_cli.call_async(req), a.service_timeout)
             if resp is None or not resp.success:
                 self.record['service_failures']['empty_generation'] = (
@@ -215,8 +229,10 @@ class SensorHandshakeDriver:
                 for lc in resp.layers]
             self.log('empty_certified', producer_nonce=resp.producer_nonce)
 
-            # ---- OpenAdmission ----
-            cutoff_stamp = sim_ns[0]
+            # ---- OpenAdmission (map still empty) ----
+            # Cutoff at sim 0: every acquisition stamp below (>= sim baseline) is
+            # strictly newer. The map must still carry zero blocks here.
+            cutoff_stamp = 0
             cutoff_steady = time.monotonic_ns()
             orq = seq.open_request(cutoff_stamp_ns=cutoff_stamp, cutoff_steady_ns=cutoff_steady)
             req = m['OpenAdmission'].Request()
@@ -228,7 +244,6 @@ class SensorHandshakeDriver:
             req.acquisition_cutoff_stamp = self._time_msg(m, cutoff_stamp)
             req.acquisition_cutoff_steady_ns = cutoff_steady
             req.steady_clock_domain = orq['steady_clock_domain']
-            publish_clock()
             resp = wait_future(open_cli.call_async(req), a.service_timeout)
             if resp is None or not resp.success:
                 self.record['service_failures']['open_admission'] = (
@@ -236,6 +251,15 @@ class SensorHandshakeDriver:
                 self.log('open_failed', reason=self.record['service_failures']['open_admission'])
                 raise RuntimeError('open admission refused')
             self.log('admission_open')
+
+            # Admission is open: NOW start the sim clock and publish the static TF
+            # nvblox needs to project depth into the map frame.
+            for _ in range(3):
+                publish_clock()
+                tf_static_pub.publish(tf_message(sim_ns[0]))
+                tf_pub.publish(tf_message(sim_ns[0]))
+                spin(0.05)
+            self.log('clock_tf_started', sim_ns=sim_ns[0])
 
             # ---- consumer TemporalMap (observes each registered acquisition) ----
             from twin.navigation.temporal import TemporalMap, MapIdentity as CMapIdentity
@@ -263,7 +287,7 @@ class SensorHandshakeDriver:
                 tf_pub.publish(tf_message(sim_ns[0]))
                 spin(0.02)  # let the mapper advance its sim clock past the stamp
 
-                stamp_ns = sim_ns[0] - 1_000_000  # 1 ms before "now" so now >= stamp natively
+                stamp_ns = sim_ns[0] - 20_000_000  # 20 ms before "now" for sim-clock propagation lag
                 steady_ns = time.monotonic_ns()
                 for b in sensors:
                     rr = seq.register_request(sensor=b.sensor, stamp_ns=stamp_ns, steady_ns=steady_ns,
@@ -342,10 +366,15 @@ class SensorHandshakeDriver:
             else:
                 self.record['measured']['CONSUMED'] = False
                 self.log('no_snapshot_within_window', registered=registered)
-        except Exception as exc:
+        except BaseException as exc:  # record SIGINT/teardown too, not just Exception
             self.record['error'] = f'{type(exc).__name__}: {exc}'
             self.log('error', detail=self.record['error'])
         finally:
+            try:
+                (a.output / 'handshake_result.json').write_text(
+                    json.dumps(self.record, indent=2, default=str) + '\n')
+            except Exception:
+                pass
             try:
                 node.destroy_node()
             except Exception:
@@ -375,6 +404,9 @@ def main():
     p.add_argument('--integrate-wait', type=float, default=0.08)
     p.add_argument('--service-timeout', type=float, default=20.0)
     p.add_argument('--window', type=float, default=90.0)
+    p.add_argument('--probe-empty-count', type=int, default=0,
+                   help='diagnostic: poll EmptyGeneration N times and exit (no admission)')
+    p.add_argument('--probe-interval', type=float, default=1.0)
     a = p.parse_args()
     if a.challenge is None:
         a.challenge = f'challenge-{int(time.time())}'

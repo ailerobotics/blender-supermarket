@@ -21,7 +21,7 @@ from twin.navigation.mapper_launch import mapper_plan, NAMESPACE
 def _evidence_params(args, plan):
     params = dict(plan['parameters'])
     slice_height = params.get('static_mapper.esdf_slice_height', 0.03)
-    return [{
+    merged = {
         **params,
         'evidence.session': args.session,
         'evidence.scene': args.scene,
@@ -32,7 +32,20 @@ def _evidence_params(args, plan):
         'evidence.slice_height': float(slice_height),
         'evidence.unknown_value': 1000.0,
         'evidence.sensors': list(args.sensors),
-    }]
+    }
+    # Diagnostic/launch override: coerce k=v strings into the native param type.
+    for item in getattr(args, 'mapper_param', None) or []:
+        key, _, value = item.partition('=')
+        key = key.strip()
+        value = value.strip()
+        if value.lower() in ('true', 'false'):
+            merged[key] = (value.lower() == 'true')
+        else:
+            try:
+                merged[key] = int(value) if value.lstrip('-').isdigit() else float(value)
+            except ValueError:
+                merged[key] = value
+    return [merged]
 
 
 def description(args):
@@ -80,6 +93,8 @@ def main():
     p.add_argument('--cameras', default='front')
     p.add_argument('--localization', default='amcl')
     p.add_argument('--sensors', nargs='+', default=['front=front_optical'])
+    p.add_argument('--mapper-param', action='append', default=[],
+                   help='override a native mapper parameter, KEY=VALUE (repeatable)')
     p.add_argument('--execute', action='store_true', help='start mapper; GPU guard required')
     args = p.parse_args()
     desc, plan = description(args) if args.execute else (None, mapper_plan(

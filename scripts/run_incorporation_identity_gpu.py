@@ -122,6 +122,11 @@ def main():
     p.add_argument('--localization', default='amcl')
     p.add_argument('--warmup', type=float, default=40.0, help='mapper construction grace (s)')
     p.add_argument('--driver-window', type=float, default=120.0, help='driver incorporation window (s)')
+    p.add_argument('--probe-empty-count', type=int, default=0,
+                   help='diagnostic: driver only polls EmptyGeneration N times and exits')
+    p.add_argument('--probe-interval', type=float, default=1.0)
+    p.add_argument('--mapper-param', action='append', default=[],
+                   help='override a native mapper parameter, KEY=VALUE (repeatable)')
     p.add_argument('--heavy-threshold-mb', type=int, default=2500)
     a = p.parse_args()
     ceiling = a.warmup + a.driver_window + 60
@@ -142,16 +147,18 @@ def main():
                   f'export ROS_DOMAIN_ID=88 ROS_LOCALHOST_ONLY=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST; ')
 
     sensors = ' '.join(a.sensors)
+    mapper_params = ' '.join(f'--mapper-param {mp}' for mp in a.mapper_param)
     mapper_sh = (env_prefix +
                  f'exec python3 "{a.repo}/scripts/launch_evidence_mapper.py" --execute '
                  f'--generation {a.generation} --camera-count {a.camera_count} '
                  f'--transport-height {a.transport_height} --session {a.session} --scene {a.scene} '
-                 f'--cameras {a.cameras} --localization {a.localization} --sensors {sensors}')
+                 f'--cameras {a.cameras} --localization {a.localization} --sensors {sensors} {mapper_params}')
     driver_sh = (env_prefix +
                  f'exec python3 "{a.repo}/scripts/twin/restock_host/sensor_handshake.py" '
                  f'--generation {a.generation} --output "{a.output}" --session {a.session} '
                  f'--scene {a.scene} --cameras {a.cameras} --localization {a.localization} '
-                 f'--sensors {sensors} --window {a.driver_window}')
+                 f'--sensors {sensors} --window {a.driver_window} '
+                 f'--probe-empty-count {a.probe_empty_count} --probe-interval {a.probe_interval}')
 
     record = {'generation': a.generation, 'warmup': a.warmup, 'driver_window': a.driver_window}
     mapper = driver = None
