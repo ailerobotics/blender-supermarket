@@ -7,6 +7,51 @@ It does not boot Isaac or credit inventory from scene geometry. Offline ray chec
 
 ## Current registered-support binding
 
+`restock_camera.qr.FixedTileQR(camera_id).decode(rgb, evidence, now=..., parked=...)`
+searches original RGB pixels with single-code detection on fixed overlapping
+640×640 tiles, stride 480 with the last tile anchored at the image edge. The
+2560×1920 view uses 20 tiles; larger images refuse. There is no initial full-frame
+multicoder, resizing, expected-identity input or prior successful-frame crop.
+
+The immutable `FrameQR` contains decoded text, full-image corners, duplicate
+statistics, unresolved candidates, exact `FrameEvidence`, RGB hash and processing
+time. `CameraContext.qr_observation` carries the SAME result used by support
+registration into `IsaacCartonSensors`. The inventory adapter validates the pixels,
+frame/session/epoch and reuses it instead of decoding the acquisition twice.
+Custom providers that decode support markers must supply this field; providers
+without it use one fixed-tile inventory decode. The diagnostic `_registrations`
+return shape remains unchanged, with its result on `context.qr_observation`.
+
+Spatial duplicates require identical decoded text, centers within 5 px and
+corresponding-corner RMS <=2 px; first actual corners are retained, not averaged.
+Conflicting text/corners, overlapping labels and the same identity at separate
+locations refuse. Unreadable candidates remain explicit. Unknown/undecoded labels
+inside an inventory search mask refuse the packet; support IDs never become SKUs.
+
+The decoder enforces a **500 ms wall-processing ceiling**, discarding partial
+results on overrun/error. Failed attempts consume their frame: replay cannot retry
+old pixels into success. This ceiling does not extend acquisition freshness or
+commissioning TTL, and processing completion never replaces capture time.
+
+CPU replay of actual `native-source-view-01` PNGs reproduced the original 1/6
+full-frame success. The implementation recovers all three codes in 6/6 frames,
+with zero unresolved/conflicting labels, 0.95–1.03 mm maximum marker-fit residual
+and 335–357 ms decode/hash/merge time. These six frames are the discovery set,
+**not held-out proof**. Shared-result validation, depth/witness fitting, clearance,
+native readback/queueing and multiple cameras still need end-to-end timing on an
+independent integration capture. Runtime readiness remains false.
+Shared-result validation took another 58–107 ms in this replay; decoding plus
+validation plus diagnostic depth archive I/O/registration reached 516 ms on one
+frame. That diagnostic I/O is not the live acquisition path, but the result does
+not establish a complete 500 ms pipeline. No budget extension or further tuning
+was applied; integration must refuse stale end-to-end observations.
+
+Focused tests in `test_restock_qr.py` cover fixed coverage, pixel/frame binding,
+negative/unreadable cases, duplicate/conflict rejection, timeout and replay.
+The support/inventory test forbids a second decode on the shared acquisition.
+No camera scene, physical layout or published configuration changes accompany
+this decoder update.
+
 `restock_camera.sensed` separates dated rigid geometry from current vacancy.
 An actual empty commissioning RGB-D frame measures a full support quadrilateral
 and an independent visible plane witness. Paired physical QR markers establish
