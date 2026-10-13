@@ -103,10 +103,14 @@ epoch itself. Expiry remains absolute from original commissioning.
 `test_navigation_temporal.py` checks historical free-space persistence, 600-second
 expiry across rebuilds, revision changes, held/stale data, independently moving
 cart geometry, unknown/occupied boundaries, measured-latency stopping, initial
-command acceptance and stop/replan after a changed map. `test_nav2_handoff.py`
-uses actual Jazzy message types with fake action clients, including cancellation
-ordering and generated nvblox plugin configuration. These are deterministic CPU
-contract fixtures, not native mapping or physical braking evidence.
+command acceptance and stop/replan after a changed map. `test_navigation_evidence.py`
+exercises the typed `EvidenceSnapshot` consumer: full-ledger completeness, per-sensor
+freshness, admission/empty state, producer-identity one-shot binding, monotonic
+index/revision, optical-frame binding immutability, and the permanently closed
+full-height gate. `test_nav2_handoff.py` uses actual Jazzy message types with fake
+action clients, including cancellation ordering and generated nvblox plugin
+configuration. These are deterministic CPU contract fixtures, not native mapping
+or physical braking evidence.
 
 The next native handoff must establish navigation-scoped mapper startup and
 package loading, slice/incorporation pairing, sensor-time TF including cart
@@ -140,28 +144,62 @@ The required host-to-gate evidence interface is:
 | Evidence | Required binding |
 | --- | --- |
 | Process generation | Exact task-owned mapper process, no map load, old process exit, native empty-state evidence before input admission; discard queued old output |
-| Required acquisition | Native sensor identity/sequence, simulation stamp, acquisition steady stamp and configured MapIdentity; register through `observe` |
-| Snapshot incorporation | Exact native slice content associated with that process generation and an actually integrated registered acquisition; pass through `DistanceSlice.from_message` and `accept` |
-| Clearance event | Hold motion/input, record event time, prove a new empty generation, admit strictly later acquisitions; preserve the original commissioning deadline |
+| Required acquisition | Native sensor identity/sequence, simulation stamp, acquisition steady stamp, optical frame, shared steady-clock domain and configured MapIdentity; register through `observe` (one per `restock_mapper_evidence/RegisterAcquisition`) |
+| Snapshot incorporation | A typed `restock_mapper_evidence/EvidenceSnapshot` binding the native slice to the FULL per-sensor incorporation ledger, producer nonce + certificate, monotonic `snapshot_index`/`esdf_revision` and explicit admission/empty state; consume through `EvidenceEnvelope` + `TemporalMap.accept_envelope` |
+| Clearance event | Hold motion/input, record event time, prove a new empty generation (fresh producer nonce/certificate), admit strictly later acquisitions; preserve the original commissioning deadline |
+
+### Consumed typed evidence envelope
+
+The host authored the typed interface package `restock_mapper_evidence` (messages
+`MapIdentity`, `Acquisition`, `LayerCount`, `SensorBinding`, `EvidenceSnapshot`;
+services `EmptyGeneration`, `OpenAdmission`, `RegisterAcquisition`). The navigation
+consumer `TemporalMap.accept_envelope` validates each `EvidenceSnapshot` against
+the whole ledger before adopting the embedded slice and refuses it unless **all**
+of the following hold:
+
+- `admission_state == OPEN` and `empty_state == POPULATED` (an unknown/verified-empty
+  snapshot never certifies free space for motion);
+- producer `producer_nonce`/`certificate_token`/steady-clock domain are bound once
+  per empty-started generation and never change within it — a new producer identity
+  cannot reopen a retained map;
+- `snapshot_index` strictly increases and `esdf_revision` never decreases (an
+  unchanged ESDF revision may repeat under a new index);
+- every ledger `Acquisition` names a configured sensor, carries an immutable
+  optical-frame binding, is already registered through `observe`, and is unique;
+- the embedded slice binds the newest ledger acquisition in the current generation
+  and stable `map` frame, with no out-of-order incorporation;
+- `readiness` additionally requires the ledger to represent every configured sensor
+  and each incorporated acquisition to be `<=300 ms` old in both the simulation and
+  steady domains. `republished_slice` returns the slice to Nav2 only while all gates pass.
+
+`full_height_observation_verified` is recorded verbatim but NEVER opens the
+full-height observed-column gate: `full_height_certified()` stays `False` on this
+lane. Provenance certifies only that a bound 2D slice came from an empty-started
+mapper; it cannot establish vertical-column coverage.
 
 The native slice output topic stays canonical across processes and has no
 generation field. Input topic names alone cannot reject late output: integration
 must bind producer lifetime and flush/subscriber state before accepting a new
 generation. The supplied launcher does not manufacture that binding.
 
-**Actual upstream API limitation:** the installed `DistanceMapSlice` definition
-has no generation or documented acquisition-incorporation field. The installed
-`EsdfAndGradients` service is **3D-only and exits the node in 2D mode**; never
-invoke it on this navigation mapper. In its supported mode, the response stamps
-latest incorporated depth for its own returned
-grid; it supplies no identifier linking that grid to a separately published
-slice. Matching publication times, FIFO assumptions or a later successful ESDF
-call therefore cannot satisfy the snapshot binding above. The inspected host
-interface also offers no documented empty-generation acknowledgement. A native
-producer-side binding/empty-state observation must be established before calling
-the motion gate ready. This implementation adds no fake acknowledgement or
-timer-based substitute. Full-height unknown-column reduction must also be
-validated; merely increasing the configured slice height is not that evidence.
+**Actual upstream API status:** the installed `DistanceMapSlice` definition has
+no generation or acquisition-incorporation field, and the installed
+`EsdfAndGradients` service is **3D-only and exits the node in 2D mode** — never
+invoke it on this navigation mapper. The host has now authored a typed
+`restock_mapper_evidence` interface package whose `EvidenceSnapshot` supplies the
+missing atomic slice-to-ledger binding, empty/admission state and producer
+identity; the navigation consumer above is written against that frozen interface.
+
+What remains strictly native and **UNCOMMISSIONED**: no producer yet populates
+`EvidenceSnapshot` from synchronized native work, and the `EmptyGeneration`/
+`OpenAdmission`/`RegisterAcquisition` services are unimplemented native hooks. The
+CPU consumer therefore proves only that a *well-formed* envelope is validated or
+refused; it does not observe a real empty map, a real incorporation, or real
+admission. Matching publication times, FIFO assumptions or a later successful ESDF
+call still cannot substitute for a populated envelope. Full-height unknown-column
+reduction must also be validated natively; merely increasing the configured slice
+height — or the producer flag — is not that evidence. A native producer plus
+departure and blocked-aisle stop/replan must pass before the motion gate is ready.
 
 CPU checks cover the station-independent plan, isolated generation input topics,
 argument rejection, real installed export lookup and construction of the ROS

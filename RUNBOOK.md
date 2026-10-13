@@ -619,8 +619,25 @@ the plan prints generation-specific depth/CameraInfo inputs. **Never call
 It is listed only under forbidden probes. Feed registered, self-filtered native depth without manipulation target
 removal. Publish `/clock` and acquisition-time TF into stable `map`.
 
+Provenance is consumed from the host typed `restock_mapper_evidence/EvidenceSnapshot`
+envelope (the plan prints its `evidence` topic/service names), NOT from the ESDF
+service. The navigation consumer is `twin.navigation.temporal.accept_envelope`; its
+contract and the permanently closed full-height gate are documented in
+[the temporal mapping contract](docs/navigation_temporal_mapping.md#consumed-typed-evidence-envelope).
+CPU consumer tests:
+
+```bash
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
+  scripts/twin/tests/test_navigation_evidence.py \
+  scripts/twin/tests/test_navigation_temporal.py \
+  scripts/twin/tests/test_navigation_mapper_launch.py -q
+```
+
 Before accepting any wheel command, satisfy the evidence table and unresolved
 native API binding in [the temporal mapping contract](docs/navigation_temporal_mapping.md#executable-commissioning-handoff).
-The launch does not prove an empty generation, supply an incorporation ack,
-commission the epoch, or bypass unknown/stale/clearance checks. Integration must
-then demonstrate actual departure and blocked-aisle stop/replan.
+**This remains UNCOMMISSIONED:** no native producer populates `EvidenceSnapshot`
+and the `EmptyGeneration`/`OpenAdmission`/`RegisterAcquisition` services are
+unimplemented native hooks, so the launch does not prove an empty generation,
+supply a real incorporation ack, commission the epoch, or bypass
+unknown/stale/clearance checks. Integration must then demonstrate actual departure
+and blocked-aisle stop/replan.

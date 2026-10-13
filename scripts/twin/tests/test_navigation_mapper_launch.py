@@ -34,6 +34,20 @@ class MapperLaunchTests(unittest.TestCase):
         self.assertNotIn('station',str(plan));self.assertNotIn('target_bbox',str(plan))
         self.assertNotIn('ur_base_link',str(plan))
 
+    def test_plan_advertises_typed_evidence_interface_not_esdf_probe(self):
+        plan=mapper_plan(generation='mission_a',camera_count=2,transport_height=1.9)
+        ev=plan['evidence']
+        self.assertEqual(ev['package'],'restock_mapper_evidence')
+        self.assertEqual(ev['snapshot_topic'],SLICE_TOPIC.rsplit('/',1)[0]+'/evidence_snapshot')
+        for name in ('empty_generation','open_admission','register_acquisition'):
+            self.assertEqual(ev[name+'_service'],'/restock_sim/navigation/nvblox_node/'+name)
+        # Provenance never claims full-height coverage, and the ESDF probe that
+        # exits a 2D mapper is listed only as forbidden, never as an evidence source.
+        self.assertFalse(ev['full_height_observation_verified'])
+        self.assertNotIn(ev['snapshot_topic'],plan['forbidden_probe_services'])
+        self.assertIn('/restock_sim/navigation/nvblox_node/get_esdf_and_gradient',
+                      plan['forbidden_probe_services'])
+
     def test_generations_have_disjoint_admission_topics_and_process_names(self):
         a=mapper_plan(generation='one',camera_count=2,transport_height=1.9)
         b=mapper_plan(generation='two',camera_count=2,transport_height=1.9)

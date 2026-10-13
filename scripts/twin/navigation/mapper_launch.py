@@ -28,6 +28,17 @@ def mapper_plan(*,generation,camera_count,transport_height):
             'node':'nvblox_node','container':'navigation_mapper_'+generation,
             'component':'nvblox::NvbloxNode','parameters':params,'inputs':inputs,
             'slice_topic':SLICE_TOPIC,
+            # Provenance comes from the typed EvidenceSnapshot envelope published by
+            # the host restock_mapper_evidence producer subclass, NOT from an ESDF
+            # service request. twin.navigation.temporal.accept_envelope consumes it.
+            'evidence':{'package':'restock_mapper_evidence',
+                        'snapshot_topic':NAMESPACE+'/nvblox_node/evidence_snapshot',
+                        'empty_generation_service':NAMESPACE+'/nvblox_node/empty_generation',
+                        'open_admission_service':NAMESPACE+'/nvblox_node/open_admission',
+                        'register_acquisition_service':NAMESPACE+'/nvblox_node/register_acquisition',
+                        'steady_clock_domain':'host_monotonic_shared',
+                        # Provenance can never certify this; stays a closed gate.
+                        'full_height_observation_verified':False},
             # Upstream service exits the node in 2D mode. Never use as a probe.
             'forbidden_probe_services':[NAMESPACE+'/nvblox_node/get_esdf_and_gradient'],
             'commissioned':False,'map_load':False,
