@@ -327,7 +327,13 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
                 grid = marker_module_grid(marker['id'])
                 white_quad,black_quads = marker_geometry_quads(grid,half)
                 white = quad_mesh(base,[white_quad],.0002,marker['parent_from_marker'])
-                constant_material(base+'/Material',white.GetPrim(),(1,1,1),emissive=(1,1,1))
+                # Passive diffuse white (NO emissive): the lamp lights the support now, and
+                # an emissive white base glowed through/around the thin black modules
+                # (0.4 mm above it) and washed the pattern to a near-uniform bright plane in
+                # the native render (blacks ~122/255, no module contrast). A diffuse white
+                # that the black diffuse modules occlude renders the pattern with contrast
+                # regardless of lamp intensity (diffuse black reflects ~0 even over-lit).
+                constant_material(base+'/Material',white.GetPrim(),(1,1,1))
                 if black_quads:
                     # Child of the white base: it INHERITS base's parent_from_marker, so
                     # it must not re-apply it (that double transform put the QR modules at

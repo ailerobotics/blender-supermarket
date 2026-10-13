@@ -132,6 +132,7 @@ def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
         assert len(black.GetFaceVertexCountsAttr().Get()) > 50             # many black modules
         white_surf = UsdShade.Shader(stage.GetPrimAtPath(base + '/Material/Surface'))
         assert tuple(white_surf.GetInput('diffuseColor').Get()) == (1, 1, 1)
+        assert not white_surf.GetInput('emissiveColor')   # passive white; emissive washed the pattern
         black_surf = UsdShade.Shader(stage.GetPrimAtPath(base + '/Modules/Material/Surface'))
         assert tuple(black_surf.GetInput('diffuseColor').Get()) == (0, 0, 0)
 
