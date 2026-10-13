@@ -354,3 +354,18 @@ Focused tests live in `scripts/twin/tests/test_restock_camera.py`; they use anal
 depth fixtures labelled as CPU tests. No fixtures establish sensor or physics
 success. The task's exact-input visibility JSON and report are handed to
 integration separately; final recorded demonstration remains integration-owned.
+# Acquisition-to-use integration gate
+
+`restock_camera/freshness.py` keeps the 500 ms acquisition deadline across
+processing. Native frames carry their original monotonic acquisition timestamp;
+registration, commissioning, carton sensing and sequential station aggregation
+read a fresh clock after their work. They refuse expired evidence even while
+simulation time is paused. CPU functional pixel fixtures use explicit fake clocks;
+they do not establish native latency.
+
+`Sensors.valid_until_steady` carries the earliest deadline through the same-host
+ROS handoff. The transfer controller rechecks it before motion starts; native
+gripper dispatch also refuses an expired queued command. The host and native
+process must share the workstation monotonic clock. This is not a cross-machine
+clock synchronization protocol. Runtime remains UNCOMMISSIONED until held-out
+native acquisition, all processing, mapping and actuator handoff pass the limit.

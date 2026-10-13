@@ -1,0 +1,57 @@
+from dataclasses import replace
+from types import SimpleNamespace as NS
+import pytest
+
+from scripts.twin.restock_camera.freshness import frame_deadline,require_fresh
+
+
+def test_acquisition_queue_age_is_not_reset_at_processing_start():
+    frame=dict(rendering_time=1.,acquired_steady=10.,steady_domain='process')
+    deadline=frame_deadline(frame,1.,10.4)
+    assert deadline==10.5
+    require_fresh(deadline,lambda:10.5)
+    with pytest.raises(ValueError,match='freshness expired'):
+        require_fresh(deadline,lambda:10.501)
+    with pytest.raises(ValueError,match='future'):
+        frame_deadline(frame,1.,9.)
+
+
+def test_sequential_camera_processing_cannot_refresh_first_deadline(monkeypatch):
+    from scripts.twin.restock_camera.binding import StationSensors
+    from scripts.twin.restock_manipulation import isaac_sensors
+    from scripts.twin.restock_manipulation.types import Sensors,Target
+    clock=[100.]
+    target=Target('depth','sensor',2.,'shelf',(0,0,.2,0,0,0,1),True,(.62,.42,.25))
+    def adapter(camera,**kw):
+        key=kw['camera_id']
+        def capture(*args):
+            clock[0]+=.3
+            return Sensors(2.,(),target if key=='shelf' else None,True,False,2.,2.,(0.,)*6,(),2.,100.5)
+        return NS(slots=(NS(location=key),),capture=capture,sensed_target_bboxes=(),evidence=())
+    monkeypatch.setattr(isaac_sensors,'IsaacCartonSensors',adapter)
+    sensors=StationSensors(cameras={'cart':object(),'shelf':object()},profiles={},
+        pose_bridge_root='fixture',context_providers={'cart':object(),'shelf':object()},
+        location_cameras={'cart':'cart','shelf':'shelf'},steady_clock=lambda:clock[0])
+    with pytest.raises(ValueError,match='freshness expired'):
+        sensors.capture(2.,'cart','shelf',None,None)
+    assert sensors.evidence==() and sensors.sensed_target_bboxes==()
+
+
+def test_packet_delayed_after_capture_cannot_start_motion():
+    from .test_restock_manipulation import make_controller,packet
+    c,motion=make_controller(steady_clock=lambda:100.6)
+    result=c.step(.1,replace(packet(c),valid_until_steady=100.5))
+    assert result.status=='failed' and 'freshness expired' in result.reason
+    assert not motion.moves and motion.stops==1
+
+
+def test_pose_processing_delay_is_rechecked_immediately_before_motion():
+    from .test_restock_manipulation import make_controller,packet
+    clock=[100.]
+    c,motion=make_controller(steady_clock=lambda:clock[0])
+    def build(source,target,profile):
+        clock[0]=100.6
+        return c.poses
+    c.pose_policy=NS(build=build)
+    result=c.step(.1,replace(packet(c),valid_until_steady=100.5))
+    assert result.status=='failed' and not motion.moves

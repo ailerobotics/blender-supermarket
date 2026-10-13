@@ -224,7 +224,8 @@ def test_executable_context_decodes_real_qr_pixels_before_clearance(monkeypatch)
                        auxiliary_id='support:b',auxiliary_offset_xy=(0,.34))
     binding = RenderedSupportContext(camera_id='camera',intrinsics=k,slots=[slot],
         measure_context=lambda frame,now:(camera,now,'park1',True),
-        clearance_for_slot=clearance_callback,depth_error_m=.0002,camera_revision='lens1')
+        clearance_for_slot=clearance_callback,depth_error_m=.0002,camera_revision='lens1',
+        steady_clock=lambda:0.)  # Functional pixel fixture, not native latency evidence.
     baseline = binding.commission(frame,1.,{'cart':(support,witness)})[0]
     assert not calls
     loaded = depth.copy()

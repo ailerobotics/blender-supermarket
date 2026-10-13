@@ -9,6 +9,7 @@ import json
 import time
 
 from .ros_adapter import require_sim_domain
+from ..restock_camera.freshness import require_fresh
 
 
 TOPICS = {'sensors': '/restock_sim/sensors',
@@ -140,6 +141,16 @@ class IsaacRosGraph:
             if result is None:
                 raw = ''
         if result is not None:
+            if result.get('status')!='failed' and any(c.get('kind')=='gripper' for c in result.get('controls',[])):
+                try:
+                    deadline=result.get('valid_until_steady')
+                    if deadline is None:
+                        raise ValueError('missing acquisition deadline for gripper command')
+                    require_fresh(deadline,time.monotonic)
+                except (ValueError,TypeError) as exc:
+                    self.hold()
+                    self.faulted,self.active=True,False
+                    return dict(status='failed',reason=str(exc))
             self.last_sequence = result['sequence']
             self.last_status, self.last_receive = raw, time.monotonic()
             for control in result.get('controls',[]):

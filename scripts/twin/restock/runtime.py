@@ -6,6 +6,8 @@ the sibling modules are injected after a guarded simulator boot.
 """
 from dataclasses import asdict, dataclass, replace
 import math
+import time
+from ..restock_camera.freshness import require_fresh
 from typing import Protocol
 
 from .mission import Result
@@ -202,6 +204,9 @@ class RuntimeAdapter:
             return Result('succeeded', self._evidence(p, stationary=True))
         if self.action in ('collect', 'transfer'):
             r = self.manip.step(dt, p)
+            deadline=getattr(p.manipulation,'valid_until_steady',None)
+            if deadline is not None and r.status!='failed':
+                require_fresh(deadline,time.monotonic)
             # MotionPort owns trajectory commands; port must only dispatch
             # gripper/stop controls, never issue a second trajectory for `move`.
             self.port.controls(r.controls)

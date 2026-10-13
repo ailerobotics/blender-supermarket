@@ -1,6 +1,8 @@
 """Executable multi-camera inventory binding. No native Isaac/ROS imports."""
 from dataclasses import dataclass, replace
+import time
 import numpy as np
+from .freshness import frame_deadline, require_fresh
 
 from .sensed import (FrameEvidence, register_marker, calibrate_rigid_support,
                      RegisteredSupport)
@@ -32,7 +34,9 @@ class RenderedSupportContext:
     Both callbacks are integration-owned; receipt of this frame is not map incorporation.
     """
     def __init__(self, *, camera_id, intrinsics, slots, measure_context,
-                 clearance_for_slot, depth_error_m, camera_revision, clock_context=None):
+                 clearance_for_slot, depth_error_m, camera_revision, clock_context=None,
+                 steady_clock=time.monotonic):
+        self.steady_clock=steady_clock
         self.camera_id,self.intrinsics = camera_id,intrinsics
         self.slots = tuple(slots)
         self.measure_context,self.clearance_for_slot = measure_context,clearance_for_slot
@@ -77,6 +81,7 @@ class RenderedSupportContext:
         from that measured frame. Source starts occupied, so a real prior empty
         commissioning frame is required; never manufacture it from a setup dict.
         """
+        deadline=frame_deadline(frame,now,self.steady_clock())
         transform,e,parked,depth,registrations = self._registrations(frame,now)
         pending = []
         for slot,registration in zip(self.slots,registrations):
@@ -85,12 +90,14 @@ class RenderedSupportContext:
                 required_xy=slot.required_xy,calibration_id=f'{e.session_id}:{self.camera_id}:{e.frame_id}:{slot.support_id}',
                 now=now,parked=parked,lifetime_s=lifetime_s)
             pending.append(RegisteredSupport(model))
+        require_fresh(deadline,self.steady_clock)
         for slot,tracker in zip(self.slots,pending):
             slot.tracker = tracker
         return tuple(t.geometry for t in pending)
 
     def __call__(self, frame, now):
         from ..restock_manipulation.isaac_sensors import CameraContext, SlotView
+        deadline=frame_deadline(frame,now,self.steady_clock())
         transform,e,parked,depth,registrations = self._registrations(frame,now)
         views = []
         for slot,registration in zip(self.slots,registrations):
@@ -102,6 +109,7 @@ class RenderedSupportContext:
                 clearance.validate(now,e,view.geometry)
                 view = replace(view,clearance=clearance)
             views.append(SlotView.from_support(slot.location,view,slot.label_mask))
+        require_fresh(deadline,self.steady_clock)
         return CameraContext(transform,e.transform_stamp,e.epoch,tuple(views),parked,
                              e.session_id,e.steady_domain,e.acquired_steady,self.qr_observation)
 
@@ -113,20 +121,23 @@ class RenderedSupportContext:
 
 class StationSensors:
     """Aggregate distinct assigned cameras; no camera implicitly covers the mapper."""
-    def __init__(self, *, cameras, profiles, pose_bridge_root, context_providers, location_cameras):
+    def __init__(self, *, cameras, profiles, pose_bridge_root, context_providers, location_cameras,
+                 steady_clock=time.monotonic):
+        self.steady_clock=steady_clock
         from ..restock_manipulation.isaac_sensors import IsaacCartonSensors
         self.location_cameras = dict(location_cameras)
         if (not cameras or set(cameras) != set(context_providers)
                 or any(camera not in cameras for camera in self.location_cameras.values())):
             raise ValueError('camera/location/context binding is incomplete')
         self.adapters = {key:IsaacCartonSensors(camera,pose_bridge_root=pose_bridge_root,
-            profiles=profiles,camera_id=key,context_provider=context_providers[key])
+            profiles=profiles,camera_id=key,context_provider=context_providers[key],steady_clock=steady_clock)
             for key,camera in cameras.items()}
         self.sensed_target_bboxes = ()
         self.evidence = ()
 
     def capture(self, now, source, destination, motion, contact):
         from ..restock_manipulation.types import Sensors
+        started=self.steady_clock()
         self.sensed_target_bboxes,self.evidence = (),()
         selected = sorted({self.location_cameras[source],self.location_cameras[destination]})
         packets = []
@@ -143,7 +154,15 @@ class StationSensors:
             raise ValueError('station cameras are not synchronized')
         self.sensed_target_bboxes = tuple(box for key in selected for box in self.adapters[key].sensed_target_bboxes)
         self.evidence = tuple(item for key in selected for item in self.adapters[key].evidence)
-        return Sensors(now,tuple(o for p in packets for o in p.observations),targets[0],
+        deadline=min(p.valid_until_steady if p.valid_until_steady is not None
+                     else started+.5-(now-p.scan_time) for p in packets)
+        packet=Sensors(now,tuple(o for p in packets for o in p.observations),targets[0],
             all(p.parked for p in packets),packets[0].contact,min(p.feedback_time for p in packets),
             min(p.collision_time for p in packets),packets[0].joint_positions,
-            tuple(location for p in packets for location in p.scanned_locations),min(p.scan_time for p in packets))
+            tuple(location for p in packets for location in p.scanned_locations),min(p.scan_time for p in packets),deadline)
+        try:
+            require_fresh(deadline,self.steady_clock)
+        except ValueError:
+            self.sensed_target_bboxes,self.evidence=(),()
+            raise
+        return packet

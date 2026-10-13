@@ -28,7 +28,8 @@ def test_native_bridge_ignores_reordered_status_before_gripper_actuation():
     from types import SimpleNamespace as NS
     bridge=IsaacRosGraph.__new__(IsaacRosGraph)
     commands=[]
-    reply=dict(job_id='j',sequence=2,status='running',controls=[dict(kind='gripper',enabled=False)])
+    reply=dict(job_id='j',sequence=2,status='running',controls=[dict(kind='gripper',enabled=False)],
+               valid_until_steady=time.monotonic()+.5)
     def attribute(path):
         return NS(get=lambda:False if '/stop/' in path else json.dumps(reply))
     bridge.og=NS(Controller=NS(attribute=attribute))
@@ -43,3 +44,6 @@ def test_native_bridge_ignores_reordered_status_before_gripper_actuation():
     reply['sequence']=4
     assert bridge.poll()['sequence']==4
     assert commands==[False]
+    reply.update(sequence=5,valid_until_steady=time.monotonic()-.001)
+    assert bridge.poll()['status']=='failed'
+    assert commands==[False] and bridge.faulted and not bridge.active

@@ -1,6 +1,8 @@
 """Bounded transfer state machine; all runtime evidence must originate in sensors."""
 from dataclasses import asdict
 import math
+import time
+from ..restock_camera.freshness import require_fresh
 
 from .types import MotionPort, ProductProfile, Result, Sensors
 
@@ -9,7 +11,9 @@ class TransferController:
     def __init__(self, motion: MotionPort, profiles: dict[str, ProductProfile], *,
                  cart_location: str = 'rollwagen', max_age: float = 0.5,
                  phase_timeout: float = 30.0, fixture_mode: bool = False,
-                 frame: str = 'ur_base_link', pose_policy=None, transport_joints=None):
+                 frame: str = 'ur_base_link', pose_policy=None, transport_joints=None,
+                 steady_clock=time.monotonic):
+        self.steady_clock=steady_clock
         if max_age <= 0 or phase_timeout <= 0:
             raise ValueError('timeouts must be positive')
         self.motion, self.profiles = motion, profiles
@@ -82,7 +86,8 @@ class TransferController:
 
     def _result(self, controls=()):
         status = self.phase if self.phase in ('failed', 'succeeded') else 'running'
-        return Result(status, self.phase, self.reason, tuple(controls), tuple(self.evidence))
+        return Result(status, self.phase, self.reason, tuple(controls), tuple(self.evidence),
+                      None if status=='failed' else getattr(self,'valid_until_steady',None))
 
     def _fail(self, reason):
         self.reason, self.phase = reason, 'failed'
@@ -99,6 +104,7 @@ class TransferController:
         if self.phase in ('failed', 'succeeded'):
             return self._result()
         now = sensors.simulation_time
+        self.valid_until_steady=sensors.valid_until_steady
         if (not math.isfinite(dt) or dt <= 0 or not math.isfinite(now)
                 or (self.last_time is not None and now < self.last_time)):
             return self._fail('invalid or regressing simulation clock')
@@ -115,6 +121,8 @@ class TransferController:
         if self.held and self.phase != 'release' and not sensors.contact:
             return self._fail('lost grasp')
         try:
+            if sensors.valid_until_steady is not None:
+                require_fresh(sensors.valid_until_steady,self.steady_clock)
             return self._advance(sensors)
         except Exception as exc:
             return self._fail(f'adapter failure: {type(exc).__name__}: {exc}')
@@ -178,6 +186,8 @@ class TransferController:
                         or math.dist(t.pose[:3], self.target_surface[:3]) > .02):
                     return self._fail('target clearance lost')
             if not self.issued:
+                if s.valid_until_steady is not None:
+                    require_fresh(s.valid_until_steady,self.steady_clock)
                 self.motion.begin(self.poses[self.phase], s.joint_positions)
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': self.poses[self.phase]},))
@@ -194,6 +204,8 @@ class TransferController:
             return self._result()
         if self.phase == 'grasp':
             if not self.issued:
+                if s.valid_until_steady is not None:
+                    require_fresh(s.valid_until_steady,self.steady_clock)
                 self.issued = True
                 return self._result(({'kind': 'gripper', 'enabled': True},))
             if s.contact:
@@ -204,6 +216,8 @@ class TransferController:
             return self._result()
         if self.phase == 'release':
             if not self.issued:
+                if s.valid_until_steady is not None:
+                    require_fresh(s.valid_until_steady,self.steady_clock)
                 self.issued = True
                 self.release_time = now
                 return self._result(({'kind': 'gripper', 'enabled': False},))
@@ -217,6 +231,8 @@ class TransferController:
             if s.contact or self.held:
                 return self._fail('cannot stow with unexpected held payload')
             if not self.issued:
+                if s.valid_until_steady is not None:
+                    require_fresh(s.valid_until_steady,self.steady_clock)
                 self.motion.begin_joint_goal(self.transport_joints,s.joint_positions)
                 self.issued=True
                 return self._result()

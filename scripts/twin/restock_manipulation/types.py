@@ -58,6 +58,7 @@ class Sensors:
     joint_positions: tuple[float, ...]
     scanned_locations: tuple[str, ...] = ()
     scan_time: float = -1.0
+    valid_until_steady: float | None = None
     # Driver must reject stale/absent joint/contact/odom data before making a packet.
 
 
@@ -68,6 +69,7 @@ class Result:
     reason: str = ''
     controls: tuple[dict, ...] = ()
     evidence: tuple[dict, ...] = ()
+    valid_until_steady: float | None = None
 
 
 class MotionPort(Protocol):

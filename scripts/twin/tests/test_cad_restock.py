@@ -182,8 +182,9 @@ def test_rendered_qr_and_depth_are_actual_inputs(monkeypatch):
         return isaac_sensors.CameraContext(transform,now,'park1',
             (isaac_sensors.SlotView.from_support('rollwagen',view,np.ones(depth.shape,bool)),),True)
     profile = ProductProfile('carton',(.3,.2,.1),(1,0,0,0), tcp_surface_offset=.0025)
+    clock=[100.]
     sensor = isaac_sensors.IsaacCartonSensors(camera, pose_bridge_root='fixture-only',
-        profiles={'carton':profile}, context_provider=context)
+        profiles={'carton':profile}, context_provider=context,steady_clock=lambda:clock[0])
     motion = NS(parked=lambda:True, joint_positions=lambda:(0.,)*6,
                 collision_time=2., observe_source=lambda o:None)
     packet = sensor.capture(2.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
@@ -211,6 +212,19 @@ def test_rendered_qr_and_depth_are_actual_inputs(monkeypatch):
     sensor.profiles = {}
     with pytest.raises(ValueError,match='unknown or undecoded'):
         sensor.capture(5.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
+    # Native acquisition expires while registration/clearance processing runs,
+    # although the caller's simulation `now` remains fixed.
+    frame.update(rendering_frame=6,rendering_time=6.,rgb=np.full_like(rgb,255),
+                 acquired_steady=100.,steady_domain='fixture-process')
+    motion.collision_time=6.
+    def delayed_context(frame,now):
+        result=context(frame,now)
+        clock[0]+=.501
+        return result
+    sensor.context_provider=delayed_context
+    with pytest.raises(ValueError,match='freshness expired'):
+        sensor.capture(6.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
+    assert sensor.evidence==() and sensor.sensed_target_bboxes==()
 
 
 def test_native_partial_latch_releases_without_weld_fallback():
