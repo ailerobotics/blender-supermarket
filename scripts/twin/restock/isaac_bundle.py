@@ -173,7 +173,8 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
     assembly = assemble(app=app, config=config, scenario=scenario, output=output)
 
     build_runtime = _runtime or _build_isaac_runtime
-    parts = build_runtime(app=app, assembly=assembly, plan=plan, config=config, output=output)
+    parts = build_runtime(app=app, assembly=assembly, plan=plan, config=config, output=output,
+                          scenario=scenario, manifest=manifest)
     navigation, mobile, manipulation, port, closers, recording = (
         parts['navigation'], parts['mobile'], parts['manipulation'], parts['port'],
         parts.get('closers', ()), parts.get('recording', {}))
@@ -188,18 +189,19 @@ def _real_assemble(*, app, config, scenario, output):
     return assemble(app=app, config=config, scenario=scenario, output=output)
 
 
-def _build_isaac_runtime(*, app, assembly, plan, config, output):
+def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manifest):
     """Wire the measured IsaacPort + lane controllers around the validated assembly.
 
-    Integration owns the port assembly; the navigation, manipulation and inventory
-    sensing controllers come from the lane-owned factories named in the runtime-config.
-    Only runs inside the live app; never exercised by the CPU contract tests (which
-    inject `_runtime`).
+    Integration owns the port assembly and `assembly.sensing_sources`; the navigation,
+    manipulation and inventory sensing controllers come from the lane-owned factories named
+    in the runtime-config. Only runs inside the live app; never exercised by the CPU contract
+    tests (which inject `_runtime`).
     """
     from .isaac_port import IsaacPort, TransportEnvelope
     from .recording import Recorder
     from twin.navigation.sensors import IsaacRangeSensor
     from .verification import InventoryVerifier
+    from .sensing_sources import build_sensing_sources
 
     nav_factory = _resolve_factory(config, 'nav_factory')
     manip_factory = _resolve_factory(config, 'manip_factory')
@@ -212,6 +214,16 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output):
     # ManipulationBridge unwrapped, so do not re-wrap here.
     manipulation = manip_factory(
         app=app, assembly=assembly, plan=plan, config=config, output=output)
+    # Build the integration-owned sensing bindings from the composed assembly + the camera
+    # design + the manipulation motion port, and attach them so the camera-lane sensing_factory
+    # resolves them. Must precede sensing_factory (which fails closed without them). The camera
+    # design is sized against the MOBILE manifest (spec.arm_mount_z), not the environment manifest
+    # run_mobile_restock validates against, so load it from the runtime-config.
+    import json as _json
+    mobile_manifest = _json.loads(Path(config['mobile_manifest']).read_text())
+    assembly.sensing_sources = build_sensing_sources(
+        assembly=assembly, scenario=scenario, manifest=mobile_manifest,
+        manip_runtime=manipulation.controller)
     sensing = sensing_factory(app=app, assembly=assembly, plan=plan, config=config, output=output)
     capture = sensing['capture']
     recording_camera = sensing['recording_camera']

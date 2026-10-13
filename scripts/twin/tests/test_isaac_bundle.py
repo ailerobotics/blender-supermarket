@@ -107,7 +107,7 @@ class _Port:
 
 class CreateWiringTests(unittest.TestCase):
     def _fixture_runtime(self, flags):
-        def build(*, app, assembly, plan, config, output):
+        def build(*, app, assembly, plan, config, output, scenario=None, manifest=None):
             flags['built'] = True
             flags['plan'] = plan
             return {'navigation': NavigationBridge(_Ctrl(), sensor_navigation=plan.nav_mode == 'sensor'),
