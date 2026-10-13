@@ -1,6 +1,5 @@
 """CPU contract tests. The generated robot here is explicitly a test fixture."""
 import copy
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,7 +28,8 @@ def fixture(directory):
     for i, name in enumerate(JOINTS):
         child = 'link' + str(i)
         joints.append(f'<joint name="{name}" type="revolute"><parent link="{previous}"/>'
-                      f'<child link="{child}"/><limit lower="-3" upper="3" velocity="1" effort="1"/></joint>')
+                      f'<child link="{child}"/><origin xyz="0.1 0 0"/><axis xyz="0 0 1"/>'
+                      '<limit lower="-3" upper="3" velocity="1" effort="1"/></joint>')
         previous = child
     for name, parent, child in [('mount', 'base_link', 'arm_mount'),
                                 ('arm', 'arm_mount', FRAME),
@@ -37,22 +37,15 @@ def fixture(directory):
                                 ('tcp', 'suction_cups', 'gripper_pad_tcp')]:
         joints.append(f'<joint name="{name}" type="fixed"><parent link="{parent}"/><child link="{child}"/></joint>')
     (directory / 'robot.urdf').write_text('<robot name="test_fixture">' +
-        ''.join(f'<link name="{n}"/>' for n in links) + ''.join(joints) + '</robot>')
-    (directory / 'robot.srdf').write_text('<robot name="test_fixture"><group name="ur_manipulator">'
-        '<chain base_link="ur_base_link" tip_link="gripper_pad_tcp"/></group></robot>')
-    xrdf = {'format': 'xrdf', 'format_version': 1.0,
-            'modifiers': [{'set_base_frame': FRAME}],
-            'tool_frames': ['gripper_pad_tcp'],
-            'cspace': {'joint_names': list(JOINTS), 'acceleration_limits': [1.] * 6,
-                       'jerk_limits': [10.] * 6},
-            'geometry': {'cad': {'spheres': {n: [{'center': [0., 0., 0.], 'radius': .1}]
-                                           for n in links}}},
-            'collision': {'geometry': 'cad'}, 'self_collision': {'geometry': 'cad'}}
-    (directory / 'robot.xrdf').write_text(yaml.safe_dump(xrdf))
+        ''.join(f'<link name="{n}"><collision><geometry><sphere radius="0.005"/></geometry></collision></link>'
+                for n in links) + ''.join(joints) + '</robot>')
     (directory / 'mobile.json').write_text(json.dumps({'transport_positions': dict.fromkeys(JOINTS, 0.)}))
-    return {name: str(directory / ('robot.' + name)) for name in ('urdf', 'srdf', 'xrdf')} | {
+    from twin.restock_host.generate_assets import generate
+    generate(directory / 'robot.urdf', directory / 'mobile.json', directory, directory / 'generated')
+    return {name: str(directory / 'generated' / ('mobile.' + name)) for name in ('urdf', 'srdf', 'xrdf')} | {
         'workspace_min': [-2., -2., -1.], 'workspace_max': [2., 2., 2.],
-        'shelfbot_root': str(directory), 'mobile_manifest': str(directory / 'mobile.json')}
+        'shelfbot_root': str(directory), 'mobile_manifest': str(directory / 'mobile.json'),
+        'asset_report': str(directory / 'generated/asset-report.json')}
 
 
 class HostTests(unittest.TestCase):
@@ -103,7 +96,7 @@ class HostTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, section):
                 launch_plan(self.config)
         invalid = copy.deepcopy(original)
-        del invalid['geometry']['cad']['spheres']['suction_cups']
+        del invalid['geometry']['mobile_cad']['spheres']['suction_cups']
         path.write_text(yaml.safe_dump(invalid))
         with self.assertRaisesRegex(ValueError, 'suction_cups'):
             launch_plan(self.config)
@@ -127,16 +120,17 @@ class HostTests(unittest.TestCase):
             self.assertIn('librequired.so', link_errors('/fixture/component.so')[0])
 
     def test_asset_diagnostics_are_hash_bound_and_block_known_overlaps(self):
-        report = {'generated_sha256': {'mobile.' + key: hashlib.sha256(Path(self.config[key]).read_bytes()).hexdigest()
-                                     for key in ('urdf', 'srdf', 'xrdf')},
-                  'transport_sphere_overlaps': [{'links': ['a', 'b']}]}
-        path = Path(self.temp.name) / 'asset-report.json'
+        path = Path(self.config['asset_report'])
+        report = json.loads(path.read_text())
+        original = path.read_text()
+        report['transport_sphere_overlaps'] = [{'links': ['a', 'b']}]
         path.write_text(json.dumps(report))
-        config = self.config | {'asset_report': str(path)}
-        self.assertIn('1 nonexcluded', launch_plan(config)['static_errors'][0])
-        Path(config['srdf']).write_text(Path(config['srdf']).read_text() + '\n')
+        with self.assertRaisesRegex(ValueError, 'recomputed'):
+            launch_plan(self.config)
+        path.write_text(original)
+        Path(self.config['srdf']).write_text(Path(self.config['srdf']).read_text() + '\n')
         with self.assertRaisesRegex(ValueError, 'does not match'):
-            launch_plan(config)
+            launch_plan(self.config)
 
     @unittest.skipUnless(os.environ.get('RESTOCK_HOST_VALIDATE_INSTALLED') == '1',
                          'explicit CPU-only installed-image validation')
