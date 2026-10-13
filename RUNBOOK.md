@@ -526,11 +526,25 @@ actual sensor acquisition, controller setup and recording. `--runtime-config`
 supplies exact host/CAD/camera paths, checked before any GPU acquisition or run
 directory creation; its scenario must match the mission scenario.
 `recording.Recorder`
-accepts real rendered RGB with unique render IDs and regular simulation timestamps;
-its H.264 encoder uses a caller-supplied local ffmpeg executable. Missing frames
-are rejected, never replaced by an animated fixture. No ready bundle is currently
+accepts real rendered RGB with unique render IDs and strictly increasing acquisition
+timestamps; its H.264 encoder uses a caller-supplied local ffmpeg executable.
+Variable frame intervals are preserved with a microsecond container timebase and
+verified by decoding every presentation timestamp. Frames are never interpolated
+or duplicated; cached acquisition IDs must be skipped by the capture caller.
+No ready bundle is currently
 shipped. The wrapper caps wall time at 20 minutes. GPU guard defaults stay intact;
 `--heavy-threshold-mb 2500` is the existing explicit whispr opt-in, never `--force`.
+
+The independent `scripts/run_restock_render_smoke.py --help` command validates
+native RTX RGB-D acquisition and H.264 under a 300-second cap. Supply a verified
+matching NVIDIA runtime with `--nvidia-runtime`, installed interpreter with
+`--isaac-python`, `--ffmpeg` and a new `--output`. Its process-local aliases cover
+Kit's unversioned NVML/CUDA requests without changing system libraries. Optional
+`--runtime-config CONFIG --view source` composes a full-store **static optical
+bench** with actual robot/cart CAD and physical camera mounts. This bench disables
+dynamics at initial composition and is not evidence of robot motion or autonomy.
+It preserves same-acquisition depth and instance-ID path mappings for verification;
+those IDs may only identify known rig self pixels, never product inventory.
 
 CPU assembled preview (URDF collision geometry, **not** a physics screenshot):
 

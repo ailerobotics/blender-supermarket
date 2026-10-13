@@ -1,7 +1,7 @@
 # Mobile restocking integration checkpoint
 
 Status: incomplete. Guarded GPU use was explicitly authorized on October 13;
-native boot/render validation is beginning. No autonomous physics cycle or mission MP4 has
+native RTX RGB-D rendering and VFR recording now pass. No autonomous physics cycle or mission MP4 has
 been produced. The current branch contains CPU mission/inventory infrastructure;
 the landed mobile/cart, schema-2 environment, articulated navigation and CAD
 manipulation components are integrated from origin/main.
@@ -24,7 +24,7 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-329 combined CPU tests and 14 subtests pass with five optional skips after the landed October 13 host collision refinement and integration updates, with the installed Isaac USD libraries exposed
+360 combined CPU tests and 16 subtests pass with five optional skips after the landed October 13 host, camera and navigation updates, with the installed Isaac USD libraries exposed
 without booting Kit (including mission/runtime, recording, stock-scene and environment tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
 Reproduction is in RUNBOOK section 11. The shared firstmate interface contract was
@@ -64,9 +64,73 @@ supervisor-reported diagnostics, not this worker's simulator evidence. They
 supersede the earlier unavailable-counterfactual diagnosis. Isaac compatibility,
 memory headroom and simultaneous planner operation remain unproven.
 
-The simulator hold remains explicit pending firstmate's release and matching
-runtime environment. Preserve live services and the protected-Blender/resource
-guard; no driver installation, reboot, service restart or guard bypass occurred.
+The approval hold was released on October 13. The native smoke below used the
+matching process-local runtime and unchanged protected-Blender/resource guard;
+no driver installation, reboot, service restart or guard bypass occurred.
+
+## Native GPU render evidence (2026-10-13)
+
+The subsequent `native-source-view-01` at code `6ecb5c5` passed bounded native
+capture of the full store, 24 actual robot collision geometries, rollwagen rails,
+loaded source support and all physical camera mounts. Six real 2560×1920 RGB-D
+frames span simulation time 1.5166667458 to 1.6166667510 seconds. The verified VFR
+H.264 SHA-256 is `89bd8d59904c5c41d25b8e965a5a3659149dbed3bf35c0aaa857c6ba8e7f7bd4`.
+Peak total GPU usage was 6465 MiB; minimum available host RAM was 16196 MiB;
+system/user service states and PIDs were unchanged. Every rigid body was static
+at initial composition: this is an optical bench, not a dynamics run.
+
+The SKU and both support QR markers decoded together in only **one of six**
+frames. The other five missed one support marker. This proves the view can see
+the labels, but does not prove reliable registration, empty-support commissioning,
+depth-plane fit, uncertainty margins or manipulation readiness. The native image
+is dark; no enhancement or synthetic replacement was used in the evidence.
+Same-acquisition `instance_id_segmentation` supplied uint32 pixels and exact USD
+paths: 687264 pixels per frame belonged to the known robot/cart subtrees. The
+captured depth archives include those IDs; frame metadata preserves their path
+mapping, actual native frame identity and acquisition steady clock. Such IDs are
+authorized only for known rig self masking, with self returns and their shadows
+remaining unknown. They do not supply product identity or free-space truth.
+
+Current end-to-end gates:
+
+| Stage | Actual evidence | Remaining gate |
+| --- | --- | --- |
+| Native startup/render/record | Passed cube and full-store source optical checks | Other station views and reliable calibrated support sensing |
+| Stock selection/collection | CPU state machine and CAD checks | Real empty-support commissioning, planner and physical grasp |
+| Cart coupling | Landed controller and CPU checks | Measured native latch/constraint validation |
+| Travel/parking | Geometric route, 805 fixed obstacles including mounts | Actual observed-space coverage, dynamic cart mounts, wheel-driven run |
+| Shelf transfer/verification | CAD reach and sensor-contract tests | Real planner execution and fresh post-transfer RGB-D inventory |
+| Return | CPU orchestration | Actual loaded/unloaded navigation and docking |
+
+The full simulator factory is still incomplete. No autonomous restocking cycle,
+robot-motion video, successful planner GPU run or collision-free physics result
+is claimed. The recordings below are genuine static native captures only.
+
+`native-smoke-04`, code `7858f8f`, passed a guarded Isaac 5.1 startup and recorded
+60 actual 640×360 RGB-D frames of a static cube/floor/camera scene. No robot or
+planner was present. The embedded H.264 MP4 preserves variable acquisition
+intervals; decoding verifies every presentation timestamp against the capture
+manifest at microsecond precision. Frames span simulation time 1.4833334107 to
+2.5166667979 seconds. The final frame has one container timebase tick of display
+duration; no later acquisition is inferred. Video SHA-256:
+`535fcc7b564e03c934e8d4cde2a3545594451c84e8b2601e65e5fc59334de690`.
+Per-frame RGB/depth hashes and structured native identities are retained.
+
+Preflight had 9,667 MiB free VRAM; peak sampled total GPU use was 3,989 MiB and
+minimum available host RAM was 17,171 MiB. System/user service identity and state
+snapshots were unchanged; free VRAM returned to 9,667 MiB. CUDA/NVML/Vulkan core
+driver mappings came from staged 580.173.02 libraries. The optional system NGX
+580.178.04 library was also mapped, so this is not an all-libraries compatibility
+claim. A task-local unversioned NVML alias fixed the plugin's fallback to the
+mismatched system library; system files were untouched.
+
+Attempts 01–03 are preserved as partial/failed evidence. Attempt 01 produced one
+RGB-D frame but mishandled a structured native frame ID; exit zero was initially
+misclassified and the verdict was corrected. Attempts 02–03 correctly refused
+irregular cadence under the former CFR-only contract. Firstmate authorized VFR;
+no frames were fabricated, interpolated or restamped. Offline regression and
+separate single-frame encodings preceded attempt 04. Rendering/recording success
+does not prove stock perception, camera calibration, navigation or manipulation.
 
 ## Remaining delivery gates
 
@@ -91,8 +155,8 @@ yet implemented or claimed compatible solely from this documentation.
 - `guard.py` / `run_mobile_restock.py` / shell wrapper implement exclusive GPU flock,
   protected Blender/process/socket checks, 8 GB VRAM and 12 GiB RAM preconditions,
   4 GiB RAM watchdog, isolated ROS domain 88 and 20-minute wall timeout. These
-  safeguards are CPU-tested with mocked probes. **No new GPU probe was run after
-  firstmate's instruction to preserve the accepted driver diagnosis.**
+  safeguards are CPU-tested with mocked probes. The later October 13 native checks
+  above exercised the real resource guard after explicit GPU authorization.
 - A new scratch output directory is required; existing run/inventory directories
   are refused. Interrupted reservations persist and are not automatically replayed.
 - `scene.py` composes input USD layers read-only and promotes the selected concrete
@@ -241,16 +305,15 @@ zero nonexcluded transport overlaps, and seven full-motion separation proofs
 justify narrow exclusions. Strict host `--check` passes against the current
 generated inputs and installed ROS/NVIDIA overlay; GPU capacity and actual
 trajectories remain unverified. The original ten-overlap report is historical.
-Remaining inputs include a current-scenario camera configuration with sensed support
-and clearance, camera housing collision validation, mapper reset/incorporation
-acknowledgements, and the complete sensor-binding mission factory. Camera work
-currently reports loaded-support occlusion and insufficient shelf support ROI;
-these must be resolved with actual sensing, not enlarged or invented free space.
-The camera lane's bounded 18-view search found four side-view candidates with full
-0.62×0.42 m support and top visibility, but none satisfies the current single-ROI
-support/label contract. Separate sensor-derived support and label masks, physical
-brackets and all-link clearance are required. A loaded cart still blocks fresh
-support sensing; the helper does not infer an unseen plane through the load.
+The camera follow-up is now merged with an executable 2560×1920 candidate config,
+separate measured support/label masks and paired physical markers. Its mounts
+clear all 24 collision links plus held payload in 16 bounded local segments;
+whole-mission transit, perception and native dynamics remain unproven. Actual
+empty RGB-D commissioning and fresh marker/witness registration are required;
+an occupied slot never becomes empty by reusing dated geometry. Next is one
+candidate view's actual render/decode check before allocating multiple cameras.
+Mapper reset/incorporation acknowledgements and the complete mission factory
+still require native integration. Static mount geometry must also enter navigation.
 
 October 13 integration adds explicit host-interpreter/setup validation and owned
 ROS-process sessions, native camera optical TF registration, global host-stop
@@ -259,7 +322,7 @@ Independent inventory verification requires two new post-transfer sensor scans,
 including full cart vacancy and matching shelf identity. A depth-volume checker
 refuses any occupied, invalid, occluded or unobserved cell; it requires separate
 fresh support-plane evidence and a real mapper incorporation timestamp. These
-modules pass CPU tests; native camera/ROS/physics execution is still untested.
+modules pass CPU tests; native ROS/robot physics execution is still untested.
 
 Two newly identified runtime constraints remain open. First, the original lidar
 column starts inside the chassis. The navigation follow-up finds unknown sectors
@@ -267,15 +330,14 @@ even with corrected height or an outboard mast when actual robot/cart collision
 bounds are included. Its multi-origin stopping-sweep coverage work is not yet
 landed. The passing map-only route fixture proves geometric routing, not usable
 physical range-sensor coverage; the runtime must stop with unobserved space.
-Second, the camera follow-up's dated rigid-support baseline currently expires in
-120 seconds. The recorded IK branches at the existing 0.15 rad/s command limit
+Second, the camera follow-up corrected its 120-second baseline lifetime mismatch.
+The recorded IK branches at the existing 0.15 rad/s command limit
 need approximately 52.53 seconds for collection and 52.55 seconds for shelf
 transfer; adding the 52.95-second outbound fixture gives 158.03 seconds before
 commissioning, reset, acceleration or planning overhead. This is a timing
-estimate, not a measured or globally optimal trajectory. Baseline lifetime must
-be reconciled explicitly; old acquisition timestamps must never be refreshed.
-Camera registration/commissioning and physical mount validation remain in the
-camera lane and are not treated as already merged.
+estimate, not a measured or globally optimal trajectory. The merged baseline now
+defaults to 600 seconds, bounded to 900, while fresh evidence remains limited to
+0.5 seconds. Original acquisition timestamps remain immutable across scene resets.
 
 Resume CPU validation from the isolated worktree (runtime config remains in the
 task artifact directory, with machine paths kept out of reusable source):
