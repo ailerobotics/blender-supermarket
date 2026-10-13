@@ -86,7 +86,7 @@ class PhysicsAssembly:
         self.command_gate.hold()
 
 
-def assemble(*, app, config, scenario, output):
+def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     """Import actual mobile CAD, compose scratch USD and initialize drive control.
 
     Does not create SimulationApp, acquire GPU permission or start a host service.
@@ -127,6 +127,8 @@ def assemble(*, app, config, scenario, output):
         body_path=paths['suction_cups'],gripper_path='/RestockPanelGripper')
     cart_path=composition['assets']['cart']['body']
     solver=configure_cart_solver(stage,composition['assets']['cart']['root'])
+    if diagnostic_prepare is not None:
+        diagnostic_prepare(stage)
     controller=MobileController(stage,paths['base_link'],cart_path,
         [paths['left_wheel_joint'],paths['right_wheel_joint']],spec=spec)
     scenes=[str(p.GetPath()) for p in stage.Traverse() if p.IsA(UsdPhysics.Scene)]

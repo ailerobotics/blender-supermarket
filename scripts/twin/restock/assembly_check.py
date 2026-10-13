@@ -11,18 +11,33 @@ from .isaac_port import body_measurement
 def run(app, config, output):
     output=Path(output)
     scenario=json.loads(Path(config['scenario']).read_text())
-    assembly=assemble(app=app,config=config,scenario=scenario,output=output/'assembly')
+    diagnostic=None
+    if 'cart_diagnostic_variant' in config:
+        from .cart_diagnostic import CartDiagnostic
+        diagnostic=CartDiagnostic(output,config['cart_diagnostic_variant'])
+    assembly=assemble(app=app,config=config,scenario=scenario,output=output/'assembly',
+                      diagnostic_prepare=diagnostic.prepare if diagnostic else None)
     history=[]
     initial={}
     arm_initial=assembly.command_gate.measured().copy()
     for name,body in (('robot',assembly.robot_body),('cart',assembly.cart_body)):
         pose,z,_,_=body_measurement(body)
         initial[name]=np.array([pose.x,pose.y,z,pose.yaw])
+    if diagnostic:
+        diagnostic.initialize(assembly)
+        (output/'measured-initial.json').write_text(json.dumps(dict(
+            simulation_time=float(assembly.world.current_time),
+            gate_baselines={name:values.tolist() for name,values in initial.items()},
+            native=diagnostic.snapshot()),indent=2))
     try:
         for index in range(120):
+            if diagnostic:
+                diagnostic.phase=f'step-{index+1}'
             assembly.hold()
             assembly.world.step(render=True)
             row=dict(step=index+1,simulation_time=float(assembly.world.current_time))
+            if diagnostic:
+                row['native_diagnostic']=diagnostic.snapshot()
             for name,body in (('robot',assembly.robot_body),('cart',assembly.cart_body)):
                 pose,z,linear,angular=body_measurement(body)
                 state=np.array([pose.x,pose.y,z,pose.yaw])
@@ -48,3 +63,5 @@ def run(app, config, output):
     finally:
         assembly.hold()
         (output/'stationary-feedback.json').write_text(json.dumps(history,indent=2)+'\n')
+        if diagnostic:
+            diagnostic.save()
