@@ -13,6 +13,7 @@ from .perception import DepthPerception, load_pose_bridge
 from .types import Sensors
 from ..restock_camera.geometry import rigid
 from ..restock_camera.sensed import FrameEvidence, SupportView, masked_cloud, contains
+from ..restock_camera.qr import FixedTileQR, FrameQR
 
 
 @dataclass(frozen=True)
@@ -49,18 +50,18 @@ class CameraContext:
     session_id: str = 'default'
     steady_domain: str = ''
     acquired_steady: float | None = None
+    qr_observation: FrameQR | None = None
 
 
 class IsaacCartonSensors:
     def __init__(self, camera, *, pose_bridge_root, profiles, slots=(), base_from_camera=None,
                  context_provider=None, camera_id='camera'):
-        import cv2
         self.camera, self.profiles = camera, profiles
         self.slots = tuple(slots)
         self.transform = None if base_from_camera is None else rigid(base_from_camera)
         self.context_provider, self.camera_id = context_provider, camera_id
         self.depth = DepthPerception(load_pose_bridge(pose_bridge_root))
-        self.decoder = cv2.QRCodeDetector()
+        self.decoder = None  # created only when the context has no shared QR result
         self.last_frame = None
         self.last_stamp = None
         self.last_session = None
@@ -101,6 +102,7 @@ class IsaacCartonSensors:
         self.seen_sessions.add(context.session_id)
         if not self.slots or len({s.location for s in self.slots}) != len(self.slots):
             raise ValueError('camera needs unique calibrated slots')
+        camera_evidence = None
         for slot in self.slots:
             if slot.support_view is None:
                 raise ValueError('fresh registered support view required')
@@ -110,6 +112,9 @@ class IsaacCartonSensors:
             evidence = FrameEvidence(self.camera_id,int(frame_id),stamp,context.transform_stamp,
                 context.epoch,slot.support_view.registration.evidence.camera_revision,
                 context.session_id,context.steady_domain,context.acquired_steady)
+            if camera_evidence is not None and evidence != camera_evidence:
+                raise ValueError('slot camera-frame evidence disagrees')
+            camera_evidence = evidence
             slot.support_view.validate(depth,k,self.transform,evidence,now,
                                        bool(context.parked and motion.parked()))
             if (not np.isfinite(motion.collision_time) or not 0 <= now-motion.collision_time <= .5
@@ -124,10 +129,18 @@ class IsaacCartonSensors:
             if (np.asarray(slot.label_mask).dtype != bool or np.shape(slot.label_mask) != depth.shape):
                 raise ValueError('separate registered label mask required')
         marker_ids = {marker for s in self.slots for marker in s.support_view.registration.marker_ids}
-        ok, codes, corners, _ = self.decoder.detectAndDecodeMulti(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        qr = context.qr_observation
+        if qr is None:
+            if self.decoder is None:
+                self.decoder = FixedTileQR(self.camera_id)
+            qr = self.decoder.decode(rgb,camera_evidence,now=now,parked=bool(context.parked and motion.parked()))
+        else:
+            qr.validate(rgb,camera_evidence,now=now,parked=bool(context.parked and motion.parked()))
         observations, rejected = [], []
         mask_shape = depth.shape
-        for index, (code, polygon) in enumerate(zip(codes, corners if ok else [])):
+        candidates = [(d.text,np.asarray(d.corners)) for d in qr.detections]
+        candidates.extend(('',np.asarray(p)) for p in qr.unreadable_corners)
+        for index, (code, polygon) in enumerate(candidates):
             if code in marker_ids:
                 continue  # support identity never becomes inventory/SKU
             centre = np.mean(polygon, axis=0)
@@ -137,8 +150,7 @@ class IsaacCartonSensors:
             if not matches:
                 continue
             if code not in self.profiles:
-                rejected.append(code or 'undecoded label')
-                continue
+                raise ValueError('unknown or undecoded label in calibrated slot')
             if len(matches) != 1:
                 rejected.append('label outside unique calibrated slot')
                 continue
@@ -199,6 +211,7 @@ class IsaacCartonSensors:
             current_frame_id=frame_id,current_stamp=stamp,epoch=context.epoch,
             registration_uncertainty_m=s.support_view.uncertainty_m,
             clearance_observation_id=None if s.support_view.clearance is None else s.support_view.clearance.observation_id,
+            qr_processing_seconds=qr.processing_seconds,qr_rgb_sha256=qr.rgb_sha256,
             provenance='dated_rigid_geometry_with_fresh_marker_witness_and_depth') for s in self.slots)
         return Sensors(now, tuple(observations), targets.get(destination),
                        motion.parked(), contact.read(), now, motion.collision_time,

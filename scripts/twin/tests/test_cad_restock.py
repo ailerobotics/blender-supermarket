@@ -205,6 +205,12 @@ def test_rendered_qr_and_depth_are_actual_inputs(monkeypatch):
     frame['distance_to_image_plane'] = empty
     packet = sensor.capture(4.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
     assert packet.target.clear and 'rollwagen' in packet.scanned_locations
+    frame['rendering_frame'] = 5
+    frame['rendering_time'] = motion.collision_time = 5.
+    frame['rgb'] = rgb
+    sensor.profiles = {}
+    with pytest.raises(ValueError,match='unknown or undecoded'):
+        sensor.capture(5.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
 
 
 def test_native_partial_latch_releases_without_weld_fallback():
