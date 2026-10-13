@@ -7,12 +7,49 @@ import json
 import os
 from pathlib import Path
 import signal
+import subprocess
 import threading
+import time
 
 from twin.restock.guard import available_ram_mb, gpu_slot
 from twin.restock.inventory import Inventory, Job
 from twin.restock.mission import Mission
 from twin.restock.scenario import validate
+
+
+def _launch_host_stack(*, repo, plugin_env, nvidia_runtime, host_config, logpath):
+    """Co-launch the task-isolated MoveIt/cuMotion planner stack + nvblox mapper on
+    domain 88, inside the caller's single GPU-lock hold (the launch recipe does NOT
+    re-flock). A sanitized env keeps the Isaac interpreter's PYTHONHOME/PYTHONPATH out
+    of the host ROS python; the recipe sources its own runtime closure. Returns the
+    child process group leader + the open log handle."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ('PYTHONHOME', 'PYTHONPATH', 'PYTHONSTARTUP')
+           and not k.startswith('CONDA')}
+    env.update(RESTOCK_REPO=str(repo), RESTOCK_PLUGIN_ENV=str(plugin_env),
+               RESTOCK_HOST_CONFIG=str(host_config), RESTOCK_NVIDIA_RUNTIME=str(nvidia_runtime),
+               RESTOCK_WITH_GPU_USERSPACE='1',
+               ROS_DOMAIN_ID='88', ROS_LOCALHOST_ONLY='1', ROS_AUTOMATIC_DISCOVERY_RANGE='LOCALHOST')
+    script = str(Path(repo) / 'scripts/restock_runtime/launch_restock_host_stack.sh')
+    log = open(logpath, 'wb')
+    child = subprocess.Popen(['bash', '-lc', f'exec bash "{script}"'],
+                             stdout=log, stderr=subprocess.STDOUT, preexec_fn=os.setsid, env=env)
+    return child, log
+
+
+def _teardown_pg(child):
+    if child is None:
+        return
+    try:
+        os.killpg(os.getpgid(child.pid), signal.SIGINT)
+        time.sleep(5)
+        if child.poll() is None:
+            os.killpg(os.getpgid(child.pid), signal.SIGTERM)
+            time.sleep(3)
+        if child.poll() is None:
+            os.killpg(os.getpgid(child.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def check(args):
@@ -69,11 +106,31 @@ def run(args, manifest, scenario):
                 os.kill(os.getpid(), signal.SIGTERM)
                 return
     summary = {'state': 'failed', 'reason': 'runtime did not start', 'physics_verified': False}
+    stack = stack_log = None
     try:
         with gpu_slot(heavy_threshold_mb=args.heavy_threshold_mb):
             watcher = threading.Thread(target=watch_ram, daemon=True)
             watcher.start()
             try:
+                # Co-launch the host planner stack + mapper (domain 88) inside this single
+                # GPU-lock hold, before Isaac, so the manip can connect and the mapper can
+                # build the ESDF world from the mission's live depth. The recipe does not
+                # re-flock; teardown is by exact PID group. The 4 GiB RAM watchdog + the
+                # wall ceiling still bound the whole run.
+                if args.host_stack:
+                    if not args.plugin_env or not args.nvidia_runtime:
+                        raise ValueError('--host-stack requires --plugin-env and --nvidia-runtime')
+                    repo = Path(__file__).resolve().parent.parent
+                    stack, stack_log = _launch_host_stack(
+                        repo=repo, plugin_env=args.plugin_env, nvidia_runtime=args.nvidia_runtime,
+                        host_config=config['host_config'], logpath=args.output / 'host-stack.log')
+                    summary['host_stack_pid'] = stack.pid
+                    warm = time.monotonic()
+                    while time.monotonic() - warm < args.host_stack_warmup:
+                        if stack.poll() is not None:
+                            raise RuntimeError(f'host stack exited during warmup rc={stack.returncode}')
+                        time.sleep(3)
+                    summary['host_stack_warmup_s'] = round(time.monotonic() - warm, 1)
                 # NVIDIA requires runtime/plugin imports after SimulationApp startup.
                 from isaacsim import SimulationApp
                 app = SimulationApp({'headless': True, 'width': 960, 'height': 540})
@@ -120,6 +177,12 @@ def run(args, manifest, scenario):
         raise
     finally:
         finished.set()
+        _teardown_pg(stack)
+        if stack_log is not None:
+            try:
+                stack_log.close()
+            except Exception:
+                pass
         summary['events'] = db.events(scenario['job']['job_id'])
         (args.output/'mission.json').write_text(json.dumps(summary, indent=2, allow_nan=False)+'\n')
         db.close()
@@ -135,6 +198,13 @@ def main():
     parser.add_argument('--runtime-config',type=Path,help='exact host, CAD and camera runtime inputs')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--heavy-threshold-mb', type=int, choices=(1500,2500), default=1500)
+    parser.add_argument('--host-stack', action='store_true',
+                        help='co-launch the MoveIt/cuMotion planner stack + nvblox mapper (domain 88) '
+                             'inside the GPU-lock hold before Isaac')
+    parser.add_argument('--plugin-env', type=Path, help='host runtime closure env.sh for --host-stack')
+    parser.add_argument('--nvidia-runtime', type=Path, help='task-local NVIDIA runtime root for --host-stack')
+    parser.add_argument('--host-stack-warmup', type=float, default=180.0,
+                        help='seconds to let the planner stack + mapper advertise before booting Isaac')
     args = parser.parse_args()
     report, manifest, scenario = check(args)
     print(json.dumps(report, indent=2))
