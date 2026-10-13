@@ -10,6 +10,39 @@ manipulation components are integrated from origin/main.
 A controller dispatcher and guarded launcher now exist; a complete simulator
 bundle with actual sensor acquisition/planner/actuator wiring is still missing.
 
+## Camera lighting applied: SOURCE decodes 3/3, SHELF still dark 0/2 (measured)
+
+The camera worker's store light rig (PR #26, `twin.restock_camera.lights`) landed on
+origin/main and was merged and consumed in the native composition per
+`data/sim-restock-camera-v2/lighting-handoff.md`. `view_scene` now authors the designed
+rig (72 store `RectLight`s at correct nits + a `DomeLight` fill) and **disables the 73
+dim exported store lights** (authored at `power/pi` ~14.3, ~200x too dim in RTX nits -
+the original dark-capture cause) to avoid doubling. For the shelf view a task fill is
+co-located with the shelf camera; its eye/target derived from the camera config
+(-3.55, 4.826, 0.96 -> -3.29, 4.826, 0.73) match the handoff. RTX auto-exposure is
+already off; the single knob `intensity_scale` is 1.0.
+
+Measured native decode (6 frames each, 2560x1920):
+
+- **Source view: PASSED 3/3** markers decoded (`juice_orange`, `support:source:0`,
+  `support:source:1`), up from 1/6 before lighting. The rig fixes the backroom-lit views.
+- **Shelf view: FAILED 0/2** (`support:shelf:0/1`). The recessed ~0.24 m shelf slot stays
+  in deep shadow even with the co-located task fill and dome: the central 800x800 support
+  region renders **max luminance 4/255 (median 2)** and **0 %** of pixels reach the
+  ~180/255 a QR white module needs; the two marker instance-id regions peak at **0** and
+  **21/255**. Pixel extent is ample (marker bbox ~500-800 px, ~20-32 px/module for 25
+  modules), so the limiter is **illuminance/contrast, not resolution**. Guards: peak
+  6636 MiB GPU, services unchanged.
+
+Per the integration/camera contract and firstmate's instruction, this is reported as a
+measured illuminance/pixel-size result and **routed back to the camera worker** rather
+than blind-tuned: the ceiling panels have no line of sight into the slot and the
+handoff's grazing-only `keep_fill` fill, applied as specified, does not lift the slot to
+decodable contrast. The source-view decode confirms the rig itself is correct where line
+of sight exists. Evidence:
+`~/datasets/twin-robot-in-store-boot-v1/view-source-lit-01/` and `view-shelf-lit-01/`
+(`native-result.json`, `frames/`, `observed-frames.json`, `view-setup.json`).
+
 ## Host/collision preflight: COLLISION GATE GREEN (CPU, vs origin/main)
 
 The fourth lighting-independent priority-3 step passed on CPU. The strict host

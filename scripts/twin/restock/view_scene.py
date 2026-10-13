@@ -11,6 +11,46 @@ from pathlib import Path
 import numpy as np
 
 
+def _apply_light_rig(stage, design, view, config):
+    """Apply the camera worker's store light rig per the lighting handoff.
+
+    The 72 Blender-exported RectLights are authored at power/pi (~14.3), ~200x too
+    dim in RTX nits, which caused the dark captures. Per the handoff we author the
+    designed rig (correct per-fixture nits, physical 4.44x panel/tube ratio, dome
+    fill) and DISABLE the dim exported store lights to avoid doubling. For the
+    recessed shelf support a task fill is co-located with the shelf camera. The
+    single calibration knob is intensity_scale (config 'light_intensity_scale').
+    RTX auto-exposure (histogram) is already off, so exposure is fixed; calibrate
+    brightness through intensity_scale rather than editing the physical ratio.
+    """
+    import numpy as np
+    from pxr import UsdLux
+    from twin.restock_camera.lights import light_rig, author_light_rig, task_fill_fixture, LightRigTuning
+    tuning=LightRigTuning(intensity_scale=float(config.get('light_intensity_scale',1.0)))
+    fills=[]
+    if view=='shelf':
+        # Co-locate a task fill with the shelf camera (parent 'map' == /World identity)
+        # so it reaches into the recessed shelf slot the ceiling panels cannot light.
+        optical=np.asarray(design['cameras']['shelf']['parent_from_optical'],float)
+        eye=optical[:3,3]
+        target=eye+optical[:3,2]*0.35  # optical +Z looks at the support
+        fills=[task_fill_fixture('fill:shelf',eye.tolist(),target.tolist())]
+    # Disable the dim exported store lights before adding the rig (avoid doubling).
+    disabled=0
+    for prim in stage.Traverse():
+        if (prim.IsA(UsdLux.RectLight) or prim.IsA(UsdLux.DomeLight)) and \
+                not str(prim.GetPath()).startswith('/World/RestockLight_'):
+            prim.SetActive(False)
+            disabled+=1
+    rig=light_rig(tuning,fills=fills)
+    authored=author_light_rig(stage,rig,parent_path='/World',tuning=tuning)
+    return dict(intensity_scale=tuning.intensity_scale,disabled_exported_lights=disabled,
+                authored_fixtures=len(authored),dome_fill=bool(rig.get('dome',{}).get('enabled')),
+                shelf_task_fill=bool(fills),tonemapping=rig['tonemapping'],
+                counts=rig['counts'],
+                note='RTX auto-exposure already off; calibrate via intensity_scale only')
+
+
 def build(stage, config, output, *, view='source'):
     from pxr import Gf,UsdGeom,UsdPhysics
     import trimesh
@@ -81,6 +121,7 @@ def build(stage, config, output, *, view='source'):
             textures[marker['id']]=path
     paths=author_camera_design(stage,design,parent_paths={'map':'/World','cart_chassis':'/ViewCart/chassis'},
                                marker_textures=textures)
+    lighting=_apply_light_rig(stage,design,view,config)
     # This is a new static optical test scene, not a physics mission state.
     for prim in stage.Traverse():
         if prim.HasAPI(UsdPhysics.RigidBodyAPI):
@@ -91,7 +132,7 @@ def build(stage, config, output, *, view='source'):
     camera=initialize_camera(paths[view],k,name='candidate_'+view)
     evidence=dict(evidence='static optical bench, dynamics disabled at initial composition',
         runtime_mission=False,view=view,actual_robot_collision_geometries=count,
-        full_store=True,cart_rails_and_camera_solids=True,
+        full_store=True,cart_rails_and_camera_solids=True,lighting=lighting,
         input_sha256={name:hashlib.sha256(Path(config[name]).read_bytes()).hexdigest()
                       for name in ('scenario','mobile_manifest','camera_config','store_usd')})
     (output/'view-setup.json').write_text(json.dumps(evidence,indent=2)+'\n')
