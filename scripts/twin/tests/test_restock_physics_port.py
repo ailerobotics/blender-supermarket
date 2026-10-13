@@ -11,6 +11,28 @@ from twin.restock.native_transport import ArmCommandGate
 from twin.restock_manipulation.cad_tool import ARM_JOINTS
 
 
+def test_cart_solver_tuning_preserves_physical_bodies_and_free_joints():
+    Usd=pytest.importorskip('pxr.Usd')
+    from pxr import UsdPhysics
+    from twin.mobile_assets import author_cart
+    from twin.restock.physics_setup import configure_cart_solver
+    stage=Usd.Stage.CreateInMemory()
+    cart=author_cart(stage)
+    before={(str(p.GetPath()),a.GetName()):a.Get() for p in stage.Traverse()
+            for a in p.GetAttributes() if a.HasAuthoredValueOpinion()}
+    joints={str(p.GetPath()):list(UsdPhysics.Joint(p).GetBody1Rel().GetTargets())
+            for p in stage.Traverse() if p.IsA(UsdPhysics.Joint)}
+    result=configure_cart_solver(stage,cart['root'])
+    assert len(result)==9
+    for (path,name),value in before.items():
+        assert stage.GetPrimAtPath(path).GetAttribute(name).Get()==value
+    for path,targets in joints.items():
+        joint=UsdPhysics.Joint(stage.GetPrimAtPath(path))
+        assert list(joint.GetBody1Rel().GetTargets())==targets and joint.GetJointEnabledAttr().Get()
+    assert not any(p.HasAPI(UsdPhysics.RigidBodyAPI) and UsdPhysics.RigidBodyAPI(p).GetKinematicEnabledAttr().Get()
+                   for p in stage.Traverse())
+
+
 def test_body_measurement_uses_isaac_wxyz_and_rejects_nonfinite_feedback():
     body=NS(get_world_pose=lambda:(np.array([2,3,.24]),np.array([2**-.5,0,0,2**-.5])),
             get_linear_velocity=lambda:np.zeros(3),get_angular_velocity=lambda:np.zeros(3))

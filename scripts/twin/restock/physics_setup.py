@@ -42,6 +42,31 @@ def inputs(config, scenario):
     return mobile,urdf,store,spec,tool,hashes
 
 
+def configure_cart_solver(stage, root):
+    """Increase constraint convergence for the 35 kg cage/0.25 kg caster forks.
+
+    Preserve all mass, inertia, friction, collision and free-wheel joint models.
+    Native measurements must still prove parking; this setting is not a brake.
+    """
+    from pxr import Usd,UsdPhysics,Sdf
+    prim=stage.GetPrimAtPath(root)
+    if not prim:
+        raise ValueError('cart root absent')
+    bodies=[]
+    for body in Usd.PrimRange(prim):
+        if body.HasAPI(UsdPhysics.RigidBodyAPI):
+            body.AddAppliedSchema('PhysxRigidBodyAPI')
+            before={}
+            for name,value in (('solverPositionIterationCount',64),('solverVelocityIterationCount',16)):
+                attr=body.CreateAttribute('physxRigidBody:'+name,Sdf.ValueTypeNames.Int,False)
+                before[name]=attr.Get()
+                attr.Set(value)
+            bodies.append(dict(path=str(body.GetPath()),before=before,position_iterations=64,velocity_iterations=16))
+    if len(bodies)!=9:
+        raise ValueError('expected cage, four forks and four wheels')
+    return bodies
+
+
 @dataclass
 class PhysicsAssembly:
     world: object
@@ -101,6 +126,7 @@ def assemble(*, app, config, scenario, output):
     author_native_gripper(stage,tool=tool,tool0_path=paths['ur_tool0'],
         body_path=paths['suction_cups'],gripper_path='/RestockPanelGripper')
     cart_path=composition['assets']['cart']['body']
+    solver=configure_cart_solver(stage,composition['assets']['cart']['root'])
     controller=MobileController(stage,paths['base_link'],cart_path,
         [paths['left_wheel_joint'],paths['right_wheel_joint']],spec=spec)
     scenes=[str(p.GetPath()) for p in stage.Traverse() if p.IsA(UsdPhysics.Scene)]
@@ -135,6 +161,7 @@ def assemble(*, app, config, scenario, output):
         command_gate=gate)
     stage.GetRootLayer().Save()
     evidence=dict(input_sha256=hashes,composition=composition,paths=paths,
+        cart_solver=solver,
         initialization='declared initial joint state before mission; never runtime teleport',
         physics_verified=False,camera_mapper_ready=False)
     (output/'assembly.json').write_text(json.dumps(evidence,indent=2)+'\n')
