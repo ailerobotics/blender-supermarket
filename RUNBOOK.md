@@ -589,3 +589,37 @@ Cross-interpreter CPU contract smoke (neither interpreter boots a ROS graph or G
 the sourced host Jazzy Python3.12 executable. This verifies fixture-only schema
 roundtrip and actual host ROS message serialization; it does not test DDS or
 OmniGraph. Runtime server and attachment requirements are in the manipulation doc.
+
+## 14. Controlled static-scene navigation mapper commissioning
+
+This is an uncommissioned integration handoff, not a moving-mission readiness
+claim. Use the existing task plugin environment selected by `RESTOCK_PLUGIN_ENV`.
+Set a unique ROS-safe `NAV_GENERATION`, actual camera count `NAV_CAMERA_COUNT`,
+and measured complete transport height in metres `NAV_TRANSPORT_HEIGHT`.
+
+CPU plan only (no ROS node or GPU):
+
+```bash
+source "${RESTOCK_PLUGIN_ENV:?existing task plugin environment required}"
+python3 scripts/launch_navigation_mapper.py \
+  --generation "${NAV_GENERATION:?}" --camera-count "${NAV_CAMERA_COUNT:?}" \
+  --transport-height "${NAV_TRANSPORT_HEIGHT:?}"
+```
+
+Only integration may append `--execute`, inside its existing bounded GPU launch
+with the resource checks and lock already held. This starts the navigation-only
+mapper in domain 88/loopback, not Nav2 or robot motion. The launch refuses other
+ROS domains/discovery settings. Keep generation-specific input publishers closed
+until empty-map evidence is established. Terminate only the exact task-owned
+process when reconstructing; never touch the parked manipulation mapper.
+
+Canonical output is `/restock_sim/navigation/nvblox_node/static_map_slice`;
+the plan prints generation-specific depth/CameraInfo inputs and native ESDF
+service. Feed registered, self-filtered native depth without manipulation target
+removal. Publish `/clock` and acquisition-time TF into stable `map`.
+
+Before accepting any wheel command, satisfy the evidence table and unresolved
+native API binding in [the temporal mapping contract](docs/navigation_temporal_mapping.md#executable-commissioning-handoff).
+The launch does not prove an empty generation, supply an incorporation ack,
+commission the epoch, or bypass unknown/stale/clearance checks. Integration must
+then demonstrate actual departure and blocked-aisle stop/replan.

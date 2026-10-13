@@ -67,9 +67,9 @@ pixel handling remain mapper input requirements. Self shadows are not cleared.
 adds NVIDIA's `nvblox::nav2::NvbloxCostmapLayer` while retaining unknown planning
 disabled and no reverse. A raw-slice actuator check remains necessary: maximum
 merging of Nav2 layers must not let static free cells erase unknown evidence.
-The selected host extraction did not contain the plugin package/library when
-inspected; matching package availability is a host handoff item, not proof that
-the configured plugin can load.
+The matching official 4.4.0 plugin is now delivered by the host lane with CPU
+symbol/loader checks. This removes the missing-package handoff; native plugin
+instantiation and costmap behavior remain unproven.
 
 The gate treats sentinel/nonfinite, out-of-map and occupied cells as STOP. For
 the 4.4 plugin's rounded lookup versus the message's documented corner origin,
@@ -115,6 +115,56 @@ and actual departure followed by blocked-aisle stop/replan. Integration owns
 those GPU checks. The parked `/restock_sim` mapper remains independent of
 `/restock_sim/navigation`. No system install, service change or GPU execution is performed
 by these modules.
+
+## Executable commissioning handoff
+
+`scripts/launch_navigation_mapper.py` prints a plan by default; `--execute`
+starts only a separate navigation mapper. Commands are in RUNBOOK §14. It uses
+the installed base nvblox YAML and stable-map/full-transport-height overrides,
+without station bounds, manipulation target removal or map loading. It checks
+the installed component and matching Nav2 plugin exports before constructing
+the real ROS launch description. Construction is CPU-only; execution belongs
+to integration under the existing GPU/resource guards.
+
+The generation argument names a requested new process, **not an empty-map
+acknowledgement**. Each generation has distinct depth/CameraInfo admission
+topics printed in the plan. Integration keeps these publishers closed until
+it has native empty-map evidence, then publishes only post-generation data.
+Use sensor-time registered depth and matching CameraInfo, SENSOR_DATA QoS,
+acquisition-time camera TF into `map`, `/clock`, and measured base/cart state.
+Remove only actual same-acquisition self hits; invalid pixels and occluded
+space remain unknown. No manipulation target-box mask feeds this mapper.
+
+The required host-to-gate evidence interface is:
+
+| Evidence | Required binding |
+| --- | --- |
+| Process generation | Exact task-owned mapper process, no map load, old process exit, native empty-state evidence before input admission; discard queued old output |
+| Required acquisition | Native sensor identity/sequence, simulation stamp, acquisition steady stamp and configured MapIdentity; register through `observe` |
+| Snapshot incorporation | Exact native slice content associated with that process generation and an actually integrated registered acquisition; pass through `DistanceSlice.from_message` and `accept` |
+| Clearance event | Hold motion/input, record event time, prove a new empty generation, admit strictly later acquisitions; preserve the original commissioning deadline |
+
+The native slice output topic stays canonical across processes and has no
+generation field. Input topic names alone cannot reject late output: integration
+must bind producer lifetime and flush/subscriber state before accepting a new
+generation. The supplied launcher does not manufacture that binding.
+
+**Actual upstream API limitation:** the installed `DistanceMapSlice` definition
+has no generation or documented acquisition-incorporation field. The installed
+`EsdfAndGradients` response stamps latest incorporated depth for its own returned
+grid; it supplies no identifier linking that grid to a separately published
+slice. Matching publication times, FIFO assumptions or a later successful ESDF
+call therefore cannot satisfy the snapshot binding above. The inspected host
+interface also offers no documented empty-generation acknowledgement. A native
+producer-side binding/empty-state observation must be established before calling
+the motion gate ready. This implementation adds no fake acknowledgement or
+timer-based substitute. Full-height unknown-column reduction must also be
+validated; merely increasing the configured slice height is not that evidence.
+
+CPU checks cover the station-independent plan, isolated generation input topics,
+argument rejection, real installed export lookup and construction of the ROS
+launch description. They do not instantiate the mapper or plugin, observe an
+empty map, prove incorporation, or demonstrate motion.
 
 Primary references: [NVIDIA4.4 mapper inputs and outputs](https://nvidia-isaac-ros.github.io/v/release-4.4/repositories_and_packages/isaac_ros_nvblox/isaac_ros_nvblox/api/topics_and_services.html),
 [NVIDIA4.4 Nav2 plugin](https://nvidia-isaac-ros.github.io/v/release-4.4/repositories_and_packages/isaac_ros_nvblox/nvblox_nav2/index.html),
