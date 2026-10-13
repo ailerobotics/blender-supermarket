@@ -164,8 +164,9 @@ initialization, rigid attachment and actual rendered commissioning.
 Shelf markers are authored as **geometry, not texture** (`marker_module_grid` +
 `marker_geometry_quads`): a white base quad (`<marker>`) plus one black quad per dark
 module in a `<marker>/Modules` child mesh, constant-colour with a passive (diffuse,
-non-emissive) white base — an emissive base glowed through the thin modules and washed the
-pattern in the native render,
+non-emissive) white base and truly matte materials (ior 1.0, metallic 0, roughness 1) —
+an emissive base glowed through the thin modules and a default-ior dielectric specular
+mirrored the white base/lamp at the grazing angle, both washing the pattern in the native render,
 same code content/size/pose as the textured marker but **no texture lookup** — the native
 RTX render never sampled the shelf markers' UsdUVTexture (flat grey) even though the
 identical source markers decoded (see

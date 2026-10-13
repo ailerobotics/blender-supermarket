@@ -135,6 +135,12 @@ def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
         assert not white_surf.GetInput('emissiveColor')   # passive white; emissive washed the pattern
         black_surf = UsdShade.Shader(stage.GetPrimAtPath(base + '/Modules/Material/Surface'))
         assert tuple(black_surf.GetInput('diffuseColor').Get()) == (0, 0, 0)
+        # Truly matte so the black does not mirror the white base / lamp at the grazing
+        # shelf angle (ior 1.0 -> zero dielectric specular; metallic 0; roughness 1).
+        for surf in (black_surf, white_surf):
+            assert surf.GetInput('ior').Get() == 1.0
+            assert surf.GetInput('metallic').Get() == 0.0
+            assert surf.GetInput('roughness').Get() == 1.0
 
     def centroid(path):
         prim = stage.GetPrimAtPath(path)

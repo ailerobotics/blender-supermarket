@@ -289,6 +289,13 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
         shader.CreateIdAttr('UsdPreviewSurface')
         shader.CreateInput('roughness',Sdf.ValueTypeNames.Float).Set(1.)
         shader.CreateInput('diffuseColor',Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
+        # Truly matte: a diffuseColor-0 UsdPreviewSurface still keeps metallic 0 + ior 1.5,
+        # whose dielectric Fresnel specular rises at grazing angles, so the black modules
+        # mirrored the bright white base and the lamp and floored at ~0.42 at the oblique
+        # shelf view. ior 1.0 gives F0=0 -> zero specular at every angle; metallic 0 keeps
+        # it dielectric. Matte the white base too so no glossy highlight blooms.
+        shader.CreateInput('metallic',Sdf.ValueTypeNames.Float).Set(0.)
+        shader.CreateInput('ior',Sdf.ValueTypeNames.Float).Set(1.)
         if emissive is not None:
             shader.CreateInput('emissiveColor',Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*emissive))
         material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(),'surface')
