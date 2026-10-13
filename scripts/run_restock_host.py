@@ -47,7 +47,7 @@ def main():
         service = LaunchService()
         service.include_launch_description(description(config))
         return service.run()
-    except (ValueError, KeyError, TypeError, OSError) as exc:
+    except (ValueError, KeyError, TypeError, OSError, ImportError) as exc:
         print(json.dumps({'errors': [str(exc)], 'runtime_verified': False}))
         return 2
 

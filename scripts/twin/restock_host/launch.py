@@ -17,6 +17,8 @@ def description(config):
     from launch_ros.descriptions import ComposableNode
 
     plan = launch_plan(config)
+    if plan['static_errors']:
+        raise ValueError('; '.join(plan['static_errors']))
     robot = plan['robot']
 
     def params(package, relative):

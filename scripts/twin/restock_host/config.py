@@ -1,7 +1,6 @@
 """CPU-only validation and a serializable launch contract for the real CAD robot."""
 import math
 import json
-import hashlib
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -168,15 +167,14 @@ def launch_plan(config):
     c = validate_config(config)
     static_errors = []
     if c.get('asset_report'):
-        report = json.loads(Path(c['asset_report']).read_text())
-        for kind in ('urdf', 'srdf', 'xrdf'):
-            expected = report.get('generated_sha256', {}).get('mobile.' + kind)
-            if expected != hashlib.sha256(Path(c[kind]).read_bytes()).hexdigest():
-                raise ValueError('asset_report does not match generated ' + kind)
-        overlaps = report.get('transport_sphere_overlaps', [])
+        from .evidence import validate_evidence
+        report = validate_evidence(c)
+        overlaps = report['transport_sphere_overlaps']
         if overlaps:
             static_errors.append(f'CAD sphere model has {len(overlaps)} nonexcluded transport overlaps; '
                                  'refine conservative coverage or prove narrow exclusions; see ' + c['asset_report'])
+    else:
+        static_errors.append('asset_report: current recomputable coverage evidence required; rerun generate_assets')
     return {
         'environment': ENV, 'namespace': NS, 'frame': FRAME, 'tcp': TCP,
         'robot': {k: c[k] for k in ('urdf', 'srdf', 'xrdf')},
