@@ -1,0 +1,16 @@
+string challenge
+restock_mapper_evidence/MapIdentity expected_identity
+---
+bool success
+string failure_reason
+string challenge
+string producer_nonce
+restock_mapper_evidence/MapIdentity identity
+string certificate_token
+string layer_inventory_identity
+restock_mapper_evidence/LayerCount[] layers
+bool admission_open
+uint64 ledger_count
+uint64 pending_sensor_work_count
+uint64 synchronized_steady_ns
+string steady_clock_domain

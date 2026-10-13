@@ -224,3 +224,47 @@ dependencies, not replaced with dummy servers. The source patterns reused are
 ur10-setup's `cams/cellmap/planner.launch.py`, MoveIt pipeline setup, and
 shelfbot_newgripper's `launch/perception_collision_world.launch.py` plus its
 `shelfbot/perception/object_segmenter.py`. Their hardware launchers are never run.
+
+## Navigation evidence producer binding (completes the slice/incorporation gate)
+
+The separate navigation mapper (`/restock_sim/navigation/nvblox_node`) must prove
+that every published map slice was produced by a known, empty-started generation
+and carries the exact incorporated-acquisition identity. The installed
+`nvblox_msgs/DistanceMapSlice` cannot carry that, so the native producer
+`restock_mapper_evidence::EvidenceProducerNode`
+(`native/restock_mapper_evidence/`, a subclass of the installed `nvblox::NvbloxNode`)
+emits a typed `restock_mapper_evidence/EvidenceSnapshot` that embeds the copied
+slice next to the full per-sensor ledger. Its CPU build/verification evidence is in
+`data/sim-restock-host-v2/producer-build-evidence.md`.
+
+How integration binds it at launch:
+
+1. Run the navigation component as `EvidenceProducerNode` (not the stock
+   `NvbloxNode`) in the `/restock_sim/navigation` namespace with node name
+   `nvblox_node`, so the canonical topic names are unchanged. Set evidence
+   parameters: `evidence.session/scene/cameras/localization` (the MapIdentity
+   revisions), `evidence.producer_nonce` (the unique empty-generation id — this is
+   the `generation` the consumer's `TemporalMap` is constructed with),
+   `evidence.steady_clock_domain` (the shared `CLOCK_MONOTONIC` domain string),
+   `evidence.slice_height`/`evidence.unknown_value`, and
+   `evidence.sensors:=['front=front_optical','rear=rear_optical', ...]`.
+2. Remap the base raw slice output (`static_map_slice`) to a dead internal topic
+   so only the certified envelope on `~/evidence_snapshot` carries geometry.
+3. Commission the generation over the services: `~/empty_generation` (measures all
+   maintained native layers + queues + watermarks with admission CLOSED and
+   returns the certificate), then `~/open_admission` (rechecks emptiness, echoes
+   the accepted acquisition cutoffs, admission OPEN — one-shot), then
+   `~/register_acquisition` per registered depth+CameraInfo before its frame is
+   integrated.
+4. The consumer decode is `twin.restock_host.evidence_bridge.envelope_from_message`
+   (reference): it maps the native message to navigation's
+   `twin.navigation.temporal.EvidenceEnvelope`, binding the embedded slice to the
+   **newest** ledger acquisition and converting stamps to float seconds. Feed it to
+   the landed `TemporalMap.accept_envelope`; the consumer republishes only the
+   validated embedded slice to the canonical Nav2 topic.
+
+`full_height_observation_verified` is always false here: provenance/emptiness only.
+The runtime binding (real frames advancing only their own ledger, GPU-copy/TF
+failures stopping, restart rejecting old output) is an integration GPU gate, not
+proven by this CPU build. Contract tests against the landed consumer are in
+`scripts/twin/tests/test_restock_host_evidence_binding.py`.
