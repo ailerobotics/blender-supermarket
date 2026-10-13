@@ -50,7 +50,7 @@ class RenderedCamera:
 
 
 class CameraRig:
-    def __init__(self, *, stage, specs, parent_paths, frequency=30):
+    def __init__(self, *, stage, specs, parent_paths, frequency=-1):
         from pxr import Gf,UsdGeom,UsdPhysics
         from isaacsim.sensors.camera import Camera
         self.stage,self.cameras,self.optical_paths=stage,{},{}
@@ -81,6 +81,10 @@ class CameraRig:
             prim=UsdGeom.Camera.Define(stage,camera_path)
             # USD camera looks -Z, +Y up. ROS optical parent is +Z, +Y down.
             prim.AddTransformOp().Set(Gf.Matrix4d(1,0,0,0,0,-1,0,0,0,0,-1,0,0,0,0,1))
+            # Acquire each actual render. Isaac5.1's elapsed-time >= 1/frequency
+            # decimator can skip a step due to floating-point accumulation.
+            # The mission recorder selects every second 60Hz physics render;
+            # native ROS helpers independently use frameSkipCount=1.
             camera=Camera(prim_path=camera_path,name='restock_'+name,
                           frequency=frequency,resolution=(k.width,k.height))
             camera.set_clipping_range(k.near,k.far)

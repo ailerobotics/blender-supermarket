@@ -111,13 +111,16 @@ def worker(output,ffmpeg):
         world.reset()
         camera=rig.cameras['smoke']
         for _ in range(90): world.step(render=True)
-        recorder=Recorder(output/'frames',fps=30)
+        recorder=Recorder(output/'frames',fps=60)
         last=None
+        observed_frames=[]
         for _ in range(180):
             world.step(render=True)
             frame=camera.get_current_frame(clone=True)
             identity=frame.get('rendering_frame')
             if identity is None or identity==last: continue
+            observed_frames.append(dict(rendering_frame=identity,rendering_time=float(frame['rendering_time'])))
+            write(output/'observed-frames.json',observed_frames)
             rgb=np.asarray(frame.get('rgb'))
             depth=np.asarray(frame.get('distance_to_image_plane'),float)
             if rgb.shape!=(360,640,4) or depth.shape!=(360,640):
@@ -131,8 +134,8 @@ def worker(output,ffmpeg):
                     rendering_frame=identity,rendering_time=float(frame['rendering_time']),
                     finite_depth_pixels=int(np.count_nonzero(np.isfinite(depth)&(depth>0)))))
             last=identity
-            if len(recorder.frames)>=30: break
-        if len(recorder.frames)<30: raise RuntimeError('insufficient real rendered frames')
+            if len(recorder.frames)>=60: break
+        if len(recorder.frames)<60: raise RuntimeError('insufficient real rendered frames')
         video=recorder.encode(output/'native-render-smoke.mp4',ffmpeg=ffmpeg)
         stage.GetRootLayer().Export(str(output/'smoke.usda'))
         libraries=sorted({line.split()[-1] for line in Path('/proc/self/maps').read_text().splitlines()
