@@ -1,0 +1,7 @@
+restock_mapper_evidence/MapIdentity identity
+string sensor
+string optical_frame
+uint64 sequence
+builtin_interfaces/Time acquisition_stamp
+uint64 acquisition_steady_ns
+string steady_clock_domain
