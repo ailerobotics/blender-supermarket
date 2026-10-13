@@ -8,7 +8,8 @@ from actual RGB-D. A config is not permission to move or a calibration result.
 from dataclasses import asdict
 import numpy as np
 
-from .geometry import Intrinsics, look_at, pose_matrix, usd_camera_transform
+from .geometry import (Intrinsics, look_at, pose_matrix, usd_camera_transform,
+                       project, transform_points, rigid)
 from .lights import camera_lamp
 
 
@@ -112,6 +113,96 @@ def camera_config(scenario, manifest):
                              'No commissioning pixels or inventory are provided by this config.'])
 
 
+def marker_module_grid(sku):
+    """The QR module matrix for ``sku`` with a 4-module white quiet border (0 == black).
+
+    Byte-identical content to ``write_carton_label``'s PNG (encode then a 4-module
+    border), so a geometry fiducial built from it carries the same code.
+    """
+    import cv2
+    grid = cv2.copyMakeBorder(cv2.QRCodeEncoder_create().encode(sku), 4, 4, 4, 4,
+                              cv2.BORDER_CONSTANT, value=255)
+    return grid
+
+
+def marker_geometry_quads(grid, half):
+    """White base quad and one black quad per dark module across a +/-``half`` footprint.
+
+    The pattern is laid over the same footprint the textured marker would occupy, so the
+    physical size and pose are unchanged; only the texture becomes geometry. Grid row 0 is
+    the top (+y). Returns (white_quad, black_quads) as marker-local XY corner lists.
+    """
+    module_count = grid.shape[0]
+    module = 2 * half / module_count
+    white_quad = [(-half, -half), (half, -half), (half, half), (-half, half)]
+    black_quads = []
+    for row in range(module_count):
+        for col in range(module_count):
+            if grid[row, col] == 0:
+                x0 = -half + col * module
+                y1 = half - row * module
+                black_quads.append([(x0, y1 - module), (x0 + module, y1 - module),
+                                    (x0 + module, y1), (x0, y1)])
+    return white_quad, black_quads
+
+
+def render_marker_at_camera(grid, half, world_from_optical, parent_from_marker,
+                            intrinsics, *, background=128, upscale=16):
+    """Render-faithful projection of a geometry fiducial into the camera image (CPU).
+
+    Projects the +/-``half`` white-quad world corners through the exact pinhole and warps
+    the module ``grid`` into a camera-size canvas, so decoding it proves the geometric
+    pattern reads at this pose and pixel size. Not a renderer: no lighting, material,
+    occlusion or noise, so a successful decode is necessary, not sufficient, for the
+    native render. Returns (canvas, in_fov).
+    """
+    import cv2
+    k = intrinsics
+    module_count = grid.shape[0]
+    # Grid-image corners TL,TR,BR,BL <-> marker-plane corners (row 0 is +y top).
+    local = np.array([[-half, half, .0002, 1], [half, half, .0002, 1],
+                      [half, -half, .0002, 1], [-half, -half, .0002, 1]])
+    world = (rigid(parent_from_marker) @ local.T).T[:, :3]
+    uv, valid = project(transform_points(np.linalg.inv(rigid(world_from_optical)), world), k)
+    canvas = np.full((k.height, k.width), background, np.uint8)
+    src = cv2.resize(grid.astype(np.uint8), (module_count * upscale, module_count * upscale),
+                     interpolation=cv2.INTER_NEAREST)
+    h, w = src.shape
+    homography = cv2.getPerspectiveTransform(
+        np.float32([[0, 0], [w, 0], [w, h], [0, h]]), uv.astype(np.float32))
+    # Area-sampled warp, as a real sensor integrates over each pixel footprint, so the
+    # oblique pattern is anti-aliased rather than point-sampled (point sampling aliases a
+    # crisp binary grid and understates decodability).
+    cv2.warpPerspective(src, homography, (k.width, k.height), dst=canvas,
+                        flags=cv2.INTER_AREA, borderMode=cv2.BORDER_TRANSPARENT)
+    return canvas, bool(valid.all())
+
+
+def decode_marker_render(grid, half, world_from_optical, parent_from_marker, intrinsics,
+                         *, upscale=16):
+    """Render the geometry marker at the camera, rectify by its projected corners and decode.
+
+    A marker-registration pipeline detects the fiducial corners and rectifies before
+    decoding; this does the same from the known projection, so a correct decode proves the
+    geometric pattern carries its code at this pose and pixel size. (A bare auto-detector
+    is fragile on a strongly sheared QR; rectification is the faithful test.) Returns
+    (decoded_text, full_quad_in_fov).
+    """
+    import cv2
+    canvas, in_fov = render_marker_at_camera(grid, half, world_from_optical,
+                                             parent_from_marker, intrinsics, upscale=upscale)
+    local = np.array([[-half, half, .0002, 1], [half, half, .0002, 1],
+                      [half, -half, .0002, 1], [-half, -half, .0002, 1]])
+    world = (rigid(parent_from_marker) @ local.T).T[:, :3]
+    uv, _ = project(transform_points(np.linalg.inv(rigid(world_from_optical)), world), intrinsics)
+    side = grid.shape[0] * upscale
+    homography = cv2.getPerspectiveTransform(
+        uv.astype(np.float32), np.float32([[0, 0], [side, 0], [side, side], [0, side]]))
+    frontal = cv2.warpPerspective(canvas, homography, (side, side), flags=cv2.INTER_AREA)
+    text, _, _ = cv2.QRCodeDetector().detectAndDecode(cv2.cvtColor(frontal, cv2.COLOR_GRAY2BGR))
+    return text, in_fov
+
+
 def author_camera_design(stage, config, *, parent_paths, marker_textures):
     """Author actual cameras/collision mounts and physically printed QR planes.
 
@@ -147,8 +238,54 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
         camera.CreateVerticalApertureAttr(20.*k.height/k.fy)
         camera.CreateClippingRangeAttr(Gf.Vec2f(k.near,k.far))
         paths[name] = str(camera.GetPath())
+    def constant_material(matpath, mesh_prim, color, emissive=None):
+        material = UsdShade.Material.Define(stage,matpath)
+        shader = UsdShade.Shader.Define(stage,matpath+'/Surface')
+        shader.CreateIdAttr('UsdPreviewSurface')
+        shader.CreateInput('roughness',Sdf.ValueTypeNames.Float).Set(1.)
+        shader.CreateInput('diffuseColor',Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
+        if emissive is not None:
+            shader.CreateInput('emissiveColor',Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*emissive))
+        material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(),'surface')
+        UsdShade.MaterialBindingAPI.Apply(mesh_prim).Bind(material)
+
+    def quad_mesh(prim_path,quads,z,parent_from_marker):
+        mesh = UsdGeom.Mesh.Define(stage,prim_path)
+        points,counts,indices = [],[],[]
+        for quad in quads:
+            start = len(points)
+            points += [(x,y,z) for (x,y) in quad]
+            counts.append(4); indices += [start,start+1,start+2,start+3]
+        mesh.CreatePointsAttr(points); mesh.CreateFaceVertexCountsAttr(counts)
+        mesh.CreateFaceVertexIndicesAttr(indices); mesh.CreateSubdivisionSchemeAttr('none')
+        transform(mesh.GetPrim(),parent_from_marker)
+        return mesh
+
     for name,support in config['supports'].items():
         for index,marker in enumerate(support['markers']):
+            base = path(support['parent'],name+'_marker_'+str(index))
+            if name == 'shelf':
+                # Geometry fiducial (no texture): the native render never sampled the shelf
+                # markers' texture, so build the pattern from a white base quad plus one
+                # black quad per dark module. Same footprint/pose as the textured marker
+                # (size read from the printed PNG), constant-colour with emissive white so
+                # it reads in or out of the lamp; black modules sit a sliver above the base.
+                import cv2
+                texture = Path(marker_textures[marker['id']]).resolve()
+                pixels = cv2.imread(str(texture))
+                code,corners,_ = cv2.QRCodeDetector().detectAndDecode(pixels)
+                if code != marker['id'] or corners is None:
+                    raise ValueError('marker texture does not decode to its physical identity')
+                edge = np.linalg.norm(np.roll(corners.reshape(4,2),-1,axis=0)-corners.reshape(4,2),axis=1)
+                half = marker['side_m']*pixels.shape[0]/edge.mean()/2
+                grid = marker_module_grid(marker['id'])
+                white_quad,black_quads = marker_geometry_quads(grid,half)
+                white = quad_mesh(base,[white_quad],.0002,marker['parent_from_marker'])
+                constant_material(base+'/Material',white.GetPrim(),(1,1,1),emissive=(1,1,1))
+                if black_quads:
+                    black = quad_mesh(base+'/Modules',black_quads,.0006,marker['parent_from_marker'])
+                    constant_material(base+'/Modules/Material',black.GetPrim(),(0,0,0))
+                continue
             texture = Path(marker_textures[marker['id']]).resolve()
             if not texture.is_file():
                 raise ValueError('printed marker texture missing')
