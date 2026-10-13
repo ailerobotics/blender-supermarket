@@ -69,16 +69,19 @@ def camera_config(scenario, manifest):
     # (omnidirectional) avoids any aim/orientation failure; intensity shares the store
     # rig tuning so one intensity_scale drives it and the fixtures together. Its housing
     # is collision geometry and must be included in navigation/planning.
-    # Emitter dropped below the lens, into the slot mouth (z below the ~0.97 m shelf
-    # tier), so its light physically reaches the recessed markers on the same clear
-    # sightline the camera uses; the body/housing stays above-and-behind, out of both
-    # the camera frustum and the emitter->marker rays (an emitter co-located with the
-    # housing above the tier was occluded by its own housing and rendered 4/255).
+    # Aimed DISK ring lamp at the slot mouth, below the ~0.97 m shelf tier, emission
+    # pointed at the marker centroid. A disk is an area light sampled like the store
+    # RectLights (which illuminate the native RTX render); a tiny SphereLight at the
+    # same nits emitted ~nothing there (see shelf-lamp-native-diagnosis.md). The emitter
+    # stays below the tier and on the clear sightline the camera uses; the body/housing
+    # stays above-and-behind, out of the camera frustum and the emitter->marker rays.
     # plan_restock_lighting.py ray-tests emitter->marker against both housings, the
-    # shelf tiers and products; keep both rays clear if this placement is retuned.
+    # shelf tiers and products in the rendered store; keep both rays clear if retuned.
     shelf_lamp_emitter = shelf+[-.50,0,.17]
+    shelf_marker_centroid = shelf+[-.42,0,0]
     shelf_lamp_body = shelf+[-.55,0,.33]
-    lamps.append(camera_lamp('shelf','map',shelf_lamp_emitter,radius=.03,power_w=6.))
+    lamps.append(camera_lamp('shelf','map',shelf_lamp_emitter,kind_type='disk',
+                             aim_at=shelf_marker_centroid,radius=.06,power_w=8.))
     solid('shelf_lamp_housing','map',shelf_lamp_body,[.04,.04,.03])
 
     def support(name,parent,center,yaw,marker_centers,witness_center,witness_size):
