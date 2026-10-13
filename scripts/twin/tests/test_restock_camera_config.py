@@ -71,3 +71,32 @@ def test_authoring_retains_physical_mounts_and_metric_printed_markers(tmp_path):
     qr_fraction = np.linalg.norm(corners[0,1]-corners[0,0])/texture.shape[0]
     assert code == 'support:cart:0'
     assert np.ptp(points[:,0])*qr_fraction == pytest.approx(.06,abs=1e-6)
+
+
+def test_marker_material_is_rtx_robust_emissive_qr(tmp_path):
+    pytest.importorskip('pxr')
+    pytest.importorskip('cv2')
+    from pxr import Usd, UsdGeom, UsdShade
+    from scripts.twin.restock_manipulation.isaac_sensors import write_carton_label
+    config = design()
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.Xform.Define(stage, '/World'); UsdGeom.Xform.Define(stage, '/Cart')
+    textures = {}
+    for support in config['supports'].values():
+        for marker in support['markers']:
+            path = tmp_path / (marker['id'].replace(':', '_') + '.png')
+            write_carton_label(marker['id'], path)
+            textures[marker['id']] = path
+    author_camera_design(stage, config, parent_paths={'map': '/World', 'cart_chassis': '/Cart'},
+                         marker_textures=textures)
+    # The native shelf render showed the diffuse QR texture unapplied (flat grey); the
+    # fiducial now also self-illuminates via emissive and declares its colour space so it
+    # decodes independent of lighting/exposure and a diffuse-only distillation quirk.
+    for name in ('source', 'shelf', 'cart'):
+        base = ('/Cart' if name == 'cart' else '/World') + f'/RestockCamera_{name}_marker_0'
+        tex = UsdShade.Shader(stage.GetPrimAtPath(base + '/Material/Texture'))
+        assert tex.GetInput('sourceColorSpace').Get() == 'sRGB'
+        surf = UsdShade.Shader(stage.GetPrimAtPath(base + '/Material/Surface'))
+        for channel in ('diffuseColor', 'emissiveColor'):
+            srcs = surf.GetInput(channel).GetConnectedSources()
+            assert srcs and srcs[0][0].source.GetPrim().GetName() == 'Texture'

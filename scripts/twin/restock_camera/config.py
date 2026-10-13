@@ -184,8 +184,17 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
             tex = UsdShade.Shader.Define(stage,base+'/Material/Texture')
             tex.CreateIdAttr('UsdUVTexture')
             tex.CreateInput('file',Sdf.ValueTypeNames.Asset).Set(str(texture))
+            # Declare the colour space so the RTX/MDL distiller samples the PNG rather than
+            # falling back to a flat colour; the native shelf render showed the diffuse
+            # texture unapplied (flat grey) with identical authoring that works for source.
+            tex.CreateInput('sourceColorSpace',Sdf.ValueTypeNames.Token).Set('sRGB')
             tex.CreateInput('st',Sdf.ValueTypeNames.Float2).ConnectToSource(reader.ConnectableAPI(),'result')
             shader.CreateInput('diffuseColor',Sdf.ValueTypeNames.Color3f).ConnectToSource(tex.ConnectableAPI(),'rgb')
+            # Also drive emissive from the same QR texture so the fiducial pattern renders
+            # self-lit: white modules emit, black emit nothing. This makes the code decode
+            # independent of scene lighting/exposure and of a diffuse-only distillation
+            # quirk, while the diffuse path (unchanged) keeps the working markers working.
+            shader.CreateInput('emissiveColor',Sdf.ValueTypeNames.Color3f).ConnectToSource(tex.ConnectableAPI(),'rgb')
             material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(),'surface')
             UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(material)
     return paths
