@@ -38,10 +38,63 @@ def _apply_light_rig(stage, design, view, config):
     rig=light_rig(tuning)
     authored=author_light_rig(stage,rig,parent_path='/World',tuning=tuning)
     lamps=author_camera_lamps(stage,design,parent_paths={'map':'/World','cart_chassis':'/ViewCart/chassis'},tuning=tuning)
-    return dict(intensity_scale=tuning.intensity_scale,disabled_exported_lights=disabled,
-                authored_fixtures=len(authored),dome_fill=bool(rig.get('dome',{}).get('enabled')),
-                camera_lamps=sorted(lamps),tonemapping=rig['tonemapping'],counts=rig['counts'],
-                note='camera-mounted ring lamp(s) from config lamps; RTX auto-exposure off; calibrate via intensity_scale only')
+    diag=_apply_lighting_diagnostics(stage,config,lamps)
+    out=dict(intensity_scale=tuning.intensity_scale,disabled_exported_lights=disabled,
+             authored_fixtures=len(authored),dome_fill=bool(rig.get('dome',{}).get('enabled')),
+             camera_lamps=sorted(lamps),tonemapping=rig['tonemapping'],counts=rig['counts'],
+             note='camera-mounted ring lamp(s) from config lamps; RTX auto-exposure off; calibrate via intensity_scale only')
+    if diag:
+        out['diagnostic']=diag
+    return out
+
+
+def _apply_lighting_diagnostics(stage, config, config_lamp_paths):
+    """Integration-owned native lighting diagnostics (no camera-owned edits).
+
+    Driven by optional config knobs so the shelf-support darkness can be isolated:
+    - diag_hide_prim_substrings: make matching imageable prims invisible for the
+      render (e.g. the lamp/camera housing cubes) to test housing occlusion.
+    - diag_extra_lamp {center,radius,nits}: author one extra UsdLux SphereLight at
+      an explicit world point (e.g. 0.30 m in front of the marker face, outside
+      meshes) to test whether a clear, unoccluded emitter lights the support.
+    - diag_disable_config_lamps: hide the config camera lamp(s) so only the extra
+      lamp emits (isolates the moved-lamp effect).
+    Returns the applied diagnostic record, or None if no knob is set.
+    """
+    from pxr import Gf, UsdGeom, UsdLux
+    hide_subs=config.get('diag_hide_prim_substrings')
+    extra=config.get('diag_extra_lamp')
+    if not hide_subs and not extra:
+        return None
+    record={}
+    if hide_subs:
+        hidden=[]
+        for prim in stage.Traverse():
+            path=str(prim.GetPath())
+            if any(s in path for s in hide_subs):
+                img=UsdGeom.Imageable(prim)
+                if img:
+                    img.MakeInvisible()
+                    hidden.append(path)
+        record['hidden_prims']=hidden
+    if config.get('diag_disable_config_lamps'):
+        for p in config_lamp_paths.values():
+            lp=stage.GetPrimAtPath(p)
+            if lp:
+                UsdGeom.Imageable(lp).MakeInvisible()
+        record['config_lamps_hidden']=sorted(config_lamp_paths.values())
+    if extra:
+        path='/World/RestockLamp_diag'
+        sphere=UsdLux.SphereLight.Define(stage,path)
+        sphere.CreateRadiusAttr(float(extra['radius']))
+        sphere.CreateColorAttr(Gf.Vec3f(1,0.98,0.95))
+        sphere.CreateIntensityAttr(float(extra.get('nits',101321.19)))
+        sphere.CreateNormalizeAttr(False)
+        UsdGeom.Xformable(sphere.GetPrim()).ClearXformOpOrder()
+        UsdGeom.Xformable(sphere.GetPrim()).AddTranslateOp().Set(Gf.Vec3d(*[float(c) for c in extra['center']]))
+        record['extra_lamp']=dict(path=path,center=list(extra['center']),radius=float(extra['radius']),
+                                  nits=float(extra.get('nits',101321.19)))
+    return record
 
 
 def build(stage, config, output, *, view='source'):
