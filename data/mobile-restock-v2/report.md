@@ -1,6 +1,7 @@
 # Mobile restocking integration checkpoint
 
-Status: incomplete, simulator execution held pending explicit release. No autonomous physics cycle or MP4 has
+Status: incomplete. Guarded GPU use was explicitly authorized on October 13;
+native boot/render validation is beginning. No autonomous physics cycle or mission MP4 has
 been produced. The current branch contains CPU mission/inventory infrastructure;
 the landed mobile/cart, schema-2 environment, articulated navigation and CAD
 manipulation components are integrated from origin/main.
@@ -23,7 +24,7 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-279 combined CPU tests and 14 subtests pass with four dependency skips after all landed host/camera/navigation corrections, with the installed Isaac USD libraries exposed
+329 combined CPU tests and 14 subtests pass with five optional skips after the landed October 13 host collision refinement and integration updates, with the installed Isaac USD libraries exposed
 without booting Kit (including mission/runtime, recording, stock-scene and environment tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
 Reproduction is in RUNBOOK section 11. The shared firstmate interface contract was
@@ -235,9 +236,12 @@ gripper/drive assembly for the guarded app; it is not yet simulator-tested.
 Host worker owns CAD SRDF/XRDF generation and coverage/hash evidence. Its task-local
 ROS overlay imports and component dependency checks passed; this does not prove
 GPU planner/mapper startup. Host, camera and navigation corrections are now merged.
-Exact CAD SRDF/XRDF assets exist, but strict host preflight rejects ten nonexcluded
-transport-pose sphere overlaps; coverage refinement or narrowly justified exclusions
-are still required. Remaining inputs include a current-scenario camera configuration with sensed support
+The October 13 host refinement is merged: 1,930 conservative CAD spheres have
+zero nonexcluded transport overlaps, and seven full-motion separation proofs
+justify narrow exclusions. Strict host `--check` passes against the current
+generated inputs and installed ROS/NVIDIA overlay; GPU capacity and actual
+trajectories remain unverified. The original ten-overlap report is historical.
+Remaining inputs include a current-scenario camera configuration with sensed support
 and clearance, camera housing collision validation, mapper reset/incorporation
 acknowledgements, and the complete sensor-binding mission factory. Camera work
 currently reports loaded-support occlusion and insufficient shelf support ROI;
@@ -247,6 +251,31 @@ The camera lane's bounded 18-view search found four side-view candidates with fu
 support/label contract. Separate sensor-derived support and label masks, physical
 brackets and all-link clearance are required. A loaded cart still blocks fresh
 support sensing; the helper does not infer an unseen plane through the load.
+
+October 13 integration adds explicit host-interpreter/setup validation and owned
+ROS-process sessions, native camera optical TF registration, global host-stop
+checking outside manipulation, and actual mesh resolution before URDF import.
+Independent inventory verification requires two new post-transfer sensor scans,
+including full cart vacancy and matching shelf identity. A depth-volume checker
+refuses any occupied, invalid, occluded or unobserved cell; it requires separate
+fresh support-plane evidence and a real mapper incorporation timestamp. These
+modules pass CPU tests; native camera/ROS/physics execution is still untested.
+
+Two newly identified runtime constraints remain open. First, the original lidar
+column starts inside the chassis. The navigation follow-up finds unknown sectors
+even with corrected height or an outboard mast when actual robot/cart collision
+bounds are included. Its multi-origin stopping-sweep coverage work is not yet
+landed. The passing map-only route fixture proves geometric routing, not usable
+physical range-sensor coverage; the runtime must stop with unobserved space.
+Second, the camera follow-up's dated rigid-support baseline currently expires in
+120 seconds. The recorded IK branches at the existing 0.15 rad/s command limit
+need approximately 52.53 seconds for collection and 52.55 seconds for shelf
+transfer; adding the 52.95-second outbound fixture gives 158.03 seconds before
+commissioning, reset, acceleration or planning overhead. This is a timing
+estimate, not a measured or globally optimal trajectory. Baseline lifetime must
+be reconciled explicitly; old acquisition timestamps must never be refreshed.
+Camera registration/commissioning and physical mount validation remain in the
+camera lane and are not treated as already merged.
 
 Resume CPU validation from the isolated worktree (runtime config remains in the
 task artifact directory, with machine paths kept out of reusable source):

@@ -85,6 +85,7 @@ class NativeTransport:
             if not stage.GetPrimAtPath(path):
                 raise ValueError('native transport frame missing: '+path)
         self.og,self.root,self.command_gate=og,root,command_gate
+        self.stage,self.tf_paths=stage,list(tf_paths)
         keys=og.Controller.Keys
         nodes=[('tick','omni.graph.action.OnImpulseEvent'),
                ('context','isaacsim.ros2.bridge.ROS2Context'),
@@ -105,6 +106,21 @@ class NativeTransport:
                                 ('context.outputs:context',name+'.inputs:context')])
         og.Controller.edit({'graph_path':root,'evaluator_name':'execution'},
             {keys.CREATE_NODES:nodes,keys.SET_VALUES:values,keys.CONNECT:connections})
+
+    def add_frames(self, paths):
+        """Include actual optical mount prims after camera construction.
+
+        TF stays relative to the measured moving arm base; cart-mounted frames
+        retain their independently articulated pose. No object/support poses
+        are published as perceived measurements.
+        """
+        from pxr import Sdf
+        paths=list(paths)
+        if any(not self.stage.GetPrimAtPath(path) for path in paths):
+            raise ValueError('native optical TF frame missing')
+        self.tf_paths=list(dict.fromkeys([*self.tf_paths,*paths]))
+        self.og.Controller.attribute(self.root+'/tf.inputs:targetPrims').set(
+            [Sdf.Path(path) for path in self.tf_paths])
 
     def tick(self, now):
         og=self.og

@@ -10,12 +10,28 @@ import json
 import math
 import os
 import time
+import xml.etree.ElementTree as ET
 
 from .types import Observation, Sensors, Target
 
 from .cad_tool import ARM_JOINTS
 
 JOINTS = ARM_JOINTS
+
+
+def planner_velocity_scale(urdf, *, command_limit=.15):
+    """Keep planner URDF-scaled speeds below the simulator's absolute gate.
+
+    Reserve ten percent for interpolation; the executor still checks exact cubic
+    extrema and rejects any overshoot. This is not trajectory certification.
+    """
+    robot=ET.parse(urdf).getroot()
+    rates={joint.attrib['name']:float(joint.find('limit').attrib['velocity'])
+           for joint in robot.findall('joint') if joint.attrib['name'] in JOINTS}
+    if (set(rates)!=set(JOINTS) or not math.isfinite(command_limit) or command_limit<=0
+            or any(not math.isfinite(v) or v<=0 for v in rates.values())):
+        raise ValueError('actual six-joint URDF velocity limits required')
+    return min(.05,.9*command_limit/max(rates.values()))
 
 
 def require_sim_domain():
@@ -55,7 +71,7 @@ def validate_trajectory(trajectory, start, limits):
 class RosMotionPort:
     def __init__(self, node, *, joint_limits, payload_sync, emergency_stop,
                  group='ur_manipulator', tcp='gripper_pad_tcp', namespace='/restock_sim',
-                 pipeline='isaac_ros_cumotion', timeout=25.0):
+                 pipeline='isaac_ros_cumotion', timeout=25.0, velocity_scale=.04):
         require_sim_domain()
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
             raise RuntimeError('node must use domain 88 and simulation clock')
@@ -66,11 +82,14 @@ class RosMotionPort:
             raise ValueError('six finite URDF joint-limit pairs required')
         if not callable(payload_sync) or not callable(emergency_stop):
             raise ValueError('payload collision acknowledgement and stop callbacks required')
+        if not math.isfinite(velocity_scale) or not 0<velocity_scale<=.05:
+            raise ValueError('bounded planner velocity scaling required')
         from rclpy.action import ActionClient
         from moveit_msgs.action import MoveGroup, ExecuteTrajectory
         from moveit_msgs.srv import GetPositionIK
         self.node, self.group, self.tcp = node, group, tcp
         self.pipeline, self.limits, self.timeout = pipeline, joint_limits, timeout
+        self.velocity_scale=velocity_scale
         self.payload_sync, self.emergency_stop = payload_sync, emergency_stop
         self.ik = node.create_client(GetPositionIK, namespace + '/compute_ik')
         self.plan = ActionClient(node, MoveGroup, namespace + '/move_action')
@@ -136,7 +155,7 @@ class RosMotionPort:
         req.pipeline_id=self.pipeline
         req.allowed_planning_time=5.
         req.num_planning_attempts=1
-        req.max_velocity_scaling_factor=.05
+        req.max_velocity_scaling_factor=self.velocity_scale
         req.max_acceleration_scaling_factor=.05
         req.start_state.joint_state.name=list(JOINTS)
         req.start_state.joint_state.position=list(self.start)
@@ -181,7 +200,7 @@ class RosMotionPort:
             req.group_name, req.pipeline_id = self.group, self.pipeline
             req.allowed_planning_time = 5.0
             req.num_planning_attempts = 1
-            req.max_velocity_scaling_factor = .05
+            req.max_velocity_scaling_factor = self.velocity_scale
             req.max_acceleration_scaling_factor = .05
             req.start_state.joint_state.name = list(JOINTS)
             req.start_state.joint_state.position = list(self.start)
@@ -204,6 +223,13 @@ class RosMotionPort:
                 raise RuntimeError('planning failed')
             trajectory = result.result.planned_trajectory
             validate_trajectory(trajectory.joint_trajectory, self.start, self.limits)
+            end=trajectory.joint_trajectory.points[-1].time_from_start
+            duration=end.sec+end.nanosec*1e-9
+            if duration>110.:
+                raise ValueError('trajectory exceeds bounded execution budget')
+            # Planning and physical execution have different clocks/budgets.
+            # Do not spend the execution allowance waiting for IK/planning.
+            self.deadline=time.monotonic()+max(self.timeout,duration+5.)
             goal = ExecuteTrajectory.Goal()
             goal.trajectory = trajectory
             self._send(self.execute, goal, 'execute_accept')

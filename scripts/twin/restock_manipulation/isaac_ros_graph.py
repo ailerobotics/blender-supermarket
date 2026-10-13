@@ -106,17 +106,29 @@ class IsaacRosGraph:
     def publish_sensors(self, sensors):
         self._publish('sensors',json.dumps(asdict(sensors),allow_nan=False))
 
-    def poll(self):
-        """Call every physics step, including steps without a fresh image."""
+    def check_health(self):
+        """Check global stop every physics tick without consuming job replies.
+
+        Integration also calls this while navigating or warming the mapper,
+        when the manipulation state machine does not call poll().
+        """
         if self.faulted:
             self.hold()
-            return {'status':'failed','reason':'explicit fault recovery required'}
+            raise RuntimeError('explicit fault recovery required')
         og = self.og
         if og.Controller.attribute(self.root+'/stop/wire.outputs:data').get():
             self.hold()
             self.faulted = True
             self.active = False
-            return {'status':'failed','reason':'host emergency stop'}
+            raise RuntimeError('host emergency stop')
+
+    def poll(self):
+        """Call every physics step, including steps without a fresh image."""
+        try:
+            self.check_health()
+        except RuntimeError as exc:
+            return {'status':'failed','reason':str(exc)}
+        og=self.og
         raw = og.Controller.attribute(self.root+'/status/wire.outputs:data').get()
         result = None
         if raw and raw != self.last_status:

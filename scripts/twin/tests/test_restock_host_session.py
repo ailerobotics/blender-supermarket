@@ -9,7 +9,8 @@ from twin.restock.station import OwnedProcess
 
 def test_setup_paths_are_literal_and_environment_is_isolated(tmp_path):
     setup=tmp_path/'setup $(touch injected).bash'
-    setup.write_text('export HOST_OVERLAY_READY=yes\nexport PYTHONPATH=/host/messages\n')
+    setup.write_text('export HOST_OVERLAY_READY=yes\nexport PYTHONPATH=/host/messages\n'
+                    'export ROS_AUTOMATIC_DISCOVERY_RANGE=${ROS_AUTOMATIC_DISCOVERY_RANGE:-SUBNET}\n')
     env=host_environment([setup],{'PATH':os.defpath,'PYTHONPATH':'/isaac/python',
                                  'PYTHONHOME':'/isaac','BASH_ENV':'/unrequested/script'})
     assert env['HOST_OVERLAY_READY']=='yes'

@@ -9,7 +9,8 @@ from dataclasses import asdict
 import json
 import sys
 
-from .ros_adapter import RosMotionPort, RosTransferBridge, require_sim_domain, sensors_from_json
+from .ros_adapter import (RosMotionPort, RosTransferBridge, require_sim_domain,
+                          sensors_from_json,planner_velocity_scale)
 
 
 def contract_smoke():
@@ -69,7 +70,8 @@ def main():
     stop = node.create_publisher(Bool,'/restock_sim/manipulation/stop',10)
     payload = RosPayloadSync()
     motion = RosMotionPort(node,joint_limits=tool.arm_limits,payload_sync=payload,
-                           emergency_stop=lambda:stop.publish(Bool(data=True)))
+                           emergency_stop=lambda:stop.publish(Bool(data=True)),
+                           velocity_scale=planner_velocity_scale(args.urdf))
     controller = TransferController(motion,profiles,frame=tool.base_frame,
         phase_timeout=120.,pose_policy=WallCartonPolicy(args.shelfbot_root,tool,walls=config['walls']),
         transport_joints=transport_joints)

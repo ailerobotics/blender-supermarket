@@ -1,8 +1,9 @@
 {
-  "CPU tests": "279 passed, 14 subtests passed, 4 dependency skips after host/camera/navigation merge; no simulator execution",
+  "CPU tests": "329 passed, 14 subtests passed, 5 optional skips after October 13 host refinement and integration updates; native smoke beginning",
   "Mobile assets": "Landed source; real CAD/FK static preview",
   "Environment": "USD and offline composition PASS; static source renders",
-  "Physical autonomy": "NOT RUN; explicit simulator hold remains, task-local driver workaround under firstmate review",
-  "Navigation": "Merged corridor correction passes outbound/return at full .05+.10m margins, 798 obstacles, exact Y17.1 scenario; quasistatic CPU fixture only",
+  "Physical autonomy": "NOT RUN; guarded GPU use authorized October 13, native boot/render smoke beginning with task-local matching drivers",
+  "Navigation": "Full-margin geometric route fixture passes; actual self-occlusion leaves unknown sectors. Multi-origin observed-space correction is underway, not landed; no sensing-ready claim.",
+  "Host collision model": "Merged refinement: 1930 spheres, zero nonexcluded transport overlaps, seven full-motion exclusion proofs. Strict installed host preflight passes; native planner capacity untested.",
   "Handling geometry": "Side grasp: 16 IK poses solve using actual articulated arrival; no arm/tool overlap in conservative insertion sweeps. Support-contact bounds remain; transit/self collision/physics unverified."
 }

@@ -30,7 +30,9 @@ def host_environment(setup_files, launch_environment):
     scripts=[Path(p).resolve() for p in setup_files]
     if not scripts or any(not p.is_file() for p in scripts):
         raise ValueError('existing explicit host ROS setup files required')
-    env=dict(launch_environment)
+    # Seed isolation before setup scripts apply ROS's default SUBNET discovery.
+    # Reject an explicitly incompatible launch environment instead of hiding it.
+    env=isolated_environment(launch_environment)
     for key in ('PYTHONPATH','PYTHONHOME','VIRTUAL_ENV','CONDA_PREFIX','CONDA_DEFAULT_ENV',
                 'AMENT_PREFIX_PATH','CMAKE_PREFIX_PATH','COLCON_PREFIX_PATH','BASH_ENV','ENV'):
         env.pop(key,None)
