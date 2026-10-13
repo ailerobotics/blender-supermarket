@@ -310,6 +310,8 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
             counts.append(4); indices += [start,start+1,start+2,start+3]
         mesh.CreatePointsAttr(points); mesh.CreateFaceVertexCountsAttr(counts)
         mesh.CreateFaceVertexIndicesAttr(indices); mesh.CreateSubdivisionSchemeAttr('none')
+        # Double-sided so the module/base faces render regardless of winding vs the camera.
+        mesh.CreateDoubleSidedAttr(True)
         if parent_from_marker is not None:
             transform(mesh.GetPrim(),parent_from_marker)
         return mesh
@@ -346,7 +348,12 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
                     # it must not re-apply it (that double transform put the QR modules at
                     # twice the world coords, behind the camera, leaving only a blank white
                     # plane in the native render). Author the quads in marker-local coords.
-                    black = quad_mesh(base+'/Modules',black_quads,.0006,None)
+                    # Offset 2 mm in front of the base (base is at local z .0002) along the
+                    # marker normal toward the camera: at .0006 (0.4 mm) the base won the depth
+                    # test in the native RTX render (within the ray self-intersection epsilon)
+                    # so the modules never rendered and the "black" read the white base; 2 mm
+                    # clears that while the uniform in-plane shift does not corrupt the code.
+                    black = quad_mesh(base+'/Modules',black_quads,.0022,None)
                     constant_material(base+'/Modules/Material',black.GetPrim(),(0,0,0))
                 continue
             texture = Path(marker_textures[marker['id']]).resolve()

@@ -171,7 +171,9 @@ same code content/size/pose as the textured marker but **no texture lookup** —
 RTX render never sampled the shelf markers' UsdUVTexture (flat grey) even though the
 identical source markers decoded (see
 `data/sim-restock-camera-v2/shelf-marker-render-diagnosis.md`). The `Modules` child
-**inherits** the base's `parent_from_marker`, so it carries no transform of its own; an
+**inherits** the base's `parent_from_marker` (no transform of its own) and is offset 2 mm in
+front of the base along the marker normal (double-sided): at 0.4 mm the base won the RTX
+depth test and the modules never rendered; an
 earlier double transform put the modules at twice the world coordinates (behind the
 camera) and rendered only a blank white plane. Source and cart markers stay plain diffuse
 texture (no emissive — an emissive copy over-exposed the source markers natively).
