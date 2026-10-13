@@ -186,6 +186,14 @@ class Nav2Adapter:
         message.orientation.z=math.sin(pose[2]/2)
         message.orientation.w=math.cos(pose[2]/2)
 
+    def _safe_start(self,goal,coupled,goal_articulation):
+        # Thread the per-goal articulation tolerance to the safety controller so the
+        # NavigationBridge start(goal, coupled, goal_articulation=) contract holds.
+        if goal_articulation is None:
+            self.safe.start(goal,coupled)
+        else:
+            self.safe.start(goal,coupled,goal_articulation=goal_articulation)
+
     def initialize_pose(self,pose):
         from geometry_msgs.msg import PoseWithCovarianceStamped
         msg=PoseWithCovarianceStamped()
@@ -225,11 +233,11 @@ class Nav2Adapter:
         self.scan_pub.publish(msg)
         self.executor.spin_once(timeout_sec=0.0)
 
-    def start(self,goal,coupled):
+    def start(self,goal,coupled,*,goal_articulation=None):
         from nav2_msgs.action import NavigateToPose
         if self.goal_future is not None or self.goal_handle is not None:
             raise RuntimeError('cancel previous goal and wait for its result before starting another')
-        self.safe.start(goal,coupled)
+        self._safe_start(goal,coupled,goal_articulation)
         self.outcome=None; self.command=(0.0,0.0); self.command_stamp=-math.inf
         if not self.client.server_is_ready():
             self.outcome='nav2_unavailable'
@@ -338,12 +346,12 @@ class ArticulatedNav2Adapter(Nav2Adapter):
         self.pending=False
         self.stop_sent=False
 
-    def start(self,goal,coupled):
+    def start(self,goal,coupled,*,goal_articulation=None):
         if self.goal_future is not None or self.goal_handle is not None:
             raise RuntimeError('wait for previous action result before starting another')
         if not coupled:
             raise ValueError('use Nav2Adapter for an uncoupled mission')
-        self.safe.start(goal,coupled)
+        self._safe_start(goal,coupled,goal_articulation)
         self.outcome=None
         self.command=(0.0,0.0)
         self.command_stamp=-math.inf
