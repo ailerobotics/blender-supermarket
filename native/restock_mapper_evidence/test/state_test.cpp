@@ -14,7 +14,31 @@ void open(State& s) {
   s.admit("native-nonce", "challenge", id, {0,0,0}, true, true, 100, 1000);
 }
 int main() {
-  { auto s=fresh(); rejects([&]{ s.certify("c",id,{0,1},true,true); }); assert(s.phase()==State::Phase::Fault); }
+  // (1) An emptiness refusal is recoverable: it does NOT fault the one-shot producer
+  //     (stays Closed) and a genuinely-empty retry still certifies.
+  { auto s=fresh(); rejects([&]{ s.certify("c",id,{0,1},true,true); });
+    assert(s.phase()==State::Phase::Closed);
+    s.certify("c",id,{0,0},true,true); assert(s.phase()==State::Phase::Certified); }
+  // A genuine protocol violation (identity mismatch) still faults hard.
+  { auto s=fresh(); Identity other{"x","scene","cameras","localization"};
+    rejects([&]{ s.certify("c",other,{0},true,true); }); assert(s.phase()==State::Phase::Fault); }
+  // (2) Construction-baseline-aware emptiness: a nonzero baseline is "empty".
+  //     Allocation at or below baseline certifies; growth beyond it still refuses.
+  { auto s=fresh(); s.set_construction_baseline({5,3,0,0,0});
+    s.certify("c",id,{5,3,0,0,0},true,true); assert(s.phase()==State::Phase::Certified); }
+  { auto s=fresh(); s.set_construction_baseline({5,3,0,0,0});
+    s.certify("c",id,{4,2,0,0,0},true,true); assert(s.phase()==State::Phase::Certified); }
+  // A single layer growing beyond baseline (real depth integration) refuses, no fault.
+  { auto s=fresh(); s.set_construction_baseline({5,3,0,0,0});
+    rejects([&]{ s.certify("c",id,{6,3,0,0,0},true,true); });
+    assert(s.phase()==State::Phase::Closed); }
+  // A change in the reported layer set since construction is refused, not mis-indexed.
+  { auto s=fresh(); s.set_construction_baseline({5,3});
+    rejects([&]{ s.certify("c",id,{5,3,0},true,true); });
+    assert(s.phase()==State::Phase::Closed); }
+  // The baseline may only be recorded before certification.
+  { auto s=fresh(); s.certify("c",id,{0},true,true);
+    rejects([&]{ s.set_construction_baseline({0}); }); }
   { auto s=fresh(); rejects([&]{ s.certify("c",id,{0},false,true); }); }
   { auto s=fresh(); rejects([&]{ s.certify("c",id,{},true,true); }); }
   { auto s=fresh(); s.certify("c",id,{0},true,true); rejects([&]{s.admit("wrong","c",id,{0},true,true,1,1);}); }

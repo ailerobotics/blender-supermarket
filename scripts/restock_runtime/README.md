@@ -48,3 +48,17 @@ Publishing a first slice BOUND to an incorporation identity additionally needs
 the integration sensor+handshake driver (NitrosImage depth + `camera_info` +
 camera→`map` TF + `/clock`, plus EmptyGeneration → OpenAdmission →
 RegisterAcquisition); that is sensor/integration-owned and not driven here.
+
+## Guarded EmptyGeneration construction-baseline verification
+
+`scripts/verify_empty_baseline_gpu.py` (with `empty_baseline_probe.py`) holds the
+same exclusive GPU guard and launches the producer twice as fresh constructions to
+prove the construction-baseline emptiness fix: `EmptyGeneration` ACCEPTED on a
+freshly-constructed map with the per-layer `LayerCount` baseline reported (a fresh
+nvblox layer reports 2048 preallocated blocks/layer, so "empty" is zero
+sensor-observed voxels, not zero allocated blocks), then REFUSED after one synthetic
+depth frame is actually integrated — without faulting the one-shot producer. Two
+instances are used because a successful EmptyGeneration transitions the producer to
+`Certified`, which correctly locks out a second probe. The synthetic depth is a
+FIXTURE; this is a launch/measurement check, never commissioning. Report:
+`data/sim-restock-host-v2/empty-baseline-report.md`.
