@@ -2,11 +2,13 @@
 """CPU proof that the geometry shelf fiducials decode at the shelf camera; never a render.
 
 The native render never sampled the shelf markers' texture, so they are authored as
-geometry (a white base quad plus one black quad per dark module). This renders each
-geometry fiducial through the exact pinhole at the shelf camera pose and pixel size,
-rectifies it by its projected corners (as a registration pipeline does) and decodes it.
-A decode proves the geometric pattern carries its code at this pose/size; it is not a
-renderer (no lighting, material, occlusion or noise), so it is necessary, not sufficient.
+geometry (a white base quad plus one black quad per dark module). This AUTHORS the markers
+into a USD stage and decodes them from the composed world-space mesh vertices projected
+through the exact shelf camera — reading the authored geometry, not the design model, so an
+authoring fault (e.g. the black-module child mesh double-applying its parent transform,
+which put the pattern behind the camera and rendered a blank white plane) is caught. It is
+not a renderer (no lighting, material, occlusion or noise), so a decode is necessary, not
+sufficient, for the native render.
 """
 import argparse
 import hashlib
@@ -17,9 +19,9 @@ import tempfile
 import cv2
 import numpy as np
 
-from twin.restock_camera.config import (camera_config, marker_module_grid,
-                                        decode_marker_render)
-from twin.restock_camera.geometry import Intrinsics, project, transform_points
+from twin.restock_camera.config import (camera_config, author_camera_design,
+                                        decode_authored_marker)
+from twin.restock_camera.geometry import Intrinsics
 from twin.restock_manipulation.isaac_sensors import write_carton_label
 
 
@@ -43,57 +45,62 @@ def main():
                Path(__file__).parent / 'twin/restock_camera/config.py',
                Path(__file__).parent / 'twin/restock_camera/geometry.py']
     hashes = {str(path.resolve()): sha(path) for path in sources}
+    from pxr import Usd, UsdGeom
     camera = config['cameras']['shelf']
     world = np.array(camera['parent_from_optical'])          # shelf camera parent is 'map'
     k = Intrinsics(**camera['intrinsics'])
     results = {}
+
+    def world_centroid(stage, path):
+        prim = stage.GetPrimAtPath(path)
+        matrix = np.array(UsdGeom.XformCache().GetLocalToWorldTransform(prim)).T
+        points = np.array(UsdGeom.Mesh(prim).GetPointsAttr().Get(), float)
+        return ((matrix @ np.c_[points, np.ones(len(points))].T).T[:, :3]).mean(axis=0)
+
     with tempfile.TemporaryDirectory() as tmp:
-        detector = cv2.QRCodeDetector()
-        for marker in config['supports']['shelf']['markers']:
-            png = Path(tmp) / (marker['id'].replace(':', '_') + '.png')
-            write_carton_label(marker['id'], png)
-            pixels = cv2.imread(str(png))
-            code, corners, _ = detector.detectAndDecode(pixels)
-            if code != marker['id']:
-                raise ValueError('printed marker does not decode to its identity')
-            edge = np.linalg.norm(np.roll(corners.reshape(4, 2), -1, 0)
-                                  - corners.reshape(4, 2), axis=1)
-            half = marker['side_m'] * pixels.shape[0] / edge.mean() / 2
-            grid = marker_module_grid(marker['id'])
-            parent_from_marker = np.array(marker['parent_from_marker'])
-            decoded, in_fov = decode_marker_render(grid, half, world, parent_from_marker, k)
-            # data-region projected edge (pixels) for the pixel-size record
-            data_half = half * (grid.shape[0] - 8) / grid.shape[0]
-            quad = (parent_from_marker @ np.array(
-                [[-data_half, -data_half, .0006, 1], [data_half, -data_half, .0006, 1],
-                 [data_half, data_half, .0006, 1], [-data_half, data_half, .0006, 1]]).T).T[:, :3]
-            uv, _ = project(transform_points(np.linalg.inv(world), quad), k)
-            edges_px = np.linalg.norm(np.roll(uv, -1, 0) - uv, axis=1)
+        textures = {}
+        for support in config['supports'].values():
+            for marker in support['markers']:
+                png = Path(tmp) / (marker['id'].replace(':', '_') + '.png')
+                write_carton_label(marker['id'], png)
+                textures[marker['id']] = png
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.Xform.Define(stage, '/World'); UsdGeom.Xform.Define(stage, '/Cart')
+        author_camera_design(stage, config, parent_paths={'map': '/World', 'cart_chassis': '/Cart'},
+                             marker_textures=textures)
+        for index, marker in enumerate(config['supports']['shelf']['markers']):
+            base = f'/World/RestockCamera_shelf_marker_{index}'
+            decoded = decode_authored_marker(stage, base, world, k)
+            base_c = world_centroid(stage, base)
+            modules_c = world_centroid(stage, base + '/Modules')
+            # The black module mesh must share the white base's plane; a double transform
+            # would move it far away (the native double-transform put it behind the camera).
+            aligned = bool(np.linalg.norm(modules_c[:2] - base_c[:2]) < .02
+                           and abs(modules_c[2] - base_c[2]) < .002)
             results[marker['id']] = dict(
                 decoded=decoded, decodes_to_identity=bool(decoded == marker['id']),
-                full_quad_in_fov=bool(in_fov), module_count=int(grid.shape[0]),
-                black_modules=int((grid == 0).sum()), marker_full_side_m=float(2 * half),
-                data_side_m=float(marker['side_m']),
-                data_edge_px_min=float(edges_px.min()),
-                px_per_module=float(edges_px.min() / (grid.shape[0] - 8)))
+                base_world_centroid=base_c.round(4).tolist(),
+                modules_world_centroid=modules_c.round(4).tolist(),
+                modules_share_base_plane=aligned)
     for path in sources:
         if hashes[str(path.resolve())] != sha(path):
             raise ValueError('input changed during proof')
-    report = dict(evidence='CPU_geometry_fiducial_projection_decode_not_rendered_capture',
+    report = dict(evidence='CPU_authored_geometry_fiducial_decode_not_rendered_capture',
                   runtime_ready=False, input_sha256=hashes,
                   shelf_camera_intrinsics=dict(fx=k.fx, fy=k.fy, width=k.width, height=k.height),
                   markers=results,
                   all_decode=all(v['decodes_to_identity'] for v in results.values()),
+                  all_modules_aligned=all(v['modules_share_base_plane'] for v in results.values()),
                   limitations=[
-                      'Rectified-projection decode proves the geometry pattern/size/pose, not '
-                      'lighting, material, occlusion, noise or the native decoder path.',
+                      'Decode of the authored world geometry proves pattern/size/pose and that '
+                      'the black modules sit on the base plane; it is not lighting, material, '
+                      'occlusion, noise or the native decoder path.',
                       'The data region is framed; the quiet-border corners clip the frame edges '
                       'at this oblique view, so integration should confirm on a real render.',
                       'Only the shelf support markers are geometry; source and cart stay textured.'])
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps(report, indent=2) + '\n')
-    print(json.dumps({mid: dict(decoded=v['decoded'], in_fov=v['full_quad_in_fov'],
-                                px_per_module=round(v['px_per_module'], 1))
+    print(json.dumps({mid: dict(decoded=v['decoded'], modules_aligned=v['modules_share_base_plane'])
                       for mid, v in results.items()}, indent=2))
 
 
