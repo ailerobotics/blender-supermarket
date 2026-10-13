@@ -162,17 +162,21 @@ accounted for in the physical plane size. Integration owns native camera
 initialization, rigid attachment and actual rendered commissioning.
 
 Shelf markers are authored as **geometry, not texture** (`marker_module_grid` +
-`marker_geometry_quads`): a white base quad plus one black quad per dark module,
-constant-colour with an emissive white base, same code content/size/pose as the
-textured marker but **no texture lookup** — the native RTX render never sampled the
-shelf markers' UsdUVTexture (flat grey) even though the identical source markers
-decoded (see `data/sim-restock-camera-v2/shelf-marker-render-diagnosis.md`). Source
-and cart markers stay textured (hardened with emissive + `sourceColorSpace=sRGB`).
-`scripts/plan_restock_marker_geometry.py` proves it offline: each geometry fiducial,
-projected through the exact pinhole at the shelf camera and rectified by its corners
-(as a registration pipeline does), decodes to its identity at ~15 px/module
-(`decode_marker_render`). A bare auto-detector reads only the less-sheared marker;
-rectification reads both. Not a render — integration confirms contrast/decode natively.
+`marker_geometry_quads`): a white base quad (`<marker>`) plus one black quad per dark
+module in a `<marker>/Modules` child mesh, constant-colour with an emissive white base,
+same code content/size/pose as the textured marker but **no texture lookup** — the native
+RTX render never sampled the shelf markers' UsdUVTexture (flat grey) even though the
+identical source markers decoded (see
+`data/sim-restock-camera-v2/shelf-marker-render-diagnosis.md`). The `Modules` child
+**inherits** the base's `parent_from_marker`, so it carries no transform of its own; an
+earlier double transform put the modules at twice the world coordinates (behind the
+camera) and rendered only a blank white plane. Source and cart markers stay plain diffuse
+texture (no emissive — an emissive copy over-exposed the source markers natively).
+`scripts/plan_restock_marker_geometry.py` proves it offline against the **authored world
+geometry** (`decode_authored_marker`): it authors the markers, projects the composed mesh
+vertices through the exact shelf camera and decodes — catching an authoring fault that the
+design model would miss — reporting both markers decode and the modules share the base
+plane. Not a render; integration confirms contrast/decode natively.
 
 Design sampling is 2560×1920 with cx=1280, cy=960 (the installed Isaac camera's
 width/2, height/2 principal-point API) and a .15–3.5 m range. Focal length is now
