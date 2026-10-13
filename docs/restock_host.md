@@ -303,3 +303,17 @@ GPU in one bounded guarded job (`scripts/verify_empty_baseline_gpu.py` +
 `scripts/restock_runtime/empty_baseline_probe.py`): accept on a fresh construction with
 the 2048/layer baseline reported, refused after one synthetic depth frame actually
 integrated. Report: `data/sim-restock-host-v2/empty-baseline-report.md`.
+
+### Published slice carries the global frame (consumer acceptance)
+
+`processEsdf` fills `env->slice` through `distanceMapSliceMsgFromSliceImage`, which sets
+only the slice geometry and leaves the message header default. The producer therefore
+sets `env->slice.header.frame_id` to the mapper `global_frame` (read from the base node
+parameter, default `map`) and the stamp to the newest incorporated acquisition's sim
+time — mirroring the stock nvblox publish path. Without the frame the landed consumer
+rejects the snapshot as an `invalid native distance slice` (empty frame), and
+`accept_envelope` requires `slice.frame == 'map'`. Covered by the contract tests in
+`scripts/twin/tests/test_restock_host_evidence_binding.py` and verified end to end on GPU
+(`scripts/verify_slice_consume_gpu.py` + `scripts/restock_runtime/consume_snapshot_probe.py`):
+the full pipeline publishes an EvidenceSnapshot whose slice frame is `map` and the landed
+`TemporalMap.accept_envelope` adopts it. Report: `data/sim-restock-host-v2/slice-frameid-report.md`.

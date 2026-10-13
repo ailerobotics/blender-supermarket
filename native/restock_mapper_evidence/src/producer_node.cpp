@@ -34,6 +34,15 @@ EvidenceProducerNode::EvidenceProducerNode(const rclcpp::NodeOptions & options)
   const std::string localization = declare_parameter<std::string>("evidence.localization", "");
   identity_ = Identity{session, scene, cameras, localization};
 
+  // The published slice must carry the mapper's global frame: the stock nvblox
+  // publish path sets slice.header.frame_id to global_frame, but the ESDF slice
+  // converter leaves the header default, so without this the landed consumer
+  // rejects the snapshot as an "invalid native distance slice" (empty frame_id).
+  // global_frame is declared by the base NvbloxNode; read it, never redeclare it.
+  global_frame_ = has_parameter("global_frame") ? get_parameter("global_frame").as_string()
+                                                 : std::string("map");
+  if (global_frame_.empty()) {global_frame_ = "map";}
+
   producer_nonce_ = declare_parameter<std::string>("evidence.producer_nonce", "");
   steady_domain_ = declare_parameter<std::string>("evidence.steady_clock_domain", "");
   slice_height_ = static_cast<float>(declare_parameter<double>("evidence.slice_height", 0.0));
@@ -228,6 +237,17 @@ void EvidenceProducerNode::processEsdf()
     auto env = std::make_unique<msg::EvidenceSnapshot>();
     esdf_slice_converter_.distanceMapSliceMsgFromSliceImage(
       slice_image, aabb, slice_height_, static_mapper_->voxel_size_m(), unknown_value_, &env->slice);
+
+    // The converter fills geometry but leaves the header default. Mirror the stock
+    // nvblox publish contract the consumer validates: the slice frame is the mapper
+    // global frame, and the stamp is the newest incorporated acquisition's sim time
+    // (provenance-consistent; the publication stamp is not an incorporation ack).
+    env->slice.header.frame_id = global_frame_;
+    int64_t newest_stamp = 0;
+    for (const auto & entry : policy_->ledger()) {
+      newest_stamp = std::max(newest_stamp, entry.second.stamp);
+    }
+    env->slice.header.stamp = to_ros_time(newest_stamp);
 
     // snapshot() throws unless every configured sensor is incorporated and fresh
     // in both clocks; the copied slice above is frozen with this exact ledger.
