@@ -590,6 +590,35 @@ the sourced host Jazzy Python3.12 executable. This verifies fixture-only schema
 roundtrip and actual host ROS message serialization; it does not test DDS or
 OmniGraph. Runtime server and attachment requirements are in the manipulation doc.
 
+## 13. Restock inventory sensing factory (CPU contract)
+
+The mission bundle (`twin.restock.isaac_bundle`) resolves the inventory-sensing lane from
+the runtime-config:
+
+```
+config['sensing_factory'] = 'twin.restock_camera.sensing:build_sensing'
+```
+
+`build_sensing(app, assembly, plan, config, output)` returns `{'capture', 'recording_camera'}`.
+`capture(now, source, destination)` returns a `restock_manipulation.types.Sensors` packet
+(or `None`) from the multi-camera `StationSensors`, under the 500 ms freshness, exact-frame
+identity, source-immutability/tamper and fresh-clearance gates (consuming the mapper
+`collision_time`); it never fabricates an observation. The live cameras, the TF
+`measure_context` and mapper `clearance_for_slot` callbacks, the motion port and the contact
+reader are integration-owned and supplied via `assembly.sensing_sources` — the exact
+contract is the `twin.restock_camera.sensing` module docstring and
+[docs/restock_camera.md](docs/restock_camera.md). `support_slots(camera_config, camera_id,
+...)` and `rendered_context(...)` build the per-camera slots/contexts from the camera design.
+CPU contract tests (no Isaac/ROS, no GPU):
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_sensing_factory.py -q
+```
+
+Commission the contexts from observed empty supports before the first capture; a mission
+readiness claim still needs integration's live GPU run and the `InventoryVerifier`'s two
+post-boundary confirmations.
+
 ## 14. Controlled static-scene navigation mapper commissioning
 
 This is an uncommissioned integration handoff, not a moving-mission readiness
