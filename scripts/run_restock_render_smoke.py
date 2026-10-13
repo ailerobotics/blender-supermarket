@@ -25,6 +25,19 @@ def write(path,data):
     path.write_text(json.dumps(data,indent=2,allow_nan=False)+'\n')
 
 
+def renderer_metadata():
+    """Read effective native settings; do not infer them from requested config."""
+    import carb.dictionary
+    import carb.settings
+    import cv2
+    settings=carb.settings.get_settings()
+    tree=settings.get_settings_dictionary('/rtx')
+    return dict(opencv_version=cv2.__version__,opencv_module=cv2.__file__,
+        opencv_build=cv2.getBuildInformation(),
+        effective_rtx=carb.dictionary.get_dictionary().get_dict_copy(tree),
+        note='Actual settings snapshot; absent keys are not inferred defaults.')
+
+
 def runtime_environment(root,output):
     root=Path(root).resolve()
     lib=root/'usr/lib/x86_64-linux-gnu'
@@ -85,6 +98,7 @@ def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False):
     app=SimulationApp({'headless':True,'width':640,'height':360,
         'renderer':'RayTracedLighting','anti_aliasing':0,'multi_gpu':False})
     try:
+        write(output/'renderer-start.json',renderer_metadata())
         if assembly_only:
             from twin.restock.assembly_check import run
             config=json.loads(Path(runtime_config).read_text())
@@ -128,6 +142,7 @@ def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False):
             camera=rig.cameras['smoke']
         world.reset()
         for _ in range(90): world.step(render=True)
+        write(output/'renderer-capture.json',renderer_metadata())
         recorder=Recorder(output/'frames',fps=60)
         last=None
         last_native_time=None
@@ -137,8 +152,11 @@ def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False):
         width,height=spec['intrinsics']['width'],spec['intrinsics']['height']
         (output/'depth-frames').mkdir()
         for _ in range(180):
+            step_started=time.monotonic()
             world.step(render=True)
+            step_finished=time.monotonic()
             frame=camera.get_current_frame(clone=True)
+            clone_finished=time.monotonic()
             identity=frame.get('native_rendering_frame',frame.get('rendering_frame'))
             if identity is None or identity==last: continue
             native_time=Fraction(identity['referenceTimeNumerator'],identity['referenceTimeDenominator'])
@@ -151,6 +169,7 @@ def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False):
             if np.std(rgb[:,:,:3])<2 or np.count_nonzero(np.isfinite(depth)&(depth>0))<1000:
                 raise ValueError('native RGB-D is empty or uniform')
             recorder.add(rgb[:,:,:3],render_id=str(identity),simulation_time=float(frame['rendering_time']))
+            rgb_written=time.monotonic()
             depth_path=output/'depth-frames'/f'{len(recorder.frames)-1:06d}.npz'
             segmentation=frame.get('instance_id_segmentation',{})
             ids=np.asarray(segmentation.get('data'))
@@ -158,15 +177,20 @@ def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False):
             if ids.shape!=depth.shape or ids.dtype!=np.uint32 or not paths:
                 raise ValueError('same-acquisition instance IDs/path mapping unavailable')
             np.savez_compressed(depth_path,depth=depth,instance_ids=ids)
+            depth_written=time.monotonic()
             codes=[]
             if required_codes:
                 import cv2
                 ok,codes,_,_=cv2.QRCodeDetector().detectAndDecodeMulti(cv2.cvtColor(rgb[:,:,:3],cv2.COLOR_RGB2BGR))
                 if ok: decoded_codes.update(codes)
+            decode_finished=time.monotonic()
             observed_frames.append(dict(rendering_frame=identity,rendering_time=float(frame['rendering_time']),
                 acquired_steady=frame.get('acquired_steady'),session_id=frame.get('session_id'),
                 steady_domain=frame.get('steady_domain'),decoded_codes=list(codes),
                 instance_id_to_path=paths,
+                wall_durations_s=dict(world_step=step_finished-step_started,
+                    clone=clone_finished-step_finished,rgb_validation_and_write=rgb_written-clone_finished,
+                    depth_segmentation_write=depth_written-rgb_written,qr_decode=decode_finished-depth_written),
                 rgb_sha256=recorder.frames[-1]['sha256'],depth_file=str(depth_path.relative_to(output)),
                 depth_sha256=hashlib.sha256(depth_path.read_bytes()).hexdigest(),
                 rgb_depth_identity_model='same Camera render-product acquisition callback and cloned frame'))
@@ -221,6 +245,9 @@ def main():
     args.output=args.output.resolve()
     args.output.mkdir(parents=True,exist_ok=False)
     environment=runtime_environment(args.nvidia_runtime,args.output)
+    if args.assembly_only:
+        from twin.restock.native_environment import ros_environment
+        environment=ros_environment(environment,args.isaac_python)
     os.environ.clear();os.environ.update(environment)
     record=dict(status='failed',code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 telemetry=[],runtime_root=str(args.nvidia_runtime),wall_limit_s=300)
