@@ -17,10 +17,35 @@ class Scan:
     range_max: float
     source: str = 'simulated_lidar'
     sensor_to_base: tuple = (0.0, 0.0, 0.0)  # sensor origin x,y,yaw in base frame
+    unknown: tuple = ()  # any sampled height occluded: never certifies clearing
+    external_returns: tuple = ()  # (beam index, range), retained in unknown sectors
 
     def __post_init__(self):
         if len(self.sensor_to_base) != 3 or not all(math.isfinite(v) for v in self.sensor_to_base):
             raise ValueError('finite calibrated sensor-to-base pose required')
+        if self.unknown and (len(self.unknown)!=len(self.ranges) or
+                             any(type(v) is not bool for v in self.unknown)):
+            raise ValueError('unknown mask must contain one bool per beam')
+        for i,r in self.external_returns:
+            if (type(i) is not int or not 0<=i<len(self.ranges) or
+                    not math.isfinite(r) or not 0<r<self.range_max):
+                raise ValueError('invalid retained external return')
+
+    def validate(self):
+        if (not math.isfinite(self.range_max) or self.range_max<=0
+                or not math.isfinite(self.angle_min) or not math.isfinite(self.angle_increment)
+                or self.angle_increment<=0 or len(self.ranges)<3):
+            raise ValueError('invalid scan geometry')
+        for i,r in enumerate(self.ranges):
+            hidden=bool(self.unknown and self.unknown[i])
+            # NaN survives a raw polar-scan transport as unknown, not max range.
+            if (hidden and not math.isnan(r)) or (not hidden and
+                    (not math.isfinite(r) or not 0<r<=self.range_max)):
+                raise ValueError('unknown beams require explicit mask and NaN range')
+
+    def hits(self):
+        return tuple((i,r) for i,r in enumerate(self.ranges)
+                     if math.isfinite(r) and 0<r<self.range_max)+self.external_returns
 
     def sensor_pose(self, base_pose):
         x,y,yaw = base_pose
@@ -32,7 +57,7 @@ class Scan:
         x, y, yaw = self.sensor_pose(pose)
         return tuple((x+r*math.cos(yaw+self.angle_min+i*self.angle_increment),
                       y+r*math.sin(yaw+self.angle_min+i*self.angle_increment))
-                     for i,r in enumerate(self.ranges) if 0 < r < self.range_max)
+                     for i,r in self.hits())
 
 
 class WheelOdometry:
@@ -90,8 +115,8 @@ class MapLocalizer:
     def update(self, odom, scan):
         if abs(odom.stamp-scan.stamp)>0.05:
             raise ValueError('scan/encoder time mismatch')
-        if scan.source != 'simulated_lidar' or not scan.ranges or any(
-                not math.isfinite(r) or r <= 0 or r > scan.range_max for r in scan.ranges):
+        scan.validate()
+        if scan.source != 'simulated_lidar':
             raise ValueError('invalid scan')
         prior=self.prior
         if self.last_odom is not None:
@@ -101,7 +126,7 @@ class MapLocalizer:
                    prior[1]+dx*math.sin(a)+dy*math.cos(a),
                    wrap(prior[2]+odom.pose[2]-self.last_odom[2]))
         # Downsample the scan evenly, retain enough independent mapped surfaces.
-        hits=[(i,r) for i,r in enumerate(scan.ranges) if r<scan.range_max]
+        hits=list(scan.hits())
         hits=hits[::max(1,len(hits)//90)]
         if len(hits)<12:
             raise ValueError('insufficient mapped range returns')
@@ -132,43 +157,67 @@ class IsaacRangeSensor:
     """Idealized multi-height 360 degree collision-ray scanner (not RTX optics).
 
     Construct after Isaac boot. get_sensor_pose() returns physical (x,y,yaw).
-    Self hits stop rays and become range_min returns: occlusion never becomes
-    invented free space. Mount outside self geometry or provide separate sensors.
+    Self hits stop rays and become unknown. Identity is collider/rigid-body USD
+    subtree membership, never inferred from point location or cart ground truth.
+    Heights are WORLD Z values; they are not offsets from the lidar_frame.
     """
     def __init__(self,get_sensor_pose,*,heights=(0.15,0.5,1.0),beams=360,range_max=10.0,
-                 sensor_to_base=(0.0,0.0,0.0)):
-        from omni.physx import get_physx_scene_query_interface
-        self.query=get_physx_scene_query_interface()
+                 sensor_to_base=(0.0,0.0,0.0),self_paths=(),query=None):
+        if query is None:
+            from omni.physx import get_physx_scene_query_interface
+            query=get_physx_scene_query_interface()
+        self.query=query
+        self.self_paths=tuple(p.rstrip('/') for p in self_paths)
+        if any(not p.startswith('/') or p=='/' or not p or '//' in p or
+               any(s in ('.','..') for s in p.split('/')) for p in self.self_paths):
+            raise ValueError('self paths must be explicit absolute USD subtrees')
+        if (type(beams) is not int or beams<3 or not heights or
+                not all(math.isfinite(z) for z in heights) or
+                not math.isfinite(range_max) or range_max<=0):
+            raise ValueError('invalid range sensor configuration')
         self.get_pose=get_sensor_pose
         self.heights,self.beams,self.range_max=heights,beams,range_max
         self.sensor_to_base=Scan(0,(),0,1,range_max,sensor_to_base=sensor_to_base).sensor_to_base
 
+    def _self_hit(self,hit):
+        return any(path==root or path.startswith(root+'/')
+                   for path in (hit.get('collision',''),hit.get('rigidBody',''))
+                   if isinstance(path,str) for root in self.self_paths)
+
     def read(self,stamp):
         x,y,yaw=self.get_pose()
-        ranges=[]
+        if not all(math.isfinite(v) for v in (x,y,yaw,stamp)):
+            raise ValueError('invalid range sensor pose or timestamp')
+        ranges=[];unknown=[];external=[]
         increment=2*math.pi/self.beams
         for i in range(self.beams):
             angle=yaw-math.pi+i*increment
             best=self.range_max
+            hidden=False
             for z in self.heights:
                 hit=self.query.raycast_closest((x,y,z),(math.cos(angle),math.sin(angle),0.0),self.range_max)
                 if hit['hit']:
-                    best=min(best,max(0.001,float(hit['distance'])))
-            ranges.append(best)
+                    distance=float(hit['distance'])
+                    if not math.isfinite(distance) or not 0<=distance<=self.range_max:
+                        raise ValueError('invalid closest-hit distance')
+                    if self._self_hit(hit):
+                        hidden=True
+                    else:
+                        best=min(best,max(0.001,distance))
+            unknown.append(hidden)
+            ranges.append(math.nan if hidden else best)
+            if hidden and best<self.range_max:
+                external.append((i,best))
         return Scan(stamp,tuple(ranges),-math.pi,increment,self.range_max,
-                    sensor_to_base=self.sensor_to_base)
+                    sensor_to_base=self.sensor_to_base,unknown=tuple(unknown),
+                    external_returns=tuple(external))
 
 
 def observation(scan,localized,*,coupled,arm_transport,articulation=0.0):
     """Transform returns through estimated pose; caller supplies measured state."""
-    if (not math.isfinite(scan.range_max) or scan.range_max<=0
-            or not math.isfinite(scan.angle_min) or not math.isfinite(scan.angle_increment)
-            or scan.angle_increment<=0 or len(scan.ranges)<3
-            or any(math.isnan(r) or r<=0 or (math.isfinite(r) and r>scan.range_max)
-                   for r in scan.ranges)):
-        raise ValueError('invalid scan; unknown beams must not become free space')
+    scan.validate()
     # Range is measured about the sensor, not the chassis origin. The inscribed
     # base-centred observation disk shrinks by the calibrated translation.
-    coverage=max(0.0,scan.range_max-math.hypot(*scan.sensor_to_base[:2])) if len(scan.ranges)*scan.angle_increment>=2*math.pi-.01 else 0.0
+    coverage=max(0.0,scan.range_max-math.hypot(*scan.sensor_to_base[:2])) if not any(scan.unknown) and len(scan.ranges)*scan.angle_increment>=2*math.pi-.01 else 0.0
     return Observation(scan.stamp,scan.points(localized.pose),coupled,arm_transport,
                        articulation,scan.source,coverage)
