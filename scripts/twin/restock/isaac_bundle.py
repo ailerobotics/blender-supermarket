@@ -199,8 +199,11 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output):
 
     navigation = _build_navigation(plan, nav_factory(
         app=app, assembly=assembly, plan=plan, config=config, output=output))
-    manipulation = ManipulationBridge(manip_factory(
-        app=app, assembly=assembly, plan=plan, config=config, output=output))
+    # manip_factory returns a fully-configured ManipulationBridge (it alone knows the
+    # owns-sensor-io mode and per-station preparation); RuntimeAdapter leaves an existing
+    # ManipulationBridge unwrapped, so do not re-wrap here.
+    manipulation = manip_factory(
+        app=app, assembly=assembly, plan=plan, config=config, output=output)
     sensing = sensing_factory(app=app, assembly=assembly, plan=plan, config=config, output=output)
     capture = sensing['capture']
     recording_camera = sensing['recording_camera']
