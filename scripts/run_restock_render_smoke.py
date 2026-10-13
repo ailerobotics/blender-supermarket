@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import traceback
 
 from twin.restock.guard import available_ram_mb,gpu_slot
 from twin.restock.station import OwnedProcess
@@ -22,7 +23,7 @@ def write(path,data):
     path.write_text(json.dumps(data,indent=2,allow_nan=False)+'\n')
 
 
-def runtime_environment(root):
+def runtime_environment(root,output):
     root=Path(root).resolve()
     lib=root/'usr/lib/x86_64-linux-gnu'
     icd=root/'usr/share/vulkan/icd.d/nvidia_icd.json'
@@ -30,13 +31,20 @@ def runtime_environment(root):
     if any(not p.is_file() for p in (lib/'libcuda.so.1',lib/'libnvidia-ml.so.1',
                                     root/'usr/bin/nvidia-smi',icd,egl)):
         raise ValueError('complete verified task-local NVIDIA runtime required')
+    # Kit's CUDA interop plugin requests the unversioned NVML development name.
+    # Distribution runtime packages supply only .so.1; without this task-local
+    # alias the loader can fall back to a mismatched system development symlink.
+    aliases=Path(output)/'runtime-links'
+    aliases.mkdir()
+    for name in ('libnvidia-ml','libcuda'):
+        (aliases/(name+'.so')).symlink_to(lib/(name+'.so.1'))
     env=dict(os.environ)
     for key in ('LD_PRELOAD','LD_AUDIT','LD_DEBUG','LD_DEBUG_OUTPUT','DISPLAY','WAYLAND_DISPLAY',
                 'VK_INSTANCE_LAYERS','VK_LOADER_LAYERS_ENABLE','VK_LOADER_LAYERS_ALLOW',
                 'VK_ADD_DRIVER_FILES','__NV_PRIME_RENDER_OFFLOAD','__NV_PRIME_RENDER_OFFLOAD_PROVIDER',
                 '__VK_LAYER_NV_optimus','__NV_SMOOTH_MOTION','__EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES'):
         env.pop(key,None)
-    env.update(LD_LIBRARY_PATH=str(lib)+':'+str(lib/'vdpau'),
+    env.update(LD_LIBRARY_PATH=str(aliases)+':'+str(lib)+':'+str(lib/'vdpau'),
         PATH=str(root/'usr/bin')+os.pathsep+env.get('PATH',os.defpath),
         VK_DRIVER_FILES=str(icd),VK_ICD_FILENAMES=str(icd),VK_LOADER_LAYERS_DISABLE='~implicit~',
         __EGL_VENDOR_LIBRARY_FILENAMES=str(egl),
@@ -120,7 +128,7 @@ def worker(output,ffmpeg):
             if not recorder.frames[:-1]:
                 np.save(output/'depth.npy',depth)
                 write(output/'camera.json',dict(spec=spec,intrinsics=camera.get_intrinsics_matrix().tolist(),
-                    rendering_frame=int(identity),rendering_time=float(frame['rendering_time']),
+                    rendering_frame=identity,rendering_time=float(frame['rendering_time']),
                     finite_depth_pixels=int(np.count_nonzero(np.isfinite(depth)&(depth>0)))))
             last=identity
             if len(recorder.frames)>=30: break
@@ -131,6 +139,12 @@ def worker(output,ffmpeg):
                           if any(name in line for name in ('libcuda','libnvidia','libGLX_nvidia'))})
         write(output/'native-result.json',dict(status='passed',evidence='static native RTX RGB-D smoke only',
             robot_motion=False,autonomous_mission=False,video=video,nvidia_libraries=libraries))
+    except BaseException as exc:
+        # Kit shutdown may terminate the interpreter with zero even while Python
+        # unwinds an exception. Persist the failure before entering app.close().
+        write(output/'native-result.json',dict(status='failed',reason=str(exc),
+            traceback=traceback.format_exc()))
+        raise
     finally:
         app.close()
 
@@ -148,9 +162,10 @@ def main():
         worker(args.output,args.ffmpeg);return
     if not args.isaac_python or not args.nvidia_runtime:
         parser.error('--isaac-python and --nvidia-runtime required')
-    environment=runtime_environment(args.nvidia_runtime)
-    os.environ.clear();os.environ.update(environment)
+    args.output=args.output.resolve()
     args.output.mkdir(parents=True,exist_ok=False)
+    environment=runtime_environment(args.nvidia_runtime,args.output)
+    os.environ.clear();os.environ.update(environment)
     record=dict(status='failed',code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 telemetry=[],runtime_root=str(args.nvidia_runtime),wall_limit_s=300)
     child=None
@@ -175,6 +190,13 @@ def main():
                     time.sleep(1.)
                 record['exit_code']=child.process.returncode
                 if child.process.returncode: raise RuntimeError('native child failed; inspect isaac.log')
+                native=json.loads((args.output/'native-result.json').read_text())
+                if native.get('status')!='passed' or native.get('video',{}).get('frames',0)<30:
+                    raise RuntimeError('native result incomplete: '+native.get('reason','missing frames'))
+                # Decode the whole recorded video, not merely its container header.
+                subprocess.run([str(args.ffmpeg),'-v','error','-nostdin','-i',
+                    str(args.output/'native-render-smoke.mp4'),'-f','null','-'],
+                    check=True,capture_output=True,timeout=30)
                 record['status']='passed'
             finally:
                 if child: child.close()
