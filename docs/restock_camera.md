@@ -126,6 +126,18 @@ existing `Sensors` packet and refuses unsynchronized station images. Its
 poses, separate from label/support masks. Integration chooses the active target
 for mapper masking; multiple inventory cameras do not certify mapper coverage.
 
+**Mission sensing factory.** The restock bundle resolves the inventory-sensing lane
+from `config['sensing_factory'] = 'twin.restock_camera.sensing:build_sensing'`.
+`build_sensing(app, assembly, plan, config, output)` returns
+`{'capture', 'recording_camera'}`; `capture(now, source, destination)` is the
+`StationSensors` scan under all the gates (consuming the mapper `collision_time`),
+closing over the integration motion port and contact reader. The live cameras, the TF
+`measure_context`/mapper `clearance_for_slot` callbacks, motion, contact and recording
+camera arrive through `assembly.sensing_sources` (contract in the `sensing` module
+docstring); `support_slots`/`rendered_context` build the per-camera slots/contexts from
+the camera design. CPU contract tests: `test_restock_sensing_factory.py`; RUNBOOK §13.
+It never boots the app or fabricates an observation.
+
 Baseline identity, original render/session/frame and acquisition time are immutable.
 The 600 s default lifetime accommodates the current 158.03 s CPU timing estimate
 plus bounded commissioning/reset/planning overhead. Configuration is restricted
