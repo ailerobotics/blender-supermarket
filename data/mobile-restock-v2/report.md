@@ -10,6 +10,27 @@ bundle with actual sensor acquisition/planner/actuator wiring is still missing.
 
 ## Implemented and tested
 
+## New stationary checkpoint: FAILED, cause unresolved
+
+At e9acc7f the CPU checkpoint is 369 passed, 16 subtests and five optional skips.
+Native assembly-03 crossed the unchanged 50 mm stationary envelope at simulation
+time 1.266667 s; assembly-04 with 64/16 cart solver iterations crossed it at
+2.033333 s. These are failed stationary diagnostics, not a demonstrated mission.
+Higher iterations did not establish or fix the cause. The full offline diagnosis
+is retained below and in `data/mobile-restock-v2/cart-stability-diagnosis.md`.
+The embedded comparison plot uses actual saved telemetry, not animated motion.
+The videos remain the earlier optical/startup evidence from report entry2457.
+
+Camera PR https://github.com/ailerobotics/blender-supermarket/pull/22 was reported
+merged by firstmate; this e9acc7f diagnosis does not claim its code has been merged
+into the integration branch. Camera runtime remains uncommissioned: a fresh clock
+must enforce the unchanged 500 ms acquisition-to-use limit after all processing and
+before action. A delayed-processing rejection test is still required. Navigation's
+assigned mapper namespace is `/restock_sim/navigation`, with domain88 and stable
+map frame; the separate manipulation mapper and native plugin build are not ready.
+
+## Existing CPU integration
+
 `scripts/twin/restock/inventory.py` provides SQLite reservations, persistent action
 history, atomic source-to-shelf stock transfer and observation deduplication.
 Interrupted/failed jobs retain stock reservations and cannot automatically replay.
@@ -24,7 +45,7 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-360 combined CPU tests and 16 subtests pass with five optional skips after the landed October 13 host, camera and navigation updates, with the installed Isaac USD libraries exposed
+369 combined CPU tests and 16 subtests pass with five optional skips at e9acc7f, with the installed Isaac USD libraries exposed
 without booting Kit (including mission/runtime, recording, stock-scene and environment tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
 Reproduction is in RUNBOOK section 11. The shared firstmate interface contract was

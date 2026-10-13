@@ -1,11 +1,14 @@
 {
-  "CPU tests": "360 passed, 16 subtests passed, 5 optional skips after October 13 host, camera and navigation merges; no GPU boot in this test suite",
+  "CPU tests": "369 passed, 16 subtests passed, 5 optional skips at e9acc7f; no GPU boot in this test suite",
+  "Stationary native assembly": "FAILED: run03 crossed50mm at1.266667s; run04 with64/16 solver iterations crossed50mm at2.033333s. Cause unproven. No towing, coupling or manipulation tested.",
+  "Offline causal diagnosis": "Nominal caster joint frames align. Two overlapping floor slabs identified; actual contact participation unrecorded. Proposed one-condition ground-contact counterfactual NOT EXECUTED. No production change or GPU run during diagnosis.",
+  "Camera integration gate": "UNCOMMISSIONED: require a fresh acquisition-to-use clock check after all processing before action; retain500ms limit. Decoder timing alone is insufficient.",
   "Mobile assets": "Landed source; real CAD/FK static preview",
   "Environment": "USD and offline composition PASS; static source renders",
   "Physical autonomy": "NOT RUN; guarded GPU use authorized. Native static rendering passed, full moving mission remains gated on actual sensing/map/coverage.",
   "Native GPU evidence": "60 real640x360 RGB-D frames, verified VFR H264; peak3989MiB total GPU, minimum17171MiB available RAM, services unchanged. Static cube smoke only.",
   "Full-store source view": "Six real2560x1920 RGB-D frames at6ecb5c5; all3 QR codes together in only1/6 frames, not robust registration. Exact rig instance paths verified; peak6465MiB GPU/min16196MiB RAM; services unchanged. Static CAD bench, no dynamics or autonomy.",
-  "Navigation": "Full-margin geometric route fixture passes; actual self-occlusion leaves unknown sectors. Multi-origin observed-space correction is underway, not landed; no sensing-ready claim.",
+  "Navigation": "Full-margin geometric route fixture passes; sensor self-occlusion remains unresolved. NVIDIA mapper integration assigned /restock_sim/navigation on domain88; native plugin prerequisite missing, no runtime or sensing-ready claim.",
   "Host collision model": "Merged refinement: 1930 spheres, zero nonexcluded transport overlaps, seven full-motion exclusion proofs. Strict installed host preflight passes; native planner capacity untested.",
   "Handling geometry": "Side grasp: 16 IK poses solve using actual articulated arrival; no arm/tool overlap in conservative insertion sweeps. Support-contact bounds remain; transit/self collision/physics unverified."
 }
