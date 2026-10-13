@@ -10,6 +10,16 @@ bundle with actual sensor acquisition/planner/actuator wiring is still missing.
 
 ## Latest passive-observer and CPU checkpoint
 
+The complete offline reduction finds nonzero reported cart contacts only at the
+four wheels on Backroom_floor; lower-floor and hitch/drawbar impulses are zero.
+Rolling joints show the largest anchor-velocity disagreement. PhysX documents
+different position/velocity solve biases, so reported velocities need not integrate
+to body displacements. The exact TGS >4 velocity-iteration warning is present.
+One targeted64/1 cart solver control is proposed, not executed; original run03's
+16/1 failure remains disconfirming evidence against blaming excessive velocity
+iterations alone. Full per-body/contact/joint tables, CSV paths and vendor sources
+are retained in the diagnosis below. GPU ownership remains released.
+
 At65bd36e,390 CPU tests and16 subtests pass, with five optional skips, including the
 confirmed merged camera latency update. Native latency still has no commissioning
 proof; reported offline processing includes500ms overruns and the strict rejection

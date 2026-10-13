@@ -1,5 +1,92 @@
 # Stationary cart investigation record — 2026-10-13
 
+## Complete passive reduction and one proposed control
+
+All nine bodies and eight joints are reduced in
+`/home/manishsaini/firstmate/data/twin-robot-in-store-boot-v1/passive-complete-reduction.json`.
+The same directory holds `reduce_passive_all.py`, `passive-all-body-timesteps.csv`,
+`passive-joint-timesteps.csv`, and `passive-contact-timesteps.csv`. These preserve
+phase-labelled per-step values and every recorded contact pair. Sampling is after
+each completed `world.step(render=True)`; contacts distinguish initialization and
+step-N. All recorded intervals are0.016666667536s. This reduction includes the
+serialized measured initial sample; earlier first-to-last-recorded-row figures
+below intentionally use a slightly shorter interval.
+
+| Body | Measured COM ΔX mm | Integrated reported VX mm | Measured COM ΔZ mm | Integrated reported VZ mm |
+|---|---:|---:|---:|---:|
+| chassis | −50.073 | −65.212 | −0.110 | 111.740 |
+| fork0 | −50.029 | −77.940 | −0.114 | 119.260 |
+| wheel0 | −50.159 | 113.221 | 0.005 | −2.794 |
+| fork1 | −49.981 | −78.111 | −0.182 | 119.315 |
+| wheel1 | −50.211 | 112.964 | −0.007 | −3.181 |
+| fork2 | −50.031 | −78.405 | −0.039 | 104.687 |
+| wheel2 | −50.031 | 92.516 | 0.003 | −4.092 |
+| fork3 | −49.986 | −78.334 | −0.106 | 104.649 |
+| wheel3 | −50.061 | 94.044 | −0.000 | −4.886 |
+
+COM positions use measured body rotation and native local COM, rather than
+equating chassis origin with its offset COM. Trapezoidal integration is a
+diagnostic comparison, not an asserted reconstruction of PhysX position updates.
+
+All contact pairs with nonzero reported impulses are listed here. Vectors sum
+recorded contact impulses across initialization and measured steps, in N·s;
+they are not instantaneous forces or complete joint-force measurements.
+
+| Pair (wheel shape → Backroom_floor) | Nonzero points | Σ impulse X | Σ impulse Y | Σ impulse Z |
+|---|---:|---:|---:|---:|
+| wheel0 | 249 | −0.315625 | 0.379948 | 179.658492 |
+| wheel1 | 262 | −0.590828 | 0.380045 | 181.162842 |
+| wheel2 | 257 | −0.497435 | 0.702965 | 212.184219 |
+| wheel3 | 256 | −0.996118 | 0.553361 | 210.713623 |
+
+Every reported hitch/drawbar and lower-ground contact has zero impulse. No other
+cart self/store contact pair is recorded. All nine cart bodies have threshold-zero
+contact reporting and callbacks report no errors. This disconfirms an observed
+unexpected contact push as the leading explanation; it does not expose every
+solver-internal constraint impulse or guarantee reporting of uninstrumented bodies.
+
+| Joint | Max anchor separation mm | Max reported anchor-velocity difference m/s |
+|---|---:|---:|
+| swivel0 | 0.0513 | 0.000000249 |
+| swivel1 | 0.0695 | 0.000326318 |
+| swivel2 | 0.0489 | 0.000343503 |
+| swivel3 | 0.0673 | 0.000452230 |
+| roll0 | 0.9381 | 0.136906 |
+| roll1 | 0.9952 | 0.141004 |
+| roll2 | 1.1641 | 0.120605 |
+| roll3 | 1.2173 | 0.133779 |
+
+Anchor velocities include angular velocity crossed with the anchor's offset from
+the measured COM. The mismatch is concentrated at rolling constraints, while
+swivel anchor velocities nearly agree. This supports investigating the interaction
+of position correction and the velocity solve; it does not prove position
+correction causes or dominates the50mm drift. We did not record separate
+pre/post-position-solve velocities or joint impulses, so that contribution cannot
+be quantified from these callbacks alone.
+
+PhysX documents split-impulse solving: position and velocity iterations use
+different bias terms, and reported final velocities need not integrate to the
+measured positions. Thus the disagreement alone is not evidence of a bad read
+path or physical energy gain. [NVIDIA PhysX simulation documentation](https://nvidia-omniverse.github.io/PhysX/physx/5.7.0/docs/Simulation.html).
+The installed107.3-family documentation specifically discusses TGS velocity
+iterations above four and suggests zero or few velocity iterations. This replay
+logs that exact >4 warning for the chassis. [NVIDIA Omni Physics107.3 limitations](https://docs.omniverse.nvidia.com/kit/docs/omni_physics/107.3/dev_guide/guides/current_limitations.html).
+
+The strongest next single-variable control proposed from this reduction is cart
+velocity iterations16→1, holding position iterations64 and every physical model,
+floor, material, timestep, CPU/TGS backend, passive observer and threshold fixed.
+It is a test of the documented position/velocity-solve interaction, not a general
+parameter sweep or a claimed remedy. Keep at most120steps/300s and the original
+early stop/resource gates. No such run or production setting change has occurred.
+Compare rolling-anchor velocity disagreement, COM displacement/integration gap,
+actual drift and final settle speed with the preserved passive baseline.
+Unchanged gaps/drift would disconfirm16 velocity iterations as the relevant
+interaction in this setup. Improved velocity consistency without acceptable
+drift/settling would be a telemetry/solver-semantics result, not an operational fix.
+Original run03 already failed with16/1: excessive velocity iterations are therefore
+not established as necessary for the original failure. The proposed64/1 control
+isolates them at the current fixed position-iteration setting.
+
 ## Latest passive-observer baseline — FAILED
 
 The independent contact-observer audit found that late `SingleRigidPrim`
