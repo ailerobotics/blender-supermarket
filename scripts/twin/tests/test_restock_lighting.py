@@ -154,3 +154,91 @@ def test_decodability_rejects_bad_inputs():
         marker_decodability(cam, _square([0, 0, 0], 0.06)[:3], k, 25)
     with pytest.raises(ValueError):
         marker_decodability(cam, _square([0, 0, 0], 0.06), k, 0)
+
+
+# --- camera-mounted lamp (recessed shelf support) ---------------------------------
+from scripts.twin.restock_camera.lights import (camera_lamp, sphere_illuminance,
+                                                rect_illuminance, author_camera_lamps)
+from scripts.twin.restock_camera.config import camera_config
+import math as _math
+
+
+def _shelf_config():
+    scenario = dict(handling_unit=dict(local_wall=3, grasp_mode='side', dimensions_m=[.6, .4, .16]),
+        initial_staging=dict(support_center_xy=[-5.73, 17.1], unit_bottom_z=.6,
+            target_surface_pose_world=[-3.05, 4.826, .73, 0], cart_load_center_body_xy=[.08, 0],
+            cart_support_z_world=.225))
+    return camera_config(scenario, dict(spec=dict(arm_mount_z=.5)))
+
+
+def test_camera_lamp_intensity_shares_rig_tuning():
+    lamp1 = camera_lamp('shelf', 'map', [-3.55, 4.826, 0.96], radius=.03, power_w=4.,
+                        tuning=LightRigTuning(intensity_scale=1.0))
+    lamp2 = camera_lamp('shelf', 'map', [-3.55, 4.826, 0.96], radius=.03, power_w=4.,
+                        tuning=LightRigTuning(intensity_scale=5.0))
+    assert lamp1['kind'] == 'camera_lamp' and lamp1['type'] == 'sphere'
+    assert lamp1['radiance_w'] == pytest.approx(4. / (_math.pi * .03 ** 2 * _math.pi))
+    assert lamp2['intensity_nits'] == pytest.approx(5 * lamp1['intensity_nits'])
+
+
+def test_sphere_illuminance_inverse_square_and_cosine():
+    up = np.array([0, 0, 1.0])
+    e_near = sphere_illuminance([0, 0, 1.0], .03, [0, 0, 0], up, 1000.)
+    e_far = sphere_illuminance([0, 0, 2.0], .03, [0, 0, 0], up, 1000.)
+    assert e_near == pytest.approx(4 * e_far, rel=1e-6)          # half distance -> 4x
+    straight = sphere_illuminance([0, 0, 1.0], .03, [0, 0, 0], up, 1000.)
+    tilted = sphere_illuminance([1.0, 0, 1.0], .03, [0, 0, 0], up, 1000.)
+    assert tilted < straight                                     # off-normal gets less
+    assert sphere_illuminance([0, 0, -1.0], .03, [0, 0, 0], up, 1000.) == 0.0  # below surface
+
+
+def test_rect_illuminance_zero_when_point_above_down_emitter():
+    panel = next(f for f in store_fixtures() if f.kind == 'sales_panel')
+    up = np.array([0, 0, 1.0])
+    below = rect_illuminance(panel, [panel.center[0], panel.center[1], panel.center[2] - 1], up, 3000.)
+    above = rect_illuminance(panel, [panel.center[0], panel.center[1], panel.center[2] + 1], up, 3000.)
+    assert below > 0 and above == 0.0                           # -Z emitter lights only below
+
+
+def test_config_carries_shelf_camera_lamp_and_collidable_housing():
+    cfg = _shelf_config()
+    assert len(cfg['lamps']) == 1
+    lamp = cfg['lamps'][0]
+    assert lamp['id'] == 'shelf' and lamp['parent'] == 'map' and lamp['type'] == 'sphere'
+    np.testing.assert_allclose(lamp['center'], [-3.58, 4.826, 1.05])
+    housing = next(s for s in cfg['solids'] if s['id'] == 'shelf_lamp_housing')
+    assert housing['collision'] is True
+
+
+def test_shelf_lamp_outilluminates_the_source_reference():
+    # Source markers decode 3/3 at ~582 lux (scale 1) from the backroom tubes; the shelf
+    # lamp alone must exceed that on the recessed shelf markers.
+    cfg = _shelf_config()
+    lamp = cfg['lamps'][0]
+    up = np.array([0, 0, 1.0])
+    for marker in cfg['supports']['shelf']['markers']:
+        pt = np.array(marker['parent_from_marker'])[:3, 3]
+        e = sphere_illuminance(lamp['center'], lamp['radius'], pt, up, lamp['intensity_nits'])
+        assert e > 582 * 2                                       # >= 2x the decoding source level
+
+
+def test_author_camera_lamps_places_sphere_light(tmp_path):
+    pytest.importorskip('pxr')
+    from pxr import Usd, UsdGeom, UsdLux
+    cfg = _shelf_config()
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.Xform.Define(stage, '/World')
+    paths = author_camera_lamps(stage, cfg, parent_paths={'map': '/World', 'cart_chassis': '/World'})
+    assert set(paths) == {'shelf'}
+    sl = UsdLux.SphereLight(stage.GetPrimAtPath(paths['shelf']))
+    assert sl.GetRadiusAttr().Get() == pytest.approx(.03)
+    assert sl.GetIntensityAttr().Get() == pytest.approx(cfg['lamps'][0]['intensity_nits'])
+    matrix = np.array(UsdGeom.Xformable(sl.GetPrim()).GetLocalTransformation()).T
+    np.testing.assert_allclose(matrix[:3, 3], [-3.58, 4.826, 1.05], atol=1e-6)
+    before = len(list(stage.Traverse()))
+    author_camera_lamps(stage, cfg, parent_paths={'map': '/World', 'cart_chassis': '/World'})
+    assert len(list(stage.Traverse())) == before               # idempotent
+    retuned = author_camera_lamps(stage, cfg, parent_paths={'map': '/World'},
+                                  tuning=LightRigTuning(intensity_scale=3.0))
+    sl2 = UsdLux.SphereLight(stage.GetPrimAtPath(retuned['shelf']))
+    assert sl2.GetIntensityAttr().Get() == pytest.approx(3 * cfg['lamps'][0]['intensity_nits'])

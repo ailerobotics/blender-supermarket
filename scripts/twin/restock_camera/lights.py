@@ -125,6 +125,53 @@ def task_fill_fixture(fixture_id, eye, target, *, width=0.18, height=0.06, power
                        world_from_light=tuple(map(tuple, pose.tolist())))
 
 
+def camera_lamp(lamp_id, parent, center, *, radius=0.03, power_w=4.0,
+                color=(1.0, 0.98, 0.95), tuning=None):
+    """An omnidirectional sphere lamp physically mounted at a camera (a ring light).
+
+    Co-located with the lens, it lights exactly what the camera sees — recessed
+    supports (the shelf slot) that store fixtures cannot reach. A sphere radiates in
+    every direction, so unlike an aimed rect fill it has no orientation failure mode.
+    Intensity uses the SAME tuning as the store rig, so a single intensity_scale drives
+    lamp and fixtures together and the lamp/source illuminance ratio is scale-free.
+    """
+    tuning = tuning or LightRigTuning()
+    area = math.pi * radius ** 2            # projected (disk) area, as seen from the support
+    radiance = power_w / (area * math.pi)   # Lambertian radiance matching the radiant power
+    return dict(id=lamp_id, parent=parent, kind='camera_lamp', type='sphere',
+                center=list(map(float, center)), radius=float(radius), power_w=float(power_w),
+                color=list(color), area_m2=float(area), radiance_w=float(radiance),
+                intensity_nits=float(tuning.luminous_efficacy_lm_per_w * radiance
+                                     * tuning.intensity_scale))
+
+
+def sphere_illuminance(center, radius, point, normal, nits):
+    """Illuminance (lux) at ``point`` with surface ``normal`` from a sphere emitter.
+
+    d>>r disk approximation: E = nits * pi r^2 * cos(surface) / d^2. UsdLux SphereLight
+    intensity (normalize=False) is the surface luminance, matching this estimate.
+    """
+    d = np.asarray(point, float) - np.asarray(center, float)
+    dist = float(np.linalg.norm(d))
+    if dist <= radius:
+        return float('inf')
+    u = d / dist
+    cos_surf = max(0.0, float(np.asarray(normal, float) @ (-u)))
+    return nits * math.pi * radius ** 2 * cos_surf / dist ** 2
+
+
+def rect_illuminance(fixture, point, normal, nits):
+    """Illuminance (lux) at ``point`` from a down-facing (-Z) rectangular emitter."""
+    d = np.asarray(point, float) - np.asarray(fixture.center, float)
+    dist = float(np.linalg.norm(d))
+    if dist == 0.0:
+        return float('inf')
+    u = d / dist
+    cos_surf = max(0.0, float(np.asarray(normal, float) @ (-u)))
+    cos_src = max(0.0, float(u @ np.array([0, 0, -1.0])))   # emitter normal is -Z
+    return nits * fixture.area_m2() * cos_src * cos_surf / dist ** 2
+
+
 def light_rig(tuning=None, *, fills=()):
     """Serializable light rig: fixtures with computed intensities, dome, tonemapping.
 
@@ -235,4 +282,35 @@ def author_light_rig(stage, rig, *, parent_path='/World', tuning=None):
         dl.CreateIntensityAttr(float(dome['intensity_nits']))
         dl.CreateColorAttr(Gf.Vec3f(*[float(c) for c in dome['color']]))
         paths['dome_fill'] = str(dl.GetPrim().GetPath())
+    return paths
+
+
+def author_camera_lamps(stage, config, *, parent_paths, tuning=None):
+    """Author the camera-mounted sphere lamps in ``config['lamps']`` as UsdLux SphereLights.
+
+    Parallel to ``config.author_camera_design``: ``parent_paths`` maps each lamp's parent
+    ('map'/'cart_chassis') to an existing prim path. Omnidirectional, so no orientation.
+    ``tuning`` (if given) overrides the stored per-lamp nits (e.g. to re-scale). Returns
+    the authored prim paths; idempotent per id.
+    """
+    from pxr import Gf, UsdGeom, UsdLux
+    paths = {}
+    for lamp in config.get('lamps', ()):
+        parent = lamp['parent']
+        if parent not in parent_paths or not stage.GetPrimAtPath(parent_paths[parent]):
+            raise ValueError('camera lamp parent missing: ' + parent)
+        path = parent_paths[parent] + '/RestockLamp_' + lamp['id'].replace(':', '_').replace('-', 'm').replace('.', 'd')
+        sphere = UsdLux.SphereLight.Define(stage, path)
+        sphere.CreateRadiusAttr(float(lamp['radius']))
+        sphere.CreateColorAttr(Gf.Vec3f(*[float(c) for c in lamp['color']]))
+        if tuning is not None:
+            nits = (tuning.luminous_efficacy_lm_per_w * lamp['radiance_w'] * tuning.intensity_scale)
+        else:
+            nits = lamp['intensity_nits']
+        sphere.CreateIntensityAttr(float(nits))
+        sphere.CreateNormalizeAttr(bool((tuning or LightRigTuning()).normalize))
+        prim = sphere.GetPrim()
+        UsdGeom.Xformable(prim).ClearXformOpOrder()
+        UsdGeom.Xformable(prim).AddTranslateOp().Set(Gf.Vec3d(*[float(c) for c in lamp['center']]))
+        paths[lamp['id']] = str(prim.GetPath())
     return paths

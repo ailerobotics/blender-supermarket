@@ -18,7 +18,8 @@ import numpy as np
 
 from twin.restock_camera.config import camera_config
 from twin.restock_camera.geometry import pose_matrix, transform_points
-from twin.restock_camera.lights import light_rig, store_fixtures, LightRigTuning
+from twin.restock_camera.lights import (light_rig, store_fixtures, LightRigTuning,
+                                         rect_illuminance, sphere_illuminance)
 from twin.restock_camera.visibility import ray_hits, sample_plane, usd_surfaces
 
 
@@ -94,6 +95,23 @@ def main():
         marker_reach = {mid: sorted(f.id for f in fixtures
                                     if near_overhead(f, np.asarray(pt)) and reach(f, pt, surfaces))
                         for mid, pt in markers.items()}
+        # Illuminance (lux, intensity_scale=1) at each marker: horizontal up-facing
+        # QR plane lit by store fixtures (with line of sight) plus any camera-mounted
+        # lamp bolted to this station's camera. The lamp shares the rig tuning, so the
+        # marker/source illuminance ratio is independent of the scale integration picks.
+        up = np.array([0, 0, 1.0])
+        station_lamps = [lamp for lamp in config.get('lamps', []) if lamp['id'] == name]
+        marker_lux = {}
+        for mid, pt in markers.items():
+            store_lux = sum(rect_illuminance(f, pt, up, LightRigTuning().intensity_nits(f))
+                            for f in fixtures if reach(f, pt, surfaces))
+            lamp_lux = 0.0
+            for lamp in station_lamps:
+                lc = transform_points(parent, [lamp['center']])[0]
+                if lc[2] > pt[2] and not any(ray_hits(lc, pt, sfc.triangles) for sfc in surfaces):
+                    lamp_lux += sphere_illuminance(lc, lamp['radius'], pt, up, lamp['intensity_nits'])
+            marker_lux[mid] = dict(store_lux=round(store_lux, 1), lamp_lux=round(lamp_lux, 1),
+                                   total_lux=round(store_lux + lamp_lux, 1))
         best_any = max((v['samples_reached'] for v in panel_reach.values()), default=0)
         best_direct = max((v['samples_reached'] for v in direct_reach.values()), default=0)
         fraction = best_direct / len(patch)
@@ -115,7 +133,35 @@ def main():
             verdict=verdict,
             nearest_fixtures=dict(sorted(panel_reach.items(),
                                          key=lambda kv: kv[1]['distance_m'])[:4]),
-            marker_near_overhead_line_of_sight=marker_reach)
+            marker_near_overhead_line_of_sight=marker_reach,
+            camera_lamp_ids=[lamp['id'] for lamp in station_lamps],
+            marker_illuminance_lux_scale1=marker_lux)
+    # Anchor to the measured SOURCE decode: integration reports the source markers
+    # decode 3/3 under this rig, so at the chosen intensity_scale their white modules
+    # reach the ~180/255 threshold. A marker lit to >= that illuminance, same up-facing
+    # QR material and the same shared scale/exposure, reaches >= the same pixel value.
+    source_marker_lux = [m['total_lux'] for m in results['source']['marker_illuminance_lux_scale1'].values()]
+    source_ref = min(source_marker_lux)
+    for name, st in results.items():
+        worst = min(m['total_lux'] for m in st['marker_illuminance_lux_scale1'].values())
+        lamp_lux = min((m['lamp_lux'] for m in st['marker_illuminance_lux_scale1'].values()),
+                       default=0.0) if st['camera_lamp_ids'] else 0.0
+        st['worst_marker_lux_scale1'] = worst
+        st['worst_marker_vs_source_ratio'] = round(worst / source_ref, 3) if source_ref else None
+        st['predicted_marker_white_ge_source_threshold'] = bool(worst + 1e-6 >= source_ref)
+        # Combined verdict. A marker is decodably lit if a near-overhead store fixture
+        # sees it (integration confirmed source decodes 3/3 wherever line of sight
+        # exists) OR a camera lamp lights it to >= the measured source level. The
+        # source ratio is a sufficient (conservative) bound, not a necessary one: cart
+        # is below the bright source yet is direct-overhead lit, so it is not a gap.
+        if st['markers_reached_by_near_overhead']:
+            st['marker_lit_verdict'] = 'overhead_direct'
+        elif lamp_lux > 0 and worst + 1e-6 >= source_ref:
+            st['marker_lit_verdict'] = 'camera_lamp_lit'
+        elif lamp_lux > 0:
+            st['marker_lit_verdict'] = 'camera_lamp_below_source_reference'
+        else:
+            st['marker_lit_verdict'] = 'dark_requires_fill'
     for path in sorted(layers):
         hashes[str(Path(path).resolve())] = sha(path)
     for path in inputs:
@@ -126,19 +172,24 @@ def main():
                   runtime_ready=False, input_sha256=hashes,
                   light_rig_summary=dict(counts=rig['counts'], tuning=rig['tuning'],
                                          dome=rig['dome'], tonemapping=rig['tonemapping']),
+                  camera_lamps=config.get('lamps', []),
+                  source_marker_reference_lux_scale1=round(source_ref, 1),
                   stations=results,
                   limitations=[
-                      'Line of sight is not illuminance; a reached support still needs the tuned '
-                      'intensity_scale and tonemapper for decodable contrast.',
-                      'A recessed verdict means overhead panels cannot light the support; keep the '
-                      'dome fill or a local task fill, then verify on real rendered pixels.',
+                      'Illuminance is estimated from UsdLux-consistent geometry, not a render; the '
+                      'source-anchored >=180/255 claim assumes the measured source decode means its '
+                      'whites reach ~180 and the exposure/scale is shared by lamp and fixtures.',
+                      'The camera lamp shares the rig intensity_scale, so the marker/source ratio is '
+                      'scale-free; integration still tunes the one scale and tonemapper on real pixels.',
                       'Ceiling/tube geometry mirrors the Blender store; integration authors the rig '
-                      'into the native stage and owns the GPU render.'])
+                      'and the camera lamp into the native stage and owns the GPU render.'])
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps(report, indent=2) + '\n')
-    print(json.dumps({name: dict(verdict=st['verdict'],
-                                 near_overhead_fraction=st['near_overhead_support_fraction'],
-                                 markers_lit=st['markers_reached_by_near_overhead'])
+    print(json.dumps({name: dict(marker_lit_verdict=st['marker_lit_verdict'],
+                                 overhead=st['verdict'],
+                                 worst_marker_lux=st['worst_marker_lux_scale1'],
+                                 vs_source=st['worst_marker_vs_source_ratio'],
+                                 lamps=st['camera_lamp_ids'])
                       for name, st in results.items()}, indent=2))
 
 

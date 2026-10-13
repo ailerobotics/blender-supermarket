@@ -230,14 +230,26 @@ store already carries the 72 Blender-exported RectLights, but at intensity ≈14
 darkness cause. Integration either re-tunes those exported lights to the rig's per
 fixture nits or authors the rig fresh, then adds the dome.
 
-`scripts/plan_restock_lighting.py` is the offline CPU line-of-sight proof: for each
-station support it ray-tests which fixtures have an unobstructed, near-overhead path.
-Source and cart supports are `direct_overhead_light`; the shelf support is
-`grazing_only_keep_fill` (near-overhead fraction 0.2, steep light blocked by the shelf
-tier) so the dome fill or a local task fill (`task_fill_fixture`, co-located with the
-shelf camera) is required. Line of sight is not illuminance; a reached support still
-needs the tuned `intensity_scale` and tonemapper for decodable contrast. The exact
-handoff for integration is `data/sim-restock-camera-v2/lighting-handoff.md`.
+The shelf support is recessed in its shelf slot, so overhead store fixtures cannot
+light it (native render measured it at 4/255). A **camera-mounted ring lamp**
+(`camera_lamp`, authored by `author_camera_lamps` as a UsdLux SphereLight) is bolted to
+the shelf camera: being co-located with the lens it lights exactly what the camera
+sees, and being omnidirectional it has no aim/orientation failure mode (an earlier
+aimed rect fill did not light the markers). Its intensity uses the *same* rig tuning,
+so one `intensity_scale` drives lamp and fixtures together and the marker/source
+illuminance ratio is scale-free. The lamp and its collidable housing are carried in the
+camera-config (`config['lamps']`, `shelf_lamp_housing` solid) and must be in
+navigation/planning; the housing is mounted above/behind the lens so it is not in the
+frustum.
+
+`scripts/plan_restock_lighting.py` is the offline CPU proof: per station it ray-tests
+near-overhead fixture line of sight and estimates per-marker illuminance (lux, scale 1)
+from fixtures + camera lamps, anchored to the measured source decode. Source and cart
+markers are `overhead_direct`; the shelf is `camera_lamp_lit` — its markers receive
+~2× the illuminance the (decoding) source markers get, so at whatever `intensity_scale`
+integration tunes for the source whites to reach ~180/255, the shelf whites reach it
+too. Line of sight and illuminance are not a render; integration verifies contrast on
+real pixels. The exact handoff is `data/sim-restock-camera-v2/lighting-handoff.md`.
 
 Exact main input SHA-256 values for this prediction:
 

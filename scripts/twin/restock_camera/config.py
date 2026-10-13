@@ -9,6 +9,7 @@ from dataclasses import asdict
 import numpy as np
 
 from .geometry import Intrinsics, look_at, pose_matrix, usd_camera_transform
+from .lights import camera_lamp
 
 
 def camera_config(scenario, manifest):
@@ -31,7 +32,7 @@ def camera_config(scenario, manifest):
     source = np.array([*staging['support_center_xy'],staging['unit_bottom_z']])
     shelf = np.array(staging['target_surface_pose_world'][:3])
     deck = np.array([*staging['cart_load_center_body_xy'],staging['cart_support_z_world']-.2])
-    cameras,solids,supports = {},[],{}
+    cameras,solids,supports,lamps = {},[],{},[]
 
     def solid(name,parent,center,size):
         solids.append(dict(id=name,parent=parent,parent_from_solid=pose_matrix([*center[:2],0],center[2]).tolist(),
@@ -62,6 +63,18 @@ def camera_config(scenario, manifest):
     solid('cart_bracket','cart_chassis',deck+[0,-.02,.674],[.02,.02,.017])
     solid('shelf_bracket','map',shelf+[-.50,0,.27],[.02,.55,.02])
     solid('shelf_anchor','map',shelf+[-.47,-.22,.14],[.08,.02,.26])
+    # Camera-mounted ring lamp co-located with the shelf lens. The shelf support sits
+    # in a recessed slot the ceiling panels cannot light (grazing_only), so the robot
+    # carries its own coaxial lamp: it illuminates exactly what the camera sees. Sphere
+    # (omnidirectional) avoids any aim/orientation failure; intensity shares the store
+    # rig tuning so one intensity_scale drives it and the fixtures together. Its housing
+    # is collision geometry and must be included in navigation/planning.
+    # Mounted on the bracket just above and behind the lens so neither the lamp nor its
+    # housing sits in the camera frustum (a ring light's body clears the lens); the
+    # omnidirectional sphere still lights the markers ~0.35 m away.
+    shelf_lamp_center = shelf+[-.53,0,.32]
+    lamps.append(camera_lamp('shelf','map',shelf_lamp_center,radius=.03,power_w=6.))
+    solid('shelf_lamp_housing','map',shelf_lamp_center,[.05,.05,.02])
 
     def support(name,parent,center,yaw,marker_centers,witness_center,witness_size):
         pose = pose_matrix([*marker_centers[0][:2],yaw],marker_centers[0][2])
@@ -84,7 +97,7 @@ def camera_config(scenario, manifest):
     support('shelf','map',shelf,0.,[shelf+[-.42,-.14,0],shelf+[-.42,.14,0]],
             shelf+[-.42,0,0],[.06,.14])
     return dict(schema='restock-camera-design.v2',evidence='geometric_design_not_sensor_capture',
-                runtime_ready=False,cameras=cameras,solids=solids,supports=supports,
+                runtime_ready=False,cameras=cameras,solids=solids,supports=supports,lamps=lamps,
                 cart_chassis_height_m=.20,required_depth_error_bound_m=.0002,
                 limitations=['Depth error bound must be established for the real renderer/sensor; not assumed.',
                              'Full-link/mount collision and visibility report must be checked before use.',
