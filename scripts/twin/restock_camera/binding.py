@@ -4,6 +4,7 @@ import numpy as np
 
 from .sensed import (FrameEvidence, register_marker, calibrate_rigid_support,
                      RegisteredSupport)
+from .qr import FixedTileQR
 
 
 @dataclass
@@ -32,18 +33,18 @@ class RenderedSupportContext:
     """
     def __init__(self, *, camera_id, intrinsics, slots, measure_context,
                  clearance_for_slot, depth_error_m, camera_revision, clock_context=None):
-        import cv2
         self.camera_id,self.intrinsics = camera_id,intrinsics
         self.slots = tuple(slots)
         self.measure_context,self.clearance_for_slot = measure_context,clearance_for_slot
         self.depth_error_m,self.camera_revision = depth_error_m,camera_revision
         self.clock_context = clock_context
-        self.decoder = cv2.QRCodeDetector()
+        self.decoder = FixedTileQR(camera_id)
+        self.qr_observation = None
         if len({slot.location for slot in slots}) != len(slots):
             raise ValueError('duplicate support location')
 
     def _registrations(self, frame, now):
-        import cv2
+        self.qr_observation = None
         transform,tf_stamp,epoch,parked = self.measure_context(frame,now)
         clock = ('default','',None) if self.clock_context is None else self.clock_context(frame,now)
         evidence = FrameEvidence(self.camera_id,int(frame['rendering_frame']),
@@ -53,12 +54,8 @@ class RenderedSupportContext:
         depth = np.asarray(frame['distance_to_image_plane'],float)
         if rgb.shape[:2] != (self.intrinsics.height,self.intrinsics.width) or depth.shape != rgb.shape[:2]:
             raise ValueError('unregistered marker RGB-D')
-        ok,codes,corners,_ = self.decoder.detectAndDecodeMulti(cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR))
-        decoded = {}
-        for code,polygon in zip(codes,corners if ok else []):
-            if code in decoded:
-                raise ValueError('duplicate support/product identity in camera frame')
-            decoded[code] = polygon
+        qr = self.decoder.decode(rgb,evidence,now=now,parked=parked)
+        decoded = {item.text:np.asarray(item.corners) for item in qr.detections}
         registrations = []
         for slot in self.slots:
             if slot.marker_id not in decoded or slot.auxiliary_id and slot.auxiliary_id not in decoded:
@@ -70,6 +67,7 @@ class RenderedSupportContext:
                 marker_id=slot.marker_id,decoded_id=slot.marker_id,support_id=slot.support_id,
                 revision=slot.revision,side_m=slot.marker_side_m,evidence=evidence,now=now,
                 parked=parked,depth_error_m=self.depth_error_m,**extra))
+        self.qr_observation = qr
         return transform,evidence,parked,depth,registrations
 
     def commission(self, frame, now, empty_polygons, *, lifetime_s=600.):
@@ -105,7 +103,7 @@ class RenderedSupportContext:
                 view = replace(view,clearance=clearance)
             views.append(SlotView.from_support(slot.location,view,slot.label_mask))
         return CameraContext(transform,e.transform_stamp,e.epoch,tuple(views),parked,
-                             e.session_id,e.steady_domain,e.acquired_steady)
+                             e.session_id,e.steady_domain,e.acquired_steady,self.qr_observation)
 
     def invalidate(self, reason):
         for slot in self.slots:

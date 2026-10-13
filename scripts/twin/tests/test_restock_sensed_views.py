@@ -200,7 +200,7 @@ def test_oblique_quad_retains_physical_footprint():
     assert view.geometry.required_xy == (.62,.42)
 
 
-def test_executable_context_decodes_real_qr_pixels_before_clearance():
+def test_executable_context_decodes_real_qr_pixels_before_clearance(monkeypatch):
     cv2 = pytest.importorskip('cv2')
     from scripts.twin.restock_camera.binding import RenderedSupportContext, SupportSlot
     k,camera,depth,support,witness,a,b = fixture(scale=2)
@@ -234,6 +234,25 @@ def test_executable_context_decodes_real_qr_pixels_before_clearance():
     assert calls == [('cart',2.,1.)]
     assert current.slots[0].free_dimensions[2] == 0
     assert baseline.baseline_stamp == 1.
+    # Inventory reuses exactly the marker decoder's frame result; it must not
+    # pay for an independent decode or silently accept changed pixels.
+    from types import SimpleNamespace as NS
+    from scripts.twin.restock_manipulation import isaac_sensors
+    from .test_restock_manipulation import FixturePoseBridge
+    monkeypatch.setattr(isaac_sensors,'load_pose_bridge',lambda root:FixturePoseBridge())
+    camera_stub=NS(get_current_frame=lambda **kw:frame,
+        get_intrinsics_matrix=lambda:np.array([[k.fx,0,k.cx],[0,k.fy,k.cy],[0,0,1.]]),
+        add_distance_to_image_plane_to_frame=lambda:None)
+    sensor=isaac_sensors.IsaacCartonSensors(camera_stub,pose_bridge_root='fixture',profiles={},
+                                          context_provider=lambda f,now:current)
+    def forbidden_decode(*args,**kwargs):
+        pytest.fail('support and inventory decoded the same acquired pixels twice')
+    sensor.decoder=NS(decode=forbidden_decode)
+    motion=NS(parked=lambda:True,collision_time=2.,joint_positions=lambda:(0.,)*6,
+              observe_source=lambda observation:None)
+    packet=sensor.capture(2.,'cart','cart',motion,NS(read=lambda:False))
+    assert not packet.observations and not packet.target.clear
+    assert sensor.evidence[0]['qr_rgb_sha256']==current.qr_observation.rgb_sha256
     # Removing real identity pixels refuses; geometry/config never supplies ID.
     frame.update(rgb=np.full_like(frame['rgb'],255),rendering_frame=3,rendering_time=3.)
     with pytest.raises(ValueError,match='not decoded'):
