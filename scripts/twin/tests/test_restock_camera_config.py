@@ -150,13 +150,19 @@ def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
 
     # Decode from the AUTHORED world geometry (not the design model): this catches the
     # child Modules mesh double-applying its parent transform, which flung the QR pattern
-    # off behind the camera and rendered only a blank white plane. The black modules must
-    # share the white base plane.
+    # off behind the camera and rendered only a blank white plane.
     camera = config['cameras']['shelf']
     world = np.array(camera['parent_from_optical']); k = Intrinsics(**camera['intrinsics'])
     for index, marker in enumerate(config['supports']['shelf']['markers']):
         base = f'/World/RestockCamera_shelf_marker_{index}'
         assert decode_authored_marker(stage, base, world, k) == marker['id']
+        assert UsdGeom.Mesh(stage.GetPrimAtPath(base + '/Modules')).GetDoubleSidedAttr().Get()
         base_c, modules_c = centroid(base), centroid(base + '/Modules')
-        assert np.linalg.norm(modules_c[:2] - base_c[:2]) < .02
-        assert abs(modules_c[2] - base_c[2]) < .002
+        assert np.linalg.norm(modules_c[:2] - base_c[:2]) < .02         # same marker location
+        # The modules sit ~2 mm in front of the base along the marker normal, and strictly
+        # nearer the camera than the base at the same pixel, so RTX does not let the base win
+        # the depth test (at 0.4 mm it did and the modules never rendered).
+        assert 0.0015 < modules_c[2] - base_c[2] < 0.0025
+        base_depth = (np.linalg.inv(world) @ np.r_[base_c, 1])[2]
+        modules_depth = (np.linalg.inv(world) @ np.r_[modules_c, 1])[2]
+        assert modules_depth < base_depth - 0.001                      # nearer the camera
