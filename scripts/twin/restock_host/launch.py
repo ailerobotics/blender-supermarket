@@ -67,9 +67,30 @@ def description(config):
                               namespace=NS, parameters=parameters,
                               remappings=list(remappings))
 
+    lo, hi = plan['workspace_min'], plan['workspace_max']
+    world = {**common, 'global_frame': FRAME, 'map_clearing_frame_id': FRAME,
+             'esdf_slice_bounds_visualization_attachment_frame_id': FRAME,
+             'workspace_height_bounds_visualization_attachment_frame_id': FRAME,
+             'use_depth': True, 'use_color': False, 'use_lidar': False, 'num_cameras': 1,
+             'update_esdf_rate_hz': 0.0, 'static_mapper.workspace_bounds_type': 'bounding_box'}
+    for key, val in zip(('min_corner_x_m', 'min_corner_y_m', 'min_height_m',
+                         'max_corner_x_m', 'max_corner_y_m', 'max_height_m'), lo + hi):
+        world['static_mapper.workspace_bounds_' + key] = float(val)
+    nvblox_node = component('nvblox_ros', 'nvblox::NvbloxNode', 'nvblox_node', [
+        str(Path(share('nvblox_examples_bringup')) / 'config/nvblox/nvblox_base.yaml'),
+        str(Path(share('isaac_ros_manipulation_bringup')) / 'config/nvblox/nvblox_manipulator_base.yaml'),
+        world], [('camera_0/depth/image', NS + '/world_depth'),
+                 ('camera_0/depth/camera_info', NS + '/camera/camera_info')])
+    # Load order matters: composable nodes load sequentially in one container, and the
+    # CumotionPlanner constructor blocks waiting for the nvblox get_esdf_and_gradient
+    # service, so the mapper must load BEFORE the planner or the whole container
+    # deadlocks (planner never returns, mapper never gets loaded). ObjectAttachment and
+    # RobotSegmenter in turn depend on the planner's robot-description service, so they
+    # follow it. Order: scene server, mapper, planner, attachment, segmenter.
     nodes = [component('isaac_ros_cumotion',
                        'nvidia::isaac_ros::cumotion::StaticPlanningSceneServer',
                        'static_planning_scene_server', [common, {'moveit_collision_objects_scene_file': ''}]),
+             nvblox_node,
              component('isaac_ros_cumotion', 'nvidia::isaac_ros::cumotion::CumotionPlanner',
                        'cumotion_planner', [cp]),
              component('isaac_ros_cumotion_object_attachment',
@@ -91,20 +112,6 @@ def description(config):
                         ('joint_states', NS + '/joint_states'),
                         ('robot_mask', NS + '/robot_mask'),
                         ('robot_depth', NS + '/robot_world_depth')])]
-    lo, hi = plan['workspace_min'], plan['workspace_max']
-    world = {**common, 'global_frame': FRAME, 'map_clearing_frame_id': FRAME,
-             'esdf_slice_bounds_visualization_attachment_frame_id': FRAME,
-             'workspace_height_bounds_visualization_attachment_frame_id': FRAME,
-             'use_depth': True, 'use_color': False, 'use_lidar': False, 'num_cameras': 1,
-             'update_esdf_rate_hz': 0.0, 'static_mapper.workspace_bounds_type': 'bounding_box'}
-    for key, val in zip(('min_corner_x_m', 'min_corner_y_m', 'min_height_m',
-                         'max_corner_x_m', 'max_corner_y_m', 'max_height_m'), lo + hi):
-        world['static_mapper.workspace_bounds_' + key] = float(val)
-    nodes.append(component('nvblox_ros', 'nvblox::NvbloxNode', 'nvblox_node', [
-        str(Path(share('nvblox_examples_bringup')) / 'config/nvblox/nvblox_base.yaml'),
-        str(Path(share('isaac_ros_manipulation_bringup')) / 'config/nvblox/nvblox_manipulator_base.yaml'),
-        world], [('camera_0/depth/image', NS + '/world_depth'),
-                 ('camera_0/depth/camera_info', NS + '/camera/camera_info')]))
     container = ComposableNodeContainer(name='host_components', namespace=NS,
         package='rclcpp_components', executable='component_container_mt', output='screen',
         composable_node_descriptions=nodes)

@@ -133,6 +133,43 @@ class HostTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'does not match'):
             launch_plan(self.config)
 
+    def test_xrdf_default_joint_positions_are_cspace_only(self):
+        # cuMotion/cuRobo prunes off-arm-path branches (e.g. the mobile base's two-joint
+        # caster chains swivel->fork->roll->wheel); a default position for a pruned joint
+        # aborts the planner at load. The generated xrdf must name ONLY the six cspace
+        # arm joints in default_joint_positions, while still covering the base link with
+        # collision spheres. Build a robot with an extra continuous base chain and check.
+        import yaml
+        from twin.restock_host.generate_assets import generate
+        d = Path(self.temp.name) / 'wheeled'
+        d.mkdir()
+        links = ['base_link', 'arm_mount', FRAME, 'suction_cups', 'gripper_pad_tcp',
+                 'caster_fork', 'caster_wheel'] + ['link' + str(i) for i in range(6)]
+        joints, previous = [], FRAME
+        for i, name in enumerate(JOINTS):
+            joints.append(f'<joint name="{name}" type="revolute"><parent link="{previous}"/>'
+                          f'<child link="link{i}"/><origin xyz="0.1 0 0"/><axis xyz="0 0 1"/>'
+                          '<limit lower="-3" upper="3" velocity="1" effort="1"/></joint>')
+            previous = 'link' + str(i)
+        for name, parent, child in [('mount', 'base_link', 'arm_mount'), ('arm', 'arm_mount', FRAME),
+                                    ('tool', previous, 'suction_cups'), ('tcp', 'suction_cups', 'gripper_pad_tcp')]:
+            joints.append(f'<joint name="{name}" type="fixed"><parent link="{parent}"/><child link="{child}"/></joint>')
+        # Two-joint continuous caster chain off the base, like the real mobile CAD.
+        joints.append('<joint name="caster_swivel" type="continuous"><parent link="base_link"/>'
+                      '<child link="caster_fork"/><axis xyz="0 0 1"/></joint>')
+        joints.append('<joint name="caster_roll" type="continuous"><parent link="caster_fork"/>'
+                      '<child link="caster_wheel"/><axis xyz="0 1 0"/></joint>')
+        (d / 'robot.urdf').write_text('<robot name="wheeled">' + ''.join(
+            f'<link name="{n}"><collision><geometry><sphere radius="0.01"/></geometry></collision></link>'
+            for n in links) + ''.join(joints) + '</robot>')
+        (d / 'mobile.json').write_text(json.dumps({'transport_positions': dict.fromkeys(JOINTS, 0.)}))
+        generate(d / 'robot.urdf', d / 'mobile.json', d, d / 'out')
+        xrdf = yaml.safe_load((d / 'out' / 'mobile.xrdf').read_text())
+        self.assertEqual(list(xrdf['default_joint_positions']), list(JOINTS))
+        self.assertNotIn('caster_roll', xrdf['default_joint_positions'])
+        # The pruned base links are still covered by collision spheres.
+        self.assertTrue(xrdf['geometry']['mobile_cad']['spheres'].get('caster_wheel'))
+
     def test_asset_report_tolerates_env_float_noise_but_not_real_change(self):
         # The recompute is numerically env-dependent (scipy qhull/KDTree): a float
         # leaf may drift at ~1e-17. A drift within tolerance must still validate; a

@@ -317,3 +317,25 @@ rejects the snapshot as an `invalid native distance slice` (empty frame), and
 (`scripts/verify_slice_consume_gpu.py` + `scripts/restock_runtime/consume_snapshot_probe.py`):
 the full pipeline publishes an EvidenceSnapshot whose slice frame is `map` and the landed
 `TemporalMap.accept_envelope` adopts it. Report: `data/sim-restock-host-v2/slice-frameid-report.md`.
+
+### Task-isolated planner + mapper launch and VRAM fit
+
+`scripts/restock_runtime/launch_restock_host_stack.sh` is the one task-isolated recipe
+that starts the whole host manipulation graph — MoveIt `move_group`, the Isaac cuMotion
+servers, the shelfbot `object_segmenter`, and the nvblox mapper co-launched — on DDS
+domain 88 under the task-local runtime closure, never the rig's shared containers. Two
+load-time constraints are encoded in `launch.py` and `generate_assets.py`: the generated
+xrdf `default_joint_positions` names **only the six cspace arm joints** (cuMotion/cuRobo
+prunes off-arm-path branches such as the base's two-joint caster chains, and a default
+position for a pruned joint aborts the planner at load — `test_restock_host.py` locks
+this), and the composable nodes load **mapper before planner** (the `CumotionPlanner`
+constructor blocks on the mapper's `get_esdf_and_gradient` service, so the reverse order
+deadlocks the container). Verified in one bounded guarded GPU run
+(`scripts/verify_restock_host_stack_gpu.py` + `scripts/restock_runtime/stack_probe.py`):
+6/7 servers up (the depth self-filter `RobotSegmenter` needs the real NITROS depth
+input), all stack endpoints advertised, `compute_ik` succeeds against the refined CAD
+config, the mapper serves an ESDF+gradient grid, and the stack's **measured VRAM ~1.16 GB
+fits** beside the Isaac renderer (~6.6 GB) and whispr (~2.2 GB) on the 12 GB card. A full
+cuMotion trajectory and `RobotSegmenter` need the sensor-populated ESDF world and live
+depth (`required_external`), integration-owned. Report:
+`data/sim-restock-host-v2/host-stack-launch-report.md`.

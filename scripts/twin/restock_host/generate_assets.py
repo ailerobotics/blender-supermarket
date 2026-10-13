@@ -143,9 +143,18 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
     ignore = {}
     for a, b in sorted(excluded):
         ignore.setdefault(a, []).append(b)
+    # cuMotion/cuRobo builds a reduced kinematic tree to the tool frames and prunes
+    # off-path branches (e.g. the mobile base's two-joint caster chains
+    # swivel->fork->roll->wheel), so a default position for a pruned joint
+    # (front_caster_roll) aborts the planner at load. Follow the reference cuMotion
+    # xrdf convention: default_joint_positions names ONLY the cspace (arm) joints. The
+    # base/cart joints are all at 0 at transport, which is their kinematic default, so
+    # cuMotion locks them there without an explicit entry; the full base geometry still
+    # drives FK/overlap above and the collision spheres below.
+    arm_defaults = {name: positions[name] for name in JOINTS}
     xrdf = {'format': 'xrdf', 'format_version': 1.0,
             'modifiers': [{'set_base_frame': FRAME}],
-            'default_joint_positions': positions, 'tool_frames': [TCP],
+            'default_joint_positions': arm_defaults, 'tool_frames': [TCP],
             'cspace': {'joint_names': list(JOINTS), 'acceleration_limits': [acceleration]*6,
                        'jerk_limits': [jerk]*6},
             'collision': {'geometry': 'mobile_cad'},
