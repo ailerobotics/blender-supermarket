@@ -10,6 +10,22 @@ manipulation components are integrated from origin/main.
 A controller dispatcher and guarded launcher now exist; a complete simulator
 bundle with actual sensor acquisition/planner/actuator wiring is still missing.
 
+## Host/collision preflight: COLLISION GATE GREEN (CPU, vs origin/main)
+
+The fourth lighting-independent priority-3 step passed on CPU. The strict host
+collision preflight (`python -m twin.restock_host.generate_assets`, `restock_host`
+byte-identical to current origin/main) regenerates the refined mobile CAD sphere model
+and checks transport self-collision: **1930 spheres, `transport_collision_check_passed
+= True` (zero non-excluded transport overlaps), 7 full-range separation proofs** and
+sound kinematic exclusions (same-rigid / adjacent / proven-separation). Evidence:
+`~/datasets/twin-robot-in-store-boot-v1/host-preflight-01/asset-report.json`.
+
+`planning_ready` and `native_gpu_capacity_verified` remain `False` by design: offline
+asset generation deliberately does not certify the native cuMotion planner capacity,
+batching or trajectory/dynamics - that is the remaining planner/sensing gate, not a
+collision-model failure. With the collision gate confirmed green and the camera light
+rig now landed on origin/main, the remaining mission gates are **lighting and sensing**.
+
 ## Forward towing: TRAIN TOWS THROUGH THE PORTAL on native guarded GPU
 
 The third lighting-independent priority-3 step passed. `native-towing-02` docks the
