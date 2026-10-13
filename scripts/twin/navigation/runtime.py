@@ -16,8 +16,13 @@ class SensorNavigation:
         self.localizer=localizer
         self.last_localized=None
 
-    def start(self,goal,coupled):
-        self.controller.start(goal,coupled)
+    def start(self,goal,coupled,*,goal_articulation=None):
+        # Forward the per-goal articulation tolerance to the inner controller so the
+        # NavigationBridge start(goal, coupled, goal_articulation=) contract holds.
+        if goal_articulation is None:
+            self.controller.start(goal,coupled)
+        else:
+            self.controller.start(goal,coupled,goal_articulation=goal_articulation)
 
     def cancel(self):
         return self.controller.cancel()
