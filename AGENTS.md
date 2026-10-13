@@ -102,6 +102,24 @@ repo's `scenes/`, `export/` or `renders/`.
   `scripts/twin/restock/`; CPU checks and adapter contract are in RUNBOOK §11.
   `data/mobile-restock-v2/report.md` distinguishes fixture tests from the still
   unverified physical cycle and records the GPU driver diagnosis.
+- **Bounded native restock diagnostics** (guarded GPU, no full mission) are driven by
+  `scripts/run_restock_render_smoke.py` with one of `--assembly-only` (stationary
+  physics hold → `restock/assembly_check.py`), `--coupling-only` (dock+latch+hold →
+  `coupling_check.py`), `--towing-only` (forward crawl + VFR H.264 → `towing_check.py`),
+  or a `--runtime-config … --view source|shelf` optical bench (`view_scene.py`). They
+  run under the same guards as the mission (`--isaac-python` env_isaaclab, `--nvidia-runtime`
+  the task-local matching userspace at `~/datasets/sim-gpu-userspace-recovery-s1/root`,
+  `/tmp/aile-gpu.lock`, `--heavy-threshold-mb 2500` for the always-on whispr). ffmpeg is
+  the `imageio_ffmpeg` binary under env_isaaclab. Stationarity is gated on **measured net
+  pose displacement** (`restock/settle_metrics.py`), never the TGS-reported instantaneous
+  velocity — that carries a documented solver bias (~14 mm/s while a body is provably
+  frozen). Cart rest stability needs PhysX `enable_stablization(True)` applied through the
+  World `PhysicsContext` before `reset()` (Isaac re-applies its `False` default at World
+  init, clobbering the USD attr) **plus** rigid-body damping for caster/rolling resistance
+  — `physxJoint:jointFriction` is inert on the maximal-coordinate cart casters
+  (`excludeFromArticulation`); see `physics_setup.configure_scene_physics` /
+  `configure_cart_bearings`. Evidence + the exact per-run commands are in
+  `data/mobile-restock-v2/report.md`.
 - Git hosting: inspect the configured remote and current task delivery contract
   before publishing; older local-only task notes predate the configured remote.
 
