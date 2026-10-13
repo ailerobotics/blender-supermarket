@@ -153,10 +153,20 @@ def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
     # off behind the camera and rendered only a blank white plane.
     camera = config['cameras']['shelf']
     world = np.array(camera['parent_from_optical']); k = Intrinsics(**camera['intrinsics'])
+    from scripts.twin.restock_camera.geometry import project, transform_points
     for index, marker in enumerate(config['supports']['shelf']['markers']):
         base = f'/World/RestockCamera_shelf_marker_{index}'
         assert decode_authored_marker(stage, base, world, k) == marker['id']
         assert UsdGeom.Mesh(stage.GetPrimAtPath(base + '/Modules')).GetDoubleSidedAttr().Get()
+        # Both paired markers (mirror-symmetric) must sit FULLY inside the frame with their
+        # quiet border; at the old fx the far-left marker overran the edge and lost a finder
+        # pattern, so it decoded offline (rectified from known corners) but not natively.
+        white = UsdGeom.Mesh(stage.GetPrimAtPath(base))
+        m = np.array(UsdGeom.XformCache().GetLocalToWorldTransform(white.GetPrim())).T
+        corners = (m @ np.c_[np.array(white.GetPointsAttr().Get()), np.ones(4)].T).T[:, :3]
+        uv, in_fov = project(transform_points(np.linalg.inv(world), corners), k)
+        assert in_fov.all()
+        assert uv[:, 0].min() > 10 and uv[:, 0].max() < k.width - 10        # left/right margin
         base_c, modules_c = centroid(base), centroid(base + '/Modules')
         assert np.linalg.norm(modules_c[:2] - base_c[:2]) < .02         # same marker location
         # The modules sit ~2 mm in front of the base along the marker normal, and strictly
