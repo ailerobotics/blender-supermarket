@@ -33,6 +33,49 @@ def test_cart_solver_tuning_preserves_physical_bodies_and_free_joints():
                    for p in stage.Traverse())
 
 
+def test_cart_bearings_add_friction_damping_without_touching_physical_model():
+    Usd=pytest.importorskip('pxr.Usd')
+    from pxr import UsdPhysics
+    from twin.mobile_assets import author_cart
+    from twin.restock.physics_setup import configure_cart_bearings
+    stage=Usd.Stage.CreateInMemory()
+    cart=author_cart(stage)
+    # Snapshot everything the fidelity correction must NOT change: mass, inertia,
+    # collision geometry, joint bodies/axes and the free (undriven) revolute model.
+    protected={(str(p.GetPath()),a.GetName()):a.Get() for p in stage.Traverse()
+               for a in p.GetAttributes() if a.HasAuthoredValueOpinion()}
+    result=configure_cart_bearings(stage,cart['root'])
+    assert len(result['joints'])==8 and len(result['bodies'])==9
+    for (path,name),value in protected.items():
+        assert stage.GetPrimAtPath(path).GetAttribute(name).Get()==value
+    # Friction authored on every caster joint; bodies carry mild damping only.
+    for path in result['joints']:
+        j=stage.GetPrimAtPath(path)
+        assert j.GetAttribute('physxJoint:jointFriction').Get()==pytest.approx(0.01)
+        assert not UsdPhysics.RevoluteJoint(j).GetBody1Rel().GetTargets()==[]  # still a real joint
+    for path in result['bodies']:
+        b=stage.GetPrimAtPath(path)
+        assert b.GetAttribute('physxRigidBody:linearDamping').Get()==pytest.approx(0.05)
+        assert b.GetAttribute('physxRigidBody:angularDamping').Get()==pytest.approx(0.05)
+
+
+def test_scene_physics_enables_stabilization_only():
+    Usd=pytest.importorskip('pxr.Usd')
+    from pxr import UsdPhysics, Gf
+    from twin.restock.physics_setup import configure_scene_physics
+    stage=Usd.Stage.CreateInMemory()
+    scene=UsdPhysics.Scene.Define(stage,'/World/physicsScene')
+    scene.CreateGravityDirectionAttr(Gf.Vec3f(0,0,-1))
+    scene.CreateGravityMagnitudeAttr(9.81)
+    result=configure_scene_physics(stage,'/World/physicsScene')
+    assert result['enable_stabilization'] is True
+    prim=stage.GetPrimAtPath('/World/physicsScene')
+    assert prim.GetAttribute('physxScene:enableStabilization').Get() is True
+    # Gravity (the physical model) is untouched.
+    assert list(prim.GetAttribute('physics:gravityDirection').Get())==[0,0,-1]
+    assert prim.GetAttribute('physics:gravityMagnitude').Get()==pytest.approx(9.81)
+
+
 def test_body_measurement_uses_isaac_wxyz_and_rejects_nonfinite_feedback():
     body=NS(get_world_pose=lambda:(np.array([2,3,.24]),np.array([2**-.5,0,0,2**-.5])),
             get_linear_velocity=lambda:np.zeros(3),get_angular_velocity=lambda:np.zeros(3))

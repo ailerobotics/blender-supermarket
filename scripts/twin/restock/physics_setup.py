@@ -67,6 +67,61 @@ def configure_cart_solver(stage, root):
     return bodies
 
 
+def configure_scene_physics(stage, scene_path):
+    """Enable PhysX resting-contact stabilization on the composed scene.
+
+    Isaac persists ``enableStabilization=False`` by default. On a balanced body
+    resting on four contacts that injects depenetration jitter every step - the
+    signature observed on the stationary cart was a constant ~55-70 mm/s reported
+    +z velocity with ~0 z displacement. Stabilization is a solver-accuracy setting,
+    not an applied force or brake: a balanced cart under zero horizontal load must
+    not drift. TGS solver, gravity and time step are unchanged.
+    """
+    from pxr import Sdf
+    prim=stage.GetPrimAtPath(scene_path)
+    if not prim:
+        raise ValueError('composed physics scene absent')
+    prim.AddAppliedSchema('PhysxSceneAPI')
+    attr=prim.CreateAttribute('physxScene:enableStabilization',Sdf.ValueTypeNames.Bool,False)
+    before=attr.Get()
+    attr.Set(True)
+    return dict(path=str(prim.GetPath()),enable_stabilization=True,before=before)
+
+
+def configure_cart_bearings(stage, root):
+    """Author conservative caster bearing friction and body damping on the cart.
+
+    The cart's four swivel/roll caster joints were authored frictionless and its
+    bodies undamped, unlike the robot's own URDF casters (damping 0.05, friction
+    0.01). Real caster bearings resist motion; a perfectly frictionless free-rolling
+    caster converts any sub-millimetre solver residual into unbounded sideways roll.
+    The values below match the robot's declared caster bearings and model bearing /
+    rolling resistance. They are a fidelity correction, not a holding brake: they
+    are far too small to resist a commanded tow (which produces orders-of-magnitude
+    larger joint torque), and they do not touch mass, inertia, collision geometry or
+    the free revolute model. Preserve every other authored attribute.
+    """
+    from pxr import Usd, UsdPhysics, Sdf
+    prim=stage.GetPrimAtPath(root)
+    if not prim:
+        raise ValueError('cart root absent')
+    joints,bodies=[],[]
+    for p in Usd.PrimRange(prim):
+        if p.IsA(UsdPhysics.RevoluteJoint):
+            p.AddAppliedSchema('PhysxJointAPI')
+            p.CreateAttribute('physxJoint:jointFriction',Sdf.ValueTypeNames.Float,False).Set(0.01)
+            joints.append(str(p.GetPath()))
+        if p.HasAPI(UsdPhysics.RigidBodyAPI):
+            p.AddAppliedSchema('PhysxRigidBodyAPI')
+            for name,value in (('linearDamping',0.05),('angularDamping',0.05)):
+                p.CreateAttribute('physxRigidBody:'+name,Sdf.ValueTypeNames.Float,False).Set(value)
+            bodies.append(str(p.GetPath()))
+    if len(joints)!=8 or len(bodies)!=9:
+        raise ValueError('expected eight caster joints and nine cart bodies')
+    return dict(joint_friction=0.01,linear_damping=0.05,angular_damping=0.05,
+                joints=joints,bodies=bodies)
+
+
 @dataclass
 class PhysicsAssembly:
     world: object
@@ -126,7 +181,9 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     author_native_gripper(stage,tool=tool,tool0_path=paths['ur_tool0'],
         body_path=paths['suction_cups'],gripper_path='/RestockPanelGripper')
     cart_path=composition['assets']['cart']['body']
-    solver=configure_cart_solver(stage,composition['assets']['cart']['root'])
+    cart_root=composition['assets']['cart']['root']
+    solver=configure_cart_solver(stage,cart_root)
+    bearings=configure_cart_bearings(stage,cart_root)
     if diagnostic_prepare is not None:
         diagnostic_prepare(stage)
     controller=MobileController(stage,paths['base_link'],cart_path,
@@ -134,6 +191,7 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     scenes=[str(p.GetPath()) for p in stage.Traverse() if p.IsA(UsdPhysics.Scene)]
     if len(scenes)!=1:
         raise ValueError('one composed physics scene required')
+    scene_physics=configure_scene_physics(stage,scenes[0])
     world=World(physics_dt=1/60,rendering_dt=1/60,stage_units_in_meters=1.,physics_prim_path=scenes[0])
     robot=world.scene.add(SingleArticulation(prim_path=paths['articulation'],name='restock_robot'))
     robot_body=world.scene.add(SingleRigidPrim(prim_path=paths['base_link'],name='restock_base'))
@@ -163,7 +221,7 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
         command_gate=gate)
     stage.GetRootLayer().Save()
     evidence=dict(input_sha256=hashes,composition=composition,paths=paths,
-        cart_solver=solver,
+        cart_solver=solver,cart_bearings=bearings,scene_physics=scene_physics,
         initialization='declared initial joint state before mission; never runtime teleport',
         physics_verified=False,camera_mapper_ready=False)
     (output/'assembly.json').write_text(json.dumps(evidence,indent=2)+'\n')

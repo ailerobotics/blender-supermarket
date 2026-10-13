@@ -104,7 +104,7 @@ class CartDiagnostic:
         proof['backend']=dict(physx_gpu_override=physx.get_overwrite_gpu_setting(),
             scenes=[{str(a.GetName()):str(a.Get()) for a in prim.GetAttributes()
                      if 'enableGPUDynamics' in str(a.GetName()) or 'solverType' in str(a.GetName())
-                     or 'timeStepsPerSecond' in str(a.GetName())}
+                     or 'timeStepsPerSecond' in str(a.GetName()) or 'enableStabilization' in str(a.GetName())}
                     for prim in self.stage.Traverse() if prim.IsA(UsdPhysics.Scene)],
             note='CPU PhysX and GPU RTX rendering are distinct; no backend setting changed')
         self.phase='observer-attachment-no-step'
