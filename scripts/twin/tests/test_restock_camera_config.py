@@ -73,7 +73,7 @@ def test_authoring_retains_physical_mounts_and_metric_printed_markers(tmp_path):
     assert np.ptp(points[:,0])*qr_fraction == pytest.approx(.06,abs=1e-6)
 
 
-def test_marker_material_is_rtx_robust_emissive_qr(tmp_path):
+def test_source_and_cart_markers_are_plain_diffuse_texture(tmp_path):
     pytest.importorskip('pxr')
     pytest.importorskip('cv2')
     from pxr import Usd, UsdGeom, UsdShade
@@ -89,16 +89,18 @@ def test_marker_material_is_rtx_robust_emissive_qr(tmp_path):
             textures[marker['id']] = path
     author_camera_design(stage, config, parent_paths={'map': '/World', 'cart_chassis': '/Cart'},
                          marker_textures=textures)
-    # Source and cart stay textured; the self-lit emissive + sRGB colour space hardens
-    # them against a diffuse-only distillation quirk. (The shelf markers are geometry now.)
+    # Source and cart stay plain diffuse texture. An emissive copy of the QR over-exposed
+    # the SOURCE markers natively and broke the working decode, so the material must carry
+    # NO emissive connection (and no colour-space override). The shelf markers are geometry.
     for name in ('source', 'cart'):
         base = ('/Cart' if name == 'cart' else '/World') + f'/RestockCamera_{name}_marker_0'
         tex = UsdShade.Shader(stage.GetPrimAtPath(base + '/Material/Texture'))
-        assert tex.GetInput('sourceColorSpace').Get() == 'sRGB'
+        assert not tex.GetInput('sourceColorSpace')
         surf = UsdShade.Shader(stage.GetPrimAtPath(base + '/Material/Surface'))
-        for channel in ('diffuseColor', 'emissiveColor'):
-            srcs = surf.GetInput(channel).GetConnectedSources()
-            assert srcs and srcs[0][0].source.GetPrim().GetName() == 'Texture'
+        diffuse = surf.GetInput('diffuseColor').GetConnectedSources()
+        assert diffuse and diffuse[0][0].source.GetPrim().GetName() == 'Texture'
+        emissive = surf.GetInput('emissiveColor')
+        assert not emissive or not emissive.GetConnectedSources()[0]
 
 
 def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
