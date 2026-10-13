@@ -25,9 +25,9 @@ checks. Detail + exact commands are in the per-topic sections below.
 | Host self-collision model | GREEN | CPU | `host-preflight-01`: 1930 spheres, zero transport overlaps, 7 separation proofs |
 | Navigation route preflight | GREEN | CPU fixture | `nav-preflight-01`: outbound + return succeed at 0.10 m uncertainty, peak ~46 deg; not a physics demo |
 | Source-station sensing (decode) | GREEN | native | `view-source-lit-01`: 3/3 markers decoded under the applied light rig |
-| Shelf-station sensing (decode) | RED | native | `view-shelf-lit-03` (camera PR#28 relocated lamp): still 0/2; lamp authored correct at slot-mouth z=0.9 but support renders max 4/255 — 3rd lamp iteration passing offline yet failing native; routed to camera worker |
+| Shelf-station sensing (decode) | RED (lit) | native | `view-shelf-lit-04` (PR#30 DiskLight): illumination FIXED (support max 4->217, 31% >=180) but decode still 0/2 — QR contrast/over-exposure (band 161-227, no dark), routed to camera worker |
 | Mapper construction | CONFIRMED | native | `mapper-evidence-construct-01` (PR#29 runtime closure): EvidenceProducerNode instantiated + advertised services/topic + 5893 ticks, GPU reclaimed; incorporation = sensor+handshake next |
-| Collision-map incorporation (mapper) | BLOCKED | — | native producer slice/incorporation identity binding not yet implemented (host PR #25) |
+| Collision-map incorporation (mapper) | IN PROGRESS | native | sensor+handshake driver built; mapper+services launch, but EmptyGeneration returns 'native layer not empty' on the live mapper — producer emptiness-certification design question routed to host worker |
 | Full autonomous restock cycle | NOT RUN | — | gated on shelf sensing + mapper incorporation; the `isaac_bundle:create` factory is not built until those land |
 
 Source-station note: per the integration/camera contract the 3/3 native decode
