@@ -19,8 +19,10 @@ import numpy as np
 from twin.restock_camera.config import camera_config
 from twin.restock_camera.geometry import pose_matrix, transform_points
 from twin.restock_camera.lights import (light_rig, store_fixtures, LightRigTuning,
-                                         rect_illuminance, sphere_illuminance)
-from twin.restock_camera.visibility import ray_hits, sample_plane, usd_surfaces
+                                         rect_illuminance, sphere_illuminance,
+                                         lamp_marker_occlusion)
+from twin.restock_camera.visibility import (ray_hits, sample_plane, usd_surfaces,
+                                            box_surface)
 
 
 def sha(path):
@@ -101,6 +103,14 @@ def main():
         # marker/source illuminance ratio is independent of the scale integration picks.
         up = np.array([0, 0, 1.0])
         station_lamps = [lamp for lamp in config.get('lamps', []) if lamp['id'] == name]
+        # Obstacles for the emitter->marker ray test: both camera-rig housings (camera
+        # body and the lamp body) plus the store shelf tiers/products already loaded.
+        # A lamp whose own housing or a tier sits on the segment never lights the marker.
+        housings = [box_surface(sol['id'], [0, 0, 0], sol['dimensions_m'],
+                                transform=parent @ np.array(sol['parent_from_solid']))
+                    for sol in config['solids'] if sol['id'].endswith('_housing')]
+        lamp_obstacles = housings + surfaces
+        lamp_occlusion = {}
         marker_lux = {}
         for mid, pt in markers.items():
             store_lux = sum(rect_illuminance(f, pt, up, LightRigTuning().intensity_nits(f))
@@ -108,7 +118,10 @@ def main():
             lamp_lux = 0.0
             for lamp in station_lamps:
                 lc = transform_points(parent, [lamp['center']])[0]
-                if lc[2] > pt[2] and not any(ray_hits(lc, pt, sfc.triangles) for sfc in surfaces):
+                blocked = lamp_marker_occlusion(lc, [pt], lamp_obstacles)
+                lamp_occlusion.setdefault(lamp['id'], {})[mid] = (
+                    sorted({n.split('/')[-1] for n in blocked[0]}) if blocked else [])
+                if not blocked and lc[2] > pt[2]:
                     lamp_lux += sphere_illuminance(lc, lamp['radius'], pt, up, lamp['intensity_nits'])
             marker_lux[mid] = dict(store_lux=round(store_lux, 1), lamp_lux=round(lamp_lux, 1),
                                    total_lux=round(store_lux + lamp_lux, 1))
@@ -135,6 +148,9 @@ def main():
                                          key=lambda kv: kv[1]['distance_m'])[:4]),
             marker_near_overhead_line_of_sight=marker_reach,
             camera_lamp_ids=[lamp['id'] for lamp in station_lamps],
+            camera_lamp_marker_occlusion=lamp_occlusion,
+            camera_lamp_reaches_all_markers=bool(station_lamps) and all(
+                not blk for lamp in lamp_occlusion.values() for blk in lamp.values()),
             marker_illuminance_lux_scale1=marker_lux)
     # Anchor to the measured SOURCE decode: integration reports the source markers
     # decode 3/3 under this rig, so at the chosen intensity_scale their white modules
@@ -187,6 +203,7 @@ def main():
     a.output.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({name: dict(marker_lit_verdict=st['marker_lit_verdict'],
                                  overhead=st['verdict'],
+                                 lamp_reaches_all_markers=st['camera_lamp_reaches_all_markers'],
                                  worst_marker_lux=st['worst_marker_lux_scale1'],
                                  vs_source=st['worst_marker_vs_source_ratio'],
                                  lamps=st['camera_lamp_ids'])

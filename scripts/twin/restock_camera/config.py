@@ -69,12 +69,17 @@ def camera_config(scenario, manifest):
     # (omnidirectional) avoids any aim/orientation failure; intensity shares the store
     # rig tuning so one intensity_scale drives it and the fixtures together. Its housing
     # is collision geometry and must be included in navigation/planning.
-    # Mounted on the bracket just above and behind the lens so neither the lamp nor its
-    # housing sits in the camera frustum (a ring light's body clears the lens); the
-    # omnidirectional sphere still lights the markers ~0.35 m away.
-    shelf_lamp_center = shelf+[-.53,0,.32]
-    lamps.append(camera_lamp('shelf','map',shelf_lamp_center,radius=.03,power_w=6.))
-    solid('shelf_lamp_housing','map',shelf_lamp_center,[.05,.05,.02])
+    # Emitter dropped below the lens, into the slot mouth (z below the ~0.97 m shelf
+    # tier), so its light physically reaches the recessed markers on the same clear
+    # sightline the camera uses; the body/housing stays above-and-behind, out of both
+    # the camera frustum and the emitter->marker rays (an emitter co-located with the
+    # housing above the tier was occluded by its own housing and rendered 4/255).
+    # plan_restock_lighting.py ray-tests emitter->marker against both housings, the
+    # shelf tiers and products; keep both rays clear if this placement is retuned.
+    shelf_lamp_emitter = shelf+[-.50,0,.17]
+    shelf_lamp_body = shelf+[-.55,0,.33]
+    lamps.append(camera_lamp('shelf','map',shelf_lamp_emitter,radius=.03,power_w=6.))
+    solid('shelf_lamp_housing','map',shelf_lamp_body,[.04,.04,.03])
 
     def support(name,parent,center,yaw,marker_centers,witness_center,witness_size):
         pose = pose_matrix([*marker_centers[0][:2],yaw],marker_centers[0][2])

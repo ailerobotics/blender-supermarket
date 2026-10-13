@@ -160,6 +160,25 @@ def sphere_illuminance(center, radius, point, normal, nits):
     return nits * math.pi * radius ** 2 * cos_surf / dist ** 2
 
 
+def lamp_marker_occlusion(lamp_center, marker_points, surfaces):
+    """Cast a ray from a lamp emitter to each marker centroid against ``surfaces``.
+
+    ``surfaces`` is a list of ``visibility.Surface`` (camera housing, lamp housing,
+    shelf tiers, products). Returns {marker_index: [blocker names]} for every ray that
+    is blocked; empty means the emitter physically reaches all markers. A lamp whose own
+    housing or a shelf tier sits on the emitter->marker segment never lights the marker,
+    whatever its intensity -- this is the check the illuminance estimate alone missed.
+    """
+    from .visibility import ray_hits
+    eye = np.asarray(lamp_center, float)
+    blocked = {}
+    for i, pt in enumerate(np.asarray(marker_points, float)):
+        names = [s.name for s in surfaces if ray_hits(eye, pt, s.triangles)]
+        if names:
+            blocked[i] = sorted(set(names))
+    return blocked
+
+
 def rect_illuminance(fixture, point, normal, nits):
     """Illuminance (lux) at ``point`` from a down-facing (-Z) rectangular emitter."""
     d = np.asarray(point, float) - np.asarray(fixture.center, float)
