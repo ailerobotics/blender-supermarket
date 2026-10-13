@@ -1,8 +1,8 @@
 {
-  "CPU tests": "369 passed, 16 subtests passed, 5 optional skips at e9acc7f; no GPU boot in this test suite",
+  "CPU tests": "380 passed, 16 subtests passed, 5 optional skips at a446380; no GPU boot in this test suite",
   "Stationary native assembly": "FAILED: run03 crossed50mm at1.266667s; run04 with64/16 solver iterations crossed50mm at2.033333s. Cause unproven. No towing, coupling or manipulation tested.",
-  "Offline causal diagnosis": "Nominal caster joint frames align. Two overlapping floor slabs identified; actual contact participation unrecorded. Proposed one-condition ground-contact counterfactual NOT EXECUTED. No production change or GPU run during diagnosis.",
-  "Camera integration gate": "UNCOMMISSIONED: require a fresh acquisition-to-use clock check after all processing before action; retain500ms limit. Decoder timing alone is insufficient.",
+  "Matched contact counterfactual": "BOTH FAILED at d2441bb: baseline50.269mm/1.550s; lower-ground-disabled variant50.788mm/1.683s. Baseline lower-ground contacts had zero reported impulse. Eliminating them did not fix drift; cause unresolved. GPU released, no production floor patch.",
+  "Camera integration gate": "500ms acquisition-to-use rejection implemented after processing/aggregation and before motion or queued gripper dispatch; delayed-processing CPU tests pass. Runtime remains UNCOMMISSIONED without native latency validation.",
   "Mobile assets": "Landed source; real CAD/FK static preview",
   "Environment": "USD and offline composition PASS; static source renders",
   "Physical autonomy": "NOT RUN; guarded GPU use authorized. Native static rendering passed, full moving mission remains gated on actual sensing/map/coverage.",

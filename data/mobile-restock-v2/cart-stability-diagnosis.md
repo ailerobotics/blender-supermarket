@@ -1,5 +1,66 @@
 # Stationary cart diagnosis — offline, 2026-10-13
 
+## Authorized matched native follow-up — both failed
+
+The original offline diagnosis below is retained as the pre-experiment record.
+Firstmate subsequently authorized exactly one matched pair at code d2441bb.
+That authorization is consumed. No further native run was made; the GPU slot was
+released for shelf reconstruction. No production floor change was applied.
+
+| Diagnostic arm | Steps | Final simulation time | XY drift from serialized measured initial | Final cart speed |
+|---|---|---|---|---|
+| baseline | 90 | 1.550000 s | 50.269 mm | 80.969 mm/s |
+| lower-ground collision disabled | 98 | 1.683333 s | 50.788 mm | 81.674 mm/s |
+
+Both failed the unchanged 50 mm gate. The variant removed all reported lower-ground
+contacts but did not remove the failure. Lower-ground collision participation is
+therefore not necessary for this drift in the tested setup. It is not an established
+root cause and the experiment does not justify a production floor patch.
+
+Actual contact callbacks recorded 885 lower-ground contact points in the baseline,
+all with zero reported impulse. The baseline also recorded 168 hitch/drawbar
+points, all with zero reported impulse; the variant recorded 188, also zero.
+Backroom-floor wheel contacts carried nonzero impulses in both arms. No callback
+errors were recorded. Contact presence alone must not be described as a pushing
+force. Effective simulation-selected contact offsets and friction-anchor impulses
+remain unavailable through the selected callback. Pose/velocity inconsistency and
+joint convergence remain unresolved; no alternative cause is certified.
+
+The diagnostic saved pristine pre-reset authored layers, actual measured initial
+states, per-step native body pose/velocity and joint-anchor residuals, and contact
+collider identities/normals/impulses/separations. Both arms used identical diagnostic
+instrumentation. Only the variant's lower-ground collision flag changed; visible
+geometry, the load-bearing floor, 64/16 solver settings, physical joints, masses,
+placement, free casters and original acceptance limits were retained.
+
+Task dataset directories are `native-contact-baseline-01/` and
+`native-contact-variant-01/`, each containing `pristine-authored.usda`,
+`measured-initial.json`, `contact-events.json`, `contact-provenance.json`,
+`stationary-feedback.json`, `native-result.json`, `run.json`, and `isaac.log`.
+Exact audit locations on the workstation:
+
+- `/home/manishsaini/datasets/twin-robot-in-store-boot-v1/native-contact-baseline-01/`
+- `/home/manishsaini/datasets/twin-robot-in-store-boot-v1/native-contact-variant-01/`
+- `/home/manishsaini/firstmate/data/twin-robot-in-store-boot-v1/contact-pair.json`
+
+The task artifact directory contains the reproducible CPU reduction
+`analyze_contact_pair.py`, hashes and summary `contact-pair.json`, and
+`contact-pair.png`. The exact local dataset paths were sent to firstmate for
+independent dynamics audit; no files were removed or overwritten.
+
+Each guarded run took approximately 68 s; the matched pair completed in under
+three minutes. Peak GPU usage was 4745 MiB in each arm. Minimum available RAM was
+15225/15075 MiB. Services were unchanged in both. After the pair, 9669 MiB GPU and
+19606 MiB host RAM were available; the GPU lock was confirmed free.
+
+Subsequent CPU integration at a446380 consumes the merged camera component and
+enforces acquisition-to-use expiration after processing/aggregation and before
+motion or queued native gripper dispatch. Validation: 380 tests passed, 16 subtests,
+five optional skips. No GPU validation of that later CPU change was attempted.
+Camera runtime and the autonomous cycle remain uncommissioned/incomplete.
+
+## Original offline record (before the authorized pair)
+
 The native cart is not stable within the existing 50 mm envelope. No autonomous
 restocking cycle has run. This diagnosis uses saved source, USD and telemetry only;
 it does not authorize a new GPU run or establish a production fix.

@@ -8,9 +8,30 @@ manipulation components are integrated from origin/main.
 A controller dispatcher and guarded launcher now exist; a complete simulator
 bundle with actual sensor acquisition/planner/actuator wiring is still missing.
 
-## Implemented and tested
+## Current matched-pair and CPU checkpoint
 
-## New stationary checkpoint: FAILED, cause unresolved
+At a446380, 380 CPU tests and 16 subtests pass, with five optional skips. The
+authorized native contact pair at d2441bb failed in both arms: baseline 50.269 mm
+drift at 1.550 s; lower-ground-disabled variant 50.788 mm at 1.683 s. Removing
+lower-ground contacts did not resolve drift. Those baseline contacts reported zero
+impulse. This disconfirms the lower floor as a necessary cause in this setup;
+cart stability remains unresolved. No production floor patch was made.
+
+The pair is complete and GPU ownership was released. Both runs peaked at
+4745 MiB GPU; minimum RAM was 15225/15075 MiB, and services were unchanged.
+Pristine authored states, measured initial baselines, native per-body feedback,
+joint residuals and actual contact provenance are retained for independent audit.
+The new contact-pair plot is actual telemetry; all videos remain earlier optical
+checks, not an autonomous mission recording.
+
+The merged camera component is now integrated. Fresh monotonic readings enforce
+the unchanged 500 ms acquisition-to-use deadline after processing and sequential
+aggregation, before motion, and on queued native gripper dispatch. CPU tests
+explicitly reject delayed processing and handoff. Native latency and the full
+sensor/map/planner/actuator path remain uncommissioned. No additional GPU run is
+authorized by this checkpoint.
+
+## Earlier stationary checkpoint: FAILED, cause unresolved
 
 At e9acc7f the CPU checkpoint is 369 passed, 16 subtests and five optional skips.
 Native assembly-03 crossed the unchanged 50 mm stationary envelope at simulation
@@ -45,7 +66,7 @@ are relative to mission start. Adapter implementers must convert their sensor
 clock to that origin. Adapters remain responsible for sensor provenance and
 collision/control checks: labeling a dictionary `sensor` does not prove autonomy.
 
-369 combined CPU tests and 16 subtests pass with five optional skips at e9acc7f, with the installed Isaac USD libraries exposed
+380 combined CPU tests and 16 subtests pass with five optional skips at a446380, with the installed Isaac USD libraries exposed
 without booting Kit (including mission/runtime, recording, stock-scene and environment tests). These prove bookkeeping and failure handling, not
 robot movement, perception accuracy, coupling physics or collision avoidance.
 Reproduction is in RUNBOOK section 11. The shared firstmate interface contract was
