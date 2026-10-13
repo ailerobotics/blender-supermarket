@@ -10,6 +10,33 @@ manipulation components are integrated from origin/main.
 A controller dispatcher and guarded launcher now exist; a complete simulator
 bundle with actual sensor acquisition/planner/actuator wiring is still missing.
 
+## Mission gate table (guarded native + CPU evidence)
+
+Each row is a mission prerequisite. "Native" rows are bounded guarded-GPU runs
+(peak <= 6.6 GiB VRAM, >= 15.6 GiB host RAM, `/tmp/aile-gpu.lock`, whispr preserved via
+`--heavy-threshold-mb 2500`, services unchanged); "CPU" rows are deterministic offline
+checks. Detail + exact commands are in the per-topic sections below.
+
+| Gate | Status | Kind | Evidence |
+|---|---|---|---|
+| Stationary cart/base hold | GREEN | native | `native-assembly-stabilized-04`: cart net 0.000 m/s, base 0.00079 m/s over 2 s |
+| Cart coupling (dock + latch + hold) | GREEN | native | `native-coupling-02`: hitch from fresh/stopped/aligned dock, 120-step hold, 0.18 mm residual, 0.045 deg articulation |
+| Forward towing (through portal) | GREEN | native | `native-towing-02`: towed 0.378 m to portal centre, 0.39 deg articulation, no wheel lift, 270-frame VFR H.264 (`native-towing.mp4`) |
+| Host self-collision model | GREEN | CPU | `host-preflight-01`: 1930 spheres, zero transport overlaps, 7 separation proofs |
+| Navigation route preflight | GREEN | CPU fixture | `nav-preflight-01`: outbound + return succeed at 0.10 m uncertainty, peak ~46 deg; not a physics demo |
+| Source-station sensing (decode) | GREEN | native | `view-source-lit-01`: 3/3 markers decoded under the applied light rig |
+| Shelf-station sensing (decode) | RED | native | `view-shelf-lit-01`: 0/2; recessed slot max luminance 4/255 — routed to camera worker |
+| Collision-map incorporation (mapper) | BLOCKED | — | nav mapper launch in unlanded PR #23; native producer slice/incorporation identity binding not yet implemented (host PR #25) |
+| Full autonomous restock cycle | NOT RUN | — | gated on shelf sensing + mapper incorporation; the `isaac_bundle:create` factory is not built until those land |
+
+Source-station note: per the integration/camera contract the 3/3 native decode
+(`view-source-lit-01`) is the accepted source-station sensing proof. The pre-capture
+marker metric-fit registration (`restock_camera.sensed.register_marker`) is deferred
+into the mission-bundle station sensing, where `base_from_camera`, `FrameEvidence` and
+the support/auxiliary layout are wired from the camera config in one place, rather than
+hand-assembled against camera-owned internals for a one-off run; the native vacancy
+capture it feeds requires the mapper incorporation gate above regardless.
+
 ## Camera lighting applied: SOURCE decodes 3/3, SHELF still dark 0/2 (measured)
 
 The camera worker's store light rig (PR #26, `twin.restock_camera.lights`) landed on
