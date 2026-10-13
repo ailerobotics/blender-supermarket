@@ -268,3 +268,19 @@ The runtime binding (real frames advancing only their own ledger, GPU-copy/TF
 failures stopping, restart rejecting old output) is an integration GPU gate, not
 proven by this CPU build. Contract tests against the landed consumer are in
 `scripts/twin/tests/test_restock_host_evidence_binding.py`.
+
+### Task-local runtime closure + guarded GPU construction
+
+The stock task env resolves CUDA but lacks the Isaac GXF/nitros ament closure the
+`NvbloxNode` constructor requests at runtime (`gxf_isaac_gxf_helpers` + its
+transitive packages), so the node constructor fails. `scripts/restock_runtime/`
+holds the recipe: `extract_runtime_overlay.sh` extracts the complete image
+`/opt/ros/jazzy` into a task-local overlay, `offline_closure_proof.sh` proves the
+closure offline (ament resolution + `ldd -r`), and `runtime-env.sh` layers the
+overlay + the built producer onto `nav-plugin/env.sh`. `scripts/launch_evidence_mapper.py`
+loads the mapper as `EvidenceProducerNode`; `scripts/run_evidence_mapper_gpu.py`
+runs it under the exclusive GPU guard (flock `/tmp/aile-gpu.lock`, protected-Blender
+refusal, ≥8 GiB VRAM / ≥12 GiB RAM, domain-88, ≤5 min, exact-PID teardown) and
+measures construction + evidence-interface advertisement. Measured evidence and
+honest limits (a bound-slice still needs the integration sensor+handshake driver):
+`data/sim-restock-host-v2/runtime-closure-report.md`.
