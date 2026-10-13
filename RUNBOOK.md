@@ -354,6 +354,49 @@ to both `run_restock_nav2.py` and `run_articulated_nav2_bridge.py`.
 This includes the support obstacle and checks the scenario’s actual chassis goal;
 a successful environment-only route does not certify a different scenario.
 
+## 11a. Navigation lane factory for the mission bundle
+
+The mission bundle factory (`twin.restock.isaac_bundle:create`, integration lane)
+resolves each lane's controller from the runtime-config as a `module:function`
+reference and calls it `fn(app=, assembly=, plan=, config=, output=)`. The
+navigation lane reference is **`twin.navigation.factory:nav_factory`**; set it as
+the runtime-config key **`nav_factory`**. The returned object is wrapped by
+`twin.restock.runtime.NavigationBridge` and driven per `plan.nav_mode`:
+
+- `reference` → `ArticulatedController` (measured-state route following);
+- `sensor` → `twin.navigation.runtime.SensorNavigation` (wheel odometry + map
+  localizer + the articulated controller); packet odometry carries wheel encoder
+  angles and packet navigation carries the raw scan;
+- `nav2` → `twin.navigation.nav2.ArticulatedNav2Adapter` (domain-88 loopback Nav2
+  FollowPath overlay). Constructing it REQUIRES `ROS_DOMAIN_ID=88`,
+  `ROS_LOCALHOST_ONLY=1`, loopback discovery; it is the only mode that touches ROS.
+
+The factory builds the shared controller from the STATIC navigation manifest in
+`config['navigation']` (same conservative obstacle map used for gating/validation;
+live obstacles are always sensed) and NEVER enables test fixtures — the returned
+controller only accepts `wheel_odometry_localized`/`simulated_lidar` provenance,
+so no ground-truth or fixture input can drive the base in production. It validates
+at build time that the returned object exposes exactly the methods the bridge
+calls (`start(goal, coupled, goal_articulation=)`, `cancel()`, the per-mode
+`step(...)`, and `publish_sensors(...)` for nav2), failing closed otherwise.
+
+`config['navigation']` keys: `environment` (manifest object) or
+`environment_path`; optional `scenario`/`scenario_path`,
+`camera_config`/`camera_config_path`, `mobile_spec`, `require_temporal_map`,
+`goal_timeout`; and for `sensor` mode a `sensor` block with `wheel_radius`,
+`wheel_separation`, `initial_pose`, `initial_map_pose`. For `nav2` mode an
+optional `nav2` block may set `emit_assets`/`nvblox_topic`/`params_template`.
+
+```bash
+# Deterministic CPU contract tests (no ROS/GPU/Isaac, no fixtures).
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
+  scripts/twin/tests/test_navigation_factory.py -q
+```
+
+Integration owns the native run: the live `assembly`/`SimulationApp`, the Nav2
+launch, and all GPU/physics validation. The factory performs no simulator boot
+and is proven only at the CPU contract level here.
+
 ## 9. Mobile UR10 and rollwagen (CPU)
 
 Interface and remaining simulator checks: [mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md).
