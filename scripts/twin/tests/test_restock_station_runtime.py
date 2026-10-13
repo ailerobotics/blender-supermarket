@@ -61,3 +61,21 @@ def test_motion_and_global_stop_are_checked_outside_manipulation():
     result.graph.check_health=emergency
     with pytest.raises(RuntimeError,match='emergency stop'):
         result.after_step(1.2,True)
+
+
+def test_station_waits_for_acquired_pair_behind_map_ack():
+    result,channel,selected,epochs,captures=runtime()
+    queue_epochs=[];selections=[];received=[]
+    queues=SimpleNamespace(begin_epoch=queue_epochs.append,
+        append=lambda *a,**k:received.append((a,k)),
+        select=lambda *a,**k:selections.append(k) or False)
+    result.bind_frames(queues,lambda now:[('source',{'real_fixture':True},'transform',now)])
+    result.after_step(1.,True);result.prepare('collect',{})
+    channel.reply=dict(epoch=1,stamp=1.1,state='ready',collision_time=1.05)
+    result.after_step(1.1,True)
+    assert queue_epochs==[1] and len(received)==1
+    assert result.capture(1.1,'source','rollwagen') is None and not captures
+    assert selections==[dict(now=1.1,collision_time=1.05)]
+    queues.select=lambda *a,**k:True
+    result.capture(1.1,'source','rollwagen')
+    assert len(captures)==1

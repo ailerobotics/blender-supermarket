@@ -80,11 +80,18 @@ def sample():
                 gpu_free_mib=free,ram_available_mib=available_ram_mb())
 
 
-def worker(output,ffmpeg,runtime_config=None,view='source'):
+def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False):
     from isaacsim import SimulationApp
     app=SimulationApp({'headless':True,'width':640,'height':360,
         'renderer':'RayTracedLighting','anti_aliasing':0,'multi_gpu':False})
     try:
+        if assembly_only:
+            from twin.restock.assembly_check import run
+            config=json.loads(Path(runtime_config).read_text())
+            result=run(app,config,output)
+            write(output/'native-result.json',dict(status='passed',assembly=result,
+                evidence='stationary native assembly diagnostic, not mission or video'))
+            return
         import numpy as np
         import omni.usd
         from pxr import UsdGeom,UsdLux,Gf
@@ -201,11 +208,14 @@ def main():
     parser.add_argument('--nvidia-runtime',type=Path)
     parser.add_argument('--runtime-config',type=Path,help='optional full-store static candidate camera bench')
     parser.add_argument('--view',choices=('source','cart','shelf'),default='source')
+    parser.add_argument('--assembly-only',action='store_true',help='stationary native CAD/physics/hold diagnostic; no planner or video')
     parser.add_argument('--heavy-threshold-mb',type=int,choices=(1500,2500),default=1500)
     parser.add_argument('--worker',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()
+    if args.assembly_only and not args.runtime_config:
+        parser.error('--assembly-only requires --runtime-config')
     if args.worker:
-        worker(args.output,args.ffmpeg,args.runtime_config,args.view);return
+        worker(args.output,args.ffmpeg,args.runtime_config,args.view,args.assembly_only);return
     if not args.isaac_python or not args.nvidia_runtime:
         parser.error('--isaac-python and --nvidia-runtime required')
     args.output=args.output.resolve()
@@ -224,6 +234,8 @@ def main():
                      '--output',str(args.output),'--ffmpeg',str(args.ffmpeg)]
             if args.runtime_config:
                 command.extend(['--runtime-config',str(args.runtime_config),'--view',args.view])
+            if args.assembly_only:
+                command.append('--assembly-only')
             child=OwnedProcess(command,args.output/'isaac.log',env=environment)
             try:
                 child.start()
@@ -239,12 +251,16 @@ def main():
                 record['exit_code']=child.process.returncode
                 if child.process.returncode: raise RuntimeError('native child failed; inspect isaac.log')
                 native=json.loads((args.output/'native-result.json').read_text())
-                if native.get('status')!='passed' or native.get('video',{}).get('frames',0)<(6 if args.runtime_config else 60):
+                complete=(native.get('assembly',{}).get('settled') is True
+                          and native.get('assembly',{}).get('steps',0)>=120) if args.assembly_only else (
+                          native.get('video',{}).get('frames',0)>=(6 if args.runtime_config else 60))
+                if native.get('status')!='passed' or not complete:
                     raise RuntimeError('native result incomplete: '+native.get('reason','missing frames'))
                 # Decode the whole recorded video, not merely its container header.
-                subprocess.run([str(args.ffmpeg),'-v','error','-nostdin','-i',
-                    str(args.output/'native-render-smoke.mp4'),'-f','null','-'],
-                    check=True,capture_output=True,timeout=30)
+                if not args.assembly_only:
+                    subprocess.run([str(args.ffmpeg),'-v','error','-nostdin','-i',
+                        str(args.output/'native-render-smoke.mp4'),'-f','null','-'],
+                        check=True,capture_output=True,timeout=30)
                 record['status']='passed'
             finally:
                 if child: child.close()
