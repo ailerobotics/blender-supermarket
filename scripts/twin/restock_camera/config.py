@@ -178,6 +178,51 @@ def render_marker_at_camera(grid, half, world_from_optical, parent_from_marker,
     return canvas, bool(valid.all())
 
 
+def render_authored_marker(stage, base_path, world_from_optical, intrinsics, *, background=128):
+    """Rasterise an AUTHORED marker (white base + black Modules meshes) at the camera.
+
+    Reads the composed world-space vertices of the authored prims and fills the projected
+    polygons (white base, then each black module on top), so an authoring fault that moves
+    the modules (e.g. a child mesh double-applying its parent transform) shows up as a
+    blank or off-frame pattern. Returns (canvas, white_corners_uv). pxr + cv2 required.
+    """
+    import cv2
+    from pxr import UsdGeom
+    k = intrinsics
+    xform = UsdGeom.XformCache()
+
+    def world_quads(prim):
+        matrix = np.array(xform.GetLocalToWorldTransform(prim)).T
+        points = np.array(UsdGeom.Mesh(prim).GetPointsAttr().Get(), float)
+        world = (matrix @ np.c_[points, np.ones(len(points))].T).T[:, :3]
+        return [world[i:i + 4] for i in range(0, len(world), 4)]
+
+    def to_px(quad):
+        uv, _ = project(transform_points(np.linalg.inv(rigid(world_from_optical)), quad), k)
+        return uv
+
+    canvas = np.full((k.height, k.width), background, np.uint8)
+    white = world_quads(stage.GetPrimAtPath(base_path))[0]
+    cv2.fillPoly(canvas, [np.round(to_px(white)).astype(np.int32)], 255)
+    modules = stage.GetPrimAtPath(base_path + '/Modules')
+    if modules:
+        for quad in world_quads(modules):
+            cv2.fillPoly(canvas, [np.round(to_px(quad)).astype(np.int32)], 0)
+    return canvas, to_px(white)
+
+
+def decode_authored_marker(stage, base_path, world_from_optical, intrinsics, *, upscale=16):
+    """Rasterise the authored marker at the camera, rectify by its base corners, decode."""
+    import cv2
+    canvas, white_uv = render_authored_marker(stage, base_path, world_from_optical, intrinsics)
+    side = 33 * upscale
+    homography = cv2.getPerspectiveTransform(
+        white_uv.astype(np.float32), np.float32([[0, side], [side, side], [side, 0], [0, 0]]))
+    frontal = cv2.warpPerspective(canvas, homography, (side, side), flags=cv2.INTER_AREA)
+    text, _, _ = cv2.QRCodeDetector().detectAndDecode(cv2.cvtColor(frontal, cv2.COLOR_GRAY2BGR))
+    return text
+
+
 def decode_marker_render(grid, half, world_from_optical, parent_from_marker, intrinsics,
                          *, upscale=16):
     """Render the geometry marker at the camera, rectify by its projected corners and decode.
@@ -258,7 +303,8 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
             counts.append(4); indices += [start,start+1,start+2,start+3]
         mesh.CreatePointsAttr(points); mesh.CreateFaceVertexCountsAttr(counts)
         mesh.CreateFaceVertexIndicesAttr(indices); mesh.CreateSubdivisionSchemeAttr('none')
-        transform(mesh.GetPrim(),parent_from_marker)
+        if parent_from_marker is not None:
+            transform(mesh.GetPrim(),parent_from_marker)
         return mesh
 
     for name,support in config['supports'].items():
@@ -283,7 +329,11 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
                 white = quad_mesh(base,[white_quad],.0002,marker['parent_from_marker'])
                 constant_material(base+'/Material',white.GetPrim(),(1,1,1),emissive=(1,1,1))
                 if black_quads:
-                    black = quad_mesh(base+'/Modules',black_quads,.0006,marker['parent_from_marker'])
+                    # Child of the white base: it INHERITS base's parent_from_marker, so
+                    # it must not re-apply it (that double transform put the QR modules at
+                    # twice the world coords, behind the camera, leaving only a blank white
+                    # plane in the native render). Author the quads in marker-local coords.
+                    black = quad_mesh(base+'/Modules',black_quads,.0006,None)
                     constant_material(base+'/Modules/Material',black.GetPrim(),(0,0,0))
                 continue
             texture = Path(marker_textures[marker['id']]).resolve()

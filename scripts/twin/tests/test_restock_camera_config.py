@@ -106,7 +106,7 @@ def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
     cv2 = pytest.importorskip('cv2')
     from pxr import Usd, UsdGeom, UsdShade
     from scripts.twin.restock_manipulation.isaac_sensors import write_carton_label
-    from scripts.twin.restock_camera.config import (marker_module_grid, decode_marker_render)
+    from scripts.twin.restock_camera.config import decode_authored_marker
     from scripts.twin.restock_camera.geometry import Intrinsics
     config = design()
     stage = Usd.Stage.CreateInMemory()
@@ -132,14 +132,22 @@ def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
         assert tuple(white_surf.GetInput('diffuseColor').Get()) == (1, 1, 1)
         black_surf = UsdShade.Shader(stage.GetPrimAtPath(base + '/Modules/Material/Surface'))
         assert tuple(black_surf.GetInput('diffuseColor').Get()) == (0, 0, 0)
-    # The geometry pattern decodes at the shelf camera pose and pixel size (rectified).
+
+    def centroid(path):
+        prim = stage.GetPrimAtPath(path)
+        matrix = np.array(UsdGeom.XformCache().GetLocalToWorldTransform(prim)).T
+        points = np.array(UsdGeom.Mesh(prim).GetPointsAttr().Get(), float)
+        return ((matrix @ np.c_[points, np.ones(len(points))].T).T[:, :3]).mean(axis=0)
+
+    # Decode from the AUTHORED world geometry (not the design model): this catches the
+    # child Modules mesh double-applying its parent transform, which flung the QR pattern
+    # off behind the camera and rendered only a blank white plane. The black modules must
+    # share the white base plane.
     camera = config['cameras']['shelf']
     world = np.array(camera['parent_from_optical']); k = Intrinsics(**camera['intrinsics'])
-    for marker in config['supports']['shelf']['markers']:
-        pixels = cv2.imread(str(textures[marker['id']]))
-        corners = cv2.QRCodeDetector().detectAndDecode(pixels)[1].reshape(4, 2)
-        edge = np.linalg.norm(np.roll(corners, -1, 0) - corners, axis=1)
-        half = marker['side_m'] * pixels.shape[0] / edge.mean() / 2
-        decoded, _ = decode_marker_render(marker_module_grid(marker['id']), half, world,
-                                          np.array(marker['parent_from_marker']), k)
-        assert decoded == marker['id']
+    for index, marker in enumerate(config['supports']['shelf']['markers']):
+        base = f'/World/RestockCamera_shelf_marker_{index}'
+        assert decode_authored_marker(stage, base, world, k) == marker['id']
+        base_c, modules_c = centroid(base), centroid(base + '/Modules')
+        assert np.linalg.norm(modules_c[:2] - base_c[:2]) < .02
+        assert abs(modules_c[2] - base_c[2]) < .002
