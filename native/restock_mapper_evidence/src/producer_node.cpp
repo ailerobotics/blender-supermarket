@@ -64,6 +64,14 @@ EvidenceProducerNode::EvidenceProducerNode(const rclcpp::NodeOptions & options)
   // a misconfigured generation refuses to construct rather than certifying later.
   policy_ = std::make_unique<State>(producer_nonce_, identity_, sensors_);
 
+  // Record nvblox's post-construction allocation as the emptiness baseline, before
+  // any sensor frame can arrive. A freshly constructed nvblox layer is non-empty
+  // from construction (preallocated/derived blocks independent of sensor input), so
+  // "empty" means no growth beyond this baseline, never zero allocated blocks.
+  std::vector<uint64_t> baseline;
+  for (const auto & lc : measure_layers()) {baseline.push_back(lc.allocated_blocks);}
+  policy_->set_construction_baseline(std::move(baseline));
+
   snapshot_publisher_ = create_publisher<msg::EvidenceSnapshot>(
     "~/evidence_snapshot", rclcpp::QoS(1).reliable().transient_local());
 
@@ -259,23 +267,27 @@ void EvidenceProducerNode::handle_empty(
   response->steady_clock_domain = steady_domain_;
   response->admission_open = false;
   response->success = false;
+  // Report the measured per-layer allocation (and the inventory identity) on EVERY
+  // outcome: a non-emptiness refusal must name the exact non-empty layer and its
+  // count so the caller can diagnose the map, and the policy refuses that case
+  // WITHOUT faulting the one-shot producer, so this probe never bricks the map.
+  const auto layers = measure_layers();
+  response->layers = layers;
+  response->layer_inventory_identity = kLayerInventoryIdentity;
   try {
     if (!policy_) {throw std::runtime_error("producer not configured");}
     if (!identity_matches(request->expected_identity)) {
       throw std::runtime_error("expected identity mismatch");
     }
-    const auto layers = measure_layers();
     std::vector<uint64_t> blocks;
     blocks.reserve(layers.size());
     for (const auto & lc : layers) {blocks.push_back(lc.allocated_blocks);}
     const bool q = queues_empty();
     const bool w = watermarks_empty();
-    policy_->certify(request->challenge, identity_, blocks, q, w);  // throws unless truly empty
+    policy_->certify(request->challenge, identity_, blocks, q, w);  // refuses (no fault) unless empty vs baseline
     const int64_t steady = steady_now_ns();
     issued_token_ = request->challenge;
     response->certificate_token = issued_token_;
-    response->layer_inventory_identity = kLayerInventoryIdentity;
-    response->layers = layers;
     response->ledger_count = 0;
     response->pending_sensor_work_count = 0;
     response->synchronized_steady_ns = static_cast<uint64_t>(steady);
