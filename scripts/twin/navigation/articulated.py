@@ -400,7 +400,8 @@ class ArticulatedPlanner:
 
 class ArticulatedController(Controller):
     """Measured-state route following and braking sweep for the physical tow rig."""
-    def __init__(self, grid, spec=None, **kwargs):
+    def __init__(self, grid, spec=None, *, require_temporal_map=False, **kwargs):
+        self.require_temporal_map=require_temporal_map
         self.spec=spec or MobileSpec()
         self.world=ArticulatedMap(grid,self.spec)
         self.planner=ArticulatedPlanner(self.world)
@@ -419,12 +420,32 @@ class ArticulatedController(Controller):
         self.planning_stop=False
         self.goal_articulation=self.spec.max_articulation if goal_articulation is None else goal_articulation
 
+    def plan_observed_route(self,state,obs,uncertainty):
+        """Plan against current nvblox unknown/occupied cells when configured."""
+        planner=self.planner
+        if obs.temporal_map is not None:
+            planner=ArticulatedPlanner(ArticulatedMap(obs.temporal_map.planning_grid(self.grid),self.spec))
+            uncertainty=max(.10,uncertainty)
+        return planner.plan(state,self.goal,obs.obstacles,uncertainty,self.goal_articulation)
+
     def gate_velocity(self,now,odom,obs,linear,angular):
+        if self.require_temporal_map and (obs is None or obs.temporal_map is None):
+            return Result(reason='missing_navigation_map')
+        if self.require_temporal_map and not self.coupled:
+            return Result(reason='temporal_route_requires_coupled')
         if not self.coupled:
             return super().gate_velocity(now,odom,obs,linear,angular)
         reason=self._inputs(now,odom,obs)
         if reason:
             return Result(reason=reason)
+        if obs.observed_space is not None:
+            return Result(reason='instantaneous_coverage_retired')
+        temporal=obs.temporal_map
+        if temporal is not None:
+            from .temporal import TemporalMap
+            if not isinstance(temporal,TemporalMap):return Result(reason='invalid_temporal_map')
+            reason=temporal.readiness(now)
+            if reason:return Result(reason=reason)
         if not all(math.isfinite(v) for v in (linear,angular)) or linear<0:
             return Result(reason='reverse_or_invalid_command')
         v=min(linear,self.max_speed)
@@ -433,26 +454,37 @@ class ArticulatedController(Controller):
             return Result(reason='turn_radius')
         state=TrainState(*odom.pose,wrap(odom.pose[2]-obs.articulation))
         speed=max(v,abs(odom.linear))
-        stop=speed*self.stale_after+speed*speed/(2*self.brake_acceleration)
-        if obs.coverage_radius<self.footprint.radius(True)+max(.02,odom.position_uncertainty)+stop:
+        delay=self.stale_after+(temporal.reaction_delay(now) if temporal else 0.)
+        stop=speed*delay+speed*speed/(2*self.brake_acceleration)
+        if temporal is None and obs.coverage_radius<self.footprint.radius(True)+max(.02,odom.position_uncertainty)+stop:
             return Result(reason='insufficient_sensor_coverage')
-        uncertainty=max(0.02,odom.position_uncertainty)
+        uncertainty=max(.10 if temporal else .02,odom.position_uncertainty)
         if not self.world.valid(state,obs.obstacles,uncertainty):
             return Result(reason='obstacle_stop')
         k=w/v if v>1e-6 else 0.0
-        if not self.world.rollout(state,stop,k,obs.obstacles,uncertainty):
+        predicted=self.world.rollout(state,stop,k,obs.obstacles,uncertainty)
+        if not predicted:
             return Result(reason='obstacle_stop')
         # During a command change braking follows measured curvature, too.
         if abs(odom.linear)>0.02:
             measured_k=odom.angular/odom.linear
             if abs(measured_k)>1/1.5+0.03:
                 return Result(reason='measured_turn_radius')
-            if not self.world.rollout(state,stop,max(-1/1.5,min(1/1.5,measured_k)),
-                                      obs.obstacles,uncertainty):
+            braking=self.world.rollout(state,stop,max(-1/1.5,min(1/1.5,measured_k)),
+                                      obs.obstacles,uncertainty)
+            if not braking:
                 return Result(reason='obstacle_stop')
+            predicted+=braking
+        if temporal is not None:
+            reason=temporal.check_train(predicted,self.spec,uncertainty,now)
+            if reason:return Result(reason=reason)
         return Result(v,w,reason='tracking')
 
     def step(self,dt,odometry,observations,*,now=None):
+        if self.require_temporal_map and (observations is None or observations.temporal_map is None):
+            return Result(reason='missing_navigation_map')
+        if self.require_temporal_map and not self.coupled:
+            return Result(reason='temporal_route_requires_coupled')
         if not self.coupled:
             return super().step(dt,odometry,observations,now=now)
         if self.terminal:
@@ -464,6 +496,12 @@ class ArticulatedController(Controller):
         reason=self._inputs(now,odometry,observations)
         if reason:
             return self._wait(dt,reason)
+        if observations.temporal_map is not None:
+            from .temporal import TemporalMap
+            if not isinstance(observations.temporal_map,TemporalMap):
+                return self._wait(dt,'invalid_temporal_map')
+            reason=observations.temporal_map.readiness(now)
+            if reason:return self._wait(dt,reason)
         if self.goal is None or self.elapsed>self.goal_timeout:
             self.terminal=Result(status='failed',reason='no_goal_or_goal_timeout')
             return self.terminal
@@ -485,13 +523,17 @@ class ArticulatedController(Controller):
                 return Result(reason='planning_stop')
             if abs(odom.linear)>0.02 or abs(odom.angular)>0.03:
                 return Result(reason='waiting_stopped_for_plan')
-            self.route=self.planner.plan(state,self.goal,obs.obstacles,max(0.02,odom.position_uncertainty),
-                                         self.goal_articulation)
+            if obs.temporal_map is not None:
+                reason=obs.temporal_map.readiness(now)
+                if reason:return self._wait(dt,reason)
+            self.route=self.plan_observed_route(state,obs,max(0.02,odom.position_uncertainty))
             self.planned_obstacles=obs.obstacles
+            self.planned_map=obs.temporal_map.slice if obs.temporal_map is not None else None
             self.index=0
             return Result(reason='route_ready' if self.route.states else self.route.reason)
         if not self.route.states:
-            if obs.obstacles!=self.planned_obstacles:
+            if (obs.obstacles!=self.planned_obstacles or
+                    (obs.temporal_map is not None and obs.temporal_map.slice is not self.planned_map)):
                 self.route=None
                 return Result(reason='replan_changed_observations')
             return self._wait(dt,'blocked_no_route')

@@ -55,6 +55,8 @@ class Observation:
     articulation: float = 0.0
     source: str = 'simulated_lidar'
     coverage_radius: float = 0.0  # certified observed free radius/scan reach
+    observed_space: object = None  # optional depth-voxel evidence for articulated gate
+    temporal_map: object = None  # controlled static-scene nvblox map, <=600s epoch
 
 
 @dataclass(frozen=True)
