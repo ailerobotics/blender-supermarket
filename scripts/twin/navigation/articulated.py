@@ -434,22 +434,31 @@ class ArticulatedController(Controller):
         state=TrainState(*odom.pose,wrap(odom.pose[2]-obs.articulation))
         speed=max(v,abs(odom.linear))
         stop=speed*self.stale_after+speed*speed/(2*self.brake_acceleration)
-        if obs.coverage_radius<self.footprint.radius(True)+max(.02,odom.position_uncertainty)+stop:
+        if obs.observed_space is None and obs.coverage_radius<self.footprint.radius(True)+max(.02,odom.position_uncertainty)+stop:
             return Result(reason='insufficient_sensor_coverage')
         uncertainty=max(0.02,odom.position_uncertainty)
         if not self.world.valid(state,obs.obstacles,uncertainty):
             return Result(reason='obstacle_stop')
         k=w/v if v>1e-6 else 0.0
-        if not self.world.rollout(state,stop,k,obs.obstacles,uncertainty):
+        predicted=self.world.rollout(state,stop,k,obs.obstacles,uncertainty)
+        if not predicted:
             return Result(reason='obstacle_stop')
         # During a command change braking follows measured curvature, too.
         if abs(odom.linear)>0.02:
             measured_k=odom.angular/odom.linear
             if abs(measured_k)>1/1.5+0.03:
                 return Result(reason='measured_turn_radius')
-            if not self.world.rollout(state,stop,max(-1/1.5,min(1/1.5,measured_k)),
-                                      obs.obstacles,uncertainty):
+            braking=self.world.rollout(state,stop,max(-1/1.5,min(1/1.5,measured_k)),
+                                      obs.obstacles,uncertainty)
+            if not braking:
                 return Result(reason='obstacle_stop')
+            predicted+=braking
+        if obs.observed_space is not None:
+            from .observed_space import ObservedSpace
+            if not isinstance(obs.observed_space,ObservedSpace):
+                return Result(reason='invalid_observed_space')
+            reason=obs.observed_space.check_train(predicted,self.spec,uncertainty,now)
+            if reason:return Result(reason=reason)
         return Result(v,w,reason='tracking')
 
     def step(self,dt,odometry,observations,*,now=None):

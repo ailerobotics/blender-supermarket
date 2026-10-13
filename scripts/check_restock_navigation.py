@@ -21,6 +21,7 @@ def main():
     parser.add_argument('--environment',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--scenario',type=Path,help='Integration scenario: staging support and actual chassis goals')
+    parser.add_argument('--camera-config',type=Path,help='Physical camera config: include fixed mount colliders')
     parser.add_argument('--position-uncertainty','--localization-allowance',type=float,default=.10,
                         help='Fixture bound from localization evidence (default: MapLocalizer floor)')
     args=parser.parse_args()
@@ -29,7 +30,8 @@ def main():
     manifest=json.loads(args.environment.read_text())
     scenario=json.loads(args.scenario.read_text()) if args.scenario else None
     from twin.navigation.scenario import environment_grid
-    grid=environment_grid(manifest,scenario)
+    cameras=json.loads(args.camera_config.read_text()) if args.camera_config else None
+    grid=environment_grid(manifest,scenario,cameras)
     poses=dict(manifest['poses'])
     if scenario:
         staging=scenario['initial_staging']
@@ -43,6 +45,7 @@ def main():
         'obstacles':len(grid.obstacles),'geometry_margin':.05,'localization_allowance':args.position_uncertainty,
         'minimum_turn_radius':1.5,'max_articulation_degrees':65,'legs':[]}
     report['scenario_sha256']=hashlib.sha256(args.scenario.read_bytes()).hexdigest() if args.scenario else None
+    report['camera_config_sha256']=hashlib.sha256(args.camera_config.read_bytes()).hexdigest() if args.camera_config else None
     report['goals']=poses
     args.output.mkdir(parents=True,exist_ok=True)
     v=w=0.0
