@@ -205,7 +205,7 @@ def test_config_carries_shelf_camera_lamp_and_collidable_housing():
     assert len(cfg['lamps']) == 1
     lamp = cfg['lamps'][0]
     assert lamp['id'] == 'shelf' and lamp['parent'] == 'map' and lamp['type'] == 'sphere'
-    np.testing.assert_allclose(lamp['center'], [-3.58, 4.826, 1.05])
+    np.testing.assert_allclose(lamp['center'], [-3.55, 4.826, 0.90])
     housing = next(s for s in cfg['solids'] if s['id'] == 'shelf_lamp_housing')
     assert housing['collision'] is True
 
@@ -234,7 +234,7 @@ def test_author_camera_lamps_places_sphere_light(tmp_path):
     assert sl.GetRadiusAttr().Get() == pytest.approx(.03)
     assert sl.GetIntensityAttr().Get() == pytest.approx(cfg['lamps'][0]['intensity_nits'])
     matrix = np.array(UsdGeom.Xformable(sl.GetPrim()).GetLocalTransformation()).T
-    np.testing.assert_allclose(matrix[:3, 3], [-3.58, 4.826, 1.05], atol=1e-6)
+    np.testing.assert_allclose(matrix[:3, 3], [-3.55, 4.826, 0.90], atol=1e-6)
     before = len(list(stage.Traverse()))
     author_camera_lamps(stage, cfg, parent_paths={'map': '/World', 'cart_chassis': '/World'})
     assert len(list(stage.Traverse())) == before               # idempotent
@@ -242,3 +242,44 @@ def test_author_camera_lamps_places_sphere_light(tmp_path):
                                   tuning=LightRigTuning(intensity_scale=3.0))
     sl2 = UsdLux.SphereLight(stage.GetPrimAtPath(retuned['shelf']))
     assert sl2.GetIntensityAttr().Get() == pytest.approx(3 * cfg['lamps'][0]['intensity_nits'])
+
+
+from scripts.twin.restock_camera.lights import lamp_marker_occlusion
+from scripts.twin.restock_camera.visibility import box_surface, Surface
+from scripts.twin.restock_camera.geometry import pose_matrix as _pose
+
+
+def test_lamp_marker_occlusion_flags_blocker_on_the_segment():
+    emitter = np.array([0, 0, 1.0])
+    marker = np.array([0, 0, 0.0])
+    wall = box_surface('wall', [0, 0, 0.5], [1.0, 1.0, 0.02])     # straddles the segment
+    beside = box_surface('beside', [0.5, 0, 0.5], [0.1, 0.1, 0.02])  # off to the side
+    assert lamp_marker_occlusion(emitter, [marker], [wall]) == {0: ['wall']}
+    assert lamp_marker_occlusion(emitter, [marker], [beside]) == {}
+
+
+def test_configured_shelf_lamp_is_not_blocked_by_its_own_or_camera_housing():
+    # Reproduces the native failure fix: the earlier emitter co-located with the lamp
+    # housing was occluded by it; the configured emitter below the lens must clear both
+    # the lamp housing and the camera housing (shelf tiers/products need USD and are
+    # covered by plan_restock_lighting.py).
+    cfg = _shelf_config()
+    lamp = cfg['lamps'][0]
+    housings = [box_surface(s['id'], [0, 0, 0], s['dimensions_m'],
+                            transform=np.array(s['parent_from_solid']))
+                for s in cfg['solids'] if s['id'].endswith('_housing')]
+    markers = [np.array(m['parent_from_marker'])[:3, 3] + [0, 0, .001]
+               for m in cfg['supports']['shelf']['markers']]
+    assert lamp_marker_occlusion(np.array(lamp['center']), markers, housings) == {}
+
+
+def test_emitter_at_old_above_tier_position_is_occluded_by_housing():
+    # Guard against regressing to the native-failure placement (emitter inside its body).
+    cfg = _shelf_config()
+    body = next(s for s in cfg['solids'] if s['id'] == 'shelf_lamp_housing')
+    bad_emitter = np.array(body['parent_from_solid'])[:3, 3]      # emitter inside the housing
+    housing = box_surface('shelf_lamp_housing', [0, 0, 0], body['dimensions_m'],
+                          transform=np.array(body['parent_from_solid']))
+    markers = [np.array(m['parent_from_marker'])[:3, 3] + [0, 0, .001]
+               for m in cfg['supports']['shelf']['markers']]
+    assert lamp_marker_occlusion(bad_emitter, markers, [housing]) != {}
