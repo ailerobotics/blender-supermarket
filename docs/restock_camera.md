@@ -149,17 +149,26 @@ stage; it never boots an app. Marker side refers to decoded QR corners, with the
 texture quiet border accounted for in the physical plane size. Integration owns
 native camera initialization, rigid attachment and actual rendered commissioning.
 
-Current design sampling is 2560×1920, fx=fy=1280, cx=1280, cy=960;
-this matches the installed Isaac camera's width/2, height/2 principal-point API.
-the field of view and .15–3.5 m optical range are unchanged. This increases
-sampling for the small paired support QR markers; actual decoding still needs
-render validation. The revised shelf view is target+(-.50,.30,.22), looking at
-target+(-.20,0,-.06) to retain both the top label and exposed support markers.
-Source and cart optical poses remain as in the historical table below. The source
-adds a rigid coplanar marker/witness tab behind the existing table; cart markers
-and witness occupy its exposed left strip; shelf markers use the exposed left
-strip of the actual shelf. These additions remain collision geometry and must
-be included in navigation/planning. No rail, lip, handle/post or shelf is removed.
+Design sampling is 2560×1920 with cx=1280, cy=960 (the installed Isaac camera's
+width/2, height/2 principal-point API) and a .15–3.5 m range. Focal length is now
+per camera so the 60 mm paired QR markers (25-module v2) clear a decode-safe
+pixels-per-module margin while the full .62×.42 support stays framed: source
+fx=fy=2000, cart fx=fy=1500, shelf fx=fy=1280. Resolution is unchanged, so the
+bounded QR tile grid (hence decode latency) is unaffected — it is resolution-bound,
+not marker-size-bound. Pixel size and incidence are necessary, never sufficient,
+for decoding; lighting and contrast are separate (see Store light rig below).
+
+The shelf view is re-aimed to target+(-.50,0,.23), looking at target+(-.18,0,-.05):
+y-centred on the marker pair (the earlier +.30 y offset grazed the far marker at
+63.8° / 3.65 px·module⁻¹). Both shelf markers now reach ~13 px·module⁻¹ at ~35°
+while the carton-top label plane and full support stay framed. The camera stays just
+below the next shelf tier (~0.97 m) to see under it to the carton top; a top-down
+view is impossible because that tier is ~0.24 m above the support. Source and cart
+optical poses are unchanged. The source adds a rigid coplanar marker/witness tab
+behind the existing table; cart markers and witness occupy its exposed left strip;
+shelf markers use the exposed left strip of the actual shelf. These additions remain
+collision geometry and must be included in navigation/planning. No rail, lip,
+handle/post or shelf is removed.
 
 `scripts/plan_restock_sensed_views.py --help` is the current optional CPU helper.
 Supply current scenario, measured-margin navigation summary, matching IK report,
@@ -176,17 +185,20 @@ Geometric visibility does not certify QR decoding, error bounds or free volume.
 Use the reported rejections; `runtime_ready` remains false until integration has
 real sensor/physics evidence. CPU tests: `python3 -m pytest -q
 scripts/twin/tests/test_restock_sensed_views.py scripts/twin/tests/test_restock_camera_config.py
-scripts/twin/tests/test_restock_camera.py scripts/twin/tests/test_cad_restock.py`.
+scripts/twin/tests/test_restock_camera.py scripts/twin/tests/test_restock_lighting.py
+scripts/twin/tests/test_cad_restock.py`.
 USD authoring tests require the CPU USD environment described in RUNBOOK §6a.
 
-Current CPU design prediction (2026-10-13, no rendered sensor capture):
+Current CPU design prediction (2026-10-13, no rendered sensor capture). The marker
+column adds the projected pixels-per-module (min over both markers) and incidence;
+both markers stay fully in frustum/range at every station:
 
-| View | Top samples | Empty support | Loaded support | Loaded witness | Each support marker |
+| View | Top samples | Empty support | Loaded witness | Each support marker | px/module @ incidence |
 |---|---:|---:|---:|---:|---:|
-| Source | 81/81 | 81/81 | 9/81 | 25/25 | 25/25 |
-| Cart pickup | 81/81 | 81/81 | 0/81 | 25/25 | 25/25 |
-| Cart articulated arrival | 81/81 | 81/81 | 0/81 | 25/25 | 25/25 |
-| Shelf | 81/81 | 81/81 | 17/81 | 25/25 | 25/25 |
+| Source | 81/81 | 81/81 | 25/25 | 25/25 | 6.0 @ 20° |
+| Cart pickup | 81/81 | 81/81 | 25/25 | 25/25 | 5.4 @ 34° |
+| Cart articulated arrival | 81/81 | 81/81 | 25/25 | 25/25 | 5.4 @ 34° |
+| Shelf | 81/81 | 81/81 | 25/25 | 25/25 | 13.1 @ 35° |
 
 The added solids have no conservative overlap with 24 URDF collision links or
 held payload in 7,498 bounded samples over 16 local segments. This is only the
@@ -195,6 +207,37 @@ transit, self-collision and existing store/cart collisions. Shelf fit still need
 a measured full-footprint quad with uncertainty margin; nominal placement is only
 4 mm from the flat shelf's front margin, so a sensed feasible center may shift
 rearward. The helper does not change the scenario or manufacture a larger shelf.
+
+## Store light rig
+
+`restock_camera.lights` reproduces the Blender store lighting so the native
+composition is lit without opening Blender: `store_fixtures()` returns the 63 ceiling
+LED panels (`build_supermarket.build_lighting`, 1.2×0.6 m, 45 W, warm white) and the
+9 backroom service tubes (`store_environment.add_service_environment`, 1.2×0.3 m,
+100 W) as down-facing `RectFixture`s at their exact Blender positions. `light_rig()`
+returns a serialisable rig (fixtures with computed intensity, a dome fill and
+tonemapping advice); `author_light_rig(stage, rig, parent_path=...)` authors UsdLux
+RectLights (and the dome) into a supplied stage. These are physical fixture designs,
+never a render or decode result.
+
+Intensity model: a fixture's UsdLux intensity is `luminous_efficacy_lm_per_w *
+radiance_w * intensity_scale` with `normalize=False`, where `radiance_w =
+power_w / (area * π)` is the Lambertian radiance that reproduces the Blender radiant
+power. The efficacy and `intensity_scale` fold into one scalar integration calibrates
+against the tonemapper; the panel/tube ratio is physical and fixed. The side-scenario
+store already carries the 72 Blender-exported RectLights, but at intensity ≈14.3
+(≈ power/π, radiometric) — ~200× too dim for Omniverse/RTX nits, which is the observed
+darkness cause. Integration either re-tunes those exported lights to the rig's per
+fixture nits or authors the rig fresh, then adds the dome.
+
+`scripts/plan_restock_lighting.py` is the offline CPU line-of-sight proof: for each
+station support it ray-tests which fixtures have an unobstructed, near-overhead path.
+Source and cart supports are `direct_overhead_light`; the shelf support is
+`grazing_only_keep_fill` (near-overhead fraction 0.2, steep light blocked by the shelf
+tier) so the dome fill or a local task fill (`task_fill_fixture`, co-located with the
+shelf camera) is required. Line of sight is not illuminance; a reached support still
+needs the tuned `intensity_scale` and tonemapper for decodable contrast. The exact
+handoff for integration is `data/sim-restock-camera-v2/lighting-handoff.md`.
 
 Exact main input SHA-256 values for this prediction:
 

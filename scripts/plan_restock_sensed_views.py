@@ -10,7 +10,8 @@ import numpy as np
 
 from twin.restock_camera.config import camera_config
 from twin.restock_camera.geometry import Intrinsics, pose_matrix, transform_points
-from twin.restock_camera.visibility import Surface, box_surface, inspect_view, sample_plane, usd_surfaces
+from twin.restock_camera.visibility import (Surface, box_surface, inspect_view,
+                                            marker_decodability, sample_plane, usd_surfaces)
 from twin.restock_camera.mount_audit import audit_mounts
 
 
@@ -19,6 +20,12 @@ def sha(path):
     with open(path,'rb') as f:
         for block in iter(lambda:f.read(1024*1024),b''): h.update(block)
     return h.hexdigest()
+
+
+def qr_module_count(marker_id):
+    """Module side of the actual printed QR for this id (version v -> 17+4v)."""
+    import cv2
+    return int(cv2.QRCodeEncoder_create().encode(marker_id).shape[0])
 
 
 def main():
@@ -82,7 +89,16 @@ def main():
         for marker in support['markers']:
             points = transform_points(parent @ marker['parent_from_marker'],
                                       sample_plane([0,0,.0002],[marker['side_m']]*2,0,count=5))
-            marker_results[marker['id']] = inspect_view(camera,points,k,surfaces+[loaded])
+            view = inspect_view(camera,points,k,surfaces+[loaded])
+            # Decodable-pixel-size proof: project the QR data-region corners and report
+            # pixels-per-module at the marker's actual module count. Necessary, never
+            # sufficient; says nothing about lighting or contrast.
+            side = marker['side_m']
+            data_corners = transform_points(parent @ marker['parent_from_marker'],
+                [[-side/2,-side/2,.0002],[side/2,-side/2,.0002],
+                 [side/2,side/2,.0002],[-side/2,side/2,.0002]])
+            view['decodability'] = marker_decodability(camera,data_corners,k,qr_module_count(marker['id']))
+            marker_results[marker['id']] = view
         results[station] = dict(camera_id=camera_id,world_from_optical=camera.tolist(),
             base_from_optical=(np.linalg.inv(pose_matrix(base,manifest['spec']['arm_mount_z'])) @ camera).tolist(),
             robot_body_pose=base,cart_body_pose=cart_pose,

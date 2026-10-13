@@ -17,10 +17,17 @@ def camera_config(scenario, manifest):
             or not np.allclose(unit['dimensions_m'],[.6,.4,.16])
             or not np.isclose(manifest['spec']['arm_mount_z'],.5)):
         raise ValueError('camera design requires audited mobile wall3 handling unit')
-    # Keep the same physical FOV, but enough pixel sampling for 60 mm paired QR
-    # markers. 48 px markers in the old 1280-wide design alias in CPU QR checks.
-    # Installed Isaac Camera.get_intrinsics_matrix uses width/2, height/2.
-    k = Intrinsics(2560,1920,1280.,1280.,1280.,960.,.15,3.5)
+    # Per-camera pixel sampling sized so the 60 mm paired QR markers (25-module v2)
+    # clear a decode-safe pixels-per-module margin (~6 px/module) while the full
+    # .62x.42 support stays framed. Resolution stays 2560x1920, so the bounded QR
+    # tile grid (hence decode latency) is unchanged: it is resolution-bound, not
+    # marker-size-bound. Source/cart narrow the FOV to enlarge their frontal-ish
+    # markers; the shelf keeps the wide FOV because its markers and support span a
+    # wide, close arc inside the shelf slot. Installed Isaac
+    # Camera.get_intrinsics_matrix uses width/2, height/2 for the principal point.
+    def intr(f):
+        return Intrinsics(2560,1920,f,f,1280.,960.,.15,3.5)
+    k_source,k_cart,k_shelf = intr(2000.),intr(1500.),intr(1280.)
     source = np.array([*staging['support_center_xy'],staging['unit_bottom_z']])
     shelf = np.array(staging['target_surface_pose_world'][:3])
     deck = np.array([*staging['cart_load_center_body_xy'],staging['cart_support_z_world']-.2])
@@ -30,25 +37,31 @@ def camera_config(scenario, manifest):
         solids.append(dict(id=name,parent=parent,parent_from_solid=pose_matrix([*center[:2],0],center[2]).tolist(),
                            dimensions_m=list(size),collision=True))
 
-    def camera(name,parent,eye,target):
+    def camera(name,parent,eye,target,k):
         pose = look_at(eye,target)
         cameras[name] = dict(id=name,parent=parent,parent_from_optical=pose.tolist(),
-            intrinsics=asdict(k),revision='physical-paired-marker-v2')
+            intrinsics=asdict(k),revision='physical-paired-marker-v3')
         housing = pose.copy()
         # Glass is the front face, lens at the face; body is behind optical origin.
         housing[:3,3] += pose[:3,:3] @ [0,0,-.014]
         solids.append(dict(id=name+'_housing',parent=parent,parent_from_solid=housing.tolist(),
                            dimensions_m=[.06,.025,.025],collision=True))
 
-    camera('source','map',source+[0,.20,.85],source+[0,0,.08])
-    camera('cart','cart_chassis',deck+[0,-.02,.655],deck+[0,0,.075])
-    camera('shelf','map',shelf+[-.50,.30,.22],shelf+[-.20,0,-.06])
+    camera('source','map',source+[0,.20,.85],source+[0,0,.08],k_source)
+    camera('cart','cart_chassis',deck+[0,-.02,.655],deck+[0,0,.075],k_cart)
+    # Shelf camera: same realisable aisle bracket height as before, but y-centred on
+    # the marker pair (the old +.30 y offset grazed the far marker at 63.8 deg and
+    # 3.65 px/module). Centred, both markers reach ~13 px/module at ~35 deg while the
+    # carton-top label plane and full support stay framed. The camera must stay just
+    # below the next shelf tier (~0.97 m) to see under it to the carton top; a top-down
+    # view is impossible (the tier is ~0.24 m above the support).
+    camera('shelf','map',shelf+[-.50,0,.23],shelf+[-.18,0,-.05],k_shelf)
     solid('source_mast','map',source+[0,.44,.15],[.03,.03,1.50])
     solid('source_boom','map',source+[0,.32,.88],[.03,.27,.025])
     solid('source_marker_tab','map',source+[0,.30,-.0015],[.72,.16,.003])
     solid('cart_bracket','cart_chassis',deck+[0,-.02,.674],[.02,.02,.017])
-    solid('shelf_bracket','map',shelf+[-.50,.04,.252],[.02,.55,.02])
-    solid('shelf_anchor','map',shelf+[-.47,-.22,.13],[.08,.02,.26])
+    solid('shelf_bracket','map',shelf+[-.50,0,.27],[.02,.55,.02])
+    solid('shelf_anchor','map',shelf+[-.47,-.22,.14],[.08,.02,.26])
 
     def support(name,parent,center,yaw,marker_centers,witness_center,witness_size):
         pose = pose_matrix([*marker_centers[0][:2],yaw],marker_centers[0][2])
