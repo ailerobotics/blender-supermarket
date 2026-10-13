@@ -1,5 +1,6 @@
 """Bounded decoder behavior; synthetic tests are not held-out render evidence."""
 from dataclasses import replace
+import hashlib
 from types import SimpleNamespace
 
 import numpy as np
@@ -113,3 +114,51 @@ def test_real_blank_pixels_do_not_create_inventory():
     result=qr.FixedTileQR('camera').decode(np.full((320,320,3),255,np.uint8),
                                          evidence(),now=1.,parked=True)
     assert result.detections==() and result.unreadable_corners==()
+
+
+@pytest.mark.parametrize('layout', ['contiguous','rgba_view','reversed','transposed','readonly'])
+def test_rgb_digest_preserves_original_c_order_bytes_for_all_layouts(layout):
+    original = np.arange(13*17*4,dtype=np.uint8).reshape(13,17,4)
+    pixels = original[:,:,:3]
+    if layout == 'contiguous':
+        pixels = pixels.copy()
+    elif layout == 'reversed':
+        pixels = pixels[::-1,::-1,::-1]
+    elif layout == 'transposed':
+        pixels = pixels.transpose(1,0,2)
+    elif layout == 'readonly':
+        pixels.setflags(write=False)
+    before = original.copy()
+    assert qr.rgb_digest(pixels) == hashlib.sha256(pixels.tobytes(order='C')).hexdigest()
+    np.testing.assert_array_equal(original,before)
+
+
+@pytest.mark.parametrize('strided', [False,True])
+def test_hash_uses_independent_snapshot_even_if_source_changes_during_hash(monkeypatch,strided):
+    backing = np.zeros((20,30,4 if strided else 3),np.uint8)
+    pixels = backing[:,:,:3]
+    expected = hashlib.sha256(pixels.tobytes()).hexdigest()
+    actual_sha256 = hashlib.sha256
+    def mutate_source(buffer):
+        assert buffer.flags.c_contiguous
+        assert not np.shares_memory(buffer,pixels)
+        backing[0,0,0] = 1
+        return actual_sha256(buffer)
+    monkeypatch.setattr(qr.hashlib,'sha256',mutate_source)
+    assert qr.rgb_digest(pixels) == expected
+    assert qr.rgb_digest(pixels) != expected  # every call resnapshots current pixels
+
+
+def test_shared_validation_rehashes_mutated_strided_pixels_every_time():
+    backing = np.zeros((100,100,4),np.uint8)
+    rgb = backing[:,:,:3]
+    obj,_ = decoder([('actual',box())])
+    result = obj.decode(rgb,evidence(),now=1.,parked=True)
+    result.validate(rgb,evidence(),now=1.,parked=True)
+    backing[99,99,2] = 1  # outside the detected QR; still part of exact frame
+    with pytest.raises(ValueError,match='another frame'):
+        result.validate(rgb,evidence(),now=1.,parked=True)
+    backing[99,99,2] = 0
+    result.validate(rgb,evidence(),now=1.,parked=True)
+    with pytest.raises(ValueError,match='another frame'):
+        replace(result,processing_seconds=.501).validate(rgb,evidence(),now=1.,parked=True)
