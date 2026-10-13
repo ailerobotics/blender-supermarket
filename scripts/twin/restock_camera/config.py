@@ -29,7 +29,12 @@ def camera_config(scenario, manifest):
     # Camera.get_intrinsics_matrix uses width/2, height/2 for the principal point.
     def intr(f):
         return Intrinsics(2560,1920,f,f,1280.,960.,.15,3.5)
-    k_source,k_cart,k_shelf = intr(2000.),intr(1500.),intr(1280.)
+    # Shelf fx widened 1280 -> 1050 so BOTH paired markers sit fully inside the frame with
+    # their quiet border: at 1280 the mirror-symmetric pair each overran a frame edge by
+    # ~84 px (the far-left marker lost a finder pattern and would not decode natively,
+    # though the nearer one did). The wider FOV pulls both in with a ~55 px margin at
+    # ~12 px/module (ample), unchanged obliquity, and top/support/witness stay framed.
+    k_source,k_cart,k_shelf = intr(2000.),intr(1500.),intr(1050.)
     source = np.array([*staging['support_center_xy'],staging['unit_bottom_z']])
     shelf = np.array(staging['target_surface_pose_world'][:3])
     deck = np.array([*staging['cart_load_center_body_xy'],staging['cart_support_z_world']-.2])
