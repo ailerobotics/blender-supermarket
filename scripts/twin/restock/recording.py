@@ -20,6 +20,23 @@ class Recorder:
         self.fps,self.frames=fps,[]
         self.ids=set()
 
+    def capture(self, frame):
+        """Record a newly acquired camera frame; skip only an unchanged cache.
+
+        Physics ticks can outnumber sensor callbacks. Never turn a cached sensor
+        frame into a new acquisition by assigning the current physics time.
+        """
+        import numpy as np
+        identity=frame.get('native_rendering_frame',frame['rendering_frame'])
+        render_id=json.dumps(identity,sort_keys=True,separators=(',',':'))
+        stamp=float(frame['rendering_time'])
+        if self.frames and self.frames[-1]['render_id']==render_id:
+            if stamp!=self.frames[-1]['simulation_time']:
+                raise ValueError('cached camera identity changed acquisition timestamp')
+            return False
+        self.add(np.asarray(frame['rgb'])[:,:,:3],render_id=render_id,simulation_time=stamp)
+        return True
+
     def add(self, rgb, *, render_id, simulation_time):
         import numpy as np
         from PIL import Image

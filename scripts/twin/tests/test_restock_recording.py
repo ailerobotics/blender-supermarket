@@ -52,3 +52,22 @@ def test_vfr_encode_decodes_exact_count_and_irregular_timestamps(tmp_path):
 def test_recording_refuses_existing_directory(tmp_path):
     with pytest.raises(FileExistsError):
         Recorder(tmp_path)
+
+
+def test_capture_skips_cached_callback_without_restamping(tmp_path):
+    np=pytest.importorskip('numpy')
+    r=Recorder(tmp_path/'frames')
+    frame=dict(rgb=np.zeros((4,4,4),dtype=np.uint8),rendering_frame=10,
+               native_rendering_frame={'referenceTimeNumerator':10,'referenceTimeDenominator':30},
+               rendering_time=1.)
+    assert r.capture(frame)
+    assert not r.capture(dict(frame))
+    with pytest.raises(ValueError,match='cached camera identity'):
+        r.capture(dict(frame,rendering_time=1.1))
+    old=dict(frame)
+    frame.update(rendering_frame=14,rendering_time=1.0666667,
+                 native_rendering_frame={'referenceTimeDenominator':30,'referenceTimeNumerator':14})
+    assert r.capture(frame)
+    with pytest.raises(ValueError,match='render ID'):
+        r.capture(old)
+    assert [f['simulation_time'] for f in r.frames]==[1.,1.0666667]

@@ -133,8 +133,7 @@ class IsaacPort:
         evidence=self.verification(now)
         if self.recorder is not None and self.tick%2 == 0:
             frame=self.recording_camera.get_current_frame()
-            self.recorder.add(np.asarray(frame['rgb'])[:,:,:3],
-                render_id=str(frame['rendering_frame']),simulation_time=float(frame['rendering_time']))
+            self.recorder.capture(frame)
         return Packet(f'physics:{self.tick}','sensor',now,
             tuple(float(joints[i]) for i in self.wheels),scan,docking,None,
             ready,coupled,wrap(r.yaw-c.yaw),parked,evidence)
