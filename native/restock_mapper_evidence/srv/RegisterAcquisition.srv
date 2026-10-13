@@ -1,0 +1,6 @@
+string producer_nonce
+string certificate_token
+restock_mapper_evidence/Acquisition acquisition
+---
+bool success
+string failure_reason

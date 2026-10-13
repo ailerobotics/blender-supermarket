@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>restock_mapper_evidence</name>
+  <version>0.0.1</version>
+  <description>Draft native mapper evidence interfaces and pure admission policy; no runtime producer yet.</description>
+  <maintainer email="engineering@ailerobotics.com">Aile Robotics</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <depend>builtin_interfaces</depend>
+  <depend>nvblox_msgs</depend>
+  <!-- Only needed when EVIDENCE_BUILD_PRODUCER is ON (native producer component). -->
+  <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
+  <depend>nvblox_ros</depend>
+  <depend>sensor_msgs</depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

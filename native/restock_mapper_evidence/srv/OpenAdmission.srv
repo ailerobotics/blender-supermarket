@@ -1,0 +1,18 @@
+string producer_nonce
+string certificate_token
+restock_mapper_evidence/MapIdentity identity
+restock_mapper_evidence/SensorBinding[] required_sensors
+builtin_interfaces/Time acquisition_cutoff_stamp
+uint64 acquisition_cutoff_steady_ns
+string steady_clock_domain
+---
+bool success
+string failure_reason
+string producer_nonce
+string certificate_token
+restock_mapper_evidence/MapIdentity identity
+bool admission_open
+builtin_interfaces/Time acquisition_cutoff_stamp
+uint64 acquisition_cutoff_steady_ns
+uint64 opened_steady_ns
+string steady_clock_domain

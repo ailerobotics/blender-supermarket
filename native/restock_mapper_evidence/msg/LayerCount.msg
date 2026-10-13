@@ -1,0 +1,3 @@
+string layer_name
+string layer_type
+uint64 allocated_blocks
