@@ -28,7 +28,7 @@ checks. Detail + exact commands are in the per-topic sections below.
 | Shelf-station sensing (decode) | RED (lit) | native | `view-shelf-lit-04` (PR#30 DiskLight): illumination FIXED (support max 4->217, 31% >=180) but decode still 0/2 — QR contrast/over-exposure (band 161-227, no dark), routed to camera worker |
 | Mapper construction | CONFIRMED | native | `mapper-evidence-construct-01` (PR#29 runtime closure): EvidenceProducerNode instantiated + advertised services/topic + 5893 ticks, GPU reclaimed; incorporation = sensor+handshake next |
 | Collision-map incorporation (mapper) | NEAR-GREEN (1-line producer bug) | native | `incorp-identity-01/02`: under PR#32 baseline producer the full path runs — EmptyGeneration ACCEPTED (baseline 2048/layer) → admission open → 2 depth frames registered+integrated → EvidenceSnapshot PUBLISHED (index 1, rev 1, ledger front, slice 48×80 data_len 3840==expected). Consumer fails closed only because the producer leaves slice `header.frame_id`='' (should be global_frame 'map'); one-line host-lane fix in producer_node.cpp processEsdf |
-| Full autonomous restock cycle | NOT RUN | — | gated on shelf sensing + mapper incorporation; the `isaac_bundle:create` factory is not built until those land |
+| Full autonomous restock cycle | BUNDLE BUILT, UNRUN | CPU + gated | `isaac_bundle:create` factory now exists (`twin/restock/isaac_bundle.py`): pure `plan_bundle` (mission poses/articulation/nav-mode/verification contract, 11 CPU tests) + `create()` assembling the validated `physics_setup.assemble` scene → measured `IsaacPort` → `RuntimeAdapter(fixture_mode=False)`, with nav/manip/sensing controllers resolved from lane-owned `module:function` runtime-config refs (no stubs). Source-station sensing wired via the sensing-factory into `InventoryVerifier`. Unrun: gated on the producer frame_id fix + the lane factory refs; one bounded run executes collect→couple→outbound→park→transfer→verify→return when they land |
 
 Source-station note: per the integration/camera contract the 3/3 native decode
 (`view-source-lit-01`) is the accepted source-station sensing proof. The pre-capture
@@ -133,6 +133,37 @@ host-lane fix (`native/restock_mapper_evidence/src/producer_node.cpp` `processEs
 stamp the header too). Integration does not paper over it (an empty slice frame is correctly a
 fail-closed envelope). A measured incorporation identity, then source-station vacancy capture and
 the full mission, follow immediately once the producer stamps the slice frame.
+
+## Mission bundle factory `isaac_bundle:create` built (CPU-tested, unrun — gated)
+
+`run_mobile_restock.py --execute --factory twin.restock.isaac_bundle:create` now has a real
+factory (`scripts/twin/restock/isaac_bundle.py`). It owns the **integration assembly only** and
+fabricates no sensor data:
+
+- `plan_bundle(manifest, scenario, config)` — pure, Isaac-free, fail-closed: derives and validates
+  the four mission navigation poses (`pickup`/`cart_dock`/`shelf_approach`/`home`), the per-action
+  articulation tolerances (`outbound`/`return`, 0 < tol ≤ 65°), the navigation mode
+  (`reference`/`nav2`/`sensor`, defaulting to `sensor` for an `articulated` scenario), and the
+  verification/recording parameters. Poses are **required explicit runtime-config inputs**, never
+  guessed from staging geometry. 11 CPU tests.
+- `create(app, manifest, scenario, config, output)` — calls the validated
+  `physics_setup.assemble` scene builder (the same one the coupling/towing/assembly native
+  diagnostics use), constructs the measured `IsaacPort` (wheel-encoder odometry + idealized range
+  scan + native contact + rigid-body cart/base proprioception + rendered inventory verification +
+  H.264 recorder), and wraps the real sub-runtimes in the CPU-tested `RuntimeAdapter`
+  (`fixture_mode=False`, so the launcher's production check accepts it). Mission actions map to the
+  adapter's existing collect→couple→outbound→park→transfer→verify→return logic, each gated on
+  measured sensor evidence.
+- The per-lane **controllers stay lane-owned** and are resolved from the runtime-config as
+  `module:function` refs — `nav_factory` (navigation), `manip_factory` (manipulation),
+  `sensing_factory` (camera/inventory sensing) — each called `fn(app, assembly, plan, config,
+  output)`. A missing/invalid ref fails closed naming the exact contract; no stub is substituted.
+  Source-station sensing capture is wired through `sensing_factory` into `InventoryVerifier`.
+
+Status: **built and CPU-tested, NOT run.** The full physical mission is gated on (a) the one-line
+producer slice `frame_id` fix (`incorp-slice-frame`) so the incorporated map is adoptable, and
+(b) the lane factory refs landing. When both land, one bounded guarded run drives the full cycle
+and records it as VFR H.264, with any failed stage reported as failed. 502 CPU tests pass.
 
 ## Camera lighting applied: SOURCE decodes 3/3, SHELF still dark 0/2 (measured)
 
