@@ -108,6 +108,8 @@ class TemporalMap:
         self.sources={};self.slice=None;self.invalid='';self.last_missing=None
         self.history=deque(maxlen=512)
         self.reconstruction_since=commissioned;self.retired_generations=set()
+        self.clearance_changed=False
+        self.last_checked_time=None;self.last_checked_steady=None
 
     def invalidate(self,reason):
         self.invalid=reason or 'epoch_invalidated'
@@ -129,6 +131,7 @@ class TemporalMap:
         if self.invalid and self.invalid!='clearance_reobservation_required':
             return  # A payload event cannot reopen an invalid mission epoch.
         self.reconstruction_since=now
+        self.clearance_changed=True
         self.invalid='clearance_reobservation_required';self.slice=None
 
     def begin_empty_reconstruction(self,generation):
@@ -146,6 +149,7 @@ class TemporalMap:
         if acquisition.sensor not in self.required:raise ValueError('unconfigured sensor')
         old=self.sources.get(acquisition.sensor)
         if (acquisition.stamp<self.reconstruction_since or
+                (self.clearance_changed and acquisition.stamp==self.reconstruction_since) or
                 (old and (acquisition.sequence<=old.sequence or acquisition.stamp<=old.stamp
                           or acquisition.steady_stamp<=old.steady_stamp))):
             raise ValueError('held, out-of-order or pre-reconstruction sensor frame')
@@ -168,6 +172,11 @@ class TemporalMap:
     def readiness(self,now):
         steady=self.clock()
         if not math.isfinite(now) or not math.isfinite(steady):return 'invalid_map_time'
+        if (self.last_checked_time is not None and
+                (now<self.last_checked_time or steady<self.last_checked_steady)):
+            if not self.invalid or self.invalid=='clearance_reobservation_required':
+                self.invalidate('map_clock_rollback')
+        self.last_checked_time=now;self.last_checked_steady=steady
         if self.invalid:return self.invalid
         if not 0<self.duration<=600 or not 0<self.stale_after<=.3:return 'invalid_map_time_limits'
         if not math.isfinite(self.measured_latency) or not 0<=self.measured_latency<=.3:

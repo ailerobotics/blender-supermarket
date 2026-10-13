@@ -87,7 +87,7 @@ def write_assets(directory,grid,footprint,*,coupled=True,template=None,articulat
         if 'obstacle_layer' not in p['plugins']:
             p['plugins'].insert(-1,'obstacle_layer')
         if nvblox_topic is not None:
-            if not nvblox_topic.startswith('/restock_nav/'):
+            if not nvblox_topic.startswith('/restock_sim/navigation/'):
                 raise ValueError('navigation-scoped nvblox topic required')
             p['nvblox_layer']={'plugin':'nvblox::nav2::NvbloxCostmapLayer',
                 'nvblox_map_slice_topic':nvblox_topic,

@@ -1,7 +1,7 @@
 """Parameters for the approved controlled-static-scene navigation mapper.
 
 No node, GPU, dependency install or process lifecycle is started here. Host owns
-the /restock_nav mapper; /restock_sim parked manipulation remains independent.
+the /restock_sim/navigation mapper; parked manipulation remains independent.
 """
 import math
 

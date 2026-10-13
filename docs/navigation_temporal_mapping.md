@@ -40,6 +40,8 @@ Pass `temporal_map=gate` into `SensorNavigation.step` or
 used by acquisition metadata and the gate. The 600-second bound is checked in
 both simulation and steady time, so slower-than-real-time execution cannot
 silently extend an epoch.
+Any decrease in either checked clock latches epoch invalidation, even inside
+the freshness window. Reconstruction cannot clear this invalidation.
 
 Required acquisitions and mapper incorporation must each be no more than 300 ms
 old in both clock domains. The mapper may legitimately lag a newer camera frame;
@@ -61,7 +63,7 @@ Configured 20 Hz depth integration and 10 Hz ESDF updates are targets, not measu
 throughput. Depth/TF registration, same-acquisition self filtering and invalid
 pixel handling remain mapper input requirements. Self shadows are not cleared.
 
-`nav2.write_assets(..., nvblox_topic='/restock_nav/nvblox_node/static_map_slice')`
+`nav2.write_assets(..., nvblox_topic='/restock_sim/navigation/nvblox_node/static_map_slice')`
 adds NVIDIA's `nvblox::nav2::NvbloxCostmapLayer` while retaining unknown planning
 disabled and no reverse. A raw-slice actuator check remains necessary: maximum
 merging of Nav2 layers must not let static free cells erase unknown evidence.
@@ -90,6 +92,8 @@ For the first implementation, a stock/manipulation/payload event conservatively
 invalidates the whole navigation map, rather than pretending a global timestamp
 proves regional re-observation. Host restarts only its own navigation mapper with
 an empty map and a new generation, then supplies fresh observations. Reusing a
+frame stamped exactly at the clearance-change time is refused; post-change
+observations must have strictly later acquisition timestamps. Reusing a
 retained map under a renamed generation or clearing changed regions to free is
 not allowed. Scene/camera/localization/session discontinuities invalidate the
 epoch itself. Expiry remains absolute from original commissioning.
@@ -109,7 +113,7 @@ package loading, slice/incorporation pairing, sensor-time TF including cart
 motion, full-height map behavior, empty-generation reset, timing/resource bounds
 and actual departure followed by blocked-aisle stop/replan. Integration owns
 those GPU checks. The parked `/restock_sim` mapper remains independent of
-`/restock_nav`. No system install, service change or GPU execution is performed
+`/restock_sim/navigation`. No system install, service change or GPU execution is performed
 by these modules.
 
 Primary references: [NVIDIA4.4 mapper inputs and outputs](https://nvidia-isaac-ros.github.io/v/release-4.4/repositories_and_packages/isaac_ros_nvblox/isaac_ros_nvblox/api/topics_and_services.html),

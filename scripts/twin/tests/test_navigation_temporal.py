@@ -70,6 +70,7 @@ class TemporalTests(unittest.TestCase):
     def test_stale_sensor_mapper_and_frozen_sim_clock(self):
         self.clock[0]=1.301
         self.assertEqual(self.gate.readiness(1.),'stale_navigation_sensor_or_mapper')
+        self.setUp()  # Independent future-frame case, not a clock rollback.
         self.clock[0]=1.1
         self.assertEqual(self.gate.readiness(.9),'stale_navigation_sensor_or_mapper')
         self.clock[0]=2.
@@ -82,6 +83,31 @@ class TemporalTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.gate.observe(replace(frame,stamp=1.1,steady_stamp=1.1))
         with self.assertRaises(ValueError):self.gate.observe(replace(frame,sequence=2000))
         self.assertEqual(self.gate.sources['front'],frame)
+
+    def test_clock_rollback_latches_epoch_even_inside_freshness_window(self):
+        for domain in ('simulation','steady'):
+            with self.subTest(domain=domain):
+                self.setUp()
+                self.refresh(10.)
+                self.clock[0]=10.2
+                self.assertEqual(self.gate.readiness(10.2),'')
+                self.clock[0]=10.1 if domain=='steady' else 10.2
+                now=10.1 if domain=='simulation' else 10.2
+                self.assertEqual(self.gate.readiness(now),'map_clock_rollback')
+                self.assertIsNone(self.gate.slice)
+                self.refresh(10.3)
+                self.assertEqual(self.gate.readiness(10.3),'map_clock_rollback')
+                self.gate.invalidate_clearance(now=10.3)
+                with self.assertRaises(ValueError):self.gate.begin_empty_reconstruction('new')
+
+    def test_same_tick_old_frame_cannot_repopulate_reconstructed_map(self):
+        old=self.snapshot.incorporated
+        self.gate.invalidate_clearance(now=old.stamp)
+        self.gate.begin_empty_reconstruction('empty-2')
+        with self.assertRaises(ValueError):self.gate.observe(old)
+        self.assertEqual(self.gate.readiness(1.),'missing_navigation_sensor')
+        self.refresh(1.01)
+        self.assertEqual(self.gate.readiness(1.01),'')
 
     def test_mapper_ack_must_match_acquisition_and_generation(self):
         for snapshot in (replace(self.snapshot,generation='other'),

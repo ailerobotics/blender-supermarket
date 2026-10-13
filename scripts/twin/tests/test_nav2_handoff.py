@@ -95,12 +95,14 @@ class Nav2HandoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as output:
             grid=GridMap((-2,-2,2,2))
             _,params=write_assets(output,grid,ArticulatedController(grid).footprint,
-                articulated_spec=MobileSpec(),nvblox_topic='/restock_nav/nvblox_node/static_map_slice')
+                articulated_spec=MobileSpec(),nvblox_topic='/restock_sim/navigation/nvblox_node/static_map_slice')
             config=yaml.safe_load(params.read_text())
             for name in ('local_costmap','global_costmap'):
                 p=config[name][name]['ros__parameters']
                 self.assertTrue(p['track_unknown_space'])
                 self.assertEqual(p['nvblox_layer']['plugin'],'nvblox::nav2::NvbloxCostmapLayer')
+                self.assertEqual(p['nvblox_layer']['nvblox_map_slice_topic'],
+                                 '/restock_sim/navigation/nvblox_node/static_map_slice')
             self.assertFalse(config['planner_server']['ros__parameters']['GridBased']['allow_unknown'])
             self.assertFalse(config['controller_server']['ros__parameters']['FollowPath']['allow_reversing'])
 
