@@ -25,8 +25,9 @@ checks. Detail + exact commands are in the per-topic sections below.
 | Host self-collision model | GREEN | CPU | `host-preflight-01`: 1930 spheres, zero transport overlaps, 7 separation proofs |
 | Navigation route preflight | GREEN | CPU fixture | `nav-preflight-01`: outbound + return succeed at 0.10 m uncertainty, peak ~46 deg; not a physics demo |
 | Source-station sensing (decode) | GREEN | native | `view-source-lit-01`: 3/3 markers decoded under the applied light rig |
-| Shelf-station sensing (decode) | RED | native | `view-shelf-lit-01`: 0/2; recessed slot max luminance 4/255 — routed to camera worker |
-| Collision-map incorporation (mapper) | BLOCKED | — | nav mapper launch in unlanded PR #23; native producer slice/incorporation identity binding not yet implemented (host PR #25) |
+| Shelf-station sensing (decode) | RED | native | `view-shelf-lit-02` (camera lamp applied): still 0/2; lamp occluded by its co-located opaque housing + sits above the shelf tier, support luminance 0/255 — routed to camera worker |
+| Mapper launch | MEASURED (fails) | native | `mapper-check/run01`: nvblox inits under guards (GPU userspace OK), node load blocked by missing host package `gxf_isaac_gxf_helpers` → no slice/evidence |
+| Collision-map incorporation (mapper) | BLOCKED | — | native producer slice/incorporation identity binding not yet implemented (host PR #25) |
 | Full autonomous restock cycle | NOT RUN | — | gated on shelf sensing + mapper incorporation; the `isaac_bundle:create` factory is not built until those land |
 
 Source-station note: per the integration/camera contract the 3/3 native decode
@@ -36,6 +37,25 @@ into the mission-bundle station sensing, where `base_from_camera`, `FrameEvidenc
 the support/auxiliary layout are wired from the camera config in one place, rather than
 hand-assembled against camera-owned internals for a one-off run; the native vacancy
 capture it feeds requires the mapper incorporation gate above regardless.
+
+## Mapper launch check: nvblox inits under guards, node load blocked by missing host package
+
+With nav PR #23 merged (mapper launch code + typed `restock_mapper_evidence` consumer),
+a bounded guarded native launch check (`mapper-check/run01`, domain 88) was run:
+`launch_navigation_mapper.py --execute` under the GPU lock with the host nav-plugin env
+plus the task-local GPU userspace. Measured: the `component_container_mt` started, the
+nvblox node printed its full static-TSDF config and reached `subscribeToTopics()`, and
+GXF `std`+`cuda` extensions loaded with **no CUDA driver error** (so the task-local GPU
+userspace works for nvblox; GPU peaked 3059 MiB and returned to the 2258 MiB whispr
+baseline, process torn down cleanly). The nvblox node constructor then threw: **package
+`gxf_isaac_gxf_helpers` not found** in the host plugin `AMENT_PREFIX_PATH`. Consequently
+the node did not load — `static_map_slice` was not advertised and no `EvidenceSnapshot`
+was produced. This is a host plugin-environment completeness gap (a missing Isaac GXF
+dependency), distinct from dependency (b), the still-unimplemented native producer
+incorporation binding (host PR #25). The CPU consumer tests (`test_navigation_evidence`,
+`test_navigation_temporal`, `test_navigation_mapper_launch`) pass. This is a measured
+launch result, not a readiness claim: slice publication and incorporation stay gated on
+restoring the host GXF package and landing (b).
 
 ## Camera lighting applied: SOURCE decodes 3/3, SHELF still dark 0/2 (measured)
 
@@ -67,8 +87,20 @@ than blind-tuned: the ceiling panels have no line of sight into the slot and the
 handoff's grazing-only `keep_fill` fill, applied as specified, does not lift the slot to
 decodable contrast. The source-view decode confirms the rig itself is correct where line
 of sight exists. Evidence:
-`~/datasets/twin-robot-in-store-boot-v1/view-source-lit-01/` and `view-shelf-lit-01/`
-(`native-result.json`, `frames/`, `observed-frames.json`, `view-setup.json`).
+`~/datasets/twin-robot-in-store-boot-v1/view-source-lit-01/` and `view-shelf-lit-01/`.
+
+Camera ring lamp (PR #27) follow-up — `view-shelf-lit-02`: `view_scene` now consumes
+`config['lamps']` via `author_camera_lamps` (the shelf `SphereLight` ring lamp, 101321
+nits at (-3.58, 4.826, 1.05), sharing `intensity_scale`). The lamp is authored active and
+correct, but the shelf support **still renders 0/255 (0/2 decode)** while the rest of the
+frame is lit (whole-frame max 243). Two native causes observed (not blind-tuned): the
+opaque `shelf_lamp_housing` cube is co-located at the **same centre** as the lamp and
+occludes its emission toward the support, and the lamp at z=1.05 sits **above** the
+~0.97 m shelf tier the camera (z=0.96) sees beneath, so its light cannot enter the slot.
+This native render contradicts the offline 2088-lux proof (which did not model the housing
+as an opaque occluder / the above-tier height). Routed to the camera worker; the same
+wiring will decode once the lamp clears its housing / drops below the tier. Evidence:
+`~/datasets/twin-robot-in-store-boot-v1/view-shelf-lit-02/`.
 
 ## Host/collision preflight: COLLISION GATE GREEN (CPU, vs origin/main)
 

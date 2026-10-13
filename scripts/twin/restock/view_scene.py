@@ -12,43 +12,36 @@ import numpy as np
 
 
 def _apply_light_rig(stage, design, view, config):
-    """Apply the camera worker's store light rig per the lighting handoff.
+    """Apply the camera worker's store light rig + camera lamps per the lighting handoff.
 
     The 72 Blender-exported RectLights are authored at power/pi (~14.3), ~200x too
     dim in RTX nits, which caused the dark captures. Per the handoff we author the
     designed rig (correct per-fixture nits, physical 4.44x panel/tube ratio, dome
-    fill) and DISABLE the dim exported store lights to avoid doubling. For the
-    recessed shelf support a task fill is co-located with the shelf camera. The
-    single calibration knob is intensity_scale (config 'light_intensity_scale').
-    RTX auto-exposure (histogram) is already off, so exposure is fixed; calibrate
-    brightness through intensity_scale rather than editing the physical ratio.
+    fill) and DISABLE the dim exported store lights to avoid doubling. The recessed
+    shelf support cannot be reached by ceiling panels or an aimed fill (handoff
+    section 4), so the shelf camera carries an omnidirectional SphereLight ring lamp
+    (`config['lamps']`, authored by author_camera_lamps, sharing intensity_scale);
+    it is co-located with the lens and outside the frustum. The single calibration
+    knob is intensity_scale (config 'light_intensity_scale'); RTX auto-exposure is
+    already off, so calibrate brightness through intensity_scale, not the ratio.
     """
-    import numpy as np
     from pxr import UsdLux
-    from twin.restock_camera.lights import light_rig, author_light_rig, task_fill_fixture, LightRigTuning
+    from twin.restock_camera.lights import light_rig, author_light_rig, author_camera_lamps, LightRigTuning
     tuning=LightRigTuning(intensity_scale=float(config.get('light_intensity_scale',1.0)))
-    fills=[]
-    if view=='shelf':
-        # Co-locate a task fill with the shelf camera (parent 'map' == /World identity)
-        # so it reaches into the recessed shelf slot the ceiling panels cannot light.
-        optical=np.asarray(design['cameras']['shelf']['parent_from_optical'],float)
-        eye=optical[:3,3]
-        target=eye+optical[:3,2]*0.35  # optical +Z looks at the support
-        fills=[task_fill_fixture('fill:shelf',eye.tolist(),target.tolist())]
     # Disable the dim exported store lights before adding the rig (avoid doubling).
     disabled=0
     for prim in stage.Traverse():
-        if (prim.IsA(UsdLux.RectLight) or prim.IsA(UsdLux.DomeLight)) and \
+        if (prim.IsA(UsdLux.RectLight) or prim.IsA(UsdLux.DomeLight) or prim.IsA(UsdLux.SphereLight)) and \
                 not str(prim.GetPath()).startswith('/World/RestockLight_'):
             prim.SetActive(False)
             disabled+=1
-    rig=light_rig(tuning,fills=fills)
+    rig=light_rig(tuning)
     authored=author_light_rig(stage,rig,parent_path='/World',tuning=tuning)
+    lamps=author_camera_lamps(stage,design,parent_paths={'map':'/World','cart_chassis':'/ViewCart/chassis'},tuning=tuning)
     return dict(intensity_scale=tuning.intensity_scale,disabled_exported_lights=disabled,
                 authored_fixtures=len(authored),dome_fill=bool(rig.get('dome',{}).get('enabled')),
-                shelf_task_fill=bool(fills),tonemapping=rig['tonemapping'],
-                counts=rig['counts'],
-                note='RTX auto-exposure already off; calibrate via intensity_scale only')
+                camera_lamps=sorted(lamps),tonemapping=rig['tonemapping'],counts=rig['counts'],
+                note='camera-mounted ring lamp(s) from config lamps; RTX auto-exposure off; calibrate via intensity_scale only')
 
 
 def build(stage, config, output, *, view='source'):
