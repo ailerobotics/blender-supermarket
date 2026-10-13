@@ -10,6 +10,27 @@ manipulation components are integrated from origin/main.
 A controller dispatcher and guarded launcher now exist; a complete simulator
 bundle with actual sensor acquisition/planner/actuator wiring is still missing.
 
+## Cart coupling: LATCH HOLDS on native guarded GPU
+
+The second lighting-independent priority-3 step passed. `native-coupling-02` settles
+the uncoupled robot+cart at the authored docking pose (150 steps), then requests the
+physical hitch through the same `MobileController`/`Coupler` contract the mission uses:
+the latch is created only from a fresh, stopped, aligned observation (measured hitch
+error 9.6 mm < the 25 mm gate, hitch-Z difference 0.06 mm, relative yaw ~0, reported
+speeds within the 20 mm/s stationary bound). Over the following 120 coupled hold steps
+the hitch stays present and healthy with **max hitch residual 0.18 mm** and **max
+articulation 0.045 deg**, and the coupled train is stationary by measured displacement
+(cart net 1.9e-5 m/s, base 1.1e-4 m/s). Guards held: peak 4832 MiB GPU, 16494 MiB host
+RAM floor, services unchanged. This proves docking and a holding physical coupling only
+- no towing, navigation, planner or sensing is exercised; drive targets stay zero.
+
+Reproduce (guarded): `... run_restock_render_smoke.py --coupling-only --runtime-config
+<config> ...`. The native validator is `scripts/twin/restock/coupling_check.py`; the
+shared measured-displacement settle metric is `scripts/twin/restock/settle_metrics.py`
+(CPU-tested). Evidence:
+`~/datasets/twin-robot-in-store-boot-v1/native-coupling-02/` (`native-result.json`,
+`coupling-feedback.json`, `run.json`).
+
 ## Stationary cart/base: SETTLED on native guarded GPU (a11510f)
 
 The uncoupled cart no longer drifts out of the stationary native assembly diagnostic;
