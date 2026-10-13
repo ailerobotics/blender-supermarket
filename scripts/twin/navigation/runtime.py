@@ -23,7 +23,7 @@ class SensorNavigation:
         return self.controller.cancel()
 
     def step(self,dt,wheel_angles,scan,*,now,coupled,arm_transport,articulation=0.0,
-             observed_space=None):
+             observed_space=None,temporal_map=None):
         if self.controller.terminal:
             return self.controller.terminal
         try:
@@ -33,6 +33,8 @@ class SensorNavigation:
                                arm_transport=arm_transport,articulation=articulation)
             if observed_space is not None:
                 sensed=replace(sensed,observed_space=observed_space)
+            if temporal_map is not None:
+                sensed=replace(sensed,temporal_map=temporal_map)
         except (ValueError,TypeError,IndexError,AttributeError):
             self.last_localized=None
             return self.controller.step(dt,None,None,now=now)

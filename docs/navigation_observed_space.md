@@ -1,5 +1,10 @@
 # Observed-space implementation checkpoint
 
+**Retired from motion acceptance.** The controlled static-scene replacement is
+[temporal nvblox navigation](navigation_temporal_mapping.md). Checkpoint7739eae
+and this report preserve the failed investigation; these candidate rigs must not
+be deployed. The controller rejects `Observation.observed_space`.
+
 This implementation is **not ready for the autonomous mission**. It provides a
 CPU depth binding and occupancy prototype, with fail-closed tests. Useful motion
 under complete observed stopping-sweep coverage has not been demonstrated.
