@@ -5,10 +5,12 @@ from .lights import (RectFixture, LightRigTuning, store_fixtures, task_fill_fixt
                      light_rig, tonemapping_settings, author_light_rig, camera_lamp,
                      author_camera_lamps, sphere_illuminance, rect_illuminance,
                      aimed_illuminance, lamp_illuminance, lamp_marker_occlusion)
+from .sensing import build_sensing, support_slots, rendered_context
 
 __all__ = ['Intrinsics', 'backproject', 'project', 'pose_matrix', 'look_at',
            'relative_camera', 'calibrate_support', 'SupportCalibration',
            'RectFixture', 'LightRigTuning', 'store_fixtures', 'task_fill_fixture',
            'light_rig', 'tonemapping_settings', 'author_light_rig', 'camera_lamp',
            'author_camera_lamps', 'sphere_illuminance', 'rect_illuminance',
-           'aimed_illuminance', 'lamp_illuminance', 'lamp_marker_occlusion']
+           'aimed_illuminance', 'lamp_illuminance', 'lamp_marker_occlusion',
+           'build_sensing', 'support_slots', 'rendered_context']
