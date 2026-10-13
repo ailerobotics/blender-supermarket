@@ -160,38 +160,57 @@ def test_rendered_qr_and_depth_are_actual_inputs(monkeypatch):
     from scripts.twin.restock_manipulation import isaac_sensors
     from .test_restock_manipulation import FixturePoseBridge
     monkeypatch.setattr(isaac_sensors, 'load_pose_bridge', lambda root:FixturePoseBridge())
-    gray = np.full((400,800),255,np.uint8)
+    from .test_restock_sensed_views import commissioned, registration, pixels, quad, clearance
+    from scripts.twin.restock_camera.sensed import polygon_mask
+    tracker,(k,transform,empty,_,_,a,b) = commissioned()
+    gray = np.full(empty.shape,255,np.uint8)
     qr = cv2.QRCodeEncoder_create().encode('carton')
     qr = cv2.resize(qr,(150,150),interpolation=cv2.INTER_NEAREST)
-    gray[125:275,125:275] = qr
+    gray[405:555,565:715] = qr
     rgb = np.repeat(gray[:,:,None],3,axis=2)
-    depth = np.full((400,800),.6)
-    depth[:,:400] = .5
-    frame = dict(rgb=rgb, distance_to_image_plane=depth, rendering_time=1., rendering_frame=1)
+    depth = empty.copy()
+    depth[polygon_mask(pixels(quad([0,0,.3],[.3,.2]),k,transform),k)] = .7
+    frame = dict(rgb=rgb, distance_to_image_plane=depth, rendering_time=2., rendering_frame=2)
     camera = NS(get_current_frame=lambda **kw:frame,
-                get_intrinsics_matrix=lambda:np.array([[400.,0,400.],[0,400.,200.],[0,0,1.]]),
+                get_intrinsics_matrix=lambda:np.array([[k.fx,0,k.cx],[0,k.fy,k.cy],[0,0,1.]]),
                 add_distance_to_image_plane_to_frame=lambda:None)
-    transform = np.diag([1.,-1.,-1.,1.])
-    transform[2,3] = 1.
+    def context(frame, now):
+        depth = frame['distance_to_image_plane']
+        reg = registration(k,transform,depth,a,b,stamp=now,frame_id=frame['rendering_frame'])
+        proof = clearance(now) if np.all(depth == empty) else None
+        view = tracker.prepare(depth,k,transform,reg,proof,now=now,parked=True)
+        return isaac_sensors.CameraContext(transform,now,'park1',
+            (isaac_sensors.SlotView.from_support('rollwagen',view,np.ones(depth.shape,bool)),),True)
     profile = ProductProfile('carton',(.3,.2,.1),(1,0,0,0), tcp_surface_offset=.0025)
     sensor = isaac_sensors.IsaacCartonSensors(camera, pose_bridge_root='fixture-only',
-        profiles={'carton':profile}, slots=[
-            isaac_sensors.SlotView('rollwagen',(0,0,400,400),.4,(.4,.3,.3)),
-            isaac_sensors.SlotView('shelf',(400,0,800,400),.4,(.4,.3,.3))], base_from_camera=transform)
+        profiles={'carton':profile}, context_provider=context)
     motion = NS(parked=lambda:True, joint_positions=lambda:(0.,)*6,
-                collision_time=1., observe_source=lambda o:None)
-    packet = sensor.capture(1.,'rollwagen','shelf',motion,NS(read=lambda:False))
+                collision_time=2., observe_source=lambda o:None)
+    packet = sensor.capture(2.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
     assert len(packet.observations) == 1
     assert packet.observations[0].sku == 'carton'
-    assert packet.observations[0].pose[2] == pytest.approx(.5)
-    assert packet.target.clear and 'rollwagen' not in packet.scanned_locations
-    with pytest.raises(ValueError, match='new synchronized'):
-        sensor.capture(1.,'rollwagen','shelf',motion,NS(read=lambda:False))
+    assert packet.observations[0].pose[2] == pytest.approx(.3)
+    assert not packet.target.clear and packet.target.free_dimensions[2] == 0
+    assert sensor.sensed_target_bboxes[0]['source'] == 'sensor_pose_registered_catalog_volume'
+    with pytest.raises(ValueError, match='monotonic|new synchronized'):
+        sensor.capture(2.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
     # Remove identity pixels: no SKU appears from known scene/profile metadata.
-    frame['rendering_frame'] = 2
+    frame['rendering_frame'] = 3
+    frame['rendering_time'] = motion.collision_time = 3.
     frame['rgb'] = np.full_like(rgb,255)
-    packet = sensor.capture(1.,'rollwagen','shelf',motion,NS(read=lambda:False))
-    assert not packet.observations
+    packet = sensor.capture(3.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
+    assert not packet.observations and not packet.target.clear
+    frame['rendering_frame'] = 4
+    frame['rendering_time'] = motion.collision_time = 4.
+    frame['distance_to_image_plane'] = empty
+    packet = sensor.capture(4.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
+    assert packet.target.clear and 'rollwagen' in packet.scanned_locations
+    frame['rendering_frame'] = 5
+    frame['rendering_time'] = motion.collision_time = 5.
+    frame['rgb'] = rgb
+    sensor.profiles = {}
+    with pytest.raises(ValueError,match='unknown or undecoded'):
+        sensor.capture(5.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
 
 
 def test_native_partial_latch_releases_without_weld_fallback():

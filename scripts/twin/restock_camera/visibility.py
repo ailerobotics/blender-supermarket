@@ -59,6 +59,35 @@ def inspect_view(world_from_camera, points, intrinsics, surfaces):
                 blocked_sample_indices=list(hits))
 
 
+def marker_decodability(world_from_camera, corners, intrinsics, module_count):
+    """Projected pixel-size/incidence metrics for a QR data square (design only).
+
+    ``corners`` are the four ordered world points of the QR *data* region (the
+    quiet border excluded), ``module_count`` its module side (version v -> 17+4v).
+    Returns whether every corner is in the frustum/range, the four projected edge
+    lengths, the smallest edge, pixels-per-module at that smallest edge, and the
+    incidence angle between the marker normal and the view ray to its centroid.
+    Pixel size and incidence are necessary but not sufficient for decoding; this is
+    never a decode, contrast or lighting claim.
+    """
+    points = np.asarray(corners, float)
+    if points.shape != (4, 3) or int(module_count) < 1:
+        raise ValueError('four ordered marker corners and a positive module count required')
+    uv, valid = project(transform_points(np.linalg.inv(world_from_camera), points), intrinsics)
+    edges = np.linalg.norm(np.roll(uv, -1, axis=0) - uv, axis=1)
+    centroid = points.mean(axis=0)
+    normal = np.cross(points[1] - points[0], points[3] - points[0])
+    normal = normal / (np.linalg.norm(normal) or 1.0)
+    ray = centroid - world_from_camera[:3, 3]
+    ray = ray / (np.linalg.norm(ray) or 1.0)
+    incidence = float(np.degrees(np.arccos(min(1.0, abs(float(normal @ ray))))))
+    min_edge = float(edges.min())
+    return dict(in_fov_and_range=bool(valid.all()), module_count=int(module_count),
+                edge_px=[float(e) for e in edges], min_edge_px=min_edge,
+                px_per_module=min_edge / int(module_count), incidence_deg=incidence,
+                centre_px=[float(c) for c in uv.mean(axis=0)])
+
+
 def sample_plane(center, size, yaw, count=9):
     c,s = np.cos(yaw),np.sin(yaw)
     return np.array([[center[0]+c*x-s*y,center[1]+s*x+c*y,center[2]]
@@ -73,7 +102,7 @@ def usd_surfaces(path, bounds, *, exclude=()):
     types in that volume raise, rather than silently deleting an occluder.
     Mesh polygons are fan triangulated (authored store faces are convex).
     """
-    from pxr import Usd, UsdGeom
+    from pxr import Usd, UsdGeom, UsdLux
     stage = Usd.Stage.Open(str(path))
     if not stage:
         raise ValueError('USD stage could not be opened')
@@ -86,6 +115,8 @@ def usd_surfaces(path, bounds, *, exclude=()):
             continue
         if not prim.IsA(UsdGeom.Boundable):
             continue
+        if prim.HasAPI(UsdLux.LightAPI):
+            continue  # exported store lights are emitters, never ray occluders
         if UsdGeom.Imageable(prim).ComputeVisibility() == UsdGeom.Tokens.invisible:
             continue
         r = cache.ComputeWorldBound(prim).ComputeAlignedRange()

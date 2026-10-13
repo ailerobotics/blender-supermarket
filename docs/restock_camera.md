@@ -1,11 +1,267 @@
 # Restocking camera geometry and depth calibration
 
 `scripts/twin/restock_camera/` supplies bounded CPU geometry and support-calibration
-helpers for the existing `IsaacCartonSensors` and `SlotView` adapter. It does not
-boot Isaac, perform perception, or credit inventory. Offline ray checks are
+helpers and a fresh rendered-pixel binding for `IsaacCartonSensors` and `SlotView`.
+It does not boot Isaac or credit inventory from scene geometry. Offline ray checks are
 **geometric design predictions, not rendered RGB-D measurements**.
 
-## Frames and physical camera candidates
+## Current registered-support binding
+
+`restock_camera.qr.FixedTileQR(camera_id).decode(rgb, evidence, now=..., parked=...)`
+searches original RGB pixels with single-code detection on fixed overlapping
+640×640 tiles, stride 480 with the last tile anchored at the image edge. The
+2560×1920 view uses 20 tiles; larger images refuse. There is no initial full-frame
+multicoder, resizing, expected-identity input or prior successful-frame crop.
+
+The immutable `FrameQR` contains decoded text, full-image corners, duplicate
+statistics, unresolved candidates, exact `FrameEvidence`, RGB hash and processing
+time. `CameraContext.qr_observation` carries the SAME result used by support
+registration into `IsaacCartonSensors`. The inventory adapter validates the pixels,
+frame/session/epoch and reuses it instead of decoding the acquisition twice.
+Custom providers that decode support markers must supply this field; providers
+without it use one fixed-tile inventory decode. The diagnostic `_registrations`
+return shape remains unchanged, with its result on `context.qr_observation`.
+
+Spatial duplicates require identical decoded text, centers within 5 px and
+corresponding-corner RMS <=2 px; first actual corners are retained, not averaged.
+Conflicting text/corners, overlapping labels and the same identity at separate
+locations refuse. Unreadable candidates remain explicit. Unknown/undecoded labels
+inside an inventory search mask refuse the packet; support IDs never become SKUs.
+
+The decoder enforces a **500 ms wall-processing ceiling**, discarding partial
+results on overrun/error. Failed attempts consume their frame: replay cannot retry
+old pixels into success. This ceiling does not extend acquisition freshness or
+commissioning TTL, and processing completion never replaces capture time.
+
+CPU replay of actual `native-source-view-01` PNGs reproduced the original 1/6
+full-frame success. The implementation recovers all three codes in 6/6 frames,
+with zero unresolved/conflicting labels, 0.95–1.03 mm maximum marker-fit residual
+and 335–357 ms decode/hash/merge time. These six frames are the discovery set,
+**not held-out proof**. Shared-result validation, depth/witness fitting, clearance,
+native readback/queueing and multiple cameras still need end-to-end timing on an
+independent integration capture. Runtime readiness remains false.
+Shared-result validation took another 58–107 ms in this replay; decoding plus
+validation plus diagnostic depth archive I/O/registration reached 516 ms on one
+frame. That diagnostic I/O is not the live acquisition path, but the result does
+not establish a complete 500 ms pipeline. No budget extension or further tuning
+was applied; integration must refuse stale end-to-end observations.
+
+Focused tests in `test_restock_qr.py` cover fixed coverage, pixel/frame binding,
+negative/unreadable cases, duplicate/conflict rejection, timeout and replay.
+The support/inventory test forbids a second decode on the shared acquisition.
+No camera scene, physical layout or published configuration changes accompany
+this decoder update.
+
+RGB hashing snapshots all pixels into a contiguous C-order array on every
+decode and shared-result validation, then hashes its buffer directly. This
+preserves the original byte digest and mutation detection without the slower
+strided-array `tobytes()` serialization. No hash/validation success is cached;
+even contiguous inputs are copied to preserve independent snapshot semantics.
+The API, frame/session checks and 500 ms gates are unchanged.
+
+A bounded two-thread CPU comparison on the same six discovery frames (three
+paired repetitions per frame) measured median shared validation 57.3 → 32.6 ms
+and decode + validation + depth archive I/O + registration 470.2 → 428.7 ms.
+The corrected chain still reached 551.0 ms (p95 513.6 ms): **the complete 500 ms
+pipeline remains unproven**. All paired hashes, corners, identities and metric
+registrations matched. Sensor aggregation was not measurable from this loaded
+source capture alone: it lacks a genuine empty commissioning baseline. These
+component measurements exclude native acquisition, witness/clearance checks,
+sensor aggregation and action handoff; integration's final fresh-clock gate
+must still reject expired observations. No further tuning follows this pass.
+
+`restock_camera.sensed` separates dated rigid geometry from current vacancy.
+An actual empty commissioning RGB-D frame measures a full support quadrilateral
+and an independent visible plane witness. Paired physical QR markers establish
+support identity and pose. Every later frame must decode those same markers,
+fit their depth-backed metric layout, and reobserve the independent plane patch.
+The loaded carton may hide the original footprint; that never refreshes the
+empty scan or proves the hidden space empty. Required .62×.42 m dimensions are
+checked inside the measured quad with uncertainty margins, never inflated from
+a smaller inscribed image rectangle.
+
+`restock_camera.binding.RenderedSupportContext` provides the executable adapter:
+
+```python
+context = RenderedSupportContext(
+    camera_id="cart", intrinsics=k, slots=support_slots,
+    measure_context=measured_camera_context,
+    clearance_for_slot=independent_clearance,
+    clock_context=persistent_acquisition_clock,
+    depth_error_m=validated_depth_error, camera_revision="mount-revision")
+geometry = context.commission(empty_rgbd_frame, commissioning_now,
+                             observed_empty_quads, lifetime_s=600.)
+sensor = IsaacCartonSensors(camera, profiles=profiles,
+    pose_bridge_root=pose_bridge_root, camera_id="cart", context_provider=context)
+```
+
+`SupportSlot` supplies location, support identity/revision, primary and auxiliary
+marker identities, metric printed side and rigid offset, separate label search
+mask, and required dimensions. The label mask must be selected from the current
+sensed view; it is not evidence of support or clearance. The full support mask is
+projected from the measured quad registered into the current camera frame. Raw
+legacy `SlotView` constants alone now fail closed in the runtime sensor adapter.
+The original `calibrate_support` rectangular helper remains an offline/diagnostic
+API; its legacy `slot_view` is insufficient for the current runtime proof gates.
+
+Callbacks are deliberately native-runtime-free:
+
+- `measure_context(frame, now)` returns `(base_from_camera, transform_stamp,
+  epoch, parked)`. Stop both robot/cart and withdraw the arm for the capture.
+- `clock_context(frame, now)` returns `(session_id, steady_domain,
+  acquired_steady)`. Record acquisition time in one persistent monotonic clock
+  across commissioning and mission resets; never timestamp retrieval as capture.
+  Without it, a different simulation session cannot reuse commissioning geometry.
+- `clearance_for_slot(location, support_view, frame, now)` returns independently
+  measured `ClearanceEvidence`, or `None` for occupied/unknown volume. It runs
+  after the fresh witness fit, so occupied source recognition does not require
+  falsely claiming its volume free. Without clearance, target.clear is false
+  and certified free height is zero. Use the measured support pose/footprint,
+  uncertainty, current plane stamp and actual incorporated collision-map stamp.
+
+`CameraContext` adds optional session/acquisition-clock fields after its original
+five fields. `StationSensors` aggregates separately assigned cameras into the
+existing `Sensors` packet and refuses unsynchronized station images. Its
+`sensed_target_bboxes` are catalog volumes anchored to accepted current QR/depth
+poses, separate from label/support masks. Integration chooses the active target
+for mapper masking; multiple inventory cameras do not certify mapper coverage.
+
+Baseline identity, original render/session/frame and acquisition time are immutable.
+The 600 s default lifetime accommodates the current 158.03 s CPU timing estimate
+plus bounded commissioning/reset/planning overhead. Configuration is restricted
+to 1–900 s at commissioning. It cannot extend an existing record. Live RGB-D,
+marker, witness, TF and clearance freshness remain <=0.5 s (TF skew <=0.05 s).
+The unchanged 10 micrometre/s drift allowance, marker/depth uncertainty, 10 mm
+combined limit and full-footprint containment can reject earlier. These are
+bounded design policies requiring deployment validation, not measured accuracy.
+Unbolting/deformation, changed marker layout, lens/mount revision or calibration
+requires explicit invalidation and a new actual empty scan. Motion/localization
+changes need a new parking epoch and fresh measured transforms. Session/frame
+replay, missing/invalid depth, hidden witnesses and unknown identities refuse.
+
+## Executable physical design and CPU audit
+
+`restock_camera.config.camera_config(scenario, manifest)` returns camera IDs,
+map/cart-chassis parents, optical transforms, pinhole intrinsics, collidable
+housing/bracket solids and paired physical fiducial layouts. `author_camera_design`
+authors those solids/cameras and actual printed marker textures in a supplied USD
+stage; it never boots an app. Marker side refers to decoded QR corners, with the
+texture quiet border accounted for in the physical plane size. Integration owns
+native camera initialization, rigid attachment and actual rendered commissioning.
+
+Design sampling is 2560×1920 with cx=1280, cy=960 (the installed Isaac camera's
+width/2, height/2 principal-point API) and a .15–3.5 m range. Focal length is now
+per camera so the 60 mm paired QR markers (25-module v2) clear a decode-safe
+pixels-per-module margin while the full .62×.42 support stays framed: source
+fx=fy=2000, cart fx=fy=1500, shelf fx=fy=1280. Resolution is unchanged, so the
+bounded QR tile grid (hence decode latency) is unaffected — it is resolution-bound,
+not marker-size-bound. Pixel size and incidence are necessary, never sufficient,
+for decoding; lighting and contrast are separate (see Store light rig below).
+
+The shelf view is re-aimed to target+(-.50,0,.23), looking at target+(-.18,0,-.05):
+y-centred on the marker pair (the earlier +.30 y offset grazed the far marker at
+63.8° / 3.65 px·module⁻¹). Both shelf markers now reach ~13 px·module⁻¹ at ~35°
+while the carton-top label plane and full support stay framed. The camera stays just
+below the next shelf tier (~0.97 m) to see under it to the carton top; a top-down
+view is impossible because that tier is ~0.24 m above the support. Source and cart
+optical poses are unchanged. The source adds a rigid coplanar marker/witness tab
+behind the existing table; cart markers and witness occupy its exposed left strip;
+shelf markers use the exposed left strip of the actual shelf. These additions remain
+collision geometry and must be included in navigation/planning. No rail, lip,
+handle/post or shelf is removed.
+
+`scripts/plan_restock_sensed_views.py --help` is the current optional CPU helper.
+Supply current scenario, measured-margin navigation summary, matching IK report,
+mobile manifest, composed store, package roots and scratch output. It verifies
+scenario/arrival identity, composes the cart independently of the robot, checks
+sampled top/support/marker/witness rays against actual meshes plus new mounts,
+and checks every URDF collision link and held payload against the added solids
+over bounded joint-linear approach/contact/lift/preplace segments. Output hashes
+include inputs, composed USD layers, collision meshes and helper sources.
+
+An overlap rejects a candidate; a clear mount audit does not certify existing
+store/cart/self-collision, transit, physical towing or an actual planner trajectory.
+Geometric visibility does not certify QR decoding, error bounds or free volume.
+Use the reported rejections; `runtime_ready` remains false until integration has
+real sensor/physics evidence. CPU tests: `python3 -m pytest -q
+scripts/twin/tests/test_restock_sensed_views.py scripts/twin/tests/test_restock_camera_config.py
+scripts/twin/tests/test_restock_camera.py scripts/twin/tests/test_restock_lighting.py
+scripts/twin/tests/test_cad_restock.py`.
+USD authoring tests require the CPU USD environment described in RUNBOOK §6a.
+
+Current CPU design prediction (2026-10-13, no rendered sensor capture). The marker
+column adds the projected pixels-per-module (min over both markers) and incidence;
+both markers stay fully in frustum/range at every station:
+
+| View | Top samples | Empty support | Loaded witness | Each support marker | px/module @ incidence |
+|---|---:|---:|---:|---:|---:|
+| Source | 81/81 | 81/81 | 25/25 | 25/25 | 6.0 @ 20° |
+| Cart pickup | 81/81 | 81/81 | 25/25 | 25/25 | 5.4 @ 34° |
+| Cart articulated arrival | 81/81 | 81/81 | 25/25 | 25/25 | 5.4 @ 34° |
+| Shelf | 81/81 | 81/81 | 25/25 | 25/25 | 13.1 @ 35° |
+
+The added solids have no conservative overlap with 24 URDF collision links or
+held payload in 7,498 bounded samples over 16 local segments. This is only the
+new-mount audit, with <=2 mm intersample displacement padding; it excludes
+transit, self-collision and existing store/cart collisions. Shelf fit still needs
+a measured full-footprint quad with uncertainty margin; nominal placement is only
+4 mm from the flat shelf's front margin, so a sensed feasible center may shift
+rearward. The helper does not change the scenario or manufacture a larger shelf.
+
+## Store light rig
+
+`restock_camera.lights` reproduces the Blender store lighting so the native
+composition is lit without opening Blender: `store_fixtures()` returns the 63 ceiling
+LED panels (`build_supermarket.build_lighting`, 1.2×0.6 m, 45 W, warm white) and the
+9 backroom service tubes (`store_environment.add_service_environment`, 1.2×0.3 m,
+100 W) as down-facing `RectFixture`s at their exact Blender positions. `light_rig()`
+returns a serialisable rig (fixtures with computed intensity, a dome fill and
+tonemapping advice); `author_light_rig(stage, rig, parent_path=...)` authors UsdLux
+RectLights (and the dome) into a supplied stage. These are physical fixture designs,
+never a render or decode result.
+
+Intensity model: a fixture's UsdLux intensity is `luminous_efficacy_lm_per_w *
+radiance_w * intensity_scale` with `normalize=False`, where `radiance_w =
+power_w / (area * π)` is the Lambertian radiance that reproduces the Blender radiant
+power. The efficacy and `intensity_scale` fold into one scalar integration calibrates
+against the tonemapper; the panel/tube ratio is physical and fixed. The side-scenario
+store already carries the 72 Blender-exported RectLights, but at intensity ≈14.3
+(≈ power/π, radiometric) — ~200× too dim for Omniverse/RTX nits, which is the observed
+darkness cause. Integration either re-tunes those exported lights to the rig's per
+fixture nits or authors the rig fresh, then adds the dome.
+
+`scripts/plan_restock_lighting.py` is the offline CPU line-of-sight proof: for each
+station support it ray-tests which fixtures have an unobstructed, near-overhead path.
+Source and cart supports are `direct_overhead_light`; the shelf support is
+`grazing_only_keep_fill` (near-overhead fraction 0.2, steep light blocked by the shelf
+tier) so the dome fill or a local task fill (`task_fill_fixture`, co-located with the
+shelf camera) is required. Line of sight is not illuminance; a reached support still
+needs the tuned `intensity_scale` and tonemapper for decodable contrast. The exact
+handoff for integration is `data/sim-restock-camera-v2/lighting-handoff.md`.
+
+Exact main input SHA-256 values for this prediction:
+
+- Current scenario: `fbea2c7420ea7f4451cae27981fde897811f6ce7d6da1a09d1073ec3d1fc3a80`
+- Measured-margin navigation: `0ccfb5d83f25b715fc031b9d6d6dda8f3377e4de34646b27b030bef4a08a35a5`
+- Matching IK: `e57419969ce2496d9eb95c071e18605e023ae701636732c90b597b1b9abb50ad`
+- Mobile URDF: `ac45b9f71360e0631ff79100f1a3c09772c773397cbee86c74fc26524d33d0e4`
+
+The complete layer/mesh/helper hash manifest is emitted by the offline command.
+Predicted marker image bounds are about 105×103 px at source, 121×120 and
+118×115 px on cart, and 254×131 and 413×352 px at shelf. These are projected
+quadrilateral bounding boxes, not a measured minimum module resolution.
+All current IDs fit the minimum 21-module QR grid. Shorter explicit decoded IDs
+are supported, but do not substitute a configured identity when decoding fails.
+An 80 mm QR needs about 126 mm substrate with this writer's quiet border. It is
+a possible lower-resolution fallback after moving source marker centers inward
+to +/-280 mm and shelf centers to X=targetX-405 mm; cart left-strip space already
+permits it. This alternative needs a new layout revision, geometric audit and
+actual rendered commissioning. Freshness/latency thresholds remain unchanged.
+
+## Historical single-ROI design (superseded runtime handoff)
+
+The following records the original checkpoint and its refusals. Use the current
+binding above for runtime integration, not the historical six-step handoff.
 
 All lengths are metres. Matrices use column vectors and `parent_from_child`.
 Optical axes are right/down/forward. Depth must be registered **distance to the
