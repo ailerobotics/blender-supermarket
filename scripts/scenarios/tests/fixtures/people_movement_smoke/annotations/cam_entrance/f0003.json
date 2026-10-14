@@ -1,0 +1,9 @@
+{
+ "camera": "cam_entrance",
+ "frame": 3,
+ "time_s": 1.5,
+ "width": 128,
+ "height": 96,
+ "annotations": [],
+ "file_name": "frames/cam_entrance/f0003.png"
+}

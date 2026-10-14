@@ -1,0 +1,198 @@
+{
+ "camera": "spill_overhead",
+ "frame": 1,
+ "time_s": 0.5,
+ "width": 128,
+ "height": 96,
+ "annotations": [
+  {
+   "id": "spill_overhead:1:floormark_0",
+   "entity_id": "floormark_0",
+   "category": "floor_marking",
+   "kind": "distractor",
+   "is_hazard": false,
+   "is_distractor": true,
+   "bbox": [
+    63,
+    0,
+    2,
+    96
+   ],
+   "bbox_amodal": [
+    62.93,
+    -5.06,
+    2.14,
+    106.73
+   ],
+   "center_px": [
+    64.0,
+    48.18
+   ],
+   "depth_m": 3.599,
+   "world_center": [
+    -4.85,
+    0.0,
+    0.001
+   ],
+   "world_size": [
+    0.12,
+    6.0,
+    0.002
+   ],
+   "pass_index": 7,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     6048,
+     192,
+     6048
+    ]
+   },
+   "area_px": 192,
+   "visibility": 0.8406,
+   "meta": {
+    "note": "aisle guide line"
+   }
+  },
+  {
+   "id": "spill_overhead:1:shadow_0",
+   "entity_id": "shadow_0",
+   "category": "shadow",
+   "kind": "distractor",
+   "is_hazard": false,
+   "is_distractor": true,
+   "bbox": [
+    66,
+    94,
+    14,
+    2
+   ],
+   "bbox_amodal": [
+    65.78,
+    94.49,
+    14.27,
+    21.48
+   ],
+   "center_px": [
+    72.91,
+    105.22
+   ],
+   "depth_m": 3.5901,
+   "world_center": [
+    -4.35,
+    -3.2,
+    0.001
+   ],
+   "world_size": [
+    0.8,
+    1.2,
+    0.002
+   ],
+   "pass_index": 8,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     6430,
+     2,
+     94,
+     2,
+     94,
+     2,
+     94,
+     2,
+     94,
+     2,
+     94,
+     2,
+     94,
+     2,
+     94,
+     2,
+     94,
+     2,
+     94,
+     2,
+     94,
+     2,
+     94,
+     2,
+     94,
+     2,
+     94,
+     2,
+     4608
+    ]
+   },
+   "area_px": 28,
+   "visibility": 0.0913,
+   "meta": {
+    "note": "cast shadow patch"
+   }
+  },
+  {
+   "id": "spill_overhead:1:papersign_0",
+   "entity_id": "papersign_0",
+   "category": "paper_sign",
+   "kind": "distractor",
+   "is_hazard": false,
+   "is_distractor": true,
+   "bbox": [
+    55,
+    44,
+    4,
+    5
+   ],
+   "bbox_amodal": [
+    55.02,
+    43.76,
+    3.74,
+    5.28
+   ],
+   "center_px": [
+    56.89,
+    46.4
+   ],
+   "depth_m": 3.5998,
+   "world_center": [
+    -5.25,
+    0.1,
+    0.0005
+   ],
+   "world_size": [
+    0.21,
+    0.297,
+    0.001
+   ],
+   "pass_index": 9,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     5324,
+     5,
+     91,
+     5,
+     91,
+     5,
+     91,
+     5,
+     6671
+    ]
+   },
+   "area_px": 20,
+   "visibility": 1.0,
+   "meta": {
+    "note": "dropped A4 flyer, flat on floor"
+   }
+  }
+ ],
+ "file_name": "frames/spill_overhead/f0001.png"
+}

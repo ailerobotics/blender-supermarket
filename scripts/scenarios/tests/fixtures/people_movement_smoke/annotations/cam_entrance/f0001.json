@@ -1,0 +1,321 @@
+{
+ "camera": "cam_entrance",
+ "frame": 1,
+ "time_s": 0.5,
+ "width": 128,
+ "height": 96,
+ "annotations": [
+  {
+   "id": "cam_entrance:1:person_0",
+   "entity_id": "person_0",
+   "category": "person",
+   "kind": "person",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    8,
+    61,
+    16,
+    35
+   ],
+   "bbox_amodal": [
+    6.78,
+    60.62,
+    21.39,
+    50.71
+   ],
+   "center_px": [
+    18.13,
+    83.7
+   ],
+   "depth_m": 2.3443,
+   "world_center": [
+    6.75,
+    -9.1667,
+    0.875
+   ],
+   "world_size": [
+    0.5,
+    0.42,
+    1.75
+   ],
+   "pass_index": 1,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     836,
+     1,
+     94,
+     2,
+     186,
+     1,
+     9,
+     3,
+     93,
+     16,
+     71,
+     3,
+     3,
+     2,
+     1,
+     23,
+     63,
+     4,
+     2,
+     3,
+     1,
+     23,
+     61,
+     6,
+     2,
+     2,
+     2,
+     2,
+     7,
+     14,
+     61,
+     6,
+     2,
+     2,
+     2,
+     2,
+     18,
+     3,
+     61,
+     13,
+     83,
+     13,
+     84,
+     12,
+     85,
+     6,
+     1,
+     3,
+     85,
+     5,
+     2,
+     3,
+     87,
+     4,
+     94,
+     1,
+     10014
+    ]
+   },
+   "area_px": 178,
+   "visibility": 0.1641,
+   "meta": {
+    "session_id": "s_74bf20f876",
+    "speed": 1.138
+   }
+  },
+  {
+   "id": "cam_entrance:1:person_1",
+   "entity_id": "person_1",
+   "category": "person",
+   "kind": "person",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    9,
+    61,
+    15,
+    35
+   ],
+   "bbox_amodal": [
+    6.78,
+    60.62,
+    21.39,
+    50.71
+   ],
+   "center_px": [
+    18.13,
+    83.7
+   ],
+   "depth_m": 2.3443,
+   "world_center": [
+    6.75,
+    -9.1667,
+    0.875
+   ],
+   "world_size": [
+    0.5,
+    0.42,
+    1.75
+   ],
+   "pass_index": 2,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     929,
+     2,
+     2,
+     2,
+     89,
+     8,
+     88,
+     9,
+     3,
+     5,
+     78,
+     10,
+     16,
+     5,
+     64,
+     2,
+     3,
+     3,
+     2,
+     1,
+     85,
+     1,
+     4,
+     2,
+     3,
+     1,
+     90,
+     2,
+     2,
+     2,
+     2,
+     7,
+     81,
+     2,
+     2,
+     2,
+     2,
+     18,
+     77,
+     22,
+     74,
+     22,
+     61,
+     1,
+     12,
+     22,
+     62,
+     1,
+     6,
+     1,
+     3,
+     23,
+     67,
+     2,
+     3,
+     2,
+     6,
+     16,
+     67,
+     2,
+     2,
+     1,
+     10,
+     14,
+     82,
+     14,
+     9984
+    ]
+   },
+   "area_px": 227,
+   "visibility": 0.2093,
+   "meta": {
+    "session_id": "s_0251908fcd",
+    "speed": 1.122
+   }
+  },
+  {
+   "id": "cam_entrance:1:person_2",
+   "entity_id": "person_2",
+   "category": "person",
+   "kind": "person",
+   "is_hazard": false,
+   "is_distractor": false,
+   "bbox": [
+    21,
+    67,
+    17,
+    29
+   ],
+   "bbox_amodal": [
+    17.83,
+    65.67,
+    25.63,
+    69.02
+   ],
+   "center_px": [
+    31.66,
+    96.17
+   ],
+   "depth_m": 1.8088,
+   "world_center": [
+    7.7667,
+    -9.1667,
+    0.875
+   ],
+   "world_size": [
+    0.5,
+    0.42,
+    1.75
+   ],
+   "pass_index": 3,
+   "segmentation": {
+    "size": [
+     96,
+     128
+    ],
+    "counts": [
+     2090,
+     6,
+     88,
+     10,
+     85,
+     11,
+     84,
+     26,
+     69,
+     27,
+     68,
+     28,
+     68,
+     28,
+     67,
+     29,
+     67,
+     29,
+     67,
+     29,
+     67,
+     29,
+     67,
+     29,
+     67,
+     29,
+     67,
+     29,
+     68,
+     28,
+     69,
+     27,
+     70,
+     7,
+     9,
+     10,
+     8640
+    ]
+   },
+   "area_px": 411,
+   "visibility": 0.2323,
+   "meta": {
+    "session_id": "s_d9dcbd7a08",
+    "speed": 1.249
+   }
+  }
+ ],
+ "file_name": "frames/cam_entrance/f0001.png"
+}
