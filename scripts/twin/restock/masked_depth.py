@@ -8,19 +8,24 @@ segmentation the mission already captures (`add_instance_id_segmentation_to_fram
 nvblox then integrates only non-rig returns, so the ESDF/planning scene is built without
 the robot carving itself into the obstacle set.
 
-The masking core (`rig_instance_ids`, `mask_rig_depth`, `parse_instance_frame`) is pure
-NumPy and CPU-tested; the ROS publisher (`MaskedDepthPublisher`) lazy-imports rclpy and
-sensor_msgs so it is constructed only inside the guarded app. The publisher is wired only
-when the runtime-config opts in (`masked_depth` block), so the legacy raw-depth OmniGraph
-path is untouched until the host worker chooses option B.
+The masking core (`rig_instance_ids`, `mask_rig_depth`, `parse_instance_frame`,
+`select_target_bbox`) is pure NumPy and CPU-tested. Publishing uses OmniGraph ROS2 nodes
+(`ArmDepthOmniGraphBridge`), NOT rclpy: an rclpy Node created inside the Isaac SimulationApp
+aborts (rcl_interfaces parameter_event typesupport assert) because the isaacsim.ros2.bridge
+extension and full rclpy load conflicting ROS2 middleware. The OmniGraph path mirrors
+`isaac_ros_graph.py` / `native_cameras.py` / `native_transport.py` (the proven in-app
+pattern). The bridge is wired only when the runtime-config opts in (`masked_depth` block).
 
-Contract proposed to the host worker (confirm via status notes before enabling):
+Contract with the host worker (host PR#50):
   depth topic : /restock_sim/camera/masked_depth        sensor_msgs/Image, 32FC1, metres
   info  topic : /restock_sim/camera/masked_depth/camera_info   sensor_msgs/CameraInfo
-  frame_id    : restock_camera_<id> (same TF frame as the existing camera stream)
+  bbox  topic : /restock_sim/target_bbox                 std_msgs/Float32MultiArray [u1,v1,u2,v2]
+  frame_id    : restock_camera_arm (optical frame, added to native_transport's /tf tree)
   invalid     : 0.0 (nvblox treats 0 / non-finite depth as no-return)
   domain      : 88 (the mission's isolated ROS domain)
-  stamp       : mission-relative acquisition clock (sim time), matching the RGB/info stream
+  stamp       : mission sim time; masked_depth + bbox published on one acquisition stamp,
+                TF (restock_camera_arm -> ur_base_link) published every physics tick by
+                native_transport's ROS2PublishTransformTree + /clock.
 """
 from __future__ import annotations
 
@@ -149,107 +154,12 @@ def mask_rig_depth(depth, instance_ids, rig_ids, *, invalid=INVALID_DEPTH):
     out[bad] = float(invalid)
     return out
 
-
-class MaskedDepthPublisher:
-    """Publish rig-masked depth + camera info on the mission's ROS domain for nvblox.
-
-    Constructed only inside the guarded app (lazy-imports rclpy/sensor_msgs). `camera` is a
-    RenderedCamera exposing `get_current_frame()` (RGB-D + instance-ID seg) and
-    `get_intrinsics_matrix()`; `rig_prefixes` are the USD prim prefixes of the robot/cart.
-    `publish(now)` reads one frame, masks it and publishes; callers invoke it only on
-    sensing-stage ticks (when the scene is rendered).
-    """
-
-    def __init__(self, camera, rig_prefixes, *, topic='/restock_sim/camera/masked_depth',
-                 info_topic=None, frame_id='restock_camera', domain=88,
-                 invalid=INVALID_DEPTH, node=None, _ros=None):
-        self.camera = camera
-        self.rig_prefixes = tuple(rig_prefixes)
-        if not self.rig_prefixes:
-            raise ValueError('rig_prefixes required to identify robot/cart self-returns')
-        self.topic = topic
-        self.info_topic = info_topic or topic + '/camera_info'
-        self.frame_id = frame_id
-        self.invalid = float(invalid)
-        self._id_cache = (None, frozenset())  # (id_to_path identity, resolved rig ids)
-        self._ros = _ros or self._init_ros(domain, node)
-
-    def _init_ros(self, domain, node):
-        import os
-        import rclpy
-        from rclpy.node import Node
-        from sensor_msgs.msg import Image, CameraInfo
-        # The isolated mission domain must already be set by the launcher; honour it.
-        os.environ.setdefault('ROS_DOMAIN_ID', str(domain))
-        if not rclpy.ok():
-            rclpy.init(args=None)
-        node = node or Node('restock_masked_depth')
-        return {'node': node, 'Image': Image, 'CameraInfo': CameraInfo,
-                'depth_pub': node.create_publisher(Image, self.topic, 10),
-                'info_pub': node.create_publisher(CameraInfo, self.info_topic, 10)}
-
-    def _rig_ids(self, id_to_path):
-        # Resolve once per distinct id->path map (Isaac reuses the dict object across frames
-        # while the scene graph is stable), then reuse for every subsequent frame.
-        if id_to_path is not self._id_cache[0]:
-            self._id_cache = (id_to_path, frozenset(rig_instance_ids(id_to_path, self.rig_prefixes)))
-        return self._id_cache[1]
-
-    def masked_frame(self, frame):
-        """Pure step: frame -> (masked HxW float32 depth metres, KxK intrinsics)."""
-        depth = frame.get('distance_to_image_plane')
-        if depth is None:
-            depth = frame.get('depth')
-        if depth is None:
-            raise ValueError('frame carries no depth (distance_to_image_plane)')
-        ids, id_to_path = parse_instance_frame(frame)
-        masked = mask_rig_depth(depth, ids, self._rig_ids(id_to_path), invalid=self.invalid)
-        return masked, self.camera.get_intrinsics_matrix()
-
-    def publish(self, now):
-        """Read the current frame and publish masked depth + info stamped at `now`."""
-        return self.publish_frame(self.camera.get_current_frame(), float(now))
-
-    def publish_frame(self, frame, stamp_seconds):
-        """Publish masked depth + camera info for an already-read frame at an explicit stamp.
-
-        The explicit stamp lets the caller keep depth, camera_info and the camera TF on one
-        acquisition time (the host object_segmenter + nvblox match them by stamp).
-        """
-        masked, intrinsics = self.masked_frame(frame)
-        stamp = self._stamp(float(stamp_seconds))
-        height, width = masked.shape
-        image = self._ros['Image']()
-        image.header.stamp, image.header.frame_id = stamp, self.frame_id
-        image.height, image.width = int(height), int(width)
-        image.encoding, image.is_bigendian = '32FC1', 0
-        image.step = int(width) * 4
-        image.data = np.ascontiguousarray(masked, dtype=np.float32).tobytes()
-        info = self._ros['CameraInfo']()
-        info.header.stamp, info.header.frame_id = stamp, self.frame_id
-        info.height, info.width = int(height), int(width)
-        info.distortion_model = 'plumb_bob'
-        info.d = [0.0, 0.0, 0.0, 0.0, 0.0]
-        k = np.asarray(intrinsics, float).reshape(3, 3)
-        info.k = k.ravel().tolist()
-        info.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-        info.p = [k[0, 0], 0.0, k[0, 2], 0.0, 0.0, k[1, 1], k[1, 2], 0.0, 0.0, 0.0, 1.0, 0.0]
-        self._ros['depth_pub'].publish(image)
-        self._ros['info_pub'].publish(info)
-        return image, info
-
-    @staticmethod
-    def _stamp(seconds):
-        return ros_time(seconds)
-
-
 def bbox_payload(bbox):
     """Validate and flatten one grasp-target bbox to [u1, v1, u2, v2] floats.
 
     `bbox` is the target's axis-aligned image box as (u1, v1, u2, v2) pixel corners with
     u1<u2 and v1<v2 (the shelfbot object_segmenter masks this rectangle out of the depth so
-    cuMotion can plan a path into the grasp target). Returns a plain float list for the
-    Float32MultiArray data field.
+    cuMotion can plan a path into the grasp target).
     """
     box = [float(v) for v in bbox]
     if len(box) != 4 or not all(np.isfinite(box)):
@@ -260,128 +170,133 @@ def bbox_payload(bbox):
     return box
 
 
-class TargetBboxPublisher:
-    """Publish the grasp-target image bbox as std_msgs/Float32MultiArray for the host.
+def select_target_bbox(sensed_bboxes, target_location, previous):
+    """Pure pick of the grasp-target roi to publish, caching the last good one.
 
-    The shelfbot object_segmenter subscribes `/restock_sim/target_bbox` (bbox_timeout_s 0.5)
-    and, for each masked-depth frame with a fresh bbox, invalidates the target rectangle in
-    the depth before republishing `world_depth` to nvblox; a stale/absent bbox passes depth
-    through unchanged (leaving the target an obstacle). So the bbox must be published on every
-    masked-depth frame, in the SAME camera image as the depth. Constructed only inside the
-    guarded app (lazy rclpy import).
+    `sensed_bboxes` are dicts with 'roi' and 'location' (from IsaacCartonSensors). Prefer the
+    entry at `target_location`; fall back to the first available. Returns the roi tuple, or
+    `previous` when perception produced none this frame (republished so the host's 0.5 s bbox
+    freshness never lapses while the static target is momentarily unobserved).
+    """
+    boxes = list(sensed_bboxes or ())
+    matched = [b for b in boxes if target_location is None or b.get('location') == target_location]
+    pick = matched or boxes
+    if pick:
+        return tuple(pick[0]['roi'])
+    return previous
+
+
+def masked_depth_from_frame(frame, rig_prefixes, id_cache, *, invalid=INVALID_DEPTH):
+    """(masked HxW float32 depth, refreshed id_cache). Pure; shared by the bridge and tests.
+
+    `id_cache` is a (id_to_path_obj, frozenset rig_ids) tuple reused across frames (Isaac
+    keeps the id->path dict object stable while the scene graph is), so rig IDs resolve once.
+    """
+    depth = frame.get('distance_to_image_plane')
+    if depth is None:
+        depth = frame.get('depth')
+    if depth is None:
+        raise ValueError('frame carries no depth (distance_to_image_plane)')
+    ids, id_to_path = parse_instance_frame(frame)
+    # Key the cache on the raw seg-info object (stable across frames while the scene graph is),
+    # since parse_instance_frame rebuilds a fresh normalized mapping each call.
+    raw = frame['instance_id_segmentation'].get('info')
+    if raw is None or raw is not id_cache[0]:
+        id_cache = (raw, frozenset(rig_instance_ids(id_to_path, rig_prefixes)))
+    masked = mask_rig_depth(depth, ids, id_cache[1], invalid=invalid)
+    return masked, id_cache
+
+
+class ArmDepthOmniGraphBridge:
+    """Publish arm masked-depth (Image) + camera_info + target_bbox via OmniGraph ROS2 nodes.
+
+    Built only inside the guarded app (lazy `omni.graph.core`). TF (restock_camera_arm ->
+    ur_base_link) is NOT published here: an optical child prim `restock_camera_arm` is created
+    under the arm camera and added to the existing native_transport /tf tree, which publishes
+    it every physics tick alongside /clock. `publish(now)` reads one arm-camera frame, masks
+    the rig self-pixels, and emits depth + camera_info + the cached target bbox on one stamp.
+
+    - `camera` is the Isaac arm Camera (render product + get_current_frame + intrinsics);
+    - `transport` is the native_transport graph exposing `add_frames([optical_path])`;
+    - `sensors` exposes `sensed_target_bboxes`; set `target_location` per operation.
     """
 
-    def __init__(self, *, topic='/restock_sim/target_bbox', domain=88, node=None, _ros=None):
-        self.topic = topic
-        self._ros = _ros or self._init_ros(domain, node)
+    DEPTH_TOPIC = '/restock_sim/camera/masked_depth'
+    INFO_TOPIC = '/restock_sim/camera/masked_depth/camera_info'
+    BBOX_TOPIC = '/restock_sim/target_bbox'
 
-    def _init_ros(self, domain, node):
-        import os
-        import rclpy
-        from rclpy.node import Node
-        from std_msgs.msg import Float32MultiArray
-        os.environ.setdefault('ROS_DOMAIN_ID', str(domain))
-        if not rclpy.ok():
-            rclpy.init(args=None)
-        node = node or Node('restock_target_bbox')
-        return {'node': node, 'Float32MultiArray': Float32MultiArray,
-                'pub': node.create_publisher(Float32MultiArray, self.topic, 10)}
+    def __init__(self, *, camera, camera_path, stage, transport, sensors, rig_prefixes,
+                 frame_id='restock_camera_arm', domain=88, invalid=INVALID_DEPTH,
+                 root='/RestockMaskedDepthROS'):
+        import omni.graph.core as og
+        from pxr import UsdGeom, Gf, Sdf
+        if stage.GetPrimAtPath(root):
+            raise ValueError('refusing to overwrite the masked-depth ROS graph')
+        self.og, self.root, self.frame_id = og, root, frame_id
+        self.camera, self.sensors = camera, sensors
+        self.rig_prefixes = tuple(rig_prefixes)
+        if not self.rig_prefixes:
+            raise ValueError('rig_prefixes required to identify robot/cart self-returns')
+        self.invalid = float(invalid)
+        self.target_location = None
+        self._id_cache = (None, frozenset())
+        self._bbox = None
 
-    def publish(self, bbox):
-        msg = self._ros['Float32MultiArray']()
-        msg.data = bbox_payload(bbox)
-        self._ros['pub'].publish(msg)
-        return msg
+        # Optical child prim (ROS +Z forward / +Y down) under the USD camera (-Z / +Y up).
+        optical_path = camera_path + '/' + frame_id
+        if not stage.GetPrimAtPath(optical_path):
+            xf = UsdGeom.Xform.Define(stage, optical_path)
+            xf.AddTransformOp().Set(Gf.Matrix4d(1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1))
+        # Hand the optical frame to the existing TF tree (parent ur_base_link via the chain).
+        transport.add_frames([optical_path])
 
+        render_product = camera.get_render_product_path()
+        keys = og.Controller.Keys
+        og.Controller.edit({'graph_path': root, 'evaluator_name': 'execution'}, {
+            keys.CREATE_NODES: [
+                ('tick', 'omni.graph.action.OnImpulseEvent'),
+                ('context', 'isaacsim.ros2.bridge.ROS2Context'),
+                ('info', 'isaacsim.ros2.bridge.ROS2CameraInfoHelper'),
+                ('depth', 'isaacsim.ros2.bridge.ROS2PublishImage'),
+                ('bbox', 'isaacsim.ros2.bridge.ROS2Publisher')],
+            keys.SET_VALUES: [
+                ('context.inputs:useDomainIDEnvVar', False), ('context.inputs:domain_id', domain),
+                ('info.inputs:renderProductPath', render_product),
+                ('info.inputs:topicName', self.INFO_TOPIC), ('info.inputs:frameId', frame_id),
+                ('info.inputs:useSystemTime', False), ('info.inputs:resetSimulationTimeOnStop', False),
+                ('depth.inputs:topicName', self.DEPTH_TOPIC), ('depth.inputs:frameId', frame_id),
+                ('depth.inputs:encoding', '32FC1'),
+                ('bbox.inputs:topicName', self.BBOX_TOPIC),
+                ('bbox.inputs:messagePackage', 'std_msgs'), ('bbox.inputs:messageSubfolder', 'msg'),
+                ('bbox.inputs:messageName', 'Float32MultiArray')],
+            keys.CONNECT: [
+                ('tick.outputs:execOut', 'info.inputs:execIn'),
+                ('tick.outputs:execOut', 'depth.inputs:execIn'),
+                ('tick.outputs:execOut', 'bbox.inputs:execIn'),
+                ('context.outputs:context', 'info.inputs:context'),
+                ('context.outputs:context', 'depth.inputs:context'),
+                ('context.outputs:context', 'bbox.inputs:context')]})
+        # Materialize the Float32MultiArray dynamic data attribute.
+        og.Controller.evaluate_sync(root)
 
-class TfPublisher:
-    """Publish a single camera->base TransformStamped on /tf each frame (tf2_msgs/TFMessage).
-
-    nvblox does per-frame stamped TF lookups in global_frame ur_base_link, so the arm
-    (eye-in-hand) camera's optical frame must be broadcast at every masked-depth frame with
-    the same stamp. Constructed only inside the guarded app (lazy rclpy import).
-    """
-
-    def __init__(self, *, topic='/tf', domain=88, node=None, _ros=None):
-        self.topic = topic
-        self._ros = _ros or self._init_ros(domain, node)
-
-    def _init_ros(self, domain, node):
-        import os
-        import rclpy
-        from rclpy.node import Node
-        from tf2_msgs.msg import TFMessage
-        from geometry_msgs.msg import TransformStamped
-        os.environ.setdefault('ROS_DOMAIN_ID', str(domain))
-        if not rclpy.ok():
-            rclpy.init(args=None)
-        node = node or Node('restock_camera_tf')
-        return {'node': node, 'TFMessage': TFMessage, 'TransformStamped': TransformStamped,
-                'pub': node.create_publisher(TFMessage, self.topic, 10)}
-
-    def publish(self, translation, quaternion_xyzw, stamp_seconds, *, parent, child):
-        t = self._ros['TransformStamped']()
-        t.header.stamp = ros_time(stamp_seconds)
-        t.header.frame_id = parent
-        t.child_frame_id = child
-        tx, ty, tz = (float(v) for v in translation)
-        t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = tx, ty, tz
-        qx, qy, qz, qw = (float(v) for v in quaternion_xyzw)
-        t.transform.rotation.x, t.transform.rotation.y = qx, qy
-        t.transform.rotation.z, t.transform.rotation.w = qz, qw
-        msg = self._ros['TFMessage']()
-        msg.transforms = [t]
-        self._ros['pub'].publish(msg)
-        return msg
-
-
-class ArmCameraDepthBridge:
-    """Drive the arm eye-in-hand masked-depth / info / TF / target-bbox stream for nvblox.
-
-    Called on every sensing-stage tick with the mission (sim) time. Reads the arm camera
-    frame once, derives one acquisition stamp from it, and publishes (all on that stamp):
-      - masked depth + camera_info (rig self-pixels invalidated),
-      - the live camera-optical->ur_base_link TF (from `base_from_optical()`),
-      - the grasp-target bbox (republished EVERY frame so the host object_segmenter never
-        drops it on its 0.5 s freshness timeout; the latest sensed roi at the target location
-        is cached and re-emitted even on ticks where perception produced none).
-
-    `base_from_optical()` returns (translation xyz, quaternion xyzw) of the camera optical
-    frame in ur_base_link, recomputed live from the stage (the camera moves with the arm).
-    `sensors` exposes `sensed_target_bboxes` (dicts with 'roi' and 'location'); set
-    `target_location` to the operation's grasp target (source bin for collect).
-    """
-
-    def __init__(self, *, depth_publisher, bbox_publisher, tf_publisher, sensors,
-                 base_from_optical, frame_id='restock_camera_arm', parent_frame='ur_base_link',
-                 target_location=None):
-        self.depth = depth_publisher
-        self.bbox = bbox_publisher
-        self.tf = tf_publisher
-        self.sensors = sensors
-        self.base_from_optical = base_from_optical
-        self.frame_id = frame_id
-        self.parent_frame = parent_frame
-        self.target_location = target_location
-        self._latest_bbox = None
-
-    def _select_bbox(self):
-        boxes = getattr(self.sensors, 'sensed_target_bboxes', ()) or ()
-        matched = [b for b in boxes
-                   if self.target_location is None or b.get('location') == self.target_location]
-        pick = matched or list(boxes)
-        if pick:
-            self._latest_bbox = tuple(pick[0]['roi'])
-        return self._latest_bbox
+    def _attr(self, node, attr):
+        return self.og.Controller.attribute(self.root + '/' + node + '.inputs:' + attr)
 
     def publish(self, now):
-        frame = self.depth.camera.get_current_frame()
-        stamp_s = float(frame.get('rendering_time', now)) if isinstance(frame, dict) else float(now)
-        self.depth.publish_frame(frame, stamp_s)
-        translation, quaternion_xyzw = self.base_from_optical()
-        self.tf.publish(translation, quaternion_xyzw, stamp_s,
-                        parent=self.parent_frame, child=self.frame_id)
-        bbox = self._select_bbox()
-        if bbox is not None:
-            self.bbox.publish(bbox)
-        return stamp_s
+        frame = self.camera.get_current_frame()
+        stamp = float(frame.get('rendering_time', now)) if isinstance(frame, dict) else float(now)
+        masked, self._id_cache = masked_depth_from_frame(
+            frame, self.rig_prefixes, self._id_cache, invalid=self.invalid)
+        height, width = masked.shape
+        data = np.ascontiguousarray(masked, dtype=np.float32).view(np.uint8).reshape(-1)
+        self._attr('depth', 'data').set(data)
+        self._attr('depth', 'width').set(int(width))
+        self._attr('depth', 'height').set(int(height))
+        self._attr('depth', 'timeStamp').set(float(stamp))
+        self._bbox = select_target_bbox(
+            getattr(self.sensors, 'sensed_target_bboxes', ()), self.target_location, self._bbox)
+        if self._bbox is not None:
+            self._attr('bbox', 'data').set([float(v) for v in bbox_payload(self._bbox)])
+        self.og.Controller.attribute(self.root + '/tick.state:enableImpulse').set(True)
+        self.og.Controller.evaluate_sync(self.root)
+        return stamp

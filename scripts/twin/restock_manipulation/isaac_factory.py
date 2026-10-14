@@ -247,9 +247,8 @@ def _build_runtime(*, app, assembly, params, output):
     sensing_bridge = None
     if params.masked_depth.get('enabled'):
         sensing_bridge = _build_masked_depth_bridge(
-            stage=stage, camera=camera, camera_path=camera_path, base_path=paths['ur_base_link'],
-            gripper_path=gripper_path, assembly=assembly, sensors=sensors,
-            settings=params.masked_depth)
+            stage=stage, camera=camera, camera_path=camera_path, gripper_path=gripper_path,
+            assembly=assembly, sensors=sensors, settings=params.masked_depth)
 
     # Native ROS bridge to the host MoveGroup/cuMotion + TransferController + trajectory_host.
     graph = IsaacRosGraph(contact=contact, hold=assembly.command_gate.hold)
@@ -265,48 +264,27 @@ def _rig_root(path):
     return '/' + parts[0] if parts and parts[0] else str(path)
 
 
-def _build_masked_depth_bridge(*, stage, camera, camera_path, base_path, gripper_path,
+def _build_masked_depth_bridge(*, stage, camera, camera_path, gripper_path,
                                assembly, sensors, settings):
-    """Wire the arm eye-in-hand masked-depth/info/TF/bbox publishers for the host nvblox.
+    """Wire the arm eye-in-hand masked-depth/info/bbox OmniGraph publishers for host nvblox.
 
     Rig prefixes (robot + cart + gripper subtrees whose self-pixels are invalidated) come from
-    the runtime-config when given, else are derived from the composed assembly roots. The TF is
-    recomputed live from the stage every frame (the camera moves with the arm).
+    the runtime-config when given, else are derived from the composed assembly roots. TF for the
+    optical frame is published by the existing native_transport /tf tree (an optical child prim
+    is added to it inside the bridge); publishing uses OmniGraph nodes, never rclpy.
     """
-    import numpy as np
-    from pxr import UsdGeom
-    from twin.restock.masked_depth import (
-        MaskedDepthPublisher, TargetBboxPublisher, TfPublisher, ArmCameraDepthBridge,
-        base_from_optical_transform)
+    from twin.restock.masked_depth import ArmDepthOmniGraphBridge
 
     prefixes = settings.get('rig_prefixes')
     if not prefixes:
         cart_root = assembly.evidence['composition']['assets']['cart']['root']
         prefixes = tuple(dict.fromkeys(
             [_rig_root(assembly.paths['articulation']), _rig_root(cart_root), gripper_path]))
-    frame_id = settings.get('frame_id', 'restock_camera_arm')
-    domain = int(settings.get('domain', 88))
-
-    import rclpy
-    from rclpy.node import Node  # one shared node for all arm-bridge publishers
-    if not rclpy.ok():
-        rclpy.init(args=None)
-    node = Node('restock_arm_depth')
-    depth_pub = MaskedDepthPublisher(camera, prefixes, frame_id=frame_id, domain=domain, node=node)
-    bbox_pub = TargetBboxPublisher(domain=domain, node=node)
-    tf_pub = TfPublisher(domain=domain, node=node)
-
-    cam_prim, base_prim = stage.GetPrimAtPath(camera_path), stage.GetPrimAtPath(base_path)
-
-    def base_from_optical():
-        cache = UsdGeom.XformCache()  # fresh cache -> current (moving) transforms this frame
-        cam_world = np.array(cache.GetLocalToWorldTransform(cam_prim)).T   # USD row-major -> column
-        base_world = np.array(cache.GetLocalToWorldTransform(base_prim)).T
-        return base_from_optical_transform(cam_world, base_world)
-
-    return ArmCameraDepthBridge(depth_publisher=depth_pub, bbox_publisher=bbox_pub,
-                                tf_publisher=tf_pub, sensors=sensors,
-                                base_from_optical=base_from_optical, frame_id=frame_id)
+    return ArmDepthOmniGraphBridge(
+        camera=camera, camera_path=camera_path, stage=stage, transport=assembly.transport,
+        sensors=sensors, rig_prefixes=prefixes,
+        frame_id=settings.get('frame_id', 'restock_camera_arm'),
+        domain=int(settings.get('domain', 88)))
 
 
 def create(*, app, assembly, plan, config, output, _builder=None):
