@@ -3,17 +3,20 @@ from the landed (retired-lane) restock_manipulation modules, unchanged.
 
 The integration bundle (`twin.restock.isaac_bundle`) resolves this as the runtime-config
 `manip_factory` ref and calls `create(app=, assembly=, plan=, config=, output=)`. It
-returns a fully-configured `ManipulationBridge` (owns_sensor_io=True — the CAD runtime owns
-its camera/ESDF and control I/O) wrapping `CadRestockRuntime` (CAD side-grip planning +
-`TransferController` + `IsaacCartonSensors`). No sensor data is fabricated and no behaviour
-of the landed modules is modified; this module only assembles them and prepares the arm
-station per mission action.
+returns a fully-configured `ManipulationBridge` (owns_sensor_io=True) wrapping the LANDED
+HOST cuMotion path: a `twin.restock.ros_manipulation.RosManipulationRuntime` that bridges the
+real arm-camera packets over domain-88 ROS (native Isaac `IsaacRosGraph`) to the host
+MoveGroup/cuMotion planner, `TransferController` (CAD side-grip + support-contact gates) and
+`trajectory_host`. No in-process cuRobo planner is constructed inside Isaac; no sensor data is
+fabricated and the landed host-side modules are unchanged. This module only assembles the
+Isaac-side camera/graph and prepares the arm station per mission action.
 
 `parse_manipulation_config()` is the pure, CPU-tested contract: it validates the grasp
 profiles (including the scenario SKU and a single calibrated grasp mode), the per-station
 sensing slots + `base_from_camera` calibration, and the shelfbot package root from
-`config['manipulation']`. The Isaac construction (arm camera + `CadRestockRuntime`) is
-isolated behind the `_build_runtime` seam so the wiring is proven offline without a boot.
+`config['manipulation']`. The Isaac construction (arm camera + ROS graph +
+`RosManipulationRuntime`) is isolated behind the `_build_runtime` seam so the wiring is proven
+offline without a boot.
 """
 from __future__ import annotations
 
@@ -123,46 +126,12 @@ def parse_manipulation_config(config, job_sku):
                        grasp_mode=next(iter(modes)))
 
 
-def _build_runtime(*, app, assembly, params, output):
-    """Real Isaac construction of CadRestockRuntime (arm camera + CAD runtime).
-
-    Only runs inside the live app; the CPU contract tests inject `_builder`.
-    """
-    import numpy as np
-    from pxr import Gf, UsdGeom
-    from isaacsim.sensors.camera import Camera
-    from .isaac_runtime import CadRestockRuntime
-
-    paths = assembly.paths
-    # front_camera_frame is a URDF body frame (+X forward, +Z up), not a Camera prim.
-    # Author a child USD Camera (which looks -Z with +Y up) oriented to look forward
-    # along the frame's +X with +Z up; Camera() then adopts this existing prim.
-    stage = assembly.stage
-    camera_path = paths['front_camera_frame'] + '/arm_camera'
-    if not stage.GetPrimAtPath(camera_path):
-        cam = UsdGeom.Camera.Define(stage, camera_path)
-        cam.AddTransformOp().Set(Gf.Matrix4d(0, -1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 1))
-    camera = Camera(prim_path=camera_path)
-    camera.initialize()
-    source = params.stations['source']
-    return CadRestockRuntime(
-        stage=assembly.stage, articulation=assembly.robot, camera=camera,
-        gripper_path='/RestockPanelGripper', urdf_path=str(output / 'mobile-import.urdf'),
-        shelfbot_root=params.shelfbot_root, pose_bridge_root=paths['ur_base_link'],
-        profiles=params.profiles, slots=source['slots'],
-        base_from_camera=np.asarray(source['base_from_camera'], float),
-        voxel_dims=params.voxel_dims, voxel_size=params.voxel_size, walls=params.walls)
-
-
-class _DegradedMotion:
-    """Reports the REAL base stationarity from the articulation; every manipulation
-    operation is unavailable. Used only when the in-process cuRobo planner is absent.
-    """
+class _ArticulationParked:
+    """Base stationarity read from the real articulation. The host owns arm motion on
+    the cuMotion path, so the Isaac side only certifies the base is parked (the view the
+    station sensing reads); it never commands or teleports a joint."""
     def __init__(self, articulation):
         self._robot = articulation
-        self.collision_time = -1.
-        self.last_grid = None
-        self.source = None
 
     def parked(self):
         import numpy as np
@@ -171,43 +140,87 @@ class _DegradedMotion:
         return bool(np.isfinite(linear).all() and np.isfinite(angular).all()
                     and np.linalg.norm(linear) < .005 and np.linalg.norm(angular) < .005)
 
-    def tick(self, dt):
-        pass
 
-    def stop(self):
-        pass
+class HostManipulationRuntime:
+    """Isaac-side manipulation on the landed host cuMotion path.
 
-
-class _UnavailableManipulation:
-    """Honest stand-in when the in-process cuRobo planner is not provisioned.
-
-    Construction succeeds so the mission still exercises and records every stage,
-    but the manipulation stages (collect, transfer) report status ``'unavailable'``
-    with the measured reason. It never fabricates a successful grasp or placement.
-    This is the interim path until manip_factory is switched to the host cuMotion
-    MoveGroup port; see data/mobile-restock-v2/report.md.
+    Wraps a `twin.restock.ros_manipulation.RosManipulationRuntime`, which bridges the
+    real arm-camera packets to the host MoveGroup/cuMotion planner, TransferController
+    (CAD side-grip + support-contact gates) and trajectory_host over domain-88 ROS; the
+    Isaac process runs no in-process planner (no cuRobo). It also exposes the `.motion`
+    (base parked) and `.controller.profiles` views the integration sensing lane reads.
     """
-    def __init__(self, reason, articulation):
-        from types import SimpleNamespace
-        self._reason = reason
-        self.motion = _DegradedMotion(articulation)
-        self.contact = None
-        # ManipulationBridge(owns_sensor_io=True) reads controller.controller.cart_location;
-        # sensing reads controller.controller.profiles (absent -> no product profiles).
-        self.controller = SimpleNamespace(cart_location='rollwagen', profiles={})
+    cart_location = 'rollwagen'
 
-    def start(self, operation, job):
-        pass
+    def __init__(self, *, runtime, sensors, articulation, profiles):
+        from types import SimpleNamespace
+        self._runtime = runtime
+        self._sensors = sensors
+        self.motion = _ArticulationParked(articulation)
+        self.controller = SimpleNamespace(cart_location='rollwagen', profiles=profiles)
 
     def configure_station(self, *, slots, base_from_camera):
-        pass
+        # Re-point the arm camera's station sensing before the host plans the next grasp.
+        import numpy as np
+        self._sensors.slots = tuple(slots)
+        self._sensors.transform = np.asarray(base_from_camera, float)
+        self._sensors.last_frame = None
+
+    def start(self, operation, job):
+        return self._runtime.start(operation, job)
 
     def step(self, dt, simulation_time):
-        from .types import Result
-        return Result('unavailable', 'unavailable', self._reason)
+        return self._runtime.step(dt, simulation_time)
 
     def stop(self):
-        pass
+        return self._runtime.stop()
+
+
+def _build_runtime(*, app, assembly, params, output):
+    """Real Isaac construction of the host cuMotion manipulation path.
+
+    Builds the arm camera + station sensing capture, the native Isaac ROS graph that
+    bridges to the host planner/controller, and a RosManipulationRuntime over them. No
+    in-process cuRobo planner is constructed. Only runs inside the live app; the CPU
+    contract tests inject `_builder`.
+    """
+    import numpy as np
+    from pxr import Gf, UsdGeom
+    from isaacsim.sensors.camera import Camera
+    from twin.restock.ros_manipulation import RosManipulationRuntime
+    from .cad_tool import NativePanelContact
+    from .isaac_ros_graph import IsaacRosGraph
+    from .isaac_sensors import IsaacCartonSensors
+
+    paths = assembly.paths
+    stage = assembly.stage
+    # front_camera_frame is a URDF body frame (+X forward, +Z up), not a Camera prim.
+    # Author a child USD Camera (which looks -Z with +Y up) oriented to look forward
+    # along the frame's +X with +Z up; Camera() then adopts this existing prim.
+    camera_path = paths['front_camera_frame'] + '/arm_camera'
+    if not stage.GetPrimAtPath(camera_path):
+        cam = UsdGeom.Camera.Define(stage, camera_path)
+        cam.AddTransformOp().Set(Gf.Matrix4d(0, -1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 1))
+    camera = Camera(prim_path=camera_path)
+    camera.initialize()
+
+    gripper_path = '/RestockPanelGripper'
+    contact = NativePanelContact(stage, gripper_path)
+    source = params.stations['source']
+    sensors = IsaacCartonSensors(camera, pose_bridge_root=paths['ur_base_link'],
+                                 profiles=params.profiles, slots=source['slots'],
+                                 base_from_camera=np.asarray(source['base_from_camera'], float))
+    parked = _ArticulationParked(assembly.robot)
+
+    def capture(simulation_time, station_source, destination):
+        # Real arm-camera packet for the host planner; base parked, gripper contact measured.
+        return sensors.capture(simulation_time, station_source, destination, parked, contact)
+
+    # Native ROS bridge to the host MoveGroup/cuMotion + TransferController + trajectory_host.
+    graph = IsaacRosGraph(contact=contact, hold=assembly.command_gate.hold)
+    runtime = RosManipulationRuntime(graph, capture, prepare_station=lambda operation, job: None)
+    return HostManipulationRuntime(runtime=runtime, sensors=sensors,
+                                   articulation=assembly.robot, profiles=params.profiles)
 
 
 def create(*, app, assembly, plan, config, output, _builder=None):
@@ -216,18 +229,7 @@ def create(*, app, assembly, plan, config, output, _builder=None):
 
     params = parse_manipulation_config(config, plan.job_sku)
     build = _builder or _build_runtime
-    try:
-        runtime = build(app=app, assembly=assembly, params=params, output=output)
-    except ModuleNotFoundError as exc:
-        # The in-process cuRobo planner (shelfbot_newgripper) is not installed in the
-        # Isaac interpreter. Degrade honestly instead of crashing the whole factory, so
-        # the mission records the full navigate/couple/tow/park/verify/return loop with
-        # the manipulation stages reported FAILED-unavailable (never a mock success).
-        if exc.name != 'curobo':
-            raise
-        runtime = _UnavailableManipulation(
-            f'manipulation construction unavailable: in-process cuRobo not provisioned ({exc})',
-            assembly.robot)
+    runtime = build(app=app, assembly=assembly, params=params, output=output)
 
     def prepare_station(operation, job):
         station = ACTION_STATION.get(operation)
