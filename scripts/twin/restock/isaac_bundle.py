@@ -265,6 +265,11 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     source_target_provider = sensing.get('source_target_provider')
     if source_target_provider is not None and hasattr(manipulation.controller, 'set_source_target_provider'):
         manipulation.controller.set_source_target_provider(source_target_provider)
+    # Transfer destination: the camera lane's fixed-shelf slot provider (PR62), consumed by the
+    # transfer stage (cart source -> shelf slot). Collect is unaffected if absent.
+    shelf_target_provider = sensing.get('shelf_target_provider')
+    if shelf_target_provider is not None and hasattr(manipulation.controller, 'set_shelf_target_provider'):
+        manipulation.controller.set_shelf_target_provider(shelf_target_provider)
 
     paths = assembly.paths
     robot_root = paths['articulation'].rsplit('/', 1)[0] if '/' in paths['articulation'] else paths['articulation']

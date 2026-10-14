@@ -249,6 +249,13 @@ class HostManipulationRuntime:
         if bridge is not None:
             bridge.provider = provider
 
+    def set_shelf_target_provider(self, provider):
+        # Hand the fixed-shelf transfer-destination provider (camera lane PR62) to the bridge for
+        # the transfer stage (cart source -> shelf slot). Collect is unaffected.
+        bridge = getattr(self, '_collect_bridge', None)
+        if bridge is not None and hasattr(bridge, 'set_shelf_target_provider'):
+            bridge.set_shelf_target_provider(provider)
+
     def configure_station(self, *, slots, base_from_camera):
         # Re-point the arm camera's station sensing before the host plans the next grasp.
         import numpy as np
@@ -297,7 +304,15 @@ class CollectTargetBridge:
         self.cart_placement = dict(cart_placement or {})
         self.cart_root = cart_root
         self.provider = None
+        # Transfer stage (cart is the SOURCE, shelf the DESTINATION): the shelf slot target comes
+        # from the camera lane's fixed-shelf provider (PR62, set after build_sensing); the carton on
+        # the cart is derived from the same cart asset pose as the collect placement (controlled
+        # asset). Collect leaves this None and is unaffected.
+        self.shelf_provider = None
         self.sensed_target_bboxes = ()
+
+    def set_shelf_target_provider(self, provider):
+        self.shelf_provider = provider
 
     def _arm_base_from_camera(self):
         import numpy as np
@@ -352,10 +367,27 @@ class CollectTargetBridge:
         Returns None when no cart placement is configured (backward-compatible / non-collect paths).
         """
         cp = self.cart_placement
-        if not cp or not self.cart_root:          # no cart placement -> no destination target (CPU-safe: no pxr)
+        pose = self._cart_pose_station()
+        if pose is None:                          # no cart placement -> no destination target
+            return None
+        import math
+        from twin.restock_manipulation.types import Target
+        (x, y, z), _ = pose
+        q = tuple(float(v) for v in src.pose_station[3:])             # carry-through carton yaw/quat
+        return Target(observation_id=f'cart:{cp["location"]}:{now:.3f}', source='sensor',
+                      simulation_time=float(now), location=cp['location'],
+                      pose=(x, y, z, *q), clear=True,
+                      free_dimensions=tuple(cp['free_dimensions']), frame='ur_base_link')
+
+    def _cart_pose_station(self):
+        """The cart load-centre as ((x,y,z) in ur_base_link, yaw-relative-to-ur_base), from the cart
+        asset's live measured pose + scenario load-centre/support (controlled asset, not sensed
+        stock). Shared by the collect placement Target and the transfer cart-source Observation.
+        Returns None when no cart placement is configured (CPU-safe: no pxr on that path)."""
+        cp = self.cart_placement
+        if not cp or not self.cart_root:
             return None
         import numpy as np, math
-        from twin.restock_manipulation.types import Target
         from pxr import UsdGeom
         if not self.stage.GetPrimAtPath(self.cart_root):
             return None
@@ -368,16 +400,64 @@ class CollectTargetBridge:
                           float(Tc[1, 3]) + math.sin(cyaw) * lx + math.cos(cyaw) * ly,
                           float(cp['support_z_world']), 1.0])
         p = np.linalg.inv(Tub) @ world                                # load centre in ur_base_link
-        q = tuple(float(v) for v in src.pose_station[3:])             # carry-through carton yaw/quat
-        return Target(observation_id=f'cart:{cp["location"]}:{now:.3f}', source='sensor',
-                      simulation_time=float(now), location=cp['location'],
-                      pose=(float(p[0]), float(p[1]), float(p[2]), *q), clear=True,
-                      free_dimensions=tuple(cp['free_dimensions']), frame='ur_base_link')
+        ub_yaw = math.atan2(float(Tub[1, 0]), float(Tub[0, 0]))
+        return (float(p[0]), float(p[1]), float(p[2])), float(cyaw - ub_yaw)
+
+    def _capture_transfer(self, now):
+        """Transfer sensing: the carton on the cart (derived cart pose, controlled asset) as the
+        SOURCE observation + the camera-lane fixed-shelf slot as the DESTINATION target. Mirrors
+        collect; never fabricates -- returns None until the base is parked and the shelf provider
+        senses a fresh slot. NOTE: assumes the shelf provider's pose_station is ur_base_link (as the
+        collect source provider's is); validate when the pipeline first reaches transfer."""
+        from twin.restock_manipulation.types import Sensors, Observation, Target
+        import math
+        if self.shelf_provider is None:
+            if self._calls % 30 == 1:
+                print('TRANSFER_CAPTURE shelf_provider=None', flush=True)
+            return None
+        parked = bool(self.motion.parked())
+        cart = self._cart_pose_station()
+        if not parked or cart is None:
+            if self._calls % 10 == 1:
+                print(f'TRANSFER_CAPTURE parked={parked} cart={cart is not None}', flush=True)
+            return None
+        try:
+            slot = self.shelf_provider(now)      # ShelfSlotTarget | None (provider enforces its gates)
+        except Exception as exc:
+            if self._calls % 10 == 1:
+                print(f'TRANSFER_CAPTURE shelf_error={type(exc).__name__}:{exc}', flush=True)
+            return None
+        if slot is None or not (-0.02 <= now - slot.stamp <= .5):
+            if self._calls % 10 == 1:
+                print(f'TRANSFER_CAPTURE slot={slot is not None} fresh?', flush=True)
+            return None
+        (cx, cy, cz), yaw = cart
+        sku = next(iter(self.profiles)) if self.profiles else ''
+        cq = (0., 0., math.sin(yaw / 2.), math.cos(yaw / 2.))
+        obs = Observation(observation_id=f'cart:{now:.3f}', source='sensor', simulation_time=float(now),
+                          sku=sku, location=self.cart_placement['location'], pose=(cx, cy, cz, *cq),
+                          confidence=1.0, frame='ur_base_link')
+        tgt = Target(observation_id=f'shelf:{slot.stamp}', source='sensor', simulation_time=float(now),
+                     location=slot.location, pose=tuple(slot.pose_station), clear=bool(slot.clear),
+                     free_dimensions=tuple(slot.free_dimensions), frame='ur_base_link')
+        try:
+            joints = tuple(float(j) for j in self.joints())
+        except Exception:
+            joints = (0.,) * 6
+        print(f'TRANSFER_CAPTURE calls={self._calls} sku={sku} cart=({cx:.2f},{cy:.2f},{cz:.2f}) '
+              f'shelf={slot.location} clear={slot.clear}', flush=True)
+        return Sensors(now, (obs,), tgt, parked, bool(self.contact.read()), now,
+                       float(self.motion.collision_time), joints, (), float(now))
 
     def capture(self, now, source, destination):
         from twin.restock_manipulation.types import Sensors, Observation
         self.sensed_target_bboxes = ()
         self._calls = getattr(self, '_calls', 0) + 1
+        # TRANSFER (cart is the SOURCE, shelf the DESTINATION): the mirror of collect. Routed here
+        # when the mission source is the cart; collect (source = bin) falls through unchanged.
+        cart_loc = self.cart_placement.get('location')
+        if cart_loc and source == cart_loc:
+            return self._capture_transfer(now)
         if self.provider is None:
             if self._calls % 30 == 1:
                 print(f'COLLECT_CAPTURE calls={self._calls} provider=None', flush=True)
