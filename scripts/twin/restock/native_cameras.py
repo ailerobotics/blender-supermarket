@@ -71,7 +71,7 @@ class RenderedCamera:
         return getattr(self.camera,name)
 
 
-def initialize_camera(path,k,*,name,frequency=-1,session_id=None,steady_domain=None):
+def initialize_camera(path,k,*,name,frequency=-1,session_id=None,steady_domain=None,resolution=None):
     """Initialize one authored optical view; clock metadata is captured in callback.
 
     The Isaac5.1 acquisition callback supplies one render-product RGB/depth frame.
@@ -90,7 +90,8 @@ def initialize_camera(path,k,*,name,frequency=-1,session_id=None,steady_domain=N
             if isinstance(native,dict) and (previous is None or native!=previous['native_id']):
                 self._restock_acquisition=dict(native_id=dict(native),acquired_steady=began,
                     session_id=session_id,steady_domain=steady_domain)
-    camera=AcquisitionCamera(prim_path=path,name=name,frequency=frequency,resolution=(k.width,k.height))
+    camera=AcquisitionCamera(prim_path=path,name=name,frequency=frequency,
+                             resolution=resolution or (k.width,k.height))
     camera.set_clipping_range(k.near,k.far)
     camera.set_focal_length(.02)
     camera.set_horizontal_aperture(k.width*.02/k.fx)
@@ -105,9 +106,12 @@ def initialize_camera(path,k,*,name,frequency=-1,session_id=None,steady_domain=N
 
 
 class CameraRig:
-    def __init__(self, *, stage, specs, parent_paths, frequency=-1):
+    def __init__(self, *, stage, specs, parent_paths, frequency=-1, render_scale=1.0):
         from pxr import Gf,UsdGeom,UsdPhysics
+        if not 0 < render_scale <= 1.0:
+            raise ValueError('render_scale must be in (0, 1]')
         self.stage,self.cameras,self.optical_paths=stage,{},{}
+        self.render_scale=render_scale
         self.specs={}
         for spec in specs:
             name,k,matrix,solids=camera_spec(spec)
@@ -139,7 +143,17 @@ class CameraRig:
             # decimator can skip a step due to floating-point accumulation.
             # The mission recorder selects every second 60Hz physics render;
             # native ROS helpers independently use frameSkipCount=1.
-            self.cameras[name]=initialize_camera(camera_path,k,name='restock_'+name,frequency=frequency)
+            # Scale the render-product resolution (not the intrinsics) to bound VRAM when
+            # the whole-scene multi-camera render would otherwise exhaust the card. Keep
+            # even dimensions: the recorder refuses odd HxW. Decode-grade stages must use
+            # render_scale=1.0.
+            if self.render_scale == 1.0:
+                resolution=None
+            else:
+                resolution=(max(2,int(k.width*self.render_scale)//2*2),
+                            max(2,int(k.height*self.render_scale)//2*2))
+            self.cameras[name]=initialize_camera(camera_path,k,name='restock_'+name,
+                                                 frequency=frequency,resolution=resolution)
             self.optical_paths[name]=root
             self.specs[name]=spec
 

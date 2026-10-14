@@ -144,7 +144,8 @@ def run(args, manifest, scenario):
                                  config=config, output=args.output)
                 if getattr(bundle.adapter, 'fixture_mode', True):
                     raise RuntimeError('production runtime refuses fixture adapters')
-                mission = Mission(db, Job(**scenario['job']), bundle.adapter)
+                mission = Mission(db, Job(**scenario['job']), bundle.adapter,
+                                  stages=config.get('stages'))
                 mission.start()
                 for _ in range(60*20*60):  # bounded simulation time; shell also bounds wall time
                     if mission.terminal:

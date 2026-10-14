@@ -30,11 +30,16 @@ class Adapter(Protocol):
 
 class Mission:
     def __init__(self, inventory: Inventory, job: Job, adapter: Adapter,
-                 timeout_s=120., fixture_mode=False, max_evidence_age_s=1.):
+                 timeout_s=120., fixture_mode=False, max_evidence_age_s=1., stages=None):
         if not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError('timeout must be finite and positive')
         if not math.isfinite(max_evidence_age_s) or max_evidence_age_s < 0:
             raise ValueError('evidence age must be finite and nonnegative')
+        # A bounded stage subset must be an in-order prefix of ACTIONS so each stage's
+        # physical prerequisites (coupled, parked, ...) still hold. Default: the full cycle.
+        self.stages = tuple(stages) if stages else ACTIONS
+        if self.stages != ACTIONS[:len(self.stages)]:
+            raise ValueError(f'stages must be an in-order prefix of {ACTIONS}')
         self.inventory, self.job, self.adapter = inventory, job, adapter
         self.timeout_s, self.fixture_mode = timeout_s, fixture_mode
         self.max_evidence_age_s = max_evidence_age_s
@@ -59,7 +64,7 @@ class Mission:
             raise ValueError('mission already started')
         self.inventory.reserve(self.job)
         try:
-            self._begin(ACTIONS[0])
+            self._begin(self.stages[0])
         except Exception as exc:
             self.fail(f'adapter start: {exc}')
 
@@ -133,8 +138,8 @@ class Mission:
         return self.state
 
     def _advance(self):
-        index = ACTIONS.index(self.state) + 1
-        if index == len(ACTIONS):
+        index = self.stages.index(self.state) + 1
+        if index == len(self.stages):
             self.adapter.stop()
             if self.degraded:
                 self.state, self.reason = 'failed', 'stages unavailable: ' + ', '.join(self.degraded)

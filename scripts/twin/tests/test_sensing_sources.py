@@ -28,7 +28,7 @@ class FakeRig:
         # one RenderedCamera stand-in per design camera id
         self.cameras = {cid: NS(id=cid) for cid in design['cameras']}
 
-    def builder(self, *, assembly, design):
+    def builder(self, *, assembly, design, render_scale=1.0):
         return {'cameras': self.cameras,
                 'base_from_camera': lambda cid: [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
                 'recording_camera': self.cameras.get('shelf') or next(iter(self.cameras.values()))}

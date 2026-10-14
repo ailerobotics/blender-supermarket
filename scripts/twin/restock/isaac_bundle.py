@@ -223,7 +223,8 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     mobile_manifest = _json.loads(Path(config['mobile_manifest']).read_text())
     assembly.sensing_sources = build_sensing_sources(
         assembly=assembly, scenario=scenario, manifest=mobile_manifest,
-        manip_runtime=manipulation.controller, pose_bridge_root=config['pose_bridge_root'])
+        manip_runtime=manipulation.controller, pose_bridge_root=config['pose_bridge_root'],
+        render_scale=float(config.get('render_scale', 1.0)))
     sensing = sensing_factory(app=app, assembly=assembly, plan=plan, config=config, output=output)
     capture = sensing['capture']
     recording_camera = sensing['recording_camera']

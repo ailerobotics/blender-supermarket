@@ -36,7 +36,7 @@ def _all_true_mask(design, camera_id):
 
 
 def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_bridge_root,
-                          clearance_for_slot=None, _rig_builder=None):
+                          render_scale=1.0, clearance_for_slot=None, _rig_builder=None):
     """Assemble the sensing_sources mapping. Pure wiring; the rig is built behind the seam.
 
     pose_bridge_root is the FILESYSTEM root of the tray-perception pose bridge
@@ -47,7 +47,7 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
     shelf_id = scenario['job']['shelf_id']
     support_locations = dict(_STATIC_SUPPORT_LOCATIONS, shelf=shelf_id)
 
-    rig = (_rig_builder or _real_rig)(assembly=assembly, design=design)
+    rig = (_rig_builder or _real_rig)(assembly=assembly, design=design, render_scale=render_scale)
     cameras = rig['cameras']
     base_from_camera = rig['base_from_camera']       # callable(camera_id) -> 4x4
     recording_camera = rig['recording_camera']
@@ -96,7 +96,7 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
     }
 
 
-def _real_rig(*, assembly, design):
+def _real_rig(*, assembly, design, render_scale=1.0):
     """Build the Isaac CameraRig on the composed stage and expose the sensing cameras."""
     from pxr import UsdGeom
     from .native_cameras import CameraRig
@@ -123,7 +123,8 @@ def _real_rig(*, assembly, design):
         if not collision_solids:
             raise ValueError(f'camera {name!r} has no housing/bracket collision solid in the design')
         specs.append(dict(camera, collision_solids=collision_solids))
-    rig = CameraRig(stage=assembly.stage, specs=specs, parent_paths=parent_paths, frequency=-1)
+    rig = CameraRig(stage=assembly.stage, specs=specs, parent_paths=parent_paths, frequency=-1,
+                    render_scale=render_scale)
     base_root = assembly.paths['ur_base_link']
     # The shelf camera frames the destination support; reuse it for the mission video.
     recording_id = 'shelf' if 'shelf' in rig.cameras else next(iter(rig.cameras))
