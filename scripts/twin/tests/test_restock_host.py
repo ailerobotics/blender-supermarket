@@ -332,15 +332,25 @@ class IncorporationAckTest(unittest.TestCase):
         self.assertEqual(snap['state'], 'failed')
         self.assertEqual(snap['reason'], 'parked heartbeat lost: sim gap 0.73 s')
 
+    def test_wall_guard_tolerates_render_paced_capture_tick(self):
+        st, clock = self.prepared()
+        st.acknowledge(10.2, 1)
+        # A render-paced client blocks its heartbeat for a ~2 s capture tick; the 3 s wall
+        # guard must NOT fault it while the sim gap stays within 0.5 s (render-paced /clock).
+        clock[0] = 102.0
+        snap = st.snapshot(10.2, endpoints_ready=True, process_alive=True)
+        self.assertNotEqual(snap['state'], 'failed')
+        self.assertEqual(snap['reason'], '')
+
     def test_fault_names_wall_heartbeat_gap_with_value(self):
         st, clock = self.prepared()
         st.acknowledge(10.2, 1)
-        # Wall clock advances 1.4 s with no fresh command while sim gap stays within 0.5 s,
-        # so the wall-heartbeat condition is the one that trips, named with its value.
-        clock[0] = 101.4
+        # A genuinely hung client (no tick completes) exceeds the 3 s wall guard while the
+        # sim gap stays within 0.5 s, so the wall-heartbeat condition trips, named with value.
+        clock[0] = 103.4
         snap = st.snapshot(10.2, endpoints_ready=True, process_alive=True)
         self.assertEqual(snap['state'], 'failed')
-        self.assertEqual(snap['reason'], 'parked heartbeat lost: wall gap 1.40 s')
+        self.assertEqual(snap['reason'], 'parked heartbeat lost: wall gap 3.40 s')
 
     def test_invalid_commands_rejected(self):
         st, _ = self.state()

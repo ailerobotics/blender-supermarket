@@ -23,6 +23,17 @@ only), so this node's service poll is what actually integrates pending masked de
 The epoch/acknowledgement state machine below is a self-contained copy of the parked
 mapper lifecycle contract (the integration lane keeps the mirror-side copy); the two
 agree on the JSON wire fields, not on a shared import.
+
+Heartbeat liveness has two independent guards (``snapshot``): a 0.5 s **sim-time** gap
+(``now - last_heartbeat``) and a 3.0 s **wall-clock** gap since the last accepted command
+(``wall_clock() - wall_heartbeat``). The two measure different failures. The sim guard is
+the parked-mapper freshness contract and rides the render-paced ``/clock``, so it stays at
+0.5 s. The wall guard is a pure liveness check that does NOT stretch with ``/clock``: the
+mission client is render-paced and its single render tick during the first capture takes up
+to ~2 s of wall time, during which it cannot heartbeat (it is blocked inside the tick) --
+run-72 faulted on the old 1.0 s wall guard with ``wall gap 1.85 s``. The wall guard is 3.0 s
+so a normal render-paced client survives a ~2 s capture tick while a genuinely hung client
+(no tick completes) is still caught within 3 s.
 """
 import argparse
 import json
@@ -97,8 +108,10 @@ class IncorporationAckState:
 
     def snapshot(self, now, *, endpoints_ready, process_alive):
         # Name the tripped liveness condition with its measured value so a mission failure
-        # says which one fired; thresholds unchanged (sim gap > .5 s, wall gap > 1. s). The
-        # first-tripped reason is frozen (a fault is terminal until explicit recovery).
+        # says which one fired. The sim guard stays 0.5 s; the wall guard is 3.0 s (see the
+        # module docstring -- a render-paced client stalls its heartbeat up to ~2 s per
+        # capture tick, and 3 s still catches a genuinely hung client). The first-tripped
+        # reason is frozen (a fault is terminal until explicit recovery).
         if self.active and not self.fault:
             sim_gap = now - self.last_heartbeat
             wall_gap = self.wall_clock() - self.wall_heartbeat
@@ -106,7 +119,7 @@ class IncorporationAckState:
                 self.fault = 'station process lost'
             elif sim_gap > .5:
                 self.fault = f'parked heartbeat lost: sim gap {sim_gap:.2f} s'
-            elif wall_gap > 1.:
+            elif wall_gap > 3.:
                 self.fault = f'parked heartbeat lost: wall gap {wall_gap:.2f} s'
         ready = (self.active and not self.fault and endpoints_ready
                  and 0 <= now - self.collision_time <= .5 and self.collision_time > self.parked_since)
