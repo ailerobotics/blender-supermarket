@@ -108,6 +108,8 @@ class IsaacPort:
         self.masked_depth=masked_depth
         # Current mission action (set by begin_action); gates per-tick rendering + sensing.
         self.current_action=None
+        from collections import deque
+        self._pose_hist=deque()  # (now, robot (x,y,yaw), cart (x,y,yaw)) for displacement-based parked
         self.wall_origin=time.monotonic()
         self.tick=0
         self.names=tuple(robot.dof_names)
@@ -160,7 +162,21 @@ class IsaacPort:
             cz+frames['cart_hitch_local'][2],float(np.linalg.norm(rv)),float(np.linalg.norm(cv)),
             float(rw[2]),float(cw[2]),age=0.)
         coupled=self.mobile.coupling_state(docking)['healthy']
-        parked=bool(max(np.linalg.norm(v) for v in (rv,rw,cv,cw))<.005)
+        # Stationarity from measured net POSE displacement over a short window, NOT the TGS
+        # instantaneous velocity: PhysX TGS reports a documented ~14 mm/s velocity bias on a
+        # provably-frozen body (the cart on its casters reads ~12-14 mm/s at rest), which the
+        # 0.005 m/s instantaneous threshold could never clear -> the base never 'parked' and
+        # collect/couple never left the navigate parking gate. Displacement is bias-free.
+        hist=self._pose_hist
+        hist.append((now,(r.x,r.y,r.yaw),(c.x,c.y,c.yaw)))
+        while hist and now-hist[0][0]>0.25:
+            hist.popleft()
+        def _still(idx):
+            ps=[h[idx] for h in hist]
+            dxy=max((math.hypot(p[0]-q[0],p[1]-q[1]) for p in ps for q in ps),default=0.)
+            dyaw=max((abs(wrap(p[2]-q[2])) for p in ps for q in ps),default=0.)
+            return dxy<0.005 and dyaw<0.01
+        parked=bool(now-hist[0][0]>=0.2 and _still(1) and _still(2))
         if self.after_step is not None:
             self.after_step(now,parked)
         ready=self.transport.contains(positions) and not self.contact.read()
