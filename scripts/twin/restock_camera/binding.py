@@ -74,14 +74,19 @@ class RenderedSupportContext:
         self.qr_observation = qr
         return transform,evidence,parked,depth,registrations
 
-    def commission(self, frame, now, empty_polygons, *, lifetime_s=600.):
+    def commission(self, frame, now, empty_polygons, *, lifetime_s=600., commissioning_freshness_s=5.0):
         """Explicitly acquire baselines from observed empty supports.
 
         empty_polygons[location] = (support_quad_uv, witness_quad_uv), selected
         from that measured frame. Source starts occupied, so a real prior empty
         commissioning frame is required; never manufacture it from a setup dict.
+
+        ``commissioning_freshness_s`` is the acquisition-to-use window for THIS
+        commissioning capture only (default 5 s): a stall guard for a static, empty,
+        parked scene whose baseline is consumed hours later -- not the live sensing
+        safety contract, which stays at the 0.5 s default of ``frame_deadline``.
         """
-        deadline=frame_deadline(frame,now,self.steady_clock())
+        deadline=frame_deadline(frame,now,self.steady_clock(),budget_s=commissioning_freshness_s)
         transform,e,parked,depth,registrations = self._registrations(frame,now)
         pending = []
         for slot,registration in zip(self.slots,registrations):
