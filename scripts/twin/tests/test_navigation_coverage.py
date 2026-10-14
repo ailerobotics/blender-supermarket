@@ -160,5 +160,70 @@ class GateDriveTests(unittest.TestCase):
         self.assertEqual(c.gate_velocity(0.1, _odom(), obs, 0.25, 0.0).reason, 'obstacle_stop')
 
 
+class CoupledCrescentTests(unittest.TestCase):
+    """Coupled train: certify only the newly swept crescent, subtracting the body.
+
+    The circular train footprint (radius >= 1.1, dominated by the towed cart behind)
+    must NOT pull self-occluded near-side bearings (~+/-85-86 deg) into the required set.
+    The coupled gate subtracts the actual occupied envelope and requires observation only
+    for the forward crescent in the direction of travel; the lateral extent is covered by
+    the footprint, but a turn's outward lateral bulge still demands observation.
+    """
+
+    FRONT = (0.52, 0.0, 0.0)  # lidar at the chassis front edge (mission mount)
+
+    def _scan(self, free):
+        r, u = [], []
+        for i in range(BEAMS):
+            clear = free(_bearing(i))
+            r.append(RANGE_MAX if clear else math.nan)
+            u.append(not clear)
+        return Scan(0.1, tuple(r), -math.pi, INC, RANGE_MAX,
+                    sensor_to_base=self.FRONT, unknown=tuple(u))
+
+    def _gate(self, free, *, linear=0.25, angular=0.0):
+        c = ArticulatedController(GridMap((-12, -12, 12, 12)))
+        c.start((6., 0., 0.), True)
+        obs = observation(self._scan(free), _odom(), coupled=True, arm_transport=True,
+                          articulation=0.0)
+        return c.gate_velocity(0.1, _odom(), obs, linear, angular), obs
+
+    def test_near_side_self_occlusion_with_clear_forward_crescent_drives(self):
+        # Forward cone clear; everything near-side (incl. -85.4/-86.4) and rear is UNKNOWN.
+        result, obs = self._gate(lambda b: abs(b) <= math.radians(85))
+        self.assertGreater(sum(1 for _, rch in obs.coverage.beams if rch == 0), 150)
+        self.assertEqual(result.reason, 'tracking')
+        self.assertGreater(result.linear, 0.0)
+
+    def test_unobserved_lateral_obstacle_zone_in_crescent_refuses(self):
+        # A blind wedge off to the forward-left: inside the swept crescent, not observed.
+        result, _ = self._gate(lambda b: abs(b) <= math.radians(85)
+                               and not (math.radians(-40) <= b <= math.radians(-10)))
+        self.assertEqual(result.reason, 'insufficient_sensor_coverage')
+
+    def test_blind_dead_ahead_refuses(self):
+        result, _ = self._gate(lambda b: abs(b) <= math.radians(85)
+                               and abs(b) >= math.radians(6))
+        self.assertEqual(result.reason, 'insufficient_sensor_coverage')
+
+    def test_stationary_coupled_train_certifies_despite_full_self_occlusion(self):
+        c = ArticulatedController(GridMap((-12, -12, 12, 12)))
+        c.start((0., 0., 0.), True)  # already at goal -> commands 0,0
+        obs = observation(self._scan(lambda b: False), _odom(), coupled=True,
+                          arm_transport=True, articulation=0.0)
+        self.assertEqual(c.gate_velocity(0.1, _odom(), obs, 0.0, 0.0).reason, 'tracking')
+
+    def test_certifies_sweep_exempts_lateral_face_requires_leading_face(self):
+        # Direct geometry: a square body translating +x. Blind beam through the FRONT
+        # face (leading) refuses; through a SIDE face (lateral) certifies.
+        occupied = [(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)]
+        swept = [(-1., -1.), (1.3, -1.), (1.3, 1.), (-1., 1.)]  # translated +0.3 in x
+        travel = (1.0, 0.0)
+        front = CoverageField(RANGE_MAX, ((0.0, 0.0),), origin=(0.0, 0.0))   # blind ahead
+        side = CoverageField(RANGE_MAX, ((math.pi / 2, 0.0),), origin=(0.0, 0.0))  # blind left
+        self.assertFalse(front.certifies_sweep(occupied, swept, travel))
+        self.assertTrue(side.certifies_sweep(occupied, swept, travel))
+
+
 if __name__ == '__main__':
     unittest.main()

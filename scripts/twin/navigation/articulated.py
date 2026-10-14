@@ -10,7 +10,7 @@ import math
 import time
 
 from twin.mobile import MobileSpec, Pose2, occupied_envelope, swept_envelope, wrap
-from .core import Controller, Footprint, Result, coverage_certifies
+from .core import Controller, Footprint, Result
 
 
 @dataclass(frozen=True)
@@ -428,6 +428,28 @@ class ArticulatedController(Controller):
             uncertainty=max(.10,uncertainty)
         return planner.plan(state,self.goal,obs.obstacles,uncertainty,self.goal_articulation)
 
+    def _sweep_coverage_ok(self,odom,obs,state,stop,k,uncertainty):
+        """Coupled braking-sweep coverage for a self-occluding train.
+
+        Subtracts the current occupied envelope from the braking sweep and requires
+        non-self observation only for the newly swept forward crescent in the direction
+        of travel (`CoverageField.certifies_sweep`); the lateral extent of the capsule is
+        covered by the footprint and the rear is never swept. The envelopes carry the
+        0.05 m geometry margin and the localization inflation, and the swept hull carries
+        the full cart sweep at the commanded curvature, so a turn's outward lateral bulge
+        still demands observation. Fixture observations without a coverage field fall back
+        to the legacy scalar reach.
+        """
+        field=getattr(obs,'coverage',None)
+        if field is None:
+            return obs.coverage_radius>=self.footprint.radius(True)+uncertainty+stop
+        margin=self.world.margin+uncertainty
+        end=advance(state,stop,k,self.spec)
+        occupied=occupied_envelope(*state.bodies(self.spec),spec=self.spec,margin=margin)
+        swept=swept_envelope([state.bodies(self.spec),end.bodies(self.spec)],self.spec,margin=margin)
+        travel=(math.cos(odom.pose[2]),math.sin(odom.pose[2]))
+        return field.certifies_sweep(occupied,swept,travel,geometry_margin=self.world.margin)
+
     def gate_velocity(self,now,odom,obs,linear,angular):
         if self.require_temporal_map and (obs is None or obs.temporal_map is None):
             return Result(reason='missing_navigation_map')
@@ -456,14 +478,12 @@ class ArticulatedController(Controller):
         speed=max(v,abs(odom.linear))
         delay=self.stale_after+(temporal.reaction_delay(now) if temporal else 0.)
         stop=speed*delay+speed*speed/(2*self.brake_acceleration)
-        if temporal is None and not coverage_certifies(
-                obs, odom.pose[2],
-                self.footprint.radius(True)+max(.02,odom.position_uncertainty), stop):
-            return Result(reason='insufficient_sensor_coverage')
         uncertainty=max(.10 if temporal else .02,odom.position_uncertainty)
+        k=w/v if v>1e-6 else 0.0
+        if temporal is None and not self._sweep_coverage_ok(odom,obs,state,stop,k,uncertainty):
+            return Result(reason='insufficient_sensor_coverage')
         if not self.world.valid(state,obs.obstacles,uncertainty):
             return Result(reason='obstacle_stop')
-        k=w/v if v>1e-6 else 0.0
         predicted=self.world.rollout(state,stop,k,obs.obstacles,uncertainty)
         if not predicted:
             return Result(reason='obstacle_stop')
