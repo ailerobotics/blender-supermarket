@@ -159,8 +159,9 @@ def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
         assert decode_authored_marker(stage, base, world, k) == marker['id']
         assert UsdGeom.Mesh(stage.GetPrimAtPath(base + '/Modules')).GetDoubleSidedAttr().Get()
         # PR#44's "full white base in frame" guarantee is relaxed: the shelf camera is
-        # tilted (config camera() roll_world_x_deg) to clear both QR cores off the certified
-        # production tile seams, which pushes each outer white border toward a frame edge
+        # tilted (config camera() roll/yaw/dz levers; shipped pose is a pure -6.75 deg
+        # tilt) to clear both QR cores off the certified production tile seams, which
+        # pushes each outer white border toward a frame edge
         # where it may clip. The decodable CORE (the black-module region) plus a >=4-module
         # quiet zone must still sit inside the frame.
         modules = UsdGeom.Mesh(stage.GetPrimAtPath(base + '/Modules'))
@@ -200,3 +201,45 @@ def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
     evidence = FrameEvidence('shelf', 1, 1., 1., 'park', 'lens', 'mission')
     detections = FixedTileQR('shelf').decode(rgb, evidence, now=1., parked=True).detections
     assert {d.text for d in detections} == {'support:shelf:0', 'support:shelf:1'}
+
+
+def test_shelf_camera_sees_under_the_tier_to_the_carton_top_and_support():
+    """The shelf lens must stay below the shelf tier so it still senses the station.
+
+    The decode proof above guards the OTHER half of the shelf camera's job (reading the
+    two markers). This gate guards the primary half: the carton-top label plane and the
+    empty support must stay visible UNDER the next shelf tier. A steeper candidate (pose
+    A: -9 deg tilt, -1 deg yaw, +4 cm eye-raise) scored a marginally better marker-decode
+    noise margin but raised the lens to z=1.00 m, ABOVE the ~0.97 m tier, so the tier
+    occluded the whole station (plan_restock_sensed_views reported top/support 0/0) -- it
+    decoded markers while blinding restocking. The shipped pure -6.75 deg tilt keeps the
+    lens under the tier. This reproduces the planner's ray-visibility audit with a
+    synthetic tier so the trade-off can never regress silently without the store USD.
+    """
+    from scripts.twin.restock_camera.geometry import Intrinsics
+    from scripts.twin.restock_camera.visibility import box_surface, inspect_view, sample_plane
+    config = design()
+    camera = config['cameras']['shelf']
+    pose = np.array(camera['parent_from_optical']); k = Intrinsics(**camera['intrinsics'])
+    support = config['supports']['shelf']
+    center = np.array(support['nominal_center']); yaw = support['yaw']
+    dims = np.array([.6, .4, .16])                       # audited wall-3 handling unit
+    top = sample_plane(center + [0, 0, dims[2]], dims[:2] - .02, yaw)   # carton-top plane
+    footprint = sample_plane(center, [.62, .42], yaw)                  # empty support
+    # The next shelf tier: a horizontal plate whose underside sits ~0.24 m above the 0.73 m
+    # support surface (~0.97 m), spanning the support footprint and out over the aisle lip.
+    tier_z = center[2] + .24
+    tier = box_surface('shelf_tier_above', [center[0] - .07, center[1], tier_z + .01],
+                       [.80, .60, .02])
+    assert pose[2, 3] < tier_z                           # lens stays under the tier
+    for plane in (top, footprint):
+        view = inspect_view(pose, plane, k, [tier])
+        assert view['all_samples_visible']               # whole station seen under the tier
+        assert not view['occluders']
+    # Negative control: the gate must BITE. Raise only the lens by pose A's +4 cm (above
+    # the tier) and the tier must now occlude the station -- proving this is a real audit,
+    # not a pose-agnostic pass.
+    raised = pose.copy(); raised[2, 3] += .04
+    assert raised[2, 3] > tier_z
+    blinded = inspect_view(raised, top, k, [tier])
+    assert blinded['visible_samples'] == 0 and 'shelf_tier_above' in blinded['occluders']
