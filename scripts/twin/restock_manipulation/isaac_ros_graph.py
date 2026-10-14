@@ -53,7 +53,8 @@ class IsaacMeasuredFeedback:
 
 
 class IsaacRosGraph:
-    def __init__(self, *, contact, hold, root='/RestockManipulationROS', timeout=5.):
+    def __init__(self, *, contact, hold, root='/RestockManipulationROS', timeout=5.,
+                 host_control=None):
         require_sim_domain()
         import omni.graph.core as og
         import omni.usd
@@ -61,12 +62,18 @@ class IsaacRosGraph:
             raise ValueError('refusing to overwrite an existing ROS graph')
         self.og, self.contact, self.hold = og, contact, hold
         self.root, self.timeout = root, timeout
+        # Isaac->host PUBLISHES (job, sensors) go through the host-DDS subprocess, since the
+        # OmniGraph ROS2 publisher does not reach the host UDPv4 DDS (run-59). The host->Isaac
+        # SUBSCRIBERS (status, stop, gripper) stay on OmniGraph, which discovers the host writers.
+        self.host_control = host_control
         self.active, self.last_status = False, ''
         self.last_sequence = -1
         self.faulted, self.job_id = False, None
         self.last_receive = time.monotonic()
         for key, topic in TOPICS.items():
             publish = key in ('sensors', 'job')
+            if publish and host_control is not None:
+                continue  # published out-of-Isaac via the host-DDS control subprocess
             node_type = 'ROS2Publisher' if publish else 'ROS2Subscriber'
             tick_type = 'OnImpulseEvent' if publish else 'OnPlaybackTick'
             tick_port = 'execOut' if publish else 'tick'
@@ -90,6 +97,9 @@ class IsaacRosGraph:
             og.Controller.evaluate_sync(graph)
 
     def _publish(self, key, data):
+        if self.host_control is not None and key in ('sensors', 'job'):
+            self.host_control.publish(TOPICS[key], data)  # host-DDS subprocess (reaches the host)
+            return
         og = self.og
         path = self.root+'/'+key
         og.Controller.attribute(path+'/wire.inputs:data').set(data)
@@ -169,3 +179,8 @@ class IsaacRosGraph:
         self.hold()  # leave any physically held payload sealed
         self.active = False
         self.faulted = True
+        if self.host_control is not None:
+            try:
+                self.host_control.close()  # terminate the out-of-Isaac control publisher subprocess
+            except Exception:
+                pass

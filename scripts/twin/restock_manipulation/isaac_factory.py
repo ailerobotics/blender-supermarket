@@ -314,7 +314,7 @@ def _build_runtime(*, app, assembly, params, output):
     from isaacsim.sensors.camera import Camera
     from twin.restock.ros_manipulation import RosManipulationRuntime
     from .cad_tool import NativePanelContact
-    from .isaac_ros_graph import IsaacRosGraph, IsaacMeasuredFeedback
+    from .isaac_ros_graph import IsaacRosGraph, IsaacMeasuredFeedback, TOPICS
     from .isaac_sensors import IsaacCartonSensors
 
     paths = assembly.paths
@@ -376,8 +376,20 @@ def _build_runtime(*, app, assembly, params, output):
             stage=stage, camera=camera, camera_path=camera_path, gripper_path=gripper_path,
             assembly=assembly, sensors=collect_bridge, settings=params.masked_depth)
 
+    # Isaac->host control-plane PUBLISHES (manipulation/job, sensors, station/command) go through
+    # an out-of-Isaac host-DDS rclpy subprocess: the OmniGraph ROS2 publisher is invisible to the
+    # host UDPv4 Fast DDS (run-59: job/command pub=0), so ros_host / the ack never received them.
+    # The host->Isaac subscribers (status, stop, gripper, station/status) stay on OmniGraph.
+    host_control = None
+    if params.masked_depth.get('enabled'):
+        from twin.restock.control_ipc import HostControlPublisher
+        host_control = HostControlPublisher(
+            topics=(TOPICS['job'], TOPICS['sensors'], '/restock_sim/station/command'),
+            runtime_env=params.masked_depth['runtime_env'],
+            python=params.masked_depth.get('python', 'python3'),
+            domain=params.masked_depth.get('domain', 88))
     # Native ROS bridge to the host MoveGroup/cuMotion + TransferController + trajectory_host.
-    graph = IsaacRosGraph(contact=contact, hold=assembly.command_gate.hold)
+    graph = IsaacRosGraph(contact=contact, hold=assembly.command_gate.hold, host_control=host_control)
     # Parked-station client to the host nvblox mapper-incorporation ack
     # (twin.restock_host.incorporation_ack, co-launched with the stack): drives prepare/heartbeat
     # on /restock_sim/station/command and reads collision_time from /restock_sim/station/status.
@@ -389,7 +401,8 @@ def _build_runtime(*, app, assembly, params, output):
         from twin.restock.native_channel import JsonChannel, StationClient
         channel = JsonChannel(root='/RestockStationChannel',
                               publish_topic='/restock_sim/station/command',
-                              subscribe_topic='/restock_sim/station/status')
+                              subscribe_topic='/restock_sim/station/status',
+                              host_control=host_control)
         station = StationClient(channel)
     runtime = RosManipulationRuntime(graph, collect_bridge.capture,
                                      prepare_station=lambda operation, job: None,

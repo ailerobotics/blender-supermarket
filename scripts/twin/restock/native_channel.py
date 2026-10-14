@@ -6,15 +6,22 @@ from twin.restock_manipulation.ros_adapter import require_sim_domain
 
 
 class JsonChannel:
-    def __init__(self, *, root, publish_topic, subscribe_topic):
+    def __init__(self, *, root, publish_topic, subscribe_topic, host_control=None):
         require_sim_domain()
         import omni.graph.core as og
         import omni.usd
         if omni.usd.get_context().get_stage().GetPrimAtPath(root):
             raise ValueError('refusing to overwrite native ROS channel')
         self.og,self.root=og,root
-        for direction,topic,kind in (('send',publish_topic,'ROS2Publisher'),
-                                     ('receive',subscribe_topic,'ROS2Subscriber')):
+        # The Isaac->host PUBLISH (station/command) goes through the host-DDS subprocess, since the
+        # OmniGraph ROS2 publisher is invisible to the host UDPv4 DDS (run-57/59: command pub=0).
+        # The host->Isaac station/status SUBSCRIBER stays on OmniGraph (it discovers the ack writer).
+        self.host_control, self.publish_topic = host_control, publish_topic
+        directions = (('send',publish_topic,'ROS2Publisher'),
+                      ('receive',subscribe_topic,'ROS2Subscriber'))
+        if host_control is not None:
+            directions = directions[1:]  # publish out-of-Isaac; only build the receive graph
+        for direction,topic,kind in directions:
             key=og.Controller.Keys
             graph,_,_,_=og.Controller.edit({'graph_path':root+'/'+direction,'evaluator_name':'execution'}, {
                 key.CREATE_NODES:[('tick','omni.graph.action.OnImpulseEvent'),
@@ -32,7 +39,11 @@ class JsonChannel:
         self.og.Controller.evaluate_sync(path)
 
     def publish(self,value):
-        self.og.Controller.attribute(self.root+'/send/wire.inputs:data').set(json.dumps(value,allow_nan=False))
+        payload=json.dumps(value,allow_nan=False)
+        if self.host_control is not None:
+            self.host_control.publish(self.publish_topic,payload)  # host-DDS subprocess
+            return
+        self.og.Controller.attribute(self.root+'/send/wire.inputs:data').set(payload)
         self._pulse('send')
 
     def read(self):
