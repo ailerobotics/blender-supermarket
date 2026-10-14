@@ -17,7 +17,9 @@ def _matrix_tuple(matrix):
 
 
 def depth_digest(depth):
-    return hashlib.sha256(np.asarray(depth, dtype='<f8').tobytes()).hexdigest()
+    # Hash the contiguous buffer directly; ascontiguousarray is a no-op when the depth is
+    # already C-contiguous float64 and memoryview avoids a second full-frame copy (tobytes).
+    return hashlib.sha256(memoryview(np.ascontiguousarray(depth, dtype='<f8'))).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -58,10 +60,16 @@ def polygon_mask(polygon, k):
         raise ValueError('support polygon must be convex and ordered')
     x1,y1 = np.ceil(uv.min(axis=0)).astype(int)
     x2,y2 = np.floor(uv.max(axis=0)).astype(int)+1
-    v,u = np.mgrid[y1:y2,x1:x2]
-    delta = np.stack([u,v],axis=-1)[:,:,None,:]-uv
-    cross = edges[None,None,:,0]*delta[:,:,:,1]-edges[None,None,:,1]*delta[:,:,:,0]
-    inside = np.all(cross >= 0,axis=2) | np.all(cross <= 0,axis=2)
+    u = np.arange(x1,x2); v = np.arange(y1,y2)
+    uu,vv = np.meshgrid(u,v)
+    # Half-plane sign per edge, accumulated over 2-D grids (no H x W x 4 x 2 intermediate):
+    # inside iff every edge cross-product shares one sign. Identical test, far less memory.
+    positive = np.ones(uu.shape,bool); negative = np.ones(uu.shape,bool)
+    for (ex,ey),(px,py) in zip(edges,uv):
+        cross = ex*(vv-py)-ey*(uu-px)
+        positive &= cross >= 0
+        negative &= cross <= 0
+    inside = positive | negative
     result = np.zeros((k.height,k.width),bool)
     result[y1:y2,x1:x2] = inside
     if result.sum() < 64:
@@ -379,7 +387,12 @@ class RegisteredSupport:
         if not valid.all():
             raise ValueError('full support footprint is truncated or out of range')
         mask = polygon_mask(uv,k)
-        masked_cloud(depth,mask,k,base_from_camera)  # no invalid/hidden-depth pixels
+        # The full footprint must carry only valid, present depth (no invalid/hidden pixels),
+        # but its 3-D cloud is not used here — validate the masked depths directly instead of
+        # backprojecting ~1e6 points every capture (same gate as masked_cloud, far cheaper).
+        patch = np.asarray(depth,float)[mask]
+        if patch.size < 64 or not np.isfinite(patch).all() or np.any((patch < k.near)|(patch > k.far)):
+            raise ValueError('insufficient observed support pixels')
         center = transform_points(pose,[g.center_support])[0]
         result = SupportView(g,registration,clearance,_matrix_tuple(uv),float(center[2]),tuple(center),
             math.atan2(pose[1,0],pose[0,0]),float(error),depth_digest(depth),_matrix_tuple(base_from_camera))
