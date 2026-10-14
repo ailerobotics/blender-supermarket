@@ -2,9 +2,11 @@
 import numpy as np
 import pytest
 
+from types import SimpleNamespace as NS
+
 from twin.restock.masked_depth import (
     parse_instance_frame, rig_instance_ids, mask_rig_depth, MaskedDepthPublisher,
-    bbox_payload)
+    bbox_payload, ArmCameraDepthBridge)
 
 
 def _frame(depth, ids, id_to_path):
@@ -97,3 +99,98 @@ def test_masked_frame_end_to_end_without_ros():
     assert masked.tolist() == [[0.0, 0.0, 3.0], [4.0, 0.0, 6.0]]   # robot(1,1), cart(2) zeroed
     assert masked.dtype == np.float32
     assert np.allclose(intrinsics, k)
+
+
+class _RecordingDepth:
+    def __init__(self, frame):
+        self.camera = NS(get_current_frame=lambda: frame)
+        self.calls = []
+
+    def publish_frame(self, frame, stamp_s):
+        self.calls.append((frame, stamp_s))
+
+
+class _Recorder:
+    def __init__(self):
+        self.calls = []
+
+    def publish(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+
+
+def _bridge(frame, sensors, target_location=None):
+    depth, bbox, tf = _RecordingDepth(frame), _Recorder(), _Recorder()
+    br = ArmCameraDepthBridge(depth_publisher=depth, bbox_publisher=bbox, tf_publisher=tf,
+                             sensors=sensors, base_from_optical=lambda: ((1.0, 2.0, 3.0),
+                             (0.0, 0.0, 0.0, 1.0)), target_location=target_location)
+    return br, depth, bbox, tf
+
+
+def test_bridge_publishes_depth_tf_bbox_on_one_stamp():
+    frame = {'rendering_time': 4.25}
+    sensors = NS(sensed_target_bboxes=({'location': 'backstock_00', 'roi': (1, 2, 3, 4)},))
+    br, depth, bbox, tf = _bridge(frame, sensors, target_location='backstock_00')
+    stamp = br.publish(now=99.0)
+    assert stamp == 4.25                                   # stamp taken from the frame, not now
+    assert depth.calls == [(frame, 4.25)]
+    assert tf.calls and tf.calls[0][1] == {'parent': 'ur_base_link', 'child': 'restock_camera_arm'}
+    assert bbox.calls and bbox.calls[0][0][0] == (1, 2, 3, 4)
+
+
+def test_bridge_republishes_cached_bbox_when_perception_empty():
+    frame = {'rendering_time': 1.0}
+    sensors = NS(sensed_target_bboxes=({'location': 'backstock_00', 'roi': (5, 6, 7, 8)},))
+    br, depth, bbox, tf = _bridge(frame, sensors, target_location='backstock_00')
+    br.publish(now=1.0)
+    sensors.sensed_target_bboxes = ()                      # perception produced none this tick
+    br.publish(now=1.1)
+    assert [c[0][0] for c in bbox.calls] == [(5, 6, 7, 8), (5, 6, 7, 8)]   # cached, still fresh
+
+
+def test_bridge_filters_bbox_by_target_location():
+    frame = {'rendering_time': 2.0}
+    sensors = NS(sensed_target_bboxes=({'location': 'rollwagen', 'roi': (0, 0, 2, 2)},
+                                       {'location': 'backstock_00', 'roi': (9, 9, 11, 11)}))
+    br, depth, bbox, tf = _bridge(frame, sensors, target_location='backstock_00')
+    br.publish(now=2.0)
+    assert bbox.calls[0][0][0] == (9, 9, 11, 11)           # the source target, not the cart
+
+
+def test_bridge_skips_bbox_until_first_detection():
+    frame = {'rendering_time': 3.0}
+    sensors = NS(sensed_target_bboxes=())
+    br, depth, bbox, tf = _bridge(frame, sensors, target_location='backstock_00')
+    br.publish(now=3.0)
+    assert bbox.calls == [] and depth.calls and tf.calls   # depth+TF still publish
+
+
+def test_mat_to_quat_identity_and_180x():
+    from twin.restock.masked_depth import mat_to_quat_xyzw
+    assert np.allclose(mat_to_quat_xyzw(np.eye(3)), [0, 0, 0, 1])
+    # Rx(180) = diag(1,-1,-1) -> quaternion (1,0,0,0) xyzw
+    assert np.allclose(mat_to_quat_xyzw(np.diag([1.0, -1.0, -1.0])), [1, 0, 0, 1e-16], atol=1e-9) \
+        or np.allclose(np.abs(mat_to_quat_xyzw(np.diag([1.0, -1.0, -1.0]))), [1, 0, 0, 0], atol=1e-9)
+
+
+def test_base_from_optical_identity_is_the_flip():
+    from twin.restock.masked_depth import base_from_optical_transform
+    t, q = base_from_optical_transform(np.eye(4), np.eye(4))
+    assert np.allclose(t, [0, 0, 0])
+    # optical frame in base == 180deg about X (USD cam -> ROS optical)
+    assert np.allclose(np.abs(q), [1, 0, 0, 0], atol=1e-9)
+
+
+def test_base_from_optical_translation_and_norm():
+    from twin.restock.masked_depth import base_from_optical_transform
+    cam = np.array([[1, 0, 0, 2.0], [0, 1, 0, -1.0], [0, 0, 1, 0.5], [0, 0, 0, 1]])
+    t, q = base_from_optical_transform(cam, np.eye(4))
+    assert np.allclose(t, [2.0, -1.0, 0.5])              # optical origin == camera origin
+    assert abs(np.linalg.norm(q) - 1.0) < 1e-9           # unit quaternion
+
+
+def test_base_from_optical_moving_base_subtracts_base_pose():
+    from twin.restock.masked_depth import base_from_optical_transform
+    base = np.array([[1, 0, 0, 1.0], [0, 1, 0, 0.0], [0, 0, 1, 0.0], [0, 0, 0, 1]])
+    cam = np.array([[1, 0, 0, 3.0], [0, 1, 0, 0.0], [0, 0, 1, 0.0], [0, 0, 0, 1]])
+    t, _ = base_from_optical_transform(cam, base)
+    assert np.allclose(t, [2.0, 0.0, 0.0])               # camera is 2 m ahead of the base origin

@@ -24,9 +24,56 @@ Contract proposed to the host worker (confirm via status notes before enabling):
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 INVALID_DEPTH = 0.0  # nvblox no-return sentinel
+
+# USD camera looks down -Z with +Y up; the ROS optical frame looks +Z with +Y down.
+# Converting a point from the optical frame to the USD-camera frame flips Y and Z.
+_USDCAM_FROM_OPTICAL = np.diag([1.0, -1.0, -1.0, 1.0])
+
+
+def mat_to_quat_xyzw(rotation):
+    """3x3 rotation matrix (column convention, p' = R @ p) -> (x, y, z, w) quaternion."""
+    r = np.asarray(rotation, float)
+    trace = r[0, 0] + r[1, 1] + r[2, 2]
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        w, x, y, z = 0.25 * s, (r[2, 1]-r[1, 2])/s, (r[0, 2]-r[2, 0])/s, (r[1, 0]-r[0, 1])/s
+    elif r[0, 0] > r[1, 1] and r[0, 0] > r[2, 2]:
+        s = math.sqrt(1.0 + r[0, 0] - r[1, 1] - r[2, 2]) * 2.0
+        w, x, y, z = (r[2, 1]-r[1, 2])/s, 0.25 * s, (r[0, 1]+r[1, 0])/s, (r[0, 2]+r[2, 0])/s
+    elif r[1, 1] > r[2, 2]:
+        s = math.sqrt(1.0 + r[1, 1] - r[0, 0] - r[2, 2]) * 2.0
+        w, x, y, z = (r[0, 2]-r[2, 0])/s, (r[0, 1]+r[1, 0])/s, 0.25 * s, (r[1, 2]+r[2, 1])/s
+    else:
+        s = math.sqrt(1.0 + r[2, 2] - r[0, 0] - r[1, 1]) * 2.0
+        w, x, y, z = (r[1, 0]-r[0, 1])/s, (r[0, 2]+r[2, 0])/s, (r[1, 2]+r[2, 1])/s, 0.25 * s
+    return (x, y, z, w)
+
+
+def base_from_optical_transform(cam_world_col, base_world_col):
+    """Pose of the camera OPTICAL frame in ur_base_link as (translation xyz, quat xyzw).
+
+    Both inputs are 4x4 local-to-world matrices in COLUMN convention (p_world = M @ p_local).
+    The USD camera's world matrix is converted to the ROS optical frame, then expressed in
+    the base frame. This is the per-frame TF the host nvblox needs for the moving eye-in-hand
+    camera; isolating the convention math here keeps it unit-tested off the live stage.
+    """
+    cam = np.asarray(cam_world_col, float)
+    base = np.asarray(base_world_col, float)
+    optical_world = cam @ _USDCAM_FROM_OPTICAL
+    base_from_opt = np.linalg.inv(base) @ optical_world
+    return tuple(base_from_opt[:3, 3]), mat_to_quat_xyzw(base_from_opt[:3, :3])
+
+
+def ros_time(seconds):
+    """builtin_interfaces/Time for a (sim) seconds float; lazy import for CPU tests."""
+    from builtin_interfaces.msg import Time
+    sec = int(seconds)
+    return Time(sec=sec, nanosec=int(round((float(seconds) - sec) * 1e9)))
 
 
 def parse_instance_frame(frame):
@@ -160,10 +207,17 @@ class MaskedDepthPublisher:
         return masked, self.camera.get_intrinsics_matrix()
 
     def publish(self, now):
-        frame = self.camera.get_current_frame()
+        """Read the current frame and publish masked depth + info stamped at `now`."""
+        return self.publish_frame(self.camera.get_current_frame(), float(now))
+
+    def publish_frame(self, frame, stamp_seconds):
+        """Publish masked depth + camera info for an already-read frame at an explicit stamp.
+
+        The explicit stamp lets the caller keep depth, camera_info and the camera TF on one
+        acquisition time (the host object_segmenter + nvblox match them by stamp).
+        """
         masked, intrinsics = self.masked_frame(frame)
-        node = self._ros['node']
-        stamp = self._stamp(float(now))
+        stamp = self._stamp(float(stamp_seconds))
         height, width = masked.shape
         image = self._ros['Image']()
         image.header.stamp, image.header.frame_id = stamp, self.frame_id
@@ -186,9 +240,7 @@ class MaskedDepthPublisher:
 
     @staticmethod
     def _stamp(seconds):
-        from builtin_interfaces.msg import Time
-        sec = int(seconds)
-        return Time(sec=sec, nanosec=int(round((seconds - sec) * 1e9)))
+        return ros_time(seconds)
 
 
 def bbox_payload(bbox):
@@ -240,3 +292,96 @@ class TargetBboxPublisher:
         msg.data = bbox_payload(bbox)
         self._ros['pub'].publish(msg)
         return msg
+
+
+class TfPublisher:
+    """Publish a single camera->base TransformStamped on /tf each frame (tf2_msgs/TFMessage).
+
+    nvblox does per-frame stamped TF lookups in global_frame ur_base_link, so the arm
+    (eye-in-hand) camera's optical frame must be broadcast at every masked-depth frame with
+    the same stamp. Constructed only inside the guarded app (lazy rclpy import).
+    """
+
+    def __init__(self, *, topic='/tf', domain=88, node=None, _ros=None):
+        self.topic = topic
+        self._ros = _ros or self._init_ros(domain, node)
+
+    def _init_ros(self, domain, node):
+        import os
+        import rclpy
+        from rclpy.node import Node
+        from tf2_msgs.msg import TFMessage
+        from geometry_msgs.msg import TransformStamped
+        os.environ.setdefault('ROS_DOMAIN_ID', str(domain))
+        if not rclpy.ok():
+            rclpy.init(args=None)
+        node = node or Node('restock_camera_tf')
+        return {'node': node, 'TFMessage': TFMessage, 'TransformStamped': TransformStamped,
+                'pub': node.create_publisher(TFMessage, self.topic, 10)}
+
+    def publish(self, translation, quaternion_xyzw, stamp_seconds, *, parent, child):
+        t = self._ros['TransformStamped']()
+        t.header.stamp = ros_time(stamp_seconds)
+        t.header.frame_id = parent
+        t.child_frame_id = child
+        tx, ty, tz = (float(v) for v in translation)
+        t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = tx, ty, tz
+        qx, qy, qz, qw = (float(v) for v in quaternion_xyzw)
+        t.transform.rotation.x, t.transform.rotation.y = qx, qy
+        t.transform.rotation.z, t.transform.rotation.w = qz, qw
+        msg = self._ros['TFMessage']()
+        msg.transforms = [t]
+        self._ros['pub'].publish(msg)
+        return msg
+
+
+class ArmCameraDepthBridge:
+    """Drive the arm eye-in-hand masked-depth / info / TF / target-bbox stream for nvblox.
+
+    Called on every sensing-stage tick with the mission (sim) time. Reads the arm camera
+    frame once, derives one acquisition stamp from it, and publishes (all on that stamp):
+      - masked depth + camera_info (rig self-pixels invalidated),
+      - the live camera-optical->ur_base_link TF (from `base_from_optical()`),
+      - the grasp-target bbox (republished EVERY frame so the host object_segmenter never
+        drops it on its 0.5 s freshness timeout; the latest sensed roi at the target location
+        is cached and re-emitted even on ticks where perception produced none).
+
+    `base_from_optical()` returns (translation xyz, quaternion xyzw) of the camera optical
+    frame in ur_base_link, recomputed live from the stage (the camera moves with the arm).
+    `sensors` exposes `sensed_target_bboxes` (dicts with 'roi' and 'location'); set
+    `target_location` to the operation's grasp target (source bin for collect).
+    """
+
+    def __init__(self, *, depth_publisher, bbox_publisher, tf_publisher, sensors,
+                 base_from_optical, frame_id='restock_camera_arm', parent_frame='ur_base_link',
+                 target_location=None):
+        self.depth = depth_publisher
+        self.bbox = bbox_publisher
+        self.tf = tf_publisher
+        self.sensors = sensors
+        self.base_from_optical = base_from_optical
+        self.frame_id = frame_id
+        self.parent_frame = parent_frame
+        self.target_location = target_location
+        self._latest_bbox = None
+
+    def _select_bbox(self):
+        boxes = getattr(self.sensors, 'sensed_target_bboxes', ()) or ()
+        matched = [b for b in boxes
+                   if self.target_location is None or b.get('location') == self.target_location]
+        pick = matched or list(boxes)
+        if pick:
+            self._latest_bbox = tuple(pick[0]['roi'])
+        return self._latest_bbox
+
+    def publish(self, now):
+        frame = self.depth.camera.get_current_frame()
+        stamp_s = float(frame.get('rendering_time', now)) if isinstance(frame, dict) else float(now)
+        self.depth.publish_frame(frame, stamp_s)
+        translation, quaternion_xyzw = self.base_from_optical()
+        self.tf.publish(translation, quaternion_xyzw, stamp_s,
+                        parent=self.parent_frame, child=self.frame_id)
+        bbox = self._select_bbox()
+        if bbox is not None:
+            self.bbox.publish(bbox)
+        return stamp_s

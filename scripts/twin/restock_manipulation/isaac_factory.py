@@ -21,7 +21,7 @@ offline without a boot.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .types import ProductProfile
 
@@ -62,6 +62,7 @@ class ManipConfig:
     voxel_size: float
     grasp_mode: str
     pose_bridge_root: str = ''    # filesystem root of the tray-perception pose bridge
+    masked_depth: dict = field(default_factory=dict)  # arm masked-depth bridge settings
 
 
 def parse_manipulation_config(config, job_sku):
@@ -126,9 +127,24 @@ def parse_manipulation_config(config, job_sku):
     # package root IsaacCartonSensors loads for depth geometry. Optional at parse (the
     # pure CPU contract); the live host-path builder requires it.
     pose_bridge_root = config.get('pose_bridge_root', '')
+    # Arm eye-in-hand masked-depth bridge for the host nvblox (option B). Off unless the
+    # runtime-config opts in; the pure settings are validated here, the publishers wired live.
+    md = config.get('masked_depth', {})
+    if not isinstance(md, dict):
+        raise ValueError('config.masked_depth must be an object')
+    masked_depth = {}
+    if md.get('enabled'):
+        prefixes = md.get('rig_prefixes', [])
+        if prefixes and (not isinstance(prefixes, (list, tuple))
+                         or not all(isinstance(p, str) and p for p in prefixes)):
+            raise ValueError('masked_depth.rig_prefixes must be a list of USD prim-path strings')
+        masked_depth = {'enabled': True, 'rig_prefixes': tuple(prefixes),
+                        'frame_id': str(md.get('frame_id', 'restock_camera_arm')),
+                        'domain': int(md.get('domain', 88))}
     return ManipConfig(profiles=profiles, stations=stations, shelfbot_root=shelfbot_root,
                        walls=walls, voxel_dims=tuple(float(v) for v in vd), voxel_size=float(vs),
-                       grasp_mode=next(iter(modes)), pose_bridge_root=pose_bridge_root)
+                       grasp_mode=next(iter(modes)), pose_bridge_root=pose_bridge_root,
+                       masked_depth=masked_depth)
 
 
 class _ArticulationParked:
@@ -208,6 +224,11 @@ def _build_runtime(*, app, assembly, params, output):
         cam.AddTransformOp().Set(Gf.Matrix4d(0, -1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 1))
     camera = Camera(prim_path=camera_path)
     camera.initialize()
+    # The masked-depth bridge needs per-pixel rig identity to invalidate the robot/cart
+    # self-returns; IsaacCartonSensors adds distance-to-image-plane, this adds the instance-ID
+    # segmentation. Exact prim IDs only mark known rig pixels unknown; never product identity.
+    if params.masked_depth.get('enabled'):
+        camera.add_instance_id_segmentation_to_frame(init_params={'colorize': False})
 
     gripper_path = '/RestockPanelGripper'
     contact = NativePanelContact(stage, gripper_path)
@@ -223,11 +244,69 @@ def _build_runtime(*, app, assembly, params, output):
         # Real arm-camera packet for the host planner; base parked, gripper contact measured.
         return sensors.capture(simulation_time, station_source, destination, parked, contact)
 
+    sensing_bridge = None
+    if params.masked_depth.get('enabled'):
+        sensing_bridge = _build_masked_depth_bridge(
+            stage=stage, camera=camera, camera_path=camera_path, base_path=paths['ur_base_link'],
+            gripper_path=gripper_path, assembly=assembly, sensors=sensors,
+            settings=params.masked_depth)
+
     # Native ROS bridge to the host MoveGroup/cuMotion + TransferController + trajectory_host.
     graph = IsaacRosGraph(contact=contact, hold=assembly.command_gate.hold)
-    runtime = RosManipulationRuntime(graph, capture, prepare_station=lambda operation, job: None)
+    runtime = RosManipulationRuntime(graph, capture, prepare_station=lambda operation, job: None,
+                                     sensing_bridge=sensing_bridge)
     return HostManipulationRuntime(runtime=runtime, sensors=sensors,
                                    articulation=assembly.robot, profiles=params.profiles)
+
+
+def _rig_root(path):
+    """Top-level USD prim of a path, e.g. '/mobile_ur10_rollwagen/ur_base_link' -> '/mobile_ur10_rollwagen'."""
+    parts = str(path).strip('/').split('/')
+    return '/' + parts[0] if parts and parts[0] else str(path)
+
+
+def _build_masked_depth_bridge(*, stage, camera, camera_path, base_path, gripper_path,
+                               assembly, sensors, settings):
+    """Wire the arm eye-in-hand masked-depth/info/TF/bbox publishers for the host nvblox.
+
+    Rig prefixes (robot + cart + gripper subtrees whose self-pixels are invalidated) come from
+    the runtime-config when given, else are derived from the composed assembly roots. The TF is
+    recomputed live from the stage every frame (the camera moves with the arm).
+    """
+    import numpy as np
+    from pxr import UsdGeom
+    from twin.restock.masked_depth import (
+        MaskedDepthPublisher, TargetBboxPublisher, TfPublisher, ArmCameraDepthBridge,
+        base_from_optical_transform)
+
+    prefixes = settings.get('rig_prefixes')
+    if not prefixes:
+        cart_root = assembly.evidence['composition']['assets']['cart']['root']
+        prefixes = tuple(dict.fromkeys(
+            [_rig_root(assembly.paths['articulation']), _rig_root(cart_root), gripper_path]))
+    frame_id = settings.get('frame_id', 'restock_camera_arm')
+    domain = int(settings.get('domain', 88))
+
+    import rclpy
+    from rclpy.node import Node  # one shared node for all arm-bridge publishers
+    if not rclpy.ok():
+        rclpy.init(args=None)
+    node = Node('restock_arm_depth')
+    depth_pub = MaskedDepthPublisher(camera, prefixes, frame_id=frame_id, domain=domain, node=node)
+    bbox_pub = TargetBboxPublisher(domain=domain, node=node)
+    tf_pub = TfPublisher(domain=domain, node=node)
+
+    cam_prim, base_prim = stage.GetPrimAtPath(camera_path), stage.GetPrimAtPath(base_path)
+
+    def base_from_optical():
+        cache = UsdGeom.XformCache()  # fresh cache -> current (moving) transforms this frame
+        cam_world = np.array(cache.GetLocalToWorldTransform(cam_prim)).T   # USD row-major -> column
+        base_world = np.array(cache.GetLocalToWorldTransform(base_prim)).T
+        return base_from_optical_transform(cam_world, base_world)
+
+    return ArmCameraDepthBridge(depth_publisher=depth_pub, bbox_publisher=bbox_pub,
+                                tf_publisher=tf_pub, sensors=sensors,
+                                base_from_optical=base_from_optical, frame_id=frame_id)
 
 
 def create(*, app, assembly, plan, config, output, _builder=None):

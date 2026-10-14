@@ -12,10 +12,14 @@ from twin.restock_manipulation.types import Result
 class RosManipulationRuntime:
     cart_location = 'rollwagen'
 
-    def __init__(self, graph, capture, *, prepare_station):
+    def __init__(self, graph, capture, *, prepare_station, sensing_bridge=None):
         self.graph = graph
         self.capture = capture
         self.prepare_station = prepare_station
+        # Optional Isaac-side arm masked-depth/TF/bbox bridge for the host nvblox (option B).
+        # None keeps the legacy behaviour; publishes every step so the host's 0.5 s bbox
+        # freshness never lapses and nvblox gets continuous depth while the station maps.
+        self.sensing_bridge = sensing_bridge
         self.last_sensor_time = -1.
         self.latest = Result('running','idle')
 
@@ -24,6 +28,11 @@ class RosManipulationRuntime:
             raise ValueError('unsupported transfer operation')
         self.source = job['source_bin'] if operation == 'collect' else self.cart_location
         self.destination = self.cart_location if operation == 'collect' else job['shelf_id']
+        if self.sensing_bridge is not None:
+            # The grasp target to carve from the ESDF: the pick source for collect, the
+            # place destination for transfer.
+            self.sensing_bridge.target_location = (self.source if operation == 'collect'
+                                                   else self.destination)
         # Invalidate old ROIs, current arm-frame TF and mapper acknowledgement.
         self.preparation = self.prepare_station(operation, job)
         self.operation,self.job=operation,job
@@ -41,6 +50,10 @@ class RosManipulationRuntime:
                     return Result('running','prepare_station')
                 self.graph.start(self.operation,self.job)
                 self.dispatched=True
+            if self.sensing_bridge is not None:
+                # Continuous masked depth + info + TF + (cached) target bbox for the host
+                # nvblox/object_segmenter, every step and independent of carton verification.
+                self.sensing_bridge.publish(simulation_time)
             packet = self.capture(simulation_time,self.source,self.destination)
             if packet is not None:
                 stamp = packet.simulation_time
