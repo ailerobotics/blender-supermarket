@@ -65,6 +65,7 @@ class ManipConfig:
     masked_depth: dict = field(default_factory=dict)  # arm masked-depth bridge settings
     collect_source_location: str = ''  # mission location of the collect pick (fixed-source target)
     cart_placement: dict = field(default_factory=dict)  # collect destination (rollwagen) placement, derived from the cart asset
+    arm_camera_reaim: dict = field(default_factory=dict)  # {origin, aim_targets} in ur_base for the look-at mount (camera lane PR64)
 
 
 def parse_manipulation_config(config, job_sku):
@@ -152,11 +153,34 @@ def parse_manipulation_config(config, job_sku):
     if collect_source_location and not isinstance(collect_source_location, str):
         raise ValueError('collect_source_location must be a mission-location string')
     cart_placement = _parse_cart_placement(mcfg.get('cart_placement'))
+    arm_camera_reaim = _parse_arm_camera_reaim(mcfg.get('arm_camera_reaim'))
     return ManipConfig(profiles=profiles, stations=stations, shelfbot_root=shelfbot_root,
                        walls=walls, voxel_dims=tuple(float(v) for v in vd), voxel_size=float(vs),
                        grasp_mode=next(iter(modes)), pose_bridge_root=pose_bridge_root,
                        masked_depth=masked_depth, collect_source_location=collect_source_location,
-                       cart_placement=cart_placement)
+                       cart_placement=cart_placement, arm_camera_reaim=arm_camera_reaim)
+
+
+def _parse_arm_camera_reaim(entry):
+    """Validate the arm-camera look-at re-aim spec (camera lane PR64) into a dict, or {}.
+
+    `origin` is the mount frame origin in ur_base_link (front_camera_frame is rigid on base_link,
+    so this is pose-independent); `aim_targets` is one or more (x,y,z) points in ur_base_link that
+    the single fixed mount aims at (their centroid) -- the collect bin and transfer slot are only
+    ~8 deg apart, so one re-aim frames both stages. Absent -> {} -> keep the run-75 forward mount.
+    """
+    if entry is None:
+        return {}
+    if not isinstance(entry, dict):
+        raise ValueError('arm_camera_reaim must be an object')
+    try:
+        origin = tuple(float(v) for v in entry['origin'])
+        targets = [tuple(float(v) for v in p) for p in entry['aim_targets']]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f'arm_camera_reaim needs origin (3) and aim_targets (list of >=3-vectors): {exc}')
+    if len(origin) != 3 or not targets or any(len(p) < 3 for p in targets):
+        raise ValueError('arm_camera_reaim origin must be 3 and aim_targets a non-empty list of >=3-vectors')
+    return {'origin': origin, 'aim_targets': [p[:3] for p in targets]}
 
 
 def _parse_cart_placement(entry):
@@ -421,11 +445,34 @@ def _build_runtime(*, app, assembly, params, output):
     # Author a child USD Camera (which looks -Z with +Y up) oriented to look forward
     # along the frame's +X with +Z up; Camera() then adopts this existing prim.
     camera_path = paths['front_camera_frame'] + '/arm_camera'
+    # Re-aim the fixed mount at the restock targets (camera lane PR64, arm_mount). Without it the
+    # mount looks forward (+X) while both the collect bin and transfer slot sit to base +Y, so every
+    # reprojection put the carton behind the optical plane (roi=None). The re-aim also widens the
+    # field to the collision intrinsics (424x240 @ 75 deg HFOV) so the 0.6 m carton fits (the 128x128
+    # forward field clamped the ROI to full width). Absent config keeps the run-75 forward mount.
+    reaim = params.arm_camera_reaim
+    resolution = None
+    if reaim:
+        from twin.restock_camera.arm_mount import arm_camera_look_at_mount, collision_camera_intrinsics
+        mount = arm_camera_look_at_mount(reaim['origin'], reaim['aim_targets'])
+        cam_xform = Gf.Matrix4d(*[float(v) for row in mount.usd_transform_op for v in row])
+        k = collision_camera_intrinsics()
+        resolution = (k.width, k.height)
+    else:
+        cam_xform = Gf.Matrix4d(0, -1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 1)
+        k = None
     if not stage.GetPrimAtPath(camera_path):
         cam = UsdGeom.Camera.Define(stage, camera_path)
-        cam.AddTransformOp().Set(Gf.Matrix4d(0, -1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 1))
-    camera = Camera(prim_path=camera_path)
+        cam.AddTransformOp().Set(cam_xform)
+    else:
+        prim = UsdGeom.Camera(stage.GetPrimAtPath(camera_path))
+        ops = prim.GetOrderedXformOps()
+        (ops[0] if ops else prim.AddTransformOp()).Set(cam_xform)
+    camera = Camera(prim_path=camera_path, resolution=resolution) if resolution else Camera(prim_path=camera_path)
     camera.initialize()
+    if k is not None:                                   # collision/masked-depth intrinsics (wide field)
+        camera.set_focal_length(.02)
+        camera.set_horizontal_aperture(k.width * .02 / k.fx)
     # The masked-depth bridge needs per-pixel rig identity to invalidate the robot/cart
     # self-returns; IsaacCartonSensors adds distance-to-image-plane, this adds the instance-ID
     # segmentation. Exact prim IDs only mark known rig pixels unknown; never product identity.

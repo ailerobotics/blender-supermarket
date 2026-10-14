@@ -57,6 +57,21 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(c.cart_placement['support_z_world'], 0.225)
         self.assertEqual(c.cart_placement['free_dimensions'], (0.65, 0.45, 0.30))
 
+    def test_arm_camera_reaim_absent_defaults_empty(self):
+        self.assertEqual(parse_manipulation_config(manip_cfg(), JOB_SKU).arm_camera_reaim, {})
+
+    def test_arm_camera_reaim_parsed(self):
+        cfg = manip_cfg(arm_camera_reaim={'origin': [0.46, 0, 0.09], 'aim_targets': [[0.0, 1.101, 0.261]]})
+        c = parse_manipulation_config(cfg, JOB_SKU)
+        self.assertEqual(c.arm_camera_reaim['origin'], (0.46, 0.0, 0.09))
+        self.assertEqual(c.arm_camera_reaim['aim_targets'], [(0.0, 1.101, 0.261)])
+
+    def test_arm_camera_reaim_malformed_rejected(self):
+        for bad in ({'origin': [0, 0]}, {'origin': [0, 0, 0], 'aim_targets': []},
+                    {'origin': [0, 0, 0], 'aim_targets': [[0, 0]]}):
+            with self.assertRaises(ValueError):
+                parse_manipulation_config(manip_cfg(arm_camera_reaim=bad), JOB_SKU)
+
     def test_cart_placement_malformed_rejected(self):
         for bad in ({'location': 'rollwagen'},                       # missing fields
                     {'location': '', 'load_center_body_xy': [0, 0],  # empty location
