@@ -106,12 +106,21 @@ def initialize_camera(path,k,*,name,frequency=-1,session_id=None,steady_domain=N
 
 
 class CameraRig:
-    def __init__(self, *, stage, specs, parent_paths, frequency=-1, render_scale=1.0):
+    def __init__(self, *, stage, specs, parent_paths, frequency=-1, render_scale=1.0,
+                 camera_render_scales=None):
         from pxr import Gf,UsdGeom,UsdPhysics
         if not 0 < render_scale <= 1.0:
             raise ValueError('render_scale must be in (0, 1]')
+        # Per-camera override of the render-product scale: a decode-grade camera (small markers,
+        # e.g. the collect source) renders at 1.0 for its own full-res product while the mapper
+        # and other cameras keep the reduced VRAM scale. Each camera's context/baseline intrinsics
+        # must be scaled by the SAME factor (see sensing_sources / rendered_context).
+        camera_render_scales = camera_render_scales or {}
+        if any(not 0 < s <= 1.0 for s in camera_render_scales.values()):
+            raise ValueError('every per-camera render_scale must be in (0, 1]')
         self.stage,self.cameras,self.optical_paths=stage,{},{}
         self.render_scale=render_scale
+        self.camera_render_scales=dict(camera_render_scales)
         self.specs={}
         for spec in specs:
             name,k,matrix,solids=camera_spec(spec)
@@ -147,11 +156,12 @@ class CameraRig:
             # the whole-scene multi-camera render would otherwise exhaust the card. Keep
             # even dimensions: the recorder refuses odd HxW. Decode-grade stages must use
             # render_scale=1.0.
-            if self.render_scale == 1.0:
+            scale=self.camera_render_scales.get(name,self.render_scale)
+            if scale == 1.0:
                 resolution=None
             else:
-                resolution=(max(2,int(k.width*self.render_scale)//2*2),
-                            max(2,int(k.height*self.render_scale)//2*2))
+                resolution=(max(2,int(k.width*scale)//2*2),
+                            max(2,int(k.height*scale)//2*2))
             self.cameras[name]=initialize_camera(camera_path,k,name='restock_'+name,
                                                  frequency=frequency,resolution=resolution)
             self.optical_paths[name]=root

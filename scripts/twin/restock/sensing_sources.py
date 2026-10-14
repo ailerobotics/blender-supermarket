@@ -25,10 +25,6 @@ from __future__ import annotations
 from twin.restock_camera.config import camera_config as build_camera_design
 from twin.restock_camera.sensing import support_slots, rendered_context
 
-# Camera-design support name -> mission location resolver.
-_STATIC_SUPPORT_LOCATIONS = {'source': 'source', 'cart': 'rollwagen'}
-
-
 def _all_true_mask(design, camera_id):
     import numpy as np
     intr = design['cameras'][camera_id]['intrinsics']
@@ -36,26 +32,42 @@ def _all_true_mask(design, camera_id):
 
 
 def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_bridge_root,
-                          render_scale=1.0, clearance_for_slot=None, _rig_builder=None):
+                          render_scale=1.0, full_res_locations=(), clearance_for_slot=None,
+                          _rig_builder=None):
     """Assemble the sensing_sources mapping. Pure wiring; the rig is built behind the seam.
 
     pose_bridge_root is the FILESYSTEM root of the tray-perception pose bridge
     (``<root>/labeling/pose_bridge.py``) that IsaacCartonSensors loads for depth
     geometry -- not a USD prim path.
+
+    ``render_scale`` is the default (VRAM-bounded) render-product scale for the mapper and
+    other cameras; ``full_res_locations`` are mission locations whose serving camera must
+    render at 1.0 instead (decode-grade, e.g. the collect source whose paired markers are
+    only ~6 px/module). Each camera's context intrinsics are scaled by the SAME per-camera
+    factor so the context, its commissioned baseline and the live capture share one calibration.
     """
     design = build_camera_design(scenario, manifest)
     shelf_id = scenario['job']['shelf_id']
-    support_locations = dict(_STATIC_SUPPORT_LOCATIONS, shelf=shelf_id)
+    # Map the design 'source' support to the job's source_bin (the mission's address for the
+    # pick location, e.g. 'backstock_00') exactly as run_restock_commissioning does, so the
+    # commissioned baseline, the source context slot and collect_source_location all agree.
+    support_locations = {'source': scenario['job'].get('source_bin', 'source'),
+                         'cart': 'rollwagen', 'shelf': shelf_id}
 
-    rig = (_rig_builder or _real_rig)(assembly=assembly, design=design, render_scale=render_scale)
-    cameras = rig['cameras']
-    base_from_camera = rig['base_from_camera']       # callable(camera_id) -> 4x4
-    recording_camera = rig['recording_camera']
-
-    # location -> camera_id, from each design support's assigned camera.
+    # location -> camera_id, from each design support's assigned camera (needed before the rig
+    # to resolve which cameras must render full-res).
     location_cameras = {}
     for name, support in design['supports'].items():
         location_cameras[support_locations.get(name, name)] = support['camera_id']
+    full_res_cameras = {location_cameras[loc] for loc in full_res_locations if loc in location_cameras}
+    camera_scales = {cid: (1.0 if cid in full_res_cameras else render_scale)
+                     for cid in {s['camera_id'] for s in design['supports'].values()}}
+
+    rig = (_rig_builder or _real_rig)(assembly=assembly, design=design, render_scale=render_scale,
+                                      camera_render_scales=camera_scales)
+    cameras = rig['cameras']
+    base_from_camera = rig['base_from_camera']       # callable(camera_id) -> 4x4
+    recording_camera = rig['recording_camera']
 
     # No co-launched live mapper by default: clearance is conservatively absent, so sensing
     # fails closed rather than fabricating free space. A real mapper clearance callback may
@@ -80,7 +92,8 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
         context_providers[camera_id] = rendered_context(
             design, camera_id, slots, measure_context=measure_context_for(camera_id),
             clearance_for_slot=clearance_for_slot,
-            camera_revision=design['cameras'][camera_id]['revision'])
+            camera_revision=design['cameras'][camera_id]['revision'],
+            render_scale=camera_scales[camera_id])
 
     profiles = dict(getattr(manip_runtime.controller, 'profiles', {}))
 
@@ -96,7 +109,7 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
     }
 
 
-def _real_rig(*, assembly, design, render_scale=1.0):
+def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
     """Build the Isaac CameraRig on the composed stage and expose the sensing cameras."""
     from pxr import UsdGeom
     from .native_cameras import CameraRig
@@ -124,7 +137,7 @@ def _real_rig(*, assembly, design, render_scale=1.0):
             raise ValueError(f'camera {name!r} has no housing/bracket collision solid in the design')
         specs.append(dict(camera, collision_solids=collision_solids))
     rig = CameraRig(stage=assembly.stage, specs=specs, parent_paths=parent_paths, frequency=-1,
-                    render_scale=render_scale)
+                    render_scale=render_scale, camera_render_scales=camera_render_scales)
     base_root = assembly.paths['ur_base_link']
     # The shelf camera frames the destination support; reuse it for the mission video.
     recording_id = 'shelf' if 'shelf' in rig.cameras else next(iter(rig.cameras))

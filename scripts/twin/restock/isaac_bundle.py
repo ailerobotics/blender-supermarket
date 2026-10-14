@@ -221,10 +221,14 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # run_mobile_restock validates against, so load it from the runtime-config.
     import json as _json
     mobile_manifest = _json.loads(Path(config['mobile_manifest']).read_text())
+    # The collect source camera must render full-res (decode-grade: paired markers ~6 px/module);
+    # the default render_scale (VRAM-bounded) still applies to the mapper and other cameras.
+    _collect_source = config.get('collect_source_location')
     assembly.sensing_sources = build_sensing_sources(
         assembly=assembly, scenario=scenario, manifest=mobile_manifest,
         manip_runtime=manipulation.controller, pose_bridge_root=config['pose_bridge_root'],
-        render_scale=float(config.get('render_scale', 1.0)))
+        render_scale=float(config.get('render_scale', 1.0)),
+        full_res_locations=(_collect_source,) if _collect_source else ())
     sensing = sensing_factory(app=app, assembly=assembly, plan=plan, config=config, output=output)
     capture = sensing['capture']
     recording_camera = sensing['recording_camera']

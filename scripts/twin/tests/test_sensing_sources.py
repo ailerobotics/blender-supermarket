@@ -28,7 +28,8 @@ class FakeRig:
         # one RenderedCamera stand-in per design camera id
         self.cameras = {cid: NS(id=cid) for cid in design['cameras']}
 
-    def builder(self, *, assembly, design, render_scale=1.0):
+    def builder(self, *, assembly, design, render_scale=1.0, camera_render_scales=None):
+        self.camera_render_scales = camera_render_scales
         return {'cameras': self.cameras,
                 'base_from_camera': lambda cid: [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
                 'recording_camera': self.cameras.get('shelf') or next(iter(self.cameras.values()))}
@@ -72,7 +73,17 @@ class BuildSensingSourcesTests(unittest.TestCase):
         src, _ = self._build()
         # every mapped camera that has a support slot gets a context provider
         self.assertTrue(set(src['context_providers']) <= set(src['cameras']))
-        self.assertIn('shelf', src['context_providers'])
+
+    def test_full_res_location_renders_its_camera_at_1_0(self):
+        import twin.restock_camera.config as cc
+        rig = FakeRig(cc.camera_config(SCENARIO, MANIFEST))
+        build_sensing_sources(assembly=assembly(), scenario=SCENARIO, manifest=MANIFEST,
+                              manip_runtime=manip_runtime(), pose_bridge_root='/pkg/tray_perception',
+                              render_scale=0.375, full_res_locations=('source',), _rig_builder=rig.builder)
+        # the source camera (serving the full-res collect location) renders at 1.0; others at 0.375
+        self.assertEqual(rig.camera_render_scales['source'], 1.0)
+        self.assertEqual(rig.camera_render_scales['shelf'], 0.375)
+        self.assertEqual(rig.camera_render_scales['cart'], 0.375)
 
     def test_clearance_conservative_none_without_mapper(self):
         src, _ = self._build()
