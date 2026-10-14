@@ -207,7 +207,9 @@ class IsaacPort:
                     wall=round(time.monotonic()-self.wall_origin,3),action=self.current_action,
                     rendered=bool(self.sensing_tick or self.record_tick),
                     x=round(r.x,3),y=round(r.y,3),yaw_deg=round(_math.degrees(heading),1),
-                    lin=round(float(np.linalg.norm(rv)),4),coupled=bool(coupled),
+                    lin=round(float(np.linalg.norm(rv)),4),coupled=bool(coupled),parked=bool(parked),
+                    vel=dict(rv=round(float(np.linalg.norm(rv)),4),rw=round(float(np.linalg.norm(rw)),4),
+                             cv=round(float(np.linalg.norm(cv)),4),cw=round(float(np.linalg.norm(cw)),4)),
                     unknown=sum(1 for u in scan.unknown if u),probe=rec))
                 with (self.recorder.directory.parent/'nav-trace.jsonl').open('a') as _f:
                     _f.write(line+'\n')
