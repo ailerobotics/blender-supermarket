@@ -96,7 +96,22 @@ def _real_rig(*, assembly, design):
     from .native_cameras import CameraRig
     cart_root = assembly.evidence['composition']['assets']['cart']['root']
     parent_paths = {'map': '/World', 'cart_chassis': cart_root}
-    specs = list(design['cameras'].values())
+    # The camera design keeps camera bodies and their mount collision boxes in separate
+    # lists (cameras + solids, with dimensions_m); CameraRig.camera_spec expects each
+    # camera to carry its own collision_solids (size_m). Bridge the two here by attaching
+    # each camera's housing (and bracket, when present) from the design's solids list.
+    solids_by_id = {s['id']: s for s in design.get('solids', [])}
+    specs = []
+    for name, camera in design['cameras'].items():
+        collision_solids = []
+        for suffix in ('_housing', '_bracket'):
+            solid = solids_by_id.get(name + suffix)
+            if solid is not None:
+                collision_solids.append({'parent_from_solid': solid['parent_from_solid'],
+                                         'size_m': solid['dimensions_m']})
+        if not collision_solids:
+            raise ValueError(f'camera {name!r} has no housing/bracket collision solid in the design')
+        specs.append(dict(camera, collision_solids=collision_solids))
     rig = CameraRig(stage=assembly.stage, specs=specs, parent_paths=parent_paths, frequency=-1)
     base_root = assembly.paths['ur_base_link']
     # The shelf camera frames the destination support; reuse it for the mission video.

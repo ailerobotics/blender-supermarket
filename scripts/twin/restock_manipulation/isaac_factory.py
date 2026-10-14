@@ -154,6 +154,30 @@ def _build_runtime(*, app, assembly, params, output):
         voxel_dims=params.voxel_dims, voxel_size=params.voxel_size, walls=params.walls)
 
 
+class _DegradedMotion:
+    """Reports the REAL base stationarity from the articulation; every manipulation
+    operation is unavailable. Used only when the in-process cuRobo planner is absent.
+    """
+    def __init__(self, articulation):
+        self._robot = articulation
+        self.collision_time = -1.
+        self.last_grid = None
+        self.source = None
+
+    def parked(self):
+        import numpy as np
+        linear = np.asarray(self._robot.get_linear_velocity(), float)
+        angular = np.asarray(self._robot.get_angular_velocity(), float)
+        return bool(np.isfinite(linear).all() and np.isfinite(angular).all()
+                    and np.linalg.norm(linear) < .005 and np.linalg.norm(angular) < .005)
+
+    def tick(self, dt):
+        pass
+
+    def stop(self):
+        pass
+
+
 class _UnavailableManipulation:
     """Honest stand-in when the in-process cuRobo planner is not provisioned.
 
@@ -163,11 +187,14 @@ class _UnavailableManipulation:
     This is the interim path until manip_factory is switched to the host cuMotion
     MoveGroup port; see data/mobile-restock-v2/report.md.
     """
-    def __init__(self, reason):
+    def __init__(self, reason, articulation):
         from types import SimpleNamespace
         self._reason = reason
-        # ManipulationBridge(owns_sensor_io=True) reads controller.controller.cart_location.
-        self.controller = SimpleNamespace(cart_location='rollwagen')
+        self.motion = _DegradedMotion(articulation)
+        self.contact = None
+        # ManipulationBridge(owns_sensor_io=True) reads controller.controller.cart_location;
+        # sensing reads controller.controller.profiles (absent -> no product profiles).
+        self.controller = SimpleNamespace(cart_location='rollwagen', profiles={})
 
     def start(self, operation, job):
         pass
@@ -199,7 +226,8 @@ def create(*, app, assembly, plan, config, output, _builder=None):
         if exc.name != 'curobo':
             raise
         runtime = _UnavailableManipulation(
-            f'manipulation construction unavailable: in-process cuRobo not provisioned ({exc})')
+            f'manipulation construction unavailable: in-process cuRobo not provisioned ({exc})',
+            assembly.robot)
 
     def prepare_station(operation, job):
         station = ACTION_STATION.get(operation)
