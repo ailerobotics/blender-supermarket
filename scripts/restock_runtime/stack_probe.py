@@ -37,6 +37,11 @@ def main():
     p.add_argument('--discovery-timeout', type=float, default=120.0)
     p.add_argument('--plan-timeout', type=float, default=60.0)
     p.add_argument('--integrate-seconds', type=float, default=5.0)
+    # Cold first-job latency measurement (vs the IsaacRosGraph 5 s process/status watchdog):
+    # how long after the first masked-depth frame the ESDF first reports observed voxels, and
+    # how long the first cuMotion plan reply takes. --esdf-ready-timeout caps the ESDF poll.
+    p.add_argument('--esdf-ready-timeout', type=float, default=20.0)
+    p.add_argument('--esdf-poll-interval', type=float, default=0.3)
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     config = json.loads(a.config.read_text())
@@ -63,7 +68,7 @@ def main():
     from twin.restock_host.config import ENDPOINTS, NS, FRAME, TCP, JOINTS
     from twin.restock_host.readiness import missing_endpoints
 
-    rec = {'steps': [], 'endpoints': {}, 'nodes': {}}
+    rec = {'steps': [], 'endpoints': {}, 'nodes': {}, 'latencies': {}}
 
     def log(ev, **kw):
         rec['steps'].append({'t': round(time.monotonic(), 2), 'event': ev, **kw})
@@ -237,15 +242,36 @@ def main():
                 rec['compute_ik']['error_code'] = int(resp.error_code.val)  # 1 == SUCCESS
             log('compute_ik_done', **{k: rec['compute_ik'].get(k) for k in ('round_trip', 'error_code')})
 
-        # ---- 2b. depth integration: fuse synthetic masked-depth frames and prove the ESDF
-        #          goes from empty (every cell the -1000 unobserved sentinel) to observed ----
+        # ---- 2b. depth integration + COLD first-ESDF-ready latency: starting from a cold
+        #          mapper (every cell the -1000 unobserved sentinel), begin publishing masked
+        #          depth and poll the ESDF service until it first reports observed voxels. The
+        #          elapsed time from the first depth frame to that first non-empty read is the
+        #          "first ESDF ready after depth starts" latency the IsaacRosGraph watchdog
+        #          cares about (the ESDF service call drives update_esdf=True exactly as the
+        #          cuMotion planner's world query does). ----
         rec['mapper_esdf'] = {'available': esdf_cli.wait_for_service(timeout_sec=10.0)}
         if rec['mapper_esdf']['available']:
-            before = esdf_observed()
-            integrate_depth(a.integrate_seconds)
-            spin(1.0)  # let the last frames flush through object_segmenter into nvblox
-            after = esdf_observed()
+            before = esdf_observed()  # cold baseline: should be zero observed voxels
             obs_before = (before or {}).get('observed_voxels')
+            t_depth0 = time.monotonic()
+            first_ready_s, after = None, None
+            period, nxt_pub, nxt_poll = 0.1, 0.0, t_depth0  # 10 Hz publish; poll from t0
+            deadline = t_depth0 + a.esdf_ready_timeout
+            while time.monotonic() < deadline:
+                now = time.monotonic()
+                if now >= nxt_pub:
+                    publish_depth(); nxt_pub = now + period
+                if now >= nxt_poll:
+                    nxt_poll = time.monotonic() + a.esdf_poll_interval
+                    snap = esdf_observed()  # blocks on the service (ticks clock + spins inside)
+                    if snap and snap.get('observed_voxels', 0) > (obs_before or 0) and snap['observed_voxels'] > 0:
+                        first_ready_s = round(time.monotonic() - t_depth0, 3)
+                        after = snap
+                        break
+                    nxt_poll = time.monotonic() + a.esdf_poll_interval  # re-base after blocking call
+                tick_clock(); rclpy.spin_once(node, timeout_sec=0.02)
+            if after is None:  # never went non-empty within the window; take a final read
+                after = esdf_observed()
             obs_after = (after or {}).get('observed_voxels')
             rec['mapper_esdf'].update(
                 round_trip=bool(before and after),
@@ -255,8 +281,11 @@ def main():
                 total_voxels=(after or {}).get('total_voxels'),
                 observed_before=obs_before, observed_after=obs_after,
                 non_empty=bool(obs_after and obs_after > 0 and obs_after > (obs_before or 0)))
+            rec['latencies']['first_esdf_ready_s'] = first_ready_s
+            rec['latencies']['esdf_ready_timed_out'] = first_ready_s is None
         log('mapper_esdf_done', **{k: rec['mapper_esdf'].get(k)
-            for k in ('round_trip', 'success', 'observed_before', 'observed_after', 'non_empty')})
+            for k in ('round_trip', 'success', 'observed_before', 'observed_after', 'non_empty')},
+            first_esdf_ready_s=rec['latencies'].get('first_esdf_ready_s'))
 
         # ---- 2c. cuMotion MoveGroup joint-space plan (plan_only) against the populated ESDF ----
         rec['cumotion_plan'] = {}
@@ -280,13 +309,21 @@ def main():
                 con.joint_constraints.append(jc)
             goal.request.goal_constraints = [con]
             goal.planning_options.plan_only = True
+            # COLD first-cuMotion-reply latency: wall time from sending the manip (plan) job to
+            # receiving the plan result. This is the reply the IsaacRosGraph process/status
+            # watchdog is timing; the cuMotion node queries the (now populated) nvblox ESDF as
+            # part of answering, so the reply includes its own world-sync cost.
+            t_goal = time.monotonic()
             gh_fut = mg.send_goal_async(goal)
             gh = wait_future(gh_fut, 20.0)
             if gh is not None and gh.accepted:
                 res = wait_future(gh.get_result_async(), a.plan_timeout)
                 if res is not None:
                     code = int(res.result.error_code.val)
+                    reply_s = round(time.monotonic() - t_goal, 3)
+                    rec['latencies']['first_cumotion_reply_s'] = reply_s
                     rec['cumotion_plan'] = {'round_trip': True, 'error_code': code,
+                                            'reply_s': reply_s,
                                             'points': len(res.result.planned_trajectory.joint_trajectory.points)}
                 else:
                     rec['cumotion_plan'] = {'round_trip': False, 'reason': 'no result within timeout'}
@@ -295,6 +332,18 @@ def main():
         else:
             rec['cumotion_plan'] = {'round_trip': False, 'reason': 'move_action server absent'}
         log('cumotion_plan_done', **rec['cumotion_plan'])
+
+        # ---- cold first-job summary vs the 5 s IsaacRosGraph watchdog ----
+        esdf_s = rec['latencies'].get('first_esdf_ready_s')
+        reply_s = rec['latencies'].get('first_cumotion_reply_s')
+        # Worst case for a cold first job: the manip request lands before any depth has been
+        # integrated, so the host must build the ESDF and then plan before replying.
+        rec['latencies']['cold_first_job_s'] = (
+            round(esdf_s + reply_s, 3) if (esdf_s is not None and reply_s is not None) else None)
+        rec['latencies']['watchdog_s'] = 5.0
+        cold = rec['latencies']['cold_first_job_s']
+        rec['latencies']['within_watchdog'] = (cold is not None and cold <= 5.0)
+        log('latency_summary', **rec['latencies'])
     except BaseException as exc:
         rec['error'] = f'{type(exc).__name__}: {exc}'
         log('error', detail=rec['error'])
