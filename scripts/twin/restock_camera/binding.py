@@ -21,6 +21,7 @@ class SupportSlot:
     auxiliary_id: str | None = None
     auxiliary_offset_xy: tuple | None = None
     tracker: RegisteredSupport | None = None
+    decode_roi: tuple | None = None   # cached pixel bbox of this slot's support (set at commission)
 
 
 class RenderedSupportContext:
@@ -47,6 +48,20 @@ class RenderedSupportContext:
         if len({slot.location for slot in slots}) != len(slots):
             raise ValueError('duplicate support location')
 
+    def _decode_roi(self):
+        """Union pixel bbox of the slots' cached support regions (None until commissioned).
+
+        Each slot's support and its camera are rigidly related per station, so the
+        commissioned support pixel box bounds the fresh support markers and the handling
+        unit on it across captures; a miss still falls back to the full certified grid.
+        """
+        boxes = [slot.decode_roi for slot in self.slots if slot.decode_roi is not None]
+        if len(boxes) != len(self.slots) or not boxes:
+            return None
+        boxes = np.asarray(boxes, float)
+        return (float(boxes[:,0].min()), float(boxes[:,1].min()),
+                float(boxes[:,2].max()), float(boxes[:,3].max()))
+
     def _registrations(self, frame, now):
         self.qr_observation = None
         transform,tf_stamp,epoch,parked = self.measure_context(frame,now)
@@ -58,7 +73,7 @@ class RenderedSupportContext:
         depth = np.asarray(frame['distance_to_image_plane'],float)
         if rgb.shape[:2] != (self.intrinsics.height,self.intrinsics.width) or depth.shape != rgb.shape[:2]:
             raise ValueError('unregistered marker RGB-D')
-        qr = self.decoder.decode(rgb,evidence,now=now,parked=parked)
+        qr = self.decoder.decode(rgb,evidence,now=now,parked=parked,roi=self._decode_roi())
         decoded = {item.text:np.asarray(item.corners) for item in qr.detections}
         registrations = []
         for slot in self.slots:
@@ -101,6 +116,15 @@ class RenderedSupportContext:
         require_fresh(deadline,self.steady_clock)
         for slot,tracker in zip(self.slots,pending):
             slot.tracker = tracker
+            # Cache the support's pixel box (support + witness) padded, so the live capture can
+            # ROI-bound its decode to the commissioned region and fall back to the full frame.
+            support,witness = empty_polygons[slot.location]
+            box = np.concatenate([np.asarray(support,float),np.asarray(witness,float)])
+            lo,hi = box.min(axis=0),box.max(axis=0)
+            pad = np.maximum((hi-lo)*.25,96.)
+            slot.decode_roi = (float(max(0,lo[0]-pad[0])),float(max(0,lo[1]-pad[1])),
+                               float(min(self.intrinsics.width,hi[0]+pad[0])),
+                               float(min(self.intrinsics.height,hi[1]+pad[1])))
         return tuple(t.geometry for t in pending)
 
     def __call__(self, frame, now):

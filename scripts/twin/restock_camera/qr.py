@@ -24,6 +24,13 @@ def rgb_digest(rgb):
     return hashlib.sha256(snapshot).hexdigest()
 
 
+def _tile_overlaps(origin, roi, width, height):
+    """Whether the 640-px tile at ``origin`` overlaps the ROI box (x1,y1,x2,y2)."""
+    x,y = origin
+    x1,y1,x2,y2 = roi
+    return x < x2 and min(x+640,width) > x1 and y < y2 and min(y+640,height) > y1
+
+
 def tile_origins(width, height):
     if not 1 <= width <= 2560 or not 1 <= height <= 1920:
         raise ValueError('image exceeds bounded QR search dimensions')
@@ -96,23 +103,8 @@ class FixedTileQR:
         self.last = None
         self.seen_sessions = set()
 
-    def decode(self, rgb, evidence, *, now, parked):
+    def _scan(self, bgr, origins, width, height, start):
         import cv2
-        start = time.perf_counter()
-        evidence.validate(now,parked)
-        if evidence.camera_id != self.camera_id:
-            raise ValueError('QR decoder belongs to another camera')
-        if self.last is not None:
-            same = self.last.session_id == evidence.session_id
-            if ((same and (evidence.frame_id <= self.last.frame_id or evidence.stamp <= self.last.stamp))
-                    or (not same and evidence.session_id in self.seen_sessions)):
-                raise ValueError('QR decoder refuses replayed camera frame/session')
-        self.last = evidence
-        self.seen_sessions.add(evidence.session_id)
-        digest = rgb_digest(rgb)
-        height,width = rgb.shape[:2]
-        origins = tile_origins(width,height)
-        bgr = cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR)
         groups,unreadable = [],[]
         for x,y in origins:
             if time.perf_counter()-start > .5:
@@ -141,6 +133,40 @@ class FixedTileQR:
                 if any(g['text']==text or _overlap(p,g['corners']) for g in groups):
                     raise ValueError('duplicate QR identity or overlapping conflicting labels')
                 groups.append(dict(text=text,corners=p,sightings=1,rms=0.))
+        return groups,unreadable
+
+    def decode(self, rgb, evidence, *, now, parked, roi=None):
+        """Decode QR tiles. ``roi``=(x1,y1,x2,y2) restricts the first pass to the certified
+        tiles overlapping that region (the expected handling-unit/support area from the
+        commissioned station geometry + pose); a miss (no readable AND no unreadable candidate
+        in the subset) falls back to the full certified tile grid, so correctness is unchanged
+        and only the common case is cheaper."""
+        import cv2
+        start = time.perf_counter()
+        evidence.validate(now,parked)
+        if evidence.camera_id != self.camera_id:
+            raise ValueError('QR decoder belongs to another camera')
+        if self.last is not None:
+            same = self.last.session_id == evidence.session_id
+            if ((same and (evidence.frame_id <= self.last.frame_id or evidence.stamp <= self.last.stamp))
+                    or (not same and evidence.session_id in self.seen_sessions)):
+                raise ValueError('QR decoder refuses replayed camera frame/session')
+        self.last = evidence
+        self.seen_sessions.add(evidence.session_id)
+        digest = rgb_digest(rgb)
+        height,width = rgb.shape[:2]
+        origins = tile_origins(width,height)
+        bgr = cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR)
+        scanned = origins
+        if roi is not None:
+            subset = tuple(o for o in origins if _tile_overlaps(o,roi,width,height))
+            groups,unreadable = self._scan(bgr,subset,width,height,start)
+            if not groups and not unreadable:        # total miss in the ROI: full-frame fallback
+                groups,unreadable = self._scan(bgr,origins,width,height,start)
+            else:
+                scanned = subset
+        else:
+            groups,unreadable = self._scan(bgr,origins,width,height,start)
         # A failed tile may contain a code successfully decoded in another tile.
         # Preserve all other unreadable candidates so in-slot inventory refuses.
         unresolved = [p for p in unreadable if not any(
@@ -152,4 +178,4 @@ class FixedTileQR:
         if elapsed > .5:
             raise ValueError('QR detection/merge exceeds 500 ms budget')
         return FrameQR(evidence,tuple(rgb.shape),digest,detections,
-                       tuple(tuple(map(tuple,p)) for p in unresolved),elapsed,len(origins))
+                       tuple(tuple(map(tuple,p)) for p in unresolved),elapsed,len(scanned))

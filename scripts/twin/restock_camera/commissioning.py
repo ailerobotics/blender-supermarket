@@ -87,6 +87,7 @@ class BaselineRecord:
     base_from_camera: tuple | None = None       # measured camera transform at capture (audit)
     commissioning_freshness_s: float = 5.       # acquisition-to-use bound used at commission
     render_scale: float = 1.                     # render-product scale the baseline was commissioned at
+    decode_roi: tuple | None = None              # cached support pixel bbox for ROI-bounded decode
     source: str = SOURCE
     schema: str = SCHEMA
 
@@ -117,6 +118,7 @@ class BaselineRecord:
                     [list(r) for r in self.base_from_camera],
                     commissioning_freshness_s=self.commissioning_freshness_s,
                     render_scale=self.render_scale,
+                    decode_roi=None if self.decode_roi is None else list(self.decode_roi),
                     provenance=self.provenance(), geometry=geometry_to_json(self.geometry))
 
     @classmethod
@@ -141,6 +143,7 @@ class BaselineRecord:
                    base_from_camera=None if bfc is None else tuple(tuple(r) for r in bfc),
                    commissioning_freshness_s=data.get('commissioning_freshness_s', 5.),
                    render_scale=data.get('render_scale', 1.),
+                   decode_roi=None if data.get('decode_roi') is None else tuple(data['decode_roi']),
                    source=data['source'], schema=data['schema'])
 
 
@@ -227,7 +230,7 @@ def commission_and_persist(context, frame, now, empty_polygons, *, dataset_dir,
         record = BaselineRecord(station=slot.location, geometry=tracker.geometry,
                                 capture_pose=None if pose is None else tuple(pose),
                                 commissioning_freshness_s=commissioning_freshness_s,
-                                render_scale=render_scale)
+                                render_scale=render_scale, decode_roi=slot.decode_roi)
         persist_baseline(dataset_dir, record, raw_frame=raw_frames.get(slot.location))
         records.append(record)
     rebuild_manifest(dataset_dir)
@@ -337,6 +340,7 @@ def apply_baselines(context, records, *, required_locations=None):
                 f'commission it before the mission (available: {sorted(records)})')
         _check_match(context, slot, record.geometry)
         slot.tracker = RegisteredSupport(record.geometry)
+        slot.decode_roi = record.decode_roi      # restore the ROI-bounded decode region
         attached.append(slot.location)
     missing = required - set(attached)
     if missing:
@@ -362,6 +366,7 @@ def apply_to_contexts(context_providers, records, *, required_locations=None):
                 continue
             _check_match(context, slot, record.geometry)
             slot.tracker = RegisteredSupport(record.geometry)
+            slot.decode_roi = record.decode_roi      # restore the ROI-bounded decode region
             attached.append(slot.location)
     if required_locations is not None:
         missing = set(required_locations) - set(attached)
