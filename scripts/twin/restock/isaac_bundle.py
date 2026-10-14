@@ -239,7 +239,7 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # forward, and navigation refuses to drive on a blind forward sector. The lidar frame
     # is a fixed base_link child (rpy 0), so it shares the base yaw at the URDF offset.
     from twin.urdf_probe import parse_urdf as _parse_urdf
-    _lidar_xyz = _parse_urdf(str(mobile_urdf)).joints_by_child()['lidar_frame'].origin_xyz
+    _lidar_xyz = _parse_urdf(str(mobile_urdf)).joints_by_child['lidar_frame'].origin_xyz
     range_sensor = IsaacRangeSensor(
         get_sensor_pose=lambda: _lidar_pose(assembly.robot_body, _lidar_xyz[0], _lidar_xyz[1]),
         sensor_to_base=_lidar_xyz, self_paths=(robot_root,))
