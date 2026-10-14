@@ -24,7 +24,11 @@ import importlib
 import json
 from pathlib import Path
 
-DEFAULT_STATIONS = ('backstock_00', 'G3_back_s2')
+# The three mission stations that need an empty-support baseline, matching the
+# ros_host_config.json `walls` keys (collect source, cart rollwagen, transfer shelf). The cart
+# `rollwagen` context is commissioned empty at the staging pose before pickup; sensing_sources
+# refuses it today as uncommissioned, so it must be in the default run.
+DEFAULT_STATIONS = ('backstock_00', 'rollwagen', 'G3_back_s2')
 
 
 def _resolve(spec):
@@ -121,7 +125,7 @@ def main():
     parser.add_argument('--scenario', type=Path, required=True, help='mission scenario JSON')
     parser.add_argument('--output', type=Path, help='dataset dir for persisted baselines (execute)')
     parser.add_argument('--station', action='append', dest='stations',
-                        help='mission location to commission (repeatable; default: collect source + shelf)')
+                        help='mission location to commission (repeatable; default: collect source + cart + shelf)')
     parser.add_argument('--sources', help='module:function returning booted {contexts, capture} (execute)')
     parser.add_argument('--lifetime-s', type=float, default=600.)
     parser.add_argument('--render-scale', type=float, default=1.0,
