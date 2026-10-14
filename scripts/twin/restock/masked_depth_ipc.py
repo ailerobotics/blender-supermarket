@@ -163,6 +163,8 @@ def serve(socket_path, *, idle_timeout_s=600.0):
                 msg.data = [float(v) for v in header['bbox']]
                 bbox_pub.publish(msg)
             published += 1
+            if published % 20 == 0:          # periodic so the count survives a SIGTERM kill
+                node.get_logger().info(f'masked-depth publisher: published={published}')
             rclpy.spin_once(node, timeout_sec=0.0)
     finally:
         node.get_logger().info(f'masked-depth publisher exiting; published={published}')

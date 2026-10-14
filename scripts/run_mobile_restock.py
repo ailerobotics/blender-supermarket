@@ -67,6 +67,37 @@ def check(args):
     return report, manifest, scenario
 
 
+def _run_transport_probe(bundle, scenario, args, app):
+    """Drive the arm masked-depth bridge for N frames at the collect staging pose (no mission).
+
+    The robot is already composed at the staging pose; this configures the source station and
+    ticks the port (rendering the arm camera) + the bridge, so the host object_segmenter/nvblox
+    can prove the masked-depth transport end to end. Pass/fail is asserted host-side.
+    """
+    from dataclasses import asdict
+    adapter = bundle.adapter
+    port = adapter.port
+    manip = adapter.manip
+    runtime = getattr(getattr(manip, 'controller', None), '_runtime', None)
+    bridge = getattr(runtime, 'sensing_bridge', None)
+    if bridge is None:
+        raise RuntimeError('transport probe requires the arm masked_depth bridge '
+                           '(enable masked_depth in the runtime-config)')
+    manip.start('collect', asdict(Job(**scenario['job'])))  # source station + bridge.target_location
+    port.current_action = 'collect'                         # force the sensing render each tick
+    frames = int(args.transport_probe)
+    published = 0
+    for _ in range(frames):
+        if not app.is_running():
+            break
+        packet = port.advance(1 / 60)
+        bridge.publish(packet.simulation_time)
+        published += 1
+    return {'state': 'complete' if published == frames else 'failed',
+            'reason': f'transport probe drove {published}/{frames} masked-depth frames',
+            'physics_verified': False, 'frames': published}
+
+
 def run(args, manifest, scenario):
     if not args.factory or ':' not in args.factory:
         raise ValueError('runtime requires --factory module:function; no mock fallback')
@@ -144,6 +175,16 @@ def run(args, manifest, scenario):
                                  config=config, output=args.output)
                 if getattr(bundle.adapter, 'fixture_mode', True):
                     raise RuntimeError('production runtime refuses fixture adapters')
+                if args.transport_probe:
+                    # Focused native masked-depth transport probe (no mission/navigation): the
+                    # robot is already at the collect staging pose; drive the arm masked-depth
+                    # bridge for N frames so the host (object_segmenter -> nvblox) can prove the
+                    # transport. Assertions are host-side (see run_transport_probe.sh).
+                    summary = _run_transport_probe(bundle, scenario, args, app)
+                    (args.output / 'mission.json').write_text(
+                        json.dumps(dict(summary, events=db.events(scenario['job']['job_id'])),
+                                   indent=2, allow_nan=False) + '\n')
+                    return 0 if summary['state'] == 'complete' else 1
                 mission = Mission(db, Job(**scenario['job']), bundle.adapter,
                                   stages=config.get('stages'))
                 mission.start()
@@ -223,6 +264,9 @@ def main():
     parser.add_argument('--nvidia-runtime', type=Path, help='task-local NVIDIA runtime root for --host-stack')
     parser.add_argument('--host-stack-warmup', type=float, default=180.0,
                         help='seconds to let the planner stack + mapper advertise before booting Isaac')
+    parser.add_argument('--transport-probe', type=int, default=0,
+                        help='focused masked-depth transport probe: drive the arm bridge for N '
+                             'frames at the staging pose instead of running the mission')
     args = parser.parse_args()
     report, manifest, scenario = check(args)
     print(json.dumps(report, indent=2))
