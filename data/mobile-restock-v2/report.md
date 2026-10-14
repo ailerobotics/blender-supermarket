@@ -1463,3 +1463,29 @@ SUBSCRIBERS do (status/station-status eventually appear). This is the fix #2 tri
 route the Isaac->host PUBLISHES (`/manipulation/job`, `/sensors`, `/station/command`, plus
 `/manipulation/stop`, `/gripper/enable`) through a host-DDS rclpy subprocess like masked depth,
 keeping OmniGraph subscribers for the return topics (status, station/status).
+
+### 2026-10-14 — fix #1/#2/#3 all working; new blocker: ack rejects prepare on a clock/stamp mismatch
+
+run-64 (fix #3 active: approach warm-up + split sensor watchdog, commission run-21). The pipeline
+now advances: nav completes -> RuntimeAdapter 'warm' phase runs (STATION_STATS tick 1..N, prepare +
+heartbeats published via the control subprocess) -> MANIP_START dispatches after the 300-tick warm
+cap. Mission fails `station supervisor heartbeat unavailable` (StationClient got no reply in 10 s).
+
+Decisive: the host echo of /restock_sim/station/status shows the ack RECEIVES the prepare (fix #2
+fully confirmed) but rejects it -- it goes idle -> `failed: "invalid station epoch, sequence or
+timestamp"` -> `station fault requires explicit recovery`. That reason is the freshness/field guard
+in IncorporationAckState.accept: `0 <= now - stamp <= 0.5`. Measured:
+- StationClient prepare stamp (mission Packet.simulation_time) = 0.233 at warm tick 1;
+- ack now() (snapshot `stamp`, its /clock-derived sim time) advances in 0.05 steps to 1.0+.
+The ack's now() and the mission's prepare stamp fall outside the 0.5 s window, so accept() rejects
+every prepare/heartbeat -> collision_time never advances -> warm never reports ready (runs to the
+cap) -> the StationClient never gets a matching-epoch reply -> 10 s heartbeat failure.
+
+Root cause is a clock-sync / stamp-domain mismatch at the station boundary: the StationClient stamps
+with the mission's sim time while the ack validates against its own /clock-derived sim time, and the
+two diverge beyond 0.5 s (sampling skew + discovery/relay latency, with the host /clock published by
+native_transport). This is cross-lane (host incorporation_ack.py freshness contract + native_transport
+/clock) -- escalated to Firstmate. Candidate fixes: tolerate a bounded skew on the ack's freshness
+lower/upper bound (symmetric with the gate-1 render-lead tolerance), or align the StationClient stamp
+to the same /clock domain the ack validates against. Prepare-to-first-/sensors gap: N/A -- no /sensors
+was produced because the prepare never cleared the ack's freshness guard.
