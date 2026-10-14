@@ -333,5 +333,32 @@ class IncorporationAckTest(unittest.TestCase):
                 st.accept(bad, 10.0)
 
 
+class RosHostLaunchWiring(unittest.TestCase):
+    """The mission host stack must launch ros_host (the manipulation bridge) so
+    /restock_sim/manipulation/status is published; without it every manip job dies on the
+    Isaac 5 s process/status watchdog. Verifies the launch wires ros_host with the verified
+    {profiles, walls} fixture + the plan's integration_host_arguments, and the fixture is usable."""
+
+    def test_launch_wires_ros_host_with_fixture_and_plan_args(self):
+        src = (Path(__file__).resolve().parents[1]
+               / 'restock_host' / 'launch.py').read_text()
+        self.assertIn('twin.restock_manipulation.ros_host', src)
+        self.assertIn('ros_host_config.json', src)
+        self.assertIn("*plan['integration_host_arguments']", src)
+        # It must be a shutdown-guarded process (in `processes`), not an auxiliary like the ack.
+        self.assertIn('masker, manipulation]', src)
+
+    def test_ros_host_config_fixture_is_usable(self):
+        from twin.restock_manipulation.types import ProductProfile
+        cfg = json.loads((Path(__file__).resolve().parents[1]
+                          / 'restock_manipulation' / 'ros_host_config.json').read_text())
+        self.assertEqual(set(cfg), {'profiles', 'walls'})
+        # Every profile constructs; walls cover source (backstock_00), cart (rollwagen) and
+        # target (G3_back_s2) so WallCartonPolicy.build never raises on a missing location.
+        self.assertTrue({p['sku']: ProductProfile(**p) for p in cfg['profiles']})
+        for location in ('backstock_00', 'rollwagen', 'G3_back_s2'):
+            self.assertIn(location, cfg['walls'])
+
+
 if __name__ == '__main__':
     unittest.main()

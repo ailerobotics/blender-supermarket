@@ -127,7 +127,19 @@ def description(config):
         '-p', 'bbox_padding_px:=0'],
         additional_env={'PYTHONPATH': plan['shelfbot_root'] + os.pathsep + os.environ.get('PYTHONPATH', '')},
         output='screen')
-    processes = [moveit, container, masker]
+    # Host manipulation bridge (ros_host / RosTransferBridge): the ONLY node that consumes
+    # /restock_sim/manipulation/job + /sensors, drives the move_group/cuMotion action servers
+    # launched above, and publishes /restock_sim/manipulation/status -- the reply the Isaac-side
+    # IsaacRosGraph waits for. Without it the first manip job gets no status and dies on the Isaac
+    # 5 s process/status watchdog. The verified {profiles, walls} fixture is the manipulation
+    # lane's ros_host_config.json (walls cover source/cart/target so no regrasp); urdf, shelfbot
+    # root and the mobile manifest come from the validated plan (integration_host_arguments).
+    ros_host_config = Path(__file__).resolve().parents[1] / 'restock_manipulation' / 'ros_host_config.json'
+    manipulation = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock_manipulation.ros_host',
+        '--config', str(ros_host_config), *plan['integration_host_arguments']],
+        additional_env={'PYTHONPATH': plan['shelfbot_root'] + os.pathsep + os.environ.get('PYTHONPATH', '')},
+        output='screen')
+    processes = [moveit, container, masker, manipulation]
     # Losing mapping/masking must not leave an apparently healthy planner behind.
     guards = [RegisterEventHandler(OnProcessExit(target_action=process,
               on_exit=[EmitEvent(event=Shutdown(reason='restock host component exited'))]))
