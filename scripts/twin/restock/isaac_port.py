@@ -144,6 +144,22 @@ class IsaacPort:
         odometry=Odometry((r.x,r.y,r.yaw),now,float(np.linalg.norm(rv)),float(rw[2]))
         navigation=nav_observation(scan,odometry,coupled=coupled,arm_transport=ready,
                                    articulation=articulation)
+        if self.tick==1 and self.recorder is not None:
+            # One-shot nav-coverage diagnostic: which beam bearings are self-occluded
+            # (unknown), relative to the robot heading, so a blind forward sweep can be
+            # localized without a core dump.
+            try:
+                import json as _json, math as _math
+                bad=[round(_math.degrees(wrap(scan.angle_min+i*scan.angle_increment - r.yaw)),1)
+                     for i,u in enumerate(scan.unknown) if u]
+                fwd=[a for a in bad if abs(a)<90]
+                (self.recorder.directory.parent/'scan-debug.json').write_text(_json.dumps(dict(
+                    heading_deg=round(_math.degrees(r.yaw),1),beams=len(scan.unknown),
+                    unknown_count=len(bad),forward_unknown_count=len(fwd),
+                    forward_unknown_bearings_deg=fwd[:60],
+                    sensor_to_base=list(scan.sensor_to_base)),indent=1)+'\n')
+            except Exception:
+                pass
         evidence=self.verification(now)
         if self.recorder is not None and self.tick%2 == 0:
             frame=self.recording_camera.get_current_frame()
