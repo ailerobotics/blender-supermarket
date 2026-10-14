@@ -837,6 +837,48 @@ estimate, not a measured or globally optimal trajectory. The merged baseline now
 defaults to 600 seconds, bounded to 900, while fresh evidence remains limited to
 0.5 seconds. Original acquisition timestamps remain immutable across scene resets.
 
+## Runs 30-32: nav coverage fixed, manipulation host-stack blocker exposed
+
+The uncoupled collect-navigate coverage timeout that blocked runs 05-31 is now
+**resolved**. Navigation PR#49 extended the occupied-envelope crescent
+certification to `core.Controller.gate_velocity`: the sub-margin crescent of a
+`v=0` settle stop is exempt, side/rear self-occlusion is exempt at every heading,
+and a genuine forward blind zone still refuses. A run-31 collect-only diagnostic,
+instrumented with a new per-tick `nav-trace.jsonl`, localized the exact cause:
+the pickup goal equals the robot start pose `(-5.73, 16, 0)`, so the controller
+only ever issued the settle stop command, whose stopping distance is the residual
+physics velocity alone (~1e-4 m). `sweep_extent` at near-broadside bearings is
+non-monotonic in stop distance (equal to the footprint radius at stop 0, slightly
+above it for a tiny stop, below it again once the quadratic footprint-shrink
+dominates), so an infinitesimal residual velocity spuriously pulled the five
+near-side self-occluded beams (−85.4° … −89.4°, the robot's own side/cart
+geometry) into the required swept crescent and refused forever. The fix exempts
+exactly that case.
+
+Run-32 (PR#49 merged, full `collect+couple`, `--host-stack`) confirmed the fix:
+collect-navigate **passed** — no `insufficient_sensor_coverage_timeout`, and the
+robot held station at the goal for 2070 ticks / 34.5 s of simulation (the old
+failure fired `blocked_timeout` at ~8 s). The mission then advanced into
+collect-**execute**, where it **stalled**: the host-stack node `robot_segmenter`
+(`nvidia::isaac_ros::manipulator::RobotSegmenter`) fails to load at host launch
+with *"could not create subscription: invalid allocator"*, caused by a
+duplicate/incompatible subscription on `rt/restock_sim/cumotion/robot_description_updated`
+(`std_msgs/Bool`). Without it, nvblox receives no robot-masked depth, the ESDF /
+planning scene stays empty, cuMotion produces no plan, and the arm never picks —
+`inventory.sqlite` shows the job stuck at `collect` with 0 units loaded and 0
+observations. The robot sat stationary until the wrapper's 1200 s wall-clock cap
+sent `SIGTERM` (signal 15) mid-execute; `mission.json` was never written, so this
+is an interrupted run, not a clean pass or fail. The `robot_segmenter` load
+failure lives in the host-stack launch graph
+(`sim-restock-host-v2` runtime closure, `librobot_segmenter_node.so`), was latent
+in every prior run, and only became reachable once navigation stopped failing
+first. A secondary constraint: stepping runs at ~0.48 s wall per tick (render plus
+host ROS round-trips), so 34.5 s of simulation consumed ~1000 s of wall time —
+even without the stall, the full pair may not fit the 1200 s cap. No MP4 was
+produced for this incomplete mission. Artifacts:
+`run-32-collect-couple/{host-stack.log, inventory.sqlite, nav-trace.jsonl,
+mission-frames/}`.
+
 Resume CPU validation from the isolated worktree (runtime config remains in the
 task artifact directory, with machine paths kept out of reusable source):
 
