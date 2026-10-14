@@ -1183,6 +1183,48 @@ lane). Each collect sensing tick:
 This keeps every grasp input sensor-sourced, uses the one commissionable camera for identity+pose, and
 confines the arm to geometry it can measure from a moving eye-in-hand view.
 
+### Collect sensing wired + three gates cleared; blocked at the cross-session commissioning clock (2026-10-14)
+
+The collect consumer is implemented and the mission now drives the fixed-source capture. Merged PR55
+(scale_intrinsics + injectable clock) and PR56 (ROI-bounded decode, ~311 ms). Delivered on the branch:
+per-camera render_scale (collect source renders full-res 1.0 for its ~6 px/module markers, mapper/others
+0.375, matching scaled intrinsics); the `source` design support mapped to `job.source_bin` so baseline /
+slot / `collect_source_location` agree; `CollectTargetBridge` (fixed-source `SourceTarget` → host `Sensors`
+packet + live arm-image reprojection for the nvblox box via `reproject_carton_roi`); provider injected
+after `build_sensing`; re-commissioned `backstock_00` at scale 1.0 with the ROI persisted (`run-04`).
+CPU tests green throughout.
+
+Three successive native shakedown/attempt runs each cleared a gate and surfaced the next (collect reaches
+`MANIP_START`, masked depth reaches the host nvblox, host cuMotion/ESDF/MotionPlan all initialise):
+
+1. **run-42** — host watchdog, no target. `COLLECT_CAPTURE` diagnostic added.
+2. **run-43** — `FrameEvidence.validate` rejected the source frame: `now-stamp = -0.0167 s`, the render
+   leading the dt-clock by one physics step, with no tolerance. **Fixed** (`de014f5`): `FrameEvidence.validate`
+   now allows `-_RENDER_LEAD` on the stamp/tf checks (matches `frame_deadline`).
+3. **run-44** — `fresh support marker(s) not decoded`. Root cause: `author_camera_design` (the QR support
+   markers) is called only in the view bench / commissioning, never in the mission compose, so the mission
+   scene had cameras (via `CameraRig`) but no registration markers. **Fixed** (`2cc106c`): author the collect
+   source support's markers in the mission compose (markers-only; no duplicate cameras/mount colliders).
+4. **run-45** — `expired or reversed rigid-support commissioning clock` (`sensed.RegisteredSupport.age_at`).
+   The baseline (`run-04`) has `steady_domain=''`/`baseline_acquired_steady=None`, so `age_at` takes the
+   non-persistent path `age = now - baseline_stamp = 0.2 - 1.52 < 0` → reversed. Commissioning ran in a
+   SEPARATE process/sim session (sim stamp ≈ 1.52), the mission's sim clock restarts at 0, and the two
+   are not comparable. The persistent (cross-session) path needs the baseline + the mission capture to
+   share a `steady_domain` AND an acquisition clock comparable across processes — per-process
+   `time.monotonic()` (what the camera's `AcquisitionCamera` records) is not comparable across the
+   commissioning and mission processes.
+
+**This gate is a camera-lane acquisition-clock-policy question.** For a baseline commissioned in a separate
+process and consumed by the mission, `age_at` must gate on a clock that is continuous across processes.
+Proposed fix (needs camera-lane confirmation of how `calibrate_rigid_support` populates the geometry's
+`steady_domain`/`baseline_acquired_steady` and how `clock_context` threads through): give commissioning
+and the mission sensing lane a shared `clock_context` using **wall time** (`time.time()`) under one fixed
+`steady_domain`, and commission with a generous `lifetime_s`, so `age_at`'s persistent path measures real
+elapsed wall seconds since commissioning (bounded by lifetime) instead of incomparable sim/monotonic clocks.
+Alternatively, gate a pre-commissioned baseline by support identity (+ a wall-clock lifetime), not sim time.
+Integration can wire the shared `clock_context` once the camera lane confirms the scheme; everything up to
+this gate is proven in `run-45`.
+
 ### Consumer wiring ready; collect grasp gated by the fixed-source live-capture budget on this box (2026-10-14)
 
 PR54 (merged) added the `source_target_provider` to my contract. I built + CPU-tested the pure arm-image
