@@ -61,8 +61,13 @@ After compute authorization, and only under integration's resource guard:
 ```
 
 The foreground launch owns its children; stop it cleanly before moving the base.
-It starts MoveGroup, real cuMotion/static-scene/attachment components, NVIDIA
-robot segmentation, the existing shelfbot object segmenter and nvblox. No saved
+It starts MoveGroup, real cuMotion/static-scene/attachment components, the existing
+shelfbot object segmenter and nvblox. It does NOT run the NVIDIA RobotSegmenter: that
+node subscribed its `std_msgs/Bool` reload trigger to `cumotion/robot_description_updated`,
+which the cuMotion planner publishes as `std_msgs/UInt64`, so the composable container
+threw `could not create subscription: invalid allocator` and aborted the whole launch.
+The rig self mask is delegated to the Isaac side, which produces exact per-pixel
+instance-ID self masks every frame and publishes robot-masked depth (see below). No saved
 map is loaded. It sets sim time and fixed task isolation, rejects conflicting DDS
 domains/profiles/peers, disables automatic default FastDDS XML loading and uses
 UDPv4 loopback discovery. It does not start a hardware driver, robot state
@@ -108,15 +113,23 @@ Graph discovery is not motion readiness.
 
 Integration provides `/clock`, `/tf`, `/tf_static`, measured
 `/restock_sim/joint_states` (including movable CAD fingers/base as needed),
-registered `/restock_sim/camera/depth` and `/restock_sim/camera/camera_info`, and
-sensor-derived `/restock_sim/target_bbox` (`Float32MultiArray [u1,v1,u2,v2]`).
-NVIDIA segmenter emits `robot_world_depth`; shelfbot's existing mask node emits
-`world_depth`, the only nvblox depth input. Sensed target boxes must describe the
-current grasp target/carried target, not a fixture or USD pose. The inherited
+sensor-derived `/restock_sim/target_bbox` (`Float32MultiArray [u1,v1,u2,v2]`), and
+the rig-masked depth stream. Because the host no longer runs the NVIDIA
+RobotSegmenter, integration's Isaac side invalidates the robot+cart self pixels
+per frame from its instance-ID segmentation and publishes
+`/restock_sim/camera/masked_depth` (`sensor_msgs/Image`, `32FC1`, metres, self/no-return
+pixels `0.0`) with `/restock_sim/camera/masked_depth/camera_info` (`CameraInfo`), both
+stamped at mission sim time in frame `restock_camera_<id>` on domain 88. Shelfbot's
+existing mask node subscribes that masked depth, masks the grasp-target bbox out of it,
+and emits `world_depth`, the only nvblox depth input; nvblox's `input_qos` is
+`SENSOR_DATA` so the best-effort republished depth actually reaches the mapper, and its
+`camera_info` is taken straight from `masked_depth/camera_info`. Sensed target boxes must
+describe the current grasp target/carried target, not a fixture or USD pose. The inherited
 mask node uses receipt-aged, unstamped boxes and passes depth through when stale;
 it does not prove mask synchronization. Integration must gate motion on current
 sensing. Broad bounding-box removal can also hide background geometry; it is
-not a validated safe mask for every scene. No automatic success is inferred.
+not a validated safe mask for every scene. The Isaac self mask is ground-truth per-pixel,
+but a correct instance-ID mask is still integration's to certify. No automatic success is inferred.
 
 At each measured parked station, stop the host launch, move/park, restart it with
 an empty mapper, and acquire new sensor data. Mapping in a moving `ur_base_link`
@@ -323,19 +336,27 @@ the full pipeline publishes an EvidenceSnapshot whose slice frame is `map` and t
 `scripts/restock_runtime/launch_restock_host_stack.sh` is the one task-isolated recipe
 that starts the whole host manipulation graph — MoveIt `move_group`, the Isaac cuMotion
 servers, the shelfbot `object_segmenter`, and the nvblox mapper co-launched — on DDS
-domain 88 under the task-local runtime closure, never the rig's shared containers. Two
+domain 88 under the task-local runtime closure, never the rig's shared containers. Three
 load-time constraints are encoded in `launch.py` and `generate_assets.py`: the generated
 xrdf `default_joint_positions` names **only the six cspace arm joints** (cuMotion/cuRobo
 prunes off-arm-path branches such as the base's two-joint caster chains, and a default
 position for a pruned joint aborts the planner at load — `test_restock_host.py` locks
-this), and the composable nodes load **mapper before planner** (the `CumotionPlanner`
+this); the composable nodes load **mapper before planner** (the `CumotionPlanner`
 constructor blocks on the mapper's `get_esdf_and_gradient` service, so the reverse order
-deadlocks the container). Verified in one bounded guarded GPU run
-(`scripts/verify_restock_host_stack_gpu.py` + `scripts/restock_runtime/stack_probe.py`):
-6/7 servers up (the depth self-filter `RobotSegmenter` needs the real NITROS depth
-input), all stack endpoints advertised, `compute_ik` succeeds against the refined CAD
-config, the mapper serves an ESDF+gradient grid, and the stack's **measured VRAM ~1.16 GB
-fits** beside the Isaac renderer (~6.6 GB) and whispr (~2.2 GB) on the 12 GB card. A full
-cuMotion trajectory and `RobotSegmenter` need the sensor-populated ESDF world and live
-depth (`required_external`), integration-owned. Report:
-`data/sim-restock-host-v2/host-stack-launch-report.md`.
+deadlocks the container); and the **`RobotSegmenter` is not launched** — it subscribed its
+`std_msgs/Bool` reload trigger to `cumotion/robot_description_updated`, which the planner
+publishes as `std_msgs/UInt64`, so the container aborted with `could not create
+subscription: invalid allocator` and killed the whole launch. The rig self mask is
+delegated to the Isaac side (robot-masked depth on `camera/masked_depth`), and nvblox's
+`input_qos` is set `SENSOR_DATA` to match the best-effort `world_depth` republish.
+Verified in one bounded guarded GPU run (`scripts/verify_restock_host_stack_gpu.py` +
+`scripts/restock_runtime/stack_probe.py`): all **6 servers load with no node failure**, all
+stack endpoints advertised, `compute_ik` succeeds against the refined CAD config, a
+synthetic masked-depth frame fuses into a **non-empty ESDF (0 → ~2.5M observed voxels)**,
+and **one cuMotion joint-space plan returns a 16-point trajectory** against the populated
+map. Measured stack VRAM is map-dependent — ~0.9 GB for a small observed patch up to
+~3.4 GB when the whole workspace is carved free; the latter fits beside the Isaac renderer
+(~6.6 GB) and whispr (~2.2 GB) on the 12 GB card only by a thin margin, so the real
+per-station map size matters for the three-way fit. A full mission cuMotion trajectory still
+needs the sensor-populated ESDF world and live depth (`required_external`), integration-owned.
+Report: `data/sim-restock-host-v2/host-stack-maskdepth-report.md`.
