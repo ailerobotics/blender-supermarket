@@ -1305,6 +1305,38 @@ emitted each nvblox incorporation (continuous, independent of a grasp job). `par
 only when `collision_time` is finite and `0 <= now - stamp <= 0.5` (sim clock), else -1 (fail-closed). Once
 the host PR merges and the GPU returns, the collect capture clears gate 7 and hands the host a grasp target.
 
+### PR57 merged; gate-7 consumer rebuilt to the REAL interface; two more gates cleared; stuck at collision_time delivery (2026-10-14)
+
+The host ack (PR57, `twin.restock_host.incorporation_ack`) publishes on `/restock_sim/station/status` under
+the parked-station prepare/heartbeat/stop protocol (`/restock_sim/station/command`) — NOT the
+`/mapper/incorporation` topic I had guessed. Reverted that wrong consumer and wired the REAL one: the mission
+drives the ack via the existing `StationClient` (JsonChannel over station/command|status) and mirrors
+`station.collision_time` onto `IsaacMeasuredFeedback` each step before the capture; stop clears it. The ack
+is co-launched by `twin.restock_host.launch.description` (so `run_restock_host.py --launch` → the mission's
+`--host-stack` now starts it; launch-wiring test green). CPU-tested vs a fake channel.
+
+Two more gates cleared live across attempts 8-9:
+
+- **Gate 7 reached** — the capture now fails on the actual `collision_time` gate (`collision map has not
+  incorporated current clearance evidence`) rather than an AttributeError; the feedback is `IsaacMeasuredFeedback`.
+- **Gate 8 (station parked)** — attempt 8 died on `station lost measured parking`: `StationClient.tick` was
+  fed the instantaneous `IsaacMeasuredFeedback.parked()` (velocity `< 5 mm/s`), which flaps on sub-mm/rad
+  angular noise (`rw` hit 0.006). **Fixed**: thread the port's robust net-pose-displacement `Packet.parked`
+  through `ManipulationBridge`/`HostManipulationRuntime`/`RosManipulationRuntime` into a `_PortParkedFeedback`
+  whose `parked()` returns that robust value (drives both the station gate and the capture). CPU-tested.
+
+Attempt 9 then runs the station alive, masked depth flows (published=6), but `collision_time` never goes
+fresh, so the capture stays on the collision_time gate, no grasp target is produced, and the mission dies on
+the 5 s host watchdog. The ack process launches (`python3-*` in host-stack.log) but logs nothing past rcl
+startup — no prepare received / no `/station/status` published that the `StationClient` sees. Open question
+for the next run (a `STATION_STATS` diagnostic is committed, `c3b5c8a`): is this a **connection** problem (the
+Isaac-side JsonChannel prepare/status not crossing to the host ack over the mixed OmniGraph/rclpy DDS — note
+the masked-depth path needed a specific host DDS config to deliver) or a **timing** problem (the ack readies
+after the 5 s watchdog, since the collect flow must publish masked depth → nvblox integrate → ack ready →
+capture → host plan 3.30 s, within 5 s of the manip job)? `STATION_STATS` prints the station snapshot +
+mirrored collision_time per 10 steps to distinguish them. Likely cross-lane with the host ack (its prepare
+reception / status QoS). GPU released after the run.
+
 ### Consumer wiring ready; collect grasp gated by the fixed-source live-capture budget on this box (2026-10-14)
 
 PR54 (merged) added the `source_target_provider` to my contract. I built + CPU-tested the pure arm-image
