@@ -239,7 +239,7 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     _md=config.get('masked_depth',{})
     transport=NativeTransport(stage=stage,articulation_path=paths['articulation'],
         arm_base_path=paths['ur_base_link'],tf_paths=[paths['gripper_pad_tcp'],paths['gripper_tcp']],
-        command_gate=gate,robot=robot,
+        command_gate=gate,robot=robot,base_path=paths.get('base_link'),
         runtime_env=_md.get('runtime_env'),python=_md.get('python','python3'))
     stage.GetRootLayer().Save()
     evidence=dict(input_sha256=hashes,composition=composition,paths=paths,

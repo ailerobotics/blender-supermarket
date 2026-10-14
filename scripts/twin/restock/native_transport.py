@@ -92,7 +92,7 @@ class ArmCommandGate:
 class NativeTransport:
     def __init__(self, *, stage, articulation_path, arm_base_path, tf_paths,
                  command_gate, root='/RestockTransport', robot=None, runtime_env=None,
-                 python='python3'):
+                 python='python3', base_path=None):
         require_sim_domain()
         import omni.graph.core as og
         from pxr import Sdf
@@ -103,6 +103,11 @@ class NativeTransport:
                 raise ValueError('native transport frame missing: '+path)
         self.og,self.root,self.command_gate=og,root,command_gate
         self.stage,self.tf_paths=stage,list(tf_paths)
+        # The URDF root link (base_link) is MoveIt's planning frame, but nvblox/the relay root the
+        # tree at ur_base_link; without base_link <- ur_base_link in /tf, move_group cannot transform
+        # the collision object to its planning frame and the approach plan fails ("base_link ... does
+        # not exist"). Publish that rigid link each tick so the host tree reaches base_link too.
+        self.base_path = base_path if (base_path and stage.GetPrimAtPath(base_path)) else None
         self.arm_base_path=arm_base_path
         self.robot=robot            # physics articulation for /joint_states (names+positions)
         # Host-DDS relay for the sim-time backbone: /clock, /tf, /restock_sim/joint_states. These are
@@ -199,7 +204,17 @@ class NativeTransport:
             q = rel.ExtractRotationQuat()
             im = q.GetImaginary()
             entries.append((path, (t[0], t[1], t[2]), (im[0], im[1], im[2], q.GetReal())))
-        self._relay.publish('/tf', json.dumps(tf_payload(self.arm_base_path, entries, now)))
+        payload = tf_payload(self.arm_base_path, entries, now)
+        if self.base_path:                           # base_link <- ur_base_link, MoveIt's planning frame
+            rel = (cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.arm_base_path))
+                   * cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.base_path)).GetInverse())
+            t = rel.ExtractTranslation()
+            q = rel.ExtractRotationQuat()
+            im = q.GetImaginary()
+            base = tf_payload(self.base_path, [(self.arm_base_path, (t[0], t[1], t[2]),
+                                                (im[0], im[1], im[2], q.GetReal()))], now)
+            payload['tf'].extend(base['tf'])
+        self._relay.publish('/tf', json.dumps(payload))
 
     def close(self):
         self.command_gate.hold()
