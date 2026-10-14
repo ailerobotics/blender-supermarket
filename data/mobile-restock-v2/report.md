@@ -31,7 +31,7 @@ checks. Detail + exact commands are in the per-topic sections below.
 | Shelf-station sensing (decode) | RED (stale camera-config) | native | `view-shelf-lit-07` under merged PR#38 still 0/2; render byte-near-identical to pre-PR#38 (06→07 abs-diff max 27, 0 px>40). PR#38 fixed the generator but the consumed camera-config.json data file (mtime 2026-10-13 23:31, pre-PR#38) is STALE → old marker placement. Camera worker to regenerate camera-config.json |
 | Mapper construction | CONFIRMED | native | `mapper-evidence-construct-01` (PR#29 runtime closure): EvidenceProducerNode instantiated + advertised services/topic + 5893 ticks, GPU reclaimed; incorporation = sensor+handshake next |
 | Collision-map incorporation (mapper) | GREEN | native | `incorp-identity-03` under merged PR#33: full path EmptyGeneration ACCEPT → admission → 2 frames registered+integrated → EvidenceSnapshot (frame_id='map') → `accept_envelope` ADOPTED. Measured identity: gen mission_incorp_e, nonce+certificate echoed, index 1, rev 1, front→front_optical, slice_adopted true, full_height_certified false |
-| Full autonomous restock cycle | ATTEMPTED, BLOCKED at preflight | native+gated | run-01 (guarded, env_isaaclab): CPU check ok:True, standalone preflight files_ready:True (system python, refined host CAD), but the launcher preflight fails under env_isaaclab on host_cad_configuration ('recomputed coverage... differ; rerun generate_assets') so Isaac does not boot. Behind it: cuRobo planner absent in env_isaaclab + no live cuMotion/mapper servers. Integration complete (bundle+3 factories+sensing_sources, 541 CPU tests); host-lane asset-report regen + deployment prerequisites remain |
+| Full autonomous restock cycle | BOOTS CLEAN, BLOCKED at transfer-manip construction | native+gated | runs 05-07 (guarded, env_isaaclab, --host-stack): GPU guard, host MoveIt/cuMotion warmup (6/7), Isaac boot, ROS2 bridge **'rclpy loaded'**, full scene composition and arm-camera authoring all PASS. Two defects found + fixed en route: Isaac-ROS-bridge env (system /opt/ros rclpy shadowed the bundled Jazzy one) and the arm camera (attached to a body frame, not a Camera prim). Then blocks: `ModuleNotFoundError: No module named 'curobo'` — `isaac_factory`→`CadRestockRuntime`→`build_cad_planner` imports shelfbot's IN-PROCESS cuRobo planner, which is not installed; the provisioned planner is the HOST cuMotion ROS stack. Factory raises before `mission.start()`, so no stages tick / no MP4 this attempt. See "Full assembled mission run (d)" below |
 
 Source-station note: per the integration/camera contract the 3/3 native decode
 (`view-source-lit-01`) is the accepted source-station sensing proof. The pre-capture
@@ -40,6 +40,71 @@ into the mission-bundle station sensing, where `base_from_camera`, `FrameEvidenc
 the support/auxiliary layout are wired from the camera config in one place, rather than
 hand-assembled against camera-owned internals for a one-off run; the native vacancy
 capture it feeds requires the mapper incorporation gate above regardless.
+
+## Full assembled mission run (d): boots clean through every infrastructure gate, blocks at transfer-manipulation (measured)
+
+The full assembled mission was attempted as one bounded guarded native run with the
+host planner stack co-launched (`run_mobile_restock.sh --execute --host-stack`, env_isaaclab,
+task-local NVIDIA runtime, domain 88, `--heavy-threshold-mb 2500`). It now boots cleanly
+through **every** infrastructure gate and stops at a single, specific, measured blocker.
+
+Measured progression (runs 05-07; console logs + `run-06/07/mission-error.txt` under the
+task scratch dir):
+
+1. **GPU guard** passes (>= 8 GiB VRAM free) once orphaned co-launch host-stack GPU
+   processes are reclaimed. (Teardown note below.)
+2. **Host MoveIt/cuMotion stack** warms up: 6/7 servers advertise; the `robot_segmenter`
+   NITROS-allocator failure is the documented-expected one.
+3. **Isaac Sim** boots and composes the full scene (store + mobile UR10 + rollwagen +
+   gripper + physics).
+4. **ROS2 bridge**: `rclpy loaded` — the bundled Jazzy rclpy initializes.
+5. **Arm camera** is authored and initialized.
+6. **Transfer-stage manipulation construction** raises
+   `ModuleNotFoundError: No module named 'curobo'`.
+
+Two integration defects were found and fixed to reach the blocker:
+
+- **Isaac ROS2 bridge env.** The bridge first failed with
+  `No module named 'rclpy._rclpy_pybind11'`: a login shell sources the system
+  `/opt/ros/jazzy` overlay, putting its python3.12 `site-packages` on `PYTHONPATH` and
+  `/opt/ros/jazzy` on `AMENT_PREFIX_PATH`, so Isaac imported that (wrong-ABI) rclpy instead
+  of its bundled one. The fix lives in `scripts/run_mobile_restock.sh`: on `--execute` it
+  clears the ROS prefix vars, pins `PYTHONPATH` to the scripts dir, selects
+  `rmw_fastrtps_cpp`, and appends the bundled `isaacsim.ros2.bridge/jazzy/lib` to
+  `LD_LIBRARY_PATH`. This must be set at process creation (the ELF loader and rclpy
+  resolver are fixed before Python starts). Result: runs 05/06/07 log `rclpy loaded`.
+- **Arm camera prim.** `twin/restock_manipulation/isaac_factory.py` constructed an Isaac
+  `Camera(prim_path=paths['front_camera_frame'])`, but `front_camera_frame` is a URDF body
+  frame (an Xform, `rpy="0 0 0"` off `base_link`), not a USD Camera, so Isaac raised
+  "prim path does not correspond to a Camera prim." The factory now authors a child USD
+  `Camera` under that frame, oriented so the USD camera (looks -Z, +Y up) faces forward
+  along the frame's +X with +Z up. Run-07 clears this gate.
+
+**Remaining blocker (measured).** `isaac_factory` → `CadRestockRuntime` →
+`isaac_motion.build_cad_planner` imports `shelfbot.planning.curobo_planner`, which imports
+`curobo` (NVIDIA cuRobo). `curobo` is not installed in any environment on this machine; the
+only cuMotion present is the **host** stack's ROS2 `isaac_ros_cumotion` packages (MoveGroup
+on domain 88), consumed by `twin/restock_manipulation/ros_adapter.py:RosMotionPort` in host
+Python (it needs `moveit_msgs`, which the Isaac interpreter does not carry). So the
+in-process cuRobo path that `CadRestockRuntime` uses is the retired manipulation lane's
+mechanism, not the planning capability this environment actually provisions. Because the
+factory raises before `mission.start()`, no mission stages tick and no mission MP4 is
+recorded in this attempt. Wiring the Isaac mission's manipulation to the host cuMotion path
+(or installing cuRobo into the Isaac interpreter) is the open integration decision; it
+touches the retired manipulation lane's runtime (`isaac_runtime.py`/`isaac_motion.py`).
+
+`run_mobile_restock.py` now persists the construction traceback to
+`<output>/mission-error.txt` before `app.close()`, because Isaac's `SimulationApp.close()`
+can terminate the process hard and otherwise the outer `finally` (which writes
+`mission.json`) never runs and the traceback is lost.
+
+**Shared-environment teardown note.** The co-launched host stack's
+`run_restock_host.py --launch` calls `setsid`, so it escapes `run_mobile_restock.py`'s
+process-group teardown and leaves orphaned GPU-holding `component_container_mt` processes
+that block the next boot. They must be reclaimed by targeting the actual `/dev/nvidia*`
+holders only — never by matching `run_restock_host.py` on the command line, because the
+CPU-only host worker runs an identically-named process concurrently that must not be
+touched. A robust in-run teardown remains to be implemented.
 
 ## Mapper launch check: nvblox inits under guards, node load blocked by missing host package
 

@@ -4,5 +4,55 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESTOCK_PYTHON="${RESTOCK_PYTHON:-python3}"
+
+# The --execute path boots Isaac Sim in RESTOCK_PYTHON. Its ROS2 bridge must load
+# the bundled Jazzy rclpy, not the system one: the ELF loader and rclpy resolver
+# are fixed at process creation, so this env has to be set HERE, before Python
+# starts (see data/mobile-restock-v2/report.md, "Isaac ROS bridge"). Two things
+# are required and must not be undone inside Python:
+#   1. Drop the system ROS overlay from the resolver. A login shell sources
+#      /opt/ros/<distro>/setup, which puts python3.12 site-packages on PYTHONPATH
+#      and /opt/ros on AMENT_PREFIX_PATH; Isaac then imports that rclpy (wrong ABI:
+#      "No module named 'rclpy._rclpy_pybind11'") instead of its bundled one. We
+#      set PYTHONPATH to only this scripts dir (for twin.*) and clear the ROS
+#      prefix vars. The host stack child re-sources its own overlay regardless.
+#   2. Put the bundled Jazzy native libs on LD_LIBRARY_PATH and select FastRTPS,
+#      so the bundled rclpy's C extension resolves ("rclpy loaded").
+# RESTOCK_NVIDIA_RUNTIME (optional) is the task-local matching NVIDIA userspace
+# whose nvidia-smi/libs the GPU guard and Isaac need beside a mismatched host driver.
+for arg in "$@"; do
+  if [ "$arg" = "--execute" ]; then
+    unset AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH ROS_PACKAGE_PATH || true
+    export PYTHONPATH="$SCRIPT_DIR"
+    export ROS_DISTRO=jazzy
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-88}"
+    export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-1}"
+    export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
+    # Resolve the one bundled Jazzy bridge lib dir via the interpreter itself so
+    # the exact pythonX.Y is right and stray siblings/symlinks cannot double-match.
+    jazzy="$("$RESTOCK_PYTHON" - <<'PY'
+import glob, os, sys
+prefix = os.path.dirname(os.path.dirname(os.path.realpath(sys.executable)))
+pat = os.path.join(prefix, 'lib', 'python*', 'site-packages', 'isaacsim',
+                   'exts', 'isaacsim.ros2.bridge', 'jazzy', 'lib')
+cands = sorted({os.path.realpath(p) for p in glob.glob(pat)})
+cands = [c for c in cands if os.path.isfile(os.path.join(c, 'librmw_fastrtps_cpp.so'))]
+print(cands[0] if len(cands) == 1 else '')
+PY
+)"
+    if [ -z "$jazzy" ] || [ ! -f "$jazzy/librmw_fastrtps_cpp.so" ]; then
+      echo "run_mobile_restock.sh: one bundled Isaac Jazzy bridge lib dir required for $RESTOCK_PYTHON" >&2
+      exit 3
+    fi
+    if [ -n "${RESTOCK_NVIDIA_RUNTIME:-}" ]; then
+      export PATH="$RESTOCK_NVIDIA_RUNTIME/usr/bin:$PATH"
+      export LD_LIBRARY_PATH="$RESTOCK_NVIDIA_RUNTIME/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+    fi
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$jazzy"
+    break
+  fi
+done
+
 exec timeout --signal=TERM --kill-after=15s 1200s \
   "$RESTOCK_PYTHON" "$SCRIPT_DIR/run_mobile_restock.py" "$@"

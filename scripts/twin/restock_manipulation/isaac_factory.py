@@ -129,11 +129,20 @@ def _build_runtime(*, app, assembly, params, output):
     Only runs inside the live app; the CPU contract tests inject `_builder`.
     """
     import numpy as np
+    from pxr import Gf, UsdGeom
     from isaacsim.sensors.camera import Camera
     from .isaac_runtime import CadRestockRuntime
 
     paths = assembly.paths
-    camera = Camera(prim_path=paths['front_camera_frame'])
+    # front_camera_frame is a URDF body frame (+X forward, +Z up), not a Camera prim.
+    # Author a child USD Camera (which looks -Z with +Y up) oriented to look forward
+    # along the frame's +X with +Z up; Camera() then adopts this existing prim.
+    stage = assembly.stage
+    camera_path = paths['front_camera_frame'] + '/arm_camera'
+    if not stage.GetPrimAtPath(camera_path):
+        cam = UsdGeom.Camera.Define(stage, camera_path)
+        cam.AddTransformOp().Set(Gf.Matrix4d(0, -1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 1))
+    camera = Camera(prim_path=camera_path)
     camera.initialize()
     source = params.stations['source']
     return CadRestockRuntime(

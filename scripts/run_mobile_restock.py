@@ -10,6 +10,7 @@ import signal
 import subprocess
 import threading
 import time
+import traceback
 
 from twin.restock.guard import available_ram_mb, gpu_slot
 from twin.restock.inventory import Inventory, Job
@@ -159,6 +160,14 @@ def run(args, manifest, scenario):
             except Exception as exc:
                 if mission is not None and not mission.terminal:
                     mission.fail(str(exc))
+                # Persist the failure before app.close(): Isaac's SimulationApp.close()
+                # can terminate the process hard, so the outer finally that writes
+                # mission.json may never run and the traceback would otherwise be lost.
+                try:
+                    (args.output/'mission-error.txt').write_text(
+                        ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+                except Exception:
+                    pass
                 raise
             finally:
                 # Cleanup stays inside GPU lock, including partial boot failures.
