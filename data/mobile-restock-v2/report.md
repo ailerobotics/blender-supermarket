@@ -1503,3 +1503,14 @@ stage_clock seam and stamps + validates freshness in that /clock domain; the fac
 stage_clock=lambda: assembly.transport.stage_time. CPU-tested: a stage-stamped prepare clears
 IncorporationAckState.accept at 0 and 0.4 s skew and is refused at 0.6 s; the StationClient stamps
 from the stage clock, not the passed mission time (628 passed).
+
+### 2026-10-14 — residual trailing-clock skew (<0.3s): publish_lag past-dates station stamps
+
+After the /clock alignment, run-66 measured stage_stamp=0.2333 == mission now=0.233 (origin~=0 in
+this mission, so the domain alignment was a no-op here) yet the ack still rejected: its /clock
+TRAILS the stamp at processing (ack now()=0.20 when stamp=0.233), tripping the strict 0<=now-stamp
+lower bound on a ~0.03 s NEGATIVE skew -- the small station/command outruns the matching /clock
+update on a separate topic. Residual skew ~0.03 s, well below Firstmate's 0.3 s host-escalation
+threshold, so handled on this branch: StationClient.publish_lag=0.1 past-dates every command stamp
+by ~6 clock periods (<< the 0.5 s window) to a /clock value the ack is sure to already hold, so
+ack now() >= stamp. CPU-tested. Host ack 0.5 s contract untouched.

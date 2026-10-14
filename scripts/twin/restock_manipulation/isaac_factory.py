@@ -411,7 +411,12 @@ def _build_runtime(*, app, assembly, params, output):
         # Stamp station/command in the /clock (Isaac stage-time) domain the host ack validates
         # against -- read native_transport's last-published stage time -- NOT the mission clock
         # (Packet.simulation_time, zeroed at the first action), which the ack rejected as stale.
-        station = StationClient(channel, stage_clock=lambda: assembly.transport.stage_time)
+        # publish_lag past-dates the command stamp by ~6 clock periods (<< the ack's 0.5 s window)
+        # so the ack -- whose /clock can lag the just-sampled stage time by ~one step when the fast
+        # command outruns the matching /clock update -- never sees now() behind the stamp (run-66:
+        # ack now()=0.20 vs stamp=0.233 tripped the strict 0<=now-stamp lower bound).
+        station = StationClient(channel, stage_clock=lambda: assembly.transport.stage_time,
+                                publish_lag=0.1)
     runtime = RosManipulationRuntime(graph, collect_bridge.capture,
                                      prepare_station=lambda operation, job: None,
                                      sensing_bridge=sensing_bridge, feedback=feedback,

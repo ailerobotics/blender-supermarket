@@ -58,9 +58,15 @@ class StationClient:
     # mission's Packet.simulation_time is zeroed at the first mission action -- two epochs. The
     # stage_clock seam reads the same stage-time source native_transport publishes on /clock, at the
     # moment of publish, so both sides share one clock domain and the ack's bound stays untouched.
-    def __init__(self, channel, *, wall_clock=time.monotonic, stage_clock=None):
+    def __init__(self, channel, *, wall_clock=time.monotonic, stage_clock=None, publish_lag=0.):
         self.channel,self.wall_clock=channel,wall_clock
         self.stage_clock=stage_clock
+        # Stamp commands a touch in the PAST (one /clock value the ack is sure to already hold):
+        # /clock and station/command are separate topics, and the small fast command can reach the
+        # ack before the matching /clock update, leaving the ack's now() ~one step BEHIND the stamp
+        # -- which the ack's strict `0 <= now - stamp` lower bound rejects. publish_lag (a few clock
+        # periods, << the 0.5 s window) absorbs that delivery skew while staying in the /clock domain.
+        self.publish_lag=float(publish_lag)
         self.epoch=0
         self.sequence=0
         self.active=False
@@ -108,7 +114,7 @@ class StationClient:
             acknowledged=self.latest is not None
             self.channel.publish(dict(action='heartbeat' if acknowledged else 'prepare',
                 epoch=self.epoch,sequence=self.sequence if acknowledged else 0,
-                stamp=now,parked=True,camera_frame=self.camera_frame))
+                stamp=now-self.publish_lag,parked=True,camera_frame=self.camera_frame))
             self.sequence+=1
             self.last_send=now
 
@@ -128,6 +134,6 @@ class StationClient:
         if self.active:
             self.sequence+=1
             self.channel.publish(dict(action='stop',epoch=self.epoch,sequence=self.sequence,
-                                      stamp=self.now,parked=True))
+                                      stamp=self.now-self.publish_lag,parked=True))
         self.active=False
         self.latest=None

@@ -83,8 +83,10 @@ class RosManipulationRuntime:
             self._sc = getattr(self, '_sc', 0) + 1
             if self._sc % 10 == 1:                       # STATION_STATS diagnostic
                 snap = getattr(self.station, 'latest', None)
+                sc = getattr(self.station, 'stage_clock', None)
+                stage = sc() if sc is not None else None
                 print(f'STATION_STATS tick={self._sc} now={simulation_time:.3f} '
-                      f'collision_time={self.feedback.collision_time} '
+                      f'stage_stamp={stage} collision_time={self.feedback.collision_time} '
                       f'ready={self.station.ready(simulation_time)} snapshot={snap}', flush=True)
         if self.sensing_bridge is not None:
             # Continuous masked depth + info + TF + (cached) target bbox for the host

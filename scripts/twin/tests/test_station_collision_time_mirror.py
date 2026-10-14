@@ -52,7 +52,19 @@ def test_station_command_stamped_in_stage_clock_domain_not_mission_time():
                        stage_clock=lambda: 42.0)
     st.begin('restock_camera_arm', now=0.233)          # mission time 0.233 -> ignored for the stamp
     assert ch.sent[-1]['action'] == 'prepare'
-    assert ch.sent[-1]['stamp'] == 42.0                # stamped from the stage clock
+    assert ch.sent[-1]['stamp'] == 42.0                # stamped from the stage clock (no publish_lag)
+
+
+def test_publish_lag_past_dates_the_command_stamp_for_a_trailing_ack_clock():
+    # The ack's /clock can lag the just-sampled stage time (command outruns the /clock update), so
+    # publish_lag past-dates the stamp to keep the ack's now() >= stamp within its 0.5 s window.
+    ch = FakeChannel()
+    st = StationClient(ch, wall_clock=lambda c=itertools.count(100., .001): next(c),
+                       stage_clock=lambda: 42.0, publish_lag=0.1)
+    st.begin('restock_camera_arm', now=0.0)
+    assert ch.sent[-1]['stamp'] == pytest.approx(41.9)  # 42.0 stage - 0.1 lag
+    # An ack whose now() trails the stage clock by ~one step still clears 0 <= now - stamp <= 0.5:
+    assert 0 <= (42.0 - 0.03) - ch.sent[-1]['stamp'] <= 0.5
 
 
 def test_ack_accepts_stage_stamped_prepare_within_half_second_and_refuses_beyond():
