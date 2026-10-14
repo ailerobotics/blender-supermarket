@@ -1253,6 +1253,34 @@ expiry races the contention. Needs Firstmate to briefly hold the shelf-twin work
 commission+attempt can run back-to-back. All code gates are fixed and pushed; only GPU access blocks the
 final attempt.
 
+### Ran under a reserved GPU; gates 5-6 cleared live; stops at gate 7 (motion/mapper port) (2026-10-14)
+
+Firstmate held the shelf-twins off and granted the GPU. Commission + collect+couple attempt ran
+back-to-back (`run-12` baseline + `run-52-attempt7`). Live result — the collect sensing/perception chain
+now clears SIX support-validation gates in the running mission:
+
+`nav(arrived_stopped) -> MANIP_START(collect) -> masked depth at the host nvblox -> source markers decode
+-> freshness(render-lead) -> commissioning clock -> layout_id -> support witness`
+
+each with the fixes above. The attempt then fails at **gate 7**: `IsaacCartonSensors.capture` calls
+`motion.collision_time` (and `motion.joint_positions()`, `motion.observe_source()`), but the sensing lane
+is wired with `manip_runtime.motion = _ArticulationParked`, a parked-only port — `AttributeError:
+'_ArticulationParked' object has no attribute 'collision_time'`. `collision_time` is the nvblox
+mapper-incorporation freshness stamp (`0 <= now-collision_time <= 0.5`), sourced in the mission from the
+host reply (`native_channel.collision_time` / `station.collision_time`), NOT from the articulation. It
+must be a real mapper-incorporation value (the sensor-provenance invariant forbids fabricating it as
+`now`).
+
+Remaining work to a full collect+couple (each likely its own gate, as the live sensing path was never
+exercised before): (1) a composite sensing **motion port** exposing `collision_time` from the live nvblox
+incorporation + `joint_positions` from the articulation + a no-op `observe_source`, which depends on the
+host→Isaac mapper-incorporation feedback reaching the sensing lane; (2) the host cuMotion **grasp plan +
+reply** within the IsaacRosGraph watchdog (host cold first-job was 3.30 s uncontended; contended figure
+still to be measured once a target is produced); (3) the **couple** (cart dock/latch) stage. The collect
+PERCEPTION chain (identity + pose + reprojected nvblox target box, all sensor-sourced) is proven to the
+point of handing the host a grasp target; the gate-7 motion/mapper port is the next piece. GPU released
+back to the shared pool after the run.
+
 ### Consumer wiring ready; collect grasp gated by the fixed-source live-capture budget on this box (2026-10-14)
 
 PR54 (merged) added the `source_target_provider` to my contract. I built + CPU-tested the pure arm-image
