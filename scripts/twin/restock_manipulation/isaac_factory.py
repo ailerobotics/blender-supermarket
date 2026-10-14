@@ -154,13 +154,52 @@ def _build_runtime(*, app, assembly, params, output):
         voxel_dims=params.voxel_dims, voxel_size=params.voxel_size, walls=params.walls)
 
 
+class _UnavailableManipulation:
+    """Honest stand-in when the in-process cuRobo planner is not provisioned.
+
+    Construction succeeds so the mission still exercises and records every stage,
+    but the manipulation stages (collect, transfer) report status ``'unavailable'``
+    with the measured reason. It never fabricates a successful grasp or placement.
+    This is the interim path until manip_factory is switched to the host cuMotion
+    MoveGroup port; see data/mobile-restock-v2/report.md.
+    """
+    def __init__(self, reason):
+        from types import SimpleNamespace
+        self._reason = reason
+        # ManipulationBridge(owns_sensor_io=True) reads controller.controller.cart_location.
+        self.controller = SimpleNamespace(cart_location='rollwagen')
+
+    def start(self, operation, job):
+        pass
+
+    def configure_station(self, *, slots, base_from_camera):
+        pass
+
+    def step(self, dt, simulation_time):
+        from .types import Result
+        return Result('unavailable', 'unavailable', self._reason)
+
+    def stop(self):
+        pass
+
+
 def create(*, app, assembly, plan, config, output, _builder=None):
     """Assemble the manipulation runtime and return a configured ManipulationBridge."""
     from twin.restock.runtime import ManipulationBridge
 
     params = parse_manipulation_config(config, plan.job_sku)
     build = _builder or _build_runtime
-    runtime = build(app=app, assembly=assembly, params=params, output=output)
+    try:
+        runtime = build(app=app, assembly=assembly, params=params, output=output)
+    except ModuleNotFoundError as exc:
+        # The in-process cuRobo planner (shelfbot_newgripper) is not installed in the
+        # Isaac interpreter. Degrade honestly instead of crashing the whole factory, so
+        # the mission records the full navigate/couple/tow/park/verify/return loop with
+        # the manipulation stages reported FAILED-unavailable (never a mock success).
+        if exc.name != 'curobo':
+            raise
+        runtime = _UnavailableManipulation(
+            f'manipulation construction unavailable: in-process cuRobo not provisioned ({exc})')
 
     def prepare_station(operation, job):
         station = ACTION_STATION.get(operation)

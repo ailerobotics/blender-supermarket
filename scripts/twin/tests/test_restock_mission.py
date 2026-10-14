@@ -65,6 +65,32 @@ class MissionTests(unittest.TestCase):
         m.tick(.1)
         self.assertEqual(self.inv.count('shelf', 'milk'), 1)
 
+    def test_unavailable_stage_records_failed_continues_and_ends_failed(self):
+        # Honest degradation: a stage that reports 'unavailable' is recorded FAILED, the
+        # mission keeps exercising every later stage, and the overall outcome is 'failed'.
+        class Degraded(Fixture):
+            def step(self, dt):
+                result = super().step(dt)
+                if self.action == 'transfer':
+                    return Result('unavailable', {}, 'manipulation unavailable: cuRobo not provisioned')
+                return result
+        self.adapter = Degraded()
+        m = self.mission(fixture_mode=True)
+        seen = []
+        for _ in range(len(ACTIONS)):
+            seen.append(m.state)
+            m.tick(.1)
+        # Every stage was attempted, including the ones after the unavailable transfer.
+        self.assertEqual(seen, list(ACTIONS))
+        self.assertEqual(m.state, 'failed')
+        self.assertIn('transfer', m.reason)
+        self.assertEqual(m.degraded, ['transfer'])
+        # Transfer was recorded as unavailable, never as a success.
+        actions = [e['state'] for e in self.inv.events('one')]
+        self.assertIn('transfer_unavailable', actions)
+        self.assertNotIn('transfer_succeeded', actions)
+        self.assertTrue(self.adapter.stopped)
+
     def test_production_rejects_fixture_and_ground_truth(self):
         m = self.mission()
         m.tick(.1)

@@ -205,7 +205,7 @@ class RuntimeAdapter:
         if self.action in ('collect', 'transfer'):
             r = self.manip.step(dt, p)
             deadline=getattr(p.manipulation,'valid_until_steady',None)
-            if deadline is not None and r.status!='failed':
+            if deadline is not None and r.status not in ('failed','unavailable'):
                 require_fresh(deadline,time.monotonic)
             # MotionPort owns trajectory commands; port must only dispatch
             # gripper/stop controls, never issue a second trajectory for `move`.

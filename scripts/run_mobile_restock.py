@@ -157,6 +157,14 @@ def run(args, manifest, scenario):
                 summary = {'state': mission.state, 'reason': mission.reason,
                            'physics_verified': False,
                            'note': 'Mission success alone does not verify video, contacts or autonomy.'}
+                # Persist the per-stage summary now, before the finally runs app.close():
+                # Isaac's SimulationApp.close() can terminate the process hard and skip the
+                # outer finally (which re-writes mission.json with events as a fallback).
+                try:
+                    early = dict(summary, events=db.events(scenario['job']['job_id']))
+                    (args.output/'mission.json').write_text(json.dumps(early, indent=2, allow_nan=False)+'\n')
+                except Exception:
+                    pass
             except Exception as exc:
                 if mission is not None and not mission.terminal:
                     mission.fail(str(exc))

@@ -40,6 +40,10 @@ class Mission:
         self.max_evidence_age_s = max_evidence_age_s
         self.state, self.reason = 'new', ''
         self.time = self.elapsed = 0.
+        # Stages attempted but reported 'unavailable' (a provisioned-capability gap, e.g.
+        # in-process cuRobo). They are recorded FAILED and the mission keeps running so the
+        # full choreography is exercised, but the overall outcome is forced to 'failed'.
+        self.degraded = []
 
     @property
     def terminal(self):
@@ -108,19 +112,35 @@ class Mission:
             result = self.adapter.step(dt)
             if result.status == 'running':
                 return self.state
+            if result.status == 'unavailable':
+                # Honest degradation: the stage was attempted but its capability is not
+                # provisioned. Record it FAILED (never success), keep the mission moving so
+                # the full loop is recorded, and force an overall 'failed' outcome at the end.
+                self.degraded.append(self.state)
+                self.inventory.record(self.job.job_id, self.state + '_unavailable',
+                                      {'reason': result.reason})
+                self._advance()
+                return self.state
             if result.status != 'succeeded':
                 raise RuntimeError(result.reason or f'invalid/failed status: {result.status}')
             self._validate(result.evidence)
             if self.state == 'verify':
                 self.inventory.verify(self.job, result.evidence)
             self.inventory.record(self.job.job_id, self.state + '_succeeded', result.evidence)
-            index = ACTIONS.index(self.state) + 1
-            if index == len(ACTIONS):
-                self.adapter.stop()
-                self.inventory.record(self.job.job_id, 'complete', {})
-                self.state = 'complete'
-            else:
-                self._begin(ACTIONS[index])
+            self._advance()
         except Exception as exc:
             self.fail(str(exc))
         return self.state
+
+    def _advance(self):
+        index = ACTIONS.index(self.state) + 1
+        if index == len(ACTIONS):
+            self.adapter.stop()
+            if self.degraded:
+                self.state, self.reason = 'failed', 'stages unavailable: ' + ', '.join(self.degraded)
+                self.inventory.record(self.job.job_id, 'failed', {'reason': self.reason})
+            else:
+                self.inventory.record(self.job.job_id, 'complete', {})
+                self.state = 'complete'
+        else:
+            self._begin(ACTIONS[index])
