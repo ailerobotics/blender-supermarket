@@ -206,97 +206,77 @@ def masked_depth_from_frame(frame, rig_prefixes, id_cache, *, invalid=INVALID_DE
     masked = mask_rig_depth(depth, ids, id_cache[1], invalid=invalid)
     return masked, id_cache
 
+class ArmDepthSubprocessBridge:
+    """Ship arm masked-depth frames to the out-of-Isaac rclpy publisher subprocess.
 
-class ArmDepthOmniGraphBridge:
-    """Publish arm masked-depth (Image) + camera_info + target_bbox via OmniGraph ROS2 nodes.
+    Built only inside the guarded app (lazy pxr). On construction it (1) creates an optical
+    child prim `restock_camera_arm` under the arm camera and hands it to native_transport's
+    existing ROS2PublishTransformTree (so ur_base_link -> restock_camera_arm + /clock publish
+    every physics tick), and (2) spawns `masked_depth_ipc.serve` under the host overlay ROS
+    env (domain 88) and connects a Unix socket to it. `publish(now)` reads one arm-camera
+    frame, masks the rig self-pixels, and ships (stamp, frame_id, w, h, K, bbox, depth) to the
+    subprocess, which publishes masked_depth + camera_info + target_bbox on that one stamp.
 
-    Built only inside the guarded app (lazy `omni.graph.core`). TF (restock_camera_arm ->
-    ur_base_link) is NOT published here: an optical child prim `restock_camera_arm` is created
-    under the arm camera and added to the existing native_transport /tf tree, which publishes
-    it every physics tick alongside /clock. `publish(now)` reads one arm-camera frame, masks
-    the rig self-pixels, and emits depth + camera_info + the cached target bbox on one stamp.
-
-    - `camera` is the Isaac arm Camera (render product + get_current_frame + intrinsics);
-    - `transport` is the native_transport graph exposing `add_frames([optical_path])`;
-    - `sensors` exposes `sensed_target_bboxes`; set `target_location` per operation.
+    `sensors` exposes `sensed_target_bboxes`; set `target_location` per operation.
     """
 
-    DEPTH_TOPIC = '/restock_sim/camera/masked_depth'
-    INFO_TOPIC = '/restock_sim/camera/masked_depth/camera_info'
-    BBOX_TOPIC = '/restock_sim/target_bbox'
-
     def __init__(self, *, camera, camera_path, stage, transport, sensors, rig_prefixes,
-                 frame_id='restock_camera_arm', domain=88, invalid=INVALID_DEPTH,
-                 root='/RestockMaskedDepthROS'):
-        import omni.graph.core as og
-        from pxr import UsdGeom, Gf, Sdf
-        if stage.GetPrimAtPath(root):
-            raise ValueError('refusing to overwrite the masked-depth ROS graph')
-        self.og, self.root, self.frame_id = og, root, frame_id
+                 runtime_env, python='python3', frame_id='restock_camera_arm', domain=88,
+                 invalid=INVALID_DEPTH, socket_path=None, idle_timeout_s=1800.0):
+        from pxr import UsdGeom, Gf
         self.camera, self.sensors = camera, sensors
         self.rig_prefixes = tuple(rig_prefixes)
         if not self.rig_prefixes:
             raise ValueError('rig_prefixes required to identify robot/cart self-returns')
-        self.invalid = float(invalid)
+        self.frame_id, self.invalid = frame_id, float(invalid)
         self.target_location = None
         self._id_cache = (None, frozenset())
         self._bbox = None
 
-        # Optical child prim (ROS +Z forward / +Y down) under the USD camera (-Z / +Y up).
+        # Optical child prim (ROS +Z forward / +Y down) under the USD camera (-Z / +Y up),
+        # handed to the existing TF tree.
         optical_path = camera_path + '/' + frame_id
         if not stage.GetPrimAtPath(optical_path):
             xf = UsdGeom.Xform.Define(stage, optical_path)
             xf.AddTransformOp().Set(Gf.Matrix4d(1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1))
-        # Hand the optical frame to the existing TF tree (parent ur_base_link via the chain).
         transport.add_frames([optical_path])
 
-        render_product = camera.get_render_product_path()
-        keys = og.Controller.Keys
-        og.Controller.edit({'graph_path': root, 'evaluator_name': 'execution'}, {
-            keys.CREATE_NODES: [
-                ('tick', 'omni.graph.action.OnImpulseEvent'),
-                ('context', 'isaacsim.ros2.bridge.ROS2Context'),
-                ('info', 'isaacsim.ros2.bridge.ROS2CameraInfoHelper'),
-                ('depth', 'isaacsim.ros2.bridge.ROS2PublishImage'),
-                ('bbox', 'isaacsim.ros2.bridge.ROS2Publisher')],
-            keys.SET_VALUES: [
-                ('context.inputs:useDomainIDEnvVar', False), ('context.inputs:domain_id', domain),
-                ('info.inputs:renderProductPath', render_product),
-                ('info.inputs:topicName', self.INFO_TOPIC), ('info.inputs:frameId', frame_id),
-                ('info.inputs:useSystemTime', False), ('info.inputs:resetSimulationTimeOnStop', False),
-                ('depth.inputs:topicName', self.DEPTH_TOPIC), ('depth.inputs:frameId', frame_id),
-                ('depth.inputs:encoding', '32FC1'),
-                ('bbox.inputs:topicName', self.BBOX_TOPIC),
-                ('bbox.inputs:messagePackage', 'std_msgs'), ('bbox.inputs:messageSubfolder', 'msg'),
-                ('bbox.inputs:messageName', 'Float32MultiArray')],
-            keys.CONNECT: [
-                ('tick.outputs:execOut', 'info.inputs:execIn'),
-                ('tick.outputs:execOut', 'depth.inputs:execIn'),
-                ('tick.outputs:execOut', 'bbox.inputs:execIn'),
-                ('context.outputs:context', 'info.inputs:context'),
-                ('context.outputs:context', 'depth.inputs:context'),
-                ('context.outputs:context', 'bbox.inputs:context')]})
-        # Materialize the Float32MultiArray dynamic data attribute.
-        og.Controller.evaluate_sync(root)
-
-    def _attr(self, node, attr):
-        return self.og.Controller.attribute(self.root + '/' + node + '.inputs:' + attr)
+        # Spawn the out-of-Isaac rclpy publisher under the host overlay env + domain 88.
+        import os
+        import subprocess
+        from .masked_depth_ipc import FrameWriter
+        self._socket_path = socket_path or f'/tmp/restock_maskdepth_{os.getpid()}.sock'
+        ipc_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'masked_depth_ipc.py')
+        command = (f'set +u; source {runtime_env}; '
+                   f'export ROS_DOMAIN_ID={int(domain)} ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST; '
+                   f'exec {python} {ipc_script} serve {self._socket_path} {float(idle_timeout_s)}')
+        self._proc = subprocess.Popen(['bash', '-c', command])
+        self._writer = FrameWriter(self._socket_path)
 
     def publish(self, now):
+        import numpy as np
         frame = self.camera.get_current_frame()
-        stamp = float(frame.get('rendering_time', now)) if isinstance(frame, dict) else float(now)
+        stamp_s = float(frame.get('rendering_time', now)) if isinstance(frame, dict) else float(now)
         masked, self._id_cache = masked_depth_from_frame(
             frame, self.rig_prefixes, self._id_cache, invalid=self.invalid)
         height, width = masked.shape
-        data = np.ascontiguousarray(masked, dtype=np.float32).view(np.uint8).reshape(-1)
-        self._attr('depth', 'data').set(data)
-        self._attr('depth', 'width').set(int(width))
-        self._attr('depth', 'height').set(int(height))
-        self._attr('depth', 'timeStamp').set(float(stamp))
+        k = np.asarray(self.camera.get_intrinsics_matrix(), float).reshape(3, 3).ravel().tolist()
         self._bbox = select_target_bbox(
             getattr(self.sensors, 'sensed_target_bboxes', ()), self.target_location, self._bbox)
-        if self._bbox is not None:
-            self._attr('bbox', 'data').set([float(v) for v in bbox_payload(self._bbox)])
-        self.og.Controller.attribute(self.root + '/tick.state:enableImpulse').set(True)
-        self.og.Controller.evaluate_sync(self.root)
-        return stamp
+        sec = int(stamp_s)
+        header = {'stamp_sec': sec, 'stamp_nsec': int(round((stamp_s - sec) * 1e9)),
+                  'frame_id': self.frame_id, 'width': int(width), 'height': int(height),
+                  'k': k, 'bbox': list(self._bbox) if self._bbox is not None else None}
+        self._writer.send(header, np.ascontiguousarray(masked, dtype='<f4').tobytes())
+        return stamp_s
+
+    def close(self):
+        try:
+            self._writer.close()
+        finally:
+            if self._proc.poll() is None:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=5)
+                except Exception:
+                    self._proc.kill()

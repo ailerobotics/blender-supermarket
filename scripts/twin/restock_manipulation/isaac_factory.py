@@ -138,9 +138,14 @@ def parse_manipulation_config(config, job_sku):
         if prefixes and (not isinstance(prefixes, (list, tuple))
                          or not all(isinstance(p, str) and p for p in prefixes)):
             raise ValueError('masked_depth.rig_prefixes must be a list of USD prim-path strings')
+        runtime_env = md.get('runtime_env')
+        if not isinstance(runtime_env, str) or not runtime_env:
+            raise ValueError('masked_depth.runtime_env (host overlay env.sh for the rclpy '
+                             'publisher subprocess) is required when enabled')
         masked_depth = {'enabled': True, 'rig_prefixes': tuple(prefixes),
                         'frame_id': str(md.get('frame_id', 'restock_camera_arm')),
-                        'domain': int(md.get('domain', 88))}
+                        'domain': int(md.get('domain', 88)), 'runtime_env': runtime_env,
+                        'python': str(md.get('python', 'python3'))}
     return ManipConfig(profiles=profiles, stations=stations, shelfbot_root=shelfbot_root,
                        walls=walls, voxel_dims=tuple(float(v) for v in vd), voxel_size=float(vs),
                        grasp_mode=next(iter(modes)), pose_bridge_root=pose_bridge_root,
@@ -273,18 +278,19 @@ def _build_masked_depth_bridge(*, stage, camera, camera_path, gripper_path,
     optical frame is published by the existing native_transport /tf tree (an optical child prim
     is added to it inside the bridge); publishing uses OmniGraph nodes, never rclpy.
     """
-    from twin.restock.masked_depth import ArmDepthOmniGraphBridge
+    from twin.restock.masked_depth import ArmDepthSubprocessBridge
 
     prefixes = settings.get('rig_prefixes')
     if not prefixes:
         cart_root = assembly.evidence['composition']['assets']['cart']['root']
         prefixes = tuple(dict.fromkeys(
             [_rig_root(assembly.paths['articulation']), _rig_root(cart_root), gripper_path]))
-    return ArmDepthOmniGraphBridge(
+    return ArmDepthSubprocessBridge(
         camera=camera, camera_path=camera_path, stage=stage, transport=assembly.transport,
         sensors=sensors, rig_prefixes=prefixes,
         frame_id=settings.get('frame_id', 'restock_camera_arm'),
-        domain=int(settings.get('domain', 88)))
+        domain=int(settings.get('domain', 88)),
+        runtime_env=settings['runtime_env'], python=settings.get('python', 'python3'))
 
 
 def create(*, app, assembly, plan, config, output, _builder=None):

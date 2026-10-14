@@ -82,4 +82,9 @@ class RosManipulationRuntime:
             return self.latest
 
     def stop(self):
+        if self.sensing_bridge is not None and hasattr(self.sensing_bridge, 'close'):
+            try:
+                self.sensing_bridge.close()  # terminate the out-of-Isaac publisher subprocess
+            except Exception:
+                pass
         self.graph.close()  # hold; never unseal a held object on failure
