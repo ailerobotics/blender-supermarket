@@ -103,6 +103,15 @@ def serve(socket_path, *, idle_timeout_s=600.0):
     import os
     import numpy as np
     import rclpy
+    # Guard the ROS seam: this subprocess MUST load the host rclpy (the /opt/ros jazzy or the
+    # runtime-closure overlay), never Isaac's bundled "internal" rclpy -- mixing the two leaves
+    # the publishers on an incompatible middleware the host cannot see (run-37). Fail loudly so
+    # this can never silently recur.
+    _rclpy_path = getattr(rclpy, '__file__', '') or ''
+    if ('isaacsim' in _rclpy_path or '/env_isaaclab/' in _rclpy_path
+            or not ('opt/ros' in _rclpy_path or 'runtime-closure' in _rclpy_path)):
+        raise RuntimeError('masked-depth publisher loaded the wrong rclpy: ' + _rclpy_path +
+                           ' (expected host /opt/ros or runtime-closure overlay, not Isaac internal)')
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
     from sensor_msgs.msg import Image, CameraInfo
