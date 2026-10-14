@@ -96,9 +96,18 @@ class IncorporationAckState:
         self.collision_time = stamp
 
     def snapshot(self, now, *, endpoints_ready, process_alive):
-        if self.active and (not process_alive or now - self.last_heartbeat > .5
-                            or self.wall_clock() - self.wall_heartbeat > 1.):
-            self.fault = 'station process or parked heartbeat lost'
+        # Name the tripped liveness condition with its measured value so a mission failure
+        # says which one fired; thresholds unchanged (sim gap > .5 s, wall gap > 1. s). The
+        # first-tripped reason is frozen (a fault is terminal until explicit recovery).
+        if self.active and not self.fault:
+            sim_gap = now - self.last_heartbeat
+            wall_gap = self.wall_clock() - self.wall_heartbeat
+            if not process_alive:
+                self.fault = 'station process lost'
+            elif sim_gap > .5:
+                self.fault = f'parked heartbeat lost: sim gap {sim_gap:.2f} s'
+            elif wall_gap > 1.:
+                self.fault = f'parked heartbeat lost: wall gap {wall_gap:.2f} s'
         ready = (self.active and not self.fault and endpoints_ready
                  and 0 <= now - self.collision_time <= .5 and self.collision_time > self.parked_since)
         return dict(epoch=self.epoch, sequence=self.sequence, stamp=now,
@@ -155,9 +164,18 @@ def main():
         query_size.append(2.0 * half)
 
     def command(message):
+        n = now()
+        payload = None
         try:
-            state.accept(json.loads(message.data), now())
+            payload = json.loads(message.data)
+            state.accept(payload, n)
         except Exception as exc:
+            # Make a rejected command (bad epoch/sequence/timestamp, lost parked flag,
+            # unparseable JSON) visible in host-stack.log with its ValueError text and the
+            # now/stamp pair -- otherwise a rejected heartbeat faults the station silently.
+            stamp = payload.get('stamp') if isinstance(payload, dict) else None
+            node.get_logger().info(
+                f'station command rejected: {exc}; now={n:.3f} stamp={stamp}')
             state.fault = str(exc)
             stop.publish(Bool(data=True))
 
