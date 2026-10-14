@@ -238,4 +238,11 @@ class RuntimeAdapter:
             return self._step(dt)
         except Exception as exc:
             self.stop()
-            return Result('failed', reason=str(exc))
+            # Keep the originating frame(s) in the reason: the mission records only this
+            # string (SimulationApp.close() can hard-exit before any outer handler), so a
+            # bare message leaves runtime-tick failures unlocatable.
+            import traceback
+            where = ' | '.join(
+                f'{__import__("os").path.basename(fr.filename)}:{fr.lineno} {fr.name}'
+                for fr in traceback.extract_tb(exc.__traceback__)[-3:])
+            return Result('failed', reason=f'{type(exc).__name__}: {exc} [{where}]')
