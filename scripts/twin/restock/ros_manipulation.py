@@ -53,19 +53,25 @@ class RosManipulationRuntime:
                 self.dispatched=True
             if self.sensing_bridge is not None:
                 # Continuous masked depth + info + TF + (cached) target bbox for the host
-                # nvblox/object_segmenter, every step and independent of carton verification.
+                # nvblox/object_segmenter EVERY sensing tick, independent of carton verification.
                 self.sensing_bridge.publish(simulation_time)
-            packet = self.capture(simulation_time,self.source,self.destination)
-            if packet is not None:
-                stamp = packet.simulation_time
-                if (not math.isfinite(stamp) or stamp <= self.last_sensor_time or
-                        not 0 <= simulation_time-stamp <= .5):
-                    raise ValueError('stale or repeated camera packet')
-                items = list(packet.observations)+([packet.target] if packet.target else [])
-                if any(item.source != 'sensor' for item in items):
-                    raise ValueError('production manipulation requires sensor provenance')
-                self.graph.publish_sensors(packet)
-                self.last_sensor_time = stamp
+            # A carton-verification (capture) failure must NOT stop the bridge or the mission:
+            # the bridge keeps publishing so the host ESDF builds; the perception gate is just
+            # not satisfied yet, and the stage timeout still bounds a genuinely stuck capture.
+            try:
+                packet = self.capture(simulation_time,self.source,self.destination)
+                if packet is not None:
+                    stamp = packet.simulation_time
+                    if (not math.isfinite(stamp) or stamp <= self.last_sensor_time or
+                            not -0.02 <= simulation_time-stamp <= .5):
+                        raise ValueError('stale or repeated camera packet')
+                    items = list(packet.observations)+([packet.target] if packet.target else [])
+                    if any(item.source != 'sensor' for item in items):
+                        raise ValueError('production manipulation requires sensor provenance')
+                    self.graph.publish_sensors(packet)
+                    self.last_sensor_time = stamp
+            except Exception as cap_exc:
+                self.latest = Result('running','observe',str(cap_exc))
             reply = self.graph.poll()
             if reply is not None:
                 status = reply.get('status')

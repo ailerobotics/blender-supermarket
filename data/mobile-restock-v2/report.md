@@ -899,3 +899,37 @@ command is `scripts/run_mobile_restock.sh --manifest "$ENVIRONMENT_MANIFEST"
 readiness flag remains false, and this command is **not runnable as a complete
 mission yet**. Execute only after explicit GPU release and fresh guards. No MP4
 has been fabricated to fill the missing physics evidence.
+
+## Masked-depth + mission-path seam chain (runs 32-40, 2026-10-14)
+
+Each guarded run cleared one real seam. Two independent chains converged.
+
+**Masked-depth transport (host nvblox) — PROVEN end to end.** (a) Host `robot_segmenter`
+failed to load (duplicate NITROS subscription) — fixed by host PR#50 (drop the segmenter;
+take Isaac masked depth), evidence run-32 host-stack.log. (b) An rclpy publisher created inside
+the Isaac SimulationApp aborts (`parameter_event` typesupport) — run-33 crash. (c) OmniGraph
+`ROS2PublishImage` is render-product-driven, not data-driven, so it delivered no depth.
+(d) Decided (Firstmate): publish from a separate out-of-Isaac rclpy subprocess fed over a
+length-prefixed Unix socket (`masked_depth_ipc.py`, `ArmDepthSubprocessBridge`); TF via an
+optical `restock_camera_arm` prim on the existing transform tree. (e) The subprocess must use
+the HOST DDS config (`twin.restock_host.config.ENV`: rmw_fastrtps_cpp, FASTDDS_BUILTIN_TRANSPORTS=
+UDPv4, SKIP_DEFAULT_XML, localhost) or it discovers topics but delivers no data (UDPv4 vs default
+SHM+UDP). PROOF: focused probe `scripts/restock_runtime/run_transport_probe.sh` (reusable
+regression test) — host subscriber got masked_depth 1.63 Hz, depth/info one stamp, 32FC1,
+frame restock_camera_arm; `tf2_echo` resolves; nvblox `get_esdf_and_gradient` -> **248,984
+observed voxels** (run-tp-3).
+
+**Mission path (why collect never reached execute, runs 32-40).** The mission was stuck in
+collect-NAVIGATE the whole time, so the bridge was never driven. Seams: (f) collect-navigate
+SUCCEEDS (arrived_stopped) but `parked=False` loops at "waiting for measured parking": the
+resting cart reads ~12-14 mm/s, the documented PhysX TGS instantaneous-velocity bias, which the
+0.005 m/s gate can't clear. FIX: `parked` from net POSE displacement over 0.25 s (bias-free,
+isaac_port). Then execute reached + bridge publishes real masked depth (no_depth=False). (g)
+arm-camera capture "stale acquisition"/"no new synchronized rendered camera frame": the render
+reflects the just-stepped state, leading the dt-accumulated sim clock by ~1 physics step. FIX:
+tolerate a -0.02 s lead in `frame_deadline` + the two duplicate now-stamp checks
+(isaac_sensors, ros_manipulation). (h) A capture-validation failure stopped the bridge (manip
+step -> stop -> fail). FIX (Firstmate structural): the bridge publishes every sensing tick
+independent of capture; a capture failure is non-fatal (Result running/observe), the stage
+timeout still bounds it. CURRENT GATE: capture raises `'dict' object has no attribute
+support_view` (slot-config in IsaacCartonSensors) — now non-fatal, so the bridge sustains.
