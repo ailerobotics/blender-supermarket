@@ -123,13 +123,17 @@ class HostControlPublisher:
     """
 
     def __init__(self, *, topics, runtime_env, python='python3', domain=88,
-                 socket_path=None, idle_timeout_s=1800.0):
+                 socket_path=None, idle_timeout_s=1800.0, node_name='restock_control_pub'):
         self.topics = tuple(topics)
         if not self.topics:
             raise ValueError('at least one control topic is required')
+        # Unique rclpy node name per subprocess: the control-plane relay and the sim-time-backbone
+        # relay are two separate subprocesses on domain 88; sharing one node name collides in DDS and
+        # shadowed the control plane's /station/command publisher (run-70: ack stuck 'idle').
+        self.node_name = node_name
         import os
         import subprocess
-        self._socket_path = socket_path or f'/tmp/restock_control_{os.getpid()}.sock'
+        self._socket_path = socket_path or f'/tmp/restock_{node_name}_{os.getpid()}.sock'
         ipc_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'control_ipc.py')
         command = (f'set +u; source {runtime_env}; '
                    f'export ROS_DOMAIN_ID={int(domain)} ROS_LOCALHOST_ONLY=1 ROS_STATIC_PEERS= '
@@ -138,7 +142,7 @@ class HostControlPublisher:
                    f'unset FASTRTPS_DEFAULT_PROFILES_FILE FASTDDS_DEFAULT_PROFILES_FILE '
                    f'ROS_DISCOVERY_SERVER CYCLONEDDS_URI RMW_FASTRTPS_USE_QOS_FROM_XML; '
                    f'exec {python} {ipc_script} serve {self._socket_path} {float(idle_timeout_s)} '
-                   + ' '.join(self.topics))
+                   f'{node_name} ' + ' '.join(self.topics))
         clean_env = {k: os.environ[k] for k in ('HOME', 'USER', 'LOGNAME', 'TERM', 'DISPLAY')
                      if k in os.environ}
         clean_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -162,7 +166,7 @@ class HostControlPublisher:
                     self._proc.kill()
 
 
-def serve(socket_path, topics, *, idle_timeout_s=1800.0):
+def serve(socket_path, topics, *, idle_timeout_s=1800.0, node_name='restock_control_pub'):
     """Subprocess entry: bind the socket, accept the Isaac writer, publish each message.
 
     Runs under the host overlay ROS env (domain 88). Declares one std_msgs/String publisher per
@@ -235,7 +239,7 @@ def serve(socket_path, topics, *, idle_timeout_s=1800.0):
     srv.settimeout(idle_timeout_s)
 
     rclpy.init(args=None)
-    node = Node('restock_control_pub')
+    node = Node(node_name)
     # /clock + /tf consumers (move_group, nvblox, cuMotion) subscribe BEST_EFFORT/SENSOR for TF but
     # the sim-time /clock is conventionally RELIABLE depth-10; keep depth-10 and let rmw negotiate.
     publishers = {topic: node.create_publisher(
@@ -274,10 +278,10 @@ def serve(socket_path, topics, *, idle_timeout_s=1800.0):
 
 if __name__ == '__main__':
     import sys
-    if len(sys.argv) >= 4 and sys.argv[1] == 'serve':
+    if len(sys.argv) >= 6 and sys.argv[1] == 'serve':
         timeout = float(sys.argv[3])
-        serve(sys.argv[2], sys.argv[4:], idle_timeout_s=timeout)
+        serve(sys.argv[2], sys.argv[5:], idle_timeout_s=timeout, node_name=sys.argv[4])
     else:
-        print('usage: control_ipc.py serve <socket_path> <idle_timeout_s> <topic> [<topic>...]',
+        print('usage: control_ipc.py serve <socket_path> <idle_timeout_s> <node_name> <topic> [<topic>...]',
               file=sys.stderr)
         sys.exit(2)

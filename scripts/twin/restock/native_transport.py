@@ -99,7 +99,7 @@ class NativeTransport:
             from .control_ipc import HostControlPublisher
             self._relay=HostControlPublisher(
                 topics=('/clock', '/tf', '/restock_sim/joint_states'),
-                runtime_env=runtime_env, python=python)
+                runtime_env=runtime_env, python=python, node_name='restock_transport_pub')
         # Last Isaac stage time published on /clock (set each tick). The station/command stamps
         # must use THIS clock domain -- never the mission-relative Packet.simulation_time, which is
         # zeroed at the first mission action -- so the host ack's /clock-validated 0.5 s freshness
