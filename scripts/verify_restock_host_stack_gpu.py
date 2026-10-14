@@ -4,11 +4,13 @@
 ONE guarded job (flock /tmp/aile-gpu.lock + protected-Blender refusal + >=8 GiB free
 VRAM + >=12 GiB RAM + domain-88 isolation, CPU preflight, 10-minute cap, exact-PID
 teardown): launch the task-isolated stack (launch_restock_host_stack.sh -> MoveIt
-move_group + the Isaac cuMotion servers + the shelfbot segmenter + the co-launched
+move_group + the Isaac cuMotion servers + the shelfbot object_segmenter + the co-launched
 nvblox mapper, all under the task-local runtime closure on domain 88, never the real
-rig containers), sample GPU memory to its peak, run stack_probe.py (7 nodes present,
-endpoints advertised, a compute_ik planning round-trip against the refined CAD config,
-a best-effort cuMotion plan, and the nvblox get_esdf_and_gradient mapper grid), then
+rig containers; the NVIDIA RobotSegmenter self-filter is delegated to the Isaac side), sample
+GPU memory to its peak, run stack_probe.py (6 nodes present with no load failure, endpoints
+advertised, a compute_ik planning round-trip against the refined CAD config, a synthetic
+masked-depth frame fused into a NON-EMPTY nvblox ESDF, and a cuMotion plan that returns a
+trajectory against it), then
 tear down by exact PID group and report the measured VRAM so firstmate can judge
 whether the stack fits beside the Isaac renderer (~6.6 GB) and the protected whispr
 (~2.2 GB) on the 12 GB card.
@@ -150,14 +152,16 @@ def main():
         fit = {'stack_vram_mb': stack_vram, 'whispr_mb': whispr, 'renderer_mb': RENDERER_MB,
                'total_mb': total, 'headroom_mb': headroom, 'fits_beside_renderer': headroom >= 0}
     present = set((pr.get('nodes') or {}).get('present') or [])
-    # The depth self-filter RobotSegmenter needs the real NITROS depth input to create
-    # its managed subscription, so it is a sensor-dependent node like the external
-    # controller; the planner + mapper core is what this bounded fixture run verifies.
+    # The host no longer runs the NVIDIA RobotSegmenter self-filter: its incompatible reload
+    # subscription aborted the whole container, and the self mask is now delegated to the
+    # Isaac side (robot-masked depth on camera/masked_depth). The six remaining nodes are the
+    # full required server set, so all of them must be present with no load failure.
     core = {'move_group', 'cumotion_planner', 'static_planning_scene_server',
             'object_attachment', 'nvblox_node', 'object_segmenter'}
+    me = pr.get('mapper_esdf') or {}
     record['verdict'] = {
         'core_planner_nodes_present': core <= present,
-        'all_seven_nodes_present': (pr.get('nodes') or {}).get('all_seven_present'),
+        'all_nodes_present': (pr.get('nodes') or {}).get('all_present'),
         'nodes_present': sorted(present),
         'nodes_absent': (pr.get('nodes') or {}).get('absent'),
         'stack_endpoints_advertised': not (pr.get('endpoints') or {}).get('missing_excluding_external_controller'),
@@ -166,16 +170,22 @@ def main():
         'compute_ik_error_code': (pr.get('compute_ik') or {}).get('error_code'),
         'cumotion_plan': pr.get('cumotion_plan'),
         'cumotion_trajectory_points': (pr.get('cumotion_plan') or {}).get('points'),
-        'mapper_esdf_round_trip': (pr.get('mapper_esdf') or {}).get('round_trip'),
-        'mapper_esdf_success': (pr.get('mapper_esdf') or {}).get('success'),
-        'mapper_esdf_grid_dims': (pr.get('mapper_esdf') or {}).get('grid_dims'),
+        'mapper_esdf_round_trip': me.get('round_trip'),
+        'mapper_esdf_success': me.get('success'),
+        'mapper_esdf_grid_dims': me.get('grid_dims'),
+        'mapper_esdf_observed_before': me.get('observed_before'),
+        'mapper_esdf_observed_after': me.get('observed_after'),
+        'mapper_esdf_non_empty': me.get('non_empty'),
         'vram_fit': fit,
         'gpu_reclaimed': (free_after >= free_before - 200) if free_before else None,
     }
     v = record['verdict']
-    record['PASS'] = bool(v['core_planner_nodes_present'] and v['stack_endpoints_advertised']
-                          and v['planning_round_trip_compute_ik'] and v['mapper_esdf_round_trip']
-                          and v['mapper_esdf_success'] and stack_vram is not None)
+    record['PASS'] = bool(v['core_planner_nodes_present'] and v['all_nodes_present']
+                          and v['stack_endpoints_advertised']
+                          and v['planning_round_trip_compute_ik']
+                          and v['mapper_esdf_non_empty']
+                          and (v['cumotion_trajectory_points'] or 0) > 0
+                          and stack_vram is not None)
     (a.output / 'result.json').write_text(json.dumps(record, indent=2, default=str) + '\n')
     print(json.dumps({'PASS': record['PASS'], 'verdict': {k: v[k] for k in v if k != 'cumotion_plan'},
                       'cumotion_plan': v['cumotion_plan'], 'elapsed_s': record['elapsed_s'],
