@@ -91,7 +91,11 @@ class IsaacPort:
         self.after_step,self.on_action=after_step,on_action
         self.realtime=realtime
         self.wall_origin=time.monotonic()
-        self.origin=float(world.current_time)
+        # Zero the sensor-acquisition clock at the FIRST mission advance, not here:
+        # camera initialisation and the host-stack warmup step the world after the port
+        # is built, so capturing current_time now would leave sim time ahead of the
+        # mission's tick clock and every packet would read stale.
+        self.origin=None
         self.tick=0
         self.names=tuple(robot.dof_names)
         self.wheels=tuple(self.names.index(n) for n in ('left_wheel_joint','right_wheel_joint'))
@@ -108,6 +112,8 @@ class IsaacPort:
             remaining=self.wall_origin+(self.tick+1)*dt-time.monotonic()
             if remaining>0:
                 time.sleep(remaining)
+        if self.origin is None:
+            self.origin=float(self.world.current_time)
         self.world.step(render=True)
         self.tick+=1
         now=float(self.world.current_time)-self.origin
