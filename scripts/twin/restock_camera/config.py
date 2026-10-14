@@ -29,11 +29,13 @@ def camera_config(scenario, manifest):
     # Camera.get_intrinsics_matrix uses width/2, height/2 for the principal point.
     def intr(f):
         return Intrinsics(2560,1920,f,f,1280.,960.,.15,3.5)
-    # Shelf fx widened 1280 -> 1050 so BOTH paired markers sit fully inside the frame with
-    # their quiet border: at 1280 the mirror-symmetric pair each overran a frame edge by
-    # ~84 px (the far-left marker lost a finder pattern and would not decode natively,
-    # though the nearer one did). The wider FOV pulls both in with a ~55 px margin at
-    # ~12 px/module (ample), unchanged obliquity, and top/support/witness stay framed.
+    # Shelf fx widened 1280 -> 1050 so both paired markers sit inside the frame at
+    # ~12 px/module with unchanged obliquity (at 1280 each overran an edge by ~84 px).
+    # The guarantee is now "QR core plus its full quiet zone framed", NOT the full white
+    # base: the shelf camera is tilted (see the camera() roll_world_x_deg below) to clear
+    # both cores off the production QR tile seams, which pushes each outer white border
+    # toward a frame edge where it may clip. The decodable core keeps a >=4-module quiet
+    # zone in frame; top/support/witness stay framed.
     k_source,k_cart,k_shelf = intr(2000.),intr(1500.),intr(1050.)
     source = np.array([*staging['support_center_xy'],staging['unit_bottom_z']])
     shelf = np.array(staging['target_surface_pose_world'][:3])
@@ -44,8 +46,21 @@ def camera_config(scenario, manifest):
         solids.append(dict(id=name,parent=parent,parent_from_solid=pose_matrix([*center[:2],0],center[2]).tolist(),
                            dimensions_m=list(size),collision=True))
 
-    def camera(name,parent,eye,target,k):
+    def camera(name,parent,eye,target,k,roll_world_x_deg=0.):
         pose = look_at(eye,target)
+        if roll_world_x_deg:
+            # Rotate the optical frame about the world X axis through the lens. The shelf
+            # pair's two ~0.46 m-wide rendered QR cores sit off-centre and each straddled a
+            # seam of the certified 640 px production tile grid (qr.tile_origins), so
+            # FixedTileQR decoded NEITHER natively (both returned as unreadable candidates);
+            # a bench full-frame cv2 pass caught only the nearer one and masked it. This
+            # small tilt shifts both cores clear of the seams into single tiles. The full
+            # white quiet border may now overrun a frame edge (the QR core plus its quiet
+            # zone stay framed). See data/sim-restock-camera-v2/shelf-tile-seam-root-cause.md.
+            t = np.radians(roll_world_x_deg); c,s = np.cos(t),np.sin(t)
+            spin = np.eye(4); spin[1,1]=c; spin[1,2]=-s; spin[2,1]=s; spin[2,2]=c
+            to,back = np.eye(4),np.eye(4); to[:3,3]=eye; back[:3,3]=-np.asarray(eye,float)
+            pose = to @ spin @ back @ pose
         cameras[name] = dict(id=name,parent=parent,parent_from_optical=pose.tolist(),
             intrinsics=asdict(k),revision='physical-paired-marker-v3')
         housing = pose.copy()
@@ -62,7 +77,7 @@ def camera_config(scenario, manifest):
     # carton-top label plane and full support stay framed. The camera must stay just
     # below the next shelf tier (~0.97 m) to see under it to the carton top; a top-down
     # view is impossible (the tier is ~0.24 m above the support).
-    camera('shelf','map',shelf+[-.50,0,.23],shelf+[-.18,0,-.05],k_shelf)
+    camera('shelf','map',shelf+[-.50,0,.23],shelf+[-.18,0,-.05],k_shelf,roll_world_x_deg=-6.25)
     solid('source_mast','map',source+[0,.44,.15],[.03,.03,1.50])
     solid('source_boom','map',source+[0,.32,.88],[.03,.27,.025])
     solid('source_marker_tab','map',source+[0,.30,-.0015],[.72,.16,.003])
@@ -339,6 +354,15 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
                 edge = np.linalg.norm(np.roll(corners.reshape(4,2),-1,axis=0)-corners.reshape(4,2),axis=1)
                 half = marker['side_m']*pixels.shape[0]/edge.mean()/2
                 grid = marker_module_grid(marker['id'])
+                if index == 1:
+                    # The paired shelf markers are mirror-positioned about the camera's
+                    # optical axis, so they render under opposite perspective shear. cv2's
+                    # finder-pattern locator reads the near marker's shear but not the far
+                    # one's, so the far marker (index 1) would not decode while index 0 did.
+                    # A QR is decode-invariant under a 180 deg in-plane rotation, so spinning
+                    # only the far grid (identical footprint, same SKU) reorients its finder
+                    # patterns into the shear cv2 reads. Mount this fiducial rotated 180 deg.
+                    grid = np.rot90(grid, 2)
                 white_quad,black_quads = marker_geometry_quads(grid,half)
                 white = quad_mesh(base,[white_quad],.0002,marker['parent_from_marker'])
                 # Passive diffuse white (NO emissive): the lamp lights the support now, and

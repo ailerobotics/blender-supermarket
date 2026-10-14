@@ -158,15 +158,20 @@ def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
         base = f'/World/RestockCamera_shelf_marker_{index}'
         assert decode_authored_marker(stage, base, world, k) == marker['id']
         assert UsdGeom.Mesh(stage.GetPrimAtPath(base + '/Modules')).GetDoubleSidedAttr().Get()
-        # Both paired markers (mirror-symmetric) must sit FULLY inside the frame with their
-        # quiet border; at the old fx the far-left marker overran the edge and lost a finder
-        # pattern, so it decoded offline (rectified from known corners) but not natively.
-        white = UsdGeom.Mesh(stage.GetPrimAtPath(base))
-        m = np.array(UsdGeom.XformCache().GetLocalToWorldTransform(white.GetPrim())).T
-        corners = (m @ np.c_[np.array(white.GetPointsAttr().Get()), np.ones(4)].T).T[:, :3]
-        uv, in_fov = project(transform_points(np.linalg.inv(world), corners), k)
+        # PR#44's "full white base in frame" guarantee is relaxed: the shelf camera is
+        # tilted (config camera() roll_world_x_deg) to clear both QR cores off the certified
+        # production tile seams, which pushes each outer white border toward a frame edge
+        # where it may clip. The decodable CORE (the black-module region) plus a >=4-module
+        # quiet zone must still sit inside the frame.
+        modules = UsdGeom.Mesh(stage.GetPrimAtPath(base + '/Modules'))
+        mm = np.array(UsdGeom.XformCache().GetLocalToWorldTransform(modules.GetPrim())).T
+        pts = np.array(modules.GetPointsAttr().Get(), float)
+        core = (mm @ np.c_[pts, np.ones(len(pts))].T).T[:, :3]
+        uv, in_fov = project(transform_points(np.linalg.inv(world), core), k)
         assert in_fov.all()
-        assert uv[:, 0].min() > 10 and uv[:, 0].max() < k.width - 10        # left/right margin
+        quiet = 4 * np.ptp(uv[:, 0]) / 21          # >=4-module zone; 25-module v2, ~21 data span
+        assert uv[:, 0].min() > quiet and uv[:, 0].max() < k.width - quiet
+        assert uv[:, 1].min() > quiet and uv[:, 1].max() < k.height - quiet
         base_c, modules_c = centroid(base), centroid(base + '/Modules')
         assert np.linalg.norm(modules_c[:2] - base_c[:2]) < .02         # same marker location
         # The modules sit ~2 mm in front of the base along the marker normal, and strictly
@@ -176,3 +181,22 @@ def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
         base_depth = (np.linalg.inv(world) @ np.r_[base_c, 1])[2]
         modules_depth = (np.linalg.inv(world) @ np.r_[modules_c, 1])[2]
         assert modules_depth < base_depth - 0.001                      # nearer the camera
+
+    # Authoritative mission proof: the PRODUCTION decoder (FixedTileQR, the mission
+    # RenderedSupportContext decoder) reads BOTH shelf markers from a rendered-faithful
+    # rasterisation of the authored geometry at this pose. Before the camera tilt both
+    # cores straddled the 640 px tile seams and FixedTileQR decoded neither (a full-frame
+    # cv2 pass caught only the nearer one). NOTE: a clean raster is necessary, NOT
+    # sufficient — the oblique decode is pose/noise sensitive; integration confirms the
+    # decode on the native render (see shelf-tile-seam-root-cause.md).
+    from scripts.twin.restock_camera.config import render_authored_marker
+    from scripts.twin.restock_camera.qr import FixedTileQR
+    from scripts.twin.restock_camera.sensed import FrameEvidence
+    canvas = np.full((k.height, k.width), 128, np.uint8)
+    for index in (0, 1):
+        tile, _ = render_authored_marker(stage, f'/World/RestockCamera_shelf_marker_{index}', world, k)
+        canvas = np.where(tile != 128, tile, canvas).astype(np.uint8)
+    rgb = np.repeat(canvas[:, :, None], 3, axis=2).astype(np.uint8)
+    evidence = FrameEvidence('shelf', 1, 1., 1., 'park', 'lens', 'mission')
+    detections = FixedTileQR('shelf').decode(rgb, evidence, now=1., parked=True).detections
+    assert {d.text for d in detections} == {'support:shelf:0', 'support:shelf:1'}
