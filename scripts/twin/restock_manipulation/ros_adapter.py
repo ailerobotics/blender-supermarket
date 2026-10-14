@@ -272,9 +272,29 @@ class RosTransferBridge:
     /restock_sim/sensors is a complete synchronized derived-sensor packet (Sensors
     JSON), never a list of scene prims. Raw RGB-D preprocessing uses DepthPerception.
     External integration supplies contact/odom/joints/map timestamps and full ROI
-    scan coverage. Missing packets trigger a wall-time watchdog and immediate stop.
+    scan coverage. Missing packets trigger a watchdog and immediate stop.
+
+    Sensor-stream bounds, after the first /sensors frame arms the tight per-frame watchdog:
+
+    - The per-frame bound is measured in NODE-CLOCK (ROS) time, not wall time. The node runs
+      under use_sim_time, so a 1 s bound is 1 s of *simulation* time. On real hardware sim
+      time == wall time, so this keeps exactly today's 1 s semantics; in a render-paced
+      simulation it scales correctly -- each collect tick renders the full-resolution source
+      camera, masks depth and captures, so consecutive /sensors are 1.7-3.5 s apart in WALL
+      time (measured, run-74) but only a small step apart in SIMULATION time. A wall-time 1 s
+      bound false-trips on that render latency; a node-clock 1 s bound does not, because the
+      sim clock barely advances across one render tick.
+    - A wall-time BACKSTOP (30 s since the last frame) still hard-stops if the sim clock
+      freezes: a frozen clock stops the node-clock bound from ever advancing, so without the
+      backstop a stalled simulator would hang the job forever. The watchdog timer itself stays
+      on STEADY_TIME so it keeps firing when the sim clock is frozen.
+    - Arm-on-first-frame and the 5 s startup grace (a job that never produces a first frame)
+      stay in WALL time, unchanged: cold first-ESDF incorporation is ~1 s and unachievable
+      from a cold job start, and before the first frame the arm has acted on nothing, so the
+      moving-arm protection is not weakened.
     """
-    def __init__(self, node, controller, *, watchdog_seconds=1.0, startup_grace_seconds=5.0):
+    def __init__(self, node, controller, *, watchdog_seconds=1.0, startup_grace_seconds=5.0,
+                 wall_backstop_seconds=30.0):
         require_sim_domain()
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
             raise RuntimeError('bridge requires isolated simulation node')
@@ -283,6 +303,7 @@ class RosTransferBridge:
         self.node, self.controller = node, controller
         self.String, self.Bool = String, Bool
         self.last_packet_wall = time.monotonic()
+        self.last_packet_sim = None   # node-clock (sim) time of the last frame; gates the per-frame bound
         self.last_sim = None
         self.sequence = 0
         self.status = node.create_publisher(String, '/restock_sim/manipulation/status', 10)
@@ -299,6 +320,7 @@ class RosTransferBridge:
         # weakening the moving-arm protection (before the first frame the arm has acted on nothing).
         self.watchdog_seconds = watchdog_seconds
         self.startup_grace_seconds = startup_grace_seconds
+        self.wall_backstop_seconds = wall_backstop_seconds
         self.first_frame = False
         self.job_start_wall = None
         self.timer = node.create_timer(.1, self._watchdog,
@@ -319,6 +341,7 @@ class RosTransferBridge:
             data = json.loads(message.data)
             self.controller.start(data['operation'], data['job'])
             self.last_sim = None
+            self.last_packet_sim = None
             self.first_frame = False
             self.job_start_wall = time.monotonic()
             self.last_packet_wall = time.monotonic()
@@ -337,6 +360,7 @@ class RosTransferBridge:
             self.last_sim = sensors.simulation_time
             self._emit(self.controller.step(dt, sensors))
             self.last_packet_wall = time.monotonic()
+            self.last_packet_sim = now         # node-clock stamp the per-frame bound measures against
             self.first_frame = True            # arms the tight per-frame watchdog from here on
         except (ValueError, KeyError, TypeError) as exc:
             self._emit(self.controller._fail('invalid sensor packet: ' + str(exc)))
@@ -344,16 +368,25 @@ class RosTransferBridge:
     def _watchdog(self):
         if self.controller.phase in ('idle', 'failed', 'succeeded'):
             return
-        now = time.monotonic()
+        wall_now = time.monotonic()
         if not self.first_frame:
             # No /sensors yet: the looser startup grace (not the 1 s per-frame bound) applies, so a
-            # warm-up + cold first ESDF has time to produce the first frame. A job that never does
-            # still hard-stops with a distinct reason.
-            if self.job_start_wall is not None and now - self.job_start_wall > self.startup_grace_seconds:
+            # warm-up + cold first ESDF has time to produce the first frame. Stays in WALL time; a
+            # job that never produces a frame still hard-stops with a distinct reason.
+            if self.job_start_wall is not None and wall_now - self.job_start_wall > self.startup_grace_seconds:
                 self._emit(self.controller._fail('no initial sensor frame'))
             return
-        if now - self.last_packet_wall > self.watchdog_seconds:
+        # Per-frame bound in NODE-CLOCK (sim) time: on real hardware sim == wall so the 1 s
+        # semantics are unchanged, and under a render-paced /clock it does not false-trip on the
+        # 1.7-3.5 s wall gap between captures (the sim clock barely advances across a render tick).
+        sim_now = self.node.get_clock().now().nanoseconds * 1e-9
+        if self.last_packet_sim is not None and sim_now - self.last_packet_sim > self.watchdog_seconds:
             self._emit(self.controller._fail('sensor stream watchdog expired'))
+            return
+        # Wall-time backstop: a frozen sim clock never advances sim_now, so the node-clock bound
+        # above can never trip; this still hard-stops a stalled simulator.
+        if wall_now - self.last_packet_wall > self.wall_backstop_seconds:
+            self._emit(self.controller._fail('sensor stream wall backstop expired'))
 
 
 class NvbloxWorldBridge:
