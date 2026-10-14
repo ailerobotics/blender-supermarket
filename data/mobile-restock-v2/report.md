@@ -1374,3 +1374,47 @@ not budget widening**: the camera/sensing lane should scale the station-camera c
 live capture fits 0.5 s) and re-commission the baseline at that resolution. Then the provider returns a
 target, my consumer wiring lands, and the shakedown + attempt follow. Reprojection core committed;
 consumer wiring held ready pending that reconciliation.
+
+
+## 2026-10-14 — DECISIVE: the mission host stack never launches the manipulation bridge (ros_host)
+
+Full-length attempt **run-58-full** (fresh commission run-17, 900 s baseline, 1400 s cap)
+failed with `mission.json: state=failed, reason="host process/status watchdog"` after the
+collect phase ran only ~6 s. The host planner stack (move_group, cumotion_planner,
+nvblox_node, object_attachment, static_planning_scene_server) was **alive and healthy to
+the end** (nvblox allocating at 16:20:05, teardown ~16:20:13). So the watchdog fired
+despite a live host.
+
+Root cause (confirmed, upstream of all station/collision_time work):
+- The Isaac-side `IsaacRosGraph` publishes the collect job on `/restock_sim/manipulation/job`
+  and fails after `timeout=5 s` if it receives no `/restock_sim/manipulation/status`
+  (`isaac_ros_graph.py:161-165`).
+- The ONLY host node that consumes `/manipulation/job`+`/sensors`, drives move_group/cuMotion,
+  and publishes `/manipulation/status` is `ros_host.py` (`RosTransferBridge`+`RosMotionPort`+
+  `TransferController`).
+- The mission's `--host-stack` runs `launch_restock_host_stack.sh` -> `run_restock_host.py
+  --launch` -> `twin.restock_host.launch.description`, which launches the planner stack + the
+  incorporation ack but **NOT ros_host**. `host-stack.log` for run-58 shows no
+  `restock_manipulation` node; `git log -S ros_host -- launch.py` is empty (ros_host was never
+  in that launch). `launch_plan()` even computes `integration_host_arguments`
+  (`--urdf/--shelfbot-root/--mobile-manifest`) but it is consumed only by a test.
+  `HostSession` (host_session.py) is the only launcher that starts the `manipulation` process,
+  and the mission does not use it.
+- Therefore `/manipulation/status` is never published -> the 5 s watchdog fires every attempt.
+  This — not the station transport — is why every prior attempt died on the host watchdog.
+
+Secondary (sd2 topic-info, still relevant): the Isaac OmniGraph ROS2 **publisher** on
+`/restock_sim/station/command` is not visible to the host UDPv4 Fast DDS (`Publisher count: 0`
+across 14 probes) while the OmniGraph **subscriber** on `/station/status` did appear
+(`sub=1` at probes 13-14). The same publisher asymmetry likely affects `/manipulation/job`,
+so even once ros_host is launched the job may not reach it over OmniGraph — Isaac->host
+publishes may need the masked-depth-style host-DDS subprocess.
+
+Fix plan (incremental, evidence-driven):
+1. Launch `ros_host` (manipulation bridge) in the mission host stack, wired with a ros_host-
+   shaped config (`{profiles, walls}`; mission manip block has profiles but no `walls` — `walls={}`
+   is accepted by the CPU tests), `--urdf/--shelfbot-root/--mobile-manifest` from the plan.
+   Re-attempt; inspect ros_host's log for job receipt.
+2. If ros_host does NOT receive the job -> the OmniGraph publisher->host-DDS transport is broken
+   for the manip graph; route Isaac->host publishes (job/sensors/station-command) through a
+   host-DDS subprocess like `masked_depth_ipc`.
