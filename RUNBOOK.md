@@ -662,6 +662,32 @@ Commission the contexts from observed empty supports before the first capture; a
 readiness claim still needs integration's live GPU run and the `InventoryVerifier`'s two
 post-boundary confirmations.
 
+### 13a. Commission empty-support baselines (CPU plan + persistence/loader)
+
+`scripts/run_restock_commissioning.py` runs the commissioning choreography (camera lane).
+Default `--plan` (CPU, no Isaac) prints the per-station plan (station → mission location →
+camera → capture pose → required footprint / markers / lifetime) from the camera design +
+mission scenario — the plan the native run executes; it captures nothing:
+
+```bash
+PYTHONPATH=scripts python3 scripts/run_restock_commissioning.py \
+  --camera-config "$CAMERA_CONFIG" --scenario "$SCENARIO"      # covers backstock_00 + shelf
+```
+
+`--execute` runs the choreography: with each target station EMPTY and the robot at its
+capture pose, it captures the eye-in-hand/station RGB-D frame, commissions the support via
+the production `commission()` path, and persists the baseline with provenance (session id,
+station, capture pose, stamp) under `--output`. All robot motion, empty staging, frame
+capture and empty-polygon selection are integration/GPU-owned and supplied by a
+`--sources module:function` hook (the script imports no Isaac/ROS). The mission picks the
+baselines up at boot via `config['commissioning_dir']` (see `twin.restock_camera.sensing`);
+a required station with no baseline is refused, never fabricated. Pure logic + persistence,
+loader and refusal live in `twin.restock_camera.commissioning`. CPU tests (no Isaac/GPU):
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_commissioning.py -q
+```
+
 ## 14. Controlled static-scene navigation mapper commissioning
 
 This is an uncommissioned integration handoff, not a moving-mission readiness
