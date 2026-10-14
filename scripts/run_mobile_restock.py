@@ -91,15 +91,21 @@ def _run_transport_probe(bundle, scenario, args, app):
         if not app.is_running():
             break
         port.advance(1 / 60)
+    # Publish continuously for a HOLD window so the host stays alive and keeps integrating while
+    # the host-side verdict (masked_depth rate + the nvblox ESDF query) runs against it; stop
+    # once at least `frames` were published AND the hold elapsed.
+    hold_until = time.monotonic() + 70.0
     published = 0
-    for _ in range(frames * 4):                             # cap ticks; count PUBLISHED frames
-        if not app.is_running() or published >= frames:
-            break
+    while app.is_running():
         packet = port.advance(1 / 60)
         if bridge.publish(packet.simulation_time) is not None:
             published += 1
+        if published >= frames and time.monotonic() >= hold_until:
+            break
+        if time.monotonic() >= hold_until + 20.0:           # safety cap
+            break
     return {'state': 'complete' if published >= frames else 'failed',
-            'reason': f'transport probe published {published}/{frames} masked-depth frames',
+            'reason': f'transport probe published {published}/{frames} masked-depth frames (held for host verdict)',
             'physics_verified': False, 'frames': published}
 
 
