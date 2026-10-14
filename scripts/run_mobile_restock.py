@@ -86,15 +86,20 @@ def _run_transport_probe(bundle, scenario, args, app):
     manip.start('collect', asdict(Job(**scenario['job'])))  # source station + bridge.target_location
     port.current_action = 'collect'                         # force the sensing render each tick
     frames = int(args.transport_probe)
-    published = 0
-    for _ in range(frames):
+    # Warm up the camera render + annotators (depth/instance-ID populate a few frames in).
+    for _ in range(20):
         if not app.is_running():
             break
+        port.advance(1 / 60)
+    published = 0
+    for _ in range(frames * 4):                             # cap ticks; count PUBLISHED frames
+        if not app.is_running() or published >= frames:
+            break
         packet = port.advance(1 / 60)
-        bridge.publish(packet.simulation_time)
-        published += 1
-    return {'state': 'complete' if published == frames else 'failed',
-            'reason': f'transport probe drove {published}/{frames} masked-depth frames',
+        if bridge.publish(packet.simulation_time) is not None:
+            published += 1
+    return {'state': 'complete' if published >= frames else 'failed',
+            'reason': f'transport probe published {published}/{frames} masked-depth frames',
             'physics_verified': False, 'frames': published}
 
 
