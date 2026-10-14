@@ -81,6 +81,33 @@ def test_runtime_mirrors_station_collision_time_onto_feedback_before_capture():
     assert seen['ct'] == pytest.approx(8.48)                  # fresh for the capture this tick
 
 
+class FlappyFeedback:
+    """Instantaneous parked() flaps False (angular noise); set_parked overrides with the port's
+    robust net-pose parked, which is what the station/capture must use."""
+    def __init__(self):
+        self.collision_time = -1.
+        self._port = None
+    def set_parked(self, value):
+        self._port = None if value is None else bool(value)
+    def parked(self):
+        return False if self._port is None else self._port
+
+
+def test_robust_parked_from_port_overrides_flappy_velocity_for_the_station():
+    st = _client()
+    fb = FlappyFeedback()
+    rt = RosManipulationRuntime(FakeGraph(), lambda *a: None, prepare_station=lambda op, job: None,
+                                feedback=fb, station=st, station_camera_frame='restock_camera_arm')
+    rt.start('collect', {'source_bin': 'backstock_00', 'job_id': 'j1'})
+    # The port reports robustly parked even though the instantaneous velocity would read moving:
+    # begin() prepares the station without raising 'station lost measured parking'.
+    r1 = rt.step(1 / 60., 8.0, parked=True)
+    assert r1.status == 'running' and fb.parked() is True
+    # A genuine not-parked from the port stops the station (fatal), as designed.
+    r2 = rt.step(1 / 60., 8.1, parked=False)
+    assert r2.status == 'failed'
+
+
 def test_runtime_clears_collision_time_on_stop():
     st = _client()
     feedback = NS(collision_time=5.0, parked=lambda: True)

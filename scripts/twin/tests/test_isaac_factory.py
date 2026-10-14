@@ -127,7 +127,7 @@ class HostRuntimeTests(unittest.TestCase):
         calls = []
         inner = SimpleNamespace(
             start=lambda op, job: calls.append(('start', op)),
-            step=lambda dt, t: calls.append(('step', t)) or 'result',
+            step=lambda dt, t, parked=None: calls.append(('step', t)) or 'result',
             stop=lambda: calls.append(('stop',)))
         sensors = SimpleNamespace(slots=None, transform=None, last_frame='old')
         art = SimpleNamespace(get_linear_velocity=lambda: lin, get_angular_velocity=lambda: ang)

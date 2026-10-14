@@ -207,8 +207,8 @@ class HostManipulationRuntime:
     def start(self, operation, job):
         return self._runtime.start(operation, job)
 
-    def step(self, dt, simulation_time):
-        return self._runtime.step(dt, simulation_time)
+    def step(self, dt, simulation_time, parked=None):
+        return self._runtime.step(dt, simulation_time, parked=parked)
 
     def stop(self):
         return self._runtime.stop()
@@ -349,7 +349,16 @@ def _build_runtime(*, app, assembly, params, output):
     # sensing capture needs; collision_time is synced each step from the host mapper-incorporation
     # ack via IsaacRosGraph.refresh_incorporation (see RosManipulationRuntime.step). Replaces the
     # parked-only adapter that could not satisfy IsaacCartonSensors.capture's collision_time gate.
-    feedback = IsaacMeasuredFeedback(assembly.robot)
+    class _PortParkedFeedback(IsaacMeasuredFeedback):
+        # parked() reflects the port's robust net-pose-displacement parking (set each step via
+        # set_parked), not the instantaneous articulation velocity, which flaps on sub-mm/rad
+        # angular noise and would fatally trip StationClient's 'lost measured parking' gate.
+        _port_parked = None
+        def set_parked(self, value):
+            self._port_parked = None if value is None else bool(value)
+        def parked(self):
+            return super().parked() if self._port_parked is None else self._port_parked
+    feedback = _PortParkedFeedback(assembly.robot)
 
     # The collect grasp target comes from the FIXED source camera via the camera-lane provider,
     # reprojected into the live arm image. The provider is injected after build_sensing through

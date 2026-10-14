@@ -88,7 +88,7 @@ class ManipulationBridge:
 
     def step(self, dt, packet):
         if self.owns_sensor_io:
-            result = self.controller.step(dt, packet.simulation_time)
+            result = self.controller.step(dt, packet.simulation_time, parked=packet.parked)
             return replace(result, controls=())
         return self.controller.step(dt, packet.manipulation)
 

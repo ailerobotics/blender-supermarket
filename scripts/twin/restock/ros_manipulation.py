@@ -56,8 +56,12 @@ class RosManipulationRuntime:
             self.graph.start(operation,job)
             self.dispatched=True
 
-    def step(self, dt, simulation_time):
+    def step(self, dt, simulation_time, parked=None):
         try:
+            # The port's robust net-pose-displacement parked (Packet.parked) overrides the flappy
+            # instantaneous velocity for the station gate AND the capture's motion.parked().
+            if parked is not None and hasattr(self.feedback, 'set_parked'):
+                self.feedback.set_parked(parked)
             # Drive the parked-station ack and mirror its collision_time onto the feedback BEFORE
             # this tick's capture reads it (the sensing capture gates on motion.collision_time
             # freshness). begin() prepares the station on the first step; later steps heartbeat.
