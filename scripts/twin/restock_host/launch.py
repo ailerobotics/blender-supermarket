@@ -25,6 +25,11 @@ def description(config):
         return yaml.safe_load((Path(share(package)) / relative).read_text())['/**']['ros__parameters']
 
     common = {'use_sim_time': True}
+    # Diagnostic-only, env-gated (default off): surface the nvblox input-queue / TF decisions
+    # and the object_segmenter at debug so a depth frame that never resolves its transform is
+    # explained in host-stack.log. Changes no mapping/masking behaviour. The mission enables it
+    # (RESTOCK_NVBLOX_DIAG=1) for a diagnostic run; it is inert otherwise.
+    nvblox_diag = bool(os.environ.get('RESTOCK_NVBLOX_DIAG'))
     pipeline = yaml.safe_load((Path(share('isaac_ros_cumotion_moveit')) /
                              'config/isaac_ros_cumotion_planning.yaml').read_text())
     pipeline['response_adapters'] = [
@@ -78,6 +83,13 @@ def description(config):
              'use_depth': True, 'use_color': False, 'use_lidar': False, 'num_cameras': 1,
              'input_qos': 'SENSOR_DATA',
              'update_esdf_rate_hz': 0.0, 'static_mapper.workspace_bounds_type': 'bounding_box'}
+    # nvblox's own input-queue-drop / per-message-delay counters to the stack log (see
+    # nvblox_diag above); paired with the debug log levels below so queue decisions and the
+    # tf2 lookup refusals that gate them both appear.
+    if nvblox_diag:
+        world.update(print_queue_drops_to_console=True, print_delays_to_console=True,
+                     print_rates_to_console=True, print_timings_to_console=True,
+                     print_statistics_on_console_period_ms=1000)
     for key, val in zip(('min_corner_x_m', 'min_corner_y_m', 'min_height_m',
                          'max_corner_x_m', 'max_corner_y_m', 'max_height_m'), lo + hi):
         world['static_mapper.workspace_bounds_' + key] = float(val)
@@ -116,15 +128,20 @@ def description(config):
                            'esdf_reference_frame': FRAME, 'clear_esdf_on_attach': True,
                            'get_robot_description_service': NS + '/cumotion/get_robot_description',
                            'set_robot_description_service': NS + '/cumotion/set_robot_description'}])]
+    # Env-gated debug: raise only the nvblox_node logger (its TransformListener logs tf2
+    # lookup refusals and the input-queue decisions under this name) -- scoped so the other
+    # composable nodes in the container stay at their normal level.
     container = ComposableNodeContainer(name='host_components', namespace=NS,
         package='rclcpp_components', executable='component_container_mt', output='screen',
-        composable_node_descriptions=nodes)
+        composable_node_descriptions=nodes,
+        ros_arguments=(['--log-level', NS.strip('/') + '.nvblox_node:=debug'] if nvblox_diag else []))
     masker = ExecuteProcess(cmd=[sys.executable, '-m', 'shelfbot.perception.object_segmenter',
         '--ros-args', '-r', '__ns:=' + NS,
         '-p', 'use_sim_time:=true', '-p', 'depth_in_topic:=' + NS + '/camera/masked_depth',
         '-p', 'depth_out_topic:=' + NS + '/world_depth',
         '-p', 'bbox_topic:=' + NS + '/target_bbox', '-p', 'bbox_timeout_s:=0.5',
-        '-p', 'bbox_padding_px:=0'],
+        '-p', 'bbox_padding_px:=0']
+        + (['--log-level', 'debug'] if nvblox_diag else []),
         additional_env={'PYTHONPATH': plan['shelfbot_root'] + os.pathsep + os.environ.get('PYTHONPATH', '')},
         output='screen')
     # Host manipulation bridge (ros_host / RosTransferBridge): the ONLY node that consumes
