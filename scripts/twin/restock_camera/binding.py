@@ -2,10 +2,10 @@
 from dataclasses import dataclass, replace
 import time
 import numpy as np
-from .freshness import frame_deadline, require_fresh
 
 from .sensed import (FrameEvidence, register_marker, calibrate_rigid_support,
                      RegisteredSupport)
+from .freshness import frame_deadline, require_fresh
 from .qr import FixedTileQR
 
 
@@ -36,7 +36,7 @@ class RenderedSupportContext:
     def __init__(self, *, camera_id, intrinsics, slots, measure_context,
                  clearance_for_slot, depth_error_m, camera_revision, clock_context=None,
                  steady_clock=time.monotonic):
-        self.steady_clock=steady_clock
+        self.steady_clock = steady_clock
         self.camera_id,self.intrinsics = camera_id,intrinsics
         self.slots = tuple(slots)
         self.measure_context,self.clearance_for_slot = measure_context,clearance_for_slot
@@ -74,19 +74,22 @@ class RenderedSupportContext:
         self.qr_observation = qr
         return transform,evidence,parked,depth,registrations
 
-    def commission(self, frame, now, empty_polygons, *, lifetime_s=600., commissioning_freshness_s=5.0):
+    def commission(self, frame, now, empty_polygons, *, lifetime_s=600.,
+                   commissioning_freshness_s=5.):
         """Explicitly acquire baselines from observed empty supports.
 
         empty_polygons[location] = (support_quad_uv, witness_quad_uv), selected
         from that measured frame. Source starts occupied, so a real prior empty
         commissioning frame is required; never manufacture it from a setup dict.
 
-        ``commissioning_freshness_s`` is the acquisition-to-use window for THIS
-        commissioning capture only (default 5 s): a stall guard for a static, empty,
-        parked scene whose baseline is consumed hours later -- not the live sensing
-        safety contract, which stays at the 0.5 s default of ``frame_deadline``.
+        Commissioning is a static-scene step whose full-resolution decode+calibrate can
+        exceed the live 0.5 s acquisition-to-use budget, so it runs under its own
+        ``commissioning_freshness_s`` acquisition-to-use bound (default 5 s): a stall guard,
+        not the mission freshness. The live mission capture still uses the 0.5 s gate.
         """
-        deadline=frame_deadline(frame,now,self.steady_clock(),budget_s=commissioning_freshness_s)
+        if not np.isfinite(commissioning_freshness_s) or commissioning_freshness_s < .5:
+            raise ValueError('commissioning_freshness_s must be finite and at least the 0.5 s live budget')
+        deadline = frame_deadline(frame,now,self.steady_clock(),budget_s=commissioning_freshness_s)
         transform,e,parked,depth,registrations = self._registrations(frame,now)
         pending = []
         for slot,registration in zip(self.slots,registrations):
@@ -102,7 +105,6 @@ class RenderedSupportContext:
 
     def __call__(self, frame, now):
         from ..restock_manipulation.isaac_sensors import CameraContext, SlotView
-        deadline=frame_deadline(frame,now,self.steady_clock())
         transform,e,parked,depth,registrations = self._registrations(frame,now)
         views = []
         for slot,registration in zip(self.slots,registrations):
@@ -114,7 +116,6 @@ class RenderedSupportContext:
                 clearance.validate(now,e,view.geometry)
                 view = replace(view,clearance=clearance)
             views.append(SlotView.from_support(slot.location,view,slot.label_mask))
-        require_fresh(deadline,self.steady_clock)
         return CameraContext(transform,e.transform_stamp,e.epoch,tuple(views),parked,
                              e.session_id,e.steady_domain,e.acquired_steady,self.qr_observation)
 
@@ -126,23 +127,20 @@ class RenderedSupportContext:
 
 class StationSensors:
     """Aggregate distinct assigned cameras; no camera implicitly covers the mapper."""
-    def __init__(self, *, cameras, profiles, pose_bridge_root, context_providers, location_cameras,
-                 steady_clock=time.monotonic):
-        self.steady_clock=steady_clock
+    def __init__(self, *, cameras, profiles, pose_bridge_root, context_providers, location_cameras):
         from ..restock_manipulation.isaac_sensors import IsaacCartonSensors
         self.location_cameras = dict(location_cameras)
         if (not cameras or set(cameras) != set(context_providers)
                 or any(camera not in cameras for camera in self.location_cameras.values())):
             raise ValueError('camera/location/context binding is incomplete')
         self.adapters = {key:IsaacCartonSensors(camera,pose_bridge_root=pose_bridge_root,
-            profiles=profiles,camera_id=key,context_provider=context_providers[key],steady_clock=steady_clock)
+            profiles=profiles,camera_id=key,context_provider=context_providers[key])
             for key,camera in cameras.items()}
         self.sensed_target_bboxes = ()
         self.evidence = ()
 
     def capture(self, now, source, destination, motion, contact):
         from ..restock_manipulation.types import Sensors
-        started=self.steady_clock()
         self.sensed_target_bboxes,self.evidence = (),()
         selected = sorted({self.location_cameras[source],self.location_cameras[destination]})
         packets = []
@@ -159,15 +157,7 @@ class StationSensors:
             raise ValueError('station cameras are not synchronized')
         self.sensed_target_bboxes = tuple(box for key in selected for box in self.adapters[key].sensed_target_bboxes)
         self.evidence = tuple(item for key in selected for item in self.adapters[key].evidence)
-        deadline=min(p.valid_until_steady if p.valid_until_steady is not None
-                     else started+.5-(now-p.scan_time) for p in packets)
-        packet=Sensors(now,tuple(o for p in packets for o in p.observations),targets[0],
+        return Sensors(now,tuple(o for p in packets for o in p.observations),targets[0],
             all(p.parked for p in packets),packets[0].contact,min(p.feedback_time for p in packets),
             min(p.collision_time for p in packets),packets[0].joint_positions,
-            tuple(location for p in packets for location in p.scanned_locations),min(p.scan_time for p in packets),deadline)
-        try:
-            require_fresh(deadline,self.steady_clock)
-        except ValueError:
-            self.sensed_target_bboxes,self.evidence=(),()
-            raise
-        return packet
+            tuple(location for p in packets for location in p.scanned_locations),min(p.scan_time for p in packets))

@@ -225,7 +225,7 @@ def test_executable_context_decodes_real_qr_pixels_before_clearance(monkeypatch)
     binding = RenderedSupportContext(camera_id='camera',intrinsics=k,slots=[slot],
         measure_context=lambda frame,now:(camera,now,'park1',True),
         clearance_for_slot=clearance_callback,depth_error_m=.0002,camera_revision='lens1',
-        steady_clock=lambda:0.)  # Functional pixel fixture, not native latency evidence.
+        steady_clock=lambda:0.)      # deterministic commission freshness, independent of decode wall time
     baseline = binding.commission(frame,1.,{'cart':(support,witness)})[0]
     assert not calls
     loaded = depth.copy()

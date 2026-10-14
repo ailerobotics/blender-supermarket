@@ -85,7 +85,7 @@ class BaselineRecord:
     geometry: SupportGeometry
     capture_pose: tuple | None = None          # robot base planar pose [x,y,yaw] at capture
     base_from_camera: tuple | None = None       # measured camera transform at capture (audit)
-    commissioning_freshness_s: float = 5.0      # static-scene acquisition-to-use window used at commission
+    commissioning_freshness_s: float = 5.       # acquisition-to-use bound used at commission
     source: str = SOURCE
     schema: str = SCHEMA
 
@@ -105,8 +105,8 @@ class BaselineRecord:
                     revision=g.revision, calibration_id=g.calibration_id,
                     baseline_frame_id=g.baseline_frame_id, baseline_stamp=g.baseline_stamp,
                     steady_domain=g.steady_domain, baseline_acquired_steady=g.baseline_acquired_steady,
-                    lifetime_s=g.lifetime_s, capture_pose=self.capture_pose, source=self.source,
-                    commissioning_freshness_s=self.commissioning_freshness_s)
+                    lifetime_s=g.lifetime_s, commissioning_freshness_s=self.commissioning_freshness_s,
+                    capture_pose=self.capture_pose, source=self.source)
 
     def to_json(self):
         return dict(schema=self.schema, source=self.source, station=self.station,
@@ -136,7 +136,7 @@ class BaselineRecord:
         return cls(station=data['station'], geometry=geometry,
                    capture_pose=None if pose is None else tuple(pose),
                    base_from_camera=None if bfc is None else tuple(tuple(r) for r in bfc),
-                   commissioning_freshness_s=float(data.get('commissioning_freshness_s', 5.0)),
+                   commissioning_freshness_s=data.get('commissioning_freshness_s', 5.),
                    source=data['source'], schema=data['schema'])
 
 
@@ -200,8 +200,8 @@ def rebuild_manifest(dataset_dir, *, session_id=None, extra=None):
 
 
 def commission_and_persist(context, frame, now, empty_polygons, *, dataset_dir,
-                           capture_poses=None, lifetime_s=600., raw_frames=None,
-                           commissioning_freshness_s=5.0):
+                           capture_poses=None, lifetime_s=600., commissioning_freshness_s=5.,
+                           raw_frames=None):
     """Run ``context.commission`` on an observed empty frame and persist each baseline.
 
     ``empty_polygons[location] = (support_quad_uv, witness_quad_uv)`` selected from this
@@ -229,7 +229,7 @@ def commission_and_persist(context, frame, now, empty_polygons, *, dataset_dir,
     return records
 
 
-def run_commissioning(contexts, capture, *, dataset_dir, lifetime_s=600., commissioning_freshness_s=5.0):
+def run_commissioning(contexts, capture, *, dataset_dir, lifetime_s=600., commissioning_freshness_s=5.):
     """Commission a set of per-camera contexts from observed empty supports and persist.
 
     ``contexts`` is an iterable of :class:`binding.RenderedSupportContext` (one per camera,
@@ -251,8 +251,7 @@ def run_commissioning(contexts, capture, *, dataset_dir, lifetime_s=600., commis
         records.extend(commission_and_persist(
             context, got['frame'], got['now'], got['empty_polygons'], dataset_dir=dataset_dir,
             capture_poses=got.get('capture_poses'), raw_frames=got.get('raw_frames'),
-            lifetime_s=lifetime_s,
-            commissioning_freshness_s=got.get('commissioning_freshness_s', commissioning_freshness_s)))
+            lifetime_s=lifetime_s, commissioning_freshness_s=commissioning_freshness_s))
     rebuild_manifest(dataset_dir)
     return records
 

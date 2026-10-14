@@ -8,12 +8,15 @@ import math
 _RENDER_LEAD=0.02
 
 
-def frame_deadline(frame, now, started, budget_s=0.5):
-    # budget_s is the acquisition-to-use freshness window. Live sensing keeps the default
-    # 0.5 s safety contract (robot may move); commissioning passes a wider static-scene
-    # stall guard (empty, parked, baseline consumed later) -- never widen the live default.
+def frame_deadline(frame, now, started, budget_s=.5):
+    """Steady-clock deadline for using a frame acquired at ``now``.
+
+    ``budget_s`` is the acquisition-to-use budget: the live mission capture uses the standing
+    0.5 s gate; a static-scene commissioning pass passes its larger ``commissioning_freshness_s``
+    so a slow full-resolution decode+calibrate does not trip the live budget.
+    """
     stamp=float(frame['rendering_time'])
-    if not all(math.isfinite(v) for v in (now,started,stamp)) or not -_RENDER_LEAD<=now-stamp<=budget_s:
+    if not all(math.isfinite(v) for v in (now,started,stamp,budget_s)) or not -_RENDER_LEAD<=now-stamp<=budget_s:
         raise ValueError('stale acquisition before processing')
     deadline=started+budget_s-(now-stamp)
     acquired=frame.get('acquired_steady')
