@@ -369,9 +369,23 @@ def _build_runtime(*, app, assembly, params, output):
 
     # Native ROS bridge to the host MoveGroup/cuMotion + TransferController + trajectory_host.
     graph = IsaacRosGraph(contact=contact, hold=assembly.command_gate.hold)
+    # Parked-station client to the host nvblox mapper-incorporation ack
+    # (twin.restock_host.incorporation_ack, co-launched with the stack): drives prepare/heartbeat
+    # on /restock_sim/station/command and reads collision_time from /restock_sim/station/status.
+    # RosManipulationRuntime mirrors its collision_time onto the feedback each step. Only with the
+    # masked-depth ESDF path enabled (the ack integrates that masked depth).
+    station = None
+    station_frame = params.masked_depth.get('frame_id', 'restock_camera_arm')
+    if params.masked_depth.get('enabled'):
+        from twin.restock.native_channel import JsonChannel, StationClient
+        channel = JsonChannel(root='/RestockStationChannel',
+                              publish_topic='/restock_sim/station/command',
+                              subscribe_topic='/restock_sim/station/status')
+        station = StationClient(channel)
     runtime = RosManipulationRuntime(graph, collect_bridge.capture,
                                      prepare_station=lambda operation, job: None,
-                                     sensing_bridge=sensing_bridge, feedback=feedback)
+                                     sensing_bridge=sensing_bridge, feedback=feedback,
+                                     station=station, station_camera_frame=station_frame)
     return HostManipulationRuntime(runtime=runtime, sensors=sensors,
                                    motion=feedback, profiles=params.profiles,
                                    collect_bridge=collect_bridge)
