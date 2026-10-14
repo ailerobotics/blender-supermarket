@@ -14,6 +14,12 @@ When ``config['collect_source_location']`` is set, the mapping also carries
 ``source_target_provider(now) -> SourceTarget | None`` — the fixed-source collect pick target
 (see :mod:`twin.restock_camera.source_target` and the "Collect sensing contract").
 
+When ``config['transfer_shelf_location']`` is set, the mapping also carries
+``shelf_target_provider(now) -> ShelfSlotTarget | None`` (the empty-slot placement target) and
+``shelf_verification_provider`` → ``verify(now, expected_sku, expected_pose) -> ShelfVerification``
+(the post-placement check) — both from the fixed shelf station camera against its commissioned
+baseline (see :mod:`twin.restock_camera.shelf_target` and ``data/sim-restock-camera-v2/shelf-contract.md``).
+
 ``capture(now, source, destination)`` returns a ``restock_manipulation.types.Sensors``
 packet (or ``None``) from the multi-camera :class:`binding.StationSensors`, under the
 500 ms freshness, exact-frame identity, source-immutability/tamper and fresh-clearance
@@ -169,6 +175,21 @@ def build_sensing(*, app, assembly, plan, config, output):
         result['source_target_provider'] = build_source_target_provider(
             adapter, motion, contact, source_location=source_location,
             station_frame=config.get('station_frame', 'map'))
+    # Transfer-stage shelf sensing from the FIXED shelf station camera + its commissioned
+    # G3_back_s2 baseline: the empty-slot placement target and the post-placement verification,
+    # both against the same baseline (see twin.restock_camera.shelf_target / the shelf contract).
+    shelf_location = config.get('transfer_shelf_location') if isinstance(config, dict) else None
+    if shelf_location:
+        from .shelf_target import build_shelf_target_provider, build_shelf_verification_provider
+        location_cameras = _get(sources, 'location_cameras')
+        if shelf_location not in location_cameras:
+            raise ValueError(f'transfer_shelf_location {shelf_location!r} has no assigned camera')
+        adapter = station.adapters[location_cameras[shelf_location]]
+        station_frame = config.get('station_frame', 'map')
+        result['shelf_target_provider'] = build_shelf_target_provider(
+            adapter, motion, contact, shelf_location=shelf_location, station_frame=station_frame)
+        result['shelf_verification_provider'] = build_shelf_verification_provider(
+            adapter, motion, contact, shelf_location=shelf_location, station_frame=station_frame)
     return result
 
 
