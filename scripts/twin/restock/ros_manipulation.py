@@ -72,6 +72,12 @@ class RosManipulationRuntime:
                 else:
                     self.station.tick(simulation_time, parked=bool(self.feedback.parked()))
                 self.feedback.collision_time = self.station.collision_time
+                self._sc = getattr(self, '_sc', 0) + 1
+                if self._sc % 10 == 1:                       # STATION_STATS diagnostic
+                    snap = getattr(self.station, 'latest', None)
+                    print(f'STATION_STATS tick={self._sc} now={simulation_time:.3f} '
+                          f'collision_time={self.feedback.collision_time} '
+                          f'ready={self.station.ready(simulation_time)} snapshot={snap}', flush=True)
             if not self.dispatched:
                 if not self.preparation.ready(simulation_time):
                     return Result('running','prepare_station')
