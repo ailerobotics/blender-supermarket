@@ -972,3 +972,33 @@ support view. Both are multi-file and, because the CPU contract tests inject `_b
 **not offline-validatable** — only a GPU boot proves the real wiring. Combined with the still-open
 host 5 s manip-reply/ESDF-warm watchdog (measured in parallel by the host worker), a clean
 collect+couple proof inside this task's window was not attainable; escalated to Firstmate.
+
+### The narrowest fix (register the arm view as the source support_view) is blocked by a missing commissioning phase
+
+Firstmate authorised Option A (bounded) and asked first for the narrowest fix: register the arm
+eye-in-hand view as the source station `support_view` for the COLLECT capture only. Checking it:
+a usable `support_view` is produced only by `RenderedSupportContext.__call__`, which requires a
+**commissioned baseline** — `slot.tracker` set by `RenderedSupportContext.commission(frame, now,
+empty_polygons)` from an observed **empty** support plane (support + witness quads selected from
+real empty RGB-D). Two hard blockers:
+
+1. **Commissioning is never wired into the mission.** `.commission(` has callers only in
+   `tests/test_restock_sensed_views.py`; no mission path (bundle, sensing_sources, runtime) calls
+   it, so every `RenderedSupportContext` would raise *"observed empty commissioning baseline is
+   required"* — this is why the sensing-lane context providers are built but the capture path has
+   never actually run in a mission (verify included).
+2. **The collect source is occupied at t=0.** The scenario places the `juice_orange` unit at
+   `backstock_00` (`unit_bottom_z`, `unit_yaws_world`); only the *destination* shelf is
+   `target_initially_depleted`. A commissioning baseline needs the support plane empty, so the
+   source cannot be commissioned mid-collect while the carton to be picked sits on it.
+
+The code deliberately refuses a design-only/fabricated support view (`calibrate_rigid_support`
+from empty RGB-D is mandatory; the design itself warns "nominal geometry is design only; select
+support/witness quads from empty RGB-D"), consistent with the project's standing sensor-provenance
+invariant — so synthesising a support_view to make capture "pass" is not an option. The real
+Option-A path is therefore not a bounded plumb but a new **arm-camera commissioning choreography**:
+a pre-mission empty-source baseline acquisition (observe the source empty before the carton is
+staged, or a separate staged empty frame) plus per-frame arm-camera marker framing at the source.
+That is multi-session and not provable by this task's 13:00 window. Re-escalated to Firstmate with
+the recommendation to bank the proven masked-depth transport chain + the run-41/host-3.30 s gate,
+and scope the commissioning build as its own task.
