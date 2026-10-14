@@ -1640,3 +1640,43 @@ armed after the first /sensors frame). The /sensors cadence is render-paced: the
 /sensors mid-render-tick (it is the carton packet, one per capture). Per msg155 this watchdog is the
 host lane's to widen (do NOT relax on this branch); measured gap ~1.7-3.5 s, so it needs ~4-5 s (cf.
 the ack wall guard already widened to 3 s). Everything up to the grasp dispatch now works.
+
+### 2026-10-14 — run-75/76: sensor watchdog fixed; collect stalls in observe (ROOT CAUSE: no cart target)
+
+PR61 (node-clock sensor watchdog) HELD: run-75/76 never tripped "sensor stream watchdog expired".
+Host stack came up fully (cuMotion + ESDF service + move_group "You can start planning now!"). The
+fixed-source capture produced the carton target on every collect tick (sku=juice_orange, pose
+(0.0,1.101,0.261), dist 1.13 m). But both runs sat in host `phase=observe reason=""` for the whole
+run and died on the Isaac 5 s `host process/status watchdog` — the mission's own
+IsaacRosGraph.status watchdog, firing because the controller never advanced past observe so
+`/manipulation/status` stopped progressing (a render-paced status gap eventually >5 s).
+
+ROOT CAUSE (by inspection, reproduced from the URDF): the controller observe gate
+(`controller.py:132-142`) requires BOTH a unique source carton observation AND `s.target` — the
+destination placement `Target` (for collect, destination = the cart `rollwagen`).
+`CollectTargetBridge.capture` returns `Sensors(..., target=None)`: the source-camera refactor
+provides the source carton observation but DROPPED the destination Target that the old
+`IsaacCartonSensors.capture` built (`isaac_sensors.py:194`). So the gate loops forever on the
+missing cart target. All three observe early-returns are indistinguishable (`observe`/`""`) in the
+status stream, so a throttled `OBSERVE_GATE` diagnostic was added (commit de6ce4a) to confirm
+`target=None` vs a source-match drop on the next run.
+
+SECONDARY (never reached): `roi=None` on every capture. The reprojected grasp-target bbox is used
+ONLY by the host `object_segmenter` for depth-masking — NOT for planning (the planner plans from
+the carton pose). And it is structural, not a math bug: the so-called "arm eye-in-hand" camera is
+actually BASE-front-mounted — `front_camera_frame` is a fixed joint off `base_link` at (0.46,0,0.35)
+looking +X (authored next to lidar/imu in `mobile_assets.py:118`). The grasp is a +Y SIDE grasp
+(scenario `grasp_mode "side"`), so the carton sits ~1.1 m to the camera's side/behind
+(`carton_in_cam=(-1.101,-0.171,-0.460)`, derived exactly from the URDF chain: ur_base_link =
+base_link + (0,0,0.26), no rotation; carton at ur_base +Y 1.1 m = base +Y side). No wrist/side
+camera exists. Diagnostic added as commit 21a0f9b.
+
+OPEN DECISION (escalated to Firstmate — alters mission product behaviour, not taken unilaterally):
+(Q1) collect placement model — place on the staged (uncoupled) cart, needing a cart placement
+Target (sensed, or derived from the known cart asset pose: scenario `cart_load_center_body_xy` +
+`cart_support_z_world`), OR collect = pick+hold (and the observe gate must not require a destination
+target for the source-camera path). (Q2) depth-masking — the side carton isn't in the base camera's
+forward depth so it isn't an obstacle; masking is arguably a no-op and the grasp can plan from the
+pose (relax the collect roi/bbox requirement), vs adding a wrist/side camera or re-orienting the
+approach (robot-asset / scenario lane). Transfer is the MIRROR case (cart = SOURCE, shelf =
+destination via PR62 shelf_target), so the same cart-target provider question applies there.
