@@ -138,6 +138,28 @@ def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
         specs.append(dict(camera, collision_solids=collision_solids))
     rig = CameraRig(stage=assembly.stage, specs=specs, parent_paths=parent_paths, frequency=-1,
                     render_scale=render_scale, camera_render_scales=camera_render_scales)
+    # CameraRig authors only the camera prims + their mount collision boxes. The support
+    # REGISTRATION markers (the printed QR planes the sensing decode reads every frame) are
+    # authored by author_camera_design, which the mission compose otherwise never calls -- so a
+    # mission capture finds no fresh markers ("fresh support marker(s) not decoded"). Author the
+    # collect SOURCE support's markers here (source uses store ambient light; no dedicated lamp),
+    # with cameras/solids stripped so we neither duplicate the rig's cameras nor add mount
+    # colliders. The marker planes are double-sided textured QR and decode without a backing tab.
+    import tempfile
+    from pathlib import Path as _Path
+    from twin.restock_camera.config import author_camera_design
+    from twin.restock_manipulation.isaac_sensors import write_carton_label
+    source_support = design['supports'].get('source')
+    if source_support is not None and not assembly.stage.GetPrimAtPath('/World/RestockCamera_source_marker_0'):
+        marker_dir = _Path(tempfile.mkdtemp(prefix='restock_markers_'))
+        textures = {}
+        for marker in source_support['markers']:
+            png = marker_dir / (marker['id'].replace(':', '_') + '.png')
+            write_carton_label(marker['id'], png)
+            textures[marker['id']] = str(png)
+        author_camera_design(assembly.stage, dict(design, cameras={}, solids=[],
+                             supports={'source': source_support}),
+                             parent_paths=parent_paths, marker_textures=textures)
     base_root = assembly.paths['ur_base_link']
     # The shelf camera frames the destination support; reuse it for the mission video.
     recording_id = 'shelf' if 'shelf' in rig.cameras else next(iter(rig.cameras))
