@@ -95,6 +95,19 @@ def test_geometry_json_roundtrip_is_lossless_and_keeps_tuple_types(tmp_path):
     assert isinstance(restored.polygon_support, tuple) and isinstance(restored.polygon_support[0], tuple)
 
 
+def test_commissioning_records_render_scale_in_provenance(tmp_path):
+    k, camera, depth, support, witness, frame = empty_frame()
+    ctx = context(k, camera)
+    records = C.commission_and_persist(ctx, frame, 1., {'backstock_00':(support,witness)},
+        dataset_dir=tmp_path, render_scale=0.375)
+    assert records[0].render_scale == 0.375
+    data = json.loads((tmp_path / 'backstock_00.json').read_text())
+    assert data['render_scale'] == 0.375 and data['provenance']['render_scale'] == 0.375
+    assert data['provenance']['rendered_resolution'] == [k.width, k.height]
+    # Round-trips through the loader.
+    assert C.load_baselines(tmp_path)['backstock_00'].render_scale == 0.375
+
+
 def test_persisted_record_carries_provenance_matching_the_capture(tmp_path):
     directory, records, _ = commissioned_dir(tmp_path)
     data = json.loads((directory / 'backstock_00.json').read_text())

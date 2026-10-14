@@ -6,6 +6,7 @@ enter perception. A registered carton has a centred top label reading its SKU.
 """
 from dataclasses import dataclass, replace
 import math
+import time
 
 import numpy as np
 
@@ -55,7 +56,10 @@ class CameraContext:
 
 class IsaacCartonSensors:
     def __init__(self, camera, *, pose_bridge_root, profiles, slots=(), base_from_camera=None,
-                 context_provider=None, camera_id='camera'):
+                 context_provider=None, camera_id='camera', steady_clock=time.monotonic):
+        # Injectable monotonic clock so acquisition-to-use freshness (and tests of it) do not
+        # depend on real decode wall time; defaults to the process clock for native capture.
+        self.steady_clock = steady_clock
         self.camera, self.profiles = camera, profiles
         self.slots = tuple(slots)
         self.transform = None if base_from_camera is None else rigid(base_from_camera)

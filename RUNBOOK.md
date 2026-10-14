@@ -688,6 +688,15 @@ loader and refusal live in `twin.restock_camera.commissioning`. CPU tests (no Is
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_commissioning.py -q
 ```
 
+A reduced render-product resolution MUST carry matching intrinsics:
+`geometry.scale_intrinsics(k, render_scale)` scales the pixel grid + focal/principal together
+(centred pinhole), and `sensing.rendered_context(render_scale=...)` applies it so the context,
+its commissioned baseline and the live capture share the rendered pixels' calibration. Commission
+at the mission's scale (`run_restock_commissioning.py --render-scale`; recorded in provenance).
+Decode degrades with scale (small markers: the fixed-source QR falls below the ~3 px/module cv2
+floor at ≤0.5), so a decode-grade camera stays near full resolution — see
+`data/sim-restock-camera-v2/render-scale-report.md`.
+
 ### 13b. Collect pick target from the fixed source camera
 
 The collect stage senses the pick carton with the FIXED `source` station camera against its

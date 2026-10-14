@@ -54,7 +54,16 @@ def _station_pose(staging, camera_id):
     return staging.get('shelf_robot_pose') if camera_id == 'shelf' else staging.get('robot_base_pose')
 
 
-def commissioning_plan(camera_config, scenario, *, stations, locations=None, lifetime_s=600.):
+def _rendered_intrinsics(intrinsics, render_scale):
+    if render_scale == 1.0:
+        return intrinsics
+    from twin.restock_camera.geometry import Intrinsics, scale_intrinsics
+    from dataclasses import asdict
+    return asdict(scale_intrinsics(Intrinsics(**intrinsics), render_scale))
+
+
+def commissioning_plan(camera_config, scenario, *, stations, locations=None, lifetime_s=600.,
+                       render_scale=1.0):
     """Per-station commissioning plan from the camera design + scenario (no capture)."""
     staging = scenario['initial_staging']
     locations = locations if locations is not None else support_locations(scenario)
@@ -78,9 +87,12 @@ def commissioning_plan(camera_config, scenario, *, stations, locations=None, lif
                          required_xy_m=support['required_xy_m'],
                          capture_pose=_station_pose(staging, camera_id),
                          intrinsics=camera_config['cameras'][camera_id]['intrinsics'],
+                         rendered_intrinsics=_rendered_intrinsics(
+                             camera_config['cameras'][camera_id]['intrinsics'], render_scale),
+                         render_scale=render_scale,
                          depth_error_bound_m=camera_config['required_depth_error_bound_m'],
                          lifetime_s=lifetime_s))
-    return dict(schema='restock-commissioning-plan.v1', stations=plan,
+    return dict(schema='restock-commissioning-plan.v1', render_scale=render_scale, stations=plan,
                 invariant='baselines come only from observed empty-support commissioning; '
                           'a missing station is refused, never fabricated')
 
@@ -112,6 +124,8 @@ def main():
                         help='mission location to commission (repeatable; default: collect source + shelf)')
     parser.add_argument('--sources', help='module:function returning booted {contexts, capture} (execute)')
     parser.add_argument('--lifetime-s', type=float, default=600.)
+    parser.add_argument('--render-scale', type=float, default=1.0,
+                        help='render-product scale to commission/plan at (intrinsics scale with it)')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--plan', action='store_true', help='print the commissioning plan (default; CPU, no capture)')
     mode.add_argument('--execute', action='store_true', help='run the choreography and persist baselines')
@@ -120,7 +134,8 @@ def main():
         camera_config = json.loads(args.camera_config.read_text())
         scenario = json.loads(args.scenario.read_text())
         stations = tuple(args.stations) if args.stations else DEFAULT_STATIONS
-        plan = commissioning_plan(camera_config, scenario, stations=stations, lifetime_s=args.lifetime_s)
+        plan = commissioning_plan(camera_config, scenario, stations=stations, lifetime_s=args.lifetime_s,
+                                  render_scale=args.render_scale)
         if not args.execute:
             print(json.dumps(plan, indent=2))
             return 0
