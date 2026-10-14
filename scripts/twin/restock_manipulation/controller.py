@@ -143,8 +143,16 @@ class TransferController:
                 if self._obsn % 20 == 1:
                     cand = [(o.location, o.sku, round(math.dist(o.pose[:3], (0, 0, 0)), 3),
                              o.source, round(o.confidence, 2)) for o in s.observations]
+                    # per-criterion booleans for the first candidate so the real miss is unambiguous
+                    crit = ''
+                    if s.observations:
+                        o = s.observations[0]
+                        crit = (f' first[loc={o.location==self.source},sku={o.sku==self.job["sku"]},'
+                                f'fam={o.family=="sealed_box"},qty={o.quantity==1},conf={.9<=o.confidence<=1},'
+                                f'prov={self._provenance(o,now)},pose_ok={self._pose_ok(o.pose)},'
+                                f'dt={round(now-o.simulation_time,4)},frame={o.frame==self.frame}]')
                     print(f'OBSERVE_GATE matches={len(matches)} src={self.source!r} sku={self.job["sku"]!r} '
-                          f'max_reach={self.profile.max_reach} observations={cand}', flush=True)
+                          f'max_reach={self.profile.max_reach} observations={cand}{crit}', flush=True)
                 return self._result()  # bounded retry with fresh sensor frames
             target = s.target
             if not target or target.location != self.destination or not self._provenance(target, now):

@@ -408,8 +408,14 @@ class CollectTargetBridge:
             joints = tuple(float(j) for j in self.joints())
         except Exception:
             joints = (0.,) * 6
+        # Stamp the observation with the packet `now` (not the source render stamp): the host
+        # controller's _provenance uses a STRICT _fresh (0 <= now - stamp <= max_age), but the
+        # source render may lead `now` by up to the capture's 0.02 s render-lead tolerance, so a
+        # target.stamp slightly ahead of `now` would fail _fresh (now - stamp < 0) and drop the
+        # match every tick (observe never advances). `now` is the packet clock the host compares
+        # against, so _fresh(now, now) = 0 passes; observation_id keeps the render stamp for identity.
         obs = Observation(observation_id=f'source:{target.stamp}', source='sensor',
-                          simulation_time=float(target.stamp), sku=target.sku,
+                          simulation_time=float(now), sku=target.sku,
                           location=self.source_location, pose=tuple(target.pose_station),
                           confidence=1.0, frame='ur_base_link')
         try:                                      # a cart-placement derivation failure must NOT
