@@ -234,9 +234,15 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     mobile_urdf = output / 'mobile-import.urdf'
     transport = TransportEnvelope(mobile_urdf, plan.package_roots,
                                   radius=config.get('transport_radius_m', 0.55))
+    # Mount the range sensor at the robot's lidar frame (forward of base_link), not the
+    # base centre: a centre-mounted scan is self-occluded in every direction including
+    # forward, and navigation refuses to drive on a blind forward sector. The lidar frame
+    # is a fixed base_link child (rpy 0), so it shares the base yaw at the URDF offset.
+    from twin.urdf_probe import parse_urdf as _parse_urdf
+    _lidar_xyz = _parse_urdf(str(mobile_urdf)).joints_by_child()['lidar_frame'].origin_xyz
     range_sensor = IsaacRangeSensor(
-        get_sensor_pose=lambda: _base_pose(assembly.robot_body),
-        self_paths=(robot_root,))
+        get_sensor_pose=lambda: _lidar_pose(assembly.robot_body, _lidar_xyz[0], _lidar_xyz[1]),
+        sensor_to_base=_lidar_xyz, self_paths=(robot_root,))
     recorder = Recorder(output / 'mission-frames', fps=plan.recording_fps)
     verifier = InventoryVerifier(capture, source=plan.verification_source)
 
@@ -261,3 +267,12 @@ def _base_pose(body):
     from .isaac_port import body_measurement
     pose, _z, _v, _w = body_measurement(body)
     return (pose.x, pose.y, pose.yaw)
+
+
+def _lidar_pose(body, ox, oy):
+    """World (x, y, yaw) of a base_link-fixed sensor frame at base-frame offset (ox, oy)."""
+    import math
+    from .isaac_port import body_measurement
+    pose, _z, _v, _w = body_measurement(body)
+    c, s = math.cos(pose.yaw), math.sin(pose.yaw)
+    return (pose.x + ox * c - oy * s, pose.y + ox * s + oy * c, pose.yaw)
