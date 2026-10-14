@@ -81,7 +81,11 @@ class IsaacCartonSensors:
         frame_id, stamp = frame['rendering_frame'], float(frame['rendering_time'])
         self.sensed_target_bboxes = ()
         self.evidence = ()
-        if not np.isfinite([now,stamp]).all() or not 0 <= now-stamp <= .5:
+        # Tolerate the camera render leading the dt-accumulated sim clock by up to ~1 physics
+        # step (matches frame_deadline's _RENDER_LEAD in the context freshness gate); genuine
+        # future/stale frames are still rejected. Without this a sub-step-leading frame is
+        # dropped here before the context (which tolerates it) ever sees it.
+        if not np.isfinite([now,stamp]).all() or not -0.02 <= now-stamp <= .5:
             raise ValueError('no new synchronized rendered camera frame')
         rgb = np.asarray(frame['rgb'])[:, :, :3]
         depth = np.asarray(frame['distance_to_image_plane'], float)
