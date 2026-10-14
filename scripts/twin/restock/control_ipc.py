@@ -123,8 +123,10 @@ class HostControlPublisher:
     """
 
     def __init__(self, *, topics, runtime_env, python='python3', domain=88,
-                 socket_path=None, idle_timeout_s=1800.0, node_name='restock_control_pub'):
+                 socket_path=None, idle_timeout_s=1800.0, node_name='restock_control_pub',
+                 return_topics=()):
         self.topics = tuple(topics)
+        self.return_topics = tuple(return_topics)   # host->Isaac: subprocess subscribes + forwards
         if not self.topics:
             raise ValueError('at least one control topic is required')
         # Unique rclpy node name per subprocess: the control-plane relay and the sim-time-backbone
@@ -142,12 +144,40 @@ class HostControlPublisher:
                    f'unset FASTRTPS_DEFAULT_PROFILES_FILE FASTDDS_DEFAULT_PROFILES_FILE '
                    f'ROS_DISCOVERY_SERVER CYCLONEDDS_URI RMW_FASTRTPS_USE_QOS_FROM_XML; '
                    f'exec {python} {ipc_script} serve {self._socket_path} {float(idle_timeout_s)} '
-                   f'{node_name} ' + ' '.join(self.topics))
+                   f'{node_name} ' + ' '.join(self.topics)
+                   + ((' --sub ' + ' '.join(self.return_topics)) if self.return_topics else ''))
         clean_env = {k: os.environ[k] for k in ('HOME', 'USER', 'LOGNAME', 'TERM', 'DISPLAY')
                      if k in os.environ}
         clean_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
         self._proc = subprocess.Popen(['bash', '-c', command], env=clean_env)
         self._writer = MessageWriter(self._socket_path)
+        # Reverse path: the subprocess forwards every message it receives on the return_topics back
+        # over the SAME socket (host-side latency, not the slow OmniGraph subscribers). A reader
+        # thread keeps the latest payload per topic; read(topic) hands it to the mission consumers
+        # (StationClient for /station/status, IsaacRosGraph for /manipulation/status).
+        import threading
+        self._latest = {}
+        self._lock = threading.Lock()
+        if self.return_topics:
+            self._reader = threading.Thread(target=self._read_loop, daemon=True)
+            self._reader.start()
+
+    def _read_loop(self):
+        try:
+            while True:
+                msg = read_message(self._writer.sock.recv)
+                if msg is None:
+                    break
+                topic, data = msg
+                with self._lock:
+                    self._latest[topic] = data
+        except OSError:
+            pass
+
+    def read(self, topic):
+        """Latest payload forwarded for `topic` (host->Isaac), or None. Consumers de-dup."""
+        with self._lock:
+            return self._latest.get(topic)
 
     def publish(self, topic, data):
         if topic not in self.topics:
@@ -166,7 +196,8 @@ class HostControlPublisher:
                     self._proc.kill()
 
 
-def serve(socket_path, topics, *, idle_timeout_s=1800.0, node_name='restock_control_pub'):
+def serve(socket_path, topics, *, idle_timeout_s=1800.0, node_name='restock_control_pub',
+          return_topics=()):
     """Subprocess entry: bind the socket, accept the Isaac writer, publish each message.
 
     Runs under the host overlay ROS env (domain 88). Declares one std_msgs/String publisher per
@@ -238,6 +269,7 @@ def serve(socket_path, topics, *, idle_timeout_s=1800.0, node_name='restock_cont
     srv.listen(1)
     srv.settimeout(idle_timeout_s)
 
+    import threading
     rclpy.init(args=None)
     node = Node(node_name)
     # /clock + /tf consumers (move_group, nvblox, cuMotion) subscribe BEST_EFFORT/SENSOR for TF but
@@ -248,6 +280,34 @@ def serve(socket_path, topics, *, idle_timeout_s=1800.0, node_name='restock_cont
 
     conn, _ = srv.accept()
     conn.settimeout(idle_timeout_s)
+
+    # Reverse path: forward every message received on a return topic back to the mission over the
+    # SAME socket (host-side latency, not the slow OmniGraph subscribers). All return topics are
+    # std_msgs/String (station/status, manipulation/status).
+    conn_lock = threading.Lock()
+    def _forward(topic):
+        def cb(msg):
+            try:
+                with conn_lock:
+                    conn.sendall(pack_message(topic, msg.data))
+            except OSError:
+                pass
+        return cb
+    for rt in return_topics:
+        node.create_subscription(String, rt, _forward(rt), 10)
+
+    # A background thread owns ALL spinning (subscription callbacks + publisher QoS events); the main
+    # thread only reads publish-requests and publishes. rclpy publish() is thread-safe for this.
+    stop_evt = threading.Event()
+    def _spin():
+        while not stop_evt.is_set() and rclpy.ok():
+            try:
+                rclpy.spin_once(node, timeout_sec=0.1)
+            except Exception:
+                break
+    spinner = threading.Thread(target=_spin, daemon=True)
+    spinner.start()
+
     published = 0
     try:
         while True:
@@ -263,8 +323,9 @@ def serve(socket_path, topics, *, idle_timeout_s=1800.0, node_name='restock_cont
             published += 1
             if published % 200 == 1:
                 node.get_logger().info(f'control/transport publish[{published}] {topic}')
-            rclpy.spin_once(node, timeout_sec=0.0)
     finally:
+        stop_evt.set()
+        spinner.join(timeout=1.0)
         node.get_logger().info(f'control publisher exiting; published={published}')
         node.destroy_node()
         rclpy.shutdown()
@@ -280,8 +341,14 @@ if __name__ == '__main__':
     import sys
     if len(sys.argv) >= 6 and sys.argv[1] == 'serve':
         timeout = float(sys.argv[3])
-        serve(sys.argv[2], sys.argv[5:], idle_timeout_s=timeout, node_name=sys.argv[4])
+        rest = sys.argv[5:]
+        pub_topics, return_topics = rest, []
+        if '--sub' in rest:
+            i = rest.index('--sub')
+            pub_topics, return_topics = rest[:i], rest[i + 1:]
+        serve(sys.argv[2], pub_topics, idle_timeout_s=timeout, node_name=sys.argv[4],
+              return_topics=return_topics)
     else:
-        print('usage: control_ipc.py serve <socket_path> <idle_timeout_s> <node_name> <topic> [<topic>...]',
-              file=sys.stderr)
+        print('usage: control_ipc.py serve <socket_path> <idle_timeout_s> <node_name> '
+              '<topic> [<topic>...] [--sub <return_topic>...]', file=sys.stderr)
         sys.exit(2)

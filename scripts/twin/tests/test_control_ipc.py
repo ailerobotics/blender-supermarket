@@ -96,6 +96,28 @@ class TransportRelayFraming(unittest.TestCase):
         self.assertEqual(json.loads(got[2][1])['tf'][0][1], 'restock_camera_arm')
 
 
+class ReturnPath(unittest.TestCase):
+    """Reverse framing (fix #2): the subprocess forwards station/status + manipulation/status back
+    over the same socket; the Isaac-side reader keeps the latest per topic for the mission consumers."""
+
+    def test_read_loop_populates_latest_per_topic_and_read_returns_it(self):
+        import socket as _socket
+        import threading
+        a, b = _socket.socketpair()
+        pub = HostControlPublisher.__new__(HostControlPublisher)
+        pub._writer = type('W', (), {'sock': a})()
+        pub._latest, pub._lock = {}, threading.Lock()
+        b.sendall(pack_message('/restock_sim/station/status', '{"state":"warming"}'))
+        b.sendall(pack_message('/restock_sim/manipulation/status', '{"status":"running"}'))
+        b.sendall(pack_message('/restock_sim/station/status', '{"state":"ready"}'))  # newer wins
+        b.close()
+        pub._read_loop()                                     # drains until EOF
+        self.assertEqual(pub.read('/restock_sim/station/status'), '{"state":"ready"}')
+        self.assertEqual(pub.read('/restock_sim/manipulation/status'), '{"status":"running"}')
+        self.assertIsNone(pub.read('/restock_sim/nope'))
+        a.close()
+
+
 class Writer(unittest.TestCase):
     def test_writer_sends_framed_message(self):
         a, b = socket.socketpair()

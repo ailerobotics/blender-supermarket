@@ -42,11 +42,13 @@ def _teardown_pg(child):
     if child is None:
         return
     try:
-        os.killpg(os.getpgid(child.pid), signal.SIGINT)
-        time.sleep(5)
-        if child.poll() is None:
-            os.killpg(os.getpgid(child.pid), signal.SIGTERM)
-            time.sleep(3)
+        # Graceful: SIGTERM the launcher so the ROS launch shuts its nodes down and they FLUSH
+        # host-stack.log (a hard SIGKILL truncated run-73's nvblox evidence mid-buffer). Poll up to
+        # 15 s for the whole planner/mapper stack to exit, then hard-kill only if it hangs.
+        os.killpg(os.getpgid(child.pid), signal.SIGTERM)
+        deadline = time.monotonic() + 15.
+        while time.monotonic() < deadline and child.poll() is None:
+            time.sleep(0.5)
         if child.poll() is None:
             os.killpg(os.getpgid(child.pid), signal.SIGKILL)
     except ProcessLookupError:

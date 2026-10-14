@@ -72,8 +72,11 @@ class IsaacRosGraph:
         self.last_receive = time.monotonic()
         for key, topic in TOPICS.items():
             publish = key in ('sensors', 'job')
-            if publish and host_control is not None:
-                continue  # published out-of-Isaac via the host-DDS control subprocess
+            # job/sensors are published out-of-Isaac via the control subprocess; /manipulation/status
+            # is forwarded back by it too (the OmniGraph subscriber delivered it too slowly for the
+            # 5 s manip watchdog). stop + gripper stay on OmniGraph subscribers.
+            if host_control is not None and key in ('sensors', 'job', 'status'):
+                continue
             node_type = 'ROS2Publisher' if publish else 'ROS2Subscriber'
             tick_type = 'OnImpulseEvent' if publish else 'OnPlaybackTick'
             tick_port = 'execOut' if publish else 'tick'
@@ -140,7 +143,13 @@ class IsaacRosGraph:
         except RuntimeError as exc:
             return {'status':'failed','reason':str(exc)}
         og=self.og
-        raw = og.Controller.attribute(self.root+'/status/wire.outputs:data').get()
+        # /manipulation/status arrives via the control subprocess (host-side latency) when a
+        # host_control relay is wired; otherwise the OmniGraph subscriber.
+        host_control = getattr(self, 'host_control', None)
+        if host_control is not None:
+            raw = host_control.read(TOPICS['status'])
+        else:
+            raw = og.Controller.attribute(self.root+'/status/wire.outputs:data').get()
         result = None
         if raw and raw != self.last_status:
             result = json.loads(raw)

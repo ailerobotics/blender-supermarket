@@ -20,14 +20,16 @@ class JsonChannel:
         if omni.usd.get_context().get_stage().GetPrimAtPath(root):
             raise ValueError('refusing to overwrite native ROS channel')
         self.og,self.root=og,root
-        # The Isaac->host PUBLISH (station/command) goes through the host-DDS subprocess, since the
-        # OmniGraph ROS2 publisher is invisible to the host UDPv4 DDS (run-57/59: command pub=0).
-        # The host->Isaac station/status SUBSCRIBER stays on OmniGraph (it discovers the ack writer).
-        self.host_control, self.publish_topic = host_control, publish_topic
+        # Both directions go through the host-DDS subprocess when host_control is set: the Isaac
+        # OmniGraph ROS2 publisher is invisible to the host (run-57/59: command pub=0) AND the
+        # OmniGraph subscriber delivers station/status too slowly (run-71/73: the StationClient got
+        # the ack reply only after it had faulted). The subprocess publishes station/command and
+        # forwards station/status back over the socket at host-side latency; read() uses it.
+        self.host_control, self.publish_topic, self.subscribe_topic = host_control, publish_topic, subscribe_topic
         directions = (('send',publish_topic,'ROS2Publisher'),
                       ('receive',subscribe_topic,'ROS2Subscriber'))
         if host_control is not None:
-            directions = directions[1:]  # publish out-of-Isaac; only build the receive graph
+            directions = ()  # publish + receive both out-of-Isaac via the control subprocess
         for direction,topic,kind in directions:
             key=og.Controller.Keys
             graph,_,_,_=og.Controller.edit({'graph_path':root+'/'+direction,'evaluator_name':'execution'}, {
@@ -54,6 +56,9 @@ class JsonChannel:
         self._pulse('send')
 
     def read(self):
+        if self.host_control is not None:
+            raw=self.host_control.read(self.subscribe_topic)   # forwarded by the control subprocess
+            return json.loads(raw) if raw else None
         self._pulse('receive')
         raw=self.og.Controller.attribute(self.root+'/receive/wire.outputs:data').get()
         return json.loads(raw) if raw else None

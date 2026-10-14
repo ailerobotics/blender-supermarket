@@ -390,6 +390,10 @@ def _build_runtime(*, app, assembly, params, output):
         from twin.restock.control_ipc import HostControlPublisher
         host_control = HostControlPublisher(
             topics=(TOPICS['job'], TOPICS['sensors'], '/restock_sim/station/command'),
+            # The subprocess also SUBSCRIBES these and forwards them back over the socket, so the
+            # StationClient (station/status) and IsaacRosGraph (manipulation/status) see host-side
+            # latency instead of the slow OmniGraph subscribers that delivered the ack reply late.
+            return_topics=('/restock_sim/station/status', TOPICS['status']),
             runtime_env=params.masked_depth['runtime_env'],
             python=params.masked_depth.get('python', 'python3'),
             domain=params.masked_depth.get('domain', 88))

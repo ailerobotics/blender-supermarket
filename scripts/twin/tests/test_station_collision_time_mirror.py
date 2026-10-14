@@ -278,6 +278,19 @@ def test_masked_depth_stamped_from_the_same_stage_clock_as_the_tf_relay():
     assert bridge.published[-1] == 42.0                    # depth stamped at the stage clock, not 5.0
 
 
+def test_jsonchannel_reads_station_status_via_host_control_relay():
+    # With a host_control relay, JsonChannel.read() takes station/status from the subprocess forward
+    # (host-side latency), not the slow OmniGraph subscriber.
+    from scripts.twin.restock.native_channel import JsonChannel
+    c = JsonChannel.__new__(JsonChannel)
+    c.subscribe_topic = '/restock_sim/station/status'
+    c.host_control = NS(read=lambda t: '{"epoch": 1, "state": "warming"}'
+                        if t == '/restock_sim/station/status' else None)
+    assert c.read() == {'epoch': 1, 'state': 'warming'}
+    c.host_control = NS(read=lambda t: None)                 # nothing forwarded yet
+    assert c.read() is None
+
+
 def test_runtime_clears_collision_time_on_stop():
     st = _client()
     feedback = NS(collision_time=5.0, parked=lambda: True)
