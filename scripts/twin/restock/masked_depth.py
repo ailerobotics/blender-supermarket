@@ -189,3 +189,54 @@ class MaskedDepthPublisher:
         from builtin_interfaces.msg import Time
         sec = int(seconds)
         return Time(sec=sec, nanosec=int(round((seconds - sec) * 1e9)))
+
+
+def bbox_payload(bbox):
+    """Validate and flatten one grasp-target bbox to [u1, v1, u2, v2] floats.
+
+    `bbox` is the target's axis-aligned image box as (u1, v1, u2, v2) pixel corners with
+    u1<u2 and v1<v2 (the shelfbot object_segmenter masks this rectangle out of the depth so
+    cuMotion can plan a path into the grasp target). Returns a plain float list for the
+    Float32MultiArray data field.
+    """
+    box = [float(v) for v in bbox]
+    if len(box) != 4 or not all(np.isfinite(box)):
+        raise ValueError('target bbox must be four finite pixel values [u1,v1,u2,v2]')
+    u1, v1, u2, v2 = box
+    if not (u2 > u1 and v2 > v1):
+        raise ValueError('target bbox must have u1<u2 and v1<v2')
+    return box
+
+
+class TargetBboxPublisher:
+    """Publish the grasp-target image bbox as std_msgs/Float32MultiArray for the host.
+
+    The shelfbot object_segmenter subscribes `/restock_sim/target_bbox` (bbox_timeout_s 0.5)
+    and, for each masked-depth frame with a fresh bbox, invalidates the target rectangle in
+    the depth before republishing `world_depth` to nvblox; a stale/absent bbox passes depth
+    through unchanged (leaving the target an obstacle). So the bbox must be published on every
+    masked-depth frame, in the SAME camera image as the depth. Constructed only inside the
+    guarded app (lazy rclpy import).
+    """
+
+    def __init__(self, *, topic='/restock_sim/target_bbox', domain=88, node=None, _ros=None):
+        self.topic = topic
+        self._ros = _ros or self._init_ros(domain, node)
+
+    def _init_ros(self, domain, node):
+        import os
+        import rclpy
+        from rclpy.node import Node
+        from std_msgs.msg import Float32MultiArray
+        os.environ.setdefault('ROS_DOMAIN_ID', str(domain))
+        if not rclpy.ok():
+            rclpy.init(args=None)
+        node = node or Node('restock_target_bbox')
+        return {'node': node, 'Float32MultiArray': Float32MultiArray,
+                'pub': node.create_publisher(Float32MultiArray, self.topic, 10)}
+
+    def publish(self, bbox):
+        msg = self._ros['Float32MultiArray']()
+        msg.data = bbox_payload(bbox)
+        self._ros['pub'].publish(msg)
+        return msg

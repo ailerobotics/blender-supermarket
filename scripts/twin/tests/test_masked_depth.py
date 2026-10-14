@@ -3,7 +3,8 @@ import numpy as np
 import pytest
 
 from twin.restock.masked_depth import (
-    parse_instance_frame, rig_instance_ids, mask_rig_depth, MaskedDepthPublisher)
+    parse_instance_frame, rig_instance_ids, mask_rig_depth, MaskedDepthPublisher,
+    bbox_payload)
 
 
 def _frame(depth, ids, id_to_path):
@@ -70,6 +71,16 @@ class _FakeCamera:
 
     def get_intrinsics_matrix(self):
         return self._k
+
+
+def test_bbox_payload_valid():
+    assert bbox_payload((10, 20, 30, 45)) == [10.0, 20.0, 30.0, 45.0]
+
+
+def test_bbox_payload_rejects_degenerate_or_nonfinite():
+    for bad in [(10, 20, 10, 45), (10, 20, 30, 20), (1, 2, 3), (float('nan'), 0, 1, 1)]:
+        with pytest.raises(ValueError):
+            bbox_payload(bad)
 
 
 def test_masked_frame_end_to_end_without_ros():
