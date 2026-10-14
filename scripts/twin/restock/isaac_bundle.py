@@ -250,12 +250,18 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         if action == 'verify':
             verifier.begin(job, float(assembly.world.current_time) - port.origin)
 
+    # Physics ticks per recorded walkthrough frame. Lowering the cadence (default 2 ->
+    # e.g. 6) both shrinks the video and, with the port's render gating, lets the
+    # navigation-only stages skip most whole-scene renders -- the per-tick wall-clock cost
+    # that otherwise blows the stage-pair cap. Decode-grade stages are unaffected (they
+    # render every tick via SENSING_ACTIONS regardless of this stride).
+    record_stride = int(config.get('record_stride', 2))
     port = IsaacPort(
         world=assembly.world, robot=assembly.robot, robot_body=assembly.robot_body,
         cart_body=assembly.cart_body, mobile=assembly.mobile, range_sensor=range_sensor,
         transport=transport, contact=assembly.contact, hold_arm=assembly.command_gate.hold,
         verification=verifier, recording_camera=recording_camera, recorder=recorder,
-        native_transport=assembly.transport, on_action=on_action)
+        native_transport=assembly.transport, on_action=on_action, record_stride=record_stride)
 
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)

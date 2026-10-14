@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
-from twin.restock.isaac_port import body_measurement, MissionCamera
+from twin.restock.isaac_port import body_measurement, MissionCamera, IsaacPort, SENSING_ACTIONS
 from twin.restock.native_transport import ArmCommandGate
 from twin.restock_manipulation.cad_tool import ARM_JOINTS
 
@@ -92,6 +92,52 @@ def test_mission_camera_preserves_pixels_id_and_original_frame_clock():
     measured=camera.get_current_frame()
     assert measured['rendering_time']==.5 and measured['rendering_frame']==23
     assert measured['rgb'] is frame['rgb'] and frame['rendering_time']==8.5
+
+
+def _plan_port(*, action, stride=2, recorder=True, camera=True):
+    port = IsaacPort.__new__(IsaacPort)   # skip Isaac wiring; only the render-gating state
+    port.current_action = action
+    port.record_stride = stride
+    port.recorder = object() if recorder else None
+    port.recording_camera = object() if camera else None
+    return port
+
+
+def test_navigation_stage_renders_only_on_recorder_cadence():
+    port = _plan_port(action='couple', stride=3)   # couple is navigation-only
+    plans = [port._frame_plan(t) for t in range(1, 7)]
+    sensing = [s for s, _ in plans]
+    record = [r for _, r in plans]
+    assert sensing == [False] * 6                   # no sensing render in a nav stage
+    assert record == [False, False, True, False, False, True]   # only every 3rd tick
+
+
+def test_sensing_stage_renders_every_tick():
+    for action in sorted(SENSING_ACTIONS):
+        port = _plan_port(action=action, stride=100)
+        assert all(port._frame_plan(t)[0] for t in range(1, 5))   # sensing True regardless of stride
+
+
+def test_no_recorder_means_no_record_render():
+    port = _plan_port(action='return', stride=1, recorder=False)
+    assert all(not r for _, r in (port._frame_plan(t) for t in range(1, 5)))
+
+
+def test_begin_action_tracks_current_action_for_gating():
+    port = IsaacPort.__new__(IsaacPort)
+    port.on_action = None
+    port.current_action = None
+    port.begin_action('collect', job={})
+    assert port.current_action == 'collect'
+
+
+def test_invalid_record_stride_rejected():
+    import pytest as _pt
+    with _pt.raises(ValueError, match='record_stride'):
+        IsaacPort(world=None, robot=NS(dof_names=('left_wheel_joint', 'right_wheel_joint')),
+                  robot_body=None, cart_body=None, mobile=None, range_sensor=None,
+                  transport=None, contact=None, hold_arm=None, verification=None,
+                  record_stride=0)
 
 
 def gate_fixture():

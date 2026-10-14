@@ -56,5 +56,9 @@ PY
   fi
 done
 
-exec timeout --signal=TERM --kill-after=15s 1200s \
+# Wall-clock cap for the whole launch (host warmup + Isaac boot + mission). Default 40 min
+# for a collect+couple stage pair; override with RESTOCK_WALL_CAP (e.g. a short bounded
+# smoke/measurement run). The resource guards (GPU lock, 4 GiB RAM watchdog) are unchanged.
+RESTOCK_WALL_CAP="${RESTOCK_WALL_CAP:-2400s}"
+exec timeout --signal=TERM --kill-after=15s "$RESTOCK_WALL_CAP" \
   "$RESTOCK_PYTHON" "$SCRIPT_DIR/run_mobile_restock.py" "$@"

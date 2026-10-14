@@ -15,6 +15,13 @@ from twin.navigation.sensors import observation as nav_observation
 from twin.urdf_probe import parse_urdf, link_world_transforms, geometry_world_points, resolve_package_uri
 from .runtime import Packet
 
+# Stages whose work consumes freshly rendered pixels (inventory perception, the
+# manipulation camera->nvblox depth, the final inventory verification). Only these
+# need world.step(render=True) every tick; the navigation-only stages (couple,
+# outbound, park, return) drive the base from the PhysX lidar raycast + encoders and
+# never read a rendered frame, so they render only on the recorder's cadence ticks.
+SENSING_ACTIONS = frozenset({'collect', 'transfer', 'verify'})
+
 
 def body_measurement(body):
     position, quaternion = body.get_world_pose()  # Isaac quaternion is wxyz
@@ -82,7 +89,7 @@ class IsaacPort:
     def __init__(self, *, world, robot, robot_body, cart_body, mobile, range_sensor,
                  transport, contact, hold_arm, verification, recording_camera=None,
                  recorder=None, native_transport=None, after_step=None,
-                 on_action=None, realtime=True):
+                 on_action=None, realtime=True, record_stride=2, masked_depth=None):
         self.world,self.robot=world,robot
         self.robot_body,self.cart_body=robot_body,cart_body
         self.mobile,self.range_sensor=mobile,range_sensor
@@ -92,6 +99,15 @@ class IsaacPort:
         self.native_transport=native_transport
         self.after_step,self.on_action=after_step,on_action
         self.realtime=realtime
+        if type(record_stride) is not int or record_stride<1:
+            raise ValueError('record_stride must be a positive int (physics ticks per recorded frame)')
+        self.record_stride=record_stride
+        # Optional masked-depth publisher (Isaac-side rig self-pixel invalidation for the
+        # host nvblox consumer). Published only on sensing-stage ticks; None keeps the
+        # legacy raw-depth OmniGraph path untouched. See masked_depth.MaskedDepthPublisher.
+        self.masked_depth=masked_depth
+        # Current mission action (set by begin_action); gates per-tick rendering + sensing.
+        self.current_action=None
         self.wall_origin=time.monotonic()
         self.tick=0
         self.names=tuple(robot.dof_names)
@@ -99,6 +115,14 @@ class IsaacPort:
         self.sensor_models={'docking':'ideal_simulated_rigid_body_proprioception',
                             'navigation':'wheel_encoders_and_physical_range_scan',
                             'inventory':'rendered_rgb_depth_only'}
+
+    def _frame_plan(self, upcoming_tick):
+        """(sensing_tick, record_tick) for `upcoming_tick`: whether a sensing stage needs a
+        fresh render and whether the recorder captures this tick. render = either is True."""
+        sensing=self.current_action in SENSING_ACTIONS
+        record=(self.recorder is not None and self.recording_camera is not None
+                and upcoming_tick%self.record_stride==0)
+        return sensing,record
 
     def advance(self, dt):
         if not math.isclose(float(self.world.get_physics_dt()),dt,abs_tol=1e-8):
@@ -109,7 +133,12 @@ class IsaacPort:
             remaining=self.wall_origin+(self.tick+1)*dt-time.monotonic()
             if remaining>0:
                 time.sleep(remaining)
-        self.world.step(render=True)
+        # Render only when this tick produces a frame someone reads: a recorder-cadence
+        # frame, or any sensing stage (perception / manip depth / verification). The
+        # dominant per-tick cost is the whole-scene render; the navigation-only stages
+        # read no pixels, so skipping their renders is the headroom under the wall cap.
+        self.sensing_tick,self.record_tick=self._frame_plan(self.tick+1)
+        self.world.step(render=bool(self.sensing_tick or self.record_tick))
         self.tick+=1
         # Mission-relative acquisition clock on the nominal fixed timestep. Deriving it
         # from world.current_time instead drifts: Isaac's physics dt differs from the
@@ -175,6 +204,8 @@ class IsaacPort:
                                   cert=coverage_certifies(navigation,heading,rad,stop),
                                   nblind=len(blind),blind_deg=blind[:12])
                 line=_json.dumps(dict(tick=self.tick,t=round(now,3),
+                    wall=round(time.monotonic()-self.wall_origin,3),action=self.current_action,
+                    rendered=bool(self.sensing_tick or self.record_tick),
                     x=round(r.x,3),y=round(r.y,3),yaw_deg=round(_math.degrees(heading),1),
                     lin=round(float(np.linalg.norm(rv)),4),coupled=bool(coupled),
                     unknown=sum(1 for u in scan.unknown if u),probe=rec))
@@ -185,8 +216,13 @@ class IsaacPort:
                     if self.tick==1:
                         (self.recorder.directory.parent/'nav-trace.err').write_text(repr(_e))
                 except Exception: pass
+        if self.masked_depth is not None and self.sensing_tick:
+            # Rig-masked depth (+ camera info) for the host nvblox consumer, published only
+            # while a sensing stage needs the manipulation collision world. Off (None) by
+            # default; the raw-depth OmniGraph path is unchanged until the host opts in.
+            self.masked_depth.publish(now)
         evidence=self.verification(now)
-        if self.recorder is not None and self.tick%2 == 0:
+        if self.record_tick:
             frame=self.recording_camera.get_current_frame()
             self.recorder.capture(frame)
         return Packet(f'physics:{self.tick}','sensor',now,
@@ -194,6 +230,7 @@ class IsaacPort:
             ready,coupled,articulation,parked,evidence)
 
     def begin_action(self,action,job):
+        self.current_action=action
         if self.on_action is not None:
             self.on_action(action,job)
 
