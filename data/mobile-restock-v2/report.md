@@ -1603,3 +1603,22 @@ lines; nvblox only reached 'Allocating space for last depth view'), so warm hit 
 capture saw no clearance evidence. Two residuals: (a) relax the ack's 1 s WALL guard for render
 spikes (host lane) OR a mission-side background heartbeat thread (decoupled from mission ticks);
 (b) why collision_time never advances (ack endpoints-readiness / ESDF poll; host lane).
+
+### 2026-10-14 — one-clock stamps in + ack survives (warming); collision_time still -1 (host-lane b)
+
+run-73 (merged PR59 ack wall guard 3.0 s; one-clock stamps; heartbeat bracketing). The ack now
+SURVIVES: /station/status reaches 'warming' and holds -- NO more 'parked heartbeat lost' (the 3.0 s
+wall guard + the before/after-capture heartbeats fixed msg162 (a)). One-clock stamp fix verified:
+BRIDGE_STATS now=0.2833 (= station stage_clock = native_transport.stage_time = world.current_time)
+distinct from rendering_time=0.2500, and the /tf relay + masked depth both stamp that stage value
+for the tick, /tf emitted before the depth (in isaac_port.advance, ahead of _pump). BUT collision_time
+stays -1: nvblox still does not integrate an ESDF the ack can read. host-stack.log is SIGKILL-
+truncated at the first 'Allocating space for last depth view' (19:53:05), so the runtime nvblox/ack
+logs are lost. Mission reason 'host process/status watchdog' (IsaacRosGraph 5 s manip watchdog) +
+/manipulation/status 'no initial sensor frame' = ros_host got the job but no /sensors (collision_time
+never fresh) and its status returned too slowly over OmniGraph. Candidate b cause (host lane):
+nvblox's TF lookup may still drop on ARRIVAL ORDER -- /tf (transport relay subprocess) and depth
+(masked-depth subprocess) are independent DDS participants, so a depth can reach nvblox before the
+matching /tf for the same stamp, failing the lookup even though publish order + stamps are correct.
+Residuals: (b) host lane re-diagnoses run-73 nvblox (does the lookup resolve + integrate now?); and
+fix#2 (return relay for /manipulation/status) for the IsaacRosGraph 5 s watchdog once /sensors flow.
