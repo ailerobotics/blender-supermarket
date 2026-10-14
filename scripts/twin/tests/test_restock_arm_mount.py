@@ -11,7 +11,9 @@ import math
 
 import numpy as np
 
-from scripts.twin.restock_camera.arm_mount import arm_camera_look_at_mount
+from scripts.twin.restock_camera.arm_mount import (
+    arm_camera_look_at_mount, collision_camera_intrinsics,
+    COLLISION_CAMERA_WIDTH, COLLISION_CAMERA_HEIGHT)
 
 EYE = (0.46, 0.0, 0.09)                     # front_camera_frame origin in ur_base_link
 SRC = (0.002, 1.1, 0.261)                   # source carton (ur_base_link), run-75 measured
@@ -75,6 +77,34 @@ def test_look_at_mount_frames_both_source_and_shelf():
         assert (zs > 0).all()                       # every carton corner now in front of the camera
         u1, v1, u2, v2 = roi
         assert 0 <= u1 < u2 <= SHAPE[1] and 0 <= v1 < v2 <= SHAPE[0]
+
+
+def _carton_corners(pose_xyz, yaw):
+    x, y, z = pose_xyz
+    c, s = math.cos(yaw), math.sin(yaw)
+    dx, dy, dz = DIMS[0] / 2, DIMS[1] / 2, DIMS[2]
+    return np.array([[x + c * ax - s * ay, y + s * ax + c * ay, z - az]
+                     for ax in (-dx, dx) for ay in (-dy, dy) for az in (0., dz)])
+
+
+def test_collision_intrinsics_frame_the_whole_carton_inside_both_stages():
+    # The fix for the caveat: the collision/masked-depth camera uses a WIDE field at a modest
+    # resolution (not decode-grade). With the centroid look-at re-aim, all 8 carton corners of BOTH
+    # the collect bin and the transfer slot land IN FRONT and strictly INSIDE the image -- no clamp,
+    # unlike the run-75 128x128/23.8-deg camera that overflowed the carton width.
+    k = collision_camera_intrinsics()
+    assert (k.width, k.height) == (COLLISION_CAMERA_WIDTH, COLLISION_CAMERA_HEIGHT)
+    hfov = 2 * math.degrees(math.atan((k.width / 2) / k.fx))
+    assert 51 < hfov < 90                                   # genuinely wide field for the collision depth
+    mount = arm_camera_look_at_mount(EYE, [SRC, SHELF])
+    c2b = np.linalg.inv(mount.base_from_camera)
+    for pose, yaw in [(SRC, math.pi), (SHELF, 0.)]:
+        p = _carton_corners(pose, yaw) @ c2b[:3, :3].T + c2b[:3, 3]
+        assert (p[:, 2] > 0).all()                          # all 8 corners in front of the camera
+        u = p[:, 0] / p[:, 2] * k.fx + k.cx
+        v = p[:, 1] / p[:, 2] * k.fy + k.cy
+        assert (u >= 0).all() and (u <= k.width).all()      # all 8 corners inside the image, unclamped
+        assert (v >= 0).all() and (v <= k.height).all()
 
 
 def test_look_at_both_directions_fit_within_the_arm_camera_fov():

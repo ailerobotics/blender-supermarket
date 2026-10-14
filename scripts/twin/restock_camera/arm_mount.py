@@ -16,11 +16,31 @@ value ``isaac_factory`` currently hardcodes) and the live ``_arm_base_from_camer
 
 Pure NumPy, no Isaac/USD. See ``data/sim-restock-camera-v2/arm-framing-report.md``.
 """
+import math
 from dataclasses import dataclass
 
 import numpy as np
 
-from .geometry import look_at, usd_camera_transform, rigid
+from .geometry import Intrinsics, look_at, usd_camera_transform, rigid
+
+# Collision / masked-depth intrinsics for the re-aimed arm camera. This camera feeds the host
+# nvblox collision depth and the grasp-target bbox — it does NOT decode QR, so it does NOT need the
+# decode-grade resolution of the fixed source/shelf cameras (those stay untouched). What it DOES
+# need is a WIDE field: the run-75 128x128 / 23.8-deg field covers only ~0.50 m at the ~1.2 m grasp
+# standoff, so the 0.60x0.40 carton overflowed the frame (ROI clamped to full width). The required
+# half-angles to enclose all 8 carton corners of BOTH the collect bin and the transfer slot (at the
+# centroid look-at) are 25.3 deg horizontal, 10.0 deg vertical. 424x240 at 75-deg HFOV (~47-deg VFOV)
+# clears both with margin at a modest depth-camera resolution (a native RealSense-class depth mode).
+COLLISION_CAMERA_WIDTH = 424
+COLLISION_CAMERA_HEIGHT = 240
+COLLISION_CAMERA_HFOV_DEG = 75.0
+
+
+def collision_camera_intrinsics(near=0.1, far=2.5):
+    """Wide-field, modest-resolution :class:`Intrinsics` for the arm collision/masked-depth camera."""
+    fx = (COLLISION_CAMERA_WIDTH / 2.) / math.tan(math.radians(COLLISION_CAMERA_HFOV_DEG) / 2.)
+    return Intrinsics(width=COLLISION_CAMERA_WIDTH, height=COLLISION_CAMERA_HEIGHT, fx=fx, fy=fx,
+                      cx=COLLISION_CAMERA_WIDTH / 2., cy=COLLISION_CAMERA_HEIGHT / 2., near=near, far=far)
 
 
 @dataclass(frozen=True)
