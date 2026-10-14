@@ -71,7 +71,8 @@ def main():
     payload = RosPayloadSync()
     motion = RosMotionPort(node,joint_limits=tool.arm_limits,payload_sync=payload,
                            emergency_stop=lambda:stop.publish(Bool(data=True)),
-                           velocity_scale=planner_velocity_scale(args.urdf))
+                           velocity_scale=planner_velocity_scale(args.urdf),
+                           pose_goal=bool(config.get('pose_goal', False)))
     controller = TransferController(motion,profiles,frame=tool.base_frame,
         phase_timeout=120.,pose_policy=WallCartonPolicy(args.shelfbot_root,tool,walls=config['walls']),
         transport_joints=transport_joints)

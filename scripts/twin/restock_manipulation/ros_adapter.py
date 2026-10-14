@@ -71,7 +71,7 @@ def validate_trajectory(trajectory, start, limits):
 class RosMotionPort:
     def __init__(self, node, *, joint_limits, payload_sync, emergency_stop,
                  group='ur_manipulator', tcp='gripper_pad_tcp', namespace='/restock_sim',
-                 pipeline='isaac_ros_cumotion', timeout=25.0, velocity_scale=.04):
+                 pipeline='isaac_ros_cumotion', timeout=25.0, velocity_scale=.04, pose_goal=False):
         require_sim_domain()
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
             raise RuntimeError('node must use domain 88 and simulation clock')
@@ -90,6 +90,12 @@ class RosMotionPort:
         self.node, self.group, self.tcp = node, group, tcp
         self.pipeline, self.limits, self.timeout = pipeline, joint_limits, timeout
         self.velocity_scale=velocity_scale
+        # pose_goal=True plans to the cartesian TCP pose with a MoveGroup pose-goal (cuMotion does
+        # collision-aware IK against its own XRDF model) instead of KDL GetPositionIK -> c-space
+        # target. The KDL/SRDF path returned configs cuMotion's XRDF flagged as self-collision
+        # (run-80: planToCSpaceTarget 'self collision detected'); one collision model removes that
+        # disagreement. Kept behind this switch so a regression is a one-flag revert.
+        self.pose_goal=bool(pose_goal)
         self.payload_sync, self.emergency_stop = payload_sync, emergency_stop
         self.ik = node.create_client(GetPositionIK, namespace + '/compute_ik')
         self.plan = ActionClient(node, MoveGroup, namespace + '/move_action')
@@ -107,6 +113,12 @@ class RosMotionPort:
                 or any(not math.isfinite(q) or not lo <= q <= hi for q, (lo, hi) in zip(joints, self.limits))):
             raise ValueError('invalid pose or measured start')
         self.start = tuple(joints)
+        if self.pose_goal:
+            self.generation += 1
+            self.handle = None
+            self._send(self.plan, self._pose_plan_goal(pose, joints), 'plan_accept')
+            self.deadline = time.monotonic() + self.timeout
+            return
         req = GetPositionIK.Request()
         req.ik_request.group_name = self.group
         req.ik_request.ik_link_name = self.tcp
@@ -123,6 +135,48 @@ class RosMotionPort:
         self.handle = None
         self.future, self.state = self.ik.call_async(req), 'ik'
         self.deadline = time.monotonic() + self.timeout
+
+    def _pose_plan_goal(self, pose, joints):
+        """MoveGroup plan request to a cartesian TCP pose (position+orientation goal constraints in
+        ur_base_link); cuMotion does its own collision-aware IK, so a single collision model (XRDF)
+        decides feasibility. Mirrors begin_joint_goal's request fields; plan_only (the port executes
+        a validated trajectory separately)."""
+        from moveit_msgs.action import MoveGroup
+        from moveit_msgs.msg import Constraints, PositionConstraint, OrientationConstraint, BoundingVolume
+        from shape_msgs.msg import SolidPrimitive
+        from geometry_msgs.msg import Pose as GPose
+        goal = MoveGroup.Goal()
+        req = goal.request
+        req.group_name, req.pipeline_id = self.group, self.pipeline
+        req.allowed_planning_time = 5.0
+        req.num_planning_attempts = 1
+        req.max_velocity_scaling_factor = self.velocity_scale
+        req.max_acceleration_scaling_factor = .05
+        req.start_state.joint_state.name = list(JOINTS)
+        req.start_state.joint_state.position = list(joints)
+        pc = PositionConstraint()
+        pc.header.frame_id = 'ur_base_link'
+        pc.link_name = self.tcp
+        pc.weight = 1.0
+        bv = BoundingVolume()
+        bv.primitives.append(SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[.004, .004, .004]))
+        tp = GPose()
+        tp.position.x, tp.position.y, tp.position.z = map(float, pose[:3])
+        tp.orientation.w = 1.0
+        bv.primitive_poses.append(tp)
+        pc.constraint_region = bv
+        oc = OrientationConstraint()
+        oc.header.frame_id = 'ur_base_link'
+        oc.link_name = self.tcp
+        oc.orientation.x, oc.orientation.y, oc.orientation.z, oc.orientation.w = map(float, pose[3:])
+        oc.absolute_x_axis_tolerance = oc.absolute_y_axis_tolerance = oc.absolute_z_axis_tolerance = .02
+        oc.weight = 1.0
+        c = Constraints()
+        c.position_constraints.append(pc)
+        c.orientation_constraints.append(oc)
+        req.goal_constraints = [c]
+        goal.planning_options.plan_only = True
+        return goal
 
     def _send(self, client, goal, state):
         generation = self.generation
