@@ -26,9 +26,11 @@ for arg in "$@"; do
     export PYTHONPATH="$SCRIPT_DIR"
     export ROS_DISTRO=jazzy
     export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-    export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-88}"
-    export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-1}"
-    export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
+    # The GPU guard mandates this exact domain-88 loopback isolation; set it
+    # unconditionally so an inherited ROS value from the parent shell cannot trip it.
+    export ROS_DOMAIN_ID=88
+    export ROS_LOCALHOST_ONLY=1
+    export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
     # Resolve the one bundled Jazzy bridge lib dir via the interpreter itself so
     # the exact pythonX.Y is right and stray siblings/symlinks cannot double-match.
     jazzy="$("$RESTOCK_PYTHON" - <<'PY'
