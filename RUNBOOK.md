@@ -750,8 +750,13 @@ mission scenario — the plan the native run executes; it captures nothing:
 
 ```bash
 PYTHONPATH=scripts python3 scripts/run_restock_commissioning.py \
-  --camera-config "$CAMERA_CONFIG" --scenario "$SCENARIO"      # covers backstock_00 + shelf
+  --camera-config "$CAMERA_CONFIG" --scenario "$SCENARIO"      # source + cart + shelf (walls)
 ```
+
+The default stations are the three mission stations that need an empty baseline — `backstock_00`
+(source), `rollwagen` (cart deck) and `G3_back_s2` (shelf) — matching the `ros_host_config.json`
+`walls` keys. The cart deck is commissioned empty at the staging pose before pickup (it is the
+context `sensing_sources` otherwise refuses as uncommissioned). Use `--station` to restrict.
 
 `--execute` runs the choreography: with each target station EMPTY and the robot at its
 capture pose, it captures the eye-in-hand/station RGB-D frame, commissions the support via

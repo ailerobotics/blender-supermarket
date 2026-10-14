@@ -214,3 +214,40 @@ def test_slot_provider_over_a_real_commissioned_shelf_reports_the_slot(tmp_path,
     assert len(slot.pose_station) == 7 and np.isfinite(slot.pose_station).all()
     assert len(slot.free_dimensions) == 3
     assert slot.provenance['calibration_id'] == baseline_cal       # reloaded baseline is in the path
+
+
+def test_one_shelf_baseline_covers_both_the_slot_target_and_the_verify_scan(tmp_path, monkeypatch):
+    """The SAME commissioned G3_back_s2 baseline must back both transfer providers: the
+    pre-placement slot target AND the post-placement verify scan go through one shelf context.
+    Proven end-to-end over the reloaded baseline (the native carton-present frame is integration's)."""
+    from scripts.twin.restock_manipulation import isaac_sensors
+    from scripts.twin.restock_camera import commissioning as C
+    from .test_restock_commissioning import empty_frame, context
+    from .test_restock_manipulation import FixturePoseBridge
+    k, camera, depth, support, witness, frame = empty_frame()
+    commissioned = context(k, camera, location='G3_back_s2', camera_id='shelf')
+    C.commission_and_persist(commissioned, frame, 1., {'G3_back_s2': (support, witness)}, dataset_dir=tmp_path)
+    boot = context(k, camera, location='G3_back_s2', camera_id='shelf')
+    C.apply_baselines(boot, C.load_baselines(tmp_path), required_locations=['G3_back_s2'])
+    baseline_cal = boot.slots[0].tracker.geometry.calibration_id
+
+    monkeypatch.setattr(isaac_sensors, 'load_pose_bridge', lambda root: FixturePoseBridge())
+    camera_stub = NS(get_current_frame=lambda **kw: frame,
+                     get_intrinsics_matrix=lambda: np.array([[k.fx, 0, k.cx], [0, k.fy, k.cy], [0, 0, 1.]]),
+                     add_distance_to_image_plane_to_frame=lambda: None)
+    adapter = isaac_sensors.IsaacCartonSensors(camera_stub, pose_bridge_root='fixture', profiles={},
+                                               context_provider=boot, camera_id='shelf', steady_clock=lambda: 0.)
+    motion = NS(parked=lambda: True, collision_time=1., joint_positions=lambda: (0.,)*6,
+                observe_source=lambda observation: None)
+    contact = NS(read=lambda: False)
+    # Pre-placement slot target: resolves against the reloaded G3_back_s2 baseline.
+    slot = build_shelf_target_provider(adapter, motion, contact)(1.)
+    assert slot is not None and slot.provenance['calibration_id'] == baseline_cal
+    # Post-placement verify scan: empty frame -> expected carton not present (never fabricated),
+    # but the scan validated against the SAME reloaded baseline (evidence carries its calibration).
+    frame.update(rendering_frame=2, rendering_time=1.4)        # new frame, within the collision-time budget
+    result = build_shelf_verification_provider(adapter, motion, contact)(1.4, 'juice_orange',
+                                                                         (0., 0., .5, 0., 0., 0., 1.))
+    assert result.present is False and result.within_tolerance is False
+    verify_evidence = next(e for e in adapter.evidence if e['location'] == 'G3_back_s2')
+    assert verify_evidence['baseline_calibration_id'] == baseline_cal     # one baseline covers both

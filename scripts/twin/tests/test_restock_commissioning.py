@@ -203,6 +203,49 @@ def test_run_commissioning_covers_source_and_shelf_into_one_manifest(tmp_path):
     assert manifest['provenance']['G3_back_s2']['capture_pose'] == [-3.05,6.0,np.pi]
 
 
+def test_run_commissioning_covers_all_three_mission_stations_incl_cart(tmp_path):
+    """The default run covers source + CART (rollwagen) + shelf into one manifest and reloads.
+
+    The cart deck (station 'rollwagen', cart camera) is the context sensing_sources refuses today
+    as uncommissioned; it must commission and reload like the others."""
+    frames = {cid: empty_frame() for cid in ('source', 'cart', 'shelf')}
+    station_of = {'source': 'backstock_00', 'cart': 'rollwagen', 'shelf': 'G3_back_s2'}
+    poses = {'backstock_00': [-5.73,16,0], 'rollwagen': [-5.73,16,0], 'G3_back_s2': [-3.05,6.0,np.pi]}
+    ctxs, by_ctx = [], {}
+    for cid, (k, cam, _, support, witness, frame) in frames.items():
+        frame.update(rendering_frame=7, rendering_time=1.)
+        ctx = context(k, cam, location=station_of[cid], camera_id=cid)
+        ctxs.append(ctx); by_ctx[id(ctx)] = (station_of[cid], support, witness, frame)
+
+    def capture(ctx):
+        station, support, witness, frame = by_ctx[id(ctx)]
+        return dict(frame=frame, now=1., empty_polygons={station: (support, witness)},
+                    capture_poses={station: poses[station]})
+
+    records = C.run_commissioning(ctxs, capture, dataset_dir=tmp_path)
+    assert {r.station for r in records} == {'backstock_00','rollwagen','G3_back_s2'}
+    loaded = C.load_baselines(tmp_path)
+    assert set(loaded) == {'backstock_00','rollwagen','G3_back_s2'}
+    assert loaded['rollwagen'].geometry.camera_id == 'cart'
+    manifest = json.loads((tmp_path / C.MANIFEST).read_text())
+    assert manifest['provenance']['rollwagen']['capture_pose'] == [-5.73,16,0]
+
+
+def test_commissioning_and_loader_cover_the_cart_rollwagen_station(tmp_path):
+    """The cart deck commissions, persists, reloads and applies to the cart context standalone."""
+    cart_k, cart_cam, _, support, witness, cart_frame = empty_frame()
+    cart_ctx = context(cart_k, cart_cam, location='rollwagen', camera_id='cart')
+    records = C.commission_and_persist(cart_ctx, cart_frame, 1., {'rollwagen': (support, witness)},
+                                       dataset_dir=tmp_path, capture_poses={'rollwagen': [-5.73,16,0]})
+    assert records[0].station == 'rollwagen' and records[0].geometry.camera_id == 'cart'
+    loaded = C.load_baselines(tmp_path)
+    assert set(loaded) == {'rollwagen'}
+    boot = context(cart_k, cart_cam, location='rollwagen', camera_id='cart')
+    assert boot.slots[0].tracker is None
+    attached = C.apply_baselines(boot, loaded, required_locations=['rollwagen'])
+    assert attached == ['rollwagen'] and boot.slots[0].tracker is not None
+
+
 # --- refusal (fail closed, never fabricate) -----------------------------------
 
 def test_missing_station_baseline_is_refused_at_boot(tmp_path):
@@ -261,17 +304,33 @@ def _scenario():
                 initial_staging=dict(robot_base_pose=[-5.73,16,0],shelf_robot_pose=[-3.05,6.0,np.pi]))
 
 
-def test_cli_plan_resolves_source_and_shelf_stations_and_poses():
+def test_cli_plan_resolves_source_cart_and_shelf_stations_and_poses():
     from scripts import run_restock_commissioning as cli
     plan = cli.commissioning_plan(_design_config(), _scenario(), stations=cli.DEFAULT_STATIONS)
     stations = {s['station']: s for s in plan['stations']}
-    assert set(stations) == {'backstock_00','G3_back_s2'}
+    # All three mission stations (matching ros_host_config.json walls): source, cart, shelf.
+    assert set(stations) == {'backstock_00','rollwagen','G3_back_s2'}
     assert stations['backstock_00']['camera_id'] == 'source'
     assert stations['backstock_00']['capture_pose'] == [-5.73,16,0]
+    # The cart deck (rollwagen) is commissioned empty at the staging pose, with the cart camera.
+    assert stations['rollwagen']['camera_id'] == 'cart'
+    assert stations['rollwagen']['design_support'] == 'cart'
+    assert stations['rollwagen']['capture_pose'] == [-5.73,16,0]
+    assert stations['rollwagen']['marker_id'] == 'support:cart:0'
+    assert stations['rollwagen']['intrinsics']['fx'] == 1500.
     assert stations['G3_back_s2']['camera_id'] == 'shelf'
     assert stations['G3_back_s2']['capture_pose'] == [-3.05,6.0,np.pi]
     assert stations['G3_back_s2']['marker_id'] == 'support:shelf:0'
     assert stations['G3_back_s2']['intrinsics']['fx'] == 1050.
+
+
+def test_cli_default_stations_match_ros_host_config_walls():
+    """The commissioned station ids must match the host mapper's wall/static-map keys."""
+    import json, pathlib
+    from scripts import run_restock_commissioning as cli
+    walls = json.loads((pathlib.Path('scripts/twin/restock_manipulation/ros_host_config.json')
+                        ).read_text())['walls']
+    assert set(cli.DEFAULT_STATIONS) == set(walls)
 
 
 def test_cli_plan_refuses_a_station_the_design_does_not_cover():
