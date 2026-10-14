@@ -160,7 +160,14 @@ def main():
             'object_attachment', 'nvblox_node', 'object_segmenter'}
     me = pr.get('mapper_esdf') or {}
     lat = pr.get('latencies') or {}
+    ack = pr.get('incorporation_ack') or {}
     record['verdict'] = {
+        'incorporation_ack_became_ready': ack.get('became_ready'),
+        'incorporation_ack_collision_time': ack.get('collision_time'),
+        'incorporation_ack_fresh': ack.get('collision_time_fresh'),
+        'incorporation_ack_matches_published_stamp': ack.get('collision_time_matches_published_stamp'),
+        'incorporation_ack_advanced': ack.get('collision_time_advanced'),
+        'incorporation_ack_fires_with_right_stamp': ack.get('fires_after_integration_with_right_stamp'),
         'first_esdf_ready_s': lat.get('first_esdf_ready_s'),
         'first_cumotion_reply_s': lat.get('first_cumotion_reply_s'),
         'cold_first_job_s': lat.get('cold_first_job_s'),
@@ -191,6 +198,7 @@ def main():
                           and v['planning_round_trip_compute_ik']
                           and v['mapper_esdf_non_empty']
                           and (v['cumotion_trajectory_points'] or 0) > 0
+                          and v['incorporation_ack_fires_with_right_stamp']
                           and stack_vram is not None)
     (a.output / 'result.json').write_text(json.dumps(record, indent=2, default=str) + '\n')
     print(json.dumps({'PASS': record['PASS'], 'verdict': {k: v[k] for k in v if k != 'cumotion_plan'},

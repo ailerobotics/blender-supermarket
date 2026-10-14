@@ -188,14 +188,17 @@ def launch_plan(config):
                   'isaac_ros_cumotion/CumotionPlanner',
                   'isaac_ros_cumotion_object_attachment/ObjectAttachmentNode',
                   'shelfbot.perception.object_segmenter',
-                  'nvblox_ros/NvbloxNode'],
+                  'nvblox_ros/NvbloxNode',
+                  'twin.restock_host.incorporation_ack'],
         'required_external': ['measured joint_states and TF including all movable CAD joints',
                               'rig-masked registered depth (Image 32FC1, metres, self pixels 0) on '
                               'camera/masked_depth from the Isaac per-pixel instance-ID self mask, with '
                               'camera/masked_depth/camera_info (frame restock_camera_<id>) and /clock',
                               'sensor-derived target_bbox Float32MultiArray [u1,v1,u2,v2], fresh for every masked frame',
                               'arm_controller/follow_joint_trajectory with articulation feedback',
-                              'parked station lifecycle: stop host, restart empty map, fresh ESDF ack'],
+                              'parked station lifecycle: stop host, restart empty map; the host '
+                              'publishes the fresh ESDF incorporation ack (collision_time) on '
+                              'station/status, driven by station/command prepare/heartbeat/stop'],
         'readiness': 'configuration only; graph, sensing and GPU execution unverified',
         'static_errors': static_errors,
     }

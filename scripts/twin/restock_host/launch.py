@@ -132,4 +132,15 @@ def description(config):
     guards = [RegisterEventHandler(OnProcessExit(target_action=process,
               on_exit=[EmitEvent(event=Shutdown(reason='restock host component exited'))]))
               for process in processes]
-    return LaunchDescription(guards + processes)
+    # Host-published nvblox mapper-incorporation acknowledgement. nvblox runs
+    # update_esdf_rate_hz 0.0 (on-request only), so this node's ESDF service poll is what
+    # integrates pending masked depth, and it publishes the real NVIDIA incorporation
+    # stamp as collision_time on station/status -- the stamp the mission syncs onto
+    # IsaacMeasuredFeedback so the first manip job answers inside the Isaac watchdog.
+    # Auxiliary: it is deliberately NOT a shutdown guard (its loss must not tear down the
+    # planner), but the guards above do tear it down with the stack, so a live ack node
+    # implies a live planner/mapper -- which is why its snapshot reports process_alive.
+    ack = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock_host.incorporation_ack',
+        '--workspace-min', *(str(v) for v in plan['workspace_min']),
+        '--workspace-max', *(str(v) for v in plan['workspace_max'])], output='screen')
+    return LaunchDescription(guards + processes + [ack])

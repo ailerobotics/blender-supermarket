@@ -139,14 +139,29 @@ is available. Workspace bounds and all visualization/clearing frames use the
 same arm frame. Moving between stations invalidates every prior map acknowledgement.
 
 The installed NVIDIA ESDF response `header.stamp` is explicitly the latest depth
-image incorporated into ESDF. Integration may call
-`incorporated_time(response, now=sim_time, parked_since=station_epoch)` after a
-real ESDF request. It rejects failed, empty, nonfinite, stale, future, wrong-frame
-and pre-station responses. It returns the server timestamp, never receive time.
-Feed that to `Sensors.collision_time`; also require that cuMotion's per-plan ESDF
-update and planning action succeed. No acknowledgement publisher is fabricated.
-MoveIt scene acknowledgement, NVIDIA attachment action result and physical CAD
-seal remain independent requirements. Attachment success is not a physics seal.
+image incorporated into ESDF. `incorporated_time(response, now=sim_time,
+parked_since=station_epoch)` turns a real ESDF response into that stamp: it rejects
+failed, empty, nonfinite, stale, future, wrong-frame and pre-station responses and
+returns the server timestamp, never receive time.
+
+The host publishes that mapper-incorporation acknowledgement itself. The launch
+co-starts `twin.restock_host.incorporation_ack` (ROS node `restock_incorporation_ack`),
+which speaks the parked-station command protocol on `/restock_sim/station/command`
+(prepare / heartbeat / stop, epoch+sequence validated), polls the live nvblox
+`get_esdf_and_gradient` service — nvblox runs `update_esdf_rate_hz: 0.0`, so this poll
+is what integrates pending masked depth — advances `collision_time` only through
+`incorporated_time`, and publishes the snapshot
+(`{state, stamp, collision_time, epoch, parked_since, camera_frame}`,
+`std_msgs/String` JSON) on `/restock_sim/station/status`. The mission mirrors that
+`collision_time` onto `IsaacMeasuredFeedback` (`0 <= now - collision_time <= 0.5`); the
+node withholds it (`-1`) until a fresh integration arrives and resets on stop/new epoch,
+so input receipt is never an acknowledgement and no stamp is fabricated. The node is
+auxiliary — it is not a launch shutdown guard (its loss must not fell the planner), but
+the core guards do tear it down with the stack, so a live ack implies a live mapper
+(its snapshot reports `process_alive`). The 5 s-watchdog cold first-job latency is
+measured separately (`first-job-latency-report.md`); this node supplies the fresh ESDF
+stamp that job needs. MoveIt scene acknowledgement, NVIDIA attachment action result and
+physical CAD seal remain independent requirements. Attachment success is not a physics seal.
 
 ## Installed evidence and exact remaining dependencies
 
