@@ -11,6 +11,7 @@ import numpy as np
 from .geometry import (Intrinsics, look_at, pose_matrix, usd_camera_transform,
                        project, transform_points, rigid)
 from .lights import camera_lamp
+from .wrist_camera import wrist_camera_design
 
 
 def camera_config(scenario, manifest):
@@ -95,6 +96,10 @@ def camera_config(scenario, manifest):
     # against a future pose silently trading restock sensing for marker margin again.
     camera('shelf','map',shelf+[-.50,0,.23],shelf+[-.18,0,-.05],k_shelf,
            roll_world_x_deg=-6.75)
+    # Eye-in-hand wrist collision/masked-depth camera (frame restock_camera_wrist on ur_tool0).
+    # Not a station QR camera (no support) and not decode-grade; it rides the tool so the arm's
+    # side-grasp workspace is always in its depth. See twin.restock_camera.wrist_camera.
+    cameras['wrist'] = wrist_camera_design()
     solid('source_mast','map',source+[0,.44,.15],[.03,.03,1.50])
     solid('source_boom','map',source+[0,.32,.88],[.03,.27,.025])
     solid('source_marker_tab','map',source+[0,.30,-.0015],[.72,.16,.003])
@@ -309,6 +314,12 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
         UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
     paths = {}
     for name,item in config['cameras'].items():
+        # Robot-mounted cameras (e.g. the eye-in-hand wrist camera, parent restock_camera_wrist) are
+        # authored on the MOBILE ROBOT asset (twin.mobile_assets.author_wrist_camera), not into the
+        # store/cart stage this function populates. Skip any camera whose parent is not a supplied
+        # store/cart frame.
+        if item['parent'] not in parent_paths:
+            continue
         camera = UsdGeom.Camera.Define(stage,path(item['parent'],name))
         transform(camera.GetPrim(),usd_camera_transform(item['parent_from_optical']))
         k = Intrinsics(**item['intrinsics'])
