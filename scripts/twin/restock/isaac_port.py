@@ -144,22 +144,34 @@ class IsaacPort:
         odometry=Odometry((r.x,r.y,r.yaw),now,float(np.linalg.norm(rv)),float(rw[2]))
         navigation=nav_observation(scan,odometry,coupled=coupled,arm_transport=ready,
                                    articulation=articulation)
-        if self.tick==1 and self.recorder is not None:
-            # One-shot nav-coverage diagnostic: which beam bearings are self-occluded
-            # (unknown), relative to the robot heading, so a blind forward sweep can be
-            # localized without a core dump.
+        if self.tick in (1,120,300,600) and self.recorder is not None:
+            # Nav-coverage diagnostic across ticks: run coverage_certifies directly on the
+            # built observation for a grid of footprint radii, and record the forward-blind
+            # bearings, so a persistent insufficient_sensor_coverage can be localized.
             try:
                 import json as _json, math as _math
-                bad=[round(_math.degrees(wrap(scan.angle_min+i*scan.angle_increment - r.yaw)),1)
-                     for i,u in enumerate(scan.unknown) if u]
-                fwd=[a for a in bad if abs(a)<90]
-                (self.recorder.directory.parent/'scan-debug.json').write_text(_json.dumps(dict(
-                    heading_deg=round(_math.degrees(r.yaw),1),beams=len(scan.unknown),
-                    unknown_count=len(bad),forward_unknown_count=len(fwd),
-                    forward_unknown_bearings_deg=fwd[:60],
-                    sensor_to_base=list(scan.sensor_to_base)),indent=1)+'\n')
-            except Exception:
-                pass
+                from twin.navigation.core import coverage_certifies, sweep_extent
+                heading=odometry.pose[2]
+                field=navigation.coverage
+                stop=0.25*0.3+0.25*0.25/(2*0.4)  # v=max_speed
+                grid={}
+                for R in (0.55,0.65,0.75,0.9,1.1,1.3):
+                    rad=R+0.05
+                    swept=[(a,reach) for a,reach in field.beams
+                           if sweep_extent(wrap(a-heading),rad,stop)>rad+1e-9]
+                    blind=[round(_math.degrees(wrap(a-heading)),1) for a,reach in swept
+                           if reach<sweep_extent(wrap(a-heading),rad,stop)-1e-9]
+                    grid[R]=dict(certifies=coverage_certifies(navigation,heading,rad,stop),
+                                 swept=len(swept),blind=len(blind),blind_bearings_deg=blind[:20])
+                (self.recorder.directory.parent/f'scan-debug-{self.tick}.json').write_text(_json.dumps(dict(
+                    tick=self.tick,heading_deg=round(_math.degrees(heading),1),
+                    coverage_field_present=field is not None,
+                    legacy_coverage_radius=round(float(navigation.coverage_radius),3),
+                    unknown_count=sum(1 for u in scan.unknown if u),stop_distance=round(stop,3),
+                    per_radius=grid),indent=1)+'\n')
+            except Exception as _e:
+                try:(self.recorder.directory.parent/f'scan-debug-{self.tick}.err').write_text(repr(_e))
+                except Exception: pass
         evidence=self.verification(now)
         if self.recorder is not None and self.tick%2 == 0:
             frame=self.recording_camera.get_current_frame()
