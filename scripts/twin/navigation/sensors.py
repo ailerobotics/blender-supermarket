@@ -162,14 +162,20 @@ class IsaacRangeSensor:
     Heights are WORLD Z values; they are not offsets from the lidar_frame.
     """
     def __init__(self,get_sensor_pose,*,heights=(0.15,0.5,1.0),beams=360,range_max=10.0,
-                 sensor_to_base=(0.0,0.0,0.0),self_paths=(),query=None):
+                 sensor_to_base=(0.0,0.0,0.0),self_paths=(),coupled_self_paths=(),query=None):
         if query is None:
             from omni.physx import get_physx_scene_query_interface
             query=get_physx_scene_query_interface()
         self.query=query
         self.self_paths=tuple(p.rstrip('/') for p in self_paths)
+        # Extra self subtrees active ONLY while a cart is coupled (the towed cart root + children).
+        # The caller toggles `self.coupled` each tick from the measured latch state; a decoupled
+        # cart is a real obstacle, so its returns are masked as self only when coupled is True.
+        self.coupled_self_paths=tuple(p.rstrip('/') for p in coupled_self_paths)
+        self.coupled=False
         if any(not p.startswith('/') or p=='/' or not p or '//' in p or
-               any(s in ('.','..') for s in p.split('/')) for p in self.self_paths):
+               any(s in ('.','..') for s in p.split('/'))
+               for p in self.self_paths+self.coupled_self_paths):
             raise ValueError('self paths must be explicit absolute USD subtrees')
         if (type(beams) is not int or beams<3 or not heights or
                 not all(math.isfinite(z) for z in heights) or
@@ -179,10 +185,13 @@ class IsaacRangeSensor:
         self.heights,self.beams,self.range_max=heights,beams,range_max
         self.sensor_to_base=Scan(0,(),0,1,range_max,sensor_to_base=sensor_to_base).sensor_to_base
 
+    def _active_self_paths(self):
+        return self.self_paths+(self.coupled_self_paths if self.coupled else ())
+
     def _self_hit(self,hit):
         return any(path==root or path.startswith(root+'/')
                    for path in (hit.get('collision',''),hit.get('rigidBody',''))
-                   if isinstance(path,str) for root in self.self_paths)
+                   if isinstance(path,str) for root in self._active_self_paths())
 
     def read(self,stamp):
         x,y,yaw=self.get_pose()

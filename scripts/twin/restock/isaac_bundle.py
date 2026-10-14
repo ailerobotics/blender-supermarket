@@ -65,6 +65,28 @@ class BundlePlan:
     job_quantity: int
 
 
+def require_transport_positions(mobile_manifest):
+    """Fail closed unless the mobile manifest carries usable arm-stow `transport_positions`.
+
+    The manipulation host derives `transport_joints` from `mobile_manifest['transport_positions']`
+    (ros_host.py), and both the collect `stow` phase and the outbound/return `arm_not_in_transport`
+    gate depend on the arm being stowed into the transport envelope. An absent or malformed mapping
+    otherwise surfaces as an opaque KeyError in the host subprocess, far from the mission boot.
+    Returns the validated mapping. Pure (no Isaac); CPU-tested.
+    """
+    positions = mobile_manifest.get('transport_positions') if isinstance(mobile_manifest, dict) else None
+    if not isinstance(positions, dict) or not positions:
+        raise ValueError(
+            "mobile manifest is missing 'transport_positions' (arm-stow joint targets); the "
+            'manipulation host needs it to build transport_joints and the collect-stow / '
+            'outbound-return arm-transport gate cannot pass without it')
+    for name, value in positions.items():
+        if not isinstance(name, str) or not name or isinstance(value, bool) or \
+                not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f'transport_positions[{name!r}] must be a finite joint angle')
+    return positions
+
+
 def plan_bundle(manifest, scenario, config):
     """Pure mission-bundle contract from manifest+scenario+config. No Isaac import.
 
@@ -221,6 +243,12 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # run_mobile_restock validates against, so load it from the runtime-config.
     import json as _json
     mobile_manifest = _json.loads(Path(config['mobile_manifest']).read_text())
+    # Transport (arm-stow) joint targets come from the mobile manifest's `transport_positions`
+    # (the manip host builds `transport_joints` from it; the collect `stow` phase and the
+    # outbound/return `arm_not_in_transport` gate both depend on it). Refuse closed here with a
+    # clear message if it is absent, rather than letting the host subprocess fail with a cryptic
+    # KeyError far from the mission boot. See docs/mobile_robot_rollwagen.md.
+    require_transport_positions(mobile_manifest)
     # The collect source camera must render full-res (decode-grade: paired markers ~6 px/module);
     # the default render_scale (VRAM-bounded) still applies to the mapper and other cameras.
     _collect_source = config.get('collect_source_location')
@@ -240,24 +268,36 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
 
     paths = assembly.paths
     robot_root = paths['articulation'].rsplit('/', 1)[0] if '/' in paths['articulation'] else paths['articulation']
+    cart_root = assembly.evidence['composition']['assets']['cart']['root']
     mobile_urdf = output / 'mobile-import.urdf'
+    # Default the stow envelope radius to the robot's structural stow extent (measured 0.621 m at
+    # the hitch, data/mobile-restock-v2/report.md): the old 0.55 m default could never contain the
+    # arm's stowed binding, so the outbound/return `arm_not_in_transport` gate never cleared.
     transport = TransportEnvelope(mobile_urdf, plan.package_roots,
-                                  radius=config.get('transport_radius_m', 0.55))
+                                  radius=config.get('transport_radius_m', 0.65))
     # Mount the range sensor at the robot's lidar frame (forward of base_link), not the
     # base centre: a centre-mounted scan is self-occluded in every direction including
     # forward, and navigation refuses to drive on a blind forward sector. The lidar frame
     # is a fixed base_link child (rpy 0), so it shares the base yaw at the URDF offset.
     from twin.urdf_probe import parse_urdf as _parse_urdf
     _lidar_xyz = _parse_urdf(str(mobile_urdf)).joints_by_child['lidar_frame'].origin_xyz
+    # The robot root is always self; the towed cart root is self ONLY while coupled (IsaacPort sets
+    # range_sensor.coupled each tick from the measured latch). Otherwise rear beams off the coupled
+    # cart read as a phantom obstacle behind the robot, blocking any turn-in-place/return maneuver.
     range_sensor = IsaacRangeSensor(
         get_sensor_pose=lambda: _lidar_pose(assembly.robot_body, _lidar_xyz[0], _lidar_xyz[1]),
-        sensor_to_base=_lidar_xyz, self_paths=(robot_root,))
+        sensor_to_base=_lidar_xyz, self_paths=(robot_root,), coupled_self_paths=(cart_root,))
     recorder = Recorder(output / 'mission-frames', fps=plan.recording_fps)
     verifier = InventoryVerifier(capture, source=plan.verification_source)
 
     def on_action(action, job):
         if action == 'verify':
-            verifier.begin(job, float(assembly.world.current_time) - port.origin)
+            # Begin verification on the SAME mission-relative clock the packets carry (tick*dt),
+            # which InventoryVerifier.begin/__call__ compare scan stamps against. port.mission_time()
+            # converts Isaac stage time back to mission time via the port's refreshed clock origin
+            # (the former `port.origin` read assumed an attribute that never existed -> AttributeError
+            # at the verify boundary, an immediate mission fail).
+            verifier.begin(job, port.mission_time())
 
     # Physics ticks per recorded walkthrough frame. Lowering the cadence (default 2 ->
     # e.g. 6) both shrinks the video and, with the port's render gating, lets the

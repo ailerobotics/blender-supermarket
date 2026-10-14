@@ -86,6 +86,24 @@ class PlanBundleTests(unittest.TestCase):
             plan_bundle(MANIFEST, SCENARIO, base_config(package_roots=[]))
 
 
+class TransportPositionsTests(unittest.TestCase):
+    def test_valid_mapping_returned(self):
+        positions = {'shoulder_pan_joint': 0.0, 'elbow_joint': -1.57}
+        self.assertEqual(isaac_bundle.require_transport_positions(
+            {'transport_positions': positions}), positions)
+
+    def test_missing_or_empty_refused_clearly(self):
+        for manifest in ({}, {'transport_positions': {}}, {'transport_positions': None},
+                         {'transport_positions': []}, 'not-a-dict'):
+            with self.assertRaisesRegex(ValueError, 'transport_positions'):
+                isaac_bundle.require_transport_positions(manifest)
+
+    def test_nonfinite_or_boolean_joint_value_refused(self):
+        for bad in (float('nan'), float('inf'), True, 'x'):
+            with self.assertRaisesRegex(ValueError, 'transport_positions'):
+                isaac_bundle.require_transport_positions({'transport_positions': {'elbow_joint': bad}})
+
+
 # ---- fixtures for the create() wiring seam (test-only, not physical evidence) ----
 class _Ctrl:
     cart_location = 'rollwagen'
