@@ -281,9 +281,9 @@ class ArmDepthSubprocessBridge:
         no_seg = (not isinstance(frame, dict) or not isinstance(frame.get('instance_id_segmentation'), dict)
                   or frame['instance_id_segmentation'].get('data') is None)
         if self._calls % 30 == 1:                        # lightweight diagnostic (grep BRIDGE_STATS)
-            keys = sorted(frame.keys()) if isinstance(frame, dict) else type(frame).__name__
+            rt = frame.get('rendering_time') if isinstance(frame, dict) else None
             print(f'BRIDGE_STATS calls={self._calls} no_depth={no_depth} no_seg={no_seg} '
-                  f'published={getattr(self, "_published", 0)} keys={keys}', flush=True)
+                  f'published={getattr(self, "_published", 0)} now={now} rendering_time={rt}', flush=True)
         if no_depth or no_seg:
             return None
         stamp_s = float(frame.get('rendering_time', now))
