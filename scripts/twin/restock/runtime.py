@@ -168,6 +168,11 @@ class RuntimeAdapter:
         self.last_packet_id = p.observation_id
         if self.phase == 'navigate':
             r = self.nav.step(dt, p)
+            self._navn = getattr(self, '_navn', 0) + 1
+            if self._navn % 30 == 1:                     # diagnostic: why navigate does not complete
+                print(f'NAV_STEP action={self.action} status={r.status} reason={r.reason!r} '
+                      f'transport_ready={p.transport_ready} coupled={p.coupled} parked={p.parked}',
+                      flush=True)
             if r.status == 'failed':
                 return Result('failed', reason=r.reason)
             if r.status not in ('running', 'succeeded'):
