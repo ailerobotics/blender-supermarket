@@ -1182,3 +1182,41 @@ lane). Each collect sensing tick:
 
 This keeps every grasp input sensor-sourced, uses the one commissionable camera for identity+pose, and
 confines the arm to geometry it can measure from a moving eye-in-hand view.
+
+### Consumer wiring ready; collect grasp gated by the fixed-source live-capture budget on this box (2026-10-14)
+
+PR54 (merged) added the `source_target_provider` to my contract. I built + CPU-tested the pure arm-image
+reprojection core `twin.restock.collect_target.reproject_carton_roi` (commit `cdbafaf`; reuses
+`_object_bbox`'s projection, clamps to the image, returns `None` rather than fabricating). The remaining
+consumer wiring is fully mapped and ready to land:
+
+- thread `sensing['source_target_provider']` into the manip runtime (new `HostManipulationRuntime.
+  set_source_target_provider`, called from `isaac_bundle` right after `build_sensing` at line ~228);
+- `RosManipulationRuntime` builds the host `Sensors` packet from the `SourceTarget` — one
+  `Observation(source='sensor', frame='ur_base_link', pose=pose_station, sku=..., simulation_time=stamp)`,
+  `target=None`, finite `joint_positions`/`collision_time` (publish serializes the whole dataclass with
+  `allow_nan=False`); the `source=='sensor'` + `now-stamp∈[-0.02,0.5]` gates in `step()` apply;
+- a duck-typed object exposing `sensed_target_bboxes` (updated each tick via `reproject_carton_roi` with
+  the **live** arm `base_from_camera` from `UsdGeom.XformCache` × the USD-cam→optical flip
+  `diag([1,-1,-1,1])`) feeds `ArmDepthSubprocessBridge` — its only coupling to `sensors` is that attribute;
+- the arm `IsaacCartonSensors` is demoted to masked depth. `pose_station` is the `ur_base_link` frame
+  (`Observation.frame='ur_base_link'`, enforced), the same base as the live arm `base_from_camera`, so the
+  reprojection is frame-consistent (the `SourceTarget.station_frame='map'` label is cosmetic — to fix).
+
+**Gating blocker (why the shakedown/attempt cannot succeed on this box yet).** The provider wraps the
+fixed-`source` `IsaacCartonSensors.capture`, which runs the **live 0.5 s acquisition-to-use budget** on a
+real clock. At the design full resolution (2560×1920) decode+validate measures **~0.5–0.6 s** here, over
+the budget — so the provider raises `acquisition-to-use freshness expired` and yields **no target**. This
+is triple-confirmed on this hardware: (1) my commissioning needed the 5 s window for the same reason;
+(2) the camera lane's `test_apply_baselines_attaches_tracker_so_mission_capture_validates` (live
+`__call__`) FAILS here; (3) **PR54's own** `test_provider_over_a_real_commissioned_source_returns_none_on_empty`
+FAILS here with the identical error (its adapter `steady_clock` is not injected, so it also runs real
+time — a camera-lane test-determinism gap). Dropping `render_scale` to 0.375 to cut the cost does not
+help: `CameraRig` scales the render resolution but **not** the context intrinsics, so the 960×720 frame
+fails the capture shape check against the full-res 2560×1920 intrinsics (and the full-res commissioned
+baseline). The live 0.5 s bound is Firstmate's protected safety contract, so the fix is **cost reduction,
+not budget widening**: the camera/sensing lane should scale the station-camera context intrinsics with
+`render_scale` (render the station cameras at reduced resolution with matching scaled intrinsics so the
+live capture fits 0.5 s) and re-commission the baseline at that resolution. Then the provider returns a
+target, my consumer wiring lands, and the shakedown + attempt follow. Reprojection core committed;
+consumer wiring held ready pending that reconciliation.
