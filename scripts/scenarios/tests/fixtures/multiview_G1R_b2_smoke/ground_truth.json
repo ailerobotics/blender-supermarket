@@ -1,0 +1,44 @@
+{
+ "slot_fill": [
+  {
+   "slot": "G1R_b2_s0",
+   "level": 0,
+   "shelf_depth": 0.57,
+   "stock_depth_m": 0.228,
+   "fill_ratio": 0.4,
+   "n_facings": 12
+  },
+  {
+   "slot": "G1R_b2_s1",
+   "level": 1,
+   "shelf_depth": 0.47,
+   "stock_depth_m": 0.198,
+   "fill_ratio": 0.421,
+   "n_facings": 8
+  },
+  {
+   "slot": "G1R_b2_s2",
+   "level": 2,
+   "shelf_depth": 0.47,
+   "stock_depth_m": 0.243,
+   "fill_ratio": 0.517,
+   "n_facings": 13
+  },
+  {
+   "slot": "G1R_b2_s3",
+   "level": 3,
+   "shelf_depth": 0.47,
+   "stock_depth_m": 0.228,
+   "fill_ratio": 0.485,
+   "n_facings": 7
+  },
+  {
+   "slot": "G1R_b2_s4",
+   "level": 4,
+   "shelf_depth": 0.47,
+   "stock_depth_m": 0.228,
+   "fill_ratio": 0.485,
+   "n_facings": 7
+  }
+ ]
+}

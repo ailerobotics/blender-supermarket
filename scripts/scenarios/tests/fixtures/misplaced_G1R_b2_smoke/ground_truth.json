@@ -1,0 +1,16 @@
+{
+ "misplacements": [
+  {
+   "slot": "G1R_b2_s1",
+   "expected_sku": "biscuit_choc",
+   "actual_sku": "cola_can",
+   "type": "wrong_slot"
+  },
+  {
+   "slot": "G1R_b2_s0",
+   "expected_sku": "ambient:coffee_tea",
+   "actual_sku": "milk_whole",
+   "type": "chilled_on_ambient"
+  }
+ ]
+}

@@ -1,0 +1,46 @@
+{
+ "name": "misplaced_G1R_b2_smoke",
+ "kind": "misplaced",
+ "seed": 4,
+ "fps": 1,
+ "n_frames": 1,
+ "with_depth": false,
+ "cameras": [
+  "shelf_G1R_b2"
+ ],
+ "params": {
+  "fixture_id": "G1",
+  "side": "R",
+  "bay": 2
+ },
+ "n_entities": 48,
+ "ground_truth": {
+  "misplacements": [
+   {
+    "slot": "G1R_b2_s1",
+    "expected_sku": "biscuit_choc",
+    "actual_sku": "cola_can",
+    "type": "wrong_slot"
+   },
+   {
+    "slot": "G1R_b2_s0",
+    "expected_sku": "ambient:coffee_tea",
+    "actual_sku": "milk_whole",
+    "type": "chilled_on_ambient"
+   }
+  ]
+ },
+ "images": [
+  {
+   "file": "frames/shelf_G1R_b2/f0000.png",
+   "annotation": "annotations/shelf_G1R_b2/f0000.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 0,
+   "camera": "shelf_G1R_b2"
+  }
+ ],
+ "samples": 6,
+ "format_version": "1.0"
+}

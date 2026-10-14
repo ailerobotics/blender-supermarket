@@ -47,3 +47,13 @@ __pycache__/
 
 # Reproducible CPU report embeds; source/evidence/generator remain versioned.
 /data/mobile-restock-v2/report.html
+
+# Throwaway venv for the offline scenario-generator tests + dataset validator:
+#   uv venv --python 3.12 .venv-scenarios && uv pip install --python .venv-scenarios numpy pillow pytest
+.venv-scenarios/
+
+# Generated scenario datasets live OUTSIDE git (default ~/datasets/store-scenarios/);
+# this guards against an in-repo --out by mistake. The committed smoke fixture under
+# scripts/scenarios/tests/fixtures/ is deliberately NOT ignored.
+/datasets/
+/store-scenarios/

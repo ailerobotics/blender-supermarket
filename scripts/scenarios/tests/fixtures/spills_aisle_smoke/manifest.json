@@ -1,0 +1,170 @@
+{
+ "name": "spills_aisle_smoke",
+ "kind": "spills",
+ "seed": 2,
+ "fps": 2,
+ "n_frames": 4,
+ "with_depth": false,
+ "cameras": [
+  "spill_overhead",
+  "spill_angled"
+ ],
+ "params": {
+  "aisle_x": -4.85
+ },
+ "n_entities": 9,
+ "ground_truth": {
+  "hazards": [
+   {
+    "id": "water_0",
+    "cls": "water",
+    "onset_frame": 2,
+    "onset_s": 1.0,
+    "floor_xy": [
+     -5.15,
+     -1.5
+    ]
+   },
+   {
+    "id": "milk_0",
+    "cls": "milk",
+    "onset_frame": 5,
+    "onset_s": 2.5,
+    "floor_xy": [
+     -4.65,
+     0.4
+    ]
+   },
+   {
+    "id": "juice_0",
+    "cls": "juice",
+    "onset_frame": 7,
+    "onset_s": 3.5,
+    "floor_xy": [
+     -5.05,
+     1.8
+    ]
+   },
+   {
+    "id": "oil_0",
+    "cls": "oil",
+    "onset_frame": 9,
+    "onset_s": 4.5,
+    "floor_xy": [
+     -4.5,
+     -0.6
+    ]
+   },
+   {
+    "id": "debris_0",
+    "cls": "debris",
+    "onset_frame": 4,
+    "onset_s": 2.0,
+    "floor_xy": [
+     -4.75,
+     -2.4
+    ]
+   },
+   {
+    "id": "fallen_0",
+    "cls": "fallen_product",
+    "onset_frame": 6,
+    "onset_s": 3.0,
+    "floor_xy": [
+     -5.15,
+     2.6
+    ]
+   }
+  ],
+  "distractors": [
+   {
+    "id": "floormark_0",
+    "cls": "floor_marking"
+   },
+   {
+    "id": "shadow_0",
+    "cls": "shadow"
+   },
+   {
+    "id": "papersign_0",
+    "cls": "paper_sign"
+   }
+  ]
+ },
+ "images": [
+  {
+   "file": "frames/spill_overhead/f0000.png",
+   "annotation": "annotations/spill_overhead/f0000.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 0,
+   "camera": "spill_overhead"
+  },
+  {
+   "file": "frames/spill_overhead/f0001.png",
+   "annotation": "annotations/spill_overhead/f0001.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 1,
+   "camera": "spill_overhead"
+  },
+  {
+   "file": "frames/spill_overhead/f0002.png",
+   "annotation": "annotations/spill_overhead/f0002.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 2,
+   "camera": "spill_overhead"
+  },
+  {
+   "file": "frames/spill_overhead/f0003.png",
+   "annotation": "annotations/spill_overhead/f0003.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 3,
+   "camera": "spill_overhead"
+  },
+  {
+   "file": "frames/spill_angled/f0000.png",
+   "annotation": "annotations/spill_angled/f0000.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 0,
+   "camera": "spill_angled"
+  },
+  {
+   "file": "frames/spill_angled/f0001.png",
+   "annotation": "annotations/spill_angled/f0001.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 1,
+   "camera": "spill_angled"
+  },
+  {
+   "file": "frames/spill_angled/f0002.png",
+   "annotation": "annotations/spill_angled/f0002.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 2,
+   "camera": "spill_angled"
+  },
+  {
+   "file": "frames/spill_angled/f0003.png",
+   "annotation": "annotations/spill_angled/f0003.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 3,
+   "camera": "spill_angled"
+  }
+ ],
+ "samples": 6,
+ "format_version": "1.0"
+}

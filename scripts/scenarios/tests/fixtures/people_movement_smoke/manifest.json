@@ -1,0 +1,225 @@
+{
+ "name": "people_movement_smoke",
+ "kind": "people",
+ "seed": 3,
+ "fps": 2,
+ "n_frames": 4,
+ "with_depth": false,
+ "cameras": [
+  "cam_entrance",
+  "cam_aisle",
+  "cam_checkout"
+ ],
+ "params": {
+  "n_people": 3
+ },
+ "n_entities": 14,
+ "ground_truth": {
+  "trajectories": {
+   "s_74bf20f876": {
+    "entity_id": "person_0",
+    "track": [
+     {
+      "frame": 0,
+      "x": 9.5,
+      "y": -10.0,
+      "heading": 2.847
+     },
+     {
+      "frame": 1,
+      "x": 6.75,
+      "y": -9.167,
+      "heading": 2.847
+     },
+     {
+      "frame": 2,
+      "x": 4.0,
+      "y": -8.333,
+      "heading": 2.847
+     },
+     {
+      "frame": 3,
+      "x": 11.5,
+      "y": -10.8,
+      "heading": -0.288
+     }
+    ]
+   },
+   "s_0251908fcd": {
+    "entity_id": "person_1",
+    "track": [
+     {
+      "frame": 0,
+      "x": 9.5,
+      "y": -10.0,
+      "heading": 2.847
+     },
+     {
+      "frame": 1,
+      "x": 6.75,
+      "y": -9.167,
+      "heading": 2.847
+     },
+     {
+      "frame": 2,
+      "x": 4.0,
+      "y": -8.333,
+      "heading": 2.847
+     },
+     {
+      "frame": 3,
+      "x": 11.5,
+      "y": -10.8,
+      "heading": -0.288
+     }
+    ]
+   },
+   "s_d9dcbd7a08": {
+    "entity_id": "person_2",
+    "track": [
+     {
+      "frame": 0,
+      "x": 9.5,
+      "y": -10.0,
+      "heading": 2.693
+     },
+     {
+      "frame": 1,
+      "x": 7.767,
+      "y": -9.167,
+      "heading": 2.693
+     },
+     {
+      "frame": 2,
+      "x": 6.033,
+      "y": -8.333,
+      "heading": 2.693
+     },
+     {
+      "frame": 3,
+      "x": 11.5,
+      "y": -10.8,
+      "heading": -0.225
+     }
+    ]
+   }
+  },
+  "sessions": [
+   "s_74bf20f876",
+   "s_0251908fcd",
+   "s_d9dcbd7a08"
+  ]
+ },
+ "images": [
+  {
+   "file": "frames/cam_entrance/f0000.png",
+   "annotation": "annotations/cam_entrance/f0000.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 0,
+   "camera": "cam_entrance"
+  },
+  {
+   "file": "frames/cam_entrance/f0001.png",
+   "annotation": "annotations/cam_entrance/f0001.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 1,
+   "camera": "cam_entrance"
+  },
+  {
+   "file": "frames/cam_entrance/f0002.png",
+   "annotation": "annotations/cam_entrance/f0002.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 2,
+   "camera": "cam_entrance"
+  },
+  {
+   "file": "frames/cam_entrance/f0003.png",
+   "annotation": "annotations/cam_entrance/f0003.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 3,
+   "camera": "cam_entrance"
+  },
+  {
+   "file": "frames/cam_aisle/f0000.png",
+   "annotation": "annotations/cam_aisle/f0000.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 0,
+   "camera": "cam_aisle"
+  },
+  {
+   "file": "frames/cam_aisle/f0001.png",
+   "annotation": "annotations/cam_aisle/f0001.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 1,
+   "camera": "cam_aisle"
+  },
+  {
+   "file": "frames/cam_aisle/f0002.png",
+   "annotation": "annotations/cam_aisle/f0002.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 2,
+   "camera": "cam_aisle"
+  },
+  {
+   "file": "frames/cam_aisle/f0003.png",
+   "annotation": "annotations/cam_aisle/f0003.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 3,
+   "camera": "cam_aisle"
+  },
+  {
+   "file": "frames/cam_checkout/f0000.png",
+   "annotation": "annotations/cam_checkout/f0000.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 0,
+   "camera": "cam_checkout"
+  },
+  {
+   "file": "frames/cam_checkout/f0001.png",
+   "annotation": "annotations/cam_checkout/f0001.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 1,
+   "camera": "cam_checkout"
+  },
+  {
+   "file": "frames/cam_checkout/f0002.png",
+   "annotation": "annotations/cam_checkout/f0002.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 2,
+   "camera": "cam_checkout"
+  },
+  {
+   "file": "frames/cam_checkout/f0003.png",
+   "annotation": "annotations/cam_checkout/f0003.json",
+   "depth": null,
+   "width": 128,
+   "height": 96,
+   "frame": 3,
+   "camera": "cam_checkout"
+  }
+ ],
+ "samples": 6,
+ "format_version": "1.0"
+}

@@ -315,12 +315,32 @@ class IncorporationAckTest(unittest.TestCase):
                        camera_frame='restock_camera_transfer'), 11.0)
         self.assertEqual(st.collision_time, -1.)
 
-    def test_dead_planner_or_lost_heartbeat_faults(self):
+    def test_fault_names_process_lost(self):
         st, _ = self.prepared()
         st.acknowledge(10.2, 1)
-        # process_alive False (the stack died) -> failed, stop asserted by the node.
+        # process_alive False (the stack died) -> failed with the named condition, stop
+        # asserted by the node. Thresholds unchanged; only the reason text is specific.
         snap = st.snapshot(10.3, endpoints_ready=True, process_alive=False)
         self.assertEqual(snap['state'], 'failed')
+        self.assertEqual(snap['reason'], 'station process lost')
+
+    def test_fault_names_sim_heartbeat_gap_with_value(self):
+        st, _ = self.prepared()  # parked/last_heartbeat at sim 10.0, wall at 100.0
+        st.acknowledge(10.2, 1)
+        # sim gap now(10.73) - last_heartbeat(10.0) = 0.73 s > 0.5 s; wall gap still 0.
+        snap = st.snapshot(10.73, endpoints_ready=True, process_alive=True)
+        self.assertEqual(snap['state'], 'failed')
+        self.assertEqual(snap['reason'], 'parked heartbeat lost: sim gap 0.73 s')
+
+    def test_fault_names_wall_heartbeat_gap_with_value(self):
+        st, clock = self.prepared()
+        st.acknowledge(10.2, 1)
+        # Wall clock advances 1.4 s with no fresh command while sim gap stays within 0.5 s,
+        # so the wall-heartbeat condition is the one that trips, named with its value.
+        clock[0] = 101.4
+        snap = st.snapshot(10.2, endpoints_ready=True, process_alive=True)
+        self.assertEqual(snap['state'], 'failed')
+        self.assertEqual(snap['reason'], 'parked heartbeat lost: wall gap 1.40 s')
 
     def test_invalid_commands_rejected(self):
         st, _ = self.state()
