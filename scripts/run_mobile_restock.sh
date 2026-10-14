@@ -31,6 +31,19 @@ for arg in "$@"; do
     export ROS_DOMAIN_ID=88
     export ROS_LOCALHOST_ONLY=1
     export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+    # Share ONE Fast DDS transport with the host stack. Isaac's bundled Fast DDS otherwise uses
+    # the default SHM+UDP builtin transport + default XML profile, which the host's UDPv4-only,
+    # SKIP_DEFAULT_XML Fast DDS (twin.restock_host.config / launch_restock_host_stack.sh) cannot
+    # discover -- so every Isaac OmniGraph ROS2 PUBLISHER (/clock, /tf, /tf_static,
+    # /restock_sim/joint_states, /manipulation/job, /station/command) is invisible to the host
+    # (run-57/59/60: pub=0 from the host side; the masked-depth + control subprocesses only worked
+    # because they spawn under exactly these pins). Match the host pins so the two Fast DDS
+    # participants interoperate on loopback UDPv4 and all OmniGraph publishers reach the host.
+    export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+    export SKIP_DEFAULT_XML=1
+    export ROS_STATIC_PEERS=
+    unset FASTRTPS_DEFAULT_PROFILES_FILE FASTDDS_DEFAULT_PROFILES_FILE ROS_DISCOVERY_SERVER \
+          CYCLONEDDS_URI RMW_FASTRTPS_USE_QOS_FROM_XML || true
     # Resolve the one bundled Jazzy bridge lib dir via the interpreter itself so
     # the exact pythonX.Y is right and stray siblings/symlinks cannot double-match.
     jazzy="$("$RESTOCK_PYTHON" - <<'PY'
