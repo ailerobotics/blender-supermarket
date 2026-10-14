@@ -1444,3 +1444,22 @@ So the blocker is 3-part and entangled:
 This is a cross-lane architecture decision (host-launch composition + when the mapper is warmed
 vs when collect dispatches + Isaac->host transport), not a station-client rewire. Escalated to
 Firstmate for direction before spending more GPU.
+
+### 2026-10-14 — fix #1 CONFIRMED working; fix #2 triggered (OmniGraph publisher->host DDS)
+
+Attempt run-59-fix1 (fresh commission run-18) with ros_host now launched by the host stack.
+Host-DDS probe of the manip control-plane across the collect window:
+- `Node name: restock_manipulation` is present -> **ros_host launched** (fix #1 works). It
+  subscribes `/restock_sim/manipulation/job` (**sub=1**) and publishes
+  `/restock_sim/manipulation/status` (**pub=1**); the Isaac OmniGraph status subscriber
+  (`_RestockManipulationROS_status_wire`) appears intermittently (STATUS sub flaps 0/1).
+- `/restock_sim/manipulation/job`: **pub=0 for all 8 probes** -> the Isaac OmniGraph
+  `/manipulation/job` PUBLISHER is NOT visible to the host UDPv4 Fast DDS, so ros_host never
+  receives the collect job. `/station/command`: pub=0 (same). Mission still fails
+  `host process/status watchdog` (no job -> no status).
+
+Conclusion: Isaac OmniGraph ROS2 PUBLISHERS do not reach the host DDS (pub=0), while
+SUBSCRIBERS do (status/station-status eventually appear). This is the fix #2 trigger:
+route the Isaac->host PUBLISHES (`/manipulation/job`, `/sensors`, `/station/command`, plus
+`/manipulation/stop`, `/gripper/enable`) through a host-DDS rclpy subprocess like masked depth,
+keeping OmniGraph subscribers for the return topics (status, station/status).
