@@ -299,8 +299,13 @@ source "$TASK_OUTPUT/nav2/env.sh"
 
 # Reproduce full-margin planning and feedback on the actual exported static map.
 # This is a TEST_FIXTURE controller check, not an Isaac/PhysX demonstration.
+# --goal-articulation OUTBOUND RETURN (rad) enforces the mission runtime's per-leg
+# cart-articulation tolerance; summary.json records the towing geometry, each leg's
+# final articulation, within_goal_articulation and cart_settle_rate_rad_s. The shelf
+# dock is only reachable with a ~46 deg (0.80 rad) cart swing, so pass > 0.805 rad
+# (recommended 0.90). See data/sim-restock-navigation-v2/outbound-contract.md.
 python3 scripts/check_restock_navigation.py --environment "$ENVIRONMENT_MANIFEST" \
-  --scenario "$RESTOCK_SCENARIO" --position-uncertainty 0.10 \
+  --scenario "$RESTOCK_SCENARIO" --position-uncertainty 0.10 --goal-articulation 0.90 0.90 \
   --output "$TASK_OUTPUT/navigation-proof"
 
 # In one isolated ROS shell, start the articulated FollowPath configuration.
