@@ -1293,6 +1293,18 @@ a mapper-incorporation ack. The mission's `isaac_factory._build_runtime` instead
 `poll()` updates it, then mirror onto the feedback). Cross-lane: the host must publish the nvblox incorporation
 ack carrying `collision_time`; integration mirrors it. No fabricated `now` — the gate proves the ESDF is current.
 
+**Gate-7 consumer side DONE (`7e96b0f`), only the host publish remains.** `isaac_factory._build_runtime`
+now wires `IsaacMeasuredFeedback(assembly.robot)` as the sensing/manipulation motion (replacing the
+parked-only `_ArticulationParked`); `RosManipulationRuntime.step` refreshes its `collision_time` BEFORE each
+capture from `IsaacRosGraph.refresh_incorporation(now)`, and the `CollectTargetBridge` host packet reports
+that same real `collision_time` (not `now`). CPU-tested against a fake ack
+(`test_mapper_incorporation_consumer.py`: `parse_incorporation` fresh/stale/invalid cases + the step mirror);
+184 adjacent tests green. **Interface the host lane must publish** (ROS domain 88): topic
+`/restock_sim/mapper/incorporation`, `std_msgs/String`, JSON `{"collision_time": <sim s>, "stamp": <sim s>}`,
+emitted each nvblox incorporation (continuous, independent of a grasp job). `parse_incorporation` accepts it
+only when `collision_time` is finite and `0 <= now - stamp <= 0.5` (sim clock), else -1 (fail-closed). Once
+the host PR merges and the GPU returns, the collect capture clears gate 7 and hands the host a grasp target.
+
 ### Consumer wiring ready; collect grasp gated by the fixed-source live-capture budget on this box (2026-10-14)
 
 PR54 (merged) added the `source_target_provider` to my contract. I built + CPU-tested the pure arm-image
