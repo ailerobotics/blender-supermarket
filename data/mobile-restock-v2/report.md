@@ -1727,3 +1727,27 @@ Fix (b), host/robot lane: add these pairs to host-cad/mobile.xrdf `self_collisio
 with the SRDF disable_collisions). They are structural (arm bolted to the mount; base_link_inertia
 coincident with the chassis), so ignoring them is correct, not a workaround. (a) stays either way.
 Pose-goal fix is behind the ros_host_config `pose_goal` flag.
+
+### 2026-10-14 — outbound traction investigation (CPU): prime suspect is missing wheel-ground friction
+
+PR70 nav-towing probe: ~0.3 m in 8 min (~0.6 mm/s) = near-stall, "traction-limited". CPU audit of
+the drive/physics config on this branch:
+- Base drive (mobile_runtime.py MobileController): velocity drive on left/right_wheel_joint,
+  stiffness 0, damping 100, **maxForce 80 N·m**, target velocity set from the controller. 80 N·m /
+  0.16 m wheel radius = ~500 N tractive force PER wheel (~1000 N pair) — ample for 180 kg base +
+  35 kg cart (mobile.py spec.mass 180, cart_mass 35), so torque is NOT the bottleneck.
+- Cart body damping (configure_cart_bearings): linearDamping 0.5, angularDamping 3.0 on all 9 cart
+  bodies. Linear damping force = 0.5 * 35 kg * v ≈ 1.75 N at 0.1 m/s — negligible. (Tuned for REST
+  stability per AGENTS.md; not the tow bottleneck.)
+- **No wheel-ground PhysicsMaterial is authored anywhere** (physics_setup / store_environment /
+  mobile_assets) — the drive-wheel↔floor contact uses the PhysX DEFAULT friction (~0.5). For a
+  215 kg robot+cart that is almost certainly below the slip threshold, so the drive wheels spin
+  without advancing: exactly "traction-limited".
+
+RECOMMENDED config-level tune (ready to include in the next full run): author a high-friction
+PhysicsMaterial (static ~1.0, dynamic ~0.9, restitution 0, combine=max or multiply) on the two
+DRIVE wheel colliders (paths left_wheel/right_wheel) in physics_setup, so wheel↔floor traction rises
+above the tow demand; keep the caster wheels and cart damping as-is (rest stability). If still slow
+after friction, raise MobileController maxForce (80 -> ~150 N·m). NOT applied blind: it changes tow
+physics and should be validated in a run (and the navigation lane, resuming 11:00, owns deeper tow
+dynamics). Masses/damping left unchanged (physically faithful).
