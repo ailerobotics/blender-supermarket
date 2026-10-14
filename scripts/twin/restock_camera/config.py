@@ -32,10 +32,10 @@ def camera_config(scenario, manifest):
     # Shelf fx widened 1280 -> 1050 so both paired markers sit inside the frame at
     # ~12 px/module with unchanged obliquity (at 1280 each overran an edge by ~84 px).
     # The guarantee is now "QR core plus its full quiet zone framed", NOT the full white
-    # base: the shelf camera is tilted (see the camera() roll_world_x_deg below) to clear
-    # both cores off the production QR tile seams, which pushes each outer white border
-    # toward a frame edge where it may clip. The decodable core keeps a >=4-module quiet
-    # zone in frame; top/support/witness stay framed.
+    # base: the shelf camera is tilted and yawed (see the camera() roll/yaw/dz levers below)
+    # to clear both cores off the production QR tile seams, which pushes each outer white
+    # border toward a frame edge where it may clip. The decodable core keeps a >=4-module
+    # quiet zone in frame; top/support/witness stay framed.
     k_source,k_cart,k_shelf = intr(2000.),intr(1500.),intr(1050.)
     source = np.array([*staging['support_center_xy'],staging['unit_bottom_z']])
     shelf = np.array(staging['target_surface_pose_world'][:3])
@@ -46,21 +46,27 @@ def camera_config(scenario, manifest):
         solids.append(dict(id=name,parent=parent,parent_from_solid=pose_matrix([*center[:2],0],center[2]).tolist(),
                            dimensions_m=list(size),collision=True))
 
-    def camera(name,parent,eye,target,k,roll_world_x_deg=0.):
-        pose = look_at(eye,target)
-        if roll_world_x_deg:
-            # Rotate the optical frame about the world X axis through the lens. The shelf
-            # pair's two ~0.46 m-wide rendered QR cores sit off-centre and each straddled a
-            # seam of the certified 640 px production tile grid (qr.tile_origins), so
-            # FixedTileQR decoded NEITHER natively (both returned as unreadable candidates);
-            # a bench full-frame cv2 pass caught only the nearer one and masked it. This
-            # small tilt shifts both cores clear of the seams into single tiles. The full
-            # white quiet border may now overrun a frame edge (the QR core plus its quiet
-            # zone stay framed). See data/sim-restock-camera-v2/shelf-tile-seam-root-cause.md.
-            t = np.radians(roll_world_x_deg); c,s = np.cos(t),np.sin(t)
-            spin = np.eye(4); spin[1,1]=c; spin[1,2]=-s; spin[2,1]=s; spin[2,2]=c
-            to,back = np.eye(4),np.eye(4); to[:3,3]=eye; back[:3,3]=-np.asarray(eye,float)
-            pose = to @ spin @ back @ pose
+    def camera(name,parent,eye,target,k,roll_world_x_deg=0.,yaw_world_z_deg=0.,eye_dz_m=0.):
+        # Optional eye-height raise, then re-aim from the raised position.
+        cam = np.asarray(eye,float) + [0,0,eye_dz_m]
+        pose = look_at(cam,target)
+        if roll_world_x_deg or yaw_world_z_deg:
+            # Rotate the optical frame about world axes THROUGH the lens (camera position):
+            # yaw about world Z, then tilt about world X. The shelf pair's two ~0.46 m-wide
+            # rendered QR cores sit off-centre and each straddled a seam of the certified
+            # 640 px production tile grid (qr.tile_origins), so FixedTileQR decoded NEITHER
+            # natively (both returned as unreadable candidates); a bench full-frame cv2 pass
+            # caught only the nearer one and masked it. Tilt + a small yaw shift both cores
+            # clear of the seams into single tiles and maximise the raster-noise decode
+            # margin of the weaker (far) marker. The full white quiet border may now overrun
+            # a frame edge (the QR core plus its quiet zone stay framed).
+            # See data/sim-restock-camera-v2/shelf-tile-seam-root-cause.md.
+            tx = np.radians(roll_world_x_deg); cx,sx = np.cos(tx),np.sin(tx)
+            rx = np.eye(4); rx[1,1]=cx; rx[1,2]=-sx; rx[2,1]=sx; rx[2,2]=cx
+            tz = np.radians(yaw_world_z_deg); cz,sz = np.cos(tz),np.sin(tz)
+            rz = np.eye(4); rz[0,0]=cz; rz[0,1]=-sz; rz[1,0]=sz; rz[1,1]=cz
+            to,back = np.eye(4),np.eye(4); to[:3,3]=cam; back[:3,3]=-cam
+            pose = to @ rz @ rx @ back @ pose
         cameras[name] = dict(id=name,parent=parent,parent_from_optical=pose.tolist(),
             intrinsics=asdict(k),revision='physical-paired-marker-v3')
         housing = pose.copy()
@@ -77,7 +83,18 @@ def camera_config(scenario, manifest):
     # carton-top label plane and full support stay framed. The camera must stay just
     # below the next shelf tier (~0.97 m) to see under it to the carton top; a top-down
     # view is impossible (the tier is ~0.24 m above the support).
-    camera('shelf','map',shelf+[-.50,0,.23],shelf+[-.18,0,-.05],k_shelf,roll_world_x_deg=-6.25)
+    # Shipped pose B: pure -6.75 deg tilt. The native sweep had both B and the steeper
+    # pose A (-9 deg tilt + -1 deg yaw + 4 cm eye-raise) decoding both shelf markers 6/6
+    # with FixedTileQR (~0.31 s); A scored a slightly higher raster-noise margin, BUT its
+    # 4 cm eye-raise lifts the lens to z=1.00 m, ABOVE the ~0.97 m shelf tier, so the tier
+    # occludes the carton top and support and the station-visibility audit collapses to
+    # 0/0/0 -- it blinds the restock-sensing job for a marginal decode gain. B keeps the
+    # lens under the tier: station visibility stays 81/81/25 AND both markers decode 6/6.
+    # The yaw_world_z_deg / eye_dz_m levers on camera() (default 0, exercised by A) are
+    # retained so future candidates can use them; the station-visibility test gate guards
+    # against a future pose silently trading restock sensing for marker margin again.
+    camera('shelf','map',shelf+[-.50,0,.23],shelf+[-.18,0,-.05],k_shelf,
+           roll_world_x_deg=-6.75)
     solid('source_mast','map',source+[0,.44,.15],[.03,.03,1.50])
     solid('source_boom','map',source+[0,.32,.88],[.03,.27,.025])
     solid('source_marker_tab','map',source+[0,.30,-.0015],[.72,.16,.003])
