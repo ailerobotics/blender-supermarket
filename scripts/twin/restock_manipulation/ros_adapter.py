@@ -71,7 +71,8 @@ def validate_trajectory(trajectory, start, limits):
 class RosMotionPort:
     def __init__(self, node, *, joint_limits, payload_sync, emergency_stop,
                  group='ur_manipulator', tcp='gripper_pad_tcp', namespace='/restock_sim',
-                 pipeline='isaac_ros_cumotion', timeout=25.0, velocity_scale=.04, pose_goal=False):
+                 pipeline='isaac_ros_cumotion', timeout=25.0, velocity_scale=.04, pose_goal=False,
+                 stow_config=None):
         require_sim_domain()
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
             raise RuntimeError('node must use domain 88 and simulation clock')
@@ -96,6 +97,13 @@ class RosMotionPort:
         # (run-80: planToCSpaceTarget 'self collision detected'); one collision model removes that
         # disagreement. Kept behind this switch so a regression is a one-flag revert.
         self.pose_goal=bool(pose_goal)
+        # Transport stow config (6 arm joints): the first/central KDL IK seed + the nearest-branch
+        # nominal, so solutions land in-branch and in-limits. None -> seed only with the measured
+        # start and normalise to 0.
+        if stow_config is not None and (len(stow_config) != 6
+                or any(not math.isfinite(q) or not lo <= q <= hi for q, (lo, hi) in zip(stow_config, joint_limits))):
+            raise ValueError('stow_config must be six in-limit joint values')
+        self.stow = tuple(float(q) for q in stow_config) if stow_config is not None else None
         self.payload_sync, self.emergency_stop = payload_sync, emergency_stop
         self.ik = node.create_client(GetPositionIK, namespace + '/compute_ik')
         self.plan = ActionClient(node, MoveGroup, namespace + '/move_action')
@@ -119,22 +127,77 @@ class RosMotionPort:
             self._send(self.plan, self._pose_plan_goal(pose, joints), 'plan_accept')
             self.deadline = time.monotonic() + self.timeout
             return
+        # Joint-space path (host verdict 2026-10-14: cuMotion task-space IK is systemically broken in
+        # this XRDF; KDL compute_ik + cuMotion joint-space planning work). Harden branch selection:
+        # try several KDL IK seeds (transport stow first -- a central in-limits config -- so KDL does
+        # not return a wrapped branch like run-80's joint2=-4.45), normalise each solution to the
+        # nearest in-limit branch, and if cuMotion rejects a c-space target as self-collision, try
+        # the next seed's solution before failing.
+        self._goal_pose = tuple(float(v) for v in pose)
+        self._seeds = self._seed_configs(joints)
+        self._seed_idx = 0
+        self._send_ik(self._seeds[0])
+
+    def _seed_configs(self, measured):
+        """IK seeds, best-branch-first: transport stow (central, in-limits) then the measured start
+        then mild stow perturbations, so KDL returns a near in-branch solution rather than a wrapped
+        one. De-duplicated; always at least the measured start."""
+        seeds = []
+        if self.stow is not None:
+            seeds.append(tuple(float(v) for v in self.stow))
+        seeds.append(tuple(float(v) for v in measured))
+        if self.stow is not None:
+            for d in (0.4, -0.4):
+                seeds.append(tuple(min(hi, max(lo, s + d)) for s, (lo, hi) in zip(self.stow, self.limits)))
+        out = []
+        for s in seeds:
+            if s not in out:
+                out.append(s)
+        return out
+
+    def _nearest_branch(self, q):
+        """Shift each joint by multiples of 2*pi to the branch nearest the stow nominal (or 0), then
+        keep it inside the XRDF joint limits -- avoids KDL's far wrapped branches that cuMotion
+        flags as self-collision. Returns None if a joint has no in-limit branch."""
+        nominal = self.stow if self.stow is not None else (0.,) * 6
+        out = []
+        for v, (lo, hi), nom in zip(q, self.limits, nominal):
+            v2 = v + 2 * math.pi * round((nom - v) / (2 * math.pi))
+            while v2 < lo:
+                v2 += 2 * math.pi
+            while v2 > hi:
+                v2 -= 2 * math.pi
+            if not lo <= v2 <= hi:
+                return None
+            out.append(v2)
+        return out
+
+    def _send_ik(self, seed):
+        from moveit_msgs.srv import GetPositionIK
         req = GetPositionIK.Request()
         req.ik_request.group_name = self.group
         req.ik_request.ik_link_name = self.tcp
         req.ik_request.avoid_collisions = True
         req.ik_request.timeout.sec = 2
         req.ik_request.robot_state.joint_state.name = list(JOINTS)
-        req.ik_request.robot_state.joint_state.position = list(joints)
+        req.ik_request.robot_state.joint_state.position = list(seed)
         req.ik_request.pose_stamped.header.frame_id = 'ur_base_link'
         req.ik_request.pose_stamped.header.stamp = self.node.get_clock().now().to_msg()
         p = req.ik_request.pose_stamped.pose
-        p.position.x, p.position.y, p.position.z = map(float, pose[:3])
-        p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w = map(float, pose[3:])
+        p.position.x, p.position.y, p.position.z = map(float, self._goal_pose[:3])
+        p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w = map(float, self._goal_pose[3:])
         self.generation += 1
         self.handle = None
         self.future, self.state = self.ik.call_async(req), 'ik'
         self.deadline = time.monotonic() + self.timeout
+
+    def _next_seed(self):
+        """Advance to the next IK seed; returns True if one was dispatched, False if exhausted."""
+        if self._seed_idx + 1 < len(self._seeds):
+            self._seed_idx += 1
+            self._send_ik(self._seeds[self._seed_idx])
+            return True
+        return False
 
     def _pose_plan_goal(self, pose, joints):
         """MoveGroup plan request to a cartesian TCP pose (position+orientation goal constraints in
@@ -244,10 +307,17 @@ class RosMotionPort:
         result = self.future.result()
         if self.state == 'ik':
             if result is None or result.error_code.val != 1:
+                if self._next_seed():          # this seed had no IK solution; try the next
+                    return 'running'
                 raise RuntimeError('IK failed')
             js = result.solution.joint_state
             q = [js.position[list(js.name).index(j)] for j in JOINTS]
-            if any(not math.isfinite(v) or not lo <= v <= hi for v, (lo, hi) in zip(q, self.limits)):
+            if not all(math.isfinite(v) for v in q):
+                raise ValueError('IK returned a nonfinite joint')
+            q = self._nearest_branch(q)          # unwrap to the nearest in-limit branch
+            if q is None:
+                if self._next_seed():            # no in-limit branch for this solution; try next seed
+                    return 'running'
                 raise ValueError('IK outside joint limits')
             goal = MoveGroup.Goal()
             req = goal.request
@@ -274,6 +344,10 @@ class RosMotionPort:
             self.state = 'plan_result' if self.state == 'plan_accept' else 'execute_result'
         elif self.state == 'plan_result':
             if result.status != 4 or result.result.error_code.val != 1:
+                # cuMotion rejected this c-space target (e.g. self-collision on a wrapped branch):
+                # try the next seed's IK solution before failing (joint-space retry, host verdict).
+                if getattr(self, '_seeds', None) and self._next_seed():
+                    return 'running'
                 raise RuntimeError('planning failed')
             trajectory = result.result.planned_trajectory
             validate_trajectory(trajectory.joint_trajectory, self.start, self.limits)
