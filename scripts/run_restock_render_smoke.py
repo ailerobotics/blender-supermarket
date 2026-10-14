@@ -162,6 +162,16 @@ def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False,c
         last_native_time=None
         observed_frames=[]
         decoded_codes=set()
+        # Decode with the PRODUCTION FixedTileQR (one per camera, stateful across frames),
+        # not a full-frame cv2 pass: the mission's support binding requires each marker read
+        # by this exact tiled decoder with no geometry fallback, and a full-frame cv2 pass
+        # masked a production-only failure (data/sim-restock-camera-v2/shelf-tile-seam-root-cause.md).
+        marker_camera_id=str(spec.get('id') or view)
+        qr_decoder=None
+        if required_codes:
+            from twin.restock_camera.qr import FixedTileQR
+            from twin.restock_camera.sensed import FrameEvidence
+            qr_decoder=FixedTileQR(marker_camera_id)
         target_frames=6 if runtime_config else 60
         width,height=spec['intrinsics']['width'],spec['intrinsics']['height']
         (output/'depth-frames').mkdir()
@@ -193,10 +203,15 @@ def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False,c
             np.savez_compressed(depth_path,depth=depth,instance_ids=ids)
             depth_written=time.monotonic()
             codes=[]
-            if required_codes:
-                import cv2
-                ok,codes,_,_=cv2.QRCodeDetector().detectAndDecodeMulti(cv2.cvtColor(rgb[:,:,:3],cv2.COLOR_RGB2BGR))
-                if ok: decoded_codes.update(codes)
+            if qr_decoder is not None:
+                # Synthetic-but-valid freshness: a static optical bench is parked, with
+                # strictly increasing frame_id (capture index) and acquisition stamp, so
+                # the decoder's replay refusal holds while we decode the real pixels.
+                stamp=float(frame['rendering_time'])
+                evidence=FrameEvidence(marker_camera_id,len(recorder.frames),stamp,stamp,'bench','bench')
+                qr=qr_decoder.decode(rgb[:,:,:3],evidence,now=stamp,parked=True)
+                codes=[d.text for d in qr.detections]
+                decoded_codes.update(codes)
             decode_finished=time.monotonic()
             observed_frames.append(dict(rendering_frame=identity,rendering_time=float(frame['rendering_time']),
                 acquired_steady=frame.get('acquired_steady'),session_id=frame.get('session_id'),
