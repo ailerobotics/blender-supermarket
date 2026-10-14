@@ -1281,6 +1281,18 @@ PERCEPTION chain (identity + pose + reprojected nvblox target box, all sensor-so
 point of handing the host a grasp target; the gate-7 motion/mapper port is the next piece. GPU released
 back to the shared pool after the run.
 
+Actionable gate-7 path (the adapter already exists): `isaac_ros_graph.IsaacMeasuredFeedback` is the intended
+full feedback/motion adapter — `collision_time`, `observe_source`, `joint_positions()` (the six `ARM_JOINTS`)
+and `parked()`. `station_runtime` shows the intended update pattern (`feedback.collision_time =
+station.collision_time`, reset to -1 on dock/frame change), where `station.collision_time` is stamped only on
+a mapper-incorporation ack. The mission's `isaac_factory._build_runtime` instead wires
+`HostManipulationRuntime.motion = _ArticulationParked` (parked-only), and the sensing lane reads it via
+`manip_runtime.motion`. Fix: `isaac_factory` uses `IsaacMeasuredFeedback` as the motion and syncs its
+`collision_time` from the live mapper-incorporation ack each tick (`IsaacRosGraph` already declares
+`self.collision_time` "set only from mapper incorporation acknowledgement" — confirm the host publishes it and
+`poll()` updates it, then mirror onto the feedback). Cross-lane: the host must publish the nvblox incorporation
+ack carrying `collision_time`; integration mirrors it. No fabricated `now` — the gate proves the ESDF is current.
+
 ### Consumer wiring ready; collect grasp gated by the fixed-source live-capture budget on this box (2026-10-14)
 
 PR54 (merged) added the `source_target_provider` to my contract. I built + CPU-tested the pure arm-image
