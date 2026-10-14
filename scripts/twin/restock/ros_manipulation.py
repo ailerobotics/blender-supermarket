@@ -26,6 +26,7 @@ class RosManipulationRuntime:
     def start(self, operation, job):
         if operation not in ('collect','transfer'):
             raise ValueError('unsupported transfer operation')
+        print(f'MANIP_START operation={operation}', flush=True)  # execute phase reached (diagnostic)
         self.source = job['source_bin'] if operation == 'collect' else self.cart_location
         self.destination = self.cart_location if operation == 'collect' else job['shelf_id']
         if self.sensing_bridge is not None:

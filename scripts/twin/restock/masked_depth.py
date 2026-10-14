@@ -272,13 +272,19 @@ class ArmDepthSubprocessBridge:
 
     def publish(self, now):
         import numpy as np
+        self._calls = getattr(self, '_calls', 0) + 1
         frame = self.camera.get_current_frame()
         # The camera's depth + instance-ID annotators are not populated on the very first
         # renders after initialize(); skip those frames rather than crash (the mission reaches
         # the arm camera many ticks in, so it never saw this, but the focused probe does).
-        if (not isinstance(frame, dict) or frame.get('distance_to_image_plane') is None
-                or not isinstance(frame.get('instance_id_segmentation'), dict)
-                or frame['instance_id_segmentation'].get('data') is None):
+        no_depth = not isinstance(frame, dict) or frame.get('distance_to_image_plane') is None
+        no_seg = (not isinstance(frame, dict) or not isinstance(frame.get('instance_id_segmentation'), dict)
+                  or frame['instance_id_segmentation'].get('data') is None)
+        if self._calls % 30 == 1:                        # lightweight diagnostic (grep BRIDGE_STATS)
+            keys = sorted(frame.keys()) if isinstance(frame, dict) else type(frame).__name__
+            print(f'BRIDGE_STATS calls={self._calls} no_depth={no_depth} no_seg={no_seg} '
+                  f'published={getattr(self, "_published", 0)} keys={keys}', flush=True)
+        if no_depth or no_seg:
             return None
         stamp_s = float(frame.get('rendering_time', now))
         masked, self._id_cache = masked_depth_from_frame(
@@ -292,6 +298,7 @@ class ArmDepthSubprocessBridge:
                   'frame_id': self.frame_id, 'width': int(width), 'height': int(height),
                   'k': k, 'bbox': list(self._bbox) if self._bbox is not None else None}
         self._writer.send(header, np.ascontiguousarray(masked, dtype='<f4').tobytes())
+        self._published = getattr(self, '_published', 0) + 1
         return stamp_s
 
     def close(self):
