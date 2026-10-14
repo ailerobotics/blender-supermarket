@@ -108,6 +108,37 @@ def test_robust_parked_from_port_overrides_flappy_velocity_for_the_station():
     assert r2.status == 'failed'
 
 
+def test_warm_pumps_station_before_dispatch_and_reports_ready_on_fresh_snapshot():
+    st = _client()
+    feedback = NS(collision_time=-1., parked=lambda: True, set_parked=lambda v: None)
+    graph = FakeGraph()
+    rt = RosManipulationRuntime(graph, lambda *a: None, prepare_station=lambda op, job: None,
+                                feedback=feedback, station=st, station_camera_frame='restock_camera_arm')
+    # First warm begins the station (prepare) but reports not-ready and never dispatches the job.
+    assert rt.warm(8.0, parked=True) is False
+    assert any(c['action'] == 'prepare' for c in st.channel.sent)
+    assert feedback.collision_time == -1.
+    assert graph.started is None                              # warm must NOT dispatch the grasp
+    # A fresh ack snapshot -> warm reports ready and mirrors collision_time onto the feedback.
+    st.channel.snapshot = {'state': 'ready', 'stamp': 8.1, 'collision_time': 8.08, 'epoch': st.epoch}
+    assert rt.warm(8.12, parked=True) is True
+    assert feedback.collision_time == pytest.approx(8.08)
+    assert graph.started is None
+
+
+def test_start_after_warm_keeps_the_warmed_station_and_dispatches():
+    st = _client()
+    feedback = NS(collision_time=-1., parked=lambda: True, set_parked=lambda v: None)
+    graph = FakeGraph()
+    rt = RosManipulationRuntime(graph, lambda *a: None, prepare_station=lambda op, job: None,
+                                feedback=feedback, station=st, station_camera_frame='restock_camera_arm')
+    rt.warm(8.0, parked=True)                                 # station begun during warm-up
+    assert rt._station_started is True
+    rt.start('collect', {'source_bin': 'backstock_00', 'job_id': 'j1'})
+    assert rt._station_started is True                        # start() must not re-begin (re-cold) it
+    assert graph.started == ('collect', {'source_bin': 'backstock_00', 'job_id': 'j1'})
+
+
 def test_runtime_clears_collision_time_on_stop():
     st = _client()
     feedback = NS(collision_time=5.0, parked=lambda: True)

@@ -49,44 +49,67 @@ class RosManipulationRuntime:
         self.preparation = self.prepare_station(operation, job)
         self.operation,self.job=operation,job
         self.dispatched=False
-        self._station_started = False
+        # Do NOT reset _station_started: a preceding warm-up (RuntimeAdapter 'warm' phase) may have
+        # already begun the station and driven collision_time fresh; resetting would start a new
+        # parked epoch and throw that warm map away, re-cold-starting the ack. __init__ leaves it
+        # False, so a collect with no warm-up still begins the station on the first step().
         self.last_sensor_time = -1.
         self.latest = Result('running','observe')
         if self.preparation is None:
             self.graph.start(operation,job)
             self.dispatched=True
 
+    def _pump(self, simulation_time, parked):
+        """Drive the parked-station ack + mirror collision_time + publish masked depth.
+
+        Shared by warm() (approach/parked warm-up, before the collect job) and step() (during
+        collect). Running it during the warm-up builds the host nvblox ESDF and makes
+        collision_time fresh BEFORE start() dispatches the job, so the first collect capture can
+        emit /sensors inside the host's 1 s sensor watchdog instead of racing it from cold.
+        """
+        # The port's robust net-pose-displacement parked (Packet.parked) overrides the flappy
+        # instantaneous velocity for the station gate AND the capture's motion.parked().
+        if parked is not None and hasattr(self.feedback, 'set_parked'):
+            self.feedback.set_parked(parked)
+        # begin() prepares the station on the first pump; later pumps heartbeat. Mirror its
+        # collision_time onto the feedback BEFORE any capture reads it (capture gates on freshness).
+        if self.station is not None and self.feedback is not None:
+            if not self._station_started:
+                self.station.begin(self.station_camera_frame, simulation_time)
+                self._station_started = True
+            else:
+                self.station.tick(simulation_time, parked=bool(self.feedback.parked()))
+            self.feedback.collision_time = self.station.collision_time
+            self._sc = getattr(self, '_sc', 0) + 1
+            if self._sc % 10 == 1:                       # STATION_STATS diagnostic
+                snap = getattr(self.station, 'latest', None)
+                print(f'STATION_STATS tick={self._sc} now={simulation_time:.3f} '
+                      f'collision_time={self.feedback.collision_time} '
+                      f'ready={self.station.ready(simulation_time)} snapshot={snap}', flush=True)
+        if self.sensing_bridge is not None:
+            # Continuous masked depth + info + TF + (cached) target bbox for the host
+            # nvblox/object_segmenter EVERY sensing tick, independent of carton verification.
+            self.sensing_bridge.publish(simulation_time)
+
+    def warm(self, simulation_time, parked=None):
+        """Approach/parked warm-up tick (no job dispatch, no capture): pump the station + masked
+        depth so the ESDF builds and collision_time goes fresh before the collect job is sent.
+        Returns True once the station reports a fresh collision_time (ready)."""
+        try:
+            self._pump(simulation_time, parked)
+        except Exception as exc:
+            self.latest = Result('running', 'warm', str(exc))
+            return False
+        return bool(self.station is not None and self.station.ready(simulation_time))
+
     def step(self, dt, simulation_time, parked=None):
         try:
-            # The port's robust net-pose-displacement parked (Packet.parked) overrides the flappy
-            # instantaneous velocity for the station gate AND the capture's motion.parked().
-            if parked is not None and hasattr(self.feedback, 'set_parked'):
-                self.feedback.set_parked(parked)
-            # Drive the parked-station ack and mirror its collision_time onto the feedback BEFORE
-            # this tick's capture reads it (the sensing capture gates on motion.collision_time
-            # freshness). begin() prepares the station on the first step; later steps heartbeat.
-            if self.station is not None and self.feedback is not None:
-                if not self._station_started:
-                    self.station.begin(self.station_camera_frame, simulation_time)
-                    self._station_started = True
-                else:
-                    self.station.tick(simulation_time, parked=bool(self.feedback.parked()))
-                self.feedback.collision_time = self.station.collision_time
-                self._sc = getattr(self, '_sc', 0) + 1
-                if self._sc % 10 == 1:                       # STATION_STATS diagnostic
-                    snap = getattr(self.station, 'latest', None)
-                    print(f'STATION_STATS tick={self._sc} now={simulation_time:.3f} '
-                          f'collision_time={self.feedback.collision_time} '
-                          f'ready={self.station.ready(simulation_time)} snapshot={snap}', flush=True)
+            self._pump(simulation_time, parked)
             if not self.dispatched:
                 if not self.preparation.ready(simulation_time):
                     return Result('running','prepare_station')
                 self.graph.start(self.operation,self.job)
                 self.dispatched=True
-            if self.sensing_bridge is not None:
-                # Continuous masked depth + info + TF + (cached) target bbox for the host
-                # nvblox/object_segmenter EVERY sensing tick, independent of carton verification.
-                self.sensing_bridge.publish(simulation_time)
             # A carton-verification (capture) failure must NOT stop the bridge or the mission:
             # the bridge keeps publishing so the host ESDF builds; the perception gate is just
             # not satisfied yet, and the stage timeout still bounds a genuinely stuck capture.

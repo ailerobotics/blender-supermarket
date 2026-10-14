@@ -12,6 +12,12 @@ from typing import Protocol
 
 from .mission import Result
 
+# Safety cap on the parked collision-map warm-up (RuntimeAdapter 'warm' phase): the warm-up
+# normally exits as soon as the station reports a fresh collision_time (a few ticks once nvblox
+# has incorporated the first depth), but if it never does, dispatch the grasp anyway so the host's
+# startup grace -- not an unbounded warm-up -- bounds a genuinely stuck mapper.
+_WARM_MAX_TICKS = 300
+
 
 @dataclass(frozen=True)
 class Packet:
@@ -85,6 +91,15 @@ class ManipulationBridge:
         if self.prepare_station is not None:
             self.prepare_station(operation, job)
         self.controller.start(operation, job)
+
+    def warm(self, dt, packet):
+        """Approach/parked warm-up tick before the collect job: let the sensor-owning runtime
+        build the host ESDF + drive collision_time fresh so the first grasp /sensors frame lands
+        within the host sensor watchdog. Returns True once the collision map is fresh (ready).
+        A no-op (returns True) for runtimes that do not own sensor I/O."""
+        if self.owns_sensor_io and hasattr(self.controller, 'warm'):
+            return bool(self.controller.warm(packet.simulation_time, parked=packet.parked))
+        return True
 
     def step(self, dt, packet):
         if self.owns_sensor_io:
@@ -192,9 +207,26 @@ class RuntimeAdapter:
                     raise ValueError('cart articulation exceeds manipulation/return goal tolerance')
                 key = 'arrived' if self.action == 'outbound' else 'home'
                 return Result('succeeded', self._evidence(p, **{key: True}))
-            self.phase = 'execute'
             if self.action == 'collect':
+                # Warm the host collision map (ESDF + a fresh collision_time) while parked BEFORE
+                # dispatching the grasp, so the first /sensors frame lands within the host's sensor
+                # watchdog instead of racing a cold ~1 s ESDF incorporation from job start.
+                self.phase = 'warm'
+                self._warmn = 0
+                return Result('running', reason='warming collision map before grasp')
+            self.phase = 'execute'
+        if self.phase == 'warm':
+            self.mobile.park()
+            if not p.parked:
+                return Result('failed', reason='base moved during collision-map warm-up')
+            ready = self.manip.warm(dt, p)
+            self._warmn += 1
+            if ready or self._warmn >= _WARM_MAX_TICKS:
+                self.phase = 'execute'
                 self.manip.start('collect', asdict(self.job))
+                return Result('running', reason=('collision map warm; dispatching grasp' if ready
+                                                 else 'warm-up tick cap reached; dispatching grasp'))
+            return Result('running', reason='warming collision map')
         self.mobile.park()
         if not p.parked:
             return Result('failed', reason='base moved during stationary operation')

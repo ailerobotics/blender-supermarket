@@ -274,7 +274,7 @@ class RosTransferBridge:
     External integration supplies contact/odom/joints/map timestamps and full ROI
     scan coverage. Missing packets trigger a wall-time watchdog and immediate stop.
     """
-    def __init__(self, node, controller, *, watchdog_seconds=1.0):
+    def __init__(self, node, controller, *, watchdog_seconds=1.0, startup_grace_seconds=5.0):
         require_sim_domain()
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
             raise RuntimeError('bridge requires isolated simulation node')
@@ -290,7 +290,17 @@ class RosTransferBridge:
         self.subscriptions = [
             node.create_subscription(String, '/restock_sim/manipulation/job', self._job, 10),
             node.create_subscription(String, '/restock_sim/sensors', self._sensors, 10)]
+        # Split sensor-stream bound. The tight per-frame watchdog only ARMS after the FIRST
+        # /sensors frame (a moving arm mid-grasp must never stall); before the first frame a
+        # separate, looser STARTUP GRACE bounds a job that never produces sensors at all. Host-lane
+        # measurement (data/sim-restock-host-v2/gate7-watchdog-timing-report.md): cold first ESDF
+        # incorporation is ~1.0-1.05 s on this GPU, so a 1 s bound from a cold job start is
+        # unachievable; the approach warm-up + this grace make the first frame feasible without
+        # weakening the moving-arm protection (before the first frame the arm has acted on nothing).
         self.watchdog_seconds = watchdog_seconds
+        self.startup_grace_seconds = startup_grace_seconds
+        self.first_frame = False
+        self.job_start_wall = None
         self.timer = node.create_timer(.1, self._watchdog,
                                       clock=Clock(clock_type=ClockType.STEADY_TIME))
 
@@ -309,6 +319,8 @@ class RosTransferBridge:
             data = json.loads(message.data)
             self.controller.start(data['operation'], data['job'])
             self.last_sim = None
+            self.first_frame = False
+            self.job_start_wall = time.monotonic()
             self.last_packet_wall = time.monotonic()
         except (ValueError, KeyError, TypeError) as exc:
             self.status.publish(self.String(data=json.dumps({'status': 'rejected', 'reason': str(exc)})))
@@ -325,12 +337,22 @@ class RosTransferBridge:
             self.last_sim = sensors.simulation_time
             self._emit(self.controller.step(dt, sensors))
             self.last_packet_wall = time.monotonic()
+            self.first_frame = True            # arms the tight per-frame watchdog from here on
         except (ValueError, KeyError, TypeError) as exc:
             self._emit(self.controller._fail('invalid sensor packet: ' + str(exc)))
 
     def _watchdog(self):
-        if (self.controller.phase not in ('idle', 'failed', 'succeeded')
-                and time.monotonic() - self.last_packet_wall > self.watchdog_seconds):
+        if self.controller.phase in ('idle', 'failed', 'succeeded'):
+            return
+        now = time.monotonic()
+        if not self.first_frame:
+            # No /sensors yet: the looser startup grace (not the 1 s per-frame bound) applies, so a
+            # warm-up + cold first ESDF has time to produce the first frame. A job that never does
+            # still hard-stops with a distinct reason.
+            if self.job_start_wall is not None and now - self.job_start_wall > self.startup_grace_seconds:
+                self._emit(self.controller._fail('no initial sensor frame'))
+            return
+        if now - self.last_packet_wall > self.watchdog_seconds:
             self._emit(self.controller._fail('sensor stream watchdog expired'))
 
 

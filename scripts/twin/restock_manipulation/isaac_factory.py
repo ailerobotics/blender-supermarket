@@ -207,6 +207,11 @@ class HostManipulationRuntime:
     def start(self, operation, job):
         return self._runtime.start(operation, job)
 
+    def warm(self, simulation_time, parked=None):
+        # Approach/parked warm-up: build the host ESDF + drive collision_time fresh before the
+        # collect job is dispatched. Delegates to the inner RosManipulationRuntime.
+        return self._runtime.warm(simulation_time, parked=parked)
+
     def step(self, dt, simulation_time, parked=None):
         return self._runtime.step(dt, simulation_time, parked=parked)
 
