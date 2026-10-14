@@ -1070,3 +1070,32 @@ support_view**, which the mission never provides. The precise contract the next 
     commissioned, so the verify path has likewise never run live; the commissioning phase must cover
     whichever stations the verify action reads. Keep the fixed station views for verify untouched by
     any arm-camera change (Firstmate constraint).
+
+### Native commissioning blocked: the acquisition-to-use freshness budget is exceeded on this box (2026-10-14)
+
+Built the integration side for Option A: `scripts/twin/restock/commissioning_sources.py` (a `--sources`
+hook that boots the composed store as a static bench via `view_scene.build`, empties the collect
+source by deactivating `/RestockScenario/HandlingUnit`, renders the fixed `source` camera and selects
+the empty support+witness polygons) and `scripts/run_restock_commissioning_gpu.py` (guarded GPU
+launcher). Both import-clean and committed (`cfc952d`).
+
+The native run (`commissioning/run-01`) reached the real `commission()` and failed with
+**`ValueError: acquisition-to-use freshness expired after processing`** — the camera lane's
+`restock_camera.freshness` gate. Measured on this box: `commission` on the full-res source frame takes
+**~0.575 s** (FixedTileQR decode 0.262 s + `calibrate_rigid_support` ~0.30 s), over the **0.5 s**
+acquisition-to-use budget (`frame_deadline` = `started + 0.5 - (now-stamp)`). The same failure repros in
+the camera lane's **own CPU tests here** — `test_restock_commissioning.py` is 12/14 FAILED, every
+failing case routing through `commission()` with the identical error (the 2 passing are the pure-JSON
+ones). So PR52 commissioning has never run green on this hardware. (The trailing SIGSEGV is Isaac's known
+`atexit`/`Py_FinalizeEx` omni.graph shutdown crash, after the error is printed.)
+
+This gate is **shared with live mission capture** (`RenderedSupportContext.__call__` and
+`IsaacCartonSensors.capture` use the same `require_fresh`/`frame_deadline`), and all three run only with
+the robot **parked** (capture gates on `parked=True`). So widening the parked acquisition-to-use bound
+(e.g. 0.5 s → 1.0 s) is low-risk and would unblock both commissioning and the mission's own station
+capture — but it is a camera-lane safety parameter, not mine to change unilaterally. Alternatives: reduce
+commission/capture cost (bounded-tile decode; calibrate on the support ROI only). Separately to confirm
+with the sensing lane: the runtime-config `render_scale=0.375` downscales the station render product in
+`sensing_sources._real_rig`, yet the context intrinsics stay the full 2560×1920 design — the capture
+shape check (`rgb.shape[:2] == (intrinsics.height, intrinsics.width)`) would then mismatch, so either the
+station cameras must render full-res or the intrinsics must scale with it. Escalated to Firstmate.
