@@ -84,7 +84,7 @@ class Mission:
             raise ValueError('missing observation ID')
         stamp = evidence.get('simulation_time')
         if (isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or
-                not math.isfinite(stamp) or not 0 <= self.time - stamp <= self.max_evidence_age_s):
+                not math.isfinite(stamp) or not -1e-6 <= self.time - stamp <= self.max_evidence_age_s):
             raise ValueError('missing, future or stale evidence timestamp')
         required = {'collect': ('loaded', True), 'couple': ('coupled', True),
                     'outbound': ('arrived', True), 'park': ('stationary', True),
