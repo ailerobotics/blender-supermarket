@@ -86,6 +86,16 @@ class HostTests(unittest.TestCase):
         self.assertIn('camera/masked_depth', external)
         self.assertIn('32FC1', external)
 
+    def test_host_publishes_incorporation_ack_node(self):
+        # The host now publishes the nvblox mapper-incorporation ack (collision_time) itself,
+        # as an allowlisted co-launched node; the required-external note reflects that the
+        # host publishes it (it is no longer a purely external responsibility).
+        plan = launch_plan(self.config)
+        self.assertIn('twin.restock_host.incorporation_ack', plan['nodes'])
+        external = ' '.join(plan['required_external'])
+        self.assertIn('collision_time', external)
+        self.assertIn('station/status', external)
+
     def test_manifest_stow_missing_or_out_of_bounds(self):
         path = Path(self.config['mobile_manifest'])
         for positions in ({}, dict.fromkeys(JOINTS, 100.)):
@@ -243,6 +253,84 @@ class HostTests(unittest.TestCase):
         for now, parked in [(11., 10.), (10., 9.), (10.2, 10.15)]:
             with self.assertRaises(ValueError):
                 incorporated_time(response, now=now, parked_since=parked)
+
+
+class IncorporationAckTest(unittest.TestCase):
+    """The host-published mapper-incorporation ack wire contract (collision_time)."""
+
+    def state(self):
+        from twin.restock_host.incorporation_ack import IncorporationAckState
+        clock = [100.0]
+        return IncorporationAckState(wall_clock=lambda: clock[0]), clock
+
+    def prepared(self):
+        st, clock = self.state()
+        self.assertEqual(st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=10.0,
+                                        parked=True, camera_frame='restock_camera_collect'), 10.0), 'prepare')
+        return st, clock
+
+    def test_prepare_then_fresh_integration_becomes_ready(self):
+        st, clock = self.prepared()
+        # Before any acknowledgement: active but warming, collision_time withheld (-1).
+        snap = st.snapshot(10.1, endpoints_ready=True, process_alive=True)
+        self.assertEqual(snap['state'], 'warming')
+        self.assertEqual(snap['collision_time'], -1.)
+        self.assertEqual(snap['epoch'], 1)
+        # A real NVIDIA integration stamp strictly after the parked epoch advances it.
+        st.acknowledge(10.2, 1)
+        snap = st.snapshot(10.3, endpoints_ready=True, process_alive=True)
+        self.assertEqual(snap['state'], 'ready')
+        self.assertAlmostEqual(snap['collision_time'], 10.2)
+        self.assertAlmostEqual(snap['stamp'], 10.3)
+
+    def test_collision_time_withheld_until_endpoints_and_freshness(self):
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        # endpoints not ready -> not ready, collision_time withheld.
+        self.assertEqual(st.snapshot(10.3, endpoints_ready=False, process_alive=True)['collision_time'], -1.)
+        # stale incorporation (now - collision_time > 0.5) -> withheld, matching the
+        # mission's 0 <= now - collision_time <= 0.5 freshness gate.
+        self.assertEqual(st.snapshot(10.9, endpoints_ready=True, process_alive=True)['collision_time'], -1.)
+
+    def test_acknowledgement_monotonic_and_epoch_scoped(self):
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        for bad in [(10.1, 1),   # goes backwards
+                    (10.3, 2),   # wrong epoch
+                    (9.5, 1)]:   # predates parked_since (10.0)
+            with self.assertRaises(ValueError):
+                st.acknowledge(*bad)
+        st.acknowledge(10.4, 1)  # advancing is accepted
+        self.assertAlmostEqual(st.collision_time, 10.4)
+
+    def test_stop_and_new_epoch_reset_collision_time(self):
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        st.accept(dict(action='stop', epoch=1, sequence=1, stamp=10.3, parked=True), 10.3)
+        self.assertFalse(st.active)
+        self.assertEqual(st.collision_time, -1.)
+        self.assertEqual(st.snapshot(10.3, endpoints_ready=True, process_alive=True)['state'], 'idle')
+        # A new parked epoch must re-earn its acknowledgement from zero.
+        st.accept(dict(action='prepare', epoch=2, sequence=0, stamp=11.0, parked=True,
+                       camera_frame='restock_camera_transfer'), 11.0)
+        self.assertEqual(st.collision_time, -1.)
+
+    def test_dead_planner_or_lost_heartbeat_faults(self):
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        # process_alive False (the stack died) -> failed, stop asserted by the node.
+        snap = st.snapshot(10.3, endpoints_ready=True, process_alive=False)
+        self.assertEqual(snap['state'], 'failed')
+
+    def test_invalid_commands_rejected(self):
+        st, _ = self.state()
+        for bad in [dict(action='prepare', epoch=1, sequence=0, stamp=10.0, parked=True,
+                         camera_frame='wrong_frame'),          # uncalibrated camera frame
+                    dict(action='heartbeat', epoch=1, sequence=0, stamp=10.0, parked=True),  # no active epoch
+                    dict(action='prepare', epoch=1, sequence=0, stamp=9.0, parked=True,
+                         camera_frame='restock_camera_collect')]:  # stale stamp vs now
+            with self.assertRaises((ValueError, RuntimeError)):
+                st.accept(bad, 10.0)
 
 
 if __name__ == '__main__':

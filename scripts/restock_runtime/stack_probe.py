@@ -333,6 +333,80 @@ def main():
             rec['cumotion_plan'] = {'round_trip': False, 'reason': 'move_action server absent'}
         log('cumotion_plan_done', **rec['cumotion_plan'])
 
+        # ---- 2d. host-published nvblox incorporation ack (collision_time) ----
+        # Drive the parked-station command protocol the host incorporation_ack node speaks
+        # (prepare + heartbeats on station/command), keep publishing fresh masked depth, and
+        # read station/status. Prove the host publishes the ack: collision_time goes to a
+        # FRESH stamp that matches the integrated depth frame time (0 <= now - ct <= 0.5,
+        # ct == a stamp we published), advancing as new frames integrate -- the stamp the
+        # mission syncs onto IsaacMeasuredFeedback to clear the manip-job watchdog.
+        rec['incorporation_ack'] = {}
+        from std_msgs.msg import String
+        status_box = {'msg': None}
+        cmd_pub = node.create_publisher(String, NS + '/station/command', 10)
+        node.create_subscription(String, NS + '/station/status',
+                                 lambda m: status_box.__setitem__('msg', m.data), 10)
+
+        def sim_now():
+            return sim_ns[0] * 1e-9
+
+        # Deliver prepare reliably: wait for the ack node's station/command subscription to
+        # match before publishing, else the late-joiner loses prepare and every heartbeat
+        # then faults ("no active epoch"). Re-sending prepare with the same epoch would also
+        # fault, so it must land exactly once.
+        epoch, seq = 1, 0
+        match_deadline = time.monotonic() + 8.0
+        while cmd_pub.get_subscription_count() < 1 and time.monotonic() < match_deadline:
+            tick_clock(); rclpy.spin_once(node, timeout_sec=0.02)
+        rec['incorporation_ack']['command_subscription_matched'] = cmd_pub.get_subscription_count() >= 1
+        cmd_pub.publish(String(data=json.dumps(dict(action='prepare', epoch=epoch, sequence=seq,
+            stamp=sim_now(), parked=True, camera_frame=CAM_FRAME))))
+        ready_snap, first_ready_s, last_status = None, None, None
+        published_stamps, observed_cts = [], []
+        t_prepare = time.monotonic()
+        nxt_pub = nxt_hb = 0.0
+        deadline = t_prepare + 8.0
+        while time.monotonic() < deadline:
+            nowm = time.monotonic()
+            if nowm >= nxt_pub:
+                published_stamps.append(round(sim_now(), 3)); publish_depth(); nxt_pub = nowm + 0.1
+            if nowm >= nxt_hb:
+                seq += 1
+                cmd_pub.publish(String(data=json.dumps(dict(action='heartbeat', epoch=epoch,
+                    sequence=seq, stamp=sim_now(), parked=True)))); nxt_hb = nowm + 0.1
+            tick_clock(); rclpy.spin_once(node, timeout_sec=0.02)
+            if status_box['msg']:
+                snap = json.loads(status_box['msg'])
+                last_status = snap
+                if snap.get('state') == 'ready' and isinstance(snap.get('collision_time'), (int, float)) \
+                        and snap['collision_time'] > 0:
+                    observed_cts.append(round(float(snap['collision_time']), 3))
+                    if ready_snap is None:
+                        ready_snap = snap
+                        first_ready_s = round(time.monotonic() - t_prepare, 3)
+        ct = ready_snap.get('collision_time') if ready_snap else None
+        # Freshness is judged at the snapshot's own clock (the node sets state=='ready' only
+        # when 0 <= now - collision_time <= 0.5), not against the probe's later sim time.
+        fresh = bool(ready_snap is not None and ct is not None
+                     and 0 <= ready_snap.get('stamp', -1) - ct <= 0.5)
+        # The ack stamp must be one we actually published (the integrated frame time), never
+        # a fabricated "now": allow one 0.1 s publish period of tolerance.
+        matches = bool(ct is not None and any(abs(ct - s) <= 0.1 for s in published_stamps))
+        advanced = len(set(observed_cts)) > 1  # collision_time tracks newer frames
+        rec['incorporation_ack'].update(
+            prepared=True, became_ready=ready_snap is not None, last_status=last_status,
+            first_ready_s=first_ready_s, collision_time=ct,
+            collision_time_fresh=fresh, collision_time_matches_published_stamp=matches,
+            collision_time_advanced=advanced,
+            distinct_collision_times=sorted(set(observed_cts))[:8],
+            ready_state=(ready_snap or {}).get('state'),
+            fires_after_integration_with_right_stamp=bool(
+                ready_snap is not None and fresh and matches))
+        log('incorporation_ack_done', **{k: rec['incorporation_ack'].get(k) for k in (
+            'became_ready', 'first_ready_s', 'collision_time', 'collision_time_fresh',
+            'collision_time_matches_published_stamp', 'collision_time_advanced',
+            'fires_after_integration_with_right_stamp')})
+
         # ---- cold first-job summary vs the 5 s IsaacRosGraph watchdog ----
         esdf_s = rec['latencies'].get('first_esdf_ready_s')
         reply_s = rec['latencies'].get('first_cumotion_reply_s')
