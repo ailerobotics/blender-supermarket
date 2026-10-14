@@ -232,6 +232,11 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     sensing = sensing_factory(app=app, assembly=assembly, plan=plan, config=config, output=output)
     capture = sensing['capture']
     recording_camera = sensing['recording_camera']
+    # Hand the fixed-source collect-target provider (available only after build_sensing) to the
+    # manipulation runtime, which reprojects it into the arm image for the grasp (collect stage).
+    source_target_provider = sensing.get('source_target_provider')
+    if source_target_provider is not None and hasattr(manipulation.controller, 'set_source_target_provider'):
+        manipulation.controller.set_source_target_provider(source_target_provider)
 
     paths = assembly.paths
     robot_root = paths['articulation'].rsplit('/', 1)[0] if '/' in paths['articulation'] else paths['articulation']

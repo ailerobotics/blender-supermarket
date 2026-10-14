@@ -63,6 +63,7 @@ class ManipConfig:
     grasp_mode: str
     pose_bridge_root: str = ''    # filesystem root of the tray-perception pose bridge
     masked_depth: dict = field(default_factory=dict)  # arm masked-depth bridge settings
+    collect_source_location: str = ''  # mission location of the collect pick (fixed-source target)
 
 
 def parse_manipulation_config(config, job_sku):
@@ -146,10 +147,13 @@ def parse_manipulation_config(config, job_sku):
                         'frame_id': str(md.get('frame_id', 'restock_camera_arm')),
                         'domain': int(md.get('domain', 88)), 'runtime_env': runtime_env,
                         'python': str(md.get('python', 'python3'))}
+    collect_source_location = config.get('collect_source_location', '')
+    if collect_source_location and not isinstance(collect_source_location, str):
+        raise ValueError('collect_source_location must be a mission-location string')
     return ManipConfig(profiles=profiles, stations=stations, shelfbot_root=shelfbot_root,
                        walls=walls, voxel_dims=tuple(float(v) for v in vd), voxel_size=float(vs),
                        grasp_mode=next(iter(modes)), pose_bridge_root=pose_bridge_root,
-                       masked_depth=masked_depth)
+                       masked_depth=masked_depth, collect_source_location=collect_source_location)
 
 
 class _ArticulationParked:
@@ -178,12 +182,20 @@ class HostManipulationRuntime:
     """
     cart_location = 'rollwagen'
 
-    def __init__(self, *, runtime, sensors, articulation, profiles):
+    def __init__(self, *, runtime, sensors, articulation, profiles, collect_bridge=None):
         from types import SimpleNamespace
         self._runtime = runtime
         self._sensors = sensors
+        self._collect_bridge = collect_bridge
         self.motion = _ArticulationParked(articulation)
         self.controller = SimpleNamespace(cart_location='rollwagen', profiles=profiles)
+
+    def set_source_target_provider(self, provider):
+        # Hand the fixed-source collect-target provider (built by the camera lane's build_sensing,
+        # available only AFTER manip_factory) to the collect bridge, if this runtime uses one.
+        bridge = getattr(self, '_collect_bridge', None)
+        if bridge is not None:
+            bridge.provider = provider
 
     def configure_station(self, *, slots, base_from_camera):
         # Re-point the arm camera's station sensing before the host plans the next grasp.
@@ -200,6 +212,78 @@ class HostManipulationRuntime:
 
     def stop(self):
         return self._runtime.stop()
+
+
+class CollectTargetBridge:
+    """Collect pick target from the FIXED source camera, reprojected for the moving arm.
+
+    The grasp target no longer comes from the arm eye-in-hand capture. Each sensing tick,
+    ``capture(now, source, destination)`` calls the fixed-source ``source_target_provider``
+    (set after ``build_sensing`` via ``HostManipulationRuntime.set_source_target_provider``),
+    re-validates freshness + parked at the moment of use, builds the host ``Sensors`` packet
+    from the sensed ``SourceTarget`` (sku + base-frame pose), and reprojects that pose into the
+    LIVE arm image as the masked-depth/nvblox target box. It exposes ``sensed_target_bboxes``
+    (the only field the ``ArmDepthSubprocessBridge`` reads). Returns ``None`` when nothing is
+    sensed or the capture is stale — never fabricates; the masked bridge then republishes its
+    last good box so the host's 0.5 s bbox freshness holds.
+    """
+    def __init__(self, *, stage, arm_camera, arm_camera_path, base_path, profiles,
+                 motion, contact, joints, source_location):
+        self.stage, self.arm_camera, self.arm_camera_path = stage, arm_camera, arm_camera_path
+        self.base_path, self.profiles = base_path, profiles
+        self.motion, self.contact, self.joints = motion, contact, joints
+        self.source_location = source_location
+        self.provider = None
+        self.sensed_target_bboxes = ()
+
+    def _arm_base_from_camera(self):
+        import numpy as np
+        from pxr import UsdGeom
+        cache = UsdGeom.XformCache()
+        cam = np.asarray(cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.arm_camera_path))).T
+        base = np.asarray(cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.base_path))).T
+        # USD camera looks -Z/+Y-up; flip to the +Z/+Y-down optical convention of get_intrinsics_matrix.
+        return np.linalg.inv(base) @ (cam @ np.diag([1., -1., -1., 1.]))
+
+    def _reproject(self, target):
+        import numpy as np
+        from twin.restock.collect_target import reproject_carton_roi
+        profile = self.profiles.get(target.sku)
+        if profile is None:
+            return None
+        frame = self.arm_camera.get_current_frame()
+        depth = frame.get('distance_to_image_plane') if isinstance(frame, dict) else None
+        if depth is None:
+            return None
+        m = np.asarray(self.arm_camera.get_intrinsics_matrix(), float)
+        intr = (m[0, 0], m[1, 1], m[0, 2], m[1, 2])
+        return reproject_carton_roi(target.pose_station, profile.dimensions,
+                                    self._arm_base_from_camera(), intr, np.asarray(depth).shape)
+
+    def capture(self, now, source, destination):
+        from twin.restock_manipulation.types import Sensors, Observation
+        self.sensed_target_bboxes = ()
+        if self.provider is None:
+            return None
+        target = self.provider(now)                 # SourceTarget | None (provider enforces its own gates)
+        if target is None:
+            return None
+        parked = bool(self.motion.parked())
+        if not parked or not -0.02 <= now - target.stamp <= .5:
+            return None                              # re-validate freshness + parked at use
+        roi = self._reproject(target)
+        if roi is not None:
+            self.sensed_target_bboxes = (dict(roi=roi, location=self.source_location),)
+        try:
+            joints = tuple(float(j) for j in self.joints())
+        except Exception:
+            joints = (0.,) * 6
+        obs = Observation(observation_id=f'source:{target.stamp}', source='sensor',
+                          simulation_time=float(target.stamp), sku=target.sku,
+                          location=self.source_location, pose=tuple(target.pose_station),
+                          confidence=1.0, frame='ur_base_link')
+        return Sensors(now, (obs,), None, parked, bool(self.contact.read()), now, now, joints,
+                       (), float(target.stamp))
 
 
 def _build_runtime(*, app, assembly, params, output):
@@ -240,27 +324,38 @@ def _build_runtime(*, app, assembly, params, output):
     source = params.stations['source']
     if not params.pose_bridge_root:
         raise ValueError('runtime-config pose_bridge_root (tray-perception root) required')
+    # Arm eye-in-hand camera is masked depth + fine alignment ONLY now; IsaacCartonSensors is
+    # retained for its distance-to-image-plane annotator (the masked-depth bridge needs it) and
+    # fine-alignment role, not as the grasp-target capture.
     sensors = IsaacCartonSensors(camera, pose_bridge_root=params.pose_bridge_root,
                                  profiles=params.profiles, slots=source['slots'],
                                  base_from_camera=np.asarray(source['base_from_camera'], float))
     parked = _ArticulationParked(assembly.robot)
 
-    def capture(simulation_time, station_source, destination):
-        # Real arm-camera packet for the host planner; base parked, gripper contact measured.
-        return sensors.capture(simulation_time, station_source, destination, parked, contact)
+    # The collect grasp target comes from the FIXED source camera via the camera-lane provider,
+    # reprojected into the live arm image. The provider is injected after build_sensing through
+    # HostManipulationRuntime.set_source_target_provider.
+    collect_bridge = CollectTargetBridge(
+        stage=stage, arm_camera=camera, arm_camera_path=camera_path,
+        base_path=assembly.paths['ur_base_link'], profiles=params.profiles,
+        motion=parked, contact=contact,
+        joints=lambda: assembly.robot.get_joint_positions(),
+        source_location=params.collect_source_location)
 
     sensing_bridge = None
     if params.masked_depth.get('enabled'):
         sensing_bridge = _build_masked_depth_bridge(
             stage=stage, camera=camera, camera_path=camera_path, gripper_path=gripper_path,
-            assembly=assembly, sensors=sensors, settings=params.masked_depth)
+            assembly=assembly, sensors=collect_bridge, settings=params.masked_depth)
 
     # Native ROS bridge to the host MoveGroup/cuMotion + TransferController + trajectory_host.
     graph = IsaacRosGraph(contact=contact, hold=assembly.command_gate.hold)
-    runtime = RosManipulationRuntime(graph, capture, prepare_station=lambda operation, job: None,
+    runtime = RosManipulationRuntime(graph, collect_bridge.capture,
+                                     prepare_station=lambda operation, job: None,
                                      sensing_bridge=sensing_bridge)
     return HostManipulationRuntime(runtime=runtime, sensors=sensors,
-                                   articulation=assembly.robot, profiles=params.profiles)
+                                   articulation=assembly.robot, profiles=params.profiles,
+                                   collect_bridge=collect_bridge)
 
 
 def _rig_root(path):
