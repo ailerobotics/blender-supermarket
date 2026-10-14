@@ -187,11 +187,12 @@ def launch_plan(config):
                   'isaac_ros_cumotion/StaticPlanningSceneServer',
                   'isaac_ros_cumotion/CumotionPlanner',
                   'isaac_ros_cumotion_object_attachment/ObjectAttachmentNode',
-                  'isaac_ros_cumotion_robot_segmenter/RobotSegmenter',
                   'shelfbot.perception.object_segmenter',
                   'nvblox_ros/NvbloxNode'],
         'required_external': ['measured joint_states and TF including all movable CAD joints',
-                              'registered depth + CameraInfo and /clock',
+                              'rig-masked registered depth (Image 32FC1, metres, self pixels 0) on '
+                              'camera/masked_depth from the Isaac per-pixel instance-ID self mask, with '
+                              'camera/masked_depth/camera_info (frame restock_camera_<id>) and /clock',
                               'sensor-derived target_bbox Float32MultiArray [u1,v1,u2,v2], fresh for every masked frame',
                               'arm_controller/follow_joint_trajectory with articulation feedback',
                               'parked station lifecycle: stop host, restart empty map, fresh ESDF ack'],

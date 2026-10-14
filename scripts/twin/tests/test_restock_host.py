@@ -73,6 +73,19 @@ class HostTests(unittest.TestCase):
         self.assertIn('sensor-derived', ' '.join(plan['required_external']))
         self.assertIn('--mobile-manifest', plan['integration_host_arguments'])
 
+    def test_self_filter_delegated_to_isaac_masked_depth(self):
+        # The NVIDIA RobotSegmenter is removed from the host graph (its incompatible reload
+        # subscription aborted the container); the rig self mask is delegated to the Isaac
+        # side, which publishes robot-masked depth on camera/masked_depth. The host keeps the
+        # grasp-target object_segmenter and the nvblox mapper.
+        plan = launch_plan(self.config)
+        self.assertFalse(any('RobotSegmenter' in n or 'robot_segmenter' in n for n in plan['nodes']))
+        self.assertIn('shelfbot.perception.object_segmenter', plan['nodes'])
+        self.assertIn('nvblox_ros/NvbloxNode', plan['nodes'])
+        external = ' '.join(plan['required_external'])
+        self.assertIn('camera/masked_depth', external)
+        self.assertIn('32FC1', external)
+
     def test_manifest_stow_missing_or_out_of_bounds(self):
         path = Path(self.config['mobile_manifest'])
         for positions in ({}, dict.fromkeys(JOINTS, 100.)):
