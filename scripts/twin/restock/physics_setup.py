@@ -67,6 +67,31 @@ def configure_cart_solver(stage, root):
     return bodies
 
 
+def configure_wheel_traction(stage, articulation_root, coeff):
+    """Bind a high-friction PhysX material to the drive-wheel colliders so the base can tow the
+    coupled cart (default friction ~0.5 slips the 215 kg robot+cart). Finds the wheel bodies by name
+    ('left_wheel'/'right_wheel') in the articulation subtree and binds the material to every collider
+    under them. static=coeff, dynamic=0.9*coeff, restitution 0; 'max' combine so the pair friction is
+    governed by the wheel. Returns the bound collider paths (empty if the wheels are not found)."""
+    from pxr import Usd, UsdShade, UsdPhysics, Sdf
+    mat = UsdShade.Material.Define(stage, '/RestockWheelMaterial')
+    api = UsdPhysics.MaterialAPI.Apply(mat.GetPrim())
+    api.CreateStaticFrictionAttr().Set(float(coeff))
+    api.CreateDynamicFrictionAttr().Set(float(coeff) * 0.9)
+    api.CreateRestitutionAttr().Set(0.0)
+    mat.GetPrim().CreateAttribute('physxMaterial:frictionCombineMode', Sdf.ValueTypeNames.Token, False).Set('max')
+    root = stage.GetPrimAtPath(articulation_root)
+    bound = []
+    if root:
+        for p in Usd.PrimRange(root):
+            if p.GetName() in ('left_wheel', 'right_wheel'):
+                for c in Usd.PrimRange(p):
+                    if c.HasAPI(UsdPhysics.CollisionAPI):
+                        UsdShade.MaterialBindingAPI(c).Bind(mat, materialPurpose='physics')
+                        bound.append(str(c.GetPath()))
+    return bound
+
+
 def configure_scene_physics(stage, scene_path):
     """Enable PhysX resting-contact stabilization on the composed scene.
 
@@ -192,6 +217,16 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     cart_root=composition['assets']['cart']['root']
     solver=configure_cart_solver(stage,cart_root)
     bearings=configure_cart_bearings(stage,cart_root)
+    # Optional wheel-ground traction tune (data/mobile-restock-v2 traction investigation): the
+    # default PhysX friction (~0.5) slips a 215 kg robot+cart, stalling the coupled tow. Guarded so a
+    # material-authoring failure degrades to default friction (never breaks the mission/grasp).
+    wheel_friction=config.get('wheel_friction')
+    if wheel_friction:
+        try:
+            bound=configure_wheel_traction(stage,paths['articulation'],float(wheel_friction))
+            print(f'WHEEL_TRACTION static={wheel_friction} bound={len(bound)} colliders',flush=True)
+        except Exception as exc:
+            print(f'WHEEL_TRACTION skipped: {type(exc).__name__}: {exc}',flush=True)
     if diagnostic_prepare is not None:
         diagnostic_prepare(stage)
     controller=MobileController(stage,paths['base_link'],cart_path,
