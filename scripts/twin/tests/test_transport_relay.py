@@ -47,5 +47,22 @@ class TfPayload(unittest.TestCase):
         self.assertEqual(row[5:], [0.0, 0.0, 0.7071, 0.7071])  # quat x,y,z,w
 
 
+class FrameIdContractWithNvblox(unittest.TestCase):
+    """nvblox looks up depth_frame_id <- global_frame; the relay must publish exactly those names.
+    Verify the depth header frame_id == the relay _frame_id of the arm optical prim, and the relay
+    parent == the nvblox global_frame (config.FRAME) 'ur_base_link' with no prim-path prefix."""
+
+    def test_arm_depth_frame_id_equals_relay_child_frame_id(self):
+        depth_frame_id = 'restock_camera_arm'                 # masked_depth.ArmDepthSubprocessBridge default
+        # masked_depth builds the optical prim at camera_path + '/' + frame_id
+        optical_path = '/MobileRobot/front_camera_frame/arm_camera/' + depth_frame_id
+        self.assertEqual(_frame_id(optical_path), depth_frame_id)   # exact string match, no prefix
+
+    def test_relay_parent_equals_nvblox_global_frame_with_no_prefix(self):
+        from twin.restock_host.config import FRAME
+        self.assertEqual(FRAME, 'ur_base_link')
+        self.assertEqual(_frame_id('/MobileRobot/ur_base_link'), FRAME)
+
+
 if __name__ == '__main__':
     unittest.main()
