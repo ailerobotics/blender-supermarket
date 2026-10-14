@@ -54,7 +54,7 @@ in-process. Baselines are only ever produced by an observed commissioning run; a
 one is refused, never fabricated.
 """
 from .binding import RenderedSupportContext, StationSensors, SupportSlot
-from .geometry import Intrinsics
+from .geometry import Intrinsics, scale_intrinsics
 
 _REQUIRED = ('cameras', 'context_providers', 'location_cameras', 'profiles',
              'pose_bridge_root', 'motion', 'contact', 'recording_camera')
@@ -98,15 +98,22 @@ def support_slots(camera_config, camera_id, *, label_masks, support_locations=No
 
 
 def rendered_context(camera_config, camera_id, slots, *, measure_context,
-                     clearance_for_slot, camera_revision, clock_context=None):
+                     clearance_for_slot, camera_revision, clock_context=None, render_scale=1.0):
     """A :class:`RenderedSupportContext` for one camera from the design + integration callbacks.
 
     The intrinsics and depth-error bound come from the camera design; ``measure_context``
     (TF base_from_camera + parked/epoch), ``clearance_for_slot`` (mapper vacancy) and
     ``clock_context`` are integration-owned. The caller commissions it from observed empty
     supports before any mission capture.
+
+    ``render_scale`` (<1) scales the intrinsics to match a reduced render-product resolution
+    (:func:`geometry.scale_intrinsics`) so the context, its commissioned baseline and the live
+    capture all use the SAME calibration as the actually-rendered pixels — the fix for
+    resolution scaled without intrinsics. Commission at the same scale the mission renders at;
+    note decode degrades with scale (small markers), so a decode-grade camera may need 1.0.
     """
-    intrinsics = Intrinsics(**camera_config['cameras'][camera_id]['intrinsics'])
+    k = Intrinsics(**camera_config['cameras'][camera_id]['intrinsics'])
+    intrinsics = k if render_scale == 1.0 else scale_intrinsics(k, render_scale)
     return RenderedSupportContext(
         camera_id=camera_id, intrinsics=intrinsics, slots=slots,
         measure_context=measure_context, clearance_for_slot=clearance_for_slot,

@@ -24,6 +24,25 @@ class Intrinsics:
             raise ValueError('invalid camera intrinsics/range')
 
 
+def scale_intrinsics(intrinsics, render_scale):
+    """Intrinsics for the same camera rendered at ``render_scale`` of its native resolution.
+
+    A render at a fraction of the native resolution MUST carry matching intrinsics: focal
+    length and principal point scale with the pixel grid, otherwise every backprojection is
+    off by 1/render_scale (the calibration bug that broke the 0.375 mission path). The pixel
+    grid is rounded to even dimensions to match the renderer (odd HxW is refused downstream),
+    and focal/principal scale by the realised ratio so projection stays exact. Principal
+    points stay centred (this system authors centred pinholes).
+    """
+    if not 0 < render_scale <= 1.0:
+        raise ValueError('render_scale must be in (0, 1]')
+    width = max(2, int(intrinsics.width * render_scale) // 2 * 2)
+    height = max(2, int(intrinsics.height * render_scale) // 2 * 2)
+    sx, sy = width / intrinsics.width, height / intrinsics.height
+    return Intrinsics(width, height, intrinsics.fx * sx, intrinsics.fy * sy,
+                      width / 2., height / 2., intrinsics.near, intrinsics.far)
+
+
 def rigid(matrix):
     m = np.asarray(matrix, float)
     if (m.shape != (4,4) or not np.isfinite(m).all()

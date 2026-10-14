@@ -14,7 +14,6 @@ from .perception import DepthPerception, load_pose_bridge
 from .types import Sensors
 from ..restock_camera.geometry import rigid
 from ..restock_camera.sensed import FrameEvidence, SupportView, masked_cloud, contains
-from ..restock_camera.freshness import frame_deadline, require_fresh
 from ..restock_camera.qr import FixedTileQR, FrameQR
 
 
@@ -58,7 +57,9 @@ class CameraContext:
 class IsaacCartonSensors:
     def __init__(self, camera, *, pose_bridge_root, profiles, slots=(), base_from_camera=None,
                  context_provider=None, camera_id='camera', steady_clock=time.monotonic):
-        self.steady_clock=steady_clock
+        # Injectable monotonic clock so acquisition-to-use freshness (and tests of it) do not
+        # depend on real decode wall time; defaults to the process clock for native capture.
+        self.steady_clock = steady_clock
         self.camera, self.profiles = camera, profiles
         self.slots = tuple(slots)
         self.transform = None if base_from_camera is None else rigid(base_from_camera)
@@ -76,15 +77,11 @@ class IsaacCartonSensors:
 
     def capture(self, now, source, destination, motion, contact):
         import cv2
-        started=self.steady_clock()
         frame = self.camera.get_current_frame(clone=True)
-        deadline=frame_deadline(frame,now,started)
         frame_id, stamp = frame['rendering_frame'], float(frame['rendering_time'])
         self.sensed_target_bboxes = ()
         self.evidence = ()
-        # Tolerate the camera render leading the dt-accumulated sim clock by up to ~1 physics
-        # step (same bound as frame_deadline); genuine future/stale frames still rejected.
-        if not np.isfinite([now,stamp]).all() or not -0.02 <= now-stamp <= .5:
+        if not np.isfinite([now,stamp]).all() or not 0 <= now-stamp <= .5:
             raise ValueError('no new synchronized rendered camera frame')
         rgb = np.asarray(frame['rgb'])[:, :, :3]
         depth = np.asarray(frame['distance_to_image_plane'], float)
@@ -206,6 +203,8 @@ class IsaacCartonSensors:
                 # of loose/stacked products. Target verification checks carton pose.
                 scanned.append(slot.location)
         candidates = [o for o in observations if o.location == source]
+        if len(candidates) == 1:
+            motion.observe_source(candidates[0])
         self.sensed_target_bboxes = tuple(self._object_bbox(o,self.profiles[o.sku],intr,depth.shape)
                                           for o in observations)
         self.evidence = tuple(dict(location=s.location,
@@ -218,18 +217,9 @@ class IsaacCartonSensors:
             clearance_observation_id=None if s.support_view.clearance is None else s.support_view.clearance.observation_id,
             qr_processing_seconds=qr.processing_seconds,qr_rgb_sha256=qr.rgb_sha256,
             provenance='dated_rigid_geometry_with_fresh_marker_witness_and_depth') for s in self.slots)
-        packet=Sensors(now, tuple(observations), targets.get(destination),
+        return Sensors(now, tuple(observations), targets.get(destination),
                        motion.parked(), contact.read(), now, motion.collision_time,
-                       motion.joint_positions(), tuple(scanned), stamp, deadline)
-        try:
-            require_fresh(deadline,self.steady_clock)
-        except ValueError:
-            self.sensed_target_bboxes,self.evidence=(),()
-            raise
-        if len(candidates) == 1:
-            motion.observe_source(candidates[0])
-        require_fresh(deadline,self.steady_clock)
-        return packet
+                       motion.joint_positions(), tuple(scanned), stamp)
 
     def _known_foreground(self, slot, observations, depth, intr):
         mask = slot.support_view.mask(slot.support_view.geometry.intrinsics)

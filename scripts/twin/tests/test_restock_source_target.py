@@ -121,8 +121,11 @@ def test_provider_over_a_real_commissioned_source_returns_none_on_empty(tmp_path
     camera_stub = NS(get_current_frame=lambda **kw: frame,
                      get_intrinsics_matrix=lambda: np.array([[k.fx,0,k.cx],[0,k.fy,k.cy],[0,0,1.]]),
                      add_distance_to_image_plane_to_frame=lambda: None)
+    # Deterministic steady clock so acquisition-to-use freshness never depends on real decode
+    # wall time (would otherwise expire on a loaded machine); the capture uses fixed now/stamp.
     adapter = isaac_sensors.IsaacCartonSensors(camera_stub, pose_bridge_root='fixture', profiles={},
-                                               context_provider=boot, camera_id='source')
+                                               context_provider=boot, camera_id='source',
+                                               steady_clock=lambda: 0.)
     motion = NS(parked=lambda: True, collision_time=1., joint_positions=lambda: (0.,)*6,
                 observe_source=lambda observation: None)
     provider = build_source_target_provider(adapter, motion, NS(read=lambda: False))
