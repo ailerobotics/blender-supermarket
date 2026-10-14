@@ -136,9 +136,22 @@ class TransferController:
                        and .9 <= o.confidence <= 1 and self._provenance(o, now)
                        and self._pose_ok(o.pose)]
             if len(matches) != 1:
+                # DIAG (throttled): why no unique source match -- distinguishes a reach/provenance/
+                # confidence drop from an empty observation set, since all observe early-returns look
+                # identical ('observe','') in the status stream.
+                self._obsn = getattr(self, '_obsn', 0) + 1
+                if self._obsn % 20 == 1:
+                    cand = [(o.location, o.sku, round(math.dist(o.pose[:3], (0, 0, 0)), 3),
+                             o.source, round(o.confidence, 2)) for o in s.observations]
+                    print(f'OBSERVE_GATE matches={len(matches)} src={self.source!r} sku={self.job["sku"]!r} '
+                          f'max_reach={self.profile.max_reach} observations={cand}', flush=True)
                 return self._result()  # bounded retry with fresh sensor frames
             target = s.target
             if not target or target.location != self.destination or not self._provenance(target, now):
+                self._tgtn = getattr(self, '_tgtn', 0) + 1
+                if self._tgtn % 20 == 1:
+                    print(f'OBSERVE_GATE target_gate_fail target={"None" if not target else target.location!r} '
+                          f'want_destination={self.destination!r}', flush=True)
                 return self._result()
             if not target.clear:
                 return self._fail('occupied target')
