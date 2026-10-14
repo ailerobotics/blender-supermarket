@@ -22,8 +22,23 @@ tested; the real builder runs only inside the guarded app. No observation is fab
 """
 from __future__ import annotations
 
+import time as _time
+
 from twin.restock_camera.config import camera_config as build_camera_design
 from twin.restock_camera.sensing import support_slots, rendered_context
+
+# Shared persistent acquisition-clock domain for the commissioned-support age gate
+# (sensed.RegisteredSupport.age_at). Commissioning and the mission run in SEPARATE processes
+# with independent sim clocks and incomparable per-process monotonic clocks, so the baseline
+# and the live capture both stamp their evidence with WALL time (time.time()) under this one
+# fixed domain; age_at then measures real elapsed wall seconds since commissioning, bounded by
+# the baseline lifetime, instead of a reversed sim-time delta. The commissioning hook
+# (twin.restock.commissioning_sources) imports this exact domain so the two agree.
+COMMISSIONING_STEADY_DOMAIN = 'restock-commission-wallclock-v1'
+
+
+def _wall_clock_context(frame, now):
+    return ('mission', COMMISSIONING_STEADY_DOMAIN, _time.time())
 
 def _all_true_mask(design, camera_id):
     import numpy as np
@@ -93,7 +108,7 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
             design, camera_id, slots, measure_context=measure_context_for(camera_id),
             clearance_for_slot=clearance_for_slot,
             camera_revision=design['cameras'][camera_id]['revision'],
-            render_scale=camera_scales[camera_id])
+            render_scale=camera_scales[camera_id], clock_context=_wall_clock_context)
 
     profiles = dict(getattr(manip_runtime.controller, 'profiles', {}))
 

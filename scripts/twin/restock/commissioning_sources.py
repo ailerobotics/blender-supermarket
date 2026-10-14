@@ -127,13 +127,22 @@ def build_sources(*, scenario, camera_config, output):
     support_locations = {'source': LOCATION, 'cart': 'rollwagen', 'shelf': scenario['job']['shelf_id']}
     slots = support_slots(design, STATION, label_masks=label_masks, support_locations=support_locations)
 
+    import time as _time
+    from twin.restock.sensing_sources import COMMISSIONING_STEADY_DOMAIN
+
     def measure_context(frame, now):
         # Static bench: parked, tf stamped at the render time (|stamp - tf| = 0 passes the gate).
         return (base_from_camera, float(now), 'commissioning', True)
 
+    def clock_context(frame, now):
+        # Persistent WALL-clock acquisition stamp under the shared domain the mission also uses,
+        # so sensed.age_at measures real elapsed wall seconds (not an incomparable sim/monotonic
+        # delta) across the separate commissioning and mission processes. See sensing_sources.
+        return ('commission', COMMISSIONING_STEADY_DOMAIN, _time.time())
+
     context = rendered_context(design, STATION, slots, measure_context=measure_context,
                               clearance_for_slot=lambda loc, view, frame, now: None,
-                              camera_revision=cam['revision'])
+                              camera_revision=cam['revision'], clock_context=clock_context)
 
     from twin.restock_camera.qr import FixedTileQR
     from twin.restock_camera.sensed import FrameEvidence

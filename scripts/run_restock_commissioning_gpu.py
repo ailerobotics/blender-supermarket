@@ -36,6 +36,8 @@ def main():
     parser.add_argument('--station', action='append', dest='stations', help='repeatable; default backstock_00')
     parser.add_argument('--heavy-threshold-mb', type=int, choices=(1500, 2500), default=2500)
     parser.add_argument('--wall-cap-s', type=int, default=600)
+    parser.add_argument('--lifetime-s', type=float, default=600.,
+                        help='commissioned-baseline lifetime (wall seconds via the shared clock domain)')
     args = parser.parse_args()
 
     args.output = args.output.resolve()
@@ -62,7 +64,7 @@ def main():
                        '--execute', '--camera-config', str(args.camera_config.resolve()),
                        '--scenario', str(args.scenario.resolve()),
                        '--sources', 'twin.restock.commissioning_sources:build_sources',
-                       '--output', str(baselines)]
+                       '--output', str(baselines), '--lifetime-s', str(args.lifetime_s)]
             for s in stations:
                 command.extend(['--station', s])
             record['command'] = command
