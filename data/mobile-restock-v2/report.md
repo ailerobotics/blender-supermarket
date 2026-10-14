@@ -1710,3 +1710,20 @@ IK+planning to the POSE (switch RosMotionPort from GetPositionIK->planToCSpaceTa
 MoveGroup request) so one consistent model is used, or (b) align the XRDF self_collision.ignore with
 the SRDF disable_collisions so cuMotion ignores the same arm-base pairs MoveIt does. Repro: c-space
 target above; grasp pose approach (0,0.778,0.181) quat (0,-0.71,-0.71,0) in ur_base_link.
+
+### 2026-10-14 — pose-goal planning (a) WORKS; residual = XRDF over-conservative self-collision (b)
+
+run-81 (pose_goal=True): the MoveGroup pose-goal path is correct architecture — cuMotion logs
+`Using task space goal` and does its OWN collision-aware IK (one model, the XRDF), no KDL c-space
+pre-IK. It fails `trajopt: INVERSE_KINEMATICS_FAILURE` on the approach pose (0,0.778,0.181) quat
+(0,-0.71,-0.71,0), which is well inside reach. Root: cuMotion's XRDF self-collision model checks
+STRUCTURAL arm-mounting pairs that are always in contact, so EVERY IK branch is flagged. The SRDF
+disables them but cuMotion could not apply the masks (host-stack.log "...has no self-collision
+spheres specified. Self-collision mask will not be added") for:
+  ur_shoulder_link <-> arm_mount / base_link / hitch
+  ur_base_link_inertia <-> arm_mount / base_link / front_caster_fork / hitch / left_wheel /
+                           rear_caster_fork / right_wheel
+Fix (b), host/robot lane: add these pairs to host-cad/mobile.xrdf `self_collision.ignore` (align it
+with the SRDF disable_collisions). They are structural (arm bolted to the mount; base_link_inertia
+coincident with the chassis), so ignoring them is correct, not a workaround. (a) stays either way.
+Pose-goal fix is behind the ros_host_config `pose_goal` flag.
