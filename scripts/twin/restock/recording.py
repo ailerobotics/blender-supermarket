@@ -34,7 +34,13 @@ class Recorder:
             if stamp!=self.frames[-1]['simulation_time']:
                 raise ValueError('cached camera identity changed acquisition timestamp')
             return False
-        self.add(np.asarray(frame['rgb'])[:,:,:3],render_id=render_id,simulation_time=stamp)
+        rgb=np.asarray(frame['rgb'])
+        # The render product can return an empty 1-D buffer on the first ticks before the
+        # camera has produced a real RGBA image. Skip until a real frame arrives rather
+        # than crash on the HxWx3 slice; this never fabricates or repeats a frame.
+        if rgb.ndim!=3 or rgb.shape[2]<3:
+            return False
+        self.add(rgb[:,:,:3],render_id=render_id,simulation_time=stamp)
         return True
 
     def add(self, rgb, *, render_id, simulation_time):
