@@ -225,5 +225,90 @@ class CoupledCrescentTests(unittest.TestCase):
         self.assertTrue(side.certifies_sweep(occupied, swept, travel))
 
 
+class UncoupledHeadingTests(unittest.TestCase):
+    """Uncoupled collect-stage base: the same occupied-envelope subtraction applies.
+
+    The base self-occludes its own sides and rear at short range; those beams are
+    body-fixed, so the map-frame bearings that are blind rotate with the heading. The
+    coverage gate must exempt them as footprint-covered at every heading (not only the
+    one sampled at spawn) while still refusing a genuinely unobserved forward sector.
+    Pins run-30's regression: forward-clear early ticks drove, later ticks (heading
+    changed) refused under the old circular hemisphere requirement.
+    """
+
+    FRONT = (0.52, 0.0, 0.0)
+
+    def _scan(self, body_blind):
+        """Body-fixed occlusion: beam i blind iff body_blind(relative bearing) is True."""
+        r, u = [], []
+        for i in range(BEAMS):
+            blind = body_blind(_bearing(i))
+            r.append(math.nan if blind else RANGE_MAX)
+            u.append(blind)
+        return Scan(0.1, tuple(r), -math.pi, INC, RANGE_MAX,
+                    sensor_to_base=self.FRONT, unknown=tuple(u))
+
+    def _odom(self, yaw, lin=0.0):
+        return Odometry((-5.73, 16.0, yaw), 0.1, lin, 0.0,
+                        source='wheel_odometry_localized', position_uncertainty=0.05)
+
+    def _gate(self, yaw, body_blind, *, lin=0.0, linear=0.25, angular=0.0):
+        c = ArticulatedController(GridMap((-20, -20, 20, 20)))
+        c.start((2., 16.0, yaw), False)  # uncoupled collect leg
+        obs = observation(self._scan(body_blind), self._odom(yaw, lin),
+                          coupled=False, arm_transport=True)
+        return c.gate_velocity(0.1, self._odom(yaw, lin), obs, linear, angular), obs
+
+    # The rig's real pattern: a wide forward cone is clear, sides+rear self-occlude.
+    SIDE_REAR = staticmethod(lambda rel: abs(math.degrees(rel)) > 84.0)
+
+    def test_side_rear_self_occlusion_drives_at_every_heading(self):
+        for deg in (0, 37, 90, -130, 175):
+            result, obs = self._gate(math.radians(deg), self.SIDE_REAR)
+            self.assertGreater(sum(1 for _, rch in obs.coverage.beams if rch == 0), 150)
+            self.assertEqual(result.reason, 'tracking', f'heading {deg}')
+
+    def test_heading_change_mid_drive_stays_certified(self):
+        # Simulate a turn mid-leg: the blind map-frame bearings sweep with the heading,
+        # yet every heading still certifies because they stay outside the forward cone.
+        reasons = [self._gate(math.radians(d), self.SIDE_REAR)[0].reason
+                   for d in range(0, 360, 15)]
+        self.assertTrue(all(r == 'tracking' for r in reasons), reasons)
+
+    def test_blind_forward_sector_refuses(self):
+        blind = lambda rel: self.SIDE_REAR(rel) or (math.radians(10) <= rel <= math.radians(35))
+        self.assertEqual(self._gate(math.radians(90), blind)[0].reason,
+                         'insufficient_sensor_coverage')
+
+    def test_turn_in_place_low_speed_certifies(self):
+        # v command 0 with tiny measured motion: no forward sweep -> covered by footprint.
+        result, _ = self._gate(0.0, self.SIDE_REAR, lin=0.001, linear=0.0, angular=0.3)
+        self.assertEqual(result.reason, 'tracking')
+
+    def test_fully_self_occluded_uncoupled_cannot_start(self):
+        self.assertEqual(self._gate(0.0, lambda rel: True)[0].reason,
+                         'insufficient_sensor_coverage')
+
+    def test_settle_stop_at_goal_with_residual_velocity_certifies(self):
+        # run-31: the pickup goal equals the start pose, so the robot only ever issues the
+        # settle STOP (v=0) with an infinitesimal residual stop_distance. The near-side
+        # self-occluded beams must NOT be pulled into the crescent by that residual (the
+        # old circular sweep_extent was non-monotonic there); the settle must certify.
+        for residual in (0.0, 0.0005, 0.001, 0.0015, 0.002):
+            c = ArticulatedController(GridMap((-20, -20, 20, 20)))
+            c.start((-5.73, 16.0, 0.0), False)  # goal == current pose
+            obs = observation(self._scan(self.SIDE_REAR), self._odom(0.0, residual),
+                              coupled=False, arm_transport=True)
+            gate = c.gate_velocity(0.1, self._odom(0.0, residual), obs, 0.0, 0.0)
+            self.assertEqual(gate.reason, 'tracking', f'residual {residual}')
+        # and the full settle resolves to arrived_stopped
+        c = ArticulatedController(GridMap((-20, -20, 20, 20)))
+        c.start((-5.73, 16.0, 0.0), False)
+        obs = observation(self._scan(self.SIDE_REAR), self._odom(0.0, 0.001),
+                          coupled=False, arm_transport=True)
+        self.assertEqual(c.step(0.1, self._odom(0.0, 0.001), obs, now=0.2).reason,
+                         'arrived_stopped')
+
+
 if __name__ == '__main__':
     unittest.main()

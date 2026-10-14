@@ -123,36 +123,38 @@ class CoverageField:
 
     def certifies_sweep(self, occupied, swept, travel, *, geometry_margin=0.05,
                         forward_cone=math.pi / 4):
-        """Certify the braking sweep for a self-occluding train by subtracting the body.
+        """Certify the braking sweep for a self-occluding robot by subtracting the body.
 
-        `occupied` and `swept` are convex map-frame polygons (the current train footprint
-        and its braking sweep at the commanded speed/curvature, both already carrying the
-        geometry + localization margins); `travel` is the unit heading vector. A blind
-        (self-occluded) beam is only a refusal when its ray enters a *newly swept crescent*
-        that a LEADING face advances into: the ray must leave the current occupied envelope
-        through a face whose outward normal lies within `forward_cone` of travel, and the
-        crescent beyond the body must exceed the geometry margin. Near-broadside/side faces
-        sweep parallel to themselves (the lateral extent of the capsule is covered by the
-        footprint), and the never-swept rear is exempt; a turn's outward lateral bulge is
-        carried by `swept`, so an unobserved obstacle there still refuses. Observed beams
-        are never blind and always pass.
+        `occupied` and `swept` are convex map-frame polygons (the current footprint — base,
+        or base + cart — and its braking sweep at the commanded speed/curvature, both
+        already carrying the geometry + localization margins); `travel` is the unit heading
+        vector. A blind (self-occluded) beam is a refusal only when it enters a *newly swept
+        crescent in the direction of travel*: its ray must reach beyond the current occupied
+        envelope by more than the geometry margin (`sweep_far - body_far`), AND its bearing
+        must lie within `forward_cone` of travel. Bearings outside that cone are the lateral
+        and rear extent of the capsule — swept parallel to the body or not swept at all (no
+        reverse) — and are covered by the footprint; this holds body-relative, so a rig that
+        self-occludes its own sides and rear is exempt there whatever the heading. A
+        genuinely unobserved sector in the forward cone still refuses. Observed beams are
+        never blind and always pass. The bearing test is used rather than the exit-face
+        normal because a front-offset sensor and the faceted hull make near-side rays leave
+        the envelope through forward-tilted facets.
         """
-        tx, ty = travel
-        lead = math.cos(forward_cone)
+        heading = math.atan2(travel[1], travel[0])
         ox, oy = self.origin
         for angle, reach in self.beams:
             if reach > 0.0:
                 continue  # observed (non-self): the bearing is not blind
+            if abs(wrap(angle - heading)) > forward_cone:
+                continue  # lateral/rear of travel: covered by the footprint, never swept
             dx, dy = math.cos(angle), math.sin(angle)
             sweep_far, _ = _ray_convex_exit(ox, oy, dx, dy, swept)
             if sweep_far <= 0.0:
                 continue  # ray never enters the braking sweep
-            body_far, normal = _ray_convex_exit(ox, oy, dx, dy, occupied)
+            body_far, _ = _ray_convex_exit(ox, oy, dx, dy, occupied)
             if sweep_far - body_far <= geometry_margin:
                 continue  # no real forward crescent beyond the body along this ray
-            if normal[0] * tx + normal[1] * ty <= lead:
-                continue  # exits through a lateral/rear face: covered by the footprint
-            return False  # blind over a leading forward crescent the train enters
+            return False  # blind over a newly swept forward crescent the robot enters
         return True
 
 
@@ -355,12 +357,18 @@ class Controller:
         speed = max(v,abs(odom.linear))
         stop_distance = speed*self.stale_after + speed*speed/(2*self.brake_acceleration)
         radius = self.footprint.radius(self.coupled)+odom.position_uncertainty
-        if not coverage_certifies(obs, odom.pose[2], radius, stop_distance):
+        if not self._coverage_ok(odom, obs, radius, stop_distance, v, w):
             return Result(reason='insufficient_sensor_coverage')
         # A disk expanded by stopping travel contains every possible braking arc.
         if not self.grid.free(odom.pose,radius+stop_distance,obs.obstacles):
             return Result(reason='obstacle_stop')
         return Result(v,w,reason='tracking')
+
+    def _coverage_ok(self, odom, obs, radius, stop_distance, v, w):
+        """Circular-footprint coverage for a plain differential base (overridden by the
+        articulated train with occupied-envelope subtraction). `v`/`w` are the gated
+        command, available to subclasses that model the swept envelope."""
+        return coverage_certifies(obs, odom.pose[2], radius, stop_distance)
 
     def step(self, dt, odometry, observations, *, now=None):
         if self.terminal:
