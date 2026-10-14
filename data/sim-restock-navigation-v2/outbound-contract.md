@@ -134,10 +134,25 @@ PYTHONPATH=scripts python3 scripts/check_restock_navigation.py \
 
 `passed: true` requires both legs `succeeded` **and** `within_goal_articulation`.
 
-## Open items (not navigation-lane fixes)
+## Native confirmation (planner-steered coupled towing)
 
-- One native nav-only towing run under the GPU lock (Isaac + Nav2 overlay, no arm)
-  is the physics confirmation of this contract — tracked separately.
+A bounded guarded native probe (PR #70 into `fm/twin-robot-in-store-boot-v1`;
+`run_nav_towing_probe.py` + `twin.restock.nav_towing_check`) drove **this** controller
+in Isaac at the couple pose. Measured (RTX 3060, run `nav-towing-probe-03`): the mobile
+base + rollwagen assemble at `[-5.73,16,0]`/`[-7,16,0]`, settle (robot ~1 mm/s), the
+hitch latches (11 mm alignment < 25 mm gate), the planner routes to the shelf and the
+controller **steers the coupled train forward** (commanded ω up to 0.167 rad/s), with
+bounded articulation and **no cart wheel lift** — confirming the towing geometry above
+under physics. It advanced 0.314 m of a ~11 m route: native towing is traction-limited
+(~0.045 m/s) and render-stepping is slower than realtime, so an 8-min run does not reach
+the dock. Evidence: `~/datasets/sim-restock-navigation-v2/nav-towing-probe-03/`
+(`native-nav-towing.mp4`, `native-result.json`, `nav-towing-feedback.json`).
+
+## Open items
+
+- A full native dock + parked-settle + return traverse needs more than the bounded
+  8-min window (and the sensor-coverage pipeline wired in place of the asserted-clear
+  coverage used by the probe); tracked for the integration mission.
 - `transport_radius_m` 0.65, `transport_joints`, and the cart-root `self_paths`
   entries are `isaac_bundle` default changes owned by the integration branch; this
   contract confirms the numbers they must use.
