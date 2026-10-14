@@ -108,7 +108,13 @@ def build_mobile_urdf(source, output, spec=MobileSpec()):
         hitch.find(f'{tag}/origin').set('xyz', f'{(abs(spec.hitch_x)-spec.length/2)/2} 0 0')
     _element(hitch.find('inertial'), 'origin', xyz=f'{(abs(spec.hitch_x)-spec.length/2)/2} 0 0')
     _joint(root, 'hitch_joint', 'base_link', 'hitch', (spec.hitch_x, 0, spec.hitch_z-spec.base_z))
-    for name, xyz in [('lidar_frame', (0.46, 0, 0.15)),
+    # Mount the 2D nav scanner just beyond the chassis front edge (length/2), not behind
+    # it: a scanner recessed inside its own bumper self-occludes the forward braking sweep
+    # at the low scan height. 2 cm clear of the front face keeps it inside the padded
+    # transport footprint (transport_radius) while giving an unobstructed forward view.
+    lidar_x = spec.length/2 + 0.02
+    assert lidar_x <= spec.transport_radius, 'lidar front mount must stay inside the transport footprint'
+    for name, xyz in [('lidar_frame', (lidar_x, 0, 0.15)),
                       ('front_camera_frame', (0.46, 0, 0.35)), ('imu_frame', (0, 0, 0))]:
         _element(root, 'link', name=name)
         _joint(root, f'{name}_joint', 'base_link', name, xyz)

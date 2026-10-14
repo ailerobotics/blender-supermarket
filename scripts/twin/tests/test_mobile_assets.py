@@ -125,3 +125,40 @@ def test_transport_measurement_and_missing_mesh_fail_closed(source, tmp_path):
     tree.write(out)
     with pytest.raises(ValueError, match='unresolved collision'):
         measure_transport(out, targets, [])
+
+
+def test_lidar_frame_clears_forward_braking_sweep(source, tmp_path):
+    """The 2D nav scanner must sit at/just beyond the chassis front edge, inside the
+    transport footprint, so no authored collision geometry occludes the forward
+    braking sweep at any configured scan height (navigation.core certifies the forward
+    sweep strictly; a recessed scanner self-occludes the low band and nav refuses)."""
+    import math
+    import numpy as np
+    from twin.urdf_probe import geometry_world_points, link_world_transforms
+    spec = MobileSpec()
+    out = tmp_path / 'mobile.urdf'
+    target = build_mobile_urdf(source, out, spec)
+    robot = parse_urdf(str(out))
+    lx, ly, _ = robot.joints_by_child['lidar_frame'].origin_xyz
+    # Mounted at/just beyond the chassis front (length/2) and inside the footprint.
+    assert lx >= spec.length / 2
+    assert math.hypot(lx, ly) <= spec.transport_radius
+    heights = (0.15, 0.5, 1.0)              # IsaacRangeSensor configured scan heights
+    tf = link_world_transforms(robot, target)
+    occluders = []
+    for name, link in robot.links.items():
+        for g in link.collisions:
+            cloud = geometry_world_points(g, tf[name], lambda uri: uri)
+            if cloud is None:
+                continue
+            p = np.asarray(cloud, float)
+            dx, dy = p[:, 0] - lx, p[:, 1] - ly
+            # A forward-sweep bearing is any point ahead of the lidar in its forward
+            # half-plane; it occludes height z if the box spans z.
+            forward = (dx > 1e-6) & (np.abs(np.arctan2(dy, dx)) < math.pi / 2)
+            if forward.any():
+                zlo, zhi = float(p[:, 2].min()), float(p[:, 2].max())
+                for z in heights:
+                    if zlo - 1e-9 <= z <= zhi + 1e-9:
+                        occluders.append((name, z))
+    assert not occluders, f'forward self-occlusion from lidar_frame at: {sorted(set(occluders))}'
