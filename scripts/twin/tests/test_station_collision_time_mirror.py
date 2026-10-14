@@ -254,6 +254,30 @@ def test_start_after_warm_keeps_the_warmed_station_and_dispatches():
     assert graph.started == ('collect', {'source_bin': 'backstock_00', 'job_id': 'j1'})
 
 
+class _RecordingBridge:
+    def __init__(self):
+        self.published = []
+    def publish(self, now):
+        self.published.append(now)
+
+
+def test_masked_depth_stamped_from_the_same_stage_clock_as_the_tf_relay():
+    # nvblox looks up /tf at the depth stamp and tf2 never extrapolates, so the masked depth must be
+    # stamped with the SAME host clock the /tf relay uses (the station's stage_clock = world.current_time
+    # via native_transport.stage_time), NOT the mission clock. _pump must publish it at stage_clock().
+    ch = FakeChannel()
+    st = StationClient(ch, wall_clock=lambda c=itertools.count(100., .001): next(c),
+                       stage_clock=lambda: 42.0)
+    bridge = _RecordingBridge()
+    feedback = NS(collision_time=-1., parked=lambda: True, set_parked=lambda v: None)
+    rt = RosManipulationRuntime(FakeGraph(), lambda *a: None, prepare_station=lambda op, job: None,
+                                feedback=feedback, station=st, station_camera_frame='restock_camera_arm',
+                                sensing_bridge=bridge)
+    rt.start('collect', {'source_bin': 'backstock_00', 'job_id': 'j1'})
+    rt._pump(5.0, True)                                    # mission clock 5.0, stage clock 42.0
+    assert bridge.published[-1] == 42.0                    # depth stamped at the stage clock, not 5.0
+
+
 def test_runtime_clears_collision_time_on_stop():
     st = _client()
     feedback = NS(collision_time=5.0, parked=lambda: True)

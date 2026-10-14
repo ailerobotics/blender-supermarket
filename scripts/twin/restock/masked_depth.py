@@ -286,7 +286,10 @@ class ArmDepthSubprocessBridge:
                   f'published={getattr(self, "_published", 0)} now={now} rendering_time={rt}', flush=True)
         if no_depth or no_seg:
             return None
-        stamp_s = float(frame.get('rendering_time', now))
+        # Stamp with the caller's host clock (world.current_time, the SAME source the /tf relay uses),
+        # NOT the frame's rendering_time: tf2 never extrapolates forward, so the depth stamp must
+        # equal the /tf stamp for that tick or nvblox silently drops the frame (no ESDF integration).
+        stamp_s = float(now)
         masked, self._id_cache = masked_depth_from_frame(
             frame, self.rig_prefixes, self._id_cache, invalid=self.invalid)
         height, width = masked.shape

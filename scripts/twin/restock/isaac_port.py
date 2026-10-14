@@ -148,15 +148,20 @@ class IsaacPort:
         # the packet a few nanoseconds ahead of the mission's dt-accumulated clock and
         # tripped the freshness lower bound on the very first tick.
         now=self.tick*dt
+        # Host-facing stamp source = Isaac's actual simulation time. The masked depth is stamped at
+        # world.current_time, and tf2 never extrapolates into the future, so the relayed /tf,
+        # /joint_states and /clock MUST carry world.current_time too (not the dt-accumulated mission
+        # clock, which lagged by ~0.05 s and silently dropped every nvblox TF lookup -> no ESDF).
+        # The mission's own packet/freshness clock stays `now` (tick*dt); only the host relay uses cur.
+        try:
+            cur=float(self.world.current_time)
+        except Exception:
+            cur=now
         if self.tick % 20 == 1:                      # CLOCK_DIAG: dt-accumulated vs Isaac sim time
-            try:
-                cur=float(self.world.current_time)
-            except Exception as exc:
-                cur=f'err:{exc}'
-            print(f'CLOCK_DIAG tick={self.tick} stage_time={now:.4f} world_current_time={cur} '
+            print(f'CLOCK_DIAG tick={self.tick} stage_time={now:.4f} world_current_time={cur:.4f} '
                   f'wall={time.monotonic()-self.wall_origin:.2f}', flush=True)
         if self.native_transport is not None:
-            self.native_transport.tick(now)
+            self.native_transport.tick(cur)
         joints=np.asarray(self.robot.get_joint_positions(),float)
         if joints.shape != (len(self.names),) or not np.isfinite(joints).all():
             raise ValueError('invalid measured articulation encoders')

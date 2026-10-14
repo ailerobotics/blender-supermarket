@@ -91,7 +91,11 @@ class RosManipulationRuntime:
         if self.sensing_bridge is not None:
             # Continuous masked depth + info + TF + (cached) target bbox for the host
             # nvblox/object_segmenter EVERY sensing tick, independent of carton verification.
-            self.sensing_bridge.publish(simulation_time)
+            # Stamp the masked depth with the SAME host clock the /tf relay uses (world.current_time
+            # via the station's stage_clock), so nvblox's TF lookup at the depth stamp resolves --
+            # the dt-accumulated mission clock lagged /tf and silently dropped every lookup (no ESDF).
+            sc = getattr(self.station, 'stage_clock', None) if self.station is not None else None
+            self.sensing_bridge.publish(sc() if sc is not None else simulation_time)
 
     def warm(self, simulation_time, parked=None):
         """Approach/parked warm-up tick (no job dispatch, no capture): pump the station + masked
