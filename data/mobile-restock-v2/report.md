@@ -1134,3 +1134,51 @@ but net-new, only GPU-boot-provable, and not landable by this task's 13:45 windo
 live station capture on this box: the 0.5 s live budget vs ~0.575 s full-res decode+calibrate (the
 render_scale↔intrinsics item above). Recommend banking the commissioning + freshness wins and scoping the
 grasp target-source rewire (and the live-capture resolution reconciliation) as the next task.
+
+### Collect sensing contract (architecture decided 2026-10-14 12:25)
+
+Firstmate fixed the architecture so it is designed once: **the collect stage senses the pick target
+with the FIXED `source` station camera against its commissioned baseline** (the established design —
+fixed `source`/`cart`/`shelf` views are the calibrated, pose-stable, commissionable cameras; verify
+already uses them). **The arm eye-in-hand camera is demoted to masked depth (nvblox collision mapping)
+and fine alignment only** — it no longer registers a support view or produces the grasp target. The arm
+receives a **reprojected** target computed from the fixed-camera result. This removes the arm
+`IsaacCartonSensors` placeholder-slots `support_view` path from the grasp-target critical path.
+
+**What the collect stage consumes — the fixed-source target provider.** The camera lane supplies a
+`source_target_provider(now) -> SourceTarget | None` (built beside the sensing lane's commissioned
+`source` context, i.e. from `build_sensing_sources`/`build_sensing` with the `backstock_00` baseline
+loaded). It wraps the existing fixed-`source` `IsaacCartonSensors.capture(now, 'backstock_00', ...)`
+against the commissioned baseline and, when the pick carton is sensed, returns a `SourceTarget`:
+
+- **identity** — `sku: str`, the handling-unit QR (e.g. `juice_orange`) decoded from the carton top
+  label by the fixed `source` camera (`FixedTileQR`, never a USD/semantic name).
+- **pose** — `pose_station: (x,y,z, qx,qy,qz,qw)`, the sensed carton 6-DoF pose in the **`source`
+  station/world (map) frame** (the `source` camera is `parent='map'`), anchored to the commissioned
+  `support_view` registration center/yaw — pose-stable, independent of the robot base.
+- **acquisition stamp** — `stamp: float`, the `simulation_time`/`rendering_time` of the frame the pose
+  was measured from.
+- **provenance** — `dict(camera_id='source', calibration_id=<baseline calibration_id>,
+  baseline_session_id, frame_id, source='sensor', epoch)`; carries the commissioned baseline linkage so
+  the consumer can assert sensor provenance (the standing invariant: no fabricated/fixture target).
+- **freshness rule** — valid under the **live 0.5 s acquisition-to-use bound** (`require_fresh`); the
+  provider stamps acquisition and the consumer re-validates freshness at the moment of use, every
+  sensing tick, with the base **parked**. (Live full-res capture cost vs 0.5 s on this box is the
+  separate render_scale↔intrinsics item above; the camera lane owns meeting the budget.)
+
+**Where the arm reprojection consumes it — `isaac_factory`.** In
+`twin.restock_manipulation.isaac_factory._build_runtime`, the manip runtime takes the
+`source_target_provider` (threaded from `isaac_bundle` after `build_sensing_sources`, like the sensing
+lane). Each collect sensing tick:
+1. the grasp **target published to the host** (`RosManipulationRuntime` → `graph.publish_sensors`) is
+   built from the provider's `SourceTarget` (pose + sku + provenance) — not from an arm capture;
+2. the arm `ArmDepthSubprocessBridge` (`_build_masked_depth_bridge`) computes the **nvblox target box by
+   reprojecting** `pose_station` into the **arm camera image**: transform `pose_station` into the arm
+   optical frame via the live arm TF (`world_from_base` ∘ arm `base_from_camera`), then project the
+   catalog carton volume with the arm intrinsics using `IsaacCartonSensors._object_bbox` (already exists)
+   to yield `[u1,v1,u2,v2]` on the masked-depth image the host carves;
+3. the arm `IsaacCartonSensors` is retained only for masked depth + fine alignment; its support-view /
+   `sensed_target_bboxes` grasp role is removed.
+
+This keeps every grasp input sensor-sourced, uses the one commissionable camera for identity+pose, and
+confines the arm to geometry it can measure from a moving eye-in-hand view.
