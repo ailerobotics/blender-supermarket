@@ -234,9 +234,13 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # a native image-graph crash in the installed Isaac5.1 stack.
     enable_extension('isaacsim.ros2.bridge')
     app.update()
+    # Relay /clock + /tf + /joint_states to the host over the host-DDS subprocess (OmniGraph can't
+    # reach the host), using the same host-overlay runtime_env the masked-depth bridge uses.
+    _md=config.get('masked_depth',{})
     transport=NativeTransport(stage=stage,articulation_path=paths['articulation'],
         arm_base_path=paths['ur_base_link'],tf_paths=[paths['gripper_pad_tcp'],paths['gripper_tcp']],
-        command_gate=gate)
+        command_gate=gate,robot=robot,
+        runtime_env=_md.get('runtime_env'),python=_md.get('python','python3'))
     stage.GetRootLayer().Save()
     evidence=dict(input_sha256=hashes,composition=composition,paths=paths,
         cart_solver=solver,cart_bearings=bearings,scene_physics=scene_physics,

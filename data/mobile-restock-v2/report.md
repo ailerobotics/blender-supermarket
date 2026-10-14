@@ -1554,3 +1554,18 @@ station stamps are render-paced stage_time -> the 0.5 s sim heartbeat guard trip
 fallback: relay /clock (native_transport stage_time) [+ /tf, /tf_static, /joint_states for the grasp]
 through the host-DDS subprocess so the host shares one render-paced sim clock. (CLOCK_DIAG print left
 in isaac_port.advance, gated %20, as a standing diagnostic.)
+
+### 2026-10-14 — relay /clock + /tf + /joint_states through the host-DDS subprocess (msg158)
+
+Firstmate go: OmniGraph /clock/tf/joints are invisible to the host (run-69: 0 /clock publishers),
+so relay the render-paced sim-time backbone out-of-Isaac. control_ipc.serve is now type-aware
+(TOPIC_TYPES): String for job/sensors/station-command; rosgraph_msgs/Clock for /clock;
+sensor_msgs/JointState for /restock_sim/joint_states; tf2_msgs/TFMessage for /tf. NativeTransport
+spawns its own HostControlPublisher (topics /clock,/tf,/restock_sim/joint_states) under the host
+overlay runtime_env and, each tick, ships: /clock={t:stage_time}; /joint_states from the
+articulation (dof_names+positions); /tf as each tf_path relative to ur_base_link via USD XformCache
+(ExtractTranslation/ExtractRotationQuat, frame_ids = prim names, matching the old OmniGraph tree).
+physics_setup passes robot + runtime_env. CPU-tested: typed (topic,JSON) framing round-trips,
+TOPIC_TYPES + _secs_to_time (633 passed). WALL-vs-SIM note (msg158): with the host on the
+render-paced /clock, host sim-time timeouts stretch ~30x in wall; the ack's 0.5 s guards become ~15 s
+wall (fine), and its 1 s WALL heartbeat guard is still met by the wall-paced station heartbeats.

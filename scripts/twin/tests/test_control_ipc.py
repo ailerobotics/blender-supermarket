@@ -14,7 +14,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from twin.restock.control_ipc import (pack_message, read_message, MessageWriter,
-                                       HostControlPublisher)
+                                       HostControlPublisher, TOPIC_TYPES, _secs_to_time)
 
 JOB = '/restock_sim/manipulation/job'
 SENSORS = '/restock_sim/sensors'
@@ -59,6 +59,41 @@ class Framing(unittest.TestCase):
     def test_empty_payload_round_trips(self):
         recv = _buffer_recv(pack_message(STACMD, ''))
         self.assertEqual(read_message(recv), (STACMD, ''))
+
+
+class TransportRelayFraming(unittest.TestCase):
+    """The sim-time backbone (/clock, /tf, /joint_states) rides the same (topic, JSON) framing; the
+    subprocess decodes by TOPIC_TYPES into the right ROS message (that decode needs ROS; the framing
+    + the JSON payload shapes are what's CPU-checkable)."""
+
+    def test_secs_to_time_split(self):
+        self.assertEqual(_secs_to_time(1.25), (1, 250000000))
+        self.assertEqual(_secs_to_time(0.0), (0, 0))
+
+    def test_topic_types_cover_the_backbone_and_control_plane(self):
+        self.assertEqual(TOPIC_TYPES['/clock'], 'clock')
+        self.assertEqual(TOPIC_TYPES['/tf'], 'tf')
+        self.assertEqual(TOPIC_TYPES['/restock_sim/joint_states'], 'joints')
+        self.assertEqual(TOPIC_TYPES['/restock_sim/manipulation/job'], 'string')
+
+    def test_typed_payloads_round_trip_through_the_framing(self):
+        import json
+        msgs = [('/clock', json.dumps({'t': 3.4166})),
+                ('/restock_sim/joint_states', json.dumps({'t': 3.4, 'names': ['a', 'b'], 'pos': [0.1, 0.2]})),
+                ('/tf', json.dumps({'t': 3.4, 'tf': [['ur_base_link', 'restock_camera_arm',
+                                                      0.1, 0.0, 0.2, 0.0, 0.0, 0.0, 1.0]]}))]
+        buf = bytearray()
+        for t, d in msgs:
+            buf += pack_message(t, d)
+        got = []
+        recv = _buffer_recv(buf)
+        while True:
+            m = read_message(recv)
+            if m is None:
+                break
+            got.append(m)
+        self.assertEqual(got, msgs)
+        self.assertEqual(json.loads(got[2][1])['tf'][0][1], 'restock_camera_arm')
 
 
 class Writer(unittest.TestCase):

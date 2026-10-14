@@ -24,6 +24,25 @@ import struct
 MAGIC = b'CTL1'
 _LEN = struct.Struct('>I')
 
+# Wire TYPE per relayed topic. String control messages (job/sensors/station-command) carry the exact
+# std_msgs/String payload; the transport topics carry a small JSON object the subprocess turns into
+# the proper ROS message. All go over the one length-prefixed (topic, data-string) framing above, so
+# the Isaac side only ever JSON-encodes and the subprocess decodes by topic.
+TOPIC_TYPES = {
+    '/restock_sim/manipulation/job': 'string',
+    '/restock_sim/sensors': 'string',
+    '/restock_sim/station/command': 'string',
+    '/clock': 'clock',                       # rosgraph_msgs/Clock      data={"t": <stage seconds>}
+    '/restock_sim/joint_states': 'joints',   # sensor_msgs/JointState   data={"t","names","pos","vel"}
+    '/tf': 'tf',                             # tf2_msgs/TFMessage       data={"t","tf":[[parent,child,tx,ty,tz,qx,qy,qz,qw],..]}
+}
+
+
+def _secs_to_time(seconds):
+    """(sec, nanosec) for a float-seconds stamp; shared by every relayed sim-time stamp."""
+    sec = int(seconds)
+    return sec, int(round((float(seconds) - sec) * 1e9))
+
 
 def pack_message(topic, data):
     """Serialize one (topic, data string) to a length-prefixed message."""
@@ -160,8 +179,53 @@ def serve(socket_path, topics, *, idle_timeout_s=1800.0):
             or not ('opt/ros' in _rclpy_path or 'runtime-closure' in _rclpy_path)):
         raise RuntimeError('control publisher loaded the wrong rclpy: ' + _rclpy_path +
                            ' (expected host /opt/ros or runtime-closure overlay, not Isaac internal)')
+    import json as _json
     from rclpy.node import Node
+    from rclpy.qos import QoSProfile, ReliabilityPolicy
     from std_msgs.msg import String
+    from rosgraph_msgs.msg import Clock
+    from sensor_msgs.msg import JointState
+    from tf2_msgs.msg import TFMessage
+    from geometry_msgs.msg import TransformStamped
+    from builtin_interfaces.msg import Time
+
+    def _mk_time(t):
+        sec, nsec = _secs_to_time(t)
+        return Time(sec=sec, nanosec=nsec)
+
+    def _build(topic, data):
+        """Turn the JSON `data` string for `topic` into its ROS message (pure per-topic decode)."""
+        kind = TOPIC_TYPES.get(topic, 'string')
+        if kind == 'string':
+            return String(data=data)
+        d = _json.loads(data)
+        if kind == 'clock':
+            return Clock(clock=_mk_time(d['t']))
+        if kind == 'joints':
+            js = JointState()
+            js.header.stamp = _mk_time(d['t'])
+            js.name = [str(n) for n in d['names']]
+            js.position = [float(v) for v in d.get('pos', [])]
+            js.velocity = [float(v) for v in d.get('vel', [])]
+            return js
+        if kind == 'tf':
+            msg = TFMessage()
+            stamp = _mk_time(d['t'])
+            for parent, child, tx, ty, tz, qx, qy, qz, qw in d['tf']:
+                tr = TransformStamped()
+                tr.header.stamp = stamp
+                tr.header.frame_id = str(parent)
+                tr.child_frame_id = str(child)
+                tr.transform.translation.x = float(tx)
+                tr.transform.translation.y = float(ty)
+                tr.transform.translation.z = float(tz)
+                tr.transform.rotation.x = float(qx)
+                tr.transform.rotation.y = float(qy)
+                tr.transform.rotation.z = float(qz)
+                tr.transform.rotation.w = float(qw)
+                msg.transforms.append(tr)
+            return msg
+        raise ValueError(f'unknown relay topic type for {topic!r}')
 
     if os.path.exists(socket_path):
         os.unlink(socket_path)
@@ -172,7 +236,11 @@ def serve(socket_path, topics, *, idle_timeout_s=1800.0):
 
     rclpy.init(args=None)
     node = Node('restock_control_pub')
-    publishers = {topic: node.create_publisher(String, topic, 10) for topic in topics}
+    # /clock + /tf consumers (move_group, nvblox, cuMotion) subscribe BEST_EFFORT/SENSOR for TF but
+    # the sim-time /clock is conventionally RELIABLE depth-10; keep depth-10 and let rmw negotiate.
+    publishers = {topic: node.create_publisher(
+        {'string': String, 'clock': Clock, 'joints': JointState, 'tf': TFMessage}[TOPIC_TYPES.get(topic, 'string')],
+        topic, 10) for topic in topics}
 
     conn, _ = srv.accept()
     conn.settimeout(idle_timeout_s)
@@ -187,9 +255,10 @@ def serve(socket_path, topics, *, idle_timeout_s=1800.0):
             if pub is None:
                 node.get_logger().warn(f'control publisher: undeclared topic {topic!r} ignored')
                 continue
-            pub.publish(String(data=data))
+            pub.publish(_build(topic, data))
             published += 1
-            node.get_logger().info(f'control publish[{published}] {topic}')
+            if published % 200 == 1:
+                node.get_logger().info(f'control/transport publish[{published}] {topic}')
             rclpy.spin_once(node, timeout_sec=0.0)
     finally:
         node.get_logger().info(f'control publisher exiting; published={published}')

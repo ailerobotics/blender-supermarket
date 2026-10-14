@@ -75,7 +75,8 @@ class ArmCommandGate:
 
 class NativeTransport:
     def __init__(self, *, stage, articulation_path, arm_base_path, tf_paths,
-                 command_gate, root='/RestockTransport'):
+                 command_gate, root='/RestockTransport', robot=None, runtime_env=None,
+                 python='python3'):
         require_sim_domain()
         import omni.graph.core as og
         from pxr import Sdf
@@ -86,6 +87,19 @@ class NativeTransport:
                 raise ValueError('native transport frame missing: '+path)
         self.og,self.root,self.command_gate=og,root,command_gate
         self.stage,self.tf_paths=stage,list(tf_paths)
+        self.arm_base_path=arm_base_path
+        self.robot=robot            # physics articulation for /joint_states (names+positions)
+        # Host-DDS relay for the sim-time backbone: /clock, /tf, /restock_sim/joint_states. These are
+        # OmniGraph publishers below too, but OmniGraph publishers are invisible to the host UDPv4 DDS
+        # (run-69: /clock had 0 publishers to the host, so host use_sim_time fell back to wall time).
+        # Relaying them out-of-Isaac (like masked depth + the control plane) gives the whole host
+        # stack ONE render-paced simulation clock + TF + joints.
+        self._relay=None
+        if runtime_env:
+            from .control_ipc import HostControlPublisher
+            self._relay=HostControlPublisher(
+                topics=('/clock', '/tf', '/restock_sim/joint_states'),
+                runtime_env=runtime_env, python=python)
         # Last Isaac stage time published on /clock (set each tick). The station/command stamps
         # must use THIS clock domain -- never the mission-relative Packet.simulation_time, which is
         # zeroed at the first mission action -- so the host ack's /clock-validated 0.5 s freshness
@@ -141,6 +155,40 @@ class NativeTransport:
                 velocities=get('velocityCommand'),efforts=get('effortCommand'),
                 stamp=float(get('timeStamp')),now=now)
         self.command_gate.watchdog()
+        self._publish_relay(now)
+
+    def _publish_relay(self, now):
+        """Ship the sim-time backbone (/clock, /joint_states, /tf) to the host-DDS relay subprocess
+        so the whole host stack shares the render-paced simulation clock (OmniGraph can't reach it)."""
+        if self._relay is None:
+            return
+        import json
+        import numpy as np
+        from pxr import UsdGeom, Usd
+        self._relay.publish('/clock', json.dumps({'t': float(now)}))
+        if self.robot is not None:
+            pos = [float(v) for v in np.asarray(self.robot.get_joint_positions(), float)]
+            self._relay.publish('/restock_sim/joint_states',
+                                json.dumps({'t': float(now), 'names': list(self.robot.dof_names), 'pos': pos}))
+        # Each tf frame relative to the arm base, via USD world transforms (ExtractRotationQuat gives
+        # the correct USD-convention quaternion; frame_ids are the prim names, as OmniGraph used).
+        cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+        parent_inv = cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.arm_base_path)).GetInverse()
+        parent_name = self.arm_base_path.rsplit('/', 1)[-1]
+        rows = []
+        for path in self.tf_paths:
+            rel = cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(path)) * parent_inv
+            t = rel.ExtractTranslation()
+            q = rel.ExtractRotationQuat()
+            im = q.GetImaginary()
+            rows.append([parent_name, path.rsplit('/', 1)[-1], float(t[0]), float(t[1]), float(t[2]),
+                         float(im[0]), float(im[1]), float(im[2]), float(q.GetReal())])
+        self._relay.publish('/tf', json.dumps({'t': float(now), 'tf': rows}))
 
     def close(self):
         self.command_gate.hold()
+        if self._relay is not None:
+            try:
+                self._relay.close()   # terminate the out-of-Isaac sim-clock/TF/joints relay subprocess
+            except Exception:
+                pass
