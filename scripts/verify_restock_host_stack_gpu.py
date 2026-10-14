@@ -159,7 +159,13 @@ def main():
     core = {'move_group', 'cumotion_planner', 'static_planning_scene_server',
             'object_attachment', 'nvblox_node', 'object_segmenter'}
     me = pr.get('mapper_esdf') or {}
+    lat = pr.get('latencies') or {}
     record['verdict'] = {
+        'first_esdf_ready_s': lat.get('first_esdf_ready_s'),
+        'first_cumotion_reply_s': lat.get('first_cumotion_reply_s'),
+        'cold_first_job_s': lat.get('cold_first_job_s'),
+        'watchdog_s': lat.get('watchdog_s'),
+        'within_watchdog': lat.get('within_watchdog'),
         'core_planner_nodes_present': core <= present,
         'all_nodes_present': (pr.get('nodes') or {}).get('all_present'),
         'nodes_present': sorted(present),
