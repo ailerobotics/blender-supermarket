@@ -86,6 +86,11 @@ class NativeTransport:
                 raise ValueError('native transport frame missing: '+path)
         self.og,self.root,self.command_gate=og,root,command_gate
         self.stage,self.tf_paths=stage,list(tf_paths)
+        # Last Isaac stage time published on /clock (set each tick). The station/command stamps
+        # must use THIS clock domain -- never the mission-relative Packet.simulation_time, which is
+        # zeroed at the first mission action -- so the host ack's /clock-validated 0.5 s freshness
+        # guard sees one epoch. Read it at the moment of publish via a stage_clock seam.
+        self.stage_time=0.
         keys=og.Controller.Keys
         nodes=[('tick','omni.graph.action.OnImpulseEvent'),
                ('context','isaacsim.ros2.bridge.ROS2Context'),
@@ -124,6 +129,7 @@ class NativeTransport:
 
     def tick(self, now):
         og=self.og
+        self.stage_time=float(now)   # the /clock value this tick; station stamps read it
         for name in ('clock','joints','tf'):
             og.Controller.attribute(self.root+'/'+name+'.inputs:timeStamp').set(float(now))
         og.Controller.attribute(self.root+'/tick.state:enableImpulse').set(True)

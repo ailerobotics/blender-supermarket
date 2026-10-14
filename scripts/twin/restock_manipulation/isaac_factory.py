@@ -408,7 +408,10 @@ def _build_runtime(*, app, assembly, params, output):
                               publish_topic='/restock_sim/station/command',
                               subscribe_topic='/restock_sim/station/status',
                               host_control=host_control)
-        station = StationClient(channel)
+        # Stamp station/command in the /clock (Isaac stage-time) domain the host ack validates
+        # against -- read native_transport's last-published stage time -- NOT the mission clock
+        # (Packet.simulation_time, zeroed at the first action), which the ack rejected as stale.
+        station = StationClient(channel, stage_clock=lambda: assembly.transport.stage_time)
     runtime = RosManipulationRuntime(graph, collect_bridge.capture,
                                      prepare_station=lambda operation, job: None,
                                      sensing_bridge=sensing_bridge, feedback=feedback,

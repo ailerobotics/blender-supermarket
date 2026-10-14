@@ -44,6 +44,35 @@ def _client():
     return StationClient(FakeChannel(), wall_clock=lambda c=itertools.count(100., .001): next(c))
 
 
+def test_station_command_stamped_in_stage_clock_domain_not_mission_time():
+    # The caller passes the mission clock (zeroed at the first action); the stamp must instead be
+    # the /clock stage time the host ack validates against. stage_clock overrides the passed now.
+    ch = FakeChannel()
+    st = StationClient(ch, wall_clock=lambda c=itertools.count(100., .001): next(c),
+                       stage_clock=lambda: 42.0)
+    st.begin('restock_camera_arm', now=0.233)          # mission time 0.233 -> ignored for the stamp
+    assert ch.sent[-1]['action'] == 'prepare'
+    assert ch.sent[-1]['stamp'] == 42.0                # stamped from the stage clock
+
+
+def test_ack_accepts_stage_stamped_prepare_within_half_second_and_refuses_beyond():
+    # Firstmate contract: a prepare stamped from the stage clock clears the ack's 0.5 s freshness
+    # guard at 0 and 0.4 s of skew (ack /clock now >= stamp) and is refused at 0.6 s.
+    from scripts.twin.restock_host.incorporation_ack import IncorporationAckState
+
+    def accept_at(skew):
+        st = IncorporationAckState(wall_clock=lambda: 100.)
+        stamp = 5.0
+        cmd = dict(action='prepare', epoch=1, sequence=0, stamp=stamp, parked=True,
+                   camera_frame='restock_camera_arm')
+        return st.accept(cmd, now=stamp + skew)
+
+    assert accept_at(0.0) == 'prepare'
+    assert accept_at(0.4) == 'prepare'
+    with pytest.raises(ValueError):
+        accept_at(0.6)
+
+
 def test_station_client_reads_collision_time_from_a_ready_snapshot():
     st = _client()
     st.begin('restock_camera_arm', now=8.0)

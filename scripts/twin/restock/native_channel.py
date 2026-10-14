@@ -53,8 +53,14 @@ class JsonChannel:
 
 
 class StationClient:
-    def __init__(self, channel, *, wall_clock=time.monotonic):
+    # CONTRACT: station/command stamps (prepare, heartbeat, stop) are /clock (Isaac stage time),
+    # never mission time. The host ack validates its 0.5 s freshness guard against /clock, while the
+    # mission's Packet.simulation_time is zeroed at the first mission action -- two epochs. The
+    # stage_clock seam reads the same stage-time source native_transport publishes on /clock, at the
+    # moment of publish, so both sides share one clock domain and the ack's bound stays untouched.
+    def __init__(self, channel, *, wall_clock=time.monotonic, stage_clock=None):
         self.channel,self.wall_clock=channel,wall_clock
+        self.stage_clock=stage_clock
         self.epoch=0
         self.sequence=0
         self.active=False
@@ -78,6 +84,10 @@ class StationClient:
         return self
 
     def tick(self,now,*,parked):
+        # Stamp + validate in the /clock (stage-time) domain, not the mission clock the caller
+        # passes, so the host ack's /clock-validated freshness guard sees one epoch.
+        if self.stage_clock is not None:
+            now=self.stage_clock()
         self.now=now
         reply=self.channel.read()
         if reply and reply.get('epoch')==self.epoch and reply!=self.latest:
@@ -103,6 +113,8 @@ class StationClient:
             self.last_send=now
 
     def ready(self,now):
+        if self.stage_clock is not None:
+            now=self.stage_clock()          # freshness in the /clock domain (matches the ack)
         reply=self.latest
         return bool(self.active and reply and reply.get('state')=='ready'
                     and 0<=now-reply.get('stamp',-1)<=.5

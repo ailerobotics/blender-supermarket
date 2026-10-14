@@ -1489,3 +1489,17 @@ native_transport). This is cross-lane (host incorporation_ack.py freshness contr
 lower/upper bound (symmetric with the gate-1 render-lead tolerance), or align the StationClient stamp
 to the same /clock domain the ack validates against. Prepare-to-first-/sensors gap: N/A -- no /sensors
 was produced because the prepare never cleared the ack's freshness guard.
+
+### 2026-10-14 — fix (clock domain, option b): station/command stamps are /clock, never mission time
+
+CONTRACT: station/command stamps (prepare, heartbeat, stop) are /clock (Isaac stage time), never
+mission time. Root cause of the ack's 'invalid station epoch, sequence or timestamp' rejection was
+two clock epochs, not skew: the StationClient stamped with Packet.simulation_time (mission clock,
+zeroed at the first mission action) while the host ack validates its 0.5 s freshness guard against
+/clock (Isaac stage time, published by native_transport from the same process). The gap was ~origin
+(the stage time elapsed before the first action). Fix (my branch, host ack untouched): NativeTransport
+exposes its last-published stage time (stage_time, set each tick(now)); StationClient takes a
+stage_clock seam and stamps + validates freshness in that /clock domain; the factory wires
+stage_clock=lambda: assembly.transport.stage_time. CPU-tested: a stage-stamped prepare clears
+IncorporationAckState.accept at 0 and 0.4 s skew and is refused at 0.6 s; the StationClient stamps
+from the stage clock, not the passed mission time (628 passed).
