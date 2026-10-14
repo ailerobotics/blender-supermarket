@@ -247,8 +247,17 @@ class ArmDepthSubprocessBridge:
         from .masked_depth_ipc import FrameWriter
         self._socket_path = socket_path or f'/tmp/restock_maskdepth_{os.getpid()}.sock'
         ipc_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'masked_depth_ipc.py')
+        # Match the host nodes' DDS config EXACTLY (twin.restock_host.config.isolated_environment):
+        # rmw_fastrtps_cpp + UDPv4-only builtin transport + SKIP_DEFAULT_XML + localhost-only, and
+        # strip any DDS profile/discovery-server overrides. The host forces UDPv4 (no shared memory);
+        # a subprocess on the default SHM+UDP transport discovers the topics but never delivers data
+        # to nvblox (run-37/38). Export AFTER sourcing the overlay so these win.
         command = (f'set +u; source {runtime_env}; '
-                   f'export ROS_DOMAIN_ID={int(domain)} ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST; '
+                   f'export ROS_DOMAIN_ID={int(domain)} ROS_LOCALHOST_ONLY=1 ROS_STATIC_PEERS= '
+                   f'ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST RMW_IMPLEMENTATION=rmw_fastrtps_cpp '
+                   f'FASTDDS_BUILTIN_TRANSPORTS=UDPv4 SKIP_DEFAULT_XML=1; '
+                   f'unset FASTRTPS_DEFAULT_PROFILES_FILE FASTDDS_DEFAULT_PROFILES_FILE '
+                   f'ROS_DISCOVERY_SERVER CYCLONEDDS_URI RMW_FASTRTPS_USE_QOS_FROM_XML; '
                    f'exec {python} {ipc_script} serve {self._socket_path} {float(idle_timeout_s)}')
         # Spawn under a CLEAN base env, NOT the Isaac process env: Isaac loads its own bundled
         # ("internal") jazzy rclpy/rmw and sets AMENT/PYTHONPATH/LD_LIBRARY_PATH to it; inheriting
