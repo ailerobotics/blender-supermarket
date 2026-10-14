@@ -10,6 +10,10 @@ output=output)``, then uses the returned mapping::
 
     {'capture': capture, 'recording_camera': recording_camera}
 
+When ``config['collect_source_location']`` is set, the mapping also carries
+``source_target_provider(now) -> SourceTarget | None`` — the fixed-source collect pick target
+(see :mod:`twin.restock_camera.source_target` and the "Collect sensing contract").
+
 ``capture(now, source, destination)`` returns a ``restock_manipulation.types.Sensors``
 packet (or ``None``) from the multi-camera :class:`binding.StationSensors`, under the
 500 ms freshness, exact-frame identity, source-immutability/tamper and fresh-clearance
@@ -143,7 +147,22 @@ def build_sensing(*, app, assembly, plan, config, output):
         """Fresh multi-camera inventory scan under the standing gates; never fabricated."""
         return station.capture(now, source, destination, motion, contact)
 
-    return {'capture': capture, 'recording_camera': _get(sources, 'recording_camera')}
+    result = {'capture': capture, 'recording_camera': _get(sources, 'recording_camera')}
+    # Collect-stage pick target from the FIXED source station camera + its commissioned
+    # baseline (the arm eye-in-hand camera is masked-depth/fine-alignment only; it receives
+    # a target reprojected from this by integration). See the module docstring and
+    # twin.restock_camera.source_target / the "Collect sensing contract".
+    source_location = config.get('collect_source_location') if isinstance(config, dict) else None
+    if source_location:
+        from .source_target import build_source_target_provider
+        location_cameras = _get(sources, 'location_cameras')
+        if source_location not in location_cameras:
+            raise ValueError(f'collect_source_location {source_location!r} has no assigned camera')
+        adapter = station.adapters[location_cameras[source_location]]
+        result['source_target_provider'] = build_source_target_provider(
+            adapter, motion, contact, source_location=source_location,
+            station_frame=config.get('station_frame', 'map'))
+    return result
 
 
 def _get_sources(assembly):

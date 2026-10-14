@@ -762,6 +762,23 @@ loader and refusal live in `twin.restock_camera.commissioning`. CPU tests (no Is
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_commissioning.py -q
 ```
 
+### 13b. Collect pick target from the fixed source camera
+
+The collect stage senses the pick carton with the FIXED `source` station camera against its
+commissioned `backstock_00` baseline (the pose-stable, commissionable view verify uses); the
+arm eye-in-hand camera is masked-depth/fine-alignment only and receives a target reprojected
+by integration. `twin.restock_camera.source_target.build_source_target_provider(adapter,
+motion, contact, source_location='backstock_00')` returns `source_target_provider(now) ->
+SourceTarget | None` wrapping the fixed-source `IsaacCartonSensors.capture`; `SourceTarget`
+carries `sku`, `pose_station` (map/station frame), `stamp` and baseline `provenance` under the
+live 0.5 s acquisition-to-use bound (consumer re-validates at use). `build_sensing` exposes it
+in its returned mapping when `config['collect_source_location']` is set. Contract: the
+integration report's "Collect sensing contract". CPU tests:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_source_target.py -q
+```
+
 ## 14. Controlled static-scene navigation mapper commissioning
 
 This is an uncommissioned integration handoff, not a moving-mission readiness
