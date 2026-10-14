@@ -93,8 +93,14 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, cleara
 
 def _real_rig(*, assembly, design):
     """Build the Isaac CameraRig on the composed stage and expose the sensing cameras."""
+    from pxr import UsdGeom
     from .native_cameras import CameraRig
     cart_root = assembly.evidence['composition']['assets']['cart']['root']
+    # 'map'-parented cameras (source, shelf) use world-origin poses. The view_scene bench
+    # anchors them under an identity '/World'; the composed mission stage has no '/World'
+    # (its default prim is the sublayered store), so author that identity anchor here.
+    if not assembly.stage.GetPrimAtPath('/World'):
+        UsdGeom.Xform.Define(assembly.stage, '/World')
     parent_paths = {'map': '/World', 'cart_chassis': cart_root}
     # The camera design keeps camera bodies and their mount collision boxes in separate
     # lists (cameras + solids, with dimensions_m); CameraRig.camera_spec expects each
