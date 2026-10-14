@@ -10,6 +10,8 @@ import time
 import numpy as np
 
 from twin.mobile import DockObservation, Pose2, wrap
+from twin.navigation.core import Odometry
+from twin.navigation.sensors import observation as nav_observation
 from twin.urdf_probe import parse_urdf, link_world_transforms, geometry_world_points, resolve_package_uri
 from .runtime import Packet
 
@@ -134,13 +136,21 @@ class IsaacPort:
             self.after_step(now,parked)
         ready=self.transport.contains(positions) and not self.contact.read()
         scan=self.range_sensor.read(now)
+        articulation=wrap(r.yaw-c.yaw)
+        # Reference navigation consumes a localized Odometry + an obstacle Observation,
+        # not raw wheel encoders and a Scan. The measured base pose is the reference
+        # localization (default source 'wheel_odometry_localized'); the Scan is transformed
+        # into map-frame obstacles about that pose (source 'simulated_lidar').
+        odometry=Odometry((r.x,r.y,r.yaw),now,float(np.linalg.norm(rv)),float(rw[2]))
+        navigation=nav_observation(scan,odometry,coupled=coupled,arm_transport=ready,
+                                   articulation=articulation)
         evidence=self.verification(now)
         if self.recorder is not None and self.tick%2 == 0:
             frame=self.recording_camera.get_current_frame()
             self.recorder.capture(frame)
         return Packet(f'physics:{self.tick}','sensor',now,
-            tuple(float(joints[i]) for i in self.wheels),scan,docking,None,
-            ready,coupled,wrap(r.yaw-c.yaw),parked,evidence)
+            odometry,navigation,docking,None,
+            ready,coupled,articulation,parked,evidence)
 
     def begin_action(self,action,job):
         if self.on_action is not None:
