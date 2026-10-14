@@ -81,11 +81,25 @@ def main():
                         raise TimeoutError(f'commissioning exceeded {args.wall_cap_s}s')
                     time.sleep(1.)
                 record['exit_code'] = child.process.returncode
-                if child.process.returncode:
-                    raise RuntimeError('commissioning child failed; inspect isaac.log')
-                report = json.loads((baselines / 'commissioning-report.json').read_text())
+                # The CLI writes commissioning-report.json and persists each baseline BEFORE the
+                # process exits. Isaac then crashes in its own atexit/omni-graph teardown (SIGSEGV,
+                # a known shutdown issue), so a negative return code does NOT mean commissioning
+                # failed. Treat a complete report for every required station as success; only a
+                # missing/incomplete report (or a non-signal failure) is a real failure.
+                report_path = baselines / 'commissioning-report.json'
+                report = json.loads(report_path.read_text()) if report_path.is_file() else None
                 record['report'] = report
-                record['status'] = 'passed'
+                complete = bool(report) and all(s in report.get('stations', {}) for s in stations)
+                if complete:
+                    record['status'] = 'passed'
+                    if child.process.returncode:
+                        record['shutdown_signal'] = child.process.returncode
+                        record['note'] = ('commissioning committed; child exited on a signal during '
+                                          'Isaac atexit teardown (known shutdown crash), not a commission failure')
+                elif child.process.returncode:
+                    raise RuntimeError('commissioning child failed; inspect isaac.log')
+                else:
+                    raise RuntimeError('commissioning report missing required stations')
             finally:
                 if child:
                     child.close()

@@ -135,21 +135,52 @@ def build_sources(*, scenario, camera_config, output):
                               clearance_for_slot=lambda loc, view, frame, now: None,
                               camera_revision=cam['revision'])
 
+    from twin.restock_camera.qr import FixedTileQR
+    from twin.restock_camera.sensed import FrameEvidence
+    need = {support['markers'][0]['id']}
+    if len(support['markers']) > 1:
+        need.add(support['markers'][1]['id'])
+
     def capture(ctx):
-        # Advance to a fresh rendered frame, then commission on it with now == render time.
+        # RTX RayTracedLighting needs frames to converge and the paired markers must both
+        # decode with clean (untruncated, convex) quads under the PRODUCTION FixedTileQR --
+        # the same gate commission applies internally. Scan converged frames and hand
+        # commission the first that the production decoder reads both markers from.
         last = None
-        frame = None
-        for _ in range(180):
+        attempts = []
+        chosen = None
+        last_rgb = None
+        for i in range(240):
             world.step(render=True)
             frame = camera.get_current_frame(clone=True)
             identity = frame.get('native_rendering_frame', frame.get('rendering_frame'))
-            if identity is not None and identity != last:
-                last = identity
-                break
-        rgb = np.asarray(frame['rgb'])[:, :, :3]
-        depth = np.asarray(frame['distance_to_image_plane'], float)
-        now = float(frame['rendering_time'])
-        return {'frame': frame, 'now': now,
+            if identity is None or identity == last:
+                continue
+            last = identity
+            last_rgb = np.asarray(frame['rgb'])[:, :, :3]
+            stamp = float(frame['rendering_time'])
+            probe = FixedTileQR(STATION)
+            evidence = FrameEvidence(STATION, 1_000_000 + i, stamp, stamp, 'probe', 'probe')
+            try:
+                qr = probe.decode(last_rgb, evidence, now=stamp, parked=True)
+                codes = {d.text for d in qr.detections}
+                if need <= codes:
+                    chosen = frame
+                    break
+                attempts.append((i, sorted(codes)))
+            except Exception as exc:  # truncated quad / spurious detection on this frame
+                attempts.append((i, str(exc)))
+        if chosen is None:
+            if last_rgb is not None:
+                np.save(Path(output) / 'debug-last-rgb.npy', last_rgb)
+            raise ValueError(f'no converged frame cleanly decoded source markers {sorted(need)} '
+                             f'in {len(attempts)} frames; last: {attempts[-5:]}')
+        rgb = np.asarray(chosen['rgb'])[:, :, :3]
+        depth = np.asarray(chosen['distance_to_image_plane'], float)
+        now = float(chosen['rendering_time'])
+        np.savez_compressed(Path(output) / 'commission-frame.npz', rgb=rgb, depth=depth,
+                            support_uv=support_uv, witness_uv=witness_uv)
+        return {'frame': chosen, 'now': now,
                 'empty_polygons': {LOCATION: (support_uv, witness_uv)},
                 'capture_poses': {LOCATION: list(base_pose)},
                 'raw_frames': {LOCATION: dict(rgb=rgb, depth=depth, support_uv=support_uv,
