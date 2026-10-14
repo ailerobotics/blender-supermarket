@@ -172,7 +172,12 @@ def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
             png = marker_dir / (marker['id'].replace(':', '_') + '.png')
             write_carton_label(marker['id'], png)
             textures[marker['id']] = str(png)
-        author_camera_design(assembly.stage, dict(design, cameras={}, solids=[],
+        # Keep the source marker TAB solid: the support witness patch (the off-slot rigidity
+        # reference the sensing validator reads) sits on it, so without the tab the witness
+        # depth reads the floor and trips "fresh witness disagrees with dated support
+        # calibration". Drop the camera mast/boom/housing solids (not needed, avoid colliders).
+        tab_solids = [s for s in design.get('solids', []) if s['id'] == 'source_marker_tab']
+        author_camera_design(assembly.stage, dict(design, cameras={}, solids=tab_solids,
                              supports={'source': source_support}),
                              parent_paths=parent_paths, marker_textures=textures)
     base_root = assembly.paths['ur_base_link']
