@@ -933,3 +933,11 @@ step -> stop -> fail). FIX (Firstmate structural): the bridge publishes every se
 independent of capture; a capture failure is non-fatal (Result running/observe), the stage
 timeout still bounds it. CURRENT GATE: capture raises `'dict' object has no attribute
 support_view` (slot-config in IsaacCartonSensors) — now non-fatal, so the bridge sustains.
+
+**run-41 (structural fix in):** the bridge now publishes sustained (published=10, nvblox
+received depth) and the capture gate is non-fatal, but the mission fails "host process/status
+watchdog": IsaacRosGraph.poll times out after 5 s because the host planner does not reply to the
+manipulation job (it needs a built ESDF + a cuMotion plan, which takes longer than the 5 s
+watchdog to warm). NEXT (next session): the host manip-reply / ESDF-warm handshake vs the
+IsaacRosGraph watchdog, and the IsaacCartonSensors slot `support_view` config. The masked-depth
+transport itself is proven (focused probe, 248,984 voxels) and now drives the live mission.
