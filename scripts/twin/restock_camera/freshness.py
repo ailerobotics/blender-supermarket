@@ -2,9 +2,15 @@
 import math
 
 
+# A rendered frame reflects the state just AFTER a physics step, so its render clock can lead
+# the consumer's dt-accumulated sim clock by up to one physics step (1/60 s ~= 0.0167 s). Allow
+# that sub-step lead as not-from-the-future; genuine future/stale frames are still rejected.
+_RENDER_LEAD=0.02
+
+
 def frame_deadline(frame, now, started):
     stamp=float(frame['rendering_time'])
-    if not all(math.isfinite(v) for v in (now,started,stamp)) or not 0<=now-stamp<=.5:
+    if not all(math.isfinite(v) for v in (now,started,stamp)) or not -_RENDER_LEAD<=now-stamp<=.5:
         raise ValueError('stale acquisition before processing')
     deadline=started+.5-(now-stamp)
     acquired=frame.get('acquired_steady')

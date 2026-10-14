@@ -55,3 +55,12 @@ def test_pose_processing_delay_is_rechecked_immediately_before_motion():
     c.pose_policy=NS(build=build)
     result=c.step(.1,replace(packet(c),valid_until_steady=100.5))
     assert result.status=='failed' and not motion.moves
+
+
+def test_frame_deadline_tolerates_one_physics_step_render_lead():
+    # The arm camera render leads the dt-accumulated sim clock by ~1/60 s; not "future".
+    frame=dict(rendering_time=0.2333)
+    d=frame_deadline(frame,0.2167,10.0)      # now < stamp by ~one physics step
+    assert d>0
+    with pytest.raises(ValueError,match='stale'):
+        frame_deadline(dict(rendering_time=0.30),0.21,10.0)   # >1 step ahead = rejected
