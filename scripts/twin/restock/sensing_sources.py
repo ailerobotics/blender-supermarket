@@ -35,9 +35,14 @@ def _all_true_mask(design, camera_id):
     return np.ones((int(intr['height']), int(intr['width'])), bool)
 
 
-def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, clearance_for_slot=None,
-                          _rig_builder=None):
-    """Assemble the sensing_sources mapping. Pure wiring; the rig is built behind the seam."""
+def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_bridge_root,
+                          clearance_for_slot=None, _rig_builder=None):
+    """Assemble the sensing_sources mapping. Pure wiring; the rig is built behind the seam.
+
+    pose_bridge_root is the FILESYSTEM root of the tray-perception pose bridge
+    (``<root>/labeling/pose_bridge.py``) that IsaacCartonSensors loads for depth
+    geometry -- not a USD prim path.
+    """
     design = build_camera_design(scenario, manifest)
     shelf_id = scenario['job']['shelf_id']
     support_locations = dict(_STATIC_SUPPORT_LOCATIONS, shelf=shelf_id)
@@ -84,7 +89,7 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, cleara
         'context_providers': context_providers,
         'location_cameras': location_cameras,
         'profiles': profiles,
-        'pose_bridge_root': assembly.paths['ur_base_link'],
+        'pose_bridge_root': pose_bridge_root,
         'motion': manip_runtime.motion,
         'contact': assembly.contact,
         'recording_camera': recording_camera,

@@ -50,6 +50,7 @@ class BuildSensingSourcesTests(unittest.TestCase):
         rig = FakeRig(cc.camera_config(SCENARIO, MANIFEST))
         return build_sensing_sources(assembly=assembly(), scenario=SCENARIO, manifest=MANIFEST,
                                      manip_runtime=manip_runtime(), clearance_for_slot=clearance,
+                                     pose_bridge_root='/pkg/tray_perception',
                                      _rig_builder=rig.builder), rig
 
     def test_bindings_present(self):
@@ -57,7 +58,7 @@ class BuildSensingSourcesTests(unittest.TestCase):
         for key in ('cameras', 'context_providers', 'location_cameras', 'profiles',
                     'pose_bridge_root', 'motion', 'contact', 'recording_camera'):
             self.assertIn(key, src)
-        self.assertEqual(src['pose_bridge_root'], '/MobileRobot/ur_base_link')
+        self.assertEqual(src['pose_bridge_root'], '/pkg/tray_perception')
         self.assertIn('juice_orange', src['profiles'])  # profiles passed through from manip runtime
 
     def test_location_cameras_map_mission_locations(self):
