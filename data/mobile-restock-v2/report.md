@@ -1622,3 +1622,21 @@ nvblox's TF lookup may still drop on ARRIVAL ORDER -- /tf (transport relay subpr
 matching /tf for the same stamp, failing the lookup even though publish order + stamps are correct.
 Residuals: (b) host lane re-diagnoses run-73 nvblox (does the lookup resolve + integrate now?); and
 fix#2 (return relay for /manipulation/status) for the IsaacRosGraph 5 s watchdog once /sensors flow.
+
+### 2026-10-14 — BREAKTHROUGH run-74: nvblox integrates, collision_time READY, carton captured
+
+The one-shared-stamp fix (msg168) resolved the permanent non-integration. RESTOCK_NVBLOX_DIAG run-74
+evidence: nvblox 'Received request for ESDF ... Successfully wrote requested ESDF to MultiArrayMsg'
+(450.24, 451.98, 455.49 s). collision_time ADVANCES: STATION_STATS tick=51 collision_time=1.0167
+ready=True, snapshot state 'ready' (the StationClient receives the ack reply via the return relay).
+COLLECT_CAPTURE calls=1 sku=juice -> the fixed-source capture produced the carton target and
+/sensors flowed; /manipulation/status reached 'running'/'observe'. So nav -> warm -> collision_time
+fresh -> ack ready -> carton captured -> /sensors ALL WORK now.
+
+Remaining blocker: ros_host's 1 s per-frame SENSOR watchdog (RosTransferBridge.watchdog_seconds=1.0,
+armed after the first /sensors frame). The /sensors cadence is render-paced: the ESDF polls are
+1.73 s then 3.51 s apart (full-res source render + masked depth + capture per collect tick), so the
+1 s watchdog trips -> mission fails 'sensor stream watchdog expired'. The StationClient cannot emit
+/sensors mid-render-tick (it is the carton packet, one per capture). Per msg155 this watchdog is the
+host lane's to widen (do NOT relax on this branch); measured gap ~1.7-3.5 s, so it needs ~4-5 s (cf.
+the ack wall guard already widened to 3 s). Everything up to the grasp dispatch now works.
