@@ -54,9 +54,75 @@ class Observation:
     arm_transport: bool
     articulation: float = 0.0
     source: str = 'simulated_lidar'
-    coverage_radius: float = 0.0  # certified observed free radius/scan reach
+    coverage_radius: float = 0.0  # legacy full-circle inscribed free reach (diagnostic)
     observed_space: object = None  # optional depth-voxel evidence for articulated gate
     temporal_map: object = None  # controlled static-scene nvblox map, <=600s epoch
+    coverage: object = None  # CoverageField: self-occlusion-aware directional certification
+
+
+def sweep_extent(beta, radius, stop_distance):
+    """Far reach of the forward braking capsule along relative bearing `beta`.
+
+    The capsule is the circular footprint (disk of `radius`, which circumscribes the
+    whole train including the towed cart) swept `stop_distance` forward along the
+    heading. `beta` is measured from the heading. Rear and near-side bearings reach
+    only the footprint edge (the capsule never extends behind the base: no-reverse),
+    so they are never a swept sector; only forward bearings extend beyond `radius`.
+    """
+    c = math.cos(beta)
+    if c <= 0.0:
+        return radius
+    s = abs(math.sin(beta))
+    if stop_distance * s <= radius:
+        return stop_distance * c + math.sqrt(radius * radius - (stop_distance * s) ** 2)
+    return radius / s
+
+
+class CoverageField:
+    """Per-beam observed/blind record for direction-of-travel coverage certification.
+
+    A self-occluded (UNKNOWN) beam hit the robot's own rig and certifies nothing
+    beyond it (reach 0); an observed (non-self) beam certifies its bearing is not
+    blind out to the sensor range (any real obstacle on it is reported separately in
+    Observation.obstacles and gated by the obstacle check, so coverage only answers
+    "did we observe here, or are we driving blind?"). Certification requires every
+    bearing the forward braking sweep reaches BEYOND the footprint to be covered by a
+    non-self beam; bearings whose sweep stays within the footprint are the robot's own
+    body (self-returns expected there) and need no external observation. The rear is
+    never swept, so rig self-occlusion behind the base never blocks motion.
+    """
+    __slots__ = ('range_max', 'beams')
+
+    def __init__(self, range_max, beams):
+        self.range_max = float(range_max)
+        # (map-frame bearing, certified not-blind reach); reach is 0.0 when blind.
+        self.beams = tuple((float(a), float(r)) for a, r in beams)
+
+    def certifies(self, heading, radius, stop_distance):
+        if not all(math.isfinite(v) for v in (heading, radius, stop_distance)):
+            return False
+        if stop_distance < 0 or radius <= 0:
+            return False
+        for angle, reach in self.beams:
+            extent = sweep_extent(wrap(angle - heading), radius, stop_distance)
+            if extent <= radius + 1e-9:
+                continue  # within the footprint: robot's own body / not swept
+            if reach < extent - 1e-9:
+                return False  # a forward swept sector is blind (or past sensor range)
+        return True
+
+
+def coverage_certifies(obs, heading, radius, stop_distance):
+    """Shared coverage gate for both the reference and articulated braking sweeps.
+
+    Uses the self-occlusion-aware directional field when the real pipeline supplied
+    one; falls back to the legacy scalar reach for fixture observations that set only
+    `coverage_radius`.
+    """
+    field = getattr(obs, 'coverage', None)
+    if field is None:
+        return obs.coverage_radius >= radius + stop_distance
+    return field.certifies(heading, radius, stop_distance)
 
 
 @dataclass(frozen=True)
@@ -221,7 +287,7 @@ class Controller:
         speed = max(v,abs(odom.linear))
         stop_distance = speed*self.stale_after + speed*speed/(2*self.brake_acceleration)
         radius = self.footprint.radius(self.coupled)+odom.position_uncertainty
-        if obs.coverage_radius < radius+stop_distance:
+        if not coverage_certifies(obs, odom.pose[2], radius, stop_distance):
             return Result(reason='insufficient_sensor_coverage')
         # A disk expanded by stopping travel contains every possible braking arc.
         if not self.grid.free(odom.pose,radius+stop_distance,obs.obstacles):

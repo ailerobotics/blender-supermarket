@@ -58,12 +58,20 @@ scans. A raw polar transport loses those extra obstacles and must not be used
 to certify coverage: NaNs without the explicit mask fail validation. Unknown
 sectors cannot be relabelled free even if another height sees over an obstacle.
 
-The present gate requires full-circle observed coverage. Any unknown angle
-therefore gives `coverage_radius=0`, and motion stops. This corrects false self
-obstacles without claiming that filtering creates a usable sensor layout.
-All-self scans also fail localization for insufficient external returns; mixed
-scans may localize but still fail coverage. Timestamp gates, the .10 m localizer
-floor and .05 m geometry margin are unchanged.
+The gate certifies coverage **directionally**, against the forward braking sweep
+in the direction of travel rather than the full circle: every bearing the sweep
+reaches beyond the footprint must be covered by a non-self observed beam, while
+bearings whose sweep stays within the footprint (and the never-swept rear) are the
+robot's own body and need no external observation. A self-occluded ring behind the
+base with a clear forward sweep therefore drives, a genuinely unobserved forward
+sector still refuses, and a stationary robot is certified so it can settle at the
+goal. `coverage_radius` stays only as the legacy full-circle diagnostic / fixture
+fallback; the gate consumes the `Observation.coverage` field. The intended
+lidar/coverage model is specified in
+[docs/navigation_temporal_mapping.md](navigation_temporal_mapping.md); counterfactuals
+are in `test_navigation_coverage.py`. All-self scans still fail localization for
+insufficient external returns, and a scan blind in the forward sweep still stops.
+Timestamp gates, the .10 m localizer floor and .05 m geometry margin are unchanged.
 
 Sensor heights are absolute world Z values. The default x=.46 ray column at
 z=.15 is inside the chassis (world z=.14..34), whereas the authored lidar_frame

@@ -98,6 +98,49 @@ retained map under a renamed generation or clearing changed regions to free is
 not allowed. Scene/camera/localization/session discontinuities invalidate the
 epoch itself. Expiry remains absolute from original commissioning.
 
+## Instantaneous self-occlusion-aware coverage (scalar-scan path)
+
+When no temporal map is configured, braking is gated by the instantaneous range
+scan instead. The physical restock rig's range sensor is mounted on the moving
+base and **always self-occludes on its own base, mast, stowed arm and towed cart**,
+so a fully unoccluded 360 degree scan is never produced and repositioning the mount
+cannot remove every self-return. Self-returns are reported as UNKNOWN (NaN range,
+`Scan.unknown[i]`) by the sensor's instance-ID / self-path mask (integration supplies
+the rig self paths; identity is USD collider subtree membership, never inferred from
+point location). The earlier contract zeroed coverage whenever **any** beam was
+UNKNOWN, which left the rig permanently unable to drive. The coverage model is now
+directional and keyed to the actual motion:
+
+- **Lidar model.** A beam is either a NON-self observation (it saw free space out to
+  the sensor range, or struck an external return that is reported in
+  `Observation.obstacles` and gated separately) or a self-occluded UNKNOWN beam that
+  certifies nothing beyond the rig — even when another height on the same bearing
+  retains an external return, the near field there is unobserved and never certifies
+  clearing.
+- **Braking sweep.** `sweep_extent(beta, radius, stop_distance)` is the far reach, per
+  relative bearing `beta` from the heading, of the forward braking capsule: the circular
+  footprint `radius` (which circumscribes the **whole train, including the towed cart**)
+  swept `stop_distance` forward. Rear and near-broadside bearings reach only the
+  footprint edge — the capsule never extends behind the base because reverse is forbidden
+  — so they are never a swept sector.
+- **Certification (`CoverageField.certifies`, shared by the reference and articulated
+  gates via `coverage_certifies`).** Every bearing whose braking sweep extends **beyond
+  the footprint** must be covered by a non-self observed beam reaching that far; bearings
+  whose sweep stays within the footprint are the robot's own body (self-returns expected)
+  and need no external observation. Consequently a self-occluded ring behind the base with
+  a clear forward sweep drives, a genuinely unobserved forward sector still refuses, and a
+  stationary robot (`stop_distance == 0`, no swept sector) is certified so it can settle
+  and hold at the goal despite full self-occlusion.
+
+The 0.05 m geometry margin and 0.10 m localization inflation are retained inside
+`radius`, the full cart sweep is retained via the circumscribing footprint, and the
+no-reverse rule is unchanged. `Observation.coverage_radius` remains only as the legacy
+full-circle inscribed-reach diagnostic (and the fixture fallback for observations that
+carry no field); the gates consume `Observation.coverage`. This is instantaneous-scan
+safety for the controlled static scene, not person-safety readiness, and it does not
+substitute for the native departure and blocked-aisle evidence below. Counterfactuals:
+`test_navigation_coverage.py`.
+
 ## Validation and remaining native work
 
 `test_navigation_temporal.py` checks historical free-space persistence, 600-second
