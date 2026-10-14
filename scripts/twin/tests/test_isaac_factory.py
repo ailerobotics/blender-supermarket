@@ -44,6 +44,30 @@ class ParseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_manipulation_config({}, JOB_SKU)
 
+    def test_cart_placement_absent_defaults_empty(self):
+        c = parse_manipulation_config(manip_cfg(), JOB_SKU)
+        self.assertEqual(c.cart_placement, {})
+
+    def test_cart_placement_parsed(self):
+        cfg = manip_cfg(cart_placement={'location': 'rollwagen', 'load_center_body_xy': [0.08, 0],
+                                        'support_z_world': 0.225, 'free_dimensions': [0.65, 0.45, 0.30]})
+        c = parse_manipulation_config(cfg, JOB_SKU)
+        self.assertEqual(c.cart_placement['location'], 'rollwagen')
+        self.assertEqual(c.cart_placement['load_center_body_xy'], (0.08, 0.0))
+        self.assertEqual(c.cart_placement['support_z_world'], 0.225)
+        self.assertEqual(c.cart_placement['free_dimensions'], (0.65, 0.45, 0.30))
+
+    def test_cart_placement_malformed_rejected(self):
+        for bad in ({'location': 'rollwagen'},                       # missing fields
+                    {'location': '', 'load_center_body_xy': [0, 0],  # empty location
+                     'support_z_world': 0.2, 'free_dimensions': [1, 1, 1]},
+                    {'location': 'c', 'load_center_body_xy': [0],     # wrong-length xy
+                     'support_z_world': 0.2, 'free_dimensions': [1, 1, 1]},
+                    {'location': 'c', 'load_center_body_xy': [0, 0],  # wrong-length dims
+                     'support_z_world': 0.2, 'free_dimensions': [1, 1]}):
+            with self.assertRaises(ValueError):
+                parse_manipulation_config(manip_cfg(cart_placement=bad), JOB_SKU)
+
     def test_sku_without_profile(self):
         with self.assertRaises(ValueError):
             parse_manipulation_config(manip_cfg(), 'no_such_sku')

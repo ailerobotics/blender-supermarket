@@ -64,6 +64,7 @@ class ManipConfig:
     pose_bridge_root: str = ''    # filesystem root of the tray-perception pose bridge
     masked_depth: dict = field(default_factory=dict)  # arm masked-depth bridge settings
     collect_source_location: str = ''  # mission location of the collect pick (fixed-source target)
+    cart_placement: dict = field(default_factory=dict)  # collect destination (rollwagen) placement, derived from the cart asset
 
 
 def parse_manipulation_config(config, job_sku):
@@ -150,10 +151,37 @@ def parse_manipulation_config(config, job_sku):
     collect_source_location = config.get('collect_source_location', '')
     if collect_source_location and not isinstance(collect_source_location, str):
         raise ValueError('collect_source_location must be a mission-location string')
+    cart_placement = _parse_cart_placement(mcfg.get('cart_placement'))
     return ManipConfig(profiles=profiles, stations=stations, shelfbot_root=shelfbot_root,
                        walls=walls, voxel_dims=tuple(float(v) for v in vd), voxel_size=float(vs),
                        grasp_mode=next(iter(modes)), pose_bridge_root=pose_bridge_root,
-                       masked_depth=masked_depth, collect_source_location=collect_source_location)
+                       masked_depth=masked_depth, collect_source_location=collect_source_location,
+                       cart_placement=cart_placement)
+
+
+def _parse_cart_placement(entry):
+    """Validate the collect destination (rollwagen) placement spec into a plain dict, or {}.
+
+    The carton is placed onto the robot's own staged cart; the Target POSE is derived at capture
+    time from the cart asset's MEASURED staged pose (read from the stage) plus these scenario
+    constants -- the cart is a controlled asset, so this is not a fabricated inventory observation.
+    `load_center_body_xy` is a cart-body-frame xy offset to the load centre; `support_z_world` is
+    the world z of the load surface; `free_dimensions` is the usable load volume (>= carton+margin).
+    """
+    if entry is None:
+        return {}
+    if not isinstance(entry, dict):
+        raise ValueError('cart_placement must be an object')
+    try:
+        location = entry['location']
+        lc = tuple(float(v) for v in entry['load_center_body_xy'])
+        sz = float(entry['support_z_world'])
+        fd = tuple(float(v) for v in entry['free_dimensions'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f'cart_placement needs location/load_center_body_xy/support_z_world/free_dimensions: {exc}')
+    if not isinstance(location, str) or not location or len(lc) != 2 or len(fd) != 3:
+        raise ValueError('cart_placement location (str), load_center_body_xy (2), free_dimensions (3)')
+    return {'location': location, 'load_center_body_xy': lc, 'support_z_world': sz, 'free_dimensions': fd}
 
 
 class _ArticulationParked:
@@ -233,11 +261,17 @@ class CollectTargetBridge:
     last good box so the host's 0.5 s bbox freshness holds.
     """
     def __init__(self, *, stage, arm_camera, arm_camera_path, base_path, profiles,
-                 motion, contact, joints, source_location):
+                 motion, contact, joints, source_location, cart_placement=None, cart_root=None):
         self.stage, self.arm_camera, self.arm_camera_path = stage, arm_camera, arm_camera_path
         self.base_path, self.profiles = base_path, profiles
         self.motion, self.contact, self.joints = motion, contact, joints
         self.source_location = source_location
+        # Collect destination: place the carton onto the robot's own staged (not-yet-coupled) cart.
+        # The placement Target POSE is derived at capture from the cart asset's MEASURED staged pose
+        # (read live from the stage at cart_root) + the scenario load-centre/support constants. The
+        # cart is a controlled asset, so this is not a fabricated inventory observation.
+        self.cart_placement = dict(cart_placement or {})
+        self.cart_root = cart_root
         self.provider = None
         self.sensed_target_bboxes = ()
 
@@ -285,6 +319,37 @@ class CollectTargetBridge:
                                 f'intr=({intr[0]:.0f},{intr[1]:.0f},{intr[2]:.0f},{intr[3]:.0f})')
         return roi
 
+    def _cart_target(self, now, src):
+        """Derive the collect placement Target on the staged cart (controlled asset, not sensed stock).
+
+        POSE = the cart's MEASURED staged world pose (read live at cart_root) with the scenario
+        body-frame load-centre offset and world support z, expressed in the ur_base_link frame; the
+        placement keeps the carried carton's yaw so the side-grip wall is unchanged pick->place.
+        Returns None when no cart placement is configured (backward-compatible / non-collect paths).
+        """
+        cp = self.cart_placement
+        if not cp or not self.cart_root:          # no cart placement -> no destination target (CPU-safe: no pxr)
+            return None
+        import numpy as np, math
+        from twin.restock_manipulation.types import Target
+        from pxr import UsdGeom
+        if not self.stage.GetPrimAtPath(self.cart_root):
+            return None
+        cache = UsdGeom.XformCache()
+        Tc = np.asarray(cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.cart_root))).T
+        Tub = np.asarray(cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.base_path))).T
+        cyaw = math.atan2(float(Tc[1, 0]), float(Tc[0, 0]))          # cart yaw in world
+        lx, ly = cp['load_center_body_xy']
+        world = np.array([float(Tc[0, 3]) + math.cos(cyaw) * lx - math.sin(cyaw) * ly,
+                          float(Tc[1, 3]) + math.sin(cyaw) * lx + math.cos(cyaw) * ly,
+                          float(cp['support_z_world']), 1.0])
+        p = np.linalg.inv(Tub) @ world                                # load centre in ur_base_link
+        q = tuple(float(v) for v in src.pose_station[3:])             # carry-through carton yaw/quat
+        return Target(observation_id=f'cart:{cp["location"]}:{now:.3f}', source='sensor',
+                      simulation_time=float(now), location=cp['location'],
+                      pose=(float(p[0]), float(p[1]), float(p[2]), *q), clear=True,
+                      free_dimensions=tuple(cp['free_dimensions']), frame='ur_base_link')
+
     def capture(self, now, source, destination):
         from twin.restock_manipulation.types import Sensors, Observation
         self.sensed_target_bboxes = ()
@@ -323,7 +388,8 @@ class CollectTargetBridge:
                           simulation_time=float(target.stamp), sku=target.sku,
                           location=self.source_location, pose=tuple(target.pose_station),
                           confidence=1.0, frame='ur_base_link')
-        return Sensors(now, (obs,), None, parked, bool(self.contact.read()), now,
+        cart_target = self._cart_target(now, target)
+        return Sensors(now, (obs,), cart_target, parked, bool(self.contact.read()), now,
                        float(self.motion.collision_time), joints, (), float(target.stamp))
 
 
@@ -389,12 +455,18 @@ def _build_runtime(*, app, assembly, params, output):
     # The collect grasp target comes from the FIXED source camera via the camera-lane provider,
     # reprojected into the live arm image. The provider is injected after build_sensing through
     # HostManipulationRuntime.set_source_target_provider.
+    # The collect PLACEMENT target (destination = staged cart) is derived from the cart asset's
+    # measured pose; the cart's root prim comes from the composition evidence when configured.
+    cart_root = None
+    if params.cart_placement:
+        cart_root = assembly.evidence['composition']['assets']['cart']['root']
     collect_bridge = CollectTargetBridge(
         stage=stage, arm_camera=camera, arm_camera_path=camera_path,
         base_path=assembly.paths['ur_base_link'], profiles=params.profiles,
         motion=feedback, contact=contact,
         joints=feedback.joint_positions,
-        source_location=params.collect_source_location)
+        source_location=params.collect_source_location,
+        cart_placement=params.cart_placement, cart_root=cart_root)
 
     sensing_bridge = None
     if params.masked_depth.get('enabled'):
