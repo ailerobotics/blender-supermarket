@@ -388,7 +388,13 @@ class CollectTargetBridge:
                           simulation_time=float(target.stamp), sku=target.sku,
                           location=self.source_location, pose=tuple(target.pose_station),
                           confidence=1.0, frame='ur_base_link')
-        cart_target = self._cart_target(now, target)
+        try:                                      # a cart-placement derivation failure must NOT
+            cart_target = self._cart_target(now, target)   # starve /sensors; degrade to target=None
+        except Exception as exc:                            # (diagnosable observe stall, not host death)
+            cart_target = None
+            if self._calls % 10 == 1:
+                print(f'COLLECT_CAPTURE calls={self._calls} cart_target_error={type(exc).__name__}:{exc}',
+                      flush=True)
         return Sensors(now, (obs,), cart_target, parked, bool(self.contact.read()), now,
                        float(self.motion.collision_time), joints, (), float(target.stamp))
 
