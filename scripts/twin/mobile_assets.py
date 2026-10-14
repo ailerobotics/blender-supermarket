@@ -10,6 +10,8 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from .mobile import MobileSpec
+from .restock_camera.wrist_camera import (
+    WRIST_FRAME, WRIST_PARENT_LINK, WRIST_MOUNT_XYZ, wrist_usd_camera_transform)
 
 
 def _element(parent, tag, **attrs):
@@ -112,6 +114,14 @@ def build_mobile_urdf(source, output, spec=MobileSpec()):
                       ('front_camera_frame', (0.46, 0, 0.35)), ('imu_frame', (0, 0, 0))]:
         _element(root, 'link', name=name)
         _joint(root, f'{name}_joint', 'base_link', name, xyz)
+    # Eye-in-hand wrist RGB-D collision camera frame, rigidly on the UR tool flange so the arm's
+    # side-grasp workspace is always in its depth (see twin.restock_camera.wrist_camera). The joint
+    # is a pure mount offset (identity rotation); the optical rotation lives in the camera design's
+    # parent_from_optical and the authored USD Camera prim.
+    if root.find(f"link[@name='{WRIST_PARENT_LINK}']") is None:
+        raise ValueError(f'source UR chain is missing {WRIST_PARENT_LINK!r} for the wrist camera mount')
+    _element(root, 'link', name=WRIST_FRAME)
+    _joint(root, f'{WRIST_FRAME}_joint', WRIST_PARENT_LINK, WRIST_FRAME, WRIST_MOUNT_XYZ)
     # Reject disconnected unexpected source structure before writing.
     links = {x.get('name') for x in root.findall('link')}
     children = [j.find('child').get('link') for j in root.findall('joint')]
@@ -138,6 +148,35 @@ def transport_positions(source):
         if joint.get('type') == 'prismatic':
             positions[joint.get('name')] = float(joint.find('limit').get('lower'))
     return positions
+
+
+def author_wrist_camera(stage, frame_prim_path, intrinsics=None, name='wrist_camera'):
+    """Author the eye-in-hand wrist ``Camera`` prim under the ``restock_camera_wrist`` frame prim.
+
+    ``frame_prim_path`` is the imported-URDF prim of the wrist frame (e.g.
+    ``/MobileRobot/.../restock_camera_wrist``). The optical transform (USD -Z view, +Y up) comes from
+    :func:`wrist_camera.wrist_usd_camera_transform`; the pinhole aperture encodes the collision
+    intrinsics' field of view. Integration's ``native_cameras`` adopts this prim as the collision
+    camera. CPU-safe: only ``pxr`` is imported here, nothing boots.
+    """
+    import math as _math
+    from pxr import UsdGeom, Gf
+    from .restock_camera.wrist_camera import wrist_camera_intrinsics, WRIST_HFOV_DEG
+    if not stage.GetPrimAtPath(frame_prim_path):
+        raise ValueError(f'wrist frame prim not found: {frame_prim_path}')
+    k = intrinsics or wrist_camera_intrinsics()
+    camera_path = f'{frame_prim_path}/{name}'
+    if stage.GetPrimAtPath(camera_path):
+        raise ValueError(f'wrist camera already authored: {camera_path}')
+    cam = UsdGeom.Camera.Define(stage, camera_path)
+    cam.AddTransformOp().Set(Gf.Matrix4d(*[v for row in wrist_usd_camera_transform() for v in row]))
+    focal = 18.0
+    horizontal_aperture = 2 * focal * _math.tan(_math.radians(WRIST_HFOV_DEG) / 2.)
+    cam.CreateFocalLengthAttr(focal)
+    cam.CreateHorizontalApertureAttr(horizontal_aperture)
+    cam.CreateVerticalApertureAttr(horizontal_aperture * k.height / k.width)
+    cam.CreateClippingRangeAttr(Gf.Vec2f(float(k.near), float(k.far)))
+    return camera_path
 
 
 def _usd_box(stage, path, size, xyz, color=(0.6, 0.63, 0.66)):
