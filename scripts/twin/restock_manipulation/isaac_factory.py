@@ -263,15 +263,30 @@ class CollectTargetBridge:
     def capture(self, now, source, destination):
         from twin.restock_manipulation.types import Sensors, Observation
         self.sensed_target_bboxes = ()
+        self._calls = getattr(self, '_calls', 0) + 1
         if self.provider is None:
+            if self._calls % 30 == 1:
+                print(f'COLLECT_CAPTURE calls={self._calls} provider=None', flush=True)
             return None
-        target = self.provider(now)                 # SourceTarget | None (provider enforces its own gates)
+        try:
+            target = self.provider(now)             # SourceTarget | None (provider enforces its own gates)
+        except Exception as exc:                     # a swallowed source-capture failure (decode/freshness/...)
+            if self._calls % 10 == 1:
+                print(f'COLLECT_CAPTURE calls={self._calls} provider_error={type(exc).__name__}:{exc}', flush=True)
+            return None
         if target is None:
+            if self._calls % 10 == 1:
+                print(f'COLLECT_CAPTURE calls={self._calls} target=None parked={self.motion.parked()}', flush=True)
             return None
         parked = bool(self.motion.parked())
-        if not parked or not -0.02 <= now - target.stamp <= .5:
-            return None                              # re-validate freshness + parked at use
+        fresh = -0.02 <= now - target.stamp <= .5
+        if not parked or not fresh:
+            print(f'COLLECT_CAPTURE calls={self._calls} sku={target.sku} REJECT parked={parked} '
+                  f'fresh={fresh} now={now:.3f} stamp={target.stamp:.3f}', flush=True)
+            return None
         roi = self._reproject(target)
+        print(f'COLLECT_CAPTURE calls={self._calls} sku={target.sku} roi={roi} '
+              f'pose={tuple(round(v,3) for v in target.pose_station)}', flush=True)
         if roi is not None:
             self.sensed_target_bboxes = (dict(roi=roi, location=self.source_location),)
         try:

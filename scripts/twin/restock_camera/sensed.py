@@ -10,6 +10,7 @@ import math
 import numpy as np
 
 from .geometry import Intrinsics, backproject, project, rigid, transform_points
+from .freshness import _RENDER_LEAD
 
 
 def _matrix_tuple(matrix):
@@ -38,8 +39,8 @@ class FrameEvidence:
         if (not parked or not self.camera_id or not self.epoch or not self.camera_revision or not self.session_id
                 or type(self.frame_id) is not int or self.frame_id < 0
                 or not np.isfinite([now,self.stamp,self.transform_stamp]).all()
-                or not 0 <= now-self.stamp <= .5
-                or not 0 <= now-self.transform_stamp <= .5
+                or not -_RENDER_LEAD <= now-self.stamp <= .5
+                or not -_RENDER_LEAD <= now-self.transform_stamp <= .5
                 or abs(self.stamp-self.transform_stamp) > .05):
             raise ValueError('missing, moving, stale or unsynchronized camera evidence')
         if bool(self.steady_domain) != (self.acquired_steady is not None):
