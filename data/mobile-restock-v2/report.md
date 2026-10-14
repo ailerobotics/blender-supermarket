@@ -1569,3 +1569,21 @@ physics_setup passes robot + runtime_env. CPU-tested: typed (topic,JSON) framing
 TOPIC_TYPES + _secs_to_time (633 passed). WALL-vs-SIM note (msg158): with the host on the
 render-paced /clock, host sim-time timeouts stretch ~30x in wall; the ack's 0.5 s guards become ~15 s
 wall (fine), and its 1 s WALL heartbeat guard is still met by the wall-paced station heartbeats.
+
+### 2026-10-14 — /clock relay WORKS; residual = slow RETURN path (station/status) -> seq stalls
+
+run-71 (unique node names): host `ros2 topic info -v /clock` = Publisher count 1, node
+restock_transport_pub -> the /clock(+tf+joints) relay now reaches the host. The ack ACCEPTS the
+prepare: /station/status goes idle -> warming (epoch 1, seq 0, parked_since 0.133). It then faults
+'station process or parked heartbeat lost' with sequence STILL 0 (host echo). Per Firstmate msg159
+(b)/(c): sequence stalled => no heartbeat was ever ACCEPTED. The ack's process_alive is hardcoded
+True, so the trip is the 1 s WALL heartbeat guard. Root cause: the StationClient receives the ack's
+/station/status reply only via the OmniGraph subscriber, which delivers slowly/intermittently (it
+DID get the final 'failed' snapshot -- the mission reason is the ack's reason -- but not the
+'warming' reply in time). Until self.latest is set, StationClient.tick re-sends PREPARE (seq 0),
+which the ack ignores (epoch==, seq<=); it never switches to heartbeats, so no accepted command
+updates wall_heartbeat and the 1 s wall guard trips ~1.7 s after the prepare. The return-direction
+OmniGraph SUBSCRIBERS are as unreliable as the publishers were. FIX = mirror the forward relay:
+relay the RETURN topics host->Isaac (station/status, manipulation/status, manipulation/stop,
+gripper/enable) through a SUBSCRIBING host-DDS subprocess so the StationClient/IsaacRosGraph read
+them promptly (StationClient then switches to heartbeats before the ack's 1 s guard).
