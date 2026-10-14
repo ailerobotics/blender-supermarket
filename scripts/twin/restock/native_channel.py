@@ -155,6 +155,22 @@ class StationClient:
             self.last_send=now
             self.last_wall_send=wall
 
+    def heartbeat(self):
+        """Force one extra heartbeat NOW, bypassing the wall cadence gate, to bracket a step the
+        caller knows is long (a capture render tick): the ack's wall heartbeat guard measures real
+        wall time, and the StationClient cannot send mid-tick, so a heartbeat immediately before and
+        after the long step keeps the accepted-command wall gap to ~the step duration. The sim does
+        not advance between ticks, so the extra heartbeat is cheap and honest. No-op until the active
+        epoch has been prepared."""
+        if not self.active or not self._prepared:
+            return
+        now=self.stage_clock() if self.stage_clock is not None else self.now
+        self.channel.publish(dict(action='heartbeat',epoch=self.epoch,sequence=self.sequence,
+            stamp=now-self.publish_lag,parked=True,camera_frame=self.camera_frame))
+        self.sequence+=1
+        self.last_send=now
+        self.last_wall_send=self.wall_clock()
+
     def ready(self,now):
         if self.stage_clock is not None:
             now=self.stage_clock()          # freshness in the /clock domain (matches the ack)

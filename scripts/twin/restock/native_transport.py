@@ -13,6 +13,22 @@ from twin.restock_manipulation.cad_tool import ARM_JOINTS
 from twin.restock_manipulation.ros_adapter import require_sim_domain
 
 
+def _frame_id(path):
+    """ROS TF frame_id for a USD prim path = the prim NAME, matching Isaac's ROS2PublishTransformTree
+    (e.g. '/MobileRobot/front_camera_frame/arm_camera/restock_camera_arm' -> 'restock_camera_arm')."""
+    return str(path).rsplit('/', 1)[-1]
+
+
+def tf_payload(parent_path, child_entries, stamp):
+    """Assemble the /tf relay JSON: every child published relative to the single parent (the arm
+    base), frame_ids = prim names, so nvblox resolves restock_camera_arm <- ur_base_link. Pure (no
+    USD): child_entries is a list of (child_path, (tx,ty,tz), (qx,qy,qz,qw))."""
+    parent = _frame_id(parent_path)
+    tf = [[parent, _frame_id(cp), float(t[0]), float(t[1]), float(t[2]),
+           float(q[0]), float(q[1]), float(q[2]), float(q[3])] for cp, t, q in child_entries]
+    return {'t': float(stamp), 'tf': tf}
+
+
 class ArmCommandGate:
     def __init__(self, robot, limits, apply, *, max_speed=.15, max_error=.15):
         self.robot,self.limits,self.apply=robot,tuple(limits),apply
@@ -159,7 +175,9 @@ class NativeTransport:
 
     def _publish_relay(self, now):
         """Ship the sim-time backbone (/clock, /joint_states, /tf) to the host-DDS relay subprocess
-        so the whole host stack shares the render-paced simulation clock (OmniGraph can't reach it)."""
+        so the whole host stack shares the render-paced simulation clock (OmniGraph can't reach it).
+        Publishes /tf BEFORE the masked depth for this stamp: this runs inside isaac_port.advance,
+        which precedes the manipulation runtime's sensing_bridge.publish on the same tick."""
         if self._relay is None:
             return
         import json
@@ -171,19 +189,17 @@ class NativeTransport:
             self._relay.publish('/restock_sim/joint_states',
                                 json.dumps({'t': float(now), 'names': list(self.robot.dof_names), 'pos': pos}))
         # Each tf frame relative to the arm base, via USD world transforms (ExtractRotationQuat gives
-        # the correct USD-convention quaternion; frame_ids are the prim names, as OmniGraph used).
+        # the correct USD-convention quaternion). Pure frame-id + payload assembly is tf_payload().
         cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         parent_inv = cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.arm_base_path)).GetInverse()
-        parent_name = self.arm_base_path.rsplit('/', 1)[-1]
-        rows = []
+        entries = []
         for path in self.tf_paths:
             rel = cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(path)) * parent_inv
             t = rel.ExtractTranslation()
             q = rel.ExtractRotationQuat()
             im = q.GetImaginary()
-            rows.append([parent_name, path.rsplit('/', 1)[-1], float(t[0]), float(t[1]), float(t[2]),
-                         float(im[0]), float(im[1]), float(im[2]), float(q.GetReal())])
-        self._relay.publish('/tf', json.dumps({'t': float(now), 'tf': rows}))
+            entries.append((path, (t[0], t[1], t[2]), (im[0], im[1], im[2], q.GetReal())))
+        self._relay.publish('/tf', json.dumps(tf_payload(self.arm_base_path, entries, now)))
 
     def close(self):
         self.command_gate.hold()

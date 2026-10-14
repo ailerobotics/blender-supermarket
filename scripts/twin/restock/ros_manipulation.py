@@ -115,6 +115,10 @@ class RosManipulationRuntime:
             # A carton-verification (capture) failure must NOT stop the bridge or the mission:
             # the bridge keeps publishing so the host ESDF builds; the perception gate is just
             # not satisfied yet, and the stage timeout still bounds a genuinely stuck capture.
+            # The capture triggers a full-res render that can take > 1 s wall; bracket it with a
+            # heartbeat before and after so the ack's wall heartbeat gap stays ~the render duration.
+            if self.station is not None:
+                self.station.heartbeat()
             try:
                 packet = self.capture(simulation_time,self.source,self.destination)
                 if packet is not None:
@@ -129,6 +133,8 @@ class RosManipulationRuntime:
                     self.last_sensor_time = stamp
             except Exception as cap_exc:
                 self.latest = Result('running','observe',str(cap_exc))
+            if self.station is not None:
+                self.station.heartbeat()           # close the wall gap right after the capture render
             reply = self.graph.poll()
             if reply is not None:
                 status = reply.get('status')

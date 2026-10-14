@@ -84,6 +84,25 @@ def test_heartbeat_is_wall_paced_not_stage_paced():
     assert len(ch.sent) == n0 + 1
 
 
+def test_heartbeat_force_sends_to_bracket_a_long_step():
+    # heartbeat() forces an extra accepted command immediately (no wall-cadence gate) so a known-long
+    # capture render tick is bracketed and the ack's wall heartbeat gap stays ~the render duration.
+    ch = FakeChannel()
+    st = StationClient(ch, wall_clock=lambda c=itertools.count(100., .001): next(c))
+    st.begin('restock_camera_arm', now=5.0)                  # prepare -> _prepared
+    n0 = len(ch.sent)
+    st.heartbeat()
+    st.heartbeat()
+    assert len(ch.sent) == n0 + 2
+    assert all(c['action'] == 'heartbeat' for c in ch.sent[n0:])
+    seqs = [c['sequence'] for c in ch.sent[n0:]]
+    assert seqs == sorted(seqs) and len(set(seqs)) == 2      # strictly increasing
+    # no-op before a prepare has gone out for the active epoch
+    st2 = StationClient(FakeChannel(), wall_clock=lambda: 1.0)
+    st2.heartbeat()
+    assert st2.channel.sent == []
+
+
 def test_sequence_discipline_one_prepare_then_increasing_heartbeats_regardless_of_reply():
     # The ack accepts heartbeats once it has accepted the prepare and ignores a duplicate prepare
     # (seq<=last); so send exactly ONE prepare (seq 0) then heartbeats with a strictly increasing
