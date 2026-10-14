@@ -250,7 +250,15 @@ class ArmDepthSubprocessBridge:
         command = (f'set +u; source {runtime_env}; '
                    f'export ROS_DOMAIN_ID={int(domain)} ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST; '
                    f'exec {python} {ipc_script} serve {self._socket_path} {float(idle_timeout_s)}')
-        self._proc = subprocess.Popen(['bash', '-c', command])
+        # Spawn under a CLEAN base env, NOT the Isaac process env: Isaac loads its own bundled
+        # ("internal") jazzy rclpy/rmw and sets AMENT/PYTHONPATH/LD_LIBRARY_PATH to it; inheriting
+        # that and sourcing the host /opt/ros jazzy overlay on top mixes two ROS middlewares, so
+        # the subprocess's DDS publishers never reach the host (the no-GPU smoke worked precisely
+        # because it ran in a clean shell). Hand the overlay source a minimal env to build from.
+        clean_env = {k: os.environ[k] for k in ('HOME', 'USER', 'LOGNAME', 'TERM', 'DISPLAY')
+                     if k in os.environ}
+        clean_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        self._proc = subprocess.Popen(['bash', '-c', command], env=clean_env)
         self._writer = FrameWriter(self._socket_path)
 
     def publish(self, now):
