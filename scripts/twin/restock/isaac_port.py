@@ -144,33 +144,46 @@ class IsaacPort:
         odometry=Odometry((r.x,r.y,r.yaw),now,float(np.linalg.norm(rv)),float(rw[2]))
         navigation=nav_observation(scan,odometry,coupled=coupled,arm_transport=ready,
                                    articulation=articulation)
-        if self.tick in (1,120,300,600) and self.recorder is not None:
-            # Nav-coverage diagnostic across ticks: run coverage_certifies directly on the
-            # built observation for a grid of footprint radii, and record the forward-blind
-            # bearings, so a persistent insufficient_sensor_coverage can be localized.
+        if self.recorder is not None:
+            # Per-tick nav-coverage trace (JSONL): for every tick, evaluate the uncoupled
+            # gate's exact coverage probe (coverage_certifies at the real gate radius
+            # footprint.radius(False)+position_uncertainty) plus a bracket, and record the
+            # robot pose/heading and the forward-blind bearings. The previous sparse sampler
+            # (ticks 1/120/300/600) missed the failing window entirely because collect drives
+            # for a while before coverage flips, so the fail tick was never captured. One line
+            # per tick localizes exactly when/where insufficient_sensor_coverage first appears.
             try:
                 import json as _json, math as _math
                 from twin.navigation.core import coverage_certifies, sweep_extent
                 heading=odometry.pose[2]
                 field=navigation.coverage
-                stop=0.25*0.3+0.25*0.25/(2*0.4)  # v=max_speed
-                grid={}
-                for R in (0.55,0.65,0.75,0.9,1.1,1.3):
-                    rad=R+0.05
-                    swept=[(a,reach) for a,reach in field.beams
-                           if sweep_extent(wrap(a-heading),rad,stop)>rad+1e-9]
-                    blind=[round(_math.degrees(wrap(a-heading)),1) for a,reach in swept
-                           if reach<sweep_extent(wrap(a-heading),rad,stop)-1e-9]
-                    grid[R]=dict(certifies=coverage_certifies(navigation,heading,rad,stop),
-                                 swept=len(swept),blind=len(blind),blind_bearings_deg=blind[:20])
-                (self.recorder.directory.parent/f'scan-debug-{self.tick}.json').write_text(_json.dumps(dict(
-                    tick=self.tick,heading_deg=round(_math.degrees(heading),1),
-                    coverage_field_present=field is not None,
-                    legacy_coverage_radius=round(float(navigation.coverage_radius),3),
-                    unknown_count=sum(1 for u in scan.unknown if u),stop_distance=round(stop,3),
-                    per_radius=grid),indent=1)+'\n')
+                # Gate's measured stopping distance at the worst-case commanded speed and at
+                # the turn-in-place command (v=0 -> stop from residual measured speed only).
+                sp_drive=max(0.25,float(np.linalg.norm(rv)))
+                stop_drive=sp_drive*0.3+sp_drive*sp_drive/(2*0.4)
+                sp_turn=float(np.linalg.norm(rv))
+                stop_turn=sp_turn*0.3+sp_turn*sp_turn/(2*0.4)
+                unc=0.05  # Odometry.position_uncertainty default used in advance()
+                rec={}
+                for tag,R,stop in (('gate_drive',0.70,stop_drive),('gate_turn',0.70,stop_turn),
+                                   ('bracket_0p60',0.60,stop_drive),('bracket_0p90',0.90,stop_drive)):
+                    rad=R+unc
+                    blind=[round(_math.degrees(wrap(a-heading)),1) for a,reach in field.beams
+                           if sweep_extent(wrap(a-heading),rad,stop)>rad+1e-9
+                           and reach<sweep_extent(wrap(a-heading),rad,stop)-1e-9]
+                    rec[tag]=dict(rad=round(rad,3),stop=round(stop,3),
+                                  cert=coverage_certifies(navigation,heading,rad,stop),
+                                  nblind=len(blind),blind_deg=blind[:12])
+                line=_json.dumps(dict(tick=self.tick,t=round(now,3),
+                    x=round(r.x,3),y=round(r.y,3),yaw_deg=round(_math.degrees(heading),1),
+                    lin=round(float(np.linalg.norm(rv)),4),coupled=bool(coupled),
+                    unknown=sum(1 for u in scan.unknown if u),probe=rec))
+                with (self.recorder.directory.parent/'nav-trace.jsonl').open('a') as _f:
+                    _f.write(line+'\n')
             except Exception as _e:
-                try:(self.recorder.directory.parent/f'scan-debug-{self.tick}.err').write_text(repr(_e))
+                try:
+                    if self.tick==1:
+                        (self.recorder.directory.parent/'nav-trace.err').write_text(repr(_e))
                 except Exception: pass
         evidence=self.verification(now)
         if self.recorder is not None and self.tick%2 == 0:
