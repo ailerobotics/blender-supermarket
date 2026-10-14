@@ -1751,3 +1751,25 @@ above the tow demand; keep the caster wheels and cart damping as-is (rest stabil
 after friction, raise MobileController maxForce (80 -> ~150 N·m). NOT applied blind: it changes tow
 physics and should be validated in a run (and the navigation lane, resuming 11:00, owns deeper tow
 dynamics). Masses/damping left unchanged (physically faithful).
+
+### 2026-10-14 — run-82 (final tonight): seeded IK retry works; two residual seams
+
+pose_goal=False + hardened KDL->cuMotion joint-space path. Furthest stage: COLLECT/approach. The
+seeded-IK retry IS exercised — 5 MoveGroup goals attempted across seeds (vs run-80's single wrapped
+branch), so the stow-first seeding + nearest-branch normalise + retry-next-seed all run. BUT cuMotion
+rejected every seeded c-space target (>=1 "Invalid c-space position: self collision detected",
+"MoveGroup planning completed with success: false"). So the grasp residual is NOT branch selection
+(now handled) — it is cuMotion's self-collision model rejecting the arm-mount region for this XRDF,
+i.e. the same cuMotion/XRDF issue the host verdict flagged for NVIDIA-side work at 11:00.
+
+Two residual seams for the next session:
+1. **Isaac status watchdog too tight for the retry.** Mission failed `host process/status watchdog`
+   (IsaacRosGraph 5 s WALL) during the render-paced ~5-attempt IK/plan retry. This is the status
+   analogue of the PR61 sensor-watchdog fix: widen / measure it in node-clock (sim) time so the
+   retry has room. On this branch (scripts/twin/restock_manipulation/isaac_ros_graph.py).
+2. **Wheel-friction material bound 0 colliders.** `WHEEL_TRACTION static=1.0 bound=0` — the
+   name-search for 'left_wheel'/'right_wheel' collider prims found none (wheel colliders are named/
+   nested differently in the composed USD). Fix the prim lookup so the traction tune actually binds;
+   outbound was not reached this run so it was untested regardless. No tow speed, no video.
+
+Grasp blocked on host-lane cuMotion/XRDF (11:00); parking per Firstmate (allowance gate).
