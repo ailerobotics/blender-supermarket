@@ -91,7 +91,10 @@ repo's `scenes/`, `export/` or `renders/`.
   observed empty frame and persists the baseline with provenance; the mission loads it by
   station at boot via `build_sensing`'s `config['commissioning_dir']`, refusing a missing
   one (never fabricated). Choreography CLI + runbook: `scripts/run_restock_commissioning.py`
-  and RUNBOOK §13a.
+  and RUNBOOK §13a. The collect stage senses the pick carton with the FIXED `source` camera
+  (not the arm eye-in-hand, which is masked-depth only): `restock_camera/source_target.py`
+  `build_source_target_provider` → `source_target_provider(now)` gives the handling-unit pose
+  in the station frame + baseline provenance (RUNBOOK §13b); the arm gets a reprojected target.
 - **Mobile navigation**: `scripts/twin/navigation/` and
   [docs/restock_navigation.md](docs/restock_navigation.md) define sensor, footprint
   and goal contracts; RUNBOOK §11 has CPU checks and isolated Nav2 launch. Coupled
