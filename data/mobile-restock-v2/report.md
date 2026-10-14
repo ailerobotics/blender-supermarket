@@ -941,3 +941,34 @@ manipulation job (it needs a built ESDF + a cuMotion plan, which takes longer th
 watchdog to warm). NEXT (next session): the host manip-reply / ESDF-warm handshake vs the
 IsaacRosGraph watchdog, and the IsaacCartonSensors slot `support_view` config. The masked-depth
 transport itself is proven (focused probe, 248,984 voxels) and now drives the live mission.
+
+### The slot `support_view` gate is architectural, not a config typo (diagnosis)
+
+Tracing the wiring: the manipulation grasp capture (`RosManipulationRuntime` → `capture` →
+`IsaacCartonSensors.capture`, built in `isaac_factory._build_runtime`) runs on a **bespoke arm
+eye-in-hand camera** (`front_camera_frame/arm_camera`) and is constructed with **no
+`context_provider`** and with the runtime-config station `slots` passed verbatim — those slots
+are placeholder id tags `{"id":"source"}` / `{"id":"shelf"}`, not `SlotView` objects, so
+`capture` hits the `elif self.slots and all(s.support_view ...)` branch and raises
+`'dict' object has no attribute support_view`.
+
+The only **registered support views / context_providers** in the system are built by the sensing
+lane (`sensing_sources.build_sensing_sources` → `rendered_context`), keyed by the **fixed design
+station cameras** (`source`/`shelf`/`cart`, see `restock_camera/config.py`: distinct intrinsics
+fx 2000/1500/1050, 2560×1920). Those feed the camera lane's `sensing_factory` capture, which in
+`isaac_bundle.create` is wired **only into the `InventoryVerifier` (the `verify` action)** — not
+into the manipulation grasp path. So:
+
+- **verify** → station-camera capture + context_provider (correct, registered).
+- **collect/transfer grasp** → arm-camera capture, no registration → the error.
+
+The arm eye-in-hand camera's role is the **masked-depth bridge to the host nvblox** (proven);
+it has no support design, and its intrinsics would not match a station camera's `support_view`
+(capture line ~117 `np.allclose(intr,[k.fx,...])`), so it cannot simply borrow a station
+context_provider. A correct fix wires the **station camera + its context_provider** into the
+manip capture path (plumb `assembly.sensing_sources['context_providers']` into the manip runtime
+and have `configure_station` select the station camera + provider), OR registers an arm-camera
+support view. Both are multi-file and, because the CPU contract tests inject `_builder`/`_runtime`,
+**not offline-validatable** — only a GPU boot proves the real wiring. Combined with the still-open
+host 5 s manip-reply/ESDF-warm watchdog (measured in parallel by the host worker), a clean
+collect+couple proof inside this task's window was not attainable; escalated to Firstmate.
