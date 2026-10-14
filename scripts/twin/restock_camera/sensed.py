@@ -171,7 +171,16 @@ def register_marker(depth, marker_pixels, k, base_from_camera, *, marker_id,
     distance = np.linalg.norm(actual-np.asarray(base_from_camera)[:3,3],axis=1).max()
     error = depth_error_m + residual + .75*distance/min(k.fx,k.fy)
     span = max(side_m,float(np.linalg.norm(np.ptp(model[:,:2],axis=0))))
-    layout_id = hashlib.sha256(model.tobytes()+repr(marker_ids).encode()).hexdigest()
+    # Quantize the metric model to sub-nanometre precision before hashing so the layout id is
+    # REPRODUCIBLE across processes: a commissioned baseline and the live mission build the same
+    # design geometry but differ by float ULPs (different computation order / contiguity), which a
+    # raw float64 byte hash turns into a spurious "changed rigid-support geometry" mismatch. 9
+    # decimals (1 nm) preserves genuine layout identity while killing that ULP noise.
+    layout_id = hashlib.sha256(np.round(np.asarray(model,float),9).tobytes()+repr(marker_ids).encode()).hexdigest()
+    import os as _os
+    if _os.environ.get('RESTOCK_SUPPORT_DIAG'):
+        print('REGMARK side_m=%r marker_ids=%r model_shape=%s model_sum=%.9f layout=%s' % (
+            side_m, marker_ids, model.shape, float(np.asarray(model).sum()), layout_id), flush=True)
     return MarkerRegistration(marker_id,support_id,revision,_matrix_tuple(pose),
                               float(error),float(2*error/span),evidence,marker_ids,layout_id)
 
@@ -355,6 +364,14 @@ class RegisteredSupport:
                 or registration.revision != g.revision or e.camera_id != g.camera_id
                 or registration.layout_id != g.marker_layout_id
                 or e.camera_revision != g.camera_revision or k != g.intrinsics):
+            import os as _os
+            if _os.environ.get('RESTOCK_SUPPORT_DIAG'):
+                print('SUPPORT_GEOM_MISMATCH invalid=%r support=%r/%r marker=%r/%r rev=%r/%r '
+                      'cam=%r/%r layout=%r/%r camrev=%r/%r k_eq=%s' % (
+                      self.invalid_reason, registration.support_id, g.support_id,
+                      registration.marker_id, g.marker_id, registration.revision, g.revision,
+                      e.camera_id, g.camera_id, registration.layout_id, g.marker_layout_id,
+                      e.camera_revision, g.camera_revision, k == g.intrinsics), flush=True)
             raise ValueError('expired, invalidated or changed rigid-support geometry')
         if self.last_frame is not None:
             prior = self.last_frame
