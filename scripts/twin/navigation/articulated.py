@@ -428,26 +428,53 @@ class ArticulatedController(Controller):
             uncertainty=max(.10,uncertainty)
         return planner.plan(state,self.goal,obs.obstacles,uncertainty,self.goal_articulation)
 
-    def _sweep_coverage_ok(self,odom,obs,state,stop,k,uncertainty):
-        """Coupled braking-sweep coverage for a self-occluding train.
+    def _coverage_ok(self,odom,obs,radius,stop_distance,v,w):
+        """Uncoupled braking-sweep coverage (the reference base path via super()).
 
-        Subtracts the current occupied envelope from the braking sweep and requires
-        non-self observation only for the newly swept forward crescent in the direction
-        of travel (`CoverageField.certifies_sweep`); the lateral extent of the capsule is
-        covered by the footprint and the rear is never swept. The envelopes carry the
-        0.05 m geometry margin and the localization inflation, and the swept hull carries
-        the full cart sweep at the commanded curvature, so a turn's outward lateral bulge
-        still demands observation. Fixture observations without a coverage field fall back
-        to the legacy scalar reach.
+        Applies the same occupied-envelope subtraction as the coupled gate, with the
+        base-only footprint: self-occluded side and rear beams that only enter the
+        swept capsule as the heading changes are exempt (footprint-covered), while a
+        genuinely unobserved forward or lateral-bulge zone still refuses. Fixtures with
+        no coverage field fall back to the legacy scalar reach.
         """
-        field=getattr(obs,'coverage',None)
-        if field is None:
-            return obs.coverage_radius>=self.footprint.radius(True)+uncertainty+stop
+        if getattr(obs,'coverage',None) is None:
+            return obs.coverage_radius>=radius+stop_distance
+        k=w/v if v>1e-6 else 0.0
+        return self._envelope_coverage_ok(odom,obs,stop_distance,k,
+                                          max(.02,odom.position_uncertainty),coupled=False)
+
+    def _envelope_coverage_ok(self,odom,obs,stop,k,uncertainty,*,coupled):
+        """Certify the braking sweep by subtracting the current occupied envelope.
+
+        Builds the convex occupied envelope and its braking sweep at the commanded
+        speed/curvature (base-only when uncoupled, base + cart when coupled) and requires
+        non-self observation only for the newly swept forward crescent in the direction of
+        travel (`CoverageField.certifies_sweep`). The lateral extent of the capsule is
+        covered by the footprint and the rear is never swept; the envelopes carry the
+        0.05 m geometry margin plus the localization inflation, and the swept hull carries
+        the full (cart) sweep at the commanded curvature, so a turn's outward lateral bulge
+        still demands observation.
+        """
+        field=obs.coverage
         margin=self.world.margin+uncertainty
-        end=advance(state,stop,k,self.spec)
-        occupied=occupied_envelope(*state.bodies(self.spec),spec=self.spec,margin=margin)
-        swept=swept_envelope([state.bodies(self.spec),end.bodies(self.spec)],self.spec,margin=margin)
-        travel=(math.cos(odom.pose[2]),math.sin(odom.pose[2]))
+        yaw=odom.pose[2]
+        if coupled:
+            state=TrainState(*odom.pose,wrap(yaw-obs.articulation))
+            end=advance(state,stop,k,self.spec)
+            occupied=occupied_envelope(*state.bodies(self.spec),spec=self.spec,margin=margin)
+            swept=swept_envelope([state.bodies(self.spec),end.bodies(self.spec)],
+                                 self.spec,margin=margin)
+        else:
+            robot=Pose2(odom.pose[0],odom.pose[1],yaw)
+            if abs(k)<1e-9:
+                end=Pose2(odom.pose[0]+stop*math.cos(yaw),odom.pose[1]+stop*math.sin(yaw),yaw)
+            else:
+                eyaw=yaw+k*stop
+                end=Pose2(odom.pose[0]+(math.sin(eyaw)-math.sin(yaw))/k,
+                          odom.pose[1]-(math.cos(eyaw)-math.cos(yaw))/k,eyaw)
+            occupied=occupied_envelope(robot,None,spec=self.spec,margin=margin)
+            swept=swept_envelope([(robot,None),(end,None)],self.spec,margin=margin)
+        travel=(math.cos(yaw),math.sin(yaw))
         return field.certifies_sweep(occupied,swept,travel,geometry_margin=self.world.margin)
 
     def gate_velocity(self,now,odom,obs,linear,angular):
@@ -480,8 +507,13 @@ class ArticulatedController(Controller):
         stop=speed*delay+speed*speed/(2*self.brake_acceleration)
         uncertainty=max(.10 if temporal else .02,odom.position_uncertainty)
         k=w/v if v>1e-6 else 0.0
-        if temporal is None and not self._sweep_coverage_ok(odom,obs,state,stop,k,uncertainty):
-            return Result(reason='insufficient_sensor_coverage')
+        if temporal is None:
+            if getattr(obs,'coverage',None) is None:
+                ok=obs.coverage_radius>=self.footprint.radius(True)+uncertainty+stop
+            else:
+                ok=self._envelope_coverage_ok(odom,obs,stop,k,uncertainty,coupled=True)
+            if not ok:
+                return Result(reason='insufficient_sensor_coverage')
         if not self.world.valid(state,obs.obstacles,uncertainty):
             return Result(reason='obstacle_stop')
         predicted=self.world.rollout(state,stop,k,obs.obstacles,uncertainty)
