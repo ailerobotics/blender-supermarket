@@ -1587,3 +1587,19 @@ OmniGraph SUBSCRIBERS are as unreliable as the publishers were. FIX = mirror the
 relay the RETURN topics host->Isaac (station/status, manipulation/status, manipulation/stop,
 gripper/enable) through a SUBSCRIBING host-DDS subprocess so the StationClient/IsaacRosGraph read
 them promptly (StationClient then switches to heartbeats before the ack's 1 s guard).
+
+### 2026-10-14 — fix#1 WORKS (ack accepts heartbeats, sustained warming); residual = 1s WALL guard + collision_time
+
+run-72 (merged PR58; fix#1 heartbeat discipline; /clock+tf+joints relay; unique node names). Big
+progress: the ack ACCEPTS heartbeats now -- /station/status sequence advances 0->3->6->...->22 and
+state holds 'warming' across many snapshots (0.25..0.40+ ack-sim), vs the single 'warming' before.
+/tf reaches the host (topic info Publisher count 2, incl restock_transport_pub). PR58 names the
+fault exactly: 'parked heartbeat lost: wall gap 1.85 s' -> the WALL guard (c), a single ~1.85 s
+render tick (first collect capture at MANIP_START) exceeded the ack's 1 s wall gap between accepted
+heartbeats; the StationClient cannot send a heartbeat mid-render-tick. This is the wall-bound host
+timeout Firstmate flagged (msg158) -- it does NOT stretch with the render-paced /clock. collision_time
+stayed -1: during the ~5 s-wall warming the ack never completed an ESDF poll (no 'incorp reject'
+lines; nvblox only reached 'Allocating space for last depth view'), so warm hit its cap and the
+capture saw no clearance evidence. Two residuals: (a) relax the ack's 1 s WALL guard for render
+spikes (host lane) OR a mission-side background heartbeat thread (decoupled from mission ticks);
+(b) why collision_time never advances (ack endpoints-readiness / ESDF poll; host lane).
