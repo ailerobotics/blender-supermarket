@@ -160,7 +160,11 @@ class RuntimeAdapter:
                 p.observation_id == self.last_packet_id or
                 not math.isfinite(p.articulation) or
                 not math.isfinite(p.simulation_time) or not 0 <= self.time-p.simulation_time <= .1):
-            raise ValueError('missing, repeated, stale or unsupported sensor packet')
+            raise ValueError(
+                'missing, repeated, stale or unsupported sensor packet '
+                f'[source={p.source!r} obs={p.observation_id!r} prev={self.last_packet_id!r} '
+                f'articulation={p.articulation!r} sim_time={p.simulation_time!r} '
+                f'adapter_time={self.time!r} age={self.time-p.simulation_time!r}]')
         self.last_packet_id = p.observation_id
         if self.phase == 'navigate':
             r = self.nav.step(dt, p)
