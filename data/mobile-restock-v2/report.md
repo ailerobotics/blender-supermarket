@@ -1514,3 +1514,22 @@ update on a separate topic. Residual skew ~0.03 s, well below Firstmate's 0.3 s 
 threshold, so handled on this branch: StationClient.publish_lag=0.1 past-dates every command stamp
 by ~6 clock periods (<< the 0.5 s window) to a /clock value the ack is sure to already hold, so
 ack now() >= stamp. CPU-tested. Host ack 0.5 s contract untouched.
+
+### 2026-10-14 — ack ACCEPTS prepare (warming) now; residual = /clock RATE mismatch (cross-lane)
+
+run-68 (wall-paced heartbeats + publish_lag + /clock-domain stamps): the ack now ACCEPTS the
+prepare -- it reaches state 'warming' -- a real milestone. It then faults 'station process or
+parked heartbeat lost'. Measured root cause: a CLOCK-RATE mismatch at the station boundary.
+- The ack's now() (its /clock) advances at ~1x realtime: station/status stamps 0.116 -> 5.2 over
+  ~5.15 s wall (0.05 per 50 ms timer tick).
+- The mission's stage clock (native_transport stage_time = tick*dt, which the heartbeats stamp
+  with) advances at ~0.03x: dt=0.0167 per ~0.58 s render-bound mission step (warm ran 300 ticks
+  over 173 s wall).
+So the ack's SIM heartbeat guard `now - last_heartbeat > 0.5` trips ~0.6 s wall after the prepare:
+the ack's now races ahead at 1x while each heartbeat only bumps last_heartbeat by the slow stage
+step. Wall cadence is fine now (station/command every ~0.4-0.8 s wall, was ~4 s). The ack's /clock
+is therefore NOT native_transport's render-paced stage time -- it advances at realtime, from a
+source outside this lane. This is the /clock-source / heartbeat-bound contract call reserved for
+Firstmate + the host lane. Options: stamp heartbeats in the ack's reported-clock domain (track the
+ack's now from its replies), or the host bounds the sim heartbeat against a render-paced /clock,
+or native_transport's /clock becomes the ack's single sim-time source.
