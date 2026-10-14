@@ -95,6 +95,11 @@ repo's `scenes/`, `export/` or `renders/`.
   (not the arm eye-in-hand, which is masked-depth only): `restock_camera/source_target.py`
   `build_source_target_provider` → `source_target_provider(now)` gives the handling-unit pose
   in the station frame + baseline provenance (RUNBOOK §13b); the arm gets a reprojected target.
+  The transfer stage mirrors this with the FIXED `shelf` camera + `G3_back_s2` baseline:
+  `restock_camera/shelf_target.py` exposes the empty-slot placement target (`shelf_target_provider`)
+  and the post-placement verification (`shelf_verification_provider`) when
+  `config['transfer_shelf_location']` is set — contract `data/sim-restock-camera-v2/shelf-contract.md`,
+  RUNBOOK §13c.
 - **Mobile navigation**: `scripts/twin/navigation/` and
   [docs/restock_navigation.md](docs/restock_navigation.md) define sensor, footprint
   and goal contracts; RUNBOOK §12 has CPU checks and isolated Nav2 launch. Coupled

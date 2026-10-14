@@ -788,6 +788,25 @@ integration report's "Collect sensing contract". CPU tests:
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_source_target.py -q
 ```
 
+### 13c. Transfer shelf sensing: slot target + post-placement verify
+
+The transfer stage places the carton into the shelf slot and then confirms it, both sensed with
+the FIXED `shelf` station camera against its commissioned `G3_back_s2` baseline (the arm camera
+is masked-depth/fine-alignment only). `twin.restock_camera.shelf_target` exposes
+`build_shelf_target_provider(...)` → `shelf_target_provider(now) -> ShelfSlotTarget | None` (the
+empty-slot placement target: `pose_station` in the map/station frame, `free_dimensions`, observed
+`clear` flag, `stamp`, baseline `provenance`) and `build_shelf_verification_provider(...)` →
+`verify(now, expected_sku, expected_pose) -> ShelfVerification` (post-placement: `present`,
+`within_tolerance`, `observed_sku`, `observed_pose`, position/yaw error). Both inherit the live
+0.5 s acquisition-to-use bound and never fabricate. `build_sensing` exposes both when
+`config['transfer_shelf_location']` is set. The shelf markers decode at the mission dock at full
+resolution (9.9 / 11.9 px/module, unoccluded) and the baseline covers `G3_back_s2` = the mission's
+`job.shelf_id`. Contract: `data/sim-restock-camera-v2/shelf-contract.md`. CPU tests:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_shelf_target.py -q
+```
+
 ## 14. Controlled static-scene navigation mapper commissioning
 
 This is an uncommissioned integration handoff, not a moving-mission readiness
