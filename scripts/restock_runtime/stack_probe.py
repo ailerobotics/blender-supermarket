@@ -123,20 +123,23 @@ def main():
         return fut.result() if fut.done() else None
 
     # --- synthetic masked-depth source (stands in for the integration Isaac bridge) ---
-    # A flat fronto-parallel obstacle plane at 1.0 m seen by a down-looking camera 1.5 m
-    # above ur_base_link lands a ~1.6x1.2 m horizontal patch at z=0.5 m, well inside the
-    # workspace. Published 32FC1 on camera/masked_depth + camera/masked_depth/camera_info
-    # with a static camera->ur_base_link TF: exactly the agreed Option-B contract that the
-    # object_segmenter republishes as world_depth for nvblox to fuse.
-    CAM_FRAME, W, H, FX, FY = 'restock_camera_0', 160, 120, 100.0, 100.0
-    CX, CY, DEPTH_M = W / 2.0, H / 2.0, 1.0
+    # A wide-FOV down-looking camera 2.0 m above ur_base_link sees a flat floor at z=-0.9
+    # (2.9 m away, under the 5 m max integration distance). nvblox carves the whole frustum
+    # FREE from the camera down to the floor, so the robot arm's entire body envelope becomes
+    # observed-free and cuMotion's start pose is not in (pessimistic-unobserved) world
+    # collision, while the floor remains an observed obstacle so the ESDF is non-empty.
+    # Published 32FC1 on camera/masked_depth + camera/masked_depth/camera_info with a static
+    # camera->ur_base_link TF: exactly the agreed Option-B contract that the object_segmenter
+    # republishes as world_depth for nvblox to fuse.
+    CAM_FRAME, W, H, FX, FY = 'restock_camera_0', 200, 200, 60.0, 60.0
+    CX, CY, DEPTH_M = W / 2.0, H / 2.0, 2.9
     depth_pub = node.create_publisher(Image, NS + '/camera/masked_depth', 10)
     info_pub = node.create_publisher(CameraInfo, NS + '/camera/masked_depth/camera_info', 10)
     esdf_cli = node.create_client(EsdfAndGradients, NS + '/nvblox_node/get_esdf_and_gradient')
     tf_static = StaticTransformBroadcaster(node)
     _tf = TransformStamped()
     _tf.header.frame_id, _tf.child_frame_id = FRAME, CAM_FRAME     # ur_base_link -> camera
-    _tf.transform.translation.z = 1.5
+    _tf.transform.translation.z = 2.0
     _tf.transform.rotation.x, _tf.transform.rotation.w = 1.0, 0.0  # 180 deg about X -> look down
     tf_static.sendTransform(_tf)
     _depth_bytes = np.full((H, W), DEPTH_M, dtype=np.float32).tobytes()
@@ -167,10 +170,10 @@ def main():
             tick_clock(); rclpy.spin_once(node, timeout_sec=0.02)
 
     def esdf_observed():
-        """Observed-voxel census over a focused AABB around the synthetic plane."""
+        """Observed-voxel census over a focused AABB spanning the floor + carved free space."""
         req = EsdfAndGradients.Request()
         req.update_esdf, req.visualize_esdf, req.use_aabb, req.frame_id = True, False, True, FRAME
-        req.aabb_min_m.x, req.aabb_min_m.y, req.aabb_min_m.z = -0.8, -0.8, 0.0
+        req.aabb_min_m.x, req.aabb_min_m.y, req.aabb_min_m.z = -0.8, -0.8, -1.0
         req.aabb_size_m.x, req.aabb_size_m.y, req.aabb_size_m.z = 1.6, 1.6, 1.2
         resp = wait_future(esdf_cli.call_async(req), 30.0)
         if resp is None:
