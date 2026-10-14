@@ -67,6 +67,23 @@ def test_publish_lag_past_dates_the_command_stamp_for_a_trailing_ack_clock():
     assert 0 <= (42.0 - 0.03) - ch.sent[-1]['stamp'] <= 0.5
 
 
+def test_heartbeat_is_wall_paced_not_stage_paced():
+    # The ack faults if no accepted command arrives within 1 s WALL, but stage time advances slowly
+    # under render-heavy stepping. Heartbeats must fire on WALL advance even when stage barely moves.
+    ch = FakeChannel()
+    wall = {'t': 1000.0}
+    stage = {'t': 5.0}
+    st = StationClient(ch, wall_clock=lambda: wall['t'], stage_clock=lambda: stage['t'])
+    st.begin('restock_camera_arm', now=0.0)                  # first send (prepare)
+    n0 = len(ch.sent)
+    stage['t'] += 0.001; wall['t'] += 0.4                    # stage ~still, wall past the 0.3 gate
+    st.tick(0.0, parked=True)
+    assert len(ch.sent) == n0 + 1                            # heartbeat fired on wall advance
+    stage['t'] += 0.001; wall['t'] += 0.1                    # wall under the gate -> no send
+    st.tick(0.0, parked=True)
+    assert len(ch.sent) == n0 + 1
+
+
 def test_ack_accepts_stage_stamped_prepare_within_half_second_and_refuses_beyond():
     # Firstmate contract: a prepare stamped from the stage clock clears the ack's 0.5 s freshness
     # guard at 0 and 0.4 s of skew (ack /clock now >= stamp) and is refused at 0.6 s.

@@ -4,6 +4,10 @@ import time
 
 from twin.restock_manipulation.ros_adapter import require_sim_domain
 
+# Wall seconds between station heartbeats. Must stay well under the ack's 1 s wall heartbeat
+# timeout; at the render-paced mission tick (~0.5-0.7 s wall) this sends on every tick.
+_HEARTBEAT_WALL_S = 0.3
+
 
 class JsonChannel:
     def __init__(self, *, root, publish_topic, subscribe_topic, host_control=None):
@@ -67,6 +71,12 @@ class StationClient:
         # -- which the ack's strict `0 <= now - stamp` lower bound rejects. publish_lag (a few clock
         # periods, << the 0.5 s window) absorbs that delivery skew while staying in the /clock domain.
         self.publish_lag=float(publish_lag)
+        # Heartbeat cadence is WALL-paced, not stage-paced: the ack faults if no accepted command
+        # arrives within 1 s WALL (station process/parked-heartbeat guard), but stage time advances
+        # slowly under render-heavy stepping (~0.1 stage-s was ~4 s wall -> the ack timed out). Send
+        # a heartbeat whenever >= HEARTBEAT_WALL_S of wall time has passed (every mission tick at the
+        # render pace, comfortably under the ack's 1 s), independent of how slowly stage advances.
+        self.last_wall_send=-1.
         self.epoch=0
         self.sequence=0
         self.active=False
@@ -110,13 +120,15 @@ class StationClient:
             raise RuntimeError(self.latest.get('reason','host station failed'))
         if self.wall_clock()-(self.last_reply or self.started)>10.:
             raise RuntimeError('station supervisor heartbeat unavailable')
-        if now-self.last_send>=.1 or self.last_send<0:
+        wall=self.wall_clock()
+        if self.last_send<0 or wall-self.last_wall_send>=_HEARTBEAT_WALL_S:
             acknowledged=self.latest is not None
             self.channel.publish(dict(action='heartbeat' if acknowledged else 'prepare',
                 epoch=self.epoch,sequence=self.sequence if acknowledged else 0,
                 stamp=now-self.publish_lag,parked=True,camera_frame=self.camera_frame))
             self.sequence+=1
             self.last_send=now
+            self.last_wall_send=wall
 
     def ready(self,now):
         if self.stage_clock is not None:
