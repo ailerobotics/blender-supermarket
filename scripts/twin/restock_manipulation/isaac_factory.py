@@ -61,6 +61,7 @@ class ManipConfig:
     voxel_dims: tuple
     voxel_size: float
     grasp_mode: str
+    pose_bridge_root: str = ''    # filesystem root of the tray-perception pose bridge
 
 
 def parse_manipulation_config(config, job_sku):
@@ -121,9 +122,13 @@ def parse_manipulation_config(config, job_sku):
     if not isinstance(vs, (int, float)) or not math.isfinite(vs) or not 0 < vs <= 0.05:
         raise ValueError('voxel_size must be in (0, 0.05]')
 
+    # Top-level runtime-config field (not under 'manipulation'): the tray-perception
+    # package root IsaacCartonSensors loads for depth geometry. Optional at parse (the
+    # pure CPU contract); the live host-path builder requires it.
+    pose_bridge_root = config.get('pose_bridge_root', '')
     return ManipConfig(profiles=profiles, stations=stations, shelfbot_root=shelfbot_root,
                        walls=walls, voxel_dims=tuple(float(v) for v in vd), voxel_size=float(vs),
-                       grasp_mode=next(iter(modes)))
+                       grasp_mode=next(iter(modes)), pose_bridge_root=pose_bridge_root)
 
 
 class _ArticulationParked:
@@ -207,7 +212,9 @@ def _build_runtime(*, app, assembly, params, output):
     gripper_path = '/RestockPanelGripper'
     contact = NativePanelContact(stage, gripper_path)
     source = params.stations['source']
-    sensors = IsaacCartonSensors(camera, pose_bridge_root=paths['ur_base_link'],
+    if not params.pose_bridge_root:
+        raise ValueError('runtime-config pose_bridge_root (tray-perception root) required')
+    sensors = IsaacCartonSensors(camera, pose_bridge_root=params.pose_bridge_root,
                                  profiles=params.profiles, slots=source['slots'],
                                  base_from_camera=np.asarray(source['base_from_camera'], float))
     parked = _ArticulationParked(assembly.robot)
