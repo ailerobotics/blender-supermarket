@@ -1002,3 +1002,71 @@ staged, or a separate staged empty frame) plus per-frame arm-camera marker frami
 That is multi-session and not provable by this task's 13:00 window. Re-escalated to Firstmate with
 the recommendation to bank the proven masked-depth transport chain + the run-41/host-3.30 s gate,
 and scope the commissioning build as its own task.
+
+## Banked state (2026-10-14) — what is proven, the host figure, and the commissioning contract
+
+Firstmate's decision (2026-10-14 11:42): **bank**. Fabricating a baseline is out. This is the
+authoritative summary of where the mission stands and what the next task (camera-lane
+commissioning) must deliver.
+
+### Proven, banked
+
+- **Masked-depth arm-camera transport, end to end.** Focused probe
+  `scripts/restock_runtime/run_transport_probe.sh` (kept as a reusable regression) drives the
+  out-of-Isaac rclpy subprocess bridge (`twin/restock/masked_depth.py` `ArmDepthSubprocessBridge`
+  + `twin/restock/masked_depth_ipc.py` over a Unix socket, host DDS config) and asserts on the
+  host side: nvblox integrated **248,984 observed voxels**; masked depth published at **~1.63 Hz**;
+  depth + camera_info share one stamp (32FC1, frame `restock_camera_arm`); `tf2_echo` resolves the
+  optical frame. The same bridge now runs inside the live mission (runs 38–41) and publishes every
+  sensing tick, independent of carton verification (the Firstmate structural fix: a capture failure
+  is non-fatal, `Result('running','observe')`; only a host emergency via `graph.poll` is fatal).
+- **Mission path through collect-execute.** nav coverage (PR#49) and the parked gate
+  (net-pose-displacement over 0.25 s, bias-free, replacing the TGS instantaneous-velocity bias that
+  stalled runs 32–39) both land; collect navigates to goal, parks, and reaches `MANIP_START`.
+- **Host planner latency fits the watchdog.** Cold first job on this GPU measured **3.30 s**
+  (ESDF ready 1.04 s + first cuMotion reply 2.26 s) — inside the IsaacRosGraph 5 s watchdog by
+  1.7 s **without the renderer co-resident** (host worker, PR#51 instrumentation-only, merged). No
+  IsaacRosGraph timing change is needed unless the contended figure lands near 5 s.
+
+### The one remaining gate: the grasp-perception support_view baseline (commissioning)
+
+The mission's collect grasp needs the arm-camera `IsaacCartonSensors.capture` to emit a sensed
+target (observations + `sensed_target_bboxes`) so the host object_segmenter can carve the pick
+target from the ESDF and cuMotion can plan. Capture cannot run without a **commissioned
+support_view**, which the mission never provides. The precise contract the next task must satisfy:
+
+- **What a support_view baseline is.** A `restock_camera.sensed.SupportView` carried on a
+  `RegisteredSupport` tracker: the metric support plane geometry (support quad + witness quad,
+  `support_z`, required `.62×.42` footprint, calibration id, lifetime) calibrated by
+  `calibrate_rigid_support(depth, support_quad_uv, witness_quad_uv, intrinsics, transform,
+  registration, ...)` from an observed **empty** support in real RGB-D, together with the
+  per-frame fresh marker registration (`register_marker`, decoded QR fiducials) that re-locates it.
+  Design geometry is explicitly **not** a substitute (`restock_camera/config.py` warns "nominal
+  geometry is design only; select support/witness quads from empty RGB-D"), per the standing
+  sensor-provenance invariant.
+- **Who produces it.** `restock_camera.binding.RenderedSupportContext`: `.commission(frame, now,
+  empty_polygons, lifetime_s=...)` acquires the baseline and sets each `slot.tracker`; thereafter
+  `RenderedSupportContext.__call__(frame, now)` returns a `CameraContext` of `SlotView`s (each with
+  a live `support_view`). Until commissioned, `__call__` raises *"observed empty commissioning
+  baseline is required"*. These providers are built by `twin/restock/sensing_sources.py`
+  (`build_sensing_sources` → `rendered_context`), keyed by **design camera id**.
+- **What the mission must load/do.** A commissioning phase that, per station camera, captures an
+  **empty** support frame, selects the support + witness quads from that measured RGB-D, calls
+  `.commission(...)`, and retains the trackers (respecting `lifetime_s`) into the mission. `commission`
+  is currently invoked **only** in `tests/test_restock_sensed_views.py` — it is wired into no
+  mission path, so this phase must be added to the bundle/runtime and its baselines loaded before
+  the first capture of each station it serves.
+- **Which stations need it, and when.**
+  - **collect** → the **source** station (bin `backstock_00`). The arm eye-in-hand camera is the
+    sensor on the collect grasp path; it has no registered support view and no design camera entry.
+    Note the source is **occupied at t=0** (the `juice_orange` unit is staged there; only the
+    destination shelf is `target_initially_depleted`), so its empty baseline must be acquired
+    **before the carton is staged** (or from a separate staged-empty frame) — it cannot be
+    commissioned mid-collect.
+  - **transfer/place** → the **shelf** destination (`G3_back_s2`), which *is* initially depleted, so
+    an empty shelf baseline is acquirable in-scene.
+  - **verify** → the station cameras already wired into `InventoryVerifier` via the sensing-lane
+    `capture` (fixed `source`/`shelf`/`cart` design cameras). These, too, are built but never
+    commissioned, so the verify path has likewise never run live; the commissioning phase must cover
+    whichever stations the verify action reads. Keep the fixed station views for verify untouched by
+    any arm-camera change (Firstmate constraint).
