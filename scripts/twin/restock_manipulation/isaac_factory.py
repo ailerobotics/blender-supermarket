@@ -253,17 +253,37 @@ class CollectTargetBridge:
     def _reproject(self, target):
         import numpy as np
         from twin.restock.collect_target import reproject_carton_roi
+        self._roi_reason = None
         profile = self.profiles.get(target.sku)
         if profile is None:
+            self._roi_reason = f'no-profile sku={target.sku!r} keys={sorted(self.profiles)}'
             return None
         frame = self.arm_camera.get_current_frame()
         depth = frame.get('distance_to_image_plane') if isinstance(frame, dict) else None
         if depth is None:
+            self._roi_reason = f'no-depth frame_keys={sorted(frame) if isinstance(frame, dict) else type(frame).__name__}'
             return None
         m = np.asarray(self.arm_camera.get_intrinsics_matrix(), float)
         intr = (m[0, 0], m[1, 1], m[0, 2], m[1, 2])
-        return reproject_carton_roi(target.pose_station, profile.dimensions,
-                                    self._arm_base_from_camera(), intr, np.asarray(depth).shape)
+        b2c = self._arm_base_from_camera()
+        roi = reproject_carton_roi(target.pose_station, profile.dimensions,
+                                   b2c, intr, np.asarray(depth).shape)
+        if roi is None:
+            # distinguish "behind camera" from "off image": re-run the projection summary for the
+            # carton origin, reporting its camera-frame z and (if in front) its pixel coordinate.
+            pose = np.asarray(target.pose_station, float)
+            c2b = np.linalg.inv(np.asarray(b2c, float))
+            pc = pose[:3] @ c2b[:3, :3].T + c2b[:3, 3]  # carton origin in camera frame
+            h, w = np.asarray(depth).shape[:2]
+            if pc[2] > 1e-6:
+                u = pc[0] / pc[2] * intr[0] + intr[2]
+                v = pc[1] / pc[2] * intr[1] + intr[3]
+                where = f'off-image uv=({u:.0f},{v:.0f}) img=({w}x{h})'
+            else:
+                where = 'behind-camera'
+            self._roi_reason = (f'reproject-None {where} carton_in_cam=({pc[0]:.3f},{pc[1]:.3f},{pc[2]:.3f}) '
+                                f'intr=({intr[0]:.0f},{intr[1]:.0f},{intr[2]:.0f},{intr[3]:.0f})')
+        return roi
 
     def capture(self, now, source, destination):
         from twin.restock_manipulation.types import Sensors, Observation
@@ -290,8 +310,9 @@ class CollectTargetBridge:
                   f'fresh={fresh} now={now:.3f} stamp={target.stamp:.3f}', flush=True)
             return None
         roi = self._reproject(target)
+        reason = '' if roi is not None else f' roi_reason=[{getattr(self, "_roi_reason", None)}]'
         print(f'COLLECT_CAPTURE calls={self._calls} sku={target.sku} roi={roi} '
-              f'pose={tuple(round(v,3) for v in target.pose_station)}', flush=True)
+              f'pose={tuple(round(v,3) for v in target.pose_station)}{reason}', flush=True)
         if roi is not None:
             self.sensed_target_bboxes = (dict(roi=roi, location=self.source_location),)
         try:
