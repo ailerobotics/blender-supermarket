@@ -1680,3 +1680,33 @@ forward depth so it isn't an obstacle; masking is arguably a no-op and the grasp
 pose (relax the collect roi/bbox requirement), vs adding a wrist/side camera or re-orienting the
 approach (robot-asset / scenario lane). Transfer is the MIRROR case (cart = SOURCE, shelf =
 destination via PR62 shelf_target), so the same cart-target provider question applies there.
+
+### 2026-10-14 — collect reaches the grasp; seam = KDL/cuMotion self-collision model disagreement
+
+Sequence of landed fixes drove collect all the way to the grasp plan:
+- cart placement Target (derived from the cart asset pose) + obs stamped with packet `now` -> the
+  host observe gate advances (matches=1, target=rollwagen). run-79: observe->APPROACH (first ever).
+- PR64 arm-camera look-at re-aim + 424x240@75deg collision intrinsics wired into build_sensing ->
+  the carton is framed, roi non-None (e.g. (124,107,292,159)); mask path self-re-enables.
+- native_transport now also relays base_link<-ur_base_link each tick -> move_group (plans in the
+  URDF root base_link) can transform the grasp collision object (run-80: "base_link ... does not
+  exist" is gone).
+
+CURRENT SEAM (run-80): the approach plan fails `collision planning or execution failed` ->
+`host emergency stop`. host-stack.log: `MoveGroup motion planning failed` /
+`Invalid c-space position: self collision detected. Failed call to 'planToCSpaceTarget()': target
+c-space position [[5.1284 -4.44626 2.48316 -1.17849 1.1506 -3.14159]] is invalid.`
+RosMotionPort.begin computes IK via move_group GetPositionIK (KDL, avoid_collisions=True, SRDF
+model) then plans to that c-space with cuMotion. KDL returns an awkward wrapped branch (joint2 ~
+-4.45 rad) that its SRDF model allows but cuMotion's XRDF self-collision model (host-cad/mobile.xrdf,
+a provided asset, not git-tracked) flags -> cuMotion rejects the pre-IK'd target. The grasp POSE is
+SANE/reachable (computed offline from WallCartonPolicy: approach (0,0.778,0.181) dist 0.80, contact
+(0,0.898,0.181) dist 0.92 -- well inside max_reach 1.3). So the pose is fine; the two collision
+models disagree on which self-collision pairs to ignore (cuMotion couldn't apply several SRDF
+disable-masks -- warnings "frame X has no self-collision spheres specified").
+
+CROSS-LANE CONTRACT (host/robot lane, resumes 11:00): either (a) let cuMotion do collision-aware
+IK+planning to the POSE (switch RosMotionPort from GetPositionIK->planToCSpaceTarget to a pose-goal
+MoveGroup request) so one consistent model is used, or (b) align the XRDF self_collision.ignore with
+the SRDF disable_collisions so cuMotion ignores the same arm-base pairs MoveIt does. Repro: c-space
+target above; grasp pose approach (0,0.778,0.181) quat (0,-0.71,-0.71,0) in ur_base_link.
