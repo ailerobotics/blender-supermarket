@@ -1418,3 +1418,29 @@ Fix plan (incremental, evidence-driven):
 2. If ros_host does NOT receive the job -> the OmniGraph publisher->host-DDS transport is broken
    for the manip graph; route Isaac->host publishes (job/sensors/station-command) through a
    host-DDS subprocess like `masked_depth_ipc`.
+
+### Supplement — launching ros_host alone is NOT sufficient (host 1s sensor watchdog + no pre-dispatch mapper warm-up)
+
+Reading `RosTransferBridge` (`ros_adapter.py:269-334`) closes the loop on timing:
+- `_job` (job receipt) calls `controller.start(...)` but emits NO status — status is only
+  published by `_sensors` when a `/restock_sim/sensors` packet arrives.
+- `RosTransferBridge` runs its OWN 1.0 s STEADY_TIME sensor watchdog (`watchdog_seconds=1.0`,
+  lines 277, 331-334): active controller + no sensor packet for 1 s -> it emits
+  `failed: sensor stream watchdog expired`.
+- But the collect `/sensors` packet needs a fresh `collision_time` (source ESDF incorporated),
+  which needs several seconds of masked-depth accumulation. Masked depth only starts flowing
+  at collect dispatch (`RosManipulationRuntime.step` -> `sensing_bridge.publish`), with no
+  pre-dispatch warm-up — `assembly.json` records `camera_mapper_ready: false`.
+
+So the blocker is 3-part and entangled:
+1. ros_host (manipulation bridge / status publisher) is not launched by the mission host stack.
+2. Even launched, the collect cannot produce `/sensors` within the host's 1 s (or Isaac's 5 s)
+   watchdog, because the source ESDF/`collision_time` is not warmed BEFORE collect dispatch.
+   The real design needs the station/mapper prepared and the source ESDF incorporated during
+   the approach so `collision_time` is already fresh at dispatch (sensors then flow immediately).
+3. The Isaac OmniGraph ROS2 publisher does not reach the host UDPv4 DDS (sd2: `/station/command`
+   pub=0), so Isaac->host publishes (job/sensors/station-command) may need a host-DDS subprocess.
+
+This is a cross-lane architecture decision (host-launch composition + when the mapper is warmed
+vs when collect dispatches + Isaac->host transport), not a station-client rewire. Escalated to
+Firstmate for direction before spending more GPU.
