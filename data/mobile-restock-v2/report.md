@@ -1225,6 +1225,34 @@ Alternatively, gate a pre-commissioned baseline by support identity (+ a wall-cl
 Integration can wire the shared `clock_context` once the camera lane confirms the scheme; everything up to
 this gate is proven in `run-45`.
 
+### Gates 4-6 fixed; collect capture now validates to the host; blocked on GPU lock contention (2026-10-14)
+
+Resolved the cross-session gate chain and drove the live collect capture through, one gate per native run:
+
+- **Gate 4 (commissioning clock)** — shared WALL-clock `clock_context` under one fixed `steady_domain`
+  across commissioning + mission (`sensing_sources`/`commissioning_sources`), re-commission with the 900 s
+  (policy max) lifetime. Cleared (`762f583`).
+- **Gate 5 (layout_id)** — `register_marker`'s `layout_id` hashed raw float64 model bytes, which differ by
+  ULPs between the commissioning and mission processes despite the identical design (REGMARK diagnostic
+  confirmed same `side_m`/`marker_ids`/shape/sum, different hash). Made it reproducible by quantizing the
+  model to 1 nm before hashing (`ca0870f`). Cleared live in `run-50`.
+- **Gate 6 (support witness)** — the mission compose authored the marker PLANES but not the
+  `source_marker_tab` solid they sit on, so the off-slot witness patch read the floor and tripped
+  "fresh witness disagrees". Author the tab solid in the mission (`2c3b49f`).
+
+Live progression now: nav → collect-execute (`MANIP_START`) → masked depth at the host nvblox → source
+markers decode → freshness OK → commissioning clock OK → layout OK → (witness fix pending its first run).
+Each fix committed with CPU tests green.
+
+**Blocked: GPU lock contention.** The collect+couple attempt needs a fresh commissioned baseline
+(≤900 s old) and then the mission, two GPU sessions. Two shelf-twin workers share this 12 GiB GPU via
+`/tmp/aile-gpu.lock`; the guard's `flock(LOCK_EX|LOCK_NB)` loses the race to a shelf-twin between my
+sessions (run-09 refused on VRAM 6943<8000; run-11 refused `[Errno 11]` on the lock). Firstmate stated my
+mission runs keep priority, but the non-blocking flock race does not enforce it, and the 900 s baseline
+expiry races the contention. Needs Firstmate to briefly hold the shelf-twin workers so the priority
+commission+attempt can run back-to-back. All code gates are fixed and pushed; only GPU access blocks the
+final attempt.
+
 ### Consumer wiring ready; collect grasp gated by the fixed-source live-capture budget on this box (2026-10-14)
 
 PR54 (merged) added the `source_target_provider` to my contract. I built + CPU-tested the pure arm-image
