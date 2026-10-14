@@ -91,14 +91,24 @@ class CoverageField:
     body (self-returns expected there) and need no external observation. The rear is
     never swept, so rig self-occlusion behind the base never blocks motion.
     """
-    __slots__ = ('range_max', 'beams')
+    __slots__ = ('range_max', 'beams', 'origin')
 
-    def __init__(self, range_max, beams):
+    def __init__(self, range_max, beams, origin=(0.0, 0.0)):
         self.range_max = float(range_max)
         # (map-frame bearing, certified not-blind reach); reach is 0.0 when blind.
         self.beams = tuple((float(a), float(r)) for a, r in beams)
+        # Map-frame (x, y) the beams emanate from (the calibrated sensor origin).
+        self.origin = (float(origin[0]), float(origin[1]))
 
     def certifies(self, heading, radius, stop_distance):
+        """Circular-footprint certification (uncoupled base / scalar-radius probe).
+
+        Requires every bearing the forward braking capsule enters beyond the circular
+        footprint `radius` to be covered by a non-self beam. For the coupled train use
+        `certifies_sweep`, which subtracts the actual (narrow) occupied envelope instead
+        of this circumscribing circle so the cart's radius does not pull near-broadside
+        bearings into the required set.
+        """
         if not all(math.isfinite(v) for v in (heading, radius, stop_distance)):
             return False
         if stop_distance < 0 or radius <= 0:
@@ -110,6 +120,64 @@ class CoverageField:
             if reach < extent - 1e-9:
                 return False  # a forward swept sector is blind (or past sensor range)
         return True
+
+    def certifies_sweep(self, occupied, swept, travel, *, geometry_margin=0.05,
+                        forward_cone=math.pi / 4):
+        """Certify the braking sweep for a self-occluding train by subtracting the body.
+
+        `occupied` and `swept` are convex map-frame polygons (the current train footprint
+        and its braking sweep at the commanded speed/curvature, both already carrying the
+        geometry + localization margins); `travel` is the unit heading vector. A blind
+        (self-occluded) beam is only a refusal when its ray enters a *newly swept crescent*
+        that a LEADING face advances into: the ray must leave the current occupied envelope
+        through a face whose outward normal lies within `forward_cone` of travel, and the
+        crescent beyond the body must exceed the geometry margin. Near-broadside/side faces
+        sweep parallel to themselves (the lateral extent of the capsule is covered by the
+        footprint), and the never-swept rear is exempt; a turn's outward lateral bulge is
+        carried by `swept`, so an unobserved obstacle there still refuses. Observed beams
+        are never blind and always pass.
+        """
+        tx, ty = travel
+        lead = math.cos(forward_cone)
+        ox, oy = self.origin
+        for angle, reach in self.beams:
+            if reach > 0.0:
+                continue  # observed (non-self): the bearing is not blind
+            dx, dy = math.cos(angle), math.sin(angle)
+            sweep_far, _ = _ray_convex_exit(ox, oy, dx, dy, swept)
+            if sweep_far <= 0.0:
+                continue  # ray never enters the braking sweep
+            body_far, normal = _ray_convex_exit(ox, oy, dx, dy, occupied)
+            if sweep_far - body_far <= geometry_margin:
+                continue  # no real forward crescent beyond the body along this ray
+            if normal[0] * tx + normal[1] * ty <= lead:
+                continue  # exits through a lateral/rear face: covered by the footprint
+            return False  # blind over a leading forward crescent the train enters
+        return True
+
+
+def _ray_convex_exit(ox, oy, dx, dy, poly):
+    """Farthest exit (t > 0) of a ray from a convex CCW polygon and that edge's outward
+    unit normal. Returns (t, (nx, ny)); t is 0.0 when the ray does not exit forward."""
+    best_t, normal = 0.0, (0.0, 0.0)
+    n = len(poly)
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        ex, ey = bx - ax, by - ay
+        nx, ny = ey, -ex  # outward normal for a counter-clockwise hull
+        den = dx * nx + dy * ny
+        if den <= 1e-12:  # parallel, or an entering (back-facing) edge
+            continue
+        t = ((ax - ox) * nx + (ay - oy) * ny) / den
+        if t <= 1e-9 or t <= best_t:
+            continue
+        px, py = ox + t * dx - ax, oy + t * dy - ay
+        s = (px * ex + py * ey) / (ex * ex + ey * ey)
+        if -1e-9 <= s <= 1 + 1e-9:
+            mag = math.hypot(nx, ny)
+            best_t, normal = t, (nx / mag, ny / mag)
+    return best_t, normal
 
 
 def coverage_certifies(obs, heading, radius, stop_distance):

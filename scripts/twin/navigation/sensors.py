@@ -225,12 +225,12 @@ def observation(scan,localized,*,coupled,arm_transport,articulation=0.0):
     inscribed reach for diagnostics/fixtures only; the gate consumes the field.
     """
     scan.validate()
-    _,_,sa=scan.sensor_pose(localized.pose)
+    sx,sy,sa=scan.sensor_pose(localized.pose)
     base=sa+scan.angle_min
     field=CoverageField(scan.range_max,tuple(
         (base+i*scan.angle_increment,
          0.0 if (scan.unknown and scan.unknown[i]) else scan.range_max)
-        for i in range(len(scan.ranges))))
+        for i in range(len(scan.ranges))),origin=(sx,sy))
     # Range is measured about the sensor, not the chassis origin. The inscribed
     # base-centred observation disk shrinks by the calibrated translation.
     coverage=max(0.0,scan.range_max-math.hypot(*scan.sensor_to_base[:2])) if not any(scan.unknown) and len(scan.ranges)*scan.angle_increment>=2*math.pi-.01 else 0.0

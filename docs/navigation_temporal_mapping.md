@@ -123,21 +123,42 @@ directional and keyed to the actual motion:
   swept `stop_distance` forward. Rear and near-broadside bearings reach only the
   footprint edge — the capsule never extends behind the base because reverse is forbidden
   — so they are never a swept sector.
-- **Certification (`CoverageField.certifies`, shared by the reference and articulated
-  gates via `coverage_certifies`).** Every bearing whose braking sweep extends **beyond
-  the footprint** must be covered by a non-self observed beam reaching that far; bearings
-  whose sweep stays within the footprint are the robot's own body (self-returns expected)
-  and need no external observation. Consequently a self-occluded ring behind the base with
-  a clear forward sweep drives, a genuinely unobserved forward sector still refuses, and a
-  stationary robot (`stop_distance == 0`, no swept sector) is certified so it can settle
-  and hold at the goal despite full self-occlusion.
+- **Uncoupled certification (`CoverageField.certifies`, the reference base gate via
+  `coverage_certifies`).** Every bearing whose braking capsule extends **beyond the
+  circular footprint** must be covered by a non-self observed beam reaching that far;
+  bearings whose capsule stays within the footprint are the robot's own body (self-returns
+  expected) and need no external observation. A self-occluded ring behind the base with a
+  clear forward sweep drives, a genuinely unobserved forward sector still refuses, and a
+  stationary robot (`stop_distance == 0`, no swept sector) is certified so it can settle at
+  the goal despite full self-occlusion.
+- **Coupled certification (`CoverageField.certifies_sweep`, the articulated braking gate).**
+  The circular footprint of the full train has radius ≥ 1.1 m because it circumscribes the
+  **towed cart behind the base**. Using that radius for the capsule wrongly pulls
+  self-occluded near-side bearings (≈ ±85–86°) into the required set, even though the cart
+  never occupies that forward-side space — which kept the real, always-side-self-occluding
+  rig from ever driving. The coupled gate instead builds the **actual convex occupied
+  envelope** (base + cart, at the measured articulation) and the **braking sweep** of that
+  envelope at the commanded speed/curvature, then **subtracts the occupied envelope** and
+  requires non-self observation only for the *newly swept crescent in the direction of
+  travel*: a blind beam refuses only when its ray leaves the occupied envelope through a
+  **leading face** (outward normal within 45° of travel) into a crescent deeper than the
+  geometry margin. Near-broadside/side faces sweep parallel to themselves — the lateral
+  extent of the capsule is covered by the footprint — and the rear is never swept. Because
+  the swept hull is taken at the commanded curvature, a turn's outward **lateral bulge** is
+  part of the sweep, so an unobserved obstacle zone there still refuses. The rays originate
+  at the calibrated sensor origin (`CoverageField.origin`, the chassis-front lidar mount).
 
-The 0.05 m geometry margin and 0.10 m localization inflation are retained inside
-`radius`, the full cart sweep is retained via the circumscribing footprint, and the
-no-reverse rule is unchanged. `Observation.coverage_radius` remains only as the legacy
-full-circle inscribed-reach diagnostic (and the fixture fallback for observations that
-carry no field); the gates consume `Observation.coverage`. This is instantaneous-scan
-safety for the controlled static scene, not person-safety readiness, and it does not
+Consequently the coupled train drives when the forward crescent is observed even though its
+own base/mast/arm/cart self-occlude every near-side and rear bearing; an unobserved lateral
+obstacle zone inside the swept crescent still refuses; and a stationary train certifies.
+The 0.05 m geometry margin and 0.10 m localization inflation are retained (inside `radius`
+for the uncoupled capsule, and as the occupied/swept envelope margins for the coupled
+crescent), the full cart sweep is retained (the circumscribing footprint uncoupled, the
+measured base+cart envelope coupled), and the no-reverse rule is unchanged.
+`Observation.coverage_radius` remains only as the legacy full-circle inscribed-reach
+diagnostic (and the fixture fallback for observations that carry no field); the gates
+consume `Observation.coverage`. This is instantaneous-scan safety for the controlled static
+scene, not person-safety readiness, and it does not
 substitute for the native departure and blocked-aisle evidence below. Counterfactuals:
 `test_navigation_coverage.py`.
 
