@@ -12,10 +12,14 @@ from twin.restock_manipulation.types import Result
 class RosManipulationRuntime:
     cart_location = 'rollwagen'
 
-    def __init__(self, graph, capture, *, prepare_station, sensing_bridge=None):
+    def __init__(self, graph, capture, *, prepare_station, sensing_bridge=None, feedback=None):
         self.graph = graph
         self.capture = capture
         self.prepare_station = prepare_station
+        # Measured sensing/manipulation feedback whose collision_time is refreshed each step from
+        # the host mapper-incorporation ack (so the sensing capture's collision_time gate sees a
+        # real, fresh nvblox-incorporation stamp — never a depth-receipt or fabricated value).
+        self.feedback = feedback
         # Optional Isaac-side arm masked-depth/TF/bbox bridge for the host nvblox (option B).
         # None keeps the legacy behaviour; publishes every step so the host's 0.5 s bbox
         # freshness never lapses and nvblox gets continuous depth while the station maps.
@@ -46,6 +50,10 @@ class RosManipulationRuntime:
 
     def step(self, dt, simulation_time):
         try:
+            # Refresh the mapper-incorporation collision_time onto the feedback BEFORE this tick's
+            # capture reads it (the sensing capture gates on motion.collision_time freshness).
+            if self.feedback is not None:
+                self.feedback.collision_time = self.graph.refresh_incorporation(simulation_time)
             if not self.dispatched:
                 if not self.preparation.ready(simulation_time):
                     return Result('running','prepare_station')

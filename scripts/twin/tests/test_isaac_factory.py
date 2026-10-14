@@ -123,7 +123,7 @@ class HostRuntimeTests(unittest.TestCase):
     base-parked / profile views the sensing lane reads. No in-process cuRobo."""
 
     def _host(self, lin=(0, 0, 0), ang=(0, 0, 0)):
-        from twin.restock_manipulation.isaac_factory import HostManipulationRuntime
+        from twin.restock_manipulation.isaac_factory import HostManipulationRuntime, _ArticulationParked
         calls = []
         inner = SimpleNamespace(
             start=lambda op, job: calls.append(('start', op)),
@@ -131,8 +131,8 @@ class HostRuntimeTests(unittest.TestCase):
             stop=lambda: calls.append(('stop',)))
         sensors = SimpleNamespace(slots=None, transform=None, last_frame='old')
         art = SimpleNamespace(get_linear_velocity=lambda: lin, get_angular_velocity=lambda: ang)
-        rt = HostManipulationRuntime(runtime=inner, sensors=sensors, articulation=art,
-                                     profiles={JOB_SKU: 'p'})
+        rt = HostManipulationRuntime(runtime=inner, sensors=sensors,
+                                     motion=_ArticulationParked(art), profiles={JOB_SKU: 'p'})
         return rt, calls, sensors
 
     def test_no_curobo_or_in_process_planner_imported(self):

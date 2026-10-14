@@ -6,6 +6,7 @@ RGB-D graphs remain integration-owned; this graph adds manipulation messages.
 """
 from dataclasses import asdict
 import json
+import math
 import time
 
 from .ros_adapter import require_sim_domain
@@ -16,7 +17,34 @@ TOPICS = {'sensors': '/restock_sim/sensors',
           'job': '/restock_sim/manipulation/job',
           'status': '/restock_sim/manipulation/status',
           'gripper': '/restock_sim/gripper/enable',
-          'stop': '/restock_sim/manipulation/stop'}
+          'stop': '/restock_sim/manipulation/stop',
+          # Continuous nvblox mapper-incorporation ack (host-published, independent of a job):
+          # JSON {"collision_time": <sim s>, "stamp": <sim s>}. The sensing/manipulation motion
+          # takes its collision_time from this; never from a depth-receipt shortcut.
+          'incorporation': '/restock_sim/mapper/incorporation'}
+
+
+def parse_incorporation(raw, now):
+    """collision_time (sim s) from a mapper-incorporation ack, or -1 if absent/stale/invalid.
+
+    ``raw`` is the ack topic's latest JSON string; ``now`` is the sim clock. The ack must carry a
+    finite ``collision_time`` and be fresh (its ``stamp`` within the 0.5 s acquisition-to-use
+    window), else -1 so a downstream capture fails closed rather than trust a stale ESDF. Pure."""
+    if not raw:
+        return -1.
+    try:
+        msg = json.loads(raw)
+    except (ValueError, TypeError):
+        return -1.
+    if not isinstance(msg, dict):
+        return -1.
+    ct = msg.get('collision_time')
+    st = msg.get('stamp', ct)
+    if not isinstance(ct, (int, float)) or not isinstance(st, (int, float)):
+        return -1.
+    if not math.isfinite(ct) or not math.isfinite(st) or not math.isfinite(now) or not 0 <= now - float(st) <= .5:
+        return -1.
+    return float(ct)
 
 
 class IsaacMeasuredFeedback:
@@ -65,6 +93,8 @@ class IsaacRosGraph:
         self.last_sequence = -1
         self.faulted, self.job_id = False, None
         self.last_receive = time.monotonic()
+        self.incorporation_time = -1.      # latest fresh mapper-incorporation collision_time (sim s)
+        self.last_incorporation = ''
         for key, topic in TOPICS.items():
             publish = key in ('sensors', 'job')
             node_type = 'ROS2Publisher' if publish else 'ROS2Subscriber'
@@ -122,6 +152,19 @@ class IsaacRosGraph:
             self.faulted = True
             self.active = False
             raise RuntimeError('host emergency stop')
+
+    def refresh_incorporation(self, now):
+        """Read the host mapper-incorporation ack and return the current collision_time (sim s).
+
+        Call every physics step before a capture. Latches the latest ack string and re-validates
+        its freshness against ``now`` each tick, so a stale ESDF (no fresh incorporation) decays to
+        -1 (fail-closed) exactly like the live budget intends. Integration mirrors the return onto
+        the sensing-motion feedback's collision_time."""
+        raw = self.og.Controller.attribute(self.root + '/incorporation/wire.outputs:data').get()
+        if raw:
+            self.last_incorporation = raw
+        self.incorporation_time = parse_incorporation(self.last_incorporation, now)
+        return self.incorporation_time
 
     def poll(self):
         """Call every physics step, including steps without a fresh image."""

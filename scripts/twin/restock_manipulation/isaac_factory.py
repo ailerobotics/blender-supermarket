@@ -182,12 +182,12 @@ class HostManipulationRuntime:
     """
     cart_location = 'rollwagen'
 
-    def __init__(self, *, runtime, sensors, articulation, profiles, collect_bridge=None):
+    def __init__(self, *, runtime, sensors, motion, profiles, collect_bridge=None):
         from types import SimpleNamespace
         self._runtime = runtime
         self._sensors = sensors
         self._collect_bridge = collect_bridge
-        self.motion = _ArticulationParked(articulation)
+        self.motion = motion
         self.controller = SimpleNamespace(cart_location='rollwagen', profiles=profiles)
 
     def set_source_target_provider(self, provider):
@@ -297,8 +297,8 @@ class CollectTargetBridge:
                           simulation_time=float(target.stamp), sku=target.sku,
                           location=self.source_location, pose=tuple(target.pose_station),
                           confidence=1.0, frame='ur_base_link')
-        return Sensors(now, (obs,), None, parked, bool(self.contact.read()), now, now, joints,
-                       (), float(target.stamp))
+        return Sensors(now, (obs,), None, parked, bool(self.contact.read()), now,
+                       float(self.motion.collision_time), joints, (), float(target.stamp))
 
 
 def _build_runtime(*, app, assembly, params, output):
@@ -314,7 +314,7 @@ def _build_runtime(*, app, assembly, params, output):
     from isaacsim.sensors.camera import Camera
     from twin.restock.ros_manipulation import RosManipulationRuntime
     from .cad_tool import NativePanelContact
-    from .isaac_ros_graph import IsaacRosGraph
+    from .isaac_ros_graph import IsaacRosGraph, IsaacMeasuredFeedback
     from .isaac_sensors import IsaacCartonSensors
 
     paths = assembly.paths
@@ -345,7 +345,11 @@ def _build_runtime(*, app, assembly, params, output):
     sensors = IsaacCartonSensors(camera, pose_bridge_root=params.pose_bridge_root,
                                  profiles=params.profiles, slots=source['slots'],
                                  base_from_camera=np.asarray(source['base_from_camera'], float))
-    parked = _ArticulationParked(assembly.robot)
+    # The full measured feedback (collision_time + joint_positions + observe_source + parked) the
+    # sensing capture needs; collision_time is synced each step from the host mapper-incorporation
+    # ack via IsaacRosGraph.refresh_incorporation (see RosManipulationRuntime.step). Replaces the
+    # parked-only adapter that could not satisfy IsaacCartonSensors.capture's collision_time gate.
+    feedback = IsaacMeasuredFeedback(assembly.robot)
 
     # The collect grasp target comes from the FIXED source camera via the camera-lane provider,
     # reprojected into the live arm image. The provider is injected after build_sensing through
@@ -353,8 +357,8 @@ def _build_runtime(*, app, assembly, params, output):
     collect_bridge = CollectTargetBridge(
         stage=stage, arm_camera=camera, arm_camera_path=camera_path,
         base_path=assembly.paths['ur_base_link'], profiles=params.profiles,
-        motion=parked, contact=contact,
-        joints=lambda: assembly.robot.get_joint_positions(),
+        motion=feedback, contact=contact,
+        joints=feedback.joint_positions,
         source_location=params.collect_source_location)
 
     sensing_bridge = None
@@ -367,9 +371,9 @@ def _build_runtime(*, app, assembly, params, output):
     graph = IsaacRosGraph(contact=contact, hold=assembly.command_gate.hold)
     runtime = RosManipulationRuntime(graph, collect_bridge.capture,
                                      prepare_station=lambda operation, job: None,
-                                     sensing_bridge=sensing_bridge)
+                                     sensing_bridge=sensing_bridge, feedback=feedback)
     return HostManipulationRuntime(runtime=runtime, sensors=sensors,
-                                   articulation=assembly.robot, profiles=params.profiles,
+                                   motion=feedback, profiles=params.profiles,
                                    collect_bridge=collect_bridge)
 
 

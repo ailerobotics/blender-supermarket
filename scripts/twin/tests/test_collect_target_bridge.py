@@ -22,7 +22,7 @@ def _bridge(provider):
     b = CollectTargetBridge(stage=None, arm_camera=cam, arm_camera_path='/arm', base_path='/base',
                             profiles={'juice_orange': ProductProfile(sku='juice_orange',
                                       dimensions=(.6, .4, .16), tcp_quaternion=(0., 0., 0., 1.))},
-                            motion=NS(parked=lambda: True), contact=NS(read=lambda: False),
+                            motion=NS(parked=lambda: True, collision_time=9.0), contact=NS(read=lambda: False),
                             joints=lambda: (0.,) * 6, source_location='backstock_00')
     b._arm_base_from_camera = lambda: np.eye(4)      # stub the Isaac XformCache read
     b.provider = provider
