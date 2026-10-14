@@ -31,7 +31,7 @@ checks. Detail + exact commands are in the per-topic sections below.
 | Shelf-station sensing (decode) | PARTIAL 1/2 (production decoder, native) | native | `view-shelf-pr45-prod` under merged camera PR#45 (shelf camera tilted 6.25° about world-X, far marker grid rotated 180°) with the bench now using the **production** `FixedTileQR` (not full-frame cv2): `support:shelf:0` decodes on all 6 frames (~0.30 s, < 500 ms), `support:shelf:1` does not → **1/2**. PR#45's offline raster asserted both decode; the native RTX render reads only shelf:0 (clean raster necessary, not sufficient — the risk the camera worker flagged). Production decode improved 0/2 → 1/2 natively; shelf:1 native decode remains open (camera worker) |
 | Mapper construction | CONFIRMED | native | `mapper-evidence-construct-01` (PR#29 runtime closure): EvidenceProducerNode instantiated + advertised services/topic + 5893 ticks, GPU reclaimed; incorporation = sensor+handshake next |
 | Collision-map incorporation (mapper) | GREEN | native | `incorp-identity-03` under merged PR#33: full path EmptyGeneration ACCEPT → admission → 2 frames registered+integrated → EvidenceSnapshot (frame_id='map') → `accept_envelope` ADOPTED. Measured identity: gen mission_incorp_e, nonce+certificate echoed, index 1, rev 1, front→front_optical, slice_adopted true, full_height_certified false |
-| Full autonomous restock cycle | BOOTS CLEAN, BLOCKED at transfer-manip construction | native+gated | runs 05-07 (guarded, env_isaaclab, --host-stack): GPU guard, host MoveIt/cuMotion warmup (6/7), Isaac boot, ROS2 bridge **'rclpy loaded'**, full scene composition and arm-camera authoring all PASS. Two defects found + fixed en route: Isaac-ROS-bridge env (system /opt/ros rclpy shadowed the bundled Jazzy one) and the arm camera (attached to a body frame, not a Camera prim). Then blocks: `ModuleNotFoundError: No module named 'curobo'` — `isaac_factory`→`CadRestockRuntime`→`build_cad_planner` imports shelfbot's IN-PROCESS cuRobo planner, which is not installed; the provisioned planner is the HOST cuMotion ROS stack. Factory raises before `mission.start()`, so no stages tick / no MP4 this attempt. See "Full assembled mission run (d)" below |
+| Full autonomous restock cycle | CONSTRUCTS+STARTS+TICKS; PAUSED at a native RTX render segfault on the first mission step | native+gated | runs 05-18 (guarded, env_isaaclab, --host-stack). The bundle now fully assembles and the mission state machine starts and ticks into `collect`; honest manip degradation reports manipulation unavailable (cuRobo not provisioned) without blocking construction. 14 previously-untested integration gaps were found + fixed along the way (bridge env, arm camera, manip degradation, camera collision_solids, /World anchor, tray-perception pose_bridge, nominal-dt sensor clock, reference-nav Odometry+Observation, recorder empty-frame guard — see the failure-chain section below). run-18 then **segfaulted (EXIT=139) inside the native RTX renderer** (`librtx.raytracing`/`libcarb.scenerenderer-rtx`/`libgpu.foundation`) at the first `world.step(render=True)` of the mission, under the full composed scene + 3 camera render products + recording. No mission.json / 0 frames. Per the run-17/18 bound this lane is PAUSED; blocking stage = **first rendered physics step of `collect` (native RTX renderer)**. See "Full assembled mission run (d)" below |
 
 Source-station note: per the integration/camera contract the 3/3 native decode
 (`view-source-lit-01`) is the accepted source-station sensing proof. The pre-capture
@@ -45,11 +45,12 @@ capture it feeds requires the mapper incorporation gate above regardless.
 
 The full assembled mission was attempted as one bounded guarded native run with the
 host planner stack co-launched (`run_mobile_restock.sh --execute --host-stack`, env_isaaclab,
-task-local NVIDIA runtime, domain 88, `--heavy-threshold-mb 2500`). It now boots cleanly
-through **every** infrastructure gate and stops at a single, specific, measured blocker.
+task-local NVIDIA runtime, domain 88, `--heavy-threshold-mb 2500`). The full bundle now
+constructs and the mission starts and ticks into `collect`; the run is PAUSED at a native RTX
+renderer segfault on the first rendered physics step (details and the full failure chain below).
 
-Measured progression (runs 05-07; console logs + `run-06/07/mission-error.txt` under the
-task scratch dir):
+Measured progression (runs 05-18; console logs + `run-06..17 mission.json/mission-error.txt`
+and the run-18 breakpad crash + py-spy traceback under the task scratch dir):
 
 1. **GPU guard** passes (>= 8 GiB VRAM free) once orphaned co-launch host-stack GPU
    processes are reclaimed. (Teardown note below.)
@@ -59,39 +60,51 @@ task scratch dir):
    gripper + physics).
 4. **ROS2 bridge**: `rclpy loaded` — the bundled Jazzy rclpy initializes.
 5. **Arm camera** is authored and initialized.
-6. **Transfer-stage manipulation construction** raises
-   `ModuleNotFoundError: No module named 'curobo'`.
+6. **Full bundle construction** succeeds: manipulation degrades honestly (cuRobo not
+   provisioned), sensing/camera rig, port, recorder, verifier and the RuntimeAdapter all build.
+7. **Mission starts and ticks** into `collect`.
+8. run-18 **segfaults (EXIT=139) in the native RTX renderer** on the first rendered
+   physics step.
 
-Two integration defects were found and fixed to reach the blocker:
+### Measured failure chain (runs 05-18) and the blocking stage (PAUSED)
 
-- **Isaac ROS2 bridge env.** The bridge first failed with
-  `No module named 'rclpy._rclpy_pybind11'`: a login shell sources the system
-  `/opt/ros/jazzy` overlay, putting its python3.12 `site-packages` on `PYTHONPATH` and
-  `/opt/ros/jazzy` on `AMENT_PREFIX_PATH`, so Isaac imported that (wrong-ABI) rclpy instead
-  of its bundled one. The fix lives in `scripts/run_mobile_restock.sh`: on `--execute` it
-  clears the ROS prefix vars, pins `PYTHONPATH` to the scripts dir, selects
-  `rmw_fastrtps_cpp`, and appends the bundled `isaacsim.ros2.bridge/jazzy/lib` to
-  `LD_LIBRARY_PATH`. This must be set at process creation (the ELF loader and rclpy
-  resolver are fixed before Python starts). Result: runs 05/06/07 log `rclpy loaded`.
-- **Arm camera prim.** `twin/restock_manipulation/isaac_factory.py` constructed an Isaac
-  `Camera(prim_path=paths['front_camera_frame'])`, but `front_camera_frame` is a URDF body
-  frame (an Xform, `rpy="0 0 0"` off `base_link`), not a USD Camera, so Isaac raised
-  "prim path does not correspond to a Camera prim." The factory now authors a child USD
-  `Camera` under that frame, oriented so the USD camera (looks -Z, +Y up) faces forward
-  along the frame's +X with +Z up. Run-07 clears this gate.
+Firstmate authorized an honest interim run: the mission records the navigate/couple/tow/
+park/verify/return loop with the manipulation (`transfer`, and in this scenario `collect`'s
+pick) reported FAILED-unavailable — never a mocked success. Reaching a running mission
+required fixing a long sequence of previously-untested seams; each guarded run advanced past
+the prior gap (convergent), ending at a native renderer crash:
 
-**Remaining blocker (measured).** `isaac_factory` → `CadRestockRuntime` →
-`isaac_motion.build_cad_planner` imports `shelfbot.planning.curobo_planner`, which imports
-`curobo` (NVIDIA cuRobo). `curobo` is not installed in any environment on this machine; the
-only cuMotion present is the **host** stack's ROS2 `isaac_ros_cumotion` packages (MoveGroup
-on domain 88), consumed by `twin/restock_manipulation/ros_adapter.py:RosMotionPort` in host
-Python (it needs `moveit_msgs`, which the Isaac interpreter does not carry). So the
-in-process cuRobo path that `CadRestockRuntime` uses is the retired manipulation lane's
-mechanism, not the planning capability this environment actually provisions. Because the
-factory raises before `mission.start()`, no mission stages tick and no mission MP4 is
-recorded in this attempt. Wiring the Isaac mission's manipulation to the host cuMotion path
-(or installing cuRobo into the Isaac interpreter) is the open integration decision; it
-touches the retired manipulation lane's runtime (`isaac_runtime.py`/`isaac_motion.py`).
+| run | stopped at | measured cause | fix |
+|---|---|---|---|
+| 05-06 | factory | arm camera attached to body-frame `front_camera_frame`, not a Camera prim | author a child USD Camera (forward-looking) |
+| 07 | factory (transfer manip) | `ModuleNotFoundError: curobo` — in-process cuRobo planner not provisioned | honest `_UnavailableManipulation` degradation (Firstmate-approved option a) |
+| 08 | GPU guard | wrapper `:-` default kept inherited `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET` | set domain-88 isolation vars unconditionally |
+| 09 | factory/sensing | `CameraRig.camera_spec` needs per-camera `collision_solids` | bridge design `solids` (dimensions_m) → per-camera `collision_solids` (size_m) |
+| 10 | factory/sensing | `camera physical parent absent: /World` on the composed stage | author an identity `/World` anchor |
+| 11 | factory/sensing | `pose_bridge.py` FileNotFound — USD prim path used as a filesystem root | thread the tray-perception filesystem `pose_bridge_root` from the runtime-config |
+| 12-14 | collect (first tick) | `stale sensor packet` age = -8.7e-10 — Isaac physics-dt vs python 1/60 float drift | report the nominal `tick*dt` sensor clock |
+| 15 | collect (nav) | `'tuple' object has no attribute 'pose'` — raw wheel tuple as odometry | port builds `core.Odometry` + obstacle `Observation` for reference nav |
+| 16-17 | collect (nav→record) | `too many indices: 1-D array` — recorder sliced a not-yet-rendered 1-D RGB buffer | recorder skips empty frames until a real one arrives |
+| **18** | **collect — first `world.step(render=True)`** | **native RTX renderer SIGSEGV (EXIT=139)** in `librtx.raytracing` / `libcarb.scenerenderer-rtx` / `libgpu.foundation`, under the full composed scene + 3 camera render products + recording | **OPEN — native Isaac/RTX stability under full-scene multi-camera render; not a Python-layer fix** |
+
+**Currently blocking stage: the first rendered physics step of `collect`** — Isaac's RTX
+renderer segfaults when stepping the full composed mission scene (store + mobile UR10 +
+rollwagen + gripper + 3 camera render products + mission recording). The single-camera
+optical bench (`view-shelf-pr45-prod`, `view-source-lit-03`) renders the same store without
+crashing, so the trigger is the **full-scene, multi-render-product** load, not RTX itself.
+No `mission.json` is written and no frames are recorded (0 frames).
+
+**Lane PAUSED** per Firstmate's run-17/18 bound: no further whole-cycle runs are launched.
+The likely path (for Firstmate to direct) is a **stage-by-stage split** — e.g. `collect`+
+`couple` with their own smaller scene/fewer render products and their own video — or reduced
+render settings (resolution, fewer simultaneous render products) to clear the RTX segfault.
+The manipulation planning (`transfer`) remains the retired in-process cuRobo path and still
+needs rewiring to the host cuMotion MoveGroup (`ros_adapter.RosMotionPort`, Firstmate step b).
+
+`run_mobile_restock.py` persists the construction traceback to `<output>/mission-error.txt`
+before `app.close()` (which can hard-exit), and `RuntimeAdapter.step` now carries the
+originating frames in its failure reason; both were added so these runtime-tick failures
+could be localized without a core dump.
 
 `run_mobile_restock.py` now persists the construction traceback to
 `<output>/mission-error.txt` before `app.close()`, because Isaac's `SimulationApp.close()`
