@@ -91,11 +91,6 @@ class IsaacPort:
         self.after_step,self.on_action=after_step,on_action
         self.realtime=realtime
         self.wall_origin=time.monotonic()
-        # Zero the sensor-acquisition clock at the FIRST mission advance, not here:
-        # camera initialisation and the host-stack warmup step the world after the port
-        # is built, so capturing current_time now would leave sim time ahead of the
-        # mission's tick clock and every packet would read stale.
-        self.origin=None
         self.tick=0
         self.names=tuple(robot.dof_names)
         self.wheels=tuple(self.names.index(n) for n in ('left_wheel_joint','right_wheel_joint'))
@@ -112,11 +107,14 @@ class IsaacPort:
             remaining=self.wall_origin+(self.tick+1)*dt-time.monotonic()
             if remaining>0:
                 time.sleep(remaining)
-        if self.origin is None:
-            self.origin=float(self.world.current_time)
         self.world.step(render=True)
         self.tick+=1
-        now=float(self.world.current_time)-self.origin
+        # Mission-relative acquisition clock on the nominal fixed timestep. Deriving it
+        # from world.current_time instead drifts: Isaac's physics dt differs from the
+        # mission dt by ~1e-9 per step (both pass the isclose guard above), which left
+        # the packet a few nanoseconds ahead of the mission's dt-accumulated clock and
+        # tripped the freshness lower bound on the very first tick.
+        now=self.tick*dt
         if self.native_transport is not None:
             self.native_transport.tick(now)
         joints=np.asarray(self.robot.get_joint_positions(),float)
