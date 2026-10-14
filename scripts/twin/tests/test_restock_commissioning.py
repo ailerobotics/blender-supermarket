@@ -46,14 +46,31 @@ def empty_frame():
     return k, camera, depth, support, witness, frame
 
 
-def context(k, camera, location='backstock_00', camera_id='source'):
+class StepClock:
+    """Deterministic steady clock: each call returns start, then advances by step.
+
+    Injecting it makes the commission() acquisition-to-use gate independent of real decode
+    wall time — commission reads the clock once before processing and once after, so a
+    two-reading StepClock reproduces any elapsed exactly, on any machine load.
+    """
+    def __init__(self, start=100., step=0.):
+        self.t, self.step = float(start), float(step)
+
+    def __call__(self):
+        value = self.t
+        self.t += self.step
+        return value
+
+
+def context(k, camera, location='backstock_00', camera_id='source', steady_clock=None):
     from scripts.twin.restock_camera.binding import RenderedSupportContext, SupportSlot
     slot = SupportSlot(location,'deck','support:a',.06,'bolted1',np.ones((k.height,k.width),bool),
                        auxiliary_id='support:b',auxiliary_offset_xy=(0,.34))
     return RenderedSupportContext(camera_id=camera_id,intrinsics=k,slots=[slot],
         measure_context=lambda frame,now:(camera,now,'park1',True),
         clearance_for_slot=lambda loc,view,frame,now:None,
-        depth_error_m=.0002,camera_revision='lens1')
+        depth_error_m=.0002,camera_revision='lens1',
+        steady_clock=steady_clock or StepClock())            # deterministic by default
 
 
 def commissioned_dir(tmp_path, location='backstock_00'):
@@ -114,6 +131,33 @@ def test_apply_baselines_attaches_tracker_so_mission_capture_validates(tmp_path)
     result = boot(frame, 2.)
     assert len(result.slots) == 1
     assert result.slots[0].free_dimensions[2] == 0                # foreground seen, not empty
+
+
+# --- commissioning freshness bound (deterministic, no real decode wall time) --
+
+def test_commission_uses_its_own_freshness_bound_not_the_live_half_second(tmp_path):
+    """A full-res commission that elapses 0.575 s (integration's native measurement) passes
+    under commissioning_freshness_s but would trip the 0.5 s live budget. The injected clock
+    makes this exact regardless of machine load — no dependence on real decode wall time."""
+    k, camera, depth, support, witness, frame = empty_frame()
+    # Clock advances 0.575 s between the pre-processing reading and the post-processing check.
+    ctx = context(k, camera, steady_clock=StepClock(start=100., step=0.575))
+    records = C.commission_and_persist(ctx, frame, 1., {'backstock_00':(support,witness)},
+        dataset_dir=tmp_path, commissioning_freshness_s=5.)
+    assert records and records[0].commissioning_freshness_s == 5.
+    data = json.loads((tmp_path / 'backstock_00.json').read_text())
+    assert data['commissioning_freshness_s'] == 5. and data['provenance']['commissioning_freshness_s'] == 5.
+    # The same 0.575 s elapse under the 0.5 s live budget is refused.
+    ctx2 = context(k, camera, steady_clock=StepClock(start=100., step=0.575))
+    with pytest.raises(ValueError, match='freshness expired after processing'):
+        ctx2.commission(frame, 1., {'backstock_00':(support,witness)}, commissioning_freshness_s=.5)
+
+
+def test_commission_rejects_an_unbounded_freshness():
+    k, camera, depth, support, witness, frame = empty_frame()
+    ctx = context(k, camera, steady_clock=StepClock())
+    with pytest.raises(ValueError, match='at least the 0.5 s live budget'):
+        ctx.commission(frame, 1., {'backstock_00':(support,witness)}, commissioning_freshness_s=.1)
 
 
 # --- choreography over several stations ---------------------------------------

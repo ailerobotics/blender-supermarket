@@ -1,9 +1,11 @@
 """Executable multi-camera inventory binding. No native Isaac/ROS imports."""
 from dataclasses import dataclass, replace
+import time
 import numpy as np
 
 from .sensed import (FrameEvidence, register_marker, calibrate_rigid_support,
                      RegisteredSupport)
+from .freshness import frame_deadline, require_fresh
 from .qr import FixedTileQR
 
 
@@ -32,7 +34,9 @@ class RenderedSupportContext:
     Both callbacks are integration-owned; receipt of this frame is not map incorporation.
     """
     def __init__(self, *, camera_id, intrinsics, slots, measure_context,
-                 clearance_for_slot, depth_error_m, camera_revision, clock_context=None):
+                 clearance_for_slot, depth_error_m, camera_revision, clock_context=None,
+                 steady_clock=time.monotonic):
+        self.steady_clock = steady_clock
         self.camera_id,self.intrinsics = camera_id,intrinsics
         self.slots = tuple(slots)
         self.measure_context,self.clearance_for_slot = measure_context,clearance_for_slot
@@ -70,13 +74,22 @@ class RenderedSupportContext:
         self.qr_observation = qr
         return transform,evidence,parked,depth,registrations
 
-    def commission(self, frame, now, empty_polygons, *, lifetime_s=600.):
+    def commission(self, frame, now, empty_polygons, *, lifetime_s=600.,
+                   commissioning_freshness_s=5.):
         """Explicitly acquire baselines from observed empty supports.
 
         empty_polygons[location] = (support_quad_uv, witness_quad_uv), selected
         from that measured frame. Source starts occupied, so a real prior empty
         commissioning frame is required; never manufacture it from a setup dict.
+
+        Commissioning is a static-scene step whose full-resolution decode+calibrate can
+        exceed the live 0.5 s acquisition-to-use budget, so it runs under its own
+        ``commissioning_freshness_s`` acquisition-to-use bound (default 5 s): a stall guard,
+        not the mission freshness. The live mission capture still uses the 0.5 s gate.
         """
+        if not np.isfinite(commissioning_freshness_s) or commissioning_freshness_s < .5:
+            raise ValueError('commissioning_freshness_s must be finite and at least the 0.5 s live budget')
+        deadline = frame_deadline(frame,now,self.steady_clock(),budget_s=commissioning_freshness_s)
         transform,e,parked,depth,registrations = self._registrations(frame,now)
         pending = []
         for slot,registration in zip(self.slots,registrations):
@@ -85,6 +98,7 @@ class RenderedSupportContext:
                 required_xy=slot.required_xy,calibration_id=f'{e.session_id}:{self.camera_id}:{e.frame_id}:{slot.support_id}',
                 now=now,parked=parked,lifetime_s=lifetime_s)
             pending.append(RegisteredSupport(model))
+        require_fresh(deadline,self.steady_clock)
         for slot,tracker in zip(self.slots,pending):
             slot.tracker = tracker
         return tuple(t.geometry for t in pending)
