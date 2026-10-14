@@ -64,5 +64,24 @@ class FrameIdContractWithNvblox(unittest.TestCase):
         self.assertEqual(_frame_id('/MobileRobot/ur_base_link'), FRAME)
 
 
+class OneSharedStampConversion(unittest.TestCase):
+    """tf2 accepts an exact-newest match only at NANOSECOND resolution, so the masked depth and the
+    /tf for a tick must convert the identical world.current_time float to the IDENTICAL (sec,nanosec).
+    Both go through control_ipc._secs_to_time now; lock that no 1 ns future skew can appear."""
+
+    def test_depth_and_relay_stamps_land_on_identical_nanoseconds(self):
+        from twin.restock.control_ipc import _secs_to_time
+        for t in (0.0, 0.0166667, 0.2833333481103182, 1.7500000912696123, 5.2):
+            ds, dn = _secs_to_time(t)          # depth path (masked_depth header)
+            ts, tn = _secs_to_time(t)          # /tf + /clock + /joint_states path (control_ipc serve)
+            self.assertEqual(ds * 10**9 + dn, ts * 10**9 + tn)
+            self.assertTrue(0 <= dn < 10**9)
+
+    def test_masked_depth_uses_the_shared_helper_not_an_inline_round(self):
+        src = (Path(__file__).resolve().parents[1] / 'restock' / 'masked_depth.py').read_text()
+        self.assertIn('from .control_ipc import _secs_to_time', src)
+        self.assertNotIn("int(round((stamp_s - sec)", src)   # the old divergent inline is gone
+
+
 if __name__ == '__main__':
     unittest.main()

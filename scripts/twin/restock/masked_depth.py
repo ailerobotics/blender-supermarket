@@ -296,8 +296,14 @@ class ArmDepthSubprocessBridge:
         k = np.asarray(self.camera.get_intrinsics_matrix(), float).reshape(3, 3).ravel().tolist()
         self._bbox = select_target_bbox(
             getattr(self.sensors, 'sensed_target_bboxes', ()), self.target_location, self._bbox)
-        sec = int(stamp_s)
-        header = {'stamp_sec': sec, 'stamp_nsec': int(round((stamp_s - sec) * 1e9)),
+        # ONE shared float->(sec,nanosec) helper for the depth stamp AND every relayed /tf, /clock,
+        # /joint_states stamp: tf2 accepts an exact-newest match at NANOSECOND resolution, so the
+        # depth and the TF for a tick must convert the identical world.current_time float identically
+        # -- a truncate-vs-round or float32 difference would land the depth 1 ns after the newest TF
+        # and nvblox would refuse it as future extrapolation forever (persistent non-integration).
+        from .control_ipc import _secs_to_time
+        sec, nsec = _secs_to_time(stamp_s)
+        header = {'stamp_sec': sec, 'stamp_nsec': nsec,
                   'frame_id': self.frame_id, 'width': int(width), 'height': int(height),
                   'k': k, 'bbox': list(self._bbox) if self._bbox is not None else None}
         self._writer.send(header, np.ascontiguousarray(masked, dtype='<f4').tobytes())
