@@ -5,7 +5,7 @@ only to generate ranges. Its world pose never enters the localization output.
 """
 from dataclasses import dataclass
 import math
-from .core import Odometry, Observation, wrap
+from .core import Odometry, Observation, CoverageField, wrap
 
 
 @dataclass(frozen=True)
@@ -214,10 +214,25 @@ class IsaacRangeSensor:
 
 
 def observation(scan,localized,*,coupled,arm_transport,articulation=0.0):
-    """Transform returns through estimated pose; caller supplies measured state."""
+    """Transform returns through estimated pose; caller supplies measured state.
+
+    Builds a self-occlusion-aware `CoverageField`: each beam is certified (not blind)
+    only when it is a NON-self return (a self-occluded UNKNOWN beam certifies nothing
+    beyond the rig, even if another height retained an external return). The gate then
+    requires only the bearings the forward braking sweep actually enters beyond the
+    footprint, so a rig that always self-occludes its own base/mast/arm/cart no longer
+    zeroes the whole certification. `coverage_radius` stays the legacy full-circle
+    inscribed reach for diagnostics/fixtures only; the gate consumes the field.
+    """
     scan.validate()
+    _,_,sa=scan.sensor_pose(localized.pose)
+    base=sa+scan.angle_min
+    field=CoverageField(scan.range_max,tuple(
+        (base+i*scan.angle_increment,
+         0.0 if (scan.unknown and scan.unknown[i]) else scan.range_max)
+        for i in range(len(scan.ranges))))
     # Range is measured about the sensor, not the chassis origin. The inscribed
     # base-centred observation disk shrinks by the calibrated translation.
     coverage=max(0.0,scan.range_max-math.hypot(*scan.sensor_to_base[:2])) if not any(scan.unknown) and len(scan.ranges)*scan.angle_increment>=2*math.pi-.01 else 0.0
     return Observation(scan.stamp,scan.points(localized.pose),coupled,arm_transport,
-                       articulation,scan.source,coverage)
+                       articulation,scan.source,coverage,coverage=field)

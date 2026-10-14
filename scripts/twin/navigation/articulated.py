@@ -10,7 +10,7 @@ import math
 import time
 
 from twin.mobile import MobileSpec, Pose2, occupied_envelope, swept_envelope, wrap
-from .core import Controller, Footprint, Result
+from .core import Controller, Footprint, Result, coverage_certifies
 
 
 @dataclass(frozen=True)
@@ -456,7 +456,9 @@ class ArticulatedController(Controller):
         speed=max(v,abs(odom.linear))
         delay=self.stale_after+(temporal.reaction_delay(now) if temporal else 0.)
         stop=speed*delay+speed*speed/(2*self.brake_acceleration)
-        if temporal is None and obs.coverage_radius<self.footprint.radius(True)+max(.02,odom.position_uncertainty)+stop:
+        if temporal is None and not coverage_certifies(
+                obs, odom.pose[2],
+                self.footprint.radius(True)+max(.02,odom.position_uncertainty), stop):
             return Result(reason='insufficient_sensor_coverage')
         uncertainty=max(.10 if temporal else .02,odom.position_uncertainty)
         if not self.world.valid(state,obs.obstacles,uncertainty):
