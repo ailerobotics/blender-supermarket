@@ -1533,3 +1533,24 @@ source outside this lane. This is the /clock-source / heartbeat-bound contract c
 Firstmate + the host lane. Options: stamp heartbeats in the ack's reported-clock domain (track the
 ack's now from its replies), or the host bounds the sim heartbeat against a render-paced /clock,
 or native_transport's /clock becomes the ack's single sim-time source.
+
+### 2026-10-14 — /clock DIAGNOSTIC (Firstmate msg157): no 2nd publisher; host gets NO /clock
+
+Both msg157 hypotheses refuted; the msg153 relay fallback is the fix.
+(1) stage_time is NOT fictional. CLOCK_DIAG per mission tick: stage_time vs world.current_time
+    tick1 0.0167/0.0667, tick21 0.350/0.400, tick61 1.017/1.067, tick181 3.017/3.067 -- a constant
+    ~0.05 offset, BOTH render-paced (~0.033x: wall 3->105 s while sim 0->3). Isaac's own sim time
+    also crawls; there is no 1x Isaac clock. So do NOT remove render-lead/publish_lag.
+(2) No second /clock publisher. From the host overlay env, `ros2 topic info -v /clock`:
+    Publisher count: 0; Subscription count: 18 -- ALL host nodes (move_group x10, cumotion_planner,
+    nvblox_node, object_attachment, object_segmenter, restock_incorporation_ack, restock_manipulation,
+    restock_payload, static_planning_scene_server). `ros2 topic hz /clock` and `echo --once` x3
+    received ZERO Clock messages. So the host gets NO /clock at all.
+Unified cause: native_transport's OmniGraph ROS2PublishClock is invisible to the host (0 publishers)
+-- the same OmniGraph-publisher-to-host-DDS problem the control subprocess fixed for job/sensors/
+station-command; the Isaac-process DDS pins did NOT fix /clock. With no /clock, the ack's
+use_sim_time clock falls back to WALL time (~1x) -- the '1x ack now()' seen earlier -- while the
+station stamps are render-paced stage_time -> the 0.5 s sim heartbeat guard trips. FIX = the msg153
+fallback: relay /clock (native_transport stage_time) [+ /tf, /tf_static, /joint_states for the grasp]
+through the host-DDS subprocess so the host shares one render-paced sim clock. (CLOCK_DIAG print left
+in isaac_port.advance, gated %20, as a standing diagnostic.)

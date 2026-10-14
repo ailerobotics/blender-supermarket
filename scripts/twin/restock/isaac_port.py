@@ -148,6 +148,13 @@ class IsaacPort:
         # the packet a few nanoseconds ahead of the mission's dt-accumulated clock and
         # tripped the freshness lower bound on the very first tick.
         now=self.tick*dt
+        if self.tick % 20 == 1:                      # CLOCK_DIAG: dt-accumulated vs Isaac sim time
+            try:
+                cur=float(self.world.current_time)
+            except Exception as exc:
+                cur=f'err:{exc}'
+            print(f'CLOCK_DIAG tick={self.tick} stage_time={now:.4f} world_current_time={cur} '
+                  f'wall={time.monotonic()-self.wall_origin:.2f}', flush=True)
         if self.native_transport is not None:
             self.native_transport.tick(now)
         joints=np.asarray(self.robot.get_joint_positions(),float)
