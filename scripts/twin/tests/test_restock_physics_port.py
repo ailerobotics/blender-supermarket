@@ -140,6 +140,28 @@ def test_invalid_record_stride_rejected():
                   record_stride=0)
 
 
+def test_port_initializes_mission_clock_origin():
+    # `origin` must exist so the verify boundary (on_action -> port.mission_time) never raises
+    # AttributeError -- the former `port.origin` read assumed an attribute that was never set.
+    port = IsaacPort(world=None, robot=NS(dof_names=('left_wheel_joint', 'right_wheel_joint')),
+                     robot_body=None, cart_body=None, mobile=None, range_sensor=None,
+                     transport=None, contact=None, hold_arm=None, verification=lambda now: None)
+    assert port.origin == 0.0
+
+
+def test_mission_time_recovers_packet_clock_from_stage_time_origin():
+    # mission_time() converts Isaac stage time back to the mission clock (tick*dt) the packets carry
+    # via `origin` (stage-time value at mission t=0). It is what on_action('verify') begins the
+    # InventoryVerifier on, so its scan-stamp comparisons share the packets' clock.
+    port = IsaacPort.__new__(IsaacPort)
+    port.world = NS(current_time=12.3456)
+    port.origin = 12.3456 - 5.0
+    assert port.mission_time() == pytest.approx(5.0)
+    # A stage clock that cannot be read falls back to -origin (no crash at the boundary).
+    port.world = NS()                     # no current_time attribute -> float(...) raises
+    assert port.mission_time() == pytest.approx(-(12.3456 - 5.0))
+
+
 def gate_fixture():
     applied=[]
     robot=NS(get_dof_index=lambda name:ARM_JOINTS.index(name),

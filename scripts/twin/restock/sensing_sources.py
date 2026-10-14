@@ -154,35 +154,66 @@ def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
     rig = CameraRig(stage=assembly.stage, specs=specs, parent_paths=parent_paths, frequency=-1,
                     render_scale=render_scale, camera_render_scales=camera_render_scales)
     # CameraRig authors only the camera prims + their mount collision boxes. The support
-    # REGISTRATION markers (the printed QR planes the sensing decode reads every frame) are
-    # authored by author_camera_design, which the mission compose otherwise never calls -- so a
-    # mission capture finds no fresh markers ("fresh support marker(s) not decoded"). Author the
-    # collect SOURCE support's markers here (source uses store ambient light; no dedicated lamp),
-    # with cameras/solids stripped so we neither duplicate the rig's cameras nor add mount
-    # colliders. The marker planes are double-sided textured QR and decode without a backing tab.
-    import tempfile
-    from pathlib import Path as _Path
-    from twin.restock_camera.config import author_camera_design
-    from twin.restock_manipulation.isaac_sensors import write_carton_label
-    source_support = design['supports'].get('source')
-    if source_support is not None and not assembly.stage.GetPrimAtPath('/World/RestockCamera_source_marker_0'):
-        marker_dir = _Path(tempfile.mkdtemp(prefix='restock_markers_'))
-        textures = {}
-        for marker in source_support['markers']:
-            png = marker_dir / (marker['id'].replace(':', '_') + '.png')
-            write_carton_label(marker['id'], png)
-            textures[marker['id']] = str(png)
-        # Keep the source marker TAB solid: the support witness patch (the off-slot rigidity
-        # reference the sensing validator reads) sits on it, so without the tab the witness
-        # depth reads the floor and trips "fresh witness disagrees with dated support
-        # calibration". Drop the camera mast/boom/housing solids (not needed, avoid colliders).
-        tab_solids = [s for s in design.get('solids', []) if s['id'] == 'source_marker_tab']
-        author_camera_design(assembly.stage, dict(design, cameras={}, solids=tab_solids,
-                             supports={'source': source_support}),
-                             parent_paths=parent_paths, marker_textures=textures)
+    # REGISTRATION markers (the printed QR planes the sensing decode reads every frame) are not
+    # among them, so author them for the SOURCE (collect), CART (rollwagen) and SHELF (G3_back_s2)
+    # supports the transfer/verify stages scan -- otherwise their captures fail "fresh support
+    # marker(s) not decoded".
+    author_mission_markers(assembly.stage, design, parent_paths)
     base_root = assembly.paths['ur_base_link']
     # The shelf camera frames the destination support; reuse it for the mission video.
     recording_id = 'shelf' if 'shelf' in rig.cameras else next(iter(rig.cameras))
     return {'cameras': rig.cameras,
             'base_from_camera': lambda camera_id: rig.base_from_camera(camera_id, base_root),
             'recording_camera': rig.cameras[recording_id]}
+
+
+def author_mission_markers(stage, design, parent_paths, *, support_names=('source', 'cart', 'shelf'),
+                           _author=None, _write_label=None, _mkdtemp=None):
+    """Author the registration (QR) markers for the named mission supports on the compose stage.
+
+    CameraRig authors only camera prims + mount colliders; the printed QR planes the sensing decode
+    reads every frame come from `author_camera_design`, which the mission compose otherwise never
+    calls -- so a mission capture of a support whose markers were not authored fails "fresh support
+    marker(s) not decoded". The collect SOURCE was authored from 2026-10-14 (commit 2cc106c); the
+    transfer/verify stages additionally scan the CART (rollwagen) and the SHELF station, so author
+    those supports' markers here too. Markers-only per support: cameras + mount-collision solids
+    are stripped so we neither duplicate the rig's cameras nor add colliders. A support's `<name>_
+    marker_tab` substrate (the witness-patch backing) is kept when it exists -- the SOURCE markers
+    float on 'map' and need their printed tab, while the cart/shelf witnesses rest on the physical
+    cart deck / shelf tier and need no added tab. Idempotent: a support whose first marker prim
+    already exists is skipped. Returns the support names actually authored. Pure wiring behind the
+    injectable `_author`/`_write_label`/`_mkdtemp` seams; the real builder runs only in the app.
+    """
+    import tempfile
+    from pathlib import Path as _Path
+    author = _author
+    write_label = _write_label
+    if author is None:
+        from twin.restock_camera.config import author_camera_design as author
+    if write_label is None:
+        from twin.restock_manipulation.isaac_sensors import write_carton_label as write_label
+    mkdtemp = _mkdtemp or (lambda: _Path(tempfile.mkdtemp(prefix='restock_markers_')))
+
+    authored = []
+    for name in support_names:
+        support = design['supports'].get(name)
+        if support is None:
+            continue
+        parent_root = parent_paths.get(support['parent'])
+        if parent_root is None:
+            raise ValueError(f'support {name!r} parent {support["parent"]!r} not in parent_paths')
+        # author_camera_design authors each marker at
+        # <parent_root>/RestockCamera_<name>_marker_<index>; skip if already authored.
+        if stage.GetPrimAtPath(parent_root + '/RestockCamera_' + name + '_marker_0'):
+            continue
+        marker_dir = mkdtemp()
+        textures = {}
+        for marker in support['markers']:
+            png = marker_dir / (marker['id'].replace(':', '_') + '.png')
+            write_label(marker['id'], png)
+            textures[marker['id']] = str(png)
+        tab_solids = [s for s in design.get('solids', []) if s['id'] == name + '_marker_tab']
+        author(stage, dict(design, cameras={}, solids=tab_solids, supports={name: support}),
+               parent_paths=parent_paths, marker_textures=textures)
+        authored.append(name)
+    return authored
