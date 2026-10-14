@@ -111,6 +111,39 @@ class RuntimeTests(unittest.TestCase):
         self.adapter.start('verify',self.job)
         self.assertEqual(self.adapter.step(.1).status,'running')
 
+    def test_transfer_warms_station_before_dispatching_the_place_grasp(self):
+        # Mirror the collect warm-up: transfer must not dispatch the place grasp until the shelf
+        # station's collision map is warm (fresh collision_time), so the first observe does not
+        # race a cold nvblox incorporation against the phase timeout.
+        from dataclasses import dataclass
+        @dataclass(frozen=True)
+        class Reply:
+            status: str = 'running'
+            reason: str = ''
+            controls: tuple = ()
+            evidence: tuple = ()
+        events, ready = [], {'v': False}
+        controller = NS(cart_location='rollwagen',
+                        warm=lambda sim, parked=None: (events.append(('warm', parked)) or ready['v']),
+                        start=lambda op, job: events.append(('start', op)),
+                        step=lambda dt, sim, parked=None: (events.append(('step',)) or Reply()),
+                        stop=lambda: None)
+        manip = ManipulationBridge(controller, owns_sensor_io=True)
+        poses = {k:[0,0,0] for k in ('home','pickup','cart_dock','shelf_approach')}
+        adapter = RuntimeAdapter(self.nav, self.mobile, manip, self.port, poses, fixture_mode=True)
+        adapter.start('transfer', self.job)
+        self.assertEqual(adapter.phase, 'warm')                 # warm up, do not execute yet
+        self.assertNotIn(('start', 'transfer'), events)         # grasp NOT dispatched on start
+        r = adapter.step(.1)                                    # station not ready -> keep warming
+        self.assertEqual(r.status, 'running')
+        self.assertTrue(any(e[0] == 'warm' for e in events))
+        self.assertNotIn(('start', 'transfer'), events)
+        ready['v'] = True
+        self.p = replace(self.p, observation_id='frame-2', simulation_time=.2)
+        adapter.step(.1)                                        # warm -> dispatch the place grasp
+        self.assertIn(('start', 'transfer'), events)
+        self.assertEqual(adapter.phase, 'execute')
+
 
 class ScenarioTests(unittest.TestCase):
     def test_environment_order_is_converted_and_unsafe_portal_rejected(self):

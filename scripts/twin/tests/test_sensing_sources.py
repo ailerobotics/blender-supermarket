@@ -11,7 +11,8 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from twin.restock.sensing_sources import build_sensing_sources
+from twin.restock.sensing_sources import build_sensing_sources, author_mission_markers
+import twin.restock_camera.config as cc
 
 SCENARIO = {
     'job': {'sku': 'juice_orange', 'quantity': 1, 'shelf_id': 'G3_back_s2'},
@@ -96,6 +97,59 @@ class BuildSensingSourcesTests(unittest.TestCase):
         src, _ = self._build(clearance=lambda *a: sentinel)
         ctx = next(iter(src['context_providers'].values()))
         self.assertIs(ctx.clearance_for_slot('shelf', object(), object(), 1.0), sentinel)
+
+
+class FakeStage:
+    """Records authored marker prim paths; GetPrimAtPath is truthy only for already-seen paths."""
+    def __init__(self, existing=()):
+        self.prims = set(existing)
+    def GetPrimAtPath(self, path):
+        return path in self.prims
+
+
+class AuthorMissionMarkersTests(unittest.TestCase):
+    PARENTS = {'map': '/World', 'cart_chassis': '/World/Cart'}
+
+    def _run(self, stage, **kw):
+        design = cc.camera_config(SCENARIO, MANIFEST)
+        calls = []
+        labels = []
+        author_mission_markers(
+            stage, design, self.PARENTS,
+            _author=lambda s, cfg, *, parent_paths, marker_textures: calls.append(
+                (cfg, marker_textures)),
+            _write_label=lambda marker_id, png: labels.append((marker_id, str(png))),
+            _mkdtemp=lambda: Path('/tmp/markers'), **kw)
+        return design, calls, labels
+
+    def test_authors_source_cart_and_shelf_markers_only(self):
+        design, calls, labels = self._run(FakeStage())
+        authored = {next(iter(cfg['supports'])) for cfg, _ in calls}
+        self.assertEqual(authored, {'source', 'cart', 'shelf'})
+        for cfg, textures in calls:
+            name = next(iter(cfg['supports']))
+            # markers-only: cameras dropped, only this support, textures for its markers
+            self.assertEqual(cfg['cameras'], {})
+            self.assertEqual(set(cfg['supports']), {name})
+            self.assertEqual(set(textures), {m['id'] for m in design['supports'][name]['markers']})
+            # the SOURCE keeps its witness-patch tab substrate; cart/shelf add no tab solid
+            solid_ids = {s['id'] for s in cfg['solids']}
+            self.assertEqual(solid_ids, {'source_marker_tab'} if name == 'source' else set())
+
+    def test_idempotent_skips_already_authored_support(self):
+        # source already present (its first marker prim exists) -> only cart + shelf authored
+        stage = FakeStage(existing={'/World/RestockCamera_source_marker_0'})
+        _, calls, _ = self._run(stage)
+        authored = {next(iter(cfg['supports'])) for cfg, _ in calls}
+        self.assertEqual(authored, {'cart', 'shelf'})
+
+    def test_missing_parent_path_refused(self):
+        # the cart support is parented to 'cart_chassis'; absent from parent_paths -> fail closed
+        with self.assertRaisesRegex(ValueError, 'parent'):
+            author_mission_markers(
+                FakeStage(), cc.camera_config(SCENARIO, MANIFEST), {'map': '/World'},
+                support_names=('cart',), _author=lambda *a, **k: None,
+                _write_label=lambda *a, **k: None, _mkdtemp=lambda: Path('/tmp/m'))
 
 
 if __name__ == '__main__':

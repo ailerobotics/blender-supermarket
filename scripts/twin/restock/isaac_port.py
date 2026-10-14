@@ -108,6 +108,12 @@ class IsaacPort:
         self.masked_depth=masked_depth
         # Current mission action (set by begin_action); gates per-tick rendering + sensing.
         self.current_action=None
+        # Stage-time value corresponding to mission t=0: world.current_time - now, refreshed every
+        # advance so mission_time() recovers the dt-accumulated packet clock (tick*dt) from Isaac's
+        # stage time. begin_action('verify') begins the InventoryVerifier on THIS clock -- the same
+        # one the packets and freshness windows carry. Initialised here so the verify boundary never
+        # raises before the first advance (the former `port.origin` attribute never existed).
+        self.origin=0.0
         from collections import deque
         self._pose_hist=deque()  # (now, robot (x,y,yaw), cart (x,y,yaw)) for displacement-based parked
         self.wall_origin=time.monotonic()
@@ -157,6 +163,9 @@ class IsaacPort:
             cur=float(self.world.current_time)
         except Exception:
             cur=now
+        # Mission-relative clock origin in stage-time coordinates, refreshed each tick so
+        # mission_time() exactly recovers `now` (absorbing the ~1e-9/step physics-vs-mission drift).
+        self.origin=cur-now
         if self.tick % 20 == 1:                      # CLOCK_DIAG: dt-accumulated vs Isaac sim time
             print(f'CLOCK_DIAG tick={self.tick} stage_time={now:.4f} world_current_time={cur:.4f} '
                   f'wall={time.monotonic()-self.wall_origin:.2f}', flush=True)
@@ -192,6 +201,11 @@ class IsaacPort:
         if self.after_step is not None:
             self.after_step(now,parked)
         ready=self.transport.contains(positions) and not self.contact.read()
+        # A towed cart is rig self-geometry only while physically coupled: tell the range sensor
+        # the measured latch state so its rear beams hitting the cart become self/unknown (not a
+        # phantom obstacle behind the robot) while coupled, and a decoupled cart stays a real
+        # obstacle. The sensor unions its coupled_self_paths into the self set when this is True.
+        self.range_sensor.coupled=coupled
         scan=self.range_sensor.read(now)
         articulation=wrap(r.yaw-c.yaw)
         # Reference navigation consumes a localized Odometry + an obstacle Observation,
@@ -258,6 +272,16 @@ class IsaacPort:
         return Packet(f'physics:{self.tick}','sensor',now,
             odometry,navigation,docking,None,
             ready,coupled,articulation,parked,evidence)
+
+    def mission_time(self):
+        """Mission-relative acquisition clock (tick*dt) at the current stage time -- the clock the
+        packets and freshness windows carry. on_action('verify') begins the InventoryVerifier on
+        this so its scan-stamp comparisons use the same clock; `origin` is the stage-time value at
+        mission t=0, so world.current_time - origin == the last packet's `now` (no stage drift)."""
+        try:
+            return float(self.world.current_time)-self.origin
+        except Exception:
+            return -self.origin
 
     def begin_action(self,action,job):
         self.current_action=action

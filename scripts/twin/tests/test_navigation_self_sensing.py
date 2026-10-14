@@ -148,7 +148,30 @@ class SelfSensingTests(unittest.TestCase):
     def test_invalid_self_roots_and_mask_rejected(self):
         for path in ('/','relative','/Robot/../Other'):
             with self.assertRaises(ValueError):sensor(BoxQuery([]),self_paths=(path,))
+            with self.assertRaises(ValueError):           # coupled_self_paths validated identically
+                IsaacRangeSensor(lambda:(0,0,0),query=BoxQuery([]),self_paths=('/Robot',),
+                                 coupled_self_paths=(path,))
         with self.assertRaises(ValueError):Scan(0,(1,2,3),0,1,10,unknown=(True,))
+
+    def test_coupled_cart_is_self_only_while_coupled(self):
+        # The towed cart root is rig self-geometry ONLY while coupled: masked UNKNOWN when coupled
+        # (no phantom rear obstacle), a real obstacle when decoupled. The port toggles `.coupled`.
+        state=TrainState(-2.971786,5.992829,-3.096399,-2.294942)
+        cart_boxes=[b for b in rig_boxes(state) if b[0].startswith('/Cart/')]
+        robot,_=state.bodies(MobileSpec());x,y=robot.point(.46)
+        def make():
+            return IsaacRangeSensor(lambda:(x,y,state.yaw),query=BoxQuery(cart_boxes),
+                                    self_paths=('/Robot',),coupled_self_paths=('/Cart',),
+                                    sensor_to_base=(.46,0,0),heights=(1.,))
+        decoupled=make()
+        self.assertFalse(decoupled.coupled)               # default: cart NOT self
+        scan_d=decoupled.read(.1)
+        self.assertGreater(len(scan_d.points(state.pose)),0)   # cart read as a real obstacle
+        self.assertEqual(sum(scan_d.unknown),0)
+        coupled=make();coupled.coupled=True
+        scan_c=coupled.read(.1)
+        self.assertEqual(scan_c.points(state.pose),())         # cart masked -> no phantom obstacle
+        self.assertGreater(sum(scan_c.unknown),0)
 
     def test_cart_identity_tracks_independent_articulation(self):
         state=TrainState(-2.971786,5.992829,-3.096399,-2.294942)

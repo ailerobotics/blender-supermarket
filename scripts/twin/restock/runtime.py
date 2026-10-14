@@ -148,7 +148,13 @@ class RuntimeAdapter:
             self.nav.start(self.poses[goal], action in ('outbound', 'return'), **kwargs)
             self.phase = 'navigate'
         elif action == 'transfer':
-            self.manip.start(action, asdict(job))
+            # Mirror the collect warm-up: make the shelf station's host ESDF + collision_time fresh
+            # BEFORE dispatching the place grasp, so the first transfer observe sees a fresh
+            # collision world instead of racing a cold nvblox incorporation against the 30 s phase
+            # timeout. The robot is already parked (from the park stage), so warm directly; the
+            # grasp is dispatched (manip.start('transfer')) when the warm phase completes.
+            self.phase = 'warm'
+            self._warmn = 0
         elif action not in ('park', 'verify'):
             raise ValueError(f'unsupported action: {action}')
 
@@ -223,7 +229,9 @@ class RuntimeAdapter:
             self._warmn += 1
             if ready or self._warmn >= _WARM_MAX_TICKS:
                 self.phase = 'execute'
-                self.manip.start('collect', asdict(self.job))
+                # Dispatch the current manipulation job (collect or transfer) now the collision map
+                # is warm; the warmed station is kept (the runtime does not re-begin/re-cold it).
+                self.manip.start(self.action, asdict(self.job))
                 return Result('running', reason=('collision map warm; dispatching grasp' if ready
                                                  else 'warm-up tick cap reached; dispatching grasp'))
             return Result('running', reason='warming collision map')
