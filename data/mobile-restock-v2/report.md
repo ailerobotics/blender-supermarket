@@ -1099,3 +1099,38 @@ with the sensing lane: the runtime-config `render_scale=0.375` downscales the st
 `sensing_sources._real_rig`, yet the context intrinsics stay the full 2560×1920 design — the capture
 shape check (`rgb.shape[:2] == (intrinsics.height, intrinsics.width)`) would then mismatch, so either the
 station cameras must render full-res or the intrinsics must scale with it. Escalated to Firstmate.
+
+### Native commissioning PROVEN; but the collect grasp consumes an arm-camera target the fixed-camera baseline does not feed (2026-10-14)
+
+Firstmate authorized a scoped freshness fix (`commission()` gets its own `commissioning_freshness_s`,
+default 5 s, provenance-recorded; live sensing stays 0.5 s). The camera lane landed the identical
+mechanism as PR53 (merged); my branch is merged to it (resolved in favour of main, dropped my duplicate
+test). With the 5 s commissioning window, **native commissioning of the fixed `source` camera succeeded
+end to end** (`commissioning/run-03`): `backstock_00.json` persists and reloads, provenance carries
+`camera_id=source`, `calibration_id=default:source:113:source`, `commissioning_freshness_s=5.0`,
+`source=commissioned_empty_support`, `capture_pose=[-5.73,16,0]`. The hook
+(`twin.restock.commissioning_sources`) renders the empty source (HandlingUnit deactivated) and selects a
+converged frame whose paired markers both decode under the production `FixedTileQR`. (The trailing
+SIGSEGV is Isaac's known atexit/omni-graph shutdown crash; the runner now treats a complete report as
+success.)
+
+**But this does not unblock the mission collect grasp.** The grasp capture is built in
+`isaac_factory._build_runtime` as `IsaacCartonSensors(camera=front_camera_frame/arm_camera, slots=
+source['slots'])` with **no `context_provider`** and placeholder slots `{"id":"source"}` — it consumes no
+commissioned baseline. The commissioned fixed-`source`-camera baseline is reloaded by `build_sensing`
+into the **verify lane** only, which the `[collect, couple]` mission never invokes. So the collect grasp
+is unchanged from run-41: the arm capture still hits `'dict' object has no attribute support_view`
+(now non-fatal), produces no `sensed_target_bboxes`, the masked-depth bridge has no arm-frame target
+box, and the host never gets a grasp target (watchdog).
+
+Root design mismatch: grasp-target registration needs a **pose-stable, commissionable** camera, but the
+arm eye-in-hand camera moves with the arm, and its support view at grasp time depends on the (dynamic,
+cuMotion-planned) arm pose — it cannot be pre-commissioned from a fixed pose. The fixed `source` camera
+(which I commissioned) is the pose-stable one. The correct path is therefore to have the collect grasp
+take its target from the **fixed source camera's commissioned capture** (carton base-frame pose), and let
+the arm masked-depth bridge **reproject** that pose into the arm image for the nvblox target box (reusing
+`IsaacCartonSensors._object_bbox`) — a bounded cross-camera target bridge in `isaac_factory`/`masked_depth`,
+but net-new, only GPU-boot-provable, and not landable by this task's 13:45 window. Also still gating any
+live station capture on this box: the 0.5 s live budget vs ~0.575 s full-res decode+calibrate (the
+render_scale↔intrinsics item above). Recommend banking the commissioning + freshness wins and scoping the
+grasp target-source rewire (and the live-capture resolution reconciliation) as the next task.
