@@ -41,6 +41,40 @@ the support/auxiliary layout are wired from the camera config in one place, rath
 hand-assembled against camera-owned internals for a one-off run; the native vacancy
 capture it feeds requires the mapper incorporation gate above regardless.
 
+## Stage-by-stage split (Firstmate-approved): VRAM segfault fixed, mission drives to the nav coverage gate
+
+Firstmate approved splitting the cycle into bounded stage pairs after the run-18 VRAM
+segfault. The `collect`+`couple` pair (`run_mobile_restock.sh --execute` with
+`mission-runtime-cc.json`, `render_scale=0.5`, `stages=[collect,couple]`, no host stack —
+reference nav + degraded manip need none) now runs for ~4.5 minutes with **no crash**:
+
+- **VRAM segfault (run-18) FIXED.** Root cause (read-only confirmation, Firstmate step 1):
+  Vulkan `ERROR_OUT_OF_DEVICE_MEMORY` / crash key `gpuOutOfMemory='oom'`,
+  `gpuVRAM_0≈13.1 GB` on a 12 GB card — three 2560×1920 render products + recording. NGX was
+  ruled out (disabled in the log; driver 580.173, not the system 580.178.04). Fix: config
+  `render_scale` (scales render-product resolution; 0.5 → 1280×960) threaded through
+  `CameraRig`. runs 19-21 boot and render with no OOM.
+- **Sensor-clock float drift FIXED.** `RuntimeAdapter._step`/`Mission._validate` now allow
+  `age >= -1e-6` (the port's `tick*dt` single-multiply vs the mission's accumulated `+=dt`
+  differ by one ULP).
+- **Arm-transport gate FIXED.** Nav requires the arm stowed in the transport envelope
+  (`navigation.core` `arm_not_in_transport`). At the stowed pose the binding extents are
+  **structural** — `hitch` 0.621 m and `base_link` 0.583 m — so the default
+  `transport_radius_m=0.55` can never pass; it is too small for this mobile+cart robot. Set
+  `transport_radius_m=0.65` (above the hitch; the stowed arm's 0.591 m upper-arm fits). The
+  default in `isaac_bundle` should be raised to match this robot.
+- **BLOCKING: `insufficient_sensor_coverage_timeout`.** With arm-transport satisfied, the
+  reference nav still refuses to drive: it zeroes `coverage_radius` when **any** lidar beam is
+  self-occluded (`navigation.sensors.observation`: `coverage=0 if any(scan.unknown)`), and the
+  range sensor is posed at the robot **centre** (`base_link`, heights 0.15/0.5/1.0 m) raycasting
+  through the robot's own geometry (cube/surface-plates/stowed arm/mast), so many beams self-hit
+  → coverage 0 → nav waits → 120 s timeout. The robot stays stationary (238 recorded frames are a
+  static robot, not a driven path). This is a navigation-lane coverage-certification contract
+  that the robot's self-geometry fundamentally violates: a mobile base with a mast/arm/cart can
+  never present a fully-unoccluded 360° scan. Resolving it needs a navigation-lane decision
+  (tolerate self-occlusion in the coverage certification, or certify coverage from a dedicated
+  elevated lidar frame with a clear sweep) — escalated to Firstmate.
+
 ## Full assembled mission run (d): boots clean through every infrastructure gate, blocks at transfer-manipulation (measured)
 
 The full assembled mission was attempted as one bounded guarded native run with the
