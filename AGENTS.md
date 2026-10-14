@@ -85,6 +85,13 @@ repo's `scenes/`, `export/` or `renders/`.
 - **Mobile restock manipulation**: sensor/ROS contracts and supported handling units
   live in `docs/restock_manipulation.md`; CPU checks are in RUNBOOK §12.
   Runtime inputs must come from sensors; fixtures cannot certify inventory.
+- **Empty-support commissioning**: a mission capture refuses until its station's empty
+  baseline is commissioned (`binding.py` `'observed empty commissioning baseline is
+  required'`). `scripts/twin/restock_camera/commissioning.py` runs `commission()` on an
+  observed empty frame and persists the baseline with provenance; the mission loads it by
+  station at boot via `build_sensing`'s `config['commissioning_dir']`, refusing a missing
+  one (never fabricated). Choreography CLI + runbook: `scripts/run_restock_commissioning.py`
+  and RUNBOOK §13a.
 - **Mobile navigation**: `scripts/twin/navigation/` and
   [docs/restock_navigation.md](docs/restock_navigation.md) define sensor, footprint
   and goal contracts; RUNBOOK §11 has CPU checks and isolated Nav2 launch. Coupled

@@ -39,6 +39,15 @@ module never imports Isaac/ROS or boots the app.
                          ``joint_positions()``; its ``collision_time`` gates clearance.
 - ``contact``            the gripper contact reader: ``read()``.
 - ``recording_camera``   the camera used for the mission video.
+
+Boot-time commissioning: if ``config['commissioning_dir']`` names a dataset dir written by
+the commissioning choreography (:mod:`twin.restock_camera.commissioning` /
+``scripts/run_restock_commissioning.py``), :func:`build_sensing` loads the persisted
+empty-support baselines and attaches them to the contexts by station before the first
+capture; ``config['commissioning_required_locations']`` (optional) is the set that must be
+present or boot fails closed. Without it, integration must commission the contexts
+in-process. Baselines are only ever produced by an observed commissioning run; a missing
+one is refused, never fabricated.
 """
 from .binding import RenderedSupportContext, StationSensors, SupportSlot
 from .geometry import Intrinsics
@@ -112,10 +121,21 @@ def build_sensing(*, app, assembly, plan, config, output):
     sources = _get_sources(assembly)
     for key in _REQUIRED:
         _get(sources, key)
+    context_providers = _get(sources, 'context_providers')
+    # Optional boot-time commissioning: if the runtime-config names a commissioning dataset
+    # dir, load the persisted empty-support baselines and attach them to the contexts by
+    # station (fail closed — a required station with no baseline refuses here, and any
+    # uncommissioned slot still refuses at capture). Baselines come only from an observed
+    # commissioning run; see twin.restock_camera.commissioning.
+    commissioning_dir = config.get('commissioning_dir') if isinstance(config, dict) else None
+    if commissioning_dir:
+        from .commissioning import load_baselines, apply_to_contexts
+        required = config.get('commissioning_required_locations') if isinstance(config, dict) else None
+        apply_to_contexts(context_providers, load_baselines(commissioning_dir), required_locations=required)
     station = StationSensors(
         cameras=_get(sources, 'cameras'), profiles=_get(sources, 'profiles'),
         pose_bridge_root=_get(sources, 'pose_bridge_root'),
-        context_providers=_get(sources, 'context_providers'),
+        context_providers=context_providers,
         location_cameras=_get(sources, 'location_cameras'))
     motion, contact = _get(sources, 'motion'), _get(sources, 'contact')
 
