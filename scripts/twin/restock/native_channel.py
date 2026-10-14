@@ -7,6 +7,9 @@ from twin.restock_manipulation.ros_adapter import require_sim_domain
 # Wall seconds between station heartbeats. Must stay well under the ack's 1 s wall heartbeat
 # timeout; at the render-paced mission tick (~0.5-0.7 s wall) this sends on every tick.
 _HEARTBEAT_WALL_S = 0.3
+# Bounded re-prepare attempts: a reply of 'idle'/'failed' for the current epoch means the ack lost
+# or faulted it; re-prepare under a fresh epoch a few times, then surface the reason.
+_MAX_RESTARTS = 2
 
 
 class JsonChannel:
@@ -79,6 +82,12 @@ class StationClient:
         self.last_wall_send=-1.
         self.epoch=0
         self.sequence=0
+        # Send exactly one prepare (seq 0) per epoch, then heartbeats with a strictly increasing
+        # sequence regardless of whether a reply has arrived -- the ack accepts heartbeats as soon as
+        # it has accepted the prepare, and answers a DUPLICATE prepare with 'ignored' (seq<=last),
+        # which previously stalled the sequence and tripped the ack's 1 s wall heartbeat guard.
+        self._prepared=False
+        self._restarts=0
         self.active=False
         self.latest=None
         self.last_send=-1.
@@ -90,6 +99,8 @@ class StationClient:
             raise RuntimeError('stop previous parked station before preparing another')
         self.epoch+=1
         self.sequence=0
+        self._prepared=False
+        self._restarts=0
         self.camera_frame=camera_frame
         self.active=True
         self.latest=None
@@ -116,15 +127,29 @@ class StationClient:
         if not parked:
             self.stop()
             raise ValueError('station lost measured parking')
-        if self.latest and self.latest.get('state')=='failed':
-            raise RuntimeError(self.latest.get('reason','host station failed'))
+        # A reply of 'idle'/'failed' for the current epoch means the ack lost or faulted this epoch:
+        # re-prepare under a fresh epoch (bounded), rather than re-sending the same-epoch prepare
+        # (which the ack ignores) or failing outright on a transient.
+        if self.latest and self.latest.get('state') in ('idle','failed'):
+            self._restarts+=1
+            if self._restarts>_MAX_RESTARTS:
+                raise RuntimeError(self.latest.get('reason') or 'host station failed')
+            self.epoch+=1
+            self.sequence=0
+            self._prepared=False
+            self.latest=None
         if self.wall_clock()-(self.last_reply or self.started)>10.:
             raise RuntimeError('station supervisor heartbeat unavailable')
         wall=self.wall_clock()
         if self.last_send<0 or wall-self.last_wall_send>=_HEARTBEAT_WALL_S:
-            acknowledged=self.latest is not None
-            self.channel.publish(dict(action='heartbeat' if acknowledged else 'prepare',
-                epoch=self.epoch,sequence=self.sequence if acknowledged else 0,
+            # One prepare (seq 0) per epoch; then heartbeats with a strictly increasing sequence,
+            # on the wall-paced cadence, regardless of whether a reply has arrived yet.
+            if not self._prepared:
+                action,seq='prepare',0
+                self._prepared=True
+            else:
+                action,seq='heartbeat',self.sequence
+            self.channel.publish(dict(action=action,epoch=self.epoch,sequence=seq,
                 stamp=now-self.publish_lag,parked=True,camera_frame=self.camera_frame))
             self.sequence+=1
             self.last_send=now

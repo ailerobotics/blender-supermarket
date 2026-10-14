@@ -84,6 +84,44 @@ def test_heartbeat_is_wall_paced_not_stage_paced():
     assert len(ch.sent) == n0 + 1
 
 
+def test_sequence_discipline_one_prepare_then_increasing_heartbeats_regardless_of_reply():
+    # The ack accepts heartbeats once it has accepted the prepare and ignores a duplicate prepare
+    # (seq<=last); so send exactly ONE prepare (seq 0) then heartbeats with a strictly increasing
+    # sequence on the wall cadence, WITHOUT waiting for a reply.
+    ch = FakeChannel()
+    wall = {'t': 1000.0}
+    st = StationClient(ch, wall_clock=lambda: wall['t'])
+    st.begin('restock_camera_arm', now=5.0)
+    assert ch.sent[-1]['action'] == 'prepare' and ch.sent[-1]['sequence'] == 0
+    sent = []
+    for i in range(3):
+        wall['t'] += 0.4                       # past the 0.3 s wall gate; no reply set
+        st.tick(5.0 + 0.01 * i, parked=True)
+        sent.append((ch.sent[-1]['action'], ch.sent[-1]['sequence']))
+    assert all(a == 'heartbeat' for a, _ in sent), sent      # never a duplicate prepare
+    seqs = [s for _, s in sent]
+    assert seqs == sorted(seqs) and len(set(seqs)) == 3 and min(seqs) >= 1, seqs  # strictly increasing >0
+
+
+def test_failed_reply_for_current_epoch_reprepares_new_epoch_then_fails_bounded():
+    ch = FakeChannel()
+    wall = {'t': 1000.0}
+    st = StationClient(ch, wall_clock=lambda: wall['t'])
+    st.begin('restock_camera_arm', now=5.0)
+    start_epoch = st.epoch
+    for _ in range(2):                          # _MAX_RESTARTS re-prepares under fresh epochs
+        ch.snapshot = {'state': 'failed', 'stamp': 5.0, 'collision_time': -1.0,
+                       'epoch': st.epoch, 'reason': 'boom'}
+        wall['t'] += 0.4
+        st.tick(5.0, parked=True)
+    assert st.epoch > start_epoch               # epoch advanced on re-prepare
+    ch.snapshot = {'state': 'failed', 'stamp': 5.0, 'collision_time': -1.0,
+                   'epoch': st.epoch, 'reason': 'boom'}
+    wall['t'] += 0.4
+    with pytest.raises(RuntimeError):           # bounded: surfaces the reason after _MAX_RESTARTS
+        st.tick(5.0, parked=True)
+
+
 def test_ack_accepts_stage_stamped_prepare_within_half_second_and_refuses_beyond():
     # Firstmate contract: a prepare stamped from the stage clock clears the ack's 0.5 s freshness
     # guard at 0 and 0.4 s of skew (ack /clock now >= stamp) and is refused at 0.6 s.
