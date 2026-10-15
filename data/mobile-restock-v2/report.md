@@ -2036,3 +2036,23 @@ integration-side watchdog relaxation can carry it through — the capture must k
 in-flight partial-footprint capture-tolerance PR (firstmate 202.msg). This lane's half
 (arm-speed execution profile + observe-then-execute lock) is delivered, pushed and proven to execute
 the planned grasp approach; the full collect→grasp cycle unblocks when the camera PR lands.
+
+### 2026-10-15 — runs 100-101: stride is NOT the fix; the occlusion-hold refuses a moving support camera
+
+run-100 (stride-6) and run-101 (stride-3), both with PR78 occlusion-hold + the observe-then-execute
+lock + arm 0.3, reached phase=approach and executed the reach (run-101: 196 approach status ticks,
+77 frames) but BOTH failed collect identically on the 1 s SIM `sensor stream watchdog expired`:
+/sensors flowed through observe and ~1 s into the approach, then stopped at the reach. Halving the
+render cadence (stride 6->3, 2x more frequent fresh frames) did NOT carry the reach, which rules out
+render frequency as the cause.
+
+Definitive root (camera-lane): at the reach the support-sensing camera's base-relative pose changes
+and PR78's hold REFUSES to hold -- `restock_camera/sensed.py:479`
+`'support camera moved; cannot hold registration under occlusion'` (run-101 shows it directly,
+alongside `isaac_sensors.py:113/159` frame-sync and the qr "replayed"). PR78 holds the last clean
+registration only for a STATIONARY camera; through the grasp reach the support camera (eye-in-hand /
+base-relative) moves, so the hold bails and /sensors stops. Fix is camera-lane: the hold must
+tolerate a moving support camera through the reach (re-express the held world-registration in the
+moving camera's current frame), OR the collect support must be sensed from the world-fixed source
+camera for the duration of the reach. Integration levers (arm speed, observe-then-execute controller
+lock, sensing_stride) are exhausted and proven not to be the cause. Steered to the camera lane.
