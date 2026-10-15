@@ -2056,3 +2056,26 @@ tolerate a moving support camera through the reach (re-express the held world-re
 moving camera's current frame), OR the collect support must be sensed from the world-fixed source
 camera for the duration of the reach. Integration levers (arm speed, observe-then-execute controller
 lock, sensing_stride) are exhausted and proven not to be the cause. Steered to the camera lane.
+
+### 2026-10-15 — 3-station commission boot pass: generalization runs; both NEW stations fail camera-lane quality gates
+
+Bounded commissioning-only GPU passes (578 runtime, guarded) for the two new stations:
+- **cart (rollwagen, PR 79 path):** build_sources BOOTS and renders natively (240 frames, the
+  parent-aware cart_chassis geometry path runs), but the cart camera decodes only `support:cart:1`,
+  never `support:cart:0`, in 240 frames (`no converged frame cleanly decoded source markers`) -> no
+  baseline. A cart-camera marker-framing/visibility issue in the cart station design (camera-lane).
+- **shelf (G3_back_s2, my map-parented generalization):** boots, renders, and DECODES both shelf
+  markers, so build_sources' per-station support/camera/pose + projection are correct -- then the
+  production commission gate `restock_camera/sensed.py:158/167` raises `support marker metric fit/
+  normal is uncertain` (the depth-derived marker-corner rigid fit is non-horizontal or residual
+  >2 mm). The source station uses the identical build_sources code path and commissions cleanly every
+  run, so this is not a generalization bug; the shelf camera's ~41deg grazing view (optical z-axis
+  world [0.753,-0.077,-0.654] onto a horizontal support) and/or its design inputs give an uncertain
+  support-plane depth fit (camera-lane sensing-design: the shelf camera angle / the commission gate).
+
+Net: the build_sources generalization (source+shelf+cart boot/render/decode/projection) is proven to
+run natively; both NEW stations fail at camera-lane COMMISSION-QUALITY gates (cart marker decode;
+shelf support-plane fit). The 3-station commission therefore cannot complete and the transfer config
+deltas (transfer_shelf_location/stages+transfer/commissioning_required_locations) are NOT applied --
+applying them would boot-fail the mission on the missing cart/shelf baselines. Config stays
+collect->park. Routed to the camera lane alongside the sensed.py:479 reach fix.
