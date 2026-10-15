@@ -151,14 +151,17 @@ class RenderedSupportContext:
 
 class StationSensors:
     """Aggregate distinct assigned cameras; no camera implicitly covers the mapper."""
-    def __init__(self, *, cameras, profiles, pose_bridge_root, context_providers, location_cameras):
+    def __init__(self, *, cameras, profiles, pose_bridge_root, context_providers, location_cameras,
+                 steady_clock=time.monotonic):
         from ..restock_manipulation.isaac_sensors import IsaacCartonSensors
         self.location_cameras = dict(location_cameras)
+        self.steady_clock = steady_clock
         if (not cameras or set(cameras) != set(context_providers)
                 or any(camera not in cameras for camera in self.location_cameras.values())):
             raise ValueError('camera/location/context binding is incomplete')
         self.adapters = {key:IsaacCartonSensors(camera,pose_bridge_root=pose_bridge_root,
-            profiles=profiles,camera_id=key,context_provider=context_providers[key])
+            profiles=profiles,camera_id=key,context_provider=context_providers[key],
+            steady_clock=steady_clock)
             for key,camera in cameras.items()}
         self.sensed_target_bboxes = ()
         self.evidence = ()
@@ -179,9 +182,16 @@ class StationSensors:
             raise ValueError('destination requires one current calibrated camera view')
         if max(p.scan_time for p in packets)-min(p.scan_time for p in packets) > .05:
             raise ValueError('station cameras are not synchronized')
+        # Sequential per-camera processing must not refresh the earliest acquisition deadline: hold
+        # every camera's capture to the minimum valid_until_steady, re-checked against the shared
+        # steady clock now that all cameras have been processed (evidence/bboxes stay empty on expiry).
+        deadlines = [p.valid_until_steady for p in packets if p.valid_until_steady is not None]
+        if deadlines:
+            require_fresh(min(deadlines), self.steady_clock)
         self.sensed_target_bboxes = tuple(box for key in selected for box in self.adapters[key].sensed_target_bboxes)
         self.evidence = tuple(item for key in selected for item in self.adapters[key].evidence)
         return Sensors(now,tuple(o for p in packets for o in p.observations),targets[0],
             all(p.parked for p in packets),packets[0].contact,min(p.feedback_time for p in packets),
             min(p.collision_time for p in packets),packets[0].joint_positions,
-            tuple(location for p in packets for location in p.scanned_locations),min(p.scan_time for p in packets))
+            tuple(location for p in packets for location in p.scanned_locations),min(p.scan_time for p in packets),
+            min(deadlines) if deadlines else None)

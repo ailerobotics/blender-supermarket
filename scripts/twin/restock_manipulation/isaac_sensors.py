@@ -13,6 +13,7 @@ import numpy as np
 from .perception import DepthPerception, load_pose_bridge
 from .types import Sensors
 from ..restock_camera.geometry import rigid
+from ..restock_camera.freshness import frame_deadline, require_fresh
 from ..restock_camera.sensed import FrameEvidence, SupportView, masked_cloud, contains
 from ..restock_camera.qr import FixedTileQR, FrameQR
 
@@ -87,6 +88,10 @@ class IsaacCartonSensors:
         # dropped here before the context (which tolerates it) ever sees it.
         if not np.isfinite([now,stamp]).all() or not -0.02 <= now-stamp <= .5:
             raise ValueError('no new synchronized rendered camera frame')
+        # Acquisition-to-use freshness: anchor the live 0.5 s deadline to the steady clock BEFORE
+        # processing (registration/decode/depth), then re-check it AFTER, so a slow decode that
+        # elapses past the budget while `now` stays fixed is refused (never a stale observation).
+        deadline = frame_deadline(frame, now, self.steady_clock())
         rgb = np.asarray(frame['rgb'])[:, :, :3]
         depth = np.asarray(frame['distance_to_image_plane'], float)
         if rgb.shape[:2] != depth.shape or depth.ndim != 2:
@@ -209,6 +214,9 @@ class IsaacCartonSensors:
         candidates = [o for o in observations if o.location == source]
         if len(candidates) == 1:
             motion.observe_source(candidates[0])
+        # The acquisition must still be fresh now that processing is done; refuse before publishing
+        # any evidence/bbox (they stay empty on expiry) so a stale frame never reaches the mission.
+        require_fresh(deadline, self.steady_clock)
         self.sensed_target_bboxes = tuple(self._object_bbox(o,self.profiles[o.sku],intr,depth.shape)
                                           for o in observations)
         self.evidence = tuple(dict(location=s.location,
@@ -223,7 +231,7 @@ class IsaacCartonSensors:
             provenance='dated_rigid_geometry_with_fresh_marker_witness_and_depth') for s in self.slots)
         return Sensors(now, tuple(observations), targets.get(destination),
                        motion.parked(), contact.read(), now, motion.collision_time,
-                       motion.joint_positions(), tuple(scanned), stamp)
+                       motion.joint_positions(), tuple(scanned), stamp, deadline)
 
     def _known_foreground(self, slot, observations, depth, intr):
         mask = slot.support_view.mask(slot.support_view.geometry.intrinsics)
