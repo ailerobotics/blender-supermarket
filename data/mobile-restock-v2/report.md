@@ -1869,3 +1869,46 @@ acquisition-to-use budget in **sim/node** time (as the sensor watchdog now does)
 marker or integration-wiring change. Routed to the camera lane; the integration composition, boot,
 station ack, masked-depth and nav-to-collect path are all proven healthy by this run. Mission grasp
 cannot advance until that gate is node-clocked.
+
+### 2026-10-15 — run-85: collect sensing + grasp PLAN both succeed; execution needs the arm controller
+
+The camera lane node-clocked the gate (PR 75: `frame_deadline(use_acquired=False)` measures the
+budget on a sim clock + `sensor_wall_backstop_s`), and integration wired the sim clock in
+(`sensing_sources['steady_clock'] = lambda: assembly.world.current_time`, commit — completes PR 75;
+without it `build_sensing` fell back to the wall default and the gate still tripped). run-85 then got
+the **furthest yet**:
+
+- **Collect sensing works** — the fixed `source` camera decoded the SKU and registered the carton
+  pose across multiple fresh captures (`COLLECT_CAPTURE calls=4/6/8/10/12 sku=juice_orange
+  roi=(124,107,292,159) pose=(0.0, 1.101, 0.261, …)`). The node-clocked freshness gate no longer
+  false-trips on the full-res render. (One transient `truncated or ambiguous decoded QR quadrilateral`
+  and one `no new synchronized rendered camera frame` were tolerated, not fatal — the capture retried.)
+- **Grasp approach PLANS** — `MANIP_START operation=collect` → `phase=approach`; the host cuMotion
+  planner reported `MoveGroup planning succeeded in 1.360 seconds` / `success: true` on the real
+  approach pose with the live nvblox ESDF. **This is the core blocker (runs 78–82) fully resolved** by
+  the regenerated PR-72 XRDF + `pose_goal=true`.
+- **Failed at trajectory EXECUTION**, not planning:
+  ```
+  trajectory_execution_manager: Validating trajectory ... Starting trajectory execution ...
+  ERROR: Action client not connected to action server: arm_controller/follow_joint_trajectory
+  Failed to send trajectory part 1 of 1 to controller arm_controller → status ABORTED
+  controller.py → _fail('collision planning or execution failed') → host emergency stop
+  ```
+
+Root cause — a **host-stack launch gap** (not a geometry/planning problem). `RosMotionPort` uses
+plan-only cuMotion then `ExecuteTrajectory`, which MoveIt routes to the
+`arm_controller/follow_joint_trajectory` action server that `restock_host/launch.py` **configures**
+MoveIt to use (`controller_names:['arm_controller']`, `action_ns:'follow_joint_trajectory'`). That
+server is `twin.restock.trajectory_host` (the FollowJointTrajectory executor that bridges to Isaac via
+`/restock_sim/arm_joint_command`, which Isaac subscribes to). But the `--host-stack` launch
+(`launch.py`) launches `move_group` + cuMotion + nvblox + `object_segmenter` + `ros_host` and **never
+launches `trajectory_host`**, so the planned trajectory has no controller to execute on. run-85 is the
+first run to produce a successful plan, so it is the first to reach — and reveal — this gap (run-82
+died in planning, before execution).
+
+Fix routed to the host lane (owner of `launch.py` + the `arm_controller` MoveIt config): launch
+`trajectory_host` as one `ExecuteProcess` in `launch.py`, in the same ROS launch / overlay / domain-88
+FastDDS env as `move_group` (so the controller-manager discovers its action server — launching it from
+integration would risk a DDS-pin mismatch and the same disconnect). It needs `--urdf <mobile urdf>`
+(= `host.json['urdf']`, already in the validated plan). Everything up to and including grasp planning
+is now proven end to end in the live mission; execution unblocks once the controller is launched.
