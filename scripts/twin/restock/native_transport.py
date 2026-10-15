@@ -67,16 +67,17 @@ class ArmCommandGate:
             self.hold()
             return
         try:
-            # This is a position+velocity command: NO effort command is allowed. The incoming JointState
-            # effort array may be empty OR zero-filled to the joint count by Isaac's ROS2SubscribeJointState
-            # (run-89: trajectory_host publishes no effort, but the subscriber delivered eff=6 all-zero,
-            # which an exact ``len(efforts)!=0`` wrongly rejected). Reject only a genuinely NON-ZERO effort.
+            # This is a POSITION+VELOCITY command (``apply`` drives only q, v); the effort field is
+            # never commanded and is NOT validated. trajectory_host publishes no effort, but Isaac's
+            # ROS2SubscribeJointState zero- or torque-fills effort to the joint count (run-89 saw
+            # eff=6 all-zero; run-90 saw eff=6 non-zero measured torques), so gating on effort at all
+            # wrongly rejected the executed grasp command. Validate only names, position, velocity and
+            # the stamp; position/velocity limits + tracking envelope are enforced below.
             if (len(names)!=6 or set(names)!=set(ARM_JOINTS) or len(positions)!=6
-                    or len(velocities)!=6 or any(e != 0 for e in efforts)
+                    or len(velocities)!=6
                     or not math.isfinite(stamp) or not 0 <= now-stamp <= .2):
                 print(f'ARM_CMD_REJECT names={len(names)} setok={set(names)==set(ARM_JOINTS)} '
                       f'pos={len(positions)} vel={len(velocities)} eff={len(efforts)} '
-                      f'nonzero_eff={any(e!=0 for e in efforts)} '
                       f'stamp={stamp!r} now={now!r} now-stamp={now-stamp if math.isfinite(stamp) else float("nan"):.4f}',
                       flush=True)  # diagnostic: which sub-condition rejected the executed arm command
                 raise ValueError('invalid or stale simulated arm command')

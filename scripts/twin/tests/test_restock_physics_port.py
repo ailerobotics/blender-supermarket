@@ -218,18 +218,17 @@ def test_arm_drive_targets_do_not_accept_old_sequence():
     assert len(applied)==1 and not gate.faulted
 
 
-def test_arm_command_accepts_zero_filled_effort_but_rejects_nonzero():
-    # Isaac's ROS2SubscribeJointState zero-fills effort to the joint count even though trajectory_host
-    # publishes none (run-89: eff=6 all-zero wrongly rejected, stalling the executed grasp). All-zero
-    # (or empty) effort is accepted; a genuinely non-zero effort command is still refused.
+def test_arm_command_ignores_the_effort_field():
+    # Isaac's ROS2SubscribeJointState fills effort to the joint count even though trajectory_host
+    # publishes none (run-89: eff=6 all-zero; run-90: eff=6 non-zero measured torques). Effort is
+    # never commanded (apply drives only q,v), so it must be IGNORED -- a valid position+velocity
+    # command is applied regardless of the effort field (gating on it stalled the executed grasp).
     gate,applied=gate_fixture()
     gate.command(names=list(ARM_JOINTS),positions=[.01]*6,velocities=[.01]*6,
                  efforts=[0.]*6,stamp=1.,now=1.)
-    assert len(applied)==1 and not gate.faulted
-    with pytest.raises(ValueError,match='invalid or stale'):
-        gate.command(names=list(ARM_JOINTS),positions=[.02]*6,velocities=[.01]*6,
-                     efforts=[0.,0.,0.,0.,0.,5.],stamp=2.,now=2.)
-    assert gate.faulted
+    gate.command(names=list(ARM_JOINTS),positions=[.02]*6,velocities=[.01]*6,
+                 efforts=[1.3,-2.,0.,4.,0.,5.],stamp=2.,now=2.)
+    assert len(applied)==2 and not gate.faulted
 
 
 def test_arm_tracking_jump_latches_measured_hold_and_rejects_later_move():
