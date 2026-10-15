@@ -193,8 +193,12 @@ def test_rendered_qr_and_depth_are_actual_inputs(monkeypatch):
     assert packet.observations[0].pose[2] == pytest.approx(.3)
     assert not packet.target.clear and packet.target.free_dimensions[2] == 0
     assert sensor.sensed_target_bboxes[0]['source'] == 'sensor_pose_registered_catalog_volume'
-    with pytest.raises(ValueError, match='monotonic|new synchronized'):
-        sensor.capture(2.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
+    # Stride-paced re-presentation of this exact fresh frame (same id/stamp/pixels, still inside the
+    # 0.5 s window) is CONSUMED, not refused: the decoded observation is reused and the context
+    # provider / tracker is not re-run (so no monotonic-prepare refusal). A genuinely new or stale
+    # frame below still takes the full path and the freshness gate still fires (see run 6).
+    reused = sensor.capture(2.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
+    assert len(reused.observations) == 1 and reused.observations[0].sku == 'carton'
     # Remove identity pixels: no SKU appears from known scene/profile metadata.
     frame['rendering_frame'] = 3
     frame['rendering_time'] = motion.collision_time = 3.
