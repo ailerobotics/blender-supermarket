@@ -117,6 +117,18 @@ repo's `scenes/`, `export/` or `renders/`.
   `scripts/twin/restock/`; CPU checks and adapter contract are in RUNBOOK §11.
   `data/mobile-restock-v2/report.md` distinguishes fixture tests from the still
   unverified physical cycle and records the GPU driver diagnosis.
+- **Dev-loop tooling for the Isaac mobile-restock lane** lives in `scripts/twin/tools/`
+  (CPU, no GPU): `profile_mission_run.py` breaks a recorded run's wall clock into
+  boot/commissioning/collect-observe/approach-reach/per-frame-render/ROS-idle/shutdown from
+  the run's own artifacts (console log + `nav-trace.jsonl` + `mission.json` +
+  commissioning `run.json`); `replay_reach.py` replays a run's recorded frame
+  cadence+identity (`mission-frames/frames.json`) through the **production** capture+hold
+  pipeline (`isaac_sensors`/`sensed`/`binding`/`qr`, imported unchanged) on a virtual clock
+  so a camera-side change is provable in ~1-2 s instead of a 12-20 min GPU run. Caveat: a run
+  persists only the walkthrough RGB (`restock/recording.py`), not the sensing camera's
+  depth/context, so the replay drives the real gates with the recorded timing+identity against
+  an analytic bench frame (labelled, not sensor evidence). Write-up + per-phase numbers:
+  `data/sim-restock-devloop-v1/report.md`.
 - **Bounded native restock diagnostics** (guarded GPU, no full mission) are driven by
   `scripts/run_restock_render_smoke.py` with one of `--assembly-only` (stationary
   physics hold → `restock/assembly_check.py`), `--coupling-only` (dock+latch+hold →
