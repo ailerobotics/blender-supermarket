@@ -35,6 +35,14 @@ FEEDBACK_RENDER_LEAD_S = 0.2
 # (``20 + plan.times[-1]*5``) false-failed that healthy grasp -- the executor analogue of the host-side
 # RosMotionPort wall-deadline bug fixed on the sim clock in the same wave.
 EXECUTE_WALL_BACKSTOP_S = 1200.0
+# Terminal settle gate: the measured joints must reach the planned end within GOAL_POSITION_TOL (rad)
+# and GOAL_VELOCITY_TOL (rad/s) before GOAL_SETTLE_MARGIN_S sim seconds past the trajectory end.
+# Position stays tight (grasp precision); the velocity tol and the settle window are relaxed for the
+# higher sim arm speed's residual deceleration and the render-paced settle (TRAJ_HOST_GOAL_MISS logs
+# the actual terminal error so a genuine tracking miss is told apart from a tolerance edge).
+GOAL_POSITION_TOL = 0.01
+GOAL_VELOCITY_TOL = 0.03
+GOAL_SETTLE_MARGIN_S = 5.0
 
 
 def feedback_fresh(gap):
@@ -265,15 +273,26 @@ def main():
                     feedback_message.error.velocities=(desired_velocity-measured[2]).tolist()
                     handle.publish_feedback(feedback_message)
                     if elapsed>=plan.times[-1]:
-                        if (now()-measured[0]<=.2 and time.monotonic()-state['received']<=.5
-                                and np.max(np.abs(measured[1]-plan.end))<=.01
-                                and np.max(np.abs(measured[2]))<=.02):
+                        pos_err=float(np.max(np.abs(measured[1]-plan.end)))
+                        vel_mag=float(np.max(np.abs(measured[2])))
+                        # Terminal settle freshness is SIM-clocked only (now()-measured[0]). A WALL
+                        # freshness term here (time.monotonic()-received<=.5) false-failed a settled
+                        # grasp under render pacing, where /joint_states arrives ~1-3 s WALL apart
+                        # though <=0.1 s SIM apart (run-106 reached the trajectory end with the arm at
+                        # the goal, then faulted on the wall term). The feedback-staleness watchdog
+                        # (tick(), 30 s wall backstop) still hard-stops a genuinely frozen sim.
+                        if now()-measured[0]<=.2 and pos_err<=GOAL_POSITION_TOL and vel_mag<=GOAL_VELOCITY_TOL:
                             state['target']=plan.end.copy()
                             state['plan']=None
                             handle.succeed()
                             result.error_code=result.SUCCESSFUL
                             return result
-                        if elapsed>plan.times[-1]+2.:
+                        if elapsed>plan.times[-1]+GOAL_SETTLE_MARGIN_S:
+                            # Diagnostic: the exact terminal error so a miss is attributable (settle
+                            # tolerance vs a genuine tracking error) without another blind run.
+                            print(f'TRAJ_HOST_GOAL_MISS pos_err={pos_err:.4f} vel={vel_mag:.4f} '
+                                  f'sim_age={now()-measured[0]:.3f} settle={elapsed-plan.times[-1]:.2f}',
+                                  flush=True)
                             raise RuntimeError('measured goal tolerance not reached')
                 time.sleep(.01)
             raise RuntimeError('executor shutdown')
