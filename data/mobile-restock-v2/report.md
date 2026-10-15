@@ -1810,10 +1810,10 @@ planning-scene persistence that failed the earlier return). Main is already an a
 Secondary integration fix in my mission lane: `ros_manipulation.step` now treats a returned packet's
 integrity (stale/repeated timestamp, non-sensor provenance) as **fail-closed** outside the soft capture
 try — a fixture or replayed packet stops the mission instead of degrading to `running` (was a latent
-branch-local test failure). CPU suite: 767 pass; the 2 remaining failures are camera-lane contract
-drift in `restock_camera` (`StationSensors` `steady_clock` kwarg their test expects but their impl
-lacks) — production constructs it without that kwarg so the live mission is unaffected; reported for
-the camera lane.
+branch-local test failure). After the camera lane landed PR 73 (threads the steady-clock
+acquisition-to-use freshness gate through `IsaacCartonSensors.capture` + `StationSensors`) the two
+former `restock_camera` freshness failures are fixed; combined with the sensing fix below the **full
+CPU suite is green: 771 pass, 0 fail, 10 skipped, 28 subtests**.
 
 **run-83** (first full `collect`+`couple` attempt with all fixes active, fresh commission run-38 of
 `backstock_00` at 2560×1920 / 900 s baseline, `wheel_friction=1.0`): the mission **failed during bundle
