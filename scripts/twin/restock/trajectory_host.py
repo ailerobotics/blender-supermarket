@@ -46,9 +46,17 @@ GOAL_SETTLE_MARGIN_S = 5.0
 # Max allowed command-vs-measured divergence (rad) during execution. Compared at the FEEDBACK's own
 # timestamp (see tick()) so render-paced feedback lag is not mistaken for a tracking error. With the
 # arm drive stiffened (physics_setup arm_stiffness_gain) the steady-state following error is flat and
-# near zero; run-120 only grazed the old 0.35 once, at the final-waypoint decel transient (0.3524).
-# 0.40 absorbs that single end-of-path transient with margin for the downstream grasp/lift phases.
+# near zero; each phase trajectory then produces ONE single-sample end-of-path decel transient
+# (run-120 approach 0.3524, run-121 contact 0.4044) that the next settled sample clears -- these are
+# NOT reduced by more stiffness. So the fault is DEBOUNCED over distinct feedback samples (see tick()):
+# a lone terminal transient is tolerated, but a sustained divergence (run-117's monotonically growing
+# lag, many consecutive over-tol samples) still faults. A single sample past the hard ceiling faults
+# immediately -- no healthy terminal transient reaches it, but a diverging/unstable arm does.
 TRACKING_TOL = 0.40
+# Consecutive DISTINCT over-tol feedback samples required before faulting on sustained divergence.
+TRACKING_DEBOUNCE = 3
+# Immediate-fault ceiling (rad): gross divergence/instability faults on one sample regardless of debounce.
+TRACKING_HARD_TOL = 0.80
 
 
 def feedback_fresh(gap):
@@ -62,6 +70,20 @@ def feedback_stale(sim_now, feedback_sim_stamp, wall_now, wall_received):
     render pacing); the wall bound is only a frozen-sim backstop (sim can't advance to trip then)."""
     return (sim_now - feedback_sim_stamp > FEEDBACK_SIM_STALE_S
             or wall_now - wall_received > FEEDBACK_WALL_BACKSTOP_S)
+
+
+def tracking_fault(track_err, miss_count, *, tol=TRACKING_TOL, debounce=TRACKING_DEBOUNCE,
+                   hard=TRACKING_HARD_TOL):
+    """Decide whether a command-vs-measured tracking error should emergency-stop the mission.
+
+    ``miss_count`` is the number of consecutive DISTINCT over-tol feedback samples so far (this one
+    included; the caller counts them in tick()). Within tol -> never. Over tol -> fault only once the
+    divergence is sustained (``miss_count`` reaches ``debounce``) or on a single sample past the hard
+    ceiling. This tolerates the lone single-sample end-of-path decel transient every phase trajectory
+    produces with the stiffened drive (run-120/121) while still catching run-117's growing lag."""
+    if track_err <= tol:
+        return False
+    return track_err > hard or miss_count >= debounce
 
 
 class Plan:
@@ -152,7 +174,8 @@ def main():
     if node.context.get_domain_id()!=88:
         raise RuntimeError('trajectory executor requires simulation domain 88')
     lock=threading.RLock()
-    state=dict(feedback=None,received=0.,fault=None,active=False,target=None,plan=None,start=None)
+    state=dict(feedback=None,received=0.,fault=None,active=False,target=None,plan=None,start=None,
+               miss_count=0,miss_stamp=None)
     group=ReentrantCallbackGroup()
     command=node.create_publisher(JointState,'/restock_sim/arm_joint_command',10)
     stop=node.create_publisher(Bool,'/restock_sim/manipulation/stop',10)
@@ -225,10 +248,27 @@ def main():
                 reference=q                               # idle hold: measured vs the static target
             track_err=float(np.max(np.abs(reference-state['feedback'][1])))
             if track_err>TRACKING_TOL:
-                print(f'TRAJ_HOST_TRACK_MISS err={track_err:.4f} fb_age={now()-state["feedback"][0]:.3f}',
-                      flush=True)
-                fault(f'trajectory tracking error {track_err:.3f} exceeds {TRACKING_TOL} rad')
-                return
+                # Debounce on DISTINCT feedback samples: track_err is recomputed every tick against the
+                # same feedback until a new /joint_states sample arrives (reference is sampled at the
+                # feedback's own stamp), so count each over-tol sample once. A terminal decel transient
+                # is a single over-tol sample the next settled sample clears; a growing lag stays over
+                # tol across consecutive samples. Fault on sustained divergence, or immediately past the
+                # hard ceiling. The terminal GOAL-settle gate (execute()) still enforces tight final
+                # convergence, so tolerating a transient here never lets a sloppy grasp succeed.
+                fb_stamp=state['feedback'][0]
+                if fb_stamp!=state['miss_stamp']:
+                    state['miss_stamp']=fb_stamp
+                    state['miss_count']+=1
+                    print(f'TRAJ_HOST_TRACK_MISS err={track_err:.4f} fb_age={now()-fb_stamp:.3f} '
+                          f'n={state["miss_count"]}/{TRACKING_DEBOUNCE}',flush=True)
+                if tracking_fault(track_err,state['miss_count']):
+                    fault(f'trajectory tracking error {track_err:.3f} exceeds {TRACKING_TOL} rad '
+                          f'for {state["miss_count"]} samples')
+                    return
+                # tolerated transient: keep commanding the trajectory below
+            else:
+                state['miss_count']=0
+                state['miss_stamp']=None
             msg=JointState()
             msg.header.stamp=node.get_clock().now().to_msg()
             msg.name=list(ARM_JOINTS)
@@ -260,6 +300,7 @@ def main():
             with lock:
                 plan=Plan(handle.request.trajectory,state['feedback'][1],limits,max_speed=max_speed,max_acceleration=max_acceleration)
                 state['plan'],state['start']=plan,now()
+                state['miss_count'],state['miss_stamp']=0,None   # fresh debounce window per trajectory
                 started=state['start']
             wall_backstop=time.monotonic()+EXECUTE_WALL_BACKSTOP_S
             while rclpy.ok():

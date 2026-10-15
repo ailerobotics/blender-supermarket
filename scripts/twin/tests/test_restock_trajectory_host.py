@@ -87,3 +87,22 @@ def test_feedback_fresh_tolerates_subtick_clock_lead():
     assert feedback_fresh(FEEDBACK_SIM_STALE_S - 1e-6)        # within forward staleness -> fresh
     assert not feedback_fresh(-FEEDBACK_RENDER_LEAD_S - 0.01) # too far in the "future" -> refused
     assert not feedback_fresh(FEEDBACK_SIM_STALE_S + 0.01)    # genuinely stale -> refused
+
+
+def test_tracking_fault_debounces_single_sample_transients():
+    # Each phase trajectory produces ONE single-sample end-of-path decel transient (run-120 approach
+    # 0.3524, run-121 contact 0.4044) that the next settled sample clears. The debounce must tolerate a
+    # lone transient while still faulting on sustained divergence (run-117's growing lag) and on gross
+    # instability immediately.
+    from twin.restock.trajectory_host import (tracking_fault, TRACKING_TOL, TRACKING_DEBOUNCE,
+                                             TRACKING_HARD_TOL)
+    # within tolerance -> never faults, whatever the count
+    assert not tracking_fault(TRACKING_TOL - 1e-6, TRACKING_DEBOUNCE + 5)
+    # a lone over-tol transient (run-121's 0.4044, 1st distinct sample) below the hard ceiling -> tolerated
+    assert not tracking_fault(0.4044, 1)
+    assert 1 < TRACKING_DEBOUNCE  # the tolerance above is meaningful: one sample is under the debounce
+    # sustained over-tol divergence reaching the debounce count -> faults
+    assert tracking_fault(TRACKING_TOL + 0.01, TRACKING_DEBOUNCE)
+    assert not tracking_fault(TRACKING_TOL + 0.01, TRACKING_DEBOUNCE - 1)  # not yet sustained
+    # gross divergence past the hard ceiling faults on a single sample regardless of debounce
+    assert tracking_fault(TRACKING_HARD_TOL + 0.01, 1)
