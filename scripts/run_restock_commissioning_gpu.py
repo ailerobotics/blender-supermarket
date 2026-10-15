@@ -38,6 +38,9 @@ def main():
     parser.add_argument('--wall-cap-s', type=int, default=600)
     parser.add_argument('--lifetime-s', type=float, default=600.,
                         help='commissioned-baseline lifetime (wall seconds via the shared clock domain)')
+    parser.add_argument('--render-preset', choices=('full', 'fast'),
+                        help='opt into a sensing render preset (full|fast; fast=0.6 scale); '
+                             'forwarded to the commissioning CLI. Use the SAME preset for the mission.')
     args = parser.parse_args()
 
     args.output = args.output.resolve()
@@ -69,6 +72,8 @@ def main():
                        '--scenario', str(args.scenario.resolve()),
                        '--sources', 'twin.restock.commissioning_sources:build_sources',
                        '--output', str(baselines), '--lifetime-s', str(args.lifetime_s)]
+            if args.render_preset:
+                command.extend(['--render-preset', args.render_preset])
             for s in stations:
                 command.extend(['--station', s])
             record['command'] = command
