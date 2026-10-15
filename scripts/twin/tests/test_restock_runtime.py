@@ -21,12 +21,12 @@ class RuntimeTests(unittest.TestCase):
             controls: tuple = ({'kind':'gripper','enabled':True},)
         calls=[]
         runtime=NS(controller=NS(cart_location='rollwagen'),
-                   step=lambda dt,stamp:(calls.append((dt,stamp)) or Reply()),
+                   step=lambda dt,stamp,parked=None:(calls.append((dt,stamp,parked)) or Reply()),
                    start=lambda op,job:None,
                    motion=NS(stop=lambda:calls.append('stop')))
         bridge=ManipulationBridge(runtime,owns_sensor_io=True)
-        result=bridge.step(.1,NS(simulation_time=4.2))
-        self.assertEqual(calls,[(.1,4.2)])
+        result=bridge.step(.1,NS(simulation_time=4.2,parked=True))
+        self.assertEqual(calls,[(.1,4.2,True)])
         self.assertEqual(result.controls,())
         bridge.stop()
         self.assertEqual(calls[-1],'stop')

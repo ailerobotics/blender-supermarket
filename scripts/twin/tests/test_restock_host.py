@@ -382,7 +382,10 @@ class RosHostLaunchWiring(unittest.TestCase):
         from twin.restock_manipulation.types import ProductProfile
         cfg = json.loads((Path(__file__).resolve().parents[1]
                           / 'restock_manipulation' / 'ros_host_config.json').read_text())
-        self.assertEqual(set(cfg), {'profiles', 'walls'})
+        # pose_goal selects cuMotion task-space (pose) planning over joint-space; it is an
+        # optional bool the host reads via config.get('pose_goal', False).
+        self.assertEqual(set(cfg), {'profiles', 'walls', 'pose_goal'})
+        self.assertIsInstance(cfg['pose_goal'], bool)
         # Every profile constructs; walls cover source (backstock_00), cart (rollwagen) and
         # target (G3_back_s2) so WallCartonPolicy.build never raises on a missing location.
         self.assertTrue({p['sku']: ProductProfile(**p) for p in cfg['profiles']})
