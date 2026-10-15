@@ -2079,3 +2079,23 @@ shelf support-plane fit). The 3-station commission therefore cannot complete and
 deltas (transfer_shelf_location/stages+transfer/commissioning_required_locations) are NOT applied --
 applying them would boot-fail the mission on the missing cart/shelf baselines. Config stays
 collect->park. Routed to the camera lane alongside the sensed.py:479 reach fix.
+
+### 2026-10-15 — run-102: reach-hold WORKS; new blocker = baseline lifetime vs render-paced collect
+
+run-102 (PR80 reach-hold + arm 0.3 + observe-then-execute lock + stride-3) is a breakthrough: the
+grasp approach executed with SUSTAINED sensing -- 256 approach-phase ticks, 133 frames, sim advanced
+to ~13 s (prior runs stalled by ~5 s). PR80 fixed the /sensors-stops-during-reach blocker (moving
+support camera now held). Failure moved to `host emergency stop`, and the console shows the true
+cause: at sim ~12.5 s the capture began raising `expired or reversed rigid-support commissioning
+clock` -- the commissioning baseline (900 s wall lifetime) EXPIRED mid-collect because the
+render-paced collect took ~15.5 min wall (commission -> baseline-expiry within collect).
+
+Fixes (standing authority 212, sim-only render-pacing params; recorded here):
+- baseline commissioning `--lifetime-s` 900 -> 1800 s (the 900 s wall bound is a render-pacing
+  artifact; the empty-support reference is static in sim, so the longer wall collect stays valid).
+- `arm_max_speed` 0.3 -> 0.5 rad/s (authorized ceiling) to shorten the grasp and the collect wall
+  time (~0.45 rad/s effective planner speed).
+- `walkthrough.mp4` encode moved BEFORE `app.close()` in run_mobile_restock.py: Isaac's close can
+  hard-exit and skip the outer finally, so run-102's mp4 was not written until encoded manually. Now
+  every run (success or failure) leaves `<run>/walkthrough.mp4`. run-102's clip was encoded manually
+  (132 frames, VFR H.264).
