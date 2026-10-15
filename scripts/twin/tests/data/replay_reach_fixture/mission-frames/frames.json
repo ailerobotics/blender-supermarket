@@ -1,0 +1,72 @@
+{
+  "nominal_fps": 30,
+  "timing": "variable acquisition intervals",
+  "frames": [
+    {
+      "render_id": "{\"referenceTimeDenominator\":30,\"referenceTimeNumerator\":28}",
+      "simulation_time": 0.2333,
+      "shape": [
+        720,
+        960,
+        3
+      ],
+      "file": "000000.png",
+      "sha256": "b5bd7a13d6d03b34f11b722153a9f46dd1d0c1fa5c3c633ec7dcb1bfbb85774f"
+    },
+    {
+      "render_id": "{\"referenceTimeDenominator\":30,\"referenceTimeNumerator\":30}",
+      "simulation_time": 0.3,
+      "shape": [
+        720,
+        960,
+        3
+      ],
+      "file": "000001.png",
+      "sha256": "7beb4ff8098bec637ae1f3636bfe6dace8299a42e1c48e34e6dccf14710862fa"
+    },
+    {
+      "render_id": "{\"referenceTimeDenominator\":30,\"referenceTimeNumerator\":32}",
+      "simulation_time": 0.3667,
+      "shape": [
+        720,
+        960,
+        3
+      ],
+      "file": "000002.png",
+      "sha256": "13cf5854138a729cfff38ab912760c63a3c92f455a062be16ce6a6b82ff99e54"
+    },
+    {
+      "render_id": "{\"referenceTimeDenominator\":30,\"referenceTimeNumerator\":34}",
+      "simulation_time": 0.4334,
+      "shape": [
+        720,
+        960,
+        3
+      ],
+      "file": "000003.png",
+      "sha256": "bf45f6ec3475f4528cbd8d36afa1d9fbbd3bb8ca7c5d6d8e155a92f23bf6e2ce"
+    },
+    {
+      "render_id": "{\"referenceTimeDenominator\":30,\"referenceTimeNumerator\":36}",
+      "simulation_time": 0.5001,
+      "shape": [
+        720,
+        960,
+        3
+      ],
+      "file": "000004.png",
+      "sha256": "de43be4eba1bb6ce97939a50a25e7043992e307af1909e04c92b448d243f4e61"
+    },
+    {
+      "render_id": "{\"referenceTimeDenominator\":30,\"referenceTimeNumerator\":38}",
+      "simulation_time": 0.5668,
+      "shape": [
+        720,
+        960,
+        3
+      ],
+      "file": "000005.png",
+      "sha256": "a10b2ab182463f4e20d9acb6848d77dddf8c52e9529a20baccf9d4d73ee38cdf"
+    }
+  ]
+}
