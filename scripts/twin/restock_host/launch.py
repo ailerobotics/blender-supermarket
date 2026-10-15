@@ -156,7 +156,19 @@ def description(config):
         '--config', str(ros_host_config), *plan['integration_host_arguments']],
         additional_env={'PYTHONPATH': plan['shelfbot_root'] + os.pathsep + os.environ.get('PYTHONPATH', '')},
         output='screen')
-    processes = [moveit, container, masker, manipulation]
+    # Simulation FollowJointTrajectory executor (twin.restock.trajectory_host): MoveIt above is
+    # configured with MoveItSimpleControllerManager pointing at arm_controller/follow_joint_trajectory
+    # (resolved in NS to /restock_sim/arm_controller/follow_joint_trajectory), but nothing advertised
+    # that action server, so ExecuteTrajectory ABORTED with "action server not connected" and the host
+    # emergency-stopped after the grasp plan succeeded (run-85). The host must launch this server itself,
+    # in the same launch overlay + domain-88 FastDDS env, so move_group discovers it; integration must
+    # NOT launch it separately (a second domain/DDS pin would not be discovered). It never plans -- it
+    # interpolates move_group's plan, subscribing measured /restock_sim/joint_states and publishing
+    # /restock_sim/arm_joint_command (the articulation command Isaac drives the UR10 with). --urdf is the
+    # same generated CAD urdf the plan validates (host.json["urdf"]); it reads arm joint limits only.
+    trajectory = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock.trajectory_host',
+        '--urdf', robot['urdf']], output='screen')
+    processes = [moveit, container, masker, manipulation, trajectory]
     # Losing mapping/masking must not leave an apparently healthy planner behind.
     guards = [RegisterEventHandler(OnProcessExit(target_action=process,
               on_exit=[EmitEvent(event=Shutdown(reason='restock host component exited'))]))

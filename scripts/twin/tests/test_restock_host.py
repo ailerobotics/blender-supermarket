@@ -232,7 +232,9 @@ class HostTests(unittest.TestCase):
         result = dependencies()
         self.assertEqual(result['errors'], [])
         launch = description(self.config)
-        self.assertEqual(len(launch.entities), 6)
+        # guards (one OnProcessExit shutdown guard per process) + processes + ack:
+        # processes = [moveit, container, masker, manipulation, trajectory] = 5.
+        self.assertEqual(len(launch.entities), 2 * 5 + 1)
 
     def test_graph_requires_exact_types_and_all_servers(self):
         services = [(NS + '/' + k, [v]) for k, v in ENDPOINTS.items() if '/srv/' in v]
@@ -376,7 +378,22 @@ class RosHostLaunchWiring(unittest.TestCase):
         self.assertIn('ros_host_config.json', src)
         self.assertIn("*plan['integration_host_arguments']", src)
         # It must be a shutdown-guarded process (in `processes`), not an auxiliary like the ack.
-        self.assertIn('masker, manipulation]', src)
+        self.assertIn('masker, manipulation, trajectory]', src)
+
+    def test_launch_wires_follow_joint_trajectory_executor(self):
+        # MoveIt is configured with a MoveItSimpleControllerManager pointing at
+        # arm_controller/follow_joint_trajectory; the host must also LAUNCH that action
+        # server, or ExecuteTrajectory aborts "action server not connected" after a
+        # successful grasp plan and the host emergency-stops (run-85). The executor is the
+        # host-owned twin.restock.trajectory_host, launched with the plan's generated urdf.
+        src = (Path(__file__).resolve().parents[1]
+               / 'restock_host' / 'launch.py').read_text()
+        self.assertIn('twin.restock.trajectory_host', src)
+        self.assertIn("'--urdf', robot['urdf']", src)
+        # The plan lists it as a host-launched node, and no longer as a purely external one.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = launch_plan(fixture(tmp))
+        self.assertIn('twin.restock.trajectory_host', plan['nodes'])
 
     def test_ros_host_config_fixture_is_usable(self):
         from twin.restock_manipulation.types import ProductProfile
