@@ -37,6 +37,24 @@ def cover_bounds(low, high, pitch):
     return centers, radius
 
 
+# Non-adjacent link pairs whose CONVEX SPHERE covers over-approximate into phantom contact at
+# extreme (folded, low-forward) arm configs, while the real mobile-UR10 geometry stays clear.
+# prove_separation() cannot clear them (it reasons on the conservative spheres, which do overlap),
+# so cuMotion flags them and rejects every seeded c-space target for the collect approach
+# (integration run-82; reproduced on the host stack probe, which named these as the only
+# self-collision pairs). They are the arm-mount region (the UR upper_arm cannot reach the cart
+# base / arm mount past the shoulder offset) plus two skip-one UR wrist/forearm pairs. Excluding
+# them aligns the model with physical reachability; verified by the collect approach planning on
+# the stack probe (xrdf-selfcollision-report.md).
+MANUAL_EXCLUSIONS = {
+    ('arm_mount', 'ur_upper_arm_link'): 'NonAdjacentReachableClearance',
+    ('base_link', 'ur_upper_arm_link'): 'NonAdjacentReachableClearance',
+    ('ur_base_link_inertia', 'ur_upper_arm_link'): 'NonAdjacentReachableClearance',
+    ('ur_forearm_link', 'ur_wrist_2_link'): 'NonAdjacentReachableClearance',
+    ('ur_wrist_1_link', 'ur_wrist_3_link'): 'NonAdjacentReachableClearance',
+}
+
+
 def kinematic_exclusions(robot):
     parents = {name: name for name in robot.links}
 
@@ -107,6 +125,10 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
         covers[name] = [VolumeCover(g, resolve, pitch) for g in robot.links[name].collisions]
         rebuild(name)
     excluded = kinematic_exclusions(robot)
+    present = set(robot.links)
+    for (a, b), reason in MANUAL_EXCLUSIONS.items():
+        if a in present and b in present:
+            excluded.setdefault(tuple(sorted((a, b))), reason)
     transforms = link_world_transforms(robot, positions)
     proofs, rounds = [], []
     while True:
