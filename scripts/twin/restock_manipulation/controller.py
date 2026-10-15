@@ -189,18 +189,18 @@ class TransferController:
             self.evidence.append(asdict(source))
             self._transition('approach')
         if self.phase in self.poses:
-            if self.phase in ('approach', 'contact'):
-                source_matches = [o for o in s.observations
-                                  if o.location == self.source and o.sku == self.job['sku']
-                                  and self._provenance(o, now) and self._pose_ok(o.pose)
-                                  and math.isfinite(o.confidence) and .9 <= o.confidence <= 1]
-                if (len(source_matches) > 1 or (source_matches and
-                        math.dist(source_matches[0].pose[:3], self.source_pose[:3]) > .02)):
-                    return self._fail('source pose lost or moved before grasp')
-            # Check target vacancy up to the first placement movement. Once the
-            # carried object enters the target ROI, it is expected to be occupied.
-            if (self.phase in ('approach', 'contact', 'lift')
-                    or (self.phase == 'preplace' and not self.issued)):
+            # OBSERVE-THEN-EXECUTE lock (firstmate 2026-10-15, key approach-sensing-occlusion): once
+            # observe has validated the source/target registration and cuMotion has planned the reach,
+            # the moving arm occludes/degrades the FIXED source camera's view of the support it reaches
+            # toward, so a per-tick fixed-camera re-validation cannot hold through approach/contact/lift
+            # (it made the capture fail -> /sensors stall -> wall-backstop e-stop, report run-98). Lock
+            # the validated registration for those phases and treat an absent/stale/conflicting
+            # fixed-camera observation as EXPECTED occlusion, not a fault: progress is gated on measured
+            # contact + joint feedback (the per-tick freshness/joint/contact/collision checks above) and
+            # the executor's joint-tracking and heartbeat e-stops, which still stop a genuine fault.
+            # Re-validate the placement target from the fixed camera again only once lift has cleared
+            # the view -- at preplace, before the first placement move.
+            if self.phase == 'preplace' and not self.issued:
                 t = s.target
                 if (not t or t.location != self.destination or not t.clear
                         or not self._provenance(t, now)

@@ -174,12 +174,21 @@ def test_ambiguous_duplicate_and_unreachable_source_wait_without_motion():
         assert not m.moves
 
 
-def test_target_moves_after_approach_stop():
+def test_target_move_tolerated_during_locked_reach_but_revalidated_at_preplace():
+    # Observe-then-execute lock (key approach-sensing-occlusion): the placement target is NOT
+    # re-validated from the fixed camera during the locked reach (approach/contact/lift) -- the
+    # reaching arm occludes it, so a changed/absent target there is expected, not a fault. It IS
+    # re-validated again at preplace, once lift has cleared the view.
     c, m = make_controller()
     c.step(.1, packet(c))
-    s = packet(c, 1.1)
-    s = replace(s, target=replace(s.target, pose=(.7,.2,.1,0.,0.,0.,1.)))
-    assert c.step(.1, s).reason == 'target clearance lost'
+    assert c.phase == 'approach'
+    moved = replace(packet(c, 1.1).target, pose=(.7, .2, .1, 0., 0., 0., 1.))
+    assert c.step(.1, replace(packet(c, 1.1), target=moved)).status == 'running'  # tolerated while locked
+    # Fresh controller (clean clock): the target IS re-validated again at preplace, after lift clears.
+    c2, _ = make_controller()
+    t = run_to(c2, 'preplace')
+    s = replace(packet(c2, t), target=replace(packet(c2, t).target, pose=(.7, .2, .1, 0., 0., 0., 1.)))
+    assert c2.step(.1, s).reason == 'target clearance lost'                        # re-validated after lift
 
 
 def test_replayed_sensor_time_and_invalid_configuration():
@@ -381,12 +390,17 @@ def test_ensemble_calls_rgb_models_and_rejects_unknown():
     assert not observations and 'uncertain SKU' in rejected[0]['reason']
 
 
-def test_source_motion_invalidates_approach():
+def test_source_pose_change_tolerated_during_locked_approach():
+    # Observe-then-execute lock: once the approach is planned the reaching arm occludes/degrades the
+    # fixed source camera, so a changed or absent source observation during approach/contact is
+    # EXPECTED occlusion, not a fault. The grasp proceeds; a genuine miss is caught at contact and by
+    # the executor's joint-tracking/heartbeat e-stops, not by per-tick fixed-camera re-validation.
     c, _ = make_controller()
     c.step(.1, packet(c))
+    assert c.phase == 'approach'
     s = packet(c, 1.1)
     moved = replace(s.observations[0], pose=(.45,0.,.2,0.,0.,0.,1.))
-    assert c.step(.1, replace(s, observations=(moved,))).reason == 'source pose lost or moved before grasp'
+    assert c.step(.1, replace(s, observations=(moved,))).status == 'running'
 
 
 def test_ros_packet_rejects_string_booleans_and_scan_coverage():
