@@ -73,12 +73,17 @@ def build_sources(*, scenario, camera_config, output, render_scale=1.0):
     `output` is the baselines dataset dir. Bench input paths come from
     `COMMISSIONING_BENCH_CONFIG`.
 
-    `render_scale` (<1, the resolved `--render-preset`) renders the station camera's product,
-    projects the empty support/witness polygons and scales the context intrinsics all at that
-    SAME reduced resolution, so a `fast` baseline matches a `fast` mission render (the boot-time
-    `commissioning._check_match` otherwise refuses the cross-scale mismatch). `render_scale=1.0`
-    (default) renders native -- byte-identical to the full-resolution commissioning path.
+    `render_scale` scales the station camera's product, the projected empty support/witness
+    polygons and the context intrinsics together, so the baseline matches what the mission renders
+    that camera at (the boot-time `commissioning._check_match` otherwise refuses the cross-scale
+    mismatch). Every station commissioned here is a DECODE-GRADE support (source/shelf/cart carry
+    QR markers that must decode), and a native sub-1.0 decode render does not decode (run-72: a
+    native 0.6 source render ~4.3 px/module failed in 240 frames where 1.0 ~7.1 px/module decodes;
+    the native px/module floor in restock_camera.config.render_presets). So a decode station is
+    refused below 1.0 here and the mission pins these cameras to 1.0 too -- the preset's reduced
+    scale is for the mission's non-decode cameras only. `render_scale=1.0` (default) renders native.
     """
+    from twin.restock_camera.config import DECODE_SUPPORTS
     from isaacsim import SimulationApp
     app = SimulationApp({'headless': True, 'width': 640, 'height': 360,
                          'renderer': 'RayTracedLighting', 'anti_aliasing': 0, 'multi_gpu': False})
@@ -103,10 +108,15 @@ def build_sources(*, scenario, camera_config, output, render_scale=1.0):
     if cam.get('parent') not in ('map', 'cart_chassis'):
         raise ValueError(f'station {STATION!r} camera parent {cam.get("parent")!r} unsupported; '
                          'only map-parented (source/shelf) or cart_chassis (cart) cameras are commissioned here')
+    if STATION in DECODE_SUPPORTS and render_scale != 1.0:
+        raise ValueError(
+            f'decode-grade station {STATION!r} must commission at render_scale 1.0, not '
+            f'{render_scale!r}: a native sub-1.0 decode render does not decode (run-72; the native '
+            'px/module floor). The preset render_scale is for the mission non-decode cameras only.')
     k = Intrinsics(**cam['intrinsics'])
-    # The rendered calibration: the station camera renders its product at render_scale (the resolved
-    # --render-preset), so the frame, its selected polygons and the context intrinsics are all this
-    # scaled grid -- matching what the mission renders. render_scale=1.0 keeps the native design.
+    # The rendered calibration: render_scale=1.0 (decode stations always) keeps the native design;
+    # any proven-safe <1 scale for a future non-decode station scales the frame, its selected
+    # polygons and the context intrinsics onto the same reduced grid the mission renders.
     k_rendered = k if render_scale == 1.0 else scale_intrinsics(k, render_scale)
 
     world = World(physics_dt=1 / 60., rendering_dt=1 / 60., stage_units_in_meters=1.)
