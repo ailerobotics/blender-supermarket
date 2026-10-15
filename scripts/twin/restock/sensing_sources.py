@@ -204,6 +204,18 @@ def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
     # keeps the raw prim-frame convention (no world/ROS optical-axis remap).
     chase.set_local_pose(translation=_np.array([0., 0., 2.6]),
                          orientation=_np.array([1., 0., 0., 0.]), camera_axes='usd')
+    # Fill light riding with the chase camera so the overhead walkthrough is LIT (firstmate 222): the
+    # store ceiling rig alone leaves the top-down view dark (run-110). A broad downward disk light
+    # above the base illuminates the robot, arm, towed cart and the support in frame without touching
+    # the sensing cameras' own exposure. UsdLux lights emit along -Z, so an identity-oriented child up
+    # the base +Z shines straight down. Intensity tuned from the recorded run.
+    from pxr import UsdLux, Gf
+    fill_path = base_root.rstrip('/') + '/walkthrough_fill'
+    fill = UsdLux.DiskLight.Define(assembly.stage, fill_path)
+    fill.CreateIntensityAttr(28000.)
+    fill.CreateRadiusAttr(1.6)
+    fill.CreateColorAttr(Gf.Vec3f(1., .97, .92))
+    UsdGeom.Xformable(fill.GetPrim()).AddTranslateOp().Set(Gf.Vec3d(0., 0., 2.4))
     return {'cameras': rig.cameras,
             'base_from_camera': lambda camera_id: rig.base_from_camera(camera_id, base_root),
             'recording_camera': chase}

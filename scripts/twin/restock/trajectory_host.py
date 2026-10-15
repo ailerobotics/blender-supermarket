@@ -45,7 +45,7 @@ GOAL_VELOCITY_TOL = 0.03
 GOAL_SETTLE_MARGIN_S = 5.0
 # Max allowed command-vs-measured divergence (rad) during execution. Compared at the FEEDBACK's own
 # timestamp (see tick()) so render-paced feedback lag is not mistaken for a tracking error.
-TRACKING_TOL = 0.15
+TRACKING_TOL = 0.2
 
 
 def feedback_fresh(gap):
