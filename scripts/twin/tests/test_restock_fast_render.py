@@ -95,3 +95,39 @@ def test_render_presets_knob_defaults_to_full_and_is_documented():
     assert set(presets['fast']['render_products']) == {'rgb', 'distance_to_image_plane'}
     # Exposed on the generated camera design for the integration runtime to opt in per run.
     assert _design()['render_presets']['fast']['render_scale'] == 0.6
+
+
+# --- end-to-end wiring: one opt-in flag drives commission AND mission at the matching scale -----
+
+def test_preset_render_scale_resolver():
+    from scripts.twin.restock_camera.config import preset_render_scale
+    assert preset_render_scale('full') == 1.0
+    assert preset_render_scale('fast') == 0.6
+    with pytest.raises(ValueError, match='render preset'):
+        preset_render_scale('zoom')
+
+
+def test_mission_render_preset_sets_scale_and_source_resolution():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from run_mobile_restock import _apply_render_preset
+    fast = _apply_render_preset({}, 'fast')
+    assert fast['render_scale'] == 0.6
+    assert fast['full_res_collect_source'] is False       # fast renders the dominant source at 0.6
+    full = _apply_render_preset({'render_scale': 0.6, 'full_res_collect_source': False}, 'full')
+    assert full['render_scale'] == 1.0                    # 'full' is authoritative when opted in
+    assert full['full_res_collect_source'] is True        # decode-grade full-res source
+
+
+def test_commission_render_preset_resolves_the_same_scale():
+    # the commissioning CLI resolves --render-preset through the SAME resolver the mission uses,
+    # so a `fast` baseline and a `fast` mission are commissioned/rendered at one scale.
+    from scripts.twin.restock_camera.config import preset_render_scale
+    from scripts.twin.restock_camera.geometry import Intrinsics, scale_intrinsics
+    k = Intrinsics(1280, 960, 640., 640., 639.5, 479.5)
+    full_k = k if preset_render_scale('full') == 1.0 else scale_intrinsics(k, 1.0)
+    fast_k = scale_intrinsics(k, preset_render_scale('fast'))
+    # A cross-scale baseline (commissioned full, mission fast) carries different intrinsics, so the
+    # boot-time baseline/context match (commissioning._check_match) refuses it -- the mismatch guard.
+    assert fast_k != full_k

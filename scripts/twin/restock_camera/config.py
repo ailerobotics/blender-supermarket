@@ -194,6 +194,16 @@ def render_presets():
     }
 
 
+def preset_render_scale(name):
+    """Resolve a render-preset name to its ``render_scale`` (the one opt-in that commission AND
+    mission share, so a ``fast`` baseline and a ``fast`` mission render at the SAME scale and the
+    boot-time baseline/intrinsics match (``commissioning._check_match``) stays satisfied)."""
+    presets = render_presets()
+    if name not in presets:
+        raise ValueError(f'unknown render preset {name!r}; choose one of {sorted(presets)}')
+    return float(presets[name]['render_scale'])
+
+
 def marker_module_grid(sku):
     """The QR module matrix for ``sku`` with a 4-module white quiet border (0 == black).
 
