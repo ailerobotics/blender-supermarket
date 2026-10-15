@@ -93,6 +93,61 @@ class ArticulatedTests(unittest.TestCase):
             if result.status!='running': break
         self.assertEqual(result.status,'succeeded',result.reason)
 
+    def test_transient_measured_turn_radius_keeps_route(self):
+        # A transient measured-curvature trip (base momentarily under commanded speed on a
+        # tight turn) must keep the planned route and coast, not discard it + full stop/replan.
+        c=ArticulatedController(self.world.grid,allow_test_fixtures=True)
+        c.start((5,3,0),True)
+        state=TrainState(0,0,0,0); v=w=0.0; now=0.0
+        for i in range(400):
+            now=(i+1)*.05
+            od=Odometry(state.pose,now,v,w,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            v,w=r.velocity
+            if c.route is not None and c.route.states and r.reason=='tracking':
+                break
+            state=advance(state,v*.05,w/v if v else 0,self.spec)
+        self.assertTrue(c.route and c.route.states,'controller never reached tracking')
+        route=c.route
+        # Inject odometry: base just above the 0.02 gate but its MEASURED arc is well past the
+        # 1/1.5 min-radius cap -> the braking-curvature gate trips measured_turn_radius.
+        now+=.05
+        tight=Odometry(state.pose,now,0.05,0.05*(1/1.5+0.3),'test_fixture',.02)
+        obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+        r=c.step(.05,tight,obs,now=now)
+        self.assertEqual(r.reason,'measured_turn_radius')
+        self.assertIs(c.route,route)          # route PRESERVED (no discard, no replan)
+        self.assertNotEqual(r.status,'failed')  # non-terminal wait, resumes the route on recovery
+        # Contrast: a genuine obstacle refusal still drops the route for replanning.
+        now+=.05
+        ring=tuple((state.x+.1*math.cos(a),state.y+.1*math.sin(a))
+                   for a in [k*math.pi/8 for k in range(16)])
+        od=Odometry(state.pose,now,v,w,'test_fixture',.02)
+        obs=Observation(now,ring,True,True,state.articulation,'test_fixture',10)
+        c.step(.05,od,obs,now=now)
+        self.assertIsNone(c.route)            # dropped -> will replan
+
+    def test_tight_turn_commands_reduced_speed(self):
+        # The tracking command slows for tight turns so the coupled base can keep up: the
+        # feedback curved-goal run must never command max_speed while turning hard.
+        c=ArticulatedController(self.world.grid,allow_test_fixtures=True)
+        c.start((5,3,0),True)
+        state=TrainState(0,0,0,0); v=w=0.0
+        turning_speeds=[]
+        for i in range(2000):
+            now=(i+1)*.05
+            od=Odometry(state.pose,now,v,w,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            v,w=r.velocity
+            if v>1e-6 and abs(w)/v>0.5*(1/1.5):      # a meaningfully curved command
+                turning_speeds.append(v)
+            state=advance(state,v*.05,w/v if v else 0,self.spec)
+            if r.status!='running': break
+        self.assertTrue(turning_speeds,'no curved commands observed')
+        self.assertLess(max(turning_speeds),c.max_speed-1e-9)
+
     def test_seed_replay_checks_full_margin_and_obstacles(self):
         from twin.navigation.articulated import Route
         state=TrainState(0,0,0,0)

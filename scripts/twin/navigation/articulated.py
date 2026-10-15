@@ -615,9 +615,22 @@ class ArticulatedController(Controller):
         curvature=self.route.curvatures[j]+1.5*wrap(ref_yaw-state.yaw)+2*lateral
         curvature=max(-1/1.5,min(1/1.5,curvature))
         v=min(self.max_speed,max(0.03,distance*0.5))
+        # Slow for tight turns so the under-powered coupled base does not over-rotate the
+        # MEASURED arc past the min radius: at the 1/1.5 curvature cap command 0.25*max_speed,
+        # scaling up to full speed when straight. Keeps the commanded speed near what the base
+        # actually achieves while towing, so the braking-curvature gate refuses far less.
+        v=min(v,self.max_speed*max(0.25,1.0-0.75*min(1.0,abs(curvature)*1.5)))
         result=self.gate_velocity(now,odom,obs,v,v*curvature)
         if result.reason!='tracking':
-            self.route=None
+            # A transient measured-curvature trip (the base is momentarily under commanded
+            # speed on a tight turn, so its MEASURED arc is tighter than the min radius) must
+            # NOT discard the whole planned route: keep it and coast so the measured curvature
+            # recovers, then resume the same route - instead of a full stop + replan each trip,
+            # which cycles and stalls the tow. Other refusals (obstacle, coverage, map, tracking
+            # error) still drop the route and replan. A persistent trip still fails via _wait's
+            # blocked timeout; self.blocked resets on the next clean tracking tick.
+            if result.reason!='measured_turn_radius':
+                self.route=None
             return self._wait(dt,result.reason)
         self.blocked=0.0
         return result
