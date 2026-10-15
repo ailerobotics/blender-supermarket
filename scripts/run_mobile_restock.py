@@ -255,6 +255,23 @@ def run(args, manifest, scenario):
                 stack_log.close()
             except Exception:
                 pass
+        # Encode a persistent VFR H.264 walkthrough from the recorded frames (success OR failure) so
+        # every run is immediately watchable -- the watch page lists existing *.mp4 directly instead of
+        # having to encode each run's frames on demand. Never fatal: a missing/empty frame set or an
+        # encode error is recorded in the summary and the run outcome is unchanged.
+        try:
+            frames_manifest = args.output / 'mission-frames' / 'frames.json'
+            mp4 = args.output / 'walkthrough.mp4'
+            ffmpeg = config.get('ffmpeg') if isinstance(config, dict) else None
+            if frames_manifest.is_file() and ffmpeg and not mp4.exists():
+                from twin.restock.recording import Recorder
+                recorded = Recorder.from_manifest(frames_manifest)
+                if recorded.frames:
+                    info = recorded.encode(mp4, ffmpeg=ffmpeg)
+                    summary['walkthrough_mp4'] = str(mp4)
+                    summary['walkthrough_frames'] = info['frames']
+        except Exception as exc:
+            summary['walkthrough_error'] = str(exc)
         summary['events'] = db.events(scenario['job']['job_id'])
         (args.output/'mission.json').write_text(json.dumps(summary, indent=2, allow_nan=False)+'\n')
         db.close()
