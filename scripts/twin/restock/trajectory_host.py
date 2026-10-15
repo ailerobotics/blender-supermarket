@@ -43,6 +43,9 @@ EXECUTE_WALL_BACKSTOP_S = 1200.0
 GOAL_POSITION_TOL = 0.01
 GOAL_VELOCITY_TOL = 0.03
 GOAL_SETTLE_MARGIN_S = 5.0
+# Max allowed command-vs-measured divergence (rad) during execution. Compared at the FEEDBACK's own
+# timestamp (see tick()) so render-paced feedback lag is not mistaken for a tracking error.
+TRACKING_TOL = 0.15
 
 
 def feedback_fresh(gap):
@@ -207,7 +210,20 @@ def main():
             q,v=state['target'],np.zeros(6)
             if state['plan'] is not None:
                 q,v=state['plan'].sample(now()-state['start'])
-            if np.max(np.abs(q-state['feedback'][1]))>.15:
+                # Tracking error must compare the command and the measured feedback at the SAME
+                # instant. The published command q is at now(), but the measured feedback is stamped
+                # up to FEEDBACK_SIM_STALE_S earlier (render-paced /joint_states delivery), and the
+                # command advances over that gap -- comparing q(now) to measured(feedback_stamp)
+                # counts that commanded motion as false tracking error (run-107/109 faulted >.15 rad
+                # mid-approach at BOTH 0.3 and 0.5 rad/s). Evaluate the error against the command
+                # sampled at the feedback's own stamp.
+                reference=state['plan'].sample(state['feedback'][0]-state['start'])[0]
+            else:
+                reference=q                               # idle hold: measured vs the static target
+            track_err=float(np.max(np.abs(reference-state['feedback'][1])))
+            if track_err>TRACKING_TOL:
+                print(f'TRAJ_HOST_TRACK_MISS err={track_err:.4f} fb_age={now()-state["feedback"][0]:.3f}',
+                      flush=True)
                 fault('trajectory tracking error exceeds .15 rad')
                 return
             msg=JointState()

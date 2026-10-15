@@ -185,11 +185,28 @@ def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
     # marker(s) not decoded".
     author_mission_markers(assembly.stage, design, parent_paths)
     base_root = assembly.paths['ur_base_link']
-    # The shelf camera frames the destination support; reuse it for the mission video.
-    recording_id = 'shelf' if 'shelf' in rig.cameras else next(iter(rig.cameras))
+    # Captain-facing walkthrough video (firstmate 222): the destination-fixed shelf camera only ever
+    # framed dark floor while the robot was at the backstock / in transit, so record instead from a
+    # third-person CHASE camera parented to the MOVING base. It rides 2.6 m above ur_base_link looking
+    # straight down with a wide (~96 deg) field, so the base, the UR10, the towed rollwagen and the
+    # adjacent support (backstock at collect, shelf at place) stay in frame through collect/couple/
+    # tow/place, lit by the store ceiling rig, and it follows the base's turns during tow. Added as an
+    # extra camera (the fixed station cameras are unchanged for sensing); rendered on the recorder
+    # cadence. Framing (height/FOV/tilt) is tuned from the first recorded run.
+    import numpy as _np
+    from .native_cameras import initialize_camera
+    from twin.restock_camera.geometry import Intrinsics
+    chase_path = base_root.rstrip('/') + '/walkthrough_chase'
+    chase_k = Intrinsics(width=960, height=720, fx=430., fy=430., cx=480., cy=360., near=.1, far=14.)
+    chase = initialize_camera(chase_path, chase_k, name='walkthrough_chase')
+    # Prim frame == base frame at identity orientation; a USD camera looks down its own -Z, so an
+    # identity-oriented child 2.6 m up the base +Z points straight down at the base. camera_axes='usd'
+    # keeps the raw prim-frame convention (no world/ROS optical-axis remap).
+    chase.set_local_pose(translation=_np.array([0., 0., 2.6]),
+                         orientation=_np.array([1., 0., 0., 0.]), camera_axes='usd')
     return {'cameras': rig.cameras,
             'base_from_camera': lambda camera_id: rig.base_from_camera(camera_id, base_root),
-            'recording_camera': rig.cameras[recording_id]}
+            'recording_camera': chase}
 
 
 def author_mission_markers(stage, design, parent_paths, *, support_names=('source', 'cart', 'shelf'),
