@@ -243,3 +243,87 @@ class LaunchTests(unittest.TestCase):
         poses=poses_for_job(manifest,Job('j','milk',1,'back','shelf'))
         self.assertEqual(poses['cart_dock'],[1,2,0])
         self.assertNotEqual(poses['cart_dock'],manifest['poses']['cart_dock'])
+
+
+
+class StallGuardTests(unittest.TestCase):
+    """Fail-fast: a stalled collect/transfer reach reaches terminal in seconds (sim-clock
+    window) instead of spinning 'running' until the slower host sensor-stream watchdog."""
+
+    def _packet(self, obs, t):
+        return Packet(obs, 'test_fixture', t, None, None, None, None, True, False, 0., True)
+
+    def _sensing_controller(self, *, phase='observe', advance_sensor):
+        from twin.restock_manipulation.types import Result as MResult
+        controller = NS(cart_location='rollwagen', last_sensor_time=-1.,
+                        start=lambda a, j: None, warm=lambda sim, parked=None: True,
+                        stop=lambda: None)
+
+        def step(dt, sim, parked=None):
+            if advance_sensor:
+                controller.last_sensor_time = sim   # a fresh /sensors frame accepted this tick
+            return MResult('running', phase, '', (), ())
+        controller.step = step
+        return controller
+
+    def _collect_adapter(self, controller, *, stall_window_s=20.):
+        manip = ManipulationBridge(controller, owns_sensor_io=True)
+        nav = NS(start=lambda *a, **k: None, cancel=lambda: None)
+        mobile = NS(park=lambda: None)
+        self._pkt = [self._packet('reach-0', 0.)]
+        port = NS(advance=lambda dt: self._pkt[0], controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        adapter = RuntimeAdapter(nav, mobile, manip, port, poses,
+                                 fixture_mode=True, stall_window_s=stall_window_s)
+        adapter.start('collect', Job('j', 'milk', 1, 'back', 'shelf'))
+        adapter.phase, adapter.action = 'execute', 'collect'   # drive the reach branch directly
+        adapter._reach_start = None
+        return adapter, port
+
+    def _drive(self, adapter, steps, dt=.1):
+        t = adapter.time
+        for i in range(steps):
+            t = round(t + dt, 6)
+            self._pkt[0] = self._packet(f'reach-{i}', t)
+            result = adapter.step(dt)
+            if result.status != 'running':
+                return result, i
+        return result, steps
+
+    def test_fails_fast_when_sensors_stall_in_observe(self):
+        adapter, _ = self._collect_adapter(self._sensing_controller(advance_sensor=False))
+        result, i = self._drive(adapter, steps=400)             # 20 s window / 0.1 ~ step 200
+        self.assertEqual(result.status, 'failed')
+        self.assertIn('stall', result.reason)
+        self.assertTrue(190 < i < 230, i)                       # fails just past the 20 s window
+
+    def test_keeps_running_while_sensors_flow(self):
+        adapter, _ = self._collect_adapter(self._sensing_controller(advance_sensor=True))
+        result, i = self._drive(adapter, steps=400)
+        self.assertEqual(result.status, 'running')
+        self.assertEqual(i, 400)
+
+    def test_scoped_to_observe_and_approach(self):
+        # contact/lift (arm grasping) is out of scope; host watchdog backstops it.
+        adapter, _ = self._collect_adapter(self._sensing_controller(phase='contact', advance_sensor=False))
+        result, i = self._drive(adapter, steps=400)
+        self.assertEqual(result.status, 'running')
+        self.assertEqual(i, 400)
+
+    def test_inactive_without_a_sensing_controller(self):
+        controller = NS(cart_location='rollwagen', start=lambda a, j: None,
+                        warm=lambda sim, parked=None: True, stop=lambda: None,
+                        step=lambda dt, sim, parked=None: __import__(
+                            'twin.restock_manipulation.types', fromlist=['Result']
+                        ).Result('running', 'observe', '', (), ()))
+        adapter, _ = self._collect_adapter(controller)
+        result, i = self._drive(adapter, steps=300)
+        self.assertEqual(result.status, 'running')
+        self.assertEqual(i, 300)
+
+    def test_window_none_disables_the_guard(self):
+        adapter, _ = self._collect_adapter(self._sensing_controller(advance_sensor=False),
+                                           stall_window_s=None)
+        result, i = self._drive(adapter, steps=300)
+        self.assertEqual(result.status, 'running')
+        self.assertEqual(i, 300)

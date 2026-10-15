@@ -18,6 +18,16 @@ from .mission import Result
 # startup grace -- not an unbounded warm-up -- bounds a genuinely stuck mapper.
 _WARM_MAX_TICKS = 300
 
+# Fail-fast on an unrecoverable collect/transfer reach stall. The sensing capture publishes a
+# fresh /sensors frame every tick under a healthy reach (incl. the PR#80 occlusion hold, which
+# re-publishes the held registration each tick). If NO fresh /sensors frame is accepted for
+# longer than the occlusion-hold window (sim seconds) while the controller is still in
+# observe/approach, the reach cannot recover (lost support, permanent decode failure, ...), so
+# the mission is failed in seconds instead of spinning 'running' until the slower host
+# sensor-stream watchdog. The window matches the PR#80 hold (data/sim-restock-camera-v2);
+# the host watchdog remains the backstop and is never bypassed.
+_SENSOR_STALL_WINDOW_S = 20.
+
 
 @dataclass(frozen=True)
 class Packet:
@@ -117,11 +127,17 @@ class ManipulationBridge:
 
 class RuntimeAdapter:
     def __init__(self, navigation, mobile, manipulation, port: Port, poses,
-                 *, fixture_mode=False, goal_articulation=None):
+                 *, fixture_mode=False, goal_articulation=None,
+                 stall_window_s=_SENSOR_STALL_WINDOW_S):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         if not isinstance(self.manip, ManipulationBridge):
             self.manip = ManipulationBridge(self.manip)
         self.poses, self.fixture_mode = poses, fixture_mode
+        # Fail-fast stall window (sim seconds); None disables (host watchdog still backstops).
+        if stall_window_s is not None and (not math.isfinite(stall_window_s) or stall_window_s <= 0):
+            raise ValueError('stall window must be positive and finite, or None')
+        self.stall_window_s = stall_window_s
+        self._reach_start = None
         self.goal_articulation = dict(goal_articulation or {})
         if any(not math.isfinite(v) or not 0 < v <= math.radians(65)
                for v in self.goal_articulation.values()):
@@ -140,6 +156,7 @@ class RuntimeAdapter:
             self.port.begin_action(action,job)
         self.action, self.job = action, job
         self.phase = 'execute'
+        self._reach_start = None          # set on the first execute tick of a collect/transfer reach
         if action in ('collect', 'couple', 'outbound', 'return'):
             goal = {'collect': 'pickup', 'couple': 'cart_dock',
                     'outbound': 'shelf_approach', 'return': 'home'}[action]
@@ -172,6 +189,34 @@ class RuntimeAdapter:
     def _evidence(self, packet, **extra):
         return dict(observation_id=packet.observation_id, source=packet.source,
                     simulation_time=packet.simulation_time, **extra)
+
+    def _sensor_stall(self, result):
+        """Return a failure reason if the collect/transfer reach has stalled, else None.
+
+        Stall = no fresh /sensors frame accepted for longer than ``stall_window_s`` (sim
+        seconds) while the controller is still in ``observe``/``approach``. A host trajectory
+        fault (``TRAJ_HOST_FAULT``) that surfaces as a failed/rejected reply already fails via
+        the normal status path above; this guard catches the quieter case where the reach keeps
+        reporting 'running' but /sensors has gone dead. Active only when the controller exposes
+        ``last_sensor_time`` (production sensing); other adapters are unaffected.
+        """
+        if self.stall_window_s is None:
+            return None
+        if getattr(result, 'phase', None) not in ('observe', 'approach'):
+            return None
+        core = getattr(self.manip, 'controller', None)
+        last = getattr(core, 'last_sensor_time', None)
+        if last is None:
+            return None                                   # non-sensing adapter: nothing to time
+        if self._reach_start is None:
+            self._reach_start = self.time                 # first execute tick of this reach
+        # Measure from the last accepted frame, or the reach start if none has landed yet.
+        since = self.time - (last if last >= 0 else self._reach_start)
+        if since > self.stall_window_s:
+            return (f'{self.action} reach stalled: no accepted /sensors frame for {since:.1f}s '
+                    f'(> {self.stall_window_s:.0f}s hold window) in {result.phase}; '
+                    f'host sensor-stream watchdog is the backstop')
+        return None
 
     def _step(self, dt):
         self.time += dt
@@ -253,6 +298,9 @@ class RuntimeAdapter:
             return Result('succeeded', self._evidence(p, stationary=True))
         if self.action in ('collect', 'transfer'):
             r = self.manip.step(dt, p)
+            stalled = self._sensor_stall(r)
+            if stalled is not None:                       # unrecoverable reach -> fail fast
+                return Result('failed', reason=stalled)
             deadline=getattr(p.manipulation,'valid_until_steady',None)
             if deadline is not None and r.status not in ('failed','unavailable'):
                 require_fresh(deadline,time.monotonic)
