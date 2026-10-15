@@ -14,8 +14,8 @@ from .perception import DepthPerception, load_pose_bridge
 from .types import Sensors
 from ..restock_camera.geometry import rigid
 from ..restock_camera.freshness import frame_deadline, require_fresh
-from ..restock_camera.sensed import FrameEvidence, SupportView, masked_cloud, contains
-from ..restock_camera.qr import FixedTileQR, FrameQR
+from ..restock_camera.sensed import FrameEvidence, SupportView, masked_cloud, contains, depth_digest
+from ..restock_camera.qr import FixedTileQR, FrameQR, rgb_digest
 
 
 @dataclass(frozen=True)
@@ -77,6 +77,16 @@ class IsaacCartonSensors:
         self.last_stamp = None
         self.last_session = None
         self.seen_sessions = set()
+        # Last SUCCESSFULLY captured frame, kept only to tolerate a reduced sensing render
+        # cadence (IsaacPort.sensing_stride): when integration renders the sensing camera every
+        # Nth physics tick, get_current_frame() returns the SAME frame on the intervening ticks.
+        # That is not a replay — identical frame id, stamp AND pixels — so the decoded support
+        # context + QR are reused (the costly full-tile decode is not repeated) while every
+        # time-sensitive gate is re-run below against the live clock/clearance. Set only after a
+        # full success so a failed frame is never reusable.
+        self._reuse_key = None
+        self._reuse_context = None
+        self._reuse_qr = None
         self.sensed_target_bboxes = ()
         self.evidence = ()
         # Integration initializes actual cameras; every frame uses measured TF.
@@ -109,7 +119,24 @@ class IsaacCartonSensors:
             raise ValueError('unregistered camera RGB/depth')
         matrix = self.camera.get_intrinsics_matrix()
         intr = (matrix[0,0], matrix[1,1], matrix[0,2], matrix[1,2])
-        if self.context_provider is not None:
+        # Exact-frame key for stride reuse: identical frame id, stamp AND pixels (rgb+depth) to the
+        # last captured frame. Hashing the actual pixels (never array/frame identity) also detects a
+        # tampered repeat — a changed buffer under an unchanged frame id fails the key and falls to
+        # the normal path, where the decoder's monotonic-frame gate refuses it.
+        key = (int(frame_id), stamp, rgb_digest(rgb), depth_digest(depth))
+        reuse = self._reuse_key is not None and self._reuse_key == key
+        if reuse:
+            # Stride-paced re-presentation of the exact current frame. Reuse the decoded support
+            # context + QR rather than calling the context provider / full-tile decoder again (that
+            # would refuse the repeat as a replayed frame), but re-validate the frame against the
+            # live clock below: the frame-age window was checked above, and the per-slot support /
+            # baseline-lifetime / freshness validation, the live collision-map clearance gate, the
+            # QR pixel re-hash and the acquisition-to-use deadline all re-run. A frame that has aged
+            # out of the 0.5 s window, whose baseline expired, or that is no longer parked refuses.
+            context = self._reuse_context
+            self.transform = rigid(context.base_from_camera)
+            self.slots = tuple(context.slots)
+        elif self.context_provider is not None:
             context = self.context_provider(frame,now)
             self.transform = rigid(context.base_from_camera)
             self.slots = tuple(context.slots)
@@ -119,8 +146,9 @@ class IsaacCartonSensors:
                                     e.session_id,e.steady_domain,e.acquired_steady)
         else:
             raise ValueError('fresh registered support views and camera context required')
-        if (self.last_session == context.session_id and (frame_id <= self.last_frame or stamp <= self.last_stamp)
-                or self.last_session != context.session_id and context.session_id in self.seen_sessions):
+        if not reuse and (self.last_session == context.session_id
+                          and (frame_id <= self.last_frame or stamp <= self.last_stamp)
+                          or self.last_session != context.session_id and context.session_id in self.seen_sessions):
             raise ValueError('no new synchronized rendered camera frame')
         self.last_frame,self.last_stamp,self.last_session = frame_id,stamp,context.session_id
         self.seen_sessions.add(context.session_id)
@@ -154,6 +182,8 @@ class IsaacCartonSensors:
                 raise ValueError('separate registered label mask required')
         marker_ids = {marker for s in self.slots for marker in s.support_view.registration.marker_ids}
         qr = context.qr_observation
+        if qr is None and reuse:
+            qr = self._reuse_qr  # directly-decoded frame (no shared context) re-presented under stride
         if qr is None:
             if self.decoder is None:
                 self.decoder = FixedTileQR(self.camera_id)
@@ -241,6 +271,9 @@ class IsaacCartonSensors:
             clearance_observation_id=None if s.support_view.clearance is None else s.support_view.clearance.observation_id,
             qr_processing_seconds=qr.processing_seconds,qr_rgb_sha256=qr.rgb_sha256,
             provenance='dated_rigid_geometry_with_fresh_marker_witness_and_depth') for s in self.slots)
+        # Record the just-validated frame so a stride-paced re-presentation of these exact pixels
+        # reuses this decode (only now that every gate has passed; a failed frame stays unreusable).
+        self._reuse_key, self._reuse_context, self._reuse_qr = key, context, qr
         return Sensors(now, tuple(observations), targets.get(destination),
                        motion.parked(), contact.read(), now, motion.collision_time,
                        motion.joint_positions(), tuple(scanned), stamp, deadline)
