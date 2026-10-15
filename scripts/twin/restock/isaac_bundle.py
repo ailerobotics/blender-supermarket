@@ -249,14 +249,19 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # clear message if it is absent, rather than letting the host subprocess fail with a cryptic
     # KeyError far from the mission boot. See docs/mobile_robot_rollwagen.md.
     require_transport_positions(mobile_manifest)
-    # The collect source camera must render full-res (decode-grade: paired markers ~6 px/module);
-    # the default render_scale (VRAM-bounded) still applies to the mapper and other cameras.
+    # The collect source camera renders decode-grade (paired markers ~6 px/module). By default it
+    # is forced full-res even when the mapper/other cameras step down (VRAM-bounded render_scale).
+    # The opt-in `fast` preset (run_mobile_restock --render-preset / config['full_res_collect_source']
+    # = False) renders the source at the preset scale too -- the dominant per-frame cost -- because
+    # 0.6 was validated to keep the source markers decoding (config.render_presets). The baseline
+    # must have been commissioned at the matching scale (enforced at boot by _check_match).
     _collect_source = config.get('collect_source_location')
+    _full_res_source = config.get('full_res_collect_source', True)
     assembly.sensing_sources = build_sensing_sources(
         assembly=assembly, scenario=scenario, manifest=mobile_manifest,
         manip_runtime=manipulation.controller, pose_bridge_root=config['pose_bridge_root'],
         render_scale=float(config.get('render_scale', 1.0)),
-        full_res_locations=(_collect_source,) if _collect_source else ())
+        full_res_locations=(_collect_source,) if (_collect_source and _full_res_source) else ())
     sensing = sensing_factory(app=app, assembly=assembly, plan=plan, config=config, output=output)
     capture = sensing['capture']
     recording_camera = sensing['recording_camera']

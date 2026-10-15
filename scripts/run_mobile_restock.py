@@ -18,6 +18,21 @@ from twin.restock.mission import Mission
 from twin.restock.scenario import validate
 
 
+def _apply_render_preset(config, name):
+    """Opt into a sensing render preset for this run -- the SAME ``--render-preset`` that
+    commissioning takes, so commission and mission render at the matching scale. Sets the
+    render-product scale AND whether the collect source renders at that scale: the ``fast``
+    preset was validated (config.render_presets) to keep the source markers decoding at 0.6, so
+    it renders the dominant source at scale too; ``full`` keeps the decode-grade full-res source.
+    A scale mismatch against the commissioned baseline is refused at boot by
+    ``commissioning._check_match`` (the baseline's scaled intrinsics must equal the context's)."""
+    from twin.restock_camera.config import preset_render_scale
+    scale = preset_render_scale(name)
+    config['render_scale'] = scale
+    config['full_res_collect_source'] = scale >= 1.0
+    return config
+
+
 def _launch_host_stack(*, repo, plugin_env, nvidia_runtime, host_config, logpath):
     """Co-launch the task-isolated MoveIt/cuMotion planner stack + nvblox mapper on
     domain 88, inside the caller's single GPU-lock hold (the launch recipe does NOT
@@ -120,6 +135,8 @@ def run(args, manifest, scenario):
         raise ValueError('runtime requires --runtime-config with exact sensor/host/CAD inputs')
     from preflight_mobile_restock import check as check_runtime_inputs
     config=json.loads(args.runtime_config.read_text())
+    if getattr(args, 'render_preset', None):
+        _apply_render_preset(config, args.render_preset)
     readiness=check_runtime_inputs(config)
     if not readiness['files_ready']:
         raise ValueError('runtime inputs unresolved: '+', '.join(readiness['unresolved_inputs']))
@@ -286,6 +303,10 @@ def main():
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--factory', help='installed, reviewed simulator bundle module:function')
     parser.add_argument('--runtime-config',type=Path,help='exact host, CAD and camera runtime inputs')
+    parser.add_argument('--render-preset', choices=('full','fast'),
+                        help='opt into a sensing render preset (full|fast). fast renders the '
+                             'collect source + sensing at 0.6 scale (~2.8x fewer pixels) to speed '
+                             'iteration; use the SAME preset for commissioning so the baseline matches.')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--heavy-threshold-mb', type=int, choices=(1500,2500), default=1500)
     parser.add_argument('--host-stack', action='store_true',

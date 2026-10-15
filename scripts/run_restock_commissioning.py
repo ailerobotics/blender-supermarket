@@ -130,10 +130,16 @@ def main():
     parser.add_argument('--lifetime-s', type=float, default=600.)
     parser.add_argument('--render-scale', type=float, default=1.0,
                         help='render-product scale to commission/plan at (intrinsics scale with it)')
+    parser.add_argument('--render-preset', choices=('full', 'fast'),
+                        help='opt into a sensing render preset (full|fast); resolves --render-scale '
+                             '(fast=0.6). Use the SAME preset for the mission so the baseline matches.')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--plan', action='store_true', help='print the commissioning plan (default; CPU, no capture)')
     mode.add_argument('--execute', action='store_true', help='run the choreography and persist baselines')
     args = parser.parse_args()
+    if args.render_preset:                        # one opt-in flag, shared with the mission
+        from twin.restock_camera.config import preset_render_scale
+        args.render_scale = preset_render_scale(args.render_preset)
     try:
         camera_config = json.loads(args.camera_config.read_text())
         scenario = json.loads(args.scenario.read_text())
