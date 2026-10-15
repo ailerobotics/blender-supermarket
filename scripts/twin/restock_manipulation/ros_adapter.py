@@ -18,6 +18,10 @@ from .cad_tool import ARM_JOINTS
 
 JOINTS = ARM_JOINTS
 
+# Sim-time settle margin added to a trajectory's own sim duration for the execution deadline (the
+# node-clock bound on ExecuteTrajectory). Covers start handshake + terminal settle in SIM seconds.
+EXECUTE_SETTLE_MARGIN_S = 15.0
+
 
 def planner_velocity_scale(urdf, *, command_limit=.15):
     """Keep planner URDF-scaled speeds below the simulator's absolute gate.
@@ -110,6 +114,12 @@ class RosMotionPort:
         self.execute = ActionClient(node, ExecuteTrajectory, namespace + '/execute_trajectory')
         self.state, self.handle, self.future = 'idle', None, None
         self.generation = 0
+        # Deadlines: IK/planning are compute-bound -> WALL clock. Trajectory EXECUTION is paced by the
+        # simulator: under render pacing executing D sim-seconds takes far more WALL time, so a wall
+        # execution deadline false-fails a healthy grasp (run-93). The execute deadline is therefore
+        # measured on the NODE/SIM clock (use_sim_time). deadline_clock selects which per action.
+        self._sim_now = lambda: self.node.get_clock().now().nanoseconds * 1e-9
+        self.deadline_clock = time.monotonic
 
     def begin(self, pose, joints):
         from moveit_msgs.srv import GetPositionIK
@@ -125,6 +135,7 @@ class RosMotionPort:
             self.generation += 1
             self.handle = None
             self._send(self.plan, self._pose_plan_goal(pose, joints), 'plan_accept')
+            self.deadline_clock = time.monotonic
             self.deadline = time.monotonic() + self.timeout
             return
         # Joint-space path (host verdict 2026-10-14: cuMotion task-space IK is systemically broken in
@@ -189,6 +200,7 @@ class RosMotionPort:
         self.generation += 1
         self.handle = None
         self.future, self.state = self.ik.call_async(req), 'ik'
+        self.deadline_clock = time.monotonic
         self.deadline = time.monotonic() + self.timeout
 
     def _next_seed(self):
@@ -284,6 +296,7 @@ class RosMotionPort:
         goal.planning_options.plan_only=True
         self.generation+=1
         self.handle=None
+        self.deadline_clock=time.monotonic
         self.deadline=time.monotonic()+self.timeout
         self._send(self.plan,goal,'plan_accept')
 
@@ -299,7 +312,7 @@ class RosMotionPort:
         from moveit_msgs.msg import Constraints, JointConstraint
         if self.state in ('succeeded', 'failed'):
             return self.state
-        if time.monotonic() > self.deadline:
+        if self.deadline_clock() > self.deadline:
             self.stop()
             return 'failed'
         if not self.future.done():
@@ -355,9 +368,11 @@ class RosMotionPort:
             duration=end.sec+end.nanosec*1e-9
             if duration>110.:
                 raise ValueError('trajectory exceeds bounded execution budget')
-            # Planning and physical execution have different clocks/budgets.
-            # Do not spend the execution allowance waiting for IK/planning.
-            self.deadline=time.monotonic()+max(self.timeout,duration+5.)
+            # Execution is simulator-paced, so bound it on the NODE/SIM clock: the trajectory's own
+            # sim duration plus a settle margin. A wall bound here false-failed a healthy grasp whose
+            # render-paced execution legitimately took many wall seconds per sim second (run-93).
+            self.deadline_clock=self._sim_now
+            self.deadline=self._sim_now()+duration+EXECUTE_SETTLE_MARGIN_S
             goal = ExecuteTrajectory.Goal()
             goal.trajectory = trajectory
             self._send(self.execute, goal, 'execute_accept')
