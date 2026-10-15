@@ -242,11 +242,31 @@ class SupportGeometry:
     baseline_acquired_steady: float | None = None
     lifetime_s: float = 600.
 
-    def age_at(self, evidence, now):
+    def age_at(self, evidence, now, *, wall_lifetime_s=None):
+        """Baseline age bounded by ``lifetime_s`` on the SIM/node clock (``now``).
+
+        Support drift is a SIM-time phenomenon, so the lifetime is measured on the sim/node clock
+        (``now``, the mission's 0-based sim time; the baseline is loaded at mission boot). Under
+        render pacing a run's WALL time vastly exceeds its sim time (collect ~15 min wall for ~13 s
+        sim), and the commission->mission wall gap is render compute, not drift — measuring the age
+        in wall seconds (the old ``acquired_steady`` gap) made a render-paced run outlive its baseline
+        mid-collect. The persistent acquisition clock stays a cross-process PROVENANCE +
+        anti-rewind check only (its wall magnitude no longer bounds the lifetime).
+
+        ``wall_lifetime_s`` is an opt-in cap on the acquisition-clock gap for the REAL RIG, where
+        wall == sim and the commission->deployment gap IS real drift time; left ``None`` under render
+        pacing (the sim lifetime governs). Mirrors the sim-clock watchdogs fixed across the lane."""
         if self.steady_domain:
-            if evidence.steady_domain != self.steady_domain or evidence.acquired_steady is None:
+            if (evidence.steady_domain != self.steady_domain or evidence.acquired_steady is None
+                    or evidence.acquired_steady < self.baseline_acquired_steady):
                 raise ValueError('commissioning acquisition clock continuity lost')
-            age = evidence.acquired_steady-self.baseline_acquired_steady + now-evidence.stamp
+            # Sim-time age (baseline loaded at mission boot -> age is the mission sim elapsed). Not
+            # the wall acquired_steady gap, which render pacing balloons without any real drift.
+            age = now
+            if wall_lifetime_s is not None:
+                wall_gap = evidence.acquired_steady-self.baseline_acquired_steady + now-evidence.stamp
+                if not 0 <= wall_gap <= wall_lifetime_s:
+                    raise ValueError('expired or reversed rigid-support commissioning clock')
         else:
             if evidence.session_id != self.baseline_session_id or evidence.steady_domain:
                 raise ValueError('clock reset requires persistent commissioning acquisition provenance')
