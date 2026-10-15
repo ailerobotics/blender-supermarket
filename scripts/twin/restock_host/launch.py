@@ -51,6 +51,14 @@ def description(config):
             'default_planning_pipeline': 'isaac_ros_cumotion',
             'isaac_ros_cumotion': pipeline,
             'allow_trajectory_execution': True,
+            # Disable MoveIt's WALL-clock execution-duration monitor: it cancels a trajectory that
+            # the controller does not finish within ~expected_sim_duration*scaling WALL seconds, but
+            # under render pacing the simulator executes each sim-second over many wall-seconds, so a
+            # healthy render-paced grasp (17.6 s sim) is false-cancelled ('Controller is taking too
+            # long ... Stopping trajectory' -> TIMED_OUT, run-111). trajectory_host owns sim-clocked
+            # completion/tracking/settle, and the mission bounds each stage on the sim clock, so this
+            # wall monitor is redundant here. Render-pacing watchdog (standing authority 212).
+            'trajectory_execution': {'execution_duration_monitoring': False},
             'moveit_manage_controllers': False,
             'moveit_controller_manager': 'moveit_simple_controller_manager/MoveItSimpleControllerManager',
             'moveit_simple_controller_manager': {
