@@ -201,7 +201,8 @@ def rendered_context(camera_config, camera_id, slots, *, measure_context,
         camera_id=camera_id, intrinsics=intrinsics, slots=slots,
         measure_context=measure_context, clearance_for_slot=clearance_for_slot,
         depth_error_m=camera_config['required_depth_error_bound_m'],
-        camera_revision=camera_revision, clock_context=clock_context, occlusion_window_s=window)
+        camera_revision=camera_revision, clock_context=clock_context, occlusion_window_s=window,
+        render_scale=render_scale)
 
 
 def build_sensing(*, app, assembly, plan, config, output):

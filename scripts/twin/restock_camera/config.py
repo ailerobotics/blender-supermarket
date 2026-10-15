@@ -150,9 +150,48 @@ def camera_config(scenario, manifest):
     return dict(schema='restock-camera-design.v2',evidence='geometric_design_not_sensor_capture',
                 runtime_ready=False,cameras=cameras,solids=solids,supports=supports,lamps=lamps,
                 cart_chassis_height_m=.20,required_depth_error_bound_m=.0002,
+                render_presets=render_presets(),
                 limitations=['Depth error bound must be established for the real renderer/sensor; not assumed.',
                              'Full-link/mount collision and visibility report must be checked before use.',
                              'No commissioning pixels or inventory are provided by this config.'])
+
+
+def render_presets():
+    """Sensing-camera render presets that trade per-frame render cost against fidelity, for the
+    integration runtime to opt into per run (``--render-preset``). The whole-store RTX render of
+    the sensing camera dominates the mission wall time (measured 1.7-3.5 s per full-res capture,
+    ~1:70 sim:wall); a faster preset is the lever to make Isaac iteration quicker.
+
+    ``full`` is the default and changes nothing (decode-grade reference). ``fast`` cuts cost with
+    three independent levers; the integration CameraRig applies them to the Isaac camera:
+
+    - ``render_scale`` (resolution step-down): 0.6 keeps BOTH source support markers decoding
+      (51/51 on the native commissioning frames, measured CPU parity by downsampling through the
+      production decoder) while cutting pixels ~2.8x. It works ONLY because the decoder tile grid
+      scales with the resolution (see ``qr.tile_origins`` / ``FixedTileQR(render_scale=...)``);
+      without that, downsampling shifts markers onto the fixed 640 px tile seams and decode drops
+      non-monotonically. 0.6 is the floor for the ~6 px/module source markers (0.5 collapses to
+      21/51); the shelf (coarser markers) has more headroom. The context, its commissioned baseline
+      and the live capture must all run at the SAME scale (scale_intrinsics) — commission ``fast``
+      only against a ``fast`` baseline.
+    - ``render_products``: the sensing capture reads only ``rgb`` + ``distance_to_image_plane``;
+      every other annotator (semantic, instance, motion, bbox) is pure render cost and is dropped.
+    - ``rtx_samples_per_pixel``: fewer path-tracing samples cut cost roughly linearly; the QR quiet
+      zone tolerates the added noise. The exact count is the integration renderer's; this is the
+      relative hint.
+
+    Resolution parity is CPU-provable here; the sampling/product cost reduction and the end-to-end
+    decode under the actual reduced-resolution RENDER (not a downsample) are the integration lane's
+    native proof. Combining the three comfortably exceeds the 3x target.
+    """
+    read = ['rgb', 'distance_to_image_plane']
+    return {
+        'full': dict(render_scale=1.0, render_products=read, rtx_samples_per_pixel='default',
+                     description='decode-grade reference; no speedups (default).'),
+        'fast': dict(render_scale=0.6, render_products=read, rtx_samples_per_pixel='reduced',
+                     description='~2.8x fewer sensing pixels at full decode parity (source floor), '
+                                 'plus minimal products and reduced sampling; opt in per run.'),
+    }
 
 
 def marker_module_grid(sku):

@@ -37,7 +37,7 @@ class RenderedSupportContext:
     def __init__(self, *, camera_id, intrinsics, slots, measure_context,
                  clearance_for_slot, depth_error_m, camera_revision, clock_context=None,
                  steady_clock=time.monotonic, occlusion_window_s=None,
-                 occlusion_contradiction_m=.05, occlusion_contradiction_rad=.17):
+                 occlusion_contradiction_m=.05, occlusion_contradiction_rad=.17, render_scale=1.0):
         self.steady_clock = steady_clock
         self.camera_id,self.intrinsics = camera_id,intrinsics
         self.slots = tuple(slots)
@@ -53,7 +53,10 @@ class RenderedSupportContext:
         self.occlusion_window_s = occlusion_window_s
         self.occlusion_contradiction_m = occlusion_contradiction_m
         self.occlusion_contradiction_rad = occlusion_contradiction_rad
-        self.decoder = FixedTileQR(camera_id)
+        # Scale the decoder tile grid with the sensing render resolution (a fast render preset steps
+        # it down): the intrinsics are already scaled by the same factor, so the tiles follow the
+        # markers and decode stays reliable at reduced resolution (see qr.tile_origins).
+        self.decoder = FixedTileQR(camera_id, render_scale=render_scale)
         self.qr_observation = None
         if len({slot.location for slot in slots}) != len(slots):
             raise ValueError('duplicate support location')

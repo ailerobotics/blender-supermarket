@@ -24,19 +24,26 @@ def rgb_digest(rgb):
     return hashlib.sha256(snapshot).hexdigest()
 
 
-def _tile_overlaps(origin, roi, width, height):
-    """Whether the 640-px tile at ``origin`` overlaps the ROI box (x1,y1,x2,y2)."""
+def _tile_overlaps(origin, roi, width, height, tile=640):
+    """Whether the ``tile``-px tile at ``origin`` overlaps the ROI box (x1,y1,x2,y2)."""
     x,y = origin
     x1,y1,x2,y2 = roi
-    return x < x2 and min(x+640,width) > x1 and y < y2 and min(y+640,height) > y1
+    return x < x2 and min(x+tile,width) > x1 and y < y2 and min(y+tile,height) > y1
 
 
-def tile_origins(width, height):
+def tile_origins(width, height, *, tile=640, stride=480):
+    # tile/stride default to the measured 2560x1920 grid (640 px tiles, 480 px stride). A render
+    # preset that steps the sensing resolution DOWN scales them proportionally (FixedTileQR passes
+    # tile=round(640*render_scale)), so a marker keeps the same position RELATIVE to its tile seams
+    # at reduced resolution — without that, downsampling shifts markers onto seams and decode drops
+    # non-monotonically (measured). At render_scale=1.0 the grid is byte-identical to before.
     if not 1 <= width <= 2560 or not 1 <= height <= 1920:
         raise ValueError('image exceeds bounded QR search dimensions')
+    if not 1 <= tile or not 1 <= stride <= tile:
+        raise ValueError('invalid QR tile/stride')
     def starts(size):
-        last = max(0,size-640)
-        return sorted(set([*range(0,last+1,480),last]))
+        last = max(0,size-tile)
+        return sorted(set([*range(0,last+1,stride),last]))
     return tuple((x,y) for y in starts(height) for x in starts(width))
 
 
@@ -67,14 +74,14 @@ class FrameQR:
             raise ValueError('QR observation belongs to another frame/pixels or exceeds latency budget')
 
 
-def _corners(points, x, y, width, height):
+def _corners(points, x, y, width, height, tile=640):
     p = np.asarray(points,float).reshape(-1,2)
     if p.shape != (4,2) or not np.isfinite(p).all():
         raise ValueError('invalid decoded QR quadrilateral')
     p = p+[x,y]
     edges = np.roll(p,-1,axis=0)-p
     cross = edges[:,0]*np.roll(edges,-1,axis=0)[:,1]-edges[:,1]*np.roll(edges,-1,axis=0)[:,0]
-    if (np.any(p < [x,y]) or np.any(p >= [min(x+640,width),min(y+640,height)])
+    if (np.any(p < [x,y]) or np.any(p >= [min(x+tile,width),min(y+tile,height)])
             or not (np.all(cross>0) or np.all(cross<0))):
         raise ValueError('truncated or ambiguous decoded QR quadrilateral')
     return p
@@ -94,11 +101,17 @@ class FixedTileQR:
     their unchanged freshness semantics. A failed attempt consumes its frame;
     callers must obtain new pixels, never retry/restamp old data to pass.
     """
-    def __init__(self, camera_id):
+    def __init__(self, camera_id, *, render_scale=1.0):
         import cv2
         if not camera_id:
             raise ValueError('camera identity required')
+        if not (np.isfinite(render_scale) and 0 < render_scale <= 1.0):
+            raise ValueError('render_scale must be in (0, 1]')
         self.camera_id = camera_id
+        # Scale the production 640/480 tile grid with the sensing render resolution so a marker
+        # keeps its position relative to the tile seams at reduced resolution (see tile_origins).
+        self.tile = max(64, round(640*render_scale))
+        self.stride = max(48, round(480*render_scale))
         self.detector = cv2.QRCodeDetector()
         self.last = None
         self.seen_sessions = set()
@@ -110,14 +123,14 @@ class FixedTileQR:
             if time.perf_counter()-start > .5:
                 raise ValueError('QR detection/merge exceeds 500 ms budget')
             try:
-                text,points,_ = self.detector.detectAndDecode(bgr[y:y+640,x:x+640].copy())
+                text,points,_ = self.detector.detectAndDecode(bgr[y:y+self.tile,x:x+self.tile].copy())
             except cv2.error as exc:
                 raise ValueError('QR tile decoder failed; no partial observation') from exc
             if points is None:
                 if text:
                     raise ValueError('decoded identity lacks pixel corners')
                 continue
-            p = _corners(points,x,y,width,height)
+            p = _corners(points,x,y,width,height,self.tile)
             if not text:
                 unreadable.append(p)
                 continue
@@ -155,11 +168,11 @@ class FixedTileQR:
         self.seen_sessions.add(evidence.session_id)
         digest = rgb_digest(rgb)
         height,width = rgb.shape[:2]
-        origins = tile_origins(width,height)
+        origins = tile_origins(width,height,tile=self.tile,stride=self.stride)
         bgr = cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR)
         scanned = origins
         if roi is not None:
-            subset = tuple(o for o in origins if _tile_overlaps(o,roi,width,height))
+            subset = tuple(o for o in origins if _tile_overlaps(o,roi,width,height,self.tile))
             groups,unreadable = self._scan(bgr,subset,width,height,start)
             if not groups and not unreadable:        # total miss in the ROI: full-frame fallback
                 groups,unreadable = self._scan(bgr,origins,width,height,start)
