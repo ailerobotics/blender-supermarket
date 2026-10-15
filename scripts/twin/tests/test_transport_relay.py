@@ -12,7 +12,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from twin.restock.native_transport import tf_payload, _frame_id
+from twin.restock.native_transport import tf_payload, _frame_id, joint_states_payload
 
 UR_BASE = '/MobileRobot/ur_base_link'
 ARM_OPTICAL = '/MobileRobot/front_camera_frame/arm_camera/restock_camera_arm'
@@ -85,3 +85,15 @@ class OneSharedStampConversion(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class JointStatesPayloadTests(unittest.TestCase):
+    def test_carries_both_positions_and_velocities(self):
+        # The host FollowJointTrajectory executor indexes msg.velocity; a names+position-only relay
+        # message left velocity empty and emergency-stopped the mission at the grasp (run-87).
+        p = joint_states_payload(4.25, ['a', 'b', 'c'], [0.1, 0.2, 0.3], [0.0, -0.5, 0.5])
+        self.assertEqual(p['t'], 4.25)
+        self.assertEqual(p['names'], ['a', 'b', 'c'])
+        self.assertEqual(p['pos'], [0.1, 0.2, 0.3])
+        self.assertEqual(p['vel'], [0.0, -0.5, 0.5])
+        self.assertEqual(len(p['vel']), len(p['names']))

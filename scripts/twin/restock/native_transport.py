@@ -19,6 +19,14 @@ def _frame_id(path):
     return str(path).rsplit('/', 1)[-1]
 
 
+def joint_states_payload(now, names, positions, velocities):
+    """The /restock_sim/joint_states relay JSON. Measured positions AND velocities both ride along:
+    the host FollowJointTrajectory executor (trajectory_host) indexes msg.velocity by the arm joints,
+    so omitting velocity yields an empty array and an index-out-of-bounds fault (run-87)."""
+    return {'t': float(now), 'names': list(names),
+            'pos': [float(v) for v in positions], 'vel': [float(v) for v in velocities]}
+
+
 def tf_payload(parent_path, child_entries, stamp):
     """Assemble the /tf relay JSON: every child published relative to the single parent (the arm
     base), frame_ids = prim names, so nvblox resolves restock_camera_arm <- ur_base_link. Pure (no
@@ -191,8 +199,13 @@ class NativeTransport:
         self._relay.publish('/clock', json.dumps({'t': float(now)}))
         if self.robot is not None:
             pos = [float(v) for v in np.asarray(self.robot.get_joint_positions(), float)]
+            # Velocity MUST ride along: the host FollowJointTrajectory executor (trajectory_host)
+            # indexes msg.velocity by the arm joints, so a names+position-only message (empty
+            # velocity) raised 'index out of bounds, size 0' and emergency-stopped the mission at the
+            # grasp (run-87). The relay decode reads 'vel' (control_ipc), defaulting to [] when absent.
+            vel = [float(v) for v in np.asarray(self.robot.get_joint_velocities(), float)]
             self._relay.publish('/restock_sim/joint_states',
-                                json.dumps({'t': float(now), 'names': list(self.robot.dof_names), 'pos': pos}))
+                                json.dumps(joint_states_payload(now, self.robot.dof_names, pos, vel)))
         # Each tf frame relative to the arm base, via USD world transforms (ExtractRotationQuat gives
         # the correct USD-convention quaternion). Pure frame-id + payload assembly is tf_payload().
         cache = UsdGeom.XformCache(Usd.TimeCode.Default())
