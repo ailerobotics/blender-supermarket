@@ -310,12 +310,18 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # that otherwise blows the stage-pair cap. Decode-grade stages are unaffected (they
     # render every tick via SENSING_ACTIONS regardless of this stride).
     record_stride = int(config.get('record_stride', 2))
+    # Physics ticks per rendered sensing frame (collect/transfer/verify). Rendering the whole scene
+    # every tick drove collect/grasp to ~1:70 sim:wall (run-94); a modest stride keeps the sensing
+    # consumers' sim-time freshness (controller max_age 0.5 s) while the render-paced grasp completes
+    # inside the wall budget. Default 1 = legacy every-tick behaviour; the mission config sets it higher.
+    sensing_stride = int(config.get('sensing_stride', 1))
     port = IsaacPort(
         world=assembly.world, robot=assembly.robot, robot_body=assembly.robot_body,
         cart_body=assembly.cart_body, mobile=assembly.mobile, range_sensor=range_sensor,
         transport=transport, contact=assembly.contact, hold_arm=assembly.command_gate.hold,
         verification=verifier, recording_camera=recording_camera, recorder=recorder,
-        native_transport=assembly.transport, on_action=on_action, record_stride=record_stride)
+        native_transport=assembly.transport, on_action=on_action, record_stride=record_stride,
+        sensing_stride=sensing_stride)
 
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)

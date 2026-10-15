@@ -23,6 +23,14 @@ FEEDBACK_WALL_BACKSTOP_S = 30.0
 # Sub-tick lead tolerance for the /clock-vs-/joint_states delivery-order race (both relayed with the
 # same sim stamp each tick): now()-stamp may read slightly negative without the frame being stale.
 FEEDBACK_RENDER_LEAD_S = 0.05
+# Frozen/hung-sim WALL backstop for trajectory EXECUTION. Sim-time completion and overrun are governed
+# on the SIM clock by the terminal-tolerance branch (``elapsed`` vs ``plan.times[-1]``); this WALL bound
+# exists only to break out of a genuinely stuck loop (and is redundant with the 30 s feedback watchdog,
+# which faults first on a frozen sim). It is set far larger than any render-paced execution: a ~21 s sim
+# grasp legitimately took ~170 s WALL under full-res per-tick capture (run-94), and a tight wall deadline
+# (``20 + plan.times[-1]*5``) false-failed that healthy grasp -- the executor analogue of the host-side
+# RosMotionPort wall-deadline bug fixed on the sim clock in the same wave.
+EXECUTE_WALL_BACKSTOP_S = 1200.0
 
 
 def feedback_fresh(gap):
@@ -210,7 +218,7 @@ def main():
                 plan=Plan(handle.request.trajectory,state['feedback'][1],limits)
                 state['plan'],state['start']=plan,now()
                 started=state['start']
-            wall_deadline=time.monotonic()+min(300.,20.+plan.times[-1]*5)
+            wall_backstop=time.monotonic()+EXECUTE_WALL_BACKSTOP_S
             while rclpy.ok():
                 with lock:
                     if handle.is_cancel_requested:
@@ -220,7 +228,11 @@ def main():
                         result.error_string=state['fault']
                         return result
                     elapsed=now()-started
-                    if elapsed<0 or time.monotonic()>wall_deadline:
+                    # Sim-clock regression is a hard fault; the WALL bound is only a frozen/hung-sim
+                    # backstop (see EXECUTE_WALL_BACKSTOP_S). Under render pacing a healthy grasp advances
+                    # ``elapsed`` normally while taking many wall seconds per sim second, so it never
+                    # approaches the backstop. Terminal completion/overrun is on the sim clock below.
+                    if elapsed<0 or time.monotonic()>wall_backstop:
                         fault('trajectory clock/timeout failure')
                     if state['fault']:
                         raise RuntimeError(state['fault'])

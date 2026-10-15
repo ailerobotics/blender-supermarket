@@ -133,10 +133,11 @@ def test_mission_camera_preserves_pixels_id_and_original_frame_clock():
     assert measured['rgb'] is frame['rgb'] and frame['rendering_time']==8.5
 
 
-def _plan_port(*, action, stride=2, recorder=True, camera=True):
+def _plan_port(*, action, stride=2, sensing_stride=1, recorder=True, camera=True):
     port = IsaacPort.__new__(IsaacPort)   # skip Isaac wiring; only the render-gating state
     port.current_action = action
     port.record_stride = stride
+    port.sensing_stride = sensing_stride
     port.recorder = object() if recorder else None
     port.recording_camera = object() if camera else None
     return port
@@ -153,8 +154,26 @@ def test_navigation_stage_renders_only_on_recorder_cadence():
 
 def test_sensing_stage_renders_every_tick():
     for action in sorted(SENSING_ACTIONS):
-        port = _plan_port(action=action, stride=100)
-        assert all(port._frame_plan(t)[0] for t in range(1, 5))   # sensing True regardless of stride
+        port = _plan_port(action=action, stride=100)   # default sensing_stride=1
+        assert all(port._frame_plan(t)[0] for t in range(1, 5))   # sensing True every tick
+
+
+def test_sensing_stage_renders_on_sensing_stride():
+    # With a sensing stride, a sensing stage renders only every Nth tick (freshness is sim-time
+    # bounded, not per-tick): the render-paced grasp advances sim far faster than at every tick.
+    for action in sorted(SENSING_ACTIONS):
+        port = _plan_port(action=action, stride=100, sensing_stride=4)
+        sensing = [port._frame_plan(t)[0] for t in range(1, 9)]
+        assert sensing == [False, False, False, True, False, False, False, True]
+
+
+def test_invalid_sensing_stride_rejected():
+    import pytest as _pt
+    with _pt.raises(ValueError, match='sensing_stride'):
+        IsaacPort(world=None, robot=NS(dof_names=('left_wheel_joint', 'right_wheel_joint')),
+                  robot_body=None, cart_body=None, mobile=None, range_sensor=None,
+                  transport=None, contact=None, hold_arm=None, verification=None,
+                  sensing_stride=0)
 
 
 def test_no_recorder_means_no_record_render():

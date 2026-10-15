@@ -89,7 +89,8 @@ class IsaacPort:
     def __init__(self, *, world, robot, robot_body, cart_body, mobile, range_sensor,
                  transport, contact, hold_arm, verification, recording_camera=None,
                  recorder=None, native_transport=None, after_step=None,
-                 on_action=None, realtime=True, record_stride=2, masked_depth=None):
+                 on_action=None, realtime=True, record_stride=2, sensing_stride=1,
+                 masked_depth=None):
         self.world,self.robot=world,robot
         self.robot_body,self.cart_body=robot_body,cart_body
         self.mobile,self.range_sensor=mobile,range_sensor
@@ -102,6 +103,17 @@ class IsaacPort:
         if type(record_stride) is not int or record_stride<1:
             raise ValueError('record_stride must be a positive int (physics ticks per recorded frame)')
         self.record_stride=record_stride
+        # Physics ticks per rendered SENSING frame. A sensing stage (collect/transfer/verify) consumes
+        # freshly rendered pixels, but the consumers gate on a SIM-time freshness window (controller
+        # max_age = 0.5 s; station/nvblox incorporation stamps are sim-clocked), NOT on every physics
+        # tick. Rendering the whole scene every tick made collect/grasp run ~1:70 sim:wall (a ~21 s sim
+        # grasp -> ~25 min wall, over the ceiling, run-94). Rendering every ``sensing_stride`` ticks keeps
+        # the freshest frame <= sensing_stride*dt old (<< 0.5 s for a modest stride) while cutting the
+        # dominant per-tick render cost ~stride-fold, so a render-paced grasp completes within the wall
+        # budget. Default 1 preserves the legacy every-tick behaviour.
+        if type(sensing_stride) is not int or sensing_stride<1:
+            raise ValueError('sensing_stride must be a positive int (physics ticks per rendered sensing frame)')
+        self.sensing_stride=sensing_stride
         # Optional masked-depth publisher (Isaac-side rig self-pixel invalidation for the
         # host nvblox consumer). Published only on sensing-stage ticks; None keeps the
         # legacy raw-depth OmniGraph path untouched. See masked_depth.MaskedDepthPublisher.
@@ -126,8 +138,11 @@ class IsaacPort:
 
     def _frame_plan(self, upcoming_tick):
         """(sensing_tick, record_tick) for `upcoming_tick`: whether a sensing stage needs a
-        fresh render and whether the recorder captures this tick. render = either is True."""
-        sensing=self.current_action in SENSING_ACTIONS
+        fresh render and whether the recorder captures this tick. render = either is True.
+        Sensing renders on the ``sensing_stride`` cadence (freshness is sim-time bounded, not
+        per-tick), so a render-paced sensing stage advances sim far faster than at every tick."""
+        sensing=(self.current_action in SENSING_ACTIONS
+                 and upcoming_tick%self.sensing_stride==0)
         record=(self.recorder is not None and self.recording_camera is not None
                 and upcoming_tick%self.record_stride==0)
         return sensing,record
