@@ -124,6 +124,38 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
     }
 
 
+def station_camera_specs(design, parent_paths):
+    """CameraRig specs for the FIXED station cameras only (pure; no Isaac).
+
+    The camera design keeps camera bodies and their mount collision boxes in separate lists
+    (``cameras`` + ``solids`` with ``dimensions_m``); CameraRig expects each camera to carry its
+    own ``collision_solids`` (``size_m``), so attach each camera's housing (and bracket, when
+    present) from the solids list.
+
+    Eye-in-hand cameras (e.g. the ``wrist`` collision camera on ur_tool0, frame
+    ``restock_camera_wrist``) are parented to a robot LINK, not a fixed station parent, and are
+    authored by their own path (``mobile_assets.author_wrist_camera`` /
+    ``native_cameras.initialize_collision_camera``), not this fixed-station CameraRig. They are
+    skipped here (parent absent from ``parent_paths``); the sensing supports/context/location
+    maps never reference an eye-in-hand camera, so nothing downstream expects it in the rig.
+    """
+    solids_by_id = {s['id']: s for s in design.get('solids', [])}
+    specs = []
+    for name, camera in design['cameras'].items():
+        if camera.get('parent') not in parent_paths:
+            continue
+        collision_solids = []
+        for suffix in ('_housing', '_bracket'):
+            solid = solids_by_id.get(name + suffix)
+            if solid is not None:
+                collision_solids.append({'parent_from_solid': solid['parent_from_solid'],
+                                         'size_m': solid['dimensions_m']})
+        if not collision_solids:
+            raise ValueError(f'camera {name!r} has no housing/bracket collision solid in the design')
+        specs.append(dict(camera, collision_solids=collision_solids))
+    return specs
+
+
 def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
     """Build the Isaac CameraRig on the composed stage and expose the sensing cameras."""
     from pxr import UsdGeom
@@ -135,22 +167,7 @@ def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
     if not assembly.stage.GetPrimAtPath('/World'):
         UsdGeom.Xform.Define(assembly.stage, '/World')
     parent_paths = {'map': '/World', 'cart_chassis': cart_root}
-    # The camera design keeps camera bodies and their mount collision boxes in separate
-    # lists (cameras + solids, with dimensions_m); CameraRig.camera_spec expects each
-    # camera to carry its own collision_solids (size_m). Bridge the two here by attaching
-    # each camera's housing (and bracket, when present) from the design's solids list.
-    solids_by_id = {s['id']: s for s in design.get('solids', [])}
-    specs = []
-    for name, camera in design['cameras'].items():
-        collision_solids = []
-        for suffix in ('_housing', '_bracket'):
-            solid = solids_by_id.get(name + suffix)
-            if solid is not None:
-                collision_solids.append({'parent_from_solid': solid['parent_from_solid'],
-                                         'size_m': solid['dimensions_m']})
-        if not collision_solids:
-            raise ValueError(f'camera {name!r} has no housing/bracket collision solid in the design')
-        specs.append(dict(camera, collision_solids=collision_solids))
+    specs = station_camera_specs(design, parent_paths)
     rig = CameraRig(stage=assembly.stage, specs=specs, parent_paths=parent_paths, frequency=-1,
                     render_scale=render_scale, camera_render_scales=camera_render_scales)
     # CameraRig authors only the camera prims + their mount collision boxes. The support

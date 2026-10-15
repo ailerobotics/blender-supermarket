@@ -1773,3 +1773,68 @@ Two residual seams for the next session:
    outbound was not reached this run so it was untested regardless. No tow speed, no video.
 
 Grasp blocked on host-lane cuMotion/XRDF (11:00); parking per Firstmate (allowance gate).
+
+### 2026-10-15 — three blockers cleared; integrated host XRDF/wrist/return PRs; full run-83 launched
+
+All three run-82 residual seams and the grasp blocker are fixed and on the integration branch
+(PR https://github.com/ailerobotics/blender-supermarket/pull/15):
+
+1. **Status watchdog node-clocked** (`isaac_ros_graph.IsaacRosGraph.poll`). The
+   `/manipulation/status` watchdog measured its 5 s bound in WALL time, so a render-paced cuMotion
+   multi-seed IK retry (many wall seconds, tiny sim advance per render tick) false-tripped and killed
+   the mission mid-grasp (run-82 seam 1). It now measures the 5 s bound in NODE-CLOCK (sim) time when
+   the caller supplies it (`ros_manipulation.step` passes `simulation_time`), unchanged semantics on
+   real hardware, with a generous wall backstop for a frozen sim clock. CPU-tested (4 new cases in
+   `test_restock_ros_split.py`: render-paced no-false-trip, sim-time trip, wall backstop, legacy).
+
+2. **Wheel-traction collider bind fixed** (`physics_setup.configure_wheel_traction`, run-82 seam 2,
+   `WHEEL_TRACTION bound=0`). Two faults: (a) it searched from the articulation root (`base_link`) but
+   the drive wheels are its **siblings** under the robot root `/MobileRobot`; (b) the Isaac URDF
+   importer references each collider under `<wheel>/collisions` with `instanceable=True`, so the
+   `UsdPhysics.CollisionAPI` cylinder is an **instance proxy** a default `Usd.PrimRange` skips and a
+   material cannot be bound onto. Now searches from the robot root and de-instances each drive wheel's
+   collisions subtree before binding; **verified against a real imported mobile USD** that both drive
+   wheels bind. CPU regression test added (synthetic instance-proxy layout).
+
+3. **cuMotion/XRDF phantom self-collision (grasp blocker) cleared by the host lane (PR 72)** — five
+   arm-mount pairs are excluded via `MANUAL_EXCLUSIONS` in `generate_assets.py`. Regenerated
+   `host-cad/mobile.xrdf` with the generator (1870 spheres, 0 transport overlaps); confirmed all five
+   pairs now in `self_collision.ignore`. Switched the mission grasp back to **`pose_goal=true`**
+   (`ros_host_config.json`, the config `restock_host/launch.py` feeds `ros_host`) — the host lane
+   proved the exact run-81 collect approach pose now plans a 244-point cuMotion **task-space** trajectory.
+
+Also integrated from the host/camera lanes (all into this branch): the eye-in-hand wrist RGB-D camera
+(PR 71), and the VERIFY/RETURN release/detach fix + 65-point return plan (PR 69, clears the carried-unit
+planning-scene persistence that failed the earlier return). Main is already an ancestor of the branch.
+
+Secondary integration fix in my mission lane: `ros_manipulation.step` now treats a returned packet's
+integrity (stale/repeated timestamp, non-sensor provenance) as **fail-closed** outside the soft capture
+try — a fixture or replayed packet stops the mission instead of degrading to `running` (was a latent
+branch-local test failure). CPU suite: 767 pass; the 2 remaining failures are camera-lane contract
+drift in `restock_camera` (`StationSensors` `steady_clock` kwarg their test expects but their impl
+lacks) — production constructs it without that kwarg so the live mission is unaffected; reported for
+the camera lane.
+
+**run-83** (first full `collect`+`couple` attempt with all fixes active, fresh commission run-38 of
+`backstock_00` at 2560×1920 / 900 s baseline, `wheel_friction=1.0`): the mission **failed during bundle
+construction**, before any physics step — a regression surfaced by integrating the wrist camera (PR 71):
+
+```
+ValueError: camera 'wrist' has no housing/bracket collision solid in the design
+  (sensing_sources._real_rig, run_mobile_restock -> isaac_bundle.create -> build_sensing_sources)
+```
+
+Root cause: PR 71's `restock_camera.config.camera_config()` adds the eye-in-hand `wrist` collision
+camera (frame `restock_camera_wrist`, `role='collision'`, parented to the ur_tool0 link) to
+`design['cameras']`, but the fixed-station `CameraRig` builder in integration-owned
+`sensing_sources._real_rig` required every design camera to carry a housing/bracket collision solid —
+which an eye-in-hand camera authored by its own path (`mobile_assets.author_wrist_camera` /
+`native_cameras.initialize_collision_camera`) does not have. Fix (integration lane): extracted a pure
+`station_camera_specs(design, parent_paths)` that builds specs only for cameras parented to a fixed
+station parent (`map`/`cart_chassis`) and **skips eye-in-hand cameras** — the sensing
+supports/context/location maps never reference the wrist camera, so nothing downstream expects it in
+the rig. A station camera still missing its solid fails closed. CPU-tested
+(`test_sensing_sources.py::StationCameraSpecsTests`). The run reached a clean Isaac boot (RTX up, host
+stack warmed, ROS bridge loaded, gripper + physics scene composed) in ~24 s before the construction
+error, so the boot/compose path is healthy; re-running as run-84 after this fix + pulling the camera
+lane's PR 73.

@@ -152,5 +152,28 @@ class AuthorMissionMarkersTests(unittest.TestCase):
                 _write_label=lambda *a, **k: None, _mkdtemp=lambda: Path('/tmp/m'))
 
 
+class StationCameraSpecsTests(unittest.TestCase):
+    PARENTS = {'map': '/World', 'cart_chassis': '/World/Cart'}
+
+    def test_eye_in_hand_wrist_camera_is_skipped_station_cameras_kept(self):
+        from twin.restock.sensing_sources import station_camera_specs
+        design = cc.camera_config(SCENARIO, MANIFEST)
+        # The design carries the eye-in-hand 'wrist' camera (parent restock_camera_wrist, no
+        # housing solid); it must be skipped, not raise, and the fixed stations must remain.
+        self.assertIn('wrist', design['cameras'])
+        specs = station_camera_specs(design, self.PARENTS)
+        self.assertEqual({s['id'] for s in specs}, {'source', 'cart', 'shelf'})
+        for s in specs:
+            self.assertTrue(s['collision_solids'])
+            self.assertIn(s['parent'], self.PARENTS)
+
+    def test_station_camera_without_solid_still_fails_closed(self):
+        from twin.restock.sensing_sources import station_camera_specs
+        design = cc.camera_config(SCENARIO, MANIFEST)
+        design['solids'] = [s for s in design['solids'] if not s['id'].startswith('source')]
+        with self.assertRaisesRegex(ValueError, "camera 'source' has no housing/bracket"):
+            station_camera_specs(design, self.PARENTS)
+
+
 if __name__ == '__main__':
     unittest.main()
