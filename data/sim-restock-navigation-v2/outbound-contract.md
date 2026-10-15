@@ -134,10 +134,38 @@ PYTHONPATH=scripts python3 scripts/check_restock_navigation.py \
 
 `passed: true` requires both legs `succeeded` **and** `within_goal_articulation`.
 
-## Open items (not navigation-lane fixes)
+## Native confirmation (planner-steered coupled towing)
 
-- One native nav-only towing run under the GPU lock (Isaac + Nav2 overlay, no arm)
-  is the physics confirmation of this contract — tracked separately.
+A bounded guarded native probe (`run_nav_towing_probe.py` + `twin.restock.nav_towing_check`,
+merged PR #70) drove **this** controller in Isaac at the couple pose: the mobile base +
+rollwagen assemble at `[-5.73,16,0]`/`[-7,16,0]`, settle (robot ~1 mm/s), the hitch latches
+(11 mm < 25 mm gate), the planner routes to the shelf and the controller **steers the coupled
+train forward** with bounded articulation and **no cart wheel lift** — confirming the towing
+geometry under physics.
+
+- `nav-towing-probe-03` (default friction): forward **0.314 m**, cmd ω ≤ 0.167 rad/s, articulation 0.51°.
+- `nav-towing-probe-04` (**wheel_friction=1.0**, traction fix 9988f6b, `WHEEL_TRACTION bound=2`):
+  forward **0.559 m (+78 %)**, max measured speed 0.202 m/s (0.073 avg while driving), no wheel lift.
+
+The traverse is partial because the 8-minute probe window advances only ~17 s of sim at
+render-paced stepping (a probe-harness limit, not a mission limit — the integration mission runs
+are uncapped). Evidence: `~/datasets/sim-restock-navigation-v2/nav-towing-probe-0{3,4}/`.
+
+### Controller fix: keep the route on a transient `measured_turn_radius`
+
+probe-04 showed ~36 % of tow steps were stop/replan: when the under-powered base is momentarily
+under commanded speed on a tight turn, its **measured** arc is tighter than the 1.5 m min radius,
+tripping the braking-curvature gate; the controller was discarding the whole planned route and
+forcing a full stop + replan each trip, which cycled and stalled the tow. `ArticulatedController.step`
+now (a) **slows the commanded speed for tight turns** (0.25·max_speed at the curvature cap, scaling
+to full speed when straight) so the base does not over-rotate the measured arc, and (b) on a
+transient `measured_turn_radius` **keeps the planned route and coasts** (resuming the same route once
+the measured curvature recovers) instead of dropping it; other refusals (obstacle, coverage, map,
+tracking error) still replan, and a persistent trip still fails via the blocked timeout. CPU-tested
+(`test_transient_measured_turn_radius_keeps_route`, `test_tight_turn_commands_reduced_speed`).
+
+## Open items
+
 - `transport_radius_m` 0.65, `transport_joints`, and the cart-root `self_paths`
   entries are `isaac_bundle` default changes owned by the integration branch; this
   contract confirms the numbers they must use.
