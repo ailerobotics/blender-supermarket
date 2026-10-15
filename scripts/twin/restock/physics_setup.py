@@ -284,7 +284,13 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # SIM execution profile: the Isaac-side absolute joint-speed gate (rad/s) on executed arm
     # commands. Default 0.15 keeps the conservative real-rig envelope; the sim mission raises it
     # (0.3) to match the planner/executor so a legitimately planned faster grasp is not rejected.
-    gate=ArmCommandGate(robot,tool.arm_limits,apply,max_speed=float(config.get('arm_max_speed',.15)))
+    # max_error is the Isaac-side command-vs-measured tracking envelope; it mirrors trajectory_host's
+    # TRACKING_TOL and must tolerate the same render-paced ~0.15 rad control lag (a 0.15 default
+    # tripped a healthy approach, run-115). Default 0.2 for the sim profile; conservative callers keep
+    # the class default.
+    gate=ArmCommandGate(robot,tool.arm_limits,apply,
+                        max_speed=float(config.get('arm_max_speed',.15)),
+                        max_error=float(config.get('arm_tracking_tol',.2)))
     contact=NativePanelContact(stage,'/RestockPanelGripper')
     # Register native ROS/image graph nodes only after the final scene has
     # finished opening/resetting. A bridge loaded during import/reopen caused

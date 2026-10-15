@@ -92,10 +92,18 @@ class ArmCommandGate:
             order=[names.index(name) for name in ARM_JOINTS]
             q=np.asarray(positions,float)[order]
             v=np.asarray(velocities,float)[order]
+            track_err=float(np.max(np.abs(q-self.measured())))
+            vel_mag=float(np.max(np.abs(v)))
             if (not np.isfinite(q).all() or not np.isfinite(v).all()
                     or any(not lo<=value<=hi for value,(lo,hi) in zip(q,self.limits))
-                    or np.max(np.abs(v))>self.max_speed
-                    or np.max(np.abs(q-self.measured()))>self.max_error):
+                    or vel_mag>self.max_speed
+                    or track_err>self.max_error):
+                # Diagnostic: which sub-condition rejected the command (the Isaac-side command-vs-
+                # measured tracking envelope mirrors trajectory_host's TRACKING_TOL; under render pacing
+                # the ~0.15 rad control lag can trip a too-tight max_error, run-115).
+                print(f'ARM_CMD_ENVELOPE track_err={track_err:.4f} vel={vel_mag:.4f} '
+                      f'max_error={self.max_error} max_speed={self.max_speed} '
+                      f'limit_ok={all(lo<=value<=hi for value,(lo,hi) in zip(q,self.limits))}',flush=True)
                 raise ValueError('arm target exceeds limits or tracking envelope')
             self.apply(q,v,self.indices)
             self.last_stamp=stamp
