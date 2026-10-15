@@ -85,7 +85,13 @@ def main():
         phase_timeout=120.,pose_policy=WallCartonPolicy(args.shelfbot_root,tool,walls=config['walls']),
         transport_joints=transport_joints)
     payload.controller = controller
-    bridge = RosTransferBridge(node,controller)
+    # The first decode-grade frame + support registration under render pacing needs several
+    # ~1 s RTX renders (~5-15 s WALL); the default 5 s wall startup grace flaked (run-108 failed
+    # 'no initial sensor frame' where run-106/107 cleared it only by luck). Widen it for the sim
+    # via config; the runtime.py sim-clock stall guard (PR 86) still catches a job that genuinely
+    # never produces a frame, so the generous wall grace cannot hide a real stall.
+    bridge = RosTransferBridge(node,controller,
+        startup_grace_seconds=float(config.get('startup_grace_seconds', 5.0)))
     # Remember the synchronized native-contact packet before controller consumes it.
     original = bridge._sensors
     node.destroy_subscription(bridge.subscriptions[1])

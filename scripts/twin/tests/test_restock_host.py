@@ -403,10 +403,14 @@ class RosHostLaunchWiring(unittest.TestCase):
         # optional bool the host reads via config.get('pose_goal', False). arm_max_speed is the
         # SIM execution-profile joint-speed gate (rad/s) the host reads via config.get, raised above
         # the conservative real-rig default so the render-paced grasp completes in the wall budget.
-        self.assertEqual(set(cfg), {'profiles', 'walls', 'pose_goal', 'arm_max_speed'})
+        self.assertEqual(set(cfg), {'profiles', 'walls', 'pose_goal', 'arm_max_speed',
+                                    'startup_grace_seconds'})
         self.assertIsInstance(cfg['pose_goal'], bool)
         self.assertIsInstance(cfg['arm_max_speed'], (int, float))
         self.assertGreater(cfg['arm_max_speed'], 0)
+        # Startup grace (first-frame wall window) is widened for render pacing; a positive float.
+        self.assertIsInstance(cfg['startup_grace_seconds'], (int, float))
+        self.assertGreater(cfg['startup_grace_seconds'], 0)
         # Every profile constructs; walls cover source (backstock_00), cart (rollwagen) and
         # target (G3_back_s2) so WallCartonPolicy.build never raises on a missing location.
         self.assertTrue({p['sku']: ProductProfile(**p) for p in cfg['profiles']})
