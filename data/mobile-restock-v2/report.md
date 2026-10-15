@@ -2099,3 +2099,14 @@ Fixes (standing authority 212, sim-only render-pacing params; recorded here):
   hard-exit and skip the outer finally, so run-102's mp4 was not written until encoded manually. Now
   every run (success or failure) leaves `<run>/walkthrough.mp4`. run-102's clip was encoded manually
   (132 frames, VFR H.264).
+
+### 2026-10-15 — correction: baseline lifetime is hard-capped at 900 s in the commission gate
+
+The run-102 fix note proposed `--lifetime-s 1800`; that is REJECTED. `restock_camera/sensed.py:270`
+validates `1 <= lifetime_s <= 900` in `commission()` and raises `invalid support footprint requirement`
+otherwise, so run-103's backstock_00 commission failed before any render fit. Baseline lifetime stays
+900 s (reverted). The baseline-expiry-during-collect blocker is therefore addressed ONLY by shortening
+collect wall time: `arm_max_speed` 0.5 rad/s (effective planner speed ~0.45 vs 0.27 at 0.3) shortens
+the grasp, bringing collect to roughly ~8 min wall (run-102's ~15.5 min at 0.3) -- inside the 900 s
+(15 min) baseline window with margin. (A >900 s baseline lifetime, if ever wanted, is a camera-lane
+commission-gate change, not a run param.)
