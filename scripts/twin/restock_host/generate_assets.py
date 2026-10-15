@@ -78,9 +78,20 @@ def kinematic_exclusions(robot):
 
 
 def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
-                 acceleration=1., jerk=10.):
-    """Pure CPU reconstruction used by both generator and strict evidence check."""
+                 acceleration=1., jerk=10., collision_buffer=None):
+    """Pure CPU reconstruction used by both generator and strict evidence check.
+
+    ``collision_buffer`` optionally inflates a named link's collision-sphere radii by a fixed margin
+    (metres). cuMotion plans are seed/ESDF-dependent, so a path that clears the conservative cover on
+    one seed can graze on another; a margin on a link that is never a contact surface (e.g. base_link)
+    forces the planner to keep extra clearance from it on EVERY seed, so the FCL re-validation of the
+    emitted path accepts it. Applied to base/body links only -- NOT the gripper plates, whose radii
+    also gate world (carton) contact, so inflating them would make the grasp unreachable.
+    """
     urdf, manifest = Path(urdf).resolve(), Path(manifest).resolve()
+    buffers = {str(k): float(v) for k, v in (collision_buffer or {}).items()}
+    if any(not np.isfinite(v) or not 0. <= v <= .1 for v in buffers.values()):
+        raise ValueError('each collision buffer must be finite and within 0..10 cm')
     if not np.isfinite([pitch, min_pitch]).all() or not .001 <= min_pitch <= pitch <= .2:
         raise ValueError('require 1 mm <= min_pitch <= pitch <= 20 cm')
     if not all(np.isfinite(v) and v > 0 for v in (acceleration, jerk)):
@@ -119,6 +130,12 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
             generated, evidence = cover.result()
             entries.extend(generated)
             coverage_by_link[name].append({'link': name, 'collision_index': index, **evidence})
+        margin = buffers.get(name, 0.)
+        if margin:
+            # Re-applied on every rebuild (refinement regenerates entries) so the buffered radii drive
+            # the transport overlap/refinement check too -- the gate validates the model actually shipped.
+            for sphere in entries:
+                sphere['radius'] = float(sphere['radius']) + margin
         spheres[name] = entries
 
     for name in pitches:
@@ -191,7 +208,8 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
               'inputs': {'urdf': str(urdf), 'manifest': str(manifest),
                          'shelfbot_root': str(Path(shelfbot_root).resolve())},
               'source_sha256': sources, 'pitch_m': pitch,
-              'min_pitch_m': min_pitch, 'link_pitches': pitches, 'refinement_rounds': rounds,
+              'min_pitch_m': min_pitch, 'link_pitches': pitches, 'collision_buffers_m': buffers,
+              'refinement_rounds': rounds,
               'planner_acceleration_rad_s2': acceleration, 'planner_jerk_rad_s3': jerk,
               'policy_note': 'configured conservative planner limits, not measured actuator limits',
               'collision_elements': [entry for rows in coverage_by_link.values() for entry in rows],
@@ -244,10 +262,16 @@ def main():
     parser.add_argument('--min-pitch', type=float, default=.00625)
     parser.add_argument('--acceleration', type=float, default=1.)
     parser.add_argument('--jerk', type=float, default=10.)
+    parser.add_argument('--base-buffer', type=float, default=0.,
+                        help='extra collision-sphere radius (m) on base_link so cuMotion keeps the '
+                             'gripper clear of the mobile base on every plan seed (not the gripper, '
+                             'whose radii also gate carton contact)')
     args = parser.parse_args()
+    collision_buffer = {'base_link': args.base_buffer} if args.base_buffer else None
     report = generate(args.urdf, args.mobile_manifest, args.shelfbot_root, args.output,
                       pitch=args.pitch, min_pitch=args.min_pitch,
-                      acceleration=args.acceleration, jerk=args.jerk)
+                      acceleration=args.acceleration, jerk=args.jerk,
+                      collision_buffer=collision_buffer)
     print(json.dumps({k: report[k] for k in ('sphere_count', 'planning_ready', 'transport_sphere_overlaps')}, indent=2))
 
 

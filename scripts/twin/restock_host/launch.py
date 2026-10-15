@@ -73,14 +73,6 @@ def description(config):
               read_esdf_world=True, update_esdf_on_request=True,
               esdf_service_name=NS + '/nvblox_node/get_esdf_and_gradient',
               joint_states_topic=NS + '/joint_states', enable_cuda_mps=False,
-              # cuMotion emits the optimized trajectory resampled at interpolation_dt; MoveIt's
-              # ValidateSolution densifies and FCL-checks the LINEARLY interpolated path between those
-              # points. At the stock 0.05 s the straight segments between output points cut across a
-              # curved reach and FCL found the gripper plate (surface_plate_1) clipping base_link at
-              # 8/184 densified states (run-122 INVALID_MOTION_PLAN), even though cuMotion's own
-              # (conservative-sphere) check passed. The sphere cover is sound; this is a planner-output
-              # vs checker-densification discretization gap, so densify the output to hug the true path.
-              interpolation_dt=0.02,
               static_planning_scene_service_name=NS + '/publish_static_planning_scene')
 
     def component(package, plugin, name, parameters, remappings=()):
