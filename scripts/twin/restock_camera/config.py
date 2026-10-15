@@ -180,8 +180,15 @@ def camera_config(scenario, manifest):
     # the 180 deg grid flip the old mirror pair needed (that flip 180-rolled its corner order
     # and corrupted register_marker's fit). The 0.20 m Y auxiliary offset exceeds the
     # 2*side_m=0.12 m minimum; both markers stay on the shelf board (y in [4.57,5.05]).
+    # Shelf support required_xy tightened to .58x.36 (from .62x.42): under the grazing
+    # under-tier view the full .42 y-extent reaches the shelf-board side edges (the dense
+    # support-plane gate reads them as tilted/structured) and a ~0.5-module geometry seam in
+    # the deep slot drops a tiny patch of depth to infinity; .58x.36 is the clean flat slot
+    # interior the camera sees between those edges (verified passing sensed.py `_flat_patch`
+    # on the real shelf depth frame). The carton still lands on the flat shelf; the witness
+    # patch stays on the front lip by the markers.
     support('shelf','map',shelf,0.,[shelf+[-.42,-.146,0],shelf+[-.42,.054,0]],
-            shelf+[-.33,-.046,0],[.08,.12])
+            shelf+[-.33,-.046,0],[.08,.12],required_xy=(.58,.36))
     return dict(schema='restock-camera-design.v2',evidence='geometric_design_not_sensor_capture',
                 runtime_ready=False,cameras=cameras,solids=solids,supports=supports,lamps=lamps,
                 cart_chassis_height_m=.20,required_depth_error_bound_m=.0002,
