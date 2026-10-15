@@ -9,7 +9,8 @@ import numpy as np
 
 from scripts.twin.restock_camera.config import camera_config
 from scripts.twin.restock_camera.sensing import commissioning_geometry
-from scripts.twin.restock_camera.geometry import rigid, pose_matrix, transform_points, project, Intrinsics
+from scripts.twin.restock_camera.geometry import (rigid, pose_matrix, transform_points, project,
+                                                  Intrinsics, scale_intrinsics)
 
 
 def design():
@@ -85,6 +86,44 @@ def test_source_matches_the_build_sources_inline_projection():
     out = commissioning_geometry(d, 'source', world_from_parent=np.eye(4), world_from_base=np.eye(4))
     np.testing.assert_allclose(out['support_uv'], exp_support, atol=1e-9)
     np.testing.assert_allclose(out['witness_uv'], exp_witness, atol=1e-9)
+
+
+# --- render-scale: a `fast` commissioning projects onto the reduced grid ------------------------
+
+def test_render_scale_default_is_byte_identical_to_the_native_projection():
+    d = design()
+    wfb = pose_matrix([-5.73,16.,0.], .5)
+    native = commissioning_geometry(d, 'source', world_from_parent=np.eye(4), world_from_base=wfb)
+    explicit = commissioning_geometry(d, 'source', world_from_parent=np.eye(4), world_from_base=wfb,
+                                      render_scale=1.0)
+    k = Intrinsics(**d['cameras']['source']['intrinsics'])
+    assert native['intrinsics'] == k and explicit['intrinsics'] == k
+    np.testing.assert_array_equal(native['support_uv'], explicit['support_uv'])
+    np.testing.assert_array_equal(native['witness_uv'], explicit['witness_uv'])
+
+
+def test_fast_render_scale_projects_the_polygons_onto_the_reduced_grid():
+    """A 0.6 commission projects the empty support/witness quads through the SCALED intrinsics, so
+    the selected pixels land on the reduced render-product grid the `fast` frame is rendered at --
+    the fix for a baseline whose polygons/intrinsics were full-res while the mission rendered 0.6."""
+    d = design()
+    wfb = pose_matrix([-5.73,16.,0.], .5)
+    k = Intrinsics(**d['cameras']['source']['intrinsics'])
+    ks = scale_intrinsics(k, 0.6)
+    full = commissioning_geometry(d, 'source', world_from_parent=np.eye(4), world_from_base=wfb)
+    fast = commissioning_geometry(d, 'source', world_from_parent=np.eye(4), world_from_base=wfb,
+                                  render_scale=0.6)
+    assert fast['intrinsics'] == ks                               # the scaled calibration
+    # Each quad still projects inside the (smaller) scaled image.
+    for uv in (fast['support_uv'], fast['witness_uv']):
+        assert np.all(uv >= 0) and np.all(uv < [ks.width, ks.height])
+    # Exactly the same world polygons reprojected through the scaled intrinsics (not a coincidence).
+    world_from_optical = rigid(d['cameras']['source']['parent_from_optical'])
+    for key in ('support', 'witness'):
+        exp = project(transform_points(np.linalg.inv(world_from_optical), fast[key + '_world']), ks)[0]
+        np.testing.assert_allclose(fast[key + '_uv'], exp, atol=1e-9)
+    # The world polygons themselves are scale-invariant (same geometry, only the projection changes).
+    np.testing.assert_allclose(fast['support_world'], full['support_world'], atol=1e-12)
 
 
 # --- the commissioning hook now resolves the cart station (no Isaac at import) -----------------

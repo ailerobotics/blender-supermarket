@@ -97,7 +97,7 @@ def _apply_lighting_diagnostics(stage, config, config_lamp_paths):
     return record
 
 
-def build(stage, config, output, *, view='source'):
+def build(stage, config, output, *, view='source', render_scale=1.0):
     from pxr import Gf,UsdGeom,UsdPhysics
     import trimesh
     from twin.urdf_probe import parse_urdf,link_world_transforms,resolve_package_uri,rpy_to_matrix
@@ -175,9 +175,17 @@ def build(stage, config, output, *, view='source'):
         if prim.IsA(UsdPhysics.Joint):
             UsdPhysics.Joint(prim).CreateJointEnabledAttr().Set(False)
     k=Intrinsics(**design['cameras'][view]['intrinsics'])
-    camera=initialize_camera(paths[view],k,name='candidate_'+view)
+    # Render the product at render_scale of native (keep k for aperture/pinhole, exactly as the
+    # mission CameraRig does -- native_cameras.CameraRig), so a `fast` commissioning baseline is
+    # rendered at the SAME reduced resolution the `fast` mission renders at. Even dims; the recorder
+    # refuses odd HxW. render_scale=1.0 (default) renders native -- byte-identical to before.
+    if render_scale==1.0:
+        resolution=None
+    else:
+        resolution=(max(2,int(k.width*render_scale)//2*2),max(2,int(k.height*render_scale)//2*2))
+    camera=initialize_camera(paths[view],k,name='candidate_'+view,resolution=resolution)
     evidence=dict(evidence='static optical bench, dynamics disabled at initial composition',
-        runtime_mission=False,view=view,actual_robot_collision_geometries=count,
+        runtime_mission=False,view=view,render_scale=render_scale,actual_robot_collision_geometries=count,
         full_store=True,cart_rails_and_camera_solids=True,lighting=lighting,
         input_sha256={name:hashlib.sha256(Path(config[name]).read_bytes()).hexdigest()
                       for name in ('scenario','mobile_manifest','camera_config','store_usd')})

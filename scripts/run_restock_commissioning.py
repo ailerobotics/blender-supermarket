@@ -14,7 +14,8 @@ integration/GPU-owned and supplied by a `--sources module:function` hook (this s
 imports no Isaac/ROS); the choreography here only commissions and persists. A station the
 hook does not cover is refused, never fabricated.
 
-The hook is called `sources(scenario=..., camera_config=..., output=...)` and must return
+The hook is called `sources(scenario=..., camera_config=..., output=..., render_scale=...)` (the
+resolved `--render-preset`/`--render-scale`; the hook renders and projects at it) and must return
 `{'contexts': [RenderedSupportContext, ...], 'capture': capture}` where `capture(context)`
 returns `{'frame', 'now', 'empty_polygons', 'capture_poses'?, 'raw_frames'?}` (see
 `twin.restock_camera.commissioning.run_commissioning`).
@@ -103,10 +104,15 @@ def commissioning_plan(camera_config, scenario, *, stations, locations=None, lif
 
 def _execute(args, camera_config, scenario, stations):
     from twin.restock_camera import commissioning as C
-    sources = _resolve(args.sources)(scenario=scenario, camera_config=camera_config, output=args.output)
+    # The resolved render scale drives BOTH the renderer hook (so the station camera renders, and
+    # its empty polygons project, at this scale) AND the persisted baseline's record, so a `fast`
+    # baseline carries the scaled intrinsics the `fast` mission matches at boot (_check_match).
+    sources = _resolve(args.sources)(scenario=scenario, camera_config=camera_config, output=args.output,
+                                     render_scale=args.render_scale)
     contexts = sources['contexts'] if isinstance(sources, dict) else sources.contexts
     capture = sources['capture'] if isinstance(sources, dict) else sources.capture
-    records = C.run_commissioning(contexts, capture, dataset_dir=args.output, lifetime_s=args.lifetime_s)
+    records = C.run_commissioning(contexts, capture, dataset_dir=args.output, lifetime_s=args.lifetime_s,
+                                  render_scale=args.render_scale)
     by_station = {r.station: r for r in records}
     missing = [s for s in stations if s not in by_station]
     if missing:

@@ -131,3 +131,28 @@ def test_commission_render_preset_resolves_the_same_scale():
     # A cross-scale baseline (commissioned full, mission fast) carries different intrinsics, so the
     # boot-time baseline/context match (commissioning._check_match) refuses it -- the mismatch guard.
     assert fast_k != full_k
+
+
+def test_check_match_refuses_a_full_res_baseline_against_a_fast_mission_context():
+    """The run-114 regression, directly: a `fast` mission context (0.6 intrinsics) matches a baseline
+    commissioned at 0.6, but refuses one commissioned full-res (the old build_sources behaviour that
+    ignored the preset). This is the boot guard the fast-render preset relies on; the fix makes the
+    commissioning renderer produce the matching 0.6 baseline so the matched case actually occurs."""
+    from types import SimpleNamespace as NS
+    from scripts.twin.restock_camera import commissioning as C
+    from scripts.twin.restock_camera.config import preset_render_scale
+    from scripts.twin.restock_camera.geometry import Intrinsics, scale_intrinsics
+    k = Intrinsics(2560, 1920, 2000., 2000., 1280., 960.)          # full design intrinsics
+    fast_k = scale_intrinsics(k, preset_render_scale('fast'))      # the 0.6 render calibration
+
+    def ctx(intrinsics):
+        return NS(camera_id='source', camera_revision='lens1', intrinsics=intrinsics)
+
+    def geom(intrinsics):
+        return NS(support_id='deck', marker_id='support:a', revision='bolted1',
+                  camera_id='source', camera_revision='lens1', intrinsics=intrinsics)
+    slot = NS(location='backstock_00', support_id='deck', marker_id='support:a', revision='bolted1')
+
+    C._check_match(ctx(fast_k), slot, geom(fast_k))               # matched scale: no raise
+    with pytest.raises(C.CommissioningBaselineInvalid, match='was commissioned on camera'):
+        C._check_match(ctx(fast_k), slot, geom(k))                # full-res baseline vs fast mission
