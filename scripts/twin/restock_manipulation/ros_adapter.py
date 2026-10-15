@@ -83,7 +83,7 @@ class RosMotionPort:
     def __init__(self, node, *, joint_limits, payload_sync, emergency_stop,
                  group='ur_manipulator', tcp='gripper_pad_tcp', namespace='/restock_sim',
                  pipeline='isaac_ros_cumotion', timeout=25.0, velocity_scale=.04, pose_goal=False,
-                 stow_config=None):
+                 stow_config=None, max_velocity_scale=.05):
         require_sim_domain()
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
             raise RuntimeError('node must use domain 88 and simulation clock')
@@ -94,7 +94,11 @@ class RosMotionPort:
             raise ValueError('six finite URDF joint-limit pairs required')
         if not callable(payload_sync) or not callable(emergency_stop):
             raise ValueError('payload collision acknowledgement and stop callbacks required')
-        if not math.isfinite(velocity_scale) or not 0<velocity_scale<=.05:
+        # Upper bound on cuMotion's max_velocity_scaling_factor. Default 0.05 is the conservative
+        # real-rig ceiling; the SIM execution profile raises it (to arm_max_speed) so the planner may
+        # plan the faster grasp that fits the render-paced wall budget. Still a hard sanity gate.
+        if (not math.isfinite(max_velocity_scale) or not 0<max_velocity_scale<=1
+                or not math.isfinite(velocity_scale) or not 0<velocity_scale<=max_velocity_scale):
             raise ValueError('bounded planner velocity scaling required')
         from rclpy.action import ActionClient
         from moveit_msgs.action import MoveGroup, ExecuteTrajectory

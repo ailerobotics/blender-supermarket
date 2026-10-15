@@ -78,6 +78,7 @@ def main():
                            emergency_stop=lambda:stop.publish(Bool(data=True)),
                            velocity_scale=planner_velocity_scale(
                                args.urdf,command_limit=arm_max_speed,scale_cap=arm_max_speed),
+                           max_velocity_scale=min(arm_max_speed,1.),
                            pose_goal=bool(config.get('pose_goal', False)),
                            stow_config=transport_joints)
     controller = TransferController(motion,profiles,frame=tool.base_frame,
