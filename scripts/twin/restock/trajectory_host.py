@@ -15,6 +15,19 @@ import numpy as np
 from twin.restock_manipulation.cad_tool import ARM_JOINTS, inspect_tool
 from twin.restock_manipulation.ros_adapter import require_sim_domain, validate_trajectory
 
+# Measured-feedback staleness watchdog bounds. The primary bound is NODE/SIM time (use_sim_time),
+# so it does not false-trip under render pacing; the wall bound is only a frozen-sim backstop and is
+# deliberately far larger than the worst render-paced /joint_states wall gap (~1.7-3.5 s).
+FEEDBACK_SIM_STALE_S = 0.2
+FEEDBACK_WALL_BACKSTOP_S = 30.0
+
+
+def feedback_stale(sim_now, feedback_sim_stamp, wall_now, wall_received):
+    """True if measured joint feedback is stale. Primary bound is SIM time (does not false-trip under
+    render pacing); the wall bound is only a frozen-sim backstop (sim can't advance to trip then)."""
+    return (sim_now - feedback_sim_stamp > FEEDBACK_SIM_STALE_S
+            or wall_now - wall_received > FEEDBACK_WALL_BACKSTOP_S)
+
 
 class Plan:
     def __init__(self, trajectory, measured, limits, max_speed=.15, max_acceleration=.5):
@@ -101,6 +114,7 @@ def main():
     def fault(reason):
         state['fault']=reason
         state['plan']=None
+        print(f'TRAJ_HOST_FAULT {reason}',flush=True)  # diagnostic: the stop source is otherwise unlogged
         stop.publish(Bool(data=True))
 
     def feedback(msg):
@@ -130,7 +144,14 @@ def main():
                 return
             if state['feedback'] is None:
                 return
-            if time.monotonic()-state['received']>.5 or now()-state['feedback'][0]>.2:
+            # Node-clock the feedback-staleness bound. Measured in NODE/SIM time (``now()`` is the
+            # sim clock, use_sim_time) so it does not false-trip under render pacing, where Isaac
+            # publishes /joint_states every ~1.7-3.5 s WALL (a full-res capture render tick) but only
+            # a small step apart in SIM time. A wall-time 0.5 s bound here emergency-stopped the
+            # mission at the render-paced collect/grasp (run-86); the SIM bound keeps the same
+            # tracking freshness. A GENEROUS wall backstop still hard-stops a genuinely frozen sim
+            # clock (a dead Isaac), where the sim bound can never advance to trip.
+            if feedback_stale(now(), state['feedback'][0], time.monotonic(), state['received']):
                 fault('measured joint feedback lost')
                 return
             q,v=state['target'],np.zeros(6)

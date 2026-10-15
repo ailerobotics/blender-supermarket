@@ -56,3 +56,20 @@ def test_reorders_joint_names():
     t.joint_names.reverse()
     t.points[-1].positions=[.01,.02,.03,.04,.05,.06]
     assert np.allclose(Plan(t,[0]*6,[(-1,1)]*6).end,[.06,.05,.04,.03,.02,.01])
+
+
+def test_feedback_watchdog_is_node_clocked_not_wall():
+    # Node-clock the feedback-staleness bound: a render-paced /joint_states WALL gap (~3.5 s, far over
+    # the old 0.5 s wall bound that emergency-stopped run-86) must NOT be stale while the SIM gap is
+    # tiny; a real SIM-time gap, or a frozen-sim wall backstop, still is.
+    from twin.restock.trajectory_host import (feedback_stale, FEEDBACK_SIM_STALE_S,
+                                              FEEDBACK_WALL_BACKSTOP_S)
+    # render-paced: 3.5 s wall since last feedback, but only 0.016 s sim -> fresh
+    assert not feedback_stale(sim_now=10.016, feedback_sim_stamp=10.0,
+                              wall_now=100.0, wall_received=96.5)
+    # genuine sim-time staleness -> stale
+    assert feedback_stale(sim_now=10.0+FEEDBACK_SIM_STALE_S+0.01, feedback_sim_stamp=10.0,
+                          wall_now=100.0, wall_received=99.99)
+    # frozen sim clock: sim gap 0 but wall gap past the backstop -> stale
+    assert feedback_stale(sim_now=10.0, feedback_sim_stamp=10.0,
+                          wall_now=100.0+FEEDBACK_WALL_BACKSTOP_S+1, wall_received=100.0)
