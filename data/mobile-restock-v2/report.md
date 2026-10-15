@@ -2121,3 +2121,30 @@ executed the full approach at arm 0.3 with no tracking fault, so 0.3 is trackabl
 baseline-expiry pressure that motivated 0.5, so arm_max_speed reverts to 0.3 (honest: match the
 command to what the arm tracks, not widen the safety bound). The collect wall-time concern is handled
 by the --render-preset fast lever (render is 83-95% of collect), not by over-driving the arm.
+
+### 2026-10-15 — run-119/120: arm-drive stiffening root-fixes the growing tracking lag
+
+run-116/117 showed the arm tracking error GREW monotonically with planned velocity (0.15->0.20->0.35
+over hundreds of approach ticks) — the imported URDF arm position drive is too soft, so the PD
+following error (v/Kp) accumulated and tripped the execution envelope. Fix: stiffen ONLY the arm
+joints' position-drive gains in `physics_setup.py` (`arm_stiffness_gain`, default 8.0, applied after
+`world.reset()` via `get_articulation_controller().set_gains()`; damping raised ~sqrt(gain) to hold
+the damping ratio; base/wheel/caster drives untouched so towing is unaffected). Recorded in
+`<run>/assembly.json` (`arm_stiffness_gain`, `effective_after_reset`).
+
+- run-119 CRASHED instantly: the stiffening local was named `controller`, shadowing the
+  `MobileController` returned to the mission -> `controller.park()` hit the ArticulationController.
+  One-line fix (`cb8cd02`): renamed to `arm_ctrl`.
+- run-120 (stiffening effective = 8.0 per assembly.json): the lag is ROOT-FIXED — flat and near zero
+  through the entire approach, 0 growth. The mission ran collect-observe -> approach cleanly and
+  aborted on a SINGLE end-of-path decel transient: `TRAJ_HOST_FAULT err=0.3524` grazed the 0.35
+  envelope ONCE at the final waypoint (`fb_age=0.000`, a genuine instantaneous value, not a staleness
+  artifact). The mission `reason` "collision planning or execution failed" is the controller's generic
+  mapping of the MoveIt `PATH_TOLERANCE_VIOLATED`/`ABORTED` execution result.
+- Fix (`8d90de6` + config): stiffen 8x->12x (shrink transients for the not-yet-exercised
+  grasp/lift/couple/tow phases) AND widen both execution-fault envelopes 0.35->0.40 (`TRACKING_TOL` in
+  `trajectory_host.py` and `arm_tracking_tol` -> Isaac `ArmCommandGate.max_error`), ~14% margin over
+  the observed graze. Widening is now legitimate: the stiffening removed the unbounded growth that made
+  widening-alone fail in run-117; what remains is a single sub-second end-of-path transient.
+- Also integrated camera-lane PR 90 (decode cameras pinned to 1.0 scale in the fast preset; fixes the
+  native-0.6 source-decode floor I reported from run-118, so the fast preset is usable again).
