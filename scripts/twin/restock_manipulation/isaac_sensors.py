@@ -57,10 +57,16 @@ class CameraContext:
 
 class IsaacCartonSensors:
     def __init__(self, camera, *, pose_bridge_root, profiles, slots=(), base_from_camera=None,
-                 context_provider=None, camera_id='camera', steady_clock=time.monotonic):
+                 context_provider=None, camera_id='camera', steady_clock=time.monotonic,
+                 wall_backstop_s=60., wall_clock=time.monotonic):
         # Injectable monotonic clock so acquisition-to-use freshness (and tests of it) do not
-        # depend on real decode wall time; defaults to the process clock for native capture.
+        # depend on real decode wall time; defaults to the process clock for native capture. For
+        # the render-paced mission, build_sensing supplies the SIM/node clock here so a slow
+        # full-resolution render is not misread as stale; wall_backstop_s hard-stops a hung render
+        # whose sim clock is frozen (wall_clock is injectable for tests of the backstop).
         self.steady_clock = steady_clock
+        self.wall_backstop_s = wall_backstop_s
+        self.wall_clock = wall_clock
         self.camera, self.profiles = camera, profiles
         self.slots = tuple(slots)
         self.transform = None if base_from_camera is None else rigid(base_from_camera)
@@ -91,7 +97,12 @@ class IsaacCartonSensors:
         # Acquisition-to-use freshness: anchor the live 0.5 s deadline to the steady clock BEFORE
         # processing (registration/decode/depth), then re-check it AFTER, so a slow decode that
         # elapses past the budget while `now` stays fixed is refused (never a stale observation).
-        deadline = frame_deadline(frame, now, self.steady_clock())
+        # The budget is measured on the steady clock (SIM/node clock in the render-paced mission via
+        # build_sensing) using the render's SIM stamp (now-stamp) for queue age — the wall
+        # acquisition-callback stamp (use_acquired=False) is a different domain whose wall age is not
+        # staleness under render pacing. A generous wall backstop still catches a hung render.
+        deadline = frame_deadline(frame, now, self.steady_clock(), use_acquired=False)
+        wall_started = self.wall_clock()
         rgb = np.asarray(frame['rgb'])[:, :, :3]
         depth = np.asarray(frame['distance_to_image_plane'], float)
         if rgb.shape[:2] != depth.shape or depth.ndim != 2:
@@ -216,7 +227,8 @@ class IsaacCartonSensors:
             motion.observe_source(candidates[0])
         # The acquisition must still be fresh now that processing is done; refuse before publishing
         # any evidence/bbox (they stay empty on expiry) so a stale frame never reaches the mission.
-        require_fresh(deadline, self.steady_clock)
+        require_fresh(deadline, self.steady_clock, wall_started=wall_started,
+                      wall_backstop_s=self.wall_backstop_s, wall_clock=self.wall_clock)
         self.sensed_target_bboxes = tuple(self._object_bbox(o,self.profiles[o.sku],intr,depth.shape)
                                           for o in observations)
         self.evidence = tuple(dict(location=s.location,
