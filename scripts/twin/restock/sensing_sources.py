@@ -121,6 +121,14 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
         'motion': manip_runtime.motion,
         'contact': assembly.contact,
         'recording_camera': recording_camera,
+        # SIM/node clock for the capture's acquisition-to-use freshness gate (build_sensing passes
+        # it to StationSensors as steady_clock). Measuring the standing 0.5 s budget on the SIM
+        # clock -- which barely advances across a render tick -- is what stops a full-res source
+        # render+decode (>0.5 s WALL under render pacing) from false-tripping it; a wall backstop
+        # (config sensor_wall_backstop_s, default 60 s) still hard-stops a frozen render. Matches
+        # the domain of the capture's `now` and the frame rendering_time (both sim seconds); any
+        # constant offset cancels since the budget bounds (clock()-started)+(now-stamp).
+        'steady_clock': lambda: float(assembly.world.current_time),
     }
 
 

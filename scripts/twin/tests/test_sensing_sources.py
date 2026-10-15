@@ -43,6 +43,7 @@ def manip_runtime():
 
 def assembly():
     return NS(paths={'ur_base_link': '/MobileRobot/ur_base_link'}, contact=NS(read=lambda: False),
+              world=NS(current_time=7.5),
               evidence={'composition': {'assets': {'cart': {'root': '/World/Cart'}}}})
 
 
@@ -62,6 +63,13 @@ class BuildSensingSourcesTests(unittest.TestCase):
             self.assertIn(key, src)
         self.assertEqual(src['pose_bridge_root'], '/pkg/tray_perception')
         self.assertIn('juice_orange', src['profiles'])  # profiles passed through from manip runtime
+
+    def test_steady_clock_reads_the_sim_world_clock(self):
+        # build_sensing passes sources['steady_clock'] to StationSensors so the acquisition-to-use
+        # freshness gate measures the 0.5 s budget on the SIM clock (not wall) under render pacing.
+        src, _ = self._build()
+        self.assertIn('steady_clock', src)
+        self.assertEqual(src['steady_clock'](), 7.5)
 
     def test_location_cameras_map_mission_locations(self):
         src, _ = self._build()
