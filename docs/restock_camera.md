@@ -192,12 +192,19 @@ bounded QR tile grid (hence decode latency) is unaffected — it is resolution-b
 not marker-size-bound. Pixel size and incidence are necessary, never sufficient,
 for decoding; lighting and contrast are separate (see Store light rig below).
 
-The shelf view is re-aimed to target+(-.50,0,.23), looking at target+(-.18,0,-.05):
-y-centred on the marker pair (the earlier +.30 y offset grazed the far marker at
-63.8° / 3.65 px·module⁻¹). Both shelf markers now reach ~13 px·module⁻¹ at ~35°
-while the carton-top label plane and full support stay framed. The camera stays just
-below the next shelf tier (~0.97 m) to see under it to the carton top; a top-down
-view is impossible because that tier is ~0.24 m above the support. Source and cart
+The shelf view sits at target+(-.50,0,.23) (lens z=0.96, below the ~0.97 m tier) with a
+-6.75° world-X tilt and a small **+4° world-Z yaw**, aiming at target+(-.18,-.023,-.05).
+The two shelf markers are a **non-mirror pair** on the front lip (y=4.68 and 4.88,
+asymmetric about the camera's y=4.826) mounted at the **same orientation** (no per-marker
+grid flip). The earlier design centred a mirror pair and flipped the far marker's grid
+180° so cv2 could read its mirror-shear — but that flip 180°-rolled the far marker's
+decoded corner order and made `register_marker`'s shared-model fit report the support
+plane as non-horizontal (`sim-restock-stations-v1`). The repositioned pair + yaw views the
+far marker much more steeply (~23° incidence vs ~55°), so the production FixedTileQR
+decodes **both** markers at one orientation and the fit pairs corners consistently. The
+per-marker grid rotation is now a design input (`grid_rot_quarters`, default 0). The camera
+stays just below the next shelf tier (~0.97 m) to see under it to the carton top; a
+top-down view is impossible because that tier is ~0.24 m above the support. Source and cart
 optical poses are unchanged. The source adds a rigid coplanar marker/witness tab
 behind the existing table; cart markers and witness occupy its exposed left strip;
 shelf markers use the exposed left strip of the actual shelf. These additions remain
@@ -278,6 +285,16 @@ one `intensity_scale` drives lamp and fixtures together and the marker/source il
 ratio is scale-free. The emitter and its collidable `shelf_lamp_housing` are in the
 camera-config (`config['lamps']`, `config['solids']`) and must be in navigation/planning.
 
+The **cart deck carries the same kind of coaxial lamp** (`config['lamps']` id `cart`, on
+`cart_chassis`, collidable `cart_lamp_housing`). The deck markers sit on the cart's LOWER
+deck, recessed under its own UPPER shelf (chassis z≈0.72), which blocks the overhead store
+light: the bare native render left them at ~126/255 and the cage cast directional shadows
+that kept `support:cart:0` from decoding. The cart `DiskLight` is co-located with the lens
+and aimed at the deck marker centroid, so it fills the cage shadow on the clear
+lens→marker sightline and lifts the deck; it is sized (`power_w=63`) so each marker's lamp
+illuminance matches the shelf lamp's proven-decode level (scale-free). See
+`data/sim-restock-stations-v1/report.md`.
+
 `scripts/plan_restock_lighting.py` is the offline CPU proof: per station it ray-tests
 near-overhead fixture line of sight, **casts emitter→marker rays against the camera
 housing, lamp housing, shelf tiers and products** (`lamp_marker_occlusion`; a blocked
@@ -285,8 +302,8 @@ ray contributes zero lamp light), and estimates per-marker illuminance (lux, sca
 anchored to the measured source decode. **Run `--store` against the restock composition
 (`side-scenario-v2.usda`), not the raw realism `supermarket.usdc`**: the raw store still
 stocks the restock target with product, which the restock composition — and the actual
-rendered stage — remove (verified identical to the capture's `smoke.usda`). Source and
-cart markers are `overhead_direct`; the shelf is `camera_lamp_lit` with
+rendered stage — remove (verified identical to the capture's `smoke.usda`). Source markers
+are `overhead_direct`; the cart and shelf are `camera_lamp_lit` (coaxial deck/slot lamps) with
 `lamp_reaches_all_markers` true — its markers receive ~4× the illuminance the (decoding)
 source markers get, so at whatever `intensity_scale` integration tunes for the source
 whites to reach ~180/255, the shelf whites reach it too. Line of sight and illuminance
