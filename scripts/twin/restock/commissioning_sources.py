@@ -8,13 +8,15 @@ support + witness polygons from the camera design, and returns the contract
 `{'contexts': [RenderedSupportContext], 'capture': capture}` that
 `twin.restock_camera.commissioning.run_commissioning` consumes.
 
-Scope: the MAP-PARENTED stations only — the collect `source` (`backstock_00`) and the
-transfer `shelf` (`shelf_id`, e.g. `G3_back_s2`). Both design cameras are world-fixed
-(`parent='map'`), so the baseline geometry (stored support-local) is invariant to the
-robot base pose; `capture_poses` records the per-station capture pose as provenance only
-(`shelf_robot_pose` for the shelf, else `robot_base_pose`). The `cart` (rollwagen) camera
-is parented to the MOVING `cart_chassis`, so its base-relative geometry is not invariant
-here; cart commissioning is owned by the camera lane and is refused by this hook. Commission
+Scope: the collect `source` (`backstock_00`), the transfer `shelf` (`shelf_id`, e.g.
+`G3_back_s2`) and the `cart` (`rollwagen`). The source/shelf cameras are world-fixed
+(`parent='map'`); the cart camera is parented to the MOVING `cart_chassis` (`/ViewCart/chassis`
+in the bench), so its extrinsic + projected deck polygons are composed through the parent's bench
+world pose by the camera-lane `twin.restock_camera.sensing.commissioning_geometry`. The stored
+baseline is support-local and so invariant to the parent pose (the cart's bench pose cannot corrupt
+it; the live transfer re-registers the deck markers against the live base_from_camera).
+`capture_poses` records the per-station capture pose as provenance only (`shelf_robot_pose` for the
+shelf, `cart_dock_robot_pose`/`robot_base_pose` for the cart, else `robot_base_pose`). Commission
 ONE station per boot, selected by `COMMISSIONING_STATIONS` (default `backstock_00`); loop the
 guarded parent per station for more (baselines accumulate in the shared dataset dir).
 
@@ -43,8 +45,9 @@ def _resolve_station(scenario):
     """Resolve the single requested commissioning (design_station, location) for this boot.
 
     ``COMMISSIONING_STATIONS`` is a comma list of mission LOCATIONS (default ``backstock_00``);
-    exactly one map-parented station is commissioned per boot. The cart (moving-frame camera) and
-    any unknown/non-map-parented station are refused here (cart -> camera lane)."""
+    exactly one station is commissioned per boot. The map-parented source/shelf and the
+    moving-parent cart (cart_chassis, via commissioning_geometry) are supported; an unknown
+    location is refused."""
     requested = [s for s in os.environ.get('COMMISSIONING_STATIONS', DEFAULT_LOCATION).split(',') if s]
     if len(requested) != 1:
         raise ValueError('commission exactly one map-parented station per boot '
@@ -58,25 +61,9 @@ def _resolve_station(scenario):
     if location not in design_of:
         raise ValueError(f'unknown commissioning location {location!r}; known {sorted(design_of)}')
     station = design_of[location]
-    if station == 'cart':
-        raise ValueError('cart (moving-frame cart_chassis camera) commissioning is owned by the '
-                         'camera lane and is refused here; only map-parented source/shelf supported')
-    if station not in ('source', 'shelf'):
-        raise ValueError(f'only map-parented source/shelf supported here, got station {station!r}')
+    if station not in ('source', 'shelf', 'cart'):
+        raise ValueError(f'unsupported commissioning station {station!r}; known source/shelf/cart')
     return station, location
-
-
-def _quad_world(center_xy, size_xy, yaw, z):
-    """Ordered (4,2->3) convex rectangle corners in world XY at height z."""
-    c, s = np.cos(yaw), np.sin(yaw)
-    hx, hy = size_xy[0] / 2., size_xy[1] / 2.
-    local = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)]
-    rot = np.array([[c, -s], [s, c]])
-    out = []
-    for lx, ly in local:
-        dx, dy = rot @ (lx, ly)
-        out.append([center_xy[0] + dx, center_xy[1] + dy, z])
-    return np.asarray(out, float)
 
 
 def build_sources(*, scenario, camera_config, output):
@@ -94,7 +81,7 @@ def build_sources(*, scenario, camera_config, output):
     from pxr import UsdGeom, UsdLux, Gf  # noqa: F401
     from isaacsim.core.api import World
     from twin.restock.view_scene import build as build_bench
-    from twin.restock_camera.geometry import Intrinsics, rigid, pose_matrix, transform_points, project
+    from twin.restock_camera.geometry import Intrinsics, pose_matrix
     from twin.restock_camera.sensing import support_slots, rendered_context
 
     bench_cfg = json.loads(Path(os.environ['COMMISSIONING_BENCH_CONFIG']).read_text())
@@ -107,9 +94,9 @@ def build_sources(*, scenario, camera_config, output):
     STATION, LOCATION = _resolve_station(scenario)
     support = design['supports'][STATION]
     cam = design['cameras'][STATION]
-    if cam.get('parent') != 'map':
-        raise ValueError(f'station {STATION!r} camera parent {cam.get("parent")!r} is not map-parented; '
-                         'only world-fixed cameras are commissioned here')
+    if cam.get('parent') not in ('map', 'cart_chassis'):
+        raise ValueError(f'station {STATION!r} camera parent {cam.get("parent")!r} unsupported; '
+                         'only map-parented (source/shelf) or cart_chassis (cart) cameras are commissioned here')
     k = Intrinsics(**cam['intrinsics'])
 
     world = World(physics_dt=1 / 60., rendering_dt=1 / 60., stage_units_in_meters=1.)
@@ -135,32 +122,30 @@ def build_sources(*, scenario, camera_config, output):
     for _ in range(90):
         world.step(render=True)
 
-    # Map-parented station camera: parent='map' and /World is identity, so parent_from_optical is
-    # world_from_optical. base_from_camera is the true camera-relative-to-base at the per-station
-    # capture pose (provenance + base-frame support measurement; stored geometry is support-local).
-    # The shelf is reached at shelf_robot_pose; the collect source at robot_base_pose.
-    world_from_optical = rigid(cam['parent_from_optical'])
-    base_pose = staging['shelf_robot_pose'] if STATION == 'shelf' else staging['robot_base_pose']
+    # Station commissioning geometry: the camera extrinsic (base_from_camera) and the empty
+    # support + witness quads projected to image UV, all parent-aware. For the MAP-parented
+    # source/shelf the parent is the world-fixed /World identity; the shelf is reached at
+    # shelf_robot_pose, the collect source at robot_base_pose. For the CART the camera is parented
+    # to the MOVING cart_chassis (/ViewCart/chassis in the bench), so the parent's bench world pose
+    # must be composed or the extrinsic and projected deck polygons are silently wrong -- that is
+    # the camera-lane commissioning_geometry helper. The stored baseline is support-local, so it is
+    # invariant to the cart's bench pose (support_uv/witness_uv cancel world_from_parent); the live
+    # transfer re-registers the deck markers against the live base_from_camera.
+    from twin.restock_camera.sensing import commissioning_geometry
+    if cam['parent'] == 'cart_chassis':
+        chassis = stage.GetPrimAtPath('/ViewCart/chassis')
+        if not chassis or not chassis.IsValid():
+            raise ValueError('expected authored /ViewCart/chassis for cart commissioning')
+        world_from_parent = np.array(UsdGeom.XformCache().GetLocalToWorldTransform(chassis)).T
+        base_pose = staging.get('cart_dock_robot_pose', staging['robot_base_pose'])
+    else:
+        world_from_parent = np.eye(4)
+        base_pose = staging['shelf_robot_pose'] if STATION == 'shelf' else staging['robot_base_pose']
     world_from_base = pose_matrix(base_pose, float(mobile['spec']['base_z']))
-    base_from_camera = np.linalg.inv(world_from_base) @ world_from_optical
-
-    # Empty support + witness quads from the design geometry, projected to image UV. The
-    # support quad is enlarged slightly over the required footprint (so the measured corners
-    # contain it with the registration margin) while staying on the flat support-cube top;
-    # the witness is the design off-slot reference patch (disjoint from the support).
-    center = np.asarray(support['nominal_center'], float)
-    req = support['required_xy_m']
-    support_world = _quad_world(center[:2], (req[0] + .04, req[1] + .04), float(support['yaw']), float(center[2]))
-    wd = support['witness_design']
-    witness_world = _quad_world(wd['center'][:2], wd['size_xy'], float(wd['yaw']), float(wd['center'][2]))
-
-    def _project(points_world):
-        uv, valid = project(transform_points(np.linalg.inv(world_from_optical), points_world), k)
-        if not valid.all():
-            raise ValueError('empty-support polygon projects outside the station camera view')
-        return uv
-
-    support_uv, witness_uv = _project(support_world), _project(witness_world)
+    geom = commissioning_geometry(design, STATION, world_from_parent=world_from_parent,
+                                  world_from_base=world_from_base)
+    base_from_camera = geom['base_from_camera']
+    support_uv, witness_uv = geom['support_uv'], geom['witness_uv']
 
     label_masks = {LOCATION: np.ones((k.height, k.width), bool)}
     # Full design-support -> mission-location map (so support_slots resolves THIS station's slot to

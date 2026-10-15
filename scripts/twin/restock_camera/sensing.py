@@ -59,11 +59,78 @@ present or boot fails closed. Without it, integration must commission the contex
 in-process. Baselines are only ever produced by an observed commissioning run; a missing
 one is refused, never fabricated.
 """
+import math
+
+import numpy as np
+
 from .binding import RenderedSupportContext, StationSensors, SupportSlot
-from .geometry import Intrinsics, scale_intrinsics
+from .geometry import Intrinsics, scale_intrinsics, rigid, transform_points, project
 
 _REQUIRED = ('cameras', 'context_providers', 'location_cameras', 'profiles',
              'pose_bridge_root', 'motion', 'contact', 'recording_camera')
+
+
+def _parent_frame_quad(center_xy, size_xy, yaw, z):
+    """Ordered convex rectangle corners (4,3) at height ``z`` in the support's parent frame."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    hx, hy = size_xy[0] / 2., size_xy[1] / 2.
+    rot = np.array([[c, -s], [s, c]])
+    out = []
+    for lx, ly in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)):
+        dx, dy = rot @ (lx, ly)
+        out.append([center_xy[0] + dx, center_xy[1] + dy, z])
+    return np.asarray(out, float)
+
+
+def commissioning_geometry(camera_config, station, *, world_from_parent, world_from_base):
+    """Empty-support commissioning geometry for one station, correct for a world-fixed
+    (``parent='map'``) OR a moving-parent (e.g. ``'cart_chassis'``) camera.
+
+    Returns ``{intrinsics, base_from_camera, support_uv, witness_uv, support_world, witness_world}``:
+    the camera extrinsic (relative to the arm base) and the empty support + witness quads both in
+    the parent frame projected to image UV and in world. Everything composes through
+    ``world_from_parent`` -- the world pose of the camera+support's shared parent frame. For
+    ``'map'`` that is identity (and this reduces exactly to the historical source-station inline
+    computation); for the cart the caller passes the ``cart_chassis`` prim's world pose read off the
+    stage, in the SAME configuration the baseline will be USED in (transfer).
+
+    Why this matters (the silent-corruption guard): the design keys ``parent_from_optical`` and the
+    support ``nominal_center``/``witness_design`` to the station's ``parent`` frame. For a moving
+    parent, treating those as world (``world_from_optical = parent_from_optical``, as the source-only
+    path did) ignores the cart's world pose, so the extrinsic and the projected deck polygons would
+    be wrong. Because the camera and its support share the parent, ``support_uv``/``witness_uv`` are
+    INVARIANT to ``world_from_parent`` (they cancel -- the camera sees the deck identically wherever
+    the cart is), while ``base_from_camera`` reflects the actual configuration. The stored baseline
+    is support-local and therefore pose-invariant; the live transfer capture re-registers the deck
+    markers against the live ``base_from_camera`` (``sensing_sources`` reads it off the moving cart
+    frame), so place targets stay consistent. Pure -- no Isaac/stage access; the caller supplies
+    ``world_from_parent`` from the stage.
+    """
+    cam = camera_config['cameras'][station]
+    support = camera_config['supports'][station]
+    k = Intrinsics(**cam['intrinsics'])
+    wfp = rigid(world_from_parent)
+    world_from_optical = wfp @ rigid(cam['parent_from_optical'])
+    base_from_camera = np.linalg.inv(rigid(world_from_base)) @ world_from_optical
+    center = np.asarray(support['nominal_center'], float)
+    req = support['required_xy_m']
+    support_parent = _parent_frame_quad(center[:2], (req[0] + .04, req[1] + .04),
+                                        float(support['yaw']), float(center[2]))
+    wd = support['witness_design']
+    wc = np.asarray(wd['center'], float)
+    witness_parent = _parent_frame_quad(wc[:2], wd['size_xy'], float(wd['yaw']), float(wc[2]))
+    support_world = transform_points(wfp, support_parent)
+    witness_world = transform_points(wfp, witness_parent)
+
+    def _uv(points_world):
+        uv, valid = project(transform_points(np.linalg.inv(world_from_optical), points_world), k)
+        if not valid.all():
+            raise ValueError(f'empty-support polygon projects outside the {station!r} commissioning view')
+        return uv
+
+    return dict(intrinsics=k, base_from_camera=base_from_camera,
+                support_uv=_uv(support_world), witness_uv=_uv(witness_world),
+                support_world=support_world, witness_world=witness_world)
 
 
 def _get(sources, key):
