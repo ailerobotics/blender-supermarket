@@ -20,6 +20,15 @@ from twin.restock_manipulation.ros_adapter import require_sim_domain, validate_t
 # deliberately far larger than the worst render-paced /joint_states wall gap (~1.7-3.5 s).
 FEEDBACK_SIM_STALE_S = 0.2
 FEEDBACK_WALL_BACKSTOP_S = 30.0
+# Sub-tick lead tolerance for the /clock-vs-/joint_states delivery-order race (both relayed with the
+# same sim stamp each tick): now()-stamp may read slightly negative without the frame being stale.
+FEEDBACK_RENDER_LEAD_S = 0.05
+
+
+def feedback_fresh(gap):
+    """A relayed joint-feedback frame is fresh if now()-stamp (sim) is within a sub-tick negative
+    lead (the /clock-vs-/joint_states delivery-order race) and the forward staleness bound."""
+    return -FEEDBACK_RENDER_LEAD_S <= gap <= FEEDBACK_SIM_STALE_S
 
 
 def feedback_stale(sim_now, feedback_sim_stamp, wall_now, wall_received):
@@ -126,8 +135,17 @@ def main():
                 q=np.asarray(msg.position,float)[order]
                 v=np.asarray(msg.velocity,float)[order]
                 stamp=msg.header.stamp.sec+msg.header.stamp.nanosec*1e-9
-                if not np.isfinite(q).all() or not np.isfinite(v).all() or not 0<=now()-stamp<=.2:
-                    raise ValueError('stale/nonfinite joint feedback')
+                if not np.isfinite(q).all() or not np.isfinite(v).all():
+                    raise ValueError('nonfinite joint feedback')
+                # /joint_states and /clock are relayed together with the SAME sim stamp each tick, so
+                # the correct now()-stamp is ~0. Under render pacing the node's /clock update can lag
+                # the joint_states callback by up to a few physics steps (a delivery-order race), making
+                # now()-stamp slightly NEGATIVE; tolerate that sub-tick lead (as restock_camera.freshness
+                # does with _RENDER_LEAD) instead of false-faulting the executed grasp (run-92). A genuine
+                # stale frame (too far in the past) is still refused.
+                gap=now()-stamp
+                if not feedback_fresh(gap):
+                    raise ValueError(f'stale joint feedback (now-stamp={gap:.4f}s)')
                 if state['feedback'] is not None and stamp<=state['feedback'][0]:
                     return
                 state['feedback']=(stamp,q,v)

@@ -73,3 +73,17 @@ def test_feedback_watchdog_is_node_clocked_not_wall():
     # frozen sim clock: sim gap 0 but wall gap past the backstop -> stale
     assert feedback_stale(sim_now=10.0, feedback_sim_stamp=10.0,
                           wall_now=100.0+FEEDBACK_WALL_BACKSTOP_S+1, wall_received=100.0)
+
+
+def test_feedback_fresh_tolerates_subtick_clock_lead():
+    # /clock and /joint_states are relayed with the same sim stamp; the node's /clock update can lag
+    # the joint_states callback, so now()-stamp reads slightly negative (a delivery-order race, not
+    # staleness). run-92 false-faulted on exactly 0<=now()-stamp. Tolerate the sub-tick lead; still
+    # refuse a genuinely stale (too-old) frame and anything past the forward bound.
+    from twin.restock.trajectory_host import (feedback_fresh, FEEDBACK_RENDER_LEAD_S,
+                                             FEEDBACK_SIM_STALE_S)
+    assert feedback_fresh(0.0)
+    assert feedback_fresh(-FEEDBACK_RENDER_LEAD_S + 1e-6)     # small negative lead -> fresh
+    assert feedback_fresh(FEEDBACK_SIM_STALE_S - 1e-6)        # within forward staleness -> fresh
+    assert not feedback_fresh(-FEEDBACK_RENDER_LEAD_S - 0.01) # too far in the "future" -> refused
+    assert not feedback_fresh(FEEDBACK_SIM_STALE_S + 0.01)    # genuinely stale -> refused
