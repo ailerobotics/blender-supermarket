@@ -2110,3 +2110,14 @@ collect wall time: `arm_max_speed` 0.5 rad/s (effective planner speed ~0.45 vs 0
 the grasp, bringing collect to roughly ~8 min wall (run-102's ~15.5 min at 0.3) -- inside the 900 s
 (15 min) baseline window with margin. (A >900 s baseline lifetime, if ever wanted, is a camera-lane
 commission-gate change, not a run param.)
+
+### 2026-10-15 — run-107: terminal-settle fix works; arm 0.5 over-runs tracking -> revert to 0.3
+
+run-107 (sim-clocked terminal settle gate, arm 0.5, full preset) cleared the run-106 terminal-settle
+false-fail (no "goal tolerance not reached") and executed the grasp (629 approach ticks, 130 frames)
+but faulted `TRAJ_HOST_FAULT trajectory tracking error exceeds .15 rad`: at 0.5 rad/s the commanded
+trajectory outruns the arm's physical tracking (measured lags command >0.15 rad). runs 102/105
+executed the full approach at arm 0.3 with no tracking fault, so 0.3 is trackable. PR 83 removed the
+baseline-expiry pressure that motivated 0.5, so arm_max_speed reverts to 0.3 (honest: match the
+command to what the arm tracks, not widen the safety bound). The collect wall-time concern is handled
+by the --render-preset fast lever (render is 83-95% of collect), not by over-driving the arm.
