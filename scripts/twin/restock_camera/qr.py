@@ -58,8 +58,8 @@ class FrameQR:
     processing_seconds: float
     tile_count: int
 
-    def validate(self, rgb, evidence, *, now, parked):
-        evidence.validate(now,parked)
+    def validate(self, rgb, evidence, *, now, parked, max_age=.5):
+        evidence.validate(now,parked,max_age=max_age)
         if (evidence != self.evidence or tuple(np.shape(rgb)) != self.rgb_shape
                 or rgb_digest(rgb) != self.rgb_sha256
                 or not np.isfinite(self.processing_seconds)
