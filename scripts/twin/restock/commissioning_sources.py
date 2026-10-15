@@ -8,10 +8,15 @@ support + witness polygons from the camera design, and returns the contract
 `{'contexts': [RenderedSupportContext], 'capture': capture}` that
 `twin.restock_camera.commissioning.run_commissioning` consumes.
 
-Scope: the collect `source` station (`backstock_00`) only — the one the collect
-grasp needs. The `source`/`shelf` design cameras are world-fixed (`parent='map'`),
-so the baseline geometry (stored support-local) is invariant to the robot base
-pose; `capture_poses` records the scenario `robot_base_pose` as provenance only.
+Scope: the MAP-PARENTED stations only — the collect `source` (`backstock_00`) and the
+transfer `shelf` (`shelf_id`, e.g. `G3_back_s2`). Both design cameras are world-fixed
+(`parent='map'`), so the baseline geometry (stored support-local) is invariant to the
+robot base pose; `capture_poses` records the per-station capture pose as provenance only
+(`shelf_robot_pose` for the shelf, else `robot_base_pose`). The `cart` (rollwagen) camera
+is parented to the MOVING `cart_chassis`, so its base-relative geometry is not invariant
+here; cart commissioning is owned by the camera lane and is refused by this hook. Commission
+ONE station per boot, selected by `COMMISSIONING_STATIONS` (default `backstock_00`); loop the
+guarded parent per station for more (baselines accumulate in the shared dataset dir).
 
 No fabrication: the baseline is produced solely by the production
 `RenderedSupportContext.commission` on the real empty-support render; a station
@@ -30,9 +35,35 @@ from pathlib import Path
 
 import numpy as np
 
-# Design support name -> mission location (mirrors run_restock_commissioning.support_locations).
-STATION = 'source'
-LOCATION = 'backstock_00'
+# Default commissioning location when COMMISSIONING_STATIONS is unset (the collect source).
+DEFAULT_LOCATION = 'backstock_00'
+
+
+def _resolve_station(scenario):
+    """Resolve the single requested commissioning (design_station, location) for this boot.
+
+    ``COMMISSIONING_STATIONS`` is a comma list of mission LOCATIONS (default ``backstock_00``);
+    exactly one map-parented station is commissioned per boot. The cart (moving-frame camera) and
+    any unknown/non-map-parented station are refused here (cart -> camera lane)."""
+    requested = [s for s in os.environ.get('COMMISSIONING_STATIONS', DEFAULT_LOCATION).split(',') if s]
+    if len(requested) != 1:
+        raise ValueError('commission exactly one map-parented station per boot '
+                         f'(got {requested!r}); loop the guarded parent per station for more')
+    location = requested[0]
+    job = scenario.get('job', {})
+    # design support name -> mission location (mirrors run_restock_commissioning.support_locations)
+    support_locations = {'source': job.get('source_bin', 'source'),
+                         'cart': 'rollwagen', 'shelf': job.get('shelf_id', 'shelf')}
+    design_of = {loc: name for name, loc in support_locations.items()}
+    if location not in design_of:
+        raise ValueError(f'unknown commissioning location {location!r}; known {sorted(design_of)}')
+    station = design_of[location]
+    if station == 'cart':
+        raise ValueError('cart (moving-frame cart_chassis camera) commissioning is owned by the '
+                         'camera lane and is refused here; only map-parented source/shelf supported')
+    if station not in ('source', 'shelf'):
+        raise ValueError(f'only map-parented source/shelf supported here, got station {station!r}')
+    return station, location
 
 
 def _quad_world(center_xy, size_xy, yaw, z):
@@ -73,8 +104,12 @@ def build_sources(*, scenario, camera_config, output):
     design = camera_config
     staging = scenario['initial_staging']
     mobile = json.loads(Path(bench_cfg['mobile_manifest']).read_text())
+    STATION, LOCATION = _resolve_station(scenario)
     support = design['supports'][STATION]
     cam = design['cameras'][STATION]
+    if cam.get('parent') != 'map':
+        raise ValueError(f'station {STATION!r} camera parent {cam.get("parent")!r} is not map-parented; '
+                         'only world-fixed cameras are commissioned here')
     k = Intrinsics(**cam['intrinsics'])
 
     world = World(physics_dt=1 / 60., rendering_dt=1 / 60., stage_units_in_meters=1.)
@@ -85,23 +120,27 @@ def build_sources(*, scenario, camera_config, output):
     # Author the full composed store + physical cameras + printed markers as a static bench.
     camera, _spec, _codes = build_bench(stage, bench_cfg, bench_out, view=STATION)
 
-    # Empty the collect source: deactivate the authored handling-unit carton (and its label)
-    # so the bare support plane at z=unit_bottom_z is what the source camera observes. The
-    # support cube itself and the shelf (already depleted) are left intact.
+    # Present the EMPTY support to the station camera. For the collect `source`, deactivate the
+    # authored handling-unit carton so the bare support plane at z=unit_bottom_z is observed. For the
+    # `shelf`, the slot is already depleted in the authored scenario (target_initially_depleted), so
+    # no deactivation is needed; the source carton (elsewhere, out of the shelf camera's view) is
+    # still deactivated if present so a stray unit can never intrude on either baseline.
     unit = stage.GetPrimAtPath('/RestockScenario/HandlingUnit')
-    if not unit or not unit.IsValid():
-        raise ValueError('expected authored /RestockScenario/HandlingUnit to empty for commissioning')
-    unit.SetActive(False)
+    if STATION == 'source' and (not unit or not unit.IsValid()):
+        raise ValueError('expected authored /RestockScenario/HandlingUnit to empty for source commissioning')
+    if unit and unit.IsValid():
+        unit.SetActive(False)
 
     world.reset()
     for _ in range(90):
         world.step(render=True)
 
-    # Fixed source camera: parent='map' and /World is identity, so parent_from_optical is
-    # world_from_optical. base_from_camera is the true camera-relative-to-base at capture
-    # (provenance + base-frame support measurement; stored geometry is support-local).
+    # Map-parented station camera: parent='map' and /World is identity, so parent_from_optical is
+    # world_from_optical. base_from_camera is the true camera-relative-to-base at the per-station
+    # capture pose (provenance + base-frame support measurement; stored geometry is support-local).
+    # The shelf is reached at shelf_robot_pose; the collect source at robot_base_pose.
     world_from_optical = rigid(cam['parent_from_optical'])
-    base_pose = staging['robot_base_pose']
+    base_pose = staging['shelf_robot_pose'] if STATION == 'shelf' else staging['robot_base_pose']
     world_from_base = pose_matrix(base_pose, float(mobile['spec']['base_z']))
     base_from_camera = np.linalg.inv(world_from_base) @ world_from_optical
 
@@ -118,13 +157,16 @@ def build_sources(*, scenario, camera_config, output):
     def _project(points_world):
         uv, valid = project(transform_points(np.linalg.inv(world_from_optical), points_world), k)
         if not valid.all():
-            raise ValueError('empty-support polygon projects outside the source view')
+            raise ValueError('empty-support polygon projects outside the station camera view')
         return uv
 
     support_uv, witness_uv = _project(support_world), _project(witness_world)
 
     label_masks = {LOCATION: np.ones((k.height, k.width), bool)}
-    support_locations = {'source': LOCATION, 'cart': 'rollwagen', 'shelf': scenario['job']['shelf_id']}
+    # Full design-support -> mission-location map (so support_slots resolves THIS station's slot to
+    # its own location, e.g. shelf -> shelf_id); the label mask is keyed by this station's LOCATION.
+    support_locations = {'source': scenario['job'].get('source_bin', 'backstock_00'),
+                         'cart': 'rollwagen', 'shelf': scenario['job']['shelf_id']}
     slots = support_slots(design, STATION, label_masks=label_masks, support_locations=support_locations)
 
     import time as _time

@@ -45,10 +45,14 @@ def main():
     baselines = args.output / 'baselines'
     environment = runtime_environment(args.nvidia_runtime, args.output)
     environment['COMMISSIONING_BENCH_CONFIG'] = str(args.bench_config.resolve())
+    stations = args.stations or ['backstock_00']
+    # Select which station(s) the commissioning renderer (commissioning_sources.build_sources)
+    # commissions this boot. It commissions one map-parented station per boot (source/shelf);
+    # loop the parent per station for more. Default preserves the historical source-only behaviour.
+    environment['COMMISSIONING_STATIONS'] = ','.join(stations)
     os.environ.clear()
     os.environ.update(environment)
 
-    stations = args.stations or ['backstock_00']
     record = dict(status='failed', wall_limit_s=args.wall_cap_s,
                   code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   runtime_root=str(args.nvidia_runtime), stations=stations, telemetry=[])
