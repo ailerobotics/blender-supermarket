@@ -121,25 +121,30 @@ class RosManipulationRuntime:
             # not satisfied yet, and the stage timeout still bounds a genuinely stuck capture.
             # The capture triggers a full-res render that can take > 1 s wall; bracket it with a
             # heartbeat before and after so the ack's wall heartbeat gap stays ~the render duration.
+            # Only the capture() CALL is soft here. The integrity of a RETURNED packet is
+            # fail-closed and lives OUTSIDE this try: a stale/repeated timestamp or a non-sensor
+            # (fixture) provenance is an integrity violation that must stop the mission, never
+            # degrade to 'running' -- those raises propagate to the outer handler which holds+fails.
             if self.station is not None:
                 self.station.heartbeat()
             try:
                 packet = self.capture(simulation_time,self.source,self.destination)
-                if packet is not None:
-                    stamp = packet.simulation_time
-                    if (not math.isfinite(stamp) or stamp <= self.last_sensor_time or
-                            not -0.02 <= simulation_time-stamp <= .5):
-                        raise ValueError('stale or repeated camera packet')
-                    items = list(packet.observations)+([packet.target] if packet.target else [])
-                    if any(item.source != 'sensor' for item in items):
-                        raise ValueError('production manipulation requires sensor provenance')
-                    self.graph.publish_sensors(packet)
-                    self.last_sensor_time = stamp
             except Exception as cap_exc:
+                packet = None
                 self.latest = Result('running','observe',str(cap_exc))
+            if packet is not None:
+                stamp = packet.simulation_time
+                if (not math.isfinite(stamp) or stamp <= self.last_sensor_time or
+                        not -0.02 <= simulation_time-stamp <= .5):
+                    raise ValueError('stale or repeated camera packet')
+                items = list(packet.observations)+([packet.target] if packet.target else [])
+                if any(item.source != 'sensor' for item in items):
+                    raise ValueError('production manipulation requires sensor provenance')
+                self.graph.publish_sensors(packet)
+                self.last_sensor_time = stamp
             if self.station is not None:
                 self.station.heartbeat()           # close the wall gap right after the capture render
-            reply = self.graph.poll()
+            reply = self.graph.poll(simulation_time)
             if reply is not None:
                 status = reply.get('status')
                 if status not in ('running','succeeded','failed','rejected'):

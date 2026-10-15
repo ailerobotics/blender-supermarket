@@ -29,7 +29,7 @@ class FakeGraph:
         self.started = None
     def start(self, operation, job):
         self.started = (operation, job)
-    def poll(self):
+    def poll(self, simulation_time=None):
         return None
     def close(self):
         pass

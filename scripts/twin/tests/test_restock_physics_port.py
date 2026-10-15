@@ -59,6 +59,45 @@ def test_cart_bearings_add_damping_without_touching_physical_model():
         assert b.GetAttribute('physxRigidBody:angularDamping').Get()==pytest.approx(ANGULAR_DAMPING)
 
 
+def test_wheel_traction_binds_drive_wheel_colliders_despite_instance_proxy():
+    """Reproduce the Isaac URDF-import layout that bound 0 colliders: the drive wheels are
+    siblings of the articulation-root base_link, and each wheel's collider is referenced under
+    <wheel>/collisions with instanceable=True (an instance proxy a naive PrimRange skips and
+    cannot bind). The fixed lookup must bind exactly the two drive-wheel colliders."""
+    Usd=pytest.importorskip('pxr.Usd')
+    from pxr import UsdGeom, UsdPhysics, UsdShade
+    from twin.restock.physics_setup import configure_wheel_traction
+    stage=Usd.Stage.CreateInMemory()
+    # Collider source geometry the importer references per link.
+    src=UsdGeom.Xform.Define(stage,'/_colliders/wheel')
+    cyl=UsdGeom.Cylinder.Define(stage,'/_colliders/wheel/mesh_0/cylinder')
+    UsdPhysics.CollisionAPI.Apply(cyl.GetPrim())
+    robot=UsdGeom.Xform.Define(stage,'/MobileRobot').GetPrim()
+    base=UsdGeom.Xform.Define(stage,'/MobileRobot/base_link').GetPrim()
+    UsdPhysics.ArticulationRootAPI.Apply(base)
+    # Drive wheels and a non-drive caster, all siblings of base_link under the robot root.
+    for name in ('left_wheel','right_wheel','rear_caster_wheel'):
+        wheel=UsdGeom.Xform.Define(stage,f'/MobileRobot/{name}').GetPrim()
+        UsdPhysics.RigidBodyAPI.Apply(wheel)
+        coll=UsdGeom.Xform.Define(stage,f'/MobileRobot/{name}/collisions').GetPrim()
+        coll.GetReferences().AddInternalReference('/_colliders/wheel')
+        coll.SetInstanceable(True)
+        assert coll.IsInstanceable()
+    bound=configure_wheel_traction(stage,'/MobileRobot/base_link',1.0)
+    # Exactly the two drive-wheel colliders, not the caster.
+    assert sorted(bound)==[
+        '/MobileRobot/left_wheel/collisions/mesh_0/cylinder',
+        '/MobileRobot/right_wheel/collisions/mesh_0/cylinder',
+    ]
+    mat=stage.GetPrimAtPath('/RestockWheelMaterial')
+    api=UsdPhysics.MaterialAPI(mat)
+    assert api.GetStaticFrictionAttr().Get()==pytest.approx(1.0)
+    assert api.GetDynamicFrictionAttr().Get()==pytest.approx(0.9)
+    for path in bound:
+        rel=UsdShade.MaterialBindingAPI(stage.GetPrimAtPath(path)).GetDirectBindingRel(materialPurpose='physics')
+        assert [str(t) for t in rel.GetTargets()]==['/RestockWheelMaterial']
+
+
 def test_scene_physics_enables_stabilization_only():
     Usd=pytest.importorskip('pxr.Usd')
     from pxr import UsdPhysics, Gf

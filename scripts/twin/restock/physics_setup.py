@@ -69,10 +69,22 @@ def configure_cart_solver(stage, root):
 
 def configure_wheel_traction(stage, articulation_root, coeff):
     """Bind a high-friction PhysX material to the drive-wheel colliders so the base can tow the
-    coupled cart (default friction ~0.5 slips the 215 kg robot+cart). Finds the wheel bodies by name
-    ('left_wheel'/'right_wheel') in the articulation subtree and binds the material to every collider
-    under them. static=coeff, dynamic=0.9*coeff, restitution 0; 'max' combine so the pair friction is
-    governed by the wheel. Returns the bound collider paths (empty if the wheels are not found)."""
+    coupled cart (default friction ~0.5 slips the 215 kg robot+cart). static=coeff, dynamic=0.9*coeff,
+    restitution 0; 'max' combine so the pair friction is governed by the wheel. Returns the bound
+    collider paths (empty if the wheels are not found).
+
+    Two facts about the Isaac URDF import break the naive lookup and are handled here:
+
+    * The ``left_wheel``/``right_wheel`` link prims are **siblings** of the articulation-root
+      ``base_link`` (both children of the robot root ``/MobileRobot``), not inside the base_link
+      subtree -- so the search starts at the articulation root's parent, not the root itself.
+    * The importer references each link's collider under ``<link>/collisions`` with
+      ``instanceable=True``. The actual ``UsdPhysics.CollisionAPI`` cylinder is then an **instance
+      proxy**: a default ``Usd.PrimRange`` skips it (binding 0 colliders, the observed bug) and a
+      material cannot be bound onto an instance proxy anyway. We de-instance each wheel's collisions
+      subtree (``SetInstanceable(False)`` -- one cylinder each, negligible) so the collider becomes a
+      concrete, bindable prim before traversal.
+    """
     from pxr import Usd, UsdShade, UsdPhysics, Sdf
     mat = UsdShade.Material.Define(stage, '/RestockWheelMaterial')
     api = UsdPhysics.MaterialAPI.Apply(mat.GetPrim())
@@ -80,14 +92,21 @@ def configure_wheel_traction(stage, articulation_root, coeff):
     api.CreateDynamicFrictionAttr().Set(float(coeff) * 0.9)
     api.CreateRestitutionAttr().Set(0.0)
     mat.GetPrim().CreateAttribute('physxMaterial:frictionCombineMode', Sdf.ValueTypeNames.Token, False).Set('max')
-    root = stage.GetPrimAtPath(articulation_root)
+    articulation = stage.GetPrimAtPath(articulation_root)
     bound = []
-    if root:
+    if articulation:
+        # Drive wheels sit beside base_link under the robot root, so widen the search one level up.
+        root = articulation.GetParent()
+        if not root or not root.IsValid() or root.IsPseudoRoot():
+            root = articulation
         for p in Usd.PrimRange(root):
             if p.GetName() in ('left_wheel', 'right_wheel'):
+                for child in p.GetChildren():
+                    if child.IsInstanceable():
+                        child.SetInstanceable(False)
                 for c in Usd.PrimRange(p):
                     if c.HasAPI(UsdPhysics.CollisionAPI):
-                        UsdShade.MaterialBindingAPI(c).Bind(mat, materialPurpose='physics')
+                        UsdShade.MaterialBindingAPI.Apply(c).Bind(mat, materialPurpose='physics')
                         bound.append(str(c.GetPath()))
     return bound
 

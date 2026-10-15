@@ -54,7 +54,7 @@ class IsaacMeasuredFeedback:
 
 class IsaacRosGraph:
     def __init__(self, *, contact, hold, root='/RestockManipulationROS', timeout=5.,
-                 host_control=None):
+                 wall_backstop=180., host_control=None):
         require_sim_domain()
         import omni.graph.core as og
         import omni.usd
@@ -62,6 +62,9 @@ class IsaacRosGraph:
             raise ValueError('refusing to overwrite an existing ROS graph')
         self.og, self.contact, self.hold = og, contact, hold
         self.root, self.timeout = root, timeout
+        # Node-clock (sim-time) status bound + a generous wall backstop for a frozen sim clock.
+        self.wall_backstop = wall_backstop
+        self.last_receive_sim = None
         # Isaac->host PUBLISHES (job, sensors) go through the host-DDS subprocess, since the
         # OmniGraph ROS2 publisher does not reach the host UDPv4 DDS (run-59). The host->Isaac
         # SUBSCRIBERS (status, stop, gripper) stay on OmniGraph, which discovers the host writers.
@@ -116,6 +119,7 @@ class IsaacRosGraph:
         self.active = True
         self.job_id = job['job_id']
         self.last_receive = time.monotonic()
+        self.last_receive_sim = None   # re-seeded from the first poll of this job
 
     def publish_sensors(self, sensors):
         self._publish('sensors',json.dumps(asdict(sensors),allow_nan=False))
@@ -136,8 +140,24 @@ class IsaacRosGraph:
             self.active = False
             raise RuntimeError('host emergency stop')
 
-    def poll(self):
-        """Call every physics step, including steps without a fresh image."""
+    def _status_fault(self, reason):
+        self.hold()
+        self.faulted = True
+        self.active = False
+        return {'status':'failed','reason':reason}
+
+    def poll(self, simulation_time=None):
+        """Call every physics step, including steps without a fresh image.
+
+        ``simulation_time`` (the node/sim clock, seconds) node-clocks the status watchdog.
+        The host goes legitimately silent during a long render-paced cuMotion multi-seed IK
+        retry: many WALL seconds pass while the sim clock barely advances across each render
+        tick, so a wall-time 5 s bound false-trips and kills the mission mid-grasp (run-82).
+        Measuring the bound in SIM time keeps exactly the 5 s semantics on real hardware
+        (sim == wall) without false-tripping under render pacing; a generous WALL backstop
+        still hard-stops a genuinely dead host when the sim clock is frozen (the sim bound can
+        never advance to trip then). Called with no sim clock => legacy wall behaviour.
+        """
         try:
             self.check_health()
         except RuntimeError as exc:
@@ -172,16 +192,26 @@ class IsaacRosGraph:
                     return dict(status='failed',reason=str(exc))
             self.last_sequence = result['sequence']
             self.last_status, self.last_receive = raw, time.monotonic()
+            if simulation_time is not None:
+                self.last_receive_sim = simulation_time
             for control in result.get('controls',[]):
                 if control.get('kind') == 'gripper':
                     self.contact.command(control['enabled'])
             if result.get('status') in ('succeeded','failed','rejected'):
                 self.active = False
-        if self.active and time.monotonic()-self.last_receive > self.timeout:
-            self.hold()
-            self.faulted = True
-            self.active = False
-            return {'status':'failed','reason':'host process/status watchdog'}
+        if self.active:
+            wall_now = time.monotonic()
+            if simulation_time is None:
+                if wall_now - self.last_receive > self.timeout:
+                    return self._status_fault('host process/status watchdog')
+            else:
+                last_sim = getattr(self, 'last_receive_sim', None)
+                if last_sim is None:
+                    self.last_receive_sim = simulation_time   # seed from the first poll of the job
+                elif simulation_time - last_sim > self.timeout:
+                    return self._status_fault('host process/status watchdog')
+                elif wall_now - self.last_receive > getattr(self, 'wall_backstop', 180.):
+                    return self._status_fault('host process/status wall backstop')
         return result
 
     def close(self):

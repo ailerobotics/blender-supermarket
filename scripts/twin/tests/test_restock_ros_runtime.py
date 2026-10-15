@@ -10,7 +10,7 @@ def make_runtime(packet):
     calls=[]
     graph=NS(start=lambda *a:calls.append('start'),
              publish_sensors=lambda s:calls.append('sensor'),
-             poll=lambda:None,close=lambda:calls.append('hold'))
+             poll=lambda *a:None,close=lambda:calls.append('hold'))
     runtime=RosManipulationRuntime(graph,lambda *a:packet,
                                   prepare_station=lambda *a:calls.append('calibrate'))
     runtime.start('collect',dict(job_id='j',source_bin='back',shelf_id='shelf'))
@@ -19,7 +19,7 @@ def make_runtime(packet):
 
 def test_graph_polled_without_new_camera_frame_and_does_not_replay_controls():
     runtime,calls,graph=make_runtime(None)
-    graph.poll=lambda:dict(status='succeeded',phase='verify',controls=[{'kind':'gripper'}],
+    graph.poll=lambda *a:dict(status='succeeded',phase='verify',controls=[{'kind':'gripper'}],
                           evidence=[{'source':'sensor'}])
     result=runtime.step(.01,1.)
     assert result.status=='succeeded' and result.controls==()
