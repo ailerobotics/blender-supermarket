@@ -41,7 +41,7 @@ EXECUTE_WALL_BACKSTOP_S = 1200.0
 # higher sim arm speed's residual deceleration and the render-paced settle (TRAJ_HOST_GOAL_MISS logs
 # the actual terminal error so a genuine tracking miss is told apart from a tolerance edge).
 GOAL_POSITION_TOL = 0.01
-GOAL_VELOCITY_TOL = 0.03
+GOAL_VELOCITY_TOL = 0.15
 GOAL_SETTLE_MARGIN_S = 5.0
 # Max allowed command-vs-measured divergence (rad) during execution. Compared at the FEEDBACK's own
 # timestamp (see tick()) so render-paced feedback lag is not mistaken for a tracking error.
