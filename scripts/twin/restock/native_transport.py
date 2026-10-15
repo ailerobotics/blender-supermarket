@@ -70,6 +70,10 @@ class ArmCommandGate:
             if (len(names)!=6 or set(names)!=set(ARM_JOINTS) or len(positions)!=6
                     or len(velocities)!=6 or len(efforts)!=0
                     or not math.isfinite(stamp) or not 0 <= now-stamp <= .2):
+                print(f'ARM_CMD_REJECT names={len(names)} setok={set(names)==set(ARM_JOINTS)} '
+                      f'pos={len(positions)} vel={len(velocities)} eff={len(efforts)} '
+                      f'stamp={stamp!r} now={now!r} now-stamp={now-stamp if math.isfinite(stamp) else float("nan"):.4f}',
+                      flush=True)  # diagnostic: which sub-condition rejected the executed arm command
                 raise ValueError('invalid or stale simulated arm command')
             if stamp<=self.last_stamp:
                 return  # reordered/duplicate commands cannot move the arm
