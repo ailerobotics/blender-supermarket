@@ -115,3 +115,56 @@ def test_author_wrist_camera_prim_matches_the_calibrated_mount_and_fov():
     # Authoring twice refuses rather than silently overwriting the mount.
     with pytest.raises(ValueError, match='already authored'):
         author_wrist_camera(stage, frame)
+
+
+# --- native_cameras selection support (CPU-safe parts) ------------------------
+
+def test_native_cameras_resolves_the_collision_frame_as_the_wrist():
+    from scripts.twin.restock.native_cameras import collision_camera_frame
+    assert collision_camera_frame(_design()) == 'restock_camera_wrist'
+
+
+def test_grasp_region_depth_coverage_is_the_proof_assertion_core():
+    # The native proof's assertion: a rendered wrist depth with valid returns around the projected
+    # grasp point yields high coverage there; an out-of-frame point yields zero. Integration feeds
+    # the real GPU-rendered depth at the collect pose; this is the pure CPU check.
+    k = W.wrist_camera_intrinsics()
+    depth = np.full((k.height, k.width), np.nan)               # nothing returned anywhere yet
+    u, v, _ = W.grasp_region_in_image(W.GRASP_POINT_TOOL0)      # grasp point projects to the centre
+    ui, vi = int(round(u)), int(round(v))
+    depth[vi - 20:vi + 20, ui - 20:ui + 20] = 0.32             # a valid in-range depth patch at the grasp
+    cover = W.grasp_region_depth_coverage(depth, [W.GRASP_POINT_TOOL0, (5.0, 0.0, 0.2)], window_px=16)
+    assert cover[0] > 0.99                                     # grasp region is in the depth
+    assert cover[1] == 0.0                                     # a point off to the far side is not framed
+    # Out-of-range depth (beyond far clip) does not count as valid coverage.
+    depth[vi - 20:vi + 20, ui - 20:ui + 20] = k.far + 1.0
+    assert W.grasp_region_depth_coverage(depth, [W.GRASP_POINT_TOOL0], window_px=16)[0] == 0.0
+
+
+def test_wrist_depth_proof_checker_passes_on_a_framed_render_and_fails_on_empty():
+    from scripts.prove_wrist_camera_depth import proof
+    k = W.wrist_camera_intrinsics()
+    tcp = np.asarray(W.GRASP_POINT_TOOL0)
+    depth = np.full((k.height, k.width), np.nan)
+    # Fill valid depth around the projected grasp and approach windows (what a native render returns).
+    for pt in (tcp, tcp + [0, 0, 0.12], tcp + [0, 0, 0.03]):
+        u, v, z = W.grasp_region_in_image(pt)
+        ui, vi = int(round(u)), int(round(v))
+        depth[max(vi - 24, 0):vi + 24, max(ui - 24, 0):ui + 24] = float(z)
+    record = proof(depth)
+    assert record['status'] == 'passed'
+    assert record['coverage']['grasp'] > 0.6 and record['coverage']['approach'] > 0.6
+    # An empty render (nothing returned) fails -- never fabricated into a pass.
+    assert proof(np.full((k.height, k.width), np.nan))['status'] == 'failed'
+
+
+def test_initialize_collision_camera_refuses_when_the_wrist_prim_is_not_authored():
+    pytest.importorskip('pxr')
+    from pxr import Usd, UsdGeom
+    from scripts.twin.restock.native_cameras import initialize_collision_camera
+    stage = Usd.Stage.CreateInMemory()
+    frame = '/MobileRobot/ur_tool0/restock_camera_wrist'
+    UsdGeom.Xform.Define(stage, frame)                         # frame present, camera prim NOT authored
+    # Refuses (before any Isaac import) because author_wrist_camera has not run on this stage.
+    with pytest.raises(ValueError, match='not authored on the robot'):
+        initialize_collision_camera(stage, _design(), frame)

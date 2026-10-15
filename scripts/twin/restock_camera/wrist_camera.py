@@ -107,3 +107,37 @@ def wrist_tool0_from_optical():
     transform = wrist_parent_from_optical()
     transform[:3, 3] = WRIST_MOUNT_XYZ
     return transform
+
+
+def grasp_region_depth_coverage(depth, points_tool0, *, intrinsics=None, window_px=16):
+    """Fraction of the grasp-region windows (around each tool-frame point) with valid depth.
+
+    This is the pure assertion core of the native proof: given a rendered wrist ``depth`` image
+    (metres, non-finite where nothing was returned), project each grasp-region point (in
+    ``ur_tool0``) into the image and measure, over a ``window_px`` square around it, the fraction of
+    pixels whose depth is finite and within the camera's ``[near, far]`` clip range. The native
+    renderer (integration, under the GPU lock) supplies ``depth`` at the collect pose; a high
+    coverage there proves the side-grasp region is actually in the wrist camera's depth (what the
+    fixed body camera could never show). Points outside the image contribute zero coverage.
+    """
+    k = intrinsics or wrist_camera_intrinsics()
+    depth = np.asarray(depth, float)
+    if depth.ndim != 2:
+        raise ValueError('wrist depth must be a 2-D image')
+    result = {}
+    for i, point in enumerate(np.atleast_2d(np.asarray(points_tool0, float))):
+        u, v, z = grasp_region_in_image(point, k)
+        if not (z > 0):
+            result[i] = 0.0
+            continue
+        u0, u1 = int(round(u)) - window_px, int(round(u)) + window_px + 1
+        v0, v1 = int(round(v)) - window_px, int(round(v)) + window_px + 1
+        u0, v0 = max(u0, 0), max(v0, 0)
+        u1, v1 = min(u1, depth.shape[1]), min(v1, depth.shape[0])
+        if u1 <= u0 or v1 <= v0:
+            result[i] = 0.0
+            continue
+        patch = depth[v0:v1, u0:u1]
+        valid = np.isfinite(patch) & (patch >= k.near) & (patch <= k.far)
+        result[i] = float(valid.mean())
+    return result
