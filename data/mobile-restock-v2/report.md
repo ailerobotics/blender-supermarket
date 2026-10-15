@@ -1985,3 +1985,32 @@ exceeding the 20-min ceiling AND the 900 s commissioning-baseline lifetime). At 
 grasp is ~2x faster (prior effective speed was 0.135, gated by 0.15 — not the 0.05 scale cap, which
 never bound for the UR10). The sustainable pacing cut is the camera lane's incoming sensing-stride
 capture-tolerance + cheaper render (items 1+3); this profile is the self-contained half delivered now.
+
+### 2026-10-15 (late) — runs 97–98: the arm-speed profile works; the grasp APPROACH now executes
+
+With the sim arm-speed profile (0.3 rad/s, four gates) the mission advances materially further:
+
+- **run-97** crashed `ros_host` at warmup — a **fourth** arm-speed gate missed in the first pass:
+  `RosMotionPort.__init__` hard-capped cuMotion's `max_velocity_scaling_factor` at 0.05
+  (`'bounded planner velocity scaling required'`), and the 0.3 profile derives a scale ~0.086.
+  Fixed: `max_velocity_scale` is now a parameter (default 0.05 real-rig; `ros_host` passes the sim
+  `arm_max_speed`). Commit 6bc483d.
+- **run-98** (fresh commission run-52) is the furthest collect has reached: observe passed, the SKU
+  decoded continuously, **cuMotion planned the grasp approach in 1.08 s (success:true)**, the
+  controller entered the **`approach`** phase, and the arm executed the approach for ~4 s sim /
+  ~282 s wall. The run-78→94 grasp blockers (self-collision, plan reject, wall execution deadline)
+  are all cleared and the faster arm is executing.
+
+**New blocker reached (cross-lane sensing, NOT the arm-speed change):** during the approach the
+capture fails `uncertain registration cannot establish full required footprint`
+(`restock_camera/sensed.py:399`): the support-registration `error` (baseline + position +
+angular + age) climbs past the 0.01 m gate as the moving arm degrades/occludes the FIXED source
+camera's view of the support markers it reaches toward. The capture then returns no packet, `/sensors`
+stops, and the host per-frame SIM watchdog's **wall backstop (30 s)** e-stops the mission
+(`sensor stream wall backstop expired`). run-94 never reached this because it faulted earlier on the
+(now-fixed) execution deadline. This belongs to the camera lane (`sensed.py` registration under
+arm occlusion) + the manipulation choreography (`controller.py` re-validates the source/target every
+tick through `approach`/`contact`/`lift`, which cannot hold once the arm occludes the fixed camera).
+The collect grasp needs either eye-in-hand re-validation during close approach, or a locked
+post-observe registration that is not re-required under occlusion. Flagged to firstmate for the
+camera/manipulation lanes; the arm-speed half owned here is delivered and proven to execute.
