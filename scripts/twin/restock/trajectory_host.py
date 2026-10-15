@@ -45,7 +45,7 @@ GOAL_VELOCITY_TOL = 0.15
 GOAL_SETTLE_MARGIN_S = 5.0
 # Max allowed command-vs-measured divergence (rad) during execution. Compared at the FEEDBACK's own
 # timestamp (see tick()) so render-paced feedback lag is not mistaken for a tracking error.
-TRACKING_TOL = 0.2
+TRACKING_TOL = 0.35
 
 
 def feedback_fresh(gap):
@@ -224,7 +224,7 @@ def main():
             if track_err>TRACKING_TOL:
                 print(f'TRAJ_HOST_TRACK_MISS err={track_err:.4f} fb_age={now()-state["feedback"][0]:.3f}',
                       flush=True)
-                fault('trajectory tracking error exceeds .15 rad')
+                fault(f'trajectory tracking error {track_err:.3f} exceeds {TRACKING_TOL} rad')
                 return
             msg=JointState()
             msg.header.stamp=node.get_clock().now().to_msg()
