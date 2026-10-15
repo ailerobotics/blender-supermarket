@@ -98,8 +98,8 @@ def test_tracking_fault_debounces_single_sample_transients():
                                              TRACKING_HARD_TOL)
     # within tolerance -> never faults, whatever the count
     assert not tracking_fault(TRACKING_TOL - 1e-6, TRACKING_DEBOUNCE + 5)
-    # a lone over-tol transient (run-121's 0.4044, 1st distinct sample) below the hard ceiling -> tolerated
-    assert not tracking_fault(0.4044, 1)
+    # a lone over-tol transient (1st distinct sample) below the hard ceiling -> tolerated
+    assert not tracking_fault(TRACKING_TOL + 0.02, 1)
     assert 1 < TRACKING_DEBOUNCE  # the tolerance above is meaningful: one sample is under the debounce
     # sustained over-tol divergence reaching the debounce count -> faults
     assert tracking_fault(TRACKING_TOL + 0.01, TRACKING_DEBOUNCE)
