@@ -20,9 +20,13 @@ from twin.restock_manipulation.ros_adapter import require_sim_domain, validate_t
 # deliberately far larger than the worst render-paced /joint_states wall gap (~1.7-3.5 s).
 FEEDBACK_SIM_STALE_S = 0.2
 FEEDBACK_WALL_BACKSTOP_S = 30.0
-# Sub-tick lead tolerance for the /clock-vs-/joint_states delivery-order race (both relayed with the
-# same sim stamp each tick): now()-stamp may read slightly negative without the frame being stale.
-FEEDBACK_RENDER_LEAD_S = 0.05
+# Lead tolerance for the /clock-vs-/joint_states delivery-order race (both relayed with the same sim
+# stamp each tick): now()-stamp may read negative without the frame being stale. Under render pacing
+# the node /clock update lags the joint_states callback by up to a few physics steps, so the lead can
+# reach ~0.1 s (measured run-104: now-stamp=-0.100 faulted the grasp at a 0.05 s tolerance). Bounded by
+# the forward staleness window (FEEDBACK_SIM_STALE_S) -- a genuinely future stamp beyond that still
+# refuses. This is a render-pacing artifact, not a real stale/future frame.
+FEEDBACK_RENDER_LEAD_S = 0.2
 # Frozen/hung-sim WALL backstop for trajectory EXECUTION. Sim-time completion and overrun are governed
 # on the SIM clock by the terminal-tolerance branch (``elapsed`` vs ``plan.times[-1]``); this WALL bound
 # exists only to break out of a genuinely stuck loop (and is redundant with the 30 s feedback watchdog,
