@@ -66,12 +66,18 @@ def _resolve_station(scenario):
     return station, location
 
 
-def build_sources(*, scenario, camera_config, output):
+def build_sources(*, scenario, camera_config, output, render_scale=1.0):
     """Boot the empty-source optical bench and return {contexts, capture}.
 
     `scenario`/`camera_config` are the loaded dicts passed by the commissioning CLI;
     `output` is the baselines dataset dir. Bench input paths come from
     `COMMISSIONING_BENCH_CONFIG`.
+
+    `render_scale` (<1, the resolved `--render-preset`) renders the station camera's product,
+    projects the empty support/witness polygons and scales the context intrinsics all at that
+    SAME reduced resolution, so a `fast` baseline matches a `fast` mission render (the boot-time
+    `commissioning._check_match` otherwise refuses the cross-scale mismatch). `render_scale=1.0`
+    (default) renders native -- byte-identical to the full-resolution commissioning path.
     """
     from isaacsim import SimulationApp
     app = SimulationApp({'headless': True, 'width': 640, 'height': 360,
@@ -81,7 +87,7 @@ def build_sources(*, scenario, camera_config, output):
     from pxr import UsdGeom, UsdLux, Gf  # noqa: F401
     from isaacsim.core.api import World
     from twin.restock.view_scene import build as build_bench
-    from twin.restock_camera.geometry import Intrinsics, pose_matrix
+    from twin.restock_camera.geometry import Intrinsics, pose_matrix, scale_intrinsics
     from twin.restock_camera.sensing import support_slots, rendered_context
 
     bench_cfg = json.loads(Path(os.environ['COMMISSIONING_BENCH_CONFIG']).read_text())
@@ -98,14 +104,19 @@ def build_sources(*, scenario, camera_config, output):
         raise ValueError(f'station {STATION!r} camera parent {cam.get("parent")!r} unsupported; '
                          'only map-parented (source/shelf) or cart_chassis (cart) cameras are commissioned here')
     k = Intrinsics(**cam['intrinsics'])
+    # The rendered calibration: the station camera renders its product at render_scale (the resolved
+    # --render-preset), so the frame, its selected polygons and the context intrinsics are all this
+    # scaled grid -- matching what the mission renders. render_scale=1.0 keeps the native design.
+    k_rendered = k if render_scale == 1.0 else scale_intrinsics(k, render_scale)
 
     world = World(physics_dt=1 / 60., rendering_dt=1 / 60., stage_units_in_meters=1.)
     stage = omni.usd.get_context().get_stage()
     UsdGeom.Xform.Define(stage, '/World')
     light = UsdLux.DomeLight.Define(stage, '/World/Light')
     light.CreateIntensityAttr(1000.)
-    # Author the full composed store + physical cameras + printed markers as a static bench.
-    camera, _spec, _codes = build_bench(stage, bench_cfg, bench_out, view=STATION)
+    # Author the full composed store + physical cameras + printed markers as a static bench, with
+    # the station camera's render product at the preset scale (byte-identical at 1.0).
+    camera, _spec, _codes = build_bench(stage, bench_cfg, bench_out, view=STATION, render_scale=render_scale)
 
     # Present the EMPTY support to the station camera. For the collect `source`, deactivate the
     # authored handling-unit carton so the bare support plane at z=unit_bottom_z is observed. For the
@@ -143,11 +154,11 @@ def build_sources(*, scenario, camera_config, output):
         base_pose = staging['shelf_robot_pose'] if STATION == 'shelf' else staging['robot_base_pose']
     world_from_base = pose_matrix(base_pose, float(mobile['spec']['base_z']))
     geom = commissioning_geometry(design, STATION, world_from_parent=world_from_parent,
-                                  world_from_base=world_from_base)
+                                  world_from_base=world_from_base, render_scale=render_scale)
     base_from_camera = geom['base_from_camera']
     support_uv, witness_uv = geom['support_uv'], geom['witness_uv']
 
-    label_masks = {LOCATION: np.ones((k.height, k.width), bool)}
+    label_masks = {LOCATION: np.ones((k_rendered.height, k_rendered.width), bool)}
     # Full design-support -> mission-location map (so support_slots resolves THIS station's slot to
     # its own location, e.g. shelf -> shelf_id); the label mask is keyed by this station's LOCATION.
     support_locations = {'source': scenario['job'].get('source_bin', 'backstock_00'),
@@ -169,7 +180,8 @@ def build_sources(*, scenario, camera_config, output):
 
     context = rendered_context(design, STATION, slots, measure_context=measure_context,
                               clearance_for_slot=lambda loc, view, frame, now: None,
-                              camera_revision=cam['revision'], clock_context=clock_context)
+                              camera_revision=cam['revision'], clock_context=clock_context,
+                              render_scale=render_scale)
 
     from twin.restock_camera.qr import FixedTileQR
     from twin.restock_camera.sensed import FrameEvidence
@@ -195,7 +207,7 @@ def build_sources(*, scenario, camera_config, output):
             last = identity
             last_rgb = np.asarray(frame['rgb'])[:, :, :3]
             stamp = float(frame['rendering_time'])
-            probe = FixedTileQR(STATION)
+            probe = FixedTileQR(STATION, render_scale=render_scale)
             evidence = FrameEvidence(STATION, 1_000_000 + i, stamp, stamp, 'probe', 'probe')
             try:
                 qr = probe.decode(last_rgb, evidence, now=stamp, parked=True)

@@ -339,6 +339,53 @@ def test_cli_plan_refuses_a_station_the_design_does_not_cover():
         cli.commissioning_plan(_design_config(), _scenario(), stations=['nonexistent_bin'])
 
 
+def test_cli_execute_forwards_render_scale_to_the_renderer_and_the_persisted_baseline(tmp_path, monkeypatch):
+    """The resolved --render-preset scale must reach BOTH the renderer hook (so it renders/projects
+    at that scale) and run_commissioning (so the baseline records it). Without this, a `fast` mission
+    renders 0.6 while the baseline comes out full-res and the boot-time _check_match refuses it."""
+    import importlib, sys
+    from pathlib import Path
+    from types import SimpleNamespace as NS
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))       # scripts/ (for the `twin` pkg)
+    from scripts import run_restock_commissioning as cli
+    C = importlib.import_module('twin.restock_camera.commissioning')   # the module _execute imports
+    seen = {}
+
+    def fake_hook(*, scenario, camera_config, output, render_scale):
+        seen['hook_scale'] = render_scale
+        return {'contexts': ['ctx'], 'capture': 'cap'}
+
+    def fake_run(contexts, capture, *, dataset_dir, lifetime_s, render_scale):
+        seen['commission_scale'] = render_scale
+        return [NS(station='backstock_00', provenance=lambda: {'station': 'backstock_00'})]
+
+    monkeypatch.setattr(cli, '_resolve', lambda spec: fake_hook)
+    monkeypatch.setattr(C, 'run_commissioning', fake_run)
+    args = NS(sources='mod:fn', output=tmp_path, lifetime_s=600., render_scale=0.6)
+    report = cli._execute(args, {'cameras': {}}, {}, ['backstock_00'])
+    assert seen == {'hook_scale': 0.6, 'commission_scale': 0.6}
+    assert report['stations']['backstock_00'] == {'station': 'backstock_00'}
+    assert json.loads((tmp_path / 'commissioning-report.json').read_text())['stations']
+
+
+def test_cli_execute_defaults_to_full_scale_when_no_preset(tmp_path, monkeypatch):
+    import importlib, sys
+    from pathlib import Path
+    from types import SimpleNamespace as NS
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from scripts import run_restock_commissioning as cli
+    C = importlib.import_module('twin.restock_camera.commissioning')
+    seen = {}
+    monkeypatch.setattr(cli, '_resolve',
+                        lambda spec: (lambda **kw: seen.update(hook_scale=kw['render_scale'])
+                                      or {'contexts': [], 'capture': 'cap'}))
+    monkeypatch.setattr(C, 'run_commissioning',
+                        lambda *a, render_scale, **kw: seen.update(commission_scale=render_scale) or [])
+    args = NS(sources='mod:fn', output=tmp_path, lifetime_s=600., render_scale=1.0)
+    cli._execute(args, {'cameras': {}}, {}, [])
+    assert seen == {'hook_scale': 1.0, 'commission_scale': 1.0}
+
+
 def _commission_both(tmp_path):
     """Commission backstock_00 (source) and G3_back_s2 (shelf) into one dataset dir."""
     source_k, source_cam, _, support, witness, source_frame = empty_frame()

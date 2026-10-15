@@ -82,13 +82,18 @@ def _parent_frame_quad(center_xy, size_xy, yaw, z):
     return np.asarray(out, float)
 
 
-def commissioning_geometry(camera_config, station, *, world_from_parent, world_from_base):
+def commissioning_geometry(camera_config, station, *, world_from_parent, world_from_base,
+                           render_scale=1.0):
     """Empty-support commissioning geometry for one station, correct for a world-fixed
     (``parent='map'``) OR a moving-parent (e.g. ``'cart_chassis'``) camera.
 
     Returns ``{intrinsics, base_from_camera, support_uv, witness_uv, support_world, witness_world}``:
     the camera extrinsic (relative to the arm base) and the empty support + witness quads both in
-    the parent frame projected to image UV and in world. Everything composes through
+    the parent frame projected to image UV and in world. ``render_scale`` (<1) projects the UV onto
+    the REDUCED render-product grid (:func:`geometry.scale_intrinsics`), so a ``fast`` commissioning
+    frame, its selected empty polygons and the scaled context intrinsics all agree; the returned
+    ``intrinsics`` is then the scaled calibration. ``render_scale=1.0`` (default) is byte-identical
+    to the native design projection. Everything composes through
     ``world_from_parent`` -- the world pose of the camera+support's shared parent frame. For
     ``'map'`` that is identity (and this reduces exactly to the historical source-station inline
     computation); for the cart the caller passes the ``cart_chassis`` prim's world pose read off the
@@ -109,6 +114,7 @@ def commissioning_geometry(camera_config, station, *, world_from_parent, world_f
     cam = camera_config['cameras'][station]
     support = camera_config['supports'][station]
     k = Intrinsics(**cam['intrinsics'])
+    k = k if render_scale == 1.0 else scale_intrinsics(k, render_scale)
     wfp = rigid(world_from_parent)
     world_from_optical = wfp @ rigid(cam['parent_from_optical'])
     base_from_camera = np.linalg.inv(rigid(world_from_base)) @ world_from_optical
