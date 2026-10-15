@@ -146,7 +146,7 @@ def camera_config(scenario, manifest):
                              aim_at=cart_marker_centroid,radius=.06,power_w=63.))
     solid('cart_lamp_housing','cart_chassis',cart_lamp_body,[.04,.04,.03])
 
-    def support(name,parent,center,yaw,marker_centers,witness_center,witness_size):
+    def support(name,parent,center,yaw,marker_centers,witness_center,witness_size,required_xy=(.62,.42)):
         pose = pose_matrix([*marker_centers[0][:2],yaw],marker_centers[0][2])
         markers = []
         for index,point in enumerate(marker_centers):
@@ -155,15 +155,23 @@ def camera_config(scenario, manifest):
                 substrate_thickness_m=.0002))
         auxiliary = np.linalg.inv(pose) @ np.r_[marker_centers[1],1]
         supports[name] = dict(id=name,parent=parent,revision='bolted-pair-v2',
-            camera_id=name,required_xy_m=[.62,.42],nominal_center=list(center),yaw=yaw,
+            camera_id=name,required_xy_m=list(required_xy),nominal_center=list(center),yaw=yaw,
             markers=markers,auxiliary_offset_xy=auxiliary[:2].tolist(),
             witness_design=dict(center=list(witness_center),size_xy=list(witness_size),yaw=0.),
             warning='nominal geometry is design only; select support/witness quads from empty RGB-D')
 
     support('source','map',source,np.pi,[source+[-.30,.30,0],source+[.30,.30,0]],
             source+[0,.30,0],[.18,.06])
+    # Cart support: the required_xy is tightened to .54x.34 (from the default .62x.42) because
+    # the cart's LOWER deck is ringed by its cage: the vertical cage-wall posts have ~34 mm bases
+    # that poke into a full .62x.42 support polygon at its +/-y edges, and the +x edge reaches the
+    # back cage wall -- the dense support-plane gate (sensed.py `_flat_patch`, ptp<=6 mm) then
+    # refuses it ("support patch is tilted, occupied or occluded"), even though the deck itself is
+    # flat to 0.1 mm. .54x.34 is the clean flat deck interior the camera sees between the cage
+    # posts; it still covers the carton core (handling unit .6x.4 sits on the physically flat deck,
+    # the cage posts clear it). The witness patch stays on the flat lip by the markers.
     support('cart','cart_chassis',deck,-np.pi/2,[deck+[-.38,-.22,0],deck+[-.38,.22,0]],
-            deck+[-.38,0,0],[.06,.18])
+            deck+[-.38,0,0],[.06,.18],required_xy=(.54,.34))
     # Shelf support: a repositioned marker pair on the shelf's exposed front lip (x=-3.47, in
     # front of the carton footprint whose front edge is ~x=-3.35), both mounted at the SAME
     # orientation (no per-marker grid flip). The pair is asymmetric about the camera world-Y

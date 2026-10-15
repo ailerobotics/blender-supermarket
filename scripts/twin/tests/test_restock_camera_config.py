@@ -37,7 +37,12 @@ def test_cart_markers_and_witness_are_outside_loaded_unit():
         center = np.array(marker['parent_from_marker'])[:3,3]
         assert center[0]+marker['side_m']/2 < -.12
         assert center[0]-marker['side_m']/2 > -.4
-    assert support['required_xy_m'] == [.62,.42]
+    # The cart support is tightened to .54x.34 (from the .62x.42 default): the cart's lower
+    # deck is ringed by its cage, whose vertical wall-post bases poke ~34 mm into a full
+    # .62x.42 support polygon at its +/-y edges (and the +x edge reaches the back cage wall),
+    # so the dense support-plane gate (sensed.py `_flat_patch`) refuses it. .54x.34 is the
+    # clean flat deck interior between the posts; the carton still sits on the flat deck.
+    assert support['required_xy_m'] == [.54,.34]
 
 
 def test_authoring_retains_physical_mounts_and_metric_printed_markers(tmp_path):
