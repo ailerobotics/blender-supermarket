@@ -20,16 +20,14 @@ from twin.restock.scenario import validate
 
 def _apply_render_preset(config, name):
     """Opt into a sensing render preset for this run -- the SAME ``--render-preset`` that
-    commissioning takes, so commission and mission render at the matching scale. Sets the
-    render-product scale AND whether the collect source renders at that scale: the ``fast``
-    preset was validated (config.render_presets) to keep the source markers decoding at 0.6, so
-    it renders the dominant source at scale too; ``full`` keeps the decode-grade full-res source.
-    A scale mismatch against the commissioned baseline is refused at boot by
-    ``commissioning._check_match`` (the baseline's scaled intrinsics must equal the context's)."""
+    commissioning takes. Sets the NON-decode render-product scale (mapper/nav/arm). The QR-decode
+    support cameras (source, shelf, cart) are always rendered full-res by the mission (isaac_bundle
+    pins every decode support location): a native sub-1.0 decode render does not decode (run-72;
+    the native px/module floor in config.render_presets), so ``fast`` never demotes a decode camera.
+    Decode baselines are commissioned at 1.0 too, so ``commissioning._check_match`` stays satisfied
+    at 1.0 for those cameras."""
     from twin.restock_camera.config import preset_render_scale
-    scale = preset_render_scale(name)
-    config['render_scale'] = scale
-    config['full_res_collect_source'] = scale >= 1.0
+    config['render_scale'] = preset_render_scale(name)
     return config
 
 

@@ -202,52 +202,90 @@ def camera_config(scenario, manifest):
                              'No commissioning pixels or inventory are provided by this config.'])
 
 
+#: Design-support names whose cameras carry QR markers that MUST decode (registration +
+#: handling-unit identity). Every one is decode-grade and is pinned to render_scale 1.0 by the
+#: presets; the resolution step-down applies only to the non-decode cameras (mapper/nav/arm).
+DECODE_SUPPORTS = ('source', 'shelf', 'cart')
+
+
 def render_presets():
     """Sensing-camera render presets that trade per-frame render cost against fidelity, for the
     integration runtime to opt into per run (``--render-preset``). The whole-store RTX render of
     the sensing camera dominates the mission wall time (measured 1.7-3.5 s per full-res capture,
     ~1:70 sim:wall); a faster preset is the lever to make Isaac iteration quicker.
 
-    ``full`` is the default and changes nothing (decode-grade reference). ``fast`` cuts cost with
-    three independent levers; the integration CameraRig applies them to the Isaac camera:
+    ``full`` (default) renders every camera at 1.0. ``fast`` cuts per-frame render cost on the
+    NON-decode cameras only (mapper/nav RGB-D, arm eye-in-hand masked-depth) and keeps every
+    QR-decode support camera (``DECODE_SUPPORTS``) at full resolution, because the resolution
+    step-down does NOT survive a native RTX render for the decode-grade markers.
 
-    - ``render_scale`` (resolution step-down): 0.6 keeps BOTH source support markers decoding
-      (51/51 on the native commissioning frames, measured CPU parity by downsampling through the
-      production decoder) while cutting pixels ~2.8x. It works ONLY because the decoder tile grid
-      scales with the resolution (see ``qr.tile_origins`` / ``FixedTileQR(render_scale=...)``);
-      without that, downsampling shifts markers onto the fixed 640 px tile seams and decode drops
-      non-monotonically. 0.6 is the floor for the ~6 px/module source markers (0.5 collapses to
-      21/51); the shelf (coarser markers) has more headroom. The context, its commissioned baseline
-      and the live capture must all run at the SAME scale (scale_intrinsics) — commission ``fast``
-      only against a ``fast`` baseline.
+    **Native decode floor** (measured on the native commissioning frames; camera-lane
+    ``native-floor-preset-handoff``):
+
+    - The source support marker is a version-1 QR (21 modules). At ``render_scale`` 1.0 it renders
+      at ~7.1 px/module and decodes cleanly (run-73). At a NATIVE 0.6 render it is ~4.3 px/module
+      and the commission FAILED to decode either source marker in 240 converged frames (run-72:
+      "no converged frame cleanly decoded source markers ... in 240 frames").
+    - A 0.6 *resample* of the native 1.0 frame decodes fine at that same ~4.3 px/module (51/51,
+      PR 82's CPU parity) -- but a native low-resolution RTX render is ~4.4x softer than the
+      resample (Laplacian variance 9.6 vs 42.2; DLSS upsamples from a sub-minimal internal
+      resolution and aliases the thin modules), so the resample parity did NOT hold natively.
+    - The native floor therefore sits in (4.3, 7.1] px/module, i.e. a decode camera is safe only at
+      scale (0.6, 1.0], and 1.0 is the only natively proven point. So ``fast`` pins all
+      ``DECODE_SUPPORTS`` to 1.0 and does not gamble a sub-1.0 decode camera.
+
+    ``fast`` cuts cost with three levers, none of which touches a decode camera:
+
+    - ``render_scale`` (0.6): the default product scale for the NON-support cameras (mapper/nav/arm).
+      ``full_res_supports`` names the decode support cameras pinned to 1.0; the mission maps these
+      design-support names to its own locations and passes them to ``build_sensing_sources`` as
+      ``full_res_locations``, and commission runs each decode station at 1.0 too -- so the baseline
+      scale equals the mission render scale for that camera and ``commissioning._check_match`` stays
+      satisfied at 1.0 (the cross-scale boot guard stays consistent).
     - ``render_products``: the sensing capture reads only ``rgb`` + ``distance_to_image_plane``;
       every other annotator (semantic, instance, motion, bbox) is pure render cost and is dropped.
     - ``rtx_samples_per_pixel``: fewer path-tracing samples cut cost roughly linearly; the QR quiet
       zone tolerates the added noise. The exact count is the integration renderer's; this is the
       relative hint.
 
-    Resolution parity is CPU-provable here; the sampling/product cost reduction and the end-to-end
-    decode under the actual reduced-resolution RENDER (not a downsample) are the integration lane's
-    native proof. Combining the three comfortably exceeds the 3x target.
+    The resolution-adaptive decoder tile grid (``qr.FixedTileQR(render_scale=...)`` /
+    ``tile_origins``) remains the mechanism a reduced-resolution decode needs and is kept intact for
+    any camera a future native run proves safe below 1.0; it does not by itself lift the native
+    px/module floor. The speedup under ``fast`` comes from the non-decode render cost, which the
+    native lane measures.
     """
     read = ['rgb', 'distance_to_image_plane']
     return {
-        'full': dict(render_scale=1.0, render_products=read, rtx_samples_per_pixel='default',
-                     description='decode-grade reference; no speedups (default).'),
-        'fast': dict(render_scale=0.6, render_products=read, rtx_samples_per_pixel='reduced',
-                     description='~2.8x fewer sensing pixels at full decode parity (source floor), '
-                                 'plus minimal products and reduced sampling; opt in per run.'),
+        'full': dict(render_scale=1.0, full_res_supports=DECODE_SUPPORTS, render_products=read,
+                     rtx_samples_per_pixel='default',
+                     description='decode-grade reference; every camera at 1.0 (default).'),
+        'fast': dict(render_scale=0.6, full_res_supports=DECODE_SUPPORTS, render_products=read,
+                     rtx_samples_per_pixel='reduced',
+                     description='0.6 on the non-decode cameras (mapper/nav/arm) only; every '
+                                 'QR-decode support camera (source, shelf, cart) stays at 1.0 '
+                                 '(native px/module floor), plus minimal products and reduced '
+                                 'sampling; opt in per run.'),
     }
 
 
 def preset_render_scale(name):
-    """Resolve a render-preset name to its ``render_scale`` (the one opt-in that commission AND
-    mission share, so a ``fast`` baseline and a ``fast`` mission render at the SAME scale and the
-    boot-time baseline/intrinsics match (``commissioning._check_match``) stays satisfied)."""
+    """Resolve a render-preset name to its NON-decode ``render_scale`` (mapper/nav/arm product
+    scale). The QR-decode support cameras (``DECODE_SUPPORTS``) are NOT scaled by this -- they are
+    pinned to 1.0 in both commission and mission (native px/module floor; see ``render_presets``),
+    so a decode baseline and the decode mission render share one scale (1.0) and
+    ``commissioning._check_match`` stays satisfied."""
     presets = render_presets()
     if name not in presets:
         raise ValueError(f'unknown render preset {name!r}; choose one of {sorted(presets)}')
     return float(presets[name]['render_scale'])
+
+
+def preset_full_res_supports(name):
+    """The decode-grade support names a preset pins to render_scale 1.0 (``DECODE_SUPPORTS``)."""
+    presets = render_presets()
+    if name not in presets:
+        raise ValueError(f'unknown render preset {name!r}; choose one of {sorted(presets)}')
+    return tuple(presets[name]['full_res_supports'])
 
 
 def marker_module_grid(sku):

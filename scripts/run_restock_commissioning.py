@@ -23,6 +23,7 @@ returns `{'frame', 'now', 'empty_polygons', 'capture_poses'?, 'raw_frames'?}` (s
 import argparse
 import importlib
 import json
+import sys
 from pathlib import Path
 
 # The three mission stations that need an empty-support baseline, matching the
@@ -144,8 +145,18 @@ def main():
     mode.add_argument('--execute', action='store_true', help='run the choreography and persist baselines')
     args = parser.parse_args()
     if args.render_preset:                        # one opt-in flag, shared with the mission
+        # Commissioning only ever commissions decode-grade support stations (source/shelf/cart),
+        # which MUST render at 1.0: a native sub-1.0 source render does not decode (run-72), and the
+        # mission pins these cameras to 1.0 too, so the baseline stays full-res and _check_match
+        # stays satisfied at 1.0. The preset's reduced render_scale is for the mission's NON-decode
+        # cameras only, so --render-preset never lowers the commission scale below 1.0.
         from twin.restock_camera.config import preset_render_scale
-        args.render_scale = preset_render_scale(args.render_preset)
+        if preset_render_scale(args.render_preset) < 1.0 and args.render_scale == 1.0:
+            print(f"note: --render-preset {args.render_preset!r} does not reduce the commission "
+                  "scale; decode-grade support baselines are always commissioned at 1.0 "
+                  "(native px/module floor).", file=sys.stderr)
+        # Leave args.render_scale at its default/explicit value (1.0 unless --render-scale was given
+        # for a deliberate experiment, which build_sources then refuses for a decode station).
     try:
         camera_config = json.loads(args.camera_config.read_text())
         scenario = json.loads(args.scenario.read_text())
