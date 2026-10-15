@@ -281,7 +281,10 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
         raise RuntimeError('contact stabilization did not take effect after reset')
     def apply(q,v,indices):
         robot.apply_action(ArticulationAction(joint_positions=q,joint_velocities=v,joint_indices=indices))
-    gate=ArmCommandGate(robot,tool.arm_limits,apply)
+    # SIM execution profile: the Isaac-side absolute joint-speed gate (rad/s) on executed arm
+    # commands. Default 0.15 keeps the conservative real-rig envelope; the sim mission raises it
+    # (0.3) to match the planner/executor so a legitimately planned faster grasp is not rejected.
+    gate=ArmCommandGate(robot,tool.arm_limits,apply,max_speed=float(config.get('arm_max_speed',.15)))
     contact=NativePanelContact(stage,'/RestockPanelGripper')
     # Register native ROS/image graph nodes only after the final scene has
     # finished opening/resetting. A bridge loaded during import/reopen caused

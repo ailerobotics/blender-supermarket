@@ -23,19 +23,26 @@ JOINTS = ARM_JOINTS
 EXECUTE_SETTLE_MARGIN_S = 15.0
 
 
-def planner_velocity_scale(urdf, *, command_limit=.15):
+def planner_velocity_scale(urdf, *, command_limit=.15, scale_cap=.05):
     """Keep planner URDF-scaled speeds below the simulator's absolute gate.
 
     Reserve ten percent for interpolation; the executor still checks exact cubic
     extrema and rejects any overshoot. This is not trajectory certification.
+
+    ``command_limit`` is the absolute joint-speed gate (rad/s); ``scale_cap`` is an
+    extra ceiling on the URDF-velocity SCALE (fraction) regardless of command_limit.
+    Both default to the conservative real-rig profile (0.15 rad/s, 5% scale); the SIM
+    execution profile passes a single raised ``arm_max_speed`` for both so the grasp
+    completes within the render-paced wall budget (see data/mobile-restock-v2 report).
     """
     robot=ET.parse(urdf).getroot()
     rates={joint.attrib['name']:float(joint.find('limit').attrib['velocity'])
            for joint in robot.findall('joint') if joint.attrib['name'] in JOINTS}
     if (set(rates)!=set(JOINTS) or not math.isfinite(command_limit) or command_limit<=0
+            or not math.isfinite(scale_cap) or scale_cap<=0
             or any(not math.isfinite(v) or v<=0 for v in rates.values())):
         raise ValueError('actual six-joint URDF velocity limits required')
-    return min(.05,.9*command_limit/max(rates.values()))
+    return min(scale_cap,.9*command_limit/max(rates.values()))
 
 
 def require_sim_domain():

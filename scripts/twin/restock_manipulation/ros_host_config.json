@@ -25,5 +25,6 @@
     "rollwagen": 3,
     "G3_back_s2": 3
   },
-  "pose_goal": true
+  "pose_goal": true,
+  "arm_max_speed": 0.3
 }

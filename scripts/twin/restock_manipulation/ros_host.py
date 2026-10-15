@@ -64,6 +64,11 @@ def main():
     profiles = {p['sku']:ProductProfile(**p) for p in config['profiles']}
     for profile in profiles.values():
         tool.validate_profile(profile)
+    # SIM execution profile: a single configurable arm joint-speed gate (rad/s). Default 0.15 keeps
+    # the conservative real-rig envelope; the sim mission raises it (0.3) so the render-paced grasp
+    # completes within the wall/baseline budget. It bounds both the cuMotion plan speed (command_limit)
+    # and the URDF-scale ceiling (scale_cap) so the planner actually commands up to it.
+    arm_max_speed = float(config.get('arm_max_speed', .15))
     rclpy.init()
     node = rclpy.create_node('restock_manipulation',namespace='/restock_sim',
                             parameter_overrides=[Parameter('use_sim_time',value=True)])
@@ -71,7 +76,8 @@ def main():
     payload = RosPayloadSync()
     motion = RosMotionPort(node,joint_limits=tool.arm_limits,payload_sync=payload,
                            emergency_stop=lambda:stop.publish(Bool(data=True)),
-                           velocity_scale=planner_velocity_scale(args.urdf),
+                           velocity_scale=planner_velocity_scale(
+                               args.urdf,command_limit=arm_max_speed,scale_cap=arm_max_speed),
                            pose_goal=bool(config.get('pose_goal', False)),
                            stow_config=transport_joints)
     controller = TransferController(motion,profiles,frame=tool.base_frame,

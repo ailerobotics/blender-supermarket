@@ -400,9 +400,13 @@ class RosHostLaunchWiring(unittest.TestCase):
         cfg = json.loads((Path(__file__).resolve().parents[1]
                           / 'restock_manipulation' / 'ros_host_config.json').read_text())
         # pose_goal selects cuMotion task-space (pose) planning over joint-space; it is an
-        # optional bool the host reads via config.get('pose_goal', False).
-        self.assertEqual(set(cfg), {'profiles', 'walls', 'pose_goal'})
+        # optional bool the host reads via config.get('pose_goal', False). arm_max_speed is the
+        # SIM execution-profile joint-speed gate (rad/s) the host reads via config.get, raised above
+        # the conservative real-rig default so the render-paced grasp completes in the wall budget.
+        self.assertEqual(set(cfg), {'profiles', 'walls', 'pose_goal', 'arm_max_speed'})
         self.assertIsInstance(cfg['pose_goal'], bool)
+        self.assertIsInstance(cfg['arm_max_speed'], (int, float))
+        self.assertGreater(cfg['arm_max_speed'], 0)
         # Every profile constructs; walls cover source (backstock_00), cart (rollwagen) and
         # target (G3_back_s2) so WallCartonPolicy.build never raises on a missing location.
         self.assertTrue({p['sku']: ProductProfile(**p) for p in cfg['profiles']})

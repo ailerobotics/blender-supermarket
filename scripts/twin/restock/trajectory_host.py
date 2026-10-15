@@ -104,8 +104,20 @@ class Plan:
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--urdf',required=True)
+    # SIM execution profile: the per-joint speed ceiling (rad/s) the interpolated plan is checked
+    # against. This is the SIMULATION-only FollowJointTrajectory executor, so its default IS the sim
+    # value (0.3); it must match the planner/command gate the sim mission uses (ros_host arm_max_speed,
+    # ArmCommandGate) so a legitimately planned faster grasp is not rejected as a speed violation.
+    parser.add_argument('--max-speed',type=float,default=.3)
     args=parser.parse_args()
     require_sim_domain()
+    if not math.isfinite(args.max_speed) or args.max_speed<=0:
+        raise ValueError('--max-speed must be finite and positive')
+    max_speed=args.max_speed
+    # Scale the interpolated-acceleration ceiling with the speed profile (preserve the conservative
+    # 0.5/0.15 rad/s^2-per-rad/s ratio): a faster plan reaches proportionally higher segment
+    # accelerations, so a fixed 0.5 cap would reject a legitimately planned faster grasp.
+    max_acceleration=max_speed*(.5/.15)
     limits=inspect_tool(args.urdf).arm_limits
     import rclpy
     from rclpy.action import ActionServer, GoalResponse, CancelResponse
@@ -205,7 +217,7 @@ def main():
                 # This bounded executor declares its fixed tolerance policy explicitly.
                 if request.path_tolerance or request.goal_tolerance:
                     raise ValueError('custom tolerance policy unsupported')
-                Plan(request.trajectory,state['feedback'][1],limits)
+                Plan(request.trajectory,state['feedback'][1],limits,max_speed=max_speed,max_acceleration=max_acceleration)
                 state['active']=True
                 return GoalResponse.ACCEPT
             except ValueError:
@@ -215,7 +227,7 @@ def main():
         result=FollowJointTrajectory.Result()
         try:
             with lock:
-                plan=Plan(handle.request.trajectory,state['feedback'][1],limits)
+                plan=Plan(handle.request.trajectory,state['feedback'][1],limits,max_speed=max_speed,max_acceleration=max_acceleration)
                 state['plan'],state['start']=plan,now()
                 started=state['start']
             wall_backstop=time.monotonic()+EXECUTE_WALL_BACKSTOP_S
