@@ -187,8 +187,12 @@ def camera_config(scenario, manifest):
     # interior the camera sees between those edges (verified passing sensed.py `_flat_patch`
     # on the real shelf depth frame). The carton still lands on the flat shelf; the witness
     # patch stays on the front lip by the markers.
+    # Witness sits on the front lip in the gap BETWEEN the two markers (y=4.78) and in front of
+    # the tightened support (whose front edge is now at x=-3.34): the dense-witness gate requires
+    # the witness polygon be disjoint from the support polygon in image space, and on the same
+    # flat plane (verified passing sensed.py `calibrate_rigid_support` on the real shelf frame).
     support('shelf','map',shelf,0.,[shelf+[-.42,-.146,0],shelf+[-.42,.054,0]],
-            shelf+[-.33,-.046,0],[.08,.12],required_xy=(.58,.36))
+            shelf+[-.37,-.046,0],[.06,.12],required_xy=(.58,.36))
     return dict(schema='restock-camera-design.v2',evidence='geometric_design_not_sensor_capture',
                 runtime_ready=False,cameras=cameras,solids=solids,supports=supports,lamps=lamps,
                 cart_chassis_height_m=.20,required_depth_error_bound_m=.0002,
