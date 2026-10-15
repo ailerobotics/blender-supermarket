@@ -1838,3 +1838,34 @@ the rig. A station camera still missing its solid fails closed. CPU-tested
 stack warmed, ROS bridge loaded, gripper + physics scene composed) in ~24 s before the construction
 error, so the boot/compose path is healthy; re-running as run-84 after this fix + pulling the camera
 lane's PR 73.
+
+**run-84** (same scenario, fresh commission run-39, after the eye-in-hand rig fix + PR 73 + PR 74
+nav): progressed **much further** — full bundle construction, Isaac RTX boot, host stack warmed, the
+mission state machine ran `reserved → collect`, the parked-station ack reached `ready`
+(`collision_time` 0.28–0.32, warming→ready), and masked depth published (9 frames). It then **failed
+in the collect capture**:
+
+```
+NAV_STEP action=collect status=succeeded reason='arrived_stopped' transport_ready=True
+MANIP_START operation=collect
+COLLECT_CAPTURE calls=1 provider_error=ValueError:acquisition-to-use freshness expired after processing
+mission.json: collect → failed, reason "no initial sensor frame"
+```
+
+Root cause — a **PR 73 regression** (camera lane). PR 73 added an acquisition-to-use *recheck* after
+capture processing (`restock_camera.freshness.require_fresh`, standing **0.5 s** live budget) measured
+on `StationSensors.steady_clock`, which `build_sensing` leaves at its default **wall** `time.monotonic`
+(no integration override exists). The collect source camera renders **full-res 2560×1920** (needed so
+the ~6 px/module paired markers decode) and its render+QR-decode+registration takes **>0.5 s wall**
+under render pacing (measured 1.7–3.5 s/capture in earlier runs), so the recheck trips on **every**
+capture → no `/sensors` is ever published → the host's startup grace fails the mission with
+"no initial sensor frame". This is the **same wall-clock-vs-render-pacing** failure mode the
+integration lane just fixed for the status watchdog (node-clock it). run-82 (pre-PR 73) reached the
+grasp because that run had no after-processing recheck.
+
+The fix is camera-owned (`restock_camera`, which integration must not edit): measure the
+acquisition-to-use budget in **sim/node** time (as the sensor watchdog now does), or have
+`build_sensing` pass a sim-time `steady_clock`, or scale the live budget by the render latency — not a
+marker or integration-wiring change. Routed to the camera lane; the integration composition, boot,
+station ack, masked-depth and nav-to-collect path are all proven healthy by this run. Mission grasp
+cannot advance until that gate is node-clocked.
