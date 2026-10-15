@@ -105,6 +105,40 @@ def initialize_camera(path,k,*,name,frequency=-1,session_id=None,steady_domain=N
     return RenderedCamera(camera)
 
 
+def collision_camera_frame(design):
+    """The ROS ``frame_id`` the masked-depth bridge publishes for the collision camera.
+
+    Resolves the single ``role == 'collision'`` camera from the design
+    (``twin.restock_camera.wrist_camera.collision_camera``). For the eye-in-hand wrist camera this
+    is ``restock_camera_wrist``.
+    """
+    from twin.restock_camera.wrist_camera import collision_camera
+    return collision_camera(design)['frame']
+
+
+def initialize_collision_camera(stage, design, frame_prim_path, *, session_id=None,
+                                steady_domain=None, resolution=None):
+    """Wrap the eye-in-hand wrist camera as a :class:`RenderedCamera` for the masked-depth bridge.
+
+    Unlike the store/cart mapper cameras (authored by :class:`CameraRig`), the wrist collision
+    camera rides the UR tool flange: its prim is authored on the robot asset
+    (``twin.mobile_assets.author_wrist_camera``) under the ``restock_camera_wrist`` frame, and its
+    design entry has ``role == 'collision'`` (a wide-field, non-decode-grade depth camera). This
+    selects it by that role and initializes it at the authored prim with the design intrinsics, so
+    the bridge can publish its masked depth on frame ``restock_camera_wrist``. Returns
+    ``(RenderedCamera, frame_id)``. Refuses before any Isaac import if the prim is not authored.
+    """
+    from twin.restock_camera.wrist_camera import collision_camera
+    spec = collision_camera(design)
+    k = Intrinsics(**spec['intrinsics'])
+    camera_path = frame_prim_path.rstrip('/') + '/wrist_camera'
+    if not stage.GetPrimAtPath(camera_path):
+        raise ValueError('wrist collision camera prim not authored on the robot: ' + camera_path)
+    camera = initialize_camera(camera_path, k, name='restock_' + spec['id'], session_id=session_id,
+                               steady_domain=steady_domain, resolution=resolution)
+    return camera, spec['frame']
+
+
 class CameraRig:
     def __init__(self, *, stage, specs, parent_paths, frequency=-1, render_scale=1.0,
                  camera_render_scales=None):

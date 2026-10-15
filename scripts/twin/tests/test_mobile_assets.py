@@ -11,12 +11,14 @@ def source(tmp_path):
     p = tmp_path/'arm.urdf'
     p.write_text('''<robot name="test_fixture">
       <link name="world"/><link name="pedestal_link"/><link name="pedestal_top"/>
-      <link name="ur_base_link"/><link name="arm"/>
+      <link name="ur_base_link"/><link name="arm"/><link name="ur_tool0"/>
       <joint name="pedestal_joint" type="fixed"><parent link="world"/><child link="pedestal_link"/></joint>
       <joint name="pedestal_top_joint" type="fixed"><parent link="pedestal_link"/><child link="pedestal_top"/></joint>
       <joint name="ur_base_joint" type="fixed"><parent link="pedestal_top"/><child link="ur_base_link"/></joint>
       <joint name="shoulder" type="revolute"><parent link="ur_base_link"/><child link="arm"/>
       <limit lower="-3" upper="3" effort="100" velocity="1"/></joint>
+      <joint name="tool0_joint" type="fixed"><parent link="arm"/><child link="ur_tool0"/>
+      <origin xyz="0 0 0.3" rpy="0 0 0"/></joint>
       <ros2_control name="fixture"><joint name="shoulder"><state_interface name="position">
       <param name="initial_value">-2.5</param></state_interface></joint></ros2_control>
       </robot>''')
@@ -47,6 +49,11 @@ def test_mobile_urdf_free_root_preserves_arm_and_wheel_geometry(source, tmp_path
     assert generated.attrib == original.attrib
     assert generated.find('limit').attrib == original.find('limit').attrib
     assert ET.parse(out).find('ros2_control') is None  # no real-rig driver plugin
+    # The eye-in-hand wrist camera frame is a fixed child of the UR tool flange (ur_tool0), not base_link.
+    wrist = ET.parse(out).find("joint[@name='restock_camera_wrist_joint']")
+    assert wrist is not None and wrist.find('parent').get('link') == 'ur_tool0'
+    assert wrist.find('child').get('link') == 'restock_camera_wrist'
+    assert 'restock_camera_wrist' in robot.links and robot.joints_by_name['restock_camera_wrist_joint']
 
 
 @pytest.fixture
