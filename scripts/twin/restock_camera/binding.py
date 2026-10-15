@@ -152,16 +152,17 @@ class RenderedSupportContext:
 class StationSensors:
     """Aggregate distinct assigned cameras; no camera implicitly covers the mapper."""
     def __init__(self, *, cameras, profiles, pose_bridge_root, context_providers, location_cameras,
-                 steady_clock=time.monotonic):
+                 steady_clock=time.monotonic, wall_backstop_s=60., wall_clock=time.monotonic):
         from ..restock_manipulation.isaac_sensors import IsaacCartonSensors
         self.location_cameras = dict(location_cameras)
         self.steady_clock = steady_clock
+        self.wall_backstop_s, self.wall_clock = wall_backstop_s, wall_clock
         if (not cameras or set(cameras) != set(context_providers)
                 or any(camera not in cameras for camera in self.location_cameras.values())):
             raise ValueError('camera/location/context binding is incomplete')
         self.adapters = {key:IsaacCartonSensors(camera,pose_bridge_root=pose_bridge_root,
             profiles=profiles,camera_id=key,context_provider=context_providers[key],
-            steady_clock=steady_clock)
+            steady_clock=steady_clock,wall_backstop_s=wall_backstop_s,wall_clock=wall_clock)
             for key,camera in cameras.items()}
         self.sensed_target_bboxes = ()
         self.evidence = ()
@@ -169,6 +170,7 @@ class StationSensors:
     def capture(self, now, source, destination, motion, contact):
         from ..restock_manipulation.types import Sensors
         self.sensed_target_bboxes,self.evidence = (),()
+        wall_started = self.wall_clock()
         selected = sorted({self.location_cameras[source],self.location_cameras[destination]})
         packets = []
         for camera_id in selected:
@@ -187,7 +189,8 @@ class StationSensors:
         # steady clock now that all cameras have been processed (evidence/bboxes stay empty on expiry).
         deadlines = [p.valid_until_steady for p in packets if p.valid_until_steady is not None]
         if deadlines:
-            require_fresh(min(deadlines), self.steady_clock)
+            require_fresh(min(deadlines), self.steady_clock, wall_started=wall_started,
+                          wall_backstop_s=self.wall_backstop_s, wall_clock=self.wall_clock)
         self.sensed_target_bboxes = tuple(box for key in selected for box in self.adapters[key].sensed_target_bboxes)
         self.evidence = tuple(item for key in selected for item in self.adapters[key].evidence)
         return Sensors(now,tuple(o for p in packets for o in p.observations),targets[0],

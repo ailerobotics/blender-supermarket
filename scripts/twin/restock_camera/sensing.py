@@ -149,11 +149,24 @@ def build_sensing(*, app, assembly, plan, config, output):
         from .commissioning import load_baselines, apply_to_contexts
         required = config.get('commissioning_required_locations') if isinstance(config, dict) else None
         apply_to_contexts(context_providers, load_baselines(commissioning_dir), required_locations=required)
+    # Acquisition-to-use freshness clock: the render-paced mission supplies a SIM/node clock via
+    # sensing_sources['steady_clock'] (e.g. the ROS node clock, seconds), so a slow full-resolution
+    # render is not misread as stale (a 0.5 s WALL budget false-trips when one capture's render +
+    # decode takes 1.7-3.5 s wall under render pacing). A generous wall backstop
+    # (config['sensor_wall_backstop_s'], default 60 s) still hard-stops a hung render whose sim clock
+    # is frozen. No sim clock supplied => legacy wall behaviour (real hardware, where sim == wall).
+    station_kwargs = {}
+    sim_clock = (sources.get('steady_clock') if isinstance(sources, dict)
+                 else getattr(sources, 'steady_clock', None))
+    if sim_clock is not None:
+        station_kwargs['steady_clock'] = sim_clock
+    if isinstance(config, dict) and config.get('sensor_wall_backstop_s') is not None:
+        station_kwargs['wall_backstop_s'] = float(config['sensor_wall_backstop_s'])
     station = StationSensors(
         cameras=_get(sources, 'cameras'), profiles=_get(sources, 'profiles'),
         pose_bridge_root=_get(sources, 'pose_bridge_root'),
         context_providers=context_providers,
-        location_cameras=_get(sources, 'location_cameras'))
+        location_cameras=_get(sources, 'location_cameras'), **station_kwargs)
     motion, contact = _get(sources, 'motion'), _get(sources, 'contact')
 
     def capture(now, source, destination):
