@@ -78,24 +78,25 @@ def camera_config(scenario, manifest):
 
     camera('source','map',source+[0,.20,.85],source+[0,0,.08],k_source)
     camera('cart','cart_chassis',deck+[0,-.02,.655],deck+[0,0,.075],k_cart)
-    # Shelf camera: same realisable aisle bracket height as before, but y-centred on
-    # the marker pair (the old +.30 y offset grazed the far marker at 63.8 deg and
-    # 3.65 px/module). Centred, both markers reach ~13 px/module at ~35 deg while the
-    # carton-top label plane and full support stay framed. The camera must stay just
-    # below the next shelf tier (~0.97 m) to see under it to the carton top; a top-down
-    # view is impossible (the tier is ~0.24 m above the support).
-    # Shipped pose B: pure -6.75 deg tilt. The native sweep had both B and the steeper
-    # pose A (-9 deg tilt + -1 deg yaw + 4 cm eye-raise) decoding both shelf markers 6/6
-    # with FixedTileQR (~0.31 s); A scored a slightly higher raster-noise margin, BUT its
-    # 4 cm eye-raise lifts the lens to z=1.00 m, ABOVE the ~0.97 m shelf tier, so the tier
-    # occludes the carton top and support and the station-visibility audit collapses to
-    # 0/0/0 -- it blinds the restock-sensing job for a marginal decode gain. B keeps the
-    # lens under the tier: station visibility stays 81/81/25 AND both markers decode 6/6.
-    # The yaw_world_z_deg / eye_dz_m levers on camera() (default 0, exercised by A) are
-    # retained so future candidates can use them; the station-visibility test gate guards
-    # against a future pose silently trading restock sensing for marker margin again.
-    camera('shelf','map',shelf+[-.50,0,.23],shelf+[-.18,0,-.05],k_shelf,
-           roll_world_x_deg=-6.75)
+    # Shelf camera: same realisable aisle bracket height and -6.75 deg tilt as before, plus
+    # a small +4 deg world-Z YAW. The mirror-positioned pair the camera lane shipped decoded
+    # only with the far marker's grid flipped 180 deg, which 180-rolled that marker's decoded
+    # corner order and made register_marker's rigid support-plane fit uncertain
+    # (sensed.py:158/167 -- normal tilt / residual > 2 mm). This repositions the pair
+    # (asymmetric about the camera's world-Y, see support() below) and yaws the aim so the
+    # far marker is viewed much more steeply (~23 deg incidence vs ~55 deg before), which
+    # drops its perspective shear enough that the production FixedTileQR reads BOTH markers at
+    # the SAME mounted orientation (grid_rot_quarters 0 for both, no per-marker flip). Then
+    # register_marker pairs each marker's TL,TR,BR,BL to one model consistently and the fit is
+    # well-conditioned. The camera must stay just below the next shelf tier (~0.97 m) to see
+    # under it to the carton top; a top-down view is impossible (the tier is ~0.24 m above the
+    # support). The lens stays at z=0.96 (< tier): the station-visibility audit
+    # (test_shelf_camera_sees_under_the_tier...) still sees the whole carton-top + support
+    # under the tier at this yaw. Both-decode proven on the production decoder over the
+    # faithful raster (test_shelf_markers...decodes) and on the native commissioning render.
+    # See data/sim-restock-stations-v1/report.md.
+    camera('shelf','map',shelf+[-.50,0,.23],shelf+[-.18,-.023,-.05],k_shelf,
+           roll_world_x_deg=-6.75,yaw_world_z_deg=4.)
     # Eye-in-hand wrist collision/masked-depth camera (frame restock_camera_wrist on ur_tool0).
     # Not a station QR camera (no support) and not decode-grade; it rides the tool so the arm's
     # side-grasp workspace is always in its depth. See twin.restock_camera.wrist_camera.
@@ -121,11 +122,29 @@ def camera_config(scenario, manifest):
     # plan_restock_lighting.py ray-tests emitter->marker against both housings, the
     # shelf tiers and products in the rendered store; keep both rays clear if retuned.
     shelf_lamp_emitter = shelf+[-.50,0,.17]
-    shelf_marker_centroid = shelf+[-.42,0,0]
+    shelf_marker_centroid = shelf+[-.42,-.046,0]   # centroid of the same-side marker pair (y=4.78)
     shelf_lamp_body = shelf+[-.55,0,.33]
     lamps.append(camera_lamp('shelf','map',shelf_lamp_emitter,kind_type='disk',
                              aim_at=shelf_marker_centroid,radius=.06,power_w=8.))
     solid('shelf_lamp_housing','map',shelf_lamp_body,[.04,.04,.03])
+    # Camera-mounted coaxial lamp for the cart (rollwagen) deck, mirroring the shelf lamp.
+    # The deck markers sit on the LOWER deck, recessed under the cart's own UPPER shelf
+    # (chassis z=.72, underside ~.9075) which blocks the overhead store light, so the bare
+    # native render left the deck dark (marker whites ~126/255) and the cage cast directional
+    # shadows that clipped one marker's finder pattern (support:cart:0 would not decode while
+    # support:cart:1 did). An aimed DISK lamp co-located with the cart lens, emission pointed
+    # at the deck marker centroid, lights exactly what the camera sees FROM THE LENS DIRECTION,
+    # so it fills the cage shadow (no occluder on the clear lens->marker sightline) and raises
+    # contrast. Sized (power_w=63) so each deck marker's lamp illuminance (~4940 lux at scale 1)
+    # matches the shelf lamp's proven-decode level on the recessed shelf markers (4937 lux) --
+    # scale-free, both share intensity_scale. Housing stays +x/above the lens, out of the frustum
+    # and off the emitter->marker rays. Collision geometry.
+    cart_lamp_emitter = deck+[-.05,-.02,.575]
+    cart_marker_centroid = deck+[-.38,0,0]
+    cart_lamp_body = deck+[.05,-.02,.645]
+    lamps.append(camera_lamp('cart','cart_chassis',cart_lamp_emitter,kind_type='disk',
+                             aim_at=cart_marker_centroid,radius=.06,power_w=63.))
+    solid('cart_lamp_housing','cart_chassis',cart_lamp_body,[.04,.04,.03])
 
     def support(name,parent,center,yaw,marker_centers,witness_center,witness_size):
         pose = pose_matrix([*marker_centers[0][:2],yaw],marker_centers[0][2])
@@ -145,8 +164,16 @@ def camera_config(scenario, manifest):
             source+[0,.30,0],[.18,.06])
     support('cart','cart_chassis',deck,-np.pi/2,[deck+[-.38,-.22,0],deck+[-.38,.22,0]],
             deck+[-.38,0,0],[.06,.18])
-    support('shelf','map',shelf,0.,[shelf+[-.42,-.14,0],shelf+[-.42,.14,0]],
-            shelf+[-.42,0,0],[.06,.14])
+    # Shelf support: a repositioned marker pair on the shelf's exposed front lip (x=-3.47, in
+    # front of the carton footprint whose front edge is ~x=-3.35), both mounted at the SAME
+    # orientation (no per-marker grid flip). The pair is asymmetric about the camera world-Y
+    # (y=4.68 and 4.88, centroid 4.78) so marker 1 sits near the camera-Y line and is viewed
+    # steeply (~23 deg) -- low enough shear that the production FixedTileQR decodes it without
+    # the 180 deg grid flip the old mirror pair needed (that flip 180-rolled its corner order
+    # and corrupted register_marker's fit). The 0.20 m Y auxiliary offset exceeds the
+    # 2*side_m=0.12 m minimum; both markers stay on the shelf board (y in [4.57,5.05]).
+    support('shelf','map',shelf,0.,[shelf+[-.42,-.146,0],shelf+[-.42,.054,0]],
+            shelf+[-.33,-.046,0],[.08,.12])
     return dict(schema='restock-camera-design.v2',evidence='geometric_design_not_sensor_capture',
                 runtime_ready=False,cameras=cameras,solids=solids,supports=supports,lamps=lamps,
                 cart_chassis_height_m=.20,required_depth_error_bound_m=.0002,
@@ -382,15 +409,18 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
                 edge = np.linalg.norm(np.roll(corners.reshape(4,2),-1,axis=0)-corners.reshape(4,2),axis=1)
                 half = marker['side_m']*pixels.shape[0]/edge.mean()/2
                 grid = marker_module_grid(marker['id'])
-                if index == 1:
-                    # The paired shelf markers are mirror-positioned about the camera's
-                    # optical axis, so they render under opposite perspective shear. cv2's
-                    # finder-pattern locator reads the near marker's shear but not the far
-                    # one's, so the far marker (index 1) would not decode while index 0 did.
-                    # A QR is decode-invariant under a 180 deg in-plane rotation, so spinning
-                    # only the far grid (identical footprint, same SKU) reorients its finder
-                    # patterns into the shear cv2 reads. Mount this fiducial rotated 180 deg.
-                    grid = np.rot90(grid, 2)
+                # Per-marker in-plane grid rotation is a DESIGN INPUT (`grid_rot_quarters`,
+                # units of 90 deg), not a hardcoded index special-case. A QR is decode-invariant
+                # under any 90 deg in-plane rotation, so the mounted rotation only reorients the
+                # finder patterns relative to the view's perspective shear. The two shelf markers
+                # are now a same-side (non-mirror) pair viewed under the SAME readable shear, so
+                # both decode at the SAME mounted rotation -- which `register_marker`'s rigid fit
+                # requires (it pairs each marker's TL,TR,BR,BL to one model, so a per-marker flip
+                # would 180-roll one marker's decoded corners and corrupt the fit). See the
+                # support() shelf layout and data/sim-restock-stations-v1/report.md.
+                rot = int(marker.get('grid_rot_quarters', 0)) % 4
+                if rot:
+                    grid = np.rot90(grid, rot)
                 white_quad,black_quads = marker_geometry_quads(grid,half)
                 white = quad_mesh(base,[white_quad],.0002,marker['parent_from_marker'])
                 # Passive diffuse white (NO emissive): the lamp lights the support now, and

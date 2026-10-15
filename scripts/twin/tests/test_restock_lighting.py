@@ -221,22 +221,47 @@ def test_rect_illuminance_zero_when_point_above_down_emitter():
 
 def test_config_carries_shelf_camera_lamp_and_collidable_housing():
     cfg = _shelf_config()
-    assert len(cfg['lamps']) == 1
-    lamp = cfg['lamps'][0]
-    assert lamp['id'] == 'shelf' and lamp['parent'] == 'map' and lamp['type'] == 'disk'
+    lamps = {l['id']: l for l in cfg['lamps']}
+    assert set(lamps) == {'shelf', 'cart'}
+    lamp = lamps['shelf']
+    assert lamp['parent'] == 'map' and lamp['type'] == 'disk'
     np.testing.assert_allclose(lamp['center'], [-3.55, 4.826, 0.90])
     assert lamp['center'][2] < 0.974                            # below the shelf tier plane
     housing = next(s for s in cfg['solids'] if s['id'] == 'shelf_lamp_housing')
     assert housing['collision'] is True
 
 
+def test_config_carries_cart_camera_lamp_and_collidable_housing():
+    # The cart lower deck is recessed under the cart's upper shelf (chassis z=0.72), which
+    # blocks overhead store light, so it carries a coaxial camera lamp like the shelf. It is
+    # parented to the moving cart_chassis, aimed at the deck marker centroid.
+    cfg = _shelf_config()
+    lamp = next(l for l in cfg['lamps'] if l['id'] == 'cart')
+    assert lamp['parent'] == 'cart_chassis' and lamp['type'] == 'disk' and 'aim_at' in lamp
+    housing = next(s for s in cfg['solids'] if s['id'] == 'cart_lamp_housing')
+    assert housing['collision'] is True and housing['parent'] == 'cart_chassis'
+
+
 def test_shelf_lamp_outilluminates_the_source_reference():
     # Source markers decode 3/3 at ~1007 lux (scale 1) from the backroom tubes; the shelf
     # disk lamp alone must exceed that on the recessed shelf markers.
     cfg = _shelf_config()
-    lamp = cfg['lamps'][0]
+    lamp = next(l for l in cfg['lamps'] if l['id'] == 'shelf')
     up = np.array([0, 0, 1.0])
     for marker in cfg['supports']['shelf']['markers']:
+        pt = np.array(marker['parent_from_marker'])[:3, 3]
+        e = lamp_illuminance(lamp, pt, up)
+        assert e > 1007 * 2                                      # >= 2x the decoding source level
+
+
+def test_cart_lamp_outilluminates_the_source_reference():
+    # The cart deck markers sit under the cart's upper shelf (overhead store light blocked),
+    # so the coaxial cart disk lamp must lift BOTH deck markers above the decoding source
+    # level -- this is what fills the cage shadow that kept support:cart:0 from decoding.
+    cfg = _shelf_config()
+    lamp = next(l for l in cfg['lamps'] if l['id'] == 'cart')
+    up = np.array([0, 0, 1.0])
+    for marker in cfg['supports']['cart']['markers']:
         pt = np.array(marker['parent_from_marker'])[:3, 3]
         e = lamp_illuminance(lamp, pt, up)
         assert e > 1007 * 2                                      # >= 2x the decoding source level
@@ -246,11 +271,11 @@ def test_author_camera_lamps_places_aimed_disk_light(tmp_path):
     pytest.importorskip('pxr')
     from pxr import Usd, UsdGeom, UsdLux
     cfg = _shelf_config()
-    lamp = cfg['lamps'][0]
+    lamp = next(l for l in cfg['lamps'] if l['id'] == 'shelf')
     stage = Usd.Stage.CreateInMemory()
     UsdGeom.Xform.Define(stage, '/World')
     paths = author_camera_lamps(stage, cfg, parent_paths={'map': '/World', 'cart_chassis': '/World'})
-    assert set(paths) == {'shelf'}
+    assert set(paths) == {'shelf', 'cart'}
     prim = stage.GetPrimAtPath(paths['shelf'])
     assert prim.GetTypeName() == 'DiskLight'
     dl = UsdLux.DiskLight(prim)
@@ -264,7 +289,7 @@ def test_author_camera_lamps_places_aimed_disk_light(tmp_path):
     before = len(list(stage.Traverse()))
     author_camera_lamps(stage, cfg, parent_paths={'map': '/World', 'cart_chassis': '/World'})
     assert len(list(stage.Traverse())) == before                # idempotent
-    retuned = author_camera_lamps(stage, cfg, parent_paths={'map': '/World'},
+    retuned = author_camera_lamps(stage, cfg, parent_paths={'map': '/World', 'cart_chassis': '/World'},
                                   tuning=LightRigTuning(intensity_scale=3.0))
     dl2 = UsdLux.DiskLight(stage.GetPrimAtPath(retuned['shelf']))
     assert dl2.GetIntensityAttr().Get() == pytest.approx(3 * lamp['intensity_nits'])
