@@ -82,6 +82,24 @@ def test_hold_refused_when_visible_markers_contradict_the_held_pose():
         tracker.prepare(occ, k, camera, moved, None, now=3., parked=True, occlusion_window_s=20.)
 
 
+def test_hold_tolerates_a_moved_support_camera_by_re_expressing_the_pose():
+    # run-101: as the arm reaches, the support camera's base-relative pose changes; the hold must
+    # re-express the held registration from live TF, not bail with 'support camera moved'.
+    tracker,(k,camera,depth,support,_,a,b) = commissioned()
+    clean = _clean(tracker, k, camera, depth, a, b, now=2., frame_id=2)
+    assert not clean.occluded
+    moved = camera.copy()
+    moved[0,3] += 0.01                                  # camera shifted 1 cm relative to the base
+    e = registration(k, camera, depth, a, b, stamp=3., frame_id=3).evidence
+    held = tracker.hold(depth, k, moved, e, now=3., parked=True, occlusion_window_s=20.,
+                        current_registration=None)
+    assert held.occluded
+    # base_from_support was re-expressed into the moved camera frame (not the frozen clean pose).
+    np.testing.assert_allclose(np.asarray(held.base_from_camera), moved, atol=1e-12)
+    assert not np.allclose(np.asarray(held.registration.base_from_support),
+                           np.asarray(clean.registration.base_from_support))
+
+
 def test_a_disturbed_support_can_no_longer_be_held():
     tracker,(k,camera,depth,support,_,a,b) = commissioned()
     _clean(tracker, k, camera, depth, a, b, now=2., frame_id=2)
@@ -243,3 +261,98 @@ def test_strict_mode_refuses_an_undecoded_label_every_frame(tmp_path, monkeypatc
     motion.collision_time = 1.10
     with pytest.raises(ValueError, match='unknown or undecoded'):
         adapter.capture(1.10, 'backstock_00', 'backstock_00', motion, contact)
+
+
+# --- sustained hold through the reach: a FRESH failed render-tick frame must engage the hold ----
+# (run-100: the moving arm makes render-tick frames fail decode/registration; PR77 identical-frame
+#  reuse cannot cover it, so /sensors must come from engaging the hold on the fresh failed frame.)
+
+def _fail_decode_next(adapter, exc=ValueError('QR decoder refuses replayed camera frame/session')):
+    """Make the boot context's decoder raise once (simulating the occluded arm garbling the frame)."""
+    decoder = adapter.context_provider.decoder
+    real = decoder.decode
+    state = {'armed': True}
+    def decode(*a, **kw):
+        if state['armed']:
+            state['armed'] = False
+            raise exc
+        return real(*a, **kw)
+    decoder.decode = decode
+    return state
+
+
+def test_fresh_render_tick_decode_failure_engages_the_hold(tmp_path, monkeypatch):
+    from .test_restock_manipulation import FixturePoseBridge
+    monkeypatch.setattr('scripts.twin.restock_manipulation.isaac_sensors.load_pose_bridge',
+                        lambda root: FixturePoseBridge())
+    _, adapter, camera, motion, contact, (k, witness, frame, camera_pose) = _source_rig(tmp_path)
+    adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)   # clean observe seeds good
+
+    # A FRESH frame (new id/stamp) whose decode RAISES under occlusion: hold must engage (no reuse
+    # key matches it) and /sensors still publishes with the occluded flag.
+    _fail_decode_next(adapter)
+    camera.frame = dict(frame, rendering_frame=2, rendering_time=1.05)
+    motion.collision_time = 1.05
+    packet = adapter.capture(1.05, 'backstock_00', 'backstock_00', motion, contact)   # no raise
+    assert packet is not None and packet.parked
+    assert adapter.evidence[0]['registration_occluded'] is True
+
+
+def test_sustained_hold_over_a_multi_tick_reach(tmp_path, monkeypatch):
+    from .test_restock_manipulation import FixturePoseBridge
+    monkeypatch.setattr('scripts.twin.restock_manipulation.isaac_sensors.load_pose_bridge',
+                        lambda root: FixturePoseBridge())
+    _, adapter, camera, motion, contact, (k, witness, frame, camera_pose) = _source_rig(tmp_path)
+    adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)
+
+    # Each successive FRESH render-tick frame fails decode (the arm stays over the markers); every
+    # one must hold and keep /sensors flowing -- not just an identical-frame reuse.
+    for i, t in enumerate([1.05, 1.10, 1.15, 1.20], start=2):
+        _fail_decode_next(adapter)
+        camera.frame = dict(frame, rendering_frame=i, rendering_time=t)
+        motion.collision_time = t
+        packet = adapter.capture(t, 'backstock_00', 'backstock_00', motion, contact)
+        assert packet is not None and adapter.evidence[0]['registration_occluded'] is True
+
+
+def test_held_frame_stale_past_half_second_still_publishes_within_window(tmp_path, monkeypatch):
+    from .test_restock_manipulation import FixturePoseBridge
+    monkeypatch.setattr('scripts.twin.restock_manipulation.isaac_sensors.load_pose_bridge',
+                        lambda root: FixturePoseBridge())
+    _, adapter, camera, motion, contact, (k, witness, frame, camera_pose) = _source_rig(tmp_path, window=20.)
+    adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)
+    _fail_decode_next(adapter)
+    camera.frame = dict(frame, rendering_frame=2, rendering_time=1.05)   # held render-tick frame
+    motion.collision_time = 1.05
+    adapter.capture(1.05, 'backstock_00', 'backstock_00', motion, contact)
+    # Re-present that held frame 0.65 s later (> the 0.5 s live budget, < the 20 s hold window):
+    # the frame-age / freshness gates must accept held output for the window.
+    motion.collision_time = 1.70
+    packet = adapter.capture(1.70, 'backstock_00', 'backstock_00', motion, contact)   # no raise
+    assert packet is not None and adapter.evidence[0]['registration_occluded'] is True
+
+
+def test_held_frame_refused_once_stale_past_the_window(tmp_path, monkeypatch):
+    from .test_restock_manipulation import FixturePoseBridge
+    monkeypatch.setattr('scripts.twin.restock_manipulation.isaac_sensors.load_pose_bridge',
+                        lambda root: FixturePoseBridge())
+    _, adapter, camera, motion, contact, (k, witness, frame, camera_pose) = _source_rig(tmp_path, window=0.5)
+    adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)
+    _fail_decode_next(adapter)
+    camera.frame = dict(frame, rendering_frame=2, rendering_time=1.05)
+    motion.collision_time = 1.05
+    adapter.capture(1.05, 'backstock_00', 'backstock_00', motion, contact)
+    motion.collision_time = 1.70
+    with pytest.raises(ValueError):            # 0.65 s stale > 0.5 s window -> refuse
+        adapter.capture(1.70, 'backstock_00', 'backstock_00', motion, contact)
+
+
+def test_decode_failure_before_any_clean_observe_is_strict(tmp_path, monkeypatch):
+    from .test_restock_manipulation import FixturePoseBridge
+    monkeypatch.setattr('scripts.twin.restock_manipulation.isaac_sensors.load_pose_bridge',
+                        lambda root: FixturePoseBridge())
+    _, adapter, camera, motion, contact, (k, witness, frame, camera_pose) = _source_rig(tmp_path)
+    # First ever frame fails decode: nothing clean to hold -> strict refusal (observe stays strict).
+    _fail_decode_next(adapter)
+    with pytest.raises(ValueError):
+        adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)

@@ -35,12 +35,17 @@ class FrameEvidence:
     steady_domain: str = ''
     acquired_steady: float | None = None
 
-    def validate(self, now, parked):
+    def validate(self, now, parked, *, max_age=.5):
+        # max_age is the acquisition-to-use staleness bound (default 0.5 s live). A HELD frame under
+        # approach occlusion passes the hold window here instead: its registration is the last clean
+        # one (window-bounded by RegisteredSupport.hold), so the per-frame 0.5 s budget must not
+        # refuse a deliberately held, flagged-occluded frame. The cross-stamp sync (|stamp-tf|<=.05)
+        # and the from-the-future bound (-_RENDER_LEAD) are physical and stay fixed regardless.
         if (not parked or not self.camera_id or not self.epoch or not self.camera_revision or not self.session_id
                 or type(self.frame_id) is not int or self.frame_id < 0
                 or not np.isfinite([now,self.stamp,self.transform_stamp]).all()
-                or not -_RENDER_LEAD <= now-self.stamp <= .5
-                or not -_RENDER_LEAD <= now-self.transform_stamp <= .5
+                or not -_RENDER_LEAD <= now-self.stamp <= max_age
+                or not -_RENDER_LEAD <= now-self.transform_stamp <= max_age
                 or abs(self.stamp-self.transform_stamp) > .05):
             raise ValueError('missing, moving, stale or unsynchronized camera evidence')
         if bool(self.steady_domain) != (self.acquired_steady is not None):
@@ -321,8 +326,11 @@ class SupportView:
     base_from_camera: tuple
     occluded: bool = False       # True: held last-good registration under approach occlusion
 
-    def validate(self, depth, k, transform, evidence, now, parked):
-        evidence.validate(now,parked)
+    def validate(self, depth, k, transform, evidence, now, parked, *, max_age=.5):
+        # max_age relaxes only the per-frame acquisition staleness for a HELD (occluded) view (the
+        # capture passes the hold window); the baseline lifetime (age_at) and frame/calibration/depth
+        # identity below are unconditional.
+        evidence.validate(now,parked,max_age=max(max_age,.5) if self.occluded else .5)
         self.geometry.age_at(evidence,now)
         if (self.registration.evidence != evidence or k != self.geometry.intrinsics
                 or not np.allclose(transform,self.base_from_camera,atol=1e-9,rtol=0)
@@ -457,13 +465,21 @@ class RegisteredSupport:
 
         Used when the support markers/footprint are occluded by the reaching arm so no fresh
         full-footprint registration is available this frame. Every non-visibility gate still holds:
-        current-frame freshness, baseline lifetime (``age_at``), identity validity, a monotonic
-        frame and that the fixed camera has not moved. Refuses when there is no established clean
-        view, when the view has been lost longer than ``occlusion_window_s``, or when a still-visible
-        current registration contradicts the held pose (the support actually moved, not just hidden).
-        Never carries a stale clearance forward — a held view is not fresh vacancy proof."""
+        the from-the-future bound + stamp sync, baseline lifetime (``age_at``), identity validity and
+        a monotonic frame. The camera is allowed to MOVE through the reach: the support is rigid
+        (world-fixed for the collect source, cart-fixed for the transfer deck) so camera_from_support
+        is invariant, and base_from_support is RE-EXPRESSED from the live ``base_from_camera`` each
+        tick rather than frozen — a frozen pose silently drifts, and the old exact-match guard bailed
+        on sub-mm base motion as the arm reached, stopping /sensors. The per-frame acquisition
+        STALENESS is bounded by ``occlusion_window_s`` (not the 0.5 s live budget), since a
+        deliberately held frame under a multi-second reach is stale by design; the window is the real
+        bound, enforced against the last clean registration. Refuses when there is no established
+        clean view, the view has been lost longer than ``occlusion_window_s``, the support has left
+        the camera frustum, or a still-visible current registration contradicts the held pose
+        re-expressed into the current frame (the support actually moved, not just hidden). Never
+        carries a stale clearance forward — a held view is not fresh vacancy proof."""
         g,e = self.geometry,evidence
-        e.validate(now,parked)
+        e.validate(now,parked,max_age=occlusion_window_s if (occlusion_window_s and math.isfinite(occlusion_window_s)) else .5)
         age = g.age_at(e,now)
         if self.invalid_reason:
             raise ValueError('expired, invalidated or changed rigid-support geometry')
@@ -475,22 +491,35 @@ class RegisteredSupport:
         good_view,good_now = self.good
         if now-good_now > occlusion_window_s:
             raise ValueError('support view lost beyond the occlusion window')
-        if not np.allclose(np.asarray(base_from_camera),np.asarray(good_view.base_from_camera),atol=1e-9,rtol=0):
-            raise ValueError('support camera moved; cannot hold registration under occlusion')
-        held = np.asarray(good_view.registration.base_from_support)
+        # Re-express the held pose into the current camera/base frame from live TF (support rigid,
+        # only the camera moved): camera_from_support is invariant; base_from_support follows the
+        # live base_from_camera.
+        bfc = rigid(base_from_camera)
+        camera_from_support = np.linalg.inv(rigid(good_view.base_from_camera)) @ np.asarray(good_view.registration.base_from_support)
+        base_from_support = bfc @ camera_from_support
+        if base_from_support[2,2] < .999:
+            raise ValueError('held support is no longer horizontal in the current camera frame')
         if current_registration is not None:
             cur = np.asarray(current_registration.base_from_support)
-            if (np.linalg.norm(cur[:3,3]-held[:3,3]) > contradiction_m
-                    or abs(math.atan2(cur[1,0],cur[0,0])-math.atan2(held[1,0],held[0,0])) > contradiction_rad):
+            if (np.linalg.norm(cur[:3,3]-base_from_support[:3,3]) > contradiction_m
+                    or abs(math.atan2(cur[1,0],cur[0,0])-math.atan2(base_from_support[1,0],base_from_support[0,0])) > contradiction_rad):
                 raise ValueError('visible support markers contradict the held registration')
         radius = np.linalg.norm(np.asarray(g.polygon_support)[:,:2],axis=1).max()
         error = (g.baseline_error_m+good_view.registration.position_error_m
                  +radius*good_view.registration.angular_error_rad+age*.00001)
+        center = transform_points(base_from_support,[g.center_support])[0]
+        # Reproject the uncertainty-expanded footprint through the LIVE camera; if the moving camera
+        # has pushed the support out of the frustum the hold refuses here (never a blind target).
+        polygon = np.column_stack([_rectangle(g.center_support[:2],np.asarray(g.required_xy)+2*error),
+                                   np.full(4,g.center_support[2])])
+        uv,valid = project(transform_points(np.linalg.inv(bfc),transform_points(base_from_support,polygon)),g.intrinsics)
+        if not valid.all():
+            raise ValueError('held support footprint is truncated or out of range in the current camera frame')
         degraded = MarkerRegistration(good_view.registration.marker_id,g.support_id,good_view.registration.revision,
-            good_view.registration.base_from_support,good_view.registration.position_error_m,
+            _matrix_tuple(base_from_support),good_view.registration.position_error_m,
             good_view.registration.angular_error_rad,e,good_view.registration.marker_ids,good_view.registration.layout_id)
-        result = SupportView(g,degraded,None,good_view.support_polygon_uv,good_view.support_z,
-            good_view.center_base,good_view.yaw_rad,float(error),depth_digest(depth),
+        result = SupportView(g,degraded,None,_matrix_tuple(uv),float(center[2]),tuple(center),
+            math.atan2(base_from_support[1,0],base_from_support[0,0]),float(error),depth_digest(depth),
             _matrix_tuple(base_from_camera),occluded=True)
         self.last_frame = e
         self.seen_sessions.add(e.session_id)
