@@ -1912,3 +1912,61 @@ FastDDS env as `move_group` (so the controller-manager discovers its action serv
 integration would risk a DDS-pin mismatch and the same disconnect). It needs `--urdf <mobile urdf>`
 (= `host.json['urdf']`, already in the validated plan). Everything up to and including grasp planning
 is now proven end to end in the live mission; execution unblocks once the controller is launched.
+
+### 2026-10-15 (afternoon) — runs 86–96: grasp execution reached; the render-pacing vs grasp-completion wall
+
+**Context after the reboot.** The host rebooted ~13:53. The NVIDIA driver is now self-consistent at
+**580.178.04** (kernel + system userspace), so the pre-reboot staged `580.173.02` userspace under
+`sim-gpu-userspace-recovery-s1/root` now MISMATCHES the kernel (`nvidia-smi` through it fails NVML).
+A driver-matched root that symlinks the system 578 nvidia libs + Vulkan ICD / EGL vendor JSON was
+built at `datasets/twin-robot-in-store-boot-v1/gpu-runtime-578/root` and **proven by a bounded RTX
+smoke** (`run_restock_render_smoke.py --view source`): Isaac booted, rendered full RGB+depth
+(2560×1920, 4.9 M finite depth px), and decoded the `juice_orange` SKU + both support markers in 3/4
+frames. All GPU runs below use this root; whispr (~2.2 GB, pid changes per boot) preserved throughout.
+
+**Executor-deadline fix (kept, pushed 40387ad).** run-94 reached grasp PLAN success
+(cuMotion 1.39 s, success:true), the controller connected, the arm began executing — then
+`trajectory_host` faulted `trajectory clock/timeout failure` → MoveIt `PATH_TOLERANCE_VIOLATED` →
+host emergency stop at ~128 s wall. Cause: `trajectory_host`'s EXECUTION deadline was a tight WALL
+bound (`min(300, 20 + plan.times[-1]*5)` = 125 s for the ~21 s sim grasp) — the executor analogue of
+the host-side `RosMotionPort` wall-deadline bug fixed on the sim clock in 79b21e4. It is now a
+generous frozen/hung-sim backstop; sim-time completion is governed by the terminal-tolerance branch.
+
+**The remaining blocker is physical, not a bug: render pacing vs grasp duration.** Measured in
+run-94 collect: 120 physics ticks took 139.9 s wall for 2.0 s sim → **1:70 sim:wall** (each
+`world.step(render=True)` ≈ 1.17 s wall; the whole-store RTX render of the arm camera + depth +
+annotators, at `render_scale` 0.375). The grasp trajectory is **~21 s sim** because the arm is gated
+to **0.05 rad/s** (`planner_velocity_scale` → `min(.05,…)`, enforced again in `trajectory_host.Plan`
+and `native_transport`, "the simulator's absolute gate"). 21 s sim × 1:70 ≈ **~24 min wall for the
+grasp alone**, which exceeds both the 20-min wall ceiling AND the commissioning baseline lifetime
+(`lifetime_s` 900 s = 15 min) — the baseline would expire mid-collect. This is the wall every run
+78–94 hit.
+
+- **run-95** (reused run-49 baselines per steer): failed early, collect `no initial sensor frame`.
+  The run-49 baseline was ~52 min old → `expired or reversed rigid-support commissioning clock` /
+  `QR decoder refuses replayed camera frame/session`. The baseline is time-limited + session-bound
+  and must be re-derived in the same boot window (run-94 re-commissioned 3 min before its mission).
+- **run-96** (fresh commission run-50 + mission, 42 s commission): got past the baseline gate, then
+  failed collect `sensor stream watchdog expired`. Cause: the trial `sensing_stride=6` (render every
+  6th tick to cut pacing ~6×) breaks the sensing capture — the QR decoder refuses the repeated frame
+  on non-render ticks (`restock_camera/qr.py`), and `isaac_sensors.py` requires the collision map to
+  have incorporated the *current* frame's clearance every tick. Both files are **camera-lane-owned**.
+  Reverted to `sensing_stride=1` (every-tick, = run-94 behaviour); the param stays as inert infra.
+
+**Why a longer wall budget alone cannot fix it:** the 900 s baseline lifetime caps usable
+post-commission mission time below the ~24-min grasp, so the baseline expires regardless of the wall cap.
+
+**Decision needed (escalated).** Reducing render pacing during the grasp is unavoidable, and every
+lever is cross-lane or a safety-gate change:
+1. **Camera-lane capture stride-tolerance** (restock_camera/qr.py + restock_manipulation/isaac_sensors.py):
+   make the sensing capture tolerate a reduced sensing render cadence (consume the last fresh frame
+   within `max_age` instead of demanding a new frame every tick). Integration already has the render
+   gate (`IsaacPort.sensing_stride`) + can call capture only on render ticks. Architecturally honest.
+2. **Raise the arm-speed gate** (0.05 → e.g. 0.3 rad/s across `planner_velocity_scale`,
+   `trajectory_host.Plan`, `native_transport`): shortens the grasp to ~3.5 s sim → ~4 min wall, within
+   the ceiling and baseline lifetime. Self-contained in the integration lane but relaxes a deliberate
+   safety/fidelity gate — a product/fidelity call.
+3. **Cheaper per-tick render** (resolution/RTX quality): camera-lane concern (affects decode).
+
+Recommendation: pursue (1) with the camera lane for the sustainable version; (2) is the fastest
+self-contained path to a first completed cycle if the faster arm is acceptable for the demo.
