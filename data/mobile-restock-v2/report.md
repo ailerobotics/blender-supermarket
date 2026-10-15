@@ -2148,3 +2148,30 @@ the damping ratio; base/wheel/caster drives untouched so towing is unaffected). 
   widening-alone fail in run-117; what remains is a single sub-second end-of-path transient.
 - Also integrated camera-lane PR 90 (decode cameras pinned to 1.0 scale in the fast preset; fixes the
   native-0.6 source-decode floor I reported from run-118, so the fast preset is usable again).
+
+### 2026-10-15 — run-122: tracking blockers resolved; FIRST real planning-collision blocker
+
+With the debounce (909bc42) the tracking watchdog no longer false-faults. run-122 reached the CONTACT
+phase (approach completed, controller transitioned approach->contact) with NO tracking fault, NO
+PATH_TOLERANCE abort. It then failed on a genuine motion-planning rejection:
+
+- cuMotion PLANNING SUCCEEDED (0.987 s) for the contact descent, but MoveIt's `ValidateSolution`
+  adapter rejected the computed path: `INVALID_MOTION_PLAN` — FCL found a collision between the
+  gripper plate `surface_plate_1` and the mobile base `base_link` at trajectory waypoints 100-107/184.
+- `surface_plate_1..6` + `cube_without_surface_plates` + `suction_cups` are the shelfbot_newgripper
+  end-effector (on `ur_wrist_3` via `big_cube`; `surface_plate_1` is a prismatic plate). So this is a
+  gripper-vs-mobile-base self-collision the planned grasp descent routes through.
+- Both planners DO check the pair: xrdf `self_collision.ignore[base_link]` excludes the plates, and the
+  SRDF has no `base_link<->surface_plate_*` disable. base_link has 960 collision spheres; the gripper
+  plates have only 2 each. So cuMotion's coarse sphere model judged the path clear while FCL's exact
+  meshes found the overlap — a cuMotion-sphere vs FCL-mesh fidelity gap. Disabling the pair in the
+  SRDF would be WRONG (it's a real mesh overlap, not phantom).
+- FIX DOMAIN (NOT in the sim-param authority; host-cad collision model, repo-owned by
+  `scripts/twin/restock_host/generate_assets.py` + `xrdf_selfcollision_probe.py`, offline tests in
+  `test_restock_collision_refinement.py`): refine the collision cover so cuMotion sees and avoids the
+  base (finer gripper-plate spheres and/or a cuMotion collision buffer), OR shape the grasp approach so
+  the descent never routes the gripper across the base. Raised to firstmate as a cross-lane/fidelity
+  call (key: grasp-plan-base-collision) before spending contended GPU on a guess.
+
+All arm tracking/watchdog blockers (tracking lag, terminal transients, render pacing) are now RESOLVED;
+the arm reaches contact cleanly. The remaining blocker is purely motion-planning collision fidelity.
