@@ -2014,3 +2014,25 @@ tick through `approach`/`contact`/`lift`, which cannot hold once the arm occlude
 The collect grasp needs either eye-in-hand re-validation during close approach, or a locked
 post-observe registration that is not re-required under occlusion. Flagged to firstmate for the
 camera/manipulation lanes; the arm-speed half owned here is delivered and proven to execute.
+
+### 2026-10-15 — run-99: observe-then-execute lock + PR 77 + stride-6; capture-during-occlusion remains
+
+run-99 (fresh commission run-53; arm 0.3 rad/s, `sensing_stride=6`, PR 77 stride capture-tolerance,
+the observe-then-execute controller lock) is the furthest collect has reached on sensing: 74 mission
+frames (vs 46 in run-98), observe passed, **cuMotion planned the approach (0.964 s)**, the controller
+held `phase=approach` without the per-tick fixed-camera re-validation failing (the lock works), and
+sim advanced to 7.35 s. It still failed collect, now on the tighter **SIM** watchdog
+(`sensor stream watchdog expired`, 1 s sim) rather than the 30 s wall backstop — because stride-6
+runs sim ~1.6x faster so the 1 s-sim gap is reached first.
+
+Root remaining cause (camera-lane, not this lane): during the reach the capture still **raises** and
+stops `/sensors` — dominant error now `unknown or undecoded label in calibrated slot`
+(`restock_manipulation/isaac_sensors.py:207`): the reaching arm occludes the support marker so the
+calibrated-slot label cannot be decoded. PR 77's reuse covers only the 0.5 s freshness window, shorter
+than the multi-second occluded reach, so once the last clean frame ages out `/sensors` stalls. The
+controller fundamentally needs `/sensors` to poll motion completion and advance phases, so no
+integration-side watchdog relaxation can carry it through — the capture must keep emitting a packet
+(physical feedback + partial/occluded perception) during the reach. That is exactly the camera lane's
+in-flight partial-footprint capture-tolerance PR (firstmate 202.msg). This lane's half
+(arm-speed execution profile + observe-then-execute lock) is delivered, pushed and proven to execute
+the planned grasp approach; the full collect→grasp cycle unblocks when the camera PR lands.
