@@ -70,7 +70,11 @@ class RosPayloadSync:
             return False
         attached = AttachedCollisionObject()
         attached.link_name = 'gripper_pad_tcp'
-        attached.touch_links = ['suction_cups']
+        # The held carton is seated on the suction panel AND rests against the gripper surface-plate
+        # tines, so all of them legitimately touch it. Without the tines in touch_links a correctly
+        # attached carton trips the planner's start-state self-collision (restock_carried_unit vs
+        # surface_plate_1..6), blocking the lift/place and the post-release stow.
+        attached.touch_links = ['suction_cups'] + ['surface_plate_%d' % i for i in range(1, 7)]
         attached.object.id = 'restock_carried_unit'
         attached.object.header.frame_id = 'ur_base_link'
         attached.object.operation = CollisionObject.ADD if held else CollisionObject.REMOVE
@@ -100,6 +104,16 @@ class RosPayloadSync:
         request.scene.is_diff = True
         request.scene.robot_state.is_diff = True
         request.scene.robot_state.attached_collision_objects = [attached]
+        if not held:
+            # Detaching an AttachedCollisionObject re-adds it to the planning-scene WORLD, so the
+            # released carton would linger as a world obstacle and block the post-release stow
+            # (CheckStartStateCollision on restock_carried_unit). Remove it from the world too so
+            # release fully clears it from move_group's monitored scene.
+            world_remove = CollisionObject()
+            world_remove.id = 'restock_carried_unit'
+            world_remove.header.frame_id = 'ur_base_link'
+            world_remove.operation = CollisionObject.REMOVE
+            request.scene.world.collision_objects = [world_remove]
         if not self._wait(self.scene.call_async(request)).success:
             return False
         pending = self.attach.send_goal_async(goal)
