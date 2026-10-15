@@ -40,8 +40,13 @@ EXECUTE_WALL_BACKSTOP_S = 1200.0
 # Position stays tight (grasp precision); the velocity tol and the settle window are relaxed for the
 # higher sim arm speed's residual deceleration and the render-paced settle (TRAJ_HOST_GOAL_MISS logs
 # the actual terminal error so a genuine tracking miss is told apart from a tolerance edge).
+# 0.30: on the base-detour path the 8x-stiffened drive reaches the goal POSITION essentially exactly
+# (run-125 pos_err=0.0005) but rings at ~0.24 rad/s that does not damp below 0.15 within the settle
+# window (a drive limit-cycle, not a position miss). Position stays tight at 0.01 (grasp precision is
+# unaffected); only the residual settle velocity is relaxed. Adding damping would reintroduce the
+# following lag the stiffening fixed and risk the tracking envelope, so relax the velocity tol instead.
 GOAL_POSITION_TOL = 0.01
-GOAL_VELOCITY_TOL = 0.15
+GOAL_VELOCITY_TOL = 0.30
 GOAL_SETTLE_MARGIN_S = 5.0
 # Max allowed command-vs-measured divergence (rad) during execution. Compared at the FEEDBACK's own
 # timestamp (see tick()) so render-paced feedback lag is not mistaken for a tracking error. With the
