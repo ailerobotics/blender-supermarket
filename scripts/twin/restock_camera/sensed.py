@@ -319,6 +319,7 @@ class SupportView:
     uncertainty_m: float
     depth_sha256: str
     base_from_camera: tuple
+    occluded: bool = False       # True: held last-good registration under approach occlusion
 
     def validate(self, depth, k, transform, evidence, now, parked):
         evidence.validate(now,parked)
@@ -351,14 +352,14 @@ class RegisteredSupport:
         self.invalid_reason = ''
         self.last_frame = None
         self.seen_sessions = set()
+        self.good = None             # (SupportView, now) of the last fully visible clean registration
 
     def invalidate(self, reason):
         self.invalid_reason = str(reason) or 'rigid support invalidated'
+        self.good = None             # a disturbed support may never be held under occlusion
 
-    def prepare(self, depth, k, base_from_camera, registration, clearance, *, now, parked):
-        g,e = self.geometry,registration.evidence
-        e.validate(now,parked)
-        age = g.age_at(e,now)
+    def _identity_ok(self, registration, e, k):
+        g = self.geometry
         if (self.invalid_reason
                 or registration.support_id != g.support_id or registration.marker_id != g.marker_id
                 or registration.revision != g.revision or e.camera_id != g.camera_id
@@ -373,6 +374,8 @@ class RegisteredSupport:
                       e.camera_id, g.camera_id, registration.layout_id, g.marker_layout_id,
                       e.camera_revision, g.camera_revision, k == g.intrinsics), flush=True)
             raise ValueError('expired, invalidated or changed rigid-support geometry')
+
+    def _monotonic_ok(self, e):
         if self.last_frame is not None:
             prior = self.last_frame
             same_session = e.session_id == prior.session_id
@@ -380,40 +383,115 @@ class RegisteredSupport:
                     or (not same_session and e.session_id in self.seen_sessions)
                     or (e.acquired_steady is not None and e.acquired_steady <= prior.acquired_steady)):
                 raise ValueError('rigid-support registration needs a new monotonic frame')
+
+    def prepare(self, depth, k, base_from_camera, registration, clearance, *, now, parked,
+                occlusion_window_s=None, contradiction_m=.05, contradiction_rad=.17):
+        """Refresh the registered support from the current frame.
+
+        ``occlusion_window_s`` (None = strict, the observe/commissioning default) enables
+        approach-occlusion tolerance: when the markers register but the support footprint/witness
+        is occluded by the reaching arm (so the fresh view would refuse), fall back to the last
+        fully visible clean registration (``self.good``), flagged ``occluded``, as long as the view
+        has not been lost longer than the window AND the visible markers do not contradict the held
+        pose. The identity, monotonic-frame, horizontality and baseline-lifetime gates are strict
+        regardless; only the fresh full-footprint *visibility* requirement is relaxed under occlusion
+        (the held registration already satisfied it at observe time)."""
+        g,e = self.geometry,registration.evidence
+        e.validate(now,parked)
+        age = g.age_at(e,now)
+        self._identity_ok(registration,e,k)
+        self._monotonic_ok(e)
         if clearance is not None:
             clearance.validate(now,e,g)
         pose = np.asarray(registration.base_from_support)
         if pose[2,2] < .999:
             raise ValueError('registered support is no longer horizontal')
-        witness_base = transform_points(pose,g.witness_support)
-        uv,valid = project(transform_points(np.linalg.inv(rigid(base_from_camera)),witness_base),k)
-        if not valid.all():
-            raise ValueError('fresh support witness not visible')
-        _,z = _flat_patch(depth,uv,k,base_from_camera,pose)
-        if abs(z-g.center_support[2]) > .003:
-            raise ValueError('fresh witness disagrees with dated support calibration')
-        radius = np.linalg.norm(np.asarray(g.polygon_support)[:,:2],axis=1).max()
-        error = g.baseline_error_m+registration.position_error_m+radius*registration.angular_error_rad+age*.00001
-        footprint = _rectangle(g.center_support[:2],g.required_xy)
-        if error > .01 or not contains(np.asarray(g.polygon_support)[:,:2],footprint,error):
-            raise ValueError('uncertain registration cannot establish full required footprint')
-        # Expand the runtime check, never the measured geometry, by uncertainty.
-        polygon = np.column_stack([_rectangle(g.center_support[:2],np.asarray(g.required_xy)+2*error),
-                                   np.full(4,g.center_support[2])])
-        base = transform_points(pose,polygon)
-        uv,valid = project(transform_points(np.linalg.inv(rigid(base_from_camera)),base),k)
-        if not valid.all():
-            raise ValueError('full support footprint is truncated or out of range')
-        mask = polygon_mask(uv,k)
-        # The full footprint must carry only valid, present depth (no invalid/hidden pixels),
-        # but its 3-D cloud is not used here — validate the masked depths directly instead of
-        # backprojecting ~1e6 points every capture (same gate as masked_cloud, far cheaper).
-        patch = np.asarray(depth,float)[mask]
-        if patch.size < 64 or not np.isfinite(patch).all() or np.any((patch < k.near)|(patch > k.far)):
-            raise ValueError('insufficient observed support pixels')
+        try:
+            witness_base = transform_points(pose,g.witness_support)
+            uv,valid = project(transform_points(np.linalg.inv(rigid(base_from_camera)),witness_base),k)
+            if not valid.all():
+                raise ValueError('fresh support witness not visible')
+            _,z = _flat_patch(depth,uv,k,base_from_camera,pose)
+            if abs(z-g.center_support[2]) > .003:
+                raise ValueError('fresh witness disagrees with dated support calibration')
+            radius = np.linalg.norm(np.asarray(g.polygon_support)[:,:2],axis=1).max()
+            error = g.baseline_error_m+registration.position_error_m+radius*registration.angular_error_rad+age*.00001
+            footprint = _rectangle(g.center_support[:2],g.required_xy)
+            if error > .01 or not contains(np.asarray(g.polygon_support)[:,:2],footprint,error):
+                raise ValueError('uncertain registration cannot establish full required footprint')
+            # Expand the runtime check, never the measured geometry, by uncertainty.
+            polygon = np.column_stack([_rectangle(g.center_support[:2],np.asarray(g.required_xy)+2*error),
+                                       np.full(4,g.center_support[2])])
+            base = transform_points(pose,polygon)
+            uv,valid = project(transform_points(np.linalg.inv(rigid(base_from_camera)),base),k)
+            if not valid.all():
+                raise ValueError('full support footprint is truncated or out of range')
+            mask = polygon_mask(uv,k)
+            # The full footprint must carry only valid, present depth (no invalid/hidden pixels),
+            # but its 3-D cloud is not used here — validate the masked depths directly instead of
+            # backprojecting ~1e6 points every capture (same gate as masked_cloud, far cheaper).
+            patch = np.asarray(depth,float)[mask]
+            if patch.size < 64 or not np.isfinite(patch).all() or np.any((patch < k.near)|(patch > k.far)):
+                raise ValueError('insufficient observed support pixels')
+        except ValueError:
+            # The reaching arm occludes the fixed camera's view of the support it grasps toward.
+            # Hold the last clean registration if configured and still within policy; otherwise the
+            # strict refusal (observe/commissioning, or no prior good view, or a lost/contradicted
+            # view) stands.
+            if occlusion_window_s is None or self.good is None:
+                raise
+            return self.hold(depth,k,base_from_camera,e,now=now,parked=parked,
+                             occlusion_window_s=occlusion_window_s,current_registration=registration,
+                             contradiction_m=contradiction_m,contradiction_rad=contradiction_rad)
         center = transform_points(pose,[g.center_support])[0]
         result = SupportView(g,registration,clearance,_matrix_tuple(uv),float(center[2]),tuple(center),
             math.atan2(pose[1,0],pose[0,0]),float(error),depth_digest(depth),_matrix_tuple(base_from_camera))
+        self.last_frame = e
+        self.seen_sessions.add(e.session_id)
+        self.good = (result, now)
+        return result
+
+    def hold(self, depth, k, base_from_camera, evidence, *, now, parked, occlusion_window_s,
+             current_registration=None, contradiction_m=.05, contradiction_rad=.17):
+        """Publish the last clean registration under approach occlusion, flagged ``occluded``.
+
+        Used when the support markers/footprint are occluded by the reaching arm so no fresh
+        full-footprint registration is available this frame. Every non-visibility gate still holds:
+        current-frame freshness, baseline lifetime (``age_at``), identity validity, a monotonic
+        frame and that the fixed camera has not moved. Refuses when there is no established clean
+        view, when the view has been lost longer than ``occlusion_window_s``, or when a still-visible
+        current registration contradicts the held pose (the support actually moved, not just hidden).
+        Never carries a stale clearance forward — a held view is not fresh vacancy proof."""
+        g,e = self.geometry,evidence
+        e.validate(now,parked)
+        age = g.age_at(e,now)
+        if self.invalid_reason:
+            raise ValueError('expired, invalidated or changed rigid-support geometry')
+        if (occlusion_window_s is None or not math.isfinite(occlusion_window_s) or occlusion_window_s < 0):
+            raise ValueError('occlusion tolerance is not configured for this support')
+        if self.good is None:
+            raise ValueError('no established support registration to hold under occlusion')
+        self._monotonic_ok(e)
+        good_view,good_now = self.good
+        if now-good_now > occlusion_window_s:
+            raise ValueError('support view lost beyond the occlusion window')
+        if not np.allclose(np.asarray(base_from_camera),np.asarray(good_view.base_from_camera),atol=1e-9,rtol=0):
+            raise ValueError('support camera moved; cannot hold registration under occlusion')
+        held = np.asarray(good_view.registration.base_from_support)
+        if current_registration is not None:
+            cur = np.asarray(current_registration.base_from_support)
+            if (np.linalg.norm(cur[:3,3]-held[:3,3]) > contradiction_m
+                    or abs(math.atan2(cur[1,0],cur[0,0])-math.atan2(held[1,0],held[0,0])) > contradiction_rad):
+                raise ValueError('visible support markers contradict the held registration')
+        radius = np.linalg.norm(np.asarray(g.polygon_support)[:,:2],axis=1).max()
+        error = (g.baseline_error_m+good_view.registration.position_error_m
+                 +radius*good_view.registration.angular_error_rad+age*.00001)
+        degraded = MarkerRegistration(good_view.registration.marker_id,g.support_id,good_view.registration.revision,
+            good_view.registration.base_from_support,good_view.registration.position_error_m,
+            good_view.registration.angular_error_rad,e,good_view.registration.marker_ids,good_view.registration.layout_id)
+        result = SupportView(g,degraded,None,good_view.support_polygon_uv,good_view.support_z,
+            good_view.center_base,good_view.yaw_rad,float(error),depth_digest(depth),
+            _matrix_tuple(base_from_camera),occluded=True)
         self.last_frame = e
         self.seen_sessions.add(e.session_id)
         return result

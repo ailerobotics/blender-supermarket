@@ -104,7 +104,8 @@ def support_slots(camera_config, camera_id, *, label_masks, support_locations=No
 
 
 def rendered_context(camera_config, camera_id, slots, *, measure_context,
-                     clearance_for_slot, camera_revision, clock_context=None, render_scale=1.0):
+                     clearance_for_slot, camera_revision, clock_context=None, render_scale=1.0,
+                     occlusion_window_s=20.0):
     """A :class:`RenderedSupportContext` for one camera from the design + integration callbacks.
 
     The intrinsics and depth-error bound come from the camera design; ``measure_context``
@@ -117,14 +118,23 @@ def rendered_context(camera_config, camera_id, slots, *, measure_context,
     capture all use the SAME calibration as the actually-rendered pixels — the fix for
     resolution scaled without intrinsics. Commission at the same scale the mission renders at;
     note decode degrades with scale (small markers), so a decode-grade camera may need 1.0.
+
+    ``occlusion_window_s`` enables approach-occlusion tolerance (see RenderedSupportContext): during
+    a grasp the reaching arm occludes the fixed camera's view of the support it grasps toward, so
+    the live capture holds the last clean registration (flagged occluded) up to this window instead
+    of refusing and starving the host sensor-stream watchdog. ``camera_config['occlusion_window_s']``
+    overrides it; set ``None`` to disable (strict every-frame full-footprint). commission()/observe
+    stay strict regardless. The default covers a bounded grasp; the held registration still obeys the
+    baseline lifetime and per-frame freshness, and a contradicting/lost view still refuses.
     """
     k = Intrinsics(**camera_config['cameras'][camera_id]['intrinsics'])
     intrinsics = k if render_scale == 1.0 else scale_intrinsics(k, render_scale)
+    window = camera_config.get('occlusion_window_s', occlusion_window_s)
     return RenderedSupportContext(
         camera_id=camera_id, intrinsics=intrinsics, slots=slots,
         measure_context=measure_context, clearance_for_slot=clearance_for_slot,
         depth_error_m=camera_config['required_depth_error_bound_m'],
-        camera_revision=camera_revision, clock_context=clock_context)
+        camera_revision=camera_revision, clock_context=clock_context, occlusion_window_s=window)
 
 
 def build_sensing(*, app, assembly, plan, config, output):
