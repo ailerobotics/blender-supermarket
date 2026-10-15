@@ -53,6 +53,7 @@ class CameraContext:
     steady_domain: str = ''
     acquired_steady: float | None = None
     qr_observation: FrameQR | None = None
+    occlusion_window_s: float | None = None   # None: label in a calibrated slot must decode every frame
 
 
 class IsaacCartonSensors:
@@ -87,6 +88,12 @@ class IsaacCartonSensors:
         self._reuse_key = None
         self._reuse_context = None
         self._reuse_qr = None
+        # Per-location sim time of the last frame a calibrated slot was cleanly read (support not
+        # held AND no undecoded label in it). While the reaching arm occludes a slot's carton label
+        # during approach/contact/lift, an undecoded label is tolerated (held, flagged occluded)
+        # for up to context.occlusion_window_s seconds since that last clean read; past the window
+        # it refuses. Seeded by the clean observe before the reach.
+        self._label_clean = {}
         self.sensed_target_bboxes = ()
         self.evidence = ()
         # Integration initializes actual cameras; every frame uses measured TF.
@@ -191,6 +198,8 @@ class IsaacCartonSensors:
         else:
             qr.validate(rgb,camera_evidence,now=now,parked=bool(context.parked and motion.parked()))
         observations, rejected = [], []
+        occluded_labels = set()        # calibrated slots whose label is occluded (held) this frame
+        window = context.occlusion_window_s
         mask_shape = depth.shape
         candidates = [(d.text,np.asarray(d.corners)) for d in qr.detections]
         candidates.extend(('',np.asarray(p)) for p in qr.unreadable_corners)
@@ -204,6 +213,17 @@ class IsaacCartonSensors:
             if not matches:
                 continue
             if code not in self.profiles:
+                # The reaching arm/gripper occludes the carton label (on the carton top) during the
+                # grasp, so it decodes as undecoded/unknown. While within the occlusion window since
+                # the slot was last cleanly read, hold it (flag occluded) instead of refusing, so
+                # /sensors keeps publishing and the controller can poll its locked grasp to
+                # completion. A slot never cleanly read, or lost longer than the window, still refuses.
+                tolerant = (window is not None and any(
+                    s.location in self._label_clean and now-self._label_clean[s.location] <= window
+                    for s in matches))
+                if tolerant:
+                    occluded_labels.update(s.location for s in matches)
+                    continue
                 raise ValueError('unknown or undecoded label in calibrated slot')
             if len(matches) != 1:
                 rejected.append('label outside unique calibrated slot')
@@ -255,6 +275,11 @@ class IsaacCartonSensors:
         candidates = [o for o in observations if o.location == source]
         if len(candidates) == 1:
             motion.observe_source(candidates[0])
+        # Seed/refresh the per-slot clean-read time for the label occlusion window: a slot is clean
+        # this frame when its support is not held AND no label in it was occluded (held).
+        for slot in self.slots:
+            if not slot.support_view.occluded and slot.location not in occluded_labels:
+                self._label_clean[slot.location] = now
         # The acquisition must still be fresh now that processing is done; refuse before publishing
         # any evidence/bbox (they stay empty on expiry) so a stale frame never reaches the mission.
         require_fresh(deadline, self.steady_clock, wall_started=wall_started,
@@ -270,6 +295,7 @@ class IsaacCartonSensors:
             registration_uncertainty_m=s.support_view.uncertainty_m,
             clearance_observation_id=None if s.support_view.clearance is None else s.support_view.clearance.observation_id,
             qr_processing_seconds=qr.processing_seconds,qr_rgb_sha256=qr.rgb_sha256,
+            registration_occluded=bool(getattr(s.support_view,'occluded',False) or s.location in occluded_labels),
             provenance='dated_rigid_geometry_with_fresh_marker_witness_and_depth') for s in self.slots)
         # Record the just-validated frame so a stride-paced re-presentation of these exact pixels
         # reuses this decode (only now that every gate has passed; a failed frame stays unreusable).
