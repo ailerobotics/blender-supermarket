@@ -218,6 +218,23 @@ def test_arm_drive_targets_do_not_accept_old_sequence():
     assert len(applied)==1 and not gate.faulted
 
 
+def test_arm_heartbeat_is_node_clocked_not_wall(monkeypatch):
+    # The arm-command heartbeat must be measured in SIM time: a render-paced WALL gap (~3.5 s, far
+    # over the old 0.5 s wall bound that emergency-stopped the executed grasp, run-91) is NOT a lost
+    # heartbeat while the SIM gap is tiny; a real SIM-time gap still is.
+    import twin.restock.native_transport as nt
+    clock = [1000.0]
+    monkeypatch.setattr(nt.time, 'monotonic', lambda: clock[0])
+    gate, _ = gate_fixture()
+    gate.command(names=list(ARM_JOINTS), positions=[.01]*6, velocities=[.01]*6,
+                 efforts=[], stamp=5.0, now=5.0)
+    clock[0] = 1003.5                       # 3.5 s WALL later, but only 0.1 s SIM later -> still fresh
+    gate.watchdog(now=5.1)
+    assert not gate.faulted
+    with pytest.raises(RuntimeError, match='heartbeat lost'):
+        gate.watchdog(now=5.7)             # 0.7 s SIM gap -> lost heartbeat
+
+
 def test_arm_command_ignores_the_effort_field():
     # Isaac's ROS2SubscribeJointState fills effort to the joint count even though trajectory_host
     # publishes none (run-89: eff=6 all-zero; run-90: eff=6 non-zero measured torques). Effort is

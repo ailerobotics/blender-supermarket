@@ -19,6 +19,12 @@ def _frame_id(path):
     return str(path).rsplit('/', 1)[-1]
 
 
+# Arm-command heartbeat bounds. Primary bound is SIM time (does not false-trip under render pacing);
+# the wall bound is only a frozen-sim backstop, far larger than the worst render-paced command gap.
+ARM_HEARTBEAT_SIM_S = 0.5
+ARM_HEARTBEAT_WALL_BACKSTOP_S = 30.0
+
+
 def joint_states_payload(now, names, positions, velocities):
     """The /restock_sim/joint_states relay JSON. Measured positions AND velocities both ride along:
     the host FollowJointTrajectory executor (trajectory_host) indexes msg.velocity by the arm joints,
@@ -99,8 +105,15 @@ class ArmCommandGate:
             self.hold()
             raise
 
-    def watchdog(self):
-        if self.started and time.monotonic()-self.last_receive>.5:
+    def watchdog(self, now):
+        # Node-clock the arm-command heartbeat. ``now`` and ``last_stamp`` are both SIM seconds (the
+        # /clock-synced domain; run-89 measured now-stamp ~= one physics step), so the 0.5 s bound is
+        # 0.5 s of SIMULATION time -- it does not false-trip under render pacing, where consecutive
+        # arm commands are ~1.7-3.5 s apart in WALL time but a small step apart in sim (a wall-time
+        # 0.5 s heartbeat emergency-stopped the executed grasp, run-91). A generous WALL backstop
+        # still hard-stops a genuinely frozen sim clock, where the sim bound can never advance to trip.
+        if self.started and (now-self.last_stamp>ARM_HEARTBEAT_SIM_S
+                             or time.monotonic()-self.last_receive>ARM_HEARTBEAT_WALL_BACKSTOP_S):
             self.hold()
             raise RuntimeError('arm command heartbeat lost')
         if self.faulted:
@@ -193,7 +206,7 @@ class NativeTransport:
             self.command_gate.command(names=names,positions=get('positionCommand'),
                 velocities=get('velocityCommand'),efforts=get('effortCommand'),
                 stamp=float(get('timeStamp')),now=now)
-        self.command_gate.watchdog()
+        self.command_gate.watchdog(now)
         self._publish_relay(now)
 
     def _publish_relay(self, now):
