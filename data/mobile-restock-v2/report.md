@@ -1970,3 +1970,18 @@ lever is cross-lane or a safety-gate change:
 
 Recommendation: pursue (1) with the camera lane for the sustainable version; (2) is the fastest
 self-contained path to a first completed cycle if the faster arm is acceptable for the demo.
+
+### 2026-10-15 — SIM arm-speed execution profile (0.3 rad/s), owner-authorised
+
+Per the owner decision on the render-pacing grasp wall (do BOTH; integration owns the speed profile),
+the arm joint-speed gate is now a single configurable value, **SIM default 0.3 rad/s**, threaded through
+all three gates: `planner_velocity_scale` (`command_limit`+`scale_cap`, read by `ros_host` from
+`config['arm_max_speed']`), `trajectory_host` (`--max-speed`, the simulation-only executor), and the
+Isaac-side `ArmCommandGate` (`physics_setup`, from `config['arm_max_speed']`). Each function keeps its
+conservative default (0.15 rad/s / 5% scale), so any **real-rig / ur10-setup-shared** caller is
+unchanged; only the sim configs set 0.3. This is a **deliberate sim-only fidelity relaxation** whose
+sole justification is the measured **1:70 render pacing** (a 0.135 rad/s grasp needs ~24 min wall,
+exceeding the 20-min ceiling AND the 900 s commissioning-baseline lifetime). At 0.3 rad/s the planned
+grasp is ~2x faster (prior effective speed was 0.135, gated by 0.15 — not the 0.05 scale cap, which
+never bound for the UR10). The sustainable pacing cut is the camera lane's incoming sensing-stride
+capture-tolerance + cheaper render (items 1+3); this profile is the self-contained half delivered now.
