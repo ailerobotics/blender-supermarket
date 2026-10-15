@@ -109,16 +109,15 @@ class IsaacCartonSensors:
         # step (matches frame_deadline's _RENDER_LEAD in the context freshness gate); genuine
         # future/stale frames are still rejected. Without this a sub-step-leading frame is
         # dropped here before the context (which tolerates it) ever sees it.
-        if not np.isfinite([now,stamp]).all() or not -0.02 <= now-stamp <= .5:
+        # From-the-future / non-finite frames are always rejected here. The STALENESS bound is
+        # deferred until the context tells us whether this is HELD output under approach occlusion
+        # (then the bound is the hold window, not 0.5 s — a deliberately held frame is stale by
+        # design); see the budget block after the context is resolved.
+        if not np.isfinite([now,stamp]).all() or now-stamp < -0.02:
             raise ValueError('no new synchronized rendered camera frame')
-        # Acquisition-to-use freshness: anchor the live 0.5 s deadline to the steady clock BEFORE
-        # processing (registration/decode/depth), then re-check it AFTER, so a slow decode that
-        # elapses past the budget while `now` stays fixed is refused (never a stale observation).
-        # The budget is measured on the steady clock (SIM/node clock in the render-paced mission via
-        # build_sensing) using the render's SIM stamp (now-stamp) for queue age — the wall
-        # acquisition-callback stamp (use_acquired=False) is a different domain whose wall age is not
-        # staleness under render pacing. A generous wall backstop still catches a hung render.
-        deadline = frame_deadline(frame, now, self.steady_clock(), use_acquired=False)
+        # Anchor the acquisition-to-use deadline on the steady clock BEFORE processing; the budget
+        # (0.5 s live, or the hold window for held output) is applied once known, below.
+        started = self.steady_clock()
         wall_started = self.wall_clock()
         rgb = np.asarray(frame['rgb'])[:, :, :3]
         depth = np.asarray(frame['distance_to_image_plane'], float)
@@ -161,6 +160,19 @@ class IsaacCartonSensors:
         self.seen_sessions.add(context.session_id)
         if not self.slots or len({s.location for s in self.slots}) != len(self.slots):
             raise ValueError('camera needs unique calibrated slots')
+        # HELD output (approach occlusion): any slot whose registration the context provider held
+        # from the last clean frame. Its per-frame acquisition staleness is bounded by the hold
+        # window, not the 0.5 s live budget -- a deliberately held, flagged-occluded frame is stale
+        # by design, and the window (vs the last clean registration) is the real bound, enforced in
+        # RegisteredSupport.hold. Clean/observe output stays on the strict 0.5 s budget. This is what
+        # lets /sensors keep publishing through the multi-second reach instead of the frame-age and
+        # monotonic/reuse gates stopping it once no fresh frame registers.
+        held = any(getattr(s.support_view, 'occluded', False) for s in self.slots)
+        window = getattr(context, 'occlusion_window_s', None)
+        budget = float(window) if (held and window and np.isfinite(window)) else .5
+        if now-stamp > budget:
+            raise ValueError('no new synchronized rendered camera frame')
+        deadline = frame_deadline(frame, now, started, budget_s=budget, use_acquired=False)
         camera_evidence = None
         for slot in self.slots:
             if slot.support_view is None:
@@ -175,7 +187,7 @@ class IsaacCartonSensors:
                 raise ValueError('slot camera-frame evidence disagrees')
             camera_evidence = evidence
             slot.support_view.validate(depth,k,self.transform,evidence,now,
-                                       bool(context.parked and motion.parked()))
+                                       bool(context.parked and motion.parked()),max_age=budget)
             if (not np.isfinite(motion.collision_time) or not 0 <= now-motion.collision_time <= .5
                     or (slot.support_view.clearance is not None
                         and motion.collision_time < slot.support_view.clearance.incorporated_time)):
@@ -196,7 +208,7 @@ class IsaacCartonSensors:
                 self.decoder = FixedTileQR(self.camera_id)
             qr = self.decoder.decode(rgb,camera_evidence,now=now,parked=bool(context.parked and motion.parked()))
         else:
-            qr.validate(rgb,camera_evidence,now=now,parked=bool(context.parked and motion.parked()))
+            qr.validate(rgb,camera_evidence,now=now,parked=bool(context.parked and motion.parked()),max_age=budget)
         observations, rejected = [], []
         occluded_labels = set()        # calibrated slots whose label is occluded (held) this frame
         window = context.occlusion_window_s

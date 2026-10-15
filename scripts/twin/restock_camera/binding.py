@@ -6,7 +6,7 @@ import numpy as np
 from .sensed import (FrameEvidence, register_marker, calibrate_rigid_support,
                      RegisteredSupport)
 from .freshness import frame_deadline, require_fresh
-from .qr import FixedTileQR
+from .qr import FixedTileQR, FrameQR, rgb_digest
 
 
 @dataclass
@@ -76,9 +76,12 @@ class RenderedSupportContext:
         """Decode support markers and register each slot against this depth.
 
         ``allow_occlusion`` (the live __call__ path, never commission/observe): a slot whose marker
-        is not decoded, or whose marker is too occluded to register, yields ``None`` instead of
-        aborting — __call__ then holds that slot's last clean registration. Strict (default) keeps
-        the historical 'no geometry fallback' refusal so commissioning requires full visibility."""
+        is not decoded, whose marker is too occluded to register, OR a frame the production decoder
+        cannot read at all (unreadable/conflicting/replayed-re-presentation/over-budget as the
+        reaching arm occludes the support) yields ``None`` instead of aborting — __call__ then holds
+        that slot's last clean registration, and this frame carries an EMPTY held QR (no fresh
+        detections). Strict (default) keeps the historical 'no geometry fallback' / decode refusal so
+        commissioning/observe require full visibility."""
         self.qr_observation = None
         transform,tf_stamp,epoch,parked = self.measure_context(frame,now)
         clock = ('default','',None) if self.clock_context is None else self.clock_context(frame,now)
@@ -89,7 +92,15 @@ class RenderedSupportContext:
         depth = np.asarray(frame['distance_to_image_plane'],float)
         if rgb.shape[:2] != (self.intrinsics.height,self.intrinsics.width) or depth.shape != rgb.shape[:2]:
             raise ValueError('unregistered marker RGB-D')
-        qr = self.decoder.decode(rgb,evidence,now=now,parked=parked,roi=self._decode_roi())
+        try:
+            qr = self.decoder.decode(rgb,evidence,now=now,parked=parked,roi=self._decode_roi())
+        except ValueError:
+            if not allow_occlusion:
+                raise
+            # Decode could not read a clean frame under occlusion: present an empty held QR for this
+            # frame (every slot then holds its last clean registration) so /sensors keeps publishing
+            # the occluded flag through the reach, instead of aborting and starving the watchdog.
+            qr = FrameQR(evidence, tuple(rgb.shape), rgb_digest(rgb), (), (), 0., 0)
         decoded = {item.text:np.asarray(item.corners) for item in qr.detections}
         registrations = []
         for slot in self.slots:
