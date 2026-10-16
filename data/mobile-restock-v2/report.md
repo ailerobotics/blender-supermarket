@@ -2198,3 +2198,24 @@ move would fault trajectory_host (its `goal()` rejects new goals after a fault),
 The controller then advances to grasp (suction) → lift from the achieved contact pose. CPU tests:
 `test_restock_manipulation.py` (contact raises the signal, no-contact/free-space moves never do);
 the trajectory_host succeed-hold is validated by the integration run. 828 CPU green.
+
+### 2026-10-16 — run-140/141: full stack to contact; occlusion window < render-paced gated reach
+
+With the latching-gripper PR (seals jointEnabled) + camera decode-render-product disable + the
+masked-depth ESDF cadence + over-damped contact settle, run-140 ran the full stack: approach
+COMPLETED, no collision, no 'stale parked-station' (the masked-depth cadence kept the host ESDF
+fresh through the gated reach). But the grasp did not complete:
+- run-140: contact stalled 218 ticks with 0 suction controls -> no latch -> /sensors watchdog. The
+  contact suction-enable guard waited indefinitely for a fresh `valid_until_steady` that did not
+  arrive on the gated contact ticks. Fixed (57761e2): bounded 3-tick grace then enable suction
+  anyway (conditional require_fresh, mirroring the grasp phase) + CONTACT_SUCTION diagnostics.
+- run-141: never reached contact -- 1000 approach ticks (~16.7 s sim) then /sensors watchdog.
+
+ROOT of the recurring /sensors watchdog: the gate's held-republish is bounded by `occlusion_window_s`
+(default 20 s, sensing.py) counted from the last CLEAN read (observe). The ENTIRE render-suspended
+collect reach (approach->contact->grasp->lift, no clean read until preplace) must fit that window,
+but the reach is >20 s sim under render pacing (the approach alone ~16.7 s). So the held registration
+lapses mid-reach -> watchdog. Fix (firstmate-authorized, key occlusion-window-vs-reach): a SIM-ONLY
+occlusion window sized to the render-paced gated reach -- occlusion_window_s=60 in the sim camera
+config. Physically justified: base parked, carton static; the contradiction gate and the hard
+ceiling still refuse a wrong/aged hold. Camera lane notified in parallel to object if unsafe.
