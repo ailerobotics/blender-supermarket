@@ -51,9 +51,11 @@ def packet(c, t=1., **kwargs):
                               (.4, 0., .2, 0., 0., 0., 1.), .99)
     target = Target(f'target-{t}', 'test_fixture', t, c.destination,
                     (.5, .2, .1, 0., 0., 0., 1.), True, (.3, .3, .4))
+    import time
     values = dict(simulation_time=t, observations=(observation,), target=target,
                   parked=True, contact=c.held, feedback_time=t, collision_time=t,
-                  joint_positions=(0.,)*6, scanned_locations=(c.source, c.destination), scan_time=t)
+                  joint_positions=(0.,)*6, scanned_locations=(c.source, c.destination), scan_time=t,
+                  valid_until_steady=time.monotonic() + 100.)  # fresh acquisition deadline by default
     values.update(kwargs)
     return Sensors(**values)
 
@@ -145,54 +147,55 @@ def test_lost_grasp_stops_without_release():
         c.start('transfer', JOB)
 
 
-def test_contact_move_raises_contact_signal_only_on_measured_contact():
-    # Contact-terminated grasp descent (firstmate key contact-move-termination): in the 'contact'
-    # phase, while the move is RUNNING, MEASURED contact raises a {'kind':'contact'} control so
-    # trajectory_host can succeed the goal holding the touch pose (the gripper is against the carton
-    # and cannot reach the commanded free-space pose). Without contact it never signals, keeping the
-    # normal pose-settle; free-space moves (approach/lift/...) never signal contact.
+def _fresh():
+    import time
+    return time.monotonic() + 100.   # a future steady-clock acquisition deadline (require_fresh passes)
+
+
+def test_contact_descent_enables_suction_then_terminates_on_latch():
+    # Suction-grasp choreography + contact-terminated move (firstmate keys). In the 'contact' phase:
+    # (1) issue the descent move; (2) enable suction ONCE a fresh valid_until_steady is present (the
+    # grip command carries an acquisition deadline); (3) s.contact is the grip LATCH (needs suction
+    # on), so once it latches, raise {'kind':'contact'} to terminate the move holding the touch pose;
+    # (4) advance to grasp. Free-space moves never enable suction or signal contact.
     c, m = make_controller()
     t = run_to(c, 'contact')
-    m.outcome = 'running'                       # the contact descent is now executing
-    r = c.step(.1, packet(c, t, contact=False))     # issues the contact move
-    assert r.status == 'running'
-    r = c.step(.1, packet(c, t+.1, contact=False))  # running, no contact yet -> no signal
-    assert r.status == 'running'
-    assert not any(ctl.get('kind') == 'contact' for ctl in r.controls)
-    r = c.step(.1, packet(c, t+.2, contact=True))   # measured contact -> raise the signal
-    assert r.status == 'running' and c.phase == 'contact'
-    assert any(ctl.get('kind') == 'contact' for ctl in r.controls)
-    m.outcome = 'succeeded'                       # trajectory_host honored the signal (succeed+hold)
-    c.step(.1, packet(c, t+.3, contact=True))
-    assert c.phase == 'grasp'                     # advance to grasp from the achieved contact pose
-
-
-def test_contact_descent_enables_suction_so_it_latches_on_touch():
-    # Suction-grasp choreography: s.contact is the surface gripper's grip-LATCH (needs suction on), not
-    # a touch sensor, so the contact descent must enable suction up front -> it latches the instant the
-    # seals reach the carton, and that latch is the contact that terminates the move. The FREE-SPACE
-    # approach move must NOT enable suction.
-    c, m = make_controller()
-    run_to(c, 'contact')
     m.outcome = 'running'
-    r = c.step(.1, packet(c, 50., contact=False))     # issues the contact move
+    r = c.step(.1, packet(c, t, contact=False, valid_until_steady=_fresh()))        # issue the move
+    assert r.controls[0]['kind'] == 'move'
+    r = c.step(.1, packet(c, t+.1, contact=False, valid_until_steady=_fresh()))     # suction enabled
     assert {'kind': 'gripper', 'enabled': True} in r.controls
-    c2, _ = make_controller()
-    run_to(c2, 'approach')
-    r2 = c2.step(.1, packet(c2, 50., contact=False))   # issues the approach move (free space)
-    assert not any(ctl.get('kind') == 'gripper' for ctl in r2.controls)
+    r = c.step(.1, packet(c, t+.2, contact=False, valid_until_steady=_fresh()))     # running, no latch
+    assert r.status == 'running' and not any(x.get('kind') == 'contact' for x in r.controls)
+    r = c.step(.1, packet(c, t+.3, contact=True, valid_until_steady=_fresh()))      # latch -> terminate
+    assert r.status == 'running' and c.phase == 'contact'
+    assert any(x.get('kind') == 'contact' for x in r.controls)
+    m.outcome = 'succeeded'                                                          # host succeeded+held
+    c.step(.1, packet(c, t+.4, contact=True, valid_until_steady=_fresh()))
+    assert c.phase == 'grasp'
 
 
-def test_free_space_move_never_raises_contact_signal():
-    # The approach (free-space) move keeps its exact pose-settle: it must never emit a contact signal
-    # even if a (spurious) contact were measured mid-flight -- only the 'contact' phase does.
+def test_contact_suction_waits_for_a_fresh_acquisition_deadline():
+    # The grip command must carry an acquisition deadline; under the sensing gate the first held ticks
+    # may lack one (run-137). Do not emit the gripper until valid_until_steady is present.
+    c, m = make_controller()
+    t = run_to(c, 'contact')
+    m.outcome = 'running'
+    c.step(.1, packet(c, t, contact=False, valid_until_steady=_fresh()))            # issue the move
+    r = c.step(.1, packet(c, t+.1, contact=False, valid_until_steady=None))         # no deadline yet
+    assert not any(x.get('kind') == 'gripper' for x in r.controls)                  # suction withheld
+
+
+def test_free_space_move_never_enables_suction_or_signals_contact():
+    # The approach (free-space) move keeps its exact pose-settle: never enables suction, never signals
+    # contact, even if a (spurious) contact is measured mid-flight.
     c, m = make_controller()
     run_to(c, 'approach')
     m.outcome = 'running'
-    c.step(.1, packet(c, 50., contact=False))       # issue the approach move
-    r = c.step(.1, packet(c, 50.1, contact=True))
+    c.step(.1, packet(c, 50., contact=False, valid_until_steady=_fresh()))          # issue approach
+    r = c.step(.1, packet(c, 50.1, contact=True, valid_until_steady=_fresh()))
     assert r.status == 'running' and c.phase == 'approach'
-    assert not any(ctl.get('kind') == 'contact' for ctl in r.controls)
+    assert not any(x.get('kind') in ('contact', 'gripper') for x in r.controls)
 
 
 def test_planning_failure_and_missing_attachment():

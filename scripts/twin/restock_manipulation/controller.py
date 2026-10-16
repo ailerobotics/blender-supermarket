@@ -65,6 +65,7 @@ class TransferController:
         self.last_time = None
         self.evidence, self.reason = [], ''
         self.issued = False
+        self._contact_suction = False   # suction enabled once during the contact descent (grasp latch)
         self.verify_ids = set()
         self.release_time = None
 
@@ -211,17 +212,21 @@ class TransferController:
                     require_fresh(s.valid_until_steady,self.steady_clock)
                 self.motion.begin(self.poses[self.phase], s.joint_positions)
                 self.issued = True
-                controls = ({'kind': 'move', 'pose': self.poses[self.phase]},)
-                if self.phase == 'contact':
-                    # Suction-grasp choreography: s.contact (NativePanelContact.read) is the surface
-                    # gripper's grip-LATCH status (Closed + one object), NOT a touch/force signal, so it
-                    # is only ever True with suction ON. Enable suction AT THE START of the contact
-                    # descent so the gripper LATCHES the moment its seals reach the carton; that latch is
-                    # the measured contact that terminates the move (the contact seam below) and the grasp
-                    # itself. Without this, s.contact stays False through the whole descent and the move
-                    # stalls against the carton until the /sensors watchdog (run-136, 218 ticks, 0 latches).
-                    controls += ({'kind': 'gripper', 'enabled': True},)
-                return self._result(controls)
+                return self._result(({'kind': 'move', 'pose': self.poses[self.phase]},))
+            if self.phase == 'contact' and not self._contact_suction:
+                # Suction-grasp choreography: s.contact (NativePanelContact.read) is the surface gripper's
+                # grip-LATCH status (Closed + one object), NOT a touch/force signal -- only ever True with
+                # suction ON. Enable suction DURING the contact descent so the gripper LATCHES the instant
+                # its seals reach the carton; that latch is the measured contact that terminates the move
+                # (the seam below) and the grasp. The gripper command carries an acquisition deadline, so
+                # wait for a fresh valid_until_steady (under the sensing gate the first ticks may be a bare
+                # held frame with none yet; run-137 emitted it a tick too early) and require_fresh it,
+                # exactly like the grasp phase -- then emit it ONCE.
+                if s.valid_until_steady is None:
+                    return self._result()
+                require_fresh(s.valid_until_steady, self.steady_clock)
+                self._contact_suction = True
+                return self._result(({'kind': 'gripper', 'enabled': True},))
             outcome = self.motion.poll()
             if outcome == 'failed':
                 return self._fail('collision planning or execution failed')
