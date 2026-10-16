@@ -148,9 +148,33 @@ class IsaacCartonSensors:
 
         Integration toggles this each tick from the controller phase: True while the arm EXECUTES a
         validated reach (the rendered frame is unused and the full-res render is the wall cost),
-        False for observe / the preplace+verify re-validations (a fresh render is required). When the
-        gate is off this just records the flag and nothing changes. See ``sensing_render_required``."""
-        self._render_suspended = bool(suspended)
+        False for observe / the preplace+verify re-validations (a fresh render is required).
+
+        On the suspend EDGE this DISABLES the decode camera's render product(s) via the camera's
+        optional ``set_render_products_enabled(False)`` hook, so a ``world.step(render=True)`` during
+        suspension skips the expensive whole-store decode render and pays only for the cheap
+        non-decode products (arm depth / masked_depth / chase recorder -- separate cameras the host
+        nvblox ESDF needs; run-139 died when integration skipped ALL rendering to get the wall win).
+        On the resume EDGE it re-enables the product AND drops the exact-frame reuse snapshot, so the
+        first post-resume capture requires a genuinely NEW render: a stale decode-product frame (its
+        id/stamp unchanged from before suspension) is no longer reused, and the monotonic-frame gate
+        then refuses it until a fresh render lands. Toggling only on edges keeps a steady-state tick
+        cheap. When the gate is off this just records the flag and nothing changes (byte-identical).
+        See ``sensing_render_required``."""
+        suspended = bool(suspended)
+        was = self._render_suspended
+        self._render_suspended = suspended
+        if not self.execution_gate or suspended == was:
+            return
+        toggle = getattr(self.camera, 'set_render_products_enabled', None)
+        if suspended:
+            if toggle is not None:
+                toggle(False)                       # stop the decode render product while held
+        else:
+            if toggle is not None:
+                toggle(True)                        # re-enable for the resume render
+            # Force a fresh render after resume: a stale decode-product frame must not be reused.
+            self._reuse_key = self._reuse_context = self._reuse_qr = None
 
     def _held_capture(self, now, source, destination, motion, contact):
         """Republish the last validated registration (PR 80 occlusion hold) WITHOUT rendering.

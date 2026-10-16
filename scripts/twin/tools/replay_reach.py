@@ -164,6 +164,8 @@ class ReplayCamera:
         self._clean_depth = np.asarray(base_frame["distance_to_image_plane"], float)
         self._occluded_depth = occluded_depth
         self._frame = base_frame
+        self.render_products_enabled = True       # the decode camera's render product (rgb+depth)
+        self.product_toggles = []                 # recorded enable/disable edges (gate render half)
 
     def present(self, record: FrameRecord, *, occluded: bool):
         depth = self._occluded_depth if occluded else self._clean_depth
@@ -181,6 +183,13 @@ class ReplayCamera:
     def add_distance_to_image_plane_to_frame(self):
         pass
 
+    def set_render_products_enabled(self, enabled):
+        """Gate render-half hook: integration's native camera disables the expensive decode render
+        product(s) under suspension so world.step(render=True) renders only the cheap non-decode
+        products. Here we just record the edges so the harness can prove the product was off."""
+        self.render_products_enabled = bool(enabled)
+        self.product_toggles.append(bool(enabled))
+
 
 # --- replay report -----------------------------------------------------------
 
@@ -195,6 +204,7 @@ class ReplayReport:
     log_lines: list = field(default_factory=list)       # COLLECT_CAPTURE-form lines
     occluded_published: int = 0                         # held (flagged-occluded) successes
     rendered: int = 0                                   # frames actually presented (render cost)
+    product_off_during_hold: int = 0                    # held steps with the decode product disabled
 
     def summary(self) -> str:
         parts = [f"frames={self.frames} steps={self.steps} ok={self.ok} "
@@ -224,7 +234,11 @@ def replay(adapter, camera: ReplayCamera, motion, contact, schedule, *,
         suspended = gate and step.occluded
         if gate:
             adapter.set_render_suspended(suspended)
-        if not suspended:
+        if suspended:
+            # The decode render product is disabled under suspension (so world.step(render=True)
+            # would skip the expensive decode render); the held republish needs no new frame.
+            rep.product_off_during_hold += int(not getattr(camera, 'render_products_enabled', True))
+        else:
             camera.present(step.frame, occluded=step.occluded)   # a fresh render
             rep.rendered += 1
         # collision map keeps pace with the packet clock (we are not exercising that gate)
