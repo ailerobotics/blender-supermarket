@@ -99,6 +99,32 @@ def test_pr80_hold_sustains_sensors_through_the_reach():
     assert rep.occluded_published >= 1       # the reach frames are held, not refused
 
 
+def test_sensing_gate_holds_the_reach_without_rendering():
+    # Opt-in sensing gate: observe renders and validates the registration; the occluded reach steps
+    # republish the HELD registration WITHOUT a new render (set_render_suspended), so /sensors keeps
+    # publishing (flagged occluded) while the decode-camera render -- the dominant wall cost -- is
+    # suspended. This is the run-126 wall lever.
+    adapter, cam, motion, contact, loc = build_source_bench(occlusion_window_s=20.0,
+                                                            execution_gate=True)
+    steps = build_schedule(_synthetic_tape(), plan=PhasePlan())
+    rep = replay(adapter, cam, motion, contact, steps, source=loc, destination=loc, gate=True)
+    assert rep.ok == rep.steps                                   # every tick still publishes
+    assert rep.occluded_published >= 1                           # the reach is held, not rendered
+    assert rep.rendered == sum(1 for s in steps if not s.occluded)   # only observe actually rendered
+    assert rep.rendered < rep.steps                              # the reach frames were not rendered
+
+
+def test_sensing_gate_off_renders_every_frame_like_pr80():
+    # Default (gate off): the harness renders every frame -- the PR #80 behaviour (hold still fetches
+    # and decodes a frame each tick). The gate is purely additive; off changes nothing.
+    adapter, cam, motion, contact, loc = build_source_bench(occlusion_window_s=20.0,
+                                                            execution_gate=False)
+    steps = build_schedule(_synthetic_tape(), plan=PhasePlan())
+    rep = replay(adapter, cam, motion, contact, steps, source=loc, destination=loc, gate=False)
+    assert rep.rendered == rep.steps                             # every frame rendered (the wall cost)
+    assert rep.ok == rep.steps
+
+
 def test_exact_repeat_is_reused_but_a_stale_older_frame_is_refused():
     # Two production behaviours on re-presented frames:
     #  * an EXACT repeat (same id+stamp+pixels) is the legitimate stride re-presentation and

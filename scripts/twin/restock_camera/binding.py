@@ -205,7 +205,8 @@ class RenderedSupportContext:
 class StationSensors:
     """Aggregate distinct assigned cameras; no camera implicitly covers the mapper."""
     def __init__(self, *, cameras, profiles, pose_bridge_root, context_providers, location_cameras,
-                 steady_clock=time.monotonic, wall_backstop_s=60., wall_clock=time.monotonic):
+                 steady_clock=time.monotonic, wall_backstop_s=60., wall_clock=time.monotonic,
+                 execution_gate=False):
         from ..restock_manipulation.isaac_sensors import IsaacCartonSensors
         self.location_cameras = dict(location_cameras)
         self.steady_clock = steady_clock
@@ -215,10 +216,17 @@ class StationSensors:
             raise ValueError('camera/location/context binding is incomplete')
         self.adapters = {key:IsaacCartonSensors(camera,pose_bridge_root=pose_bridge_root,
             profiles=profiles,camera_id=key,context_provider=context_providers[key],
-            steady_clock=steady_clock,wall_backstop_s=wall_backstop_s,wall_clock=wall_clock)
+            steady_clock=steady_clock,wall_backstop_s=wall_backstop_s,wall_clock=wall_clock,
+            execution_gate=execution_gate)
             for key,camera in cameras.items()}
         self.sensed_target_bboxes = ()
         self.evidence = ()
+
+    def set_render_suspended(self, suspended):
+        """Fan the opt-in sensing gate (render-suspend) to every per-camera adapter. Integration
+        toggles this each tick from the controller phase; a no-op when the gate is off."""
+        for adapter in self.adapters.values():
+            adapter.set_render_suspended(suspended)
 
     def capture(self, now, source, destination, motion, contact):
         from ..restock_manipulation.types import Sensors

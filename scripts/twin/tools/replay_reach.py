@@ -194,6 +194,7 @@ class ReplayReport:
     errors: dict = field(default_factory=dict)          # message -> count
     log_lines: list = field(default_factory=list)       # COLLECT_CAPTURE-form lines
     occluded_published: int = 0                         # held (flagged-occluded) successes
+    rendered: int = 0                                   # frames actually presented (render cost)
 
     def summary(self) -> str:
         parts = [f"frames={self.frames} steps={self.steps} ok={self.ok} "
@@ -204,17 +205,28 @@ class ReplayReport:
 
 
 def replay(adapter, camera: ReplayCamera, motion, contact, schedule, *,
-           source: str, destination: str) -> ReplayReport:
+           source: str, destination: str, gate: bool = False) -> ReplayReport:
     """Drive the production ``adapter.capture`` over the replay schedule.
 
     Emits one ``COLLECT_CAPTURE``-form line per step (identical in form to the live log),
     tallies outcomes, and flags held (occluded) successes -- the PR #80 sustain behaviour.
+
+    ``gate`` exercises the opt-in SENSING GATE: on an occluded (execution-phase) step the harness
+    signals ``adapter.set_render_suspended(True)`` and does NOT present a new frame, so the adapter
+    republishes the last validated registration (flagged occluded) WITHOUT rendering -- the wall
+    lever. Observe (clean) steps render as before. ``rep.rendered`` counts actual renders; with the
+    gate it drops to the observe prefix while ``/sensors`` keeps publishing through the reach.
     """
     rep = ReplayReport(frames=len({s.frame.frame_id for s in schedule}), steps=len(schedule))
     calls = 0
     for step in schedule:
         calls += 1
-        camera.present(step.frame, occluded=step.occluded)
+        suspended = gate and step.occluded
+        if gate:
+            adapter.set_render_suspended(suspended)
+        if not suspended:
+            camera.present(step.frame, occluded=step.occluded)   # a fresh render
+            rep.rendered += 1
         # collision map keeps pace with the packet clock (we are not exercising that gate)
         motion.collision_time = step.now
         try:
@@ -281,7 +293,7 @@ def _quad(center, size):
         * [*np.asarray(size) / 2, 0]
 
 
-def build_source_bench(*, occlusion_window_s=20.0, location="backstock_00"):
+def build_source_bench(*, occlusion_window_s=20.0, location="backstock_00", execution_gate=False):
     """Build a REAL commissioned source ``IsaacCartonSensors`` over an analytic empty
     support, via production commissioning APIs. Returns (adapter, camera, motion, contact).
 
@@ -350,7 +362,8 @@ def build_source_bench(*, occlusion_window_s=20.0, location="backstock_00"):
     replay_camera = ReplayCamera(frame, k, occluded_depth)
     adapter = isaac_sensors.IsaacCartonSensors(
         replay_camera, pose_bridge_root=str(_bench_pose_bridge_root()), profiles={},
-        context_provider=boot, camera_id="source", steady_clock=lambda: 0.)
+        context_provider=boot, camera_id="source", steady_clock=lambda: 0.,
+        execution_gate=execution_gate)
     motion = SimpleNamespace(parked=lambda: True, collision_time=1.,
                              joint_positions=lambda: (0.,) * 6, observe_source=lambda o: None)
     contact = SimpleNamespace(read=lambda: False)
