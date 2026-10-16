@@ -266,6 +266,12 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     robot_body=world.scene.add(SingleRigidPrim(prim_path=paths['base_link'],name='restock_base'))
     cart_body=world.scene.add(SingleRigidPrim(prim_path=cart_path,name='restock_cart'))
     world.reset()
+    # Give the base hold the live wheel angles so hold() can lock each wheel at its current angle
+    # (the stationary parking brake); read lazily from the articulation at hold time.
+    _wheel_dof=[robot.get_dof_index(p.rsplit('/',1)[-1])
+                for p in (paths['left_wheel_joint'],paths['right_wheel_joint'])]
+    controller.wheel_angle_reader=lambda: [float(np.asarray(robot.get_joint_positions(),float)[i])
+                                           for i in _wheel_dof]
     # Establish documented spawn state before any mission or recorded step.
     # This second reset applies joint defaults; it is never used during a mission.
     positions=np.asarray(robot.get_joint_positions(),float).copy()

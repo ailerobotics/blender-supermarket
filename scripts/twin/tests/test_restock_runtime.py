@@ -42,6 +42,8 @@ class RuntimeTests(unittest.TestCase):
                       step=lambda dt,p:NS(status='succeeded',linear=0.,angular=0.,reason=''),
                       cancel=lambda:self.stops.append('nav'))
         self.mobile = NS(park=lambda:self.stops.append('base'),
+                         hold=lambda:self.stops.append('hold'),   # stationary base parking brake
+                         release=lambda:None,
                          command=lambda *a,**k:self.commands.append(a),
                          attach=lambda obs:None, coupling_state=lambda o:{'healthy':True})
         self.manip = NS(start=lambda a,j:None,cart_location='rollwagen',
@@ -269,7 +271,7 @@ class StallGuardTests(unittest.TestCase):
     def _collect_adapter(self, controller, *, stall_window_s=20.):
         manip = ManipulationBridge(controller, owns_sensor_io=True)
         nav = NS(start=lambda *a, **k: None, cancel=lambda: None)
-        mobile = NS(park=lambda: None)
+        mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None)
         self._pkt = [self._packet('reach-0', 0.)]
         port = NS(advance=lambda dt: self._pkt[0], controls=lambda c: None, stop=lambda: None)
         poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
