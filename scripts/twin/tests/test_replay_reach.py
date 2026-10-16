@@ -69,7 +69,8 @@ def test_max_frames_bounds_the_replay():
 
 cv2 = pytest.importorskip("cv2")
 
-from scripts.twin.tools.replay_reach import build_source_bench, replay, ReplayStep  # noqa: E402
+from scripts.twin.tools.replay_reach import (build_source_bench, replay, replay_source_target,  # noqa: E402
+                                             ReplayStep)
 
 
 def _synthetic_tape(n=7):
@@ -123,6 +124,33 @@ def test_sensing_gate_off_renders_every_frame_like_pr80():
     rep = replay(adapter, cam, motion, contact, steps, source=loc, destination=loc, gate=False)
     assert rep.rendered == rep.steps                             # every frame rendered (the wall cost)
     assert rep.ok == rep.steps
+
+
+def test_collect_source_target_holds_fresh_through_the_gated_reach():
+    # The run-131 coverage gap: under the sensing gate the decode frame freezes, so the collect
+    # source_target_provider's pick observation stamp goes stale -> the consumer's 0.5 s freshness
+    # gate rejects every tick -> /sensors starves. With the provider honoring suspension, the held
+    # pick is republished with a FRESH stamp, so the collect path stays fresh through the reach while
+    # the render -- the wall cost -- is suspended.
+    adapter, cam, motion, contact, loc = build_source_bench(occlusion_window_s=20.0,
+                                                            execution_gate=True, with_pick=True)
+    steps = build_schedule(_synthetic_tape(), plan=PhasePlan())
+    rep = replay_source_target(adapter, cam, motion, contact, steps, location=loc, gate=True)
+    assert rep.fresh == rep.steps                        # every tick delivers a fresh collect target
+    assert rep.stale == 0                                # never the stale-stamp starvation
+    assert rep.held >= 1                                 # the reach targets are held (occluded)
+    assert rep.rendered == sum(1 for s in steps if not s.occluded)   # only observe rendered
+
+
+def test_collect_source_target_without_gate_renders_every_frame():
+    # Gate off: the provider path is unchanged -- every frame renders and the collect target carries
+    # the measuring-frame stamp (fresh because the frame is re-rendered each tick).
+    adapter, cam, motion, contact, loc = build_source_bench(occlusion_window_s=20.0,
+                                                            execution_gate=False, with_pick=True)
+    steps = build_schedule(_synthetic_tape(), plan=PhasePlan())
+    rep = replay_source_target(adapter, cam, motion, contact, steps, location=loc, gate=False)
+    assert rep.rendered == rep.steps                     # every frame rendered (the wall cost)
+    assert rep.held == 0                                 # nothing is gate-held when off
 
 
 def test_exact_repeat_is_reused_but_a_stale_older_frame_is_refused():

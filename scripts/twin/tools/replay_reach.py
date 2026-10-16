@@ -260,6 +260,44 @@ def replay(adapter, camera: ReplayCamera, motion, contact, schedule, *,
     return rep
 
 
+def replay_source_target(adapter, camera: ReplayCamera, motion, contact, schedule, *,
+                         location: str, gate: bool = False, max_age: float = 0.5):
+    """Replay the COLLECT ``source_target_provider`` over the schedule (observe -> occluded reach).
+
+    Mirrors the integration consumer (``isaac_factory``): a target is *fresh* iff
+    ``-0.02 <= now - target.stamp <= max_age``. With the gate, the occluded reach steps suspend the
+    render and the provider republishes the held pick with a FRESH stamp, so the collect path keeps
+    delivering a fresh target through the reach instead of the run-131 starvation (a frozen frame's
+    stale observation stamp failing this gate every tick). Returns fresh / held / rendered tallies.
+    """
+    from scripts.twin.restock_camera.source_target import build_source_target_provider
+    provider = build_source_target_provider(adapter, motion, contact, source_location=location)
+    rep = SimpleNamespace(steps=len(schedule), fresh=0, stale=0, held=0, rendered=0,
+                          none=0, errors={})
+    for step in schedule:
+        suspended = gate and step.occluded
+        if gate:
+            adapter.set_render_suspended(suspended)
+        if not suspended:
+            camera.present(step.frame, occluded=step.occluded)
+            rep.rendered += 1
+        motion.collision_time = step.now
+        try:
+            target = provider(step.now)
+        except Exception as exc:
+            rep.errors[str(exc)] = rep.errors.get(str(exc), 0) + 1
+            continue
+        if target is None:
+            rep.none += 1
+            continue
+        if -0.02 <= step.now - target.stamp <= max_age:
+            rep.fresh += 1
+            rep.held += bool(target.occluded)
+        else:
+            rep.stale += 1                              # the consumer would reject -> /sensors starves
+    return rep
+
+
 # --- analytic source bench (production-API construction; NOT sensor evidence) -
 
 # A minimal pinhole pose bridge for the bench: this is projection MATH only (the same
@@ -293,7 +331,8 @@ def _quad(center, size):
         * [*np.asarray(size) / 2, 0]
 
 
-def build_source_bench(*, occlusion_window_s=20.0, location="backstock_00", execution_gate=False):
+def build_source_bench(*, occlusion_window_s=20.0, location="backstock_00", execution_gate=False,
+                       with_pick=False):
     """Build a REAL commissioned source ``IsaacCartonSensors`` over an analytic empty
     support, via production commissioning APIs. Returns (adapter, camera, motion, contact).
 
@@ -354,14 +393,45 @@ def build_source_bench(*, occlusion_window_s=20.0, location="backstock_00", exec
     C.apply_baselines(boot, C.load_baselines(dataset), required_locations=[location])
     boot.occlusion_window_s = occlusion_window_s
 
-    occluded_depth = depth.copy()
+    # Optional pick carton on the commissioned support, so the COLLECT source_target_provider path
+    # (restock_camera/source_target.py) can be replayed: a raised box with a decodable top-face SKU
+    # QR, authored into a SEPARATE live frame (commission stays on the empty support above). Its top
+    # sits one carton-height above the support plane, so the depth patch + height gate pass and the
+    # production decode reads the SKU as inventory (not a support marker).
+    profiles = {}
+    live_frame, live_depth = frame, depth
+    if with_pick:
+        from scripts.twin.restock_manipulation.types import ProductProfile
+        sku, dims = "bench_sku", (.24, .18, .16)
+        top_z = .2 + dims[2]                              # carton top in the base/map frame
+        top_quad = pix(_quad([0, 0, top_z], [dims[0], dims[1]]))   # full top footprint (depth patch)
+        # Warp the (square) QR onto a centred SQUARE region of the top face -- a non-square dest
+        # would stretch the modules and make it undecodable. Match the support-marker corner order
+        # ([3,2,1,0]) so it is not mirrored.
+        qr_side = min(dims[0], dims[1]) - .02
+        dest = pix(_quad([0, 0, top_z], [qr_side, qr_side])[[3, 2, 1, 0]])
+        live_depth = depth.copy()
+        live_depth[polygon_mask(top_quad, k)] = 1. - top_z   # camera-frame depth of the raised top
+        pick_gray = gray.copy()
+        qr = cv2.copyMakeBorder(cv2.QRCodeEncoder_create().encode(sku), 4, 4, 4, 4,
+                                cv2.BORDER_CONSTANT, value=255)
+        qr = cv2.resize(qr, (400, 400), interpolation=cv2.INTER_NEAREST)
+        _, corners, _ = cv2.QRCodeDetector().detectAndDecode(qr)
+        hom = cv2.getPerspectiveTransform(corners[0].astype(np.float32), dest.astype(np.float32))
+        pick_gray = np.minimum(pick_gray, cv2.warpPerspective(qr, hom, (k.width, k.height),
+                                                              flags=cv2.INTER_NEAREST, borderValue=255))
+        live_frame = dict(rgb=np.repeat(pick_gray[:, :, None], 3, axis=2),
+                          distance_to_image_plane=live_depth, rendering_frame=1, rendering_time=1.)
+        profiles = {sku: ProductProfile(sku, dims, (0., 0., 0., 1.))}
+
+    occluded_depth = live_depth.copy()
     # The reaching arm hides the fixed camera's independent witness patch (markers still
     # register): the fresh full-footprint view refuses, so the capture must hold or go strict.
     occluded_depth[polygon_mask(witness, k)] = np.nan
 
-    replay_camera = ReplayCamera(frame, k, occluded_depth)
+    replay_camera = ReplayCamera(live_frame, k, occluded_depth)
     adapter = isaac_sensors.IsaacCartonSensors(
-        replay_camera, pose_bridge_root=str(_bench_pose_bridge_root()), profiles={},
+        replay_camera, pose_bridge_root=str(_bench_pose_bridge_root()), profiles=profiles,
         context_provider=boot, camera_id="source", steady_clock=lambda: 0.,
         execution_gate=execution_gate)
     motion = SimpleNamespace(parked=lambda: True, collision_time=1.,

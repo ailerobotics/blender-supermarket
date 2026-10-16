@@ -73,6 +73,49 @@ def test_provider_ignores_observations_at_other_locations():
     assert provider(2.) is None
 
 
+# --- render-suspension (sensing gate) hold on the collect path -----------------
+
+def _gated_adapter(observations, *, render_suspended, occluded, camera_id='source'):
+    """A duck-typed source adapter modelling the gate: under suspension capture serves a held
+    republish whose observation stamp is STALE (the frozen frame) and whose evidence is occluded."""
+    ev = _evidence()
+    ev['registration_occluded'] = occluded
+    packet = Sensors(2., tuple(observations), None, True, False, 2., 2., (0.,)*6, (), 2.)
+    return NS(capture=lambda now, s, d, m, c: packet, evidence=(ev,), camera_id=camera_id,
+              render_suspended=render_suspended)
+
+
+def test_provider_holds_with_a_fresh_motion_completion_stamp_under_suspension():
+    # The frozen frame's observation stamp is stale (2.0) while the tick is far ahead (now=12.0):
+    # the provider must stamp the held pick with `now` so the consumer's live-freshness gate passes,
+    # flag it occluded, and keep the held pose. This is the run-131 fix.
+    adapter = _gated_adapter([_carton()], render_suspended=True, occluded=True)
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(12.0)
+    assert target.stamp == 12.0 and target.occluded is True        # fresh motion-completion stamp
+    assert target.pose_station == (-.42,4.9,.81,0.,0.,.38,.92)      # the held pick pose
+    assert target.provenance['registration_occluded'] is True
+    # the isaac_factory consumer freshness gate (-0.02 <= now - stamp <= 0.5) now passes
+    assert -0.02 <= 12.0 - target.stamp <= 0.5
+
+
+def test_provider_stamp_is_the_frozen_observation_stamp_without_the_fix_would_starve():
+    # Same held packet, but if the provider used the observation stamp (the old behaviour) the gate
+    # would reject: now - 2.0 = 10 > 0.5. The test documents the gap the fix closes.
+    assert not (-0.02 <= 12.0 - 2.0 <= 0.5)
+
+
+def test_provider_is_byte_identical_when_not_suspended_even_if_occluded():
+    # Gate off / not suspended: even a PR 80 rendered-occluded frame (evidence occluded, but the
+    # frame is freshly rendered so its observation stamp is fresh) keeps the measuring-frame stamp
+    # and occluded=False on the target -- unchanged from before the gate.
+    adapter = _gated_adapter([_carton()], render_suspended=False, occluded=True)
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(2.0)
+    assert target.stamp == 2.0 and target.occluded is False
+    # an adapter with no render_suspended attribute at all behaves the same (duck-typed default).
+    plain, _ = _adapter([_carton()])
+    assert build_source_target_provider(plain, motion=NS(), contact=NS())(2.).occluded is False
+
+
 # --- build_sensing wiring -----------------------------------------------------
 
 def test_build_sensing_exposes_source_target_provider_when_configured(monkeypatch):
