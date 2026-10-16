@@ -211,7 +211,17 @@ class TransferController:
                     require_fresh(s.valid_until_steady,self.steady_clock)
                 self.motion.begin(self.poses[self.phase], s.joint_positions)
                 self.issued = True
-                return self._result(({'kind': 'move', 'pose': self.poses[self.phase]},))
+                controls = ({'kind': 'move', 'pose': self.poses[self.phase]},)
+                if self.phase == 'contact':
+                    # Suction-grasp choreography: s.contact (NativePanelContact.read) is the surface
+                    # gripper's grip-LATCH status (Closed + one object), NOT a touch/force signal, so it
+                    # is only ever True with suction ON. Enable suction AT THE START of the contact
+                    # descent so the gripper LATCHES the moment its seals reach the carton; that latch is
+                    # the measured contact that terminates the move (the contact seam below) and the grasp
+                    # itself. Without this, s.contact stays False through the whole descent and the move
+                    # stalls against the carton until the /sensors watchdog (run-136, 218 ticks, 0 latches).
+                    controls += ({'kind': 'gripper', 'enabled': True},)
+                return self._result(controls)
             outcome = self.motion.poll()
             if outcome == 'failed':
                 return self._fail('collision planning or execution failed')

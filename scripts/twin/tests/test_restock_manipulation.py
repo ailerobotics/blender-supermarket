@@ -167,6 +167,22 @@ def test_contact_move_raises_contact_signal_only_on_measured_contact():
     assert c.phase == 'grasp'                     # advance to grasp from the achieved contact pose
 
 
+def test_contact_descent_enables_suction_so_it_latches_on_touch():
+    # Suction-grasp choreography: s.contact is the surface gripper's grip-LATCH (needs suction on), not
+    # a touch sensor, so the contact descent must enable suction up front -> it latches the instant the
+    # seals reach the carton, and that latch is the contact that terminates the move. The FREE-SPACE
+    # approach move must NOT enable suction.
+    c, m = make_controller()
+    run_to(c, 'contact')
+    m.outcome = 'running'
+    r = c.step(.1, packet(c, 50., contact=False))     # issues the contact move
+    assert {'kind': 'gripper', 'enabled': True} in r.controls
+    c2, _ = make_controller()
+    run_to(c2, 'approach')
+    r2 = c2.step(.1, packet(c2, 50., contact=False))   # issues the approach move (free space)
+    assert not any(ctl.get('kind') == 'gripper' for ctl in r2.controls)
+
+
 def test_free_space_move_never_raises_contact_signal():
     # The approach (free-space) move keeps its exact pose-settle: it must never emit a contact signal
     # even if a (spurious) contact were measured mid-flight -- only the 'contact' phase does.
