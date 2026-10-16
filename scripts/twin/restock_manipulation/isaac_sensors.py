@@ -511,20 +511,55 @@ class IsaacCartonSensors:
                     roi=tuple(map(int,[*lo,*hi])),source='sensor_pose_registered_catalog_volume')
 
     def _label_yaw(self, polygon, depth, intr):
+        """Fit the carton-top QR yaw from ALL FOUR decoded corners, not one top edge.
+
+        The printed label is a square centred on the carton top (marker axes +X right,
+        +Y up, +Z out of the top). Each corner is backprojected with a 3x3 depth patch
+        that rejects a corner straddling a depth discontinuity (the carton rim / a gap),
+        then a single in-plane rotation is fit to the four map-frame corners by orthogonal
+        Procrustes -- the same rigid fit ``sensed.register_marker`` uses for supports -- and
+        its yaw is the carton yaw. Using four neighbourhood-sampled corners averages
+        per-corner pixel/depth quantisation and refuses a mis-sampled corner, so one noisy
+        or boundary corner cannot rotate the fitted yaw by degrees the way the former two
+        single-pixel top-edge corners could (run-177 collect seal-alignment hardening).
+        The returned angle is the SAME marker-+X direction in the map frame as before: on a
+        clean flat top the four-corner fit and the old top edge agree to < 0.05 deg.
+        """
         fx,fy,cx,cy = intr
-        points = []
-        for u,v in polygon[:2]:
+        depth = np.asarray(depth)
+        corners = []
+        for u,v in polygon:
             ui,vi = int(round(u)),int(round(v))
-            if not (0 <= ui < depth.shape[1] and 0 <= vi < depth.shape[0]):
+            if not (1 <= ui < depth.shape[1]-1 and 1 <= vi < depth.shape[0]-1):
                 raise ValueError('QR corner outside depth image')
-            z = depth[vi,ui]
-            if not np.isfinite(z) or z <= 0:
+            patch = depth[vi-1:vi+2,ui-1:ui+2]
+            if not np.isfinite(patch).all() or np.any(patch <= 0):
                 raise ValueError('QR orientation lacks valid depth')
-            points.append(self.transform @ np.array([(u-cx)*z/fx,(v-cy)*z/fy,z,1.]))
-        axis = points[1]-points[0]
-        if np.linalg.norm(axis[:2]) < .005 or abs(axis[2]) > .004:
+            if np.ptp(patch) > .015:
+                raise ValueError('QR corner straddles a depth discontinuity')
+            z = float(depth[vi,ui])
+            corners.append((self.transform @ np.array([(ui-cx)*z/fx,(vi-cy)*z/fy,z,1.]))[:3])
+        corners = np.asarray(corners)
+        if np.linalg.norm(np.ptp(corners[:,:2],axis=0)) < .01:
             raise ValueError('QR top orientation is uncertain/tilted')
-        return math.atan2(axis[1],axis[0])
+        # A flat carton top keeps the four corners within a few mm in world Z; constrain to
+        # gravity exactly as the former abs(edge_z) edge-tilt guard did (dense top-patch depth
+        # independently re-checks this plane in _check_top_patch).
+        if np.ptp(corners[:,2]) > .006:
+            raise ValueError('QR top orientation is uncertain/tilted')
+        model = np.array([[-1,1],[1,1],[1,-1],[-1,-1]],float)   # TL,TR,BR,BL, marker +X right/+Y up
+        xy = corners[:,:2]
+        model_center,center = model.mean(0),xy.mean(0)
+        u,_,vt = np.linalg.svd((model-model_center).T @ (xy-center))
+        rotation = vt.T @ u.T
+        if np.linalg.det(rotation) < 0:
+            vt[-1] *= -1
+            rotation = vt.T @ u.T
+        scale = np.linalg.norm(xy-center,axis=1).sum()/np.linalg.norm(model-model_center,axis=1).sum()
+        residual = float(np.max(np.linalg.norm((model-model_center)*scale @ rotation.T+center-xy,axis=1)))
+        if not np.isfinite(residual) or residual > .01:
+            raise ValueError('QR top orientation is uncertain/tilted')  # corners are not a rigid square
+        return math.atan2(rotation[1,0],rotation[0,0])
 
     def _check_top_patch(self, observation, profile, depth, intr):
         # A dense interior grid requires depth agreement over the registered
