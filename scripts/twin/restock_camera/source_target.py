@@ -13,6 +13,8 @@ not this module's job.
 Contract: ``data/mobile-restock-v2/report.md`` section "Collect sensing contract".
 No Isaac/ROS imports: the adapter is duck-typed (``capture``, ``evidence``, ``camera_id``).
 """
+import math
+import os
 from dataclasses import dataclass
 
 
@@ -95,6 +97,21 @@ def build_source_target_provider(adapter, motion, contact, *, source_location='b
                           registration_uncertainty_m=evidence['registration_uncertainty_m'],
                           qr_rgb_sha256=evidence['qr_rgb_sha256'],
                           registration_occluded=bool(evidence.get('registration_occluded')))
+        # Localisation diagnostic (opt-in, RESTOCK_SOURCE_YAW_DIAG=1; silent + byte-identical when
+        # unset). The carton yaw that reaches the grasp is `yaw(pose_station)` -- and `pose_station`
+        # is expressed in the adapter's LIVE `base_from_camera` frame (read off ur_base_link each
+        # capture, native_cameras.CameraRig.base_from_camera), i.e. the carton yaw RELATIVE TO THE
+        # ARM BASE at the capture tick. For an axis-aligned carton docked at base world-yaw b, a
+        # CORRECT observation reads `-b` here (carton_world 0 - base b). Logging it next to the base
+        # yaw (which integration records in nav-trace) localises a residual grasp-yaw error: if this
+        # equals `-base_yaw` the camera observation is correct and the bias is downstream (grasp-pose
+        # construction / execution base frame); if it stays ~0 while the base is at `b!=0`, the
+        # observation is in a stale base frame (held across base motion). See run-182 diagnosis.
+        if os.environ.get('RESTOCK_SOURCE_YAW_DIAG', '0') != '0':
+            obs_yaw = math.degrees(2.0 * math.atan2(obs.pose[5], obs.pose[6]))
+            print('SOURCE_YAW_DIAG loc=%s sku=%s obs_yaw_base_deg=%+.3f occluded=%s stamp=%.3f '
+                  'frame_id=%s' % (source_location, obs.sku, obs_yaw, suspended, stamp,
+                                   evidence['current_frame_id']), flush=True)
         return SourceTarget(sku=obs.sku, pose_station=tuple(obs.pose),
                             stamp=stamp, provenance=provenance,
                             location=source_location, station_frame=station_frame,
