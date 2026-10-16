@@ -73,6 +73,16 @@ def description(config):
               read_esdf_world=True, update_esdf_on_request=True,
               esdf_service_name=NS + '/nvblox_node/get_esdf_and_gradient',
               joint_states_topic=NS + '/joint_states', enable_cuda_mps=False,
+              # Densify the emitted trajectory. MoveIt's ValidateSolution FCL-checks the LINEARLY
+              # interpolated path between cuMotion's output points; at the stock 0.05 s those chords
+              # cut across the curved reach and FCL finds the gripper plate (surface_plate_1) clipping
+              # base_link on SOME plan seeds (recurring INVALID_MOTION_PLAN: run-122/129), while the
+              # base collision buffer alone is seed-insufficient. 0.02 s makes the output hug the true
+              # (collision-checked) path so the densified validation agrees. Measured NOT to cost wall:
+              # run-123 (0.02) and run-126 (0.05) both hit the contact descent's backstop at the same
+              # 1200 s -- the descent length, not the output sampling, drives wall (the sensing gate
+              # addresses that). Paired with the base buffer for belt-and-braces seed robustness.
+              interpolation_dt=0.02,
               static_planning_scene_service_name=NS + '/publish_static_planning_scene')
 
     def component(package, plugin, name, parameters, remappings=()):
