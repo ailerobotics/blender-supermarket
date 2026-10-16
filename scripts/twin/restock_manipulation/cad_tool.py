@@ -206,6 +206,15 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
         # plugin seals only on a near-perpendicular approach (~1-2 deg); compliant/driven rotation
         # does NOT widen that (proven natively, data/surface-gripper-latch-v1), so rotation stays
         # locked and the arm must present the pad roughly flat.
+        #
+        # That ~2 deg tolerance is SURFACE-RELATIVE, not world-frame: it is the angle between the
+        # pad forward axis and the gripped FACE normal, so a flush pad latches at ANY carton yaw
+        # (measured: a pad held flush to a 4 deg / 8 deg-yawed carton seals; a pad 4 deg off a flat
+        # face does not -- data/sim-restock-stations-v1 report `gripper-seal-align`,
+        # evidence/probe_seal_frame.py). The gate is already keyed to the gripped surface; the plugin
+        # exposes NO angle attribute, so this floor cannot be widened from here. A seal therefore
+        # needs the pad presented within ~2 deg of the TRUE face -- an accurate grasp ORIENTATION
+        # (observation/pose policy), NOT a change in this authoring.
         for axis in ('transX', 'transY', 'rotX', 'rotY', 'rotZ'):
             limit = UsdPhysics.LimitAPI.Apply(prim, axis)
             limit.CreateLowAttr(1.)

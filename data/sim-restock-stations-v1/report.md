@@ -96,6 +96,70 @@ then ended `Closed`-but-empty with no lift.
 Final authority is a full mission run: the shipped `SEAL_DIAG`/`probe()` will log the grasp numbers
 there, and the integration lane confirms the sealed grasp → lift → couple → tow → park in-mission.
 
+---
+
+# Grasp-yaw seal alignment (key `gripper-seal-align`)
+
+With PR 102 (the pure-observer `read()`) merged, run-177 reaches the grasp but still never seals.
+`SEAL_DIAG` pinpoints why: the side-grasp pad reaches the carton (`min_gap_mm 0`, vertical tilt
+89.875° correct) but `gripped_n = 0`, and the pad forward axis is `[0.073, 0.997, -0.002]` =
+**4.19° off world +Y** — above the plugin's ~2° seal floor. This section measures where that 4.2°
+comes from (Task 2) and whether the seal gate is world-frame or surface-relative (Task 1).
+
+## (Task 2) The 4.2° is the collect **source observation** yaw, not the base or the gate
+
+- **True carton yaw ≈ 0.00°.** `run-177/mission.usda` `def Mesh "HandlingUnit"` authors
+  `quatf xformOp:orient = (-5.56e-9, -8.86e-10, 1.81e-8, 1)` — identity to ~1e-8 rad; the pick
+  carton is axis-aligned (flush to the backstock wall).
+- **Grasp yaw tracks the observed source yaw.** `wall_policy.py:56` sets
+  `placement.yaw = yaw(source.observation.pose)`, and upstream `shelfbot…geometry.wall_grip`
+  (verbatim) computes `angle = placement.yaw + wall·90°`, `quat = yaw_quat(angle)·grasp_quat`.
+  The `wall·90°` term is a fixed quadrant, so the pad-forward's deviation from the wall-nominal
+  face normal **equals the observed source yaw**.
+- Measured pad forward `[0.073, 0.997, -0.002]` → `atan2(0.073, 0.997) = 4.19°` off +Y; the base
+  dock yaw is ~0.6° and the arm tracked within 0.57° of command (integration SEAL_DIAG), so the
+  commanded grasp orientation carries ~3.6–4.2°.
+
+⇒ **The collect source observation estimates the carton yaw ~4.2° (≈3.6° net of the base dock) off
+its true ~0° pose.** That bias originates in the camera lane's `restock_camera` source_target, not
+in any file this lane owns. (Firstmate relaunched the camera lane on this bias; inbox 011.)
+
+## (Task 1) The native seal gate is **surface-relative**, already keyed to the gripped face
+
+A static GPU harness (`probe_surface.py`) drives the REAL `author_native_gripper` +
+`NativePanelContact`: the panel body (dynamic, pinned to a kinematic carrier) is held `GAP = 3 mm`
+from a carton face, suction enabled, and latch measured. It separates a top grasp from a side grasp
+and, for side grasps, a pad misaligned from a flat face vs a pad held **flush** to a yawed carton.
+`~/datasets/sim-restock-stations-v1/surface-20261016-183950` (`/tmp/aile-gpu.lock`, heavy=2500,
+runtime `gpu-runtime-578/root`):
+
+| recipe | grasp | pad vs TRUE face | latched | gripped |
+|---|---|---|---|---|
+| `top_flat` | top-down | 0° | **yes** | `['/World/Carton']` (sanity — harness latches) |
+| `side_flat` | side | 0° | **yes** | `['/World/Carton']` (a flush side grasp seals) |
+| `side_pad4` | side | **4.0°** | **no** | `[]` (reproduces run-177) |
+| `side_both4` | side | 0° (pad ∥ **4°-yawed** carton) | **yes** | `['/World/Carton']` |
+| `side_both8` | side | 0° (pad ∥ **8°-yawed** carton) | **yes** | `['/World/Carton']` |
+
+**Verdict: the gate is surface-relative, not world-frame.** A flush pad latches at *any* carton
+yaw (`side_both4`/`side_both8` seal with the carton yawed 4° and 8°); the gate rejects only when the
+pad is misaligned from the *real* contacted face (`side_pad4`, 4° off a flat face → no grip — the
+exact run-177 condition). So the authored forward axis + per-seal raycast already key the ~2°
+tolerance to the gripped surface normal — which is precisely what Task 1 asked the gate to be.
+
+Consequences for the fix:
+- There is **no world-frame bug in `cad_tool.py`** to correct; the gate already does the
+  surface-relative thing and is robust to the carton's own yaw.
+- The plugin's ~2° *pad-vs-true-surface* tolerance is a compiled limit of
+  `isaacsim.robot.surface_gripper` (no angle attribute among `maxGripDistance / clearanceOffset /
+  forces / retryInterval`; rotational joint compliance was already proven not to widen it,
+  `data/surface-gripper-latch-v1`). **No `author_native_gripper` lever widens that angle gate.**
+- The mission's seal therefore needs the pad presented within ~2° of the *true* face. The only
+  in-this-lane lever for that is the **grasp orientation** (`wall_policy.py:56`): source the pad
+  rotation from the design-known wall normal instead of the noisy observed yaw. That overlaps the
+  camera lane's relaunched observation fix and changes behaviour for a genuinely-tilted carton, so
+  it is raised to firstmate rather than taken unilaterally.
+
 ## Definition of done
 
 - Diagnostic: `SEAL_DIAG`/`probe()` in `cad_tool.py`, CPU test, logged every grasp tick in-mission.
