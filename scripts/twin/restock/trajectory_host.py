@@ -34,7 +34,7 @@ FEEDBACK_RENDER_LEAD_S = 0.2
 # grasp legitimately took ~170 s WALL under full-res per-tick capture (run-94), and a tight wall deadline
 # (``20 + plan.times[-1]*5``) false-failed that healthy grasp -- the executor analogue of the host-side
 # RosMotionPort wall-deadline bug fixed on the sim clock in the same wave.
-EXECUTE_WALL_BACKSTOP_S = 1200.0
+EXECUTE_WALL_BACKSTOP_S = 1800.0
 # Terminal settle gate: the measured joints must reach the planned end within GOAL_POSITION_TOL (rad)
 # and GOAL_VELOCITY_TOL (rad/s) before GOAL_SETTLE_MARGIN_S sim seconds past the trajectory end.
 # Position stays tight (grasp precision); the velocity tol and the settle window are relaxed for the
