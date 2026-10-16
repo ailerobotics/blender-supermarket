@@ -82,7 +82,7 @@ def inspect_tool(urdf_path):
 
 
 def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
-                           max_gap=.005, force_limit=30., clearance_offset=.003, retry_interval=1.):
+                           max_gap=.005, force_limit=30., clearance_offset=.003, retry_interval=1e6):
     """Author BEFORE physics starts, on the task's composed output stage only.
 
     body_path must name the actual rigid body carrying the CAD panel (importers
@@ -100,9 +100,21 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
     latched). body0 is the panel; body1 is empty (world) with both local poses
     authored; the shear/tilt axes are locked and the approach axis (local +Z, the
     forward/suction axis) is a small 0..max_gap compliant stroke with a drive; a
-    positive clearanceOffset places the suction plane off the panel face and a
-    positive retryInterval gives the plugin a window to form the seal (retryInterval 0
-    abandons the close in the same step).
+    positive clearanceOffset places the suction plane off the panel face.
+
+    retryInterval is the window the plugin keeps *attempting* the seal after a single
+    close command before giving up to Open. The mission enables suction ONCE at the
+    start of the contact descent (controller.py `contact` phase) and expects the
+    gripper to latch the instant its seals reach the carton; that descent is slow
+    (time-dilation 0.05 -- run-145's prior collect move alone took ~185 s), so a short
+    window (retryInterval 1 s) expires long before the seals arrive and the gripper is
+    never re-commanded -> no latch (the run-145 in-mission failure). The default is
+    therefore large: keep attempting across the whole descent and latch when the seals
+    enter range; the mission stage watchdog bounds the overall attempt, and `release`
+    (open_gripper) ends it. Verified natively (data/surface-gripper-latch-v1): with the
+    panel enabled far (15 mm) and descended slowly, retryInterval 1 never latches but a
+    large retryInterval latches at ~4.9 mm as the seals reach the 5 mm window.
+    (retryInterval 0 abandons the close in the same step.)
     """
     from pxr import Gf, Sdf, UsdGeom, UsdPhysics
     if not 0 < max_gap <= .005 or not math.isfinite(force_limit) or force_limit <= 0:

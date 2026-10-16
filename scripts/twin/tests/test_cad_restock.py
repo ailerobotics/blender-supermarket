@@ -44,7 +44,10 @@ def test_native_authoring_never_selects_or_moves_payload():
     grip = stage.GetPrimAtPath(path)
     points = grip.GetRelationship('isaac:attachmentPoints').GetTargets()
     assert len(points) == 4 and grip.GetTypeName() == 'IsaacSurfaceGripper'
-    assert grip.GetAttribute('isaac:retryInterval').Get() > 0  # 0 abandons the close in-step
+    # retryInterval must span the slow (time-dilated) contact descent: the mission enables suction
+    # ONCE at descent start, so a short window expires before the seals reach the carton and never
+    # re-commands (the run-145 in-mission no-latch). 0 abandons the close in-step.
+    assert grip.GetAttribute('isaac:retryInterval').Get() >= 1000.
     for p in points:
         joint = UsdPhysics.Joint(stage.GetPrimAtPath(p))
         # body1 stays EMPTY (the gripper never pre-selects a payload); the plugin records the
