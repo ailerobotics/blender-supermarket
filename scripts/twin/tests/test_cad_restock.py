@@ -252,25 +252,69 @@ def test_rendered_qr_and_depth_are_actual_inputs(monkeypatch):
     assert sensor.evidence==() and sensor.sensed_target_bboxes==()
 
 
-def test_native_partial_latch_releases_without_weld_fallback():
-    # The installed plugin reports the latch via its own status + gripped-objects list (it never
-    # writes a per-seal body1 to USD, verified natively, data/surface-gripper-latch-v1), so the
-    # reader keys off those: Closed holding exactly one body is held; anything else that still
-    # reports a body is a partial grab and is explicitly released (no weld fallback).
+def test_native_read_is_pure_observer_keyed_on_gripped_objects():
+    # read() is a PURE OBSERVER that never mutates the gripper, and it keys the hold on the
+    # plugin's grippedObjects list (exactly one attached body), not on status==Closed. Measured
+    # natively (data/sim-restock-stations-v1 contactgap sweep): a prior version open_gripper()-ed
+    # any object seen while status != Closed, aborting the normal Closing->Closed seal on every
+    # poll of the slow contact descent (the gripper-seal-fail blocker); and the plugin's status
+    # flickers Closing<->Closed tick to tick even while the carton is provably gripped and the pad
+    # is frozen, so keying on Closed flickered False and would false-trip the lost-grasp gate.
     from scripts.twin.restock_manipulation.cad_tool import NativePanelContact
     def adapter(status, objects):
         a = NativePanelContact.__new__(NativePanelContact)
-        a.path, a.closed_status, a.opened = '/Grip', 'closed', []
+        a.path, a.closed_status, a.open_status, a.opened = '/Grip', 'closed', 'open', []
         a.api = NS(get_gripper_status=lambda p: status, get_gripped_objects=lambda p: objects,
                    open_gripper=lambda p: a.opened.append(p))
         return a
-    held = adapter('closed', ['/Box'])
-    assert held.read() is True and held.opened == []
-    for partial in (adapter('closed', ['/Box', '/Other']), adapter('closing', ['/Box'])):
-        assert partial.read() is False and partial.opened == ['/Grip']
-    # A clean non-latch reports nothing and releases nothing.
-    idle = adapter('open', [])
-    assert idle.read() is False and idle.opened == []
+    # One attached body while the gripper is closing OR closed is a genuine hold (both lift the
+    # carton natively); read() reports held and never touches the gripper.
+    for held in (adapter('closed', ['/Box']), adapter('closing', ['/Box'])):
+        assert held.read() is True and held.opened == []
+    # A multi-object grab is ambiguous (not held); a released gripper still listing a stale object
+    # is not held (status Open guard). Neither mutates the gripper.
+    for other in (adapter('closed', ['/Box', '/Other']), adapter('open', ['/Box']), adapter('open', [])):
+        assert other.read() is False and other.opened == []
+
+
+def test_seal_probe_measures_status_grip_and_geometry():
+    # The seal diagnostic (firstmate key gripper-seal-fail) must surface the plugin's measured
+    # state -- status, gripped-object count + paths, and the seal geometry -- so an in-mission
+    # no-latch has a number. probe() keys off the plugin api for status/grip (always present) and
+    # computes each seal's live world pose + the suction-axis direction from the authored joints;
+    # the raycast gap is best-effort and degrades to an error string without a live PhysX scene.
+    Usd = pytest.importorskip('pxr.Usd')
+    from pxr import UsdGeom, UsdPhysics
+    from scripts.twin.restock_manipulation.cad_tool import NativePanelContact, SIM_MAX_GRIP_DISTANCE
+    stage = Usd.Stage.CreateInMemory()
+    body = UsdGeom.Xform.Define(stage, '/Robot/Wrist').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(body)
+    UsdGeom.Xform.Define(stage, '/Robot/Wrist/Tool0')
+    path = author_native_gripper(stage, tool=tool_fixture(), tool0_path='/Robot/Wrist/Tool0',
+                                 body_path='/Robot/Wrist', gripper_path='/Robot/Grip')
+    grip = stage.GetPrimAtPath(path)
+    c = NativePanelContact.__new__(NativePanelContact)
+    c.stage, c.path, c._diag = stage, path, False
+    c.enabled = True
+    c.points = list(grip.GetRelationship('isaac:attachmentPoints').GetTargets())
+    c.max_gap = float(grip.GetAttribute('isaac:maxGripDistance').Get())
+    c.api = NS(get_gripper_status=lambda p: 'StatusClosing',
+               get_gripped_objects=lambda p: ['/World/Carton', '/World/Neighbor'])
+    info = c.probe()
+    # Plugin-sourced facts are always present and exact.
+    assert info['status'] == 'StatusClosing'
+    assert info['gripped_n'] == 2 and info['gripped'] == ['/World/Carton', '/World/Neighbor']
+    assert info['enabled'] is True
+    assert c.max_gap == pytest.approx(SIM_MAX_GRIP_DISTANCE)
+    # Four seal world poses and a unit suction-axis direction are computed from the authored joints.
+    assert len(info['seals_world']) == 4 and all(len(s) == 3 for s in info['seals_world'])
+    assert len(info['forward_world']) == 3
+    # With an identity-rotation pad the suction axis is body +Z (world up), i.e. 180 deg from down.
+    assert info['forward_world'] == pytest.approx([0., 0., 1.], abs=1e-6)
+    assert info['tilt_deg_from_down'] == pytest.approx(180., abs=1e-3)
+    # No live PhysX scene in a CPU test: the gap raycast degrades to a recorded error, never a crash.
+    assert 'raycast_err' in info and 'min_gap_mm' not in info
+    assert c.last_probe is info
 
 
 def test_new_obstacle_map_stops_rejected_active_plan():

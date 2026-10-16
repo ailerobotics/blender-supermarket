@@ -117,6 +117,14 @@ repo's `scenes/`, `export/` or `renders/`.
   `scripts/twin/restock/`; CPU checks and adapter contract are in RUNBOOK §11.
   `data/mobile-restock-v2/report.md` distinguishes fixture tests from the still
   unverified physical cycle and records the GPU driver diagnosis.
+- **Surface-gripper seal reader** (`restock_manipulation/cad_tool.py` `NativePanelContact`):
+  `read()` is a PURE OBSERVER — never command the gripper from it (an `open_gripper()` on a
+  not-yet-`Closed` grab aborted the seal on every poll of the slow contact descent), and key the
+  hold on the plugin's `grippedObjects` list (exactly one body), NOT `status==Closed` — the status
+  flickers `Closing↔Closed` tick to tick while a grip provably holds. `command()` owns open/close.
+  The built-in `SEAL_DIAG`/`probe()` logs status, gripped count, per-seal pose + raycast gap every
+  grasp tick (`RESTOCK_SEAL_DIAG=0` to silence). Evidence + the contact-gap GPU probe:
+  `data/sim-restock-stations-v1/report.md`.
 - **Dev-loop tooling for the Isaac mobile-restock lane** lives in `scripts/twin/tools/`
   (CPU, no GPU): `profile_mission_run.py` breaks a recorded run's wall clock into
   boot/commissioning/collect-observe/approach-reach/per-frame-render/ROS-idle/shutdown from
