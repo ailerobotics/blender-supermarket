@@ -18,6 +18,26 @@ from ..restock_camera.sensed import FrameEvidence, SupportView, masked_cloud, co
 from ..restock_camera.qr import FixedTileQR, FrameQR, rgb_digest
 
 
+#: Controller phases whose decode-camera render is unused: observe has validated the registration
+#: and cuMotion is executing the reach, so the arm occludes the fixed camera (the OBSERVE-THEN-
+#: EXECUTE lock). The opt-in sensing gate suspends the render for these and republishes the held
+#: registration. 'couple' is the cart-coupling action's execution phase.
+_SENSING_SUSPEND_PHASES = frozenset({'approach', 'contact', 'grasp', 'lift', 'place', 'retreat',
+                                     'release', 'stow', 'couple'})
+
+
+def sensing_render_required(phase):
+    """Whether the decode camera must render for this controller phase.
+
+    False only for the execution phases in ``_SENSING_SUSPEND_PHASES`` (observe already validated the
+    registration and the rendered frame is unused while the arm occludes the fixed camera). True for
+    observe and the preplace/verify re-validations, and for any other/unknown phase -- fail safe:
+    never suspend the render unless the phase is explicitly a validated-reach execution phase. The
+    integration runtime maps the controller phase through this each tick to drive
+    ``set_render_suspended(not sensing_render_required(phase))``."""
+    return str(phase) not in _SENSING_SUSPEND_PHASES
+
+
 @dataclass(frozen=True)
 class SlotView:
     location: str
@@ -59,7 +79,7 @@ class CameraContext:
 class IsaacCartonSensors:
     def __init__(self, camera, *, pose_bridge_root, profiles, slots=(), base_from_camera=None,
                  context_provider=None, camera_id='camera', steady_clock=time.monotonic,
-                 wall_backstop_s=60., wall_clock=time.monotonic):
+                 wall_backstop_s=60., wall_clock=time.monotonic, execution_gate=False):
         # Injectable monotonic clock so acquisition-to-use freshness (and tests of it) do not
         # depend on real decode wall time; defaults to the process clock for native capture. For
         # the render-paced mission, build_sensing supplies the SIM/node clock here so a slow
@@ -88,6 +108,21 @@ class IsaacCartonSensors:
         self._reuse_key = None
         self._reuse_context = None
         self._reuse_qr = None
+        # Opt-in integration-controlled SENSING GATE (default off): during a controller EXECUTION
+        # phase (approach/contact/lift/place/retreat/release/stow/couple) AFTER observe validated the
+        # registration, the arm occludes the fixed camera and the rendered frame is unused, yet the
+        # whole-store RTX render runs every sensing tick -- the dominant wall cost (run-126). When the
+        # gate is on and integration signals suspension (set_render_suspended(True)), capture skips
+        # get_current_frame entirely and REPUBLISHES the last validated registration flagged occluded
+        # (PR 80 hold), with FRESH motion-completion fields (parked/contact/collision/joints) so
+        # /sensors stays alive for motion polling. Rendering resumes (set_render_suspended(False)) on
+        # the controller re-validation signal (preplace after lift, verify) and for every observe.
+        # Bounded by the same occlusion window as the hold: suspended past it refuses, so a genuinely
+        # stalled execution still trips a fault. Default off => every gate and the exact-frame reuse
+        # key below are byte-identical to before.
+        self.execution_gate = bool(execution_gate)
+        self._render_suspended = False
+        self._held_source = None   # last validated registration republished while suspended
         # Per-location sim time of the last frame a calibrated slot was cleanly read (support not
         # held AND no undecoded label in it). While the reaching arm occludes a slot's carton label
         # during approach/contact/lift, an undecoded label is tolerated (held, flagged occluded)
@@ -99,7 +134,60 @@ class IsaacCartonSensors:
         # Integration initializes actual cameras; every frame uses measured TF.
         camera.add_distance_to_image_plane_to_frame()
 
+    def set_render_suspended(self, suspended):
+        """Integration-controlled sensing gate (effective only when ``execution_gate`` is on).
+
+        Integration toggles this each tick from the controller phase: True while the arm EXECUTES a
+        validated reach (the rendered frame is unused and the full-res render is the wall cost),
+        False for observe / the preplace+verify re-validations (a fresh render is required). When the
+        gate is off this just records the flag and nothing changes. See ``sensing_render_required``."""
+        self._render_suspended = bool(suspended)
+
+    def _held_capture(self, now, source, destination, motion, contact):
+        """Republish the last validated registration (PR 80 occlusion hold) WITHOUT rendering.
+
+        The integration runtime has suspended the decode-camera render for a controller execution
+        phase, so there is no new frame to fetch/decode. Serve the last validated registration flagged
+        occluded, with FRESH motion-completion fields so /sensors keeps feeding the controller's
+        parked/contact/joint/collision polling. Every non-visibility bound still holds: a prior clean
+        registration must exist, the configured occlusion window bounds how long the render may be
+        suspended (past it this refuses, so a stalled execution trips a fault, never an endless held
+        publish), and the base must still be parked (a moving base refuses -- the held pose is not
+        re-measured). The published packet's simulation_time is the fresh tick time; its sensed
+        registration/target are held, exactly as a PR 80 occluded frame."""
+        held = self._held_source
+        if held is None:
+            raise ValueError('no validated registration to hold while the sensing render is suspended')
+        window = held['window']
+        if window is None or not np.isfinite(window) or window < 0:
+            raise ValueError('sensing gate requires a configured occlusion window to hold')
+        if not np.isfinite(now) or now < held['clean_now']:
+            raise ValueError('held sensing publish needs a non-regressing clock')
+        if now - held['clean_now'] > window:
+            raise ValueError('sensing render suspended beyond the occlusion window')
+        if not (motion.parked() and held['parked']):
+            raise ValueError('held sensing publish requires a parked base')
+        collision_time = motion.collision_time
+        joints = tuple(motion.joint_positions())
+        contact_state = bool(contact.read())
+        if (not np.isfinite(collision_time) or not 0 <= now - collision_time <= .5
+                or len(joints) != 6 or not np.isfinite(joints).all()):
+            raise ValueError('stale or missing motion-completion feedback while sensing is held')
+        # Fresh steady-clock deadline = the window remaining since the last clean registration, so the
+        # controller's require_fresh(valid_until_steady) passes while the sim-time window still bounds
+        # the hold. feedback/collision_time are fresh (motion-completion); the sensed target/obs held.
+        remaining = window - (now - held['clean_now'])
+        valid_until = self.steady_clock() + remaining
+        self.sensed_target_bboxes = ()                      # no fresh detection is claimed while held
+        self.evidence = tuple(dict(item, registration_occluded=True, current_stamp=now)
+                              for item in held['evidence'])
+        return Sensors(now, held['observations'], held['target'], bool(motion.parked()),
+                       contact_state, now, collision_time, joints,
+                       held['scanned'], held['scan_time'], valid_until)
+
     def capture(self, now, source, destination, motion, contact):
+        if self.execution_gate and self._render_suspended:
+            return self._held_capture(now, source, destination, motion, contact)
         import cv2
         frame = self.camera.get_current_frame(clone=True)
         frame_id, stamp = frame['rendering_frame'], float(frame['rendering_time'])
@@ -312,6 +400,15 @@ class IsaacCartonSensors:
         # Record the just-validated frame so a stride-paced re-presentation of these exact pixels
         # reuses this decode (only now that every gate has passed; a failed frame stays unreusable).
         self._reuse_key, self._reuse_context, self._reuse_qr = key, context, qr
+        # Snapshot this validated registration so the opt-in sensing gate can republish it (flagged
+        # occluded) while the render is suspended for a controller execution phase. Guarded by the
+        # opt-in flag so a default (gate-off) run is byte-identical. clean_now anchors the hold window.
+        if self.execution_gate:
+            self._held_source = dict(
+                observations=tuple(observations), target=targets.get(destination),
+                scanned=tuple(scanned), scan_time=stamp, evidence=self.evidence,
+                clean_now=now, window=context.occlusion_window_s,
+                parked=bool(context.parked and motion.parked()))
         return Sensors(now, tuple(observations), targets.get(destination),
                        motion.parked(), contact.read(), now, motion.collision_time,
                        motion.joint_positions(), tuple(scanned), stamp, deadline)

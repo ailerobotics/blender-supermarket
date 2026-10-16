@@ -246,6 +246,13 @@ def build_sensing(*, app, assembly, plan, config, output):
         station_kwargs['steady_clock'] = sim_clock
     if isinstance(config, dict) and config.get('sensor_wall_backstop_s') is not None:
         station_kwargs['wall_backstop_s'] = float(config['sensor_wall_backstop_s'])
+    # Opt-in sensing gate (default off): when config['sensing_execution_gate'] is set, the capture
+    # path can SUSPEND the decode-camera render during a controller execution phase and republish the
+    # held registration (keeps /sensors alive without the render -- the run-126 wall lever). The
+    # runtime drives it via the returned 'set_render_suspended' each tick from the controller phase
+    # (isaac_sensors.sensing_render_required). Off => every gate is byte-identical to before.
+    if isinstance(config, dict) and config.get('sensing_execution_gate'):
+        station_kwargs['execution_gate'] = True
     station = StationSensors(
         cameras=_get(sources, 'cameras'), profiles=_get(sources, 'profiles'),
         pose_bridge_root=_get(sources, 'pose_bridge_root'),
@@ -257,7 +264,11 @@ def build_sensing(*, app, assembly, plan, config, output):
         """Fresh multi-camera inventory scan under the standing gates; never fabricated."""
         return station.capture(now, source, destination, motion, contact)
 
-    result = {'capture': capture, 'recording_camera': _get(sources, 'recording_camera')}
+    result = {'capture': capture, 'recording_camera': _get(sources, 'recording_camera'),
+              # Integration seam for the opt-in sensing gate: the runtime calls this each tick with
+              # ``not sensing_render_required(controller.phase)`` to suspend/resume the decode-camera
+              # render. A no-op when config['sensing_execution_gate'] is unset (default).
+              'set_render_suspended': station.set_render_suspended}
     # Collect-stage pick target from the FIXED source station camera + its commissioned
     # baseline (the arm eye-in-hand camera is masked-depth/fine-alignment only; it receives
     # a target reprojected from this by integration). See the module docstring and
