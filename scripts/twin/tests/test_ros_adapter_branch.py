@@ -70,3 +70,21 @@ class Seeds(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReplanRetry(unittest.TestCase):
+    """Bounded fresh-seed re-plan on a MoveIt plan rejection (INVALID_MOTION_PLAN). The validator is
+    ground truth and cuMotion is stochastic, so re-planning the same goal up to REPLAN_MAX times turns
+    the seed-variant base/plate collision into a near-certain pass before falling back / failing."""
+    def test_replans_while_budget_and_goal_remain(self):
+        from twin.restock_manipulation.ros_adapter import _should_replan, REPLAN_MAX
+        for n in range(REPLAN_MAX):
+            self.assertTrue(_should_replan(n, has_plan_goal=True), n)   # retry each attempt within budget
+
+    def test_stops_replanning_at_budget(self):
+        from twin.restock_manipulation.ros_adapter import _should_replan, REPLAN_MAX
+        self.assertFalse(_should_replan(REPLAN_MAX, has_plan_goal=True))   # budget spent -> fall back
+
+    def test_never_replans_without_a_stored_goal(self):
+        from twin.restock_manipulation.ros_adapter import _should_replan
+        self.assertFalse(_should_replan(0, has_plan_goal=False))

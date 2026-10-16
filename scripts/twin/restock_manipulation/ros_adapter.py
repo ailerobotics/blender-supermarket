@@ -21,6 +21,17 @@ JOINTS = ARM_JOINTS
 # Sim-time settle margin added to a trajectory's own sim duration for the execution deadline (the
 # node-clock bound on ExecuteTrajectory). Covers start handshake + terminal settle in SIM seconds.
 EXECUTE_SETTLE_MARGIN_S = 15.0
+# Bounded re-plan of the SAME goal on a MoveIt plan rejection. MoveIt's FCL ValidateSolution is
+# ground truth and cuMotion is stochastic, so re-planning draws a fresh seed; a few retries turn the
+# seed-variant base/plate collision (INVALID_MOTION_PLAN, run-129/134 ~half of seeds) into a
+# near-certain pass at ~1 s of planning per retry (firstmate standing-authority lever).
+REPLAN_MAX = 3
+
+
+def _should_replan(replan_attempts, has_plan_goal):
+    """On a MoveIt plan rejection, re-plan the SAME goal (a fresh stochastic cuMotion seed) up to
+    REPLAN_MAX times before falling back to the next IK seed / failing. Pure for CPU testing."""
+    return replan_attempts < REPLAN_MAX and has_plan_goal
 
 
 def planner_velocity_scale(urdf, *, command_limit=.15, scale_cap=.05):
@@ -142,10 +153,13 @@ class RosMotionPort:
                 or any(not math.isfinite(q) or not lo <= q <= hi for q, (lo, hi) in zip(joints, self.limits))):
             raise ValueError('invalid pose or measured start')
         self.start = tuple(joints)
+        self._replan_attempts = 0          # fresh-seed re-plan budget for this move (see REPLAN_MAX)
+        self._plan_goal = None             # the MoveGroup goal to re-send on a plan rejection
         if self.pose_goal:
             self.generation += 1
             self.handle = None
-            self._send(self.plan, self._pose_plan_goal(pose, joints), 'plan_accept')
+            self._plan_goal = self._pose_plan_goal(pose, joints)
+            self._send(self.plan, self._plan_goal, 'plan_accept')
             self.deadline_clock = time.monotonic
             self.deadline = time.monotonic() + self.timeout
             return
@@ -359,6 +373,7 @@ class RosMotionPort:
                     tolerance_below=.001, weight=1.0))
             req.goal_constraints = [constraints]
             goal.planning_options.plan_only = True
+            self._plan_goal = goal          # remember for a fresh-seed re-plan on rejection
             self._send(self.plan, goal, 'plan_accept')
         elif self.state in ('plan_accept', 'execute_accept'):
             if not result or not result.accepted:
@@ -368,8 +383,17 @@ class RosMotionPort:
             self.state = 'plan_result' if self.state == 'plan_accept' else 'execute_result'
         elif self.state == 'plan_result':
             if result.status != 4 or result.result.error_code.val != 1:
-                # cuMotion rejected this c-space target (e.g. self-collision on a wrapped branch):
-                # try the next seed's IK solution before failing (joint-space retry, host verdict).
+                # MoveIt's FCL ValidateSolution is ground truth and cuMotion is stochastic, so FIRST
+                # re-plan the SAME goal (fresh seed) up to REPLAN_MAX times -- this turns the
+                # seed-variant base/plate collision (INVALID_MOTION_PLAN, ~half of seeds) into a
+                # near-certain pass. Then fall back to the next IK seed (a wrapped-branch self-collision
+                # needs a different c-space target), then fail.
+                if _should_replan(self._replan_attempts, getattr(self, '_plan_goal', None) is not None):
+                    self._replan_attempts += 1
+                    self.deadline_clock = time.monotonic
+                    self.deadline = time.monotonic() + self.timeout   # fresh planning budget per retry
+                    self._send(self.plan, self._plan_goal, 'plan_accept')
+                    return 'running'
                 if getattr(self, '_seeds', None) and self._next_seed():
                     return 'running'
                 raise RuntimeError('planning failed')
