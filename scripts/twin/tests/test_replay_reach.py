@@ -129,6 +129,22 @@ def test_sensing_gate_off_renders_every_frame_like_pr80():
     assert rep.ok == rep.steps
 
 
+@pytest.mark.parametrize("window", [20.0, 60.0, None])
+def test_clean_first_observe_is_window_independent(window):
+    # run-146/147 regression guard: occlusion_window_s governs ONLY the held/occluded fallback. The
+    # CLEAN first-frame registration (self.good is None on frame 1) must be emitted identically at
+    # ANY window value, so a larger window (e.g. 60 s) can never suppress the first /sensors packet
+    # ("no initial sensor frame"). Verified here on the real capture pipeline; the recorded run-146/
+    # 147 cadence also replays identically at 20 vs 60 (see the camera-lane finding).
+    adapter, cam, motion, contact, loc = build_source_bench(occlusion_window_s=window, with_pick=True)
+    from scripts.twin.restock_camera.source_target import build_source_target_provider
+    provider = build_source_target_provider(adapter, motion, contact, source_location=loc)
+    cam.present(FrameRecord(0, 5, 1.0, "h"), occluded=False)   # a clean first observe frame
+    motion.collision_time = 1.0
+    target = provider(1.0)
+    assert target is not None and target.sku == "bench_sku" and target.occluded is False
+
+
 def test_collect_source_target_holds_fresh_through_the_gated_reach():
     # The run-131 coverage gap: under the sensing gate the decode frame freezes, so the collect
     # source_target_provider's pick observation stamp goes stale -> the consumer's 0.5 s freshness
