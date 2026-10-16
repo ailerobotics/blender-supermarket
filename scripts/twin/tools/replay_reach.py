@@ -287,7 +287,7 @@ def replay_source_target(adapter, camera: ReplayCamera, motion, contact, schedul
     from scripts.twin.restock_camera.source_target import build_source_target_provider
     provider = build_source_target_provider(adapter, motion, contact, source_location=location)
     rep = SimpleNamespace(steps=len(schedule), fresh=0, stale=0, held=0, rendered=0,
-                          none=0, errors={})
+                          none=0, held_with_deadline=0, errors={})
     for step in schedule:
         suspended = gate and step.occluded
         if gate:
@@ -307,6 +307,11 @@ def replay_source_target(adapter, camera: ReplayCamera, motion, contact, schedul
         if -0.02 <= step.now - target.stamp <= max_age:
             rep.fresh += 1
             rep.held += bool(target.occluded)
+            # a held target must also carry the acquisition deadline the contact/grasp suction guard
+            # needs (run-140), fresh on the motion clock the held capture used.
+            if target.occluded and target.valid_until_steady is not None \
+                    and getattr(adapter, 'steady_clock', lambda: 0.)() <= target.valid_until_steady:
+                rep.held_with_deadline += 1
         else:
             rep.stale += 1                              # the consumer would reject -> /sensors starves
     return rep

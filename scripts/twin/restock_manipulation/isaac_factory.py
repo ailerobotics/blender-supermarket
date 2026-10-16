@@ -505,8 +505,14 @@ class CollectTargetBridge:
             if self._calls % 10 == 1:
                 print(f'COLLECT_CAPTURE calls={self._calls} cart_target_error={type(exc).__name__}:{exc}',
                       flush=True)
+        # Carry the source target's acquisition-to-use deadline onto the host packet: under the
+        # sensing gate the held republish provides a FRESH sim-clock valid_until_steady, which the
+        # contact/grasp suction guard (require_fresh) needs to enable the gripper (run-140). None
+        # when not suspended -- the rendered collect packet carried no deadline before, so gate-off
+        # is byte-identical.
         return Sensors(now, (obs,), cart_target, parked, bool(self.contact.read()), now,
-                       float(self.motion.collision_time), joints, (), float(target.stamp))
+                       float(self.motion.collision_time), joints, (), float(target.stamp),
+                       target.valid_until_steady)
 
 
 def _build_runtime(*, app, assembly, params, output):

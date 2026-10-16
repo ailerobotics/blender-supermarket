@@ -29,9 +29,10 @@ def _bridge(provider):
     return b
 
 
-def _target(stamp=1.0):
+def _target(stamp=1.0, valid_until_steady=None):
     return SourceTarget(sku='juice_orange', pose_station=(0., 0., 1.5, 0., 0., 0., 1.),
-                        stamp=stamp, provenance={'camera_id': 'source', 'source': 'sensor'})
+                        stamp=stamp, provenance={'camera_id': 'source', 'source': 'sensor'},
+                        valid_until_steady=valid_until_steady)
 
 
 def test_sensed_target_produces_a_sensor_packet_and_reprojected_box():
@@ -47,6 +48,17 @@ def test_sensed_target_produces_a_sensor_packet_and_reprojected_box():
     assert len(b.sensed_target_bboxes) == 1
     box = b.sensed_target_bboxes[0]
     assert box['location'] == 'backstock_00' and len(box['roi']) == 4
+
+
+def test_held_acquisition_deadline_is_threaded_onto_the_host_packet():
+    # Under the sensing gate the held source target carries a fresh sim-clock valid_until_steady;
+    # the bridge must put it on the host Sensors so the contact/grasp suction guard can fire (run-140).
+    b = _bridge(lambda now: _target(stamp=now, valid_until_steady=now + 18.5))
+    packet = b.capture(1.0, 'backstock_00', 'rollwagen')
+    assert packet is not None and packet.valid_until_steady == 1.0 + 18.5
+    # Not suspended (no deadline on the target): the host packet carries none -- byte-identical.
+    b2 = _bridge(lambda now: _target(stamp=now))
+    assert b2.capture(1.0, 'backstock_00', 'rollwagen').valid_until_steady is None
 
 
 def test_none_when_nothing_sensed():

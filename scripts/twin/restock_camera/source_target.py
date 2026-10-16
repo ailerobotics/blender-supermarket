@@ -27,6 +27,10 @@ class SourceTarget:
     location: str = 'backstock_00'
     station_frame: str = 'map'
     occluded: bool = False        # True: held registration republished while the render is suspended
+    valid_until_steady: float | None = None   # held acquisition-to-use deadline (sim clock) under
+                                  # suspension; the consumer puts it on the host Sensors so the
+                                  # contact/grasp suction guard (require_fresh) can fire. None when
+                                  # not suspended (the rendered packet carries its own deadline).
 
 
 def _source_evidence(adapter, location):
@@ -76,6 +80,13 @@ def build_source_target_provider(adapter, motion, contact, *, source_location='b
         # capture) bounds the hold. Byte-identical when not suspended.
         suspended = bool(getattr(adapter, 'render_suspended', False))
         stamp = float(now) if suspended else float(obs.simulation_time)
+        # Under suspension carry the held packet's FRESH acquisition-to-use deadline (sim clock,
+        # bounded by the occlusion window) so the host contact/grasp suction guard -- which withholds
+        # the gripper until a fresh valid_until_steady is present (run-137/140) -- can fire. The
+        # held republish set it Isaac-side; without threading it here the collect packet drops it and
+        # suction never enables under the gate. None when not suspended (byte-identical: the rendered
+        # collect packet carries no deadline, exactly as before).
+        valid_until_steady = packet.valid_until_steady if suspended else None
         provenance = dict(camera_id=adapter.camera_id, source=obs.source,
                           calibration_id=evidence['baseline_calibration_id'],
                           baseline_session_id=evidence['baseline_session_id'],
@@ -87,5 +98,5 @@ def build_source_target_provider(adapter, motion, contact, *, source_location='b
         return SourceTarget(sku=obs.sku, pose_station=tuple(obs.pose),
                             stamp=stamp, provenance=provenance,
                             location=source_location, station_frame=station_frame,
-                            occluded=suspended)
+                            occluded=suspended, valid_until_steady=valid_until_steady)
     return source_target_provider

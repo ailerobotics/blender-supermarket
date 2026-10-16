@@ -75,12 +75,15 @@ def test_provider_ignores_observations_at_other_locations():
 
 # --- render-suspension (sensing gate) hold on the collect path -----------------
 
-def _gated_adapter(observations, *, render_suspended, occluded, camera_id='source'):
+def _gated_adapter(observations, *, render_suspended, occluded, camera_id='source',
+                   valid_until_steady=None):
     """A duck-typed source adapter modelling the gate: under suspension capture serves a held
-    republish whose observation stamp is STALE (the frozen frame) and whose evidence is occluded."""
+    republish whose observation stamp is STALE (the frozen frame), whose evidence is occluded, and
+    which carries a fresh motion-clock ``valid_until_steady`` (the held acquisition-to-use deadline)."""
     ev = _evidence()
     ev['registration_occluded'] = occluded
-    packet = Sensors(2., tuple(observations), None, True, False, 2., 2., (0.,)*6, (), 2.)
+    packet = Sensors(2., tuple(observations), None, True, False, 2., 2., (0.,)*6, (), 2.,
+                     valid_until_steady)
     return NS(capture=lambda now, s, d, m, c: packet, evidence=(ev,), camera_id=camera_id,
               render_suspended=render_suspended)
 
@@ -102,6 +105,25 @@ def test_provider_stamp_is_the_frozen_observation_stamp_without_the_fix_would_st
     # Same held packet, but if the provider used the observation stamp (the old behaviour) the gate
     # would reject: now - 2.0 = 10 > 0.5. The test documents the gap the fix closes.
     assert not (-0.02 <= 12.0 - 2.0 <= 0.5)
+
+
+def test_provider_carries_the_held_acquisition_deadline_under_suspension():
+    # run-140: the contact/grasp suction guard withholds the gripper until a fresh valid_until_steady
+    # is present. The held capture produces one (sim clock, window-bounded); the provider must carry
+    # it so the host collect packet can satisfy the guard. Without this it is dropped -> zero gripper.
+    adapter = _gated_adapter([_carton()], render_suspended=True, occluded=True,
+                             valid_until_steady=21.0)
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(12.0)
+    assert target.valid_until_steady == 21.0            # the held sim-clock deadline, carried through
+
+
+def test_provider_drops_the_deadline_when_not_suspended_byte_identical():
+    # Gate off / not suspended: the collect target carries no deadline (as before the gate).
+    adapter = _gated_adapter([_carton()], render_suspended=False, occluded=False,
+                             valid_until_steady=21.0)
+    assert build_source_target_provider(adapter, motion=NS(), contact=NS())(2.0).valid_until_steady is None
+    plain, _ = _adapter([_carton()])
+    assert build_source_target_provider(plain, motion=NS(), contact=NS())(2.).valid_until_steady is None
 
 
 def test_provider_is_byte_identical_when_not_suspended_even_if_occluded():
