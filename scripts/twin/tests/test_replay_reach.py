@@ -143,6 +143,8 @@ def test_collect_source_target_holds_fresh_through_the_gated_reach():
     assert rep.stale == 0                                # never the stale-stamp starvation
     assert rep.held >= 1                                 # the reach targets are held (occluded)
     assert rep.rendered == sum(1 for s in steps if not s.occluded)   # only observe rendered
+    # every held target also carries a fresh acquisition deadline the suction guard needs (run-140)
+    assert rep.held_with_deadline == rep.held
 
 
 def test_collect_source_target_without_gate_renders_every_frame():
