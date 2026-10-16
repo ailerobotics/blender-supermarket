@@ -122,6 +122,12 @@ class IsaacCartonSensors:
         # key below are byte-identical to before.
         self.execution_gate = bool(execution_gate)
         self._render_suspended = False
+        # Tracked desired state of the decode camera's render product (None = never driven yet). The
+        # gate drives it to match (enabled when NOT suspended), idempotently, so the FIRST
+        # non-suspended tick at mission start guarantees the product is ON regardless of the native
+        # camera's default or a disable persisted from a prior run -- not an edge-only toggle that
+        # no-ops when was==suspended at init (run-146..148: product left off -> no first frame).
+        self._products_enabled = None
         self._held_source = None   # last validated registration republished while suspended
         # Per-location sim time of the last frame a calibrated slot was cleanly read (support not
         # held AND no undecoded label in it). While the reaching arm occludes a slot's carton label
@@ -150,30 +156,32 @@ class IsaacCartonSensors:
         validated reach (the rendered frame is unused and the full-res render is the wall cost),
         False for observe / the preplace+verify re-validations (a fresh render is required).
 
-        On the suspend EDGE this DISABLES the decode camera's render product(s) via the camera's
-        optional ``set_render_products_enabled(False)`` hook, so a ``world.step(render=True)`` during
-        suspension skips the expensive whole-store decode render and pays only for the cheap
-        non-decode products (arm depth / masked_depth / chase recorder -- separate cameras the host
-        nvblox ESDF needs; run-139 died when integration skipped ALL rendering to get the wall win).
-        On the resume EDGE it re-enables the product AND drops the exact-frame reuse snapshot, so the
-        first post-resume capture requires a genuinely NEW render: a stale decode-product frame (its
-        id/stamp unchanged from before suspension) is no longer reused, and the monotonic-frame gate
-        then refuses it until a fresh render lands. Toggling only on edges keeps a steady-state tick
-        cheap. When the gate is off this just records the flag and nothing changes (byte-identical).
-        See ``sensing_render_required``."""
+        This DRIVES the decode camera's render product(s) to match the gate state via the camera's
+        optional ``set_render_products_enabled`` hook: DISABLED while suspended (so a
+        ``world.step(render=True)`` during suspension skips the expensive whole-store decode render
+        and pays only for the cheap non-decode products -- arm depth / masked_depth / chase recorder,
+        separate cameras the host nvblox ESDF needs; run-139 died when integration skipped ALL
+        rendering), ENABLED otherwise. It is IDEMPOTENT and tracked (``_products_enabled``), not
+        edge-only: the FIRST non-suspended call at mission start enables the product even though it is
+        not a transition, so a native default-off (or a disable persisted from a prior run) can no
+        longer leave the decode camera dark at startup (run-146..148: no first frame). On a genuine
+        resume (was suspended, now not) it also drops the exact-frame reuse snapshot, so the first
+        post-resume capture requires a NEW render (a stale decode-product frame is refused by the
+        monotonic-frame gate, not reused). When the gate is off this just records the flag and never
+        touches the product (byte-identical). See ``sensing_render_required``."""
         suspended = bool(suspended)
         was = self._render_suspended
         self._render_suspended = suspended
-        if not self.execution_gate or suspended == was:
+        if not self.execution_gate:
             return
         toggle = getattr(self.camera, 'set_render_products_enabled', None)
-        if suspended:
+        desired_enabled = not suspended
+        if self._products_enabled is not desired_enabled:   # None (startup) always drives it
             if toggle is not None:
-                toggle(False)                       # stop the decode render product while held
-        else:
-            if toggle is not None:
-                toggle(True)                        # re-enable for the resume render
-            # Force a fresh render after resume: a stale decode-product frame must not be reused.
+                toggle(desired_enabled)
+            self._products_enabled = desired_enabled
+        if was and not suspended:
+            # Genuine resume: a stale decode-product frame must not be reused as a fresh capture.
             self._reuse_key = self._reuse_context = self._reuse_qr = None
 
     def _held_capture(self, now, source, destination, motion, contact):
