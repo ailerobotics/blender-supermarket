@@ -115,6 +115,32 @@ def test_suspend_disables_the_decode_render_product_and_resume_re_enables_it_on_
     assert cam.product_toggles == [False, True]
 
 
+def test_first_non_suspended_call_enables_the_product_at_startup():
+    # run-146..148: with the gate on, the decode render product was left OFF at mission start because
+    # the FIRST set_render_suspended(False) (phase=observe, was=False at init) was a no-edge no-op, so
+    # the source never rendered -> "no initial sensor frame". The idempotent drive must ENABLE the
+    # product on that first non-suspended call regardless of a native default-off or a persisted
+    # disable.
+    adapter, cam, motion, contact, loc = build_source_bench(occlusion_window_s=20.0,
+                                                            execution_gate=True)
+    cam.render_products_enabled = False                 # native default-off / persisted disable at boot
+    cam.product_toggles.clear()
+    adapter.set_render_suspended(False)                 # first startup tick, not suspended
+    assert cam.render_products_enabled is True and cam.product_toggles == [True]
+    adapter.set_render_suspended(False)                 # steady state: idempotent, no re-toggle
+    assert cam.product_toggles == [True]
+
+
+def test_gate_off_does_not_touch_the_product_at_startup():
+    adapter, cam, motion, contact, loc = build_source_bench(occlusion_window_s=20.0,
+                                                            execution_gate=False)
+    cam.render_products_enabled = False
+    cam.product_toggles.clear()
+    adapter.set_render_suspended(False)
+    adapter.set_render_suspended(True)
+    assert cam.product_toggles == []                    # gate off never manages the product
+
+
 def test_resume_forces_a_fresh_render_not_a_stale_product_frame():
     adapter, cam, motion, contact, loc = build_source_bench(occlusion_window_s=20.0,
                                                             execution_gate=True)
