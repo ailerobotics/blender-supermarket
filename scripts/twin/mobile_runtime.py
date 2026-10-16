@@ -54,9 +54,12 @@ class MobileController:
 
     DRIVE_DAMPING = 100.0
     DRIVE_MAX_FORCE = 80.0
-    HOLD_STIFFNESS = 1.0e5
-    HOLD_DAMPING = 2.0e3
-    HOLD_MAX_FORCE = 1.0e4
+    # run-164 saw a single 0.25 s window at base_dxy=5.3 mm vs the 5 mm gate (yaw within gate), so a
+    # moderate ~3x stiffening shaves the 0.3 mm; damping scaled by sqrt(3) keeps the ratio. NOT a 10x
+    # jump -- PhysX destabilises at absurd brake values (firstmate msg 251, sim-only, gate unchanged).
+    HOLD_STIFFNESS = 3.0e5
+    HOLD_DAMPING = 3.5e3
+    HOLD_MAX_FORCE = 3.0e4
 
     def hold(self):
         """Engage the stationary parking brake: lock each wheel at its current angle with a stiff

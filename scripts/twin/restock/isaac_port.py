@@ -257,12 +257,20 @@ class IsaacPort:
         hist.append((now,(r.x,r.y,r.yaw),(c.x,c.y,c.yaw)))
         while hist and now-hist[0][0]>0.25:
             hist.popleft()
-        def _still(idx):
+        def _disp(idx):
             ps=[h[idx] for h in hist]
             dxy=max((math.hypot(p[0]-q[0],p[1]-q[1]) for p in ps for q in ps),default=0.)
             dyaw=max((abs(wrap(p[2]-q[2])) for p in ps for q in ps),default=0.)
-            return dxy<0.005 and dyaw<0.01
-        parked=bool(now-hist[0][0]>=0.2 and _still(1) and _still(2))
+            return dxy,dyaw
+        bdxy,bdyaw=_disp(1); cdxy,cdyaw=_disp(2)
+        windowed=now-hist[0][0]>=0.2
+        parked=bool(windowed and bdxy<0.005 and bdyaw<0.01 and cdxy<0.005 and cdyaw<0.01)
+        # Evidence for tuning the base hold (firstmate): when the 0.25 s window shows the base/cart
+        # past the 5 mm / 10 mrad stationarity gate, log how far past, throttled to ~0.2 s.
+        if windowed and not parked and now-getattr(self,'_last_bdisp_log',-1.)>=0.2:
+            self._last_bdisp_log=now
+            print(f'BASE_DISP base_dxy={bdxy*1e3:.1f}mm base_dyaw={bdyaw*1e3:.2f}mrad '
+                  f'cart_dxy={cdxy*1e3:.1f}mm cart_dyaw={cdyaw*1e3:.2f}mrad now={now:.2f}',flush=True)
         if self.after_step is not None:
             self.after_step(now,parked)
         ready=self.transport.contains(positions) and not self.contact.read()
