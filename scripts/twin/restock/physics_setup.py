@@ -283,6 +283,15 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # is v/Kp, so raising only the arm joints' stiffness (and damping, to stay critically damped)
     # reduces it proportionally; the base/wheel/caster drives are untouched so towing is unaffected.
     arm_stiffness_gain=float(config.get('arm_stiffness_gain',8.0))
+    # Damping multiplier on the arm Kd. sqrt(stiffness) keeps the ORIGINAL damping ratio, which left
+    # the drive UNDER-damped: it tracked well but RANG at a move's terminal pose (run-125/132/138:
+    # pos_err ~0.066 rad, vel ~0.25 oscillating), so the contact descent never settled and the gripper
+    # seals never pressed the carton within the 5 mm surface-gripper latch window -> no grasp. Steady
+    # following lag is v/Kp (Kd-independent), so raising Kd ABOVE sqrt kills the terminal ring WITHOUT
+    # degrading the 8x stiff tracking -- default now the full stiffness gain (over-damped, ~sqrt(2)x the
+    # original damping ratio). Config overridable (firstmate key surface-gripper-latch).
+    arm_stiffness_gain=max(1.,arm_stiffness_gain)
+    arm_damping_gain=float(config.get('arm_damping_gain',arm_stiffness_gain))
     arm_ctrl=robot.get_articulation_controller()
     kps,kds=arm_ctrl.get_gains()
     if kps is not None and kds is not None and arm_stiffness_gain!=1.:
@@ -290,9 +299,10 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
         for name in tool.arm_joints:
             i=robot.get_dof_index(name)
             kps[i]*=arm_stiffness_gain
-            kds[i]*=max(1.,arm_stiffness_gain**0.5)  # raise damping ~sqrt(stiffness) to stay damped
+            kds[i]*=max(1.,arm_damping_gain)      # over-damp: kill the terminal ring (lag stays v/Kp)
         arm_ctrl.set_gains(kps,kds)
         scene_physics['arm_stiffness_gain']=arm_stiffness_gain
+        scene_physics['arm_damping_gain']=arm_damping_gain
     else:
         scene_physics['arm_stiffness_gain']='unchanged (gains unavailable)'
     scene_physics['effective_after_reset']=bool(context.is_stablization_enabled())
