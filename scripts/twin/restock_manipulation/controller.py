@@ -66,6 +66,7 @@ class TransferController:
         self.evidence, self.reason = [], ''
         self.issued = False
         self._contact_suction = False   # suction enabled once during the contact descent (grasp latch)
+        self._contact_waits = 0         # bounded grace ticks awaiting a fresh acquisition deadline
         self.verify_ids = set()
         self.release_time = None
 
@@ -222,10 +223,18 @@ class TransferController:
                 # wait for a fresh valid_until_steady (under the sensing gate the first ticks may be a bare
                 # held frame with none yet; run-137 emitted it a tick too early) and require_fresh it,
                 # exactly like the grasp phase -- then emit it ONCE.
-                if s.valid_until_steady is None:
+                if self._contact_waits < 3 and s.valid_until_steady is None:
+                    # Brief grace for a fresh acquisition deadline (held-capture under the gate); do NOT
+                    # wait indefinitely (run-140 stalled 218 ticks with 0 suction when it never arrived).
+                    self._contact_waits += 1
+                    print(f'CONTACT_SUCTION_WAIT n={self._contact_waits} valid_until=None contact={s.contact}',
+                          flush=True)
                     return self._result()
-                require_fresh(s.valid_until_steady, self.steady_clock)
+                if s.valid_until_steady is not None:
+                    require_fresh(s.valid_until_steady, self.steady_clock)
                 self._contact_suction = True
+                print(f'CONTACT_SUCTION enable valid_until={s.valid_until_steady!r} '
+                      f'waits={self._contact_waits} contact={s.contact}', flush=True)
                 return self._result(({'kind': 'gripper', 'enabled': True},))
             outcome = self.motion.poll()
             if outcome == 'failed':
