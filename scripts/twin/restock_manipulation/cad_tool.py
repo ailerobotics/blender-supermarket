@@ -82,17 +82,33 @@ def inspect_tool(urdf_path):
 
 
 def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
-                           max_gap=.005, force_limit=30.):
+                           max_gap=.005, force_limit=30., clearance_offset=.003, retry_interval=1.):
     """Author BEFORE physics starts, on the task's composed output stage only.
 
     body_path must name the actual rigid body carrying the CAD panel (importers
     may merge fixed links). tool0_path supplies that link's robot-frame transform.
-    Native runtime owns all body1 relationships; they start EMPTY and disabled.
+    Native runtime owns the gripped body; the seals start with an EMPTY body1 and
+    the plugin records the contact on the gripper's grippedObjects relationship.
     Four sample points lie inside the actual panel. Missing any seal is a miss.
+
+    Each seal is authored exactly the way Isaac's installed surface-gripper plugin
+    (isaacsim.robot.surface_gripper) and its own authored example require, verified
+    natively (data/surface-gripper-latch-v1): an ENABLED maximal-coordinate D6 joint
+    (the plugin never creates or enables the joint itself -- it only fetches the
+    already-instantiated runtime PhysX joint; a disabled joint is never instantiated,
+    which is why the gripper logged "has no joint at attachment point" and never
+    latched). body0 is the panel; body1 is empty (world) with both local poses
+    authored; the shear/tilt axes are locked and the approach axis (local +Z, the
+    forward/suction axis) is a small 0..max_gap compliant stroke with a drive; a
+    positive clearanceOffset places the suction plane off the panel face and a
+    positive retryInterval gives the plugin a window to form the seal (retryInterval 0
+    abandons the close in the same step).
     """
     from pxr import Gf, Sdf, UsdGeom, UsdPhysics
     if not 0 < max_gap <= .005 or not math.isfinite(force_limit) or force_limit <= 0:
         raise ValueError('invalid seal distance/force')
+    if not 0 < clearance_offset <= max_gap or not math.isfinite(retry_interval) or retry_interval <= 0:
+        raise ValueError('invalid seal clearance/retry')
     body, tool0 = stage.GetPrimAtPath(body_path), stage.GetPrimAtPath(tool0_path)
     if not body or not body.HasAPI(UsdPhysics.RigidBodyAPI) or not tool0:
         raise ValueError('actual gripper rigid body and tool0 prim are required')
@@ -104,9 +120,12 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
                                 cache.GetLocalToWorldTransform(body).GetInverse()).T
     body_from_pad = body_from_tool0 @ tool.tool0_from_pad
     rotation = Gf.Matrix3d(*body_from_pad[:3, :3].T.ravel().tolist()).ExtractRotation().GetQuat()
+    # body1 is empty (world), so each seal's localPos1/localRot1 is authored in world space
+    # (body0_world * seal_in_body0) so the enabled joint rests exactly satisfied at spawn.
+    body_world = cache.GetLocalToWorldTransform(body)
     grip = stage.DefinePrim(gripper_path, 'IsaacSurfaceGripper')
     for name, value in (('maxGripDistance', max_gap), ('coaxialForceLimit', force_limit),
-                        ('shearForceLimit', force_limit), ('retryInterval', 0.)):
+                        ('shearForceLimit', force_limit), ('retryInterval', retry_interval)):
         grip.CreateAttribute('isaac:' + name, Sdf.ValueTypeNames.Float, False).Set(value)
     grip.CreateAttribute('isaac:status', Sdf.ValueTypeNames.Token, False).Set('Open')
     grip.CreateRelationship('isaac:grippedObjects', False)
@@ -117,22 +136,37 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
         prim = joint.GetPrim()
         prim.AddAppliedSchema('IsaacAttachmentPointAPI')
         prim.CreateAttribute('isaac:forwardAxis', Sdf.ValueTypeNames.Token, False).Set('Z')
-        prim.CreateAttribute('isaac:clearanceOffset', Sdf.ValueTypeNames.Float, False).Set(0.)
+        prim.CreateAttribute('isaac:clearanceOffset', Sdf.ValueTypeNames.Float, False).Set(clearance_offset)
         sample = np.array([x * (tool.panel_size[0]/2 - .015),
                            y * (tool.panel_size[1]/2 - .015), 0., 1.])
         pos = body_from_pad @ sample
+        local0 = Gf.Matrix4d(1.)
+        local0.SetRotateOnly(rotation)
+        local0.SetTranslateOnly(Gf.Vec3d(*pos[:3]))
+        world = local0 * body_world  # seal pose in world == body1 (empty) frame
+        rot1 = world.ExtractRotation().GetQuat()
         joint.CreateBody0Rel().SetTargets([Sdf.Path(body_path)])
         joint.CreateBody1Rel().SetTargets([])
         joint.CreateLocalPos0Attr(Gf.Vec3f(*pos[:3]))
         joint.CreateLocalRot0Attr(Gf.Quatf(float(rotation.GetReal()), Gf.Vec3f(rotation.GetImaginary())))
-        joint.CreateJointEnabledAttr(False)
+        joint.CreateLocalPos1Attr(Gf.Vec3f(*world.ExtractTranslation()))
+        joint.CreateLocalRot1Attr(Gf.Quatf(float(rot1.GetReal()), Gf.Vec3f(rot1.GetImaginary())))
+        joint.CreateJointEnabledAttr(True)
         joint.CreateExcludeFromArticulationAttr(True)
         joint.CreateBreakForceAttr(force_limit)
         joint.CreateBreakTorqueAttr(force_limit * .05)
-        for axis in ('transX', 'transY', 'transZ', 'rotX', 'rotY', 'rotZ'):
+        # Lock shear/tilt; leave the forward/suction axis (+Z) a small compliant stroke with a
+        # drive so the plugin can seal onto an object inside max_gap (an all-axes weld never grips).
+        for axis in ('transX', 'transY', 'rotX', 'rotY', 'rotZ'):
             limit = UsdPhysics.LimitAPI.Apply(prim, axis)
             limit.CreateLowAttr(1.)
-            limit.CreateHighAttr(-1.)  # lock; native gripper may tune at latch
+            limit.CreateHighAttr(-1.)  # low > high == locked
+        stroke = UsdPhysics.LimitAPI.Apply(prim, 'transZ')
+        stroke.CreateLowAttr(0.)
+        stroke.CreateHighAttr(max_gap)
+        drive = UsdPhysics.DriveAPI.Apply(prim, 'transZ')
+        drive.CreateStiffnessAttr(5000.)
+        drive.CreateDampingAttr(100.)
         paths.append(Sdf.Path(path))
     grip.CreateRelationship('isaac:attachmentPoints', False).SetTargets(paths)
     return gripper_path
@@ -160,13 +194,14 @@ class NativePanelContact:
             self.api.open_gripper(self.path)
 
     def read(self):
+        # The installed surface-gripper plugin reports a latch through its OWN signals -- the
+        # gripper status and the gripper's gripped-objects list -- and manages the PhysX joint
+        # directly; it never writes a per-seal body1 back to USD (verified natively,
+        # data/surface-gripper-latch-v1). The latch is therefore confirmed as Closed holding
+        # exactly one object. A non-complete close that still reports an object (a partial grab)
+        # is explicitly released, never reported as held -- no fallback weld or object pose.
         objects = set(map(str, self.api.get_gripped_objects(self.path) or []))
         complete = self.api.get_gripper_status(self.path) == self.closed_status and len(objects) == 1
-        for path in self.points:
-            joint = self.stage.GetPrimAtPath(path)
-            attached = set(map(str, joint.GetRelationship('physics:body1').GetTargets()))
-            complete = complete and attached == objects and bool(joint.GetAttribute('physics:jointEnabled').Get())
-        # A partial native seal is explicitly released, never reported as held.
         if objects and not complete:
             self.api.open_gripper(self.path)
         return bool(complete)

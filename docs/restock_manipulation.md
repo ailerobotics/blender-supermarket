@@ -113,13 +113,23 @@ pad, exceeding the 120 mm overhead room. The shelf runtime must set
 `grasp_mode='side'` and pass per-location wall indices (0=-X, 1=-Y, 2=+X, 3=+Y).
 For a 600 mm width × 400 mm depth case, wall 1/3 presents the 600 mm face.
 
-`author_native_gripper` authors four disabled attachment joints at the CAD panel,
-with empty `body1` relationships and finite force/torque limits. The native Isaac
-plugin alone chooses contact bodies and closes joints. `NativePanelContact.read`
-requires all four seal points to report one body, otherwise it releases a partial
-seal. There is no fallback fixed joint, target-pose lookup or transform parenting.
-This is a native simulation approximation of panel suction, not proof of vacuum
-performance or real hardware control. Native GPU latch/break behavior is pending.
+`author_native_gripper` authors four attachment joints at the CAD panel the way the
+installed Isaac surface-gripper plugin (`isaacsim.robot.surface_gripper`) requires, so
+the plugin can form the latch — the plugin never creates or enables the joints itself,
+it only fetches the already-instantiated runtime PhysX joint and reconfigures it. Each
+seal is therefore an **enabled** maximal-coordinate (`excludeFromArticulation`) D6 joint
+with `body0` = the panel, an **empty** `body1` (the plugin records the gripped body on
+the gripper's own `grippedObjects` relationship, never on a per-seal `body1`) and both
+local poses authored; the shear/tilt axes are locked and the forward/suction axis is a
+small `0..maxGripDistance` compliant stroke with a drive; a positive `clearanceOffset`
+and `retryInterval` are required (a disabled joint is never instantiated — the symptom
+was the plugin logging `has no joint at attachment point` and never latching; a zero
+retry abandons the close in the same step). `NativePanelContact.read` confirms the latch
+from the plugin's authoritative signals — gripper status `Closed` holding exactly one
+object — and releases any partial grab; there is no fallback fixed joint, target-pose
+lookup or transform parenting. This is a native simulation approximation of panel
+suction, not proof of vacuum performance or real hardware control. The native latch is
+verified by an isolated guarded GPU test (`data/surface-gripper-latch-v1`).
 
 The complete local adapter is `isaac_runtime.CadRestockRuntime`:
 

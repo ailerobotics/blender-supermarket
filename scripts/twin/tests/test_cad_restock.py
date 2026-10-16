@@ -44,12 +44,24 @@ def test_native_authoring_never_selects_or_moves_payload():
     grip = stage.GetPrimAtPath(path)
     points = grip.GetRelationship('isaac:attachmentPoints').GetTargets()
     assert len(points) == 4 and grip.GetTypeName() == 'IsaacSurfaceGripper'
+    assert grip.GetAttribute('isaac:retryInterval').Get() > 0  # 0 abandons the close in-step
     for p in points:
         joint = UsdPhysics.Joint(stage.GetPrimAtPath(p))
+        # body1 stays EMPTY (the gripper never pre-selects a payload); the plugin records the
+        # grip on its own grippedObjects relationship, so a world-frame localPos1 is authored.
         assert not joint.GetBody1Rel().GetTargets()
-        assert joint.GetJointEnabledAttr().Get() is False
+        assert joint.GetLocalPos1Attr().Get() is not None
+        # The seal joint must be ENABLED, else PhysX never instantiates it and the plugin logs
+        # "has no joint at attachment point" and never latches (data/surface-gripper-latch-v1).
+        assert joint.GetJointEnabledAttr().Get() is True
         assert joint.GetLocalPos0Attr().Get()[2] == pytest.approx(.272034)
         assert joint.GetExcludeFromArticulationAttr().Get()
+        assert joint.GetPrim().GetAttribute('isaac:clearanceOffset').Get() > 0
+        # Shear/tilt locked, forward/suction axis a compliant 0..max_gap stroke (not a rigid weld).
+        tz = UsdPhysics.LimitAPI(joint.GetPrim(), 'transZ')
+        assert tz.GetLowAttr().Get() == pytest.approx(0.) and tz.GetHighAttr().Get() == pytest.approx(.005)
+        tx = UsdPhysics.LimitAPI(joint.GetPrim(), 'transX')
+        assert tx.GetLowAttr().Get() > tx.GetHighAttr().Get()
     assert stage.GetPrimAtPath('/Payload').GetAttribute('xformOp:translate').Get() == before
     with pytest.raises(ValueError, match='overwrite'):
         author_native_gripper(stage, tool=tool_fixture(), tool0_path='/Robot/Wrist/Tool0',
@@ -232,16 +244,24 @@ def test_rendered_qr_and_depth_are_actual_inputs(monkeypatch):
 
 
 def test_native_partial_latch_releases_without_weld_fallback():
+    # The installed plugin reports the latch via its own status + gripped-objects list (it never
+    # writes a per-seal body1 to USD, verified natively, data/surface-gripper-latch-v1), so the
+    # reader keys off those: Closed holding exactly one body is held; anything else that still
+    # reports a body is a partial grab and is explicitly released (no weld fallback).
     from scripts.twin.restock_manipulation.cad_tool import NativePanelContact
-    adapter = NativePanelContact.__new__(NativePanelContact)
-    adapter.path, adapter.points, adapter.closed_status = '/Grip', ['a','b','c','d'], 'closed'
-    opened = []
-    adapter.api = NS(get_gripper_status=lambda p:'closed', get_gripped_objects=lambda p:['/Box'],
-                     open_gripper=lambda p:opened.append(p))
-    joint = lambda p:NS(GetRelationship=lambda n:NS(GetTargets=lambda:['/Box'] if p != 'd' else []),
-                       GetAttribute=lambda n:NS(Get=lambda:True))
-    adapter.stage = NS(GetPrimAtPath=joint)
-    assert adapter.read() is False and opened == ['/Grip']
+    def adapter(status, objects):
+        a = NativePanelContact.__new__(NativePanelContact)
+        a.path, a.closed_status, a.opened = '/Grip', 'closed', []
+        a.api = NS(get_gripper_status=lambda p: status, get_gripped_objects=lambda p: objects,
+                   open_gripper=lambda p: a.opened.append(p))
+        return a
+    held = adapter('closed', ['/Box'])
+    assert held.read() is True and held.opened == []
+    for partial in (adapter('closed', ['/Box', '/Other']), adapter('closing', ['/Box'])):
+        assert partial.read() is False and partial.opened == ['/Grip']
+    # A clean non-latch reports nothing and releases nothing.
+    idle = adapter('open', [])
+    assert idle.read() is False and idle.opened == []
 
 
 def test_new_obstacle_map_stops_rejected_active_plan():
