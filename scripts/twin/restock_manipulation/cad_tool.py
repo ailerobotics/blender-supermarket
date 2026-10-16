@@ -81,8 +81,20 @@ def inspect_tool(urdf_path):
                    envelope_pad_max=tuple(relative.max(axis=0)))
 
 
+# Physical suction reach of the real CAD cup (mm-class); the real rig seals within this. UNTOUCHED.
+REAL_MAX_GRIP_DISTANCE = .005
+# SIM FIDELITY RELAXATION (the real value above is untouched): the simulated arm cannot settle the
+# pad within 5 mm under gravity (soft drives sag ~0.5 rad; see data/surface-gripper-latch-v1), so the
+# NATIVE sim suction gate is widened to this so a residual approach gap (~1-2 cm) and a few degrees of
+# pad tilt still latch. Native-sim-only: the physical approach clearance (validate_profile
+# tcp_surface_offset 2.5-3 mm, panel size, envelope) is unchanged. Value proven by the isolated GPU
+# latch probe (largest window that still seals reliably on a flat approach + the tilt it tolerates).
+SIM_MAX_GRIP_DISTANCE = .020
+
+
 def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
-                           max_gap=.005, force_limit=30., clearance_offset=.003, retry_interval=1e6):
+                           max_gap=SIM_MAX_GRIP_DISTANCE, force_limit=30.,
+                           clearance_offset=None, retry_interval=1e6, stroke_limit=None):
     """Author BEFORE physics starts, on the task's composed output stage only.
 
     body_path must name the actual rigid body carrying the CAD panel (importers
@@ -99,8 +111,19 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
     which is why the gripper logged "has no joint at attachment point" and never
     latched). body0 is the panel; body1 is empty (world) with both local poses
     authored; the shear/tilt axes are locked and the approach axis (local +Z, the
-    forward/suction axis) is a small 0..max_gap compliant stroke with a drive; a
-    positive clearanceOffset places the suction plane off the panel face.
+    forward/suction axis) is a 0..max_gap compliant stroke with a drive; a positive
+    clearanceOffset places the suction plane off the panel face.
+
+    max_gap is the native sim suction gate (maxGripDistance). It defaults to
+    SIM_MAX_GRIP_DISTANCE -- a sim fidelity relaxation of the real mm-class cup reach so
+    the simulated arm, which cannot settle the pad within 5 mm under gravity, still
+    latches a residual approach gap. Crucially the gap only seals if the compliant
+    suction-axis stroke AND the cup standoff (clearanceOffset) scale WITH the gate
+    (stroke_limit = .8*max_gap, clearance_offset = .5*max_gap by default); widening
+    maxGripDistance alone does NOT seal -- proven natively. Native-sim-only; the physical
+    approach clearance (validate_profile) is unchanged. The latch distance and tilt
+    tolerance at this gate are proven by the isolated GPU latch probe
+    (data/surface-gripper-latch-v1).
 
     retryInterval is the window the plugin keeps *attempting* the seal after a single
     close command before giving up to Open. The mission enables suction ONCE at the
@@ -117,10 +140,20 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
     (retryInterval 0 abandons the close in the same step.)
     """
     from pxr import Gf, Sdf, UsdGeom, UsdPhysics
-    if not 0 < max_gap <= .005 or not math.isfinite(force_limit) or force_limit <= 0:
+    # The sealable gap scales only if the compliant stroke AND the cup standoff scale WITH the
+    # detection gate: widening maxGripDistance alone does NOT seal (proven natively,
+    # data/surface-gripper-latch-v1). The ratios below are the proven window (gate 20 -> stroke 16,
+    # clearance 10 seals at 19.9 mm; gate 10 -> 8/5 at 9.9 mm). Callers may override per seal.
+    if stroke_limit is None:
+        stroke_limit = .8 * max_gap
+    if clearance_offset is None:
+        clearance_offset = .5 * max_gap
+    if not 0 < max_gap <= SIM_MAX_GRIP_DISTANCE or not math.isfinite(force_limit) or force_limit <= 0:
         raise ValueError('invalid seal distance/force')
     if not 0 < clearance_offset <= max_gap or not math.isfinite(retry_interval) or retry_interval <= 0:
         raise ValueError('invalid seal clearance/retry')
+    if not 0 < stroke_limit <= SIM_MAX_GRIP_DISTANCE:
+        raise ValueError('invalid seal stroke')
     body, tool0 = stage.GetPrimAtPath(body_path), stage.GetPrimAtPath(tool0_path)
     if not body or not body.HasAPI(UsdPhysics.RigidBodyAPI) or not tool0:
         raise ValueError('actual gripper rigid body and tool0 prim are required')
@@ -167,15 +200,18 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
         joint.CreateExcludeFromArticulationAttr(True)
         joint.CreateBreakForceAttr(force_limit)
         joint.CreateBreakTorqueAttr(force_limit * .05)
-        # Lock shear/tilt; leave the forward/suction axis (+Z) a small compliant stroke with a
-        # drive so the plugin can seal onto an object inside max_gap (an all-axes weld never grips).
+        # Lock shear/tilt; the forward/suction axis (+Z) is a compliant stroke with a drive (below)
+        # so the plugin can seal onto an object inside max_gap (an all-axes weld never grips). The
+        # plugin seals only on a near-perpendicular approach (~1-2 deg); compliant/driven rotation
+        # does NOT widen that (proven natively, data/surface-gripper-latch-v1), so rotation stays
+        # locked and the arm must present the pad roughly flat.
         for axis in ('transX', 'transY', 'rotX', 'rotY', 'rotZ'):
             limit = UsdPhysics.LimitAPI.Apply(prim, axis)
             limit.CreateLowAttr(1.)
             limit.CreateHighAttr(-1.)  # low > high == locked
         stroke = UsdPhysics.LimitAPI.Apply(prim, 'transZ')
         stroke.CreateLowAttr(0.)
-        stroke.CreateHighAttr(max_gap)
+        stroke.CreateHighAttr(stroke_limit)
         drive = UsdPhysics.DriveAPI.Apply(prim, 'transZ')
         drive.CreateStiffnessAttr(5000.)
         drive.CreateDampingAttr(100.)

@@ -5,7 +5,8 @@ from types import SimpleNamespace as NS
 import numpy as np
 import pytest
 
-from scripts.twin.restock_manipulation.cad_tool import CadTool, ARM_JOINTS, TINE_JOINTS, author_native_gripper
+from scripts.twin.restock_manipulation.cad_tool import (CadTool, ARM_JOINTS, TINE_JOINTS,
+    author_native_gripper, SIM_MAX_GRIP_DISTANCE, REAL_MAX_GRIP_DISTANCE)
 from scripts.twin.restock_manipulation.isaac_motion import IsaacCadMotion
 from scripts.twin.restock_manipulation.types import ProductProfile, Observation
 
@@ -59,12 +60,17 @@ def test_native_authoring_never_selects_or_moves_payload():
         assert joint.GetJointEnabledAttr().Get() is True
         assert joint.GetLocalPos0Attr().Get()[2] == pytest.approx(.272034)
         assert joint.GetExcludeFromArticulationAttr().Get()
-        assert joint.GetPrim().GetAttribute('isaac:clearanceOffset').Get() > 0
-        # Shear/tilt locked, forward/suction axis a compliant 0..max_gap stroke (not a rigid weld).
+        # Cup standoff scales with the gate so the widened gap actually seals (.5*max_gap).
+        assert joint.GetPrim().GetAttribute('isaac:clearanceOffset').Get() == pytest.approx(.5 * SIM_MAX_GRIP_DISTANCE)
+        # Shear/tilt locked, forward/suction axis a compliant stroke (not a rigid weld) that also
+        # scales with the gate (.8*max_gap); widening the gate alone does not seal.
         tz = UsdPhysics.LimitAPI(joint.GetPrim(), 'transZ')
-        assert tz.GetLowAttr().Get() == pytest.approx(0.) and tz.GetHighAttr().Get() == pytest.approx(.005)
+        assert tz.GetLowAttr().Get() == pytest.approx(0.) and tz.GetHighAttr().Get() == pytest.approx(.8 * SIM_MAX_GRIP_DISTANCE)
         tx = UsdPhysics.LimitAPI(joint.GetPrim(), 'transX')
         assert tx.GetLowAttr().Get() > tx.GetHighAttr().Get()
+    # Sim fidelity relaxation (real-rig reach untouched): the gate is the widened window.
+    assert SIM_MAX_GRIP_DISTANCE > REAL_MAX_GRIP_DISTANCE
+    assert grip.GetAttribute('isaac:maxGripDistance').Get() == pytest.approx(SIM_MAX_GRIP_DISTANCE)
     assert stage.GetPrimAtPath('/Payload').GetAttribute('xformOp:translate').Get() == before
     with pytest.raises(ValueError, match='overwrite'):
         author_native_gripper(stage, tool=tool_fixture(), tool0_path='/Robot/Wrist/Tool0',
