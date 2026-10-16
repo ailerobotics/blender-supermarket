@@ -116,3 +116,74 @@ behaviour regresses (full twin suite: 861 passed, 0 failed; +13 new carton-yaw t
    that the four-corner fit rejected/averaged out.
 
 Reproduction scripts (CPU, task scratch): `datasets/sim-restock-camera-v2/yaw-bias/`.
+
+---
+
+# run-182 follow-up — the ~5 deg is the base dock yaw, not the QR fit (2026-10-16)
+
+PR 104 (four-corner fit) did **not** change the seal failure: run-177 was 4.2 deg, run-182 is
+**4.99 deg** off the +Y side-normal (SEAL_DIAG `forward=[0.087,0.997,-0.002]`). Integration ruled
+out the extrinsic, `wall_grip` and the arm and routed it back to the camera lane. I reproduced the
+collect carton-yaw **faithfully at the exact run-182 geometry** and localised it decisively.
+
+## Faithful reproduction at the real mission source geometry (not the mod-90 bench)
+
+`datasets/sim-restock-camera-v2/yaw-bias/repro_mission.py` drives the **production**
+`FixedTileQR` decode -> `IsaacCartonSensors._label_yaw` at the real design source camera (2560x1920,
+`k_source` fx=fy=2000, `parent_from_optical` with the X-flip + 14.56 deg pitch — identical to the
+smoke-578 bench `camera.json`) with the real run-182 `handling-unit-qr.png`, warped onto the
+projected carton quad, against an analytic flat-top depth. Reporting the **absolute** yaw (the bench
+diagnosis scored `% 90`, which cannot see the design's 180 deg):
+
+* Identity carton (run-182 truth), exact depth: fitted yaw **0.00 deg**; sweeping the true carton
+  yaw 0..5 deg, the fit tracks it to **<0.06 deg**. With accurate depth the estimator has **no bias**
+  at the mission geometry.
+* Depth-error regimes (`repro_mission.py`): a left-right depth gradient — the only shape that rotates
+  the XY fit — gives **0.13 deg @ 2 mm, 0.33 deg @ 5 mm, and is REFUSED at >=10 mm** (coplanarity /
+  discontinuity guard). Uniform depth bias: **0 deg**. Per-corner +-4 mm noise: **all 30 refused**.
+  So the four-corner fit **cannot silently emit a multi-degree yaw**: either it recovers the truth
+  (<0.1 deg) or it refuses and the collect gate holds the last clean registration.
+
+Pinned as regressions in `scripts/twin/tests/test_restock_carton_yaw_mission.py` (absolute tracking
+<1 deg; >=10 mm gradient refused; identity on a right angle; sub-threshold gradient <0.8 deg).
+
+## The extrinsic the collect capture uses IS live
+
+`capture()` sets `self.transform = rigid(context.base_from_camera)` every frame from the context
+provider (isaac_sensors.py:274-277); the collect `source_target` wraps the **same**
+`station.adapters[camera_id]` (sensing.py:282). The rig's `base_from_camera` reads
+`ur_base_link` **live** off the stage each call (`native_cameras.CameraRig.base_from_camera`,
+`inv(world_from_base) @ world_from_optical`). So the observed carton yaw is expressed in the **live
+arm-base frame at the capture tick** — the camera lane already accounts for the base pose.
+
+## Decisive: the 4.99 deg equals the run-182 base dock yaw
+
+run-182 `nav-trace.jsonl` shows the base **parked at world yaw -5.0 deg** throughout the collect
+grasp window (x=-5.693, y=15.965, `yaw_deg=-5.0`, `parked=true`, sustained wall 485..1218 s) — it
+first parked at 0 deg then turned in to -5.0 deg. **Integration's premise that the base dock yaw is
+~0.6 deg (used to "rule the base out") is contradicted by run-182's own nav-trace.** The grasp-yaw
+error (4.99 deg) equals this dock yaw in magnitude.
+
+For an axis-aligned carton docked at base world-yaw `b`, a correct observation reads `-b` in the
+base frame, and a grasp built in that frame and executed relative to the same base cancels `b` back
+to world — the seal is on-normal. A residual equal to `b` means the observation base frame and the
+execution base frame **disagree by one dock yaw**: the carton-top yaw the grasp consumes is not
+expressed in the base pose the arm actually executes against (candidates, all downstream of the QR
+fit: the observation held across the base's turn-in so its `base_from_camera` is frozen at the
+earlier 0 deg park; or the grasp-pose construction / cuMotion execution base frame in `isaac_factory`).
+
+## Verdict
+
+The carton-yaw **estimator** (`_label_yaw`) is exonerated with direct mission-geometry evidence: it
+recovers the true yaw to <0.1 deg and refuses any depth error large enough to bias it. The
+deterministic ~5 deg is the **base dock yaw (-5.0 deg)** mishandled between the observation frame and
+the grasp-execution frame — not the QR fit, the camera extrinsic (live), `wall_grip`, or the arm.
+
+### Ask to integration (to close it next run)
+1. Log, at the collect grasp tick: the **base world yaw** (nav-trace already has it) and the
+   **observed carton yaw in the base frame** — set `RESTOCK_SOURCE_YAW_DIAG=1` (this PR;
+   `SOURCE_YAW_DIAG obs_yaw_base_deg=...`). If `obs_yaw_base_deg == -base_world_yaw` the observation
+   is correct and the bias is purely in grasp construction/execution; if it stays ~0 while the base
+   is at -5 deg, the observation was **held across the base's turn-in** (stale base frame).
+2. Confirm the base pose `isaac_factory` builds/executes the grasp against is the **same tick** as
+   the `base_from_camera` the capture used (no observe-vs-execute base-pose skew while parked).
