@@ -1,0 +1,88 @@
+{
+  "recipes": {
+    "mission_slow": {
+      "status": "passed",
+      "latched": true,
+      "latch_persisted": true,
+      "gap_at_latch_mm": 19.9,
+      "final_gap_mm": 19.9,
+      "max_gap_mm": 20.0,
+      "stroke_mm": 16.0,
+      "clearance_mm": 10.0,
+      "enable_during_descent": true,
+      "final_status": "GripperStatus.Closing",
+      "final_gripped": [
+        "/World/Carton"
+      ],
+      "lift": {
+        "carton_dz_mm": 59.76,
+        "still_held": true
+      },
+      "reason": null,
+      "exit": 0
+    },
+    "mission_direct": {
+      "status": "passed",
+      "latched": true,
+      "latch_persisted": true,
+      "gap_at_latch_mm": 2.75,
+      "final_gap_mm": 2.75,
+      "max_gap_mm": 20.0,
+      "stroke_mm": 16.0,
+      "clearance_mm": 10.0,
+      "enable_during_descent": false,
+      "final_status": "GripperStatus.Closing",
+      "final_gripped": [
+        "/World/Carton"
+      ],
+      "lift": {
+        "carton_dz_mm": 60.15,
+        "still_held": true
+      },
+      "reason": null,
+      "exit": 0
+    },
+    "tight_slow": {
+      "status": "passed",
+      "latched": true,
+      "latch_persisted": true,
+      "gap_at_latch_mm": 5.9,
+      "final_gap_mm": 5.9,
+      "max_gap_mm": 6.0,
+      "stroke_mm": 5.0,
+      "clearance_mm": 3.0,
+      "enable_during_descent": true,
+      "final_status": "GripperStatus.Closing",
+      "final_gripped": [
+        "/World/Carton"
+      ],
+      "lift": {
+        "carton_dz_mm": 59.76,
+        "still_held": true
+      },
+      "reason": null,
+      "exit": 0
+    },
+    "tight_direct": {
+      "status": "passed",
+      "latched": true,
+      "latch_persisted": true,
+      "gap_at_latch_mm": 2.75,
+      "final_gap_mm": 2.75,
+      "max_gap_mm": 6.0,
+      "stroke_mm": 5.0,
+      "clearance_mm": 3.0,
+      "enable_during_descent": false,
+      "final_status": "GripperStatus.Closing",
+      "final_gripped": [
+        "/World/Carton"
+      ],
+      "lift": {
+        "carton_dz_mm": 60.01,
+        "still_held": true
+      },
+      "reason": null,
+      "exit": 0
+    }
+  }
+}

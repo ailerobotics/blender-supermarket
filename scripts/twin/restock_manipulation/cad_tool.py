@@ -6,6 +6,7 @@ It does not select a payload by path, set body1, or move any product transform.
 """
 from dataclasses import dataclass
 import math
+import os
 
 import numpy as np
 
@@ -222,17 +223,30 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
 
 class NativePanelContact:
     """Native contact/latch feedback only; zero fallback welds or object poses."""
-    def __init__(self, stage, gripper_path):
+    def __init__(self, stage, gripper_path, *, diagnostic=None):
         import isaacsim.robot.surface_gripper._surface_gripper as surface_gripper
         self.stage, self.path = stage, gripper_path
         self.api = surface_gripper.acquire_surface_gripper_interface()
         self.api.set_write_to_usd(True)
         self.closed_status = surface_gripper.GripperStatus.Closed
+        self.open_status = surface_gripper.GripperStatus.Open
         prim = stage.GetPrimAtPath(gripper_path)
         self.points = list(prim.GetRelationship('isaac:attachmentPoints').GetTargets())
         if len(self.points) != 4:
             raise ValueError('CAD panel requires all four authored seal samples')
         self.enabled = False
+        # Seal-diagnostic state (firstmate key gripper-seal-fail). The mission reaches the
+        # grasp but the plugin never reports Closed + one object; with no logged gripper state
+        # the failure had no number. read()/command() emit a throttled measured probe (gripper
+        # status Open/Closing/Closed, gripped-object count + paths, each seal's live world pose,
+        # the suction-axis world direction + flatness vs world-down, and a PhysX raycast gap to
+        # the nearest body along that axis). Pure instrumentation: the probe never feeds the latch
+        # decision in read(). Disable the logging with RESTOCK_SEAL_DIAG=0.
+        self.max_gap = float(prim.GetAttribute('isaac:maxGripDistance').Get() or SIM_MAX_GRIP_DISTANCE)
+        self.last_probe = None
+        self._diag = diagnostic if diagnostic is not None else os.environ.get('RESTOCK_SEAL_DIAG', '1') != '0'
+        self._diag_n = 0
+        self._diag_prev = None
 
     def command(self, enabled):
         self.enabled = bool(enabled)
@@ -240,19 +254,120 @@ class NativePanelContact:
             self.api.close_gripper(self.path)
         else:
             self.api.open_gripper(self.path)
+        if getattr(self, '_diag', False):
+            self._emit('command:%s' % ('close' if self.enabled else 'open'), force=True)
 
     def read(self):
-        # The installed surface-gripper plugin reports a latch through its OWN signals -- the
-        # gripper status and the gripper's gripped-objects list -- and manages the PhysX joint
-        # directly; it never writes a per-seal body1 back to USD (verified natively,
-        # data/surface-gripper-latch-v1). The latch is therefore confirmed as Closed holding
-        # exactly one object. A non-complete close that still reports an object (a partial grab)
-        # is explicitly released, never reported as held -- no fallback weld or object pose.
+        # PURE OBSERVER of the installed plugin's latch (the plugin manages the PhysX joint
+        # directly and never writes a per-seal body1 back to USD, verified natively,
+        # data/surface-gripper-latch-v1). A latch is confirmed by the plugin's grippedObjects
+        # list holding EXACTLY ONE body; read() never mutates the gripper.
+        #
+        # Two measured facts (data/sim-restock-stations-v1 contactgap sweep) shaped this:
+        #  1) read() must not open the gripper. An earlier version called open_gripper() whenever
+        #     it sampled an object while the status was not yet Closed ("a partial grab"); the
+        #     normal Closing->Closed suction transition reports its object BEFORE reaching Closed,
+        #     so that abort tore the seal down on every poll of the slow, time-dilated contact
+        #     descent and it never completed (the gripper-seal-fail blocker: s.contact False every
+        #     run). Removing the abort let every recipe seal and lift the carton ~60 mm.
+        #  2) the hold is keyed on grippedObjects, NOT on status==Closed. With the carton provably
+        #     gripped (grippedObjects==['/World/Carton'] every step) and the pad frozen, the
+        #     plugin's STATUS still flickers Closing<->Closed tick to tick; keying on Closed made
+        #     read() flicker False and would false-trip the controller's per-tick lost-grasp gate.
+        #     grippedObjects holding one body is the stable physical-attachment signal (it lifts
+        #     the carton in both Closing and Closed); status is used only to exclude Open.
+        #
+        # The hold safety property is preserved without mutating state: a partial (multi-object)
+        # or released grab is reported not-held (returns False) -- no fabricated hold, no weld.
         objects = set(map(str, self.api.get_gripped_objects(self.path) or []))
-        complete = self.api.get_gripper_status(self.path) == self.closed_status and len(objects) == 1
-        if objects and not complete:
-            self.api.open_gripper(self.path)
-        return bool(complete)
+        held = len(objects) == 1 and self.api.get_gripper_status(self.path) != self.open_status
+        if getattr(self, '_diag', False):
+            self._emit('read')
+        return bool(held)
+
+    def probe(self):
+        """Measured seal state for diagnostics/harness; never consumed by the latch contract.
+
+        Returns a JSON-safe dict: gripper status token, gripped-object paths + count, the
+        enabled command flag, each seal's live world position, the suction-axis world
+        direction and its tilt from world-down, and a PhysX raycast gap (mm) to the nearest
+        body along that axis from each seal. Geometry is best-effort (guarded); status and
+        gripped count come straight from the plugin and are always present.
+        """
+        info = {'enabled': self.enabled}
+        try:
+            info['status'] = str(self.api.get_gripper_status(self.path))
+        except Exception as exc:
+            info['status'] = 'ERR:%s' % exc
+        try:
+            objs = [str(x) for x in (self.api.get_gripped_objects(self.path) or [])]
+        except Exception as exc:
+            objs, info['gripped_err'] = [], str(exc)
+        info['gripped'], info['gripped_n'] = objs, len(objs)
+        try:
+            info.update(self._seal_geometry())
+        except Exception as exc:
+            info['geom_err'] = '%s: %s' % (type(exc).__name__, exc)
+        self.last_probe = info
+        return info
+
+    def _seal_geometry(self):
+        from pxr import Gf, UsdGeom, UsdPhysics
+        cache = UsdGeom.XformCache()
+        first = UsdPhysics.Joint(self.stage.GetPrimAtPath(self.points[0]))
+        body0 = self.stage.GetPrimAtPath(first.GetBody0Rel().GetTargets()[0])
+        body0_world = cache.GetLocalToWorldTransform(body0)
+        seals, fwds = [], []
+        for p in self.points:
+            j = UsdPhysics.Joint(self.stage.GetPrimAtPath(p))
+            lp, lr = j.GetLocalPos0Attr().Get(), j.GetLocalRot0Attr().Get()
+            m = Gf.Matrix4d(1.)
+            m.SetRotateOnly(Gf.Quatd(lr.GetReal(), Gf.Vec3d(*lr.GetImaginary())))
+            m.SetTranslateOnly(Gf.Vec3d(*lp))
+            world = m * body0_world
+            wp = world.ExtractTranslation()
+            fz = world.TransformDir(Gf.Vec3d(0, 0, 1))
+            fz = np.array([fz[0], fz[1], fz[2]], float)
+            fz /= (np.linalg.norm(fz) or 1.)
+            seals.append([float(wp[0]), float(wp[1]), float(wp[2])])
+            fwds.append(fz)
+        fwd = np.mean(fwds, axis=0)
+        fwd /= (np.linalg.norm(fwd) or 1.)
+        flat = math.degrees(math.acos(max(-1., min(1., float(np.dot(fwd, (0, 0, -1.)))))))
+        out = {'seals_world': [[round(c, 4) for c in s] for s in seals],
+               'forward_world': [round(float(c), 4) for c in fwd],
+               'tilt_deg_from_down': round(flat, 3)}
+        try:
+            from omni.physx import get_physx_scene_query_interface
+            sq = get_physx_scene_query_interface()
+            hits, reach = [], self.max_gap * 5. + .05
+            for s in seals:
+                h = sq.raycast_closest(tuple(s), tuple(float(c) for c in fwd), reach)
+                if h and h.get('hit'):
+                    hits.append([h.get('collision'), round(float(h['distance']) * 1000., 2)])
+                else:
+                    hits.append([None, None])
+            out['raycast'] = hits
+            d = [h[1] for h in hits if h[1] is not None]
+            out['min_gap_mm'] = min(d) if d else None
+        except Exception as exc:
+            out['raycast_err'] = '%s: %s' % (type(exc).__name__, exc)
+        return out
+
+    def _emit(self, label, force=False):
+        self._diag_n += 1
+        info = self.probe()
+        # Key on the gripped-object count and the measured gap, NOT the raw status: the plugin's
+        # status flickers Closing<->Closed every few ticks even while holding (measured), so keying
+        # on it would flood the whole hold/tow. Log on a command, on a grip-count/gap change, else
+        # a sparse heartbeat. The current status is still printed in every line.
+        key = (info['gripped_n'], info.get('min_gap_mm'))
+        if force or key != self._diag_prev or self._diag_n % 30 == 1:
+            self._diag_prev = key
+            print('SEAL_DIAG %s status=%s gripped_n=%d gripped=%s enabled=%s min_gap_mm=%s '
+                  'tilt_deg=%s forward=%s' % (label, info.get('status'), info['gripped_n'],
+                  info['gripped'], info['enabled'], info.get('min_gap_mm'),
+                  info.get('tilt_deg_from_down'), info.get('forward_world')), flush=True)
 
 
 def prepare_cad_gripper(stage, *, robot_root, urdf_path):
