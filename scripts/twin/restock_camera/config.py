@@ -193,10 +193,22 @@ def camera_config(scenario, manifest):
     # flat plane (verified passing sensed.py `calibrate_rigid_support` on the real shelf frame).
     support('shelf','map',shelf,0.,[shelf+[-.42,-.146,0],shelf+[-.42,.054,0]],
             shelf+[-.37,-.046,0],[.06,.12],required_xy=(.58,.36))
+    # Approach-occlusion / render-suspension hold window (sim seconds), emitted ONCE into the design
+    # so the SINGLE design builder feeds every consumer: the mission regenerates this design in
+    # build_sensing_sources and rendered_context reads design['occlusion_window_s'] for EVERY support
+    # camera (the collect source_target wraps that same per-camera adapter, so one value governs both
+    # the station /sensors capture and the collect path). Sourced from the mission scenario so the
+    # sim can size it to the render-paced gated reach (approach+contact+grasp+lift ~30-50 s sim)
+    # without changing the real-rig default; None disables the tolerance (strict). The baseline
+    # lifetime ceiling (<=900 s) and the held contradiction gate still bound it.
+    occlusion_window_s = scenario.get('occlusion_window_s', 20.0)
+    if occlusion_window_s is not None and (not np.isfinite(occlusion_window_s)
+                                           or occlusion_window_s < 0 or occlusion_window_s > 900):
+        raise ValueError('scenario occlusion_window_s must be None or a finite 0..900 s sim duration')
     return dict(schema='restock-camera-design.v2',evidence='geometric_design_not_sensor_capture',
                 runtime_ready=False,cameras=cameras,solids=solids,supports=supports,lamps=lamps,
                 cart_chassis_height_m=.20,required_depth_error_bound_m=.0002,
-                render_presets=render_presets(),
+                render_presets=render_presets(),occlusion_window_s=occlusion_window_s,
                 limitations=['Depth error bound must be established for the real renderer/sensor; not assumed.',
                              'Full-link/mount collision and visibility report must be checked before use.',
                              'No commissioning pixels or inventory are provided by this config.'])
