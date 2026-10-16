@@ -98,6 +98,52 @@ def test_held_publish_refuses_a_moving_base():
         adapter.capture(1.1, loc, loc, motion, contact)
 
 
+def test_suspend_disables_the_decode_render_product_and_resume_re_enables_it_on_edges():
+    adapter, cam, motion, contact, loc = build_source_bench(occlusion_window_s=20.0,
+                                                            execution_gate=True)
+    _clean_observe(adapter, cam, motion, contact, loc, now=1.0)
+    assert cam.render_products_enabled is True and cam.product_toggles == []
+    # suspend edge -> product disabled (world.step(render=True) would skip the decode render)
+    adapter.set_render_suspended(True)
+    assert cam.render_products_enabled is False and cam.product_toggles == [False]
+    adapter.set_render_suspended(True)                  # steady-state tick: no extra toggle
+    assert cam.product_toggles == [False]
+    # resume edge -> product re-enabled
+    adapter.set_render_suspended(False)
+    assert cam.render_products_enabled is True and cam.product_toggles == [False, True]
+    adapter.set_render_suspended(False)                 # steady-state tick: no extra toggle
+    assert cam.product_toggles == [False, True]
+
+
+def test_resume_forces_a_fresh_render_not_a_stale_product_frame():
+    adapter, cam, motion, contact, loc = build_source_bench(occlusion_window_s=20.0,
+                                                            execution_gate=True)
+    _clean_observe(adapter, cam, motion, contact, loc, frame_id=5, now=1.0)
+    adapter.set_render_suspended(True)                  # hold through a reach (no frames)
+    motion.collision_time = 1.2
+    adapter.capture(1.2, loc, loc, motion, contact)     # held republish, no render
+    adapter.set_render_suspended(False)                 # resume: reuse snapshot dropped
+    # A STALE decode-product frame (same id/stamp as before suspension) must NOT be reused: the
+    # monotonic-frame gate refuses it until a genuinely new render lands.
+    cam.present(FrameRecord(0, 5, 1.0, 'h'), occluded=False)
+    motion.collision_time = 1.3
+    # refused by a production gate (anti-replay / monotonic frame / stale evidence) -- NOT reused.
+    with pytest.raises(ValueError, match='no new synchronized|camera evidence|replayed|stale'):
+        adapter.capture(1.3, loc, loc, motion, contact)
+    # a fresh render (new id/stamp) is accepted again -- exact-frame identity/gates unchanged.
+    pkt = _clean_observe(adapter, cam, motion, contact, loc, frame_id=9, now=1.4)
+    assert pkt.simulation_time == 1.4 and not adapter.evidence[0]['registration_occluded']
+
+
+def test_gate_off_never_toggles_the_render_product():
+    adapter, cam, motion, contact, loc = build_source_bench(occlusion_window_s=20.0,
+                                                            execution_gate=False)
+    _clean_observe(adapter, cam, motion, contact, loc, now=1.0)
+    adapter.set_render_suspended(True)
+    adapter.set_render_suspended(False)
+    assert cam.render_products_enabled is True and cam.product_toggles == []   # untouched when off
+
+
 def test_gate_off_is_byte_identical_suspension_flag_is_ignored():
     # Default off: set_render_suspended records the flag but capture ignores it -- the normal render
     # path runs, so the camera IS fetched and the result is a fresh (not occluded) frame.

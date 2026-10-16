@@ -113,6 +113,9 @@ def test_sensing_gate_holds_the_reach_without_rendering():
     assert rep.occluded_published >= 1                           # the reach is held, not rendered
     assert rep.rendered == sum(1 for s in steps if not s.occluded)   # only observe actually rendered
     assert rep.rendered < rep.steps                              # the reach frames were not rendered
+    # the decode render PRODUCT is disabled on every held step (so world.step(render=True) would
+    # skip the expensive decode render), and it is re-enabled by the end (resumed on the last... )
+    assert rep.product_off_during_hold == sum(1 for s in steps if s.occluded)
 
 
 def test_sensing_gate_off_renders_every_frame_like_pr80():
