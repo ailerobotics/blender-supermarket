@@ -81,9 +81,16 @@ def main():
                            max_velocity_scale=min(arm_max_speed,1.),
                            pose_goal=bool(config.get('pose_goal', False)),
                            stow_config=transport_joints)
+    # Acquisition-to-use freshness (require_fresh on valid_until_steady) must be measured on the
+    # SIM/node clock, not wall: the held sensing deadline is a SIM-time budget (world.current_time +
+    # window remaining, sensing_sources.steady_clock) and under render pacing wall races far ahead of
+    # sim, so a wall steady_clock trips 'acquisition-to-use freshness expired' instantly (run-143, once
+    # PR 95 threaded the deadline onto the collect packet). use_sim_time is on this node, so its clock
+    # is the shared sim time both the sensing deadline and this check live on.
     controller = TransferController(motion,profiles,frame=tool.base_frame,
         phase_timeout=120.,pose_policy=WallCartonPolicy(args.shelfbot_root,tool,walls=config['walls']),
-        transport_joints=transport_joints)
+        transport_joints=transport_joints,
+        steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # The first decode-grade frame + support registration under render pacing needs several
     # ~1 s RTX renders (~5-15 s WALL); the default 5 s wall startup grace flaked (run-108 failed
