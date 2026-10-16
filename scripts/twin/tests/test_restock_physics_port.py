@@ -277,3 +277,20 @@ def test_arm_tracking_jump_latches_measured_hold_and_rejects_later_move():
     gate.command(names=list(ARM_JOINTS),positions=[.01]*6,velocities=[.01]*6,
                  efforts=[],stamp=2.,now=2.)
     assert np.array_equal(applied[-1][0],np.zeros(6))
+
+
+def test_masked_depth_renders_on_sensing_cadence_through_suspension():
+    # ESDF/masked-depth must keep publishing on the sensing cadence even while the decode capture is
+    # gate-suspended (run-139 'stale parked-station' when the suspension's render-skip stopped it).
+    # It is suspension-independent: fires for decode-grade stages on their stride, never for nav stages
+    # or when no masked-depth publisher is wired.
+    from twin.restock.isaac_port import _masked_depth_due, _sensing_frame_due
+    assert _masked_depth_due('collect', 6, 6, has_masked_depth=True)
+    assert _masked_depth_due('collect', 12, 6, has_masked_depth=True)
+    assert not _masked_depth_due('collect', 7, 6, has_masked_depth=True)       # off-cadence
+    assert not _masked_depth_due('couple', 6, 6, has_masked_depth=True)        # nav stage
+    assert not _masked_depth_due('collect', 6, 6, has_masked_depth=False)      # no publisher
+    # Decoupled from the decode capture: while suspended, sensing (decode) is skipped but masked depth
+    # still renders -> the ESDF stays fresh with the decode render off (once the camera PR lands).
+    assert not _sensing_frame_due('collect', 6, 6, suspended=True)
+    assert _masked_depth_due('collect', 6, 6, has_masked_depth=True)

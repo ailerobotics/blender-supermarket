@@ -35,6 +35,17 @@ def _sensing_frame_due(current_action, upcoming_tick, sensing_stride, suspended)
             and upcoming_tick % sensing_stride == 0)
 
 
+def _masked_depth_due(current_action, upcoming_tick, sensing_stride, has_masked_depth):
+    """Whether to render + publish masked depth (arm camera -> host nvblox ESDF) this tick. Fires on
+    the sensing cadence REGARDLESS of the execution gate's decode suspension: the parked-station
+    collision map must stay fresh through the gated reach (run-139 failed 'stale parked-station' when
+    the suspension's render-skip also stopped masked depth). The camera lane disables the decode
+    render PRODUCT on suspension, so this world.step render stays cheap (arm depth + recorder only,
+    not the full-res decode). Pure for CPU testing."""
+    return (has_masked_depth and current_action in SENSING_ACTIONS
+            and upcoming_tick % sensing_stride == 0)
+
+
 def body_measurement(body):
     position, quaternion = body.get_world_pose()  # Isaac quaternion is wxyz
     position, quaternion = np.asarray(position,float),np.asarray(quaternion,float)
@@ -196,7 +207,11 @@ class IsaacPort:
         # dominant per-tick cost is the whole-scene render; the navigation-only stages
         # read no pixels, so skipping their renders is the headroom under the wall cap.
         self.sensing_tick,self.record_tick=self._frame_plan(self.tick+1)
-        self.world.step(render=bool(self.sensing_tick or self.record_tick))
+        # Masked depth (ESDF) renders on the sensing cadence even while the decode capture is gate-
+        # suspended, so the host collision map / parked-station ack stay fresh through the reach.
+        self.masked_depth_tick=_masked_depth_due(self.current_action, self.tick+1,
+                                                 self.sensing_stride, self.masked_depth is not None)
+        self.world.step(render=bool(self.sensing_tick or self.record_tick or self.masked_depth_tick))
         self.tick+=1
         # Mission-relative acquisition clock on the nominal fixed timestep. Deriving it
         # from world.current_time instead drifts: Isaac's physics dt differs from the
@@ -310,7 +325,7 @@ class IsaacPort:
                     if self.tick==1:
                         (self.recorder.directory.parent/'nav-trace.err').write_text(repr(_e))
                 except Exception: pass
-        if self.masked_depth is not None and self.sensing_tick:
+        if self.masked_depth is not None and self.masked_depth_tick:
             # Rig-masked depth (+ camera info) for the host nvblox consumer, published only
             # while a sensing stage needs the manipulation collision world. Off (None) by
             # default; the raw-depth OmniGraph path is unchanged until the host opts in.
