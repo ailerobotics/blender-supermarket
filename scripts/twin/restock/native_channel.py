@@ -10,6 +10,13 @@ _HEARTBEAT_WALL_S = 0.3
 # Bounded re-prepare attempts: a reply of 'idle'/'failed' for the current epoch means the ack lost
 # or faulted it; re-prepare under a fresh epoch a few times, then surface the reason.
 _MAX_RESTARTS = 2
+# Ack-freshness window (stage-clock seconds) for now - ack.stamp. The host relay stamps acks on
+# world_current_time, which LEADS the mission stage clock by a step+, and the skew grows under heavy
+# render pacing during a long contact descent (run-154/160 'stale parked-station' when the lead
+# exceeded the old tight [0, 0.5]). Tolerate the lead and a wider lag; the 10 s heartbeat-unavailable
+# guard still catches a genuinely dead host.
+_ACK_LEAD = -1.0
+_ACK_LAG = 1.0
 
 
 class JsonChannel:
@@ -123,7 +130,17 @@ class StationClient:
         self.now=now
         reply=self.channel.read()
         if reply and reply.get('epoch')==self.epoch and reply!=self.latest:
-            if not 0<=now-reply.get('stamp',-1)<=.5:
+            # Freshness window on the ack stamp vs the mission stage clock. The original tight
+            # [0, 0.5] s rejected the ack the instant the host /clock drifted AHEAD of the mission
+            # stage clock (run-154/160: during the long render-paced contact descent the host led by
+            # ~0.2 s, delta<0 -> 'stale'). The host relay stamps on world_current_time, which leads the
+            # mission stage clock by a step+, and the skew grows under heavy render pacing. Tolerate the
+            # lead and a wider lag (both << the 10 s heartbeat-unavailable guard that still catches a
+            # genuinely dead host). Log the delta so a real stall is still attributable.
+            delta=now-reply.get('stamp',-1)
+            if not _ACK_LEAD<=delta<=_ACK_LAG:
+                print(f'STATION_ACK_STALE delta={delta:.3f} now={now:.3f} '
+                      f'stamp={reply.get("stamp")} window=[{_ACK_LEAD},{_ACK_LAG}]',flush=True)
                 raise ValueError('stale parked-station acknowledgement')
             self.latest=reply
             self.last_reply=self.wall_clock()

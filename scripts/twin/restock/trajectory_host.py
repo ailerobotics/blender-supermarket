@@ -47,7 +47,7 @@ EXECUTE_WALL_BACKSTOP_S = 1800.0
 # following lag the stiffening fixed and risk the tracking envelope, so relax the velocity tol instead.
 GOAL_POSITION_TOL = 0.01
 GOAL_VELOCITY_TOL = 0.30
-GOAL_SETTLE_MARGIN_S = 5.0
+GOAL_SETTLE_MARGIN_S = 15.0  # the over-damped arm creeps the final ~0.07 rad in slowly; 5 s cut it off
 # Max allowed command-vs-measured divergence (rad) during execution. Compared at the FEEDBACK's own
 # timestamp (see tick()) so render-paced feedback lag is not mistaken for a tracking error. With the
 # arm drive stiffened (physics_setup arm_stiffness_gain) the steady-state following error is flat and

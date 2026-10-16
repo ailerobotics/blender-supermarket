@@ -292,19 +292,54 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # original damping ratio). Config overridable (firstmate key surface-gripper-latch).
     arm_stiffness_gain=max(1.,arm_stiffness_gain)
     arm_damping_gain=float(config.get('arm_damping_gain',arm_stiffness_gain))
+    # Absolute per-joint position-drive gains for the SIMULATED arm (firstmate msg 248): the URDF-import
+    # defaults are far too soft -- gravity sag is tau_g/Kp ~0.5 rad, and no multiplier or effort-FF fixed
+    # it cleanly. A simulated position drive is not a motor; UR10-class Isaac drives run stiffness ~1e5-1e7
+    # with near-critical damping. At Kp~1e6 the sag is microradians and the mid-move lag collapses, so
+    # gravity effort-FF is turned OFF. Falls back to the legacy multiplier when arm_stiffness_abs is unset.
+    arm_stiffness_abs=config.get('arm_stiffness_abs')
+    arm_damping_abs=config.get('arm_damping_abs')
+    _arm_idx=np.array([robot.get_dof_index(n) for n in tool.arm_joints])
     arm_ctrl=robot.get_articulation_controller()
     kps,kds=arm_ctrl.get_gains()
-    if kps is not None and kds is not None and arm_stiffness_gain!=1.:
+    if kps is not None and kds is not None and (arm_stiffness_abs is not None or arm_stiffness_gain!=1.):
         kps=np.asarray(kps,float).copy(); kds=np.asarray(kds,float).copy()
         for name in tool.arm_joints:
             i=robot.get_dof_index(name)
-            kps[i]*=arm_stiffness_gain
-            kds[i]*=max(1.,arm_damping_gain)      # over-damp: kill the terminal ring (lag stays v/Kp)
+            if arm_stiffness_abs is not None:
+                kps[i]=float(arm_stiffness_abs)
+                kds[i]=float(arm_damping_abs if arm_damping_abs is not None
+                             else 2.*np.sqrt(float(arm_stiffness_abs)))
+            else:
+                kps[i]*=arm_stiffness_gain
+                kds[i]*=max(1.,arm_damping_gain)  # over-damp: kill the terminal ring (lag stays v/Kp)
         arm_ctrl.set_gains(kps,kds)
-        scene_physics['arm_stiffness_gain']=arm_stiffness_gain
-        scene_physics['arm_damping_gain']=arm_damping_gain
+        # Raise the per-joint effort (maxForce) limit: at Kp~1e6 even a small tracking error demands
+        # torque far above the URDF-import effort limit (shoulder ~330 Nm), so the drive SATURATES and
+        # still lags (firstmate suspect #1). A simulated drive can hold a high ceiling; errors stay tiny
+        # once the stiff drive tracks, so the ceiling is only hit on a transient. Configurable.
+        arm_max_effort=config.get('arm_max_effort')
+        if arm_max_effort is not None:
+            try:
+                arm_ctrl.set_max_efforts(np.full(len(_arm_idx),float(arm_max_effort)),joint_indices=_arm_idx)
+            except Exception as exc:
+                print(f'ARM_MAX_EFFORT_SET_FAILED {exc}',flush=True)
+        scene_physics['arm_stiffness']=('abs=%g'%arm_stiffness_abs) if arm_stiffness_abs is not None else arm_stiffness_gain
+        scene_physics['arm_damping']=arm_damping_abs if arm_stiffness_abs is not None else arm_damping_gain
+        # Read gains + max efforts BACK from the drive (not the local arrays) to PROVE they applied to
+        # physics -- the prior ARM_GAINS_SET printed the local request, not the drive's accepted value.
+        try:
+            rkp,rkd=arm_ctrl.get_gains()
+            rme=arm_ctrl.get_max_efforts()
+            rkp=np.asarray(rkp,float).reshape(-1); rkd=np.asarray(rkd,float).reshape(-1)
+            rme=np.asarray(rme,float).reshape(-1)
+            print(f'ARM_GAINS_READBACK kp={[round(float(rkp[i]),1) for i in _arm_idx]} '
+                  f'kd={[round(float(rkd[i]),1) for i in _arm_idx]} '
+                  f'max_effort={[round(float(rme[i]),1) for i in _arm_idx]}',flush=True)
+        except Exception as exc:
+            print(f'ARM_GAINS_READBACK_FAILED {exc}',flush=True)
     else:
-        scene_physics['arm_stiffness_gain']='unchanged (gains unavailable)'
+        scene_physics['arm_stiffness']='unchanged (gains unavailable)'
     scene_physics['effective_after_reset']=bool(context.is_stablization_enabled())
     if not scene_physics['effective_after_reset']:
         raise RuntimeError('contact stabilization did not take effect after reset')
@@ -318,23 +353,41 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # so the drive needs ~0 position error to hold against gravity; the small Kd*v motion lag remains.
     # Isaac adds an applied effort to the position-drive torque. Firstmate key contact-descent-drive-stall.
     _view=getattr(robot,'_articulation_view',None)
-    _arm_idx=np.array([robot.get_dof_index(n) for n in tool.arm_joints])
     _grav_ff=bool(config.get('arm_gravity_ff',True))
+    # get_generalized_gravity_forces returns the gravity term G(q) that PULLS each joint; the effort
+    # feedforward must OPPOSE it, so sign=-1 (run-155 applied +G and the gravity-loaded joint sagged
+    # further -> flip). Kept configurable to retune without a code edit.
+    _ff_sign=float(config.get('arm_gravity_ff_sign',-1.0))
+    # Only compensate joints with a MEANINGFUL gravity load. The wrists (|G|~1 Nm) and the elbow
+    # (~0 Nm at the contact pose) do not sag, but feeding their tiny time-varying FF EXCITED a terminal
+    # limit-cycle (run-156 wrist vel 0.30->0.58). Thresholding keeps the shoulder_pan/lift compensation
+    # that fixed the real sag while leaving the low-gravity joints on the clean position drive.
+    _ff_min_nm=float(config.get('arm_gravity_ff_min_nm',3.0))
     _ff_log=[0]
+    # One-shot: the FULL generalized-gravity vector (all DOFs) so the arm's gravity torque is visible
+    # and the DOF ordering is unambiguous (run-153's slice-by-robot-index read ~0 on the wrong DOFs).
     try:
-        _mf=np.asarray(_view.get_dof_max_forces(),float).reshape(-1)
-        print(f'ARM_DOF_MAX_FORCES arm={[round(float(_mf[i]),1) for i in _arm_idx]}',flush=True)
+        _gfull=np.asarray(_view.get_generalized_gravity_forces(),float).reshape(-1)
+        print(f'ARM_GRAVITY_FULL dof={len(_gfull)} '
+              f'g={np.array2string(_gfull,precision=3,separator=",")}',flush=True)
     except Exception as exc:
-        print(f'ARM_DOF_MAX_FORCES_UNAVAILABLE {exc}',flush=True)
+        print(f'ARM_GRAVITY_FULL_UNAVAILABLE {exc}',flush=True)
+    _arm_names=list(tool.arm_joints)
     def apply(q,v,indices):
         efforts=None
-        if _grav_ff and _view is not None:
+        # The gate commands all 6 arm joints together, in arm_joints order == dof indices [6..11]
+        # (ARM_GRAVITY_FF idx=[6,7,8,9,10,11]). Query gravity BY JOINT NAME: run-153/154 proved the
+        # physics view's DOF order differs from robot.get_dof_index (the arm's real gravity is at view
+        # indices 2-4, not 6-11), so index-based reads hit the wrong near-zero DOFs. joint_names is
+        # order-independent and returns the terms in arm_joints order, aligned to q/indices.
+        if _grav_ff and _view is not None and list(indices)==list(_arm_idx):
             try:
-                g=np.asarray(_view.get_generalized_gravity_forces(),float).reshape(-1)
-                efforts=g[np.asarray(indices)]
+                g=np.asarray(_view.get_generalized_gravity_forces(joint_names=_arm_names),
+                             float).reshape(-1)
+                efforts=np.where(np.abs(g)>=_ff_min_nm,_ff_sign*g,0.0)
                 if _ff_log[0]<3:
                     _ff_log[0]+=1
-                    print(f'ARM_GRAVITY_FF idx={list(indices)} '
+                    print(f'ARM_GRAVITY_FF names={_arm_names} '
                           f'ff={np.array2string(efforts,precision=2,separator=",")}',flush=True)
             except Exception as exc:
                 if _ff_log[0]<1:
