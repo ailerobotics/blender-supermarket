@@ -2219,3 +2219,41 @@ lapses mid-reach -> watchdog. Fix (firstmate-authorized, key occlusion-window-vs
 occlusion window sized to the render-paced gated reach -- occlusion_window_s=60 in the sim camera
 config. Physically justified: base parked, carton static; the contradiction gate and the hard
 ceiling still refuse a wrong/aged hold. Camera lane notified in parallel to object if unsafe.
+
+### 2026-10-16 — runs 151–168: contact-descent drive fix, latch window, base hold, sim-only gate relaxation
+
+The full stack now reaches the grasp. Blockers cleared in order (all committed to
+`fm/twin-robot-in-store-boot-v1`):
+- **FastDDS SHM port exhaustion** (run-150): 13 orphaned `sim-restock-host-v2` `move_group` leaked by
+  `ros2 launch` (own session, escapes the pgid teardown) + 300+ stale `/dev/shm/fastrtps_*` exhausted
+  the SHM port pool → the host station-ack responder `open_and_lock_file failed`, never acked →
+  `heartbeat unavailable`. Fix: orchestrate pre-launch sweep of UNOWNED fastrtps segments + post-teardown
+  reap of this task's move_group (other lanes untouched).
+- **Decode startup** (PR 99, camera lane): the collect decode render product never enabled at mission
+  start → 0 clean collect frames. Idempotent enable-at-start → 2025 clean frames (run-151).
+- **Contact-descent drive sag** (run-151–160): the URDF-import arm position-drive gains were far too
+  soft; joints sagged ~0.5 rad under gravity, never settling within the latch window. A simulated
+  position drive is not a motor (firstmate msg 248): set absolute reference-class gains
+  (`arm_stiffness_abs`=1e5, damping 3e3, `arm_max_effort` via `set_max_efforts`=2000; gravity effort-FF
+  tried and abandoned — destabilising) with a drive read-back (`ARM_GAINS_READBACK`). run-160: contact
+  descent `SUCCEEDED`, zero tracking/goal faults.
+- **Station-ack freshness** (run-154/160): host relay stamps acks on `world_current_time`, which leads
+  the mission stage clock; under the long render-paced descent the lead exceeded the tight `[0,0.5]s`
+  window → false 'stale parked-station'. Widened to `[-1.0,1.0]s` (10s heartbeat guard still catches a
+  dead host) + `STATION_ACK_STALE` delta log.
+- **Surface-gripper latch window** (PR 100, stations lane): sim `SIM_MAX_GRIP_DISTANCE` 5mm→20mm
+  (real rig untouched); the arm may stop up to ~2cm high and still latch, pad within ~1° of flat.
+- **Base moves under the stiff-arm reaction** (PR 101 stations hold + runs 164–168): the stiff arm's
+  reaction nudged the mobile base past the stationarity gate. PR 101's stiff wheel position-hold
+  (tuned here to 6e5/5e3/6e4) pulled `base_dxy` under the 5mm gate, but `base_dyaw` is **stiffness-
+  saturated**: across hold 1e5/3e5/6e5 the worst-0.25s-window yaw plateaued at **9.82 → 10.91 →
+  10.98 mrad** (run-164/165/166), ~1mrad over the 10mrad gate, cart at 0.0. This residual is a
+  physically-plausible, harmless **chassis-pivot impulse at the contact moment**, not a base rolling
+  away; chasing it via `wheel_friction` crosses into the 215kg tow traction, and a gentler descent
+  (arm_max_speed 0.4) cleared it but reintroduced the shoulder_lift drive lag (run-167).
+
+**Sim-only fidelity relaxation (firstmate msg 252, captain-directed):** the stationarity gate thresholds
+are now config-driven with **real-rig defaults 5mm / 10mrad** and a **sim profile of
+`base_stationary_dxy_m`=0.010 / `base_stationary_dyaw_rad`=0.025** (same pattern as the sim arm-speed
+and occlusion-window relaxations). A base that genuinely rolls away is still caught at these values;
+`BASE_DISP` logs every trip with its measured number. Real-rig path untouched.
