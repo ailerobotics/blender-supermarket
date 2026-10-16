@@ -308,8 +308,41 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     scene_physics['effective_after_reset']=bool(context.is_stablization_enabled())
     if not scene_physics['effective_after_reset']:
         raise RuntimeError('contact stabilization did not take effect after reset')
+    # Gravity-compensation feedforward on the ARM position drive. A position PD drive holds a
+    # gravity-loaded joint at a steady-state error tau_gravity/Kp, INDEPENDENT of damping: at Kp=8x
+    # the shoulder_lift sagged ~0.069 rad (~70 mm pad height) short of the contact pose, so the pad
+    # stalled ~7 cm above the carton and the seals never reached the 5 mm surface-gripper latch window
+    # (run-151 terminal GOAL_MISS 0.069; run-152 the gravity-loaded descent lag tripped the 0.50 rad
+    # tracking envelope mid-move). Neither more stiffness (needs ~100x to close 70->5 mm) nor damping
+    # (sag is Kd-independent) fixes it. Feed the measured generalized gravity term back as joint effort
+    # so the drive needs ~0 position error to hold against gravity; the small Kd*v motion lag remains.
+    # Isaac adds an applied effort to the position-drive torque. Firstmate key contact-descent-drive-stall.
+    _view=getattr(robot,'_articulation_view',None)
+    _arm_idx=np.array([robot.get_dof_index(n) for n in tool.arm_joints])
+    _grav_ff=bool(config.get('arm_gravity_ff',True))
+    _ff_log=[0]
+    try:
+        _mf=np.asarray(_view.get_dof_max_forces(),float).reshape(-1)
+        print(f'ARM_DOF_MAX_FORCES arm={[round(float(_mf[i]),1) for i in _arm_idx]}',flush=True)
+    except Exception as exc:
+        print(f'ARM_DOF_MAX_FORCES_UNAVAILABLE {exc}',flush=True)
     def apply(q,v,indices):
-        robot.apply_action(ArticulationAction(joint_positions=q,joint_velocities=v,joint_indices=indices))
+        efforts=None
+        if _grav_ff and _view is not None:
+            try:
+                g=np.asarray(_view.get_generalized_gravity_forces(),float).reshape(-1)
+                efforts=g[np.asarray(indices)]
+                if _ff_log[0]<3:
+                    _ff_log[0]+=1
+                    print(f'ARM_GRAVITY_FF idx={list(indices)} '
+                          f'ff={np.array2string(efforts,precision=2,separator=",")}',flush=True)
+            except Exception as exc:
+                if _ff_log[0]<1:
+                    _ff_log[0]+=1
+                    print(f'ARM_GRAVITY_FF_UNAVAILABLE {exc}',flush=True)
+                efforts=None
+        robot.apply_action(ArticulationAction(joint_positions=q,joint_velocities=v,
+                                              joint_efforts=efforts,joint_indices=indices))
     # SIM execution profile: the Isaac-side absolute joint-speed gate (rad/s) on executed arm
     # commands. Default 0.15 keeps the conservative real-rig envelope; the sim mission raises it
     # (0.3) to match the planner/executor so a legitimately planned faster grasp is not rejected.

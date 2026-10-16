@@ -276,7 +276,9 @@ def main():
                     state['miss_stamp']=fb_stamp
                     state['miss_count']+=1
                     print(f'TRAJ_HOST_TRACK_MISS err={track_err:.4f} fb_age={now()-fb_stamp:.3f} '
-                          f'n={state["miss_count"]}/{TRACKING_DEBOUNCE}',flush=True)
+                          f'n={state["miss_count"]}/{TRACKING_DEBOUNCE} '
+                          f'per_joint_err={np.array2string(reference-state["feedback"][1],precision=4,separator=",")}',
+                          flush=True)
                 if tracking_fault(track_err,state['miss_count']):
                     fault(f'trajectory tracking error {track_err:.3f} exceeds {TRACKING_TOL} rad '
                           f'for {state["miss_count"]} samples')
@@ -380,8 +382,11 @@ def main():
                         if elapsed>plan.times[-1]+GOAL_SETTLE_MARGIN_S:
                             # Diagnostic: the exact terminal error so a miss is attributable (settle
                             # tolerance vs a genuine tracking error) without another blind run.
+                            perr=measured[1]-plan.end
                             print(f'TRAJ_HOST_GOAL_MISS pos_err={pos_err:.4f} vel={vel_mag:.4f} '
-                                  f'sim_age={now()-measured[0]:.3f} settle={elapsed-plan.times[-1]:.2f}',
+                                  f'sim_age={now()-measured[0]:.3f} settle={elapsed-plan.times[-1]:.2f} '
+                                  f'per_joint_err={np.array2string(perr,precision=4,separator=",")} '
+                                  f'per_joint_vel={np.array2string(measured[2],precision=4,separator=",")}',
                                   flush=True)
                             raise RuntimeError('measured goal tolerance not reached')
                 time.sleep(.01)
