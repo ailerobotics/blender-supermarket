@@ -246,15 +246,20 @@ def main():
                 return
             q,v=state['target'],np.zeros(6)
             if state['plan'] is not None:
-                q,v=state['plan'].sample(now()-state['start'])
+                q,v=state['plan'].sample(max(0.,now()-state['start']))
                 # Tracking error must compare the command and the measured feedback at the SAME
                 # instant. The published command q is at now(), but the measured feedback is stamped
                 # up to FEEDBACK_SIM_STALE_S earlier (render-paced /joint_states delivery), and the
                 # command advances over that gap -- comparing q(now) to measured(feedback_stamp)
                 # counts that commanded motion as false tracking error (run-107/109 faulted >.15 rad
                 # mid-approach at BOTH 0.3 and 0.5 rad/s). Evaluate the error against the command
-                # sampled at the feedback's own stamp.
-                reference=state['plan'].sample(state['feedback'][0]-state['start'])[0]
+                # sampled at the feedback's own stamp. Clamp to >=0: the FIRST feedback after a goal is
+                # accepted can be stamped marginally BEFORE ``start`` (a sub-tick /joint_states-vs-now()
+                # delivery race, widened by the sensing gate's altered per-tick timing); that frame is
+                # the pre-trajectory (start) pose, so sample(0) is its correct reference. A raw negative
+                # elapsed crashed Plan.sample('invalid trajectory clock') in tick(), killing the whole
+                # executor at the first approach tick (run-130).
+                reference=state['plan'].sample(max(0.,state['feedback'][0]-state['start']))[0]
             else:
                 reference=q                               # idle hold: measured vs the static target
             track_err=float(np.max(np.abs(reference-state['feedback'][1])))

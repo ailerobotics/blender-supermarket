@@ -24,6 +24,17 @@ def test_interpolation_and_terminal_hold():
     assert np.allclose(plan.sample(5)[1],0)
 
 
+def test_sample_rejects_negative_clock_but_start_is_clamped():
+    # Plan.sample rejects a negative clock; tick() must clamp the reference-sample time to >=0, since
+    # the first feedback after a goal is accepted can be stamped marginally before the trajectory
+    # start (a sub-tick /joint_states-vs-now() race, widened by the sensing gate). A raw negative
+    # crashed the whole executor (run-130). The clamped time (0) yields the trajectory's start pose.
+    plan=Plan(trajectory(),[0]*6,[(-1,1)]*6)
+    with pytest.raises(ValueError,match='invalid trajectory clock'):
+        plan.sample(-1e-6)
+    assert np.allclose(plan.sample(max(0.,-1e-6))[0],0.)   # clamped: start pose, no crash
+
+
 def test_interior_speed_violation_despite_rest_endpoints():
     with pytest.raises(ValueError,match='speed'):
         Plan(trajectory(.14,1),[0]*6,[(-1,1)]*6)
