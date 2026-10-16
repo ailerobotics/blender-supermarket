@@ -12,7 +12,7 @@ from .mobile_assets import author_hitch
 
 class MobileController:
     def __init__(self, stage, robot_body, cart_body, wheel_joint_paths,
-                 spec=MobileSpec(), hitch_path='/MobileHitch'):
+                 spec=MobileSpec(), hitch_path='/MobileHitch', wheel_angle_reader=None):
         from pxr import UsdPhysics
         if len(wheel_joint_paths) != 2 or len(set(wheel_joint_paths)) != 2:
             raise ValueError('left and right wheel joint paths required, in that order')
@@ -32,10 +32,61 @@ class MobileController:
             drive = UsdPhysics.DriveAPI.Apply(stage.GetPrimAtPath(path), 'angular')
             drive.CreateTypeAttr('force')
             drive.CreateStiffnessAttr(0.0)
-            drive.CreateDampingAttr(100.0)
-            drive.CreateMaxForceAttr(80.0)
+            drive.CreateDampingAttr(self.DRIVE_DAMPING)
+            drive.CreateMaxForceAttr(self.DRIVE_MAX_FORCE)
             drive.CreateTargetVelocityAttr(0.0)
             self.drives.append(drive)
+        # SIM-only stationary base hold (twin.restock task base-hold-under-stiff-arm): a real parked
+        # base is braked/chocked, but the imported free base is only held by the wheels' VELOCITY
+        # drive -- which leaks a creep velocity F/damping under a steady load -- so the stiff arm's
+        # reaction torque through the arm mount creeps the base past the measured stationarity gate
+        # during a manipulation move (run-161). hold() engages a parking brake: it switches each
+        # wheel drive to a stiff POSITION hold at the wheel's current angle, so the wheels cannot
+        # roll and the base cannot creep (a position drive's steady-state error is bounded, F/Kp,
+        # not a continuous velocity leak). It is gated to the stationary/manipulation phase and
+        # released the instant the mission drives again (command()). The real-robot path is
+        # untouched -- this only reconfigures the SIM wheel drive while parked; no teleport or
+        # kinematic pin. (Verified on GPU: of the available levers only the wheel position-hold
+        # helps; base-link rigid-body damping is a PhysX mid-sim no-op and a higher-maxForce
+        # velocity brake is counterproductive -- data/surface-gripper-latch-v1 / Follow-up 4.)
+        self.wheel_angle_reader = wheel_angle_reader
+        self._held = False
+
+    DRIVE_DAMPING = 100.0
+    DRIVE_MAX_FORCE = 80.0
+    HOLD_STIFFNESS = 1.0e5
+    HOLD_DAMPING = 2.0e3
+    HOLD_MAX_FORCE = 1.0e4
+
+    def hold(self):
+        """Engage the stationary parking brake: lock each wheel at its current angle with a stiff
+        POSITION drive. Gated to the stationary/manipulation phase; released by command() when the
+        mission drives. Needs the current wheel angles (wheel_angle_reader, radians); without a
+        reader it degrades to park() (a plain zero-velocity stop)."""
+        if self._held:
+            return (0.0, 0.0)
+        if self.wheel_angle_reader is None:
+            return self.park()
+        angles = self.wheel_angle_reader()
+        for drive, angle in zip(self.drives, angles):
+            drive.GetStiffnessAttr().Set(self.HOLD_STIFFNESS)
+            drive.GetDampingAttr().Set(self.HOLD_DAMPING)
+            drive.GetMaxForceAttr().Set(self.HOLD_MAX_FORCE)
+            drive.GetTargetPositionAttr().Set(math.degrees(float(angle))) if drive.GetTargetPositionAttr() \
+                else drive.CreateTargetPositionAttr().Set(math.degrees(float(angle)))
+            drive.GetTargetVelocityAttr().Set(0.0)
+        self._held = True
+        return (0.0, 0.0)
+
+    def release(self):
+        """Restore the free (zero-stiffness velocity) driving drive so the base can move again."""
+        if self._held:
+            for drive in self.drives:
+                drive.GetStiffnessAttr().Set(0.0)
+                drive.GetDampingAttr().Set(self.DRIVE_DAMPING)
+                drive.GetMaxForceAttr().Set(self.DRIVE_MAX_FORCE)
+                drive.GetTargetVelocityAttr().Set(0.0)
+            self._held = False
 
     def park(self):
         for drive in self.drives:
@@ -43,6 +94,7 @@ class MobileController:
         return (0.0, 0.0)
 
     def command(self, v, omega, observation, *, transport_ready=False):
+        self.release()  # resuming driving: drop the stationary brake before commanding wheels
         # Stale/missing kinematics must never leave a previous nonzero drive latched.
         if observation is None or not math.isfinite(observation.age) or not 0 <= observation.age <= 0.1:
             return self.park()

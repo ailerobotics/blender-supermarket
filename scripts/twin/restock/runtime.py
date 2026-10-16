@@ -275,7 +275,7 @@ class RuntimeAdapter:
                 return Result('running', reason='warming collision map before grasp')
             self.phase = 'execute'
         if self.phase == 'warm':
-            self.mobile.park()
+            self.mobile.hold()   # stationary manipulation: brake the base against arm reaction
             if not p.parked:
                 return Result('failed', reason='base moved during collision-map warm-up')
             ready = self.manip.warm(dt, p)
@@ -288,7 +288,7 @@ class RuntimeAdapter:
                 return Result('running', reason=('collision map warm; dispatching grasp' if ready
                                                  else 'warm-up tick cap reached; dispatching grasp'))
             return Result('running', reason='warming collision map')
-        self.mobile.park()
+        self.mobile.hold()   # stationary manipulation: brake the base against stiff-arm reaction
         if not p.parked:
             return Result('failed', reason='base moved during stationary operation')
         if self.action == 'couple':

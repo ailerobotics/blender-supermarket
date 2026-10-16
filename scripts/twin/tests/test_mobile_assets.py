@@ -116,6 +116,52 @@ def test_hitch_and_runtime_do_not_change_cart_transforms(stage):
         author_hitch(stage, '/missing', '/Rollwagen/chassis')
 
 
+def test_base_hold_locks_wheels_and_releases(stage):
+    # The sim stationary base hold (task base-hold-under-stiff-arm): hold() locks each wheel at its
+    # current angle with a stiff POSITION drive (the parking brake) so the stiff arm's reaction
+    # torque cannot creep the base past the stationarity gate; it is released cleanly when driving.
+    from pxr import UsdGeom, UsdPhysics
+    from twin.mobile import DockObservation, Pose2
+    from twin.mobile_runtime import MobileController
+    author_cart(stage)
+    robot = UsdGeom.Xform.Define(stage, '/Robot/base_link').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(robot)
+    wheels = ['/Robot/l', '/Robot/r']
+    for p in wheels:
+        UsdPhysics.RevoluteJoint.Define(stage, p)
+    angles = [0.5, -0.3]   # live wheel angles (radians) the reader returns
+    c = MobileController(stage, str(robot.GetPath()), '/Rollwagen/chassis', wheels,
+                         wheel_angle_reader=lambda: list(angles))
+    d0, d1 = c.drives
+    # Free driving default: a zero-stiffness velocity drive.
+    assert d0.GetStiffnessAttr().Get() == pytest.approx(0.0)
+    assert d0.GetDampingAttr().Get() == pytest.approx(c.DRIVE_DAMPING)
+    # hold(): stiff POSITION hold locking each wheel at its current angle (degrees).
+    assert c.hold() == (0., 0.) and c._held
+    assert d0.GetStiffnessAttr().Get() == pytest.approx(c.HOLD_STIFFNESS) and c.HOLD_STIFFNESS > 0
+    assert d0.GetMaxForceAttr().Get() == pytest.approx(c.HOLD_MAX_FORCE)
+    assert d0.GetTargetPositionAttr().Get() == pytest.approx(math.degrees(0.5))
+    assert d1.GetTargetPositionAttr().Get() == pytest.approx(math.degrees(-0.3))
+    assert d0.GetTargetVelocityAttr().Get() == 0.
+    # Idempotent: a second hold() does NOT re-capture the angle (the brake stays where it engaged).
+    angles[:] = [9., 9.]
+    c.hold()
+    assert d0.GetTargetPositionAttr().Get() == pytest.approx(math.degrees(0.5))
+    # release(): restore the free (zero-stiffness) velocity drive.
+    c.release()
+    assert not c._held and d0.GetStiffnessAttr().Get() == pytest.approx(0.0)
+    assert d0.GetDampingAttr().Get() == pytest.approx(c.DRIVE_DAMPING)
+    # command() (resuming driving) auto-releases a prior hold.
+    c.hold(); assert c._held
+    c.command(.16, 0, DockObservation(Pose2(0, 0, 0), Pose2(-1.27, 0, 0), .28, .28, 0, 0, 0, 0),
+              transport_ready=True)
+    assert not c._held and d0.GetStiffnessAttr().Get() == pytest.approx(0.0)
+    # Without a reader hold() degrades to a plain zero-velocity park (not a position hold).
+    c.wheel_angle_reader = None
+    assert c.hold() == (0., 0.) and not c._held
+    assert d0.GetStiffnessAttr().Get() == pytest.approx(0.0)
+
+
 def test_transport_measurement_and_missing_mesh_fail_closed(source, tmp_path):
     from twin.mobile_assets import measure_transport
     out = tmp_path/'mobile.urdf'
