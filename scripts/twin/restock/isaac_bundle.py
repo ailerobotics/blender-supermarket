@@ -336,7 +336,12 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         transport=transport, contact=assembly.contact, hold_arm=assembly.command_gate.hold,
         verification=verifier, recording_camera=recording_camera, recorder=recorder,
         native_transport=assembly.transport, on_action=on_action, record_stride=record_stride,
-        sensing_stride=sensing_stride, set_render_suspended=gate_seam)
+        sensing_stride=sensing_stride, set_render_suspended=gate_seam,
+        # Stationary-operation gate: real-rig defaults 5 mm / 10 mrad; the sim profile relaxes them
+        # (firstmate msg 252 sim-only fidelity relaxation) to tolerate the harmless ~11 mrad contact
+        # chassis-pivot impulse. Absent from config => real-rig defaults (real path untouched).
+        stationary_dxy=float(config.get('base_stationary_dxy_m', 0.005)),
+        stationary_dyaw=float(config.get('base_stationary_dyaw_rad', 0.01)))
 
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)

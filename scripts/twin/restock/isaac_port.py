@@ -113,7 +113,8 @@ class IsaacPort:
                  transport, contact, hold_arm, verification, recording_camera=None,
                  recorder=None, native_transport=None, after_step=None,
                  on_action=None, realtime=True, record_stride=2, sensing_stride=1,
-                 masked_depth=None, set_render_suspended=None):
+                 masked_depth=None, set_render_suspended=None,
+                 stationary_dxy=0.005, stationary_dyaw=0.01):
         self.world,self.robot=world,robot
         # Opt-in sensing execution gate seam (camera lane). Wired (non-None) only when
         # config['sensing_execution_gate'] is on; gate() then suspends the decode-camera render
@@ -155,6 +156,14 @@ class IsaacPort:
         # one the packets and freshness windows carry. Initialised here so the verify boundary never
         # raises before the first advance (the former `port.origin` attribute never existed).
         self.origin=0.0
+        # Stationary-operation gate: max net base/cart displacement over the 0.25 s window to count as
+        # parked. REAL-RIG defaults 5 mm / 10 mrad. The SIM profile relaxes these (firstmate msg 252,
+        # sim-only fidelity relaxation, same pattern as the arm-speed profile): the measured plateau was
+        # a ~11 mrad chassis-pivot IMPULSE at contact (run-164..166: dxy fixed <5 mm by the wheel hold,
+        # dyaw 9.8->11 stiffness-saturated, cart 0.0) -- physically plausible and harmless, not a base
+        # rolling away (which these wider values still catch). BASE_DISP still logs every trip.
+        self.stationary_dxy=float(stationary_dxy)
+        self.stationary_dyaw=float(stationary_dyaw)
         from collections import deque
         self._pose_hist=deque()  # (now, robot (x,y,yaw), cart (x,y,yaw)) for displacement-based parked
         self.wall_origin=time.monotonic()
@@ -264,9 +273,10 @@ class IsaacPort:
             return dxy,dyaw
         bdxy,bdyaw=_disp(1); cdxy,cdyaw=_disp(2)
         windowed=now-hist[0][0]>=0.2
-        parked=bool(windowed and bdxy<0.005 and bdyaw<0.01 and cdxy<0.005 and cdyaw<0.01)
+        parked=bool(windowed and bdxy<self.stationary_dxy and bdyaw<self.stationary_dyaw
+                    and cdxy<self.stationary_dxy and cdyaw<self.stationary_dyaw)
         # Evidence for tuning the base hold (firstmate): when the 0.25 s window shows the base/cart
-        # past the 5 mm / 10 mrad stationarity gate, log how far past, throttled to ~0.2 s.
+        # past the stationarity gate, log how far past, throttled to ~0.2 s.
         if windowed and not parked and now-getattr(self,'_last_bdisp_log',-1.)>=0.2:
             self._last_bdisp_log=now
             print(f'BASE_DISP base_dxy={bdxy*1e3:.1f}mm base_dyaw={bdyaw*1e3:.2f}mrad '
