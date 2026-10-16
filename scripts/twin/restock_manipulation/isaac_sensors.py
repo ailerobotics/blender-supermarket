@@ -134,6 +134,15 @@ class IsaacCartonSensors:
         # Integration initializes actual cameras; every frame uses measured TF.
         camera.add_distance_to_image_plane_to_frame()
 
+    @property
+    def render_suspended(self):
+        """True iff the opt-in gate is on AND integration has suspended the render this tick, i.e.
+        ``capture`` is serving the held republish (frozen frame, no new decode). A consumer that
+        reads the per-observation acquisition stamp (e.g. the collect ``source_target_provider``)
+        checks this to switch to the fresh motion-completion stamp while held. False (default/gate
+        off) => the normal rendered path, byte-identical to before."""
+        return bool(self.execution_gate and self._render_suspended)
+
     def set_render_suspended(self, suspended):
         """Integration-controlled sensing gate (effective only when ``execution_gate`` is on).
 
