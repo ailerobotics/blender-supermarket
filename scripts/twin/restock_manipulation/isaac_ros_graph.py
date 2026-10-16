@@ -185,7 +185,14 @@ class IsaacRosGraph:
                     deadline=result.get('valid_until_steady')
                     if deadline is None:
                         raise ValueError('missing acquisition deadline for gripper command')
-                    require_fresh(deadline,time.monotonic)
+                    # The gripper acquisition deadline is a SIM-time budget (sensing_sources steady_clock
+                    # = world.current_time + window); check it on the SIM/node clock, not wall. Under
+                    # render pacing wall races far ahead of sim, so a wall check expires instantly even
+                    # though the registration is fresh in sim time (run-144: suction enabled at
+                    # valid_until=20.78 sim then this check wall-expired). Mirrors the controller's
+                    # sim-clocked require_fresh. Legacy wall only when no sim clock is supplied.
+                    require_fresh(deadline, (lambda: simulation_time) if simulation_time is not None
+                                  else time.monotonic)
                 except (ValueError,TypeError) as exc:
                     self.hold()
                     self.faulted,self.active=True,False
