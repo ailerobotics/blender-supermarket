@@ -140,6 +140,7 @@ def _plan_port(*, action, stride=2, sensing_stride=1, recorder=True, camera=True
     port.sensing_stride = sensing_stride
     port.recorder = object() if recorder else None
     port.recording_camera = object() if camera else None
+    port._sensing_suspended = False       # execution gate off (default); render-gating byte-identical
     return port
 
 

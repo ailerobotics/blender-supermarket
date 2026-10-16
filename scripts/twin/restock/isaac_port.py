@@ -13,6 +13,7 @@ from twin.mobile import DockObservation, Pose2, wrap
 from twin.navigation.core import Odometry
 from twin.navigation.sensors import observation as nav_observation
 from twin.urdf_probe import parse_urdf, link_world_transforms, geometry_world_points, resolve_package_uri
+from twin.restock_manipulation.isaac_sensors import sensing_render_required
 from .runtime import Packet
 
 # Stages whose work consumes freshly rendered pixels (inventory perception, the
@@ -21,6 +22,17 @@ from .runtime import Packet
 # outbound, park, return) drive the base from the PhysX lidar raycast + encoders and
 # never read a rendered frame, so they render only on the recorder's cadence ticks.
 SENSING_ACTIONS = frozenset({'collect', 'transfer', 'verify'})
+
+
+def _sensing_frame_due(current_action, upcoming_tick, sensing_stride, suspended):
+    """Whether this tick must render a fresh SENSING frame: a decode-grade stage on its stride
+    cadence, UNLESS the opt-in execution gate has suspended the decode render for the current
+    controller phase. While suspended the capture republishes the held registration instead of a
+    fresh frame (isaac_sensors.sensing_render_required / PR 80 hold), so no render is forced. Pure
+    for CPU testing of the phase->suspend->render-skip wiring; suspended is always False when the
+    gate is off, so this is byte-identical to the pre-gate behaviour then."""
+    return (not suspended and current_action in SENSING_ACTIONS
+            and upcoming_tick % sensing_stride == 0)
 
 
 def body_measurement(body):
@@ -90,8 +102,14 @@ class IsaacPort:
                  transport, contact, hold_arm, verification, recording_camera=None,
                  recorder=None, native_transport=None, after_step=None,
                  on_action=None, realtime=True, record_stride=2, sensing_stride=1,
-                 masked_depth=None):
+                 masked_depth=None, set_render_suspended=None):
         self.world,self.robot=world,robot
+        # Opt-in sensing execution gate seam (camera lane). Wired (non-None) only when
+        # config['sensing_execution_gate'] is on; gate() then suspends the decode-camera render
+        # during a validated-reach execution phase. None => the gate is off and every path below is
+        # byte-identical to the pre-gate behaviour.
+        self._set_render_suspended=set_render_suspended
+        self._sensing_suspended=False
         self.robot_body,self.cart_body=robot_body,cart_body
         self.mobile,self.range_sensor=mobile,range_sensor
         self.transport,self.contact=transport,contact
@@ -136,13 +154,30 @@ class IsaacPort:
                             'navigation':'wheel_encoders_and_physical_range_scan',
                             'inventory':'rendered_rgb_depth_only'}
 
+    def gate(self, phase):
+        """Drive the opt-in sensing execution gate from the live manipulation controller phase.
+        A no-op unless the camera-lane seam was wired (config['sensing_execution_gate'] on). When
+        on: the decode-camera render is SUSPENDED (the capture republishes the held registration,
+        PR 80 occlusion hold -- no frame fetch) during a validated-reach execution phase
+        (approach/contact/grasp/lift/place/retreat/release/stow/couple, AFTER observe validated the
+        registration and the arm occludes the fixed camera), and RESUMED on observe/preplace/verify
+        and any unknown phase (fail safe). Called each tick BEFORE advance() with the last known
+        phase; a one-tick lag is within the occlusion window the hold already tolerates."""
+        if self._set_render_suspended is None:
+            return
+        suspended=not sensing_render_required(phase)
+        self._sensing_suspended=suspended
+        self._set_render_suspended(suspended)
+
     def _frame_plan(self, upcoming_tick):
         """(sensing_tick, record_tick) for `upcoming_tick`: whether a sensing stage needs a
         fresh render and whether the recorder captures this tick. render = either is True.
         Sensing renders on the ``sensing_stride`` cadence (freshness is sim-time bounded, not
-        per-tick), so a render-paced sensing stage advances sim far faster than at every tick."""
-        sensing=(self.current_action in SENSING_ACTIONS
-                 and upcoming_tick%self.sensing_stride==0)
+        per-tick), so a render-paced sensing stage advances sim far faster than at every tick.
+        While the execution gate has suspended the decode render (``_sensing_suspended``) no sensing
+        render is forced -- the capture republishes the held registration instead."""
+        sensing=_sensing_frame_due(self.current_action, upcoming_tick, self.sensing_stride,
+                                   self._sensing_suspended)
         record=(self.recorder is not None and self.recording_camera is not None
                 and upcoming_tick%self.record_stride==0)
         return sensing,record

@@ -132,6 +132,11 @@ class RuntimeAdapter:
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         if not isinstance(self.manip, ManipulationBridge):
             self.manip = ManipulationBridge(self.manip)
+        # Last manipulation controller phase (observe/approach/contact/...), fed to the port's opt-in
+        # sensing gate each tick BEFORE advance() to suspend the decode render during the reach. None
+        # (pre-grasp) and unknown phases fail safe to render-required (no suspend). A one-tick lag is
+        # within the occlusion window the gate's hold already tolerates.
+        self._last_manip_phase = None
         self.poses, self.fixture_mode = poses, fixture_mode
         # Fail-fast stall window (sim seconds); None disables (host watchdog still backstops).
         if stall_window_s is not None and (not math.isfinite(stall_window_s) or stall_window_s <= 0):
@@ -220,6 +225,9 @@ class RuntimeAdapter:
 
     def _step(self, dt):
         self.time += dt
+        gate = getattr(self.port, 'gate', None)  # drive the opt-in sensing gate from last phase
+        if gate is not None:
+            gate(self._last_manip_phase)
         p = self.port.advance(dt)
         sources = ('sensor', 'test_fixture') if self.fixture_mode else ('sensor',)
         if (p.source not in sources or not p.observation_id or
@@ -298,6 +306,7 @@ class RuntimeAdapter:
             return Result('succeeded', self._evidence(p, stationary=True))
         if self.action in ('collect', 'transfer'):
             r = self.manip.step(dt, p)
+            self._last_manip_phase = getattr(r, 'phase', None)  # feeds next tick's port.gate()
             stalled = self._sensor_stall(r)
             if stalled is not None:                       # unrecoverable reach -> fail fast
                 return Result('failed', reason=stalled)

@@ -326,13 +326,17 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # consumers' sim-time freshness (controller max_age 0.5 s) while the render-paced grasp completes
     # inside the wall budget. Default 1 = legacy every-tick behaviour; the mission config sets it higher.
     sensing_stride = int(config.get('sensing_stride', 1))
+    # Opt-in sensing execution gate (default off): pass the camera-lane set_render_suspended seam to
+    # the port ONLY when config['sensing_execution_gate'] is on, so the port's phase-driven gate()
+    # suspends the decode render during the reach. Off => seam is None and the port is byte-identical.
+    gate_seam = sensing.get('set_render_suspended') if config.get('sensing_execution_gate') else None
     port = IsaacPort(
         world=assembly.world, robot=assembly.robot, robot_body=assembly.robot_body,
         cart_body=assembly.cart_body, mobile=assembly.mobile, range_sensor=range_sensor,
         transport=transport, contact=assembly.contact, hold_arm=assembly.command_gate.hold,
         verification=verifier, recording_camera=recording_camera, recorder=recorder,
         native_transport=assembly.transport, on_action=on_action, record_stride=record_stride,
-        sensing_stride=sensing_stride)
+        sensing_stride=sensing_stride, set_render_suspended=gate_seam)
 
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)
