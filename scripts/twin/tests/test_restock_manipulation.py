@@ -145,6 +145,40 @@ def test_lost_grasp_stops_without_release():
         c.start('transfer', JOB)
 
 
+def test_contact_move_raises_contact_signal_only_on_measured_contact():
+    # Contact-terminated grasp descent (firstmate key contact-move-termination): in the 'contact'
+    # phase, while the move is RUNNING, MEASURED contact raises a {'kind':'contact'} control so
+    # trajectory_host can succeed the goal holding the touch pose (the gripper is against the carton
+    # and cannot reach the commanded free-space pose). Without contact it never signals, keeping the
+    # normal pose-settle; free-space moves (approach/lift/...) never signal contact.
+    c, m = make_controller()
+    t = run_to(c, 'contact')
+    m.outcome = 'running'                       # the contact descent is now executing
+    r = c.step(.1, packet(c, t, contact=False))     # issues the contact move
+    assert r.status == 'running'
+    r = c.step(.1, packet(c, t+.1, contact=False))  # running, no contact yet -> no signal
+    assert r.status == 'running'
+    assert not any(ctl.get('kind') == 'contact' for ctl in r.controls)
+    r = c.step(.1, packet(c, t+.2, contact=True))   # measured contact -> raise the signal
+    assert r.status == 'running' and c.phase == 'contact'
+    assert any(ctl.get('kind') == 'contact' for ctl in r.controls)
+    m.outcome = 'succeeded'                       # trajectory_host honored the signal (succeed+hold)
+    c.step(.1, packet(c, t+.3, contact=True))
+    assert c.phase == 'grasp'                     # advance to grasp from the achieved contact pose
+
+
+def test_free_space_move_never_raises_contact_signal():
+    # The approach (free-space) move keeps its exact pose-settle: it must never emit a contact signal
+    # even if a (spurious) contact were measured mid-flight -- only the 'contact' phase does.
+    c, m = make_controller()
+    run_to(c, 'approach')
+    m.outcome = 'running'
+    c.step(.1, packet(c, 50., contact=False))       # issue the approach move
+    r = c.step(.1, packet(c, 50.1, contact=True))
+    assert r.status == 'running' and c.phase == 'approach'
+    assert not any(ctl.get('kind') == 'contact' for ctl in r.controls)
+
+
 def test_planning_failure_and_missing_attachment():
     c, m = make_controller()
     c.step(.1, packet(c))

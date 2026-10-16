@@ -2175,3 +2175,26 @@ PATH_TOLERANCE abort. It then failed on a genuine motion-planning rejection:
 
 All arm tracking/watchdog blockers (tracking lag, terminal transients, render pacing) are now RESOLVED;
 the arm reaches contact cleanly. The remaining blocker is purely motion-planning collision fidelity.
+
+### 2026-10-16 — run-132 reached contact; contact-terminated move choreography (key contact-move-termination)
+
+run-132 (gate-off) was the furthest yet: the APPROACH trajectory COMPLETED (status SUCCEEDED) — the
+first full trajectory completion, collision-free (interpolation_dt 0.02 + base buffer) with tracking
+held (0.50) and a precise terminal settle — then reached and planned the CONTACT move. It then faulted
+the contact move's terminal settle: `GOAL_MISS pos_err=0.0658 rad (3.8 deg) vel=0.2497`. The contact
+pose is commanded essentially at/into the carton, so the gripper physically STALLS a few degrees short
+(still pushing/oscillating) — a free-space pose-settle can never complete against contact. Halting the
+move would fault trajectory_host (its `goal()` rejects new goals after a fault), blocking the lift.
+
+**Contact choreography (firstmate decision (a)):** the grasp descent is a CONTACT-TERMINATED move.
+- `controller.py` (contact phase): while the move runs, raise a `{'kind':'contact'}` control from the
+  MEASURED `s.contact` (force/contact evidence, not pose). Every free-space move
+  (approach/lift/preplace/place/retreat) keeps its exact pose-settle and never raises it.
+- `ros_adapter.py`: publishes that control to `/restock_sim/arm_contact` (Bool).
+- `trajectory_host.py`: subscribes; `execute()` arms the gate fresh per goal and, on the signal,
+  SUCCEEDS the active goal holding the current measured pose (sets the idle-hold target to it, clears
+  the plan so `tick()` holds there) — NO cancel, NO fault, so `goal()` keeps accepting the lift.
+- `isaac_port.py`: ignores the `contact` control (host-side signal, not an Isaac actuation).
+The controller then advances to grasp (suction) → lift from the achieved contact pose. CPU tests:
+`test_restock_manipulation.py` (contact raises the signal, no-contact/free-space moves never do);
+the trajectory_host succeed-hold is validated by the integration run. 828 CPU green.

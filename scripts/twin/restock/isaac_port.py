@@ -345,6 +345,8 @@ class IsaacPort:
                 self.contact.command(control['enabled'])
             elif kind=='stop':
                 self.stop()
+            elif kind=='contact':
+                pass   # host-side signal: ros_adapter publishes /arm_contact to trajectory_host; Isaac ignores
             elif kind!='move':
                 raise ValueError('unknown manipulation control')
             # Planned move commands are owned by the motion server, not replayed.

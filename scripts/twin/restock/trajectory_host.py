@@ -186,7 +186,7 @@ def main():
         raise RuntimeError('trajectory executor requires simulation domain 88')
     lock=threading.RLock()
     state=dict(feedback=None,received=0.,fault=None,active=False,target=None,plan=None,start=None,
-               miss_count=0,miss_stamp=None)
+               miss_count=0,miss_stamp=None,contact=False)
     group=ReentrantCallbackGroup()
     command=node.create_publisher(JointState,'/restock_sim/arm_joint_command',10)
     stop=node.create_publisher(Bool,'/restock_sim/manipulation/stop',10)
@@ -317,6 +317,7 @@ def main():
                 plan=Plan(handle.request.trajectory,state['feedback'][1],limits,max_speed=max_speed,max_acceleration=max_acceleration)
                 state['plan'],state['start']=plan,now()
                 state['miss_count'],state['miss_stamp']=0,None   # fresh debounce window per trajectory
+                state['contact']=False                           # arm the contact gate fresh per goal
                 started=state['start']
             wall_backstop=time.monotonic()+EXECUTE_WALL_BACKSTOP_S
             while rclpy.ok():
@@ -336,6 +337,19 @@ def main():
                         fault('trajectory clock/timeout failure')
                     if state['fault']:
                         raise RuntimeError(state['fault'])
+                    if state['contact']:
+                        # Contact-terminated move: the controller signalled measured contact (the gripper
+                        # is physically against the carton, so the free-space goal pose is unreachable --
+                        # run-132 stalled a few deg short, pushing). Succeed HOLDING the current measured
+                        # pose: set the idle-hold target to it and clear the plan (tick() then holds it),
+                        # succeed the action (no cancel/fault, so goal() keeps accepting the lift). Only
+                        # the grasp-descent move ever raises this; free-space moves keep their pose-settle.
+                        measured=state['feedback']
+                        state['target']=measured[1].copy()
+                        state['plan']=None
+                        handle.succeed()
+                        result.error_code=result.SUCCESSFUL
+                        return result
                     measured=state['feedback']
                     desired,desired_velocity=plan.sample(elapsed)
                     feedback_message=FollowJointTrajectory.Feedback()
@@ -383,7 +397,14 @@ def main():
             with lock:
                 state['active']=False
 
+    def contact_signal(msg):
+        # Contact-terminated move (firstmate key contact-move-termination): the controller raises this
+        # from measured s.contact during the grasp descent. execute() then SUCCEEDS the active goal
+        # holding the current pose -- no cancel, no fault, so goal() keeps accepting the following lift.
+        with lock:
+            state['contact']=bool(msg.data)
     node.create_subscription(JointState,'/restock_sim/joint_states',feedback,10,callback_group=group)
+    node.create_subscription(Bool,'/restock_sim/arm_contact',contact_signal,10,callback_group=group)
     node.create_timer(.02,tick,callback_group=group)
     server=ActionServer(node,FollowJointTrajectory,'/restock_sim/arm_controller/follow_joint_trajectory',
         execute_callback=execute,goal_callback=goal,

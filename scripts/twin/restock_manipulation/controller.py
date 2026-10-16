@@ -222,6 +222,15 @@ class TransferController:
                                   preplace='place', place='release',
                                   retreat='stow' if self.transport_joints is not None else 'verify')
                 self._transition(next_phase[self.phase])
+                return self._result()
+            # Contact-terminated grasp descent (firstmate key contact-move-termination): while the
+            # contact move runs, raise the contact signal from MEASURED contact so trajectory_host
+            # succeeds the goal holding the touch pose -- the gripper is physically against the carton
+            # and cannot reach the commanded free-space pose (run-132 GOAL_MISS, stalled ~3.8deg short).
+            # Every free-space move (approach/lift/preplace/place/retreat) keeps its exact pose-settle:
+            # only 'contact' emits this, and only once measured contact is present.
+            if self.phase == 'contact' and s.contact:
+                return self._result(({'kind': 'contact'},))
             return self._result()
         if self.phase == 'grasp':
             if not self.issued:

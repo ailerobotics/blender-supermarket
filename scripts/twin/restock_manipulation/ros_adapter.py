@@ -462,6 +462,10 @@ class RosTransferBridge:
         self.sequence = 0
         self.status = node.create_publisher(String, '/restock_sim/manipulation/status', 10)
         self.gripper = node.create_publisher(Bool, '/restock_sim/gripper/enable', 10)
+        # Contact-terminated move seam: the controller raises a 'contact' control from measured
+        # s.contact during the grasp descent; publish it to trajectory_host, which then succeeds the
+        # active goal holding the current pose (firstmate key contact-move-termination).
+        self.arm_contact = node.create_publisher(Bool, '/restock_sim/arm_contact', 10)
         self.subscriptions = [
             node.create_subscription(String, '/restock_sim/manipulation/job', self._job, 10),
             node.create_subscription(String, '/restock_sim/sensors', self._sensors, 10)]
@@ -489,6 +493,8 @@ class RosTransferBridge:
         for command in result.controls:
             if command['kind'] == 'gripper':
                 self.gripper.publish(self.Bool(data=command['enabled']))
+            elif command['kind'] == 'contact':
+                self.arm_contact.publish(self.Bool(data=True))
 
     def _job(self, message):
         try:
