@@ -1,10 +1,17 @@
 """CPU-only tests for the static world-obstacle box geometry + clearance (no ROS, no GPU, no dataset)."""
 import math
+import os
 import unittest
 
 import numpy as np
 
-from twin.restock_host.world_obstacles import Box, clearance, boxes_from_specs
+from twin.restock_host.world_obstacles import (Box, clearance, boxes_from_specs,
+                                               carton_arm_clearance, carton_cover_local)
+
+_URDF = '/home/manishsaini/datasets/twin-robot-in-store-boot-v1/host-cad/mobile.urdf'
+_XRDF = '/home/manishsaini/datasets/twin-robot-in-store-boot-v1/host-cad/mobile.xrdf'
+_JOINTS = ['ur_shoulder_pan_joint', 'ur_shoulder_lift_joint', 'ur_elbow_joint',
+           'ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_joint']
 
 
 class TestBoxSignedDistance(unittest.TestCase):
@@ -71,6 +78,48 @@ class TestBoxesFromSpecs(unittest.TestCase):
     def test_rejects_nonpositive_size(self):
         with self.assertRaises(ValueError):
             boxes_from_specs([{'id': 'x', 'size': [1, 0, 1], 'center': [0, 0, 0]}])
+
+
+class TestCartonCoverLocal(unittest.TestCase):
+    """The shared carton/placeholder cover: a conservative sphere grid of a box in the local frame."""
+
+    def test_cover_encloses_box_corners(self):
+        grid, radius = carton_cover_local((0.6, 0.4, 0.16), offset_tcp=(0.0, 0.0, 0.0), pitch=0.08)
+        self.assertGreater(len(grid), 0)
+        self.assertGreater(radius, 0.0)
+        # every box corner is within `radius` of some grid centre (conservative enclosure)
+        half = np.array([0.3, 0.2, 0.08])
+        corners = np.array([[sx * half[0], sy * half[1], sz * half[2]]
+                            for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
+        for c in corners:
+            self.assertLessEqual(float(np.min(np.linalg.norm(grid - c, axis=1))), radius + 1e-9)
+
+    def test_rejects_nonpositive_dims(self):
+        for dims in [(0.1, 0.0, 0.1), (-0.1, 0.1, 0.1), (0.1, 0.1, float('nan'))]:
+            with self.assertRaises(ValueError):
+                carton_cover_local(dims)
+
+
+@unittest.skipUnless(os.path.isfile(_URDF) and os.path.isfile(_XRDF),
+                     'mission CAD assets not present (dataset-only regression)')
+class TestCartonArmClearance(unittest.TestCase):
+    """Regression for the planner-side finding: the tuck GOAL drives the carton into ur_upper_arm
+    even though cuMotion reports the plan collision-free -- so the arm planner is not catching the
+    carton-vs-arm contact (run-249/250). The attached_object self-collision declaration (declaration
+    + placeholder spheres) is what makes cuMotion catch it. Reproduced on CPU from the asset URDF FK
+    + XRDF spheres."""
+
+    def _cfg(self, w1):
+        return dict(zip(_JOINTS, [1.2251, -2.2422, 1.0802, w1, 1.0608, -1.1675]))
+
+    def test_carton_clear_at_pinned_but_hits_upper_arm_at_full_fold(self):
+        pinned = carton_arm_clearance(_URDF, _XRDF, self._cfg(0.6965))
+        full = carton_arm_clearance(_URDF, _XRDF, self._cfg(2.1066))
+        self.assertTrue(pinned['clear'], f"expected clear at pinned fold: {pinned}")
+        self.assertFalse(full['clear'], f"expected carton-vs-arm contact at full fold: {full}")
+        self.assertEqual(full['worst_link'], 'ur_upper_arm_link')
+        # monotone approach as the fold completes
+        self.assertLess(full['clearance_m'], pinned['clearance_m'])
 
 
 if __name__ == '__main__':
