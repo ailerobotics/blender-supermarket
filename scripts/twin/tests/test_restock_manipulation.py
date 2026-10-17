@@ -26,8 +26,8 @@ class FixtureMotion:
     def poll(self):
         return self.outcome
 
-    def begin_joint_goal(self, goal, measured):
-        self.stows.append((goal,measured))
+    def begin_joint_goal(self, goal, measured, slow=False):
+        self.stows.append((goal,measured,slow))
 
     def stop(self):
         self.stops += 1
@@ -112,6 +112,7 @@ def test_staged_cart_swing_routes_lift_through_tuck_pan_and_retreat_through_tuck
     before = len(m.stows)
     c.step(.1, packet(c, t))                              # issue the tuck joint goal
     assert m.stows[before][0] == (0.0,) + tuck_shape      # fold at measured joint0 (=0), carry shape
+    assert m.stows[before][2] is True                     # tuck carries the carton -> slow fold
     c.step(.1, packet(c, t+.1))                           # poll succeeds -> pan
     assert c.phase == 'pan'
     c.step(.1, packet(c, t+.2))                           # issue the pan joint goal
@@ -123,6 +124,7 @@ def test_staged_cart_swing_routes_lift_through_tuck_pan_and_retreat_through_tuck
     n = len(m.stows)
     c.step(.1, packet(c, t))
     assert m.stows[n][0] == (0.0,) + tuck_shape           # fold at the measured pan on the way back
+    assert m.stows[n][2] is False                         # retreat_tuck is empty-handed -> full speed
     c.step(.1, packet(c, t+.1))
     assert c.phase == 'stow'
 
@@ -137,7 +139,7 @@ def test_transport_stow_is_planned_before_fresh_inventory_verification():
     c,m=make_controller(transport_joints=(0.,)*6)
     t=run_to(c,'stow')
     assert c.step(.1,packet(c,t)).status=='running'
-    assert m.stows==[((0.,)*6,(0.,)*6)]
+    assert m.stows==[((0.,)*6,(0.,)*6,False)]   # stow is empty-handed -> full speed (slow=False)
     assert c.step(.1,packet(c,t+.1)).status=='running'
     assert c.phase=='verify' and not c.verify_ids
 
