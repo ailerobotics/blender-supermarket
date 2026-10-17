@@ -20,12 +20,12 @@ JOINTS = ARM_JOINTS
 
 # Sim-time settle margin added to a trajectory's own sim duration for the execution deadline (the
 # node-clock bound on ExecuteTrajectory). Covers start handshake + terminal settle in SIM seconds.
-EXECUTE_SETTLE_MARGIN_S = 15.0
+EXECUTE_SETTLE_MARGIN_S = 25.0
 # Bounded re-plan of the SAME goal on a MoveIt plan rejection. MoveIt's FCL ValidateSolution is
 # ground truth and cuMotion is stochastic, so re-planning draws a fresh seed; a few retries turn the
 # seed-variant base/plate collision (INVALID_MOTION_PLAN, run-129/134 ~half of seeds) into a
 # near-certain pass at ~1 s of planning per retry (firstmate standing-authority lever).
-REPLAN_MAX = 3
+REPLAN_MAX = 12
 
 
 def _should_replan(replan_attempts, has_plan_goal):
@@ -143,7 +143,7 @@ class RosMotionPort:
         self._sim_now = lambda: self.node.get_clock().now().nanoseconds * 1e-9
         self.deadline_clock = time.monotonic
 
-    def begin(self, pose, joints):
+    def begin(self, pose, joints, straight_line=False):
         from moveit_msgs.srv import GetPositionIK
         if self.state not in ('idle', 'succeeded', 'failed'):
             raise RuntimeError('motion already active')
@@ -155,13 +155,32 @@ class RosMotionPort:
         self.start = tuple(joints)
         self._replan_attempts = 0          # fresh-seed re-plan budget for this move (see REPLAN_MAX)
         self._plan_goal = None             # the MoveGroup goal to re-send on a plan rejection
-        if self.pose_goal:
+        # Straight-line contact descent (firstmate run-191). The contact move is BY DEFINITION a short
+        # straight descent INTO the target carton, so a collision planner that still holds the carton
+        # (and its support face) as obstacles rejects it near contact (INVALID_MOTION_PLAN) whenever the
+        # seed lands close -- the exact failure that stalled runs 190-and-earlier. For THIS move only,
+        # bypass the planner: KDL-IK the contact pose to a c-space target (collision-avoidance OFF, since
+        # touching the carton is the intent), branch it to the config NEAREST the measured approach start
+        # (so the move is a few-mm straight descent, not a joint swing), and execute a seeded rest-to-rest
+        # trajectory to it straight through the trajectory host -- the SAME executor path as the approach,
+        # not a cuMotion plan. Every free-space move keeps cuMotion. Forces the KDL IK path even under
+        # pose_goal, since the host trajectory interpolates to an explicit joint target.
+        self._straight_line = bool(straight_line)
+        if self.pose_goal and not self._straight_line:
             self.generation += 1
             self.handle = None
             self._plan_goal = self._pose_plan_goal(pose, joints)
             self._send(self.plan, self._plan_goal, 'plan_accept')
             self.deadline_clock = time.monotonic
             self.deadline = time.monotonic() + self.timeout
+            return
+        if self._straight_line:
+            # Seed IK from the measured approach config only -- the arm is already at the pose just above
+            # the pad, so this is the closest possible seed and keeps q on the start branch.
+            self._goal_pose = tuple(float(v) for v in pose)
+            self._seeds = [tuple(joints)]
+            self._seed_idx = 0
+            self._send_ik(self._seeds[0])
             return
         # Joint-space path (host verdict 2026-10-14: cuMotion task-space IK is systemically broken in
         # this XRDF; KDL compute_ik + cuMotion joint-space planning work). Harden branch selection:
@@ -208,12 +227,66 @@ class RosMotionPort:
             out.append(v2)
         return out
 
+    def _nearest_to(self, q, ref):
+        """Shift each joint by multiples of 2*pi to the branch nearest ``ref`` (the measured start),
+        clamped inside the XRDF limits. Used for the straight-line contact descent so the executed move
+        stays on the approach branch -- a few-mm descent, never a wrapped-branch swing. None if a joint
+        has no in-limit branch."""
+        out = []
+        for v, (lo, hi), r in zip(q, self.limits, ref):
+            v2 = v + 2 * math.pi * round((r - v) / (2 * math.pi))
+            while v2 < lo:
+                v2 += 2 * math.pi
+            while v2 > hi:
+                v2 -= 2 * math.pi
+            if not lo <= v2 <= hi:
+                return None
+            out.append(v2)
+        return out
+
+    def _straight_line_goal(self, q):
+        """A seeded rest-to-rest 2-point joint trajectory from the measured start to ``q`` for the host
+        executor. A single cubic-Hermite segment with zero endpoint velocities is a smoothstep (no
+        overshoot, so positions stay within [start, q] and thus within limits); the duration is sized so
+        the segment's peak speed/accel stay well under the host's conservative interpolation ceilings,
+        making it pass both validate_trajectory and the trajectory_host Plan checks regardless of the
+        mission's --max-speed profile."""
+        from moveit_msgs.msg import RobotTrajectory
+        from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+        from builtin_interfaces.msg import Duration
+        dmax = max((abs(b - a) for a, b in zip(self.start, q)), default=0.0)
+        # Rest-to-rest cubic peaks: speed = 1.5*dmax/T, accel = 6*dmax/T^2. Target <=0.08 rad/s and
+        # <=0.15 rad/s^2 (under both the sim 0.3/1.0 and real-rig 0.15/0.5 host ceilings); floor 2 s.
+        T = max(2.0, 1.5 * dmax / 0.08, math.sqrt(6 * dmax / 0.15))
+        sec = int(T)
+        nanosec = int(round((T - sec) * 1e9))
+        if nanosec >= 1_000_000_000:
+            sec += 1
+            nanosec -= 1_000_000_000
+        start = JointTrajectoryPoint()
+        start.positions = [float(v) for v in self.start]
+        start.velocities = [0.0] * 6
+        start.time_from_start = Duration(sec=0, nanosec=0)
+        finish = JointTrajectoryPoint()
+        finish.positions = [float(v) for v in q]
+        finish.velocities = [0.0] * 6
+        finish.time_from_start = Duration(sec=sec, nanosec=nanosec)
+        jt = JointTrajectory()
+        jt.joint_names = list(JOINTS)
+        jt.points = [start, finish]
+        rt = RobotTrajectory()
+        rt.joint_trajectory = jt
+        return rt
+
     def _send_ik(self, seed):
         from moveit_msgs.srv import GetPositionIK
         req = GetPositionIK.Request()
         req.ik_request.group_name = self.group
         req.ik_request.ik_link_name = self.tcp
-        req.ik_request.avoid_collisions = True
+        # Collision-avoidance OFF only for the straight-line contact descent: the contact pose places the
+        # pad against the carton, which an avoid_collisions IK would reject as the very collision we are
+        # deliberately driving into. Every other move keeps it on.
+        req.ik_request.avoid_collisions = not getattr(self, '_straight_line', False)
         req.ik_request.timeout.sec = 2
         req.ik_request.robot_state.joint_state.name = list(JOINTS)
         req.ik_request.robot_state.joint_state.position = list(seed)
@@ -352,6 +425,25 @@ class RosMotionPort:
             q = [js.position[list(js.name).index(j)] for j in JOINTS]
             if not all(math.isfinite(v) for v in q):
                 raise ValueError('IK returned a nonfinite joint')
+            if getattr(self, '_straight_line', False):
+                # Contact descent: branch q to the config NEAREST the measured start (not the stow
+                # nominal), so the executed move is the few-mm straight descent, then hand a seeded
+                # rest-to-rest trajectory straight to the host executor -- no cuMotion plan, no
+                # collision-world rejection. See begin()'s straight-line note.
+                q = self._nearest_to(q, self.start)
+                if q is None:
+                    raise ValueError('contact IK outside joint limits')
+                from moveit_msgs.action import ExecuteTrajectory
+                goal = ExecuteTrajectory.Goal()
+                goal.trajectory = self._straight_line_goal(q)
+                validate_trajectory(goal.trajectory.joint_trajectory, self.start, self.limits)
+                end = goal.trajectory.joint_trajectory.points[-1].time_from_start
+                duration = end.sec + end.nanosec * 1e-9
+                # Execution is sim-paced, exactly like the cuMotion plan path: bound on the NODE/SIM clock.
+                self.deadline_clock = self._sim_now
+                self.deadline = self._sim_now() + duration + EXECUTE_SETTLE_MARGIN_S
+                self._send(self.execute, goal, 'execute_accept')
+                return 'running'
             q = self._nearest_branch(q)          # unwrap to the nearest in-limit branch
             if q is None:
                 if self._next_seed():            # no in-limit branch for this solution; try next seed

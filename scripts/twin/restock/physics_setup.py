@@ -230,8 +230,17 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     stage=omni.usd.get_context().get_stage()
     paths=discover(stage)
     label_stock(stage,composition['stock'],scenario['job']['sku'],output/'handling-unit-qr.png')
+    # Seal force/torque limit. The native SurfaceGripper attach is a breakable D6 joint (breakForce =
+    # this, breakTorque = this*0.05) and the plugin's coaxial/shear release thresholds also scale from
+    # it. The SIM side grasp needs a few-mm contact over-press to reach the carton (the compliant stroke
+    # cannot close the residual gap and there is no gravity assist), and at the default 30 N / 1.5 N*m
+    # that over-press force/torque exceeds the limit, so the attach forms then breaks instantly (run-200:
+    # 0 mm contact, suction on, status stuck Closing, gripped_n 0). Raise it for the sim so the seal
+    # survives the over-press transient and still holds the 0.45 kg carton through lift/tow. Default 30
+    # keeps the conservative real-ish value; the real rig never runs this native authoring.
     author_native_gripper(stage,tool=tool,tool0_path=paths['ur_tool0'],
-        body_path=paths['suction_cups'],gripper_path='/RestockPanelGripper')
+        body_path=paths['suction_cups'],gripper_path='/RestockPanelGripper',
+        force_limit=float(config.get('gripper_force_limit', 30.)))
     cart_path=composition['assets']['cart']['body']
     cart_root=composition['assets']['cart']['root']
     solver=configure_cart_solver(stage,cart_root)

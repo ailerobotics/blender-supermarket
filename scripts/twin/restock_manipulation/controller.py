@@ -12,8 +12,29 @@ class TransferController:
                  cart_location: str = 'rollwagen', max_age: float = 0.5,
                  phase_timeout: float = 30.0, fixture_mode: bool = False,
                  frame: str = 'ur_base_link', pose_policy=None, transport_joints=None,
-                 steady_clock=time.monotonic):
+                 steady_clock=time.monotonic, contact_straight_line: bool = False,
+                 contact_overpress_step_m: float = 0.0, contact_overpress_cap_m: float = 0.0):
         self.steady_clock=steady_clock
+        # Execute the contact descent as a seeded straight-line move through the trajectory host instead
+        # of a cuMotion plan (the motion port's begin(straight_line=True) path). Default False keeps the
+        # real-rig collision-planned descent; the sim mission opts in via config -- a one-flag revert.
+        self.contact_straight_line = bool(contact_straight_line)
+        # SIM contact-feedback over-press (m). The native SurfaceGripper seals only on physical ~0 mm
+        # seal-to-carton contact, not merely within maxGripDistance (proven: isolated side_flat latched at
+        # 0 mm; mission failed at 0.45-3.25 mm). The compliant stroke cannot close that gap (it only
+        # retracts) and a side grasp has no gravity assist, and the nominal residual VARIES run-to-run
+        # (~4-7.5 mm sensing/pose variance) so a FIXED over-press undershoots or overshoots. Instead the
+        # contact move steps forward by contact_overpress_step_m (toward the carton, along approach->
+        # contact) with suction on until the seal latches (s.contact) or the capped travel
+        # contact_overpress_cap_m is exhausted (then a mission fault). The settle at each step gives the
+        # plugin a stationary pad to latch; the cap bounds the travel so a miss cannot drive deep into the
+        # carton. SIM only: the panel collider is disabled so the pad can over-press; 0 keeps the real rig
+        # (its real suction cup has the physical compliance this lacks) on a single collision-planned move.
+        for v in (contact_overpress_step_m, contact_overpress_cap_m):
+            if not math.isfinite(v) or v < 0:
+                raise ValueError('contact over-press step/cap must be finite and non-negative')
+        self.contact_overpress_step_m = float(contact_overpress_step_m)
+        self.contact_overpress_cap_m = float(contact_overpress_cap_m)
         if max_age <= 0 or phase_timeout <= 0:
             raise ValueError('timeouts must be positive')
         self.motion, self.profiles = motion, profiles
@@ -31,6 +52,23 @@ class TransferController:
         self.evidence = []
         self.reason = ''
         self.last_time = None
+
+    def _overpressed_contact(self, offset):
+        """Contact pose pushed ``offset`` m toward the carton, along the approach->contact descent axis,
+        so the straight-line contact move can press the pad into ~0 mm seal contact. Orientation is
+        unchanged. Returns the plain contact pose when offset is 0 or the approach pose is unavailable.
+        See __init__ for why the SIM side grasp steps this over-press under contact feedback."""
+        contact = self.poses['contact']
+        approach = self.poses.get('approach')
+        if offset <= 0 or approach is None:
+            return contact
+        d = [contact[i] - approach[i] for i in range(3)]
+        n = math.sqrt(sum(v * v for v in d))
+        if n < 1e-9:
+            return contact
+        step = offset / n
+        return (contact[0] + d[0] * step, contact[1] + d[1] * step, contact[2] + d[2] * step,
+                contact[3], contact[4], contact[5], contact[6])
 
     def start(self, operation: str, job: dict) -> None:
         if self.phase not in ('idle', 'succeeded', 'failed') or self.held:
@@ -67,6 +105,7 @@ class TransferController:
         self.issued = False
         self._contact_suction = False   # suction enabled once during the contact descent (grasp latch)
         self._contact_waits = 0         # bounded grace ticks awaiting a fresh acquisition deadline
+        self._contact_step = 0.0        # cumulative contact-feedback over-press travel (m); see __init__
         self.verify_ids = set()
         self.release_time = None
 
@@ -211,7 +250,9 @@ class TransferController:
             if not self.issued:
                 if s.valid_until_steady is not None:
                     require_fresh(s.valid_until_steady,self.steady_clock)
-                self.motion.begin(self.poses[self.phase], s.joint_positions)
+                straight = self.phase == 'contact' and self.contact_straight_line
+                target = self._overpressed_contact(self._contact_step) if straight else self.poses[self.phase]
+                self.motion.begin(target, s.joint_positions, straight_line=straight)
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': self.poses[self.phase]},))
             if self.phase == 'contact' and not self._contact_suction:
@@ -242,6 +283,21 @@ class TransferController:
             if outcome not in ('running', 'succeeded'):
                 return self._fail('invalid motion outcome')
             if outcome == 'succeeded':
+                # Contact-feedback descent (firstmate run-202): the step settled. If the seal has NOT
+                # latched and the capped travel is not exhausted, step the contact pose a bit further
+                # toward the carton and re-issue -- this drives to actual contact regardless of the
+                # run-to-run residual variance a fixed over-press cannot absorb, and the per-step settle
+                # gives the plugin a stationary pad to latch (suction stays on). Hitting the cap without
+                # contact is a mission fault (the latch never formed); SEAL_DIAG has logged the gap.
+                if (self.phase == 'contact' and self.contact_straight_line
+                        and self.contact_overpress_step_m > 0 and not s.contact):
+                    if self._contact_step + self.contact_overpress_step_m <= self.contact_overpress_cap_m + 1e-9:
+                        self._contact_step += self.contact_overpress_step_m
+                        self.issued = False
+                        print(f'CONTACT_STEP advance step={self._contact_step*1000:.1f}mm '
+                              f'cap={self.contact_overpress_cap_m*1000:.0f}mm contact={s.contact}', flush=True)
+                        return self._result()
+                    return self._fail('contact not reached within capped over-press travel')
                 next_phase = dict(approach='contact', contact='grasp', lift='preplace',
                                   preplace='place', place='release',
                                   retreat='stow' if self.transport_joints is not None else 'verify')

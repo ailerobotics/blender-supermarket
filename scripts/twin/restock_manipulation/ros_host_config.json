@@ -14,7 +14,7 @@
         0.5
       ],
       "tcp_surface_offset": 0.00275,
-      "approach": 0.12,
+      "approach": 0.18,
       "max_reach": 1.3,
       "mass_kg": 0.45,
       "grasp_mode": "side"
@@ -26,6 +26,9 @@
     "G3_back_s2": 3
   },
   "pose_goal": true,
+  "contact_straight_line": true,
+  "contact_overpress_step_m": 0.003,
+  "contact_overpress_cap_m": 0.020,
   "arm_max_speed": 0.3,
   "startup_grace_seconds": 60.0
 }

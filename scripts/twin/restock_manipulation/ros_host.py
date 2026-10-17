@@ -90,6 +90,9 @@ def main():
     controller = TransferController(motion,profiles,frame=tool.base_frame,
         phase_timeout=120.,pose_policy=WallCartonPolicy(args.shelfbot_root,tool,walls=config['walls']),
         transport_joints=transport_joints,
+        contact_straight_line=bool(config.get('contact_straight_line', False)),
+        contact_overpress_step_m=float(config.get('contact_overpress_step_m', 0.0)),
+        contact_overpress_cap_m=float(config.get('contact_overpress_cap_m', 0.0)),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # The first decode-grade frame + support registration under render pacing needs several

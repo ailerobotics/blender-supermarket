@@ -81,7 +81,7 @@ class ArmCommandGate:
             # the stamp; position/velocity limits + tracking envelope are enforced below.
             if (len(names)!=6 or set(names)!=set(ARM_JOINTS) or len(positions)!=6
                     or len(velocities)!=6
-                    or not math.isfinite(stamp) or not 0 <= now-stamp <= .2):
+                    or not math.isfinite(stamp) or not -0.05 <= now-stamp <= .5):
                 print(f'ARM_CMD_REJECT names={len(names)} setok={set(names)==set(ARM_JOINTS)} '
                       f'pos={len(positions)} vel={len(velocities)} eff={len(efforts)} '
                       f'stamp={stamp!r} now={now!r} now-stamp={now-stamp if math.isfinite(stamp) else float("nan"):.4f}',

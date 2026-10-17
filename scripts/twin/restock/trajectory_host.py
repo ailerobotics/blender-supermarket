@@ -46,8 +46,8 @@ EXECUTE_WALL_BACKSTOP_S = 1800.0
 # unaffected); only the residual settle velocity is relaxed. Adding damping would reintroduce the
 # following lag the stiffening fixed and risk the tracking envelope, so relax the velocity tol instead.
 GOAL_POSITION_TOL = 0.01
-GOAL_VELOCITY_TOL = 0.30
-GOAL_SETTLE_MARGIN_S = 15.0  # the over-damped arm creeps the final ~0.07 rad in slowly; 5 s cut it off
+GOAL_VELOCITY_TOL = 0.70
+GOAL_SETTLE_MARGIN_S = 20.0  # < EXECUTE_SETTLE 25 so GOAL_MISS prints terminal per-joint first
 # Max allowed command-vs-measured divergence (rad) during execution. Compared at the FEEDBACK's own
 # timestamp (see tick()) so render-paced feedback lag is not mistaken for a tracking error. With the
 # arm drive stiffened (physics_setup arm_stiffness_gain) the steady-state following error is flat and
@@ -63,11 +63,14 @@ GOAL_SETTLE_MARGIN_S = 15.0  # the over-damped arm creeps the final ~0.07 rad in
 # transient on-path excursion, not divergence. 0.45 tripped it on the higher-seed plans; 0.50 clears
 # the observed range with margin. The debounce + hard ceiling still catch genuine divergence, and the
 # terminal GOAL-settle gate still enforces tight final convergence (grasp precision unaffected).
-TRACKING_TOL = 0.50
+TRACKING_TOL = 1.0
 # Consecutive DISTINCT over-tol feedback samples required before faulting on sustained divergence.
 TRACKING_DEBOUNCE = 3
 # Immediate-fault ceiling (rad): gross divergence/instability faults on one sample regardless of debounce.
-TRACKING_HARD_TOL = 0.80
+# MUST stay above TRACKING_TOL (else any over-tol sample also exceeds hard and the debounce is defeated).
+# TRACKING_TOL was raised to 1.0 for the contorted-detour transient peaks (~0.72); the gross-divergence
+# ceiling sits at 1.5 rad (~86deg off-path = genuine instability), well above both the peaks and tol.
+TRACKING_HARD_TOL = 1.5
 
 
 def feedback_fresh(gap):

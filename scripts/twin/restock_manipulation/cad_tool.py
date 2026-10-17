@@ -88,8 +88,10 @@ REAL_MAX_GRIP_DISTANCE = .005
 # pad within 5 mm under gravity (soft drives sag ~0.5 rad; see data/surface-gripper-latch-v1), so the
 # NATIVE sim suction gate is widened to this so a residual approach gap (~1-2 cm) and a few degrees of
 # pad tilt still latch. Native-sim-only: the physical approach clearance (validate_profile
-# tcp_surface_offset 2.5-3 mm, panel size, envelope) is unchanged. Value proven by the isolated GPU
-# latch probe (largest window that still seals reliably on a flat approach + the tilt it tolerates).
+# tcp_surface_offset 2.5-3 mm, panel size, envelope) is unchanged.
+#
+# Value proven by the isolated GPU latch probe (largest window that still seals reliably on a flat
+# approach + the tilt it tolerates).
 SIM_MAX_GRIP_DISTANCE = .020
 
 
@@ -227,6 +229,28 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
         drive.CreateDampingAttr(100.)
         paths.append(Sdf.Path(path))
     grip.CreateRelationship('isaac:attachmentPoints', False).SetTargets(paths)
+    # Firstmate run-197 fix (seal self-hit): Isaac's SurfaceGripper evaluates the FIRST raycast hit per
+    # attachment point. The real robot's suction_cups link carries a 25.6 mm panel collision box that the
+    # seal ray hits FIRST at 0 mm -- a non-dynamic, same-articulation body, never a valid grip target --
+    # so grippedObjects stays empty however flush the carton sits 0.2 mm behind it (runs 193-195 measured
+    # exactly this). Disable the panel collider on the SIM gripper body so the first seal hit is the
+    # carton. Sim-only: the real rig drives the URDF through ros2_control (this native authoring never
+    # runs there), and cuMotion plans on the XRDF sphere model, NOT this PhysX collider, so approach
+    # collision-avoidance is unaffected. The grip itself is suction within maxGripDistance, not contact.
+    # The importer references each link's collider under <link>/collisions with instanceable=True, so
+    # the CollisionAPI box is an INSTANCE PROXY -- Usd.PrimRange skips it and it cannot be edited until
+    # the collisions subtree is de-instanced (the same pattern physics_setup uses for the wheels). So
+    # de-instance first, THEN disable the collider.
+    from pxr import Usd
+    for child in body.GetChildren():
+        if child.IsInstanceable():
+            child.SetInstanceable(False)
+    disabled = 0
+    for p in Usd.PrimRange(body):
+        if p.HasAPI(UsdPhysics.CollisionAPI):
+            UsdPhysics.CollisionAPI(p).CreateCollisionEnabledAttr().Set(False)
+            disabled += 1
+    print('NATIVE_GRIPPER panel colliders disabled on %s: %d' % (body_path, disabled), flush=True)
     return gripper_path
 
 
@@ -350,15 +374,45 @@ class NativePanelContact:
             from omni.physx import get_physx_scene_query_interface
             sq = get_physx_scene_query_interface()
             hits, reach = [], self.max_gap * 5. + .05
+            # The seal attachment points sit inside the gripper's own suction_cups collider, so a plain
+            # raycast_closest self-hits that body at ~0 mm and masks the true seal->carton gap. Skip hits
+            # on the gripper's own body (body0 subtree) by advancing the origin just past each self-hit,
+            # so the reported gap is to the first EXTERNAL body (the carton or a neighbour).
+            self_prefix = str(body0.GetPath())
+            fwd_t = tuple(float(c) for c in fwd)
+            face_normals = []
             for s in seals:
-                h = sq.raycast_closest(tuple(s), tuple(float(c) for c in fwd), reach)
-                if h and h.get('hit'):
-                    hits.append([h.get('collision'), round(float(h['distance']) * 1000., 2)])
-                else:
-                    hits.append([None, None])
+                origin, remaining, hit = list(map(float, s)), reach, None
+                for _ in range(6):
+                    h = sq.raycast_closest(tuple(origin), fwd_t, remaining)
+                    if not (h and h.get('hit')):
+                        break
+                    coll, dist = h.get('collision'), float(h['distance'])
+                    if not str(coll).startswith(self_prefix):
+                        hit = [coll, round(dist * 1000., 2)]
+                        n = h.get('normal')
+                        if n is not None:
+                            face_normals.append(np.array([float(n[0]), float(n[1]), float(n[2])]))
+                        break
+                    step = dist + .001           # 1 mm past the self-hit, keep casting forward
+                    origin = [origin[k] + fwd_t[k] * step for k in range(3)]
+                    remaining -= step
+                    if remaining <= 0:
+                        break
+                hits.append(hit if hit else [None, None])
             out['raycast'] = hits
             d = [h[1] for h in hits if h[1] is not None]
             out['min_gap_mm'] = min(d) if d else None
+            # The native seal gate is SURFACE-RELATIVE (~2 deg of the TRUE contacted face normal, not
+            # world +Y): report the pad-forward vs the measured hit-face normal so a no-latch at a
+            # world-aligned pad reveals a residual pad-vs-true-face orientation error (the run-177 class).
+            if face_normals:
+                fn = np.mean(face_normals, axis=0)
+                fn /= (np.linalg.norm(fn) or 1.)
+                # pad forward pushes INTO the face, so compare fwd to the inward (negated) face normal.
+                cosang = max(-1., min(1., float(np.dot(fwd, -fn))))
+                out['pad_vs_surface_deg'] = round(math.degrees(math.acos(cosang)), 3)
+                out['face_normal_world'] = [round(float(c), 4) for c in fn]
         except Exception as exc:
             out['raycast_err'] = '%s: %s' % (type(exc).__name__, exc)
         return out
@@ -373,10 +427,17 @@ class NativePanelContact:
         key = (info['gripped_n'], info.get('min_gap_mm'))
         if force or key != self._diag_prev or self._diag_n % 30 == 1:
             self._diag_prev = key
+            # raycast holds [hit_prim_path, gap_mm] per seal: log the distinct hit bodies so a
+            # no-latch at gap 0 reveals WHETHER the seal is touching the grippable dynamic handling
+            # unit or a static neighbour/support (a SurfaceGripper cannot seal a static body).
+            hits = info.get('raycast')
+            hit_bodies = sorted({h[0] for h in hits if h and h[0]}) if hits else None
             print('SEAL_DIAG %s status=%s gripped_n=%d gripped=%s enabled=%s min_gap_mm=%s '
-                  'tilt_deg=%s forward=%s' % (label, info.get('status'), info['gripped_n'],
-                  info['gripped'], info['enabled'], info.get('min_gap_mm'),
-                  info.get('tilt_deg_from_down'), info.get('forward_world')), flush=True)
+                  'tilt_deg=%s forward=%s pad_vs_surface_deg=%s face_normal=%s hit_bodies=%s'
+                  % (label, info.get('status'), info['gripped_n'], info['gripped'], info['enabled'],
+                     info.get('min_gap_mm'), info.get('tilt_deg_from_down'), info.get('forward_world'),
+                     info.get('pad_vs_surface_deg'), info.get('face_normal_world'), hit_bodies),
+                  flush=True)
 
 
 def prepare_cad_gripper(stage, *, robot_root, urdf_path):

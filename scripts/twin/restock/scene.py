@@ -13,7 +13,7 @@ from twin.mobile_assets import author
 
 
 def promote_stock(stage, path, sku, mass_kg):
-    from pxr import UsdGeom, UsdPhysics
+    from pxr import UsdGeom, UsdPhysics, Sdf
     prim = stage.GetPrimAtPath(path)
     if (not prim or not prim.IsA(UsdGeom.Mesh) or prim.IsInstanceProxy() or
             prim.IsInPrototype() or prim.IsInstance()):
@@ -26,6 +26,14 @@ def promote_stock(stage, path, sku, mass_kg):
     UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr().Set('convexHull')
     UsdPhysics.RigidBodyAPI.Apply(prim).CreateRigidBodyEnabledAttr().Set(True)
     UsdPhysics.MassAPI.Apply(prim).CreateMassAttr().Set(mass_kg)
+    # Keep the pick unit from sleeping (run-194 seal diagnostic): it settles to ~0 velocity on its
+    # support during the long approach/commissioning, and Isaac's SurfaceGripper does not seal onto a
+    # SLEEPING rigid body -- the seal reached the carton at a measured 0.45 mm, perfectly aligned, with
+    # suction on, yet grippedObjects stayed empty. sleepThreshold 0 disables sleep so the settled unit
+    # stays an active grab target. Authored as a raw PhysX attribute (no PhysxSchema import) so the CPU
+    # usd-core compose path still loads; Isaac honours it at runtime.
+    prim.AddAppliedSchema('PhysxRigidBodyAPI')
+    prim.CreateAttribute('physxRigidBody:sleepThreshold', Sdf.ValueTypeNames.Float, False).Set(0.0)
     prim.SetCustomDataByKey('restock:sku', sku)
     prim.SetCustomDataByKey('restock:provenance', 'scenario_setup_not_sensor_evidence')
     return str(prim.GetPath())

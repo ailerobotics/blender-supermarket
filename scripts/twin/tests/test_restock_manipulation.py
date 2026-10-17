@@ -18,7 +18,7 @@ class FixtureMotion:
         self.stows = []
         self.outcome, self.attach_ok = 'succeeded', True
 
-    def begin(self, pose, joints):
+    def begin(self, pose, joints, straight_line=False):
         self.moves.append(pose)
 
     def poll(self):

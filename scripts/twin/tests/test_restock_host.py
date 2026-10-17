@@ -403,9 +403,20 @@ class RosHostLaunchWiring(unittest.TestCase):
         # optional bool the host reads via config.get('pose_goal', False). arm_max_speed is the
         # SIM execution-profile joint-speed gate (rad/s) the host reads via config.get, raised above
         # the conservative real-rig default so the render-paced grasp completes in the wall budget.
-        self.assertEqual(set(cfg), {'profiles', 'walls', 'pose_goal', 'arm_max_speed',
-                                    'startup_grace_seconds'})
+        self.assertEqual(set(cfg), {'profiles', 'walls', 'pose_goal', 'contact_straight_line',
+                                    'contact_overpress_step_m', 'contact_overpress_cap_m',
+                                    'arm_max_speed', 'startup_grace_seconds'})
         self.assertIsInstance(cfg['pose_goal'], bool)
+        # contact_straight_line opts the contact descent into the host-executor straight-line path
+        # (bypassing the collision planner for that move only); optional bool read via config.get.
+        self.assertIsInstance(cfg['contact_straight_line'], bool)
+        # The sim contact-feedback descent steps the pad toward the carton by step_m (bounded by cap_m)
+        # until the seal latches, for ~0 mm contact (the SurfaceGripper seals only on contact); the real
+        # rig leaves both 0 and uses a single collision-planned move. Non-negative floats, step <= cap.
+        for k in ('contact_overpress_step_m', 'contact_overpress_cap_m'):
+            self.assertIsInstance(cfg[k], (int, float))
+            self.assertGreaterEqual(cfg[k], 0)
+        self.assertLessEqual(cfg['contact_overpress_step_m'], cfg['contact_overpress_cap_m'])
         self.assertIsInstance(cfg['arm_max_speed'], (int, float))
         self.assertGreater(cfg['arm_max_speed'], 0)
         # Startup grace (first-frame wall window) is widened for render pacing; a positive float.

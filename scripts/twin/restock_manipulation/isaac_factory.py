@@ -292,9 +292,15 @@ class CollectTargetBridge:
     last good box so the host's 0.5 s bbox freshness holds.
     """
     def __init__(self, *, stage, arm_camera, arm_camera_path, base_path, profiles,
-                 motion, contact, joints, source_location, cart_placement=None, cart_root=None):
+                 motion, contact, joints, source_location, cart_placement=None, cart_root=None,
+                 mobile_base_path=None):
         self.stage, self.arm_camera, self.arm_camera_path = stage, arm_camera, arm_camera_path
         self.base_path, self.profiles = base_path, profiles
+        # The arm executes relative to the MOBILE chassis (base_link), which carries the dock yaw
+        # (run-186: chassis -6.1deg while the USD ur_base_link prim reads ~0); the executed pad yaw
+        # tracks the chassis, so the carton grasp-yaw correction must re-express through the chassis
+        # pose, NOT ur_base_link. base_path (arm base) stays for the eye-in-hand ROI reproject.
+        self.mobile_base_path = mobile_base_path or base_path
         self.motion, self.contact, self.joints = motion, contact, joints
         self.source_location = source_location
         # Collect destination: place the carton onto the robot's own staged (not-yet-coupled) cart.
@@ -322,6 +328,57 @@ class CollectTargetBridge:
         base = np.asarray(cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.base_path))).T
         # USD camera looks -Z/+Y-up; flip to the +Z/+Y-down optical convention of get_intrinsics_matrix.
         return np.linalg.inv(base) @ (cam @ np.diag([1., -1., -1., 1.]))
+
+    def _map_pose_to_base(self, pose):
+        # Re-express a MAP-frame carton pose into the CURRENT (live) arm-base frame. source_target's
+        # pose_station is in 'map' (fixed world), but the host grasp consumes the Observation as
+        # 'ur_base_link'. When the base parks YAWED at the dock (run-182/183: world yaw -5deg; the
+        # SOURCE_YAW_DIAG obs_yaw_base=+179.94 is the MAP marker yaw, not base-relative), passing the
+        # map pose as the base pose drops the dock yaw -> the grasp is off by exactly it (4.99deg).
+        # Read base_from_map LIVE off ur_base_link so observation and execution share the same base
+        # at grasp time (firstmate finding). Returns (x,y,z, qx,qy,qz,qw) in the live base frame.
+        import os, numpy as np
+        try:
+            from pxr import UsdGeom
+        except ImportError:
+            # CPU unit tests run capture() with no USD runtime; the map->base yaw re-expression is a
+            # GPU-runtime concern, so pass the pose through unchanged there. The real run always has
+            # pxr and performs the transform; a genuine stage-read failure below still raises.
+            return tuple(float(v) for v in pose)
+        cache = UsdGeom.XformCache()
+        base = np.asarray(cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.mobile_base_path))).T
+        bfm = np.linalg.inv(base)                       # chassis base_from_map (4x4)
+        x, y, z, qx, qy, qz, qw = (float(v) for v in pose)
+        # Keep the position (prior runs reach the carton at gap 0; the ROI/approach already use it);
+        # only the ORIENTATION carries the dropped dock yaw. bfm's rotation is Rz(-base_yaw), so
+        # Rb = Rz(-base_yaw) @ R re-expresses the carton yaw into the live base (180 -> 185 at b=-5).
+        pos = np.array([x, y, z])
+        n = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw) or 1.0
+        qx, qy, qz, qw = qx/n, qy/n, qz/n, qw/n
+        R = np.array([[1-2*(qy*qy+qz*qz), 2*(qx*qy-qz*qw), 2*(qx*qz+qy*qw)],
+                      [2*(qx*qy+qz*qw), 1-2*(qx*qx+qz*qz), 2*(qy*qz-qx*qw)],
+                      [2*(qx*qz-qy*qw), 2*(qy*qz+qx*qw), 1-2*(qx*qx+qy*qy)]])
+        Rb = bfm[:3, :3] @ R
+        t = float(np.trace(Rb))
+        if t > 0:
+            s = math.sqrt(t+1.0)*2; w2 = 0.25*s
+            x2 = (Rb[2,1]-Rb[1,2])/s; y2 = (Rb[0,2]-Rb[2,0])/s; z2 = (Rb[1,0]-Rb[0,1])/s
+        else:
+            i = int(np.argmax([Rb[0,0], Rb[1,1], Rb[2,2]]))
+            if i == 0:
+                s = math.sqrt(1.0+Rb[0,0]-Rb[1,1]-Rb[2,2])*2
+                w2 = (Rb[2,1]-Rb[1,2])/s; x2 = 0.25*s; y2 = (Rb[0,1]+Rb[1,0])/s; z2 = (Rb[0,2]+Rb[2,0])/s
+            elif i == 1:
+                s = math.sqrt(1.0-Rb[0,0]+Rb[1,1]-Rb[2,2])*2
+                w2 = (Rb[0,2]-Rb[2,0])/s; x2 = (Rb[0,1]+Rb[1,0])/s; y2 = 0.25*s; z2 = (Rb[1,2]+Rb[2,1])/s
+            else:
+                s = math.sqrt(1.0-Rb[0,0]-Rb[1,1]+Rb[2,2])*2
+                w2 = (Rb[1,0]-Rb[0,1])/s; x2 = (Rb[0,2]+Rb[2,0])/s; y2 = (Rb[1,2]+Rb[2,1])/s; z2 = 0.25*s
+        out = (float(pos[0]), float(pos[1]), float(pos[2]), float(x2), float(y2), float(z2), float(w2))
+        if os.environ.get('RESTOCK_SOURCE_YAW_DIAG', '0') != '0':
+            print(f'MAP2BASE_YAW map_yaw={math.degrees(2*math.atan2(qz,qw)):.3f} '
+                  f'base_yaw={math.degrees(2*math.atan2(out[5],out[6])):.3f}', flush=True)
+        return out
 
     def _reproject(self, target):
         import numpy as np
@@ -496,7 +553,7 @@ class CollectTargetBridge:
         # against, so _fresh(now, now) = 0 passes; observation_id keeps the render stamp for identity.
         obs = Observation(observation_id=f'source:{target.stamp}', source='sensor',
                           simulation_time=float(now), sku=target.sku,
-                          location=self.source_location, pose=tuple(target.pose_station),
+                          location=self.source_location, pose=tuple(self._map_pose_to_base(target.pose_station)),
                           confidence=1.0, frame='ur_base_link')
         try:                                      # a cart-placement derivation failure must NOT
             cart_target = self._cart_target(now, target)   # starve /sensors; degrade to target=None
@@ -608,6 +665,7 @@ def _build_runtime(*, app, assembly, params, output):
     collect_bridge = CollectTargetBridge(
         stage=stage, arm_camera=camera, arm_camera_path=camera_path,
         base_path=assembly.paths['ur_base_link'], profiles=params.profiles,
+        mobile_base_path=assembly.paths.get('base_link', assembly.paths['ur_base_link']),
         motion=feedback, contact=contact,
         joints=feedback.joint_positions,
         source_location=params.collect_source_location,
