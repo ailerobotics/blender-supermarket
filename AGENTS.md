@@ -108,6 +108,10 @@ repo's `scenes/`, `export/` or `renders/`.
   bench AND the mission — regenerate it from the current design with
   `scripts/write_restock_camera_config.py` before commissioning, or a stale file feeds OLD geometry
   (e.g. the pre-fix `.62×.42` cart support overshoots the rails → `_flat_patch` refuses the deck).
+  For a warm-session re-run (`run_mobile_restock.py --warm-attempts`, PR 111), the `config['warm_reset']`
+  provider refreshes an expired/unbound baseline IN-SESSION via
+  `commissioning.recommission_in_session(...)` (re-commission all required stations through the
+  unchanged gates, raising to refuse — never bypassing the lifetime guard; RUNBOOK §13a).
   The collect stage senses the pick carton with the FIXED `source` camera
   (not the arm eye-in-hand, which is masked-depth only): `restock_camera/source_target.py`
   `build_source_target_provider` → `source_target_provider(now)` gives the handling-unit pose

@@ -266,6 +266,46 @@ def run_commissioning(contexts, capture, *, dataset_dir, lifetime_s=600., commis
     return records
 
 
+def recommission_in_session(contexts, capture, *, dataset_dir, required_locations,
+                            lifetime_s=600., commissioning_freshness_s=5., render_scale=1.):
+    """Refresh every required station baseline INSIDE a live session (a warm-session re-run step).
+
+    The warm-session loop (`run_mobile_restock.run_warm_session`) re-runs the mission in one live
+    Isaac session; its opt-in `config['warm_reset']` provider re-seats the scene and re-validates the
+    baseline, and MUST NOT bypass the lifetime guard. When the re-seated baseline would be refused
+    (expired on the sim clock, or session/acquisition-clock unbound), this is the provider's refresh
+    step: with the stations re-seated EMPTY, re-capture each live context's empty-support frame and
+    re-commission through the UNCHANGED production `commission()` gates (markers decode, metric fit,
+    flat plane), re-persist the fresh baseline (new sim-clock stamp + acquisition under the context's
+    own clock/session, so a correctly sim-clock-rebased re-run reads age ~0), and RE-ATTACH the
+    refreshed geometry to the live slots. A station whose fresh frame does not commission — or any
+    required station the contexts do not cover — RAISES, so the warm loop stops instead of running on
+    a stale/absent baseline. Pure commissioning choreography (no Isaac/USD); the caller owns the live
+    World reset, camera capture and sim-clock rebase.
+
+    `contexts`/`capture` are the live per-camera `RenderedSupportContext`s and the caller's
+    empty-frame capture, exactly the `run_commissioning` contract. `required_locations` is the set of
+    mission stations (e.g. `backstock_00`, `rollwagen`, `G3_back_s2`) that MUST refresh. Returns
+    `{station: BaselineRecord}` for the refreshed stations.
+    """
+    required = set(required_locations)
+    if not required:
+        raise ValueError('recommission_in_session requires at least one required station')
+    records = run_commissioning(contexts, capture, dataset_dir=dataset_dir, lifetime_s=lifetime_s,
+                                commissioning_freshness_s=commissioning_freshness_s,
+                                render_scale=render_scale)
+    by_station = {r.station: r for r in records}
+    missing = required - set(by_station)
+    if missing:
+        raise CommissioningBaselineMissing(
+            f'in-session re-commission did not refresh required station(s): {sorted(missing)} '
+            f'(refreshed: {sorted(by_station)})')
+    # Re-validate + re-attach from the authoritative persisted records so the next warm attempt reads
+    # the fresh baseline (apply_to_contexts also runs _check_match: support/camera must still match).
+    apply_to_contexts(contexts, by_station, required_locations=required)
+    return {s: by_station[s] for s in required}
+
+
 def load_baselines(dataset_dir):
     """Load every commissioned baseline under ``dataset_dir`` as ``{station: BaselineRecord}``.
 

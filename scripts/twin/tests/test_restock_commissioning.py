@@ -231,6 +231,64 @@ def test_run_commissioning_covers_all_three_mission_stations_incl_cart(tmp_path)
     assert manifest['provenance']['rollwagen']['capture_pose'] == [-5.73,16,0]
 
 
+def _three_station_contexts():
+    """Three live per-camera contexts (source/cart/shelf) + a capture(ctx, now) helper."""
+    frames = {cid: empty_frame() for cid in ('source', 'cart', 'shelf')}
+    station_of = {'source': 'backstock_00', 'cart': 'rollwagen', 'shelf': 'G3_back_s2'}
+    ctxs, by_ctx = [], {}
+    for cid, (k, cam, _, support, witness, frame) in frames.items():
+        ctx = context(k, cam, location=station_of[cid], camera_id=cid)
+        ctxs.append(ctx); by_ctx[id(ctx)] = (station_of[cid], support, witness, frame)
+
+    def capture_at(now):
+        def capture(ctx):
+            station, support, witness, frame = by_ctx[id(ctx)]
+            frame = dict(frame, rendering_frame=int(now * 60) + 7, rendering_time=float(now))
+            return dict(frame=frame, now=float(now), empty_polygons={station: (support, witness)})
+        return capture
+    return ctxs, capture_at
+
+
+def test_recommission_in_session_refreshes_all_three_and_reattaches(tmp_path):
+    """The warm-session refresh step re-commissions every required station in-session through the
+    UNCHANGED gates, re-persists a FRESH baseline (new sim-clock stamp) and re-attaches it to the
+    live slots, so a warm re-run reads the refreshed baseline rather than bypassing the guard."""
+    ctxs, capture_at = _three_station_contexts()
+    required = {'backstock_00', 'rollwagen', 'G3_back_s2'}
+    # boot commission at sim now=1, then an in-session re-commission at a LATER sim now=50.
+    C.run_commissioning(ctxs, capture_at(1.), dataset_dir=tmp_path)
+    before = json.loads((tmp_path / 'G3_back_s2.json').read_text())['geometry']['baseline_stamp']
+
+    refreshed = C.recommission_in_session(ctxs, capture_at(50.), dataset_dir=tmp_path,
+                                          required_locations=required)
+    assert set(refreshed) == required
+    for ctx in ctxs:                                   # re-attached to every live slot
+        assert all(slot.tracker is not None for slot in ctx.slots)
+    after = json.loads((tmp_path / 'G3_back_s2.json').read_text())['geometry']['baseline_stamp']
+    assert after == 50. and before == 1.               # the baseline stamp was refreshed forward
+    assert set(C.load_baselines(tmp_path)) == required  # union manifest still carries all three
+
+
+def test_recommission_in_session_refuses_a_required_station_it_cannot_refresh(tmp_path):
+    """A required station the live contexts do not cover RAISES (the warm loop stops, no bypass)."""
+    ctxs, capture_at = _three_station_contexts()
+    with pytest.raises(C.CommissioningBaselineMissing, match='did not refresh required station'):
+        C.recommission_in_session(ctxs, capture_at(5.), dataset_dir=tmp_path,
+                                  required_locations={'backstock_00', 'rollwagen', 'G3_back_s2', 'absent_bin'})
+
+
+def test_recommission_in_session_propagates_a_gate_failure_instead_of_bypassing(tmp_path):
+    """If a station's fresh empty frame does not pass the production commission() gates, the refusal
+    propagates out of the refresh step -- the warm loop never runs on an unvalidated baseline."""
+    class _Refusing:
+        slots = []
+        def commission(self, *a, **k):
+            raise ValueError('support marker metric fit/normal is uncertain')
+    with pytest.raises(ValueError, match='metric fit'):
+        C.recommission_in_session([_Refusing()], lambda ctx: dict(frame={}, now=5., empty_polygons={}),
+                                  dataset_dir=tmp_path, required_locations={'backstock_00'})
+
+
 def test_commissioning_and_loader_cover_the_cart_rollwagen_station(tmp_path):
     """The cart deck commissions, persists, reloads and applies to the cart context standalone."""
     cart_k, cart_cam, _, support, witness, cart_frame = empty_frame()
