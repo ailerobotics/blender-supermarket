@@ -175,6 +175,17 @@ repo's `scenes/`, `export/` or `renders/`.
   that degrades when store-vision/pydantic is absent. Also runs at mission end behind
   `run_mobile_restock.py --smart-verify` (byte-identical when absent). RUNBOOK §11b;
   write-up `data/sim-smart-verify-v1/report.md`.
+- **Behaviour-tree mission layer (opt-in)**: `scripts/twin/restock/bt/` adds a py_trees
+  orchestrator that drives the SAME `mission.Mission` (via the `begin_stage`/`step_stage`/
+  `finalize` seams, so inventory + evidence stay byte-identical) with reactive event handling and
+  a live phone view. **Default-off**: nothing runs unless the runtime-config sets `"bt": true`;
+  the state machine (`Mission.tick`) stays production. Event contract (ROS topic
+  `/restock_bt/events` + blackboard + scenario `events` list), tree shape, view paths
+  (`bt_view.html`/`bt_snapshot.json`/`bt_events.jsonl` in the run dir) and commands:
+  [docs/restock_bt.md](docs/restock_bt.md). py_trees is task-venv-only (`.venv-bt`, gitignored);
+  the pure `bt.events` contract imports with no py_trees/ROS so `scenario.py` validates scenario
+  events. Tests: `scripts/twin/tests/test_restock_bt.py` (pure tier runs anywhere; tree tier needs
+  py_trees). Design + proof: `data/sim-restock-bt-v1/report.md`.
 - **Surface-gripper seal reader** (`restock_manipulation/cad_tool.py` `NativePanelContact`):
   `read()` is a PURE OBSERVER — never command the gripper from it (an `open_gripper()` on a
   not-yet-`Closed` grab aborted the seal on every poll of the slow contact descent), and key the

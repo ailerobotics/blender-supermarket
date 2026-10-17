@@ -62,6 +62,10 @@ def validate(manifest, scenario):
         errors.append('initial inventory cannot satisfy job')
     if scenario.get('dynamic_stock_ready') is not True:
         errors.append('static backstock cases must be promoted to dynamic actors')
+    # Optional deterministic behaviour-tree scenario events (absent => none). Pure validation; adds
+    # no py_trees/ROS dependency here (bt.events is pure Python).
+    from .bt.events import validate_scenario_events
+    errors.extend(validate_scenario_events(scenario))
     if manifest.get('schema_version') == 2:
         try:
             poses_for_job(manifest, job, return_pose=scenario.get('return_pose', 'robot_dock'))
