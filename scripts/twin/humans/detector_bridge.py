@@ -92,6 +92,15 @@ def run_node(*, state_topic='/human_safety/state', event_topic='/humans/reaction
     Subscribes ``state_topic`` (std_msgs/String JSON from the fleet detector),
     publishes the reaction (base_scale / arm_hold) on ``event_topic`` and the shared
     ``Detection`` list on ``detection_topic``, and optionally appends a JSONL trace.
+
+    ROS 2 hygiene (fleet rule): to receive the mission's ``/human_safety/state`` and
+    camera topics this node must join the MISSION graph -- export the mission's
+    ``ROS_DOMAIN_ID`` (88) before launching it against a live run. For ISOLATED lane
+    testing (a synthetic publisher, no mission graph) export this lane's own
+    ``ROS_DOMAIN_ID=104`` and ``ROS_LOCALHOST_ONLY=1`` so lanes don't cross-talk.
+    Always stop this node when done and remove only YOUR OWN stale
+    ``/dev/shm/fastrtps_*`` segments afterwards (never a live one, never a rig's or
+    another lane's) -- FastDDS exhausts its shared-memory ports otherwise.
     """
     import rclpy
     from rclpy.node import Node
