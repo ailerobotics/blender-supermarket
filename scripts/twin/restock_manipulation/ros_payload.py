@@ -173,6 +173,67 @@ class RosPayloadSync:
             return _diag('attach_result_status=%s' % result.status)
         return True
 
+    def add_base_obstacle(self, allow_links=('ur_base_link_inertia', 'ur_shoulder_link'),
+                          wait_s=30.):
+        """Publish the FIXED mobile base (chassis + arm-mount + hitch + wheel boxes) as a STATIC world
+        CollisionObject to move_group so cuMotion plans the arm AND the attached carton clear of it
+        (firstmate 295). cuMotion drops the base links' self-collision spheres -- they are the fixed
+        base below the arm root ur_base_link, not arm links -- and the base is masked out of the nvblox
+        ESDF, so the carton otherwise folds/swings straight through the chassis/arm-mount
+        (run-236/240/241). The arm base link(s) that physically sit ON the mount are allowed-collision so
+        the fixed start state is not flagged. Boxes are in the ur_base_link frame (rigidly fixed to
+        base_link); published once at startup, the base is parked throughout manipulation. Returns the
+        object id. Gated by the caller on a config flag; the real-rig path never calls this."""
+        from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene
+        from moveit_msgs.msg import CollisionObject, PlanningSceneComponents, AllowedCollisionEntry
+        from shape_msgs.msg import SolidPrimitive
+        from geometry_msgs.msg import Pose
+        OBJ = 'restock_base_obstacle'
+        # (size x,y,z), (center x,y,z) in ur_base_link frame = base_link frame shifted down 0.26 m.
+        boxes = [((1.0, 0.6, 0.2), (0.0, 0.0, -0.26)),     # chassis deck
+                 ((0.24, 0.24, 0.16), (0.0, 0.0, -0.08)),  # arm_mount pedestal under ur_base_link
+                 ((0.12, 0.06, 0.04), (-0.56, 0.0, -0.22)),# hitch
+                 ((0.32, 0.08, 0.32), (0.0, 0.35, -0.34)), # left wheel envelope
+                 ((0.32, 0.08, 0.32), (0.0, -0.35, -0.34))]# right wheel envelope
+        co = CollisionObject()
+        co.id = OBJ
+        co.header.frame_id = 'ur_base_link'
+        co.operation = CollisionObject.ADD
+        for size, c in boxes:
+            prim = SolidPrimitive(type=SolidPrimitive.BOX, dimensions=list(size))
+            pose = Pose()
+            pose.position.x, pose.position.y, pose.position.z = c
+            pose.orientation.w = 1.0
+            co.primitives.append(prim)
+            co.primitive_poses.append(pose)
+        gc = self.node.create_client(GetPlanningScene, '/restock_sim/get_planning_scene')
+        if not gc.wait_for_service(timeout_sec=wait_s):
+            raise RuntimeError('get_planning_scene service unavailable for base obstacle')
+        req = GetPlanningScene.Request()
+        req.components.components = PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
+        acm = self._wait(gc.call_async(req)).scene.allowed_collision_matrix
+        names = list(acm.entry_names)
+        rows = [list(e.enabled) for e in acm.entry_values]
+        allow = set(allow_links)
+        for i, n in enumerate(names):            # append the object's column to every existing row
+            rows[i].append(n in allow)
+        names.append(OBJ)                        # object's own row: allowed vs the arm-base links + self
+        rows.append([(names[j] in allow) for j in range(len(names) - 1)] + [True])
+        from moveit_msgs.msg import AllowedCollisionMatrix
+        acm2 = AllowedCollisionMatrix()
+        acm2.entry_names = names
+        acm2.entry_values = [AllowedCollisionEntry(enabled=r) for r in rows]
+        acm2.default_entry_names = list(acm.default_entry_names)
+        acm2.default_entry_values = list(acm.default_entry_values)
+        req2 = ApplyPlanningScene.Request()
+        req2.scene.is_diff = True
+        req2.scene.world.collision_objects = [co]
+        req2.scene.allowed_collision_matrix = acm2
+        if not self._wait(self.scene.call_async(req2)).success:
+            raise RuntimeError('base obstacle planning-scene apply unsuccessful')
+        print('BASE_OBSTACLE published (%d boxes) allow=%s' % (len(boxes), sorted(allow)), flush=True)
+        return OBJ
+
     def close(self):
         self.executor.shutdown(timeout_sec=2.)
         self.thread.join(timeout=2.)

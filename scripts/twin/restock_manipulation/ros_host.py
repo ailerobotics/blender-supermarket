@@ -136,6 +136,13 @@ def main():
         except (ValueError,TypeError,KeyError) as exc:
             bridge._emit(controller._fail('invalid sensor packet: '+str(exc)))
     bridge.subscriptions[1] = node.create_subscription(String,'/restock_sim/sensors',sensors,10)
+    # Static base obstacle (firstmate 295): publish the fixed mobile base as a world CollisionObject so
+    # cuMotion plans the arm + attached carton clear of the chassis/arm-mount (the base is neither in the
+    # arm self-collision model nor the ESDF -- run-236/240/241 carton swept through it). Sim-only; gated
+    # on the config flag (real-rig path never publishes it). Done once at startup via the payload node's
+    # spinning executor; wait_for_service rides out the host-stack/move_group warmup.
+    if bool(config.get('base_collision_object', False)):
+        payload.add_base_obstacle()
     try:
         rclpy.spin(node)
     finally:
