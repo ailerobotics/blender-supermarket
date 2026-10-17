@@ -389,6 +389,16 @@ class RosMotionPort:
                     for q,(lo,hi) in zip(positions,self.limits)):
                 raise ValueError('invalid joint goal or measured start')
         self.start=tuple(measured_joints)
+        # Reset the planning anchors for THIS move, exactly as begin() does (firstmate 292 / run-238):
+        # without a fresh _plan_started_wall the total-planning-wall cap carried the stale anchor from
+        # the previous pose-goal move (lift), so the tuck/pan/stow joint goal tripped
+        # 'planning failed (exhausted within wall cap)' the instant it entered planning
+        # (PLAN_WALL_DIAG elapsed=49.6 s on a plan that had just started). A joint goal does not re-plan
+        # a stored pose, so _plan_goal stays None (poll's REPLAN path is a no-op for it).
+        self._replan_attempts=0
+        self._plan_goal=None
+        self._straight_line=False
+        self._plan_started_wall=time.monotonic()
         goal=MoveGroup.Goal()
         req=goal.request
         req.group_name=self.group
