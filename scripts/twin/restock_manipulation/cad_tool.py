@@ -354,13 +354,27 @@ class NativePanelContact:
         self._pending_body = None
 
     def _fallback_weld(self, body_path):
-        from pxr import UsdPhysics, Sdf
+        from pxr import UsdPhysics, UsdGeom, Gf, Sdf
         joint_path = self.path + '/sim_attach_fallback'
-        joint = UsdPhysics.FixedJoint.Define(self.stage, joint_path)
         first = UsdPhysics.Joint(self.stage.GetPrimAtPath(self.points[0]))
         gripper_body = first.GetBody0Rel().GetTargets()[0]
+        # Author the FixedJoint anchors at the CURRENT relative pose so it is SATISFIED at creation --
+        # zero correction, zero impulse. Default anchors (0,0) coincide the gripper-body origin with the
+        # carton origin (~0.6 m apart), yanking them together: that impulse pivoted/translated the base
+        # and oscillated the arm against the brake (runs 208-212). localPos0/Rot0 (on the gripper body) =
+        # the carton's pose in the gripper-body frame; localPos1/Rot1 = the carton origin (identity).
+        cache = UsdGeom.XformCache()
+        g = cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(gripper_body))
+        b = cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(body_path))
+        rel = b * g.GetInverse()                     # carton local -> gripper-body local
+        t, q = rel.ExtractTranslation(), rel.ExtractRotationQuat()
+        joint = UsdPhysics.FixedJoint.Define(self.stage, joint_path)
         joint.CreateBody0Rel().SetTargets([gripper_body])
         joint.CreateBody1Rel().SetTargets([Sdf.Path(body_path)])
+        joint.CreateLocalPos0Attr(Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])))
+        joint.CreateLocalRot0Attr(Gf.Quatf(float(q.GetReal()), Gf.Vec3f(*[float(v) for v in q.GetImaginary()])))
+        joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
+        joint.CreateLocalRot1Attr(Gf.Quatf(1.0))
         self._fallback_joint, self._fallback_body = joint_path, body_path
 
     def _release_fallback(self):
