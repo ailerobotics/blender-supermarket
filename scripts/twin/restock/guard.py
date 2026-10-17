@@ -45,7 +45,13 @@ def gpu_slot(*, heavy_threshold_mb=1500):
         raise ValueError('heavy threshold must use default 1500 or explicit opt-in 2500')
     isolation()
     with open('/tmp/aile-gpu.lock', 'a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # A parent orchestrator may hold /tmp/aile-gpu.lock across its WHOLE sequence
+        # (commissioning boot + mission boot, no gap) so a concurrent bench cannot slip into the
+        # gap, inheriting that hold to us via AILE_GPU_LOCK_INHERITED. Re-acquiring here would
+        # false-fail on the parent's own exclusive lock, so trust the parent's hold and skip the
+        # acquire (every other guard below still runs). Unset -> the original exclusive acquire.
+        if not os.environ.get('AILE_GPU_LOCK_INHERITED'):
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if protected_blender():
             raise RuntimeError('protected Blender process or MCP socket is present')
         if available_ram_mb() < 12*1024:
