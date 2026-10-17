@@ -40,7 +40,9 @@ def build_config(argv=None) -> tuple[Config, bool]:
     p.add_argument("--upstream", default=DEFAULT_UPSTREAM, help="existing watch-page base URL (read-only)")
     p.add_argument("--run-root", default=DEFAULT_RUN_ROOT, help="mission run directories root")
     p.add_argument("--store-state", default=None, help="store-vision store-state JSON export (overlay)")
-    p.add_argument("--bt", default=None, help="behaviour-tree view JSON (when a lane publishes one)")
+    p.add_argument("--bt", default=None,
+                   help="override path to a bt_snapshot.json (default: auto-discover "
+                        "the per-run bt_snapshot.json sim-restock-bt-v1 writes into the run dir)")
     p.add_argument("--requests-dir", default=None, help="trigger-request queue directory")
     p.add_argument("--enable-trigger", action="store_true",
                    help="allow POST /trigger to enqueue requests (default off: read-only)")
