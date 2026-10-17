@@ -254,3 +254,80 @@ change in `cad_tool.py` (gripper authoring) can fix it — proven above.
   status-flicker that motivated keying on grippedObjects.
 - Probe: `data/sim-restock-stations-v1/evidence/probe_contactgap.py` (side-grasp contact-gap +
   enable-timing sweep; same GPU guards as the mission).
+
+---
+
+# In-boot station self-sufficiency: all three baselines in one guarded boot (key `new-station-commission-quality`)
+
+Captain's order 2026-10-17: the full mission must be self-sufficient on stations — every baseline
+it needs (`backstock_00` source, `rollwagen` cart, `G3_back_s2` shelf) produced in one guarded
+commissioning session, session-bound and within the 900 s lifetime, so one mission run goes
+collect → transfer → couple → tow → park without a missing-baseline refusal.
+
+## Step 1 — what the boot commissioned today
+
+The latest integration commissioning boot (`run-249c`) was invoked `--station backstock_00` ONLY
+and produced only `backstock_00.json`; `rollwagen` and `G3_back_s2` were never commissioned (every
+`run-NNNc` since run-232 is `--station backstock_00`). So the mission could do collect but would hit
+`binding.py` `'observed empty commissioning baseline is required'` at transfer/couple/place. The
+commissioning renderer (`commissioning_sources.build_sources`) commissions exactly ONE station per
+Isaac boot, and the guarded launcher (`run_restock_commissioning_gpu.py`) launched exactly one child.
+
+## Root cause of the cart/shelf failure — a STALE camera_config, not a code bug
+
+The cart/shelf *design* fix was already merged into `restock_camera/config.py`: the cart support
+rectangle is inset `.62×.42 → .54×.34` (off the cart cage rails) and the shelf is `.58×.36` with a
+re-aimed shelf camera (tested in `test_restock_camera_config.py`
+`test_cart_markers_and_witness_are_outside_loaded_unit`). But the integration's dataset
+`camera_config.json` (2026-10-14) was generated BEFORE that merge, so it still carried the oversized
+`.62×.42` cart support. Commissioning the cart with that stale config fails:
+`ValueError: support patch is tilted, occupied or occluded` — the oversized support polygon
+overshoots the deck onto the raised cart rails (measured support-region depth spread 56 mm vs 20 mm
+for the inset polygon; `_flat_patch` gate is `np.ptp(local[:,2]) ≤ .006`). Visual proof:
+`evidence/cart-new-rgb.png` (oversized green polygon reaching the rails) vs `evidence/cart-old-rgb.png`
+(the inset polygon well inside the flat deck). `camera_config` is a *generated* artifact of
+`config.py`; the stale committed file silently fed the pre-fix geometry.
+
+## Deliverable
+
+1. **One guarded boot, all three stations** — `run_restock_commissioning_gpu.py` now accepts
+   repeatable `--station`, loops the commissioning CLI once per station inside a single
+   `/tmp/aile-gpu.lock` hold (each child a one-station Isaac boot into its own dir), then
+   `assemble_baselines()` copies every per-station baseline into the shared `<output>/baselines` dir
+   and rebuilds the union manifest. A station whose child produced no baseline is refused, never
+   fabricated. Backward compatible (default `backstock_00`).
+2. **Deterministic config regeneration** — `scripts/write_restock_camera_config.py` writes
+   `camera_config.json` from the live `config.py` design, so the stale-artifact trap can't recur;
+   RUNBOOK §13a documents regenerating it (shared by commissioning + mission) before every boot.
+3. CPU tests: `test_restock_commissioning.py` (assembly union + missing-station refusal),
+   `test_restock_camera_config.py` (the generator emits the current `.54×.34`/`.58×.36` design).
+
+## Proof — real guarded GPU, all three stations in one boot (unchanged production gates)
+
+`~/datasets/sim-restock-stations-v1/selfboot-fresh-cfg/run` (`/tmp/aile-gpu.lock`, heavy=2500,
+runtime `gpu-runtime-578/root`), camera_config regenerated from `config.py`, `--station backstock_00
+--station rollwagen --station G3_back_s2 --lifetime-s 900`. **`run.json status=passed`, union manifest
+= {backstock_00, rollwagen, G3_back_s2}, session_ids=['commission'].**
+
+| station | marker (registration) | camera | capture pose | baseline_error_m | required_xy | baseline |
+|---|---|---|---|---|---|---|
+| backstock_00 | support:source:0 (+:1 decoded) | source | [-5.73, 16, 0] | 0.00100 | [.62,.42] | baselines/backstock_00.json |
+| rollwagen | support:cart:0 (+:1 decoded) | cart (cart_chassis) | [-5.73, 16, 0] | 0.00080 | [.54,.34] | baselines/rollwagen.json |
+| G3_back_s2 | support:shelf:0 (+:1 decoded) | shelf (map) | [-3.05, 6.0, π] | 0.00223 | [.58,.36] | baselines/G3_back_s2.json |
+
+Both paired markers decode per station (the renderer's `capture()` only accepts a frame once the
+production `FixedTileQR` reads BOTH markers with clean quads); the metric fit was accepted by the
+UNCHANGED `sensed.py` gate (rotation[2,2] ≥ .999, residual ≤ 2 mm) and the empty-support plane by the
+UNCHANGED `_flat_patch` gate (normal z ≥ .999, height spread ≤ 6 mm), center_support z ≈ 0 for all
+three. No gate was relaxed. A run against the stale config fails at `rollwagen`
+(`selfboot-3station-01`, cart `support patch is tilted, occupied or occluded`), confirming the config
+was the sole blocker.
+
+## Evidence (this key)
+
+- Passing 3-station boot: `~/datasets/sim-restock-stations-v1/selfboot-fresh-cfg/run/` (run.json,
+  isaac-*.log, baselines/{backstock_00,rollwagen,G3_back_s2}.json + union manifest).
+- Stale-config failing boot: `~/datasets/sim-restock-stations-v1/selfboot-3station-01/` (cart child
+  refused).
+- Cart polygon diff: `evidence/cart-new-rgb.png` (stale .62×.42, overshoots rails) vs
+  `evidence/cart-old-rgb.png` (.54×.34, inside the deck); depth maps `*-depth.png`.

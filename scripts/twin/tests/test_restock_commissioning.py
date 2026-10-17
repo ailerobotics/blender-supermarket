@@ -386,6 +386,45 @@ def test_cli_execute_defaults_to_full_scale_when_no_preset(tmp_path, monkeypatch
     assert seen == {'hook_scale': 1.0, 'commission_scale': 1.0}
 
 
+def test_gpu_wrapper_assembles_per_station_baselines_into_one_union_manifest(tmp_path):
+    """The guarded launcher commissions one station per boot, then its assembly step copies each
+    per-station child's baseline into the shared dir and rebuilds ONE union manifest covering
+    every mission station, so a single commissioning_dir carries source + cart + shelf."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))       # scripts/ (for twin + the launcher)
+    from scripts import run_restock_commissioning_gpu as gpu
+
+    src_dir, _, _ = commissioned_dir(tmp_path / 'src', location='backstock_00')
+    cart_dir, _, _ = commissioned_dir(tmp_path / 'cart', location='rollwagen')
+    shelf_dir, _, _ = commissioned_dir(tmp_path / 'shelf', location='G3_back_s2')
+    per_station = {'backstock_00': src_dir, 'rollwagen': cart_dir, 'G3_back_s2': shelf_dir}
+    final = tmp_path / 'baselines'
+
+    manifest = gpu.assemble_baselines(per_station, final, ['backstock_00', 'rollwagen', 'G3_back_s2'])
+    assert set(manifest['stations']) == {'backstock_00', 'rollwagen', 'G3_back_s2'}
+    # Loadable by the mission's loader from the shared dir (each station's json copied in).
+    loaded = C.load_baselines(final)
+    assert set(loaded) == {'backstock_00', 'rollwagen', 'G3_back_s2'}
+    for station in ('backstock_00', 'rollwagen', 'G3_back_s2'):
+        assert (final / f'{station}.json').is_file()
+        assert (final / f'{station}.npz').is_file()           # raw-frame audit sidecar carried too
+
+
+def test_gpu_wrapper_assembly_refuses_a_station_with_no_baseline(tmp_path):
+    """A requested station whose child produced no baseline is refused, never fabricated."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from scripts import run_restock_commissioning_gpu as gpu
+
+    src_dir, _, _ = commissioned_dir(tmp_path / 'src', location='backstock_00')
+    (tmp_path / 'empty').mkdir()
+    with pytest.raises(RuntimeError, match='no baseline for station'):
+        gpu.assemble_baselines({'backstock_00': src_dir, 'rollwagen': tmp_path / 'empty'},
+                               tmp_path / 'baselines', ['backstock_00', 'rollwagen'])
+
+
 def _commission_both(tmp_path):
     """Commission backstock_00 (source) and G3_back_s2 (shelf) into one dataset dir."""
     source_k, source_cam, _, support, witness, source_frame = empty_frame()

@@ -772,6 +772,37 @@ loader and refusal live in `twin.restock_camera.commissioning`. CPU tests (no Is
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_commissioning.py -q
 ```
 
+**Guarded native run — all three stations in one boot window.** `scripts/run_restock_commissioning_gpu.py`
+holds one `/tmp/aile-gpu.lock` session and loops the commissioning CLI once per `--station` (the
+renderer `twin.restock.commissioning_sources` commissions one station per Isaac boot), then assembles
+every per-station baseline into the shared `<output>/baselines` dir and rebuilds the union manifest —
+so one `commissioning_dir` carries `backstock_00` + `rollwagen` + `G3_back_s2` for the full
+collect→transfer→couple→tow→park mission, produced in one session (session-bound, within the
+lifetime). Pass all three stations:
+
+```bash
+PYTHONPATH=scripts ROS_DOMAIN_ID=88 ROS_LOCALHOST_ONLY=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+python3 scripts/run_restock_commissioning_gpu.py --output "$CRUN" \
+  --isaac-python "$ISAAC" --nvidia-runtime "$RT" \
+  --camera-config "$CAMERA_CONFIG" --scenario "$SCENARIO" --bench-config "$BENCH" \
+  --station backstock_00 --station rollwagen --station G3_back_s2 \
+  --heavy-threshold-mb 2500 --wall-cap-s 900 --lifetime-s 900
+```
+
+**`$CAMERA_CONFIG` MUST be regenerated from the current design first.** It is a *generated* artifact
+of `restock_camera.config`, shared by the commissioning bench (`twin.restock.view_scene` authors the
+markers from it) AND the mission, so the two must use the same file. A stale file silently feeds the
+OLD geometry into commissioning — e.g. the pre-fix `.62×.42` cart support overshoots the cart rails,
+so the sampled empty-deck patch catches the raised rails and the production `_flat_patch` gate refuses
+it as "tilted, occupied or occluded" (the current design insets the cart to `.54×.34` and the shelf to
+`.58×.36`, and re-aims the shelf camera). Regenerate it before commissioning and point the mission at
+the same file:
+
+```bash
+PYTHONPATH=scripts python3 scripts/write_restock_camera_config.py \
+  --scenario "$SCENARIO" --manifest "$MOBILE_MANIFEST" --output "$CAMERA_CONFIG"
+```
+
 A reduced render-product resolution MUST carry matching intrinsics:
 `geometry.scale_intrinsics(k, render_scale)` scales the pixel grid + focal/principal together
 (centred pinhole), and `sensing.rendered_context(render_scale=...)` applies it so the context,
