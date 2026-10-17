@@ -143,6 +143,14 @@ def main():
     # spinning executor; wait_for_service rides out the host-stack/move_group warmup.
     if bool(config.get('base_collision_object', False)):
         payload.add_base_obstacle()
+    # Static environment fixtures the forward eye-in-hand camera never maps into the nvblox ESDF
+    # (the cart cage behind the robot, the overhead collider the carried carton swings into) must be
+    # published as world CollisionObjects or cuMotion plans the carton straight through them (run-249/
+    # 250). Each spec is {id, boxes:[{size,center,rpy?}]} in the ur_base_link frame; CPU-proven clear of
+    # the arm's stow + grasp-start configs by twin.restock_host.world_obstacles before any GPU run.
+    for spec in config.get('world_obstacles', []):
+        boxes = [(b['size'], b['center'], b.get('rpy', (0.0, 0.0, 0.0))) for b in spec['boxes']]
+        payload.add_world_obstacle(spec['id'], boxes)
     try:
         rclpy.spin(node)
     finally:

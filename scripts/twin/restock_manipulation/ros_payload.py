@@ -241,6 +241,53 @@ class RosPayloadSync:
               % (len(boxes), len(allow)), flush=True)
         return OBJ
 
+    def add_world_obstacle(self, obj_id, boxes, wait_s=30.):
+        """Publish a STATIC fixture (the cart cage, an overhead collider, ...) as a world
+        CollisionObject so cuMotion plans the arm AND the attached carton clear of it.
+
+        Unlike add_base_obstacle, the obstacle is NOT added to the allowed-collision matrix: the arm and
+        the carton must both avoid it (curobo ignores the MoveIt ACM for world obstacles anyway, so the
+        caller MUST have proven on CPU -- twin.restock_host.world_obstacles -- that the boxes clear the
+        arm at every plan-START configuration, or cuMotion rejects the plan with INVALID_INITIAL_CSPACE,
+        the base-box lesson, firstmate 295).  ``boxes`` is a list of (size (x,y,z), center (x,y,z),
+        rpy (r,p,y)) in the ur_base_link frame; rpy is optional (default axis-aligned).  Published once
+        at startup via the payload node's spinning executor while the base is parked at the station."""
+        import math
+        from moveit_msgs.srv import ApplyPlanningScene
+        from moveit_msgs.msg import CollisionObject
+        from shape_msgs.msg import SolidPrimitive
+        from geometry_msgs.msg import Pose
+        co = CollisionObject()
+        co.id = str(obj_id)
+        co.header.frame_id = 'ur_base_link'
+        co.operation = CollisionObject.ADD
+        for box in boxes:
+            size, center = box[0], box[1]
+            rpy = box[2] if len(box) > 2 else (0.0, 0.0, 0.0)
+            if len(size) != 3 or len(center) != 3 or len(rpy) != 3 or any(v <= 0 for v in size):
+                raise ValueError('world obstacle box needs positive size(3), center(3), optional rpy(3)')
+            prim = SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[float(v) for v in size])
+            pose = Pose()
+            pose.position.x, pose.position.y, pose.position.z = (float(v) for v in center)
+            r, p, y = (float(v) for v in rpy)
+            cr, sr, cp, sp, cy, sy = (math.cos(r / 2), math.sin(r / 2), math.cos(p / 2),
+                                      math.sin(p / 2), math.cos(y / 2), math.sin(y / 2))
+            pose.orientation.w = cr * cp * cy + sr * sp * sy
+            pose.orientation.x = sr * cp * cy - cr * sp * sy
+            pose.orientation.y = cr * sp * cy + sr * cp * sy
+            pose.orientation.z = cr * cp * sy - sr * sp * cy
+            co.primitives.append(prim)
+            co.primitive_poses.append(pose)
+        if not self.scene.wait_for_service(timeout_sec=wait_s):
+            raise RuntimeError('apply_planning_scene service unavailable for world obstacle ' + str(obj_id))
+        req = ApplyPlanningScene.Request()
+        req.scene.is_diff = True
+        req.scene.world.collision_objects = [co]
+        if not self._wait(self.scene.call_async(req), timeout=wait_s).success:
+            raise RuntimeError('world obstacle planning-scene apply unsuccessful: ' + str(obj_id))
+        print('WORLD_OBSTACLE published id=%s (%d boxes)' % (obj_id, len(co.primitives)), flush=True)
+        return co.id
+
     def close(self):
         self.executor.shutdown(timeout_sec=2.)
         self.thread.join(timeout=2.)
