@@ -200,6 +200,14 @@ repo's `scenes/`, `export/` or `renders/`.
   dataset format: `docs/scenario-format.md`. Offline tests (no Blender) validate a
   committed smoke fixture — run with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=` to
   dodge the box's ROS pytest plugins. Datasets write **outside git** (`~/datasets/store-scenarios/`).
+- **Fleet dashboard** (`scripts/twin/dashboard/`, launcher `scripts/run_fleet_dashboard.py`,
+  RUNBOOK §17): phone-first, read-only CPU panel merging the live Isaac mission (pulse from
+  the firstmate watch page `status.json`, pipeline from each run's `mission.json`, media
+  linked back) with a store-vision store-state JSON overlay + an opt-in app trigger/monitor
+  queue. Standalone — never imported or launched by the mission, so a run is byte-identical
+  whether or not it is up; everything opt-in and default off. Pure merge in `aggregate.py`
+  (unit-tested, no network/GPU/sim); binds the tailnet IP on a free port (default `8794`).
+  Contract + store-vision exporter proposal: [docs/fleet_dashboard.md](docs/fleet_dashboard.md).
 - GitHub remote is `ailerobotics/blender-supermarket` (origin); changes land via PR
   (see the merged-PR history). Use **gh-axi** for GitHub operations; never push to or
   merge into the default branch yourself.
