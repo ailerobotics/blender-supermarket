@@ -335,7 +335,8 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         cart_body=assembly.cart_body, mobile=assembly.mobile, range_sensor=range_sensor,
         transport=transport, contact=assembly.contact, hold_arm=assembly.command_gate.hold,
         verification=verifier, recording_camera=recording_camera, recorder=recorder,
-        native_transport=assembly.transport, on_action=on_action, record_stride=record_stride,
+        native_transport=assembly.transport, command_gate=assembly.command_gate,
+        on_action=on_action, record_stride=record_stride,
         sensing_stride=sensing_stride, set_render_suspended=gate_seam,
         # Stationary-operation gate: real-rig defaults 5 mm / 10 mrad; the sim profile relaxes them
         # (firstmate msg 252 sim-only fidelity relaxation) to tolerate the harmless ~11 mrad contact

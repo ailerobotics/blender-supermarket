@@ -23,6 +23,10 @@ from .runtime import Packet
 # never read a rendered frame, so they render only on the recorder's cadence ticks.
 SENSING_ACTIONS = frozenset({'collect', 'transfer', 'verify'})
 
+# Physics steps to hold the arm frozen at the measured joints after the sim attach-fallback reads
+# contact, so the link velocity decays to ~0 before the weld (firstmate run-209; no base-pivot impulse).
+ATTACH_SETTLE_STEPS = 15
+
 
 def _sensing_frame_due(current_action, upcoming_tick, sensing_stride, suspended):
     """Whether this tick must render a fresh SENSING frame: a decode-grade stage on its stride
@@ -114,7 +118,7 @@ class IsaacPort:
                  recorder=None, native_transport=None, after_step=None,
                  on_action=None, realtime=True, record_stride=2, sensing_stride=1,
                  masked_depth=None, set_render_suspended=None,
-                 stationary_dxy=0.005, stationary_dyaw=0.01):
+                 stationary_dxy=0.005, stationary_dyaw=0.01, command_gate=None):
         self.world,self.robot=world,robot
         # Opt-in sensing execution gate seam (camera lane). Wired (non-None) only when
         # config['sensing_execution_gate'] is on; gate() then suspends the decode-camera render
@@ -126,6 +130,11 @@ class IsaacPort:
         self.mobile,self.range_sensor=mobile,range_sensor
         self.transport,self.contact=transport,contact
         self.hold_arm,self.verification=hold_arm,verification
+        # ArmCommandGate for the labelled sim attach-fallback's stationary weld (firstmate run-209):
+        # when the fallback reads <=0.5mm flush contact, freeze the arm here, settle, then weld.
+        self.command_gate=command_gate
+        self._attach_freezing=False
+        self._attach_wait=0
         self.recording_camera,self.recorder=recording_camera,recorder
         self.native_transport=native_transport
         self.after_step,self.on_action=after_step,on_action
@@ -222,7 +231,23 @@ class IsaacPort:
                                                  self.sensing_stride, self.masked_depth is not None)
         self.world.step(render=bool(self.sensing_tick or self.record_tick or self.masked_depth_tick))
         self.tick+=1
-        self.contact.sim_attach_fallback_tick()   # labelled sim attach weld; no-op unless enabled (default off)
+        # Labelled sim attach-fallback with a STATIONARY weld (firstmate run-209): on a measured <=0.5mm
+        # flush contact, freeze the arm at the measured joints (stop the over-press), wait a few physics
+        # steps until the link velocity is ~0, THEN weld -- so the weld snaps no moving link and does not
+        # pivot the base past its 25 mrad gate. No-op unless the fallback is enabled (default off).
+        if self.command_gate is not None:
+            if self.contact.sim_attach_contact_ready():
+                if not self._attach_freezing:
+                    self.command_gate.begin_contact_hold()   # freeze at measured joints
+                    self._attach_freezing, self._attach_wait = True, 0
+                self._attach_wait += 1
+                if self._attach_wait >= ATTACH_SETTLE_STEPS:  # settled: link velocity ~0
+                    self.contact.sim_attach_weld()
+                    self.command_gate.end_contact_hold()      # release; weld raises s.contact -> grasp/lift
+                    self._attach_freezing = False
+            elif self._attach_freezing:
+                self.command_gate.end_contact_hold()          # contact lost before settle -> resume
+                self._attach_freezing = False
         # Mission-relative acquisition clock on the nominal fixed timestep. Deriving it
         # from world.current_time instead drifts: Isaac's physics dt differs from the
         # mission dt by ~1e-9 per step (both pass the isclose guard above), which left

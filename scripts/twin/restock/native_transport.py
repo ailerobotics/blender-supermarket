@@ -55,6 +55,22 @@ class ArmCommandGate:
         self.started=False
         self.faulted=False
         self.hold_target=None
+        # Temporary (non-faulting) contact hold: freeze the arm at the measured joints while the sim
+        # attach-fallback settles the link to ~0 velocity before welding, so the weld snaps no moving
+        # link (firstmate run-209). Distinct from hold()/faulted, which is a terminal e-stop; this is
+        # released (begin/end_contact_hold) and the arm resumes host commands for lift/couple/tow/park.
+        self._contact_hold=False
+        self._contact_hold_target=None
+
+    def begin_contact_hold(self):
+        if not self.faulted:
+            self._contact_hold_target=self.measured()
+            self._contact_hold=True
+            self.apply(self._contact_hold_target,np.zeros(6),self.indices)
+
+    def end_contact_hold(self):
+        self._contact_hold=False
+        self._contact_hold_target=None
 
     def measured(self):
         positions=np.asarray(self.robot.get_joint_positions(joint_indices=self.indices),float)
@@ -71,6 +87,11 @@ class ArmCommandGate:
     def command(self, *, names, positions, velocities, efforts, stamp, now):
         if self.faulted:
             self.hold()
+            return
+        if self._contact_hold:
+            # Temporary contact-settle freeze: hold the measured joints, ignore the host's continued
+            # over-press, so the link decelerates to ~0 before the stationary weld. Released shortly.
+            self.apply(self._contact_hold_target,np.zeros(6),self.indices)
             return
         try:
             # This is a POSITION+VELOCITY command (``apply`` drives only q, v); the effort field is

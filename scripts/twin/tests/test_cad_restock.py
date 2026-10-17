@@ -403,25 +403,28 @@ def test_sim_attach_fallback_gating_default_off_and_contact_gated():
         return a
     contact = {'min_gap_mm': 0.1, 'pad_vs_surface_deg': 0.2,
                'raycast': [['/World/Carton', 0.1]] * 4}
-    # default OFF -> never welds even at perfect contact
-    a = bridge(enabled=True, fallback=False, probe=contact); a.sim_attach_fallback_tick()
-    assert a._fallback_body is None and a._welds == []
-    # ON + suction on + measured <=0.5 mm flush contact -> welds the contacted carton
-    a = bridge(enabled=True, fallback=True, probe=contact); a.sim_attach_fallback_tick()
-    assert a._welds == ['/World/Carton'] and a.read() is True
-    # ON but the gap is outside the contact gate -> no weld
+    # default OFF -> never ready, never welds even at perfect contact
+    a = bridge(enabled=True, fallback=False, probe=contact)
+    assert a.sim_attach_contact_ready() is False
+    a.sim_attach_weld(); assert a._welds == []
+    # ON + suction on + measured <=0.5 mm flush contact -> ready; weld attaches the contacted carton
+    a = bridge(enabled=True, fallback=True, probe=contact)
+    assert a.sim_attach_contact_ready() is True
+    a.sim_attach_weld(); assert a._welds == ['/World/Carton'] and a.read() is True
+    # ON but the gap is outside the contact gate -> not ready
     far = dict(contact, min_gap_mm=SIM_ATTACH_CONTACT_MM + 1.0)
-    a = bridge(enabled=True, fallback=True, probe=far); a.sim_attach_fallback_tick()
-    assert a._welds == []
-    # ON but the pad is not flush -> no weld
+    a = bridge(enabled=True, fallback=True, probe=far)
+    assert a.sim_attach_contact_ready() is False
+    # ON but the pad is not flush -> not ready
     tilt = dict(contact, pad_vs_surface_deg=SIM_ATTACH_FLUSH_DEG + 1.0)
-    a = bridge(enabled=True, fallback=True, probe=tilt); a.sim_attach_fallback_tick()
-    assert a._welds == []
-    # ON, already natively latched -> prefer the plugin, do not weld
+    a = bridge(enabled=True, fallback=True, probe=tilt)
+    assert a.sim_attach_contact_ready() is False
+    # ON, already natively latched -> prefer the plugin, not ready
     a = bridge(enabled=True, fallback=True, gripped=['/World/Carton'], status='closed', probe=contact)
-    a.sim_attach_fallback_tick(); assert a._welds == []
-    # suction off -> releases an existing weld
+    assert a.sim_attach_contact_ready() is False and a._welds == []
+    # suction off -> not ready and releases an existing weld
     a = bridge(enabled=False, fallback=True, probe=contact)
     a._fallback_body, a._fallback_joint = '/World/Carton', '/Grip/j'
     a.stage = NS(RemovePrim=lambda p: a._releases.append(p))
-    a.sim_attach_fallback_tick(); assert a._fallback_body is None and a._releases == ['/Grip/j']
+    assert a.sim_attach_contact_ready() is False
+    assert a._fallback_body is None and a._releases == ['/Grip/j']

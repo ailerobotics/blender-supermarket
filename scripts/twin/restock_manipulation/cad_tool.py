@@ -305,51 +305,53 @@ class NativePanelContact:
         if getattr(self, '_diag', False):
             self._emit('command:%s' % ('close' if self.enabled else 'open'), force=True)
 
-    def sim_attach_fallback_tick(self):
-        """Labelled SIM attach-fallback, DEFAULT OFF (see SIM_ATTACH_CONTACT_MM). No-op unless the
-        fallback is enabled. When enabled and suction is commanded on, create ONE explicit FixedJoint
-        from the gripper body to the contacted carton the instant a MEASURED near-zero seal gap + flush
-        pad is observed; the weld is released on suction off (command()). Never fabricates a hold without
-        measured contact. Call once per physics step during the grasp; cheap (returns immediately) when
-        the fallback is off, which it is unless the stations lane proves the native plugin cannot attach
-        from the arm articulation link."""
+    def sim_attach_contact_ready(self):
+        """Labelled SIM attach-fallback DETECT step, DEFAULT OFF (see SIM_ATTACH_CONTACT_MM). Returns
+        True when a weld SHOULD form: the fallback is enabled, suction is on, nothing is yet held, and a
+        FRESH probe shows a measured <=0.5 mm flush contact on a hit body (stored for sim_attach_weld).
+        The caller (IsaacPort) then FREEZES the arm to a stationary settle and calls sim_attach_weld, so
+        the weld snaps no moving link and does not pivot the base (firstmate run-209).
+
+        Gates on the PLUGIN's shared status (!= Open), not this instance's self.enabled: the gripper
+        command is applied on a DIFFERENT NativePanelContact instance than the one IsaacPort ticks, but
+        both wrap the same gripper path (run-207). Probes FRESH, not self.last_probe, because the pad
+        crosses the ~0 mm window only briefly and last_probe only refreshes on the sensing stride."""
+        self._pending_body = None
         if not self._sim_attach_fallback:
-            return
+            return False
         self._fb_n = getattr(self, '_fb_n', 0) + 1
-        # Gate on the PLUGIN's shared status, not this instance's self.enabled: the gripper command is
-        # applied on a DIFFERENT NativePanelContact instance than the one IsaacPort ticks here (run-207:
-        # the tick'd assembly.contact saw self.enabled False while the plugin was commanded closed on the
-        # manip-runtime's instance). Both wrap the same gripper path, so get_gripper_status() is the true
-        # shared suction state: != Open means suction is on.
-        suction_on = self.api.get_gripper_status(self.path) != self.open_status
-        if not suction_on:
+        if self.api.get_gripper_status(self.path) == self.open_status:
             if self._fb_n % 120 == 1:
                 print('SIM_ATTACH_DIAG skip=suction_off', flush=True)
             self._release_fallback()
-            return
-        if self._fallback_body is not None:
-            return                                   # already welded
-        if self.read():                              # native plugin latched on its own -- prefer it
-            if self._fb_n % 120 == 1:
-                print('SIM_ATTACH_DIAG skip=native_held', flush=True)
-            return
-        # Probe FRESH every tick, not self.last_probe: read()/SEAL_DIAG only refresh last_probe on the
-        # sensing stride, but the pad crosses the ~0 mm contact window briefly DURING the over-press
-        # move (run-204 hit 0.0 mm only transiently); a stale last_probe misses it. This runs only while
-        # the fallback is enabled, suction is on, and nothing is yet held -- a bounded grasp-phase cost.
+            return False
+        if self._fallback_body is not None or self.read():   # already held (weld or native) -- prefer it
+            return False
         info = self.probe()
         gap, pvs = info.get('min_gap_mm'), info.get('pad_vs_surface_deg')
         hits = [h[0] for h in (info.get('raycast') or []) if h and h[0]]
         if (gap is None or gap > SIM_ATTACH_CONTACT_MM or pvs is None
                 or pvs > SIM_ATTACH_FLUSH_DEG or not hits):
-            # Diagnostic: why the enabled fallback is NOT welding this tick (gap/flush/hit view).
             if self._fb_n % 30 == 1 or (gap is not None and gap <= SIM_ATTACH_CONTACT_MM):
                 print('SIM_ATTACH_DIAG skip gap_mm=%s pad_vs_surface_deg=%s hits=%s'
                       % (gap, pvs, hits), flush=True)
-            return                                   # not a measured <=0.5 mm flush contact yet
-        self._fallback_weld(hits[0])
+            return False
+        self._pending_body, self._pending_gap, self._pending_pvs = hits[0], gap, pvs
+        return True
+
+    def sim_attach_weld(self):
+        """Create the labelled weld to the body stored by sim_attach_contact_ready. The caller calls
+        this only AFTER freezing the arm to a stationary settle, so no impulse. No-op if nothing is
+        pending or something is already held."""
+        if (not self._sim_attach_fallback or self._fallback_body is not None
+                or not getattr(self, '_pending_body', None)):
+            return
+        body = self._pending_body
+        self._fallback_weld(body)
         print('SIM_ATTACH_FALLBACK attach body=%s gap_mm=%s pad_vs_surface_deg=%s'
-              % (hits[0], gap, pvs), flush=True)
+              % (body, getattr(self, '_pending_gap', None), getattr(self, '_pending_pvs', None)),
+              flush=True)
+        self._pending_body = None
 
     def _fallback_weld(self, body_path):
         from pxr import UsdPhysics, Sdf
