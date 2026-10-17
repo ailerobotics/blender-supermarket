@@ -93,7 +93,7 @@ def summarize(rows, params: SafetyParams) -> dict:
 
 
 def run(app, config, output, *, ffmpeg, sensing_stride: int = 8,
-        record_stride: int = 20, max_steps: int = 900, target_frames: int = 16,
+        record_stride: int = 20, max_steps: int = 1300, target_frames: int = 16,
         dt: float = 1 / 60):  # pragma: no cover - requires GPU/Isaac/USD
     """Author the store + crossing people, render, and drive GT detection+reaction.
 
@@ -211,11 +211,15 @@ def run(app, config, output, *, ffmpeg, sensing_stride: int = 8,
                                           zone=last.get('zone'),
                                           base_scale=last.get('base_scale'),
                                           arm_hold=last.get('arm_hold')))
-        if len(recorder.frames) >= target_frames and rows and \
-                {'SLOW', 'STOP'}.issubset({r['zone'] for r in rows}):
-            # Enough frames AND both regimes already seen: keep going a little to
-            # capture the return-to-CLEAR (resume), then stop.
-            if any(r['zone'] == 'CLEAR' for r in rows[len(rows) // 2:]):
+        # Stop only once the WHOLE evidence story is captured: enough frames and the
+        # full CLEAR->SLOW->STOP plus the base/arm RESUME (a <1->1 and a hold->release
+        # transition, which each need the resume-dwell to elapse). A single late CLEAR
+        # tick is not resume, so gate on summarize(), not on any CLEAR appearing.
+        if len(recorder.frames) >= target_frames and rows \
+                and {'SLOW', 'STOP'}.issubset({r['zone'] for r in rows}):
+            s = summarize(rows, params)
+            if s['slow_seen'] and s['stop_seen'] and s['arm_paused'] \
+                    and s['base_resumed'] and s['arm_resumed']:
                 break
 
     summary = summarize(rows, params)
