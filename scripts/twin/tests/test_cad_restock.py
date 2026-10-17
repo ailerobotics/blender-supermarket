@@ -277,6 +277,31 @@ def test_native_read_is_pure_observer_keyed_on_gripped_objects():
         assert other.read() is False and other.opened == []
 
 
+def test_attach_fallback_weld_is_a_shared_stage_fact_read_by_any_instance():
+    # run-213: the mission welds on the IsaacPort NativePanelContact but /sensors is read off the
+    # build_sensing instance -- a SEPARATE object wrapping the same gripper. Keying held on this
+    # instance's own _fallback_body made the capture miss a weld authored on its sibling, so s.contact
+    # stayed False ~7 s after a persisting weld and the contact phase cap-faulted. read() now ALSO
+    # honours the shared USD FixedJoint at <gripper>/sim_attach_fallback, so any observer of the
+    # gripper reports the hold -- while the native (no-fallback) path stays a pure per-instance observer.
+    from scripts.twin.restock_manipulation.cad_tool import NativePanelContact
+    joint = '/Grip/sim_attach_fallback'
+    def sibling(fallback, has_joint):
+        a = NativePanelContact.__new__(NativePanelContact)
+        a.path, a.open_status = '/Grip', 'open'
+        a.api = NS(get_gripper_status=lambda p: 'open', get_gripped_objects=lambda p: [])
+        a._fallback_body, a._sim_attach_fallback = None, fallback
+        a.stage = NS(GetPrimAtPath=lambda p, present=has_joint: (object() if (p == joint and present) else None))
+        return a
+    # Fallback on + the shared weld prim present: held, even though THIS instance never welded
+    # (_fallback_body is None) and the native gripper is Open with nothing gripped.
+    assert sibling(fallback=True, has_joint=True).read() is True
+    # Fallback on but no weld authored yet: not held (no fabricated hold).
+    assert sibling(fallback=True, has_joint=False).read() is False
+    # Fallback OFF (real rig / default): the shared prim is ignored -- the native path is untouched.
+    assert sibling(fallback=False, has_joint=True).read() is False
+
+
 def test_seal_probe_measures_status_grip_and_geometry():
     # The seal diagnostic (firstmate key gripper-seal-fail) must surface the plugin's measured
     # state -- status, gripped-object count + paths, and the seal geometry -- so an in-mission

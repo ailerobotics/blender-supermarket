@@ -408,8 +408,17 @@ class NativePanelContact:
         objects = set(map(str, self.api.get_gripped_objects(self.path) or []))
         held = len(objects) == 1 and self.api.get_gripper_status(self.path) != self.open_status
         # The labelled sim attach-fallback (default OFF) is an explicit measured-contact weld -- a real
-        # physical hold, not a fabricated one -- so when present it is a genuine held state.
-        held = held or (getattr(self, '_fallback_body', None) is not None)
+        # physical hold, not a fabricated one -- so when present it is a genuine held state. The weld is a
+        # single USD FixedJoint authored at <gripper>/sim_attach_fallback, a SHARED stage fact: the camera
+        # lane (build_sensing) and the manip runtime (isaac_factory) each hold a SEPARATE NativePanelContact
+        # wrapping the same gripper, and the mission welds on the IsaacPort instance while /sensors is read
+        # off the build_sensing instance. Keying the held signal on this instance's _fallback_body alone
+        # made the capture miss a weld authored on a sibling (run-213: s.contact stayed False ~7 s after a
+        # persisting weld), so ALSO honour the shared stage joint -- any observer of the gripper sees it.
+        welded = (getattr(self, '_fallback_body', None) is not None
+                  or (getattr(self, '_sim_attach_fallback', False) and getattr(self, 'stage', None) is not None
+                      and bool(self.stage.GetPrimAtPath(self.path + '/sim_attach_fallback'))))
+        held = held or welded
         if getattr(self, '_diag', False):
             self._emit('read')
         return bool(held)
