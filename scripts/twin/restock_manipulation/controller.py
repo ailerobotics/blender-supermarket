@@ -6,6 +6,11 @@ from ..restock_camera.freshness import require_fresh
 
 from .types import MotionPort, ProductProfile, Result, Sensors
 
+# Controller ticks to HOLD a settled contact step before re-checking the latch, so the arm link
+# velocity decays to ~0 (the native SurfaceGripper seals a STATIONARY pad but not a moving one --
+# stations verdict, firstmate run-203). Each tick is a sensor frame = many physics steps under pacing.
+CONTACT_FREEZE_TICKS = 5
+
 
 class TransferController:
     def __init__(self, motion: MotionPort, profiles: dict[str, ProductProfile], *,
@@ -106,6 +111,7 @@ class TransferController:
         self._contact_suction = False   # suction enabled once during the contact descent (grasp latch)
         self._contact_waits = 0         # bounded grace ticks awaiting a fresh acquisition deadline
         self._contact_step = 0.0        # cumulative contact-feedback over-press travel (m); see __init__
+        self._contact_freeze = 0        # freeze-settle hold ticks at a contact step (see CONTACT_FREEZE_TICKS)
         self.verify_ids = set()
         self.release_time = None
 
@@ -291,6 +297,17 @@ class TransferController:
                 # contact is a mission fault (the latch never formed); SEAL_DIAG has logged the gap.
                 if (self.phase == 'contact' and self.contact_straight_line
                         and self.contact_overpress_step_m > 0 and not s.contact):
+                    # Freeze-settle (firstmate run-203, stations verdict): the native plugin seals a
+                    # STATIONARY pad every time, but the trajectory settle tolerance lets the link finish
+                    # with non-zero velocity -- which does NOT seal. So when a step reaches its pose
+                    # without a latch, HOLD (do not re-issue) for CONTACT_FREEZE_TICKS so the drive settles
+                    # the link to ~0 velocity at the measured joints, giving the plugin (or the gated
+                    # SIM_ATTACH_FALLBACK) its stationary settle window to latch. Only if it still has not
+                    # latched after the settle do we step further toward the carton.
+                    if self._contact_freeze < CONTACT_FREEZE_TICKS:
+                        self._contact_freeze += 1
+                        return self._result()
+                    self._contact_freeze = 0
                     if self._contact_step + self.contact_overpress_step_m <= self.contact_overpress_cap_m + 1e-9:
                         self._contact_step += self.contact_overpress_step_m
                         self.issued = False
