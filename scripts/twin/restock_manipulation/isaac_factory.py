@@ -66,6 +66,7 @@ class ManipConfig:
     collect_source_location: str = ''  # mission location of the collect pick (fixed-source target)
     cart_placement: dict = field(default_factory=dict)  # collect destination (rollwagen) placement, derived from the cart asset
     arm_camera_reaim: dict = field(default_factory=dict)  # {origin, aim_targets} in ur_base for the look-at mount (camera lane PR64)
+    sim_attach_fallback: bool = False  # labelled sim attach-fallback (cad_tool); default OFF, see SIM_ATTACH_CONTACT_MM
 
 
 def parse_manipulation_config(config, job_sku):
@@ -158,7 +159,8 @@ def parse_manipulation_config(config, job_sku):
                        walls=walls, voxel_dims=tuple(float(v) for v in vd), voxel_size=float(vs),
                        grasp_mode=next(iter(modes)), pose_bridge_root=pose_bridge_root,
                        masked_depth=masked_depth, collect_source_location=collect_source_location,
-                       cart_placement=cart_placement, arm_camera_reaim=arm_camera_reaim)
+                       cart_placement=cart_placement, arm_camera_reaim=arm_camera_reaim,
+                       sim_attach_fallback=bool(config.get('sim_attach_fallback', False)))
 
 
 def _parse_arm_camera_reaim(entry):
@@ -629,7 +631,7 @@ def _build_runtime(*, app, assembly, params, output):
         camera.add_instance_id_segmentation_to_frame(init_params={'colorize': False})
 
     gripper_path = '/RestockPanelGripper'
-    contact = NativePanelContact(stage, gripper_path)
+    contact = NativePanelContact(stage, gripper_path, sim_attach_fallback=params.sim_attach_fallback)
     source = params.stations['source']
     if not params.pose_bridge_root:
         raise ValueError('runtime-config pose_bridge_root (tray-perception root) required')

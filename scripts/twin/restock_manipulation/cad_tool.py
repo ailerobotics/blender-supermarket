@@ -94,6 +94,15 @@ REAL_MAX_GRIP_DISTANCE = .005
 # approach + the tilt it tolerates).
 SIM_MAX_GRIP_DISTANCE = .020
 
+# Sim attach-FALLBACK gates (firstmate run-202; default OFF). A clearly labelled explicit FixedJoint
+# weld, used ONLY if the stations lane proves the native SurfaceGripper cannot attach from the arm
+# ARTICULATION link (runs 191-202: pad reached a MEASURED 0 mm flush contact with suction on and
+# gripper_force_limit raised, yet the plugin never welded, while the isolated kinematic-carrier harness
+# welds at 0 mm). It is the same joint the plugin would make, created only on a MEASURED near-zero seal
+# gap + flush pad with suction on, and released on suction off -- never a fabricated hold.
+SIM_ATTACH_CONTACT_MM = 0.5
+SIM_ATTACH_FLUSH_DEG = 2.0
+
 
 def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
                            max_gap=SIM_MAX_GRIP_DISTANCE, force_limit=30.,
@@ -256,9 +265,14 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
 
 class NativePanelContact:
     """Native contact/latch feedback only; zero fallback welds or object poses."""
-    def __init__(self, stage, gripper_path, *, diagnostic=None):
+    def __init__(self, stage, gripper_path, *, diagnostic=None, sim_attach_fallback=False):
         import isaacsim.robot.surface_gripper._surface_gripper as surface_gripper
         self.stage, self.path = stage, gripper_path
+        # Labelled sim attach-fallback, default OFF (see SIM_ATTACH_CONTACT_MM). _fallback_body holds the
+        # welded carton path while attached; _fallback_joint is the explicit FixedJoint prim path.
+        self._sim_attach_fallback = bool(sim_attach_fallback)
+        self._fallback_body = None
+        self._fallback_joint = None
         self.api = surface_gripper.acquire_surface_gripper_interface()
         self.api.set_write_to_usd(True)
         self.closed_status = surface_gripper.GripperStatus.Closed
@@ -287,8 +301,52 @@ class NativePanelContact:
             self.api.close_gripper(self.path)
         else:
             self.api.open_gripper(self.path)
+            self._release_fallback()      # suction off releases any labelled sim weld
         if getattr(self, '_diag', False):
             self._emit('command:%s' % ('close' if self.enabled else 'open'), force=True)
+
+    def sim_attach_fallback_tick(self):
+        """Labelled SIM attach-fallback, DEFAULT OFF (see SIM_ATTACH_CONTACT_MM). No-op unless the
+        fallback is enabled. When enabled and suction is commanded on, create ONE explicit FixedJoint
+        from the gripper body to the contacted carton the instant a MEASURED near-zero seal gap + flush
+        pad is observed; the weld is released on suction off (command()). Never fabricates a hold without
+        measured contact. Call once per physics step during the grasp; cheap (returns immediately) when
+        the fallback is off, which it is unless the stations lane proves the native plugin cannot attach
+        from the arm articulation link."""
+        if not self._sim_attach_fallback:
+            return
+        if not self.enabled:
+            self._release_fallback()
+            return
+        if self._fallback_body is not None:
+            return                                   # already welded
+        if self.read():                              # native plugin latched on its own -- prefer it
+            return
+        info = self.last_probe or self.probe()
+        gap, pvs = info.get('min_gap_mm'), info.get('pad_vs_surface_deg')
+        hits = [h[0] for h in (info.get('raycast') or []) if h and h[0]]
+        if (gap is None or gap > SIM_ATTACH_CONTACT_MM or pvs is None
+                or pvs > SIM_ATTACH_FLUSH_DEG or not hits):
+            return                                   # not a measured 0 mm flush contact yet
+        self._fallback_weld(hits[0])
+        print('SIM_ATTACH_FALLBACK attach body=%s gap_mm=%s pad_vs_surface_deg=%s'
+              % (hits[0], gap, pvs), flush=True)
+
+    def _fallback_weld(self, body_path):
+        from pxr import UsdPhysics, Sdf
+        joint_path = self.path + '/sim_attach_fallback'
+        joint = UsdPhysics.FixedJoint.Define(self.stage, joint_path)
+        first = UsdPhysics.Joint(self.stage.GetPrimAtPath(self.points[0]))
+        gripper_body = first.GetBody0Rel().GetTargets()[0]
+        joint.CreateBody0Rel().SetTargets([gripper_body])
+        joint.CreateBody1Rel().SetTargets([Sdf.Path(body_path)])
+        self._fallback_joint, self._fallback_body = joint_path, body_path
+
+    def _release_fallback(self):
+        if getattr(self, '_fallback_joint', None) is not None:
+            self.stage.RemovePrim(self._fallback_joint)
+            print('SIM_ATTACH_FALLBACK release body=%s' % self._fallback_body, flush=True)
+        self._fallback_joint = self._fallback_body = None
 
     def read(self):
         # PURE OBSERVER of the installed plugin's latch (the plugin manages the PhysX joint
@@ -314,6 +372,9 @@ class NativePanelContact:
         # or released grab is reported not-held (returns False) -- no fabricated hold, no weld.
         objects = set(map(str, self.api.get_gripped_objects(self.path) or []))
         held = len(objects) == 1 and self.api.get_gripper_status(self.path) != self.open_status
+        # The labelled sim attach-fallback (default OFF) is an explicit measured-contact weld -- a real
+        # physical hold, not a fabricated one -- so when present it is a genuine held state.
+        held = held or (getattr(self, '_fallback_body', None) is not None)
         if getattr(self, '_diag', False):
             self._emit('read')
         return bool(held)

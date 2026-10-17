@@ -222,6 +222,7 @@ class IsaacPort:
                                                  self.sensing_stride, self.masked_depth is not None)
         self.world.step(render=bool(self.sensing_tick or self.record_tick or self.masked_depth_tick))
         self.tick+=1
+        self.contact.sim_attach_fallback_tick()   # labelled sim attach weld; no-op unless enabled (default off)
         # Mission-relative acquisition clock on the nominal fixed timestep. Deriving it
         # from world.current_time instead drifts: Isaac's physics dt differs from the
         # mission dt by ~1e-9 per step (both pass the isclose guard above), which left
