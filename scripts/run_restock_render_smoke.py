@@ -93,7 +93,7 @@ def sample():
                 gpu_free_mib=free,ram_available_mib=available_ram_mb())
 
 
-def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False,coupling_only=False,towing_only=False):
+def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False,coupling_only=False,towing_only=False,humans_only=False):
     from isaacsim import SimulationApp
     app=SimulationApp({'headless':True,'width':640,'height':360,
         'renderer':'RayTracedLighting','anti_aliasing':0,'multi_gpu':False})
@@ -119,6 +119,15 @@ def worker(output,ffmpeg,runtime_config=None,view='source',assembly_only=False,c
             result=run(app,config,output,ffmpeg=ffmpeg)
             write(output/'native-result.json',dict(status=result['status'],towing=result,
                 evidence='native straight-towing diagnostic with VFR recording, not an autonomous mission'))
+            return
+        if humans_only:
+            from twin.humans.gpu_bench import run as humans_run
+            config=json.loads(Path(runtime_config).read_text())
+            result=humans_run(app,config,output,ffmpeg=ffmpeg)
+            write(output/'native-result.json',dict(status=result['status'],humans=result,
+                evidence='native RTX ground-truth human-safety bench (scripted people crossing the '
+                         'robot, ground-truth projection into the real candidate camera); not a '
+                         'neural-detector measurement and not an autonomous mission'))
             return
         import numpy as np
         import omni.usd
@@ -264,15 +273,16 @@ def main():
     parser.add_argument('--assembly-only',action='store_true',help='stationary native CAD/physics/hold diagnostic; no planner or video')
     parser.add_argument('--coupling-only',action='store_true',help='native dock+latch+hold diagnostic; no planner, towing or video')
     parser.add_argument('--towing-only',action='store_true',help='native straight forward-towing diagnostic with VFR recording; no planner or steering')
+    parser.add_argument('--humans-only',action='store_true',help='native ground-truth human-safety bench: scripted people cross the robot, GT detection+reaction on the real camera; no planner, mission or neural detector')
     parser.add_argument('--heavy-threshold-mb',type=int,choices=(1500,2500),default=1500)
     parser.add_argument('--worker',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()
-    if sum(bool(x) for x in (args.assembly_only,args.coupling_only,args.towing_only))>1:
-        parser.error('choose at most one of --assembly-only / --coupling-only / --towing-only')
-    if (args.assembly_only or args.coupling_only or args.towing_only) and not args.runtime_config:
-        parser.error('--assembly-only/--coupling-only/--towing-only requires --runtime-config')
+    if sum(bool(x) for x in (args.assembly_only,args.coupling_only,args.towing_only,args.humans_only))>1:
+        parser.error('choose at most one of --assembly-only / --coupling-only / --towing-only / --humans-only')
+    if (args.assembly_only or args.coupling_only or args.towing_only or args.humans_only) and not args.runtime_config:
+        parser.error('--assembly-only/--coupling-only/--towing-only/--humans-only requires --runtime-config')
     if args.worker:
-        worker(args.output,args.ffmpeg,args.runtime_config,args.view,args.assembly_only,args.coupling_only,args.towing_only);return
+        worker(args.output,args.ffmpeg,args.runtime_config,args.view,args.assembly_only,args.coupling_only,args.towing_only,args.humans_only);return
     if not args.isaac_python or not args.nvidia_runtime:
         parser.error('--isaac-python and --nvidia-runtime required')
     args.output=args.output.resolve()
@@ -281,9 +291,17 @@ def main():
     if args.assembly_only or args.coupling_only or args.towing_only:
         from twin.restock.native_environment import ros_environment
         environment=ros_environment(environment,args.isaac_python)
+    if args.humans_only:
+        # The humans bench runs the ground-truth provider in-process (no ROS node),
+        # so the domain is moot; set this lane's own domain per fleet hygiene anyway.
+        environment['ROS_DOMAIN_ID']='104'
     os.environ.clear();os.environ.update(environment)
+    # The humans bench renders a multi-second people crossing (many frames), so it
+    # needs a longer wall cap than the static smoke -- still bounded well under the
+    # 15-minute lane limit firstmate set for one guarded GPU session.
+    wall_limit_s=870 if args.humans_only else 300
     record=dict(status='failed',code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                telemetry=[],runtime_root=str(args.nvidia_runtime),wall_limit_s=300)
+                telemetry=[],runtime_root=str(args.nvidia_runtime),wall_limit_s=wall_limit_s)
     child=None
     try:
         with gpu_slot(heavy_threshold_mb=args.heavy_threshold_mb) as decision:
@@ -300,6 +318,8 @@ def main():
                 command.append('--coupling-only')
             if args.towing_only:
                 command.append('--towing-only')
+            if args.humans_only:
+                command.append('--humans-only')
             child=OwnedProcess(command,args.output/'isaac.log',env=environment)
             try:
                 child.start()
@@ -310,7 +330,7 @@ def main():
                     write(args.output/'run.json',record)
                     if value['ram_available_mib']<4096 or value['gpu_free_mib']<1024:
                         raise RuntimeError('task resource floor reached')
-                    if time.monotonic()-started>300: raise TimeoutError('native smoke exceeded 300s')
+                    if time.monotonic()-started>wall_limit_s: raise TimeoutError(f'native run exceeded {wall_limit_s}s')
                     time.sleep(1.)
                 record['exit_code']=child.process.returncode
                 if child.process.returncode: raise RuntimeError('native child failed; inspect isaac.log')
@@ -326,12 +346,18 @@ def main():
                     t=native.get('towing',{})
                     complete=(t.get('towed') is True and t.get('no_wheel_lift') is True
                               and t.get('video',{}).get('frames',0)>=10)
+                elif args.humans_only:
+                    h=native.get('humans',{})
+                    s=h.get('summary',{})
+                    complete=(h.get('status')=='passed' and h.get('frames',0)>=2
+                              and s.get('slow_seen') is True and s.get('stop_seen') is True
+                              and s.get('arm_paused') is True and s.get('base_resumed') is True)
                 else:
                     complete=native.get('video',{}).get('frames',0)>=(6 if args.runtime_config else 60)
                 if native.get('status')!='passed' or not complete:
                     raise RuntimeError('native result incomplete: '+native.get('reason','missing frames'))
                 # Decode the whole recorded video, not merely its container header.
-                if not (args.assembly_only or args.coupling_only or args.towing_only):
+                if not (args.assembly_only or args.coupling_only or args.towing_only or args.humans_only):
                     subprocess.run([str(args.ffmpeg),'-v','error','-nostdin','-i',
                         str(args.output/'native-render-smoke.mp4'),'-f','null','-'],
                         check=True,capture_output=True,timeout=30)
