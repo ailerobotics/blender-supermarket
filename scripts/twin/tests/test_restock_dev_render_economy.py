@@ -42,11 +42,15 @@ def test_on_applies_dev_defaults_and_a_marker_note():
 
 
 def test_strides_only_ever_widen_never_narrow():
-    # A config that already renders coarser than the dev default is left as-is (max wins):
-    cfg = {'record_stride': 40, 'sensing_stride': 12}
+    # A config that already renders coarser than the dev default is left as-is (max wins).
+    # Bases are chosen strictly coarser than the dev defaults so the invariant is exercised
+    # regardless of their exact values; a base above the freshness cap must still be kept
+    # (the cap bounds only the knob's target, never a coarser configured base).
+    cfg = {'record_stride': _DEV_ECONOMY_RECORD + 20,
+           'sensing_stride': _DEV_ECONOMY_SENSING_CAP + 5}
     rec, sen, note = resolve_render_strides(cfg, {'SUPERMARKET_DEV_RENDER_ECONOMY': '1'})
-    assert rec == 40                       # base coarser than dev record 20 -> kept
-    assert sen == 12                       # base coarser than dev sensing 8 -> kept
+    assert rec == _DEV_ECONOMY_RECORD + 20     # base coarser than dev record -> kept
+    assert sen == _DEV_ECONOMY_SENSING_CAP + 5  # base coarser than the cap -> kept, NOT narrowed
     assert note is not None
 
 
