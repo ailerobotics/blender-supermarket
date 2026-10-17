@@ -214,7 +214,7 @@ def run(args, manifest, scenario):
                                    indent=2, allow_nan=False) + '\n')
                     return 0 if summary['state'] == 'complete' else 1
                 mission = Mission(db, Job(**scenario['job']), bundle.adapter,
-                                  stages=config.get('stages'))
+                                  stages=config.get('stages'), start_at=config.get('start_at'))
                 mission.start()
                 for _ in range(60*20*60):  # bounded simulation time; shell also bounds wall time
                     if mission.terminal:
@@ -227,6 +227,14 @@ def run(args, manifest, scenario):
                 summary = {'state': mission.state, 'reason': mission.reason,
                            'physics_verified': False,
                            'note': 'Mission success alone does not verify video, contacts or autonomy.'}
+                # Flag a start-phase shortcut run so mission.json cannot be read as a full,
+                # grasp-performed cycle: the skipped prefix was synthesized, not actuated.
+                if mission.shortcut is not None:
+                    summary['shortcut'] = mission.shortcut
+                    summary['note'] += (' START-PHASE SHORTCUT: stages '
+                                        + ', '.join(mission.shortcut['skipped'])
+                                        + ' were synthesized (robot pose, braked base, carton '
+                                          'attach), not performed; see events *_shortcut.')
                 # Persist the per-stage summary now, before the finally runs app.close():
                 # Isaac's SimulationApp.close() can terminate the process hard and skip the
                 # outer finally (which re-writes mission.json with events as a fallback).
