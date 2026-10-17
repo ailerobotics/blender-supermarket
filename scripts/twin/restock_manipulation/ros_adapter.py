@@ -423,14 +423,19 @@ class RosMotionPort:
                 > PLAN_TOTAL_WALL_CAP_S)
 
     def failed_result_pending(self):
-        """True when a plan/execute action RESULT has arrived FAILED (status != SUCCEEDED) but poll()
-        has not consumed it. Read-only. The bridge watchdog checks it so a trajectory_host GOAL_MISS
-        abort during the LIFT -- which suspends sensing, so /sensors stalls and poll() stops being
-        driven -- surfaces as a motion failure within ~0.1 s instead of hanging to the wall cap
-        (run-224: the lift GOAL_MISS aborted the executor but the controller never saw it). Only the
-        *_result states carry a get_result future with a GoalStatus; *_accept carry the goal handle."""
+        """True when an EXECUTE action RESULT has arrived FAILED (status != SUCCEEDED) but poll() has
+        not consumed it. Read-only. The bridge watchdog checks it so a trajectory_host GOAL_MISS abort
+        during a reach that suspends sensing -- /sensors stalls and poll() stops being driven --
+        surfaces as a motion failure within ~0.1 s instead of hanging to the wall cap (run-224: the
+        lift GOAL_MISS aborted the executor but the controller never saw it).
+
+        ONLY 'execute_result' (a terminal execution abort), NOT 'plan_result': a PLANNING failure has
+        the REPLAN/next-seed retry logic in poll() (cuMotion is stochastic, run-229 preplace planning
+        failed once then would re-plan), so letting the watchdog fire on the first failed plan result
+        preempted those retries and killed a recoverable plan. A genuine planning HANG is still bounded
+        by planning_wall_exceeded; exhausted retries still raise a clean 'planning failed' in poll()."""
         f = self.future
-        if f is None or self.state not in ('plan_result', 'execute_result') or not f.done():
+        if f is None or self.state != 'execute_result' or not f.done():
             return False
         try:
             return f.result().status != 4            # GoalStatus.STATUS_SUCCEEDED

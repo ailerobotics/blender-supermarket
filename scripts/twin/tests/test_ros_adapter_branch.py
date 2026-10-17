@@ -120,8 +120,13 @@ class FailedResultPending(unittest.TestCase):
     def test_only_result_states_count(self):
         self.assertFalse(self._port('execute_accept', self._F(True, status=6)).failed_result_pending())
 
-    def test_raising_result_future_is_a_failure(self):
-        self.assertTrue(self._port('plan_result', self._F(True, raises=True)).failed_result_pending())
+    def test_raising_execute_result_future_is_a_failure(self):
+        self.assertTrue(self._port('execute_result', self._F(True, raises=True)).failed_result_pending())
+
+    def test_failed_plan_result_is_not_pending_retries_own_it(self):
+        # A PLANNING failure must NOT trip the watchdog -- poll()'s REPLAN/seed retries recover the
+        # stochastic cuMotion failure (run-229); only terminal EXECUTION aborts count.
+        self.assertFalse(self._port('plan_result', self._F(True, status=6)).failed_result_pending())
 
     def test_none_future_is_safe(self):
         self.assertFalse(self._port('execute_result', None).failed_result_pending())
