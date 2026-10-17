@@ -291,10 +291,9 @@ def main():
     if args.assembly_only or args.coupling_only or args.towing_only:
         from twin.restock.native_environment import ros_environment
         environment=ros_environment(environment,args.isaac_python)
-    if args.humans_only:
-        # The humans bench runs the ground-truth provider in-process (no ROS node),
-        # so the domain is moot; set this lane's own domain per fleet hygiene anyway.
-        environment['ROS_DOMAIN_ID']='104'
+    # The humans bench runs the ground-truth provider in-process (no ROS node), so the
+    # lane ROS domain is moot; the GPU guard's isolation() pins every session to
+    # ROS_DOMAIN_ID=88 and must not be weakened, so we leave the domain at 88.
     os.environ.clear();os.environ.update(environment)
     # The humans bench renders a multi-second people crossing (many frames), so it
     # needs a longer wall cap than the static smoke -- still bounded well under the

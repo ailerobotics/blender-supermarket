@@ -8,9 +8,10 @@
 # candidate-camera frames (CLEAR -> SLOW -> STOP -> resume). LOWEST GPU priority:
 # the outer flock only proceeds when the lock is free (the integration lane holds it
 # across its commission+mission sequence). The VRAM guard is unchanged -- never
-# --force; heavy-threshold 2500 covers the always-on whispr (~2.2 GB). ROS_DOMAIN_ID
-# 104 (this lane) though the bench runs no ROS node. Cleans up only this run's own
-# FastDDS shared-memory segments.
+# --force; heavy-threshold 2500 covers the always-on whispr (~2.2 GB). The GPU guard's
+# isolation() pins every session to ROS_DOMAIN_ID=88 (must not be weakened); the bench
+# runs no ROS node so the lane domain is moot. Cleans up only this run's own FastDDS
+# shared-memory segments.
 #
 # Usage: scripts/run_humans_gpu_bench.sh   (no args; paths are pinned below)
 set -uo pipefail
@@ -60,7 +61,7 @@ trap cleanup_shm EXIT
 
 echo "[humans-gpu-bench] $(date -Is) waiting for /tmp/aile-gpu.lock (up to 3600 s)..."
 flock -w 3600 /tmp/aile-gpu.lock env \
-  AILE_GPU_LOCK_INHERITED=1 ROS_DOMAIN_ID=104 ROS_LOCALHOST_ONLY=1 \
+  AILE_GPU_LOCK_INHERITED=1 \
   PYTHONPATH="$ROOT/scripts" \
   "$PY" "$ROOT/scripts/run_restock_render_smoke.py" \
     --humans-only --view shelf --runtime-config "$CONFIG" \

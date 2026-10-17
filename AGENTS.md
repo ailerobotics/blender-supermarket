@@ -172,8 +172,9 @@ repo's `scenes/`, `export/` or `renders/`.
   (`scripts/run_humans_safety_demo.py`). Guarded-GPU evidence is the standalone bench
   `gpu_bench.py` via `run_restock_render_smoke.py --humans-only` (people cross the
   robot on the real candidate camera, GT detection+reaction → CLEAR→SLOW→STOP→resume);
-  one queued command `scripts/run_humans_gpu_bench.sh` (flock lock, ≤15 min, ROS 104,
-  RUNBOOK render-smoke section). It is ground-truth, NOT a neural-detector run — that,
+  one queued command `scripts/run_humans_gpu_bench.sh` (flock lock, ≤15 min; the GPU
+  guard pins ROS_DOMAIN_ID=88 and the bench runs no ROS node; RUNBOOK render-smoke
+  section). It is ground-truth, NOT a neural-detector run — that,
   plus mission wiring behind `humans.enabled`, is the follow-up. Report + open owner
   decisions: `data/sim-restock-humans-v1/report.md`.
 - **Route alerts** (opt-in, default-off): the mission robot as a mobile store sensor.

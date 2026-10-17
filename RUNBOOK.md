@@ -661,8 +661,9 @@ NOT a neural-detector measurement (the detector needs the fleet model on the sam
 GPU — mission-wiring follow-up) and NOT a mission. The `CONFIG` carries the mission's
 store/scenario/manifest/camera paths plus a `humans` block (`detection.source:
 ground_truth`, `humans_bench_view`). One queued, guarded command (blocks on
-`/tmp/aile-gpu.lock` up to 1 h, ≤15 min once held, ROS_DOMAIN_ID 104, heavy-threshold
-2500, cleans only its own `fastrtps_*`): `scripts/run_humans_gpu_bench.sh`. Lowest GPU
+`/tmp/aile-gpu.lock` up to 1 h, ≤15 min once held, heavy-threshold 2500, cleans only
+its own `fastrtps_*`): `scripts/run_humans_gpu_bench.sh`. The GPU guard's `isolation()`
+pins the session to `ROS_DOMAIN_ID=88` (not weakened); the bench runs no ROS node. Lowest GPU
 priority: it waits for the lock the mission lanes hold. CPU logic (crossing synthesis,
 detection/reaction driving) is tested in `scripts/twin/humans/tests/test_gpu_bench.py`.
 
