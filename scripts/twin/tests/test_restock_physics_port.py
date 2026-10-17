@@ -271,40 +271,50 @@ def test_arm_drive_targets_do_not_accept_old_sequence():
     assert len(applied)==1 and not gate.faulted
 
 
-def test_arm_heartbeat_is_node_clocked_not_wall(monkeypatch):
-    # The arm-command heartbeat must be measured in SIM time: a render-paced WALL gap (~3.5 s, far
-    # over the old 0.5 s wall bound that emergency-stopped the executed grasp, run-91) is NOT a lost
-    # heartbeat while the SIM gap is tiny; a real SIM-time gap still is.
+def test_arm_heartbeat_is_wall_backstop_only(monkeypatch):
+    # firstmate 291 same-clock fix: with freshness now in the host /clock domain, the heartbeat is the
+    # generous WALL backstop ONLY. A render-paced WALL gap under the backstop (and any SIM-now value) is
+    # NOT a lost heartbeat; only a gap beyond ARM_HEARTBEAT_WALL_BACKSTOP_S faults.
     import twin.restock.native_transport as nt
     clock = [1000.0]
     monkeypatch.setattr(nt.time, 'monotonic', lambda: clock[0])
     gate, _ = gate_fixture()
     gate.command(names=list(ARM_JOINTS), positions=[.01]*6, velocities=[.01]*6,
                  efforts=[], stamp=5.0, now=5.0)
-    clock[0] = 1003.5                       # 3.5 s WALL later, but only 0.1 s SIM later -> still fresh
-    gate.watchdog(now=5.1)
+    clock[0] = 1000.0 + nt.ARM_HEARTBEAT_WALL_BACKSTOP_S - 1.0   # under the wall backstop
+    gate.watchdog(now=9.9)                 # a large SIM-now gap no longer matters (host-domain)
     assert not gate.faulted
+    clock[0] = 1000.0 + nt.ARM_HEARTBEAT_WALL_BACKSTOP_S + 1.0   # past the wall backstop
     with pytest.raises(RuntimeError, match='heartbeat lost'):
-        gate.watchdog(now=5.7)             # 0.7 s SIM gap -> lost heartbeat
+        gate.watchdog(now=9.9)
 
 
-def test_arm_freshness_bound_is_configurable_for_the_sim_profile():
-    # firstmate 288: the sim profile relaxes the arm-command freshness+heartbeat to tolerate the
-    # preplace /clock-relay lag (run-230 tripped at now-stamp=0.5000). Default stays the real-rig 0.5 s.
+def test_arm_freshness_is_host_domain_relay_lag_cancels():
+    # firstmate 291: the freshness gate compares the stamp against the GREATEST host stamp seen
+    # (self._host_now), not ISAAC now, so the host<->ISAAC /clock-relay lag cancels (run-244 tripped a
+    # 2.5 s lag on a fresh command). The newest command is always fresh however far ISAAC now leads; a
+    # genuinely OLD resend (stamp behind the latest by > freshness) is still rejected.
     applied = []
     robot = NS(get_dof_index=lambda name: ARM_JOINTS.index(name),
                get_joint_positions=lambda **k: np.zeros(6))
-    # default 0.5 s: a 0.8 s-stale command is rejected
-    strict = ArmCommandGate(robot, [(-3, 3)]*6, lambda q, v, i: applied.append(1))
+    gate = ArmCommandGate(robot, [(-3, 3)]*6, lambda q, v, i: applied.append(1))   # default 0.5 s
+    # ISAAC now leads the host stamp by 2.5 s (pure relay lag) -> still ACCEPTED (host_age 0).
+    gate.command(names=list(ARM_JOINTS), positions=[.01]*6, velocities=[.01]*6,
+                 efforts=[], stamp=5.0, now=7.5)
+    assert len(applied) == 1 and not gate.faulted
+    gate.command(names=list(ARM_JOINTS), positions=[.02]*6, velocities=[.01]*6,
+                 efforts=[], stamp=5.4, now=9.0)           # newest -> fresh
+    assert len(applied) == 2
+    # A command stamped 0.8 s behind the latest host stamp (5.4) is a stale resend -> rejected at 0.5 s.
     with pytest.raises(ValueError, match='invalid or stale'):
-        strict.command(names=list(ARM_JOINTS), positions=[.01]*6, velocities=[.01]*6,
-                       efforts=[], stamp=5.0, now=5.8)
-    # sim profile 1.0 s: the SAME 0.8 s-stale command is accepted, and a 0.7 s heartbeat gap is fresh
+        gate.command(names=list(ARM_JOINTS), positions=[.03]*6, velocities=[.01]*6,
+                     efforts=[], stamp=4.6, now=9.1)
+    # The sim profile widens the bound: the SAME 0.8 s-behind resend is within a 1.0 s window.
     relaxed = ArmCommandGate(robot, [(-3, 3)]*6, lambda q, v, i: applied.append(1), freshness_s=1.0)
     relaxed.command(names=list(ARM_JOINTS), positions=[.01]*6, velocities=[.01]*6,
-                    efforts=[], stamp=5.0, now=5.8)
-    assert not relaxed.faulted
-    relaxed.watchdog(now=5.7)              # 0.7 s SIM gap < 1.0 s -> still fresh
+                    efforts=[], stamp=5.4, now=9.0)
+    relaxed.command(names=list(ARM_JOINTS), positions=[.02]*6, velocities=[.01]*6,
+                    efforts=[], stamp=4.6, now=9.1)         # 0.8 s behind, < 1.0 s -> accepted
     assert not relaxed.faulted
 
 

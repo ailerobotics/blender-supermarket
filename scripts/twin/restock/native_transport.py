@@ -57,6 +57,13 @@ class ArmCommandGate:
         # (run-230). A frozen stream is still hard-caught by the 30 s wall backstop.
         self.freshness_s=float(freshness_s)
         self.last_stamp=-1.
+        # Host-domain clock estimate = the greatest arm-command stamp ever received. The freshness gate
+        # compares an incoming stamp against THIS (both in the host /clock domain) rather than against
+        # ISAAC's live now, so the host<->ISAAC /clock-relay lag cancels instead of being tolerated
+        # (firstmate 291 same-clock fix; run-230/235/244 tripped a WIDENING sim bound on pure relay lag,
+        # e.g. now-stamp=2.5000 at approach once the heavier cuMotion load grew the lag). The newest
+        # command has stamp==_host_now (age 0 -> always fresh); only a genuinely old resend is rejected.
+        self._host_now=float('-inf')
         self.last_receive=time.monotonic()
         self.started=False
         self.faulted=False
@@ -106,12 +113,19 @@ class ArmCommandGate:
             # eff=6 all-zero; run-90 saw eff=6 non-zero measured torques), so gating on effort at all
             # wrongly rejected the executed grasp command. Validate only names, position, velocity and
             # the stamp; position/velocity limits + tracking envelope are enforced below.
+            if math.isfinite(stamp):
+                self._host_now=max(self._host_now,stamp)   # advance the host-domain clock estimate
+            # Freshness in the HOST domain (self._host_now - stamp), NOT ISAAC now - stamp: the newest
+            # command is age 0 and always fresh regardless of the relay lag; a genuinely old resend
+            # (stamp far behind the latest host stamp) is still rejected. ``now`` is kept for the diag.
+            host_age = self._host_now-stamp if math.isfinite(stamp) else float('nan')
             if (len(names)!=6 or set(names)!=set(ARM_JOINTS) or len(positions)!=6
                     or len(velocities)!=6
-                    or not math.isfinite(stamp) or not -0.05 <= now-stamp <= self.freshness_s):
+                    or not math.isfinite(stamp) or not -0.05 <= host_age <= self.freshness_s):
                 print(f'ARM_CMD_REJECT names={len(names)} setok={set(names)==set(ARM_JOINTS)} '
                       f'pos={len(positions)} vel={len(velocities)} eff={len(efforts)} '
-                      f'stamp={stamp!r} now={now!r} now-stamp={now-stamp if math.isfinite(stamp) else float("nan"):.4f}',
+                      f'stamp={stamp!r} host_now={self._host_now!r} host_age={host_age:.4f} '
+                      f'isaac_now={now!r} relay_lag={now-stamp if math.isfinite(stamp) else float("nan"):.4f}',
                       flush=True)  # diagnostic: which sub-condition rejected the executed arm command
                 raise ValueError('invalid or stale simulated arm command')
             if stamp<=self.last_stamp:
@@ -141,14 +155,13 @@ class ArmCommandGate:
             raise
 
     def watchdog(self, now):
-        # Node-clock the arm-command heartbeat. ``now`` and ``last_stamp`` are both SIM seconds (the
-        # /clock-synced domain; run-89 measured now-stamp ~= one physics step), so the 0.5 s bound is
-        # 0.5 s of SIMULATION time -- it does not false-trip under render pacing, where consecutive
-        # arm commands are ~1.7-3.5 s apart in WALL time but a small step apart in sim (a wall-time
-        # 0.5 s heartbeat emergency-stopped the executed grasp, run-91). A generous WALL backstop
-        # still hard-stops a genuinely frozen sim clock, where the sim bound can never advance to trip.
-        if self.started and (now-self.last_stamp>self.freshness_s
-                             or time.monotonic()-self.last_receive>ARM_HEARTBEAT_WALL_BACKSTOP_S):
+        # Arm-command heartbeat. With the freshness gate now in the HOST /clock domain (self._host_now),
+        # a sim-time "now - last_stamp" heartbeat would re-introduce the very relay lag the same-clock fix
+        # removes (ISAAC now runs ahead of the host stamps), so the heartbeat is the generous WALL
+        # backstop ONLY: a genuinely dead/stalled arm stream stops advancing last_receive and faults
+        # after ARM_HEARTBEAT_WALL_BACKSTOP_S. Under render pacing arm commands are 1.7-3.5 s apart in
+        # WALL but the backstop is far larger, so it never false-trips a healthy render-paced grasp.
+        if self.started and time.monotonic()-self.last_receive>ARM_HEARTBEAT_WALL_BACKSTOP_S:
             self.hold()
             raise RuntimeError('arm command heartbeat lost')
         if self.faulted:
