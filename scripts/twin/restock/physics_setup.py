@@ -421,7 +421,13 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     gate=ArmCommandGate(robot,tool.arm_limits,apply,
                         max_speed=float(config.get('arm_max_speed',.15)),
                         max_error=float(config.get('arm_tracking_tol',.2)))
-    contact=NativePanelContact(stage,'/RestockPanelGripper')
+    # This is the mission's canonical gripper contact: it goes into assembly.contact, which IsaacPort
+    # ticks (sim_attach_fallback_tick) AND build_sensing reads for the /sensors packet. So the labelled
+    # sim attach-fallback MUST be enabled HERE (runs 204-206: the flag was only on isaac_factory's
+    # separate instance, so the port ticked an unflagged contact and the fallback never ran). Default
+    # OFF; the real rig never runs this native authoring.
+    contact=NativePanelContact(stage,'/RestockPanelGripper',
+                               sim_attach_fallback=bool(config.get('sim_attach_fallback', False)))
     # Register native ROS/image graph nodes only after the final scene has
     # finished opening/resetting. A bridge loaded during import/reopen caused
     # a native image-graph crash in the installed Isaac5.1 stack.
