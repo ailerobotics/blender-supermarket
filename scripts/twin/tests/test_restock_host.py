@@ -403,9 +403,21 @@ class RosHostLaunchWiring(unittest.TestCase):
         # optional bool the host reads via config.get('pose_goal', False). arm_max_speed is the
         # SIM execution-profile joint-speed gate (rad/s) the host reads via config.get, raised above
         # the conservative real-rig default so the render-paced grasp completes in the wall budget.
+        # The base keys plus the SIM render-pacing / cart-place profile knobs added across firstmate
+        # 282..296 (all optional, host reads via config.get; real-rig defaults in code): the cart-place
+        # policy + staged body-clear swing + pan/tuck shapes, the wall-window relaxations
+        # (payload ack, plan cap) and the base-as-self-collision gate.
         self.assertEqual(set(cfg), {'profiles', 'walls', 'pose_goal', 'contact_straight_line',
                                     'contact_overpress_step_m', 'contact_overpress_cap_m',
-                                    'arm_max_speed', 'startup_grace_seconds'})
+                                    'arm_max_speed', 'startup_grace_seconds',
+                                    'sim_cart_place_policy', 'payload_ack_wall_s', 'staged_cart_swing',
+                                    'cart_pan_joint0', 'cart_tuck_shape', 'plan_wall_cap_s',
+                                    'base_collision_object'})
+        for k in ('sim_cart_place_policy', 'staged_cart_swing', 'base_collision_object'):
+            self.assertIsInstance(cfg[k], bool)
+        for k in ('payload_ack_wall_s', 'cart_pan_joint0', 'plan_wall_cap_s'):
+            self.assertIsInstance(cfg[k], (int, float))
+        self.assertEqual(len(cfg['cart_tuck_shape']), 5)   # arm joints 1-5 of the high carry pose
         self.assertIsInstance(cfg['pose_goal'], bool)
         # contact_straight_line opts the contact descent into the host-executor straight-line path
         # (bypassing the collision planner for that move only); optional bool read via config.get.
