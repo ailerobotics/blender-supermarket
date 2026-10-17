@@ -376,9 +376,34 @@ class NativePanelContact:
         joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
         joint.CreateLocalRot1Attr(Gf.Quatf(1.0))
         self._fallback_joint, self._fallback_body = joint_path, body_path
+        # fm318: disable the welded carton's colliders so it cannot fight the weld against the tool-side
+        # links (wrist_2/wrist_3/suction) during the folded carry; restored at release (_release_fallback).
+        self._set_carton_collision(body_path, False)
+
+    def _set_carton_collision(self, body_path, enabled):
+        # fm318: the SIM_ATTACH_FALLBACK FixedJoint only disables collision between the two JOINTED
+        # bodies (gripper-body + carton), so the welded carton's geometry still collides in PhysX with
+        # the tool-side links (wrist_2/wrist_3/suction) -- and the PLANNER ignores exactly those pairs
+        # (vendor ignore list), so a folded carry pose presses the carton into them and the solver fights
+        # the weld at ANY drive gain (the whole-wrist-cluster oscillation of runs 254-258, gain-
+        # independent). While welded the carton is rigidly held by the joint and needs no collision at
+        # all, so toggle its colliders OFF on weld and back ON at release (so the placement drop onto the
+        # cart still makes contact). CollisionEnabled is a runtime-reliable toggle (cart_diagnostic).
+        from pxr import UsdPhysics, Usd
+        prim = self.stage.GetPrimAtPath(body_path)
+        n = 0
+        if prim:
+            for p in Usd.PrimRange(prim):
+                if p.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI(p).CreateCollisionEnabledAttr(bool(enabled))
+                    n += 1
+        print('SIM_ATTACH_FALLBACK carton collision %s on %d collider(s) body=%s'
+              % ('ENABLED' if enabled else 'DISABLED', n, body_path), flush=True)
 
     def _release_fallback(self):
         if getattr(self, '_fallback_joint', None) is not None:
+            if getattr(self, '_fallback_body', None) is not None:
+                self._set_carton_collision(self._fallback_body, True)   # restore for the cart drop
             self.stage.RemovePrim(self._fallback_joint)
             print('SIM_ATTACH_FALLBACK release body=%s' % self._fallback_body, flush=True)
         self._fallback_joint = self._fallback_body = None
