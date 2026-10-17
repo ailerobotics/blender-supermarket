@@ -229,6 +229,12 @@ class TransferController:
             if self.pose_policy is not None:
                 self.poses = self.pose_policy.build(source, target, p)
             if not all(self._pose_ok(v) for v in self.poses.values()):
+                import math as _m
+                bad = {k: round(_m.dist(v[:3], (0, 0, 0)), 3) for k, v in self.poses.items()
+                       if not self._pose_ok(v)}
+                print('REACH_ENVELOPE_FAIL max_reach=%s bad=%s source=%s target=%s'
+                      % (self.profile.max_reach, bad, tuple(round(c, 3) for c in source.pose[:3]),
+                         tuple(round(c, 3) for c in target.pose[:3])), flush=True)
                 return self._fail('approach outside reach envelope')
             self.target_pose = (*target.pose[:2], target.pose[2] + p.dimensions[2], *target.pose[3:])
             self.target_surface = target.pose
