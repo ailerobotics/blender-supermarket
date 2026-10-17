@@ -271,6 +271,101 @@ def test_compute_status_merges_upstream_run(tmp_path, monkeypatch):
     assert state["mission"]["timeline"]["active"] == "collect"
 
 
+# ---------------------------------------------------------------- behaviour tree
+
+def _bt_snapshot():
+    # Mirrors data/sim-restock-bt-v1/view-demo/bt_snapshot.json (report §4).
+    return {
+        "tick": 49, "clock": 0.833,
+        "mission": {"state": "complete", "reason": "", "degraded": []},
+        "control": {"pause": False, "slow": True, "replan": False, "abort": None},
+        "active_events": {"human_detected": {"zone": "slow"}},
+        "last_event": {"t": 0.6, "type": "obstacle_cleared", "data": {}},
+        "log": [{"t": i / 10, "type": "human_detected", "data": {}, "action": "slow"}
+                for i in range(20)],
+        "tree": {
+            "name": "restock_root", "status": "success", "kind": "Sequence", "feedback": "",
+            "children": [
+                {"name": "event_pump", "status": "success", "kind": "Behaviour"},
+                {"name": "reactive", "status": "success", "kind": "Sequence", "children": [
+                    {"name": "human_safety", "status": "running", "kind": "Behaviour",
+                     "feedback": "slow"},
+                ]},
+            ],
+        },
+    }
+
+
+def test_flatten_bt_tree_depths():
+    nodes = aggregate.flatten_bt_tree(_bt_snapshot()["tree"])
+    names = [(n["name"], n["depth"]) for n in nodes]
+    assert names == [
+        ("restock_root", 0), ("event_pump", 1), ("reactive", 1), ("human_safety", 2),
+    ]
+    assert nodes[3]["status"] == "running"
+    assert nodes[3]["feedback"] == "slow"
+
+
+def test_flatten_bt_tree_tolerates_garbage():
+    assert aggregate.flatten_bt_tree(None) == []
+    assert aggregate.flatten_bt_tree({"name": "x", "status": "ok"}) == [
+        {"name": "x", "status": "ok", "depth": 0, "feedback": None, "kind": None}]
+
+
+def test_summarise_bt():
+    out = aggregate.summarise_bt(_bt_snapshot(), view_url="http://host/mission/run-9/bt_view.html",
+                                 log_tail=5)
+    assert out["tick"] == 49
+    assert out["control"]["slow"] is True
+    assert out["last_event"]["type"] == "obstacle_cleared"
+    assert len(out["nodes"]) == 4
+    assert len(out["log"]) == 5           # tail
+    assert out["view_url"].endswith("/bt_view.html")
+
+
+def test_summarise_bt_none():
+    assert aggregate.summarise_bt(None) is None
+    assert aggregate.summarise_bt("nope") is None
+
+
+def test_resolve_bt_autodiscovers_run_snapshot(tmp_path, monkeypatch):
+    run = _write_run(tmp_path, "run-9", _mission([{"state": "collect"}]))
+    (run / "bt_snapshot.json").write_text(json.dumps(_bt_snapshot()))
+    fake = {"run": "run-9", "alive": True, "trace": {"action": "collect"},
+            "mission": {}, "videos": [], "runs": []}
+    monkeypatch.setattr(server, "fetch_upstream", lambda base, timeout: (fake, True))
+    cfg = server.Config(run_root=str(tmp_path), upstream_base="http://host:8787")
+    state = server.compute_status(cfg)
+    bt = state["behaviour_tree"]
+    assert bt is not None
+    assert bt["tick"] == 49
+    # view_url points at the watch page's run tree (<run_root basename>/<run>/bt_view.html)
+    assert bt["view_url"] == f"http://host:8787/{tmp_path.name}/run-9/bt_view.html"
+
+
+def test_resolve_bt_absent_is_none(tmp_path, monkeypatch):
+    _write_run(tmp_path, "run-9", _mission([{"state": "collect"}]))  # no bt_snapshot.json
+    monkeypatch.setattr(server, "fetch_upstream", lambda base, timeout: (None, False))
+    cfg = server.Config(run_root=str(tmp_path), upstream_base="http://host:8787")
+    assert server.compute_status(cfg)["behaviour_tree"] is None
+
+
+def test_resolve_bt_explicit_path_wins(tmp_path):
+    p = tmp_path / "snap.json"
+    p.write_text(json.dumps(_bt_snapshot()))
+    cfg = server.Config(run_root=str(tmp_path), bt_path=str(p), upstream_base="http://host:8787")
+    bt = server.resolve_bt(cfg, None, None, "http://host:8787")
+    assert bt["tick"] == 49
+    assert bt["view_url"] is None          # explicit file -> no run-dir view link
+
+
+def test_resolve_run_dir(tmp_path):
+    _write_run(tmp_path, "run-a", _mission([]))
+    assert aggregate.resolve_run_dir(str(tmp_path), "run-a").endswith("run-a")
+    assert aggregate.resolve_run_dir(str(tmp_path), "ghost").endswith("run-a")  # fallback
+    assert aggregate.resolve_run_dir(str(tmp_path / "missing"), None) is None
+
+
 def test_default_bind_is_tailnet_and_free_port():
     # The brief pins the bind to the tailnet IP on a free port (>=8794).
     assert server.DEFAULT_HOST == "100.100.47.65"

@@ -1043,9 +1043,11 @@ With the store overlay + the opt-in phone trigger queue (default off):
 ```
 PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py \
     --store-state /path/to/store-state.json \
-    --bt /path/to/behaviour-tree.json \
     --enable-trigger --requests-dir /tmp/fleet-dashboard-requests
 ```
+The behaviour-tree panel needs no flag: it auto-discovers the per-run `bt_snapshot.json`
+that `sim-restock-bt-v1` writes into the run directory, so it lights up on the first
+bt-enabled run (`--bt <path>` overrides with an explicit snapshot file).
 It reads the upstream watch page (`--upstream`, default `http://100.100.47.65:8787`) and
 the mission run directories (`--run-root`, default
 `/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission`); it never writes a run,

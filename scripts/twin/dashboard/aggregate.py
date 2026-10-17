@@ -51,19 +51,27 @@ def latest_run_dir(run_root: str) -> str | None:
     return max(runs, key=lambda p: os.path.getmtime(p))
 
 
+def resolve_run_dir(run_root: str, run_name: str | None) -> str | None:
+    """The run directory for ``run_name`` under ``run_root``, else the newest run.
+
+    ``run_name`` wins only when it names a directory holding a ``mission.json``;
+    otherwise this falls back to the newest run directory (so the dashboard still
+    resolves a run when the upstream pulse cannot name the live one).
+    """
+    if run_name:
+        candidate = os.path.join(run_root, run_name)
+        if os.path.exists(os.path.join(candidate, "mission.json")):
+            return candidate
+    return latest_run_dir(run_root)
+
+
 def read_run_mission(run_root: str, run_name: str | None) -> tuple[str | None, dict | None]:
     """Resolve ``mission.json`` for ``run_name`` under ``run_root``.
 
     Returns ``(resolved_run_name, mission_dict_or_None)``. When ``run_name`` is
     falsy or has no ``mission.json``, falls back to the newest run directory.
     """
-    candidate = None
-    if run_name:
-        candidate = os.path.join(run_root, run_name)
-        if not os.path.exists(os.path.join(candidate, "mission.json")):
-            candidate = None
-    if candidate is None:
-        candidate = latest_run_dir(run_root)
+    candidate = resolve_run_dir(run_root, run_name)
     if candidate is None:
         return None, None
     return os.path.basename(candidate), _read_json(os.path.join(candidate, "mission.json"))
@@ -145,6 +153,57 @@ def stage_timeline(mission: dict | None, current_action: str | None = None) -> d
         "failed_stage": failed_stage,
         "steps": steps,
         "event_count": len(events),
+    }
+
+
+def flatten_bt_tree(node: Any, depth: int = 0, out: list | None = None) -> list[dict]:
+    """Flatten a nested ``bt_snapshot.json`` tree into an indented, phone-friendly list.
+
+    Each entry is ``{name, status, depth, feedback, kind}``; depth drives the page's
+    indentation. Tolerant of a missing/garbled tree (returns what it can).
+    """
+    if out is None:
+        out = []
+    if not isinstance(node, dict):
+        return out
+    out.append({
+        "name": node.get("name"),
+        "status": node.get("status"),
+        "depth": depth,
+        "feedback": node.get("feedback"),
+        "kind": node.get("kind"),
+    })
+    children = node.get("children")
+    if isinstance(children, list):
+        for child in children:
+            flatten_bt_tree(child, depth + 1, out)
+    return out
+
+
+def summarise_bt(snapshot: dict | None, *, view_url: str | None = None,
+                 log_tail: int = 12) -> dict | None:
+    """Project a ``sim-restock-bt-v1`` ``bt_snapshot.json`` into the panel view.
+
+    Contract (``data/sim-restock-bt-v1/report.md`` §4): the snapshot carries
+    ``tick``, ``clock``, ``mission`` {state,reason,degraded}, ``control``
+    {pause,slow,replan,abort}, ``active_events``, ``last_event``, an append-only
+    ``log`` of {t,type,data,action}, and the nested ``tree`` {name,status,feedback,
+    kind,children}. ``view_url`` is the richer self-contained ``bt_view.html`` phone
+    page (served by the watch page from the run directory). Absent/garbled -> ``None``.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    log = snapshot.get("log") if isinstance(snapshot.get("log"), list) else []
+    return {
+        "tick": snapshot.get("tick"),
+        "clock": snapshot.get("clock"),
+        "mission": snapshot.get("mission") if isinstance(snapshot.get("mission"), dict) else {},
+        "control": snapshot.get("control") if isinstance(snapshot.get("control"), dict) else {},
+        "active_events": snapshot.get("active_events") if isinstance(snapshot.get("active_events"), dict) else {},
+        "last_event": snapshot.get("last_event"),
+        "nodes": flatten_bt_tree(snapshot.get("tree")),
+        "log": log[-log_tail:] if log_tail else log,
+        "view_url": view_url,
     }
 
 

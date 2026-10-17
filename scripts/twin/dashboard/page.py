@@ -36,6 +36,12 @@ border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:500}
 .muted{color:var(--muted)}.err{color:#ff7b72}
 .state-oos,.state-empty,.state-out_of_stock{color:#ff7b72}.state-low,.state-limited{color:#e3b341}
 #trigbox{display:none}
+.bt{font-size:13px;margin:4px 0}
+.btn{padding:3px 6px;border-radius:5px;margin:2px 0;display:flex;align-items:center;gap:7px}
+.btn .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:var(--muted)}
+.bt-success .dot{background:#2ea043}.bt-running .dot{background:#58a6ff}
+.bt-failure .dot{background:#f85149}.bt-invalid .dot{background:var(--pending)}
+.bt-running{color:#fff}.bt-failure{color:#ffb3ad}
 button{background:var(--active);color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:14px}
 input{background:#0b0f14;color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:8px;
 font-size:14px;width:100%;margin:4px 0}
@@ -110,9 +116,29 @@ async function tick(){
     return `<li><a href="${esc(base+'/'+v)}">${esc(name)}</a></li>`;}).join('');
 
   const bt=s.behaviour_tree;
-  document.getElementById('btcard').innerHTML = bt
-    ? `<pre class=muted style="white-space:pre-wrap;font-size:12px;margin:0">${esc(JSON.stringify(bt,null,1))}</pre>`
-    : '<span class=muted>Not published by this run.</span>';
+  if(bt){
+    const c=bt.control||{}, me=bt.mission||{};
+    let h=`<div class=kv>`+
+      `<span>tick <b>${bt.tick??'-'}</b></span><span>clock <b>${bt.clock??'-'}</b>s</span>`+
+      `<span>mission <b>${esc(me.state||'-')}</b></span></div>`;
+    const flags=[['pause',c.pause],['slow',c.slow],['replan',c.replan],['abort',c.abort]]
+      .filter(([k,v])=>v).map(([k,v])=>`<span class="pill warn">${esc(k)}${v===true?'':': '+esc(v)}</span>`);
+    h+=`<div style="margin:4px 0">`+(flags.length?flags.join(''):`<span class="pill on">nominal</span>`)+`</div>`;
+    const le=bt.last_event;
+    if(le) h+=`<div class=cap>last event <b>${esc(le.type)}</b> @ ${esc(le.t)}s</div>`;
+    h+=`<div class=bt>`+(bt.nodes||[]).map(n=>{
+      const st=String(n.status||'').toLowerCase();
+      return `<div class="btn bt-${esc(st)}" style="padding-left:${6+(n.depth||0)*16}px">`+
+        `<span class=dot></span>${esc(n.name)}`+
+        (n.feedback?` <span class=muted>- ${esc(n.feedback)}</span>`:'')+`</div>`;}).join('')+`</div>`;
+    const lg=bt.log||[];
+    if(lg.length) h+=`<table style="margin-top:8px"><tr><th>t</th><th>event</th><th>action</th></tr>`+
+      lg.slice(-8).map(e=>`<tr><td>${esc(e.t)}</td><td>${esc(e.type)}</td><td>${esc(e.action)}</td></tr>`).join('')+`</table>`;
+    if(bt.view_url) h+=`<div class=cap><a href="${esc(bt.view_url)}">open full tree view (bt_view.html) &rarr;</a></div>`;
+    document.getElementById('btcard').innerHTML=h;
+  } else {
+    document.getElementById('btcard').innerHTML='<span class=muted>Not published by this run.</span>';
+  }
 
   const st=s.store;
   if(st){

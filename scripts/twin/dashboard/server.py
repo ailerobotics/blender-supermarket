@@ -15,6 +15,7 @@ upstream's media (those links point back at the upstream base).
 from __future__ import annotations
 
 import json
+import os
 import urllib.request
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,19 +53,44 @@ def fetch_upstream(base: str, timeout: float) -> tuple[dict | None, bool]:
     return (data if isinstance(data, dict) else None), isinstance(data, dict)
 
 
+def resolve_bt(cfg: Config, run_dir: str | None, run_name: str | None,
+               upstream_base: str) -> dict | None:
+    """Resolve the behaviour-tree snapshot for the live run (sim-restock-bt-v1).
+
+    An explicit ``--bt`` path wins; otherwise the per-run ``bt_snapshot.json`` the
+    bt lane writes into the run directory is auto-discovered, so the panel lights up
+    on the first bt-enabled run with zero config. The richer self-contained
+    ``bt_view.html`` phone page (same directory) is linked via the watch page, which
+    serves the run tree under ``<media_prefix>/<run>/``.
+    """
+    view_url = None
+    snapshot = None
+    if cfg.bt_path:
+        snapshot = aggregate._read_json(cfg.bt_path)
+    elif run_dir:
+        snapshot = aggregate._read_json(os.path.join(run_dir, "bt_snapshot.json"))
+        if snapshot is not None and run_name:
+            media_prefix = os.path.basename(cfg.run_root.rstrip("/"))
+            view_url = f"{upstream_base}/{media_prefix}/{run_name}/bt_view.html"
+    return aggregate.summarise_bt(snapshot, view_url=view_url)
+
+
 def compute_status(cfg: Config) -> dict:
     """Assemble the full aggregated status dict (pure except for the file/URL reads)."""
     upstream, ok = fetch_upstream(cfg.upstream_base, cfg.upstream_timeout)
     run_name = (upstream or {}).get("run") if isinstance(upstream, dict) else None
-    resolved_run, mission = aggregate.read_run_mission(cfg.run_root, run_name)
+    run_dir = aggregate.resolve_run_dir(cfg.run_root, run_name)
+    resolved_run = os.path.basename(run_dir) if run_dir else None
+    mission = aggregate._read_json(os.path.join(run_dir, "mission.json")) if run_dir else None
     store = store_state.load_store_state(cfg.store_state_path)
-    bt = aggregate._read_json(cfg.bt_path) if cfg.bt_path else None
+    upstream_base = cfg.upstream_base.rstrip("/")
+    bt = resolve_bt(cfg, run_dir, resolved_run, upstream_base)
     trig = triggers.list_triggers(cfg.requests_dir) if cfg.requests_dir else []
     return aggregate.build_state(
         upstream=upstream, upstream_ok=ok,
         run_name=resolved_run, mission=mission,
         store=store, behaviour_tree=bt, triggers=trig,
-        upstream_base=cfg.upstream_base.rstrip("/"),
+        upstream_base=upstream_base,
     )
 
 

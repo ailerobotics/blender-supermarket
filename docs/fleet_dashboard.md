@@ -23,9 +23,8 @@ a mission run is **byte-identical** whether or not the dashboard is up. No GPU.
    verdict is surfaced on success.
 3. **Media** — latest rendered frame and the run/stage walkthrough videos, **linked back**
    to the upstream watch page (never re-served here).
-4. **Behaviour tree** — rendered when a lane publishes a BT view JSON (`--bt <path>`);
-   otherwise the card reads "Not published by this run." This is the seam for
-   `sim-restock-bt-v1`.
+4. **Behaviour tree** — lights up automatically on the first `sim-restock-bt-v1`-enabled
+   run (see below); otherwise the card reads "Not published by this run."
 5. **Store state** — store-vision shelf fill / depletion / alerts, overlaid from a
    documented JSON export (`--store-state <path>`); absent ⇒ "Not configured."
 6. **Restock requests** — an opt-in app trigger/monitor queue (see below).
@@ -77,6 +76,30 @@ store-vision already reconstructs the live feed via
 snapshot (plus the HQ overview's alert counts) into the shape above and write it on a
 timer. That change belongs in store-vision and is out of scope for this read-only lane;
 it is written up as a proposal in this lane's report and never committed to store-vision.
+
+## Behaviour-tree panel (sim-restock-bt-v1)
+
+The behaviour-tree lane (`sim-restock-bt-v1`, py_trees mission layer, opt-in via `"bt": true`
+in the runtime-config) writes a live snapshot into each run directory every tick
+(`data/sim-restock-bt-v1/report.md` §4):
+
+- `bt_snapshot.json` — the current tree (nested `name`/`status`/`feedback`/`kind`/`children`)
+  plus `tick`, `clock`, `mission` {state,reason,degraded}, `control`
+  {pause,slow,replan,abort}, `active_events`, `last_event`, and an append-only `log` of
+  `{t,type,data,action}`.
+- `bt_view.html` — the lane's own self-contained phone page (polls `bt_snapshot.json`).
+- `bt_events.jsonl` — append-only event/action timeline.
+
+The dashboard **auto-discovers** `bt_snapshot.json` in the resolved run directory — the
+same run its pipeline reads — so the panel lights up on the first bt-enabled run with **zero
+config**. It renders the tree coloured by node status (success/running/failure/invalid),
+the control-flag chips, the last event and a recent event/action log, and links the richer
+`bt_view.html` at `<upstream>/<run_root basename>/<run>/bt_view.html` (the watch page serves
+the run tree). `--bt <path>` overrides auto-discovery with an explicit snapshot file.
+
+The event topic `/restock_bt/events` (`std_msgs/String`, JSON per event) is the lane's live
+bus; the dashboard reads the per-tick `bt_snapshot.json` the lane already persists rather
+than subscribing to ROS, so it stays CPU-only and needs no ROS on the phone path.
 
 ## App trigger / monitor queue (opt-in, default off)
 
