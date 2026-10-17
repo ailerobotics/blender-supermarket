@@ -105,22 +105,24 @@ def test_staged_cart_swing_routes_lift_through_tuck_pan_and_retreat_through_tuck
     # via points so the welded carton clears the robot body. TUCK/retreat_tuck fold to the STOW shape at
     # the measured shoulder-pan; PAN rotates joint0 to cart_pan_joint0.
     stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
-    c, m = make_controller(transport_joints=stow, staged_cart_swing=True, cart_pan_joint0=-0.8605)
+    tuck_shape = (-2.3, 1.0, 2.1066, 0.8, -1.2545)        # the high carry shape (joints 1-5)
+    c, m = make_controller(transport_joints=stow, staged_cart_swing=True, cart_pan_joint0=-0.8605,
+                           cart_tuck_shape=tuck_shape)
     t = run_to(c, 'tuck')                                 # lift transitions to tuck, not preplace
     before = len(m.stows)
     c.step(.1, packet(c, t))                              # issue the tuck joint goal
-    assert m.stows[before][0] == (0.0,) + stow[1:]        # fold at measured joint0 (=0)
+    assert m.stows[before][0] == (0.0,) + tuck_shape      # fold at measured joint0 (=0), carry shape
     c.step(.1, packet(c, t+.1))                           # poll succeeds -> pan
     assert c.phase == 'pan'
     c.step(.1, packet(c, t+.2))                           # issue the pan joint goal
-    assert m.stows[-1][0] == (-0.8605,) + stow[1:]        # pan to the cart side at the tucked shape
+    assert m.stows[-1][0] == (-0.8605,) + tuck_shape      # pan to the cart side at the carry shape
     c.step(.1, packet(c, t+.3))
     assert c.phase == 'preplace'                          # then extend to the mirrored preplace
     # Return leg: retreat -> retreat_tuck -> stow.
     t = run_to(c, 'retreat_tuck', t0=t+1.0)
     n = len(m.stows)
     c.step(.1, packet(c, t))
-    assert m.stows[n][0] == (0.0,) + stow[1:]             # fold at the measured pan on the way back
+    assert m.stows[n][0] == (0.0,) + tuck_shape           # fold at the measured pan on the way back
     c.step(.1, packet(c, t+.1))
     assert c.phase == 'stow'
 

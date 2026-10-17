@@ -19,7 +19,8 @@ class TransferController:
                  frame: str = 'ur_base_link', pose_policy=None, transport_joints=None,
                  steady_clock=time.monotonic, contact_straight_line: bool = False,
                  contact_overpress_step_m: float = 0.0, contact_overpress_cap_m: float = 0.0,
-                 staged_cart_swing: bool = False, cart_pan_joint0: float = 0.0):
+                 staged_cart_swing: bool = False, cart_pan_joint0: float = 0.0,
+                 cart_tuck_shape=None):
         self.steady_clock=steady_clock
         # Execute the contact descent as a seeded straight-line move through the trajectory host instead
         # of a cuMotion plan (the motion port's begin(straight_line=True) path). Default False keeps the
@@ -54,18 +55,23 @@ class TransferController:
         # STAGED cart-swing (firstmate 292): the direct lift->preplace swing sweeps the welded carton
         # through the robot's own chassis/arm-mount (cuMotion has no self-collision spheres for them),
         # stalling joint0 (run-236). Route it as joint-space via points instead: lift -> TUCK (fold to
-        # the compact high STOW shape at the current shoulder-pan, carton near the base axis) -> PAN
-        # (rotate the shoulder to the cart side at that tucked radius) -> extend to the mirrored
+        # a high CARRY shape that raises the carton well ABOVE the body at the current shoulder-pan)
+        # -> PAN (rotate the shoulder to the cart side at that high radius) -> extend to the mirrored
         # preplace; mirror on the way back (retreat -> retreat_tuck -> stow). TUCK/retreat_tuck fold at
-        # the MEASURED pan; PAN rotates to ``cart_pan_joint0`` (CPU KDL-verified body-clear for the
-        # fixed cart dock, staged_swing_verify.py). Needs the transport stow shape (joints 1-5) and the
-        # joint-goal motion path; gated ON only in the sim cart-place scenario (config flag). Off =>
-        # the direct lift->preplace, byte-identical to before.
-        self._stow_shape = self.transport_joints[1:] if self.transport_joints is not None else None
+        # the MEASURED pan; PAN rotates to ``cart_pan_joint0``. The carry shape (``cart_tuck_shape``,
+        # arm joints 1-5) is CPU KDL/FK-verified (staged_swing_verify.py): it lifts the carton to
+        # tcp_z~1.1 m (vs the body at z<0.26) so the fold goes UP and away from the chassis/arm_mount
+        # -- run-240's STOW tuck folded the carton DOWN into the body (tcp_z 0.79, path dipped to
+        # 0.092 m) and jammed shoulder_lift/wrist2. Falls back to the transport stow shape if no carry
+        # shape is configured. gated ON only in the sim cart-place scenario; off => direct lift->preplace.
+        self.cart_tuck_shape = (tuple(float(v) for v in cart_tuck_shape) if cart_tuck_shape is not None
+                                else (self.transport_joints[1:] if self.transport_joints is not None else None))
         self.cart_pan_joint0 = float(cart_pan_joint0)
-        self.staged_cart_swing = bool(staged_cart_swing) and self._stow_shape is not None
-        if self.staged_cart_swing and not math.isfinite(self.cart_pan_joint0):
-            raise ValueError('staged cart swing requires a finite cart_pan_joint0')
+        self.staged_cart_swing = bool(staged_cart_swing) and self.cart_tuck_shape is not None \
+            and self.transport_joints is not None
+        if self.staged_cart_swing and (not math.isfinite(self.cart_pan_joint0)
+                or len(self.cart_tuck_shape) != 5 or not all(map(math.isfinite, self.cart_tuck_shape))):
+            raise ValueError('staged cart swing requires a finite cart_pan_joint0 and 5-joint cart_tuck_shape')
         self.cart_location, self.max_age = cart_location, max_age
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
@@ -367,8 +373,8 @@ class TransferController:
             # joint0 to the cart side (cart_pan_joint0) at that tucked radius. Each is a collision-planned
             # joint goal, mirroring 'stow'. The per-tick held/contact/parked/freshness gates above still
             # apply (tuck/pan carry the held carton; retreat_tuck is empty-handed).
-            goal = ((self.cart_pan_joint0,) + tuple(self._stow_shape) if self.phase == 'pan'
-                    else (s.joint_positions[0],) + tuple(self._stow_shape))
+            goal = ((self.cart_pan_joint0,) + tuple(self.cart_tuck_shape) if self.phase == 'pan'
+                    else (s.joint_positions[0],) + tuple(self.cart_tuck_shape))
             if not self.issued:
                 if s.valid_until_steady is not None:
                     require_fresh(s.valid_until_steady, self.steady_clock)
