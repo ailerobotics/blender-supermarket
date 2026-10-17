@@ -95,7 +95,7 @@ class IsaacCarryStage(bench.ArmStage):
 
     def __init__(self, assembly, lift_joints, grasp_joints, *, carton_path='/RestockScenario/HandlingUnit',
                  pad_path_key='gripper_pad_tcp', render=False, carton_dims=(0.6, 0.4, 0.16),
-                 obstacle_prims=None, no_carton=False, arm_contacts=False):
+                 obstacle_prims=None, no_carton=False, arm_contacts=False, start_at_lift=False):
         from isaacsim.core.prims import SingleRigidPrim
         from pxr import UsdGeom
         self._UsdGeom = UsdGeom
@@ -120,6 +120,7 @@ class IsaacCarryStage(bench.ArmStage):
         self.arm_ctrl = self.robot.get_articulation_controller()
         self.no_carton = bool(no_carton)
         self._arm_contacts = bool(arm_contacts)
+        self.start_at_lift = bool(start_at_lift)
         self._weld_rel0 = None
         self._current_drive_type = 'acceleration'   # physics_setup leaves the arm drives acceleration
         self.arm_joint_prims = self._discover_arm_joints()
@@ -486,8 +487,9 @@ class IsaacCarryStage(bench.ArmStage):
         self.apply_gains(gains)
         # 3. teleport the arm to the GRASP pose at rest (the carton stays at its authored pose;
         #    the pad lands on it by construction of the source_contact IK)
+        reset_pose = self.lift_joints if self.start_at_lift else self.grasp_joints
         full = np.asarray(self.robot.get_joint_positions(), float).copy()
-        full[self.arm_idx] = self.grasp_joints
+        full[self.arm_idx] = reset_pose
         self.robot.set_joint_positions(full)
         self.robot.set_joint_velocities(np.zeros(len(full)))
         self.carton.set_linear_velocity(np.zeros(3))
@@ -497,7 +499,7 @@ class IsaacCarryStage(bench.ArmStage):
         g.faulted = False; g.hold_target = None; g.last_stamp = -1.
         g._host_now = float('-inf'); g.started = False
         g._contact_hold = False; g._contact_hold_target = None
-        g.apply(self.grasp_joints, np.zeros(6), g.indices)
+        g.apply(reset_pose, np.zeros(6), g.indices)
         # 5. place the carton at the measured side-grip offset in the gripper_pad_tcp frame
         #    (centre = pad + R_tcp @ (0,0,0.20), the model world_obstacles.carton_spheres_world uses),
         #    then weld it there -- robust to a slightly-off grasp pose (skipped in --no-carton control).
@@ -512,7 +514,7 @@ class IsaacCarryStage(bench.ArmStage):
         self.mobile.engage_brake()
         # 6. settle: hold grasp for a few ticks so the weld + brake quiesce
         for _ in range(settle_steps):
-            g.apply(self.grasp_joints, np.zeros(6), g.indices)
+            g.apply(reset_pose, np.zeros(6), g.indices)
             self.world.step(render=self.render)
 
 
@@ -583,7 +585,7 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
     # The weld forms at GRASP; the first move drives grasp->lift (carton carried by the weld), then
     # the tuck/pan fold follows. Prepend 'lift' so every trial exercises the full carried sequence.
     lift_move = ('lift', [float(v) for v in lift_joints])
-    base_goals = [lift_move] + bench.carry_goals(lift_joints, tuck_shape, pan_joint0, extra_goals=extra)
+    base_goals = ([] if args.start_at_lift else [lift_move]) + bench.carry_goals(lift_joints, tuck_shape, pan_joint0, extra_goals=extra)
     jobs = []
     if args.diagnose or args.expect == 'reproduce' or args.reproduce:
         # reproduce the mission fold in the full scene with contact reporting, at BOTH gain
@@ -594,7 +596,7 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
         safe = bench.DriveGains(args.pose_kp, args.pose_kd, args.pose_eff)
         for dv in POSE_DELTAS:
             shape = bench.tuck_shape_variant(tuck_shape, dv)
-            goals = [lift_move] + bench.carry_goals(lift_joints, shape, pan_joint0, extra_goals=extra)
+            goals = ([] if args.start_at_lift else [lift_move]) + bench.carry_goals(lift_joints, shape, pan_joint0, extra_goals=extra)
             label = 'pose_' + '_'.join(f'{x:+g}' for x in dv)
             jobs.append((label, goals, bench.TrialSpec(label, safe, carry)))
     if args.sweep:
@@ -680,7 +682,7 @@ def run(args):
             assembly = assemble(app=app, config=config, scenario=scenario, output=args.output / 'assembly')
             stage = IsaacCarryStage(assembly, lift_joints, grasp_joints, render=args.render,
                                     carton_dims=carton_dims, obstacle_prims=obstacle_override,
-                                    no_carton=args.no_carton, arm_contacts=args.arm_contacts)
+                                    no_carton=args.no_carton, arm_contacts=args.arm_contacts, start_at_lift=args.start_at_lift)
             summary['obstacles'] = stage.obstacles
             summary['arm_links'] = sorted(stage.arm_links)
             if args.pinned_config is not None:
@@ -842,6 +844,9 @@ def main():
                         '(the measured run-250 jam config); names the pinning collider (inbox 004/005)')
     p.add_argument('--carton-offsets', type=float, nargs='+', default=[0.20],
                    help='carton-centre offsets (m) along tool-z to bracket for the pinned-config probe')
+    p.add_argument('--start-at-lift', action='store_true',
+                   help='start the arm directly at --lift-joints and weld the carton there (skip the '
+                        'grasp->lift move), for a clean short terminal settle at a collision-free pose')
     p.add_argument('--arm-contacts', action='store_true',
                    help='OPT-IN: also PhysX-report arm/chassis self-collisions (names arm-vs-body '
                         'contacts) -- but this invalidates the articulation tensor view, so it CANNOT '
