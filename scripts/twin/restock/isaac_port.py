@@ -231,23 +231,13 @@ class IsaacPort:
                                                  self.sensing_stride, self.masked_depth is not None)
         self.world.step(render=bool(self.sensing_tick or self.record_tick or self.masked_depth_tick))
         self.tick+=1
-        # Labelled sim attach-fallback with a STATIONARY weld (firstmate run-209): on a measured <=0.5mm
-        # flush contact, freeze the arm at the measured joints (stop the over-press), wait a few physics
-        # steps until the link velocity is ~0, THEN weld -- so the weld snaps no moving link and does not
-        # pivot the base past its 25 mrad gate. No-op unless the fallback is enabled (default off).
-        if self.command_gate is not None:
-            if self.contact.sim_attach_contact_ready():
-                if not self._attach_freezing:
-                    self.command_gate.begin_contact_hold()   # freeze at measured joints
-                    self._attach_freezing, self._attach_wait = True, 0
-                self._attach_wait += 1
-                if self._attach_wait >= ATTACH_SETTLE_STEPS:  # settled: link velocity ~0
-                    self.contact.sim_attach_weld()
-                    self.command_gate.end_contact_hold()      # release; weld raises s.contact -> grasp/lift
-                    self._attach_freezing = False
-            elif self._attach_freezing:
-                self.command_gate.end_contact_hold()          # contact lost before settle -> resume
-                self._attach_freezing = False
+        # Labelled sim attach-fallback weld (firstmate run-209/210). On a measured <=0.5mm flush contact,
+        # weld directly. No stationary-settle freeze: the SIM PARKING BRAKE (below) rigidly holds the base
+        # (run-210 base_dyaw 0.00mrad), so the weld's reaction cannot pivot the chassis -- the freeze the
+        # brake superseded also desynced the trajectory_host (it held the arm while the host move kept its
+        # clock running, which oscillated the arm on release, run-210). No-op unless the fallback is on.
+        if self.contact.sim_attach_contact_ready():
+            self.contact.sim_attach_weld()
         # SIM PARKING BRAKE (firstmate run-210): while the arm works (a stationary sensing action), lock
         # the already-parked chassis to the world so the welded-carton reaction torque cannot pivot it
         # past the 25 mrad gate (the wheel-hold is yaw-saturated). command() releases it before any base
