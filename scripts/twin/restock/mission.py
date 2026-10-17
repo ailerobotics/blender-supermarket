@@ -85,7 +85,14 @@ class Mission:
         self.inventory.record(self.job.job_id, action, {})
         self.adapter.start(action, self.job)
 
-    def start(self):
+    def begin_stage(self, action):
+        """Public seam: begin a named stage (records the action, starts the adapter).
+
+        The opt-in behaviour-tree layer drives stages itself through this; Mission.start()
+        and _advance() use _begin internally. Same single implementation either way."""
+        self._begin(action)
+
+    def start(self, begin=True):
         if self.state != 'new':
             raise ValueError('mission already started')
         # Refuse a proven won't-fit BEFORE reserving stock or sending the robot. The job was
@@ -104,6 +111,11 @@ class Mission:
             self.inventory.record(self.job.job_id, action + '_shortcut',
                                   {'shortcut': True, 'source': 'start_phase_shortcut',
                                    'reason': 'physical and job state synthesized, not performed'})
+        # `begin=False` reserves the job + records the shortcut prefix but does NOT begin the
+        # first stage, so the behaviour-tree layer can begin stages itself (via begin_stage);
+        # the default (begin=True) is byte-identical to the production state machine.
+        if not begin:
+            return
         try:
             self._begin(self.stages[self.start_index])
         except Exception as exc:
@@ -142,14 +154,24 @@ class Mission:
                     evidence.get('transfer_confirmed') is not True):
                 raise ValueError('observed transfer does not match job')
 
-    def tick(self, dt):
-        if self.terminal:
-            return self.state
-        if self.state == 'new':
-            raise ValueError('start mission first')
+    def step_stage(self, dt):
+        """Advance the CURRENT stage by one tick WITHOUT transitioning to the next stage and
+        WITHOUT failing the mission. Returns a token the caller reconciles into mission state:
+
+          'running'          -- stage still in progress
+          'succeeded'        -- stage's measured evidence validated + recorded (verify also
+                                committed stock); caller should advance
+          'degraded'         -- stage reported capability 'unavailable' (recorded
+                                <stage>_unavailable, degraded tracked); caller should advance
+                                but the overall outcome must end 'failed'
+          ('failed', reason) -- stage/adapter raised or returned a failed status (nothing was
+                                recorded as a success); caller should fail the mission
+
+        Mission.tick() wraps this with _advance()/fail() for the production state machine; the
+        opt-in behaviour-tree layer wraps it with bounded retry + recovery subtrees instead.
+        Keeping evidence validation + recording here means it lives in exactly one place."""
         if not math.isfinite(dt) or dt <= 0:
-            self.fail('invalid simulation timestep')
-            return self.state
+            return ('failed', 'invalid simulation timestep')
         self.time += dt
         self.elapsed += dt
         try:
@@ -157,7 +179,7 @@ class Mission:
                 raise TimeoutError(f'{self.state} timed out')
             result = self.adapter.step(dt)
             if result.status == 'running':
-                return self.state
+                return 'running'
             if result.status == 'unavailable':
                 # Honest degradation: the stage was attempted but its capability is not
                 # provisioned. Record it FAILED (never success), keep the mission moving so
@@ -165,28 +187,46 @@ class Mission:
                 self.degraded.append(self.state)
                 self.inventory.record(self.job.job_id, self.state + '_unavailable',
                                       {'reason': result.reason})
-                self._advance()
-                return self.state
+                return 'degraded'
             if result.status != 'succeeded':
                 raise RuntimeError(result.reason or f'invalid/failed status: {result.status}')
             self._validate(result.evidence)
             if self.state == 'verify':
                 self.inventory.verify(self.job, result.evidence)
             self.inventory.record(self.job.job_id, self.state + '_succeeded', result.evidence)
-            self._advance()
+            return 'succeeded'
         except Exception as exc:
-            self.fail(str(exc))
+            return ('failed', str(exc))
+
+    def tick(self, dt):
+        if self.terminal:
+            return self.state
+        if self.state == 'new':
+            raise ValueError('start mission first')
+        outcome = self.step_stage(dt)
+        if outcome == 'running':
+            return self.state
+        if isinstance(outcome, tuple):     # ('failed', reason)
+            self.fail(outcome[1])
+            return self.state
+        self._advance()                     # 'succeeded' or 'degraded'
         return self.state
 
     def _advance(self):
         index = self.stages.index(self.state) + 1
         if index == len(self.stages):
-            self.adapter.stop()
-            if self.degraded:
-                self.state, self.reason = 'failed', 'stages unavailable: ' + ', '.join(self.degraded)
-                self.inventory.record(self.job.job_id, 'failed', {'reason': self.reason})
-            else:
-                self.inventory.record(self.job.job_id, 'complete', {})
-                self.state = 'complete'
+            self.finalize()
         else:
             self._begin(ACTIONS[index])
+
+    def finalize(self):
+        """Terminal bookkeeping after the last stage: stop the adapter and record the overall
+        outcome -- 'failed' if any stage degraded (unavailable), else 'complete'. Reused by the
+        behaviour-tree layer's finalize leaf so the end-of-mission record is written once."""
+        self.adapter.stop()
+        if self.degraded:
+            self.state, self.reason = 'failed', 'stages unavailable: ' + ', '.join(self.degraded)
+            self.inventory.record(self.job.job_id, 'failed', {'reason': self.reason})
+        else:
+            self.inventory.record(self.job.job_id, 'complete', {})
+            self.state = 'complete'

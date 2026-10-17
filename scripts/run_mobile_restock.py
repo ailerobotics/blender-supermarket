@@ -322,15 +322,26 @@ def run(args, manifest, scenario):
                         json.dumps(dict(summary, events=db.events(scenario['job']['job_id'])),
                                    indent=2, allow_nan=False) + '\n')
                     return 0 if summary['state'] == 'complete' else 1
+                def _make_mission():
+                    return Mission(db, Job(**scenario['job']), bundle.adapter,
+                                   stages=config.get('stages'), start_at=config.get('start_at'),
+                                   fit_preflight=fit_verdict)
                 def run_once():
                     """One full mission attempt against the live bundle; returns (mission, summary)
                     and persists mission.json. Unchanged from the single-run behaviour -- the warm
                     loop below runs it once by default (--warm-attempts 1), composing cleanly with
                     the downstream --start-at shortcut (which selects WHERE a run begins; warm
-                    selects HOW MANY runs per boot)."""
-                    m = Mission(db, Job(**scenario['job']), bundle.adapter,
-                                stages=config.get('stages'), start_at=config.get('start_at'),
-                                fit_preflight=fit_verdict)
+                    selects HOW MANY runs per boot).
+
+                    Opt-in: runtime-config ``"bt": true`` drives the SAME Mission through the
+                    behaviour-tree orchestrator (reactive event handling + live view in the run
+                    dir); default off keeps the production state machine below byte-identical."""
+                    if config.get('bt'):
+                        from twin.restock.bt.integration import run_once_bt
+                        return run_once_bt(db, scenario, bundle, config, args.output,
+                                           mission_factory=_make_mission,
+                                           is_running=app.is_running)
+                    m = _make_mission()
                     m.start()
                     for _ in range(60*20*60):  # bounded simulation time; shell also bounds wall time
                         if m.terminal:
