@@ -313,17 +313,26 @@ def main(argv=None):
 
 
 def _load_windows(args, gate):
-    """Measured joint windows for the mission arm, from its URDF limits if available,
-    else the shelfbot cuRobo cspace falls back to a wide default (bench still runs)."""
+    """Measured joint windows for the mission arm, read from the arm's own URDF
+    ``<limit>`` tags (the envelope the trajectory host enforces). Uses the repo's
+    general ``twin.urdf_probe`` parser -- NOT ``cad_tool.inspect_tool``, which is
+    specialised for the CAD panel/tine tool and rejects the arm URDF. Falls back to
+    UR10 nominal +-2pi if the URDF is absent, so the independent guard still runs."""
     if args.limits and os.path.exists(args.limits):
         try:
-            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            from twin.restock_manipulation.cad_tool import inspect_tool  # noqa: E402
+            from twin.urdf_probe import parse_urdf  # noqa: E402
         except ImportError:
-            from restock_manipulation.cad_tool import inspect_tool  # type: ignore
-        arm_limits = inspect_tool(args.limits).arm_limits
-        return bench.mission_windows(arm_limits, gate)
-    # Fallback: UR10 nominal +-2pi so the independent guard still runs (documented).
+            from urdf_probe import parse_urdf  # type: ignore
+        jb = parse_urdf(args.limits).joints_by_name
+        arm_limits = []
+        for j in bench.ARM_JOINTS:
+            jj = jb.get(j)
+            if jj is None or jj.lower is None or jj.upper is None:
+                arm_limits = None
+                break
+            arm_limits.append((jj.lower, jj.upper))
+        if arm_limits is not None:
+            return bench.mission_windows(arm_limits, gate)
     wide = [(-2 * math.pi, 2 * math.pi)] * len(bench.ARM_JOINTS)
     return bench.mission_windows(wide, gate)
 
