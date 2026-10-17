@@ -26,6 +26,13 @@ EXECUTE_SETTLE_MARGIN_S = 25.0
 # seed-variant base/plate collision (INVALID_MOTION_PLAN, run-129/134 ~half of seeds) into a
 # near-certain pass at ~1 s of planning per retry (firstmate standing-authority lever).
 REPLAN_MAX = 12
+# Fail FAST on a persistently-failing plan (firstmate run-216/279): an IK-infeasible goal churns the
+# 12 replans + every seed, each resetting a fresh per-attempt deadline, so the move could retry well
+# past the host's 30 s /sensors wall backstop -- which then fired as the mission reason instead of a
+# clean "planning failed" (the preplace IK failure manifested as a 30 s stall). Cap the TOTAL planning
+# wall time for a single move below the backstop so an unplannable pose surfaces as a motion failure
+# fast. Legit stochastic retries succeed in ~1 s each and never approach this.
+PLAN_TOTAL_WALL_CAP_S = 22.0
 
 
 def _should_replan(replan_attempts, has_plan_goal):
@@ -155,6 +162,7 @@ class RosMotionPort:
         self.start = tuple(joints)
         self._replan_attempts = 0          # fresh-seed re-plan budget for this move (see REPLAN_MAX)
         self._plan_goal = None             # the MoveGroup goal to re-send on a plan rejection
+        self._plan_started_wall = time.monotonic()   # total planning-wall cap anchor (see PLAN_TOTAL_WALL_CAP_S)
         # Straight-line contact descent (firstmate run-191). The contact move is BY DEFINITION a short
         # straight descent INTO the target carton, so a collision planner that still holds the carton
         # (and its support face) as obstacles rejects it near contact (INVALID_MOTION_PLAN) whenever the
@@ -480,6 +488,10 @@ class RosMotionPort:
                 # seed-variant base/plate collision (INVALID_MOTION_PLAN, ~half of seeds) into a
                 # near-certain pass. Then fall back to the next IK seed (a wrapped-branch self-collision
                 # needs a different c-space target), then fail.
+                # Fail fast: once the cumulative planning wall time for this move crosses the cap, stop
+                # retrying (seed/replan) and surface a clean motion failure before the /sensors backstop.
+                if time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic()) > PLAN_TOTAL_WALL_CAP_S:
+                    raise RuntimeError('planning failed (exhausted within wall cap)')
                 if _should_replan(self._replan_attempts, getattr(self, '_plan_goal', None) is not None):
                     self._replan_attempts += 1
                     self.deadline_clock = time.monotonic
