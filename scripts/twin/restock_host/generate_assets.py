@@ -171,6 +171,36 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
                 rebuild(name)
         if not split_count:
             break
+    # firstmate 296/297 -- base-as-self-collision. cuRobo's model is rooted at FRAME (ur_base_link), so
+    # the fixed mobile-base links below it carry NO self-collision spheres and the attached carton is
+    # never checked against the chassis/arm-mount (run-236..241); a world CollisionObject cannot be
+    # exempted for the arm (run-242/243). Transplant the base-link-group spheres onto ur_base_link_inertia
+    # -- the arm's base link INSIDE the model -- expressed in its frame, and exempt (self_collision.ignore)
+    # the arm links that legitimately fold near the base, but NOT wrist_3 / the tool chain, so the carton
+    # (riding on the tool link) IS checked against the body while the arm itself is not. Done after the
+    # overlap/refinement loop: the body spheres are static and intentionally ignored vs the near arm links.
+    BASE_GROUP = ('base_link', 'arm_mount', 'hitch', 'left_wheel', 'right_wheel',
+                  'front_caster_fork', 'front_caster_wheel', 'rear_caster_fork', 'rear_caster_wheel')
+    ARM_NEAR_BASE = ('ur_shoulder_link', 'ur_upper_arm_link', 'ur_forearm_link',
+                     'ur_wrist_1_link', 'ur_wrist_2_link')
+    BASE_INERTIA = 'ur_base_link_inertia'
+    if BASE_INERTIA in transforms:
+        _Tinv = np.linalg.inv(np.asarray(transforms[BASE_INERTIA], float))
+        _tx = []
+        for _ln in BASE_GROUP:
+            _T = transforms.get(_ln)
+            if _T is None:
+                continue
+            _T = np.asarray(_T, float)
+            for _s in spheres.get(_ln, []):
+                _pw = (_T[:3, :3] @ np.asarray(_s['center'], float)) + _T[:3, 3]
+                _pl = (_Tinv[:3, :3] @ _pw) + _Tinv[:3, 3]
+                _tx.append({'center': [round(float(v), 5) for v in _pl], 'radius': float(_s['radius'])})
+        if _tx:
+            spheres[BASE_INERTIA] = list(spheres.get(BASE_INERTIA, [])) + _tx
+            for _arm in ARM_NEAR_BASE:
+                if _arm in spheres:
+                    excluded.setdefault(tuple(sorted((BASE_INERTIA, _arm))), 'BaseSelfCollisionExempt')
     srdf = ET.Element('robot', name=robot.name)
     group = ET.SubElement(srdf, 'group', name='ur_manipulator')
     ET.SubElement(group, 'chain', base_link=FRAME, tip_link=TCP)
