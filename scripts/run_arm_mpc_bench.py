@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guarded GPU runner for the cuRobo MPC follow-and-avoid bench (RUNBOOK §17).
+"""Guarded GPU runner for the cuRobo MPC follow-and-avoid bench (RUNBOOK §18).
 
 Reuses the existing ``fm-plan-mpc-curobo-v1`` container (cuRobo V2, Apache-2.0 --
 scout build spec (a): do NOT rebuild the arm stack) and runs
@@ -7,12 +7,15 @@ scout build spec (a): do NOT rebuild the arm stack) and runs
 moving-person proxy, driving the mission arm's own ``shelfbot_curobo.yml``.
 
 GPU etiquette (the mission lanes hold priority on /tmp/aile-gpu.lock):
-  * NON-BLOCKING flock on /tmp/aile-gpu.lock -- if the mission lane holds it, this
-    exits 3 immediately (never waits, never barges). Re-run when the lock frees.
+  * flock on /tmp/aile-gpu.lock. Default NON-BLOCKING -- if the mission lane holds it,
+    this exits 3 immediately (never barges). With --wait-lock-s N it instead BLOCKS up
+    to N seconds for the lock to free (the `flock -w N` shape the integration
+    orchestrator uses), so a background runner can wait politely for a free window
+    rather than idling a human at the prompt. On timeout it exits 3.
   * Hard-refuses beside the live Blender GUI / MCP socket (the AGENTS.md rule).
   * A modest VRAM-headroom check (MPC needs ~0.22 GB; default require 1500 MiB free).
     There is NO --force; the VRAM guard is never overridden.
-  * Wall-clock cap (default 600 s = well under the 15-min budget) kills a wedged run.
+  * Wall-clock cap (default 600 s; refuses > 900 s = the 15-min budget) kills a wedged run.
 
 No Isaac Sim boots: cuRobo MPC is pure cuRobo + torch, so this is the cheapest GPU
 consumer in the fleet and safe to slot into a short free window.
@@ -22,6 +25,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -66,6 +70,9 @@ def main(argv=None) -> int:
                     help='plan-mpc-curobo-v1 mpc_curobo dir (gate + window guard reuse)')
     ap.add_argument('--shelfbot', default=DEFAULT_SHELFBOT,
                     help='shelfbot_newgripper repo (declares package shelfbot + the cuRobo yml)')
+    ap.add_argument('--wait-lock-s', type=int, default=0,
+                    help='block up to this many seconds for /tmp/aile-gpu.lock to free '
+                         '(0 = non-blocking, the default; e.g. 3600 for a polite background wait)')
     ap.add_argument('--min-free-mb', type=int, default=1500,
                     help='refuse unless at least this many MiB VRAM are free (default: %(default)s)')
     ap.add_argument('--timeout-s', type=int, default=600,
@@ -91,14 +98,30 @@ def main(argv=None) -> int:
     out_host = Path(args.out).resolve()
     out_host.parent.mkdir(parents=True, exist_ok=True)
 
-    # --- NON-BLOCKING lock: never wait, never barge (mission lanes have priority) --- #
+    # --- lock: default non-blocking (never barge); --wait-lock-s blocks politely ----- #
     lock_fh = open(LOCK, 'a')
-    try:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print('GPU_LOCK_HELD: /tmp/aile-gpu.lock is held by another lane; re-run when free',
-              file=sys.stderr)
-        return 3
+    if args.wait_lock_s > 0:
+        # Bounded blocking acquire == `flock -w N`: block up to N s, then give up.
+        def _timeout(signum, frame):
+            raise TimeoutError
+        old = signal.signal(signal.SIGALRM, _timeout)
+        signal.alarm(args.wait_lock_s)
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)   # blocks until free or the alarm fires
+        except (TimeoutError, InterruptedError):
+            print(f'GPU_LOCK_TIMEOUT: /tmp/aile-gpu.lock still held after {args.wait_lock_s}s',
+                  file=sys.stderr)
+            return 3
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+    else:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('GPU_LOCK_HELD: /tmp/aile-gpu.lock is held by another lane; re-run when free',
+                  file=sys.stderr)
+            return 3
 
     try:
         if _blender_live():
