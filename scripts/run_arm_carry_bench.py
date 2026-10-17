@@ -95,7 +95,7 @@ class IsaacCarryStage(bench.ArmStage):
 
     def __init__(self, assembly, lift_joints, grasp_joints, *, carton_path='/RestockScenario/HandlingUnit',
                  pad_path_key='gripper_pad_tcp', render=False, carton_dims=(0.6, 0.4, 0.16),
-                 obstacle_prims=None, no_carton=False):
+                 obstacle_prims=None, no_carton=False, arm_contacts=False):
         from isaacsim.core.prims import SingleRigidPrim
         from pxr import UsdGeom
         self._UsdGeom = UsdGeom
@@ -119,6 +119,7 @@ class IsaacCarryStage(bench.ArmStage):
         self.carton = self.world.scene.add(SingleRigidPrim(prim_path=carton_path, name='armbench_carton'))
         self.arm_ctrl = self.robot.get_articulation_controller()
         self.no_carton = bool(no_carton)
+        self._arm_contacts = bool(arm_contacts)
         self._weld_rel0 = None
         self._current_drive_type = 'acceleration'   # physics_setup leaves the arm drives acceleration
         self.arm_joint_prims = self._discover_arm_joints()
@@ -182,18 +183,23 @@ class IsaacCarryStage(bench.ArmStage):
         return obstacles
 
     def _enable_contact_reporting(self):
-        """Best-effort PhysX contact reporting on the carton AND the robot's own arm links + chassis,
-        so BOTH carton-vs-scene and arm self/body collisions during the fold are named (the latter is
-        what a straight-line joint interpolation can drive into where cuMotion would curve around).
-        Each reported contact records BOTH actors (the pair). Degrades to geometric clearance."""
+        """Best-effort PhysX contact reporting. DEFAULT: the carton only (a separate rigid prim --
+        safe). Applying ContactReportAPI to the ARM links / chassis (part of the articulation) after
+        init invalidates the physics TENSOR VIEW, breaking get_gains() -- so arm/body self-collision
+        reporting is OPT-IN (``armbench_arm_contacts``) and must not be combined with a gain sweep;
+        the carton-vs-arm self-collision is instead measured offline by
+        twin.tools.carton_arm_fold_clearance (CPU sphere model). Each reported contact records both
+        actors. Degrades to geometric clearance if unavailable."""
         try:
             from omni.physx import get_physx_simulation_interface
             from pxr import PhysxSchema, PhysicsSchemaTools
             self._PhysicsSchemaTools = PhysicsSchemaTools
-            tracked = [self.carton_path, *self.arm_links.values()]
-            base = self.assembly.paths.get('base_link')
-            if base:
-                tracked.append(base)
+            tracked = [self.carton_path]
+            if self._arm_contacts:   # opt-in: breaks the articulation tensor view / get_gains
+                tracked += list(self.arm_links.values())
+                base = self.assembly.paths.get('base_link')
+                if base:
+                    tracked.append(base)
             self._tracked_contacts = set(tracked)
             for path in tracked:
                 prim = self.stage.GetPrimAtPath(path)
@@ -674,7 +680,7 @@ def run(args):
             assembly = assemble(app=app, config=config, scenario=scenario, output=args.output / 'assembly')
             stage = IsaacCarryStage(assembly, lift_joints, grasp_joints, render=args.render,
                                     carton_dims=carton_dims, obstacle_prims=obstacle_override,
-                                    no_carton=args.no_carton)
+                                    no_carton=args.no_carton, arm_contacts=args.arm_contacts)
             summary['obstacles'] = stage.obstacles
             summary['arm_links'] = sorted(stage.arm_links)
             if args.pinned_config is not None:
@@ -836,6 +842,11 @@ def main():
                         '(the measured run-250 jam config); names the pinning collider (inbox 004/005)')
     p.add_argument('--carton-offsets', type=float, nargs='+', default=[0.20],
                    help='carton-centre offsets (m) along tool-z to bracket for the pinned-config probe')
+    p.add_argument('--arm-contacts', action='store_true',
+                   help='OPT-IN: also PhysX-report arm/chassis self-collisions (names arm-vs-body '
+                        'contacts) -- but this invalidates the articulation tensor view, so it CANNOT '
+                        'be combined with a gain sweep (get_gains fails); use carton_arm_fold_clearance '
+                        'for carton-vs-arm instead')
     p.add_argument('--no-carton', action='store_true',
                    help='control: run the fold / pinned config with NO carton welded (isolates the '
                         'carried payload as the cause of the stall)')
