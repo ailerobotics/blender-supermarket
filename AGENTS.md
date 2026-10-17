@@ -135,7 +135,21 @@ repo's `scenes/`, `export/` or `renders/`.
   (detection topic) and `sim-restock-bt-v1` (event tree). Scenario + self-asserting
   CPU evidence: `navigation/dynamic_scenario.py`, `scripts/run_dynobs_evidence.py`
   (RUNBOOK §12); docs in [restock_navigation.md](docs/restock_navigation.md)
-  "Moving obstacles".
+  "Moving obstacles". **Mission feed** (opt-in): the layer is inert until fed per
+  frame — `navigation.dynamic_obstacle_source` names a `module:function` the bundle
+  builds into a `source(now)->[Detection]` passed at the `NavigationBridge` sensor
+  seam (`restock/runtime.py`) into `SensorNavigation.step(detections=)`; absent ⇒
+  `detections=None` ⇒ byte-identical. Default builder
+  `navigation/mission_source.py:build_dynamic_obstacle_source` reuses the
+  `sim-restock-humans-v1` scripted person (`humans` block) as BOTH the rendered actor
+  and the detection (`source='scenario_scripted_actor'`, positions from pure
+  `PeopleStage.world_positions`); the humans perception path plugs into the same seam
+  via `mission_source.humans_detection_source`. Example config fragment
+  `docs/examples/dynobs-mission-fragment.json`. CPU-proven only
+  (`test_navigation_mission_source.py`); the in-sim GPU evidence run rides the
+  integration mission boot (owns GPU priority + commissioning + host-stack) and is
+  PENDING (`start_at` supports only `couple` today, so a bounded nav-only run needs it
+  extended to `outbound` — integration-owned).
 - **Simulated people + human safety** (`scripts/twin/humans/`, opt-in, default
   OFF): an absent `humans` runtime-config block imports nothing and leaves the
   mission byte-identical. Three independent pieces — scripted shopper/staff actors

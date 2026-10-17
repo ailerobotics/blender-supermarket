@@ -1,0 +1,28 @@
+{
+  "__doc__": "Opt-in moving-obstacle fragment to MERGE into a mission runtime-config (e.g. mission-runtime-cc.json) for the dynamic-obstacle evidence run. Adds three things, all default-off when absent: (1) navigation.dynamic_obstacles builds the in-process DynamicObstacleLayer on the sensor route; (2) navigation.dynamic_obstacle_source names the lane-owned detection-feed builder; (3) the humans block authors one deterministic scripted person crossing the outbound aisle, reused as both the rendered actor and the detection source. navigation.blocked_timeout is the stop-and-wait patience on a blocked aisle. Tune the person waypoints to cross the actual outbound leg of your scenario. See docs/restock_navigation.md 'Mission detection feed'.",
+  "navigation": {
+    "dynamic_obstacles": {
+      "moving_speed": 0.2,
+      "prediction_horizon": 2.0,
+      "confirm_frames": 2,
+      "drop_after": 0.8
+    },
+    "dynamic_obstacle_source": "twin.navigation.mission_source:build_dynamic_obstacle_source",
+    "blocked_timeout": 30.0
+  },
+  "humans": {
+    "enabled": true,
+    "backend": "teleport",
+    "people": [
+      {
+        "person_id": "aisle_crosser",
+        "role": "shopper",
+        "waypoints": [[3.0, -1.6], [3.0, 1.6]],
+        "speed_mps": 0.9,
+        "mode": "pingpong",
+        "radius_m": 0.3,
+        "height_m": 1.75
+      }
+    ]
+  }
+}

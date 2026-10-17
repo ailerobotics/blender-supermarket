@@ -252,9 +252,35 @@ def _resolve_factory(config, key):
     return getattr(importlib.import_module(module), name)
 
 
-def _build_navigation(plan, controller):
+def _build_navigation(plan, controller, detection_source=None):
     return NavigationBridge(controller, nav2=plan.nav_mode == 'nav2',
-                            sensor_navigation=plan.nav_mode == 'sensor')
+                            sensor_navigation=plan.nav_mode == 'sensor',
+                            detection_source=detection_source)
+
+
+def _build_detection_source(*, app, assembly, plan, config, output):
+    """Build the opt-in moving-obstacle detection feed from the runtime-config.
+
+    `navigation.dynamic_obstacle_source` names a lane-owned builder as
+    `module:function`, called `fn(app, assembly, plan, config, output)` and expected to
+    return a `callable(now) -> [navigation.dynamic.Detection]` (or None). Absent =>
+    None => the sensor route is fed `detections=None`, byte-identical to a run with no
+    moving-obstacle layer. Rejected for non-sensor nav modes (the nav2 route takes moving
+    obstacles through its ROS costmap, not this in-process feed).
+    """
+    nav = config.get('navigation')
+    ref = nav.get('dynamic_obstacle_source') if isinstance(nav, dict) else None
+    if ref is None:
+        return None
+    if plan.nav_mode != 'sensor':
+        raise ValueError('navigation.dynamic_obstacle_source applies only to nav_mode '
+                         '"sensor"; the nav2 route uses its ROS costmap obstacle layer')
+    if not isinstance(ref, str) or ':' not in ref:
+        raise ValueError('navigation.dynamic_obstacle_source must name a lane-owned '
+                         'builder as "module:function"')
+    module, name = ref.split(':', 1)
+    builder = getattr(importlib.import_module(module), name)
+    return builder(app=app, assembly=assembly, plan=plan, config=config, output=output)
 
 
 def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=None):
@@ -341,8 +367,11 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     manip_factory = _resolve_factory(config, 'manip_factory')
     sensing_factory = _resolve_factory(config, 'sensing_factory')
 
+    detection_source = _build_detection_source(
+        app=app, assembly=assembly, plan=plan, config=config, output=output)
     navigation = _build_navigation(plan, nav_factory(
-        app=app, assembly=assembly, plan=plan, config=config, output=output))
+        app=app, assembly=assembly, plan=plan, config=config, output=output),
+        detection_source=detection_source)
     # manip_factory returns a fully-configured ManipulationBridge (it alone knows the
     # owns-sensor-io mode and per-station preparation); RuntimeAdapter leaves an existing
     # ManipulationBridge unwrapped, so do not re-wrap here.

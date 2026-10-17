@@ -306,6 +306,14 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest \
 # any failed verdict. --scenario person|box|cart|all  --out DIR.
 python3 scripts/run_dynobs_evidence.py --out ~/datasets/sim-restock-dynobs-v1
 
+# Mission detection-feed wiring (opt-in): byte-identical off, deterministic scripted
+# detections reusing the humans person asset, bundle resolution. No ROS/GPU/USD.
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest \
+  scripts/twin/tests/test_navigation_mission_source.py -q
+# To exercise it in-sim, MERGE docs/examples/dynobs-mission-fragment.json into a mission
+# runtime-config and run the mission (integration-owned boot: GPU priority + station
+# commissioning + host-stack). See docs/restock_navigation.md "Mission detection feed".
+
 # Optional host-Python Jazzy overlay, extracted only into task-owned storage.
 # Uses existing trusted apt indexes; no sudo, package install, or service restart.
 python3 scripts/setup_restock_nav2.py --output "$TASK_OUTPUT/nav2"
