@@ -91,7 +91,14 @@ repo's `scenes/`, `export/` or `renders/`.
   observed empty frame and persists the baseline with provenance; the mission loads it by
   station at boot via `build_sensing`'s `config['commissioning_dir']`, refusing a missing
   one (never fabricated). Choreography CLI + runbook: `scripts/run_restock_commissioning.py`
-  and RUNBOOK §13a. The collect stage senses the pick carton with the FIXED `source` camera
+  and RUNBOOK §13a. One guarded boot commissions ALL THREE stations (source + cart + shelf)
+  into one shared `commissioning_dir`: `scripts/run_restock_commissioning_gpu.py` with repeatable
+  `--station` loops the renderer (one station per Isaac boot) and unions the baselines. Sharp edge:
+  `camera_config.json` is a GENERATED artifact of `restock_camera.config` shared by the commissioning
+  bench AND the mission — regenerate it from the current design with
+  `scripts/write_restock_camera_config.py` before commissioning, or a stale file feeds OLD geometry
+  (e.g. the pre-fix `.62×.42` cart support overshoots the rails → `_flat_patch` refuses the deck).
+  The collect stage senses the pick carton with the FIXED `source` camera
   (not the arm eye-in-hand, which is masked-depth only): `restock_camera/source_target.py`
   `build_source_target_provider` → `source_target_provider(now)` gives the handling-unit pose
   in the station frame + baseline provenance (RUNBOOK §13b); the arm gets a reprojected target.
