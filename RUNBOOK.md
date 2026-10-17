@@ -973,3 +973,40 @@ RESTOCK_NVIDIA_RUNTIME=/home/manishsaini/datasets/twin-robot-in-store-boot-v1/gp
 ```
 The bench holds the GPU lock + 4 GiB RAM watchdog inside Python and bounds its own wall cap
 (`RESTOCK_WALL_CAP`, default 800 s). Never `--force`; never stop Blender/whispr.
+
+## 17. Fleet dashboard — watch the mission + store (CPU, read-only, opt-in)
+
+A phone-first, read-only panel that merges the live Isaac restocking mission with
+store-vision store state. Standalone CPU server; never imported or launched by the
+mission, so a mission run is byte-identical whether or not it is up. No GPU. Design +
+contract: [docs/fleet_dashboard.md](docs/fleet_dashboard.md).
+
+Print the aggregated status once and exit (the dry-run transcript):
+```
+PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py --dry-run
+```
+
+Serve read-only on the tailnet (binds `100.100.47.65:8794`; `8787/8790/8791/8793` taken):
+```
+PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py
+# -> http://100.100.47.65:8794/
+```
+
+With the store overlay + the opt-in phone trigger queue (default off):
+```
+PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py \
+    --store-state /path/to/store-state.json \
+    --bt /path/to/behaviour-tree.json \
+    --enable-trigger --requests-dir /tmp/fleet-dashboard-requests
+```
+It reads the upstream watch page (`--upstream`, default `http://100.100.47.65:8787`) and
+the mission run directories (`--run-root`, default
+`/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission`); it never writes a run,
+never boots Isaac, and degrades gracefully when the upstream is down. `--enable-trigger`
+requires `--requests-dir`; without it `POST /trigger` returns `403`.
+
+CPU tests (no GPU; `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` dodges the box's ROS pytest plugins):
+```
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  python3 -m pytest scripts/twin/tests/test_fleet_dashboard.py -q
+```
