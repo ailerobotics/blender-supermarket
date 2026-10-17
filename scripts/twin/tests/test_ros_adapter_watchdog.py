@@ -110,5 +110,27 @@ class WallBackstop(unittest.TestCase):
         self.assertEqual(emitted, [])
 
 
+class PlanningHangSurfacesBeforeBackstop(unittest.TestCase):
+    # run-220/281: a planning hang must surface as a planning failure within the total planning-wall
+    # cap even when /sensors has stalled (poll() no longer driven), NOT get masked by the 30 s sensor
+    # backstop. The 0.1 s watchdog checks the motion's read-only planning_wall_exceeded() flag.
+    def test_planning_wall_exceeded_trips_even_with_fresh_sensors(self):
+        b, emitted = _bridge(first_frame=True, sim_gap=0.0, packet_wall_age=0.1, wall_backstop=30.0)
+        b.controller.motion = NS(planning_wall_exceeded=lambda: True)
+        b._watchdog()
+        self.assertEqual([e.reason for e in emitted], ['planning failed (exhausted within wall cap)'])
+
+    def test_no_trip_while_planning_within_cap(self):
+        b, emitted = _bridge(first_frame=True, sim_gap=0.0, packet_wall_age=0.1, wall_backstop=30.0)
+        b.controller.motion = NS(planning_wall_exceeded=lambda: False)
+        b._watchdog()
+        self.assertEqual(emitted, [])
+
+    def test_absent_motion_is_tolerated(self):
+        b, emitted = _bridge(first_frame=True, sim_gap=0.05, packet_wall_age=0.1)   # no .motion attr
+        b._watchdog()
+        self.assertEqual(emitted, [])
+
+
 if __name__ == '__main__':
     unittest.main()

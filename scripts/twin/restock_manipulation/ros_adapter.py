@@ -406,6 +406,17 @@ class RosMotionPort:
         self.deadline=time.monotonic()+self.timeout
         self._send(self.plan,goal,'plan_accept')
 
+    def planning_wall_exceeded(self):
+        """True once a single move has spent more than the total planning-wall cap in a PLANNING
+        phase (ik / plan request / plan result). Read-only (no state advance): the bridge watchdog
+        checks it on its own 0.1 s timer so a planning hang surfaces as a motion failure within the
+        cap EVEN WHEN /sensors has stalled and poll() is no longer being driven (run-220: the
+        preplace PLANNING_FAILED was masked by the 30 s /sensors wall backstop because poll() stopped
+        being called). Execution phases are excluded -- a render-paced execute legitimately runs long."""
+        return (self.state in ('ik', 'plan_accept', 'plan_result')
+                and time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
+                > PLAN_TOTAL_WALL_CAP_S)
+
     def poll(self):
         try:
             return self._poll()
@@ -657,6 +668,13 @@ class RosTransferBridge:
         if self.controller.phase in ('idle', 'failed', 'succeeded'):
             return
         wall_now = time.monotonic()
+        # A planning hang must surface as a planning failure within the total planning-wall cap even
+        # when /sensors has stalled and poll() is no longer driven (run-220/281): this 0.1 s timer is
+        # independent of the sensor stream, so check it here BEFORE the 30 s sensor backstop can mask it.
+        motion = getattr(self.controller, 'motion', None)
+        if motion is not None and getattr(motion, 'planning_wall_exceeded', lambda: False)():
+            self._emit(self.controller._fail('planning failed (exhausted within wall cap)'))
+            return
         if not self.first_frame:
             # No /sensors yet: the looser startup grace (not the 1 s per-frame bound) applies, so a
             # warm-up + cold first ESDF has time to produce the first frame. Stays in WALL time; a
