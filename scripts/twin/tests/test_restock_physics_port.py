@@ -182,28 +182,37 @@ def test_no_recorder_means_no_record_render():
     assert all(not r for _, r in (port._frame_plan(t) for t in range(1, 5)))
 
 
-def test_base_brake_full_lock_pre_weld_yaw_lock_when_held():
-    # firstmate run-232: during the pre-weld grasp press the base must be FULLY locked (the side-grip
-    # press slid the free-translation base 15.5 mm and the grip never sealed); once a carton is held,
-    # revert to the yaw-lock-only loop relief (a full lock there oscillated the arm, run-208/209).
+def test_base_brake_phase_aware_full_lock_vs_yaw_lock():
+    # firstmate run-232/233: FULL base lock during the pre-weld grasp press (the free-translation base
+    # slid 15.5 mm and the grip never sealed) AND while a welded carton is airborne (preplace swing
+    # levered the base 16.4 mm); YAW-LOCK-ONLY only while a WELDED carton rests on a support
+    # (grasp/place/release/contact), where a full lock would over-constrain the weld loop (run-208/209).
     class FakeMobile:
         def __init__(self):
             self.calls = []
         def __getattr__(self, name):
             return lambda *a, **k: self.calls.append(name)
-    port = IsaacPort.__new__(IsaacPort)
 
-    port.mobile = FakeMobile()
-    port._apply_base_brake(in_arm_phase=True, welded=False)      # pre-weld grasp press
-    assert port.mobile.calls == ['release_brake', 'engage_base_full_brake']
+    def calls(in_arm_phase, welded, phase):
+        port = IsaacPort.__new__(IsaacPort)
+        port.mobile = FakeMobile()
+        port._apply_base_brake(in_arm_phase, welded, phase)
+        return port.mobile.calls
 
-    port.mobile = FakeMobile()
-    port._apply_base_brake(in_arm_phase=True, welded=True)       # carton held: lift/carry
-    assert port.mobile.calls == ['release_base_full_brake', 'engage_brake']
+    FULL = ['release_brake', 'engage_base_full_brake']
+    YAW = ['release_base_full_brake', 'engage_brake']
+    OFF = ['release_base_full_brake', 'release_brake']
 
-    port.mobile = FakeMobile()
-    port._apply_base_brake(in_arm_phase=False, welded=False)     # couple/tow/park: base free to drive
-    assert port.mobile.calls == ['release_base_full_brake', 'release_brake']
+    assert calls(True, False, 'approach') == FULL       # pre-weld approach
+    assert calls(True, False, 'contact') == FULL        # pre-weld press (not yet welded) -> hold to seal
+    assert calls(True, True, 'contact') == YAW          # weld just fired on the backstock support
+    assert calls(True, True, 'grasp') == YAW            # welded, on the backstock support
+    assert calls(True, True, 'lift') == FULL            # welded but airborne -> hold the base
+    assert calls(True, True, 'preplace') == FULL        # welded, airborne swing to the cart -> hold
+    assert calls(True, True, 'place') == YAW            # welded, pressing onto the cart (loop)
+    assert calls(True, True, 'release') == YAW          # welded->releasing on the cart (loop)
+    assert calls(True, True, 'retreat') == FULL         # carton gone, arm retreats -> hold
+    assert calls(False, False, 'couple') == OFF         # left the arm phase: base free to drive
 
 
 def test_begin_action_tracks_current_action_for_gating():

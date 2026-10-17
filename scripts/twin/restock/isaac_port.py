@@ -163,6 +163,8 @@ class IsaacPort:
         # base brake switches from the pre-weld FULL lock to the yaw-lock-only loop relief. Reset when
         # the mission leaves the arm phase (a fresh grasp starts under the full lock). See advance().
         self._carton_welded=False
+        # Last controller phase seen by gate() (phase-aware base brake selection).
+        self._phase=None
         # Stage-time value corresponding to mission t=0: world.current_time - now, refreshed every
         # advance so mission_time() recovers the dt-accumulated packet clock (tick*dt) from Isaac's
         # stage time. begin_action('verify') begins the InventoryVerifier on THIS clock -- the same
@@ -187,21 +189,33 @@ class IsaacPort:
                             'navigation':'wheel_encoders_and_physical_range_scan',
                             'inventory':'rendered_rgb_depth_only'}
 
-    def _apply_base_brake(self, in_arm_phase, welded):
-        """Select the base parking brake for this tick (see advance()): FULL lock during the pre-weld
-        grasp press (hold the base solid so the side-grip press seals), YAW-LOCK-ONLY once a carton is
-        held (translation free to relieve the welded weld loop during lift), neither outside the arm
-        phase. Idempotent engage/release; the two base brakes are mutually exclusive."""
-        if in_arm_phase:
-            if welded:
-                self.mobile.release_base_full_brake()
-                self.mobile.engage_brake()
-            else:
-                self.mobile.release_brake()
-                self.mobile.engage_base_full_brake()
-        else:
+    # Controller phases where a WELDED carton rests on a support surface, so the base must NOT be
+    # rigidly locked: the world->base->arm->(weld)->carton->support->world loop would be over-
+    # constrained and oscillate the arm (run-208/209). 'grasp' = carton on the backstock; 'place'/
+    # 'release' = carton on the cart; 'contact' = the descent that fires the flush-contact weld while
+    # the carton is still on the backstock. Every OTHER arm phase either has no weld yet (approach/
+    # contact pre-weld) or the carton airborne (lift/preplace/retreat) -> no loop -> a full lock is safe.
+    _BASE_LOOP_PHASES = frozenset({'grasp', 'place', 'release', 'contact'})
+
+    def _apply_base_brake(self, in_arm_phase, welded, phase):
+        """Select the base parking brake for this tick (see advance()):
+          * outside the arm phase -> release both (the base is free to drive: couple/tow/park).
+          * WELDED carton resting on a support (``phase`` in _BASE_LOOP_PHASES) -> YAW-LOCK-ONLY, so
+            translation stays free to relieve the rigid weld loop (the kept run-208/209 behaviour).
+          * otherwise (pre-weld grasp press, or a welded carton held AIRBORNE in lift/preplace/retreat)
+            -> FULL FixedJoint lock, so the contact-press / arm-reach moment cannot slide the free base
+            past the gate (run-232 pre-weld press 15.5 mm; run-233 preplace swing 16.4 mm). Safe: no
+            over-constrained loop in these phases.
+        Idempotent engage/release; the two base brakes are mutually exclusive."""
+        if not in_arm_phase:
             self.mobile.release_base_full_brake()
             self.mobile.release_brake()
+        elif welded and phase in self._BASE_LOOP_PHASES:
+            self.mobile.release_base_full_brake()
+            self.mobile.engage_brake()
+        else:
+            self.mobile.release_brake()
+            self.mobile.engage_base_full_brake()
 
     def gate(self, phase):
         """Drive the opt-in sensing execution gate from the live manipulation controller phase.
@@ -212,6 +226,7 @@ class IsaacPort:
         registration and the arm occludes the fixed camera), and RESUMED on observe/preplace/verify
         and any unknown phase (fail safe). Called each tick BEFORE advance() with the last known
         phase; a one-tick lag is within the occlusion window the hold already tolerates."""
+        self._phase=phase            # also drives the phase-aware base brake (see _apply_base_brake)
         if self._set_render_suspended is None:
             return
         suspended=not sensing_render_required(phase)
@@ -274,7 +289,7 @@ class IsaacPort:
         #    status flicker), so the brake does not thrash; engage/release are idempotent.
         # command() releases both before any base drive; release here the moment the mission leaves the
         # arm phase (couple/tow/park).
-        self._apply_base_brake(self.current_action in SENSING_ACTIONS, self._carton_welded)
+        self._apply_base_brake(self.current_action in SENSING_ACTIONS, self._carton_welded, self._phase)
         # Cart parking brake (firstmate 287): pin the UNCOUPLED cart to the world while the robot
         # loads a carton onto it during collect, so the placement contact cannot roll it (run-228:
         # cart rolled 15.6 mm > the 15 mm gate). Released the moment collect ends (couple needs the
