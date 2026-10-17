@@ -175,6 +175,48 @@ class MissionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Job('bad', 'milk', qty, 'backroom', 'shelf')
 
+    def test_start_at_records_shortcut_prefix_and_runs_remaining_stages(self):
+        # A start-phase shortcut skips the in-order prefix before `start_at`, records each
+        # skipped stage as a `<stage>_shortcut` event (shortcut=True, never *_succeeded), then
+        # runs the real state machine from `start_at` onward -- here transfer -> verify -> return.
+        m = self.mission(fixture_mode=True, start_at='transfer')
+        skipped = ('collect', 'couple', 'outbound', 'park')
+        self.assertEqual(m.shortcut, {'start_at': 'transfer', 'skipped': list(skipped)})
+        self.assertEqual(m.state, 'transfer')  # began at the shortcut target, not collect
+        events = [e['state'] for e in self.inv.events('one')]
+        for stage in skipped:
+            self.assertIn(stage + '_shortcut', events)
+            self.assertNotIn(stage + '_succeeded', events)
+        # Skipped stages carry honest shortcut provenance.
+        shortcut_ev = next(e for e in self.inv.events('one') if e['state'] == 'collect_shortcut')
+        self.assertTrue(shortcut_ev['evidence']['shortcut'])
+        self.assertEqual(shortcut_ev['evidence']['source'], 'start_phase_shortcut')
+        for _ in range(3):  # transfer, verify, return
+            m.tick(.1)
+        self.assertEqual(m.state, 'complete')
+        # verify still committed the real stock move exactly once.
+        self.assertEqual(self.inv.count('shelf', 'milk'), 1)
+        self.assertEqual(self.inv.count('backroom', 'milk'), 1)
+        actions = [e['state'] for e in self.inv.events('one')]
+        self.assertIn('transfer_succeeded', actions)
+        self.assertIn('inventory_verified', actions)
+
+    def test_start_at_absent_is_identical_to_production(self):
+        m = self.mission(fixture_mode=True)
+        self.assertIsNone(m.shortcut)
+        self.assertEqual(m.start_index, 0)
+        self.assertEqual(m.state, 'collect')
+        actions = [e['state'] for e in self.inv.events('one')]
+        self.assertFalse(any(a.endswith('_shortcut') for a in actions))
+
+    def test_start_at_invalid_stage_raises(self):
+        with self.assertRaises(ValueError):
+            Mission(self.inv, self.job, self.adapter, start_at='not_a_stage')
+
+    def test_start_at_cannot_skip_verify_commit_gate(self):
+        with self.assertRaisesRegex(ValueError, 'verify'):
+            Mission(self.inv, self.job, self.adapter, start_at='return')
+
 
 if __name__ == '__main__':
     unittest.main()

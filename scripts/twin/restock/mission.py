@@ -30,7 +30,8 @@ class Adapter(Protocol):
 
 class Mission:
     def __init__(self, inventory: Inventory, job: Job, adapter: Adapter,
-                 timeout_s=120., fixture_mode=False, max_evidence_age_s=1., stages=None):
+                 timeout_s=120., fixture_mode=False, max_evidence_age_s=1., stages=None,
+                 start_at=None):
         if not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError('timeout must be finite and positive')
         if not math.isfinite(max_evidence_age_s) or max_evidence_age_s < 0:
@@ -40,6 +41,24 @@ class Mission:
         self.stages = tuple(stages) if stages else ACTIONS
         if self.stages != ACTIONS[:len(self.stages)]:
             raise ValueError(f'stages must be an in-order prefix of {ACTIONS}')
+        # Start-phase shortcut (dev iteration ONLY): begin the real state machine at `start_at`
+        # instead of stages[0]. The stages BEFORE it are NOT performed -- the adapter/runtime
+        # synthesizes their physical end state (robot pose, braked base, carton attach, coupling)
+        # out of band, and the mission records each skipped stage HONESTLY as a `<stage>_shortcut`
+        # event (never as a performed success). Absent (None) => no shortcut, byte-identical
+        # production behaviour (start_index 0). Stock is still only committed at the real `verify`,
+        # so a shortcut that begins at or before verify credits inventory correctly; a shortcut that
+        # begins after verify is refused (it would skip the only stock-committing gate).
+        self.start_index = 0
+        self.shortcut = None
+        if start_at is not None:
+            if start_at not in self.stages:
+                raise ValueError(f'start_at {start_at!r} not in mission stages {self.stages}')
+            self.start_index = self.stages.index(start_at)
+            if 'verify' in self.stages and self.start_index > self.stages.index('verify'):
+                raise ValueError('start_at cannot skip the verify stock-commit gate')
+            self.shortcut = {'start_at': start_at,
+                             'skipped': list(self.stages[:self.start_index])}
         self.inventory, self.job, self.adapter = inventory, job, adapter
         self.timeout_s, self.fixture_mode = timeout_s, fixture_mode
         self.max_evidence_age_s = max_evidence_age_s
@@ -63,8 +82,16 @@ class Mission:
         if self.state != 'new':
             raise ValueError('mission already started')
         self.inventory.reserve(self.job)
+        # Record any shortcut-skipped prefix HONESTLY -- as `<stage>_shortcut` events marked
+        # shortcut=True, never as performed successes -- so the durable record and mission.json
+        # cannot be mistaken for real actuation. The physical end state is synthesized by the
+        # runtime before the first real tick.
+        for action in self.stages[:self.start_index]:
+            self.inventory.record(self.job.job_id, action + '_shortcut',
+                                  {'shortcut': True, 'source': 'start_phase_shortcut',
+                                   'reason': 'physical and job state synthesized, not performed'})
         try:
-            self._begin(self.stages[0])
+            self._begin(self.stages[self.start_index])
         except Exception as exc:
             self.fail(f'adapter start: {exc}')
 
