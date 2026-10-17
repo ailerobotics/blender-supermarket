@@ -155,6 +155,16 @@ repo's `scenes/`, `export/` or `renders/`.
   `scripts/twin/restock/`; CPU checks and adapter contract are in RUNBOOK §11.
   `data/mobile-restock-v2/report.md` distinguishes fixture tests from the still
   unverified physical cycle and records the GPU driver diagnosis.
+- **Smart post-restock verification** (CPU, read-only, opt-in): `restock/smart_verify.py`
+  + CLI `scripts/run_smart_verify.py` turn a finished mission into an ADDITIONAL
+  planogram/realogram compliance verdict + residual reset jobs (sim-smart-job-feed-v1
+  `--job-from` shape), NEVER changing the mission's stock-commit gate. Evidence basis is
+  labelled honestly (`mission_verify_sensor`/`bookkeeping`/`full_shelf_sensor`). Slot-id
+  scheme mirrors `store_environment.layout` (a test asserts no drift). `restock/smart_verify_storevision.py`
+  is a lazy, best-effort cross-check through store-vision's read-only `planoreset.verify`
+  that degrades when store-vision/pydantic is absent. Also runs at mission end behind
+  `run_mobile_restock.py --smart-verify` (byte-identical when absent). RUNBOOK §11b;
+  write-up `data/sim-smart-verify-v1/report.md`.
 - **Surface-gripper seal reader** (`restock_manipulation/cad_tool.py` `NativePanelContact`):
   `read()` is a PURE OBSERVER — never command the gripper from it (an `open_gripper()` on a
   not-yet-`Closed` grab aborted the seal on every poll of the slow contact descent), and key the

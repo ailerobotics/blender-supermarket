@@ -658,6 +658,53 @@ support and deactivates only exact-slot product prims in the output layer before
 physics. It preserves fixtures, price tags and the input store. It refuses repeat
 authoring and does not create runtime motion or inventory observations.
 
+### 11b. Smart post-restock verification (CPU, read-only, opt-in)
+
+`scripts/run_smart_verify.py` is an ADDITIONAL planogram/realogram compliance
+report layered on top of the mission `verify` stage. It NEVER changes the
+mission's stock-commit gate (the `verify` stage stays the source of truth); it
+turns "one SKU landed" into "the destination slot now matches the planogram, or
+here are the residual reset jobs that would make it". Pure CPU, no Isaac/ROS/
+Blender. Evidence basis is labelled honestly on every slot verdict:
+`mission_verify_sensor` (only the landed unit was scanned — default),
+`bookkeeping` (committed DB counts — a belief), or `full_shelf_sensor` (an
+out-of-band labelled shelf view, e.g. a store-vision `realogram` export).
+
+```bash
+# default: a finished run's mission.json, verdict for the job's destination slot
+python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json
+
+# bookkeeping basis + residual reset jobs in the sim-smart-job-feed-v1 shape
+python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json \
+  --inventory "$RUN"/inventory.sqlite --source-bin backstock_00 \
+  --out "$RUN"/smart-verify.json --job-feed-out "$RUN"/reset-jobs.json
+
+# advisory cross-check through store-vision's read-only planoreset.verify
+python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json --storevision
+```
+
+Residual reset jobs are emitted in the `sim-smart-job-feed-v1` `--job-from`
+contract (`{sku, quantity, source_bin, shelf_id, slot, priority, kind,
+provenance}`; `kind` is `restock` for a shortfall or `remove` for a
+misplaced/overstocked SKU) so Lane 1's job feed can close the loop. The
+store-vision cross-check runs store-vision's real `planoreset.verify`
+read-only; it degrades to `{"available": false, "reason": ...}` when store-vision
+(or a transitive dep such as pydantic) is not importable — the built-in diff
+stays authoritative. Run it inside store-vision's own venv for full
+`planoreset.deviation` event emission.
+
+The same report is produced automatically at the end of a guarded mission run
+behind `run_mobile_restock.py --smart-verify` (writes `smart-verify.json` +
+`reset-jobs.json` into the run output; `--smart-verify-storevision` adds the
+cross-check, `--smart-verify-policy` picks the quantity policy). Absent
+`--smart-verify` the run is byte-identical. CPU tests:
+
+```bash
+cd scripts && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest twin/tests/test_smart_verify.py -q
+```
+
+Write-up: [data/sim-smart-verify-v1/report.md](data/sim-smart-verify-v1/report.md).
+
 ## 13. Mobile restock manipulation (CPU)
 
 Contracts, dependencies and limits: [restock manipulation](docs/restock_manipulation.md).
