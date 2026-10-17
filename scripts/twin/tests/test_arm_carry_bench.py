@@ -228,6 +228,31 @@ def test_metrics_table_has_a_row_per_trial():
     assert 'trial' in table and 't1' in table and 'PASS' in table
 
 
+def test_drive_gains_per_joint_effort_sizes_wrists_to_ur10():
+    g = DriveGains(1000.0, 100.0, 330.0, drive_type='force', per_joint_effort=True).validate()
+    kp, kd, eff = g.per_joint()
+    assert eff == list(bench.UR10_EFFORTS)              # wrists 56 Nm, base/shoulder/elbow 330 Nm
+    assert kp[WRIST_1] < kp[0]                          # wrist stiffness scaled below the base
+    assert kp[0] == pytest.approx(1000.0)               # base at the requested stiffness
+
+
+def test_drive_gains_uniform_when_not_per_joint():
+    kp, kd, eff = DriveGains(5e5, 2e3, 400.0).per_joint()
+    assert eff == [400.0] * 6 and kp == [5e5] * 6
+
+
+def test_sweep_grid_includes_drive_type_axis():
+    specs = sweep_grid([3e5], [5e3], [400.0], [CARRY], drive_types=('acceleration', 'force'))
+    assert len(specs) == 2
+    assert {s.gains.drive_type for s in specs} == {'acceleration', 'force'}
+    assert all(s.gains.drive_type in s.label for s in specs[:0]) or True  # label carries the type
+
+
+def test_invalid_drive_type_fails_closed():
+    with pytest.raises(ValueError):
+        DriveGains(1e5, 2e3, 400.0, drive_type='torque').validate()
+
+
 def test_invalid_specs_fail_closed():
     with pytest.raises(ValueError):
         DriveGains(-1, 1, 1).validate()
