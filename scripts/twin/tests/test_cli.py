@@ -76,3 +76,25 @@ def test_render_plan_preconverted_robot_skips_import():
     p["robot_usd"] = "/r/robot.usd"
     text = cli.render_plan(p)
     assert "import step SKIPPED" in text
+
+
+# --- --arm-mpc opt-in (default OFF; chain byte-identical when absent) ------------
+def test_arm_mpc_defaults_off_and_stores_true():
+    assert cli.build_parser().parse_args([]).arm_mpc is False
+    assert cli.build_parser().parse_args(["--arm-mpc"]).arm_mpc is True
+
+
+def test_render_plan_arm_mpc_absent_is_byte_identical():
+    # A plan WITHOUT the arm_mpc key (or with it False) renders exactly as before the
+    # flag existed -- proving a mission/dry-run with the flag absent is unchanged.
+    base = cli.render_plan(_plan())
+    p_false = dict(_plan(), arm_mpc=False)
+    assert cli.render_plan(p_false) == base
+    assert "EVALUATION-ONLY" not in base
+
+
+def test_render_plan_arm_mpc_present_shows_eval_only_note():
+    text = cli.render_plan(dict(_plan(), arm_mpc=True))
+    assert "EVALUATION-ONLY" in text
+    assert "SOFT collision cost" in text
+    assert "byte-identical" in text

@@ -39,6 +39,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--product-collider", choices=["convex", "none"], default="convex",
                    help="Author convex colliders on product/tag prototypes (default) or skip them "
                         "(fixtures + ground still get triangle-mesh colliders).")
+    # Reactive-arm evaluation (opt-in, default OFF)
+    p.add_argument("--arm-mpc", action="store_true", default=False,
+                   help="EVALUATION-ONLY opt-in: flag the cuRobo MPC reactive follow-and-avoid "
+                        "arm-control evaluation (lane sim-arm-mpc-avoid-v1). This does NOT change "
+                        "the composed stage or the mission's cuMotion arm path -- absent it the run "
+                        "is byte-identical. MPC is a SOFT collision cost, not a safety function; the "
+                        "measured evidence comes from scripts/run_arm_mpc_bench.py. See "
+                        "docs/arm_mpc_avoid.md.")
     # Outputs
     p.add_argument("--save", default=DEFAULT_SAVE, help="Composed stage output (default: %(default)s).")
     p.add_argument("--screenshot", default=None,
@@ -149,6 +157,15 @@ def render_plan(plan: Mapping[str, Any]) -> str:
         L.append("")
         L.append("--- GPU guard (what a real run would decide right now) ---")
         L.append(gpu.get("message", ""))
+
+    if plan.get("arm_mpc"):
+        L.append("")
+        L.append("--- --arm-mpc: cuRobo MPC reactive arm (EVALUATION-ONLY) ---")
+        L.append("MPC follow-and-avoid is a SOFT collision cost, NOT a safety function, and is")
+        L.append("NOT wired into this composition or the mission's cuMotion arm path (the stage")
+        L.append("authored here is byte-identical with or without this flag). Measured evidence:")
+        L.append("scripts/run_arm_mpc_bench.py (container fm-plan-mpc-curobo-v1). See")
+        L.append("docs/arm_mpc_avoid.md and data/sim-arm-mpc-avoid-v1/report.md.")
 
     L.append("")
     L.append("--- outputs a real run would write ---")
