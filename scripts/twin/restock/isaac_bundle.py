@@ -426,6 +426,13 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     paths = assembly.paths
     robot_root = paths['articulation'].rsplit('/', 1)[0] if '/' in paths['articulation'] else paths['articulation']
     cart_root = assembly.evidence['composition']['assets']['cart']['root']
+    # The handling unit rides ON the cart deck once loaded. It is a separate rigid body (not under the
+    # cart root), and the lidar's upper scan height (heights=(0.15,0.5,1.0)) strikes it on the deck
+    # (~1.0 m), so without this it reads as a phantom nav obstacle sitting on/behind the cart whenever
+    # the cart is masked as self -- blocking couple's dock approach (ds-003: 30 unmasked returns at the
+    # cart's near face were the carton, not the cart, which IS under cart_root) and the coupled tow. Mask
+    # the loaded carton together with the cart: it is cargo that moves with the train, not an obstacle.
+    cart_self_paths = (cart_root, assembly.evidence['composition']['stock'])
     mobile_urdf = output / 'mobile-import.urdf'
     # Default the stow envelope radius to the robot's structural stow extent (measured 0.621 m at
     # the hitch, data/mobile-restock-v2/report.md): the old 0.55 m default could never contain the
@@ -443,7 +450,7 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # cart read as a phantom obstacle behind the robot, blocking any turn-in-place/return maneuver.
     range_sensor = IsaacRangeSensor(
         get_sensor_pose=lambda: _lidar_pose(assembly.robot_body, _lidar_xyz[0], _lidar_xyz[1]),
-        sensor_to_base=_lidar_xyz, self_paths=(robot_root,), coupled_self_paths=(cart_root,))
+        sensor_to_base=_lidar_xyz, self_paths=(robot_root,), coupled_self_paths=cart_self_paths)
     recorder = Recorder(output / 'mission-frames', fps=plan.recording_fps)
     verifier = InventoryVerifier(capture, source=plan.verification_source)
 
@@ -487,7 +494,11 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # (firstmate msg 252 sim-only fidelity relaxation) to tolerate the harmless ~11 mrad contact
         # chassis-pivot impulse. Absent from config => real-rig defaults (real path untouched).
         stationary_dxy=float(config.get('base_stationary_dxy_m', 0.005)),
-        stationary_dyaw=float(config.get('base_stationary_dyaw_rad', 0.01)))
+        stationary_dyaw=float(config.get('base_stationary_dyaw_rad', 0.01)),
+        # Ideal simulated proprioception: a sim run may tighten the nav localization pad from the
+        # conservative real-rig 0.05 m so it does not falsely fail free(start) against a trailing
+        # obstacle. Absent => the real-rig default (untouched). See isaac_port.position_uncertainty.
+        position_uncertainty=float(config.get('sim_odometry_position_uncertainty', 0.05)))
 
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)

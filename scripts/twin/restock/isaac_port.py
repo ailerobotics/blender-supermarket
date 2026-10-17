@@ -118,8 +118,17 @@ class IsaacPort:
                  recorder=None, native_transport=None, after_step=None,
                  on_action=None, realtime=True, record_stride=2, sensing_stride=1,
                  masked_depth=None, set_render_suspended=None,
-                 stationary_dxy=0.005, stationary_dyaw=0.01, command_gate=None):
+                 stationary_dxy=0.005, stationary_dyaw=0.01, command_gate=None,
+                 position_uncertainty=0.05):
         self.world,self.robot=world,robot
+        # Localization uncertainty pad added to the nav footprint radius. The real rig keeps the
+        # conservative 0.05 m default; this port feeds IDEAL simulated rigid-body proprioception
+        # (sensor_models['localization']), so a sim run may set it to the measured ~0 to avoid an
+        # inaccurate pad falsely failing the planner's free(start) check when a trailing obstacle
+        # (e.g. the staging support behind the parked robot) sits just outside the true footprint.
+        if not math.isfinite(position_uncertainty) or position_uncertainty < 0:
+            raise ValueError('position_uncertainty must be finite and nonnegative')
+        self._odom_position_uncertainty=float(position_uncertainty)
         # Opt-in sensing execution gate seam (camera lane). Wired (non-None) only when
         # config['sensing_execution_gate'] is on; gate() then suspends the decode-camera render
         # during a validated-reach execution phase. None => the gate is off and every path below is
@@ -379,17 +388,25 @@ class IsaacPort:
         # phantom obstacle behind the robot) while coupled, and a decoupled cart stays a real
         # obstacle. The sensor unions its coupled_self_paths into the self set when this is True.
         self.range_sensor.coupled=coupled
-        # The cart is the work target (not a hazard) while the PARKED robot places a carton onto it in
-        # collect: mask it as self so the reachable adjacent cart does not trip obstacle_stop (run-217).
-        # Only during the stationary collect action; every other action leaves it a real obstacle.
-        self.range_sensor.workspace_self=(self.current_action=='collect')
+        # The cart is the work target (not a hazard), not an obstacle, in the two actions whose whole
+        # purpose is to reach it:
+        #   * collect -- the PARKED robot places a carton onto the adjacent cart (run-217: the reachable
+        #     cart inside the base footprint disk would otherwise trip obstacle_stop), and
+        #   * couple  -- the robot drives UP TO the (still uncoupled) cart to seat its hitch; an unmasked
+        #     cart reads as a hard obstacle sitting on the dock goal, so the planner finds no route to
+        #     cart_dock and couple fails 'blocked_no_route' before it can ever attach (ds-001).
+        # workspace_self masks the cart WITHOUT asserting `coupled`, so the footprint stays the uncoupled
+        # base radius (no swept-train envelope) and no coupling is implied. Every OTHER action (outbound/
+        # park/transfer/verify/return) leaves the cart a real obstacle (when coupled it is coupled-self).
+        self.range_sensor.workspace_self=(self.current_action in ('collect','couple'))
         scan=self.range_sensor.read(now)
         articulation=wrap(r.yaw-c.yaw)
         # Reference navigation consumes a localized Odometry + an obstacle Observation,
         # not raw wheel encoders and a Scan. The measured base pose is the reference
         # localization (default source 'wheel_odometry_localized'); the Scan is transformed
         # into map-frame obstacles about that pose (source 'simulated_lidar').
-        odometry=Odometry((r.x,r.y,r.yaw),now,float(np.linalg.norm(rv)),float(rw[2]))
+        odometry=Odometry((r.x,r.y,r.yaw),now,float(np.linalg.norm(rv)),float(rw[2]),
+                          position_uncertainty=self._odom_position_uncertainty)
         navigation=nav_observation(scan,odometry,coupled=coupled,arm_transport=ready,
                                    articulation=articulation)
         if self.recorder is not None:
