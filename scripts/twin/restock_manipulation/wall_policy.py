@@ -66,3 +66,32 @@ class WallCartonPolicy:
         preplace[2] += self.lift
         return {name:tuple(p) for name,p in dict(approach=approach, contact=contact,
             lift=lift, preplace=preplace, place=place, retreat=retreat).items()}
+
+
+class SimCartPlacePolicy:
+    """SIM-ONLY place-pose policy (firstmate 282). Keeps the proven side-grip PICK poses (and the
+    grip TCP orientation) from the real-rig WallCartonPolicy, but RE-CHAINS the cart PLACE so the
+    pre/post standoff offsets TOWARD the robot along the approach axis instead of the wall policy's
+    outward standoff -- which points away from the base and is cuMotion-IK-infeasible onto the cart
+    (runs 218-222: side-grip place preplace/retreat ~1.3 m IK-fail, deck AND shelf). The carton is
+    placed with the SAME side-grip orientation it was picked with; only the approach/retreat
+    direction is mirrored to the reachable (base-ward) side. The real-rig wall policy is untouched;
+    this wraps it and only rewrites preplace/place/retreat, gated on a sim config flag.
+
+    place    = the wall policy's place pose (carton resting on the shelf, side-grip TCP orientation)
+    retreat  = place offset by `profile.approach` TOWARD ur_base_link (origin) in the horizontal plane
+    preplace = retreat raised by the lift margin
+    """
+    def __init__(self, wall, lift=.03):
+        self.wall, self.lift = wall, float(lift)
+
+    def build(self, source, target, profile):
+        poses = dict(self.wall.build(source, target, profile))   # proven pick + grip orientation
+        place = tuple(poses['place'])
+        x, y = place[0], place[1]
+        n = math.hypot(x, y) or 1.0
+        d = profile.approach
+        retreat = (x - x / n * d, y - y / n * d, place[2], *place[3:])   # toward the origin (robot)
+        preplace = (retreat[0], retreat[1], retreat[2] + self.lift, *place[3:])
+        poses['place'], poses['retreat'], poses['preplace'] = place, retreat, preplace
+        return poses

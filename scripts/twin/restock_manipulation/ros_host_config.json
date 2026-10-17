@@ -30,5 +30,6 @@
   "contact_overpress_step_m": 0.003,
   "contact_overpress_cap_m": 0.02,
   "arm_max_speed": 0.3,
-  "startup_grace_seconds": 60.0
+  "startup_grace_seconds": 60.0,
+  "sim_cart_place_policy": true
 }

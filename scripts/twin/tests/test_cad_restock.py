@@ -404,6 +404,33 @@ def test_wall_policy_uses_current_station_poses_and_rejects_oversized_case():
     assert source.unit_kind == 'handling_unit' and source.retail_quantity is None
 
 
+def test_sim_cart_place_policy_offsets_place_standoff_toward_the_robot():
+    # firstmate 282 opt 3 (sim-only): keep the wall policy's PICK + place pose/orientation, but
+    # re-chain preplace/retreat to offset TOWARD the robot (ur_base_link origin) instead of the wall
+    # policy's outward standoff, so the cart place is cuMotion-reachable. Fake wall policy returns a
+    # place 1.2 m out on +x with a far (outward) preplace/retreat; the sim policy must keep the pick
+    # + place and pull preplace/retreat back toward the origin.
+    from scripts.twin.restock_manipulation.wall_policy import SimCartPlacePolicy
+    base = {'approach': (0.0, 1.1, 0.4, .5, .5, .5, .5), 'contact': (0.0, 1.1, 0.26, .5, .5, .5, .5),
+            'lift': (0.0, 1.1, 0.4, .5, .5, .5, .5), 'place': (1.2, 0.0, 0.5, -.707, 0., 0., -.707),
+            'preplace': (1.5, 0.0, 0.53, -.707, 0., 0., -.707), 'retreat': (1.5, 0.0, 0.5, -.707, 0., 0., -.707)}
+    wall = NS(build=lambda s, t, p: dict(base))
+    policy = SimCartPlacePolicy(wall, lift=.03)
+    prof = ProductProfile('case', (.6, .4, .16), (.5, .5, .5, .5), tcp_surface_offset=.0025,
+                          grasp_mode='side', approach=.18)
+    plan = policy.build(None, None, prof)
+    # pick + place + orientation preserved from the wall policy
+    assert plan['approach'] == base['approach'] and plan['lift'] == base['lift']
+    assert plan['place'] == base['place']
+    # retreat pulled 0.18 m TOWARD the origin along +x (place x 1.2 -> 1.02), z == place z, same quat
+    assert plan['retreat'][0] == pytest.approx(1.02) and plan['retreat'][1] == pytest.approx(0.0)
+    assert plan['retreat'][2] == pytest.approx(plan['place'][2])
+    assert plan['retreat'][3:] == base['place'][3:]
+    # preplace == retreat + lift up; both far UNDER the outward wall standoff (1.5 -> 1.02)
+    assert plan['preplace'][0] == pytest.approx(1.02)
+    assert plan['preplace'][2] == pytest.approx(plan['retreat'][2] + .03)
+
+
 def test_sim_attach_fallback_gating_default_off_and_contact_gated():
     """The labelled sim attach-fallback (firstmate run-202) must be a no-op by default, must weld ONLY
     on a measured near-zero flush contact with suction on, must prefer the native latch, and must

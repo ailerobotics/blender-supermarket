@@ -93,6 +93,13 @@ def main():
     # (run-222). Mirror isaac_runtime: policy only when every profile is side mode.
     _modes = {p.grasp_mode for p in profiles.values()}
     _policy = WallCartonPolicy(args.shelfbot_root, tool, walls=config['walls']) if _modes == {'side'} else None
+    # SIM-ONLY cart place-pose policy (firstmate 282, key place-on-cart-strategy-2 opt 3): the wall
+    # policy's outward place standoff is cuMotion-IK-infeasible onto the cart; wrap it so the PLACE
+    # pre/post standoff offsets TOWARD the robot (CPU-verified reachable) while the proven side-grip
+    # PICK and the real-rig wall policy are untouched. Gated on the config flag; off by default.
+    if _policy is not None and config.get('sim_cart_place_policy'):
+        from .wall_policy import SimCartPlacePolicy
+        _policy = SimCartPlacePolicy(_policy)
     controller = TransferController(motion,profiles,frame=tool.base_frame,
         phase_timeout=120.,pose_policy=_policy,
         transport_joints=transport_joints,
