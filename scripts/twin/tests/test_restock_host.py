@@ -192,6 +192,12 @@ class HostTests(unittest.TestCase):
         self.assertNotIn('caster_roll', xrdf['default_joint_positions'])
         # The pruned base links are still covered by collision spheres.
         self.assertTrue(xrdf['geometry']['mobile_cad']['spheres'].get('caster_wheel'))
+        # The attached carton (added at runtime as 'attached_object') must be DECLARED so cuMotion
+        # self-collision-checks it against the arm: reserved in collision.buffer_distance and present
+        # in the self_collision.ignore map (exempting only its gripper-seat links). Without this the
+        # reloaded carton lands only in world-collision and the planner swings it through the arm.
+        self.assertIn('attached_object', xrdf['collision'].get('buffer_distance', {}))
+        self.assertIn('attached_object', xrdf['self_collision']['ignore'])
 
     def test_asset_report_tolerates_env_float_noise_but_not_real_change(self):
         # The recompute is numerically env-dependent (scipy qhull/KDTree): a float
