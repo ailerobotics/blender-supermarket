@@ -185,7 +185,12 @@ repo's `scenes/`, `export/` or `renders/`.
   RUNBOOK §19, docs [docs/route_alerts.md](docs/route_alerts.md), write-up
   `data/sim-route-alerts-v1/report.md`. strays/coldchain need a products recognizer
   (GPU, off by default); store-vision has no per-frame chiller-door detector (proposal in
-  the report).
+  the report). Live in-Isaac detection is proven through the IDENTICAL runner by
+  `scripts/run_route_alerts_smoke.py` over real render-smoke RTX frames (a seeded
+  cube-on-floor); the "on the route while driving" run needs a mobile floor-facing RGB-D
+  camera the bundle lacks today (follow-up + touch points in the report). The dynobs
+  mission feed (`navigation.dynamic_obstacle_source`) is the consumer seam a route-alerts
+  `source(now)->latest_detections()` builder registers with — no parallel layer.
 - Git delivery: the repository now has an `origin` remote; follow the current
   task delivery contract rather than the former local-only assumption.
 - Mobile UR10/cart assets and control interfaces: [docs/mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md), commands in RUNBOOK §9. The generated mobile URDF replaces the fixed pedestal; import with a free base. CPU FK/schema checks do not establish PhysX towing stability.

@@ -1186,3 +1186,15 @@ Guarded GPU (optional, for the open-vocab paths / a live mission run). Add
 only when free (the integration lane holds it across its commission+mission sequence) and
 keep sessions short. Live people-masking requires `config["agents_factory"]` (the humans
 lane's detections) — without it the hook refuses to analyse (GDPR-by-design).
+
+Live in-Isaac smoke (proves detection through the identical runner on real RTX frames, no
+mobile floor camera needed). Two phases: (1) render a seeded obstruction (the render-smoke
+default static-cube-on-floor bench, a fixed calibrated RGB-D camera) under the blocking GPU
+lock — `flock -w 3600 /tmp/aile-gpu.lock env AILE_GPU_LOCK_INHERITED=1 ROS_DOMAIN_ID=108
+ROS_LOCALHOST_ONLY=1 PYTHONPATH=scripts <env_isaaclab python> scripts/run_restock_render_smoke.py
+--output <scratch>/render --ffmpeg <ffmpeg> --isaac-python <env_isaaclab python> --nvidia-runtime
+<gpu-runtime-578/root> --heavy-threshold-mb 2500` (render-smoke's own guards: ≥8 GiB free VRAM,
+300 s cap); then (2) run the identical runner over the captured frames on CPU — `PYTHONPATH=scripts
+<store-vision .venv python> scripts/run_route_alerts_smoke.py --render <scratch>/render --out
+<scratch>/detect` (asserts obstruction.detected + a dynobs Detection). Write-up +
+"on-the-route" follow-up (a mobile RGB-D route camera): `data/sim-route-alerts-v1/report.md`.
