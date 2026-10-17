@@ -98,26 +98,34 @@ class MobileController:
     BRAKE_PATH = '/MobileParkingBrake'
 
     def engage_brake(self):
-        """SIM PARKING BRAKE (firstmate run-210): lock the chassis to the world with a FixedJoint at its
-        CURRENT pose (zero initial error) while the arm works -- the sim equivalent of the brakes a real
-        AMR engages before manipulating. The wheel position-hold (hold()) is stiffness-saturated on yaw
-        (runs 164-166), so a 0.45 kg carton welded to the arm still pivots the base past the 25 mrad gate
-        (run-208/209); the rigid brake resists that reaction torque. Gated to the stationary arm phase and
-        released (release_brake) before any base drive. SIM-only: no teleport; the real-rig base brakes
-        physically and never runs this native authoring."""
-        from pxr import UsdPhysics, UsdGeom, Gf
+        """SIM PARKING BRAKE (firstmate run-210/212): lock the chassis YAW to the world with a D6 joint at
+        its CURRENT pose while the arm works -- the sim equivalent of the brakes a real AMR engages before
+        manipulating. The wheel position-hold (hold()) is stiffness-saturated on yaw (runs 164-166), so a
+        0.45 kg carton welded to the arm pivots the base past the 25 mrad gate (run-208/209).
+
+        A FULL FixedJoint brake held the yaw (base_dyaw 0.00 mrad, run-210/211) but RIGIDLY over-
+        constrained the loop world->base->arm->(weld)->carton->support->world once the carton welds to the
+        arm while still on its support, oscillating the arm (GOAL_MISS vel ~3.2 rad/s). So lock ONLY the
+        yaw DOF (the 47.6 mrad problem) and leave translation + roll/pitch FREE, so the base can shift a
+        little to relieve that loop (base_dxy stayed 8.8 mm, inside the 15 mm gate). Gated to the
+        stationary arm phase, released before any base drive. SIM-only; real rig brakes physically."""
+        from pxr import UsdPhysics, UsdGeom, Gf, Sdf
         if self._braked:
             return
         world = UsdGeom.XformCache().GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.robot_body))
         t, q = world.ExtractTranslation(), world.ExtractRotationQuat()
-        joint = UsdPhysics.FixedJoint.Define(self.stage, self.BRAKE_PATH)
-        joint.CreateBody1Rel().SetTargets([self.robot_body])      # body0 empty == world anchor
+        joint = UsdPhysics.Joint.Define(self.stage, self.BRAKE_PATH)     # generic D6
+        joint.CreateBody1Rel().SetTargets([self.robot_body])            # body0 empty == world anchor
         joint.CreateLocalPos0Attr(Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])))
         joint.CreateLocalRot0Attr(Gf.Quatf(float(q.GetReal()), Gf.Vec3f(*[float(v) for v in q.GetImaginary()])))
         joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
         joint.CreateLocalRot1Attr(Gf.Quatf(1.0))
+        # Lock ONLY rotZ (yaw): low>high == locked. transX/Y/Z and rotX/Y get no limit == free.
+        lock = UsdPhysics.LimitAPI.Apply(joint.GetPrim(), 'rotZ')
+        lock.CreateLowAttr(1.0)
+        lock.CreateHighAttr(-1.0)
         self._braked = True
-        print('MOBILE_BRAKE engaged at chassis pose', flush=True)
+        print('MOBILE_BRAKE engaged (yaw-lock D6) at chassis pose', flush=True)
 
     def release_brake(self):
         """Release the sim parking brake so the base can drive (couple/tow/park)."""

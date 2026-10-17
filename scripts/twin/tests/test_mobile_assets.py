@@ -180,11 +180,16 @@ def test_sim_parking_brake_locks_chassis_and_releases(stage):
                          wheel_angle_reader=lambda: [0.0, 0.0])
     assert not c._braked and not stage.GetPrimAtPath(c.BRAKE_PATH)
     c.engage_brake()
-    brake = UsdPhysics.FixedJoint(stage.GetPrimAtPath(c.BRAKE_PATH))
+    brake = UsdPhysics.Joint(stage.GetPrimAtPath(c.BRAKE_PATH))
     assert c._braked and brake
     # body1 is the chassis; body0 empty == world; anchored at the chassis's current pose.
     assert [str(t) for t in brake.GetBody1Rel().GetTargets()] == [str(robot.GetPath())]
     assert tuple(brake.GetLocalPos0Attr().Get()) == pytest.approx((-5.73, 16.0, 0.24))
+    # ONLY yaw (rotZ) is locked (low>high); translation + roll/pitch stay free (no limit).
+    z = UsdPhysics.LimitAPI.Get(brake.GetPrim(), 'rotZ')
+    assert z and z.GetLowAttr().Get() > z.GetHighAttr().Get()
+    assert not UsdPhysics.LimitAPI.Get(brake.GetPrim(), 'transX').GetLowAttr()
+    assert not UsdPhysics.LimitAPI.Get(brake.GetPrim(), 'rotX').GetLowAttr()
     c.engage_brake()  # idempotent
     assert stage.GetPrimAtPath(c.BRAKE_PATH)
     c.release_brake()
