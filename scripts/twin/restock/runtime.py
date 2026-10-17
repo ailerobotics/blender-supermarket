@@ -128,8 +128,13 @@ class ManipulationBridge:
 class RuntimeAdapter:
     def __init__(self, navigation, mobile, manipulation, port: Port, poses,
                  *, fixture_mode=False, goal_articulation=None,
-                 stall_window_s=_SENSOR_STALL_WINDOW_S):
+                 stall_window_s=_SENSOR_STALL_WINDOW_S, route_alerts=None):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
+        # Opt-in mobile store-sensor hook (twin.route_alerts). None (default) =>
+        # byte-identical run. When attached it runs the read-only store-vision
+        # detectors over the drive camera during navigate; it is self-disabling and
+        # never raises into the tick, and never changes navigation/actuation here.
+        self.route_alerts = route_alerts
         if not isinstance(self.manip, ManipulationBridge):
             self.manip = ManipulationBridge(self.manip)
         # Last manipulation controller phase (observe/approach/contact/...), fed to the port's opt-in
@@ -183,7 +188,10 @@ class RuntimeAdapter:
     def stop(self):
         errors = []
         # Try every stop even when one adapter raises. Never command release.
-        for call in (self.mobile.park, self.nav.cancel, self.manip.stop, self.port.stop):
+        calls = [self.mobile.park, self.nav.cancel, self.manip.stop, self.port.stop]
+        if self.route_alerts is not None:
+            calls.append(self.route_alerts.close)
+        for call in calls:
             try:
                 call()
             except Exception as exc:
@@ -241,6 +249,8 @@ class RuntimeAdapter:
                 f'adapter_time={self.time!r} age={self.time-p.simulation_time!r}]')
         self.last_packet_id = p.observation_id
         if self.phase == 'navigate':
+            if self.route_alerts is not None:  # opt-in mobile store sensor; self-disabling
+                self.route_alerts.on_navigate(self.port, p, self.time)
             r = self.nav.step(dt, p)
             self._navn = getattr(self, '_navn', 0) + 1
             if self._navn % 30 == 1:                     # diagnostic: why navigate does not complete

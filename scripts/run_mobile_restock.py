@@ -247,6 +247,13 @@ def run(args, manifest, scenario):
     config=json.loads(args.runtime_config.read_text())
     if getattr(args, 'render_preset', None):
         _apply_render_preset(config, args.render_preset)
+    # Opt-in mobile store-sensor (twin.route_alerts); default off => byte-identical run.
+    # --route-alerts enables the defaults; --route-alerts-config PATH loads a tuned
+    # section (floors/aisles/detector prefs). Either injects config['route_alerts'].
+    if getattr(args, 'route_alerts_config', None):
+        config['route_alerts'] = json.loads(args.route_alerts_config.read_text())
+    elif getattr(args, 'route_alerts', False):
+        config['route_alerts'] = True
     readiness=check_runtime_inputs(config)
     if not readiness['files_ready']:
         raise ValueError('runtime inputs unresolved: '+', '.join(readiness['unresolved_inputs']))
@@ -538,6 +545,14 @@ def main():
     parser.add_argument('--dry-run-job', action='store_true',
                         help='resolve --job-from, print the mapped mission job + planogram validation, '
                              'and exit without booting the simulator')
+    parser.add_argument('--route-alerts', action='store_true',
+                        help='opt-in mobile store sensor: run the read-only store-vision spill / '
+                             'obstruction detectors over the drive camera while navigating, publish '
+                             'robot.route_alert.* events + staff tasks, and expose obstruction '
+                             'detections for the dynobs costmap layer. Default off (byte-identical).')
+    parser.add_argument('--route-alerts-config', type=Path,
+                        help='JSON route_alerts section (floors/aisles/detector prefs) to inject '
+                             'instead of the --route-alerts defaults')
     args = parser.parse_args()
     if args.dry_run_job and not args.job_from:
         parser.error('--dry-run-job requires --job-from')

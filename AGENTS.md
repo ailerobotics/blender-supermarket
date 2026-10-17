@@ -154,6 +154,20 @@ repo's `scenes/`, `export/` or `renders/`.
   (`scripts/run_humans_safety_demo.py`) are the only evidence; the detector/frame
   GPU run is PENDING (lowest GPU priority). Report + open owner decisions:
   `data/sim-restock-humans-v1/report.md`.
+- **Route alerts** (opt-in, default-off): the mission robot as a mobile store sensor.
+  `scripts/twin/route_alerts/` bridges the drive camera to the READ-ONLY `store-vision`
+  spill/obstruction detectors (classical CPU by default; open-vocab is the GPU path),
+  publishes `robot.route_alert.*` events + de-duplicated staff tasks, and turns
+  obstruction footprints into `navigation.dynamic.Detection` fed to nav ONLY through the
+  dynobs costmap layer (no parallel layer). People-masked (GDPR); `--route-alerts` absent
+  ⇒ byte-identical (`run_mobile_restock.py` → `isaac_bundle.create` → `RuntimeAdapter`
+  `route_alerts` hook, all guarded/self-disabling). store-vision is imported lazily and
+  lives OUTSIDE this repo (its `.venv` python3.11 runs the integration tests). CPU tests
+  `scripts/twin/route_alerts/tests/`, evidence `scripts/run_route_alerts_evidence.py`,
+  RUNBOOK §19, docs [docs/route_alerts.md](docs/route_alerts.md), write-up
+  `data/sim-route-alerts-v1/report.md`. strays/coldchain need a products recognizer
+  (GPU, off by default); store-vision has no per-frame chiller-door detector (proposal in
+  the report).
 - Git delivery: the repository now has an `origin` remote; follow the current
   task delivery contract rather than the former local-only assumption.
 - Mobile UR10/cart assets and control interfaces: [docs/mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md), commands in RUNBOOK §9. The generated mobile URDF replaces the fixed pedestal; import with a free base. CPU FK/schema checks do not establish PhysX towing stability.

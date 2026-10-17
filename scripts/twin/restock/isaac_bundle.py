@@ -283,8 +283,25 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
         parts['navigation'], parts['mobile'], parts['manipulation'], parts['port'],
         parts.get('closers', ()), parts.get('recording', {}))
 
+    # Opt-in mobile store-sensor hook (twin.route_alerts). Built ONLY when the config
+    # carries a `route_alerts` section; absent => route_alerts=None and the adapter is
+    # byte-identical. The hook is self-disabling and never raises into the tick; the
+    # frame_builder taps the drive camera and REQUIRES a people-mask source (GDPR), so
+    # it no-ops until the humans lane's detections are wired via config['agents_factory'].
+    route_alerts = None
+    if config.get('route_alerts'):
+        from twin.route_alerts.mission import build_from_config, recording_camera_frame_builder
+        agents_provider = None
+        if config.get('agents_factory'):
+            agents_provider = _resolve_factory(config, 'agents_factory')(
+                app=app, assembly=assembly, parts=parts, plan=plan, config=config, output=output)
+        frame_builder = recording_camera_frame_builder(config, agents_provider=agents_provider)
+        route_alerts = build_from_config(config, output_dir=output, frame_builder=frame_builder,
+                                         robot_id=config.get('route_alerts_robot_id', 'shelfbot'))
+
     adapter = RuntimeAdapter(navigation, mobile, manipulation, port, plan.poses,
-                             fixture_mode=False, goal_articulation=plan.goal_articulation)
+                             fixture_mode=False, goal_articulation=plan.goal_articulation,
+                             route_alerts=route_alerts)
 
     # Opt-in warm-session reset provider (dev iteration): config['warm_reset'] names a
     # lane-owned builder `module:function` called once here with the live scene; it returns the
