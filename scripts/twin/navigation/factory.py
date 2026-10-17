@@ -73,15 +73,34 @@ def _build_spec(nav):
 
 def _controller_kwargs(nav):
     kwargs = {}
-    if 'goal_timeout' in nav:
-        kwargs['goal_timeout'] = nav['goal_timeout']
-    for limit in ('max_speed', 'max_angular', 'brake_acceleration', 'stale_after'):
+    for limit in ('goal_timeout', 'blocked_timeout', 'max_speed', 'max_angular',
+                  'brake_acceleration', 'stale_after'):
         if limit in nav:
+            # `blocked_timeout` is the avoidance patience: how long the base will
+            # stop and wait on a blocked aisle (e.g. a crossing shopper) before
+            # giving up the goal. Raising it lets the mission wait out a transient
+            # dynamic block and resume rather than fail. Default is unchanged.
             kwargs[limit] = nav[limit]
     # Production never accepts fixtures: the knob is intentionally not exposed.
     if nav.get('allow_test_fixtures'):
         raise ValueError('allow_test_fixtures is forbidden in a production bundle')
     return kwargs
+
+
+def _build_dynamic_layer(nav):
+    """Build the opt-in moving-obstacle layer from `navigation.dynamic_obstacles`.
+
+    Returns None when the key is absent (default-off, byte-identical run). The
+    config object maps directly onto DynamicObstacleConfig fields; the caller
+    supplies detections per frame from the detection topic or scenario.
+    """
+    cfg = nav.get('dynamic_obstacles')
+    if cfg is None:
+        return None
+    if not isinstance(cfg, dict):
+        raise ValueError('navigation.dynamic_obstacles must be an object')
+    from .dynamic import DynamicObstacleLayer, DynamicObstacleConfig
+    return DynamicObstacleLayer(DynamicObstacleConfig(**cfg))
 
 
 def _build_sensor(controller, grid, nav):
@@ -105,7 +124,8 @@ def _build_sensor(controller, grid, nav):
     if 'localizer_max_error' in cfg:
         localizer_kwargs['max_error'] = float(cfg['localizer_max_error'])
     localizer = MapLocalizer(grid, initial_map_pose, **localizer_kwargs)
-    return SensorNavigation(controller, wheels, localizer)
+    return SensorNavigation(controller, wheels, localizer,
+                            dynamic_layer=_build_dynamic_layer(nav))
 
 
 def _build_nav2(controller, grid, output, nav, adapter_cls):
@@ -193,6 +213,13 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
     controller = ArticulatedController(grid, spec,
                                        require_temporal_map=bool(nav.get('require_temporal_map', False)),
                                        **_controller_kwargs(nav))
+
+    if 'dynamic_obstacles' in nav and mode != 'sensor':
+        # The in-process layer is folded into the sensor route's Observation. The
+        # Nav2 route takes moving obstacles through its ROS costmap obstacle/nvblox
+        # layer instead, so refuse rather than silently ignore the config here.
+        raise ValueError('navigation.dynamic_obstacles applies only to nav_mode "sensor"; '
+                         'the nav2 route uses its ROS costmap obstacle/nvblox layer')
 
     if mode == 'reference':
         built = controller
