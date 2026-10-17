@@ -173,17 +173,21 @@ class RosPayloadSync:
             return _diag('attach_result_status=%s' % result.status)
         return True
 
-    def add_base_obstacle(self, allow_links=('ur_base_link_inertia', 'ur_shoulder_link'),
-                          wait_s=30.):
+    def add_base_obstacle(self, allow_links=None, wait_s=30.):
         """Publish the FIXED mobile base (chassis + arm-mount + hitch + wheel boxes) as a STATIC world
-        CollisionObject to move_group so cuMotion plans the arm AND the attached carton clear of it
-        (firstmate 295). cuMotion drops the base links' self-collision spheres -- they are the fixed
-        base below the arm root ur_base_link, not arm links -- and the base is masked out of the nvblox
-        ESDF, so the carton otherwise folds/swings straight through the chassis/arm-mount
-        (run-236/240/241). The arm base link(s) that physically sit ON the mount are allowed-collision so
-        the fixed start state is not flagged. Boxes are in the ur_base_link frame (rigidly fixed to
-        base_link); published once at startup, the base is parked throughout manipulation. Returns the
-        object id. Gated by the caller on a config flag; the real-rig path never calls this."""
+        CollisionObject to move_group so cuMotion plans the attached CARTON clear of it (firstmate 295).
+        cuMotion drops the base links' self-collision spheres -- they are the fixed base below the arm
+        root ur_base_link, not arm links -- and the base is masked out of the nvblox ESDF, so the carton
+        otherwise folds/swings straight through the chassis/arm-mount (run-236/240/241).
+
+        The arm itself is MOUNTED ON the base and legitimately folds near it (the stow config
+        [0,-2.5,1.7,...] overlaps the coarse box -- run-242 INVALID_INITIAL_CSPACE_POSITION when only the
+        two base links were allowed), so the object is allowed-collision vs EVERY robot link present at
+        startup (``allow_links=None`` => all current ACM entries). Only the carton payload
+        (restock_carried_unit, attached later at grasp and NOT in the startup ACM) is then checked
+        against it -- exactly the intent: keep the carton clear while the arm moves freely near its base.
+        Boxes in the ur_base_link frame (rigidly fixed to base_link); published once at startup, the base
+        is parked throughout manipulation. Gated by the caller on a config flag; real-rig never calls it."""
         from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene
         from moveit_msgs.msg import CollisionObject, PlanningSceneComponents, AllowedCollisionEntry
         from shape_msgs.msg import SolidPrimitive
@@ -214,7 +218,9 @@ class RosPayloadSync:
         acm = self._wait(gc.call_async(req)).scene.allowed_collision_matrix
         names = list(acm.entry_names)
         rows = [list(e.enabled) for e in acm.entry_values]
-        allow = set(allow_links)
+        # Allow the base obstacle vs every robot link currently in the scene (None => all): the arm is
+        # mounted on the base and folds near it, so only the later-attached carton must avoid the box.
+        allow = set(names) if allow_links is None else set(allow_links)
         for i, n in enumerate(names):            # append the object's column to every existing row
             rows[i].append(n in allow)
         names.append(OBJ)                        # object's own row: allowed vs the arm-base links + self
@@ -231,7 +237,8 @@ class RosPayloadSync:
         req2.scene.allowed_collision_matrix = acm2
         if not self._wait(self.scene.call_async(req2)).success:
             raise RuntimeError('base obstacle planning-scene apply unsuccessful')
-        print('BASE_OBSTACLE published (%d boxes) allow=%s' % (len(boxes), sorted(allow)), flush=True)
+        print('BASE_OBSTACLE published (%d boxes) allow=%d links (carton checked)'
+              % (len(boxes), len(allow)), flush=True)
         return OBJ
 
     def close(self):
