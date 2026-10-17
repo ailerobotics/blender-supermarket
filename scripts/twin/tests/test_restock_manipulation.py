@@ -18,8 +18,10 @@ class FixtureMotion:
         self.stows = []
         self.outcome, self.attach_ok = 'succeeded', True
 
-    def begin(self, pose, joints, straight_line=False):
+    def begin(self, pose, joints, straight_line=False, joint_space=False):
         self.moves.append(pose)
+        self.joint_space_moves = getattr(self, 'joint_space_moves', [])
+        self.joint_space_moves.append(joint_space)
 
     def poll(self):
         return self.outcome

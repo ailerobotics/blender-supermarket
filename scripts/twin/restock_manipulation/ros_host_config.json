@@ -25,7 +25,7 @@
     "rollwagen": 3,
     "G3_back_s2": 3
   },
-  "pose_goal": false,
+  "pose_goal": true,
   "contact_straight_line": true,
   "contact_overpress_step_m": 0.003,
   "contact_overpress_cap_m": 0.02,

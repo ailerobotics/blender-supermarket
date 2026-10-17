@@ -118,7 +118,7 @@ class IsaacCadMotion:
                 self.stop()
                 raise
 
-    def begin(self, pose, joints, straight_line=False):
+    def begin(self, pose, joints, straight_line=False, joint_space=False):
         # straight_line is the ros_adapter host-executor contact-descent path; this CAD planner always
         # collision-plans, so the flag is accepted for protocol parity and otherwise ignored here.
         if self.state == 'running':

@@ -264,7 +264,12 @@ class TransferController:
                     require_fresh(s.valid_until_steady,self.steady_clock)
                 straight = self.phase == 'contact' and self.contact_straight_line
                 target = self._overpressed_contact(self._contact_step) if straight else self.poses[self.phase]
-                self.motion.begin(target, s.joint_positions, straight_line=straight)
+                # Per-move goal type (firstmate msg 284/285): the cart PLACE poses have no cuMotion
+                # task-space IK solution (the solver is systemically broken here); route them through
+                # the reliable seeded-KDL -> joint-space path. The pick (approach/lift) keeps its proven
+                # task-space goal -- a global switch oscillated the pick's joint-space trajectory (run-226).
+                joint_space = self.phase in ('preplace', 'place', 'retreat')
+                self.motion.begin(target, s.joint_positions, straight_line=straight, joint_space=joint_space)
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': self.poses[self.phase]},))
             if self.phase == 'contact' and not self._contact_suction:

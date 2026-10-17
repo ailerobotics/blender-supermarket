@@ -150,7 +150,7 @@ class RosMotionPort:
         self._sim_now = lambda: self.node.get_clock().now().nanoseconds * 1e-9
         self.deadline_clock = time.monotonic
 
-    def begin(self, pose, joints, straight_line=False):
+    def begin(self, pose, joints, straight_line=False, joint_space=False):
         from moveit_msgs.srv import GetPositionIK
         if self.state not in ('idle', 'succeeded', 'failed'):
             raise RuntimeError('motion already active')
@@ -174,7 +174,12 @@ class RosMotionPort:
         # not a cuMotion plan. Every free-space move keeps cuMotion. Forces the KDL IK path even under
         # pose_goal, since the host trajectory interpolates to an explicit joint target.
         self._straight_line = bool(straight_line)
-        if self.pose_goal and not self._straight_line:
+        # Per-move goal type (firstmate msg 284/285): cuMotion TASK-SPACE IK is systemically broken in
+        # this XRDF, but the pick's task-space poses happen to solve; the cart PLACE poses do not, so
+        # the caller forces those through the seeded-KDL -> JOINT-SPACE path (joint_space=True) -- the
+        # reliable path -- while the proven pick keeps its task-space goal. A global pose_goal=False
+        # instead made the PICK approach's joint-space trajectory oscillate (run-226), so route PER MOVE.
+        if self.pose_goal and not self._straight_line and not joint_space:
             self.generation += 1
             self.handle = None
             self._plan_goal = self._pose_plan_goal(pose, joints)
