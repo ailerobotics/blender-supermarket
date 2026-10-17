@@ -37,8 +37,33 @@ from pathlib import Path
 
 import numpy as np
 
+from contextlib import contextmanager
+
 from twin.restock.guard import available_ram_mb, gpu_slot
 from twin.tools import arm_carry_bench as bench
+
+
+@contextmanager
+def gpu_guards_no_flock(*, heavy_threshold_mb=1500):
+    """The same protected-Blender / RAM / VRAM / domain-88-port guards as guard.gpu_slot, but WITHOUT
+    taking the flock -- for when an OUTER `flock -w /tmp/aile-gpu.lock` already holds the lock (the
+    fleet blocking-wait discipline, firstmate inbox 008). Never bypasses the VRAM guard."""
+    import socket
+    from twin.restock.guard import isolation, protected_blender
+    from twin.gpu_guard import query_and_assess
+    if heavy_threshold_mb not in (1500, 2500):
+        raise ValueError('heavy threshold must use default 1500 or explicit opt-in 2500')
+    isolation()
+    if protected_blender():
+        raise RuntimeError('protected Blender process or MCP socket is present')
+    if available_ram_mb() < 12 * 1024:
+        raise RuntimeError('need at least 12 GiB available RAM')
+    decision = query_and_assess(required_free_mb=8000, heavy_threshold_mb=heavy_threshold_mb)
+    if not decision.ok:
+        raise RuntimeError(decision.message)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(('127.0.0.1', 7400 + 250 * 88))
+        yield decision
 
 # A plausible ESTIMATE of the mission lift pose (arm joints, ARM_JOINTS order) at the start of
 # the carry fold -- carton grasped at backstock_00 and lifted, before the tuck. Override with
@@ -153,18 +178,28 @@ class IsaacCarryStage(bench.ArmStage):
         return obstacles
 
     def _enable_contact_reporting(self):
-        """Best-effort PhysX contact reporting on the carton so the carton's physical contacts
-        (hollow-geometry-aware) are named. Degrades to geometric clearance if unavailable."""
+        """Best-effort PhysX contact reporting on the carton AND the robot's own arm links + chassis,
+        so BOTH carton-vs-scene and arm self/body collisions during the fold are named (the latter is
+        what a straight-line joint interpolation can drive into where cuMotion would curve around).
+        Each reported contact records BOTH actors (the pair). Degrades to geometric clearance."""
         try:
             from omni.physx import get_physx_simulation_interface
             from pxr import PhysxSchema, PhysicsSchemaTools
             self._PhysicsSchemaTools = PhysicsSchemaTools
-            prim = self.stage.GetPrimAtPath(self.carton_path)
-            api = PhysxSchema.PhysxContactReportAPI.Apply(prim)
-            try:
-                api.CreateThresholdAttr().Set(0.0)
-            except Exception:
-                pass
+            tracked = [self.carton_path, *self.arm_links.values()]
+            base = self.assembly.paths.get('base_link')
+            if base:
+                tracked.append(base)
+            self._tracked_contacts = set(tracked)
+            for path in tracked:
+                prim = self.stage.GetPrimAtPath(path)
+                if not prim:
+                    continue
+                api = PhysxSchema.PhysxContactReportAPI.Apply(prim)
+                try:
+                    api.CreateThresholdAttr().Set(0.0)
+                except Exception:
+                    pass
 
             def _on_contact(contact_headers, contact_data):
                 for ch in contact_headers:
@@ -173,8 +208,9 @@ class IsaacCarryStage(bench.ArmStage):
                         a1 = str(PhysicsSchemaTools.intToSdfPath(ch.actor1))
                     except Exception:
                         continue
-                    other = a1 if self.carton_path in a0 else (a0 if self.carton_path in a1 else None)
-                    if other is None:
+                    hit0 = any(t in a0 for t in self._tracked_contacts)
+                    hit1 = any(t in a1 for t in self._tracked_contacts)
+                    if not (hit0 or hit1):
                         continue
                     pos = None
                     try:
@@ -183,9 +219,11 @@ class IsaacCarryStage(bench.ArmStage):
                             pos = [float(cp[0]), float(cp[1]), float(cp[2])]
                     except Exception:
                         pos = None
-                    self._contact_buf.append({'prim': other, 'position': pos})
+                    # record the PAIR so an arm-vs-body / arm-vs-arm self-collision is visible
+                    self._contact_buf.append({'prim': '%s<->%s' % (a0.rsplit('/', 1)[-1], a1.rsplit('/', 1)[-1]),
+                                              'position': pos, 'a0': a0, 'a1': a1})
             self._contact_sub = get_physx_simulation_interface().subscribe_contact_report_events(_on_contact)
-            print('ARMBENCH_CONTACT_REPORTING enabled', flush=True)
+            print('ARMBENCH_CONTACT_REPORTING enabled on %d bodies (carton+arm+chassis)' % len(tracked), flush=True)
         except Exception as exc:
             print('ARMBENCH_CONTACT_REPORTING unavailable (%s); geometric clearance only' % exc, flush=True)
 
@@ -478,6 +516,14 @@ def _run_trial(stage: IsaacCarryStage, spec: bench.TrialSpec, goals, dt, max_sim
     return moves
 
 
+def _write_partial(output, summary):
+    """Persist the running summary after each trial so a wall-cap kill keeps the results so far."""
+    try:
+        (output / 'bench.json').write_text(json.dumps(summary, indent=2, allow_nan=False) + '\n')
+    except Exception:
+        pass
+
+
 def _move_dict(m: bench.MoveMetrics):
     return dict(label=m.label, outcome=m.outcome, reason=m.reason, duration_s=m.duration_s,
                 settle_time_s=m.settle_time_s, peak_tracking_error=m.peak_tracking_error,
@@ -592,8 +638,10 @@ def run(args):
                         'contact is PhysX (hollow-geometry-aware) when available.'),
                'trials': []}
     app = None
+    slot = (gpu_guards_no_flock(heavy_threshold_mb=args.heavy_threshold_mb) if args.no_gpu_lock
+            else gpu_slot(heavy_threshold_mb=args.heavy_threshold_mb))
     try:
-        with gpu_slot(heavy_threshold_mb=args.heavy_threshold_mb):
+        with slot:
             watcher = threading.Thread(target=watch_ram, daemon=True)
             watcher.start()
             from isaacsim import SimulationApp
@@ -615,6 +663,7 @@ def run(args):
                           % (off, p['carton_world_centre'], [c['prim'] for c in p['contacts']],
                              p['arm_link_clearance_mm'], p['obstacle_clearance_mm']), flush=True)
                 summary['pinned_config_probes'] = probes
+                _write_partial(args.output, summary)
             for label, goals, spec in (jobs if args.pinned_config is None else []):
                 if not app.is_running():
                     raise RuntimeError('simulation app stopped')
@@ -629,6 +678,9 @@ def run(args):
                     carry=dict(peak_speed=spec.carry.peak_speed, peak_accel=spec.carry.peak_accel),
                     passed=bool(moves and all(m.ok for m in moves)),
                     moves=[_move_dict(m) for m in moves]))
+                # persist after EVERY trial so a wall-cap kill still leaves the results so far
+                summary['state'] = 'partial'
+                _write_partial(args.output, summary)
             summary['state'] = 'complete'
     except Exception as exc:
         summary['reason'] = str(exc)
@@ -764,6 +816,9 @@ def main():
     p.add_argument('--dt', type=float, default=1.0 / 60.0)
     p.add_argument('--max-sim-s', type=float, default=90.0, help='per-move sim-time budget')
     p.add_argument('--heavy-threshold-mb', type=int, choices=(1500, 2500), default=1500)
+    p.add_argument('--no-gpu-lock', action='store_true',
+                   help='skip the internal flock because an OUTER `flock -w /tmp/aile-gpu.lock` already '
+                        'holds it (fleet blocking-wait discipline); the VRAM/RAM/Blender guards still run')
     p.add_argument('--render', action='store_true', help='render each physics step (slower; only for evidence)')
     args = p.parse_args()
     return run(args)
