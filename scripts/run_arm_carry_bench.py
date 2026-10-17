@@ -44,7 +44,11 @@ from twin.tools import arm_carry_bench as bench
 # the carry fold -- carton grasped at backstock_00 and lifted, before the tuck. Override with
 # --lift-joints or runtime-config['armbench']['lift_joints'] with the mission's MEASURED lift
 # pose for exact fidelity; the bench records whatever start pose it actually used.
-DEFAULT_LIFT = [0.8, -1.5, 1.2, 0.5, 1.2, -1.2545]
+# Measured mission poses (IK-solved, integration lane reach-check.json, ARM_JOINTS order).
+# GRASP = source_contact (pad at the carton surface); LIFT = source_approach (grasp raised by the
+# approach offset). The bench welds the carton at GRASP in place, then drives grasp->lift->tuck->pan.
+DEFAULT_GRASP = [1.4051, -1.0610, 1.1213, -1.6311, -1.5708, -0.1657]
+DEFAULT_LIFT = [1.4051, -1.0499, 0.8940, -1.4149, -1.5708, -0.1657]
 # The carry fold's body-clear shape + cart pan (ros_host_config.json; handoff (b)).
 CART_TUCK_SHAPE = [-2.3, 1.0, 2.1066, 0.8, -1.2545]
 CART_PAN_JOINT0 = -0.8605
@@ -60,7 +64,7 @@ class IsaacCarryStage(bench.ArmStage):
     """Isaac glue: welds the carton, brakes the base, and implements the ArmStage the executor
     drives against the live articulation. Isaac-only; never imported by the CPU tests."""
 
-    def __init__(self, assembly, lift_joints, *, carton_path='/RestockScenario/HandlingUnit',
+    def __init__(self, assembly, lift_joints, grasp_joints, *, carton_path='/RestockScenario/HandlingUnit',
                  pad_path_key='gripper_pad_tcp', render=False, carton_dims=(0.6, 0.4, 0.16),
                  obstacle_prims=None):
         from isaacsim.core.prims import SingleRigidPrim
@@ -76,6 +80,7 @@ class IsaacCarryStage(bench.ArmStage):
         self.robot_body = assembly.robot_body
         self.render = render
         self.lift_joints = np.asarray(lift_joints, float)
+        self.grasp_joints = np.asarray(grasp_joints, float)
         self.arm_idx = np.asarray(self.gate.indices)
         self.pad_path = assembly.paths[pad_path_key]
         self.carton_path = carton_path
@@ -101,18 +106,10 @@ class IsaacCarryStage(bench.ArmStage):
             pass
         if self.stage.GetPrimAtPath('/RestockScenario/Support'):
             obstacles['support'] = '/RestockScenario/Support'
-        # the store/rack: largest top-level Xform that is not the robot/cart/scenario/physics
-        try:
-            skip = {self.carton_path.split('/')[1], 'RestockScenario', 'physicsScene', 'World'}
-            for prim in self.stage.GetPseudoRoot().GetChildren():
-                name = prim.GetName()
-                path = str(prim.GetPath())
-                if name in skip or path in obstacles.values():
-                    continue
-                if prim.IsA(self._UsdGeom.Xform) or prim.IsA(self._UsdGeom.Scope):
-                    obstacles.setdefault('store', path)
-        except Exception:
-            pass
+        # NB: the whole store root (/Supermarket) is NOT added as a clearance obstacle -- its AABB
+        # engulfs the robot and every fixture, so AABB clearance to it is meaningless. The rack/shelf
+        # the carton actually hits is named authoritatively by PhysX contact reporting instead; add a
+        # SPECIFIC shelf prim via config['armbench']['obstacle_prims'] for a coarse AABB rack metric.
         if override:
             obstacles.update(override)
         print('ARMBENCH_OBSTACLES %s' % obstacles, flush=True)
@@ -277,53 +274,55 @@ class IsaacCarryStage(bench.ArmStage):
             [round(float(rkd[int(i)]), 1) for i in self.arm_idx],
             [round(float(rme[int(i)]), 1) for i in self.arm_idx]), flush=True)
 
-    def reset_to_lift(self, gains: bench.DriveGains, settle_steps=30):
-        """Reset the arm to the lift pose, re-weld the carton at the grasp offset, re-brake the
-        base and re-apply the trial gains, then settle. A bench teleport -- never a mission action."""
-        from pxr import Gf
-        # 1. release any prior weld + brake so re-engagement re-anchors cleanly at the lift pose
+    def _pad_carton_gap_mm(self):
+        pad = self._pad_world().ExtractTranslation()
+        cp, _ = self.carton.get_world_pose()
+        cp = np.asarray(cp, float)
+        return float(np.linalg.norm(np.array([pad[0], pad[1], pad[2]], float) - cp) * 1000)
+
+    def reset_to_grasp(self, gains: bench.DriveGains, settle_steps=30):
+        """Faithful per-trial reset: set the arm to the measured GRASP pose (source_contact), where
+        the gripper pad is already at the authored carton by IK, then weld the carton to the gripper
+        IN PLACE (no manual carton teleport -- the weld captures the real grasp relationship, exactly
+        as the mission's SIM_ATTACH does). The subsequent 'lift' move drives grasp->approach so the
+        carton is carried by the weld. Re-applies the trial gains and the airborne-carry brake, then
+        settles. A bench teleport of the ARM only; never a mission action."""
+        # 1. release any prior weld + brake so the re-weld/brake re-anchor cleanly at the grasp pose
         self.contact._release_fallback()
         self.mobile.release_brake()
         self.mobile.release()
-        # 2. teleport the arm to the lift pose at rest (bench reset; mission never teleports joints)
+        # 2. teleport the arm to the GRASP pose at rest (the carton stays at its authored pose;
+        #    the pad lands on it by construction of the source_contact IK)
         full = np.asarray(self.robot.get_joint_positions(), float).copy()
-        full[self.arm_idx] = self.lift_joints
+        full[self.arm_idx] = self.grasp_joints
         self.robot.set_joint_positions(full)
         self.robot.set_joint_velocities(np.zeros(len(full)))
-        # 3. reset the gate's transient fault/freshness state (config untouched) so prior trials
-        #    do not leave it latched-faulted, and hold the lift pose as the drive target
+        self.carton.set_linear_velocity(np.zeros(3))
+        self.carton.set_angular_velocity(np.zeros(3))
+        # 3. reset the gate's transient fault/freshness state (config untouched) and hold grasp
         g = self.gate
         g.faulted = False; g.hold_target = None; g.last_stamp = -1.
         g._host_now = float('-inf'); g.started = False
         g._contact_hold = False; g._contact_hold_target = None
-        g.apply(self.lift_joints, np.zeros(6), g.indices)
-        # 4. apply the trial drive gains BEFORE the weld settles
+        g.apply(self.grasp_joints, np.zeros(6), g.indices)
         self.apply_gains(gains)
-        # 5. place the carton at the measured side-grip offset in the pad frame and weld it there
-        UsdGeom = self._UsdGeom
-        pad = self._pad_world()
-        rot = pad.ExtractRotationMatrix()
-        origin = pad.ExtractTranslation()
-        zaxis = np.array([rot[0][2], rot[1][2], rot[2][2]], float)
-        centre = np.array([origin[0], origin[1], origin[2]], float) + CARTON_TOOL_Z_OFFSET * zaxis
-        q = pad.ExtractRotationQuat()
-        self.carton.set_world_pose(position=np.asarray(centre, float),
-                                   orientation=np.array([q.GetReal(), *[float(v) for v in q.GetImaginary()]], float))
-        self.carton.set_linear_velocity(np.zeros(3))
-        self.carton.set_angular_velocity(np.zeros(3))
+        # 4. weld the carton to the gripper body at the CURRENT (grasp) relative transform -- the
+        #    mission's own _fallback_weld path, no synthetic placement
+        gap = self._pad_carton_gap_mm()
         self.contact._fallback_weld(self.carton_path)
         self._weld_rel0 = self._carton_in_pad()
-        # 6. brake the base in the airborne-carry state (yaw-lock D6 over the wheel hold)
+        print('ARMBENCH_WELD pad_carton_gap_mm=%.1f carton_in_pad=%s' % (gap, self._weld_rel0.tolist()), flush=True)
+        # 5. brake the base in the airborne-carry state (yaw-lock D6 over the wheel hold)
         self.mobile.hold()
         self.mobile.engage_brake()
-        # 7. settle: hold the lift pose for a few ticks so the weld + brake quiesce
+        # 6. settle: hold grasp for a few ticks so the weld + brake quiesce
         for _ in range(settle_steps):
-            g.apply(self.lift_joints, np.zeros(6), g.indices)
+            g.apply(self.grasp_joints, np.zeros(6), g.indices)
             self.world.step(render=self.render)
 
 
 def _run_trial(stage: IsaacCarryStage, spec: bench.TrialSpec, goals, dt, max_sim_s):
-    stage.reset_to_lift(spec.gains)
+    stage.reset_to_grasp(spec.gains)
     moves = []
     start = np.asarray(stage.measured(), float)
     for phase, goal in goals:
@@ -378,7 +377,10 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
     """Return the ordered list of (label, goals, spec) the bench runs. The diagnosis trials come
     first (the redirect), then the carry-pose sweep (primary), then an optional gain sweep."""
     carry = bench.CarryProfile(peak_speed=args.carry_speed, peak_accel=args.carry_accel)
-    base_goals = bench.carry_goals(lift_joints, tuck_shape, pan_joint0, extra_goals=extra)
+    # The weld forms at GRASP; the first move drives grasp->lift (carton carried by the weld), then
+    # the tuck/pan fold follows. Prepend 'lift' so every trial exercises the full carried sequence.
+    lift_move = ('lift', [float(v) for v in lift_joints])
+    base_goals = [lift_move] + bench.carry_goals(lift_joints, tuck_shape, pan_joint0, extra_goals=extra)
     jobs = []
     if args.diagnose or args.expect == 'reproduce' or args.reproduce:
         # reproduce the mission fold in the full scene with contact reporting, at BOTH gain
@@ -389,7 +391,7 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
         safe = bench.DriveGains(args.pose_kp, args.pose_kd, args.pose_eff)
         for dv in POSE_DELTAS:
             shape = bench.tuck_shape_variant(tuck_shape, dv)
-            goals = bench.carry_goals(lift_joints, shape, pan_joint0, extra_goals=extra)
+            goals = [lift_move] + bench.carry_goals(lift_joints, shape, pan_joint0, extra_goals=extra)
             label = 'pose_' + '_'.join(f'{x:+g}' for x in dv)
             jobs.append((label, goals, bench.TrialSpec(label, safe, carry)))
     if args.sweep:
@@ -420,8 +422,10 @@ def run(args):
     arm_cfg = config.get('armbench', {})
     lift_joints = (args.lift_joints if args.lift_joints is not None
                    else arm_cfg.get('lift_joints', DEFAULT_LIFT))
-    if len(lift_joints) != 6:
-        raise ValueError('lift_joints must be six arm joints (ARM_JOINTS order)')
+    grasp_joints = (args.grasp_joints if args.grasp_joints is not None
+                    else arm_cfg.get('grasp_joints', DEFAULT_GRASP))
+    if len(lift_joints) != 6 or len(grasp_joints) != 6:
+        raise ValueError('lift_joints and grasp_joints must each be six arm joints (ARM_JOINTS order)')
     tuck_shape = arm_cfg.get('cart_tuck_shape', CART_TUCK_SHAPE)
     pan_joint0 = arm_cfg.get('cart_pan_joint0', CART_PAN_JOINT0)
     extra = arm_cfg.get('extra_goals')   # {phase: 6-vector} for downstream place moves (optional)
@@ -449,7 +453,8 @@ def run(args):
                 return
 
     summary = {'state': 'failed', 'reason': 'bench did not start',
-               'lift_joints': list(lift_joints), 'carton_dims': list(carton_dims),
+               'grasp_joints': list(grasp_joints), 'lift_joints': list(lift_joints),
+               'carton_dims': list(carton_dims),
                'carry': {'peak_speed': args.carry_speed, 'peak_accel': args.carry_accel},
                'note': ('Planning path differs from the live mission (carry trajectories generated '
                         'analytically, not by MoveIt/cuMotion); the drive, gate, carton weld and '
@@ -465,7 +470,7 @@ def run(args):
             app = SimulationApp({'headless': True, 'width': 640, 'height': 360})
             from twin.restock.physics_setup import assemble
             assembly = assemble(app=app, config=config, scenario=scenario, output=args.output / 'assembly')
-            stage = IsaacCarryStage(assembly, lift_joints, render=args.render,
+            stage = IsaacCarryStage(assembly, lift_joints, grasp_joints, render=args.render,
                                     carton_dims=carton_dims, obstacle_prims=obstacle_override)
             summary['obstacles'] = stage.obstacles
             for label, goals, spec in jobs:
@@ -579,7 +584,9 @@ def main():
                    help='the mission runtime config (same one run_mobile_restock --execute consumes)')
     p.add_argument('--output', type=Path, required=True, help='scratch output dir (must not pre-exist content)')
     p.add_argument('--lift-joints', type=float, nargs=6, default=None,
-                   help='arm lift pose (ARM_JOINTS order); default from config.armbench or the estimate')
+                   help='arm lift pose source_approach (ARM_JOINTS order); default measured value')
+    p.add_argument('--grasp-joints', type=float, nargs=6, default=None,
+                   help='arm grasp pose source_contact where the carton welds (ARM_JOINTS order)')
     p.add_argument('--expect', choices=('report', 'all-settle', 'reproduce'), default='report')
     p.add_argument('--diagnose', action='store_true',
                    help='trial-1: fold the carton in the full scene at BOTH ref gains with contact '
