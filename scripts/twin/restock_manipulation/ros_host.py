@@ -87,8 +87,14 @@ def main():
     # sim, so a wall steady_clock trips 'acquisition-to-use freshness expired' instantly (run-143, once
     # PR 95 threaded the deadline onto the collect packet). use_sim_time is on this node, so its clock
     # is the shared sim time both the sensing deadline and this check live on.
+    # The WallCartonPolicy applies ONLY to side-grip cartons (it raises for any other mode). A TOP
+    # grip uses the controller's default vertical (TCP-down) poses instead (no wall standoff) -- the
+    # reachable, cuMotion-feasible place the side-grip wall standoff could not achieve onto the cart
+    # (run-222). Mirror isaac_runtime: policy only when every profile is side mode.
+    _modes = {p.grasp_mode for p in profiles.values()}
+    _policy = WallCartonPolicy(args.shelfbot_root, tool, walls=config['walls']) if _modes == {'side'} else None
     controller = TransferController(motion,profiles,frame=tool.base_frame,
-        phase_timeout=120.,pose_policy=WallCartonPolicy(args.shelfbot_root,tool,walls=config['walls']),
+        phase_timeout=120.,pose_policy=_policy,
         transport_joints=transport_joints,
         contact_straight_line=bool(config.get('contact_straight_line', False)),
         contact_overpress_step_m=float(config.get('contact_overpress_step_m', 0.0)),

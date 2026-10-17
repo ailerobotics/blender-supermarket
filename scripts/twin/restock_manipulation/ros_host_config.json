@@ -8,16 +8,16 @@
         0.16
       ],
       "tcp_quaternion": [
-        0.5,
-        0.5,
-        0.5,
-        0.5
+        1,
+        0,
+        0,
+        0
       ],
       "tcp_surface_offset": 0.00275,
       "approach": 0.18,
       "max_reach": 1.3,
       "mass_kg": 0.45,
-      "grasp_mode": "side"
+      "grasp_mode": "top"
     }
   ],
   "walls": {
@@ -28,7 +28,7 @@
   "pose_goal": true,
   "contact_straight_line": true,
   "contact_overpress_step_m": 0.003,
-  "contact_overpress_cap_m": 0.020,
+  "contact_overpress_cap_m": 0.02,
   "arm_max_speed": 0.3,
   "startup_grace_seconds": 60.0
 }
