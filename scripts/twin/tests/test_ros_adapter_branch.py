@@ -180,3 +180,26 @@ class PlanningWallExceeded(unittest.TestCase):
     def test_execute_phase_is_excluded(self):
         over = self._CAP + 5
         self.assertFalse(self._port('execute_result', self._PlanF(False), over).planning_wall_exceeded())
+
+
+class Drain(unittest.TestCase):
+    """drain() advances the PLANNING state machine off the independent watchdog tick (firstmate 290
+    option b / run-237), so a move_group result is consumed within 0.1 s of arrival regardless of the
+    /sensors cadence -- but never in execution/idle/terminal states."""
+    @staticmethod
+    def _port(state):
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state = state
+        p._polls = 0
+        p.poll = lambda: setattr(p, '_polls', p._polls + 1)
+        return p
+
+    def test_drains_planning_states(self):
+        for st in ('ik', 'plan_accept', 'plan_result'):
+            p = self._port(st); p.drain()
+            self.assertEqual(p._polls, 1, st)
+
+    def test_does_not_drain_execution_or_terminal_states(self):
+        for st in ('execute_accept', 'execute_result', 'idle', 'succeeded', 'failed'):
+            p = self._port(st); p.drain()
+            self.assertEqual(p._polls, 0, st)

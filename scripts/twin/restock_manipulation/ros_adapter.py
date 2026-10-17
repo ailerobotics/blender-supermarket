@@ -434,6 +434,45 @@ class RosMotionPort:
             return bool(r and r.accepted)
         return False
 
+    #: PLANNING states where the planning-wall cap can fire. Draining poll() in these advances the
+    #: plan request/accept/result -> execute independent of /sensors. EXECUTION states are sim-clock
+    #: bounded (never the wall cap) and the 'contact' descent has its own suction choreography, so the
+    #: watchdog does not drain those (see _watchdog).
+    _DRAIN_STATES = ('ik', 'plan_accept', 'plan_result')
+
+    def drain(self):
+        """Advance the motion state machine through PLANNING if a plan is mid-flight, WITHOUT the
+        sensor stream (firstmate 290 option b / run-237). The port only advances in poll(), which the
+        controller drives from the /sensors callback; under render pacing /sensors is ~1.7-3.5 s apart
+        (and the lift SUSPENDS sensing), so the plan_accept -> plan_result -> get_result -> execute
+        chain can take many seconds per step and the move_group result (which arrived in ~1 s) is not
+        consumed before the planning-wall cap fires on a plan that in fact succeeded. The bridge
+        watchdog calls this on its own 0.1 s timer so the plan is requested + consumed within 0.1 s of
+        arrival, independent of /sensors -- deterministic, not dice. No-op outside a planning state;
+        poll() is idempotent so this and the controller's own poll() never conflict (single-threaded
+        executor). Execution is left to the controller's poll() (sim-clock bounded, not the wall cap)."""
+        if getattr(self, 'state', None) in self._DRAIN_STATES:
+            self.poll()
+
+    def plan_wall_diag(self):
+        """One-line state snapshot for the plan-cap fire (firstmate 290/292, run-237): distinguishes a
+        result DELIVERED-but-not-consumed (future done -> the fix should have caught it) from one
+        NOT-delivered in the cap (future not done -> move_group succeeded but the action result never
+        reached the port). Read-only."""
+        f = getattr(self, 'future', None)
+        done = bool(f is not None and f.done())
+        status = None
+        if done:
+            try:
+                r = f.result()
+                status = getattr(r, 'status', None)
+            except Exception as exc:
+                status = 'raised:%r' % exc
+        elapsed = time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
+        return ('PLAN_WALL_DIAG state=%s future_done=%s result_status=%s elapsed=%.2f replans=%s'
+                % (getattr(self, 'state', None), done, status, elapsed,
+                   getattr(self, '_replan_attempts', None)))
+
     def planning_wall_exceeded(self):
         """True once a single move has spent more than the total planning-wall cap in a PLANNING
         phase (ik / plan request / plan result) WITHOUT a usable result yet. Read-only (no state
@@ -724,7 +763,22 @@ class RosTransferBridge:
         # when /sensors has stalled and poll() is no longer driven (run-220/281): this 0.1 s timer is
         # independent of the sensor stream, so check it here BEFORE the 30 s sensor backstop can mask it.
         motion = getattr(self.controller, 'motion', None)
+        # Drain the planning state machine independent of /sensors FIRST (firstmate 290 option b): a
+        # move_group result that has arrived is requested + consumed here within 0.1 s, so the cap
+        # below sees the advanced (post-planning) state instead of firing on a /sensors-paced stall.
+        # NOT during 'contact' -- its straight-line descent + suction choreography is driven only by
+        # the controller's own step()/poll() (run-202/203 freeze-settle), never pre-advanced here.
+        if (motion is not None and self.controller.phase != 'contact'
+                and callable(getattr(motion, 'drain', None))):
+            try:
+                motion.drain()
+            except Exception:
+                self._emit(self.controller._fail('arm motion failed (watchdog drain)'))
+                return
         if motion is not None and getattr(motion, 'planning_wall_exceeded', lambda: False)():
+            diag = getattr(motion, 'plan_wall_diag', lambda: '')()
+            if diag:
+                print(diag, flush=True)
             self._emit(self.controller._fail('planning failed (exhausted within wall cap)'))
             return
         # A trajectory_host GOAL_MISS/abort during the LIFT suspends sensing, so /sensors stalls and
