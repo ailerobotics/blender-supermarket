@@ -78,7 +78,7 @@ def kinematic_exclusions(robot):
 
 
 def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
-                 acceleration=1., jerk=10., collision_buffer=None):
+                 acceleration=1., jerk=10., collision_buffer=None, self_collision_buffer_m=0.0):
     """Pure CPU reconstruction used by both generator and strict evidence check.
 
     ``collision_buffer`` optionally inflates a named link's collision-sphere radii by a fixed margin
@@ -92,6 +92,8 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
     buffers = {str(k): float(v) for k, v in (collision_buffer or {}).items()}
     if any(not np.isfinite(v) or not 0. <= v <= .1 for v in buffers.values()):
         raise ValueError('each collision buffer must be finite and within 0..10 cm')
+    if not np.isfinite(self_collision_buffer_m) or not 0. <= self_collision_buffer_m <= .1:
+        raise ValueError('self_collision_buffer_m must be finite and within 0..10 cm')
     if not np.isfinite([pitch, min_pitch]).all() or not .001 <= min_pitch <= pitch <= .2:
         raise ValueError('require 1 mm <= min_pitch <= pitch <= 20 cm')
     if not all(np.isfinite(v) and v > 0 for v in (acceleration, jerk)):
@@ -226,6 +228,22 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
     ignore = {}
     for a, b in sorted(excluded):
         ignore.setdefault(a, []).append(b)
+    # Attached-carton self-collision (firstmate sim-restock-planner-obstacles-v1).
+    # The carried carton is added at runtime by the cuMotion ObjectAttachmentNode as link
+    # 'attached_object' (34 spheres written into geometry[mobile_cad][spheres][attached_object], then
+    # set_robot_description reload). For curobo to SELF-collision-check the carton against the arm (not
+    # only the nvblox world), the XRDF must DECLARE attached_object exactly as the vendor reference
+    # (isaac_ros_cumotion_robot_description ur10e_robotiq_2f_85.xrdf) does: reserve it in
+    # collision.buffer_distance AND give it a self_collision.ignore row that exempts ONLY the gripper
+    # seat + adjacent wrist links it legitimately rests on -- leaving it CHECKED vs ur_wrist_1/forearm/
+    # upper_arm/shoulder. Ours emitted NEITHER, so the reloaded carton landed only in world-collision
+    # and cuMotion swung it through ur_upper_arm while reporting the tuck collision-free (run-249/250:
+    # carton -0.003 m into ur_upper_arm). The seat set mirrors the reference (wrist_2/wrist_3/tool +
+    # gripper) intersected with the links that actually carry spheres in this CAD model.
+    ATTACHED = 'attached_object'
+    _seat = (['suction_cups', 'cube_without_surface_plates', 'ur_wrist_3_link', 'ur_wrist_2_link']
+             + ['surface_plate_%d' % i for i in range(1, 7)])
+    ignore[ATTACHED] = sorted(l for l in _seat if l in spheres)
     # cuMotion/cuRobo builds a reduced kinematic tree to the tool frames and prunes
     # off-path branches (e.g. the mobile base's two-joint caster chains
     # swivel->fork->roll->wheel), so a default position for a pruned joint
@@ -240,8 +258,17 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
             'default_joint_positions': arm_defaults, 'tool_frames': [TCP],
             'cspace': {'joint_names': list(JOINTS), 'acceleration_limits': [acceleration]*6,
                        'jerk_limits': [jerk]*6},
-            'collision': {'geometry': 'mobile_cad'},
-            'self_collision': {'geometry': 'mobile_cad', 'ignore': ignore},
+            # Reserve attached_object in collision.buffer_distance so curobo allocates its slot in the
+            # collision model (vendor reference pattern); 0.005 m matches the reference buffer. The
+            # self_collision_buffer_m (default 0) optionally inflates the arm links' self-collision
+            # radii -- fix (b), for the case where attached_object IS in the self set but the marginal
+            # (~mm) carton-vs-arm penetration slips the sphere model; tune after the GPU diagnostic.
+            'collision': {'geometry': 'mobile_cad', 'buffer_distance': {ATTACHED: 0.005}},
+            'self_collision': {'geometry': 'mobile_cad', 'ignore': ignore,
+                               **({'buffer_distance': {l: float(self_collision_buffer_m)
+                                                       for l in ('ur_upper_arm_link', 'ur_forearm_link',
+                                                                 'ur_wrist_1_link', ATTACHED)}}
+                                  if self_collision_buffer_m else {})},
             'geometry': {'mobile_cad': {'spheres': spheres}}}
     # Resolve all visual/collision package references without changing geometry.
     normalized = ET.parse(urdf)
@@ -310,12 +337,18 @@ def main():
                         help='extra collision-sphere radius (m) on base_link so cuMotion keeps the '
                              'gripper clear of the mobile base on every plan seed (not the gripper, '
                              'whose radii also gate carton contact)')
+    parser.add_argument('--self-collision-buffer', type=float, default=0.,
+                        help='extra SELF-collision radius (m) on the arm links the attached carton is '
+                             'checked against (upper_arm/forearm/wrist_1/attached_object); 0 = off. Use '
+                             'only if the carton IS in the self-collision set but a marginal carton-vs-'
+                             'arm contact slips the sphere model (the GPU diagnostic distinguishes this)')
     args = parser.parse_args()
     collision_buffer = {'base_link': args.base_buffer} if args.base_buffer else None
     report = generate(args.urdf, args.mobile_manifest, args.shelfbot_root, args.output,
                       pitch=args.pitch, min_pitch=args.min_pitch,
                       acceleration=args.acceleration, jerk=args.jerk,
-                      collision_buffer=collision_buffer)
+                      collision_buffer=collision_buffer,
+                      self_collision_buffer_m=args.self_collision_buffer)
     print(json.dumps({k: report[k] for k in ('sphere_count', 'planning_ready', 'transport_sphere_overlaps')}, indent=2))
 
 
