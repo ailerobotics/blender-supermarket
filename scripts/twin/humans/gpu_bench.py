@@ -126,14 +126,22 @@ def run(app, config, output, *, ffmpeg, sensing_stride: int = 8,
     camera, cam_design, _codes = build_view(stage, config, output, view=view)
 
     scenario = json.loads(Path(config['scenario']).read_text())
-    base_pose = tuple(float(v) for v in scenario['initial_staging']['robot_base_pose'])
+    staging_base_pose = tuple(float(v) for v in scenario['initial_staging']['robot_base_pose'])
     # The candidate camera prim lives under the map/cart; read its world pose so the
     # people are framed by the real lens and the GT cone matches the render.
     cam_prim_path = getattr(camera, 'prim_path', None)
     try:
-        cam_pose = _camera_world_xyyaw(stage, cam_prim_path) if cam_prim_path else base_pose
+        cam_pose = _camera_world_xyyaw(stage, cam_prim_path) if cam_prim_path else staging_base_pose
     except Exception:
-        cam_pose = base_pose                        # fall back to the base pose/yaw
+        cam_pose = staging_base_pose                 # fall back to the staging base pose/yaw
+
+    # The candidate camera IS the robot's eye here (eye-in-hand / on-robot), so the
+    # safety distance is person-to-CAMERA, not person-to-staging-base: the fixed
+    # store candidate camera sits metres from where the mobile base happens to park,
+    # and a person approaching the camera is a person approaching the robot. Using the
+    # staging base pose instead leaves the person forever outside the camera's range
+    # (always CLEAR). The staging base pose is kept only for the evidence record.
+    base_pose = cam_pose
 
     people = _people_from_config(humans, cam_pose, base_pose)
     humans = humans.with_people(people)
@@ -230,4 +238,6 @@ def run(app, config, output, *, ffmpeg, sensing_stride: int = 8,
                 view=view, provenance='ground_truth', frames=len(recorder.frames),
                 video=video, trace_rows=len(rows), summary=summary,
                 base_pose=list(base_pose), camera_pose=list(cam_pose),
+                staging_base_pose=list(staging_base_pose),
+                base_model='camera-as-robot-eye (safety distance is person-to-camera)',
                 robot_motion=False, autonomous_mission=False, neural_detector=False)
