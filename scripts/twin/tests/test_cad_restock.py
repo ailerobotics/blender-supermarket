@@ -419,16 +419,20 @@ def test_sim_cart_place_policy_offsets_place_standoff_toward_the_robot():
     prof = ProductProfile('case', (.6, .4, .16), (.5, .5, .5, .5), tcp_surface_offset=.0025,
                           grasp_mode='side', approach=.18)
     plan = policy.build(None, None, prof)
-    # pick + place + orientation preserved from the wall policy
+    # pick poses preserved from the wall policy
     assert plan['approach'] == base['approach'] and plan['lift'] == base['lift']
-    assert plan['place'] == base['place']
-    # retreat pulled 0.18 m TOWARD the origin along +x (place x 1.2 -> 1.02), z == place z, same quat
+    # place POSITION preserved; orientation SAGITTAL-MIRRORED (x,z negated) so the wrist reaches -y
+    mq = (0.707, 0.0, 0.0, -0.707)          # mirror of base place quat (-.707,0,0,-.707)
+    assert plan['place'][:3] == base['place'][:3]
+    assert plan['place'][3:] == mq
+    # retreat pulled 0.18 m TOWARD the origin along +x (place x 1.2 -> 1.02), z == place z, mirrored quat
     assert plan['retreat'][0] == pytest.approx(1.02) and plan['retreat'][1] == pytest.approx(0.0)
     assert plan['retreat'][2] == pytest.approx(plan['place'][2])
-    assert plan['retreat'][3:] == base['place'][3:]
+    assert plan['retreat'][3:] == mq
     # preplace == retreat + lift up; both far UNDER the outward wall standoff (1.5 -> 1.02)
     assert plan['preplace'][0] == pytest.approx(1.02)
     assert plan['preplace'][2] == pytest.approx(plan['retreat'][2] + .03)
+    assert plan['preplace'][3:] == mq
 
 
 def test_sim_attach_fallback_gating_default_off_and_contact_gated():

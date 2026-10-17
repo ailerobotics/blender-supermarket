@@ -78,20 +78,34 @@ class SimCartPlacePolicy:
     direction is mirrored to the reachable (base-ward) side. The real-rig wall policy is untouched;
     this wraps it and only rewrites preplace/place/retreat, gated on a sim config flag.
 
-    place    = the wall policy's place pose (carton resting on the shelf, side-grip TCP orientation)
+    place    = the wall place POSITION with the side-grip orientation SAGITTAL-MIRRORED (see below)
     retreat  = place offset by `profile.approach` TOWARD ur_base_link (origin) in the horizontal plane
     preplace = retreat raised by the lift margin
+
+    Orientation mirror (firstmate msg 285 step B): the raw side-grip TCP orientation has NO KDL
+    joint-space solution at the cart's -y side (CPU KDL-verified: cuMotion task-space AND KDL both
+    find none) -- the wrist cannot achieve the +y-grip orientation mirrored across the base. Its
+    SAGITTAL mirror (reflect about the base xz-plane, M=diag(1,-1,1): quat (x,y,z,w)->(-x,y,-z,w))
+    IS reachable at -y by the UR10's symmetry (CPU KDL-verified: preplace/place/retreat all solve).
+    The carton is placed in that mirrored side pose on the cart shelf.
     """
     def __init__(self, wall, lift=.03):
         self.wall, self.lift = wall, float(lift)
 
+    @staticmethod
+    def _sagittal_mirror(quat):
+        x, y, z, w = quat
+        return (-x, y, -z, w)
+
     def build(self, source, target, profile):
         poses = dict(self.wall.build(source, target, profile))   # proven pick + grip orientation
-        place = tuple(poses['place'])
-        x, y = place[0], place[1]
+        wp = tuple(poses['place'])
+        q = self._sagittal_mirror(wp[3:])                        # -y-reachable orientation
+        x, y = wp[0], wp[1]
         n = math.hypot(x, y) or 1.0
         d = profile.approach
-        retreat = (x - x / n * d, y - y / n * d, place[2], *place[3:])   # toward the origin (robot)
-        preplace = (retreat[0], retreat[1], retreat[2] + self.lift, *place[3:])
+        place = (wp[0], wp[1], wp[2], *q)
+        retreat = (x - x / n * d, y - y / n * d, wp[2], *q)       # toward the origin (robot)
+        preplace = (retreat[0], retreat[1], retreat[2] + self.lift, *q)
         poses['place'], poses['retreat'], poses['preplace'] = place, retreat, preplace
         return poses
