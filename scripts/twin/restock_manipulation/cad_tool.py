@@ -315,12 +315,17 @@ class NativePanelContact:
         from the arm articulation link."""
         if not self._sim_attach_fallback:
             return
+        self._fb_n = getattr(self, '_fb_n', 0) + 1
         if not self.enabled:
+            if self._fb_n % 120 == 1:
+                print('SIM_ATTACH_DIAG skip=suction_off', flush=True)
             self._release_fallback()
             return
         if self._fallback_body is not None:
             return                                   # already welded
         if self.read():                              # native plugin latched on its own -- prefer it
+            if self._fb_n % 120 == 1:
+                print('SIM_ATTACH_DIAG skip=native_held', flush=True)
             return
         # Probe FRESH every tick, not self.last_probe: read()/SEAL_DIAG only refresh last_probe on the
         # sensing stride, but the pad crosses the ~0 mm contact window briefly DURING the over-press
@@ -331,6 +336,10 @@ class NativePanelContact:
         hits = [h[0] for h in (info.get('raycast') or []) if h and h[0]]
         if (gap is None or gap > SIM_ATTACH_CONTACT_MM or pvs is None
                 or pvs > SIM_ATTACH_FLUSH_DEG or not hits):
+            # Diagnostic: why the enabled fallback is NOT welding this tick (gap/flush/hit view).
+            if self._fb_n % 30 == 1 or (gap is not None and gap <= SIM_ATTACH_CONTACT_MM):
+                print('SIM_ATTACH_DIAG skip gap_mm=%s pad_vs_surface_deg=%s hits=%s'
+                      % (gap, pvs, hits), flush=True)
             return                                   # not a measured <=0.5 mm flush contact yet
         self._fallback_weld(hits[0])
         print('SIM_ATTACH_FALLBACK attach body=%s gap_mm=%s pad_vs_surface_deg=%s'
