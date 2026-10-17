@@ -14,6 +14,36 @@ def design():
     return camera_config(scenario,dict(spec=dict(arm_mount_z=.5)))
 
 
+def test_write_camera_config_script_emits_the_current_station_design(tmp_path):
+    """The committed generator writes the LIVE design, so regeneration from config.py can never
+    be skipped in favour of a stale camera_config.json that feeds the OLD geometry (e.g. the
+    oversized .62x.42 cart support that overshoots the rails) into commissioning or the mission."""
+    import json
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))       # scripts/ (for twin + the script)
+    from scripts import write_restock_camera_config as gen
+
+    scenario = dict(handling_unit=dict(local_wall=3, grasp_mode='side', dimensions_m=[.6, .4, .16]),
+        initial_staging=dict(support_center_xy=[-5.73, 17.1], unit_bottom_z=.6,
+            target_surface_pose_world=[-3.05, 4.826, .73, 0], cart_load_center_body_xy=[.08, 0],
+            cart_support_z_world=.225))
+    (tmp_path / 'scn.json').write_text(json.dumps(scenario))
+    (tmp_path / 'man.json').write_text(json.dumps(dict(spec=dict(arm_mount_z=.5))))
+    out = tmp_path / 'camera_config.json'
+    old = sys.argv
+    sys.argv = ['write_restock_camera_config.py', '--scenario', str(tmp_path / 'scn.json'),
+                '--manifest', str(tmp_path / 'man.json'), '--output', str(out)]
+    try:
+        assert gen.main() == 0
+    finally:
+        sys.argv = old
+    cfg = json.loads(out.read_text())
+    assert cfg['supports']['cart']['required_xy_m'] == [.54, .34]      # inset off the cart rails
+    assert cfg['supports']['shelf']['required_xy_m'] == [.58, .36]
+    assert cfg['cameras']['shelf']['parent']=='map' and cfg['cameras']['cart']['parent']=='cart_chassis'
+
+
 def test_current_measured_margin_arrival_uses_independent_chassis_frame():
     config = design()
     intr = config['cameras']['cart']['intrinsics']
