@@ -318,6 +318,33 @@ untouched and the mission run is byte-identical. The avoidance **patience**
 `navigation.blocked_timeout` sets how long the base stops and waits on a blocked
 aisle before giving up the goal (default unchanged).
 
+**Mission detection feed (opt-in).** The layer is inert until something supplies
+`detections` each navigate tick. In a live mission that feed is built by
+`twin.navigation.mission_source` and wired at the `NavigationBridge` seam
+(`twin.restock.runtime`): set `navigation.dynamic_obstacle_source` to a lane-owned
+`module:function` and the bundle (`twin.restock.isaac_bundle`) builds a
+`source(now) -> [Detection]` that `NavigationBridge.step` passes into
+`SensorNavigation.step(detections=...)` on the sensor route only. Absent, the bridge
+passes `detections=None` — byte-identical to a run with no layer; a source on a
+non-sensor route is refused. The default builder
+`twin.navigation.mission_source:build_dynamic_obstacle_source` **reuses the
+`sim-restock-humans-v1` scripted person asset**: the `humans` config block authors one
+or more deterministic scripted actors into the Isaac stage, and each actor's known
+pose at `now` (pure `PeopleStage.world_positions`) becomes a map-frame `Detection`
+(`source='scenario_scripted_actor'`). Because the detection position and the rendered
+prim come from the same scripted path, pixels and the costmap agree by construction;
+authoring/stepping the visible prim is best-effort (a missing stage degrades to
+"detected but not rendered", never a broken tick). The perception path (the humans
+lane's detector / ground-truth projection via `MissionSafety.detections`) plugs into
+the **same** `source(now)` seam through `mission_source.humans_detection_source`
+(`detection.to_nav_detections`) once that lane's detector GPU run lands. Example
+runtime-config fragment: [`docs/examples/dynobs-mission-fragment.json`](examples/dynobs-mission-fragment.json).
+
+This wiring is CPU-proven only (`test_navigation_mission_source.py`): byte-identical
+off, deterministic scripted detections, bundle resolution. The in-sim GPU evidence run
+rides the integration mission boot (it owns GPU priority, the station commissioning
+baselines and the host planner stack); it is **pending**.
+
 **Behaviours** (deterministic CPU evidence, `scripts/run_dynobs_evidence.py`,
 RUNBOOK §12): a shopper crossing the aisle is detected, the towed base **stops and
 waits**, then **resumes** and arrives once the path clears; a box dropped on a

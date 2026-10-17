@@ -53,11 +53,21 @@ class Port(Protocol):
 
 class NavigationBridge:
     """Normalize reference and Nav2 APIs without changing measurement provenance."""
-    def __init__(self, controller, *, nav2=False, sensor_navigation=False):
+    def __init__(self, controller, *, nav2=False, sensor_navigation=False,
+                 detection_source=None):
         self.controller, self.nav2 = controller, nav2
         self.sensor_navigation = sensor_navigation
         if nav2 and sensor_navigation:
             raise ValueError('select one navigation sensor adapter')
+        # Opt-in moving-obstacle feed (twin.navigation.mission_source): a
+        # callable(now) -> [navigation.dynamic.Detection] consumed ONLY by the sensor
+        # route, which folds it into the sensed Observation add-only. None (default) =>
+        # detections=None is passed, byte-identical to a run with no layer at all. The
+        # nav2 route takes moving obstacles through its ROS costmap, so refuse the feed
+        # there rather than silently dropping it.
+        if detection_source is not None and not sensor_navigation:
+            raise ValueError('detection_source requires nav_mode "sensor"')
+        self.detection_source = detection_source
 
     def start(self, goal, coupled, *, goal_articulation=None):
         if goal_articulation is None:
@@ -67,9 +77,12 @@ class NavigationBridge:
 
     def step(self, dt, packet):
         if self.sensor_navigation:
+            detections = (self.detection_source(packet.simulation_time)
+                          if self.detection_source is not None else None)
             return self.controller.step(dt, packet.odometry, packet.navigation,
                 now=packet.simulation_time, coupled=packet.coupled,
-                arm_transport=packet.transport_ready, articulation=packet.articulation)
+                arm_transport=packet.transport_ready, articulation=packet.articulation,
+                detections=detections)
         if self.nav2:
             self.controller.publish_sensors(packet.odometry, packet.navigation)
             return self.controller.step(dt, packet.odometry, packet.navigation,
