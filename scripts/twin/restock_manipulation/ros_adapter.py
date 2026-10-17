@@ -411,14 +411,41 @@ class RosMotionPort:
         self.deadline=time.monotonic()+self.timeout
         self._send(self.plan,goal,'plan_accept')
 
+    def _pending_plan_success(self):
+        """True iff the current planning future has ALREADY DELIVERED a usable (successful) result
+        that poll() has not consumed yet, so the plan cap must NOT declare the move 'exhausted'
+        (firstmate 290 / run-234 false trip): move_group logged the plan succeeded in ~1 s, but the
+        /sensors-paced poll() was behind, so the 22 s wall cap fired on a plan that had in fact
+        succeeded. Read-only, per-state: a done IK solution, an accepted goal, or a SUCCEEDED plan
+        result are all forward progress that the next poll() will consume. A hang (future not done)
+        or a FAILED delivered result is NOT progress -- the cap still surfaces those (run-220)."""
+        f = self.future
+        if f is None or not f.done():
+            return False
+        try:
+            r = f.result()
+        except Exception:
+            return False                                 # a result future that raised is not progress
+        if self.state == 'plan_result':
+            return r is not None and r.status == 4 and r.result.error_code.val == 1
+        if self.state == 'ik':
+            return r is not None and r.error_code.val == 1
+        if self.state == 'plan_accept':
+            return bool(r and r.accepted)
+        return False
+
     def planning_wall_exceeded(self):
         """True once a single move has spent more than the total planning-wall cap in a PLANNING
-        phase (ik / plan request / plan result). Read-only (no state advance): the bridge watchdog
-        checks it on its own 0.1 s timer so a planning hang surfaces as a motion failure within the
-        cap EVEN WHEN /sensors has stalled and poll() is no longer being driven (run-220: the
-        preplace PLANNING_FAILED was masked by the 30 s /sensors wall backstop because poll() stopped
-        being called). Execution phases are excluded -- a render-paced execute legitimately runs long."""
+        phase (ik / plan request / plan result) WITHOUT a usable result yet. Read-only (no state
+        advance): the bridge watchdog checks it on its own 0.1 s timer so a planning hang surfaces as
+        a motion failure within the cap EVEN WHEN /sensors has stalled and poll() is no longer being
+        driven (run-220: the preplace PLANNING_FAILED was masked by the 30 s /sensors wall backstop
+        because poll() stopped being called). A SUCCEEDED plan result already delivered but not yet
+        consumed by the sensor-paced poll() does NOT count as exhausted (firstmate 290; run-234
+        false-tripped on a plan move_group had already completed). Execution phases are excluded -- a
+        render-paced execute legitimately runs long."""
         return (self.state in ('ik', 'plan_accept', 'plan_result')
+                and not self._pending_plan_success()
                 and time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
                 > PLAN_TOTAL_WALL_CAP_S)
 

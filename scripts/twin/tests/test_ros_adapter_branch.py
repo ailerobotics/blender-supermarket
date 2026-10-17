@@ -130,3 +130,53 @@ class FailedResultPending(unittest.TestCase):
 
     def test_none_future_is_safe(self):
         self.assertFalse(self._port('execute_result', None).failed_result_pending())
+
+
+class PlanningWallExceeded(unittest.TestCase):
+    """planning_wall_exceeded() must NOT fire when move_group has already delivered a SUCCESSFUL plan
+    result that the /sensors-paced poll() has not consumed yet (firstmate 290 / run-234 false trip),
+    while still catching a genuine hang (future not done) or an exhausted failure within the cap."""
+    import math as _math
+    from twin.restock_manipulation.ros_adapter import PLAN_TOTAL_WALL_CAP_S as _CAP
+
+    @staticmethod
+    def _port(state, future, elapsed):
+        import time
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state, p.future = state, future
+        p._plan_started_wall = time.monotonic() - elapsed
+        return p
+
+    class _PlanF:
+        """Fake plan-result future: status (GoalStatus) + result.error_code.val (MoveIt)."""
+        def __init__(self, done, status=4, err=1, raises=False):
+            self._done, self._status, self._err, self._raises = done, status, err, raises
+        def done(self):
+            return self._done
+        def result(self):
+            if self._raises:
+                raise RuntimeError('result raised')
+            res = type('R', (), {'error_code': type('E', (), {'val': self._err})()})()
+            return type('G', (), {'status': self._status, 'result': res})()
+
+    def test_delivered_success_pending_consume_does_not_exhaust(self):
+        over = self._CAP + 5
+        self.assertFalse(self._port('plan_result', self._PlanF(True, status=4, err=1), over)
+                         .planning_wall_exceeded())
+
+    def test_hang_without_result_exhausts_past_cap(self):
+        over = self._CAP + 5
+        self.assertTrue(self._port('plan_result', self._PlanF(False), over).planning_wall_exceeded())
+
+    def test_delivered_failed_result_exhausts_past_cap(self):
+        over = self._CAP + 5
+        self.assertTrue(self._port('plan_result', self._PlanF(True, status=6, err=1), over)
+                        .planning_wall_exceeded())      # aborted plan delivered -> surface it (run-220)
+
+    def test_within_cap_never_exhausts(self):
+        self.assertFalse(self._port('plan_result', self._PlanF(False), self._CAP - 5)
+                         .planning_wall_exceeded())
+
+    def test_execute_phase_is_excluded(self):
+        over = self._CAP + 5
+        self.assertFalse(self._port('execute_result', self._PlanF(False), over).planning_wall_exceeded())
