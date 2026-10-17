@@ -35,7 +35,13 @@
   "payload_ack_wall_s": 3.0,
   "staged_cart_swing": true,
   "cart_pan_joint0": -0.8605,
-  "cart_tuck_shape": [-2.3, 1.0, 2.1066, 0.8, -1.2545],
+  "cart_tuck_shape": [
+    -2.3,
+    1.0,
+    2.1066,
+    0.8,
+    -1.2545
+  ],
   "plan_wall_cap_s": 60.0,
-  "base_collision_object": true
+  "base_collision_object": false
 }
