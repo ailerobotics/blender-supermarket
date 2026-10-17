@@ -136,6 +136,10 @@ def main(argv=None) -> int:
         cmd = [
             'docker', 'run', '--rm', '--gpus', 'all',
             '--user', f'{os.getuid()}:{os.getgid()}', '-e', 'HOME=/tmp',
+            # The container's POSIX locale makes Python open() default to ASCII, which
+            # trips cuRobo's YAML loader on the non-ASCII (em-dash) comments in the
+            # mission's shelfbot_curobo.yml. UTF-8 mode reads every config correctly.
+            '-e', 'PYTHONUTF8=1', '-e', 'LANG=C.UTF-8', '-e', 'LC_ALL=C.UTF-8',
             '-v', f'{REPO}:/store:ro',
             '-v', f'{mpc_dir}:/mpc:ro',
             '-v', f'{shelfbot}:/ros_ws/src/shelfbot:ro',
