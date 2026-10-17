@@ -108,27 +108,41 @@ def arm_spheres_world(urdf_path: str, xrdf_path: str,
     return np.vstack(centres), np.concatenate(radii), owners
 
 
+def carton_cover_local(dims: Sequence[float], *, offset_tcp: Sequence[float] = (0.0, 0.0, 0.20),
+                       pitch: float = 0.08) -> Tuple[np.ndarray, float]:
+    """Conservative sphere cover of the carried carton box, in the TCP/attached-object LOCAL frame.
+
+    ``dims`` is the carton box (x, y, z) in metres; the carton centre sits ``offset_tcp`` (default
+    0.20 m along tool-z, the measured side-grip of the 0.6 m carton) from the TCP.  Fills the box with
+    a grid at ``pitch`` and gives each cell a circumsphere, so the box is conservatively enclosed.
+    Returns (centres Nx3 in the local frame, single radius).  This is the ONE carton-cover definition
+    shared by the CPU clearance check (``carton_spheres_world``) and the XRDF ``attached_object``
+    placeholder the generator emits, so both reason about the same carton model."""
+    dims = np.asarray(dims, dtype=float)
+    centre_local = np.asarray(offset_tcp, dtype=float)
+    if dims.shape != (3,) or not np.all(np.isfinite(dims)) or np.any(dims <= 0):
+        raise ValueError('carton dims must be three finite positive extents')
+    axes = [np.linspace(-d / 2.0, d / 2.0, max(2, int(math.ceil(d / pitch)) + 1)) for d in dims]
+    grid = np.array([[x, y, z] for x in axes[0] for y in axes[1] for z in axes[2]]) + centre_local
+    step = np.array([(a[1] - a[0]) if len(a) > 1 else 0.0 for a in axes])
+    radius = float(np.linalg.norm(step) / 2.0)
+    return grid, radius
+
+
 def carton_spheres_world(urdf_path: str, config: Dict[str, float], *, dims: Sequence[float],
                          offset_tcp: Sequence[float] = (0.0, 0.0, 0.20),
                          tcp_link: str = 'gripper_pad_tcp', pitch: float = 0.08
                          ) -> Tuple[np.ndarray, np.ndarray]:
     """Approximate the attached carton as a sphere grid at the gripper, in the ur_base_link frame.
 
-    The carton centre sits ``offset_tcp`` (default 0.20 m along tool-z, the measured side-grip of the
-    0.6 m carton) from the TCP; ``dims`` is the carton box (x, y, z) in the TCP frame.  Fills the box
-    with a grid at ``pitch`` and gives each cell a circumsphere, so the swept carton is conservatively
-    enclosed -- the attached-object analogue of the XRDF cover."""
+    Places the shared ``carton_cover_local`` grid at the TCP link's pose -- the attached-object
+    analogue of the XRDF cover, in world (ur_base_link) coordinates for the clearance check."""
     transforms = model_link_transforms(urdf_path, config)
     if tcp_link not in transforms:
         raise ValueError(f'tcp link {tcp_link} not in curobo model')
     tf = transforms[tcp_link]
-    dims = np.asarray(dims, dtype=float)
-    centre_local = np.asarray(offset_tcp, dtype=float)
-    axes = [np.linspace(-d / 2.0, d / 2.0, max(2, int(math.ceil(d / pitch)) + 1)) for d in dims]
-    grid = np.array([[x, y, z] for x in axes[0] for y in axes[1] for z in axes[2]]) + centre_local
+    grid, radius = carton_cover_local(dims, offset_tcp=offset_tcp, pitch=pitch)
     world = grid @ tf[:3, :3].T + tf[:3, 3]
-    step = np.array([(a[1] - a[0]) if len(a) > 1 else 0.0 for a in axes])
-    radius = float(np.linalg.norm(step) / 2.0)
     return world, np.full(len(world), radius)
 
 
@@ -136,6 +150,45 @@ def clearance(box: Box, centres: np.ndarray, radii: np.ndarray) -> float:
     """Min signed gap (metres) between the box and the sphere set: surface distance minus radius.
     Negative == penetration (would make the box block a plan start / grasp goal at ``config``)."""
     return float(np.min(box.signed_distance(centres) - radii))
+
+
+# Links the carton legitimately rests against at grasp (the gripper seat + its own tool-chain
+# neighbours); the planner must IGNORE these but still check the carton against the rest of the arm.
+# This set is the single source of the attached_object self_collision.ignore row (generate_assets
+# emits exactly these, intersected with the links that carry spheres in the CAD model).
+CARTON_SEAT_LINKS = ('suction_cups', 'cube_without_surface_plates', 'ur_wrist_3_link',
+                     'ur_wrist_2_link') + tuple('surface_plate_%d' % i for i in range(1, 7))
+
+
+def carton_arm_clearance(urdf_path: str, xrdf_path: str, config: Dict[str, float], *,
+                         carton: Optional[dict] = None,
+                         seat_links: Sequence[str] = CARTON_SEAT_LINKS) -> dict:
+    """Min signed gap (metres) between the attached carton and each arm link curobo should check it
+    against (every curobo-model link except the ``seat_links`` the carton legitimately touches).
+
+    This is the planner-side question made measurable on CPU: cuMotion plans the carton against the
+    world (nvblox ESDF + world obstacles) but the asset design also intends it self-checked against the
+    arm. A negative result here at a planned configuration means the arm planner is NOT catching a
+    carton-vs-arm contact it should -- exactly the gap the XRDF attached_object self-collision
+    declaration (declaration + placeholder spheres) is meant to close. Used to reproduce the run-250
+    finding and to prove the pre-attach grasp/approach configs stay clear of the carton cover."""
+    ac, ar, owners = arm_spheres_world(urdf_path, xrdf_path, config)
+    carton = carton or {'dims': [0.6, 0.4, 0.16]}
+    cc, cr = carton_spheres_world(urdf_path, config, **carton)
+    seat = set(seat_links)
+    per_link, worst = {}, None
+    for j, link in enumerate(owners):
+        if link in seat:
+            continue
+        gaps = np.linalg.norm(cc - ac[j], axis=1) - cr - ar[j]
+        g = float(np.min(gaps))
+        if link not in per_link or g < per_link[link]:
+            per_link[link] = g
+        if worst is None or g < worst[1]:
+            worst = (link, g)
+    return {'config': dict(config), 'worst_link': None if worst is None else worst[0],
+            'clearance_m': None if worst is None else worst[1],
+            'clear': worst is None or worst[1] > 0.0, 'per_link': per_link}
 
 
 def check_configuration(urdf_path: str, xrdf_path: str, boxes: Sequence[Box],

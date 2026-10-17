@@ -84,6 +84,16 @@ def description(config):
               # addresses that). Paired with the base buffer for belt-and-braces seed robustness.
               interpolation_dt=0.02,
               static_planning_scene_service_name=NS + '/publish_static_planning_scene')
+    # Diagnostic-only, env-gated (default off): publish the planner's SELF-collision spheres on
+    # cumotion/self_collision_spheres (world spheres are already on by default). After the carton is
+    # attached (object_attachment adds an 'attached_object' link to the shared mobile_cad geometry),
+    # this proves on a live GPU run whether the attached carton actually enters curobo's self-collision
+    # set -- the open question behind the tuck fold driving the carton into ur_upper_arm while cuMotion
+    # reports the plan collision-free (run-249/250), and the acceptance signal for the attached_object
+    # self-collision-sphere declaration this lane ships (the run-256 "mask will not be added" warning
+    # must be gone and the attached_object spheres must appear on the topic). Inert otherwise.
+    if os.environ.get('RESTOCK_SELFCOLL_DIAG'):
+        cp['publish_self_collision_spheres'] = True
 
     def component(package, plugin, name, parameters, remappings=()):
         return ComposableNode(package=package, plugin=plugin, name=name,
