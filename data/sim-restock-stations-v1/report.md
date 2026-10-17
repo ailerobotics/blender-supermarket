@@ -160,6 +160,84 @@ Consequences for the fix:
   camera lane's relaunched observation fix and changes behaviour for a genuinely-tilted carton, so
   it is raised to firstmate rather than taken unilaterally.
 
+# SurfaceGripper in-mission attach isolation (key `surfacegripper-articulation-attach`)
+
+## Question
+
+After the mission reached CONFIRMED 0 mm raycast contact (run-202: 30 `SEAL_DIAG` lines
+`min_gap_mm=0.0`, pad flush `pad_vs_surface 0.08°`, suction on, `gripper_force_limit=200`, pad
+settled stationary each step) and STILL never attached `/RestockScenario/HandlingUnit`
+(`gripped_n=0`, runs 191–202), while this lane's isolated harness attaches `/World/Carton` at 0 mm
+with the **same** `author_native_gripper` + `NativePanelContact` code, two structural differences
+between the mission panel and the harness panel remained untested in isolation (integration decision
+`key=surfacegripper-articulation-attach`: **(a) isolate now, (b) labelled sim-attach fallback
+prepared**):
+
+1. **Articulation** — the mission gripper `body0 = /MobileRobot/suction_cups` is a **terminal
+   reduced-coordinate articulation link** of the UR10 (which references `mobile-import.usd`). The
+   harness panel was a **maximal** rigid body pinned by a fixed joint to a kinematic carrier. The
+   plugin might not weld an articulation link to a free body.
+2. **Collider** — the mission panel collider is **disabled** (`physics:collisionEnabled=0`, the
+   self-hit exclusion), so there is no physical gripper–carton collision, only a raycast hit. The
+   harness panel had a collider. The attach might require real contact.
+
+## Verdict — NEITHER variable blocks the attach; no static structural cause reproduces the failure
+
+A clean 2×2 (`evidence/probe_articulation_attach.py`, **real** `author_native_gripper` +
+`NativePanelContact`, `force_limit=200`, flush side grasp at **0 mm** — the mission contact config),
+each variable moved alone from the proven-latching baseline, plus the fully faithful mission
+recipe. **All five recipes latch the free carton** (`gripped_n=1`, status `Closed`, `latch_step=1`,
+`min_gap_mm=0.0`):
+
+| recipe | mount | collider | carton | latched |
+|---|---|---|---|---|
+| `max_col`  (control = `side_flat`) | maximal carrier | on  | analytic cube | **yes** |
+| `max_nocol` | maximal carrier | off | analytic cube | **yes** |
+| `art_col`   | **articulation link** (`num_bodies=2`) | on  | analytic cube | **yes** |
+| `art_nocol` (= mission structure) | **articulation link** (`num_bodies=2`) | **off** | analytic cube | **yes** |
+| `art_nocol_realunit` (fully faithful) | **articulation link** | **off** | **real 0.45 kg convexHull mesh** | **yes** |
+
+- The plugin **does** weld a reduced-coordinate articulation link (`SingleArticulation` reports
+  `num_bodies=2`) to a free rigid body — articulation is **not** the blocker; no special
+  plugin configuration is needed.
+- A collider is **not required** for the attach (`max_nocol`, `art_nocol`, `art_nocol_realunit`
+  all latch with the panel collider off) — the disabled collider is **not** the blocker.
+- The real `/RestockScenario/HandlingUnit` **body** (a `convexHull` Mesh box 0.6×0.4×0.16 m, 0.45 kg,
+  `sleepThreshold=0`) and the real CAD panel footprint (~0.26×0.108 m, derived from the mission seal
+  `localPos0` spread) are **fine** — `art_nocol_realunit` latches. The mission seal footprint's
+  **vertical (world-Z) spread is 5.5 mm** (seals coplanar in height), so it does **not** overshoot
+  the 0.16 m-tall grasp face — consistent with the integration's run-194/198 reports that the seal
+  raycast hits the HandlingUnit flush.
+
+## Consequence
+
+No **static** structural property of the mission grasp (articulation link, disabled collider, real
+mesh carton body, real panel footprint) blocks the native attach — each latches in isolation with
+the unchanged gripper-authoring code. The remaining uncontrolled differences are **dynamic /
+composition**, both **outside gripper authoring (this lane's domain)** and only reproducible in a
+full mission run:
+
+- the `suction_cups` link is a terminal link of an **actively position-driven 6-DOF arm** holding
+  the contact pose under a 200 N over-press (the mission USD `over suction_cups` carries nonzero
+  `physics:velocity`/`angularVelocity` — the link is not at rest), whereas every latching harness
+  holds the pad on a rigid/static mount;
+- the robot is a **referenced payload**, so the seal `body0` reaches across a composition arc (the
+  plugin still resolves it — `NativePanelContact.probe()` reads `body0`'s pose and `close_gripper`
+  drives status to `Closing`/`Closed` — so this is the lower-probability candidate).
+
+This **supports the prepared decision (b)**: the integration lane's labelled sim-attach fallback (an
+explicit `FixedJoint` weld on measured 0 mm contact + suction) unblocks the end-to-end video, while
+the native-plugin latch under the driven articulation is tracked as an open sim-fidelity gap. No
+change in `cad_tool.py` (gripper authoring) can fix it — proven above.
+
+## Evidence (this key)
+
+- Harness: `evidence/probe_articulation_attach.py` (same GPU guards as the mission;
+  `/tmp/aile-gpu.lock`, heavy=2500, runtime `sim-gpu-userspace-recovery-s1/root`).
+- Sweep: `evidence/articulation-attach-02.summary.json` (the 2×2) and
+  `evidence/articulation-attach-03.summary.json` (the faithful `art_nocol_realunit`); raw runs under
+  `~/datasets/sim-restock-stations-v1/articulation-attach-02/` and `…-03/`.
+
 ## Definition of done
 
 - Diagnostic: `SEAL_DIAG`/`probe()` in `cad_tool.py`, CPU test, logged every grasp tick in-mission.

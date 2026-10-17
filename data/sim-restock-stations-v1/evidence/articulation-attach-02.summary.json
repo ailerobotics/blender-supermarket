@@ -1,0 +1,114 @@
+{
+  "recipes": {
+    "max_col": {
+      "status": "passed",
+      "latched": true,
+      "latch_step": 1,
+      "mount": "maximal",
+      "collider": true,
+      "final_status": "GripperStatus.Closed",
+      "gripped": [
+        "/World/Carton"
+      ],
+      "gripped_n": 1,
+      "min_gap_mm": 0.0,
+      "forward_world": [
+        0.0,
+        -1.0,
+        -0.0
+      ],
+      "face_normal_world": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "articulation": {},
+      "reason": null,
+      "exit": 0
+    },
+    "max_nocol": {
+      "status": "passed",
+      "latched": true,
+      "latch_step": 1,
+      "mount": "maximal",
+      "collider": false,
+      "final_status": "GripperStatus.Closed",
+      "gripped": [
+        "/World/Carton"
+      ],
+      "gripped_n": 1,
+      "min_gap_mm": 0.0,
+      "forward_world": [
+        0.0,
+        -1.0,
+        -0.0
+      ],
+      "face_normal_world": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "articulation": {},
+      "reason": null,
+      "exit": 0
+    },
+    "art_col": {
+      "status": "passed",
+      "latched": true,
+      "latch_step": 1,
+      "mount": "articulation",
+      "collider": true,
+      "final_status": "GripperStatus.Closed",
+      "gripped": [
+        "/World/Carton"
+      ],
+      "gripped_n": 1,
+      "min_gap_mm": 0.0,
+      "forward_world": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "face_normal_world": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "articulation": {
+        "articulation_dof": 0,
+        "articulation_bodies": 2
+      },
+      "reason": null,
+      "exit": 0
+    },
+    "art_nocol": {
+      "status": "passed",
+      "latched": true,
+      "latch_step": 1,
+      "mount": "articulation",
+      "collider": false,
+      "final_status": "GripperStatus.Closed",
+      "gripped": [
+        "/World/Carton"
+      ],
+      "gripped_n": 1,
+      "min_gap_mm": 0.0,
+      "forward_world": [
+        0.0,
+        -1.0,
+        -0.0
+      ],
+      "face_normal_world": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "articulation": {
+        "articulation_dof": 0,
+        "articulation_bodies": 2
+      },
+      "reason": null,
+      "exit": 0
+    }
+  }
+}
