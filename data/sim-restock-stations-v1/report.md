@@ -331,3 +331,57 @@ was the sole blocker.
   refused).
 - Cart polygon diff: `evidence/cart-new-rgb.png` (stale .62×.42, overshoots rails) vs
   `evidence/cart-old-rgb.png` (.54×.34, inside the deck); depth maps `*-depth.png`.
+
+---
+
+# In-session re-commission for warm-session re-runs (key `warm-recommission`)
+
+Follow-on to PR 112 and the devloop warm-session lever (PR 111). PR 111 shipped the warm-session
+mechanism + the pluggable `config['warm_reset']` seam (CPU-proven); the native reset provider
+(integration + camera/stations own the World/assembly + sensing clock) and a fresh **in-session
+commission** are the pluggable follow-up. This lane provides the station re-commission choreography.
+
+## Why re-commission (not bypass)
+
+The warm loop (`run_warm_session`) re-runs the mission in one live Isaac session. Its `warm_reset`
+provider re-seats the scene and **must re-validate the baseline, raising to refuse rather than
+bypass the lifetime guard**. The baseline lifetime is sim-clock based (`sensed.age_at`: with a
+steady_domain, `age = now` = the mission's 0-based sim elapsed, bounded by `lifetime_s`; the
+acquisition clock is anti-rewind provenance only). A correctly sim-clock-rebased re-seat restarts
+`now`, so the existing baseline usually re-validates. When it would be refused (expired / session
+unbound), the provider must get a FRESH baseline through the unchanged gates — never run on a stale
+one.
+
+## Deliverable
+
+`commissioning.recommission_in_session(contexts, capture, *, dataset_dir, required_locations,
+lifetime_s, …)` — the provider's refresh step. With the stations re-seated EMPTY, it re-captures each
+live context's empty-support frame (same `capture(ctx)` contract as `run_commissioning`),
+re-commissions every required station (source + cart + shelf) through the UNCHANGED production
+`commission()` gates (markers decode, metric fit ≤ 2 mm, flat plane ≤ 6 mm), re-persists the fresh
+baseline (new sim-clock stamp + acquisition under the context's own clock/session → a rebased re-run
+reads age ~0) and re-attaches the refreshed geometry to the live slots. A station whose fresh frame
+fails the gates, or a required station the contexts don't cover, **raises** (`CommissioningBaselineMissing`
+/ the gate `ValueError`) so the warm loop stops. Pure commissioning choreography — no Isaac/USD; the
+provider owns the live World reset, camera capture and sim-clock rebase.
+
+CPU tests (`test_restock_commissioning.py`): refreshes all three + re-attaches + the baseline stamp
+moves forward (1 → 50); refuses a required station the contexts can't refresh; propagates a gate
+failure instead of bypassing. RUNBOOK §13a "Warm-session in-session re-commission".
+
+## Integration/devloop seam
+
+The integration/camera native `warm_reset` provider (resolved from `config['warm_reset']` onto
+`bundle.warm_reset` in `isaac_bundle.create`, factory `build_warm_reset(app, assembly, parts, plan,
+…)`) calls `recommission_in_session` as its baseline-refresh branch, passing the live sensing
+`contexts` (from `build_sensing`) and a live empty-frame `capture`. Coordinated with
+sim-restock-devloop-v1 via status lines.
+
+## Objective-1 note — run-253 consumed the union baselines
+
+Integration run-253 commissioned all three stations in one boot (`run-253c`, my PR-112 wrapper) and
+the mission read them from the union `commissioning_dir` with **no baseline refusal**; it required
+`backstock_00` (collect) today (`transfer_shelf_location=null`, `commissioning_required_locations=
+['backstock_00']`). The cart/shelf baselines are present and ready; they are consumed once the
+downstream lane enables the transfer/couple stages (their file). No consumption gap in this lane's
+deliverable; the union loader resolves all three.

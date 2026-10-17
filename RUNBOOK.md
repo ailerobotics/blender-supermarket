@@ -907,6 +907,19 @@ Decode degrades with scale (small markers: the fixed-source QR falls below the ~
 floor at ≤0.5), so a decode-grade camera stays near full resolution — see
 `data/sim-restock-camera-v2/render-scale-report.md`.
 
+**Warm-session in-session re-commission.** For a warm-session re-run (`run_mobile_restock.py
+--warm-attempts N`, PR 111), the opt-in `config['warm_reset']` provider re-seats the scene +
+re-validates the baseline and must NOT bypass the lifetime guard. When the re-seated baseline would
+be refused (expired on the sim clock / session unbound), the provider's refresh step is
+`commissioning.recommission_in_session(contexts, capture, dataset_dir=…, required_locations={…})`: with
+the stations re-seated EMPTY, it re-captures each live station camera's empty-support frame and
+re-commissions all required stations (source + cart + shelf) through the UNCHANGED production
+`commission()` gates, re-persists the fresh baseline (new sim-clock stamp) and re-attaches it to the
+live slots. A station whose fresh frame fails the gates — or a required station the contexts don't
+cover — raises, so the warm loop stops rather than running on a stale baseline. The provider owns the
+live World reset, camera capture and sim-clock rebase; this is the station re-commission choreography
+it plugs in. CPU-tested in `test_restock_commissioning.py`.
+
 ### 13b. Collect pick target from the fixed source camera
 
 The collect stage senses the pick carton with the FIXED `source` station camera against its
