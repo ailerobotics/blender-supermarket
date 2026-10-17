@@ -4,6 +4,7 @@ import math
 import time
 from ..restock_camera.freshness import require_fresh
 
+from .fit import axis_fits
 from .types import MotionPort, ProductProfile, Result, Sensors
 
 # Controller ticks to HOLD a settled contact step before re-checking the latch, so the arm link
@@ -232,9 +233,8 @@ class TransferController:
                 return self._result()
             if not target.clear:
                 return self._fail('occupied target')
-            if (len(target.free_dimensions) != 3 or not self._pose_ok(target.pose)
-                    or any(not math.isfinite(a) or a < b + .02
-                           for a, b in zip(target.free_dimensions, self.profile.dimensions))):
+            if (not self._pose_ok(target.pose)
+                    or not axis_fits(target.free_dimensions, self.profile.dimensions)):
                 return self._fail('unreachable or undersized target')
             if s.contact:
                 return self._fail('unexpected pre-existing gripper contact')
