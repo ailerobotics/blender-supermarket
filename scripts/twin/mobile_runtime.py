@@ -53,6 +53,7 @@ class MobileController:
         self._held = False
         self._braked = False
         self._cart_braked = False
+        self._base_full_braked = False
 
     DRIVE_DAMPING = 100.0
     DRIVE_MAX_FORCE = 80.0
@@ -167,6 +168,44 @@ class MobileController:
         if getattr(self, '_cart_braked', False):
             self.stage.RemovePrim(self.CART_BRAKE_PATH)
             self._cart_braked = False
+
+    BASE_FULL_BRAKE_PATH = '/MobileGraspBrake'
+
+    def engage_base_full_brake(self):
+        """SIM FULL BASE BRAKE for the PRE-WELD grasp press (firstmate 289/run-232): pin the whole
+        chassis (translation + yaw) to the world with a FixedJoint while the arm presses into the
+        carton to seal the grip, BEFORE any carton welds to the arm. The yaw-lock-only brake leaves
+        translation free (to relieve the world->base->arm->weld->carton->support loop during the
+        welded lift), but with translation free the side-grip contact-press slides the base ~15.5 mm
+        laterally (run-232 > the gate) AND keeps the pad ~0.5 mm off the carton so the grip never
+        seals / the flush-contact weld never fires. A FULL FixedJoint is proven safe HERE: with no
+        carton welded there is no over-constrained loop yet (the exact full brake held base_dyaw
+        0.00 mrad in run-210/211 and only broke down once the carton welded). Switched to the
+        yaw-lock-only brake the instant the carton welds (isaac_port), released before any base drive.
+        SIM-only; a real AMR holds station on its drive brakes."""
+        from pxr import UsdPhysics, UsdGeom, Gf
+        if getattr(self, '_base_full_braked', False):
+            return
+        self.release_brake()   # mutually exclusive with the yaw-lock D6 brake
+        # Anchor at the chassis CURRENT world pose so the joint is satisfied at creation (zero
+        # correction impulse); coinciding default origins would yank the base to the world origin.
+        world = UsdGeom.XformCache().GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.robot_body))
+        t, q = world.ExtractTranslation(), world.ExtractRotationQuat()
+        joint = UsdPhysics.FixedJoint.Define(self.stage, self.BASE_FULL_BRAKE_PATH)
+        joint.CreateBody1Rel().SetTargets([self.robot_body])   # body0 empty == world anchor
+        joint.CreateLocalPos0Attr(Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])))
+        joint.CreateLocalRot0Attr(Gf.Quatf(float(q.GetReal()), Gf.Vec3f(*[float(v) for v in q.GetImaginary()])))
+        joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
+        joint.CreateLocalRot1Attr(Gf.Quatf(1.0))
+        self._base_full_braked = True
+        print('BASE_FULL_BRAKE engaged (fixed-to-world) for pre-weld grasp press', flush=True)
+
+    def release_base_full_brake(self):
+        """Release the pre-weld full base brake (switch to yaw-lock at the weld, or drive the base)."""
+        if getattr(self, '_base_full_braked', False):
+            self.stage.RemovePrim(self.BASE_FULL_BRAKE_PATH)
+            self._base_full_braked = False
+            print('BASE_FULL_BRAKE released', flush=True)
             print('CART_BRAKE released', flush=True)
 
     def park(self):
@@ -176,6 +215,7 @@ class MobileController:
 
     def command(self, v, omega, observation, *, transport_ready=False):
         self.release_brake()  # resuming driving: drop the sim parking brake before any base motion
+        self.release_base_full_brake()  # and the pre-weld full base pin
         self.release_cart_brake()  # and the cart pin, so the cart is free to be coupled/towed
         self.release()  # resuming driving: drop the stationary wheel-hold before commanding wheels
         # Stale/missing kinematics must never leave a previous nonzero drive latched.

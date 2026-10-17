@@ -182,6 +182,30 @@ def test_no_recorder_means_no_record_render():
     assert all(not r for _, r in (port._frame_plan(t) for t in range(1, 5)))
 
 
+def test_base_brake_full_lock_pre_weld_yaw_lock_when_held():
+    # firstmate run-232: during the pre-weld grasp press the base must be FULLY locked (the side-grip
+    # press slid the free-translation base 15.5 mm and the grip never sealed); once a carton is held,
+    # revert to the yaw-lock-only loop relief (a full lock there oscillated the arm, run-208/209).
+    class FakeMobile:
+        def __init__(self):
+            self.calls = []
+        def __getattr__(self, name):
+            return lambda *a, **k: self.calls.append(name)
+    port = IsaacPort.__new__(IsaacPort)
+
+    port.mobile = FakeMobile()
+    port._apply_base_brake(in_arm_phase=True, welded=False)      # pre-weld grasp press
+    assert port.mobile.calls == ['release_brake', 'engage_base_full_brake']
+
+    port.mobile = FakeMobile()
+    port._apply_base_brake(in_arm_phase=True, welded=True)       # carton held: lift/carry
+    assert port.mobile.calls == ['release_base_full_brake', 'engage_brake']
+
+    port.mobile = FakeMobile()
+    port._apply_base_brake(in_arm_phase=False, welded=False)     # couple/tow/park: base free to drive
+    assert port.mobile.calls == ['release_base_full_brake', 'release_brake']
+
+
 def test_begin_action_tracks_current_action_for_gating():
     port = IsaacPort.__new__(IsaacPort)
     port.on_action = None
