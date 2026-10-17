@@ -322,7 +322,11 @@ class NativePanelContact:
             return                                   # already welded
         if self.read():                              # native plugin latched on its own -- prefer it
             return
-        info = self.last_probe or self.probe()
+        # Probe FRESH every tick, not self.last_probe: read()/SEAL_DIAG only refresh last_probe on the
+        # sensing stride, but the pad crosses the ~0 mm contact window briefly DURING the over-press
+        # move (run-204 hit 0.0 mm only transiently); a stale last_probe misses it. This runs only while
+        # the fallback is enabled, suction is on, and nothing is yet held -- a bounded grasp-phase cost.
+        info = self.probe()
         gap, pvs = info.get('min_gap_mm'), info.get('pad_vs_surface_deg')
         hits = [h[0] for h in (info.get('raycast') or []) if h and h[0]]
         if (gap is None or gap > SIM_ATTACH_CONTACT_MM or pvs is None

@@ -391,6 +391,7 @@ def test_sim_attach_fallback_gating_default_off_and_contact_gated():
         a.enabled, a._sim_attach_fallback = enabled, fallback
         a._fallback_body = a._fallback_joint = None
         a.last_probe = probe
+        a.probe = lambda: probe          # fallback probes fresh each tick; stub it on CPU
         a.api = NS(get_gripper_status=lambda p: status, get_gripped_objects=lambda p: list(gripped))
         a._welds, a._releases = [], []
         a._fallback_weld = lambda body: (a._welds.append(body),
