@@ -20,11 +20,11 @@ from scripts.twin.tools.replay_reach import build_source_bench, FrameRecord  # n
 
 def test_sensing_render_required_policy():
     # render required for observe + the re-validation / unknown phases ...
-    for phase in ('observe', 'preplace', 'verify', 'idle', 'host', 'warm', 'anything'):
+    for phase in ('observe', 'verify', 'idle', 'host', 'warm', 'anything'):
         assert sensing_render_required(phase) is True
     # ... and NOT required (suspend) for the validated-reach execution phases.
-    for phase in ('approach', 'contact', 'grasp', 'lift', 'place', 'retreat', 'release', 'stow',
-                  'couple'):
+    for phase in ('approach', 'contact', 'grasp', 'lift', 'preplace', 'place', 'retreat', 'release',
+                  'stow', 'couple'):
         assert sensing_render_required(phase) is False
         assert phase in _SENSING_SUSPEND_PHASES
 

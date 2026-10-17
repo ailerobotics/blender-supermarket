@@ -22,8 +22,14 @@ from ..restock_camera.qr import FixedTileQR, FrameQR, rgb_digest
 #: and cuMotion is executing the reach, so the arm occludes the fixed camera (the OBSERVE-THEN-
 #: EXECUTE lock). The opt-in sensing gate suspends the render for these and republishes the held
 #: registration. 'couple' is the cart-coupling action's execution phase.
-_SENSING_SUSPEND_PHASES = frozenset({'approach', 'contact', 'grasp', 'lift', 'place', 'retreat',
-                                     'release', 'stow', 'couple'})
+#: The WHOLE cart holding chain (preplace/place/retreat) is suspended too (firstmate 286, observe-
+#: then-execute choreography extension): once lift has the carton, the arm reaching to the cart
+#: occludes the fixed source camera just as badly as the pick reach, so a preplace re-validation that
+#: RESUMED the render stalled /sensors to the wall backstop (run-227). The cart placement target is
+#: DERIVED from the cart prim (not camera-sensed), so the held re-validation fabricates nothing;
+#: the fixed camera resumes only after retreat clears the view (next non-suspended phase: verify).
+_SENSING_SUSPEND_PHASES = frozenset({'approach', 'contact', 'grasp', 'lift', 'preplace', 'place',
+                                     'retreat', 'release', 'stow', 'couple'})
 
 
 def sensing_render_required(phase):
@@ -31,7 +37,7 @@ def sensing_render_required(phase):
 
     False only for the execution phases in ``_SENSING_SUSPEND_PHASES`` (observe already validated the
     registration and the rendered frame is unused while the arm occludes the fixed camera). True for
-    observe and the preplace/verify re-validations, and for any other/unknown phase -- fail safe:
+    observe and the verify re-validation, and for any other/unknown phase -- fail safe:
     never suspend the render unless the phase is explicitly a validated-reach execution phase. The
     integration runtime maps the controller phase through this each tick to drive
     ``set_render_suspended(not sensing_render_required(phase))``."""

@@ -9,11 +9,12 @@ from twin.restock_manipulation.isaac_sensors import sensing_render_required, _SE
 
 class SensingGateDriverTests(unittest.TestCase):
     def test_phase_suspend_mapping(self):
-        # Validated-reach execution phases suspend the decode render; observe and the preplace/verify
-        # re-validations render; unknown/None fail safe to render-required (never wrongly suspend).
+        # Validated-reach execution phases (incl. the whole cart holding chain preplace/place/retreat,
+        # firstmate 286) suspend the decode render; observe and the verify re-validation render;
+        # unknown/None fail safe to render-required (never wrongly suspend).
         for phase in _SENSING_SUSPEND_PHASES:
             self.assertFalse(sensing_render_required(phase), phase)
-        for phase in ('observe', 'preplace', 'verify', 'idle', 'succeeded', 'failed', None, 'other'):
+        for phase in ('observe', 'verify', 'idle', 'succeeded', 'failed', None, 'other'):
             self.assertTrue(sensing_render_required(phase), phase)
 
     def test_frame_due_honours_suspension(self):
@@ -37,7 +38,7 @@ class SensingGateDriverTests(unittest.TestCase):
         self.assertFalse(would_render('approach', 6, 6))   # reaching: arm occludes -> suspend
         self.assertFalse(would_render('contact', 6, 6))
         self.assertFalse(would_render('lift', 6, 6))
-        self.assertTrue(would_render('preplace', 6, 6))     # re-validation resumes the render
+        self.assertFalse(would_render('preplace', 6, 6))    # holding chain: arm occludes -> suspend (fm 286)
         self.assertTrue(would_render(None, 6, 6))           # pre-grasp: fail safe render
 
 
