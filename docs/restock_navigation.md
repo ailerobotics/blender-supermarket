@@ -271,6 +271,65 @@ turn radius, reverse prohibition and measured goal arrival all gate execution.
 The adapter owns its own ROS context; `close()` cancels only its goal/context.
 External Nav2 nodes are owned by the launch process/integration, not this module.
 
+## Moving obstacles (dynamic-obstacle layer)
+
+There are two deliberately separate inputs for moving obstacles. The isolated
+Nav2 route's standard `ObstacleLayer` consumes the robot's navigation `scan`, so
+transient depth/range returns mark the local Nav2 costmap just like static
+returns. Its final actuator command still passes the articulated safety gate,
+which uses the **full towed-cart swept envelope**. The sensor-navigation route
+uses `Observation.obstacles` instead, so it can receive an explicit detection
+stream before the same coupled gate and planner.
+
+The controlled static-scene temporal/nvblox map is *not* a dynamic-intrusion
+claim (see [navigation_temporal_mapping.md](navigation_temporal_mapping.md)).
+The installed Isaac ROS 4.4 nvblox supports generic `mapping_type: dynamic` in
+`nvblox_node` and people mapping through `nvblox_human_node` with a semantic
+mask; both publish dynamic and combined map slices for `nvblox_nav2`. This
+project's navigation mapper is intentionally configured as the static evidence
+producer today, so it does **not** claim to have enabled either mode. Enabling
+one requires a version-matched camera/mask or depth bridge and selecting the
+combined/dynamic slice in the Nav2 layer; until then the supported live Nav2
+input is its scan obstacle layer, and the supported sensor-route input is the
+explicit detection contract below.
+
+`navigation/dynamic.py` turns per-frame obstacle **detections** (map-frame centroid
++ physical radius + source — from the robot depth/nav cameras via an nvblox
+dynamic/people layer, a detector node, or the scenario) into conservative
+occupancy points unioned into `Observation.obstacles`.
+`DynamicObstacleLayer.update(detections, stamp)` associates detections to tracks by
+nearest predicted position, low-passes a velocity estimate, debounces
+(`confirm_frames`), decays stale tracks (`drop_after`), and
+`predicted_points`/`apply` block each confirmed track's **current extent** plus, for
+a moving track, its **predicted swept path** over `prediction_horizon`. The layer is
+**add-only**: it never clears a raw return, shortens a stop, or relabels unknown
+free — removing its output can only turn a stop into motion. `DynamicObstacleConfig`
+exposes association / moving-speed / horizon / step / gain / confirm / decay /
+spacing / cap, all as configuration. `Detection(position, radius, source)` is the
+contract shared with the detection topic (`sim-restock-humans-v1`) and the reactive
+event tree (`sim-restock-bt-v1`).
+
+**Default-off / opt-in.** Nothing consumes the layer unless
+`navigation.dynamic_obstacles` is set (sensor nav_mode only; the Nav2 route takes
+moving obstacles through its ROS costmap obstacle/nvblox layer instead). When
+configured, `nav_factory` attaches the layer to the sensor route and the caller
+passes `detections=` to `SensorNavigation.step`; absent, the sensed observation is
+untouched and the mission run is byte-identical. The avoidance **patience**
+`navigation.blocked_timeout` sets how long the base stops and waits on a blocked
+aisle before giving up the goal (default unchanged).
+
+**Behaviours** (deterministic CPU evidence, `scripts/run_dynobs_evidence.py`,
+RUNBOOK §12): a shopper crossing the aisle is detected, the towed base **stops and
+waits**, then **resumes** and arrives once the path clears; a box dropped on a
+narrow route and left is an honestly **unsupported** case — the base stops and
+gives up after `blocked_timeout` rather than ever reporting arrival; and the coupled
+planner **re-plans a route around** an off-centre cart (vs the straight shot). The
+closed-loop follower reacts locally (its per-tick braking sweep, not a global
+early re-plan), so a cart met head-on in a narrow aisle is a stop/wait, while the
+planner-level detour evidence shows the re-plan-around capability. These are
+quasi-static kinematic demonstrations, not PhysX, sensing or perception runs;
+detections are scenario ground truth, not detector output.
+
 ## Evidence and limits
 
 The navigation unit tests cover cart swing bounds, corridor feasibility,

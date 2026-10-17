@@ -292,6 +292,20 @@ python3 -m unittest discover -s scripts/twin/tests -p test_navigation.py -v
 python3 -m unittest discover -s scripts/twin/tests -p test_articulated_navigation.py -v
 python3 -m unittest discover -s scripts/twin/tests -p test_navigation_corridor.py -v
 
+# Moving-obstacle layer + deterministic dynamic-obstacle scenario + closed-loop
+# evidence (all CPU, no Blender/Isaac/GPU; see docs/restock_navigation.md).
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest \
+  scripts/twin/tests/test_navigation_dynamic.py \
+  scripts/twin/tests/test_navigation_dynamic_wiring.py \
+  scripts/twin/tests/test_navigation_dynamic_scenario.py \
+  scripts/twin/tests/test_navigation_dynamic_evidence.py -q
+
+# Self-asserting evidence run: person (stop/wait/resume/arrive), box (honest
+# give-up on a permanently blocked aisle), cart (coupled re-plan AROUND it).
+# Writes trace.jsonl, run.json and top-down PNG frames OUTSIDE git; exit 1 on
+# any failed verdict. --scenario person|box|cart|all  --out DIR.
+python3 scripts/run_dynobs_evidence.py --out ~/datasets/sim-restock-dynobs-v1
+
 # Optional host-Python Jazzy overlay, extracted only into task-owned storage.
 # Uses existing trusted apt indexes; no sudo, package install, or service restart.
 python3 scripts/setup_restock_nav2.py --output "$TASK_OUTPUT/nav2"

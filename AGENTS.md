@@ -113,6 +113,19 @@ repo's `scenes/`, `export/` or `renders/`.
   clearance uses the independent base/cart swept envelope, so straight cart width alone does
   not prove aisle feasibility. Simulator/Nav2 execution still needs integration
   evidence; fixture tests must not be presented as a physics demonstration.
+- **Moving obstacles** (opt-in, default-off): `navigation/dynamic.py` tracks
+  per-frame `Detection(position,radius,source)` into velocity-predicted occupancy
+  points unioned (add-only) into `Observation.obstacles`, so the existing gates
+  avoid them with the towed-cart envelope. Enable via `navigation.dynamic_obstacles`
+  (sensor nav_mode only) + `SensorNavigation.step(detections=)`; absent ⇒
+  byte-identical run. Nav2's existing obstacle layer receives transient nav-scan
+  returns; installed Isaac ROS 4.4 supports dynamic/people nvblox maps, but this
+  repo currently launches only the static evidence mapper (do not claim its dynamic
+  modes are wired). `Detection` is the contract shared with `sim-restock-humans-v1`
+  (detection topic) and `sim-restock-bt-v1` (event tree). Scenario + self-asserting
+  CPU evidence: `navigation/dynamic_scenario.py`, `scripts/run_dynobs_evidence.py`
+  (RUNBOOK §12); docs in [restock_navigation.md](docs/restock_navigation.md)
+  "Moving obstacles".
 - Git delivery: the repository now has an `origin` remote; follow the current
   task delivery contract rather than the former local-only assumption.
 - Mobile UR10/cart assets and control interfaces: [docs/mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md), commands in RUNBOOK §9. The generated mobile URDF replaces the fixed pedestal; import with a free base. CPU FK/schema checks do not establish PhysX towing stability.
