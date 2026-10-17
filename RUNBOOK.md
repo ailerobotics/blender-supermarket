@@ -1127,3 +1127,41 @@ Scenarios: `follow` (sweep, shelves present), `person` (proxy walks the aisle), 
 control rate, warm solve ms, est. process VRAM, steady tracking error, min obstacle + person
 clearance, joint-window violations, and — against the LIVE MPC stream — the gate behaviour
 (RUN forwards, STOP holds with zero travel, resume to the freshest command).
+
+## 19. Route alerts — the robot as a mobile store sensor (CPU tests + CPU evidence)
+
+Opt-in (`--route-alerts`, default off): run the read-only store-vision spill / obstruction
+detectors over the drive camera while navigating, publish `robot.route_alert.*` events +
+staff tasks, and feed obstruction footprints to navigation through the dynobs costmap
+layer. Absent ⇒ byte-identical mission. Design + per-detector GPU/CPU path:
+[docs/route_alerts.md](docs/route_alerts.md); write-up `data/sim-route-alerts-v1/report.md`.
+
+CPU tests. The pure-logic tests (config, costmap/dynobs seam, mission-hook wiring) run
+under system python; the full-runner integration tests need store-vision, so run them
+under its venv (python3.11; has numpy/opencv/pydantic + store-vision installed):
+```
+# pure-logic (anywhere):
+PYTHONPATH=scripts python3 -m pytest scripts/twin/route_alerts/tests/test_config.py \
+    scripts/twin/route_alerts/tests/test_costmap.py \
+    scripts/twin/route_alerts/tests/test_mission.py -q
+# all tests incl. store-vision integration (unittest; the venv has no pytest):
+PYTHONPATH=scripts /home/manishsaini/firstmate/projects/store-vision/.venv/bin/python \
+    -m unittest discover -s scripts/twin/route_alerts/tests -p 'test_*.py'
+```
+
+CPU evidence (no Blender/Isaac/GPU). Seeds a spill + an aisle obstruction (+ a moving
+shopper) into store-vision synthetic aisle frames, drives the REAL runner (detect: spill +
+obstruction + aisle-blocked + robot events + staff tasks + people-masked), then drives the
+REAL coupled controller through the REAL dynobs layer so it stops for and re-routes around
+the detected obstruction. Self-asserting (exit 1 on any failure); artifacts outside git:
+```
+PYTHONPATH=scripts /home/manishsaini/firstmate/projects/store-vision/.venv/bin/python \
+    scripts/run_route_alerts_evidence.py --out ~/datasets/sim-route-alerts-v1
+```
+
+Guarded GPU (optional, for the open-vocab paths / a live mission run). Add
+`--route-alerts` (or `--route-alerts-config PATH`) to `scripts/run_mobile_restock.py`
+(§11). Use this lane's `ROS_DOMAIN_ID=108`, `ROS_LOCALHOST_ONLY=1`; take `/tmp/aile-gpu.lock`
+only when free (the integration lane holds it across its commission+mission sequence) and
+keep sessions short. Live people-masking requires `config["agents_factory"]` (the humans
+lane's detections) — without it the hook refuses to analyse (GDPR-by-design).
