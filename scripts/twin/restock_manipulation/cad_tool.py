@@ -528,9 +528,15 @@ class NativePanelContact:
             # unit or a static neighbour/support (a SurfaceGripper cannot seal a static body).
             hits = info.get('raycast')
             hit_bodies = sorted({h[0] for h in hits if h and h[0]}) if hits else None
-            print('SEAL_DIAG %s status=%s gripped_n=%d gripped=%s enabled=%s min_gap_mm=%s '
+            # inst/fb localise the attach-fallback propagation blocker (run-213): the capture that
+            # feeds the controller's s.contact calls read() on ONE instance; sim_attach_weld sets
+            # _fallback_body on the instance IsaacPort ticks. If read() logs fb=False while the port's
+            # probe logs fb=True (different inst=), the capture reads a DIFFERENT NativePanelContact
+            # than the weld mutates -- which is exactly why s.contact stayed False 7 s after the weld.
+            print('SEAL_DIAG %s inst=%04x fb=%s status=%s gripped_n=%d gripped=%s enabled=%s min_gap_mm=%s '
                   'tilt_deg=%s forward=%s pad_vs_surface_deg=%s face_normal=%s hit_bodies=%s'
-                  % (label, info.get('status'), info['gripped_n'], info['gripped'], info['enabled'],
+                  % (label, id(self) & 0xffff, getattr(self, '_fallback_body', None) is not None,
+                     info.get('status'), info['gripped_n'], info['gripped'], info['enabled'],
                      info.get('min_gap_mm'), info.get('tilt_deg_from_down'), info.get('forward_world'),
                      info.get('pad_vs_surface_deg'), info.get('face_normal_world'), hit_bodies),
                   flush=True)

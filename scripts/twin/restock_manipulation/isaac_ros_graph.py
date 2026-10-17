@@ -122,6 +122,15 @@ class IsaacRosGraph:
         self.last_receive_sim = None   # re-seeded from the first poll of this job
 
     def publish_sensors(self, sensors):
+        # Attach-fallback propagation probe (run-213): log the contact bool that actually reaches the
+        # wire, throttled to transitions. If this prints contact=True after the weld but the controller
+        # still cap-faults, the break is host-side (deserialize/freshness); if it never prints True while
+        # the welded instance shows fb=True, the capture read a different NativePanelContact.
+        c = bool(getattr(sensors, 'contact', False))
+        if c != getattr(self, '_last_pub_contact', None):
+            self._last_pub_contact = c
+            print('PUBLISH_SENSORS contact=%s stamp=%s' % (c, getattr(sensors, 'simulation_time', None)),
+                  flush=True)
         self._publish('sensors',json.dumps(asdict(sensors),allow_nan=False))
 
     def check_health(self):
