@@ -417,6 +417,21 @@ class RosMotionPort:
                 and time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
                 > PLAN_TOTAL_WALL_CAP_S)
 
+    def failed_result_pending(self):
+        """True when a plan/execute action RESULT has arrived FAILED (status != SUCCEEDED) but poll()
+        has not consumed it. Read-only. The bridge watchdog checks it so a trajectory_host GOAL_MISS
+        abort during the LIFT -- which suspends sensing, so /sensors stalls and poll() stops being
+        driven -- surfaces as a motion failure within ~0.1 s instead of hanging to the wall cap
+        (run-224: the lift GOAL_MISS aborted the executor but the controller never saw it). Only the
+        *_result states carry a get_result future with a GoalStatus; *_accept carry the goal handle."""
+        f = self.future
+        if f is None or self.state not in ('plan_result', 'execute_result') or not f.done():
+            return False
+        try:
+            return f.result().status != 4            # GoalStatus.STATUS_SUCCEEDED
+        except Exception:
+            return True                              # a result future that raised is a failure too
+
     def poll(self):
         try:
             return self._poll()
@@ -674,6 +689,12 @@ class RosTransferBridge:
         motion = getattr(self.controller, 'motion', None)
         if motion is not None and getattr(motion, 'planning_wall_exceeded', lambda: False)():
             self._emit(self.controller._fail('planning failed (exhausted within wall cap)'))
+            return
+        # A trajectory_host GOAL_MISS/abort during the LIFT suspends sensing, so /sensors stalls and
+        # poll() stops draining the action result -- surface the failed result here independently
+        # (run-224 hung ~20 min to the wall cap instead of failing when the lift missed its goal).
+        if motion is not None and getattr(motion, 'failed_result_pending', lambda: False)():
+            self._emit(self.controller._fail('arm motion failed (goal tolerance not reached)'))
             return
         if not self.first_frame:
             # No /sensors yet: the looser startup grace (not the 1 s per-frame bound) applies, so a

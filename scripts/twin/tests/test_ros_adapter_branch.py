@@ -88,3 +88,40 @@ class ReplanRetry(unittest.TestCase):
     def test_never_replans_without_a_stored_goal(self):
         from twin.restock_manipulation.ros_adapter import _should_replan
         self.assertFalse(_should_replan(0, has_plan_goal=False))
+
+class FailedResultPending(unittest.TestCase):
+    """failed_result_pending() lets the /sensors-independent bridge watchdog surface a GOAL_MISS/abort
+    during the lift (which suspends sensing, stalling poll) within ~0.1 s instead of hanging (run-224)."""
+    @staticmethod
+    def _port(state, future):
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state, p.future = state, future
+        return p
+
+    class _F:
+        def __init__(self, done, status=None, raises=False):
+            self._done, self._status, self._raises = done, status, raises
+        def done(self):
+            return self._done
+        def result(self):
+            if self._raises:
+                raise RuntimeError('result raised')
+            return type('R', (), {'status': self._status})()
+
+    def test_aborted_execute_result_is_pending_failure(self):
+        self.assertTrue(self._port('execute_result', self._F(True, status=6)).failed_result_pending())  # ABORTED
+
+    def test_succeeded_result_is_not_failure(self):
+        self.assertFalse(self._port('execute_result', self._F(True, status=4)).failed_result_pending())  # SUCCEEDED
+
+    def test_result_not_yet_arrived_is_not_failure(self):
+        self.assertFalse(self._port('execute_result', self._F(False)).failed_result_pending())
+
+    def test_only_result_states_count(self):
+        self.assertFalse(self._port('execute_accept', self._F(True, status=6)).failed_result_pending())
+
+    def test_raising_result_future_is_a_failure(self):
+        self.assertTrue(self._port('plan_result', self._F(True, raises=True)).failed_result_pending())
+
+    def test_none_future_is_safe(self):
+        self.assertFalse(self._port('execute_result', None).failed_result_pending())

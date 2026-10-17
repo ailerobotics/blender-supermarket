@@ -131,6 +131,22 @@ class PlanningHangSurfacesBeforeBackstop(unittest.TestCase):
         b._watchdog()
         self.assertEqual(emitted, [])
 
+    def test_failed_action_result_surfaces_even_when_sensors_stall(self):
+        # run-224: a LIFT GOAL_MISS aborts the executor, but lift suspends sensing so /sensors stalls
+        # and poll() never drains the failed result -> the watchdog must surface it (not hang to cap).
+        b, emitted = _bridge(first_frame=True, sim_gap=0.0, packet_wall_age=0.1, wall_backstop=30.0)
+        b.controller.motion = NS(planning_wall_exceeded=lambda: False,
+                                 failed_result_pending=lambda: True)
+        b._watchdog()
+        self.assertEqual([e.reason for e in emitted], ['arm motion failed (goal tolerance not reached)'])
+
+    def test_healthy_execution_not_faulted(self):
+        b, emitted = _bridge(first_frame=True, sim_gap=0.05, packet_wall_age=3.5, wall_backstop=30.0)
+        b.controller.motion = NS(planning_wall_exceeded=lambda: False,
+                                 failed_result_pending=lambda: False)
+        b._watchdog()
+        self.assertEqual(emitted, [])
+
 
 if __name__ == '__main__':
     unittest.main()
