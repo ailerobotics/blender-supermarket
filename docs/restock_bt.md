@@ -107,6 +107,26 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest \
     scripts/twin/tests/test_restock_bt.py -q
 ```
 
+### ROS 2 domain hygiene
+
+The CPU tests use **no ROS** (the event bus is driven by `QueueEventSource` / `ScenarioEventSource`,
+not rclpy), so they need no domain setup. For ROS specifically:
+
+- **A standalone `bt` ROS node/test** (one run *in isolation*, not inside the mission): export
+  `ROS_DOMAIN_ID=106` (this lane's fleet assignment) and `ROS_LOCALHOST_ONLY=1`, stop every node you
+  start, and afterwards remove only your **own** stale `/dev/shm/fastrtps_*` segments (never a live
+  one, never another lane's) — FastDDS shared-memory port exhaustion from stale segments has killed
+  runs fleet-wide.
+- **The in-mission subscriber** (`integration.start_event_subscriber`, active only in a live run)
+  deliberately does **not** set its own domain: it inherits the mission orchestrator's domain
+  (**88**) so it hears the humans / dynamic-obstacle lanes' detections on `/restock_bt/events`.
+  Those lanes must therefore publish on the mission domain (88) for the integrated run, not on their
+  isolated lane-test domains.
+
+The GPU is a single RTX 3060 under `/tmp/aile-gpu.lock`; the integration lane now holds the lock
+across its whole commission-plus-mission sequence, so take the lock only when it is free and keep
+sessions short (this lane is lowest priority, ≤15 min).
+
 **Opt-in GPU/live run:** add `"bt": true` to the runtime-config passed to
 `scripts/run_mobile_restock.py` (compose with `start_at` and a scenario `events` list for a scripted
 proof). The run drives the same mission through the tree and writes the live view into the run
