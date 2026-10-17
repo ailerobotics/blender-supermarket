@@ -19,7 +19,12 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY=/home/manishsaini/miniforge3/envs/env_isaaclab/bin/python
 FFMPEG=/home/manishsaini/miniforge3/envs/env_isaaclab/lib/python3.11/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2
-RUNTIME=/home/manishsaini/datasets/sim-gpu-userspace-recovery-s1/root     # 580.178.04, matches the live kernel driver
+# Matching NVIDIA userspace: this root's libnvidia-ml.so.1 symlinks to the SYSTEM
+# lib, so it tracks the live kernel (580.178.04) across reboots -- the mission lane's
+# own runtime. (The older sim-gpu-userspace-recovery-s1/root ships a FIXED 580.173.02
+# NVML that now mismatches the 580.178.04 kernel: "Failed to initialize NVML:
+# Driver/library version mismatch". Re-check with native nvidia-smi after any reboot.)
+RUNTIME=/home/manishsaini/datasets/twin-robot-in-store-boot-v1/gpu-runtime-578/root
 DATA=/home/manishsaini/datasets/sim-restock-humans-v1
 CONFIG="$DATA/humans-bench-runtime.json"
 STAMP="$(date +%Y%m%d-%H%M%S)"
