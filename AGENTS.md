@@ -144,6 +144,20 @@ repo's `scenes/`, `export/` or `renders/`.
   depth/context, so the replay drives the real gates with the recorded timing+identity against
   an analytic bench frame (labelled, not sensor evidence). Write-up + per-phase numbers:
   `data/sim-restock-devloop-v1/report.md`.
+- **Arm-carry bench** (`scripts/twin/tools/arm_carry_bench.py` + guarded GPU runner
+  `scripts/run_arm_carry_bench.py`): boots Isaac ONCE, welds the carton at the tool via the
+  mission's own `SIM_ATTACH_FALLBACK` weld, brakes the base in the airborne-carry yaw-lock
+  state, then runs many trials of the joint-space carry fold (tuck → pan → …) in seconds each
+  (physics-only stepping, no walkthrough). It drives the REAL `ArmCommandGate` and the REAL
+  `trajectory_host` Plan + tracking/settle gates (imported, not copied), so drive gains,
+  carry velocity/accel scaling and the sim-only tolerances are exercised identically; the
+  only honest differences are the planning path (trajectories generated analytically, not by
+  MoveIt/cuMotion) and the in-process executor loop (no ROS relay). Per-trial metrics include
+  carton–obstacle **clearance** (AABB) and **PhysX contact** (which prim the carton hits, at
+  what fold fraction / wrist_1) — built to diagnose the carry-fold stall (a rigid contact with
+  the unmapped cart cage, gain-independent) and to sweep carry POSES for a cage/rack-clearing
+  shape. CPU-tested under `scripts/twin/tests/test_arm_carry_bench.py` (no Isaac/ROS/GPU).
+  Write-up: `data/sim-restock-armbench-v1/report.md`.
 - **Bounded native restock diagnostics** (guarded GPU, no full mission) are driven by
   `scripts/run_restock_render_smoke.py` with one of `--assembly-only` (stationary
   physics hold → `restock/assembly_check.py`), `--coupling-only` (dock+latch+hold →
