@@ -21,7 +21,7 @@ class ScriptedArm(bench.ArmStage):
     The real ArmCommandGate + PhysX drive are exercised on the GPU, not here."""
 
     def __init__(self, start, goal, regime, *, dt=1.0 / 60.0, stall_cap=0.4,
-                 contact_prim=None, contact_at_wrist1=None):
+                 contact_prim=None, contact_at_wrist1=None, contact_force_N=0.0, weld_reaction_N=None):
         self.start = np.asarray(start, float)
         self.goal = np.asarray(goal, float)
         self.regime = regime
@@ -29,6 +29,8 @@ class ScriptedArm(bench.ArmStage):
         self.stall_cap = stall_cap
         self.contact_prim = contact_prim          # emit a physical contact once wrist_1 passes...
         self.contact_at_wrist1 = contact_at_wrist1  # ...this measured value
+        self.contact_force_N = contact_force_N
+        self.weld_reaction_N = weld_reaction_N
         self.t = 0.0
         self._last_cmd = self.start.copy()
         self._k = 0
@@ -79,8 +81,12 @@ class ScriptedArm(bench.ArmStage):
         if self.contact_prim is None or self.contact_at_wrist1 is None:
             return []
         if float(self._last_cmd[WRIST_1]) >= self.contact_at_wrist1:
-            return [{'prim': self.contact_prim, 'position': [0.0, -0.75, 1.1]}]
+            return [{'prim': self.contact_prim, 'position': [0.0, -0.75, 1.1],
+                     'force_N': self.contact_force_N}]
         return []
+
+    def weld_reaction_force(self):
+        return self.weld_reaction_N
 
 
 FAST_TOL = Tolerances(goal_settle_margin_s=0.3)   # keep goal-miss tests short
@@ -231,6 +237,20 @@ def test_records_carton_contact_and_clearance():
     assert m.first_contact['wrist1_rad'] >= 0.95   # measured, ~one tick behind the command trip
     assert '/World/Cart/cage_bar' in m.contact_prims
     assert m.min_clearance_m['cart_cage'] < 0.0           # the overlap the integration lane predicted
+
+
+def test_records_contact_force_and_weld_reaction():
+    # inbox 013: which link the carton touches + with what force, and the weld reaction force
+    arm = ScriptedArm(START, GOAL, 'perfect', contact_prim='ur_upper_arm_link<->HandlingUnit',
+                      contact_at_wrist1=1.0, contact_force_N=37.5, weld_reaction_N=42.0)
+    m = run_move(arm, START, GOAL, CARRY, FAST_TOL, 'tuck')
+    assert m.peak_contact_force_N['ur_upper_arm_link<->HandlingUnit'] == pytest.approx(37.5)
+    assert m.first_contact['force_N'] == pytest.approx(37.5)
+    assert m.peak_weld_reaction_N == pytest.approx(42.0)
+    # the contact summary names the link + its force
+    from twin.tools.arm_carry_bench import contact_summary
+    s = contact_summary([m])
+    assert 'ur_upper_arm_link' in s and '37.5 N' in s and 'weld reaction' in s
 
 
 def test_contact_makes_trial_not_robust_even_if_settled():

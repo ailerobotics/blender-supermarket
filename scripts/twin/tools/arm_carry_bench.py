@@ -319,6 +319,9 @@ class MoveMetrics:
     clearance_at_wrist1: dict = field(default_factory=dict)  # obstacle name -> wrist_1 (rad) at that min gap
     contact_prims: list = field(default_factory=list)      # distinct prims the carton physically contacted
     first_contact: dict | None = None        # {sim_time, fold_fraction, wrist1_rad, prim, position} at first touch
+    # --- inbox 013: the contact/constraint FIGHT (which link the carton touches + with what force) ---
+    peak_contact_force_N: dict = field(default_factory=dict)  # contacted prim-pair -> peak |contact force| (N)
+    peak_weld_reaction_N: float = 0.0        # peak SIM_ATTACH_FALLBACK fixed-joint reaction force (N); 0 if unread
 
     @property
     def ok(self):
@@ -356,9 +359,17 @@ class ArmStage:
         Negative = the carton's bounding volume overlaps the obstacle's."""
         return {}
     def probe_contacts(self):
-        """List of {'prim': str, 'position': [x,y,z]} the carton is PHYSICALLY contacting THIS
-        tick (PhysX contact reports, hollow-geometry-aware)."""
+        """List of {'prim': str, 'position': [x,y,z], 'force_N': float} the carton is PHYSICALLY
+        contacting THIS tick (PhysX contact reports, hollow-geometry-aware). ``force_N`` is the
+        contact-force magnitude (impulse/dt) when available, else 0."""
         return []
+
+    def weld_reaction_force(self):
+        """Magnitude (N) of the SIM_ATTACH_FALLBACK fixed-joint reaction THIS tick, or None if the
+        stage cannot report it. The weld transmits the carton's weight + whatever the contact fight
+        pushes back, so a large reaction co-timed with a link contact is the constraint-fight signal
+        (inbox 013)."""
+        return None
 
 
 def run_move(stage: ArmStage, start, goal, carry: CarryProfile, tol: Tolerances,
@@ -447,9 +458,16 @@ def run_move(stage: ArmStage, start, goal, carry: CarryProfile, tol: Tolerances,
             prim = hit.get('prim')
             if prim and prim not in m.contact_prims:
                 m.contact_prims.append(prim)
+            force = float(hit.get('force_N') or 0.0)
+            if prim and force > m.peak_contact_force_N.get(prim, 0.0):
+                m.peak_contact_force_N[prim] = force
             if m.first_contact is None and prim:
                 m.first_contact = dict(sim_time=float(stage.sim_time()), fold_fraction=fold_fraction,
-                                       wrist1_rad=wrist1, prim=prim, position=hit.get('position'))
+                                       wrist1_rad=wrist1, prim=prim, position=hit.get('position'),
+                                       force_N=force)
+        wr = stage.weld_reaction_force()
+        if wr is not None and float(wr) > m.peak_weld_reaction_N:
+            m.peak_weld_reaction_N = float(wr)
         # terminal settle gate (sim-clocked), mirroring trajectory_host.execute()
         if elapsed >= plan.times[-1]:
             pos_err = float(np.max(np.abs(measured - plan.end)))
@@ -588,10 +606,15 @@ def contact_summary(moves):
     for m in moves:
         if m.first_contact:
             fc = m.first_contact
-            lines.append('%s: FIRST CONTACT prim=%s at fold_fraction=%.2f wrist1=%.3f rad pos=%s'
-                         % (m.label, fc['prim'], fc['fold_fraction'], fc['wrist1_rad'], fc['position']))
+            lines.append('%s: FIRST CONTACT prim=%s at fold_fraction=%.2f wrist1=%.3f rad force=%.1f N pos=%s'
+                         % (m.label, fc['prim'], fc['fold_fraction'], fc['wrist1_rad'],
+                            fc.get('force_N', 0.0), fc['position']))
         if m.contact_prims:
             lines.append('%s: contacted prims=%s' % (m.label, m.contact_prims))
+        for prim, force in sorted(m.peak_contact_force_N.items(), key=lambda kv: -kv[1]):
+            lines.append('%s: peak contact force on %s = %.1f N' % (m.label, prim, force))
+        if m.peak_weld_reaction_N:
+            lines.append('%s: peak SIM_ATTACH weld reaction = %.1f N' % (m.label, m.peak_weld_reaction_N))
         for name, gap in sorted(m.min_clearance_m.items()):
             lines.append('%s: min clearance to %s = %.1f mm (at wrist1=%.3f rad)'
                          % (m.label, name, gap * 1000, m.clearance_at_wrist1.get(name, float('nan'))))

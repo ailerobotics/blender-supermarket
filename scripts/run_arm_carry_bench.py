@@ -122,6 +122,19 @@ class IsaacCarryStage(bench.ArmStage):
         self._arm_contacts = bool(arm_contacts)
         self.start_at_lift = bool(start_at_lift)
         self._weld_rel0 = None
+        # physics dt for converting accumulated contact impulse -> force (inbox 013)
+        try:
+            self._phys_dt = float(self.world.get_physics_dt())
+        except Exception:
+            self._phys_dt = 1.0 / 60.0
+        try:
+            self._carton_mass = float(np.asarray(self.carton.get_masses()).reshape(-1)[0])
+        except Exception:
+            try:
+                self._carton_mass = float(self.carton.get_mass())
+            except Exception:
+                self._carton_mass = 0.0
+        print('ARMBENCH_CARTON_MASS %.4f kg (weight %.2f N)' % (self._carton_mass, self._carton_mass * 9.81), flush=True)
         self._current_drive_type = 'acceleration'   # physics_setup leaves the arm drives acceleration
         self.arm_joint_prims = self._discover_arm_joints()
         self.arm_links = self._discover_arm_links()
@@ -224,15 +237,27 @@ class IsaacCarryStage(bench.ArmStage):
                     if not (hit0 or hit1):
                         continue
                     pos = None
+                    impulse = np.zeros(3)
                     try:
-                        if ch.num_contact_data > 0:
-                            cp = contact_data[ch.contact_data_offset].position
+                        n = int(ch.num_contact_data)
+                        off = int(ch.contact_data_offset)
+                        if n > 0:
+                            cp = contact_data[off].position
                             pos = [float(cp[0]), float(cp[1]), float(cp[2])]
+                            # sum the per-point contact impulses (inbox 013: "with what force")
+                            for k in range(off, off + n):
+                                try:
+                                    imp = contact_data[k].impulse
+                                    impulse += np.array([float(imp[0]), float(imp[1]), float(imp[2])], float)
+                                except Exception:
+                                    pass
                     except Exception:
                         pos = None
+                    # force = |impulse| / physics dt (the contact report accumulates one physics step)
+                    force_N = float(np.linalg.norm(impulse)) / max(self._phys_dt, 1e-6)
                     # record the PAIR so an arm-vs-body / arm-vs-arm self-collision is visible
                     self._contact_buf.append({'prim': '%s<->%s' % (a0.rsplit('/', 1)[-1], a1.rsplit('/', 1)[-1]),
-                                              'position': pos, 'a0': a0, 'a1': a1})
+                                              'position': pos, 'a0': a0, 'a1': a1, 'force_N': force_N})
             self._contact_sub = get_physx_simulation_interface().subscribe_contact_report_events(_on_contact)
             print('ARMBENCH_CONTACT_REPORTING enabled on %d bodies (carton+arm+chassis)' % len(tracked), flush=True)
         except Exception as exc:
@@ -292,13 +317,37 @@ class IsaacCarryStage(bench.ArmStage):
     def probe_contacts(self):
         hits = self._contact_buf
         self._contact_buf = []
-        # de-dupe within a tick by prim
-        seen, out = set(), []
+        # de-dupe within a tick by prim, keeping the LARGEST contact force seen for that pair
+        best = {}
         for h in hits:
-            if h['prim'] not in seen:
-                seen.add(h['prim'])
-                out.append(h)
-        return out
+            prev = best.get(h['prim'])
+            if prev is None or h.get('force_N', 0.0) > prev.get('force_N', 0.0):
+                best[h['prim']] = h
+        return list(best.values())
+
+    def weld_reaction_force(self):
+        """Best-effort magnitude (N) of the SIM_ATTACH_FALLBACK fixed-joint reaction this tick.
+
+        The welded carton is a FREE rigid body held only by the fixed joint, so Newton on the carton
+        gives F_weld = m*a - m*g - F_contact. Quasi-statically (a~0) the weld carries the carton weight
+        PLUS whatever a link-contact fight pushes back, so |F_weld| ~ m*g + |net contact force on the
+        carton|. The carton's measured net contact force is read via SingleRigidPrim; return None if the
+        build cannot report it (then the metric is simply absent, never fabricated)."""
+        try:
+            f = self.carton.get_net_contact_forces()
+        except Exception:
+            try:
+                f = self.carton.get_net_contact_force()
+            except Exception:
+                return None
+        try:
+            arr = np.asarray(f, float).reshape(-1)
+            if arr.size < 3:
+                return None
+            contact_mag = float(np.linalg.norm(arr[:3]))
+        except Exception:
+            return None
+        return self._carton_mass * 9.81 + contact_mag
 
     def arm_link_clearances(self):
         """Signed carton-AABB gap (m) to each of the robot's OWN arm links -- the run-250 self-
@@ -562,7 +611,8 @@ def _move_dict(m: bench.MoveMetrics):
                 terminal_velocity=m.terminal_velocity, peak_carton_drift_m=m.peak_carton_drift_m,
                 peak_base_displacement_m=m.peak_base_displacement_m, sim_elapsed_s=m.sim_elapsed_s,
                 min_clearance_m=m.min_clearance_m, clearance_at_wrist1=m.clearance_at_wrist1,
-                contact_prims=m.contact_prims, first_contact=m.first_contact)
+                contact_prims=m.contact_prims, first_contact=m.first_contact,
+                peak_contact_force_N=m.peak_contact_force_N, peak_weld_reaction_N=m.peak_weld_reaction_N)
 
 
 # Candidate carry-shape reshapings (deltas on cart_tuck_shape joints 1-5: shoulder_lift, elbow,
@@ -781,7 +831,9 @@ def _rehydrate(move_dicts):
                               min_clearance_m=d.get('min_clearance_m', {}),
                               clearance_at_wrist1=d.get('clearance_at_wrist1', {}),
                               contact_prims=d.get('contact_prims', []),
-                              first_contact=d.get('first_contact'))
+                              first_contact=d.get('first_contact'),
+                              peak_contact_force_N=d.get('peak_contact_force_N', {}),
+                              peak_weld_reaction_N=d.get('peak_weld_reaction_N', 0.0))
         out.append(m)
     return out
 
