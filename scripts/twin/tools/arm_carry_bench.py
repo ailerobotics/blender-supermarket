@@ -75,19 +75,43 @@ class Tolerances:
         return self
 
 
+# UR10 physically-grounded per-joint effort limits (Nm), ARM_JOINTS order
+# [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3].
+UR10_EFFORTS = (330.0, 330.0, 330.0, 56.0, 56.0, 56.0)
+
+
 @dataclass(frozen=True)
 class DriveGains:
-    """Isaac arm position-drive gains, applied per joint to all six arm DOFs."""
-    stiffness: float            # Kp
+    """Isaac arm position-drive gains. ``drive_type`` selects the PhysX drive mode: 'acceleration'
+    (the mission default -- stiffness/damping are MASS-NORMALISED, so Kp 1e5-1e6 is enormous) or
+    'force' (stiffness/damping/effort in physical Nm units, sizeable to the UR10). When
+    ``per_joint_effort`` is True the max effort is the UR10 per-joint vector (wrists ~56 Nm) instead
+    of a uniform ceiling; stiffness/damping are likewise scaled per joint by the effort ratio so the
+    wrists are not over-stiffened relative to their torque authority."""
+    stiffness: float            # Kp (accel units if acceleration drive; Nm/rad if force drive)
     damping: float              # Kd
-    max_effort: float           # per-joint maxForce (Nm)
+    max_effort: float           # per-joint maxForce ceiling (Nm); base value when per_joint_effort
+    drive_type: str = 'acceleration'
+    per_joint_effort: bool = False
 
     def validate(self):
+        if self.drive_type not in ('acceleration', 'force'):
+            raise ValueError("drive_type must be 'acceleration' or 'force'")
         if not (math.isfinite(self.stiffness) and self.stiffness > 0
                 and math.isfinite(self.damping) and self.damping >= 0
                 and math.isfinite(self.max_effort) and self.max_effort > 0):
             raise ValueError('invalid drive gains')
         return self
+
+    def per_joint(self):
+        """(stiffness, damping, max_effort) 6-vectors in ARM_JOINTS order. For force drive with
+        per_joint_effort, the wrists get the UR10 56 Nm cap and proportionally lower stiffness."""
+        if self.per_joint_effort:
+            scale = [e / max(UR10_EFFORTS) for e in UR10_EFFORTS]  # wrists ~0.17, others 1.0
+            return ([self.stiffness * s for s in scale],
+                    [self.damping * s for s in scale],
+                    list(UR10_EFFORTS))
+        return ([self.stiffness] * 6, [self.damping] * 6, [self.max_effort] * 6)
 
 
 @dataclass(frozen=True)
@@ -388,25 +412,30 @@ def tuck_shape_variant(base_shape, deltas):
 
 # --------------------------------------------------------------------- sweep grid
 
-def sweep_grid(stiffnesses, dampings, max_efforts, carries, tolerances=None, *, label_prefix=''):
-    """Cartesian product of candidate gains x carry profiles x tolerances -> TrialSpecs.
+def sweep_grid(stiffnesses, dampings, max_efforts, carries, tolerances=None, *,
+               drive_types=('acceleration',), per_joint_effort=False, label_prefix=''):
+    """Cartesian product of candidate drive types x gains x carry profiles x tolerances -> TrialSpecs.
 
     Physically grounded per-joint effort limits (UR10 ~330 Nm base/shoulder/elbow, ~56 Nm wrists)
-    are ONE candidate family among the max_efforts, never a mandate (brief item 2)."""
+    are ONE candidate family (``per_joint_effort``), never a mandate (brief item 2); drive type
+    ('force' vs 'acceleration') is a first-class sweep axis (integration msg 006)."""
     tolerances = tolerances or [Tolerances()]
     specs = []
-    for kp in stiffnesses:
-        for kd in dampings:
-            for eff in max_efforts:
-                for ci, carry in enumerate(carries):
-                    for ti, tol in enumerate(tolerances):
-                        label = (f'{label_prefix}kp{kp:g}_kd{kd:g}_eff{eff:g}'
-                                 f'_v{carry.peak_speed:g}_a{carry.peak_accel:g}')
-                        if len(tolerances) > 1:
-                            label += f'_tol{ti}'
-                        specs.append(TrialSpec(label=label,
-                                               gains=DriveGains(kp, kd, eff),
-                                               carry=carry, tolerances=tol).validate())
+    for dtype in drive_types:
+        for kp in stiffnesses:
+            for kd in dampings:
+                for eff in max_efforts:
+                    for carry in carries:
+                        for ti, tol in enumerate(tolerances):
+                            label = (f'{label_prefix}{dtype[:3]}_kp{kp:g}_kd{kd:g}_eff{eff:g}'
+                                     f'_v{carry.peak_speed:g}')
+                            if len(tolerances) > 1:
+                                label += f'_tol{ti}'
+                            specs.append(TrialSpec(
+                                label=label,
+                                gains=DriveGains(kp, kd, eff, drive_type=dtype,
+                                                 per_joint_effort=per_joint_effort),
+                                carry=carry, tolerances=tol).validate())
     return specs
 
 

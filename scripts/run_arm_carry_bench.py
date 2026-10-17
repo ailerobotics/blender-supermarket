@@ -44,7 +44,11 @@ from twin.tools import arm_carry_bench as bench
 # the carry fold -- carton grasped at backstock_00 and lifted, before the tuck. Override with
 # --lift-joints or runtime-config['armbench']['lift_joints'] with the mission's MEASURED lift
 # pose for exact fidelity; the bench records whatever start pose it actually used.
-DEFAULT_LIFT = [0.8, -1.5, 1.2, 0.5, 1.2, -1.2545]
+# Measured mission poses (IK-solved, integration lane reach-check.json, ARM_JOINTS order).
+# GRASP = source_contact (pad at the carton surface); LIFT = source_approach (grasp raised by the
+# approach offset). The bench welds the carton at GRASP in place, then drives grasp->lift->tuck->pan.
+DEFAULT_GRASP = [1.4051, -1.0610, 1.1213, -1.6311, -1.5708, -0.1657]
+DEFAULT_LIFT = [1.4051, -1.0499, 0.8940, -1.4149, -1.5708, -0.1657]
 # The carry fold's body-clear shape + cart pan (ros_host_config.json; handoff (b)).
 CART_TUCK_SHAPE = [-2.3, 1.0, 2.1066, 0.8, -1.2545]
 CART_PAN_JOINT0 = -0.8605
@@ -60,9 +64,9 @@ class IsaacCarryStage(bench.ArmStage):
     """Isaac glue: welds the carton, brakes the base, and implements the ArmStage the executor
     drives against the live articulation. Isaac-only; never imported by the CPU tests."""
 
-    def __init__(self, assembly, lift_joints, *, carton_path='/RestockScenario/HandlingUnit',
+    def __init__(self, assembly, lift_joints, grasp_joints, *, carton_path='/RestockScenario/HandlingUnit',
                  pad_path_key='gripper_pad_tcp', render=False, carton_dims=(0.6, 0.4, 0.16),
-                 obstacle_prims=None):
+                 obstacle_prims=None, no_carton=False):
         from isaacsim.core.prims import SingleRigidPrim
         from pxr import UsdGeom
         self._UsdGeom = UsdGeom
@@ -76,6 +80,7 @@ class IsaacCarryStage(bench.ArmStage):
         self.robot_body = assembly.robot_body
         self.render = render
         self.lift_joints = np.asarray(lift_joints, float)
+        self.grasp_joints = np.asarray(grasp_joints, float)
         self.arm_idx = np.asarray(self.gate.indices)
         self.pad_path = assembly.paths[pad_path_key]
         self.carton_path = carton_path
@@ -84,11 +89,48 @@ class IsaacCarryStage(bench.ArmStage):
             raise RuntimeError(f'carton prim not in assembly: {carton_path}')
         self.carton = self.world.scene.add(SingleRigidPrim(prim_path=carton_path, name='armbench_carton'))
         self.arm_ctrl = self.robot.get_articulation_controller()
+        self.no_carton = bool(no_carton)
         self._weld_rel0 = None
+        self._current_drive_type = 'acceleration'   # physics_setup leaves the arm drives acceleration
+        self.arm_joint_prims = self._discover_arm_joints()
+        self.arm_links = self._discover_arm_links()
         self.obstacles = self._discover_obstacles(obstacle_prims)
         self._contact_buf = []
         self._contact_sub = None
         self._enable_contact_reporting()
+
+    def _discover_arm_joints(self):
+        """Prim paths of the 6 arm revolute joints (for USD DriveAPI drive-type/gain control)."""
+        from pxr import Usd, UsdPhysics
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+        root = self.stage.GetPrimAtPath(self.assembly.paths['articulation'].rsplit('/', 1)[0])
+        byname = {}
+        if root:
+            for prim in Usd.PrimRange(root):
+                if prim.GetName() in ARM_JOINTS and (prim.IsA(UsdPhysics.RevoluteJoint)
+                                                     or prim.HasAPI(UsdPhysics.DriveAPI)
+                                                     or prim.GetTypeName() == 'PhysicsRevoluteJoint'):
+                    byname[prim.GetName()] = str(prim.GetPath())
+        ordered = [byname.get(n) for n in ARM_JOINTS]
+        print('ARMBENCH_ARM_JOINTS %s' % ordered, flush=True)
+        return ordered
+
+    def _discover_arm_links(self):
+        """Prim paths of the robot's own arm links + gripper, so carton-vs-arm self-collision
+        (the run-250 upper-arm hypothesis) is measured, not just carton-vs-static-scene."""
+        from pxr import Usd
+        root = self.assembly.paths['articulation'].rsplit('/', 1)[0]
+        root = self.stage.GetPrimAtPath(root)
+        links = {}
+        if root:
+            for prim in Usd.PrimRange(root):
+                name = prim.GetName()
+                if (name.startswith('ur_') and name.endswith('_link')) or \
+                        name in ('gripper_pad_tcp', 'gripper_tcp', 'suction_cups', 'ur_tool0',
+                                 'RestockPanelGripper'):
+                    links[name] = str(prim.GetPath())
+        print('ARMBENCH_ARM_LINKS %s' % sorted(links), flush=True)
+        return links
 
     # ---- obstacle discovery + clearance/contact probing (the redirect's diagnosis) ----
     def _discover_obstacles(self, override):
@@ -101,18 +143,10 @@ class IsaacCarryStage(bench.ArmStage):
             pass
         if self.stage.GetPrimAtPath('/RestockScenario/Support'):
             obstacles['support'] = '/RestockScenario/Support'
-        # the store/rack: largest top-level Xform that is not the robot/cart/scenario/physics
-        try:
-            skip = {self.carton_path.split('/')[1], 'RestockScenario', 'physicsScene', 'World'}
-            for prim in self.stage.GetPseudoRoot().GetChildren():
-                name = prim.GetName()
-                path = str(prim.GetPath())
-                if name in skip or path in obstacles.values():
-                    continue
-                if prim.IsA(self._UsdGeom.Xform) or prim.IsA(self._UsdGeom.Scope):
-                    obstacles.setdefault('store', path)
-        except Exception:
-            pass
+        # NB: the whole store root (/Supermarket) is NOT added as a clearance obstacle -- its AABB
+        # engulfs the robot and every fixture, so AABB clearance to it is meaningless. The rack/shelf
+        # the carton actually hits is named authoritatively by PhysX contact reporting instead; add a
+        # SPECIFIC shelf prim via config['armbench']['obstacle_prims'] for a coarse AABB rack metric.
         if override:
             obstacles.update(override)
         print('ARMBENCH_OBSTACLES %s' % obstacles, flush=True)
@@ -217,6 +251,69 @@ class IsaacCarryStage(bench.ArmStage):
                 out.append(h)
         return out
 
+    def arm_link_clearances(self):
+        """Signed carton-AABB gap (m) to each of the robot's OWN arm links -- the run-250 self-
+        collision check (carton hanging under the tool vs the upper arm / forearm)."""
+        try:
+            carton = self._carton_world_aabb()
+        except Exception:
+            return {}
+        out = {}
+        for name, path in self.arm_links.items():
+            try:
+                out[name] = self._aabb_signed_gap(carton, self._obstacle_aabb(path))
+            except Exception:
+                continue
+        return out
+
+    def probe_pinned_config(self, config_joints, carton_offset, *, hold_steps=40):
+        """Pinned-config contact dump (inbox 004/005): weld the carton under the tool at
+        ``carton_offset`` m along tool-z, hold the arm STATICALLY at ``config_joints`` (the measured
+        run-250 jam config), step, and report every PhysX prim the carton contacts + the per-arm-link
+        and per-obstacle AABB clearance + the carton world centre. Names the pinning collider."""
+        import numpy as _np
+        self.contact._release_fallback()
+        self.mobile.release_brake(); self.mobile.release()
+        full = _np.asarray(self.robot.get_joint_positions(), float).copy()
+        full[self.arm_idx] = _np.asarray(config_joints, float)
+        self.robot.set_joint_positions(full)
+        self.robot.set_joint_velocities(_np.zeros(len(full)))
+        g = self.gate
+        g.faulted = False; g.hold_target = None; g.last_stamp = -1.
+        g._host_now = float('-inf'); g.started = False
+        g.apply(_np.asarray(config_joints, float), _np.zeros(6), g.indices)
+        self.world.step(render=self.render)   # settle the arm at the config before placing the carton
+        carton_world = None
+        if not self.no_carton:
+            pad = self._pad_world()
+            rot = pad.ExtractRotationMatrix()
+            origin = pad.ExtractTranslation()
+            zaxis = _np.array([rot[0][2], rot[1][2], rot[2][2]], float)
+            centre = _np.array([origin[0], origin[1], origin[2]], float) + float(carton_offset) * zaxis
+            q = pad.ExtractRotationQuat()
+            self.carton.set_world_pose(position=centre,
+                                       orientation=_np.array([q.GetReal(), *[float(v) for v in q.GetImaginary()]], float))
+            self.carton.set_linear_velocity(_np.zeros(3)); self.carton.set_angular_velocity(_np.zeros(3))
+            self.contact._fallback_weld(self.carton_path)
+            carton_world = centre.tolist()
+        self._contact_buf = []
+        contacts = {}
+        for _ in range(hold_steps):
+            g.apply(_np.asarray(config_joints, float), _np.zeros(6), g.indices)
+            self.world.step(render=self.render)
+            for h in self.probe_contacts():
+                contacts.setdefault(h['prim'], h.get('position'))
+        try:
+            cp, _ = self.carton.get_world_pose()
+            carton_world = [float(v) for v in cp]
+        except Exception:
+            pass
+        return dict(config=list(config_joints), carton_offset=float(carton_offset),
+                    carton_world_centre=carton_world,
+                    contacts=[{'prim': p, 'position': pos} for p, pos in contacts.items()],
+                    arm_link_clearance_mm={k: round(v * 1000, 1) for k, v in self.arm_link_clearances().items()},
+                    obstacle_clearance_mm={k: round(v * 1000, 1) for k, v in self.clearance_snapshot().items()})
+
     # ---- pose helpers
     def _pad_world(self):
         m = self._UsdGeom.XformCache().GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.pad_path))
@@ -259,71 +356,101 @@ class IsaacCarryStage(bench.ArmStage):
         return np.array([pose.x, pose.y], float)
 
     # ---- bench setup / per-trial reset
-    def apply_gains(self, gains: bench.DriveGains):
-        kps, kds = self.arm_ctrl.get_gains()
-        kps = np.asarray(kps, float).copy()
-        kds = np.asarray(kds, float).copy()
-        for i in self.arm_idx:
-            kps[int(i)] = gains.stiffness
-            kds[int(i)] = gains.damping
-        self.arm_ctrl.set_gains(kps, kds)
-        self.arm_ctrl.set_max_efforts(np.full(len(self.arm_idx), gains.max_effort), joint_indices=self.arm_idx)
-        rkp, rkd = self.arm_ctrl.get_gains()
-        rme = self.arm_ctrl.get_max_efforts()
-        rkp = np.asarray(rkp, float).reshape(-1); rkd = np.asarray(rkd, float).reshape(-1)
-        rme = np.asarray(rme, float).reshape(-1)
-        print('ARMBENCH_GAINS kp=%s kd=%s eff=%s' % (
-            [round(float(rkp[int(i)]), 1) for i in self.arm_idx],
-            [round(float(rkd[int(i)]), 1) for i in self.arm_idx],
-            [round(float(rme[int(i)]), 1) for i in self.arm_idx]), flush=True)
+    def _set_drive_type_usd(self, dtype, per_joint):
+        """Author the arm joints' angular DriveAPI TYPE + per-joint stiffness/damping/maxforce on USD,
+        then world.reset() so PhysX re-parses the drives (drive TYPE is a parse-time property). Only
+        called when the drive type actually changes (expensive). Returns True if a reset happened."""
+        from pxr import UsdPhysics
+        kps, kds, effs = per_joint
+        for path, kp, kd, eff in zip(self.arm_joint_prims, kps, kds, effs):
+            if not path:
+                continue
+            prim = self.stage.GetPrimAtPath(path)
+            drive = UsdPhysics.DriveAPI.Get(prim, 'angular')
+            if not drive:
+                drive = UsdPhysics.DriveAPI.Apply(prim, 'angular')
+            drive.GetTypeAttr().Set(dtype) if drive.GetTypeAttr() else drive.CreateTypeAttr(dtype)
+            (drive.GetStiffnessAttr() or drive.CreateStiffnessAttr()).Set(float(kp))
+            (drive.GetDampingAttr() or drive.CreateDampingAttr()).Set(float(kd))
+            (drive.GetMaxForceAttr() or drive.CreateMaxForceAttr()).Set(float(eff))
+        self.world.reset()   # re-parse the authored drives (type change needs a re-init)
+        self._current_drive_type = dtype
+        return True
 
-    def reset_to_lift(self, gains: bench.DriveGains, settle_steps=30):
-        """Reset the arm to the lift pose, re-weld the carton at the grasp offset, re-brake the
-        base and re-apply the trial gains, then settle. A bench teleport -- never a mission action."""
-        from pxr import Gf
-        # 1. release any prior weld + brake so re-engagement re-anchors cleanly at the lift pose
+    def apply_gains(self, gains: bench.DriveGains):
+        kps, kds, effs = gains.per_joint()
+        if gains.drive_type != self._current_drive_type:
+            # drive TYPE change: author on USD + reset (parse-time), then the runtime set_gains below
+            # refines the values on the freshly-parsed drives
+            self._set_drive_type_usd(gains.drive_type, (kps, kds, effs))
+        rkp, rkd = self.arm_ctrl.get_gains()
+        rkp = np.asarray(rkp, float).copy(); rkd = np.asarray(rkd, float).copy()
+        for n, i in enumerate(self.arm_idx):
+            rkp[int(i)] = kps[n]; rkd[int(i)] = kds[n]
+        self.arm_ctrl.set_gains(rkp, rkd)
+        self.arm_ctrl.set_max_efforts(np.asarray(effs, float), joint_indices=self.arm_idx)
+        gkp, gkd = self.arm_ctrl.get_gains()
+        gme = self.arm_ctrl.get_max_efforts()
+        gkp = np.asarray(gkp, float).reshape(-1); gkd = np.asarray(gkd, float).reshape(-1)
+        gme = np.asarray(gme, float).reshape(-1)
+        print('ARMBENCH_GAINS type=%s kp=%s kd=%s eff=%s' % (
+            self._current_drive_type,
+            [round(float(gkp[int(i)]), 1) for i in self.arm_idx],
+            [round(float(gkd[int(i)]), 1) for i in self.arm_idx],
+            [round(float(gme[int(i)]), 1) for i in self.arm_idx]), flush=True)
+
+    def _pad_carton_gap_mm(self):
+        pad = self._pad_world().ExtractTranslation()
+        cp, _ = self.carton.get_world_pose()
+        cp = np.asarray(cp, float)
+        return float(np.linalg.norm(np.array([pad[0], pad[1], pad[2]], float) - cp) * 1000)
+
+    def reset_to_grasp(self, gains: bench.DriveGains, settle_steps=30):
+        """Faithful per-trial reset: set the arm to the measured GRASP pose (source_contact), where
+        the gripper pad is already at the authored carton by IK, then weld the carton to the gripper
+        IN PLACE (no manual carton teleport -- the weld captures the real grasp relationship, exactly
+        as the mission's SIM_ATTACH does). The subsequent 'lift' move drives grasp->approach so the
+        carton is carried by the weld. Re-applies the trial gains and the airborne-carry brake, then
+        settles. A bench teleport of the ARM only; never a mission action."""
+        # 1. release any prior weld + brake so the re-weld/brake re-anchor cleanly at the grasp pose
         self.contact._release_fallback()
         self.mobile.release_brake()
         self.mobile.release()
-        # 2. teleport the arm to the lift pose at rest (bench reset; mission never teleports joints)
+        # 2. apply the trial gains FIRST -- a drive-TYPE change does a world.reset() (re-homing the
+        #    arm), so it must precede the grasp teleport below
+        self.apply_gains(gains)
+        # 3. teleport the arm to the GRASP pose at rest (the carton stays at its authored pose;
+        #    the pad lands on it by construction of the source_contact IK)
         full = np.asarray(self.robot.get_joint_positions(), float).copy()
-        full[self.arm_idx] = self.lift_joints
+        full[self.arm_idx] = self.grasp_joints
         self.robot.set_joint_positions(full)
         self.robot.set_joint_velocities(np.zeros(len(full)))
-        # 3. reset the gate's transient fault/freshness state (config untouched) so prior trials
-        #    do not leave it latched-faulted, and hold the lift pose as the drive target
+        self.carton.set_linear_velocity(np.zeros(3))
+        self.carton.set_angular_velocity(np.zeros(3))
+        # 4. reset the gate's transient fault/freshness state (config untouched) and hold grasp
         g = self.gate
         g.faulted = False; g.hold_target = None; g.last_stamp = -1.
         g._host_now = float('-inf'); g.started = False
         g._contact_hold = False; g._contact_hold_target = None
-        g.apply(self.lift_joints, np.zeros(6), g.indices)
-        # 4. apply the trial drive gains BEFORE the weld settles
-        self.apply_gains(gains)
-        # 5. place the carton at the measured side-grip offset in the pad frame and weld it there
-        UsdGeom = self._UsdGeom
-        pad = self._pad_world()
-        rot = pad.ExtractRotationMatrix()
-        origin = pad.ExtractTranslation()
-        zaxis = np.array([rot[0][2], rot[1][2], rot[2][2]], float)
-        centre = np.array([origin[0], origin[1], origin[2]], float) + CARTON_TOOL_Z_OFFSET * zaxis
-        q = pad.ExtractRotationQuat()
-        self.carton.set_world_pose(position=np.asarray(centre, float),
-                                   orientation=np.array([q.GetReal(), *[float(v) for v in q.GetImaginary()]], float))
-        self.carton.set_linear_velocity(np.zeros(3))
-        self.carton.set_angular_velocity(np.zeros(3))
-        self.contact._fallback_weld(self.carton_path)
+        g.apply(self.grasp_joints, np.zeros(6), g.indices)
+        # 5. weld the carton to the gripper body at the CURRENT (grasp) relative transform -- the
+        #    mission's own _fallback_weld path (skipped in --no-carton control)
+        gap = self._pad_carton_gap_mm()
+        if not self.no_carton:
+            self.contact._fallback_weld(self.carton_path)
         self._weld_rel0 = self._carton_in_pad()
-        # 6. brake the base in the airborne-carry state (yaw-lock D6 over the wheel hold)
+        print('ARMBENCH_WELD pad_carton_gap_mm=%.1f carton_in_pad=%s' % (gap, self._weld_rel0.tolist()), flush=True)
+        # 5. brake the base in the airborne-carry state (yaw-lock D6 over the wheel hold)
         self.mobile.hold()
         self.mobile.engage_brake()
-        # 7. settle: hold the lift pose for a few ticks so the weld + brake quiesce
+        # 6. settle: hold grasp for a few ticks so the weld + brake quiesce
         for _ in range(settle_steps):
-            g.apply(self.lift_joints, np.zeros(6), g.indices)
+            g.apply(self.grasp_joints, np.zeros(6), g.indices)
             self.world.step(render=self.render)
 
 
 def _run_trial(stage: IsaacCarryStage, spec: bench.TrialSpec, goals, dt, max_sim_s):
-    stage.reset_to_lift(spec.gains)
+    stage.reset_to_grasp(spec.gains)
     moves = []
     start = np.asarray(stage.measured(), float)
     for phase, goal in goals:
@@ -378,7 +505,10 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
     """Return the ordered list of (label, goals, spec) the bench runs. The diagnosis trials come
     first (the redirect), then the carry-pose sweep (primary), then an optional gain sweep."""
     carry = bench.CarryProfile(peak_speed=args.carry_speed, peak_accel=args.carry_accel)
-    base_goals = bench.carry_goals(lift_joints, tuck_shape, pan_joint0, extra_goals=extra)
+    # The weld forms at GRASP; the first move drives grasp->lift (carton carried by the weld), then
+    # the tuck/pan fold follows. Prepend 'lift' so every trial exercises the full carried sequence.
+    lift_move = ('lift', [float(v) for v in lift_joints])
+    base_goals = [lift_move] + bench.carry_goals(lift_joints, tuck_shape, pan_joint0, extra_goals=extra)
     jobs = []
     if args.diagnose or args.expect == 'reproduce' or args.reproduce:
         # reproduce the mission fold in the full scene with contact reporting, at BOTH gain
@@ -389,7 +519,7 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
         safe = bench.DriveGains(args.pose_kp, args.pose_kd, args.pose_eff)
         for dv in POSE_DELTAS:
             shape = bench.tuck_shape_variant(tuck_shape, dv)
-            goals = bench.carry_goals(lift_joints, shape, pan_joint0, extra_goals=extra)
+            goals = [lift_move] + bench.carry_goals(lift_joints, shape, pan_joint0, extra_goals=extra)
             label = 'pose_' + '_'.join(f'{x:+g}' for x in dv)
             jobs.append((label, goals, bench.TrialSpec(label, safe, carry)))
     if args.sweep:
@@ -399,7 +529,9 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
                        for s in args.carry_speeds]
         for spec in bench.sweep_grid([float(x) for x in args.stiffnesses],
                                      [float(x) for x in args.dampings],
-                                     [float(x) for x in args.max_efforts], carries):
+                                     [float(x) for x in args.max_efforts], carries,
+                                     drive_types=tuple(args.drive_types),
+                                     per_joint_effort=args.per_joint_effort):
             jobs.append((spec.label, base_goals, spec))
     if not jobs:
         jobs.append(('baseline', base_goals, bench.TrialSpec('baseline', REF_SOFT, carry)))
@@ -420,8 +552,10 @@ def run(args):
     arm_cfg = config.get('armbench', {})
     lift_joints = (args.lift_joints if args.lift_joints is not None
                    else arm_cfg.get('lift_joints', DEFAULT_LIFT))
-    if len(lift_joints) != 6:
-        raise ValueError('lift_joints must be six arm joints (ARM_JOINTS order)')
+    grasp_joints = (args.grasp_joints if args.grasp_joints is not None
+                    else arm_cfg.get('grasp_joints', DEFAULT_GRASP))
+    if len(lift_joints) != 6 or len(grasp_joints) != 6:
+        raise ValueError('lift_joints and grasp_joints must each be six arm joints (ARM_JOINTS order)')
     tuck_shape = arm_cfg.get('cart_tuck_shape', CART_TUCK_SHAPE)
     pan_joint0 = arm_cfg.get('cart_pan_joint0', CART_PAN_JOINT0)
     extra = arm_cfg.get('extra_goals')   # {phase: 6-vector} for downstream place moves (optional)
@@ -449,7 +583,8 @@ def run(args):
                 return
 
     summary = {'state': 'failed', 'reason': 'bench did not start',
-               'lift_joints': list(lift_joints), 'carton_dims': list(carton_dims),
+               'grasp_joints': list(grasp_joints), 'lift_joints': list(lift_joints),
+               'carton_dims': list(carton_dims),
                'carry': {'peak_speed': args.carry_speed, 'peak_accel': args.carry_accel},
                'note': ('Planning path differs from the live mission (carry trajectories generated '
                         'analytically, not by MoveIt/cuMotion); the drive, gate, carton weld and '
@@ -465,10 +600,22 @@ def run(args):
             app = SimulationApp({'headless': True, 'width': 640, 'height': 360})
             from twin.restock.physics_setup import assemble
             assembly = assemble(app=app, config=config, scenario=scenario, output=args.output / 'assembly')
-            stage = IsaacCarryStage(assembly, lift_joints, render=args.render,
-                                    carton_dims=carton_dims, obstacle_prims=obstacle_override)
+            stage = IsaacCarryStage(assembly, lift_joints, grasp_joints, render=args.render,
+                                    carton_dims=carton_dims, obstacle_prims=obstacle_override,
+                                    no_carton=args.no_carton)
             summary['obstacles'] = stage.obstacles
-            for label, goals, spec in jobs:
+            summary['arm_links'] = sorted(stage.arm_links)
+            if args.pinned_config is not None:
+                # inbox 004/005: dump carton contacts + per-arm-link clearance at the measured jam config
+                probes = []
+                for off in args.carton_offsets:
+                    p = stage.probe_pinned_config(args.pinned_config, off)
+                    probes.append(p)
+                    print('ARMBENCH_PINNED offset=%.3f carton_world=%s contacts=%s arm_link_clear_mm=%s obstacle_clear_mm=%s'
+                          % (off, p['carton_world_centre'], [c['prim'] for c in p['contacts']],
+                             p['arm_link_clearance_mm'], p['obstacle_clearance_mm']), flush=True)
+                summary['pinned_config_probes'] = probes
+            for label, goals, spec in (jobs if args.pinned_config is None else []):
                 if not app.is_running():
                     raise RuntimeError('simulation app stopped')
                 moves = _run_trial(stage, spec, goals, args.dt, args.max_sim_s)
@@ -477,7 +624,8 @@ def run(args):
                     label=label,
                     goals=[p for p, _ in goals],
                     gains=dict(stiffness=spec.gains.stiffness, damping=spec.gains.damping,
-                               max_effort=spec.gains.max_effort),
+                               max_effort=spec.gains.max_effort, drive_type=spec.gains.drive_type,
+                               per_joint_effort=spec.gains.per_joint_effort),
                     carry=dict(peak_speed=spec.carry.peak_speed, peak_accel=spec.carry.peak_accel),
                     passed=bool(moves and all(m.ok for m in moves)),
                     moves=[_move_dict(m) for m in moves]))
@@ -579,7 +727,9 @@ def main():
                    help='the mission runtime config (same one run_mobile_restock --execute consumes)')
     p.add_argument('--output', type=Path, required=True, help='scratch output dir (must not pre-exist content)')
     p.add_argument('--lift-joints', type=float, nargs=6, default=None,
-                   help='arm lift pose (ARM_JOINTS order); default from config.armbench or the estimate')
+                   help='arm lift pose source_approach (ARM_JOINTS order); default measured value')
+    p.add_argument('--grasp-joints', type=float, nargs=6, default=None,
+                   help='arm grasp pose source_contact where the carton welds (ARM_JOINTS order)')
     p.add_argument('--expect', choices=('report', 'all-settle', 'reproduce'), default='report')
     p.add_argument('--diagnose', action='store_true',
                    help='trial-1: fold the carton in the full scene at BOTH ref gains with contact '
@@ -591,6 +741,11 @@ def main():
     p.add_argument('--pose-kd', type=float, default=5.0e3, help='fixed drive damping for the pose sweep')
     p.add_argument('--pose-eff', type=float, default=1000.0, help='fixed drive max effort for the pose sweep')
     p.add_argument('--sweep', action='store_true', help='run the gain/carry grid below (secondary axis)')
+    p.add_argument('--drive-types', nargs='+', choices=('acceleration', 'force'),
+                   default=['acceleration'], help='drive-type axis (integration msg 006)')
+    p.add_argument('--per-joint-effort', action='store_true',
+                   help='cap each joint at its UR10 effort (wrists ~56 Nm) and scale stiffness/damping '
+                        'per joint, instead of a uniform ceiling')
     p.add_argument('--stiffnesses', type=float, nargs='+', default=[1.0e6, 5.0e5, 3.0e5, 1.0e5])
     p.add_argument('--dampings', type=float, nargs='+', default=[2.0e3, 5.0e3, 1.0e4])
     p.add_argument('--max-efforts', type=float, nargs='+', default=[400.0, 1000.0, 2000.0])
@@ -598,6 +753,14 @@ def main():
     p.add_argument('--carry-accel', type=float, default=0.03, help='carry move peak joint accel (rad/s^2)')
     p.add_argument('--carry-speeds', type=float, nargs='+', default=None,
                    help='sweep these carry peak speeds instead of the single --carry-speed')
+    p.add_argument('--pinned-config', type=float, nargs=6, default=None,
+                   help='dump carton PhysX contacts + per-arm-link clearance at this static arm config '
+                        '(the measured run-250 jam config); names the pinning collider (inbox 004/005)')
+    p.add_argument('--carton-offsets', type=float, nargs='+', default=[0.20],
+                   help='carton-centre offsets (m) along tool-z to bracket for the pinned-config probe')
+    p.add_argument('--no-carton', action='store_true',
+                   help='control: run the fold / pinned config with NO carton welded (isolates the '
+                        'carried payload as the cause of the stall)')
     p.add_argument('--dt', type=float, default=1.0 / 60.0)
     p.add_argument('--max-sim-s', type=float, default=90.0, help='per-move sim-time budget')
     p.add_argument('--heavy-threshold-mb', type=int, choices=(1500, 2500), default=1500)
