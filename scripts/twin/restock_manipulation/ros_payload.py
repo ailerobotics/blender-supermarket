@@ -6,6 +6,14 @@ Sensors before attach; loss of seal prevents a collision attachment request.
 import threading
 import numpy as np
 
+# Sim-clock lead tolerance (run-221): the gripper_pad_tcp /tf (and the Sensors feedback) are stamped
+# with Isaac's world.current_time, which can lead the payload node's relayed /clock by up to ~1
+# physics step (measured 16.7 ms). A strict `0 <= now-stamp` freshness lower bound then intermittently
+# rejects a perfectly fresh transform (payload_sync tf_fresh gate False -> "payload collision
+# attachment not acknowledged"). Tolerate the same ~1-step lead the capture (isaac_sensors) and the
+# /sensors integrity check (ros_manipulation) already allow, so the gate no longer flickers.
+RENDER_LEAD_S = 0.02
+
 
 def relative_pose(base_object, base_tcp):
     """Convert measured object centre from arm base to current measured TCP."""
@@ -76,7 +84,8 @@ class RosPayloadSync:
                          (self.attach.server_is_ready() if self.attach is not None else None)),
                       flush=True)
             return False
-        if s is None or c is None or s.contact != held or not 0 <= now-s.feedback_time <= c.max_age:
+        if (s is None or c is None or s.contact != held
+                or not -RENDER_LEAD_S <= now-s.feedback_time <= c.max_age):
             return _diag('precondition')
         if not self.scene.service_is_ready():
             return _diag('scene_service')
@@ -105,7 +114,7 @@ class RosPayloadSync:
                     print('PAYLOAD_SYNC_DIAG gate=tf_lookup_raise exc=%r now=%.4f' % (exc, now), flush=True)
                 return False
             stamp = transform.header.stamp.sec+transform.header.stamp.nanosec*1e-9
-            if not 0 <= now-stamp <= c.max_age:
+            if not -RENDER_LEAD_S <= now-stamp <= c.max_age:
                 return _diag('tf_fresh now_minus_stamp=%.4f stamp=%.4f' % (now-stamp, stamp))
             xyz, quat = transform.transform.translation, transform.transform.rotation
             centre = (*c.source_pose[:2],c.source_pose[2]-profile.dimensions[2]/2,*c.source_pose[3:])
