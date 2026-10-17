@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -51,6 +52,74 @@ MAX_ARTICULATION_RAD = math.radians(65)
 def _finite_pose(pose):
     return (isinstance(pose, (list, tuple)) and len(pose) == 3
             and all(isinstance(v, (int, float)) and math.isfinite(v) for v in pose))
+
+
+# Opt-in DEV render economy (devloop lane). A full-fidelity production run renders the
+# walkthrough camera every ``record_stride`` ticks and the sensing camera every
+# ``sensing_stride`` ticks; on a render-paced mission that whole-scene render is the
+# dominant per-tick wall cost (run-248: 340 s walkthrough + 197 s sensing of an 800 s
+# loop). During iteration the captain's deliverable video and perception fidelity are not
+# the point -- reaching the arm phase fast is. This widens both strides for a dev run ONLY
+# when the launch environment opts in, so the default (unset) behaviour is byte-identical.
+#
+#   SUPERMARKET_DEV_RENDER_ECONOMY unset / "" / "0" / "off" / "false"  -> no change
+#   SUPERMARKET_DEV_RENDER_ECONOMY = "1" / "on" / "true"               -> dev defaults
+#   SUPERMARKET_DEV_RENDER_ECONOMY = "record=20,sensing=8"             -> explicit per-knob
+#
+# Strides only ever WIDEN (max against the configured value) -- the knob never renders more
+# often than the run already would. sensing_stride is capped so a stride-paced sensing frame
+# still lands inside the controller's freshness window (max_age 0.5 s sim at the nominal
+# 1/60 s step -> < 30 ticks); walkthrough has no freshness constraint but keeps a finite
+# stride so the recorder still captures enough distinct frames to encode a (low-fps) clip.
+_DEV_ECONOMY_RECORD = 20        # ~3 fps walkthrough at 60 Hz physics (vs the default 2)
+_DEV_ECONOMY_SENSING = 8        # 8/60 = 0.13 s sim between sensing renders << 0.5 s freshness
+_DEV_ECONOMY_SENSING_CAP = 20   # never stride past the freshness window (margin under 30)
+
+
+def _truthy(value):
+    return str(value).strip().lower() in ('1', 'on', 'true', 'yes')
+
+
+def resolve_render_strides(config, env):
+    """(record_stride, sensing_stride, note): the render cadence the port should run at.
+
+    Pure (no Isaac, no I/O): reads the configured strides and, iff the launch environment
+    opts into DEV render economy, widens them for a faster dev iteration loop. ``note`` is a
+    one-line marker string to log when the economy is active, else ``None``. Default path
+    (no opt-in) returns exactly ``config``'s strides so a production run is unchanged.
+    """
+    base_record = int(config.get('record_stride', 2))
+    base_sensing = int(config.get('sensing_stride', 1))
+    spec = (env or {}).get('SUPERMARKET_DEV_RENDER_ECONOMY', '')
+    spec = '' if spec is None else str(spec).strip()
+    if not spec or spec.lower() in ('0', 'off', 'false', 'no'):
+        return base_record, base_sensing, None
+
+    dev_record, dev_sensing = _DEV_ECONOMY_RECORD, _DEV_ECONOMY_SENSING
+    if not _truthy(spec):
+        # explicit per-knob spec, e.g. "record=20,sensing=8"; unknown keys are ignored,
+        # a malformed value fails closed to the dev defaults rather than the production rate.
+        for item in spec.replace(';', ',').split(','):
+            if '=' not in item:
+                continue
+            key, _, val = item.partition('=')
+            try:
+                num = int(val.strip())
+            except ValueError:
+                continue
+            if num < 1:
+                continue
+            if key.strip().lower() in ('record', 'record_stride', 'walkthrough'):
+                dev_record = num
+            elif key.strip().lower() in ('sensing', 'sensing_stride'):
+                dev_sensing = num
+
+    record = max(base_record, dev_record)
+    sensing = min(max(base_sensing, dev_sensing), _DEV_ECONOMY_SENSING_CAP)
+    note = (f'DEV_RENDER_ECONOMY record_stride={record} sensing_stride={sensing} '
+            f'(base record={base_record} sensing={base_sensing}; '
+            f'SUPERMARKET_DEV_RENDER_ECONOMY={spec!r})')
+    return record, sensing, note
 
 
 @dataclass(frozen=True)
@@ -315,17 +384,21 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
             # at the verify boundary, an immediate mission fail).
             verifier.begin(job, port.mission_time())
 
-    # Physics ticks per recorded walkthrough frame. Lowering the cadence (default 2 ->
-    # e.g. 6) both shrinks the video and, with the port's render gating, lets the
-    # navigation-only stages skip most whole-scene renders -- the per-tick wall-clock cost
-    # that otherwise blows the stage-pair cap. Decode-grade stages are unaffected (they
-    # render every tick via SENSING_ACTIONS regardless of this stride).
-    record_stride = int(config.get('record_stride', 2))
-    # Physics ticks per rendered sensing frame (collect/transfer/verify). Rendering the whole scene
-    # every tick drove collect/grasp to ~1:70 sim:wall (run-94); a modest stride keeps the sensing
-    # consumers' sim-time freshness (controller max_age 0.5 s) while the render-paced grasp completes
-    # inside the wall budget. Default 1 = legacy every-tick behaviour; the mission config sets it higher.
-    sensing_stride = int(config.get('sensing_stride', 1))
+    # Render cadence (both strides).
+    #  - record_stride: physics ticks per recorded walkthrough frame. Lowering it (default 2
+    #    -> e.g. 6) both shrinks the video and, with the port's render gating, lets the
+    #    navigation-only stages skip most whole-scene renders -- the per-tick wall-clock cost
+    #    that otherwise blows the stage-pair cap.
+    #  - sensing_stride: physics ticks per rendered sensing frame (collect/transfer/verify).
+    #    Rendering the whole scene every tick drove collect/grasp to ~1:70 sim:wall (run-94); a
+    #    modest stride keeps the sensing consumers' sim-time freshness (controller max_age 0.5 s)
+    #    while the render-paced grasp completes inside the wall budget. Default 1 = legacy
+    #    every-tick behaviour; the mission config sets it higher.
+    # SUPERMARKET_DEV_RENDER_ECONOMY (opt-in, dev runs only) widens BOTH to cut the dominant
+    # whole-scene render cost; unset leaves the configured cadence byte-identical.
+    record_stride, sensing_stride, _economy_note = resolve_render_strides(config, os.environ)
+    if _economy_note:
+        print(_economy_note, flush=True)
     # Opt-in sensing execution gate (default off): pass the camera-lane set_render_suspended seam to
     # the port ONLY when config['sensing_execution_gate'] is on, so the port's phase-driven gate()
     # suspends the decode render during the reach. Off => seam is None and the port is byte-identical.
