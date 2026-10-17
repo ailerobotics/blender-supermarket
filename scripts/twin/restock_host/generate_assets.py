@@ -196,6 +196,20 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
                 _pw = (_T[:3, :3] @ np.asarray(_s['center'], float)) + _T[:3, 3]
                 _pl = (_Tinv[:3, :3] @ _pw) + _Tinv[:3, 3]
                 _tx.append({'center': [round(float(v), 5) for v in _pl], 'radius': float(_s['radius'])})
+        # Voxel-downsample the transplanted body spheres: base_link alone is a 960-sphere fine grid, and
+        # ~1268 extra spheres on one link slowed/stalled the shared-container cuMotion plan so the nvblox
+        # station ack starved and its heartbeat tripped (run-245). Keep ONE (largest) sphere per coarse
+        # voxel, inflated to the voxel half-diagonal so the coarse cover still has no carton-sized gap --
+        # a far lighter but still conservative body model (firstmate 296 "shrink to the swept region").
+        _VOX = 0.10
+        _best = {}
+        for _s in _tx:
+            _k = tuple(round(_c / _VOX) for _c in _s['center'])
+            if _k not in _best or _s['radius'] > _best[_k]['radius']:
+                _best[_k] = _s
+        _rmin = round(_VOX * (3 ** 0.5) / 2, 5)
+        _tx = [{'center': _s['center'], 'radius': round(max(float(_s['radius']), _rmin), 5)}
+               for _s in _best.values()]
         if _tx:
             spheres[BASE_INERTIA] = list(spheres.get(BASE_INERTIA, [])) + _tx
             for _arm in ARM_NEAR_BASE:
