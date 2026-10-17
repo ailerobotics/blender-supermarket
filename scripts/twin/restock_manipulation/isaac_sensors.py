@@ -28,8 +28,12 @@ from ..restock_camera.qr import FixedTileQR, FrameQR, rgb_digest
 #: RESUMED the render stalled /sensors to the wall backstop (run-227). The cart placement target is
 #: DERIVED from the cart prim (not camera-sensed), so the held re-validation fabricates nothing;
 #: the fixed camera resumes only after retreat clears the view (next non-suspended phase: verify).
+#: The staged cart-swing via points (firstmate 292: tuck/pan on the way out, retreat_tuck on the way
+#: back) are part of the held carry chain -- the arm swings the carton and occludes the fixed camera --
+#: so they suspend the render exactly like lift/preplace/retreat.
 _SENSING_SUSPEND_PHASES = frozenset({'approach', 'contact', 'grasp', 'lift', 'preplace', 'place',
-                                     'retreat', 'release', 'stow', 'couple'})
+                                     'retreat', 'release', 'stow', 'couple',
+                                     'tuck', 'pan', 'retreat_tuck'})
 
 
 def sensing_render_required(phase):

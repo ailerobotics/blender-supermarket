@@ -62,14 +62,14 @@ def packet(c, t=1., **kwargs):
     return Sensors(**values)
 
 
-def run_to(c, phase):
+def run_to(c, phase, t0=1.0):
     for i in range(80):
         if c.phase == phase:
-            return 1 + i*.1
+            return t0 + i*.1
         contact = c.held or (c.phase == 'grasp' and c.issued)
         if c.phase == 'release' and c.issued:
             contact = False
-        result = c.step(.1, packet(c, 1+i*.1, contact=contact))
+        result = c.step(.1, packet(c, t0+i*.1, contact=contact))
         assert result.status != 'failed', result.reason
     pytest.fail('phase not reached')
 
@@ -98,6 +98,37 @@ def test_live_rejects_fixture_and_ground_truth():
         assert r.status == 'running'
     assert c.step(.1, s).status == 'failed'
     assert not m.moves
+
+
+def test_staged_cart_swing_routes_lift_through_tuck_pan_and_retreat_through_tuck():
+    # firstmate 292: lift -> TUCK -> PAN -> preplace, and retreat -> RETREAT_TUCK -> stow, as joint-space
+    # via points so the welded carton clears the robot body. TUCK/retreat_tuck fold to the STOW shape at
+    # the measured shoulder-pan; PAN rotates joint0 to cart_pan_joint0.
+    stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    c, m = make_controller(transport_joints=stow, staged_cart_swing=True, cart_pan_joint0=-0.8605)
+    t = run_to(c, 'tuck')                                 # lift transitions to tuck, not preplace
+    before = len(m.stows)
+    c.step(.1, packet(c, t))                              # issue the tuck joint goal
+    assert m.stows[before][0] == (0.0,) + stow[1:]        # fold at measured joint0 (=0)
+    c.step(.1, packet(c, t+.1))                           # poll succeeds -> pan
+    assert c.phase == 'pan'
+    c.step(.1, packet(c, t+.2))                           # issue the pan joint goal
+    assert m.stows[-1][0] == (-0.8605,) + stow[1:]        # pan to the cart side at the tucked shape
+    c.step(.1, packet(c, t+.3))
+    assert c.phase == 'preplace'                          # then extend to the mirrored preplace
+    # Return leg: retreat -> retreat_tuck -> stow.
+    t = run_to(c, 'retreat_tuck', t0=t+1.0)
+    n = len(m.stows)
+    c.step(.1, packet(c, t))
+    assert m.stows[n][0] == (0.0,) + stow[1:]             # fold at the measured pan on the way back
+    c.step(.1, packet(c, t+.1))
+    assert c.phase == 'stow'
+
+
+def test_no_staged_swing_keeps_direct_lift_to_preplace():
+    c, m = make_controller(transport_joints=(0.,)*6)      # staged off by default
+    run_to(c, 'preplace')
+    assert c.phase == 'preplace'                          # lift -> preplace directly, no tuck/pan
 
 
 def test_transport_stow_is_planned_before_fresh_inventory_verification():

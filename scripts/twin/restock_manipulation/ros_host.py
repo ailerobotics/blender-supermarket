@@ -102,12 +102,18 @@ def main():
     if _policy is not None and config.get('sim_cart_place_policy'):
         from .wall_policy import SimCartPlacePolicy
         _policy = SimCartPlacePolicy(_policy)
+    # Staged cart-swing (firstmate 292): route lift->preplace through body-clear joint-space via points
+    # (tuck/pan) so the welded carton does not sweep the un-sphered chassis/arm-mount (run-236 joint0
+    # stall). Only in the sim cart-place scenario (the policy + flag); cart_pan_joint0 is CPU-verified
+    # body-clear for the fixed cart dock (staged_swing_verify.py).
+    staged = bool(config.get('staged_cart_swing', False)) and _policy is not None and bool(config.get('sim_cart_place_policy'))
     controller = TransferController(motion,profiles,frame=tool.base_frame,
         phase_timeout=120.,pose_policy=_policy,
         transport_joints=transport_joints,
         contact_straight_line=bool(config.get('contact_straight_line', False)),
         contact_overpress_step_m=float(config.get('contact_overpress_step_m', 0.0)),
         contact_overpress_cap_m=float(config.get('contact_overpress_cap_m', 0.0)),
+        staged_cart_swing=staged, cart_pan_joint0=float(config.get('cart_pan_joint0', 0.0)),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # The first decode-grade frame + support registration under render pacing needs several

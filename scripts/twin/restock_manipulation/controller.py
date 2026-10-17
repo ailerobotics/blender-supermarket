@@ -18,7 +18,8 @@ class TransferController:
                  phase_timeout: float = 30.0, fixture_mode: bool = False,
                  frame: str = 'ur_base_link', pose_policy=None, transport_joints=None,
                  steady_clock=time.monotonic, contact_straight_line: bool = False,
-                 contact_overpress_step_m: float = 0.0, contact_overpress_cap_m: float = 0.0):
+                 contact_overpress_step_m: float = 0.0, contact_overpress_cap_m: float = 0.0,
+                 staged_cart_swing: bool = False, cart_pan_joint0: float = 0.0):
         self.steady_clock=steady_clock
         # Execute the contact descent as a seeded straight-line move through the trajectory host instead
         # of a cuMotion plan (the motion port's begin(straight_line=True) path). Default False keeps the
@@ -50,6 +51,21 @@ class TransferController:
                 not all(map(math.isfinite,self.transport_joints)) or
                 not callable(getattr(motion,'begin_joint_goal',None))):
             raise ValueError('transport stow requires six finite joints and collision-planned joint goals')
+        # STAGED cart-swing (firstmate 292): the direct lift->preplace swing sweeps the welded carton
+        # through the robot's own chassis/arm-mount (cuMotion has no self-collision spheres for them),
+        # stalling joint0 (run-236). Route it as joint-space via points instead: lift -> TUCK (fold to
+        # the compact high STOW shape at the current shoulder-pan, carton near the base axis) -> PAN
+        # (rotate the shoulder to the cart side at that tucked radius) -> extend to the mirrored
+        # preplace; mirror on the way back (retreat -> retreat_tuck -> stow). TUCK/retreat_tuck fold at
+        # the MEASURED pan; PAN rotates to ``cart_pan_joint0`` (CPU KDL-verified body-clear for the
+        # fixed cart dock, staged_swing_verify.py). Needs the transport stow shape (joints 1-5) and the
+        # joint-goal motion path; gated ON only in the sim cart-place scenario (config flag). Off =>
+        # the direct lift->preplace, byte-identical to before.
+        self._stow_shape = self.transport_joints[1:] if self.transport_joints is not None else None
+        self.cart_pan_joint0 = float(cart_pan_joint0)
+        self.staged_cart_swing = bool(staged_cart_swing) and self._stow_shape is not None
+        if self.staged_cart_swing and not math.isfinite(self.cart_pan_joint0):
+            raise ValueError('staged cart swing requires a finite cart_pan_joint0')
         self.cart_location, self.max_age = cart_location, max_age
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
@@ -329,6 +345,11 @@ class TransferController:
                 next_phase = dict(approach='contact', contact='grasp', lift='preplace',
                                   preplace='place', place='release',
                                   retreat='stow' if self.transport_joints is not None else 'verify')
+                if self.staged_cart_swing:
+                    # Insert the body-clear via points: lift -> tuck -> pan -> preplace, and route the
+                    # empty-handed return retreat -> retreat_tuck -> stow (see __init__).
+                    next_phase['lift'] = 'tuck'
+                    next_phase['retreat'] = 'retreat_tuck'
                 self._transition(next_phase[self.phase])
                 return self._result()
             # Contact-terminated grasp descent (firstmate key contact-move-termination): while the
@@ -339,6 +360,28 @@ class TransferController:
             # only 'contact' emits this, and only once measured contact is present.
             if self.phase == 'contact' and s.contact:
                 return self._result(({'kind': 'contact'},))
+            return self._result()
+        if self.staged_cart_swing and self.phase in ('tuck', 'pan', 'retreat_tuck'):
+            # Joint-space body-clear via points (firstmate 292). TUCK/retreat_tuck fold to the compact
+            # high STOW shape at the arm's CURRENT shoulder-pan (minimal joint0 motion); PAN rotates
+            # joint0 to the cart side (cart_pan_joint0) at that tucked radius. Each is a collision-planned
+            # joint goal, mirroring 'stow'. The per-tick held/contact/parked/freshness gates above still
+            # apply (tuck/pan carry the held carton; retreat_tuck is empty-handed).
+            goal = ((self.cart_pan_joint0,) + tuple(self._stow_shape) if self.phase == 'pan'
+                    else (s.joint_positions[0],) + tuple(self._stow_shape))
+            if not self.issued:
+                if s.valid_until_steady is not None:
+                    require_fresh(s.valid_until_steady, self.steady_clock)
+                self.motion.begin_joint_goal(goal, s.joint_positions)
+                self.issued = True
+                return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+            outcome = self.motion.poll()
+            if outcome == 'failed':
+                return self._fail('staged cart-swing %s move failed' % self.phase)
+            if outcome == 'succeeded':
+                self._transition({'tuck': 'pan', 'pan': 'preplace', 'retreat_tuck': 'stow'}[self.phase])
+            elif outcome != 'running':
+                return self._fail('invalid staged cart-swing motion outcome')
             return self._result()
         if self.phase == 'grasp':
             if not self.issued:
