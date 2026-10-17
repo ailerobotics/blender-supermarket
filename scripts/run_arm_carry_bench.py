@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot-once arm-carry bench runner (guarded GPU; RUNBOOK §14).
+"""Boot-once arm-carry bench runner (guarded GPU; RUNBOOK §16).
 
 Boots a SimulationApp ONCE under the canonical GPU lock, assembles the mission's physics
 scene, welds the carton at the tool through the mission's own SIM_ATTACH_FALLBACK fixed
@@ -411,6 +411,12 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
 def run(args):
     config = json.loads(args.runtime_config.read_text())
     scenario = json.loads(Path(config['scenario']).read_text())
+    # The bench drives the ArmCommandGate IN-PROCESS (no host trajectory_host), so it does not
+    # need the out-of-Isaac /clock+/tf+/joint_states relay NativeTransport would otherwise spawn.
+    # Drop runtime_env so assemble() builds the transport graph without launching that subprocess.
+    md = dict(config.get('masked_depth') or {})
+    md.pop('runtime_env', None)
+    config['masked_depth'] = md
     arm_cfg = config.get('armbench', {})
     lift_joints = (args.lift_joints if args.lift_joints is not None
                    else arm_cfg.get('lift_joints', DEFAULT_LIFT))

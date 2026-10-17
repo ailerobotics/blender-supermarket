@@ -932,3 +932,30 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= .venv-scenarios/bin/python -m pytes
 .venv-scenarios/bin/python -c "import sys;sys.path[:0]=['scripts','scripts/scenarios'];\
 import dataset,os;print(dataset.validate_dataset(os.path.expanduser('~/datasets/store-scenarios'),'depletion_G1R'))"
 ```
+
+## 16. Arm-carry bench — diagnose/sweep the carton-carry fold (CPU tests + guarded GPU)
+
+Boots Isaac ONCE, welds the carton at the tool via the mission's own `SIM_ATTACH_FALLBACK`
+weld, brakes the base in the airborne-carry yaw-lock state, and runs many carry-fold trials
+(tuck → pan → …) in seconds each. Drives the REAL `ArmCommandGate` + the REAL
+`trajectory_host` Plan/tracking/settle gates. Honest differences from the live mission:
+analytic planning path + in-process executor loop (no ROS relay). Design + metrics:
+`data/sim-restock-armbench-v1/report.md`.
+
+CPU tests (no GPU):
+```
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_arm_carry_bench.py -q
+```
+
+Guarded GPU (short session; integration lane holds `/tmp/aile-gpu.lock` priority). Trial-1
+contact diagnosis (name the obstacle the fold hits) then the carry-pose clearance sweep:
+```
+RESTOCK_PYTHON=/home/manishsaini/miniforge3/envs/env_isaaclab/bin/python \
+RESTOCK_NVIDIA_RUNTIME=/home/manishsaini/datasets/twin-robot-in-store-boot-v1/gpu-runtime-578/root \
+  scripts/run_arm_carry_bench.sh \
+    --runtime-config /home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/mission-runtime-cc-collect.json \
+    --output <scratch>/armbench --diagnose --expect reproduce --heavy-threshold-mb 2500 \
+    --lift-joints <6 measured lift joints>     # then --pose-sweep for the clearing shape
+```
+The bench holds the GPU lock + 4 GiB RAM watchdog inside Python and bounds its own wall cap
+(`RESTOCK_WALL_CAP`, default 800 s). Never `--force`; never stop Blender/whispr.
