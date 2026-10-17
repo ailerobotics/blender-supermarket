@@ -10,8 +10,8 @@ import pytest
 from twin.tools import arm_carry_bench as bench
 from twin.tools.arm_carry_bench import (
     CarryProfile, DriveGains, Tolerances, TrialSpec, WRIST_1,
-    build_carry_trajectory, move_duration, run_move, carry_goals,
-    sweep_grid, summarize, metrics_table)
+    build_carry_trajectory, build_trapezoid_trajectory, trapezoid_timing,
+    move_duration, run_move, carry_goals, sweep_grid, summarize, metrics_table)
 
 
 # ---- a scripted ArmStage that drives the executor into a chosen regime ----------
@@ -110,6 +110,63 @@ def test_build_trajectory_passes_the_real_plan():
     # generated caps) -- run_move builds it internally, so a 'perfect' run proves acceptance.
     m = run_move(ScriptedArm(START, GOAL, 'perfect'), START, GOAL, CARRY, FAST_TOL, 'probe')
     assert m.outcome == 'settled' and len(m.peak_tracking_error) == 6
+
+
+# ---- trapezoid (faithful TOTG arrival) replay ---------------------------------
+def test_trapezoid_timing_trapezoid_vs_triangular():
+    # a long move reaches cruise (trapezoid: t_cruise > 0, v_peak == cap)
+    t_a, t_c, total, v_peak = trapezoid_timing(2.3, peak_speed=0.3, peak_accel=1.0)
+    assert t_c > 0 and v_peak == pytest.approx(0.3)
+    assert total == pytest.approx(2 * t_a + t_c)
+    # a short move never reaches cruise (triangular: t_cruise == 0, v_peak < cap)
+    t_a2, t_c2, total2, v_peak2 = trapezoid_timing(0.02, peak_speed=0.3, peak_accel=1.0)
+    assert t_c2 == 0.0 and v_peak2 < 0.3
+
+
+def test_trapezoid_trajectory_cruises_then_brakes_to_the_goal():
+    # the mission tuck: big wrist travel, at the mission envelope
+    start = [1.4051, -1.0499, 0.8940, -1.4149, -1.5708, -0.1657]
+    goal = [1.2618, -2.3, 1.0, 0.9, 0.8, -1.2545]
+    carry = CarryProfile(peak_speed=0.3, peak_accel=1.0, profile='trapezoid')
+    traj, total = build_trapezoid_trajectory(start, goal, carry)
+    assert total > 0 and len(traj.points) >= 10
+    # starts and ends at rest, lands exactly on the goal
+    assert max(abs(v) for v in traj.points[0].velocities) == 0.0
+    assert max(abs(v) for v in traj.points[-1].velocities) == 0.0
+    assert traj.points[-1].positions == pytest.approx(goal)
+    # the binding joint actually CRUISES at a nonzero speed mid-move (the arrival overshoot driver),
+    # unlike the cubic which only reaches peak momentarily
+    binding = int(np.argmax(np.abs(np.asarray(goal) - np.asarray(start))))
+    speeds = [abs(p.velocities[binding]) for p in traj.points]
+    assert max(speeds) == pytest.approx(0.3, abs=0.02)      # reaches the cruise cap
+    at_cruise = [s for s in speeds if s >= 0.29]
+    assert len(at_cruise) >= 3                              # a sustained cruise plateau, not a brief spike
+
+
+def test_trapezoid_joints_are_synchronized():
+    # all joints start and finish together; the slower joints scale their speed to their travel
+    start = [0.0] * 6
+    goal = [0.1, -0.2, 0.15, 2.0, 0.1, -0.1]   # wrist_1 binds
+    carry = CarryProfile(peak_speed=0.3, peak_accel=1.0, profile='trapezoid')
+    traj, total = build_trapezoid_trajectory(start, goal, carry)
+    # a small-travel joint never exceeds the binding joint's cruise, scaled by its travel fraction
+    small = 1   # shoulder_lift travels 0.2 vs wrist_1's 2.0 -> 0.1x the speed
+    peak_small = max(abs(p.velocities[small]) for p in traj.points)
+    assert peak_small == pytest.approx(0.3 * (0.2 / 2.0), abs=0.02)
+
+
+def test_trapezoid_passes_the_real_plan_and_settles_under_perfect_tracking():
+    start, goal = [0.0] * 6, [0.1, -0.2, 0.15, 2.0, 0.1, -0.1]
+    carry = CarryProfile(peak_speed=0.3, peak_accel=1.0, profile='trapezoid')
+    # a perfectly-tracking arm still settles -- the real Plan accepts the densely-sampled trapezoid
+    m = run_move(ScriptedArm(start, goal, 'perfect'), start, goal, carry, FAST_TOL, 'tuck')
+    assert m.outcome == 'settled' and m.ok
+    assert m.duration_s > 0
+
+
+def test_carry_profile_rejects_unknown_profile():
+    with pytest.raises(ValueError):
+        CarryProfile(0.3, 1.0, profile='spline').validate()
 
 
 # ---- executor regimes ---------------------------------------------------------

@@ -581,7 +581,9 @@ POSE_DELTAS = [
 def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
     """Return the ordered list of (label, goals, spec) the bench runs. The diagnosis trials come
     first (the redirect), then the carry-pose sweep (primary), then an optional gain sweep."""
-    carry = bench.CarryProfile(peak_speed=args.carry_speed, peak_accel=args.carry_accel)
+    profile = 'trapezoid' if args.replay else 'cubic'
+    carry = bench.CarryProfile(peak_speed=args.carry_speed, peak_accel=args.carry_accel,
+                               profile=profile)
     # The weld forms at GRASP; the first move drives grasp->lift (carton carried by the weld), then
     # the tuck/pan fold follows. Prepend 'lift' so every trial exercises the full carried sequence.
     lift_move = ('lift', [float(v) for v in lift_joints])
@@ -602,7 +604,8 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
     if args.sweep:
         carries = [carry]
         if args.carry_speeds:
-            carries = [bench.CarryProfile(peak_speed=s, peak_accel=args.carry_accel)
+            carries = [bench.CarryProfile(peak_speed=s, peak_accel=args.carry_accel,
+                                          profile=carry.profile)
                        for s in args.carry_speeds]
         for spec in bench.sweep_grid([float(x) for x in args.stiffnesses],
                                      [float(x) for x in args.dampings],
@@ -835,8 +838,17 @@ def main():
     p.add_argument('--max-efforts', type=float, nargs='+', default=[400.0, 1000.0, 2000.0])
     p.add_argument('--cart-tuck-shape', type=float, nargs=5, default=None,
                    help='override the tuck shape joints 1-5 (e.g. the reshaped -2.3 1.0 0.9 0.8 -1.2545)')
-    p.add_argument('--carry-speed', type=float, default=0.05, help='carry move peak joint speed (rad/s)')
-    p.add_argument('--carry-accel', type=float, default=0.03, help='carry move peak joint accel (rad/s^2)')
+    p.add_argument('--replay', action='store_true',
+                   help='reconstruct the fold as a synchronized TRAPEZOIDAL (MoveIt-TOTG-shaped) arrival '
+                        '-- ramp to cruise, flat cruise, hard terminal decel -- so the arm ARRIVES '
+                        'OVERSHOOTING as the live mission fold does, reproducing the terminal-hold '
+                        'effort-saturation limit cycle a gentle rest-to-rest cubic misses. Implies the '
+                        'mission arm envelope (0.3 rad/s / 1.0 rad/s^2) unless --carry-speed/--carry-accel '
+                        'are given.')
+    p.add_argument('--carry-speed', type=float, default=None, help='carry move peak joint speed (rad/s); '
+                   'default 0.05 (cubic) or 0.3 (--replay, the mission trajectory_host max_speed)')
+    p.add_argument('--carry-accel', type=float, default=None, help='carry move peak joint accel (rad/s^2); '
+                   'default 0.03 (cubic) or 1.0 (--replay, the mission max_accel = max_speed*0.5/0.15)')
     p.add_argument('--carry-speeds', type=float, nargs='+', default=None,
                    help='sweep these carry peak speeds instead of the single --carry-speed')
     p.add_argument('--pinned-config', type=float, nargs=6, default=None,
@@ -863,6 +875,13 @@ def main():
                         'holds it (fleet blocking-wait discipline); the VRAM/RAM/Blender guards still run')
     p.add_argument('--render', action='store_true', help='render each physics step (slower; only for evidence)')
     args = p.parse_args()
+    # Resolve the carry envelope: --replay defaults to the live mission arm envelope (trajectory_host
+    # max_speed 0.3 / max_accel = 0.3*0.5/0.15 = 1.0) so the reconstructed arrival matches the fold;
+    # the gentle cubic keeps its original slow defaults. An explicit flag always wins.
+    if args.carry_speed is None:
+        args.carry_speed = 0.3 if args.replay else 0.05
+    if args.carry_accel is None:
+        args.carry_accel = 1.0 if args.replay else 0.03
     return run(args)
 
 
