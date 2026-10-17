@@ -385,14 +385,12 @@ def test_sim_attach_fallback_gating_default_off_and_contact_gated():
     release on suction off. The weld itself needs USD; here we stub it to test the gating on CPU."""
     from scripts.twin.restock_manipulation.cad_tool import (NativePanelContact, SIM_ATTACH_CONTACT_MM,
                                                             SIM_ATTACH_FLUSH_DEG)
-    def bridge(*, enabled, fallback, gripped=(), status='open', probe=None, prev_gap='stable'):
+    def bridge(*, enabled, fallback, gripped=(), status='open', probe=None):
         a = NativePanelContact.__new__(NativePanelContact)
         a.path, a.closed_status, a.open_status = '/Grip', 'closed', 'open'
         a.enabled, a._sim_attach_fallback = enabled, fallback
         a._fallback_body = a._fallback_joint = None
         a.last_probe = probe
-        # 'stable' seeds the previous gap equal to the current one so the stationary gate passes.
-        a._prev_gap_mm = (probe or {}).get('min_gap_mm') if prev_gap == 'stable' else prev_gap
         a.api = NS(get_gripper_status=lambda p: status, get_gripped_objects=lambda p: list(gripped))
         a._welds, a._releases = [], []
         a._fallback_weld = lambda body: (a._welds.append(body),
@@ -403,12 +401,9 @@ def test_sim_attach_fallback_gating_default_off_and_contact_gated():
     # default OFF -> never welds even at perfect contact
     a = bridge(enabled=True, fallback=False, probe=contact); a.sim_attach_fallback_tick()
     assert a._fallback_body is None and a._welds == []
-    # ON + suction on + measured 0 mm flush contact + STATIONARY (gap stable) -> welds the carton
+    # ON + suction on + measured <=0.5 mm flush contact -> welds the contacted carton
     a = bridge(enabled=True, fallback=True, probe=contact); a.sim_attach_fallback_tick()
     assert a._welds == ['/World/Carton'] and a.read() is True
-    # ON + contact but the pad is still MOVING (gap changed since last tick) -> native gets first crack
-    a = bridge(enabled=True, fallback=True, probe=contact, prev_gap=5.0); a.sim_attach_fallback_tick()
-    assert a._welds == []
     # ON but the gap is outside the contact gate -> no weld
     far = dict(contact, min_gap_mm=SIM_ATTACH_CONTACT_MM + 1.0)
     a = bridge(enabled=True, fallback=True, probe=far); a.sim_attach_fallback_tick()

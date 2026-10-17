@@ -102,10 +102,6 @@ SIM_MAX_GRIP_DISTANCE = .020
 # gap + flush pad with suction on, and released on suction off -- never a fabricated hold.
 SIM_ATTACH_CONTACT_MM = 0.5
 SIM_ATTACH_FLUSH_DEG = 2.0
-# Max seal-gap change between ticks for the pad to count as STATIONARY. The fallback welds ONLY when
-# stationary so the native plugin gets first crack during the controller's freeze-settle window and so
-# the weld never snaps onto a moving link (firstmate run-203 native-first).
-SIM_ATTACH_STABLE_MM = 0.2
 
 
 def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
@@ -277,7 +273,6 @@ class NativePanelContact:
         self._sim_attach_fallback = bool(sim_attach_fallback)
         self._fallback_body = None
         self._fallback_joint = None
-        self._prev_gap_mm = None        # last tick's seal gap, for the stationary (gap-stable) gate
         self.api = surface_gripper.acquire_surface_gripper_interface()
         self.api.set_write_to_usd(True)
         self.closed_status = surface_gripper.GripperStatus.Closed
@@ -330,13 +325,9 @@ class NativePanelContact:
         info = self.last_probe or self.probe()
         gap, pvs = info.get('min_gap_mm'), info.get('pad_vs_surface_deg')
         hits = [h[0] for h in (info.get('raycast') or []) if h and h[0]]
-        prev = self._prev_gap_mm
-        self._prev_gap_mm = gap
         if (gap is None or gap > SIM_ATTACH_CONTACT_MM or pvs is None
                 or pvs > SIM_ATTACH_FLUSH_DEG or not hits):
-            return                                   # not a measured 0 mm flush contact yet
-        if prev is None or abs(gap - prev) > SIM_ATTACH_STABLE_MM:
-            return                                   # pad still moving -> leave the native plugin first crack
+            return                                   # not a measured <=0.5 mm flush contact yet
         self._fallback_weld(hits[0])
         print('SIM_ATTACH_FALLBACK attach body=%s gap_mm=%s pad_vs_surface_deg=%s'
               % (hits[0], gap, pvs), flush=True)
