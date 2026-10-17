@@ -42,7 +42,22 @@ if [ -n "${RESTOCK_NVIDIA_RUNTIME:-}" ]; then
 fi
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$jazzy"
 
-# Short bounded wall cap for the whole bench session (GPU etiquette: keep sessions under 15 min).
+# Fleet ROS 2 hygiene (firstmate inbox 007): the bench runs on the sim domain 88 (require_sim_domain
+# + NativeTransport's OmniGraph bridge pin it; it cannot use a private lane domain) but it is a good
+# citizen by (a) booting ONLY while it holds the GPU lock, so no mission (also domain 88) runs
+# concurrently, (b) dropping the out-of-Isaac DDS relay so it spawns no host DDS participants -- in
+# practice it leaves NO new /dev/shm/fastrtps_* segments. Belt-and-suspenders: snapshot before, and
+# after the run remove only fastrtps segments that appeared during this run, are owned by us, and are
+# not open by any process (never a live one, never another lane's).
+_shm_before="$(ls -1 /dev/shm/fastrtps_* 2>/dev/null || true)"
 RESTOCK_WALL_CAP="${RESTOCK_WALL_CAP:-800s}"
-exec timeout --signal=TERM --kill-after=20s "$RESTOCK_WALL_CAP" \
+timeout --signal=TERM --kill-after=20s "$RESTOCK_WALL_CAP" \
   "$RESTOCK_PYTHON" "$SCRIPT_DIR/run_arm_carry_bench.py" "$@"
+rc=$?
+for f in /dev/shm/fastrtps_*; do
+  [ -e "$f" ] || continue
+  if ! printf '%s\n' "$_shm_before" | grep -qxF "$f" && [ -O "$f" ] && ! fuser "$f" >/dev/null 2>&1; then
+    rm -f "$f" && echo "run_arm_carry_bench.sh: removed own stale shm $f" >&2
+  fi
+done
+exit $rc

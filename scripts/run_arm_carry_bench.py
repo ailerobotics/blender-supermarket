@@ -37,8 +37,33 @@ from pathlib import Path
 
 import numpy as np
 
+from contextlib import contextmanager
+
 from twin.restock.guard import available_ram_mb, gpu_slot
 from twin.tools import arm_carry_bench as bench
+
+
+@contextmanager
+def gpu_guards_no_flock(*, heavy_threshold_mb=1500):
+    """The same protected-Blender / RAM / VRAM / domain-88-port guards as guard.gpu_slot, but WITHOUT
+    taking the flock -- for when an OUTER `flock -w /tmp/aile-gpu.lock` already holds the lock (the
+    fleet blocking-wait discipline, firstmate inbox 008). Never bypasses the VRAM guard."""
+    import socket
+    from twin.restock.guard import isolation, protected_blender
+    from twin.gpu_guard import query_and_assess
+    if heavy_threshold_mb not in (1500, 2500):
+        raise ValueError('heavy threshold must use default 1500 or explicit opt-in 2500')
+    isolation()
+    if protected_blender():
+        raise RuntimeError('protected Blender process or MCP socket is present')
+    if available_ram_mb() < 12 * 1024:
+        raise RuntimeError('need at least 12 GiB available RAM')
+    decision = query_and_assess(required_free_mb=8000, heavy_threshold_mb=heavy_threshold_mb)
+    if not decision.ok:
+        raise RuntimeError(decision.message)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(('127.0.0.1', 7400 + 250 * 88))
+        yield decision
 
 # A plausible ESTIMATE of the mission lift pose (arm joints, ARM_JOINTS order) at the start of
 # the carry fold -- carton grasped at backstock_00 and lifted, before the tuck. Override with
@@ -55,6 +80,10 @@ CART_PAN_JOINT0 = -0.8605
 # Measured side-grip offset of the carton CENTRE along tool-z from gripper_pad_tcp (handoff (a);
 # xrdf_selfcollision_check.py). 0.6 m carton, side grip ~= 0.20 m.
 CARTON_TOOL_Z_OFFSET = 0.20
+# Carton centre offset in the gripper_pad_tcp frame (the model world_obstacles.carton_spheres_world
+# uses: 0.20 m along tool-z for the 0.6 m side-grip). Confirmed against the integration lane's CPU
+# sphere model.
+CARTON_OFFSET_TCP = (0.0, 0.0, 0.20)
 # The run-248 / run-249 reference gains (the two failure signatures to reproduce).
 REF_STIFF = bench.DriveGains(1.0e6, 1.0e4, 4000.0)
 REF_SOFT = bench.DriveGains(1.0e5, 2.0e3, 400.0)
@@ -66,7 +95,7 @@ class IsaacCarryStage(bench.ArmStage):
 
     def __init__(self, assembly, lift_joints, grasp_joints, *, carton_path='/RestockScenario/HandlingUnit',
                  pad_path_key='gripper_pad_tcp', render=False, carton_dims=(0.6, 0.4, 0.16),
-                 obstacle_prims=None, no_carton=False):
+                 obstacle_prims=None, no_carton=False, arm_contacts=False, start_at_lift=False):
         from isaacsim.core.prims import SingleRigidPrim
         from pxr import UsdGeom
         self._UsdGeom = UsdGeom
@@ -90,6 +119,8 @@ class IsaacCarryStage(bench.ArmStage):
         self.carton = self.world.scene.add(SingleRigidPrim(prim_path=carton_path, name='armbench_carton'))
         self.arm_ctrl = self.robot.get_articulation_controller()
         self.no_carton = bool(no_carton)
+        self._arm_contacts = bool(arm_contacts)
+        self.start_at_lift = bool(start_at_lift)
         self._weld_rel0 = None
         self._current_drive_type = 'acceleration'   # physics_setup leaves the arm drives acceleration
         self.arm_joint_prims = self._discover_arm_joints()
@@ -153,18 +184,33 @@ class IsaacCarryStage(bench.ArmStage):
         return obstacles
 
     def _enable_contact_reporting(self):
-        """Best-effort PhysX contact reporting on the carton so the carton's physical contacts
-        (hollow-geometry-aware) are named. Degrades to geometric clearance if unavailable."""
+        """Best-effort PhysX contact reporting. DEFAULT: the carton only (a separate rigid prim --
+        safe). Applying ContactReportAPI to the ARM links / chassis (part of the articulation) after
+        init invalidates the physics TENSOR VIEW, breaking get_gains() -- so arm/body self-collision
+        reporting is OPT-IN (``armbench_arm_contacts``) and must not be combined with a gain sweep;
+        the carton-vs-arm self-collision is instead measured offline by
+        twin.tools.carton_arm_fold_clearance (CPU sphere model). Each reported contact records both
+        actors. Degrades to geometric clearance if unavailable."""
         try:
             from omni.physx import get_physx_simulation_interface
             from pxr import PhysxSchema, PhysicsSchemaTools
             self._PhysicsSchemaTools = PhysicsSchemaTools
-            prim = self.stage.GetPrimAtPath(self.carton_path)
-            api = PhysxSchema.PhysxContactReportAPI.Apply(prim)
-            try:
-                api.CreateThresholdAttr().Set(0.0)
-            except Exception:
-                pass
+            tracked = [self.carton_path]
+            if self._arm_contacts:   # opt-in: breaks the articulation tensor view / get_gains
+                tracked += list(self.arm_links.values())
+                base = self.assembly.paths.get('base_link')
+                if base:
+                    tracked.append(base)
+            self._tracked_contacts = set(tracked)
+            for path in tracked:
+                prim = self.stage.GetPrimAtPath(path)
+                if not prim:
+                    continue
+                api = PhysxSchema.PhysxContactReportAPI.Apply(prim)
+                try:
+                    api.CreateThresholdAttr().Set(0.0)
+                except Exception:
+                    pass
 
             def _on_contact(contact_headers, contact_data):
                 for ch in contact_headers:
@@ -173,8 +219,9 @@ class IsaacCarryStage(bench.ArmStage):
                         a1 = str(PhysicsSchemaTools.intToSdfPath(ch.actor1))
                     except Exception:
                         continue
-                    other = a1 if self.carton_path in a0 else (a0 if self.carton_path in a1 else None)
-                    if other is None:
+                    hit0 = any(t in a0 for t in self._tracked_contacts)
+                    hit1 = any(t in a1 for t in self._tracked_contacts)
+                    if not (hit0 or hit1):
                         continue
                     pos = None
                     try:
@@ -183,9 +230,11 @@ class IsaacCarryStage(bench.ArmStage):
                             pos = [float(cp[0]), float(cp[1]), float(cp[2])]
                     except Exception:
                         pos = None
-                    self._contact_buf.append({'prim': other, 'position': pos})
+                    # record the PAIR so an arm-vs-body / arm-vs-arm self-collision is visible
+                    self._contact_buf.append({'prim': '%s<->%s' % (a0.rsplit('/', 1)[-1], a1.rsplit('/', 1)[-1]),
+                                              'position': pos, 'a0': a0, 'a1': a1})
             self._contact_sub = get_physx_simulation_interface().subscribe_contact_report_events(_on_contact)
-            print('ARMBENCH_CONTACT_REPORTING enabled', flush=True)
+            print('ARMBENCH_CONTACT_REPORTING enabled on %d bodies (carton+arm+chassis)' % len(tracked), flush=True)
         except Exception as exc:
             print('ARMBENCH_CONTACT_REPORTING unavailable (%s); geometric clearance only' % exc, flush=True)
 
@@ -399,6 +448,23 @@ class IsaacCarryStage(bench.ArmStage):
             [round(float(gkd[int(i)]), 1) for i in self.arm_idx],
             [round(float(gme[int(i)]), 1) for i in self.arm_idx]), flush=True)
 
+    def _place_carton_at_offset(self):
+        """Teleport the carton RigidBody so its origin sits at pad + R_tcp @ CARTON_OFFSET_TCP with the
+        pad's orientation -- the faithful attached-carton pose (world_obstacles.carton_spheres_world)."""
+        pad = self._pad_world()
+        rot = pad.ExtractRotationMatrix()
+        origin = pad.ExtractTranslation()
+        off = np.asarray(CARTON_OFFSET_TCP, float)
+        R = np.array([[rot[0][0], rot[0][1], rot[0][2]],
+                      [rot[1][0], rot[1][1], rot[1][2]],
+                      [rot[2][0], rot[2][1], rot[2][2]]], float)
+        centre = np.array([origin[0], origin[1], origin[2]], float) + R @ off
+        q = pad.ExtractRotationQuat()
+        self.carton.set_world_pose(position=centre,
+                                   orientation=np.array([q.GetReal(), *[float(v) for v in q.GetImaginary()]], float))
+        self.carton.set_linear_velocity(np.zeros(3))
+        self.carton.set_angular_velocity(np.zeros(3))
+
     def _pad_carton_gap_mm(self):
         pad = self._pad_world().ExtractTranslation()
         cp, _ = self.carton.get_world_pose()
@@ -421,8 +487,9 @@ class IsaacCarryStage(bench.ArmStage):
         self.apply_gains(gains)
         # 3. teleport the arm to the GRASP pose at rest (the carton stays at its authored pose;
         #    the pad lands on it by construction of the source_contact IK)
+        reset_pose = self.lift_joints if self.start_at_lift else self.grasp_joints
         full = np.asarray(self.robot.get_joint_positions(), float).copy()
-        full[self.arm_idx] = self.grasp_joints
+        full[self.arm_idx] = reset_pose
         self.robot.set_joint_positions(full)
         self.robot.set_joint_velocities(np.zeros(len(full)))
         self.carton.set_linear_velocity(np.zeros(3))
@@ -432,20 +499,22 @@ class IsaacCarryStage(bench.ArmStage):
         g.faulted = False; g.hold_target = None; g.last_stamp = -1.
         g._host_now = float('-inf'); g.started = False
         g._contact_hold = False; g._contact_hold_target = None
-        g.apply(self.grasp_joints, np.zeros(6), g.indices)
-        # 5. weld the carton to the gripper body at the CURRENT (grasp) relative transform -- the
-        #    mission's own _fallback_weld path (skipped in --no-carton control)
-        gap = self._pad_carton_gap_mm()
+        g.apply(reset_pose, np.zeros(6), g.indices)
+        # 5. place the carton at the measured side-grip offset in the gripper_pad_tcp frame
+        #    (centre = pad + R_tcp @ (0,0,0.20), the model world_obstacles.carton_spheres_world uses),
+        #    then weld it there -- robust to a slightly-off grasp pose (skipped in --no-carton control).
         if not self.no_carton:
+            self._place_carton_at_offset()
             self.contact._fallback_weld(self.carton_path)
         self._weld_rel0 = self._carton_in_pad()
-        print('ARMBENCH_WELD pad_carton_gap_mm=%.1f carton_in_pad=%s' % (gap, self._weld_rel0.tolist()), flush=True)
+        print('ARMBENCH_WELD carton_in_pad=%s (target offset_tcp=%s)'
+              % (self._weld_rel0.tolist(), list(CARTON_OFFSET_TCP)), flush=True)
         # 5. brake the base in the airborne-carry state (yaw-lock D6 over the wheel hold)
         self.mobile.hold()
         self.mobile.engage_brake()
         # 6. settle: hold grasp for a few ticks so the weld + brake quiesce
         for _ in range(settle_steps):
-            g.apply(self.grasp_joints, np.zeros(6), g.indices)
+            g.apply(reset_pose, np.zeros(6), g.indices)
             self.world.step(render=self.render)
 
 
@@ -478,6 +547,14 @@ def _run_trial(stage: IsaacCarryStage, spec: bench.TrialSpec, goals, dt, max_sim
     return moves
 
 
+def _write_partial(output, summary):
+    """Persist the running summary after each trial so a wall-cap kill keeps the results so far."""
+    try:
+        (output / 'bench.json').write_text(json.dumps(summary, indent=2, allow_nan=False) + '\n')
+    except Exception:
+        pass
+
+
 def _move_dict(m: bench.MoveMetrics):
     return dict(label=m.label, outcome=m.outcome, reason=m.reason, duration_s=m.duration_s,
                 settle_time_s=m.settle_time_s, peak_tracking_error=m.peak_tracking_error,
@@ -508,7 +585,7 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
     # The weld forms at GRASP; the first move drives grasp->lift (carton carried by the weld), then
     # the tuck/pan fold follows. Prepend 'lift' so every trial exercises the full carried sequence.
     lift_move = ('lift', [float(v) for v in lift_joints])
-    base_goals = [lift_move] + bench.carry_goals(lift_joints, tuck_shape, pan_joint0, extra_goals=extra)
+    base_goals = ([] if args.start_at_lift else [lift_move]) + bench.carry_goals(lift_joints, tuck_shape, pan_joint0, extra_goals=extra)
     jobs = []
     if args.diagnose or args.expect == 'reproduce' or args.reproduce:
         # reproduce the mission fold in the full scene with contact reporting, at BOTH gain
@@ -519,7 +596,7 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
         safe = bench.DriveGains(args.pose_kp, args.pose_kd, args.pose_eff)
         for dv in POSE_DELTAS:
             shape = bench.tuck_shape_variant(tuck_shape, dv)
-            goals = [lift_move] + bench.carry_goals(lift_joints, shape, pan_joint0, extra_goals=extra)
+            goals = ([] if args.start_at_lift else [lift_move]) + bench.carry_goals(lift_joints, shape, pan_joint0, extra_goals=extra)
             label = 'pose_' + '_'.join(f'{x:+g}' for x in dv)
             jobs.append((label, goals, bench.TrialSpec(label, safe, carry)))
     if args.sweep:
@@ -556,7 +633,8 @@ def run(args):
                     else arm_cfg.get('grasp_joints', DEFAULT_GRASP))
     if len(lift_joints) != 6 or len(grasp_joints) != 6:
         raise ValueError('lift_joints and grasp_joints must each be six arm joints (ARM_JOINTS order)')
-    tuck_shape = arm_cfg.get('cart_tuck_shape', CART_TUCK_SHAPE)
+    tuck_shape = (args.cart_tuck_shape if args.cart_tuck_shape is not None
+                  else arm_cfg.get('cart_tuck_shape', CART_TUCK_SHAPE))
     pan_joint0 = arm_cfg.get('cart_pan_joint0', CART_PAN_JOINT0)
     extra = arm_cfg.get('extra_goals')   # {phase: 6-vector} for downstream place moves (optional)
     carton_dims = tuple(scenario.get('handling_unit', {}).get('dimensions', (0.6, 0.4, 0.16)))
@@ -592,8 +670,10 @@ def run(args):
                         'contact is PhysX (hollow-geometry-aware) when available.'),
                'trials': []}
     app = None
+    slot = (gpu_guards_no_flock(heavy_threshold_mb=args.heavy_threshold_mb) if args.no_gpu_lock
+            else gpu_slot(heavy_threshold_mb=args.heavy_threshold_mb))
     try:
-        with gpu_slot(heavy_threshold_mb=args.heavy_threshold_mb):
+        with slot:
             watcher = threading.Thread(target=watch_ram, daemon=True)
             watcher.start()
             from isaacsim import SimulationApp
@@ -602,7 +682,7 @@ def run(args):
             assembly = assemble(app=app, config=config, scenario=scenario, output=args.output / 'assembly')
             stage = IsaacCarryStage(assembly, lift_joints, grasp_joints, render=args.render,
                                     carton_dims=carton_dims, obstacle_prims=obstacle_override,
-                                    no_carton=args.no_carton)
+                                    no_carton=args.no_carton, arm_contacts=args.arm_contacts, start_at_lift=args.start_at_lift)
             summary['obstacles'] = stage.obstacles
             summary['arm_links'] = sorted(stage.arm_links)
             if args.pinned_config is not None:
@@ -615,6 +695,7 @@ def run(args):
                           % (off, p['carton_world_centre'], [c['prim'] for c in p['contacts']],
                              p['arm_link_clearance_mm'], p['obstacle_clearance_mm']), flush=True)
                 summary['pinned_config_probes'] = probes
+                _write_partial(args.output, summary)
             for label, goals, spec in (jobs if args.pinned_config is None else []):
                 if not app.is_running():
                     raise RuntimeError('simulation app stopped')
@@ -629,6 +710,9 @@ def run(args):
                     carry=dict(peak_speed=spec.carry.peak_speed, peak_accel=spec.carry.peak_accel),
                     passed=bool(moves and all(m.ok for m in moves)),
                     moves=[_move_dict(m) for m in moves]))
+                # persist after EVERY trial so a wall-cap kill still leaves the results so far
+                summary['state'] = 'partial'
+                _write_partial(args.output, summary)
             summary['state'] = 'complete'
     except Exception as exc:
         summary['reason'] = str(exc)
@@ -749,6 +833,8 @@ def main():
     p.add_argument('--stiffnesses', type=float, nargs='+', default=[1.0e6, 5.0e5, 3.0e5, 1.0e5])
     p.add_argument('--dampings', type=float, nargs='+', default=[2.0e3, 5.0e3, 1.0e4])
     p.add_argument('--max-efforts', type=float, nargs='+', default=[400.0, 1000.0, 2000.0])
+    p.add_argument('--cart-tuck-shape', type=float, nargs=5, default=None,
+                   help='override the tuck shape joints 1-5 (e.g. the reshaped -2.3 1.0 0.9 0.8 -1.2545)')
     p.add_argument('--carry-speed', type=float, default=0.05, help='carry move peak joint speed (rad/s)')
     p.add_argument('--carry-accel', type=float, default=0.03, help='carry move peak joint accel (rad/s^2)')
     p.add_argument('--carry-speeds', type=float, nargs='+', default=None,
@@ -758,12 +844,23 @@ def main():
                         '(the measured run-250 jam config); names the pinning collider (inbox 004/005)')
     p.add_argument('--carton-offsets', type=float, nargs='+', default=[0.20],
                    help='carton-centre offsets (m) along tool-z to bracket for the pinned-config probe')
+    p.add_argument('--start-at-lift', action='store_true',
+                   help='start the arm directly at --lift-joints and weld the carton there (skip the '
+                        'grasp->lift move), for a clean short terminal settle at a collision-free pose')
+    p.add_argument('--arm-contacts', action='store_true',
+                   help='OPT-IN: also PhysX-report arm/chassis self-collisions (names arm-vs-body '
+                        'contacts) -- but this invalidates the articulation tensor view, so it CANNOT '
+                        'be combined with a gain sweep (get_gains fails); use carton_arm_fold_clearance '
+                        'for carton-vs-arm instead')
     p.add_argument('--no-carton', action='store_true',
                    help='control: run the fold / pinned config with NO carton welded (isolates the '
                         'carried payload as the cause of the stall)')
     p.add_argument('--dt', type=float, default=1.0 / 60.0)
     p.add_argument('--max-sim-s', type=float, default=90.0, help='per-move sim-time budget')
     p.add_argument('--heavy-threshold-mb', type=int, choices=(1500, 2500), default=1500)
+    p.add_argument('--no-gpu-lock', action='store_true',
+                   help='skip the internal flock because an OUTER `flock -w /tmp/aile-gpu.lock` already '
+                        'holds it (fleet blocking-wait discipline); the VRAM/RAM/Blender guards still run')
     p.add_argument('--render', action='store_true', help='render each physics step (slower; only for evidence)')
     args = p.parse_args()
     return run(args)

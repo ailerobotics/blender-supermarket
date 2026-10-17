@@ -1,94 +1,104 @@
-# sim-restock-armbench-v1 — arm-carry bench
+# sim-restock-armbench-v1 — arm-carry bench + carry-fold diagnosis
 
 _Worker lane `sim-restock-armbench-v1`, branch `fm/sim-restock-armbench-v1` (cut from
-`origin/fm/twin-robot-in-store-boot-v1` @ 08e7e0d). As of 2026-10-17._
+`origin/fm/twin-robot-in-store-boot-v1`). 2026-10-17 → 2026-10-18._
 
-## Purpose
+## TL;DR
 
-A boot-once bench that proves the carton-carrying arm MOVES (tuck fold → pan → …) in
-**seconds per trial** instead of a 15-minute mission run, and diagnoses/sweeps the carry
-fold so the integration lane can fix it. After the 2026-10-17 redirect (inbox 003), the
-primary question is **contact**, not drive gains: does the carried carton swing into an
-unmapped static obstacle (the cart cage) during the lift→tuck fold?
+A boot-once **arm-carry bench** was built (merged: PR #113, PR #116; follow-up PR pending) that
+boots Isaac once, welds the carton at the tool via the mission's own `SIM_ATTACH_FALLBACK`, brakes
+the base, and runs **many carry-fold trials in seconds each** driving the real `ArmCommandGate` +
+the real `trajectory_host` Plan/tracking/settle gates. Using it (plus the integration lane's CPU
+sphere model) the carry-fold failure was diagnosed and a fix validated:
 
-## What the bench exercises identically vs what differs (honest)
+1. **The fold stall is NOT a drive-gain tradeoff** (the initial read). It is **gain-, drive-type-
+   and carton-weld-independent**: the bench reproduces run-250's exact signature — wrist_1 pinned at
+   **0.6965 rad** while shoulder/elbow/wrist_3 track — because the **carried carton collides with the
+   robot's own `ur_upper_arm_link`** as wrist_1 rotates toward the tuck goal (2.1066), and **cuMotion
+   does not self-collision-check the attached carton against the arm**, so it plans that colliding
+   tuck "collision-free" and PhysX/the drive then cannot complete it.
+2. **The reshape fixes the collision.** CPU carton-vs-`ur_upper_arm_link` clearance along the fold:
+   old (wrist1=2.1066) **−23 mm (COLLIDES)**; reshaped (wrist1=0.9) **+180 mm (clears)**.
+3. **After the reshape, a residual DRIVE oscillation remains** at the terminal settle (run-254): the
+   stiff drive **1e6/1e4/4000 rings wrist_1 at 3.14 rad/s** in the now-collision-free pose. The bench
+   sweep shows softer gains damp it below the 0.70 rad/s goal watchdog: **1e5/2000/400 → 0.48 rad/s**,
+   **kp3e5/kd8000/eff400 → 0.337 rad/s**.
 
-Identical to the live mission: the real Isaac arm position drive (gains via the same
-`articulation_controller.set_gains`/`set_max_efforts` path `physics_setup` uses), the real
-`ArmCommandGate.command` envelope, the real `trajectory_host` Plan + `tracking_fault` +
-terminal settle gate (imported, not copied), the carton welded at the tool through the
-mission's own `SIM_ATTACH_FALLBACK` fixed joint, and the base in the airborne-carry yaw-lock
-brake.
+**Recommendation:** carry shape `cart_tuck_shape` wrist_1 = **0.9** (the collision fix; owned by the
+integration lane) **+** the carry drive **arm_stiffness_abs 1e5 / arm_damping_abs 2000 /
+arm_max_effort 400** (damps the terminal ring; `kp3e5/kd8000/eff400` if more velocity margin is
+wanted). This is what integration's run-255 is validating.
 
-Differs (stated with every result): **planning path** — carry trajectories are generated
-analytically (rest-to-rest cubic per joint goal) rather than by MoveIt/cuMotion; the
-joint-space goals, carton load and drive are the mission's. **Timing** — the executor loop
-runs in-process on the sim clock, not over the ROS relay round-trip (sim-clock tolerances,
-which decide pass/fail, are preserved). **Clearance** is carton-AABB vs obstacle-AABB
-(over-approximate); **contact** is PhysX (hollow-geometry-aware) when available — the two
-together settle the "hollow cage" question.
+## The bench
 
-## Files
+- `scripts/twin/tools/arm_carry_bench.py` — pure, CPU-tested: analytic rest-to-rest carry trajectory,
+  an executor loop that **reuses `trajectory_host`'s real Plan + `tracking_fault` + terminal settle
+  gate** (imported, not copied), per-move metrics (per-joint peak tracking error, settle time, peak
+  velocity, carton drift, base displacement, carton–obstacle clearance, first-contact prim/fold-
+  fraction/wrist1), drive-type (FORCE/ACCELERATION) + UR10 force-unit gains, the sweep grid and the
+  robustness ranking.
+- `scripts/run_arm_carry_bench.py` + `run_arm_carry_bench.sh` — guarded GPU runner + `IsaacCarryStage`
+  glue: assemble, weld (carton at `pad + R_tcp·(0,0,0.20)`, the `carton_spheres_world` model), yaw-
+  brake, drive the real gate, per-trial gain/drive-type reset, incremental result writes, blocking-
+  `flock` (`--no-gpu-lock`), fastrtps shm hygiene, `--cart-tuck-shape` / `--start-at-lift` / `--no-carton`.
+- `scripts/twin/tools/carton_arm_fold_clearance.py` — **CPU (no GPU)** carton-vs-arm-link min
+  clearance along the fold, reusing `twin.restock_host.world_obstacles` sphere primitives.
+- `scripts/twin/tests/test_arm_carry_bench.py` — 23 CPU tests (no Isaac/ROS/GPU).
 
-- `scripts/twin/tools/arm_carry_bench.py` — pure, CPU-tested logic: analytic carry
-  trajectory, the executor loop (reusing `trajectory_host`), per-move metrics (per-joint
-  peak tracking error, settle time, peak velocity, carton drift, base displacement,
-  **min clearance + first contact prim/fold-fraction/wrist1**), the sweep grid and the
-  robustness ranking (robust ⇒ settles every move AND no contact, ranked by clearance).
-- `scripts/run_arm_carry_bench.py` — guarded GPU runner + `IsaacCarryStage` glue (weld,
-  brake, clearance, PhysX contact reporting, per-trial reset).
-- `scripts/twin/tests/test_arm_carry_bench.py` — 17 CPU tests (no Isaac/ROS/GPU).
+## What is exercised identically vs what differs (honest)
 
-## Commands
+Identical: the real Isaac arm position drive (gains via the same `articulation_controller` path
+`physics_setup` uses), the real `ArmCommandGate.command` envelope, the real `trajectory_host` Plan +
+`tracking_fault` + terminal settle gate + tolerances, the carton welded via the mission's own
+`SIM_ATTACH_FALLBACK`, the airborne-carry yaw-brake.
 
-CPU tests (no GPU):
+Differs: **planning path** — carry trajectories are generated analytically (rest-to-rest per joint
+goal), not by MoveIt/cuMotion; **timing** — the executor loop runs in-process on the sim clock, not
+over the ROS relay. Both are acceptable here because the stall is a *geometry/terminal-settle*
+property both paths share (the bench reproduces run-250's wrist_1=0.6965 pin and run-254's 3.14 rad/s
+ring). One artifact: the straight-line grasp→lift→tuck swings the carton lower than cuMotion's path,
+so a long-fold run adds a spurious carton-vs-floor contact; `--start-at-lift` isolates the terminal
+settle to avoid it, and the CPU clearance tool is path-controlled.
+
+## Evidence
+
+### Carton-vs-`ur_upper_arm_link` clearance along the fold (CPU, faithful sphere model)
 ```
-cd <worktree>
-PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_arm_carry_bench.py -q
+PYTHONPATH=scripts python3 -m twin.tools.carton_arm_fold_clearance \
+  --urdf …/host-cad/mobile.urdf --xrdf …/host-cad/mobile.xrdf \
+  --lift 1.4051,-1.0499,0.894,-1.4149,-1.5708,-0.1657 \
+  --tuck-shape old=-2.3,1.0,2.1066,0.8,-1.2545 --tuck-shape new=-2.3,1.0,0.9,0.8,-1.2545
 ```
+| fold | wrist1 goal | min clearance to ur_upper_arm_link | verdict |
+|---|---|---|---|
+| old | 2.1066 | **−23.1 mm** | COLLIDES |
+| new (reshaped) | 0.9 | **+180.0 mm** | clears |
 
-GPU diagnosis (trial-1; under `/tmp/aile-gpu.lock`, short session, integration lane has
-priority). Runtime root / plugin env / lock etiquette per the integration handoff §(d):
-```
-RESTOCK_PYTHON=/home/manishsaini/miniforge3/envs/env_isaaclab/bin/python \
-RESTOCK_NVIDIA_RUNTIME=/home/manishsaini/datasets/twin-robot-in-store-boot-v1/gpu-runtime-578/root \
-  scripts/run_mobile_restock.sh --execute   # (shape reference; the bench is launched directly:)
+### Drive-oscillation sweep at the reshaped collision-free tuck (GPU, carton welded)
+`run_arm_carry_bench.sh … --cart-tuck-shape -2.3 1.0 0.9 0.8 -1.2545 --diagnose --sweep …`
+| drive gains (accel) | terminal residual velocity | note |
+|---|---|---|
+| 1e6 / 1e4 / 4000 (stiff) | **3.14 rad/s** | reproduces run-254/248 ring |
+| 1e5 / 2000 / 400 (soft) | **0.48 rad/s** | under the 0.70 goal watchdog |
+| 3e5 / 8000 / 400 | **0.337 rad/s** | lowest residual |
+| 1e5 / 8000 / 400 | 0.98 rad/s | |
+| 1e5 / 20000 / 400 | 1.08 rad/s | damping non-monotonic (accel drive is mass-normalised) |
+| 3e5 / 20000 / 400 | 1.02 rad/s | |
 
-RESTOCK_PYTHON=/home/manishsaini/miniforge3/envs/env_isaaclab/bin/python \
-  <env pins from run_mobile_restock.sh --execute> \
-  "$RESTOCK_PYTHON" scripts/run_arm_carry_bench.py \
-    --runtime-config <mission-runtime-cc-collect.json> \
-    --output <scratch>/armbench-diag --diagnose --expect reproduce \
-    --heavy-threshold-mb 2500 --lift-joints <6 measured lift joints>
-```
+(The long-fold sweep also showed a ~0.198 rad wrist_1 position miss from the straight-line carton-vs-
+floor artifact; a `--start-at-lift` clean terminal-settle confirmation is queued behind run-255.)
 
-Carry-pose sweep (ranked by cart/rack clearance):
-```
-  … scripts/run_arm_carry_bench.py --runtime-config <cfg> --output <scratch>/armbench-pose \
-    --pose-sweep --lift-joints <6>
-```
+## Run history (all this lane's GPU sessions respected the lock + VRAM guard; carton-only PhysX
+contact so the articulation tensor view / get_gains stays valid)
 
-## Diagnosis (run-248/run-249 analysis, pre-GPU)
+diag/diag2/diag3 — validated boot/weld/brake/fold/contact/clearance/reset + reproduced the wrist_1
+pin. pinned-config probe at run-250's jam config. drive comparison (no-carton: wrist_1 pins even
+empty → geometry, not drive). drivecmp (accel vs force same gains). settle2 (the sweep above).
 
-The mission fold stalls on **wrist_1** (ARM_JOINTS index 3) at BOTH gain extremes:
-- run-248 (Kp 1e6 / Kd 1e4 / effort 4000): `GOAL_MISS` wrist_1 1.23 rad off, joints still
-  2.76/3.4 rad/s after the 20 s settle window.
-- run-249 (Kp 1e5 / Kd 2000 / effort 400): `TRACK_MISS` wrist_1 stuck at 0.71 vs commanded
-  2.0, error 1.306 > tol 1.3.
+## Status / ownership
 
-Per the integration lane's env-aware CPU check (inbox 003), this is **gain-independent** —
-a rigid contact of the carried carton against the unmapped cart cage, not a drive limit
-cycle. The bench confirms this in the full scene.
-
-## Results
-
-_(pending the guarded GPU session — trial-1 diagnosis then the carry-pose sweep)_
-
-| trial | outcome | wrist1_track | min_clear_mm | hit prim | note |
-|---|---|---|---|---|---|
-| _pending_ | | | | | |
-
-## Recommendation
-
-_(pending — a carry shape that clears the cage + rack with margin, for the integration lane
-which owns the carry reshaping in the mission)_
+The carry-shape reshape (wrist1=0.9) is owned by the integration lane (it owns the mission carry);
+this lane recommends it with the clearance evidence and recommends the damped carry drive. The robust
+fix for the class of bug (cuMotion self-collision-checking the attached carton) is the
+planner-obstacles lane's. The bench is reusable for the downstream lane's pan/place moves
+(`extra_goals`, `--cart-tuck-shape`, `--start-at-lift`).
