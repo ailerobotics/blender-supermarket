@@ -118,8 +118,17 @@ class IsaacPort:
                  recorder=None, native_transport=None, after_step=None,
                  on_action=None, realtime=True, record_stride=2, sensing_stride=1,
                  masked_depth=None, set_render_suspended=None,
-                 stationary_dxy=0.005, stationary_dyaw=0.01, command_gate=None):
+                 stationary_dxy=0.005, stationary_dyaw=0.01, command_gate=None,
+                 position_uncertainty=0.05):
         self.world,self.robot=world,robot
+        # Localization uncertainty pad added to the nav footprint radius. The real rig keeps the
+        # conservative 0.05 m default; this port feeds IDEAL simulated rigid-body proprioception
+        # (sensor_models['localization']), so a sim run may set it to the measured ~0 to avoid an
+        # inaccurate pad falsely failing the planner's free(start) check when a trailing obstacle
+        # (e.g. the staging support behind the parked robot) sits just outside the true footprint.
+        if not math.isfinite(position_uncertainty) or position_uncertainty < 0:
+            raise ValueError('position_uncertainty must be finite and nonnegative')
+        self._odom_position_uncertainty=float(position_uncertainty)
         # Opt-in sensing execution gate seam (camera lane). Wired (non-None) only when
         # config['sensing_execution_gate'] is on; gate() then suspends the decode-camera render
         # during a validated-reach execution phase. None => the gate is off and every path below is
@@ -396,7 +405,8 @@ class IsaacPort:
         # not raw wheel encoders and a Scan. The measured base pose is the reference
         # localization (default source 'wheel_odometry_localized'); the Scan is transformed
         # into map-frame obstacles about that pose (source 'simulated_lidar').
-        odometry=Odometry((r.x,r.y,r.yaw),now,float(np.linalg.norm(rv)),float(rw[2]))
+        odometry=Odometry((r.x,r.y,r.yaw),now,float(np.linalg.norm(rv)),float(rw[2]),
+                          position_uncertainty=self._odom_position_uncertainty)
         navigation=nav_observation(scan,odometry,coupled=coupled,arm_transport=ready,
                                    articulation=articulation)
         if self.recorder is not None:
