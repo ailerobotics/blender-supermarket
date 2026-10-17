@@ -420,7 +420,8 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # the class default.
     gate=ArmCommandGate(robot,tool.arm_limits,apply,
                         max_speed=float(config.get('arm_max_speed',.15)),
-                        max_error=float(config.get('arm_tracking_tol',.2)))
+                        max_error=float(config.get('arm_tracking_tol',.2)),
+                        freshness_s=float(config.get('arm_command_freshness_s',0.5)))
     # This is the mission's canonical gripper contact: it goes into assembly.contact, which IsaacPort
     # ticks (sim_attach_fallback_tick) AND build_sensing reads for the /sensors packet. So the labelled
     # sim attach-fallback MUST be enabled HERE (runs 204-206: the flag was only on isaac_factory's

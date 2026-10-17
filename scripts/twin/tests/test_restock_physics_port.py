@@ -255,6 +255,26 @@ def test_arm_heartbeat_is_node_clocked_not_wall(monkeypatch):
         gate.watchdog(now=5.7)             # 0.7 s SIM gap -> lost heartbeat
 
 
+def test_arm_freshness_bound_is_configurable_for_the_sim_profile():
+    # firstmate 288: the sim profile relaxes the arm-command freshness+heartbeat to tolerate the
+    # preplace /clock-relay lag (run-230 tripped at now-stamp=0.5000). Default stays the real-rig 0.5 s.
+    applied = []
+    robot = NS(get_dof_index=lambda name: ARM_JOINTS.index(name),
+               get_joint_positions=lambda **k: np.zeros(6))
+    # default 0.5 s: a 0.8 s-stale command is rejected
+    strict = ArmCommandGate(robot, [(-3, 3)]*6, lambda q, v, i: applied.append(1))
+    with pytest.raises(ValueError, match='invalid or stale'):
+        strict.command(names=list(ARM_JOINTS), positions=[.01]*6, velocities=[.01]*6,
+                       efforts=[], stamp=5.0, now=5.8)
+    # sim profile 1.0 s: the SAME 0.8 s-stale command is accepted, and a 0.7 s heartbeat gap is fresh
+    relaxed = ArmCommandGate(robot, [(-3, 3)]*6, lambda q, v, i: applied.append(1), freshness_s=1.0)
+    relaxed.command(names=list(ARM_JOINTS), positions=[.01]*6, velocities=[.01]*6,
+                    efforts=[], stamp=5.0, now=5.8)
+    assert not relaxed.faulted
+    relaxed.watchdog(now=5.7)              # 0.7 s SIM gap < 1.0 s -> still fresh
+    assert not relaxed.faulted
+
+
 def test_arm_command_ignores_the_effort_field():
     # Isaac's ROS2SubscribeJointState fills effort to the joint count even though trajectory_host
     # publishes none (run-89: eff=6 all-zero; run-90: eff=6 non-zero measured torques). Effort is

@@ -44,12 +44,18 @@ def tf_payload(parent_path, child_entries, stamp):
 
 
 class ArmCommandGate:
-    def __init__(self, robot, limits, apply, *, max_speed=.15, max_error=.15):
+    def __init__(self, robot, limits, apply, *, max_speed=.15, max_error=.15, freshness_s=ARM_HEARTBEAT_SIM_S):
         self.robot,self.limits,self.apply=robot,tuple(limits),apply
         self.indices=[robot.get_dof_index(name) for name in ARM_JOINTS]
         if len(self.limits)!=6:
             raise ValueError('six measured CAD joint limits required')
         self.max_speed,self.max_error=max_speed,max_error
+        # Arm-command sim-clock freshness + heartbeat bound. Real-rig default 0.5 s (ARM_HEARTBEAT_SIM_S).
+        # The SIM profile relaxes it (firstmate 288, render-pacing relaxation): during the preplace
+        # (sensing-held big swing + recording load the host-DDS /clock relay) the host sim clock lags the
+        # ISAAC /clock ~0.5 s, so a 0.5 s bound false-rejected a fresh arm command at now-stamp=0.5000
+        # (run-230). A frozen stream is still hard-caught by the 30 s wall backstop.
+        self.freshness_s=float(freshness_s)
         self.last_stamp=-1.
         self.last_receive=time.monotonic()
         self.started=False
@@ -102,7 +108,7 @@ class ArmCommandGate:
             # the stamp; position/velocity limits + tracking envelope are enforced below.
             if (len(names)!=6 or set(names)!=set(ARM_JOINTS) or len(positions)!=6
                     or len(velocities)!=6
-                    or not math.isfinite(stamp) or not -0.05 <= now-stamp <= .5):
+                    or not math.isfinite(stamp) or not -0.05 <= now-stamp <= self.freshness_s):
                 print(f'ARM_CMD_REJECT names={len(names)} setok={set(names)==set(ARM_JOINTS)} '
                       f'pos={len(positions)} vel={len(velocities)} eff={len(efforts)} '
                       f'stamp={stamp!r} now={now!r} now-stamp={now-stamp if math.isfinite(stamp) else float("nan"):.4f}',
@@ -141,7 +147,7 @@ class ArmCommandGate:
         # arm commands are ~1.7-3.5 s apart in WALL time but a small step apart in sim (a wall-time
         # 0.5 s heartbeat emergency-stopped the executed grasp, run-91). A generous WALL backstop
         # still hard-stops a genuinely frozen sim clock, where the sim bound can never advance to trip.
-        if self.started and (now-self.last_stamp>ARM_HEARTBEAT_SIM_S
+        if self.started and (now-self.last_stamp>self.freshness_s
                              or time.monotonic()-self.last_receive>ARM_HEARTBEAT_WALL_BACKSTOP_S):
             self.hold()
             raise RuntimeError('arm command heartbeat lost')
