@@ -260,3 +260,23 @@ def test_invalid_specs_fail_closed():
         CarryProfile(0, 1).validate()
     with pytest.raises(ValueError):
         Tolerances(tracking_hard_tol=0.5, tracking_tol=1.0).validate()  # hard must exceed tol
+
+
+# ---- carton-vs-arm fold clearance (CPU sphere math; Isaac-free) -------------------
+def test_min_sphere_clearance_signed_gap():
+    from twin.tools.carton_arm_fold_clearance import min_sphere_clearance
+    a_c = np.array([[0.0, 0.0, 0.0]]); a_r = np.array([0.1])
+    b_c = np.array([[0.5, 0.0, 0.0]]); b_r = np.array([0.1])
+    assert min_sphere_clearance(a_c, a_r, b_c, b_r) == pytest.approx(0.3)   # 0.5 - 0.1 - 0.1
+    b_c2 = np.array([[0.15, 0.0, 0.0]])
+    assert min_sphere_clearance(a_c, a_r, b_c2, b_r) == pytest.approx(-0.05)  # overlap
+
+
+def test_fold_configs_interpolate_lift_to_tuck():
+    from twin.tools.carton_arm_fold_clearance import fold_configs
+    lift = [1.4, -1.05, 0.9, -1.41, -1.57, -0.17]
+    cfgs = fold_configs(lift, [-2.3, 1.0, 0.9, 0.8, -1.2545], steps=4)
+    assert len(cfgs) == 5
+    assert cfgs[0][1] == pytest.approx(-1.41)     # wrist1 starts at the lift value
+    assert cfgs[-1][1] == pytest.approx(0.9)      # wrist1 ends at the tuck-shape value
+    assert cfgs[-1][2]['ur_shoulder_pan_joint'] == pytest.approx(1.4)  # joint0 held at lift pan

@@ -91,6 +91,29 @@ def sweep_fold(urdf_path, xrdf_path, lift_joints, tuck_shape, *, label, dims=(0.
     return fc
 
 
+def _cli(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(description='CPU carton-vs-arm clearance along the carry tuck fold.')
+    ap.add_argument('--urdf', required=True)
+    ap.add_argument('--xrdf', required=True)
+    ap.add_argument('--lift', required=True, help='lift pose: 6 arm joints (ur_ order), comma-separated')
+    ap.add_argument('--tuck-shape', action='append', default=[], metavar='LABEL=j1,..,j5',
+                    help='a tuck shape (joints 1-5) to sweep, e.g. old=-2.3,1.0,2.1066,0.8,-1.2545; repeatable')
+    ap.add_argument('--carton-dims', default='0.6,0.4,0.16')
+    ap.add_argument('--steps', type=int, default=20)
+    args = ap.parse_args(argv)
+    lift = [float(v) for v in args.lift.split(',')]
+    dims = [float(v) for v in args.carton_dims.split(',')]
+    folds = []
+    for item in args.tuck_shape:
+        label, _, vals = item.partition('=')
+        shape = [float(v) for v in vals.split(',')]
+        folds.append(sweep_fold(args.urdf, args.xrdf, lift, shape, label=label or 'fold',
+                                dims=dims, steps=args.steps))
+    print(report(folds))
+    return 0 if all(not f.collides for f in folds) else 1
+
+
 def report(folds):
     lines = ['carton-vs-arm clearance along the tuck fold (CPU sphere model; negative = collision)', '']
     for fc in folds:
@@ -110,3 +133,7 @@ def report(folds):
             cells.append('%+7.1fmm %-6s' % (gap * 1000, link.replace('ur_', '').replace('_link', '')))
         lines.append('%-9.2f %+8.3f  %s' % (frac, w1, '  '.join(cells)))
     return '\n'.join(lines)
+
+
+if __name__ == '__main__':
+    raise SystemExit(_cli())
