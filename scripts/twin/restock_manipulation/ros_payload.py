@@ -97,10 +97,16 @@ class RosPayloadSync:
         goal = AttachObject.Goal()
         goal.attach_object = held
         if held:
-            transform = self.tf.lookup_transform('ur_base_link','gripper_pad_tcp',Time())
+            try:
+                transform = self.tf.lookup_transform('ur_base_link','gripper_pad_tcp',Time())
+            except Exception as exc:
+                import os
+                if os.environ.get('PAYLOAD_SYNC_DIAG', '1') != '0':
+                    print('PAYLOAD_SYNC_DIAG gate=tf_lookup_raise exc=%r now=%.4f' % (exc, now), flush=True)
+                return False
             stamp = transform.header.stamp.sec+transform.header.stamp.nanosec*1e-9
             if not 0 <= now-stamp <= c.max_age:
-                return False
+                return _diag('tf_fresh now_minus_stamp=%.4f stamp=%.4f' % (now-stamp, stamp))
             xyz, quat = transform.transform.translation, transform.transform.rotation
             centre = (*c.source_pose[:2],c.source_pose[2]-profile.dimensions[2]/2,*c.source_pose[3:])
             relative = relative_pose(centre,(xyz.x,xyz.y,xyz.z,quat.x,quat.y,quat.z,quat.w))
@@ -131,7 +137,7 @@ class RosPayloadSync:
             world_remove.operation = CollisionObject.REMOVE
             request.scene.world.collision_objects = [world_remove]
         if not self._wait(self.scene.call_async(request)).success:
-            return False
+            return _diag('scene_apply_unsuccessful')
         pending = self.attach.send_goal_async(goal)
         try:
             accepted = self._wait(pending)
@@ -143,13 +149,15 @@ class RosPayloadSync:
             pending.add_done_callback(cancel_late)
             raise
         if not accepted.accepted:
-            return False
+            return _diag('attach_goal_rejected')
         try:
             result = self._wait(accepted.get_result_async())
         except TimeoutError:
             accepted.cancel_goal_async()
             raise
-        return result.status == 4
+        if result.status != 4:
+            return _diag('attach_result_status=%s' % result.status)
+        return True
 
     def close(self):
         self.executor.shutdown(timeout_sec=2.)
