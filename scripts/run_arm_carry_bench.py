@@ -601,6 +601,19 @@ def build_jobs(args, lift_joints, tuck_shape, pan_joint0, extra):
             goals = ([] if args.start_at_lift else [lift_move]) + bench.carry_goals(lift_joints, shape, pan_joint0, extra_goals=extra)
             label = 'pose_' + '_'.join(f'{x:+g}' for x in dv)
             jobs.append((label, goals, bench.TrialSpec(label, safe, carry)))
+    # Explicit gain SETS: each --gain-set is exactly ONE trial, so a stiffness can be PAIRED with its
+    # own (near-critical) damping instead of the cartesian product --sweep produces. Format
+    # "kp,kd,eff[,drive_type[,pj]]" (drive_type 'acceleration'|'force'; pj=1 -> per-joint UR10 efforts).
+    for gs in (args.gain_set or []):
+        parts = [p.strip() for p in gs.split(',')]
+        if len(parts) < 3:
+            raise ValueError(f'--gain-set needs at least kp,kd,eff: {gs!r}')
+        kp, kd, eff = float(parts[0]), float(parts[1]), float(parts[2])
+        dtype = parts[3] if len(parts) > 3 and parts[3] else 'acceleration'
+        pj = len(parts) > 4 and parts[4] in ('1', 'true', 'pj', 'yes')
+        label = f'set_{dtype[:3]}_kp{kp:g}_kd{kd:g}_eff{eff:g}' + ('_pj' if pj else '')
+        jobs.append((label, base_goals, bench.TrialSpec(
+            label, bench.DriveGains(kp, kd, eff, drive_type=dtype, per_joint_effort=pj), carry)))
     if args.sweep:
         carries = [carry]
         if args.carry_speeds:
@@ -827,6 +840,10 @@ def main():
     p.add_argument('--pose-kp', type=float, default=3.0e5, help='fixed drive stiffness for the pose sweep')
     p.add_argument('--pose-kd', type=float, default=5.0e3, help='fixed drive damping for the pose sweep')
     p.add_argument('--pose-eff', type=float, default=1000.0, help='fixed drive max effort for the pose sweep')
+    p.add_argument('--gain-set', action='append', default=None, metavar='kp,kd,eff[,type[,pj]]',
+                   help='one trial at an EXPLICIT gain set (repeatable); pairs a stiffness with its own '
+                        'damping (e.g. near-critical) instead of the --sweep cartesian product. '
+                        'type=acceleration|force, pj=1 for UR10 per-joint efforts (wrists ~56 Nm).')
     p.add_argument('--sweep', action='store_true', help='run the gain/carry grid below (secondary axis)')
     p.add_argument('--drive-types', nargs='+', choices=('acceleration', 'force'),
                    default=['acceleration'], help='drive-type axis (integration msg 006)')

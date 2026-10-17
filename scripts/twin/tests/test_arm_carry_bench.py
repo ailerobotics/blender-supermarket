@@ -169,6 +169,28 @@ def test_carry_profile_rejects_unknown_profile():
         CarryProfile(0.3, 1.0, profile='spline').validate()
 
 
+def test_gain_set_pairs_stiffness_with_its_own_damping():
+    # the runner's --gain-set turns each explicit "kp,kd,eff[,type[,pj]]" into ONE trial, so a
+    # stiffness is paired with its own (near-critical) damping instead of the --sweep cartesian product
+    import types
+    R = pytest.importorskip('run_arm_carry_bench')   # needs PYTHONPATH=scripts; CPU-safe imports only
+    a = types.SimpleNamespace(
+        replay=True, carry_speed=0.3, carry_accel=1.0, start_at_lift=True,
+        diagnose=False, expect='report', reproduce=False, pose_sweep=False,
+        sweep=False, carry_speeds=None, stiffnesses=[], dampings=[], max_efforts=[],
+        drive_types=['acceleration'], per_joint_effort=False,
+        gain_set=['3e5,8000,400', '1e4,200,400', '500,80,56,force,1'])
+    jobs = R.build_jobs(a, [1.26, -1.05, 0.894, -1.41, -1.57, -0.17],
+                        [-2.3, 1.0, 0.9, 0.8, -1.2545], -0.8605, None)
+    assert len(jobs) == 3
+    specs = {label: spec for label, _goals, spec in jobs}
+    paired = next(s for lbl, s in specs.items() if 'kp10000_kd200' in lbl)
+    assert paired.gains.stiffness == 1e4 and paired.gains.damping == 200    # the pairing held
+    forced = next(s for lbl, s in specs.items() if lbl.endswith('_pj'))
+    assert forced.gains.drive_type == 'force' and forced.gains.per_joint_effort
+    assert all(s.carry.profile == 'trapezoid' for s in specs.values())      # --replay propagated
+
+
 # ---- executor regimes ---------------------------------------------------------
 def test_perfect_tracking_settles():
     arm = ScriptedArm(START, GOAL, 'perfect')
