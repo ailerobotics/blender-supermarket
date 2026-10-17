@@ -173,6 +173,13 @@ class IsaacRangeSensor:
         # cart is a real obstacle, so its returns are masked as self only when coupled is True.
         self.coupled_self_paths=tuple(p.rstrip('/') for p in coupled_self_paths)
         self.coupled=False
+        # The cart is also NOT a navigation hazard while the PARKED robot is placing a carton onto it
+        # during collect: it is the work target the robot deliberately stands beside (run-217 tripped
+        # obstacle_stop because the reachable cart sits inside the base footprint disk). The caller sets
+        # this True only during the parked collect/place; it masks the SAME coupled_self_paths as self
+        # WITHOUT asserting `coupled` -- so the footprint stays the uncoupled base radius (no swept-train
+        # envelope) and no coupling is implied. Decoupled + not placing => the cart is a real obstacle.
+        self.workspace_self=False
         if any(not p.startswith('/') or p=='/' or not p or '//' in p or
                any(s in ('.','..') for s in p.split('/'))
                for p in self.self_paths+self.coupled_self_paths):
@@ -186,7 +193,8 @@ class IsaacRangeSensor:
         self.sensor_to_base=Scan(0,(),0,1,range_max,sensor_to_base=sensor_to_base).sensor_to_base
 
     def _active_self_paths(self):
-        return self.self_paths+(self.coupled_self_paths if self.coupled else ())
+        return self.self_paths+(self.coupled_self_paths
+                                if (self.coupled or self.workspace_self) else ())
 
     def _self_hit(self,hit):
         return any(path==root or path.startswith(root+'/')

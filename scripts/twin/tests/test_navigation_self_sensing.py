@@ -172,6 +172,13 @@ class SelfSensingTests(unittest.TestCase):
         scan_c=coupled.read(.1)
         self.assertEqual(scan_c.points(state.pose),())         # cart masked -> no phantom obstacle
         self.assertGreater(sum(scan_c.unknown),0)
+        # workspace_self masks the SAME cart paths while the parked robot places onto it in collect,
+        # WITHOUT asserting coupling (run-217 obstacle_stop fix). Decoupled + workspace => cart is self.
+        ws=make();ws.workspace_self=True
+        self.assertFalse(ws.coupled)                           # not coupled: footprint stays uncoupled
+        scan_w=ws.read(.1)
+        self.assertEqual(scan_w.points(state.pose),())         # cart masked as work target
+        self.assertGreater(sum(scan_w.unknown),0)
 
     def test_cart_identity_tracks_independent_articulation(self):
         state=TrainState(-2.971786,5.992829,-3.096399,-2.294942)

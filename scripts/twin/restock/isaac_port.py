@@ -322,6 +322,10 @@ class IsaacPort:
         # phantom obstacle behind the robot) while coupled, and a decoupled cart stays a real
         # obstacle. The sensor unions its coupled_self_paths into the self set when this is True.
         self.range_sensor.coupled=coupled
+        # The cart is the work target (not a hazard) while the PARKED robot places a carton onto it in
+        # collect: mask it as self so the reachable adjacent cart does not trip obstacle_stop (run-217).
+        # Only during the stationary collect action; every other action leaves it a real obstacle.
+        self.range_sensor.workspace_self=(self.current_action=='collect')
         scan=self.range_sensor.read(now)
         articulation=wrap(r.yaw-c.yaw)
         # Reference navigation consumes a localized Odometry + an obstacle Observation,
