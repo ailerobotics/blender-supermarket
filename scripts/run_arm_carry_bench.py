@@ -80,6 +80,10 @@ CART_PAN_JOINT0 = -0.8605
 # Measured side-grip offset of the carton CENTRE along tool-z from gripper_pad_tcp (handoff (a);
 # xrdf_selfcollision_check.py). 0.6 m carton, side grip ~= 0.20 m.
 CARTON_TOOL_Z_OFFSET = 0.20
+# Carton centre offset in the gripper_pad_tcp frame (the model world_obstacles.carton_spheres_world
+# uses: 0.20 m along tool-z for the 0.6 m side-grip). Confirmed against the integration lane's CPU
+# sphere model.
+CARTON_OFFSET_TCP = (0.0, 0.0, 0.20)
 # The run-248 / run-249 reference gains (the two failure signatures to reproduce).
 REF_STIFF = bench.DriveGains(1.0e6, 1.0e4, 4000.0)
 REF_SOFT = bench.DriveGains(1.0e5, 2.0e3, 400.0)
@@ -437,6 +441,23 @@ class IsaacCarryStage(bench.ArmStage):
             [round(float(gkd[int(i)]), 1) for i in self.arm_idx],
             [round(float(gme[int(i)]), 1) for i in self.arm_idx]), flush=True)
 
+    def _place_carton_at_offset(self):
+        """Teleport the carton RigidBody so its origin sits at pad + R_tcp @ CARTON_OFFSET_TCP with the
+        pad's orientation -- the faithful attached-carton pose (world_obstacles.carton_spheres_world)."""
+        pad = self._pad_world()
+        rot = pad.ExtractRotationMatrix()
+        origin = pad.ExtractTranslation()
+        off = np.asarray(CARTON_OFFSET_TCP, float)
+        R = np.array([[rot[0][0], rot[0][1], rot[0][2]],
+                      [rot[1][0], rot[1][1], rot[1][2]],
+                      [rot[2][0], rot[2][1], rot[2][2]]], float)
+        centre = np.array([origin[0], origin[1], origin[2]], float) + R @ off
+        q = pad.ExtractRotationQuat()
+        self.carton.set_world_pose(position=centre,
+                                   orientation=np.array([q.GetReal(), *[float(v) for v in q.GetImaginary()]], float))
+        self.carton.set_linear_velocity(np.zeros(3))
+        self.carton.set_angular_velocity(np.zeros(3))
+
     def _pad_carton_gap_mm(self):
         pad = self._pad_world().ExtractTranslation()
         cp, _ = self.carton.get_world_pose()
@@ -471,13 +492,15 @@ class IsaacCarryStage(bench.ArmStage):
         g._host_now = float('-inf'); g.started = False
         g._contact_hold = False; g._contact_hold_target = None
         g.apply(self.grasp_joints, np.zeros(6), g.indices)
-        # 5. weld the carton to the gripper body at the CURRENT (grasp) relative transform -- the
-        #    mission's own _fallback_weld path (skipped in --no-carton control)
-        gap = self._pad_carton_gap_mm()
+        # 5. place the carton at the measured side-grip offset in the gripper_pad_tcp frame
+        #    (centre = pad + R_tcp @ (0,0,0.20), the model world_obstacles.carton_spheres_world uses),
+        #    then weld it there -- robust to a slightly-off grasp pose (skipped in --no-carton control).
         if not self.no_carton:
+            self._place_carton_at_offset()
             self.contact._fallback_weld(self.carton_path)
         self._weld_rel0 = self._carton_in_pad()
-        print('ARMBENCH_WELD pad_carton_gap_mm=%.1f carton_in_pad=%s' % (gap, self._weld_rel0.tolist()), flush=True)
+        print('ARMBENCH_WELD carton_in_pad=%s (target offset_tcp=%s)'
+              % (self._weld_rel0.tolist(), list(CARTON_OFFSET_TCP)), flush=True)
         # 5. brake the base in the airborne-carry state (yaw-lock D6 over the wheel hold)
         self.mobile.hold()
         self.mobile.engage_brake()
@@ -602,7 +625,8 @@ def run(args):
                     else arm_cfg.get('grasp_joints', DEFAULT_GRASP))
     if len(lift_joints) != 6 or len(grasp_joints) != 6:
         raise ValueError('lift_joints and grasp_joints must each be six arm joints (ARM_JOINTS order)')
-    tuck_shape = arm_cfg.get('cart_tuck_shape', CART_TUCK_SHAPE)
+    tuck_shape = (args.cart_tuck_shape if args.cart_tuck_shape is not None
+                  else arm_cfg.get('cart_tuck_shape', CART_TUCK_SHAPE))
     pan_joint0 = arm_cfg.get('cart_pan_joint0', CART_PAN_JOINT0)
     extra = arm_cfg.get('extra_goals')   # {phase: 6-vector} for downstream place moves (optional)
     carton_dims = tuple(scenario.get('handling_unit', {}).get('dimensions', (0.6, 0.4, 0.16)))
@@ -801,6 +825,8 @@ def main():
     p.add_argument('--stiffnesses', type=float, nargs='+', default=[1.0e6, 5.0e5, 3.0e5, 1.0e5])
     p.add_argument('--dampings', type=float, nargs='+', default=[2.0e3, 5.0e3, 1.0e4])
     p.add_argument('--max-efforts', type=float, nargs='+', default=[400.0, 1000.0, 2000.0])
+    p.add_argument('--cart-tuck-shape', type=float, nargs=5, default=None,
+                   help='override the tuck shape joints 1-5 (e.g. the reshaped -2.3 1.0 0.9 0.8 -1.2545)')
     p.add_argument('--carry-speed', type=float, default=0.05, help='carry move peak joint speed (rad/s)')
     p.add_argument('--carry-accel', type=float, default=0.03, help='carry move peak joint accel (rad/s^2)')
     p.add_argument('--carry-speeds', type=float, nargs='+', default=None,
