@@ -76,6 +76,7 @@ def run_dry_run(args) -> int:
         "product_collider": args.product_collider, "min_clearance": args.min_clearance,
         "yaw_deg": args.yaw_deg, "save": args.save, "screenshot": cli.resolve_screenshot(args),
         "gpu": {"ok": gpu.ok, "message": gpu.message},
+        "arm_mpc": args.arm_mpc,
     }
     print(cli.render_plan(pland))
     return 0

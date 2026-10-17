@@ -1057,3 +1057,37 @@ CPU tests (no GPU; `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` dodges the box's ROS pytes
 PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
   python3 -m pytest scripts/twin/tests/test_fleet_dashboard.py -q
 ```
+## 18. Arm MPC follow-and-avoid bench — reactive cuRobo arm (CPU tests + guarded GPU)
+
+**EVALUATION-ONLY, simulation-only.** cuRobo V2 (Apache-2.0) Model-Predictive-Control
+reactive follow-and-avoid for the mission arm, benched against the representative store
+restock-aisle colliders + a moving-person proxy. MPC's collision avoidance is a SOFT
+optimiser cost, **NOT a certified safety function** — the single motion authority stays the
+merged human-safety gate (RUN/SLOW/STOP/BACKSTOP) and the measured joint-window guard, reused
+verbatim from the `plan-mpc-curobo-v1` prototype's `ros_bridge`. Opt-in everywhere
+(`--arm-mpc` on `compose_robot_in_store.py` only annotates the dry-run plan; the composed
+stage and the mission cuMotion arm path are byte-identical when it is absent). Design +
+numbers: `data/sim-arm-mpc-avoid-v1/report.md`; `docs/arm_mpc_avoid.md`.
+
+CPU tests (no GPU, no ROS — the bench is ROS-free):
+```
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_arm_mpc_bench.py -q
+```
+
+Guarded GPU (reuses the existing `fm-plan-mpc-curobo-v1` container — do NOT rebuild the arm
+stack; no Isaac boot, cuRobo MPC is pure cuRobo + torch, ~0.22 GB VRAM). The runner takes
+`/tmp/aile-gpu.lock` NON-BLOCKING (exits 3 if the integration lane holds it — re-run when
+free), hard-refuses beside live Blender, checks VRAM headroom (never `--force`), and caps the
+wall clock at ≤ 15 min:
+```
+PYTHONPATH=scripts python3 scripts/run_arm_mpc_bench.py \
+    --scenario all --steps 300 \
+    --out <scratch>/arm_mpc_bench/metrics.json
+#   mounts: this repo (ro) + ~/ur10/mpc_curobo (ro, the gate) + ~/workspaces/shelfbot_newgripper
+#   (ro, the mission arm's shelfbot_curobo.yml) + the out dir (rw). ROS domain 107 if ever wired.
+```
+Scenarios: `follow` (sweep, shelves present), `person` (proxy walks the aisle), `blocked`
+(proxy parked on the path), `unreachable` (target across the aisle). Per scenario it records
+control rate, warm solve ms, est. process VRAM, steady tracking error, min obstacle + person
+clearance, joint-window violations, and — against the LIVE MPC stream — the gate behaviour
+(RUN forwards, STOP holds with zero travel, resume to the freshest command).

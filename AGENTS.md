@@ -209,6 +209,23 @@ repo's `scenes/`, `export/` or `renders/`.
   the unmapped cart cage, gain-independent) and to sweep carry POSES for a cage/rack-clearing
   shape. CPU-tested under `scripts/twin/tests/test_arm_carry_bench.py` (no Isaac/ROS/GPU).
   Write-up: `data/sim-restock-armbench-v1/report.md`.
+- **Arm MPC follow-and-avoid bench** (`scripts/twin/tools/arm_mpc_bench.py` pure core +
+  `arm_mpc_run.py` container entry + guarded runner `scripts/run_arm_mpc_bench.py`):
+  **EVALUATION-ONLY, simulation-only** — cuRobo V2 (Apache-2.0) reactive MPC for the mission
+  arm, benched against the representative store restock-aisle colliders + a moving-person proxy
+  (solve rate, clearance, gate behaviour), mirroring the armbench pattern (seconds per trial).
+  MPC avoidance is a **SOFT cost, NOT a safety function**; the single motion authority stays the
+  merged human-safety gate + measured joint-window guard, **reused verbatim** from the fleet
+  `plan-mpc-curobo-v1` prototype's `ros_bridge` (`~/ur10/mpc_curobo`, mounted `/mpc`; override
+  `MPC_CUROBO_DIR`) and re-keyed to the mission `ur_` joints. Reuses the mission arm's own
+  `shelfbot_curobo.yml` and the existing `fm-plan-mpc-curobo-v1` container (NO Isaac boot, NO
+  arm-stack rebuild; ~0.22 GB VRAM). ROS-free; lane `ROS_DOMAIN_ID=107` if ever wired. Opt-in
+  everywhere: `compose_robot_in_store.py --arm-mpc` only annotates the dry-run plan — the
+  composed stage and the mission cuMotion arm path are byte-identical when absent (asserted in
+  `test_cli.py`). The guarded runner takes `/tmp/aile-gpu.lock` NON-BLOCKING (exits 3 when the
+  integration lane holds it), hard-refuses beside live Blender, VRAM-guards, caps ≤15 min, never
+  `--force`. CPU tests: `scripts/twin/tests/test_arm_mpc_bench.py`. Docs: `docs/arm_mpc_avoid.md`,
+  RUNBOOK §18; write-up `data/sim-arm-mpc-avoid-v1/report.md`.
 - **Bounded native restock diagnostics** (guarded GPU, no full mission) are driven by
   `scripts/run_restock_render_smoke.py` with one of `--assembly-only` (stationary
   physics hold → `restock/assembly_check.py`), `--coupling-only` (dock+latch+hold →
