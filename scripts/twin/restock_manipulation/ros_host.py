@@ -73,7 +73,9 @@ def main():
     node = rclpy.create_node('restock_manipulation',namespace='/restock_sim',
                             parameter_overrides=[Parameter('use_sim_time',value=True)])
     stop = node.create_publisher(Bool,'/restock_sim/manipulation/stop',10)
-    payload = RosPayloadSync()
+    # Payload-ack WALL timeout: real-rig 1 s; sim profile widens it (render pacing stalls the host
+    # between spins at grasp time) via config, >= 3x the measured worst-case service round-trip.
+    payload = RosPayloadSync(ack_wall_s=float(config.get('payload_ack_wall_s', 1.0)))
     motion = RosMotionPort(node,joint_limits=tool.arm_limits,payload_sync=payload,
                            emergency_stop=lambda:stop.publish(Bool(data=True)),
                            velocity_scale=planner_velocity_scale(

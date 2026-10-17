@@ -17,6 +17,11 @@ _MAX_RESTARTS = 2
 # guard still catches a genuinely dead host.
 _ACK_LEAD = -1.0
 _ACK_LAG = 1.0
+# WALL-clock guard: fault if no station ack has arrived within this many wall seconds (genuinely dead
+# host). Real-rig default 10 s. Under the sim's render-paced slow place swing a single accepted-command
+# gap legitimately exceeds 10 s (run-231 tripped it mid-place), so the sim profile raises it with
+# margin via StationClient(heartbeat_s=...); the 30 s /sensors wall backstop remains the one hard catch.
+_HEARTBEAT_UNAVAILABLE_S = 10.0
 
 
 class JsonChannel:
@@ -77,9 +82,12 @@ class StationClient:
     # mission's Packet.simulation_time is zeroed at the first mission action -- two epochs. The
     # stage_clock seam reads the same stage-time source native_transport publishes on /clock, at the
     # moment of publish, so both sides share one clock domain and the ack's bound stays untouched.
-    def __init__(self, channel, *, wall_clock=time.monotonic, stage_clock=None, publish_lag=0.):
+    def __init__(self, channel, *, wall_clock=time.monotonic, stage_clock=None, publish_lag=0.,
+                 heartbeat_s=_HEARTBEAT_UNAVAILABLE_S):
         self.channel,self.wall_clock=channel,wall_clock
         self.stage_clock=stage_clock
+        # Wall heartbeat-unavailable bound (real-rig 10 s; sim profile raises it for the slow place).
+        self.heartbeat_s=float(heartbeat_s)
         # Stamp commands a touch in the PAST (one /clock value the ack is sure to already hold):
         # /clock and station/command are separate topics, and the small fast command can reach the
         # ack before the matching /clock update, leaving the ack's now() ~one step BEHIND the stamp
@@ -160,7 +168,7 @@ class StationClient:
             self.sequence=0
             self._prepared=False
             self.latest=None
-        if self.wall_clock()-(self.last_reply or self.started)>10.:
+        if self.wall_clock()-(self.last_reply or self.started)>self.heartbeat_s:
             raise RuntimeError('station supervisor heartbeat unavailable')
         wall=self.wall_clock()
         if self.last_send<0 or wall-self.last_wall_send>=_HEARTBEAT_WALL_S:

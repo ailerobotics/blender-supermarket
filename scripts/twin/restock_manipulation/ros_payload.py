@@ -31,12 +31,13 @@ def relative_pose(base_object, base_tcp):
 
 
 class RosPayloadSync:
-    def __init__(self):
+    def __init__(self, ack_wall_s=1.0):
         import rclpy
         from rclpy.parameter import Parameter
         from rclpy.executors import SingleThreadedExecutor
         from tf2_ros import Buffer, TransformListener
         from moveit_msgs.srv import ApplyPlanningScene
+        self.ack_wall_s = float(ack_wall_s)
         self.node = rclpy.create_node('restock_payload',namespace='/restock_sim',
                        parameter_overrides=[Parameter('use_sim_time',value=True)])
         self.tf = Buffer()
@@ -49,8 +50,12 @@ class RosPayloadSync:
         self.thread = threading.Thread(target=self.executor.spin,daemon=True)
         self.thread.start()
 
-    @staticmethod
-    def _wait(future, timeout=1.):
+    def _wait(self, future, timeout=None):
+        # WALL timeout on a host ROS service/action future. Real-rig default 1 s (fast move_group);
+        # under the sim's render-paced stepping the host is busy rendering between spins, so the sim
+        # profile widens it (ack_wall_s, >= 3x worst case) to avoid a false grasp-time timeout.
+        if timeout is None:
+            timeout = self.ack_wall_s
         event = threading.Event()
         future.add_done_callback(lambda _:event.set())
         if not event.wait(timeout):

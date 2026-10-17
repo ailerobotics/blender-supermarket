@@ -57,6 +57,15 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(c.cart_placement['support_z_world'], 0.225)
         self.assertEqual(c.cart_placement['free_dimensions'], (0.65, 0.45, 0.30))
 
+    def test_station_heartbeat_absent_defaults_real_rig(self):
+        # Real-rig default (10 s) when the sim profile does not relax it (firstmate 289 sweep).
+        self.assertEqual(parse_manipulation_config(manip_cfg(), JOB_SKU).station_heartbeat_s, 10.0)
+
+    def test_station_heartbeat_sim_profile_parsed(self):
+        cfg = manip_cfg()
+        cfg['station_heartbeat_s'] = 30.0
+        self.assertEqual(parse_manipulation_config(cfg, JOB_SKU).station_heartbeat_s, 30.0)
+
     def test_arm_camera_reaim_absent_defaults_empty(self):
         self.assertEqual(parse_manipulation_config(manip_cfg(), JOB_SKU).arm_camera_reaim, {})
 

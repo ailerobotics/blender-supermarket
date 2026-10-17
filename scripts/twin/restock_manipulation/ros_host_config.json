@@ -31,5 +31,6 @@
   "contact_overpress_cap_m": 0.02,
   "arm_max_speed": 0.3,
   "startup_grace_seconds": 60.0,
-  "sim_cart_place_policy": true
+  "sim_cart_place_policy": true,
+  "payload_ack_wall_s": 3.0
 }

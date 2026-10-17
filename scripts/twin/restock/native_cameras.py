@@ -67,8 +67,45 @@ class RenderedCamera:
             raise ValueError('registered zero-distortion pinhole camera required')
         return np.array([[fx,0,cx],[0,fy,cy],[0,0,1.]],float)
 
+    def set_render_products_enabled(self,enabled):
+        """Optional hook IsaacCartonSensors.set_render_suspended looks up to DISABLE this camera's
+        decode render while a controller execution phase has sensing suspended (the fixed station
+        decode cameras are RenderedCamera, so they get it; the arm masked-depth camera is a raw
+        Camera without it and keeps rendering for the ESDF). Delegates to the best-effort helper on
+        the wrapped Isaac camera; a pure optimisation that never raises into the mission tick."""
+        return set_camera_render_products_enabled(self.camera,enabled)
+
     def __getattr__(self,name):
         return getattr(self.camera,name)
+
+
+def set_camera_render_products_enabled(camera, enabled):
+    """Best-effort enable/disable an Isaac Camera's RTX render product(s).
+
+    ``world.step(render=True)`` renders EVERY active render product. While a controller execution
+    phase has sensing suspended, the sensing camera's decode frame is unused but its whole-store
+    render is the dominant wall cost -- so integration disables ONLY this product's hydra updates
+    (the separate arm-depth / masked-depth / chase-recorder cameras keep their own products and
+    still render, so the host nvblox ESDF and the walkthrough are unaffected; run-139 died when ALL
+    rendering was skipped), re-enabling it before the next observe/verify.
+
+    ``camera._render_product.hydra_texture.set_updates_enabled(bool)`` is the canonical Isaac pause;
+    this is a pure optimisation, so any failure is LOGGED and the product left enabled (the
+    pre-existing always-render behaviour) -- never raised into the mission tick. Returns True iff the
+    toggle was actually applied."""
+    enabled = bool(enabled)
+    try:
+        products = getattr(camera, '_render_product', None)
+        for rp in (products if isinstance(products, (list, tuple)) else [products]):
+            tex = getattr(rp, 'hydra_texture', None) if rp is not None else None
+            setter = getattr(tex, 'set_updates_enabled', None) if tex is not None else None
+            if setter is None:
+                raise AttributeError('render product has no hydra_texture.set_updates_enabled')
+            setter(enabled)
+        return True
+    except Exception as exc:                                      # pure optimisation; never crash a tick
+        print('RENDER_PRODUCT_TOGGLE skipped enabled=%s: %r' % (enabled, exc), flush=True)
+        return False
 
 
 def initialize_camera(path,k,*,name,frequency=-1,session_id=None,steady_domain=None,resolution=None):
