@@ -316,7 +316,13 @@ class NativePanelContact:
         if not self._sim_attach_fallback:
             return
         self._fb_n = getattr(self, '_fb_n', 0) + 1
-        if not self.enabled:
+        # Gate on the PLUGIN's shared status, not this instance's self.enabled: the gripper command is
+        # applied on a DIFFERENT NativePanelContact instance than the one IsaacPort ticks here (run-207:
+        # the tick'd assembly.contact saw self.enabled False while the plugin was commanded closed on the
+        # manip-runtime's instance). Both wrap the same gripper path, so get_gripper_status() is the true
+        # shared suction state: != Open means suction is on.
+        suction_on = self.api.get_gripper_status(self.path) != self.open_status
+        if not suction_on:
             if self._fb_n % 120 == 1:
                 print('SIM_ATTACH_DIAG skip=suction_off', flush=True)
             self._release_fallback()

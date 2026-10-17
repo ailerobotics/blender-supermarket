@@ -385,9 +385,13 @@ def test_sim_attach_fallback_gating_default_off_and_contact_gated():
     release on suction off. The weld itself needs USD; here we stub it to test the gating on CPU."""
     from scripts.twin.restock_manipulation.cad_tool import (NativePanelContact, SIM_ATTACH_CONTACT_MM,
                                                             SIM_ATTACH_FLUSH_DEG)
-    def bridge(*, enabled, fallback, gripped=(), status='open', probe=None):
+    def bridge(*, enabled, fallback, gripped=(), status=None, probe=None):
         a = NativePanelContact.__new__(NativePanelContact)
         a.path, a.closed_status, a.open_status = '/Grip', 'closed', 'open'
+        # The fallback reads suction from the shared plugin STATUS (!= Open), not self.enabled; default
+        # the status from the suction intent unless a case sets it explicitly.
+        if status is None:
+            status = 'closed' if enabled else 'open'
         a.enabled, a._sim_attach_fallback = enabled, fallback
         a._fallback_body = a._fallback_joint = None
         a.last_probe = probe
