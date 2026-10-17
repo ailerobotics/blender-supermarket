@@ -248,6 +248,15 @@ class IsaacPort:
             elif self._attach_freezing:
                 self.command_gate.end_contact_hold()          # contact lost before settle -> resume
                 self._attach_freezing = False
+        # SIM PARKING BRAKE (firstmate run-210): while the arm works (a stationary sensing action), lock
+        # the already-parked chassis to the world so the welded-carton reaction torque cannot pivot it
+        # past the 25 mrad gate (the wheel-hold is yaw-saturated). command() releases it before any base
+        # drive; release here too the moment the mission leaves the arm phase (couple/tow/park). Engaging
+        # is a no-op once braked; the base is parked when a sensing action begins (nav parked it first).
+        if self.current_action in SENSING_ACTIONS:
+            self.mobile.engage_brake()
+        else:
+            self.mobile.release_brake()
         # Mission-relative acquisition clock on the nominal fixed timestep. Deriving it
         # from world.current_time instead drifts: Isaac's physics dt differs from the
         # mission dt by ~1e-9 per step (both pass the isclose guard above), which left
@@ -307,6 +316,14 @@ class IsaacPort:
             self._last_bdisp_log=now
             print(f'BASE_DISP base_dxy={bdxy*1e3:.1f}mm base_dyaw={bdyaw*1e3:.2f}mrad '
                   f'cart_dxy={cdxy*1e3:.1f}mm cart_dyaw={cdyaw*1e3:.2f}mrad now={now:.2f}',flush=True)
+        # Per-tick base-yaw trace through the arm phase (firstmate run-210 option-c evidence): shows
+        # whether a weld disturbance is a step or a transient, and proves the brake holds. Bounded to the
+        # stationary sensing action; throttled lightly so it does not flood.
+        if (windowed and self.current_action in SENSING_ACTIONS
+                and now-getattr(self,'_last_byaw_log',-1.)>=0.1):
+            self._last_byaw_log=now
+            print(f'BASE_YAW_TICK base_dyaw={bdyaw*1e3:.2f}mrad base_dxy={bdxy*1e3:.1f}mm '
+                  f'braked={getattr(self.mobile,"_braked",None)} now={now:.2f}',flush=True)
         if self.after_step is not None:
             self.after_step(now,parked)
         ready=self.transport.contains(positions) and not self.contact.read()

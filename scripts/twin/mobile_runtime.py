@@ -51,6 +51,7 @@ class MobileController:
         # velocity brake is counterproductive -- data/surface-gripper-latch-v1 / Follow-up 4.)
         self.wheel_angle_reader = wheel_angle_reader
         self._held = False
+        self._braked = False
 
     DRIVE_DAMPING = 100.0
     DRIVE_MAX_FORCE = 80.0
@@ -94,13 +95,45 @@ class MobileController:
                 drive.GetTargetVelocityAttr().Set(0.0)
             self._held = False
 
+    BRAKE_PATH = '/MobileParkingBrake'
+
+    def engage_brake(self):
+        """SIM PARKING BRAKE (firstmate run-210): lock the chassis to the world with a FixedJoint at its
+        CURRENT pose (zero initial error) while the arm works -- the sim equivalent of the brakes a real
+        AMR engages before manipulating. The wheel position-hold (hold()) is stiffness-saturated on yaw
+        (runs 164-166), so a 0.45 kg carton welded to the arm still pivots the base past the 25 mrad gate
+        (run-208/209); the rigid brake resists that reaction torque. Gated to the stationary arm phase and
+        released (release_brake) before any base drive. SIM-only: no teleport; the real-rig base brakes
+        physically and never runs this native authoring."""
+        from pxr import UsdPhysics, UsdGeom, Gf
+        if self._braked:
+            return
+        world = UsdGeom.XformCache().GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.robot_body))
+        t, q = world.ExtractTranslation(), world.ExtractRotationQuat()
+        joint = UsdPhysics.FixedJoint.Define(self.stage, self.BRAKE_PATH)
+        joint.CreateBody1Rel().SetTargets([self.robot_body])      # body0 empty == world anchor
+        joint.CreateLocalPos0Attr(Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])))
+        joint.CreateLocalRot0Attr(Gf.Quatf(float(q.GetReal()), Gf.Vec3f(*[float(v) for v in q.GetImaginary()])))
+        joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
+        joint.CreateLocalRot1Attr(Gf.Quatf(1.0))
+        self._braked = True
+        print('MOBILE_BRAKE engaged at chassis pose', flush=True)
+
+    def release_brake(self):
+        """Release the sim parking brake so the base can drive (couple/tow/park)."""
+        if self._braked:
+            self.stage.RemovePrim(self.BRAKE_PATH)
+            self._braked = False
+            print('MOBILE_BRAKE released', flush=True)
+
     def park(self):
         for drive in self.drives:
             drive.GetTargetVelocityAttr().Set(0.0)
         return (0.0, 0.0)
 
     def command(self, v, omega, observation, *, transport_ready=False):
-        self.release()  # resuming driving: drop the stationary brake before commanding wheels
+        self.release_brake()  # resuming driving: drop the sim parking brake before any base motion
+        self.release()  # resuming driving: drop the stationary wheel-hold before commanding wheels
         # Stale/missing kinematics must never leave a previous nonzero drive latched.
         if observation is None or not math.isfinite(observation.age) or not 0 <= observation.age <= 0.1:
             return self.park()

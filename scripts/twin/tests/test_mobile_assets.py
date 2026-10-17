@@ -162,6 +162,40 @@ def test_base_hold_locks_wheels_and_releases(stage):
     assert d0.GetStiffnessAttr().Get() == pytest.approx(0.0)
 
 
+def test_sim_parking_brake_locks_chassis_and_releases(stage):
+    # The sim parking brake (firstmate run-210): engage_brake welds the chassis to the world with a
+    # FixedJoint at its CURRENT pose so a welded-carton reaction torque cannot pivot the yaw-saturated
+    # base; released cleanly, and command() (resuming driving) auto-releases it.
+    from pxr import UsdGeom, UsdPhysics
+    from twin.mobile import DockObservation, Pose2
+    from twin.mobile_runtime import MobileController
+    author_cart(stage)
+    robot = UsdGeom.Xform.Define(stage, '/Robot/base_link').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(robot)
+    UsdGeom.Xformable(robot).AddTranslateOp().Set((-5.73, 16.0, 0.24))
+    wheels = ['/Robot/l', '/Robot/r']
+    for p in wheels:
+        UsdPhysics.RevoluteJoint.Define(stage, p)
+    c = MobileController(stage, str(robot.GetPath()), '/Rollwagen/chassis', wheels,
+                         wheel_angle_reader=lambda: [0.0, 0.0])
+    assert not c._braked and not stage.GetPrimAtPath(c.BRAKE_PATH)
+    c.engage_brake()
+    brake = UsdPhysics.FixedJoint(stage.GetPrimAtPath(c.BRAKE_PATH))
+    assert c._braked and brake
+    # body1 is the chassis; body0 empty == world; anchored at the chassis's current pose.
+    assert [str(t) for t in brake.GetBody1Rel().GetTargets()] == [str(robot.GetPath())]
+    assert tuple(brake.GetLocalPos0Attr().Get()) == pytest.approx((-5.73, 16.0, 0.24))
+    c.engage_brake()  # idempotent
+    assert stage.GetPrimAtPath(c.BRAKE_PATH)
+    c.release_brake()
+    assert not c._braked and not stage.GetPrimAtPath(c.BRAKE_PATH)
+    # command() (resuming driving) releases the brake before any wheel command.
+    c.engage_brake(); assert c._braked
+    c.command(.16, 0, DockObservation(Pose2(0, 0, 0), Pose2(-1.27, 0, 0), .28, .28, 0, 0, 0, 0),
+              transport_ready=True)
+    assert not c._braked and not stage.GetPrimAtPath(c.BRAKE_PATH)
+
+
 def test_transport_measurement_and_missing_mesh_fail_closed(source, tmp_path):
     from twin.mobile_assets import measure_transport
     out = tmp_path/'mobile.urdf'
