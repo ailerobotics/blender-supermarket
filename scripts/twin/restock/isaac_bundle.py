@@ -71,9 +71,9 @@ def _finite_pose(pose):
 # still lands inside the controller's freshness window (max_age 0.5 s sim at the nominal
 # 1/60 s step -> < 30 ticks); walkthrough has no freshness constraint but keeps a finite
 # stride so the recorder still captures enough distinct frames to encode a (low-fps) clip.
-_DEV_ECONOMY_RECORD = 20        # ~3 fps walkthrough at 60 Hz physics (vs the default 2)
-_DEV_ECONOMY_SENSING = 8        # 8/60 = 0.13 s sim between sensing renders << 0.5 s freshness
-_DEV_ECONOMY_SENSING_CAP = 20   # never stride past the freshness window (margin under 30)
+_DEV_ECONOMY_RECORD = 30        # 2 fps walkthrough at 60 Hz physics (the configured base is ~6)
+_DEV_ECONOMY_SENSING = 15       # 15/60 = 0.25 s sim between sensing renders < 0.5 s freshness
+_DEV_ECONOMY_SENSING_CAP = 20   # never stride past the freshness window (0.33 s, margin under 30)
 
 
 def _truthy(value):
@@ -115,7 +115,9 @@ def resolve_render_strides(config, env):
                 dev_sensing = num
 
     record = max(base_record, dev_record)
-    sensing = min(max(base_sensing, dev_sensing), _DEV_ECONOMY_SENSING_CAP)
+    # The freshness cap bounds only the knob's own target, never the configured base: the knob
+    # widens toward the cap but never narrows a run that already renders coarser than it.
+    sensing = max(base_sensing, min(dev_sensing, _DEV_ECONOMY_SENSING_CAP))
     note = (f'DEV_RENDER_ECONOMY record_stride={record} sensing_stride={sensing} '
             f'(base record={base_record} sensing={base_sensing}; '
             f'SUPERMARKET_DEV_RENDER_ECONOMY={spec!r})')
