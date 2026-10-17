@@ -18,6 +18,47 @@ from twin.restock.mission import Mission
 from twin.restock.scenario import validate
 
 
+def run_warm_session(run_once, *, warm_attempts, warm_reset, write_attempts=None):
+    """Run ``run_once`` up to ``warm_attempts`` times in one live session; return (mission, summary).
+
+    Pure control flow (no Isaac): ``run_once()`` returns ``(mission, summary)`` for one attempt and
+    is expected to have persisted that attempt's mission.json already. After a FAILED attempt with
+    budget remaining, the scene is re-seated for the next attempt via ``warm_reset(attempt, now)``
+    (a callable or None) which MUST re-validate the commissioned baseline (lifetime + session
+    binding) and raise to refuse rather than bypass it. ``warm_attempts <= 1`` is exactly one call
+    to ``run_once`` (byte-identical to a single run). On a stop, the reason is recorded on the final
+    summary (``warm_note`` when no provider is wired, ``warm_stop`` when the provider refused).
+
+    ``write_attempts`` (optional) is called with the per-attempt record list when more than one
+    attempt was configured, so the launcher can persist warm-attempts.json.
+    """
+    warm_attempts = max(1, int(warm_attempts or 1))
+    attempts = []
+    mission = summary = None
+    for attempt in range(1, warm_attempts + 1):
+        mission, summary = run_once()
+        attempts.append({'attempt': attempt, 'state': summary['state'],
+                         'reason': summary.get('reason')})
+        if summary['state'] == 'complete' or attempt >= warm_attempts:
+            break
+        if warm_reset is None:
+            summary['warm_note'] = ('--warm-attempts > 1 but no config.warm_reset provider; '
+                                    'ran a single attempt (no in-session re-seat available)')
+            break
+        try:
+            # Re-seat to the commissioned initial state + re-validate the baseline; the provider
+            # raises (guard refused / baseline expired / session unbound) to stop -- never bypassed.
+            warm_reset(attempt=attempt, now=attempt)
+        except Exception as exc:
+            summary['warm_stop'] = f'warm re-run refused (reset/guard): {exc}'
+            break
+    if warm_attempts > 1:
+        summary['warm_attempts'] = attempts
+        if write_attempts is not None:
+            write_attempts(attempts)
+    return mission, summary
+
+
 def _apply_render_preset(config, name):
     """Opt into a sensing render preset for this run -- the SAME ``--render-preset`` that
     commissioning takes. Sets the NON-decode render-product scale (mapper/nav/arm). The QR-decode
@@ -213,36 +254,58 @@ def run(args, manifest, scenario):
                         json.dumps(dict(summary, events=db.events(scenario['job']['job_id'])),
                                    indent=2, allow_nan=False) + '\n')
                     return 0 if summary['state'] == 'complete' else 1
-                mission = Mission(db, Job(**scenario['job']), bundle.adapter,
-                                  stages=config.get('stages'), start_at=config.get('start_at'))
-                mission.start()
-                for _ in range(60*20*60):  # bounded simulation time; shell also bounds wall time
-                    if mission.terminal:
-                        break
-                    if not app.is_running():
-                        raise RuntimeError('simulation app stopped')
-                    mission.tick(1/60)
-                if not mission.terminal:
-                    mission.fail('simulation step budget exceeded')
-                summary = {'state': mission.state, 'reason': mission.reason,
-                           'physics_verified': False,
-                           'note': 'Mission success alone does not verify video, contacts or autonomy.'}
-                # Flag a start-phase shortcut run so mission.json cannot be read as a full,
-                # grasp-performed cycle: the skipped prefix was synthesized, not actuated.
-                if mission.shortcut is not None:
-                    summary['shortcut'] = mission.shortcut
-                    summary['note'] += (' START-PHASE SHORTCUT: stages '
-                                        + ', '.join(mission.shortcut['skipped'])
-                                        + ' were synthesized (robot pose, braked base, carton '
-                                          'attach), not performed; see events *_shortcut.')
-                # Persist the per-stage summary now, before the finally runs app.close():
-                # Isaac's SimulationApp.close() can terminate the process hard and skip the
-                # outer finally (which re-writes mission.json with events as a fallback).
-                try:
-                    early = dict(summary, events=db.events(scenario['job']['job_id']))
-                    (args.output/'mission.json').write_text(json.dumps(early, indent=2, allow_nan=False)+'\n')
-                except Exception:
-                    pass
+                def run_once():
+                    """One full mission attempt against the live bundle; returns (mission, summary)
+                    and persists mission.json. Unchanged from the single-run behaviour -- the warm
+                    loop below runs it once by default (--warm-attempts 1), composing cleanly with
+                    the downstream --start-at shortcut (which selects WHERE a run begins; warm
+                    selects HOW MANY runs per boot)."""
+                    m = Mission(db, Job(**scenario['job']), bundle.adapter,
+                                stages=config.get('stages'), start_at=config.get('start_at'))
+                    m.start()
+                    for _ in range(60*20*60):  # bounded simulation time; shell also bounds wall time
+                        if m.terminal:
+                            break
+                        if not app.is_running():
+                            raise RuntimeError('simulation app stopped')
+                        m.tick(1/60)
+                    if not m.terminal:
+                        m.fail('simulation step budget exceeded')
+                    s = {'state': m.state, 'reason': m.reason, 'physics_verified': False,
+                         'note': 'Mission success alone does not verify video, contacts or autonomy.'}
+                    # Flag a start-phase shortcut run so mission.json cannot be read as a full,
+                    # grasp-performed cycle: the skipped prefix was synthesized, not actuated.
+                    if m.shortcut is not None:
+                        s['shortcut'] = m.shortcut
+                        s['note'] += (' START-PHASE SHORTCUT: stages '
+                                      + ', '.join(m.shortcut['skipped'])
+                                      + ' were synthesized (robot pose, braked base, carton '
+                                        'attach), not performed; see events *_shortcut.')
+                    # Persist the per-stage summary now, before the finally runs app.close():
+                    # Isaac's SimulationApp.close() can terminate the process hard and skip the
+                    # outer finally (which re-writes mission.json with events as a fallback).
+                    try:
+                        early = dict(s, events=db.events(scenario['job']['job_id']))
+                        (args.output/'mission.json').write_text(json.dumps(early, indent=2, allow_nan=False)+'\n')
+                    except Exception:
+                        pass
+                    return m, s
+
+                # Warm-session retry: re-run the mission inside the SAME live Isaac session instead
+                # of re-paying the ~30 s boot + separate ~43 s commissioning per attempt. Default
+                # --warm-attempts 1 == today's single run (byte-identical). The in-session re-seat +
+                # baseline re-validation is delegated to config['warm_reset'] (bundle.warm_reset), the
+                # same module:function contract as the lane factories; it raises to refuse, never
+                # bypassing the lifetime/session guard. Absent provider => a single attempt.
+                def _write_attempts(records):
+                    try:
+                        (args.output/'warm-attempts.json').write_text(
+                            json.dumps(records, indent=2, allow_nan=False) + '\n')
+                    except Exception:
+                        pass
+                mission, summary = run_warm_session(
+                    run_once, warm_attempts=getattr(args, 'warm_attempts', 1),
+                    warm_reset=getattr(bundle, 'warm_reset', None), write_attempts=_write_attempts)
             except Exception as exc:
                 if mission is not None and not mission.terminal:
                     mission.fail(str(exc))
@@ -314,6 +377,11 @@ def main():
                              'collect source + sensing at 0.6 scale (~2.8x fewer pixels) to speed '
                              'iteration; use the SAME preset for commissioning so the baseline matches.')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--warm-attempts', type=int, default=1,
+                        help='dev iteration: re-run the mission up to N times inside the SAME live '
+                             'Isaac session (no re-boot / re-commission per attempt), re-seating the '
+                             'scene between failed attempts via config.warm_reset and re-validating the '
+                             'commissioned baseline. 1 (default) = a single run, byte-identical.')
     parser.add_argument('--heavy-threshold-mb', type=int, choices=(1500,2500), default=1500)
     parser.add_argument('--host-stack', action='store_true',
                         help='co-launch the MoveIt/cuMotion planner stack + nvblox mapper (domain 88) '
