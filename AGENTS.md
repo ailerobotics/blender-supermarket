@@ -126,6 +126,24 @@ repo's `scenes/`, `export/` or `renders/`.
   CPU evidence: `navigation/dynamic_scenario.py`, `scripts/run_dynobs_evidence.py`
   (RUNBOOK §12); docs in [restock_navigation.md](docs/restock_navigation.md)
   "Moving obstacles".
+- **Simulated people + human safety** (`scripts/twin/humans/`, opt-in, default
+  OFF): an absent `humans` runtime-config block imports nothing and leaves the
+  mission byte-identical. Three independent pieces — scripted shopper/staff actors
+  authored into the Isaac stage (`isaac_people`/`people`/`paths`, `teleport` backend
+  by default, `anim_people` when the extension is present); the fleet human-safety
+  decision core vendored **byte-for-byte** from `ur10-setup/cams/human_safety`
+  (`perception/`, parity-tested against that checkout), fed either by the real CUDA
+  detector on the mission camera topics (`params/human_safety.restock.yaml` →
+  `detector_bridge.py`) or, behind an EXPLICIT `detection.source: ground_truth`
+  fallback, by projected known poses; and a configurable slow/stop-base +
+  pause/resume-arm mechanism (`reaction.py`, fail-safe to STOP on stale state).
+  Human detections use the dynobs `Detection(position, radius, source)` contract
+  and are consumable by `navigation/dynamic.py` via `detection.to_nav_detections`.
+  Mission/nav/arm touch points are documented seams only (`integration.py`,
+  `README.md`), not wired into the lane-owned files. CPU tests + a ground-truth demo
+  (`scripts/run_humans_safety_demo.py`) are the only evidence; the detector/frame
+  GPU run is PENDING (lowest GPU priority). Report + open owner decisions:
+  `data/sim-restock-humans-v1/report.md`.
 - Git delivery: the repository now has an `origin` remote; follow the current
   task delivery contract rather than the former local-only assumption.
 - Mobile UR10/cart assets and control interfaces: [docs/mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md), commands in RUNBOOK §9. The generated mobile URDF replaces the fixed pedestal; import with a free base. CPU FK/schema checks do not establish PhysX towing stability.
