@@ -543,6 +543,40 @@ bash scripts/run_mobile_restock.sh --manifest "$ENVIRONMENT_MANIFEST" \
   --scenario scripts/restock_scenario.json
 ```
 
+### 11a. Demand-driven mission job (store-vision plan, CPU, opt-in)
+
+The mission job is normally the one hardcoded in `scripts/restock_scenario.json`.
+`--job-from <export.json>` instead substitutes an approved store-vision restock
+plan item (schema `storevision.restock.job_plan/v1`). It is opt-in and default-off:
+absent, the job is byte-identical to today's. The mapping
+(`twin.restock.job_from_plan`) validates the plan's SKU and destination slot
+against `scripts/planogram.json` (via `scenarios.catalog_geom`), normalising the
+store-vision gondola-side slot id (`G3_R_b0_s1`) to the planogram id (`G3R_b0_s1`),
+and **refuses** an unknown slot, an unknown SKU, or a slot that does not stock that
+SKU. Resolve + print the mapped job without booting the simulator:
+
+```bash
+PYTHONPATH=scripts python3 scripts/run_mobile_restock.py \
+  --manifest "$ENVIRONMENT_MANIFEST" --scenario scripts/restock_scenario.json \
+  --job-from scripts/restock_job_plan.example.json --dry-run-job
+```
+
+Produce an export from store-vision (read-only; run with store-vision's venv),
+selecting the planner/approval policy (firstmate default: gate off = `auto_approve`):
+
+```bash
+"$STORE_VISION/.venv/bin/python" scripts/integrations/export_restock_job.py \
+  --store-vision-src "$STORE_VISION/src" \
+  --config "$STORE_VISION/configs/demo-freshmart.yaml" \
+  --sku juice_orange --slot G3_back_s2 --source-bin backstock_00 \
+  --approval-policy auto_approve --out scripts/restock_job_plan.example.json
+```
+
+A live `--execute` run adds `--job-from` to the same command; the runtime-config
+scenario guard accepts the identical substitution and the fixed source/shelf camera
+targets follow the resolved job. The mission `verify` stage remains the stock-commit
+source of truth. CPU tests: `test_restock_job_from_plan.py`.
+
 The host arm executor runs in ROS host Python after sourcing the task-owned
 overlay. Launch only with the authorized domain-88 simulator session. It consumes
 planned trajectories, publishes stamped joint-drive targets, and checks measured

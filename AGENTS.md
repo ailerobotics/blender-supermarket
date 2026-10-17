@@ -186,6 +186,16 @@ repo's `scenes/`, `export/` or `renders/`.
   the pure `bt.events` contract imports with no py_trees/ROS so `scenario.py` validates scenario
   events. Tests: `scripts/twin/tests/test_restock_bt.py` (pure tier runs anywhere; tree tier needs
   py_trees). Design + proof: `data/sim-restock-bt-v1/report.md`.
+- **Demand-driven mission job** (opt-in, default-off): `--job-from <export.json>`
+  on `run_mobile_restock.py` substitutes an approved store-vision restock plan
+  (schema `storevision.restock.job_plan/v1`) for the scenario's hardcoded job.
+  `twin/restock/job_from_plan.py` maps the plan to the mission `Job` and validates
+  SKU + destination slot against `scripts/planogram.json` (via `scenarios.catalog_geom`,
+  normalising `G3_R_b0_s1`→`G3R_b0_s1`), refusing unknown/mismatched slot or SKU.
+  Absent ⇒ byte-identical run. Producer (store-vision read-only, its own venv):
+  `scripts/integrations/export_restock_job.py`; example `scripts/restock_job_plan.example.json`;
+  `--dry-run-job` prints the resolved job with no GPU. RUNBOOK §11a;
+  write-up `data/sim-smart-job-feed-v1/report.md`.
 - **Surface-gripper seal reader** (`restock_manipulation/cad_tool.py` `NativePanelContact`):
   `read()` is a PURE OBSERVER — never command the gripper from it (an `open_gripper()` on a
   not-yet-`Closed` grab aborted the seal on every poll of the slow contact descent), and key the

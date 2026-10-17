@@ -157,12 +157,35 @@ def _maybe_smart_verify(args, scenario, summary):
         summary['smart_verify'] = {'ran': False, 'error': str(exc)}
 
 
+def _planogram_path(args):
+    """Planogram used to validate a demand-driven --job-from plan (override: --planogram)."""
+    override = getattr(args, 'planogram', None)
+    return override if override else Path(__file__).resolve().parent / 'planogram.json'
+
+
+def _resolve_job_override(args, scenario):
+    """Apply an opt-in --job-from plan to the scenario. Returns (scenario, job, meta).
+
+    Absent --job-from this is a no-op and the scenario is returned unchanged, so a run
+    without the option is byte-identical to today's hardcoded job.
+    """
+    if not getattr(args, 'job_from', None):
+        return scenario, None, None
+    from twin.restock.job_from_plan import apply_to_scenario, load_plan, resolve_job
+    plan = load_plan(args.job_from)
+    job, meta = resolve_job(plan, _planogram_path(args), job_id=getattr(args, 'job_id', None))
+    return apply_to_scenario(scenario, job), job, meta
+
+
 def check(args):
     manifest = json.loads(args.manifest.read_text())
     scenario = json.loads(args.scenario.read_text())
+    scenario, _job, job_meta = _resolve_job_override(args, scenario)
     report = validate(manifest, scenario)
     report['input_sha256'] = {name: hashlib.sha256(path.read_bytes()).hexdigest()
                              for name, path in (('manifest',args.manifest),('scenario',args.scenario))}
+    if job_meta is not None:
+        report['job_from_plan'] = job_meta
     root = Path(__file__).resolve().parent
     required = ['twin/navigation/core.py', 'twin/navigation/nav2.py',
                 'twin/mobile_runtime.py', 'twin/restock_manipulation/controller.py']
@@ -228,8 +251,17 @@ def run(args, manifest, scenario):
     if not readiness['files_ready']:
         raise ValueError('runtime inputs unresolved: '+', '.join(readiness['unresolved_inputs']))
     configured_scenario=json.loads(Path(config['scenario']).read_text())
+    # When --job-from substitutes the job, apply the identical substitution to the
+    # runtime config's own scenario before comparing, so the guard still refuses an
+    # unrelated scenario mismatch while accepting the demand-driven job.
+    configured_scenario, job_override, _ = _resolve_job_override(args, configured_scenario)
     if configured_scenario!=scenario:
         raise ValueError('runtime configuration and mission scenario differ')
+    if job_override is not None:
+        # Keep the fixed source/shelf camera targets aligned with the resolved job
+        # (isaac_bundle falls back to the job fields only when these are unset).
+        config['collect_source_location']=job_override.source_bin
+        config['transfer_shelf_location']=job_override.shelf_id
     # Opt-in tray/slot fit preflight (default off => fit_verdict stays None, byte-identical).
     # Computed once here on CPU, off the simulation hot path; a 'wont_fit' refuses the mission
     # in Mission.start() before any reservation/boot. 'ok'/'unknown' are advisory (logged).
@@ -496,8 +528,35 @@ def main():
                              'slot (measured free space in runtime-config["fit_preflight"]) BEFORE '
                              'sending the robot, instead of failing opaquely at place. Default off; '
                              'absent => byte-identical run. See twin.restock.fit_preflight.')
+    parser.add_argument('--job-from', type=Path,
+                        help='opt-in: a store-vision job-plan export (storevision.restock.job_plan/v1) '
+                             'whose approved restock item replaces the scenario job, validated against '
+                             'the planogram. Absent => the scenario hardcoded job (byte-identical).')
+    parser.add_argument('--job-id', help='override the mission job_id resolved from the plan provenance')
+    parser.add_argument('--planogram', type=Path,
+                        help='planogram.json used to validate --job-from (default: scripts/planogram.json)')
+    parser.add_argument('--dry-run-job', action='store_true',
+                        help='resolve --job-from, print the mapped mission job + planogram validation, '
+                             'and exit without booting the simulator')
     args = parser.parse_args()
-    report, manifest, scenario = check(args)
+    if args.dry_run_job and not args.job_from:
+        parser.error('--dry-run-job requires --job-from')
+    try:
+        report, manifest, scenario = check(args)
+    except Exception as exc:
+        # A --job-from plan that does not map onto the planogram is an honest refusal,
+        # reported cleanly (non-zero) rather than as a traceback.
+        from twin.restock.job_from_plan import PlanError
+        if isinstance(exc, PlanError):
+            print(json.dumps({'job_from_plan_error': str(exc)}, indent=2))
+            return 2
+        raise
+    if args.dry_run_job:
+        print(json.dumps({'resolved_job': scenario['job'],
+                          'job_from_plan': report.get('job_from_plan'),
+                          'validation_ok': report['ok'],
+                          'errors': report.get('errors', [])}, indent=2))
+        return 0 if report['ok'] else 2
     print(json.dumps(report, indent=2))
     if not report['ok']:
         return 2
