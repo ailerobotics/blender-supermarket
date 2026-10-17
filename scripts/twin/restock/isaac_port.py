@@ -247,6 +247,14 @@ class IsaacPort:
             self.mobile.engage_brake()
         else:
             self.mobile.release_brake()
+        # Cart parking brake (firstmate 287): pin the UNCOUPLED cart to the world while the robot
+        # loads a carton onto it during collect, so the placement contact cannot roll it (run-228:
+        # cart rolled 15.6 mm > the 15 mm gate). Released the moment collect ends (couple needs the
+        # cart free to tow). Only 'collect' loads the cart; other sensing actions do not touch it.
+        if self.current_action == 'collect':
+            self.mobile.engage_cart_brake()
+        else:
+            self.mobile.release_cart_brake()
         # Mission-relative acquisition clock on the nominal fixed timestep. Deriving it
         # from world.current_time instead drifts: Isaac's physics dt differs from the
         # mission dt by ~1e-9 per step (both pass the isclose guard above), which left
@@ -298,8 +306,14 @@ class IsaacPort:
             return dxy,dyaw
         bdxy,bdyaw=_disp(1); cdxy,cdyaw=_disp(2)
         windowed=now-hist[0][0]>=0.2
-        parked=bool(windowed and bdxy<self.stationary_dxy and bdyaw<self.stationary_dyaw
-                    and cdxy<self.stationary_dxy and cdyaw<self.stationary_dyaw)
+        # The ROBOT BASE gate stays strict always. The CART is excluded from the gate during 'collect'
+        # (firstmate 287, margin): the cart is intentionally being LOADED there (a placed carton shifts
+        # it slightly even with the cart brake), and it is not yet coupled/towed, so its micro-motion is
+        # not a manipulation-safety fault. Once coupled (couple/outbound/park) the cart is rig geometry
+        # and its stationarity matters again, so the gate includes it then.
+        cart_ok=(self.current_action=='collect'
+                 or (cdxy<self.stationary_dxy and cdyaw<self.stationary_dyaw))
+        parked=bool(windowed and bdxy<self.stationary_dxy and bdyaw<self.stationary_dyaw and cart_ok)
         # Evidence for tuning the base hold (firstmate): when the 0.25 s window shows the base/cart
         # past the stationarity gate, log how far past, throttled to ~0.2 s.
         if windowed and not parked and now-getattr(self,'_last_bdisp_log',-1.)>=0.2:

@@ -52,6 +52,7 @@ class MobileController:
         self.wheel_angle_reader = wheel_angle_reader
         self._held = False
         self._braked = False
+        self._cart_braked = False
 
     DRIVE_DAMPING = 100.0
     DRIVE_MAX_FORCE = 80.0
@@ -134,6 +135,40 @@ class MobileController:
             self._braked = False
             print('MOBILE_BRAKE released', flush=True)
 
+    CART_BRAKE_PATH = '/CartParkingBrake'
+
+    def engage_cart_brake(self):
+        """SIM CART PARKING BRAKE (firstmate 287): while the robot places a carton ONTO the uncoupled
+        cart during collect, pin the cart to the world so the placement contact cannot roll it. A real
+        rollwagen at rest has caster brakes + bearing friction; the sim cart's casters are only
+        bearing-DAMPED (configure_cart_bearings), which resists creep but not a landing-carton impulse,
+        so a 0.45 kg carton rolled the 35 kg cart 15.6 mm past the stationary gate (run-228). A full
+        FixedJoint is safe here (unlike the ROBOT yaw-lock rationale): the cart is NOT in the arm/weld
+        loop during collect, it is just the adjacent load target. Released before coupling so the cart
+        is free to be towed. SIM-only; the real cart brakes physically."""
+        from pxr import UsdPhysics, UsdGeom, Gf
+        if getattr(self, '_cart_braked', False):
+            return
+        # Anchor at the cart's CURRENT world pose so the joint is satisfied at creation (zero
+        # correction impulse); default coinciding origins would yank the cart to the world origin.
+        world = UsdGeom.XformCache().GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.cart_body))
+        t, q = world.ExtractTranslation(), world.ExtractRotationQuat()
+        joint = UsdPhysics.FixedJoint.Define(self.stage, self.CART_BRAKE_PATH)
+        joint.CreateBody1Rel().SetTargets([self.cart_body])   # body0 empty == world anchor
+        joint.CreateLocalPos0Attr(Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])))
+        joint.CreateLocalRot0Attr(Gf.Quatf(float(q.GetReal()), Gf.Vec3f(*[float(v) for v in q.GetImaginary()])))
+        joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
+        joint.CreateLocalRot1Attr(Gf.Quatf(1.0))
+        self._cart_braked = True
+        print('CART_BRAKE engaged (fixed-to-world) at cart pose', flush=True)
+
+    def release_cart_brake(self):
+        """Release the cart parking brake so the cart is free to be coupled and towed."""
+        if getattr(self, '_cart_braked', False):
+            self.stage.RemovePrim(self.CART_BRAKE_PATH)
+            self._cart_braked = False
+            print('CART_BRAKE released', flush=True)
+
     def park(self):
         for drive in self.drives:
             drive.GetTargetVelocityAttr().Set(0.0)
@@ -141,6 +176,7 @@ class MobileController:
 
     def command(self, v, omega, observation, *, transport_ready=False):
         self.release_brake()  # resuming driving: drop the sim parking brake before any base motion
+        self.release_cart_brake()  # and the cart pin, so the cart is free to be coupled/towed
         self.release()  # resuming driving: drop the stationary wheel-hold before commanding wheels
         # Stale/missing kinematics must never leave a previous nonzero drive latched.
         if observation is None or not math.isfinite(observation.age) or not 0 <= observation.age <= 0.1:
