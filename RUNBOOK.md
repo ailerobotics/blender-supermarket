@@ -650,6 +650,23 @@ dynamics at initial composition and is not evidence of robot motion or autonomy.
 It preserves same-acquisition depth and instance-ID path mappings for verification;
 those IDs may only identify known rig self pixels, never product inventory.
 
+`--humans-only --runtime-config CONFIG` is the opt-in human-safety bench
+(`twin.humans.gpu_bench`, sim-restock-humans-v1): it reuses that static store bench,
+authors scripted people (`twin.humans`) crossing the robot down the candidate
+camera's axis, and every frame teleports them, renders the camera, and runs the
+EXPLICIT ground-truth detection + reaction so a run shows CLEAR→SLOW→STOP and the
+return-to-CLEAR resume (base speed + arm hold in `reaction-trace.jsonl`,
+`reaction-summary.json`, frames + `humans-bench.mp4`). It is ground-truth evidence,
+NOT a neural-detector measurement (the detector needs the fleet model on the same
+GPU — mission-wiring follow-up) and NOT a mission. The `CONFIG` carries the mission's
+store/scenario/manifest/camera paths plus a `humans` block (`detection.source:
+ground_truth`, `humans_bench_view`). One queued, guarded command (blocks on
+`/tmp/aile-gpu.lock` up to 1 h, ≤15 min once held, heavy-threshold 2500, cleans only
+its own `fastrtps_*`): `scripts/run_humans_gpu_bench.sh`. The GPU guard's `isolation()`
+pins the session to `ROS_DOMAIN_ID=88` (not weakened); the bench runs no ROS node. Lowest GPU
+priority: it waits for the lock the mission lanes hold. CPU logic (crossing synthesis,
+detection/reaction driving) is tested in `scripts/twin/humans/tests/test_gpu_bench.py`.
+
 CPU assembled preview (URDF collision geometry, **not** a physics screenshot):
 
 ```bash
