@@ -85,6 +85,16 @@ repo's `scenes/`, `export/` or `renders/`.
 - **Mobile restock manipulation**: sensor/ROS contracts and supported handling units
   live in `docs/restock_manipulation.md`; CPU checks are in RUNBOOK §13.
   Runtime inputs must come from sensors; fixtures cannot certify inventory.
+- **Tray/slot fit preflight** (opt-in, default-off): `restock/fit_preflight.py` refuses a
+  handling unit that will not fit the destination slot BEFORE reserving stock or booting
+  Isaac, instead of failing opaquely at place. `fit = ok | wont_fit | unknown` from a
+  *measured* free-space record (mission depth capture in arm-base metres, or a store-vision
+  `twin3d` export mapped via an EXPLICIT `axis_order` — never a silent identity); `unknown`
+  (no/low-confidence/unmeasured record) falls back with a confidence flag, never silently.
+  The axiswise size rule is the ONE shared predicate `restock_manipulation/fit.py::axis_fits`
+  the place-phase gate (`controller.py`) also calls, so a preflight verdict matches the gate.
+  Enable with `run_mobile_restock.py --fit-preflight` + a `config['fit_preflight']` record
+  block; absent ⇒ byte-identical run. CPU tests: `tests/test_restock_fit_preflight.py`.
 - **Empty-support commissioning**: a mission capture refuses until its station's empty
   baseline is commissioned (`binding.py` `'observed empty commissioning baseline is
   required'`). `scripts/twin/restock_camera/commissioning.py` runs `commission()` on an

@@ -31,7 +31,7 @@ class Adapter(Protocol):
 class Mission:
     def __init__(self, inventory: Inventory, job: Job, adapter: Adapter,
                  timeout_s=120., fixture_mode=False, max_evidence_age_s=1., stages=None,
-                 start_at=None):
+                 start_at=None, fit_preflight=None):
         if not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError('timeout must be finite and positive')
         if not math.isfinite(max_evidence_age_s) or max_evidence_age_s < 0:
@@ -59,6 +59,13 @@ class Mission:
                 raise ValueError('start_at cannot skip the verify stock-commit gate')
             self.shortcut = {'start_at': start_at,
                              'skipped': list(self.stages[:self.start_index])}
+        # Opt-in measured tray/slot fit preflight (default None => disabled, byte-identical).
+        # A FitVerdict (twin.restock.fit_preflight) whose status is 'wont_fit' refuses the job in
+        # start() BEFORE any reservation or robot motion with an honest 'unsupported' message
+        # routed to the caller, instead of failing opaquely at the place phase. 'ok'/'unknown'
+        # never block here: the place-phase gate stays the measured backstop and verify stays the
+        # stock-commit source of truth.
+        self.fit_preflight = fit_preflight
         self.inventory, self.job, self.adapter = inventory, job, adapter
         self.timeout_s, self.fixture_mode = timeout_s, fixture_mode
         self.max_evidence_age_s = max_evidence_age_s
@@ -81,6 +88,13 @@ class Mission:
     def start(self):
         if self.state != 'new':
             raise ValueError('mission already started')
+        # Refuse a proven won't-fit BEFORE reserving stock or sending the robot. The job was
+        # never reserved, so the inventory tables stay untouched; the honest reason is surfaced
+        # on self.reason for the launcher to log and persist. 'ok'/'unknown' fall through.
+        if self.fit_preflight is not None and self.fit_preflight.status == 'wont_fit':
+            self.state = 'failed'
+            self.reason = 'unsupported: ' + self.fit_preflight.message
+            return
         self.inventory.reserve(self.job)
         # Record any shortcut-skipped prefix HONESTLY -- as `<stage>_shortcut` events marked
         # shortcut=True, never as performed successes -- so the durable record and mission.json

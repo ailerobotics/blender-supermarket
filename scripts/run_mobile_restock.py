@@ -230,6 +230,16 @@ def run(args, manifest, scenario):
     configured_scenario=json.loads(Path(config['scenario']).read_text())
     if configured_scenario!=scenario:
         raise ValueError('runtime configuration and mission scenario differ')
+    # Opt-in tray/slot fit preflight (default off => fit_verdict stays None, byte-identical).
+    # Computed once here on CPU, off the simulation hot path; a 'wont_fit' refuses the mission
+    # in Mission.start() before any reservation/boot. 'ok'/'unknown' are advisory (logged).
+    fit_verdict=None
+    if getattr(args, 'fit_preflight', False):
+        from twin.restock.fit_preflight import preflight_from_config
+        fit_verdict=preflight_from_config(scenario, config)
+        print('FIT_PREFLIGHT '+json.dumps(fit_verdict.event() if fit_verdict else
+                                          {'fit': 'disabled', 'reason': 'no fit_preflight config'}),
+              flush=True)
     # Preserve the launch shell before SimulationApp mutates Python/native-library
     # paths; the host ROS interpreter receives its own explicitly sourced overlay.
     config['_launch_environment']=dict(os.environ)
@@ -239,6 +249,16 @@ def run(args, manifest, scenario):
     db = Inventory(args.output/'inventory.sqlite')
     for row in scenario['initial_inventory']:
         db.seed(row['location'], row['sku'], row['quantity'])
+    # A proven won't-fit refuses the mission here, BEFORE paying the Isaac boot / GPU slot --
+    # the job is never reserved and no robot is sent. 'ok'/'unknown' fall through to the run.
+    if fit_verdict is not None and fit_verdict.status == 'wont_fit':
+        db.close()
+        refused = {'state': 'failed', 'reason': 'unsupported: ' + fit_verdict.message,
+                   'physics_verified': False, 'fit_preflight': fit_verdict.event(),
+                   'note': 'Refused by --fit-preflight before boot; robot was not sent.'}
+        (args.output / 'mission.json').write_text(json.dumps(refused, indent=2, allow_nan=False) + '\n')
+        print('FIT_PREFLIGHT_REFUSED ' + refused['reason'], flush=True)
+        return 1
     mission = app = bundle = None
     finished = threading.Event()
     def interrupted(signum, frame):
@@ -309,7 +329,8 @@ def run(args, manifest, scenario):
                     the downstream --start-at shortcut (which selects WHERE a run begins; warm
                     selects HOW MANY runs per boot)."""
                     m = Mission(db, Job(**scenario['job']), bundle.adapter,
-                                stages=config.get('stages'), start_at=config.get('start_at'))
+                                stages=config.get('stages'), start_at=config.get('start_at'),
+                                fit_preflight=fit_verdict)
                     m.start()
                     for _ in range(60*20*60):  # bounded simulation time; shell also bounds wall time
                         if m.terminal:
@@ -321,6 +342,8 @@ def run(args, manifest, scenario):
                         m.fail('simulation step budget exceeded')
                     s = {'state': m.state, 'reason': m.reason, 'physics_verified': False,
                          'note': 'Mission success alone does not verify video, contacts or autonomy.'}
+                    if fit_verdict is not None:
+                        s['fit_preflight'] = fit_verdict.event()
                     # Flag a start-phase shortcut run so mission.json cannot be read as a full,
                     # grasp-performed cycle: the skipped prefix was synthesized, not actuated.
                     if m.shortcut is not None:
@@ -457,6 +480,11 @@ def main():
     parser.add_argument('--transport-probe', type=int, default=0,
                         help='focused masked-depth transport probe: drive the arm bridge for N '
                              'frames at the staging pose instead of running the mission')
+    parser.add_argument('--fit-preflight', action='store_true',
+                        help='opt-in: refuse a job whose handling unit will not fit the destination '
+                             'slot (measured free space in runtime-config["fit_preflight"]) BEFORE '
+                             'sending the robot, instead of failing opaquely at place. Default off; '
+                             'absent => byte-identical run. See twin.restock.fit_preflight.')
     args = parser.parse_args()
     report, manifest, scenario = check(args)
     print(json.dumps(report, indent=2))
