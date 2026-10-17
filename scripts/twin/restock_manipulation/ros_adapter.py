@@ -101,8 +101,15 @@ class RosMotionPort:
     def __init__(self, node, *, joint_limits, payload_sync, emergency_stop,
                  group='ur_manipulator', tcp='gripper_pad_tcp', namespace='/restock_sim',
                  pipeline='isaac_ros_cumotion', timeout=25.0, velocity_scale=.04, pose_goal=False,
-                 stow_config=None, max_velocity_scale=.05):
+                 stow_config=None, max_velocity_scale=.05, plan_wall_cap_s=PLAN_TOTAL_WALL_CAP_S):
         require_sim_domain()
+        # Total planning-wall cap for a single move (ik/plan request/result). Real-rig default 22 s
+        # (PLAN_TOTAL_WALL_CAP_S); the sim profile raises it (firstmate 293) because a plan that
+        # move_group completes in ~1.4 s can take >20 s to DELIVER its ActionResult to this port under
+        # render pacing (run-234/237/239), so a 22 s cap cut off a succeeded plan. The 30 s /sensors
+        # wall backstop stays the genuine hang catch; real-rig path untouched. Recorded with the other
+        # render-pacing wall-window relaxations.
+        self.plan_wall_cap_s = float(plan_wall_cap_s)
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
             raise RuntimeError('node must use domain 88 and simulation clock')
         if namespace != '/restock_sim':
@@ -496,7 +503,7 @@ class RosMotionPort:
         return (self.state in ('ik', 'plan_accept', 'plan_result')
                 and not self._pending_plan_success()
                 and time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
-                > PLAN_TOTAL_WALL_CAP_S)
+                > getattr(self, 'plan_wall_cap_s', PLAN_TOTAL_WALL_CAP_S))
 
     def failed_result_pending(self):
         """True when an EXECUTE action RESULT has arrived FAILED (status != SUCCEEDED) but poll() has
@@ -602,7 +609,7 @@ class RosMotionPort:
                 # needs a different c-space target), then fail.
                 # Fail fast: once the cumulative planning wall time for this move crosses the cap, stop
                 # retrying (seed/replan) and surface a clean motion failure before the /sensors backstop.
-                if time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic()) > PLAN_TOTAL_WALL_CAP_S:
+                if time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic()) > getattr(self, 'plan_wall_cap_s', PLAN_TOTAL_WALL_CAP_S):
                     raise RuntimeError('planning failed (exhausted within wall cap)')
                 if _should_replan(self._replan_attempts, getattr(self, '_plan_goal', None) is not None):
                     self._replan_attempts += 1
@@ -613,6 +620,11 @@ class RosMotionPort:
                 if getattr(self, '_seeds', None) and self._next_seed():
                     return 'running'
                 raise RuntimeError('planning failed')
+            # Plan round-trip latency (request -> result consumed here), WALL. firstmate 293: if this
+            # ever exceeds ~5 s on a plan move_group completes in ~1.4 s, the ActionResult was starved in
+            # the host's single-threaded executor -> land the MultiThreadedExecutor + callback-group fix.
+            print('PLAN_DELIVERY elapsed=%.2f'
+                  % (time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())), flush=True)
             trajectory = result.result.planned_trajectory
             validate_trajectory(trajectory.joint_trajectory, self.start, self.limits)
             end=trajectory.joint_trajectory.points[-1].time_from_start

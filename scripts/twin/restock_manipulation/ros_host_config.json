@@ -34,5 +34,6 @@
   "sim_cart_place_policy": true,
   "payload_ack_wall_s": 3.0,
   "staged_cart_swing": true,
-  "cart_pan_joint0": -0.8605
+  "cart_pan_joint0": -0.8605,
+  "plan_wall_cap_s": 60.0
 }

@@ -82,7 +82,8 @@ def main():
                                args.urdf,command_limit=arm_max_speed,scale_cap=arm_max_speed),
                            max_velocity_scale=min(arm_max_speed,1.),
                            pose_goal=bool(config.get('pose_goal', False)),
-                           stow_config=transport_joints)
+                           stow_config=transport_joints,
+                           plan_wall_cap_s=float(config.get('plan_wall_cap_s', 22.0)))
     # Acquisition-to-use freshness (require_fresh on valid_until_steady) must be measured on the
     # SIM/node clock, not wall: the held sensing deadline is a SIM-time budget (world.current_time +
     # window remaining, sensing_sources.steady_clock) and under render pacing wall races far ahead of

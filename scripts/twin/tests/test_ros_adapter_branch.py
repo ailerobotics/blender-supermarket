@@ -140,11 +140,13 @@ class PlanningWallExceeded(unittest.TestCase):
     from twin.restock_manipulation.ros_adapter import PLAN_TOTAL_WALL_CAP_S as _CAP
 
     @staticmethod
-    def _port(state, future, elapsed):
+    def _port(state, future, elapsed, cap=None):
         import time
         p = RosMotionPort.__new__(RosMotionPort)
         p.state, p.future = state, future
         p._plan_started_wall = time.monotonic() - elapsed
+        if cap is not None:
+            p.plan_wall_cap_s = cap
         return p
 
     class _PlanF:
@@ -180,6 +182,13 @@ class PlanningWallExceeded(unittest.TestCase):
     def test_execute_phase_is_excluded(self):
         over = self._CAP + 5
         self.assertFalse(self._port('execute_result', self._PlanF(False), over).planning_wall_exceeded())
+
+    def test_sim_configurable_cap_defers_the_fire(self):
+        # firstmate 293: the sim profile raises the cap to 60 s (result-delivery latency), so an
+        # in-flight plan at 30 s -- which would exhaust at the 22 s default -- is still within budget.
+        self.assertTrue(self._port('plan_result', self._PlanF(False), 30).planning_wall_exceeded())
+        self.assertFalse(self._port('plan_result', self._PlanF(False), 30, cap=60.0).planning_wall_exceeded())
+        self.assertTrue(self._port('plan_result', self._PlanF(False), 65, cap=60.0).planning_wall_exceeded())
 
 
 class Drain(unittest.TestCase):
