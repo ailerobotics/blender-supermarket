@@ -263,6 +263,12 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
     assemble = _assemble or _real_assemble
     assembly = assemble(app=app, config=config, scenario=scenario, output=output)
 
+    # Start-phase shortcut (dev iteration only): synthesize the skipped prefix's physical end
+    # state before any mission tick. Guarded by config['start_at']; absent => untouched.
+    if config.get('start_at'):
+        from .shortcut import apply_start_state
+        apply_start_state(assembly, config, scenario)
+
     build_runtime = _runtime or _build_isaac_runtime
     parts = build_runtime(app=app, assembly=assembly, plan=plan, config=config, output=output,
                           scenario=scenario, manifest=manifest)
