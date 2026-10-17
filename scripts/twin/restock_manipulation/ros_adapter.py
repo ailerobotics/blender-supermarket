@@ -383,7 +383,7 @@ class RosMotionPort:
         future.add_done_callback(accepted)
         self.future, self.state = future, state
 
-    def begin_joint_goal(self, goal_joints, measured_joints):
+    def begin_joint_goal(self, goal_joints, measured_joints, slow=False):
         """Collision-planned arm stow; never an unchecked joint command."""
         from moveit_msgs.action import MoveGroup
         from moveit_msgs.msg import Constraints, JointConstraint
@@ -412,8 +412,13 @@ class RosMotionPort:
         req.pipeline_id=self.pipeline
         req.allowed_planning_time=5.
         req.num_planning_attempts=1
-        req.max_velocity_scaling_factor=self.velocity_scale
-        req.max_acceleration_scaling_factor=.05
+        # ``slow`` gentles a joint move that CARRIES the welded carton (the staged tuck/pan fold): the
+        # 0.45 kg carton on the long side-grip lever displaced wrist1 ~1.0 rad during the aggressive fold
+        # (run-241/246 TRAJ_HOST_TRACK_MISS), because the carton's inertial torque during a fast
+        # shoulder/elbow swing outruns the wrist drive. A 0.35x velocity + 0.4x acceleration keeps the
+        # carton's inertia low so the arm tracks the (body-clear) plan; free-space/empty moves keep full.
+        req.max_velocity_scaling_factor=self.velocity_scale*(0.35 if slow else 1.0)
+        req.max_acceleration_scaling_factor=(.02 if slow else .05)
         req.start_state.joint_state.name=list(JOINTS)
         req.start_state.joint_state.position=list(self.start)
         constraints=Constraints()

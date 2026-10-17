@@ -378,7 +378,10 @@ class TransferController:
             if not self.issued:
                 if s.valid_until_steady is not None:
                     require_fresh(s.valid_until_steady, self.steady_clock)
-                self.motion.begin_joint_goal(goal, s.joint_positions)
+                # tuck/pan carry the welded carton -> plan the fold gently so the carton's inertia does
+                # not displace the wrist off the body-clear plan (run-246); retreat_tuck is empty-handed.
+                self.motion.begin_joint_goal(goal, s.joint_positions,
+                                             slow=self.phase in ('tuck', 'pan'))
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
             outcome = self.motion.poll()
