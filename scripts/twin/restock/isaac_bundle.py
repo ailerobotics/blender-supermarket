@@ -223,6 +223,11 @@ class Bundle:
     adapter: RuntimeAdapter
     recording: dict = field(default_factory=dict)
     _closers: tuple = ()
+    # Opt-in warm-session reset: a callable ``reset(attempt, now)`` that re-seats the live scene
+    # to its commissioned initial state and re-validates the baseline (lifetime + session binding)
+    # so the mission can be re-run in the SAME Isaac session without a re-boot/re-commission. None
+    # unless config['warm_reset'] names a provider; the launcher runs a single attempt without it.
+    warm_reset: object = None
 
     def close(self):
         errors = []
@@ -272,7 +277,20 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
 
     adapter = RuntimeAdapter(navigation, mobile, manipulation, port, plan.poses,
                              fixture_mode=False, goal_articulation=plan.goal_articulation)
-    return Bundle(adapter=adapter, recording=recording, _closers=tuple(closers))
+
+    # Opt-in warm-session reset provider (dev iteration): config['warm_reset'] names a
+    # lane-owned builder `module:function` called once here with the live scene; it returns the
+    # per-attempt `reset(attempt, now)` callable (re-seat + baseline re-validation), or None to
+    # leave warm retry unavailable. The native World reset + robot re-seat + sensing-clock rebase
+    # live where the stage/camera do (integration + camera/stations lanes), so the Isaac-side reset
+    # is provided here rather than hard-coded into the launcher.
+    warm_reset = None
+    if config.get('warm_reset'):
+        build_warm_reset = _resolve_factory(config, 'warm_reset')
+        warm_reset = build_warm_reset(app=app, assembly=assembly, parts=parts, plan=plan,
+                                      config=config, output=output)
+    return Bundle(adapter=adapter, recording=recording, _closers=tuple(closers),
+                  warm_reset=warm_reset)
 
 
 def _real_assemble(*, app, config, scenario, output):
