@@ -60,14 +60,30 @@ class RosPayloadSync:
         from isaac_ros_cumotion_interfaces.action import AttachObject
         s, c = self.sensors, self.controller
         now = self.node.get_clock().now().nanoseconds*1e-9
+        # First in-mission grasp reached only after the attach-fallback propagation fix (run-214):
+        # this path returned False at an early gate with no scene/attach call. Name the failing gate
+        # so the next GPU run pinpoints it (sim-clock freshness vs service/server readiness vs contact
+        # mismatch). PAYLOAD_SYNC_DIAG=0 to silence; one line per call, cheap.
+        def _diag(gate):
+            import os
+            if os.environ.get('PAYLOAD_SYNC_DIAG', '1') != '0':
+                age = None if s is None else (now - s.feedback_time)
+                print('PAYLOAD_SYNC_DIAG gate=%s held=%s s_contact=%s age=%s max_age=%s now=%.4f '
+                      'scene_ready=%s attach_ready=%s'
+                      % (gate, held, (None if s is None else s.contact), age,
+                         (None if c is None else c.max_age), now,
+                         self.scene.service_is_ready(),
+                         (self.attach.server_is_ready() if self.attach is not None else None)),
+                      flush=True)
+            return False
         if s is None or c is None or s.contact != held or not 0 <= now-s.feedback_time <= c.max_age:
-            return False
+            return _diag('precondition')
         if not self.scene.service_is_ready():
-            return False
+            return _diag('scene_service')
         if self.attach is None:
             self.attach = ActionClient(self.node,AttachObject,'/restock_sim/attach_object')
         if not self.attach.server_is_ready():
-            return False
+            return _diag('attach_server')
         attached = AttachedCollisionObject()
         attached.link_name = 'gripper_pad_tcp'
         # The held carton is seated on the suction panel AND rests against the gripper surface-plate
