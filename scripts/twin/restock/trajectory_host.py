@@ -63,7 +63,7 @@ GOAL_SETTLE_MARGIN_S = 20.0  # < EXECUTE_SETTLE 25 so GOAL_MISS prints terminal 
 # transient on-path excursion, not divergence. 0.45 tripped it on the higher-seed plans; 0.50 clears
 # the observed range with margin. The debounce + hard ceiling still catch genuine divergence, and the
 # terminal GOAL-settle gate still enforces tight final convergence (grasp precision unaffected).
-TRACKING_TOL = 1.0
+TRACKING_TOL = 1.3  # fm: carton-carry fold transient peaks ~1.0 rad (run-246/247); sim-only executor
 # Consecutive DISTINCT over-tol feedback samples required before faulting on sustained divergence.
 TRACKING_DEBOUNCE = 3
 # Immediate-fault ceiling (rad): gross divergence/instability faults on one sample regardless of debounce.
@@ -278,8 +278,10 @@ def main():
                 if fb_stamp!=state['miss_stamp']:
                     state['miss_stamp']=fb_stamp
                     state['miss_count']+=1
+                    _j = int(np.argmax(np.abs(reference-state['feedback'][1])))
                     print(f'TRAJ_HOST_TRACK_MISS err={track_err:.4f} fb_age={now()-fb_stamp:.3f} '
-                          f'n={state["miss_count"]}/{TRACKING_DEBOUNCE} '
+                          f'n={state["miss_count"]}/{TRACKING_DEBOUNCE} worst_j={_j} '
+                          f'ref={reference[_j]:.4f} meas={state["feedback"][1][_j]:.4f} '
                           f'per_joint_err={np.array2string(reference-state["feedback"][1],precision=4,separator=",")}',
                           flush=True)
                 if tracking_fault(track_err,state['miss_count']):
