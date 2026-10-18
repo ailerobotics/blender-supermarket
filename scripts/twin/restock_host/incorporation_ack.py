@@ -41,6 +41,12 @@ import math
 import os
 import time
 
+# Bounded fault recovery, mirroring restock.station.StationState: a fresh measured parked epoch
+# ('prepare') clears a latched fault so the mission client's re-prepare recovers the ack instead of
+# being rejected forever, bounded so a persistently broken mapper still surfaces. heartbeat/stop do
+# not recover. See freshness-sim-clock-not-wall and ds-015.
+_MAX_RECOVERIES = 3
+
 
 class IncorporationAckState:
     """Fresh parked epochs and real mapper acknowledgements; no receipt shortcuts.
@@ -62,10 +68,17 @@ class IncorporationAckState:
         self.active = False
         self.fault = None
         self.camera_frame = None
+        self.recoveries = 0
+        self.recovered_from = None
 
     def accept(self, command, now):
+        recovering = False
         if self.fault:
-            raise RuntimeError('station fault requires explicit recovery')
+            if command.get('action') != 'prepare':
+                raise RuntimeError('station fault requires explicit recovery')
+            if self.recoveries >= _MAX_RECOVERIES:
+                raise RuntimeError('station fault recovery budget exhausted: ' + str(self.fault))
+            recovering = True
         epoch = command.get('epoch')
         stamp = command.get('stamp')
         seq = command.get('sequence')
@@ -82,6 +95,10 @@ class IncorporationAckState:
             frame = command.get('camera_frame')
             if not isinstance(frame, str) or not frame.startswith('restock_camera_'):
                 raise ValueError('calibrated mapper camera frame required')
+            if recovering:
+                self.recovered_from = self.fault
+                self.fault = None
+                self.recoveries += 1
             self.epoch, self.parked_since, self.camera_frame = epoch, stamp, frame
             self.active = True
             self.collision_time = -1.
@@ -181,7 +198,12 @@ def main():
         payload = None
         try:
             payload = json.loads(message.data)
-            state.accept(payload, n)
+            prior_fault = state.fault
+            action = state.accept(payload, n)
+            if action == 'prepare' and prior_fault:
+                node.get_logger().info(
+                    f'station recovered: epoch={state.epoch} from={prior_fault!r} '
+                    f'recoveries={state.recoveries}/{_MAX_RECOVERIES}')
         except Exception as exc:
             # Make a rejected command (bad epoch/sequence/timestamp, lost parked flag,
             # unparseable JSON) visible in host-stack.log with its ValueError text and the

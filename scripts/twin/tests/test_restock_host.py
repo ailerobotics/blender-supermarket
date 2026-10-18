@@ -404,6 +404,33 @@ class IncorporationAckTest(unittest.TestCase):
         self.assertEqual(snap['state'], 'failed')
         self.assertEqual(snap['reason'], 'parked heartbeat lost: wall gap 3.40 s')
 
+    def test_fault_recovers_on_fresh_parked_epoch_bounded(self):
+        from twin.restock_host.incorporation_ack import _MAX_RECOVERIES
+        st, _ = self.prepared()  # epoch 1 at sim 10.0
+        st.acknowledge(10.2, 1)
+        # Lost process -> fault; a heartbeat against the dead epoch is still refused.
+        self.assertEqual(st.snapshot(10.3, endpoints_ready=True, process_alive=False)['state'], 'failed')
+        with self.assertRaisesRegex(RuntimeError, 'explicit recovery'):
+            st.accept(dict(action='heartbeat', epoch=1, sequence=2, stamp=10.4, parked=True), 10.4)
+        # A fresh measured parked epoch recovers the ack instead of rejecting it forever (ds-015).
+        self.assertEqual(st.accept(dict(action='prepare', epoch=2, sequence=0, stamp=11.0,
+                                        parked=True, camera_frame='restock_camera_transfer'), 11.0), 'prepare')
+        self.assertIsNone(st.fault)
+        self.assertEqual(st.recoveries, 1)
+        self.assertEqual(st.snapshot(11.1, endpoints_ready=True, process_alive=True)['state'], 'warming')
+        # Recovery is bounded: once the budget is spent a persistently broken mapper surfaces honestly.
+        ep = 2
+        while st.recoveries < _MAX_RECOVERIES:
+            ep += 1
+            self.assertEqual(st.snapshot(float(ep) - 0.5 + 10, endpoints_ready=True,
+                                         process_alive=False)['state'], 'failed')
+            st.accept(dict(action='prepare', epoch=ep, sequence=0, stamp=float(ep) + 10,
+                           parked=True, camera_frame='restock_camera_transfer'), float(ep) + 10)
+        self.assertEqual(st.snapshot(float(ep) + 9.6, endpoints_ready=True, process_alive=False)['state'], 'failed')
+        with self.assertRaisesRegex(RuntimeError, 'recovery budget exhausted'):
+            st.accept(dict(action='prepare', epoch=ep + 1, sequence=0, stamp=float(ep) + 11,
+                           parked=True, camera_frame='restock_camera_transfer'), float(ep) + 11)
+
     def test_invalid_commands_rejected(self):
         st, _ = self.state()
         for bad in [dict(action='prepare', epoch=1, sequence=0, stamp=10.0, parked=True,

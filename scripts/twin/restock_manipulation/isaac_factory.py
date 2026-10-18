@@ -68,6 +68,7 @@ class ManipConfig:
     arm_camera_reaim: dict = field(default_factory=dict)  # {origin, aim_targets} in ur_base for the look-at mount (camera lane PR64)
     sim_attach_fallback: bool = False  # labelled sim attach-fallback (cad_tool); default OFF, see SIM_ATTACH_CONTACT_MM
     station_heartbeat_s: float = 10.0  # StationClient wall heartbeat-unavailable bound; real-rig 10 s, sim raises it
+    station_stage_unavailable_s: float = 3.0  # StationClient sim-clock (stage) supervisor-liveness bound (primary)
 
 
 def parse_manipulation_config(config, job_sku):
@@ -162,7 +163,8 @@ def parse_manipulation_config(config, job_sku):
                        masked_depth=masked_depth, collect_source_location=collect_source_location,
                        cart_placement=cart_placement, arm_camera_reaim=arm_camera_reaim,
                        sim_attach_fallback=bool(config.get('sim_attach_fallback', False)),
-                       station_heartbeat_s=float(config.get('station_heartbeat_s', 10.0)))
+                       station_heartbeat_s=float(config.get('station_heartbeat_s', 10.0)),
+                       station_stage_unavailable_s=float(config.get('station_stage_unavailable_s', 3.0)))
 
 
 def _parse_arm_camera_reaim(entry):
@@ -720,7 +722,8 @@ def _build_runtime(*, app, assembly, params, output):
         # command outruns the matching /clock update -- never sees now() behind the stamp (run-66:
         # ack now()=0.20 vs stamp=0.233 tripped the strict 0<=now-stamp lower bound).
         station = StationClient(channel, stage_clock=lambda: assembly.transport.stage_time,
-                                publish_lag=0.1, heartbeat_s=params.station_heartbeat_s)
+                                publish_lag=0.1, heartbeat_s=params.station_heartbeat_s,
+                                stage_unavailable_s=params.station_stage_unavailable_s)
     runtime = RosManipulationRuntime(graph, collect_bridge.capture,
                                      prepare_station=lambda operation, job: None,
                                      sensing_bridge=sensing_bridge, feedback=feedback,

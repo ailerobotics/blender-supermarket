@@ -52,6 +52,16 @@ class OwnedProcess:
 # render-paced mission tick so a heavy full-res sensing render cannot false-trip a station fault.
 _WALL_HEARTBEAT_BACKSTOP_S = 15.0
 
+# Bounded fault recovery: a station fault (mapper child died/segfaulted, incorporation service
+# unavailable, a rejected command) latches ``self.fault`` and emergency-stops. The mission client
+# re-prepares under a FRESH measured parked epoch when it sees the 'failed'/'idle' reply; that fresh
+# prepare is a legitimate recovery, not a protocol violation, so accept() clears the fault and the
+# supervisor restarts the mapper child (station_host.command). Bounded so a PERSISTENTLY broken mapper
+# still surfaces honestly instead of looping forever. Only a 'prepare' recovers (it carries a fresh
+# parked epoch); heartbeat/stop against a faulted station are still refused. See ds-015 (station faulted
+# then rejected re-prepare forever) and freshness-sim-clock-not-wall.
+_MAX_RECOVERIES = 3
+
 
 class StationState:
     """Fresh parked epochs and real mapper acknowledgements; no receipt shortcuts."""
@@ -66,10 +76,21 @@ class StationState:
         self.active=False
         self.fault=None
         self.camera_frame=None
+        # Bounded recovery bookkeeping (requirement: fault-recoverable station).
+        self.recoveries=0
+        self.recovered_from=None
 
     def accept(self, command, now):
+        recovering=False
         if self.fault:
-            raise RuntimeError('station fault requires explicit recovery')
+            # Only a fresh measured parked epoch ('prepare') recovers a faulted station; a stray
+            # heartbeat/stop against the dead epoch stays refused. Bound the recoveries so a mapper
+            # that keeps dying is surfaced rather than retried forever.
+            if command.get('action')!='prepare':
+                raise RuntimeError('station fault requires explicit recovery')
+            if self.recoveries>=_MAX_RECOVERIES:
+                raise RuntimeError('station fault recovery budget exhausted: '+str(self.fault))
+            recovering=True
         epoch=command.get('epoch')
         stamp=command.get('stamp')
         seq=command.get('sequence')
@@ -86,6 +107,12 @@ class StationState:
             frame=command.get('camera_frame')
             if not isinstance(frame,str) or not frame.startswith('restock_camera_'):
                 raise ValueError('calibrated mapper camera frame required')
+            # The fresh epoch validated: clear the latched fault and count the recovery. Done here,
+            # after every field check, so a malformed recovery prepare leaves the fault latched.
+            if recovering:
+                self.recovered_from=self.fault
+                self.fault=None
+                self.recoveries+=1
             self.epoch,self.parked_since,self.camera_frame=epoch,stamp,frame
             self.active=True
             self.collision_time=-1.

@@ -117,3 +117,31 @@ def test_tracking_fault_debounces_single_sample_transients():
     assert not tracking_fault(TRACKING_TOL + 0.01, TRACKING_DEBOUNCE - 1)  # not yet sustained
     # gross divergence past the hard ceiling faults on a single sample regardless of debounce
     assert tracking_fault(TRACKING_HARD_TOL + 0.01, 1)
+
+
+def test_executor_exit_is_honest_and_bounded_tolerant():
+    # run-266: executor.spin() returned mid-move under render pacing with no tracking fault, and the
+    # generic fault('executor stopped') emergency-stopped a healthy grasp while hiding the cause.
+    from twin.restock.trajectory_host import executor_exit_action
+    # A callback already latched the real cause -> stop, no new (masking) fault.
+    assert executor_exit_action(raised_exc='RuntimeError("x")', prior_fault='measured joint feedback lost',
+                                context_ok=True, transient_budget=5) == ('stop', None)
+    # Clean rclpy shutdown (no exception, context closed) -> stop, no fault.
+    assert executor_exit_action(raised_exc=None, prior_fault=None,
+                                context_ok=False, transient_budget=5) == ('stop', None)
+    # run-266: ExternalShutdownException tore the context down mid-move -> stop (NOT a futile re-spin),
+    # no new masking fault; the real cause was already logged.
+    assert executor_exit_action(raised_exc='ExternalShutdownException()', prior_fault=None,
+                                context_ok=False, transient_budget=5) == ('stop', None)
+    # Transient spin exit with budget left -> re-enter spin() instead of stopping a healthy move.
+    assert executor_exit_action(raised_exc='RCLError()', prior_fault=None,
+                                context_ok=True, transient_budget=3) == ('retry', None)
+    assert executor_exit_action(raised_exc=None, prior_fault=None,
+                                context_ok=True, transient_budget=1) == ('retry', None)
+    # Budget exhausted -> stop with the HONEST cause, not 'executor stopped'.
+    act, reason = executor_exit_action(raised_exc='RCLError(boom)', prior_fault=None,
+                                       context_ok=True, transient_budget=0)
+    assert act == 'stop' and 'RCLError(boom)' in reason and 'failed repeatedly' in reason
+    act, reason = executor_exit_action(raised_exc=None, prior_fault=None,
+                                       context_ok=True, transient_budget=0)
+    assert act == 'stop' and 'without shutdown or tracking fault' in reason
