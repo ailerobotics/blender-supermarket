@@ -390,15 +390,28 @@ class NativePanelContact:
         # all, so toggle its colliders OFF on weld and back ON at release (so the placement drop onto the
         # cart still makes contact). CollisionEnabled is a runtime-reliable toggle (cart_diagnostic).
         from pxr import UsdPhysics, Usd
+        # fm320: the bench weld-reaction probe proved the fight is the TOOL geometry (cube /
+        # surface_plates / suction_cups) colliding with the forearm/upper_arm/wrist as the fold closes
+        # (42.7 kN tool-vs-arm contact; the NO-CARTON trial also stalled) -- NOT the carton alone, and
+        # those self-pairs are on the vendor planner ignore list so cuMotion never avoids them. So while
+        # the carton is welded (held rigidly by the joint, needs no collision), disable BOTH the carton
+        # colliders AND the tool-side gripper colliders; restore on release (next grasp + the cart drop).
+        tool_side = ('suction_cups', 'cube_without_surface_plates', 'surface_plate_1',
+                     'surface_plate_2', 'surface_plate_3', 'surface_plate_4',
+                     'surface_plate_5', 'surface_plate_6')
+        targets = set()
         prim = self.stage.GetPrimAtPath(body_path)
-        n = 0
         if prim:
             for p in Usd.PrimRange(prim):
                 if p.HasAPI(UsdPhysics.CollisionAPI):
-                    UsdPhysics.CollisionAPI(p).CreateCollisionEnabledAttr(bool(enabled))
-                    n += 1
-        print('SIM_ATTACH_FALLBACK carton collision %s on %d collider(s) body=%s'
-              % ('ENABLED' if enabled else 'DISABLED', n, body_path), flush=True)
+                    targets.add(p.GetPath())
+        for p in self.stage.Traverse():
+            if p.HasAPI(UsdPhysics.CollisionAPI) and any(('/' + t) in str(p.GetPath()) for t in tool_side):
+                targets.add(p.GetPath())
+        for path in targets:
+            UsdPhysics.CollisionAPI(self.stage.GetPrimAtPath(path)).CreateCollisionEnabledAttr(bool(enabled))
+        print('SIM_ATTACH_FALLBACK carry collision %s on %d collider(s) (carton + tool-side) body=%s'
+              % ('ENABLED' if enabled else 'DISABLED', len(targets), body_path), flush=True)
 
     def _release_fallback(self):
         if getattr(self, '_fallback_joint', None) is not None:
