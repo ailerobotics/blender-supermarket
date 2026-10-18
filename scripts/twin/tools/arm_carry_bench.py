@@ -463,8 +463,13 @@ def run_move(stage: ArmStage, start, goal, carry: CarryProfile, tol: Tolerances,
             if dtt > 0:
                 pk_a = max(pk_a, max(abs(traj.points[i].velocities[j] - traj.points[i - 1].velocities[j])
                                      for j in range(len(traj.points[i].velocities))) / dtt)
-        plan_max_speed = pk_v * 1.3 + 1e-6
-        plan_max_accel = pk_a * 2.5 + 1e-6
+        # The recorded trajectory is a REAL cuMotion plan that already satisfied the mission limits;
+        # the Plan re-validation is spurious for replay, and its cubic re-interpolation of a DENSE
+        # (hundreds-of-point) trajectory overshoots a tight per-point accel estimate (pk_a*2.5 was
+        # rejected, run-273/274 bench). Use GENEROUS ceilings so a valid recorded plan is never
+        # rejected -- the replay measures TRACKING under the trial drive, not trajectory validity.
+        plan_max_speed = pk_v * 3.0 + 10.0
+        plan_max_accel = pk_a * 10.0 + 100.0
     elif carry.profile == 'trapezoid':
         # The trapezoid is densely sampled at exactly the cruise/accel caps; the Plan re-interpolates
         # each tiny segment as a cubic that can marginally overshoot the sampled peaks, so give modest

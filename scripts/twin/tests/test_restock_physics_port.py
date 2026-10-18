@@ -357,3 +357,44 @@ def test_masked_depth_renders_on_sensing_cadence_through_suspension():
     # still renders -> the ESDF stays fresh with the decode render off (once the camera PR lands).
     assert not _sensing_frame_due('collect', 6, 6, suspended=True)
     assert _masked_depth_due('collect', 6, 6, has_masked_depth=True)
+
+
+def test_gate_phase_drive_switches_stiff_for_place_soft_elsewhere(monkeypatch):
+    # fm347/348(1): gate() must switch the arm drive to STIFF for the loaded extend/rotate+place
+    # (pan/preplace/place) and back to SOFT elsewhere, once per transition, via the robot it holds.
+    # (run-274 shoulder_lift sagged 0.622 under the soft drive; bench-s348d proved stiff holds it.)
+    import twin.restock.physics_setup as ps
+    calls = []
+    monkeypatch.setattr(ps, 'set_arm_drive_gains',
+                        lambda robot, aj, kp, kd, eff: calls.append((round(kp), round(kd), round(eff))))
+    port = IsaacPort.__new__(IsaacPort)                 # skip Isaac wiring; only the phase-drive state
+    port._phase = None
+    port._set_render_suspended = None                   # render gate off -> gate() returns after the switch
+    port._phase_drive = {'soft': {'kp': 3e5, 'kd': 8e3, 'eff': 400.},
+                         'stiff': {'kp': 1e6, 'kd': 1e4, 'eff': 2000.}}
+    port._arm_joints = ARM_JOINTS
+    port._last_drive_gains = None
+    port.robot = object()                               # set_arm_drive_gains is patched; robot unused here
+    for ph in ('approach', 'tuck', 'pan', 'preplace', 'place', 'release'):
+        port.gate(ph)
+    soft, stiff = (300000, 8000, 400), (1000000, 10000, 2000)
+    # soft applied entering approach, stiff entering pan (held through preplace/place, no redundant set),
+    # soft restored at release -> exactly [soft, stiff, soft].
+    assert calls == [soft, stiff, soft], calls
+
+
+def test_gate_phase_drive_absent_is_noop(monkeypatch):
+    # Absent config['phase_drive'] -> no gain switch ever (byte-identical to the assemble() drive).
+    import twin.restock.physics_setup as ps
+    calls = []
+    monkeypatch.setattr(ps, 'set_arm_drive_gains', lambda *a, **k: calls.append(a))
+    port = IsaacPort.__new__(IsaacPort)
+    port._phase = None
+    port._set_render_suspended = None
+    port._phase_drive = None
+    port._arm_joints = ARM_JOINTS
+    port._last_drive_gains = None
+    port.robot = object()
+    for ph in ('tuck', 'pan', 'place', 'release'):
+        port.gate(ph)
+    assert calls == []

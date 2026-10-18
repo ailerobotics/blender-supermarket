@@ -371,6 +371,7 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     tests (which inject `_runtime`).
     """
     from .isaac_port import IsaacPort, TransportEnvelope
+    from ..restock_manipulation.cad_tool import ARM_JOINTS as _ARM_JOINTS   # fm347/348(1) phase-drive
     from .recording import Recorder
     from twin.navigation.sensors import IsaacRangeSensor
     from .verification import InventoryVerifier
@@ -511,7 +512,11 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # Ideal simulated proprioception: a sim run may tighten the nav localization pad from the
         # conservative real-rig 0.05 m so it does not falsely fail free(start) against a trailing
         # obstacle. Absent => the real-rig default (untouched). See isaac_port.position_uncertainty.
-        position_uncertainty=float(config.get('sim_odometry_position_uncertainty', 0.05)))
+        position_uncertainty=float(config.get('sim_odometry_position_uncertainty', 0.05)),
+        # fm347/348 (1): opt-in phase-dependent arm drive (soft tuck-settle / stiff loaded-place).
+        # Absent config['phase_drive'] => None => the assemble() drive stays (byte-identical).
+        phase_drive=config.get('phase_drive'),
+        arm_joints=_ARM_JOINTS)
 
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)

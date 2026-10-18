@@ -119,8 +119,17 @@ class IsaacPort:
                  on_action=None, realtime=True, record_stride=2, sensing_stride=1,
                  masked_depth=None, set_render_suspended=None,
                  stationary_dxy=0.005, stationary_dyaw=0.01, command_gate=None,
-                 position_uncertainty=0.05):
+                 position_uncertainty=0.05, phase_drive=None, arm_joints=None):
         self.world,self.robot=world,robot
+        # fm347/348 (1): phase-dependent arm drive. The soft tuck-settle drive (3e5/8000/400) cannot
+        # HOLD the carton-loaded place extend (run-274 shoulder_lift sagged 0.622 rad); the stiff
+        # drive (1e6/1e4/2000, bench-s348d proved it extends+holds+settles the real cuMotion carry).
+        # gate() applies it IN-PROCESS on the phase it already tracks (self._phase) via the robot it
+        # already holds -- no cross-process channel needed. config['phase_drive']={'soft':{kp,kd,eff},
+        # 'stiff':{...}}; absent => None => the assemble() drive stays throughout (byte-identical).
+        self._phase_drive=phase_drive
+        self._arm_joints=tuple(arm_joints) if arm_joints else None
+        self._last_drive_gains=None
         # Localization uncertainty pad added to the nav footprint radius. The real rig keeps the
         # conservative 0.05 m default; this port feeds IDEAL simulated rigid-body proprioception
         # (sensor_models['localization']), so a sim run may set it to the measured ~0 to avoid an
@@ -236,6 +245,18 @@ class IsaacPort:
         and any unknown phase (fail safe). Called each tick BEFORE advance() with the last known
         phase; a one-tick lag is within the occlusion window the hold already tolerates."""
         self._phase=phase            # also drives the phase-aware base brake (see _apply_base_brake)
+        # fm347/348 (1): switch the arm drive to STIFF for the loaded extend/rotate+place (pan/
+        # preplace/place) and back to SOFT elsewhere, applied once per transition (no-op when the
+        # selected gains are unchanged). Opt-in via config['phase_drive']; a stray phase keeps the
+        # current gains (phase_drive_gains returns soft for any non-stiff phase, so the drive can only
+        # be soft or the configured stiff -- never undefined).
+        if self._phase_drive is not None and self._arm_joints and self.robot is not None:
+            from .physics_setup import phase_drive_gains, set_arm_drive_gains
+            g=phase_drive_gains(phase, self._phase_drive)
+            if g is not None and g!=self._last_drive_gains:
+                set_arm_drive_gains(self.robot, self._arm_joints, g['kp'], g['kd'], g['eff'])
+                self._last_drive_gains=g
+                print(f'PHASE_DRIVE phase={phase} -> kp={g["kp"]:g} kd={g["kd"]:g} eff={g["eff"]:g}',flush=True)
         if self._set_render_suspended is None:
             return
         suspended=not sensing_render_required(phase)
