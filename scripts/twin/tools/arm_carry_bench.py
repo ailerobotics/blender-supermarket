@@ -297,6 +297,57 @@ def build_carry_trajectory(start, goal, carry: CarryProfile):
     return traj, T
 
 
+# ------------------------------------------- fm347 bench replay of a recorded cuMotion plan
+
+def parse_traj_host_plan(line):
+    """Parse one ``TRAJ_HOST_PLAN`` log line (emitted by trajectory_host.goal, fm345(d)) into
+    ``(joint_names, points)`` where joint_names is the recorded joint order and points is a list of
+    ``(time_from_start_s, [position_per_name...])``. Pure; no ROS/Isaac. Raises ValueError on a
+    non-matching line. Format:
+      ``TRAJ_HOST_PLAN names=['j',...] npoints=N goal_pos_tol=X points=[(t,[q,...]),...]``"""
+    import ast
+    import re
+    s = line.strip()
+    m = re.search(r'names=(\[[^\]]*\]).*?\bpoints=(\[.*\])\s*$', s)
+    if not m:
+        raise ValueError('not a TRAJ_HOST_PLAN line')
+    names = ast.literal_eval(m.group(1))
+    raw = ast.literal_eval(m.group(2))
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise ValueError('bad names list')
+    pts = []
+    for item in raw:
+        t, q = item
+        q = [float(v) for v in q]
+        if len(q) != len(names):
+            raise ValueError('point width != names width')
+        pts.append((float(t), q))
+    if len(pts) < 2:
+        raise ValueError('a replayable plan needs >=2 points')
+    return list(names), pts
+
+
+def build_replay_trajectory(names, points, *, ref_order=ARM_JOINTS):
+    """Build a bench ``_Trajectory`` (in ``ref_order`` / ARM_JOINTS order) from a recorded cuMotion
+    plan (``names`` joint order, ``points`` = [(t,[q...]),...] from parse_traj_host_plan). Positions
+    are remapped to ref_order; velocities are central-difference finite-differences with exact rest
+    pinned at both ends (Plan requires a rest start), so the executor replays the real cruise speed +
+    terminal decel. Returns ``(traj, duration_s)``."""
+    order = [list(names).index(n) for n in ref_order]   # raises if a ref joint is missing
+    T = [float(t) for t, _ in points]
+    Q = [[float(q[i]) for i in order] for _, q in points]
+    n = len(points)
+    pts = []
+    for k in range(n):
+        if k == 0 or k == n - 1:
+            v = [0.0] * len(ref_order)
+        else:
+            d = T[k + 1] - T[k - 1]
+            v = [((Q[k + 1][j] - Q[k - 1][j]) / d if d > 0 else 0.0) for j in range(len(ref_order))]
+        pts.append(_Point(Q[k], v, T[k]))
+    return _Trajectory(list(ref_order), pts), T[-1]
+
+
 # --------------------------------------------------------------------- executor
 
 @dataclass
@@ -385,20 +436,36 @@ class ArmStage:
 
 
 def run_move(stage: ArmStage, start, goal, carry: CarryProfile, tol: Tolerances,
-             label, *, dt=1.0 / 60.0, max_sim_s=60.0):
+             label, *, dt=1.0 / 60.0, max_sim_s=60.0, traj_override=None):
     """Execute one carrying move and grade it EXACTLY as trajectory_host does: sample the real
     Plan, command the real gate, apply the real tracking-fault debounce and terminal settle gate.
 
-    Returns MoveMetrics. ``outcome`` is 'settled' on success; a failing move yields a non-'settled'
-    outcome (the runner turns any non-'settled' trial into a non-zero exit)."""
+    ``traj_override`` (fm347): when given, replay this exact (_Trajectory, duration) instead of a
+    generated carry trajectory -- used by --replay-plan to run the recorded cuMotion preplace/place
+    timing under the bench's drive. Returns MoveMetrics. ``outcome`` is 'settled' on success; a
+    failing move yields a non-'settled' outcome (the runner turns any non-'settled' trial into a
+    non-zero exit)."""
     tol.validate()
-    traj, duration = build_carry_trajectory(start, goal, carry)
+    traj, duration = traj_override if traj_override is not None else build_carry_trajectory(start, goal, carry)
     m = MoveMetrics(label=label, duration_s=duration)
     limits = [(-2 * math.pi, 2 * math.pi)] * 6   # generous; the generated move stays well within
     # Plan guards the generated trajectory; set its speed/accel ceilings just above the generated
     # peaks (the generator already respects the carry caps, so this never rejects a well-formed move).
     delta = float(np.max(np.abs(np.asarray(goal, float) - np.asarray(start, float))))
-    if carry.profile == 'trapezoid':
+    if traj_override is not None:
+        # fm347 replay: ceilings from the recorded trajectory's own sampled peaks (+ headroom), so
+        # Plan re-interpolation of the real cuMotion timing is never rejected as a speed violation.
+        pk_v = max((abs(v) for p in traj.points for v in p.velocities), default=0.0)
+        tt = [p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in traj.points]
+        pk_a = 0.0
+        for i in range(1, len(traj.points)):
+            dtt = tt[i] - tt[i - 1]
+            if dtt > 0:
+                pk_a = max(pk_a, max(abs(traj.points[i].velocities[j] - traj.points[i - 1].velocities[j])
+                                     for j in range(len(traj.points[i].velocities))) / dtt)
+        plan_max_speed = pk_v * 1.3 + 1e-6
+        plan_max_accel = pk_a * 2.5 + 1e-6
+    elif carry.profile == 'trapezoid':
         # The trapezoid is densely sampled at exactly the cruise/accel caps; the Plan re-interpolates
         # each tiny segment as a cubic that can marginally overshoot the sampled peaks, so give modest
         # headroom (the shape, not the ceiling, is what reproduces the arrival).

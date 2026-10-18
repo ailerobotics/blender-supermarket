@@ -305,9 +305,13 @@ class TransferController:
                 # (pick approach/contact/grasp/lift, and the empty-handed retreat) keeps full speed and
                 # the tight gate. Retreat is post-release and empty, so it is NOT relaxed.
                 place_move = self.phase in ('preplace', 'place')
+                # fm347 (3): the PLACE moves seed the IK from the measured PAN config and branch to the
+                # nearest config to it, so shoulder_pan stays on the pan branch (cart_pan_joint0) instead
+                # of flipping to a far stow-nominal branch (run-273: ~3.9 rad base rotation stalled j0).
                 self.motion.begin(target, s.joint_positions, straight_line=straight,
                                   joint_space=joint_space, wrist1_cap=carry_cap,
-                                  slow=place_move, goal_tol=(0.12 if place_move else None))
+                                  slow=place_move, goal_tol=(0.12 if place_move else None),
+                                  near_start=place_move)
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': self.poses[self.phase]},))
             if self.phase == 'contact' and not self._contact_suction:

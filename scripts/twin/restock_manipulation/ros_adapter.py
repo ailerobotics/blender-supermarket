@@ -207,7 +207,7 @@ class RosMotionPort:
         self._goal_tol_pub.publish(Float64(data=tol))
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
-              slow=False, goal_tol=None):
+              slow=False, goal_tol=None, near_start=False):
         from moveit_msgs.srv import GetPositionIK
         if self.state not in ('idle', 'succeeded', 'failed'):
             raise RuntimeError('motion already active')
@@ -221,6 +221,13 @@ class RosMotionPort:
         # both reset to the full-speed / tight-tolerance default on every non-place move.
         self._move_speed_scale = 0.5 if slow else 1.0
         self._publish_goal_tol(goal_tol)
+        # fm347 (3): pan<->preplace IK-branch consistency. The joint-space IK below normally unwraps to
+        # the branch nearest the STOW nominal (_nearest_branch), which let the cart PLACE pose flip
+        # shoulder_pan to a far branch (run-273: pan left j0 at -1.822 but preplace solved ~2.09 -> a
+        # ~3.9 rad base rotation the soft drive stalled on). With near_start the PLACE moves seed the
+        # measured (pan) config FIRST and branch to the config NEAREST the measured start, so the
+        # preplace stays on the pan branch (small joint move, cart-cage clearance preserved).
+        self._near_start = bool(near_start)
         self._replan_attempts = 0          # fresh-seed re-plan budget for this move (see REPLAN_MAX)
         self._server_crash_retries = 0     # move_group-respawn re-send budget (see MOVE_GROUP_CRASH_RETRY_MAX)
         self._awaiting_server_respawn = False  # True while holding the move open for a respawned move_group
@@ -265,7 +272,10 @@ class RosMotionPort:
         # nearest in-limit branch, and if cuMotion rejects a c-space target as self-collision, try
         # the next seed's solution before failing.
         self._goal_pose = tuple(float(v) for v in pose)
-        self._seeds = self._seed_configs(joints)
+        # fm347 (3): near_start -> try the MEASURED (pan) config as the FIRST IK seed so KDL returns the
+        # branch nearest the pan (not a stow-nominal branch); the normal seeds remain as fallbacks.
+        self._seeds = ([tuple(joints)] + self._seed_configs(joints)
+                       if self._near_start else self._seed_configs(joints))
         self._seed_idx = 0
         self._send_ik(self._seeds[0])
 
@@ -464,6 +474,7 @@ class RosMotionPort:
         # wider PLACE value from a prior move cannot carry into these folds (begin_joint_goal moves
         # are not the carton-loaded place extend).
         self._publish_goal_tol(None)
+        self._near_start = False   # fm347 (3): begin_joint_goal moves use their own goal, never the near_start IK branch
         # Reset the planning anchors for THIS move, exactly as begin() does (firstmate 292 / run-238):
         # without a fresh _plan_started_wall the total-planning-wall cap carried the stale anchor from
         # the previous pose-goal move (lift), so the tuck/pan/stow joint goal tripped
@@ -710,7 +721,11 @@ class RosMotionPort:
                 self.deadline = self._sim_now() + duration + EXECUTE_SETTLE_MARGIN_S
                 self._send(self.execute, goal, 'execute_accept')
                 return 'running'
-            q = self._nearest_branch(q)          # unwrap to the nearest in-limit branch
+            # fm347 (3): the cart PLACE moves (near_start) branch to the config NEAREST the measured pan
+            # start, so shoulder_pan stays on the pan branch (no ~3.9 rad flip to the stow-nominal
+            # branch); every other move keeps the stow-nominal unwrap.
+            q = (self._nearest_to(q, self.start) if getattr(self, '_near_start', False)
+                 else self._nearest_branch(q))   # unwrap to the nearest in-limit branch
             if q is None:
                 if self._next_seed():            # no in-limit branch for this solution; try next seed
                     return 'running'

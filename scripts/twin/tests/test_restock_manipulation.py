@@ -19,7 +19,7 @@ class FixtureMotion:
         self.outcome, self.attach_ok = 'succeeded', True
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
-              slow=False, goal_tol=None):
+              slow=False, goal_tol=None, near_start=False):
         self.moves.append(pose)
         self.joint_space_moves = getattr(self, 'joint_space_moves', [])
         self.joint_space_moves.append(joint_space)
@@ -30,6 +30,9 @@ class FixtureMotion:
         self.slows.append(slow)
         self.goal_tols = getattr(self, 'goal_tols', [])
         self.goal_tols.append(goal_tol)
+        # fm347 (3): per-move IK-branch-near-the-pan flag for the PLACE moves (recorded for assertions).
+        self.near_starts = getattr(self, 'near_starts', [])
+        self.near_starts.append(near_start)
 
     def poll(self):
         return self.outcome
@@ -141,6 +144,20 @@ def test_no_staged_swing_keeps_direct_lift_to_preplace():
     c, m = make_controller(transport_joints=(0.,)*6)      # staged off by default
     run_to(c, 'preplace')
     assert c.phase == 'preplace'                          # lift -> preplace directly, no tuck/pan
+
+
+def test_place_moves_request_near_start_ik_branch_but_pick_moves_do_not():
+    # fm347 (3): the cart PLACE pose moves (preplace/place) must seed+branch the IK to the measured PAN
+    # config so shoulder_pan stays on the pan branch -- run-273 flipped j0 ~3.9 rad (pan -1.822 vs
+    # preplace IK ~2.09) and the soft drive stalled. Pick moves (approach/contact/lift) must NOT.
+    c, m = make_controller(transport_joints=(0.11, -2.5, 1.7, -0.7, -1.5708, 0.0),
+                           staged_cart_swing=True, cart_pan_joint0=-1.822,
+                           cart_tuck_shape=(-2.3, 1.0, 0.65, 0.8, -1.2545))
+    t = run_to(c, 'preplace')                             # through approach/contact/grasp/lift/tuck/pan
+    assert m.near_starts and not any(m.near_starts)       # every begin() so far is a pick move -> False
+    c.step(.1, packet(c, t))                              # issue the preplace pose move
+    assert m.near_starts[-1] is True                      # preplace stays on the pan branch
+    assert m.slows[-1] is True and m.goal_tols[-1] == 0.12  # and keeps the fm345 place relaxations
 
 
 def test_transport_stow_is_planned_before_fresh_inventory_verification():

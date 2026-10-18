@@ -398,3 +398,45 @@ def test_fold_configs_interpolate_lift_to_tuck():
     assert cfgs[0][1] == pytest.approx(-1.41)     # wrist1 starts at the lift value
     assert cfgs[-1][1] == pytest.approx(0.9)      # wrist1 ends at the tuck-shape value
     assert cfgs[-1][2]['ur_shoulder_pan_joint'] == pytest.approx(1.4)  # joint0 held at lift pan
+
+
+# ------------------------------------------------- fm347 bench replay of a recorded cuMotion plan
+
+_PLAN_LINE = (
+    "[python3-5] TRAJ_HOST_PLAN names=['ur_elbow_joint', 'ur_shoulder_lift_joint', "
+    "'ur_shoulder_pan_joint', 'ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_joint'] "
+    "npoints=3 goal_pos_tol=0.120 points=[(0.0, [1.0, -2.27, -1.822, 0.65, 0.8, -1.25]), "
+    "(0.5, [1.0, -2.0, -1.0, 0.65, 0.8, -1.25]), (1.0, [1.0, -1.742, 0.5, 0.65, 0.8, -1.25])]")
+
+
+def test_parse_traj_host_plan_roundtrips_names_and_points():
+    names, pts = bench.parse_traj_host_plan(_PLAN_LINE)
+    assert names == ['ur_elbow_joint', 'ur_shoulder_lift_joint', 'ur_shoulder_pan_joint',
+                     'ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_joint']
+    assert len(pts) == 3
+    assert pts[0] == (0.0, [1.0, -2.27, -1.822, 0.65, 0.8, -1.25])
+    assert pts[-1][0] == 1.0 and pts[-1][1][1] == -1.742
+
+
+def test_parse_traj_host_plan_rejects_nonplan_and_too_short():
+    with pytest.raises(ValueError):
+        bench.parse_traj_host_plan('[move_group-1] some other log line')
+    short = _PLAN_LINE.replace(
+        "points=[(0.0, [1.0, -2.27, -1.822, 0.65, 0.8, -1.25]), "
+        "(0.5, [1.0, -2.0, -1.0, 0.65, 0.8, -1.25]), (1.0, [1.0, -1.742, 0.5, 0.65, 0.8, -1.25])]",
+        "points=[(0.0, [1.0, -2.27, -1.822, 0.65, 0.8, -1.25])]")
+    with pytest.raises(ValueError):
+        bench.parse_traj_host_plan(short)
+
+
+def test_build_replay_trajectory_remaps_to_arm_joints_and_pins_rest_ends():
+    names, pts = bench.parse_traj_host_plan(_PLAN_LINE)
+    traj, duration = bench.build_replay_trajectory(names, pts)
+    assert list(traj.joint_names) == list(bench.ARM_JOINTS)
+    assert duration == 1.0
+    # point 0 remapped to ARM_JOINTS order [pan, lift, elbow, w1, w2, w3]
+    assert traj.points[0].positions == [-1.822, -2.27, 1.0, 0.65, 0.8, -1.25]
+    # rest pinned at both ends; the middle point carries a central-difference velocity (shoulder_pan
+    # rotates -1.822 -> 0.5 over 1.0 s -> ~ (0.5 - (-1.822))/1.0 = 2.322 rad/s at the midpoint)
+    assert traj.points[0].velocities == [0.0] * 6 and traj.points[-1].velocities == [0.0] * 6
+    assert abs(traj.points[1].velocities[0] - 2.322) < 1e-6

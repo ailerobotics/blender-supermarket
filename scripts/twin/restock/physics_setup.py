@@ -20,6 +20,43 @@ from .native_transport import ArmCommandGate, NativeTransport
 from .scene import build, label_stock
 
 
+# fm347 (1): phase-dependent arm drive. The soft drive (3e5/8000/400) SETTLES the tuck fold without
+# ringing (proven), but cannot TRACK the cuMotion preplace/place trajectory for the extended,
+# carton-loaded arm (run-273: shoulder_pan stalled 1.3 rad behind the ref). A STIFFER drive tracks the
+# loaded extend/rotate+place. config['phase_drive'] = {'soft':{kp,kd,eff}, 'stiff':{kp,kd,eff}} opts
+# in; absent => the global assemble() drive stays throughout (byte-identical). The switch is applied
+# ENTERING pan (the first loaded base rotation) through place, and back to soft after release.
+_PHASE_DRIVE_STIFF_PHASES = ('pan', 'preplace', 'place')
+
+
+def phase_drive_gains(phase, phase_drive_cfg):
+    """Pure selector: the arm drive gains to apply when ENTERING ``phase``, or None (not configured /
+    no change). Stiff for the loaded extend/rotate+place (pan/preplace/place); soft for every other
+    phase (the tuck fold, and the empty-handed post-release retreat/stow)."""
+    if not phase_drive_cfg:
+        return None
+    g = phase_drive_cfg.get('stiff' if phase in _PHASE_DRIVE_STIFF_PHASES else 'soft')
+    if not g:
+        return None
+    return {'kp': float(g['kp']), 'kd': float(g['kd']), 'eff': float(g['eff'])}
+
+
+def set_arm_drive_gains(robot, arm_joints, kp, kd, eff):
+    """Runtime re-set of the arm position-drive gains + per-joint effort ceiling for a mid-mission
+    phase switch -- the SAME articulation_controller.set_gains / set_max_efforts path assemble() uses
+    at build time. ``robot`` is the SingleArticulation; ``arm_joints`` the six arm joint names."""
+    arm_ctrl = robot.get_articulation_controller()
+    idx = np.array([robot.get_dof_index(n) for n in arm_joints])
+    kps, kds = arm_ctrl.get_gains()
+    kps = np.asarray(kps, float).copy()
+    kds = np.asarray(kds, float).copy()
+    for i in idx:
+        kps[int(i)] = float(kp)
+        kds[int(i)] = float(kd)
+    arm_ctrl.set_gains(kps, kds)
+    arm_ctrl.set_max_efforts(np.full(len(idx), float(eff)), joint_indices=idx)
+
+
 def inputs(config, scenario):
     """CPU-only exact generated asset validation, with no Isaac import."""
     manifest_path=Path(config['mobile_manifest']).resolve()

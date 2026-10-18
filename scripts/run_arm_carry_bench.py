@@ -749,6 +749,48 @@ def _run_trial(stage: IsaacCarryStage, spec: bench.TrialSpec, goals, dt, max_sim
     return moves
 
 
+def _load_replay_plans(path, *, min_points=10):
+    """fm347: parse the TRAJ_HOST_PLAN lines from a host-stack.log into replayable bench trajectories,
+    in file order. Keeps only the multi-point carry plans (>= min_points) -- the npoints=2 stubs are
+    held-pose re-commands, not moves. Returns [(label, traj, duration)]."""
+    out = []
+    for raw in Path(path).read_text().splitlines():
+        if 'TRAJ_HOST_PLAN' not in raw or 'points=' not in raw:
+            continue
+        try:
+            names, pts = bench.parse_traj_host_plan(raw)
+        except ValueError:
+            continue
+        if len(pts) < min_points:
+            continue
+        traj, duration = bench.build_replay_trajectory(names, pts)
+        out.append(('replay%d' % len(out), traj, duration))
+    if not out:
+        raise ValueError(f'no multi-point TRAJ_HOST_PLAN trajectories in {path}')
+    return out
+
+
+def _run_replay_trial(stage: IsaacCarryStage, spec: bench.TrialSpec, plans, dt, max_sim_s):
+    """fm347: replay recorded cuMotion trajectories in order under the trial drive. Each move starts
+    from the measured end of the previous (the first from the grasp/lift reset)."""
+    stage.reset_to_grasp(spec.gains)
+    moves = []
+    for label, traj, duration in plans:
+        start = np.asarray(stage.measured(), float)
+        goal = np.asarray(traj.points[-1].positions, float)
+        m = bench.run_move(stage, start, goal, spec.carry, spec.tolerances,
+                           label=label, dt=dt, max_sim_s=max_sim_s, traj_override=(traj, duration))
+        moves.append(m)
+        j, err = m.worst_tracking()
+        print('ARMBENCH_REPLAY trial=%s move=%s outcome=%s worst_j=%d worst_track=%.4f '
+              'term_vel_max=%.4f settle=%s reason=%s' % (
+                  spec.label, label, m.outcome, j, err,
+                  max(abs(x) for x in m.terminal_velocity), m.settle_time_s, m.reason), flush=True)
+        if not m.ok:
+            break
+    return moves
+
+
 def _write_partial(output, summary):
     """Persist the running summary after each trial so a wall-cap kill keeps the results so far."""
     try:
@@ -919,10 +961,13 @@ def run(args):
                              p['arm_link_clearance_mm'], p['obstacle_clearance_mm']), flush=True)
                 summary['pinned_config_probes'] = probes
                 _write_partial(args.output, summary)
+            replay_plans = _load_replay_plans(args.replay_plan) if args.replay_plan else None
             for label, goals, spec in (jobs if args.pinned_config is None else []):
                 if not app.is_running():
                     raise RuntimeError('simulation app stopped')
-                moves = _run_trial(stage, spec, goals, args.dt, args.max_sim_s)
+                moves = (_run_replay_trial(stage, spec, replay_plans, args.dt, args.max_sim_s)
+                         if replay_plans is not None
+                         else _run_trial(stage, spec, goals, args.dt, args.max_sim_s))
                 print('ARMBENCH_DIAGNOSIS trial=%s\n%s' % (label, bench.contact_summary(moves)), flush=True)
                 summary['trials'].append(dict(
                     label=label,
@@ -1075,6 +1120,13 @@ def main():
                         'effort-saturation limit cycle a gentle rest-to-rest cubic misses. Implies the '
                         'mission arm envelope (0.3 rad/s / 1.0 rad/s^2) unless --carry-speed/--carry-accel '
                         'are given.')
+    p.add_argument('--replay-plan', type=Path, default=None,
+                   help='fm347: replay the REAL cuMotion trajectories recorded as TRAJ_HOST_PLAN lines '
+                        'in this host-stack.log (run-273) instead of generated carry moves -- the arm '
+                        'follows the exact recorded preplace/place timing under the trial drive '
+                        '(--gain-set) + the carton weld, so the stiff phase-drive can be PROVEN to '
+                        'extend/rotate/hold within the tracking tol offline. Replays the multi-point '
+                        'plans in file order from the grasp/lift start.')
     p.add_argument('--carry-speed', type=float, default=None, help='carry move peak joint speed (rad/s); '
                    'default 0.05 (cubic) or 0.3 (--replay, the mission trajectory_host max_speed)')
     p.add_argument('--carry-accel', type=float, default=None, help='carry move peak joint accel (rad/s^2); '
