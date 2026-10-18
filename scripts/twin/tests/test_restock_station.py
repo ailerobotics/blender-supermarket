@@ -39,11 +39,26 @@ def test_bad_prepare_rejected(field,value):
         StationState().accept(packet,1.)
 
 
-def test_process_and_wall_heartbeat_fail_closed():
+def test_process_death_and_sim_heartbeat_fail_closed():
+    # Primary liveness: a dead host process, or a stalled SIM-clock heartbeat (>0.5 s), fault closed.
+    dead=StationState(wall_clock=lambda:0.)
+    dead.accept(message(),1.)
+    assert dead.snapshot(1.1,endpoints_ready=True,process_alive=False)['state']=='failed'
+    stale=StationState(wall_clock=lambda:0.)
+    stale.accept(message(),1.)
+    assert stale.snapshot(1.7,endpoints_ready=True,process_alive=True)['state']=='failed'  # 0.7 s sim gap
+
+
+def test_wall_backstop_tolerates_render_pacing_but_catches_frozen_sim():
+    # The wall-clock check is only a loose backstop for a FROZEN sim clock; a render-paced tick
+    # (~1 s wall) must NOT false-trip it (regression: ds-011/013 faulted the transfer warm here).
     wall=[0.]
     state=StationState(wall_clock=lambda:wall[0])
     state.accept(message(),1.)
     wall[0]=1.1
+    assert state.snapshot(1.1,endpoints_ready=True,process_alive=True)['state']=='warming'
+    # A genuinely frozen sim clock (sim time not advancing) is still caught once the wall backstop trips.
+    wall[0]=20.
     assert state.snapshot(1.1,endpoints_ready=True,process_alive=True)['state']=='failed'
 
 
