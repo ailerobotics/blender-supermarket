@@ -72,6 +72,39 @@ TRACKING_DEBOUNCE = 3
 # ceiling sits at 1.5 rad (~86deg off-path = genuine instability), well above both the peaks and tol.
 TRACKING_HARD_TOL = 1.5
 
+# Transient tolerance for abnormal executor.spin() exits. run-266: the MultiThreadedExecutor spin
+# returned mid-move under render pacing with NO tracking fault, and the finally's generic
+# fault('executor stopped') emergency-stopped a healthy grasp while masking the real cause. Survive
+# a bounded number of such exits by RE-ENTERING spin() (valid in rclpy: the node/executor stay added),
+# and when a callback has NOT already latched the true fault, log the real exception / exit condition
+# so the stop is honest rather than a generic 'executor stopped'. Bounded so a genuinely broken
+# context still surfaces instead of busy-looping.
+_EXECUTOR_TRANSIENT_BUDGET = 5
+
+
+def executor_exit_action(*, raised_exc, prior_fault, context_ok, transient_budget):
+    """Decide the trajectory executor's action when one ``executor.spin()`` cycle exits. Pure.
+
+    ``raised_exc`` is the repr of an exception spin() raised (else None), ``prior_fault`` the fault a
+    callback has already latched (else None), ``context_ok`` whether rclpy is still live, and
+    ``transient_budget`` the remaining re-entry allowance. Returns ``(action, reason)``:
+
+    * ``('retry', None)``  -- re-enter spin() to survive a transient (run-266 class).
+    * ``('stop', None)``   -- leave the loop WITHOUT a new fault: either a callback already recorded
+      the true cause, or this is a clean rclpy shutdown.
+    * ``('stop', reason)`` -- leave the loop and latch ``reason`` (the honest cause) because the
+      transient budget is spent.
+    """
+    if prior_fault is not None:
+        return ('stop', None)                     # a callback latched the true cause already
+    if raised_exc is None and not context_ok:
+        return ('stop', None)                     # clean rclpy shutdown: normal exit
+    if transient_budget <= 0:
+        reason = (f'executor spin failed repeatedly: {raised_exc}' if raised_exc is not None
+                  else 'executor spin returned without shutdown or tracking fault')
+        return ('stop', reason)
+    return ('retry', None)
+
 
 def feedback_fresh(gap):
     """A relayed joint-feedback frame is fresh if now()-stamp (sim) is within a sub-tick negative
@@ -425,15 +458,39 @@ def main():
         cancel_callback=lambda _:CancelResponse.ACCEPT,callback_group=group)
     executor=MultiThreadedExecutor(num_threads=3)
     executor.add_node(node)
+    transient_budget=_EXECUTOR_TRANSIENT_BUDGET
     try:
-        executor.spin()
+        while True:
+            raised=None
+            try:
+                executor.spin()
+            except Exception as exc:
+                # spin() raising at all is abnormal; log the REAL cause before deciding (run-266's
+                # generic 'executor stopped' hid it). A callback that faulted already published stop.
+                raised=repr(exc)
+                print(f'TRAJ_HOST_EXECUTOR_EXC {raised}',flush=True)
+            with lock:
+                prior=state['fault']
+            action,reason=executor_exit_action(raised_exc=raised,prior_fault=prior,
+                context_ok=rclpy.ok(),transient_budget=transient_budget)
+            if action=='retry':
+                transient_budget-=1
+                print(f'TRAJ_HOST_EXECUTOR_RESPIN budget_left={transient_budget} '
+                      f'raised={raised}',flush=True)
+                continue
+            if reason is not None:
+                with lock:
+                    fault(reason)
+            break
     finally:
         with lock:
-            fault('executor stopped')
+            if not state['fault']:
+                fault('executor stopped')   # honest last-resort marker if nothing truer recorded
         server.destroy()
         executor.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__=='__main__':
