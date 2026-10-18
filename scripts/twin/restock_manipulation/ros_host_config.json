@@ -43,5 +43,68 @@
   -1.2545
  ],
  "plan_wall_cap_s": 60.0,
- "base_collision_object": false
+ "base_collision_object": false,
+ "world_obstacles": [
+  {
+   "id": "cart_cage",
+   "boxes": [
+    {
+     "size": [
+      0.8,
+      0.68,
+      0.05
+     ],
+     "center": [
+      -1.27,
+      0.0,
+      -0.3
+     ]
+    },
+    {
+     "size": [
+      0.02,
+      0.68,
+      1.45
+     ],
+     "center": [
+      -1.65,
+      0.0,
+      0.425
+     ]
+    },
+    {
+     "size": [
+      0.8,
+      0.02,
+      1.45
+     ],
+     "center": [
+      -1.27,
+      -0.32,
+      0.425
+     ]
+    },
+    {
+     "size": [
+      0.8,
+      0.02,
+      1.45
+     ],
+     "center": [
+      -1.27,
+      0.32,
+      0.425
+     ]
+    }
+   ]
+  }
+ ],
+ "cart_cage_place": true,
+ "cage_axis": [
+  1.0,
+  0.0,
+  0.0
+ ],
+ "cage_mouth_standoff": 0.55,
+ "cage_insert_gap": 0.03
 }

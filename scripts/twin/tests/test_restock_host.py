@@ -489,8 +489,11 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     'arm_max_speed', 'startup_grace_seconds',
                                     'sim_cart_place_policy', 'payload_ack_wall_s', 'staged_cart_swing',
                                     'cart_pan_joint0', 'cart_tuck_shape', 'plan_wall_cap_s',
-                                    'base_collision_object'})
-        for k in ('sim_cart_place_policy', 'staged_cart_swing', 'base_collision_object'):
+                                    'base_collision_object',
+                                    # fm350(B) cart-cage open-face place (host-config keys read by ros_host).
+                                    'world_obstacles', 'cart_cage_place', 'cage_axis',
+                                    'cage_mouth_standoff', 'cage_insert_gap'})
+        for k in ('sim_cart_place_policy', 'staged_cart_swing', 'base_collision_object', 'cart_cage_place'):
             self.assertIsInstance(cfg[k], bool)
         for k in ('payload_ack_wall_s', 'cart_pan_joint0', 'plan_wall_cap_s'):
             self.assertIsInstance(cfg[k], (int, float))
