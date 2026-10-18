@@ -364,6 +364,7 @@ def run(args, manifest, scenario):
                 def _make_mission():
                     return Mission(db, Job(**scenario['job']), bundle.adapter,
                                    stages=config.get('stages'), start_at=config.get('start_at'),
+                                   timeout_s=float(config.get('stage_timeout_s', 120.)),
                                    fit_preflight=fit_verdict)
                 def run_once():
                     """One full mission attempt against the live bundle; returns (mission, summary)
