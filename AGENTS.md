@@ -214,6 +214,17 @@ repo's `scenes/`, `export/` or `renders/`.
   `scripts/twin/restock/`; CPU checks and adapter contract are in RUNBOOK §11.
   `data/mobile-restock-v2/report.md` distinguishes fixture tests from the still
   unverified physical cycle and records the GPU driver diagnosis.
+- **move_group planner-crash resilience**: an intermittent `SIGABRT` double-free inside the prebuilt
+  `isaac_ros_cumotion_moveit` 4.4.0 plugin's plan-result handling (runs in the `move_group` process;
+  correlated with the carry-fold plan computed *after* carton object-attachment) aborts move_group
+  right after a SUCCESSFUL cuMotion plan. The host launch (`scripts/twin/restock_host/launch.py`,
+  see its move_group `respawn`/`guarded` comments) now **respawns move_group** and excludes it from
+  the stack-teardown guard set, and the planning client (`restock_manipulation/ros_adapter.py`
+  `RosMotionPort._handle_server_crash`, `MOVE_GROUP_CRASH_RETRY_MAX`) **re-sends the same plan goal**
+  on server loss (bounded, logged), so the crash costs a retry not a 20-30 min GPU run. It is a vendor
+  (prebuilt) bug — don't chase it in this repo's moveit (overlay vs `/opt/ros` moveit libs are
+  byte-identical, so no ABI skew); pin it with a malloc-hardened move_group on the next GPU run. Don't
+  change stage/station-guard bounds (host-lifecycle lane territory).
 - **Smart post-restock verification** (CPU, read-only, opt-in): `restock/smart_verify.py`
   + CLI `scripts/run_smart_verify.py` turn a finished mission into an ADDITIONAL
   planogram/realogram compliance verdict + residual reset jobs (sim-smart-job-feed-v1
