@@ -230,21 +230,91 @@ class PhysicsAssembly:
         self.command_gate.hold()
 
 
-def map_arm_gravity(gfull, view_dof_names, arm_names):
-    """Extract the arm joints' generalized-gravity terms from the articulation's FULL-DOF gravity
-    vector, mapping each arm joint by its name's index in the VIEW's dof-name order.
+# fm356 option (A): the gravity feedforward is computed ON CPU from the URDF link tree + the robot's
+# per-body masses, bypassing Isaac's get_generalized_gravity_forces entirely. That query is unusable in
+# this build: the per-joint ``joint_names=`` form mis-assigned the terms (run-279 fed +78.76 Nm to the
+# VERTICAL-axis ur_shoulder_pan, whose true gravity torque is identically 0, stalling the pan 0.176 rad
+# short), and the full-DOF vector is NOT ordered like ``_view.dof_names`` so by-name indexing read all
+# zeros (run-281, caught by the boot fail-fast). The CPU computation is correct-by-construction and is
+# CPU-verified against gravity_ff_proof.py (pan G=0 at every config; lift/elbow carry the load).
+#
+# Per-body masses the mission articulation actually carries, from the armbench ARMBENCH_RUNTIME_BODY_MASS
+# dump (fixed for this robot + gripper payload; Isaac assigns a default 1.0 kg to frame links the URDF
+# leaves massless, which the URDF inertials alone would miss -- so these, not the URDF masses, are used).
+_ISAAC_BODY_MASSES = {
+    'base_link': 180.0, 'arm_mount': 12.0, 'front_camera_frame': 1.0, 'front_caster_fork': 0.3,
+    'hitch': 1.0, 'imu_frame': 1.0, 'left_wheel': 4.0, 'lidar_frame': 1.0, 'rear_caster_fork': 0.3,
+    'right_wheel': 4.0, 'ur_base_link': 1.0, 'front_caster_wheel': 0.5, 'rear_caster_wheel': 0.5,
+    'ur_base': 1.0, 'ur_base_link_inertia': 4.0, 'ur_shoulder_link': 7.1, 'ur_upper_arm_link': 12.7,
+    'ur_forearm_link': 4.27, 'ur_wrist_1_link': 2.0, 'ur_wrist_2_link': 2.0, 'ur_wrist_3_link': 0.365,
+    'ur_flange': 1.0, 'ur_ft_frame': 1.0, 'ur_tool0': 1.0, 'big_cube': 4.0,
+    'cube_without_surface_plates': 0.1, 'suction_cups': 0.1, 'gripper_tcp': 1.0, 'surface_plate_1': 0.1,
+    'surface_plate_2': 0.1, 'surface_plate_3': 0.1, 'surface_plate_4': 0.1, 'surface_plate_5': 0.1,
+    'surface_plate_6': 0.1, 'gripper_pad_tcp': 1.0,
+}
+_GRAVITY_VEC = (0.0, 0.0, -9.81)
 
-    fm355: the per-joint ``get_generalized_gravity_forces(joint_names=...)`` query mis-assigned the
-    terms in this Isaac build -- run-279 read ~ -78.76 Nm on the VERTICAL-axis ur_shoulder_pan whose
-    true gravity torque is identically 0 (r x F about a vertical axis with vertical gravity), feeding a
-    spurious +78.76 Nm bias that stalled the pan 0.176 rad short. The articulation VIEW's dof order
-    also differs from ``robot.get_dof_index`` (run-153/154), so the robust mapping is BY NAME against
-    the view's own ``dof_names``, aligned to the full-DOF vector the view returns. Pure for CPU test;
-    raises ValueError if an arm joint name is absent from the view dof names (caller guards)."""
-    gfull = np.asarray(gfull, float).reshape(-1)
-    view_dof_names = list(view_dof_names)
-    idx = [view_dof_names.index(n) for n in arm_names]
-    return gfull[np.asarray(idx, int)]
+
+def _joint_world_frame(joint, world):
+    """(origin, unit axis) of a joint in world, from its parent link world transform + joint origin."""
+    from twin.urdf_probe import rpy_to_matrix
+    Wp = world[joint.parent]
+    T = np.eye(4)
+    T[:3, :3] = rpy_to_matrix(joint.origin_rpy)
+    T[:3, 3] = joint.origin_xyz
+    Fw = Wp @ T
+    ax = np.asarray(joint.axis, float)
+    ax = ax / np.linalg.norm(ax)
+    return Fw[:3, 3], Fw[:3, :3] @ ax
+
+
+def build_arm_gravity(model, arm_names, link_masses):
+    """Return ``grav(q6) -> ndarray[6]`` giving the generalized gravity torque G on each arm joint (in
+    ``arm_names`` order) at arm config ``q6``, computed on CPU from ``model`` (a urdf_probe.parse_urdf
+    robot) + ``link_masses`` {link: kg}. Same math as gravity_ff_proof.py:
+    ``G_j = sum_{L downstream of j} m_L * g . (axis_j x (p_com_L - o_j))``. Static parts (joint map,
+    downstream link sets, local CoMs) are precomputed ONCE; only FK + the dot-product sum run per call.
+    Pure (no Isaac); importable for CPU test."""
+    from twin import urdf_probe as up
+    jby = {j.name: j for j in model.joints}
+
+    def downstream(child):
+        out, stack = set(), [child]
+        while stack:
+            c = stack.pop()
+            out.add(c)
+            for j in model.joints:
+                if j.parent == c:
+                    stack.append(j.child)
+        return out
+
+    ds = {n: downstream(jby[n].child) for n in arm_names}
+    coms = {}
+    for ln, lk in model.links.items():
+        m = link_masses.get(ln)
+        if m:
+            c = lk.inertial.origin_xyz if (lk and lk.inertial) else (0.0, 0.0, 0.0)
+            coms[ln] = (float(m), np.array([c[0], c[1], c[2], 1.0]))
+    g = np.asarray(_GRAVITY_VEC, float)
+
+    def grav(q6):
+        cfg = dict(zip(arm_names, [float(x) for x in q6]))
+        world = up.link_world_transforms(model, cfg)
+        out = np.zeros(6)
+        for i, n in enumerate(arm_names):
+            oj, axw = _joint_world_frame(jby[n], world)
+            total = 0.0
+            for ln in ds[n]:
+                mc = coms.get(ln)
+                if mc is None or ln not in world:
+                    continue
+                mkg, comh = mc
+                pw = (world[ln] @ comh)[:3]
+                total += mkg * np.dot(g, np.cross(axw, pw - oj))
+            out[i] = total
+        return out
+
+    return grav
 
 
 def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
@@ -457,30 +527,34 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     except Exception as exc:
         print(f'ARM_GRAVITY_FULL_UNAVAILABLE {exc}',flush=True)
     _arm_names=list(tool.arm_joints)
-    # fm355: the view's OWN dof-name order (the order its full-DOF gravity vector is returned in), read
-    # once. The arm gravity is then mapped BY NAME from the full vector (map_arm_gravity) -- NOT via the
-    # per-joint joint_names= query (which mis-assigned pan in this build) nor robot.get_dof_index (whose
-    # order differs from the view). None => the guard below disables the ff (never a crash).
+    # fm356 option (A): build the CPU gravity-torque function ONCE from the URDF tree + the known
+    # per-body masses (see build_arm_gravity). This replaces every Isaac get_generalized_gravity_forces
+    # read for the ff (both the joint_names= query and the full-DOF+dof_names mapping failed, run-279/
+    # 281). None => the guard below disables the ff (never a crash). The one-shot ARM_GRAVITY_FULL dump
+    # above still prints Isaac's raw vector for diagnostics; it is NOT used for the ff anymore.
+    _grav_fn=None
     try:
-        _view_dof_names=list(_view.dof_names) if _view is not None else None
+        from twin import urdf_probe as _up
+        _grav_fn=build_arm_gravity(_up.parse_urdf(str(urdf)),_arm_names,_ISAAC_BODY_MASSES)
     except Exception as exc:
-        _view_dof_names=None
-        print(f'ARM_GRAVITY_FF_VIEWNAMES_UNAVAILABLE {exc}',flush=True)
+        print(f'ARM_GRAVITY_FF_MODEL_UNAVAILABLE {exc}',flush=True)
+        _grav_fn=None
     def apply(q,v,indices):
         efforts=None
-        # fm355: gravity-comp feedforward from the FULL-DOF gravity vector, arm terms mapped by name
-        # against the view's dof_names (map_arm_gravity). Fixes run-279's spurious +78.76 Nm on the
-        # vertical-axis shoulder_pan (true gravity 0) that stalled the pan 0.176 rad short; the real
-        # loads are on shoulder_lift/elbow. Threshold + sign unchanged. Fully guarded: any failure
-        # (missing view, missing dof name, API error) => efforts=None (clean position drive, as off).
-        if _grav_ff and _view is not None and _view_dof_names is not None and list(indices)==list(_arm_idx):
+        # fm356 option (A): gravity-comp feedforward computed ON CPU from the URDF + masses at the
+        # COMMANDED arm config q (q is aligned to indices==_arm_idx, i.e. arm_names order), feeding -G
+        # as joint effort. Replaces the broken Isaac gravity query (run-279 spurious +78.76 on the
+        # vertical pan; run-281 all-zeros). Threshold + sign unchanged. Fully guarded: any failure =>
+        # efforts=None (clean position drive, exactly as the ff-off path). Per tick this is one FK pass
+        # + a dot-product sum over the arm's downstream links (cheap); no Isaac call.
+        if _grav_ff and _grav_fn is not None and list(indices)==list(_arm_idx):
             try:
-                g=map_arm_gravity(_view.get_generalized_gravity_forces(),_view_dof_names,_arm_names)
+                g=np.asarray(_grav_fn(q),float)
                 efforts=np.where(np.abs(g)>=_ff_min_nm,_ff_sign*g,0.0)
                 if _ff_log[0]<3:
                     _ff_log[0]+=1
                     print(f'ARM_GRAVITY_FF names={_arm_names} '
-                          f'g={np.array2string(np.asarray(g),precision=2,separator=",")} '
+                          f'g={np.array2string(g,precision=2,separator=",")} '
                           f'ff={np.array2string(efforts,precision=2,separator=",")}',flush=True)
             except Exception as exc:
                 if _ff_log[0]<1:
