@@ -166,9 +166,16 @@ repo's `scenes/`, `export/` or `renders/`.
   fallback, by projected known poses; and a configurable slow/stop-base +
   pause/resume-arm mechanism (`reaction.py`, fail-safe to STOP on stale state).
   Human detections use the dynobs `Detection(position, radius, source)` contract
-  and are consumable by `navigation/dynamic.py` via `detection.to_nav_detections`.
-  Mission/nav/arm touch points are documented seams only (`integration.py`,
-  `README.md`), not wired into the lane-owned files. CPU tests + a ground-truth demo
+  and are consumable by `navigation/dynamic.py` via `detection.to_nav_detections`;
+  the mission detection feed + visible people authoring already land through the
+  dynobs source (`navigation/mission_source.py`, PR #130). The reaction's base-scale
+  + reversible arm-pause into the mission is the mechanism `mission_wiring.py`
+  (`MissionReaction.step(now)`, `ReversibleArmPause`); its mission touch points
+  (isaac_bundle scene author, isaac_port `after_step`, runtime base-velocity scale,
+  a reversible `ArmCommandGate.set_paused`) are NAMED there for the owning lanes to
+  wire behind `humans.enabled` at an integration boot, not edited here.
+  Other touch points are documented seams only (`integration.py`, `README.md`),
+  not wired into the lane-owned files. CPU tests + a ground-truth demo
   (`scripts/run_humans_safety_demo.py`). Guarded-GPU evidence is the standalone bench
   `gpu_bench.py` via `run_restock_render_smoke.py --humans-only` (people cross the
   robot on the real candidate camera, GT detection+reaction → CLEAR→SLOW→STOP→resume);
