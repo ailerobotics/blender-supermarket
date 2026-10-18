@@ -369,12 +369,17 @@ def main():
                 Plan(request.trajectory,state['feedback'][1],limits,max_speed=max_speed,max_acceleration=max_acceleration)
                 # fm345 (d): dump the accepted cuMotion plan (joint names + per-point t/positions) so a
                 # future offline replay is possible if the place fails again. One line per accepted goal;
-                # no run-dir is passed to this executor, so it rides host-stack.log via stdout.
-                _jt=request.trajectory.joint_trajectory
-                _pts=[(round(p.time_from_start.sec+p.time_from_start.nanosec*1e-9,4),
-                       [round(float(x),4) for x in p.positions]) for p in _jt.points]
-                print(f'TRAJ_HOST_PLAN names={list(_jt.joint_names)} npoints={len(_pts)} '
-                      f'goal_pos_tol={state["goal_pos_tol"]:.3f} points={_pts}',flush=True)
+                # no run-dir is passed to this executor, so it rides host-stack.log via stdout. Wrapped
+                # in a best-effort guard: this is diagnostics only and must NEVER break goal acceptance
+                # (run-271: a wrong-attribute dump raised AttributeError and failed the approach).
+                try:
+                    _jt=request.trajectory   # FollowJointTrajectory.goal.trajectory IS a JointTrajectory
+                    _pts=[(round(p.time_from_start.sec+p.time_from_start.nanosec*1e-9,4),
+                           [round(float(x),4) for x in p.positions]) for p in _jt.points]
+                    print(f'TRAJ_HOST_PLAN names={list(_jt.joint_names)} npoints={len(_pts)} '
+                          f'goal_pos_tol={state["goal_pos_tol"]:.3f} points={_pts}',flush=True)
+                except Exception as _exc:
+                    print(f'TRAJ_HOST_PLAN dump skipped: {_exc!r}',flush=True)
                 state['active']=True
                 return GoalResponse.ACCEPT
             except ValueError:
