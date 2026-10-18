@@ -25,6 +25,7 @@ import math
 from pathlib import Path
 from typing import Dict, Sequence, Tuple
 
+from . import bench_overlay
 from .config import HumansConfig, PersonSpec
 from .detection import GroundTruthSafety
 from .paths import PINGPONG
@@ -151,6 +152,32 @@ def run(app, config, output, *, ffmpeg, sensing_stride: int = 8,
     radii = {p.person_id: p.radius_m for p in people}
     heights = {p.person_id: p.height_m for p in people}
 
+    # DEMONSTRATIVE third-person overview camera: the robot-eye candidate camera is
+    # aimed at the shelf and does not frame the person, so for evidence a reviewer
+    # can SEE we author a separate overview camera that frames the robot + the person
+    # path, and draw the GT box + safety-state overlay on its frames (firstmate review
+    # 2026-10-18). Reaction/detection are unchanged (ground truth, pose-based).
+    from twin.restock.native_cameras import CameraRig
+    from twin.restock_camera.geometry import look_at
+    overview = bool(config.get('humans_bench_overview', True))
+    ov_camera = ov_world_from_optical = ov_intr = None
+    if overview:
+        fwd = (math.cos(base_pose[2]), math.sin(base_pose[2]))
+        near_m, far_m = bench_overlay.frame_span_from_people(people, base_pose[:2])
+        eye, target = bench_overlay.overview_look_at(base_pose[:2], fwd, near_m, far_m)
+        ov_world_from_optical = look_at(eye, target)
+        ov_intr = dict(width=960, height=540, fx=620., fy=620., cx=480., cy=270.,
+                       near=0.1, far=40.)
+        solid = [[1., 0., 0., eye[0]], [0., 1., 0., eye[1]],
+                 [0., 0., 1., eye[2]], [0., 0., 0., 1.]]
+        ov_spec = dict(id='humans_overview', parent='map',
+                       parent_from_optical=ov_world_from_optical.tolist(),
+                       intrinsics=ov_intr,
+                       collision_solids=[dict(parent_from_solid=solid,
+                                              size_m=[0.04, 0.04, 0.04])])
+        ov_rig = CameraRig(stage=stage, specs=[ov_spec], parent_paths={'map': '/World'})
+        ov_camera = ov_rig.cameras['humans_overview']
+
     def people_positions(now: float):
         out = []
         for p in people:
@@ -197,20 +224,46 @@ def run(app, config, output, *, ffmpeg, sensing_stride: int = 8,
             (output / 'reaction-trace.jsonl').write_text(
                 '\n'.join(json.dumps(r) for r in rows) + '\n')
         if do_capture:
-            frame = camera.get_current_frame(clone=True)
-            if recorder.capture(frame):
+            # Record the OVERVIEW camera (frames the robot + person) with the GT box
+            # and safety-state overlay when enabled; else the robot-eye camera.
+            src_cam = ov_camera if ov_camera is not None else camera
+            frame = src_cam.get_current_frame(clone=True)
+            identity = frame.get('native_rendering_frame', frame.get('rendering_frame'))
+            render_id = json.dumps(identity, sort_keys=True, separators=(',', ':')) \
+                if identity is not None else None
+            stamp = float(frame['rendering_time'])
+            rgb = np.asarray(frame.get('rgb'))
+            fresh = (render_id is not None and rgb.ndim == 3 and rgb.shape[2] >= 3
+                     and render_id not in recorder.ids
+                     and (not recorder.frames or stamp > recorder.frames[-1]['simulation_time']))
+            if fresh:
+                last = rows[-1] if rows else {}
+                if ov_camera is not None:
+                    boxes = []
+                    for pid, xyz, r in people_positions(now):
+                        b = bench_overlay.person_image_box(
+                            (xyz[0], xyz[1], 0.0), r, heights[pid],
+                            ov_world_from_optical, ov_intr)
+                        if b:
+                            boxes.append(b)
+                    out_rgb = bench_overlay.draw_overlay(
+                        rgb[:, :, :3], last.get('zone', 'CLEAR'),
+                        float(last.get('base_scale', 1.0)), bool(last.get('arm_hold', False)),
+                        boxes, t=now, source=humans.detection.source)
+                else:
+                    out_rgb = rgb[:, :, :3]
+                recorder.add(np.ascontiguousarray(out_rgb, dtype=np.uint8),
+                             render_id=render_id, simulation_time=stamp)
                 depth = np.asarray(frame.get('distance_to_image_plane'), float)
                 np.savez_compressed(
                     output / 'depth-frames' / f'{len(recorder.frames) - 1:06d}.npz',
                     depth=depth)
-                # Annotate the frame with the most recent reaction state (the trace
-                # above owns the authoritative tick; this is a read-only label).
-                last = rows[-1] if rows else {}
                 frame_records.append(dict(index=len(recorder.frames) - 1,
-                                          simulation_time=float(frame['rendering_time']),
+                                          simulation_time=stamp,
                                           zone=last.get('zone'),
                                           base_scale=last.get('base_scale'),
-                                          arm_hold=last.get('arm_hold')))
+                                          arm_hold=last.get('arm_hold'),
+                                          person_boxes=boxes if ov_camera is not None else None))
         # Stop only once the WHOLE evidence story is captured: enough frames and the
         # full CLEAR->SLOW->STOP plus the base/arm RESUME (a <1->1 and a hold->release
         # transition, which each need the resume-dwell to elapse). A single late CLEAR
@@ -232,15 +285,23 @@ def run(app, config, output, *, ffmpeg, sensing_stride: int = 8,
     except Exception:
         pass
 
+    # At least one recorded frame must actually contain the person's GT box, so a
+    # pass means the demonstrative frames really show the handled person (not just a
+    # passing trace with the person off-frame, the limitation of the robot-eye view).
+    frames_show_person = any(fr.get('person_boxes') for fr in frame_records) \
+        if overview else None
     complete = (summary['slow_seen'] and summary['stop_seen']
                 and summary['arm_paused'] and summary['base_resumed']
-                and len(recorder.frames) >= 2)
+                and len(recorder.frames) >= 2
+                and (frames_show_person is not False))
     return dict(status='passed' if complete else 'failed',
                 evidence='native RTX ground-truth human-safety bench (NOT a neural '
                          'detector measurement, NOT a mission); scripted people, '
-                         'ground-truth projection into the real candidate camera',
+                         'ground-truth projection into the real candidate camera; '
+                         'frames from a third-person overview with GT box + state overlay',
                 view=view, provenance='ground_truth', frames=len(recorder.frames),
                 video=video, trace_rows=len(rows), summary=summary,
+                overview=overview, frames_show_person=frames_show_person,
                 base_pose=list(base_pose), camera_pose=list(cam_pose),
                 staging_base_pose=list(staging_base_pose),
                 base_model='camera-as-robot-eye (safety distance is person-to-camera)',
