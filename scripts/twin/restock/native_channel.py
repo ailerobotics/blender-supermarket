@@ -213,9 +213,10 @@ class StationClient:
         if self.stage_clock is not None:
             ref_stage=self._last_ack_stage if self._last_ack_stage is not None else self._begin_stage
             if ref_stage is not None and now-ref_stage>self.stage_unavailable_s:
-                raise RuntimeError('station supervisor heartbeat unavailable')
+                raise RuntimeError(self._unavailable_reason(f'stage gap {now-ref_stage:.1f}s'))
         if self.wall_clock()-(self.last_reply or self.started)>self.heartbeat_s:
-            raise RuntimeError('station supervisor heartbeat unavailable')
+            raise RuntimeError(self._unavailable_reason(
+                f'wall gap {self.wall_clock()-(self.last_reply or self.started):.1f}s'))
         wall=self.wall_clock()
         if self.last_send<0 or wall-self.last_wall_send>=_HEARTBEAT_WALL_S:
             # Re-send the prepare (seq 0) each cadence tick until the host acknowledges this epoch
@@ -247,6 +248,21 @@ class StationClient:
         self.sequence+=1
         self.last_send=now
         self.last_wall_send=self.wall_clock()
+
+    def _unavailable_reason(self,gap_desc):
+        """Honest supervisor-unavailable reason. When the station had been HEALTHY (ready/warming)
+        and then went silent, the cause is almost never the station itself -- it is the whole host
+        stack being torn down because a SIBLING host node died (run-268: move_group SIGABRT'd on a
+        cuMotion double-free, the launch SIGINT'd every host process, the station's acks froze, and
+        this guard -- firing on the resulting staleness -- was misread as the station's fault). Name
+        that so a host-stack teardown is not masked as a station lifecycle bug. Keeps the
+        'station supervisor heartbeat unavailable' substring for existing log/reason matching."""
+        last=(self.latest or {}).get('state')
+        if last in ('ready','warming'):
+            return ('station supervisor heartbeat unavailable: host stack went silent after last '
+                    f'state={last} ({gap_desc}); a sibling host process likely died -- inspect '
+                    'host-stack.log for an earlier process exit (e.g. move_group)')
+        return f'station supervisor heartbeat unavailable ({gap_desc}; last state={last})'
 
     def ready(self,now):
         if self.stage_clock is not None:
