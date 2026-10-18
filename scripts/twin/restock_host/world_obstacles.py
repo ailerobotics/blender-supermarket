@@ -28,7 +28,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -170,8 +170,8 @@ def carton_arm_clearance(urdf_path: str, xrdf_path: str, config: Dict[str, float
     world (nvblox ESDF + world obstacles) but the asset design also intends it self-checked against the
     arm. A negative result here at a planned configuration means the arm planner is NOT catching a
     carton-vs-arm contact it should -- exactly the gap the XRDF attached_object self-collision
-    declaration (declaration + placeholder spheres) is meant to close. Used to reproduce the run-250
-    finding and to prove the pre-attach grasp/approach configs stay clear of the carton cover."""
+    registration (add_frame + ignore, spheres supplied at runtime) is meant to close. Used to
+    reproduce the run-250 finding and to prove the carry fold contact the self-collision must catch."""
     ac, ar, owners = arm_spheres_world(urdf_path, xrdf_path, config)
     carton = carton or {'dims': [0.6, 0.4, 0.16]}
     cc, cr = carton_spheres_world(urdf_path, config, **carton)
@@ -189,6 +189,60 @@ def carton_arm_clearance(urdf_path: str, xrdf_path: str, config: Dict[str, float
     return {'config': dict(config), 'worst_link': None if worst is None else worst[0],
             'clearance_m': None if worst is None else worst[1],
             'clear': worst is None or worst[1] > 0.0, 'per_link': per_link}
+
+
+def simulate_object_attachment_reload(xrdf: dict, n_spheres: int = 34, radius: float = 0.05) -> dict:
+    """Model cuMotion's ObjectAttachmentNode.UpdateRobotDescriptionWithSpheres reload on CPU.
+
+    On attach the node reads the geometry name from the XRDF ``collision`` section, generates the
+    carton collision spheres, transforms them into the grasp frame, and writes them under
+    geometry[geom].spheres['attached_object'] -- OVERWRITING whatever was there -- then reloads the
+    robot description via set_robot_description (run-259 host-stack.log: "Updating robot description
+    with 34 collision spheres for link 'attached_object'" -> "Loading robot description from memory").
+    Returns a NEW XRDF dict with that mutation applied, so a test can check the post-attach robot
+    description the planner actually runs the carry plan against. The sphere values are synthetic
+    (the real ones come from the carton mesh at runtime); only their PRESENCE under that frame key
+    matters to the self-collision mask resolution modelled by resolve_self_collision_masks()."""
+    import copy
+    out = copy.deepcopy(xrdf)
+    geom = out['collision']['geometry']
+    out['geometry'][geom]['spheres']['attached_object'] = [
+        {'center': [0.0, 0.0, 0.20], 'radius': float(radius)} for _ in range(int(n_spheres))]
+    return out
+
+
+def kinematic_frames(xrdf: dict, urdf_links: Iterable[str]) -> set:
+    """The frames curobo recognises as collision-sphere carriers: every URDF link plus every frame
+    inserted by an ``add_frame`` modifier. Geometry spheres keyed by a name that is NOT such a frame
+    are orphaned and dropped -- the root cause of run-256/259: ``attached_object`` carried spheres in
+    the geometry but, lacking an add_frame modifier, curobo logged 'no self-collision spheres
+    specified' and never added its masks."""
+    frames = set(urdf_links)
+    for mod in xrdf.get('modifiers', []) or []:
+        if isinstance(mod, dict) and 'add_frame' in mod:
+            frames.add(mod['add_frame']['frame_name'])
+    return frames
+
+
+def resolve_self_collision_masks(xrdf: dict, urdf_links: Iterable[str]) -> dict:
+    """Model how cuMotion turns ``self_collision.ignore`` pairs into actual self-collision masks.
+
+    A pair (A, B) becomes a mask ONLY if BOTH A and B are kinematic frames (see kinematic_frames)
+    that carry >=1 sphere in the self_collision geometry; otherwise curobo logs "Found self-collision
+    mask between frame '<A>' and frame '<B>', but frame '<X>' has no self-collision spheres specified.
+    Self-collision mask will not be added" and SKIPS the pair. This is the exact predicate behind the
+    run-256/259 warnings. Returns {'resolved': [...], 'skipped': [...]} of (A, B) pairs."""
+    frames = kinematic_frames(xrdf, urdf_links)
+    geom = xrdf['geometry'][xrdf['self_collision']['geometry']]['spheres']
+
+    def carries(frame):
+        return frame in frames and bool(geom.get(frame))
+
+    resolved, skipped = [], []
+    for a, others in (xrdf.get('self_collision', {}).get('ignore', {}) or {}).items():
+        for b in others:
+            (resolved if carries(a) and carries(b) else skipped).append((a, b))
+    return {'resolved': resolved, 'skipped': skipped}
 
 
 def check_configuration(urdf_path: str, xrdf_path: str, boxes: Sequence[Box],

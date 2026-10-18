@@ -105,9 +105,9 @@ class TestCartonCoverLocal(unittest.TestCase):
 class TestCartonArmClearance(unittest.TestCase):
     """Regression for the planner-side finding: the tuck GOAL drives the carton into ur_upper_arm
     even though cuMotion reports the plan collision-free -- so the arm planner is not catching the
-    carton-vs-arm contact (run-249/250). The attached_object self-collision declaration (declaration
-    + placeholder spheres) is what makes cuMotion catch it. Reproduced on CPU from the asset URDF FK
-    + XRDF spheres."""
+    carton-vs-arm contact (run-249/250). The attached_object self-collision registration (add_frame +
+    ignore, carton spheres supplied at runtime) is what makes cuMotion catch it. Reproduced on CPU
+    from the asset URDF FK + XRDF spheres."""
 
     def _cfg(self, w1):
         return dict(zip(_JOINTS, [1.2251, -2.2422, 1.0802, w1, 1.0608, -1.1675]))
