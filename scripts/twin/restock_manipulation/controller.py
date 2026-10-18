@@ -347,7 +347,15 @@ class TransferController:
                 # poll/transition (preplace->place) + target re-validation above are shared unchanged.
                 if (self.phase == 'preplace' and self.cart_cage_place
                         and self.cage_preplace_shape is not None):
-                    self.motion.begin_joint_goal(self.cage_preplace_shape, s.joint_positions, slow=True)
+                    # run-279: the ~1.88 rad shoulder_pan swing into the fixed shape settles ~0.176 rad
+                    # short on joint0 ONLY (acceleration-mode drive on the high-inertia extended-arm yaw;
+                    # NOT a contact -- armbench reached the shape, no mid-track-miss). Relax THIS move's
+                    # terminal goal gate to the executor's 0.2 clamp ceiling so an otherwise-arrived shape
+                    # (every other joint exact) is not rejected; the straight-line insert (place) then
+                    # re-solves to the SENSED place and corrects the small standoff offset. Tuck/pan keep
+                    # the tight gate (goal_tol=None); place keeps its own 0.12.
+                    self.motion.begin_joint_goal(self.cage_preplace_shape, s.joint_positions,
+                                                 slow=True, goal_tol=0.2)
                     self.issued = True
                     return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
                 straight_contact = self.phase == 'contact' and self.contact_straight_line

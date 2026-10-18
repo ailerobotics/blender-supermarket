@@ -457,7 +457,7 @@ class RosMotionPort:
         future.add_done_callback(accepted)
         self.future, self.state = future, state
 
-    def begin_joint_goal(self, goal_joints, measured_joints, slow=False):
+    def begin_joint_goal(self, goal_joints, measured_joints, slow=False, goal_tol=None):
         """Collision-planned arm stow; never an unchecked joint command."""
         from moveit_msgs.action import MoveGroup
         from moveit_msgs.msg import Constraints, JointConstraint
@@ -472,8 +472,13 @@ class RosMotionPort:
         self.start=tuple(measured_joints)
         # fm345 (c): tuck/pan keep the tight terminal goal gate -- reset the latched tolerance so a
         # wider PLACE value from a prior move cannot carry into these folds (begin_joint_goal moves
-        # are not the carton-loaded place extend).
-        self._publish_goal_tol(None)
+        # are not the carton-loaded place extend). goal_tol lets a specific joint-goal move relax it:
+        # run-279 the carton-loaded fixed-shape PREPLACE (a ~1.88 rad shoulder_pan swing) settled 0.176
+        # rad short on joint0 only (the executor held the plan end but the acceleration-mode drive did
+        # not close the last step on the high-inertia extended-arm yaw swing; no contact -- armbench
+        # reached the shape, no mid-track-miss), so the tight terminal gate rejected an otherwise-arrived
+        # pose. The straight-line insert (place) re-solves to the SENSED place, correcting the offset.
+        self._publish_goal_tol(goal_tol)
         self._near_start = False   # fm347 (3): begin_joint_goal moves use their own goal, never the near_start IK branch
         # Reset the planning anchors for THIS move, exactly as begin() does (firstmate 292 / run-238):
         # without a fresh _plan_started_wall the total-planning-wall cap carried the stale anchor from

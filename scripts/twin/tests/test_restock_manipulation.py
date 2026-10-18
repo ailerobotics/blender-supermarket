@@ -37,7 +37,7 @@ class FixtureMotion:
     def poll(self):
         return self.outcome
 
-    def begin_joint_goal(self, goal, measured, slow=False):
+    def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None):
         self.stows.append((goal,measured,slow))
 
     def stop(self):

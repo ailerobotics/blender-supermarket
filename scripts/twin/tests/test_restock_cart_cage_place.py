@@ -43,8 +43,9 @@ class FixtureMotion:
     def poll(self):
         return self.outcome
 
-    def begin_joint_goal(self, goal, measured, slow=False):
+    def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None):
         self.joint_goals.append(tuple(goal))
+        self.last_joint_goal_tol = goal_tol
 
     def stop(self):
         pass
@@ -160,6 +161,7 @@ def test_cage_preplace_shape_routes_begin_joint_goal():
     c.step(.1, packet(c, 9.0)); assert c.phase == 'preplace'   # issue preplace
     assert len(m.joint_goals) == before + 1                    # routed to begin_joint_goal...
     assert m.joint_goals[-1] == pytest.approx(SHAPE)           # ...with the fixed wrist_1-safe shape
+    assert m.last_joint_goal_tol == 0.2                        # run-279: relaxed terminal gate for the pan swing
     c.step(.1, packet(c, 9.1)); assert c.phase == 'place'      # preplace poll -> place
     c.step(.1, packet(c, 9.2))                                 # issue the insert
     assert m.straights[-1] is True                             # place still a straight-line insert
