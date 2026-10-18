@@ -115,6 +115,51 @@ class NavigationTests(unittest.TestCase):
         _,obs=self.inputs(obstacles=((1.2,0),))
         self.assertEqual(c.gate_velocity(0.1,od,obs,0,0).reason,'obstacle_stop')
 
+    def test_docking_cap_shrinks_braking_disk_past_rear_obstacle(self):
+        # ds-007 shape: a dock goal (3,0,0) with the robot 1.0 m short of it (2,0,0) and
+        # the backstock staging support sensed 0.60 m directly BEHIND it (rear hemisphere
+        # of a no-reverse base). radius(False)=0.50 + default 0.05 position uncertainty
+        # = 0.55; at full speed stop=0.153 so the omnidirectional disk 0.703 engulfs the
+        # rear return -> obstacle_stop. The dock cap (0.05 m/s -> stop 0.018 -> disk 0.568)
+        # clears it; the footprint radius itself is UNCHANGED.
+        from twin.navigation import DockingApproach
+        fp=Footprint(0.45,0.5,1.0,margin=0.05)  # radius(False)=0.50
+        dock=DockingApproach(goal=(3,0,0),speed=0.05,approach_distance=1.5)
+        _,obs=self.inputs(obstacles=((1.40,0.0),))  # 0.60 m behind the robot at (2,0)
+        od=Odometry((2,0,0),0.1,source='test_fixture')
+        base=self.controller(fp=fp); base.start((3,0,0),False)
+        self.assertEqual(base.gate_velocity(0.1,od,obs,0.25,0.0).reason,'obstacle_stop')
+        capped=self.controller(fp=fp,docking=dock); capped.start((3,0,0),False)
+        self.assertEqual(capped.gate_velocity(0.1,od,obs,0.25,0.0).reason,'tracking')
+        self.assertTrue(capped._docking_active)
+        # The cap binds only to the configured dock goal: a different goal never engages it.
+        other=self.controller(fp=fp,docking=dock); other.start((2,3,0),False)
+        self.assertFalse(other._docking_active)
+        self.assertEqual(other.gate_velocity(0.1,od,obs,0.25,0.0).reason,'obstacle_stop')
+
+    def test_docking_cap_does_not_shrink_the_body_footprint(self):
+        # An obstacle inside the bare footprint still stops, even under the dock cap:
+        # the cap never masks geometry, it only shortens the forward braking reach.
+        from twin.navigation import DockingApproach
+        fp=Footprint(0.45,0.5,1.0,margin=0.05)  # radius(False)=0.50, +0.05 unc = 0.55
+        dock=DockingApproach(goal=(3,0,0),speed=0.01,approach_distance=1.5)
+        _,obs=self.inputs(obstacles=((2.40,0.0),))  # 0.40 m ahead < 0.55 footprint radius
+        od=Odometry((2,0,0),0.1,source='test_fixture')
+        c=self.controller(fp=fp,docking=dock); c.start((3,0,0),False)
+        self.assertTrue(c._docking_active)
+        self.assertEqual(c.gate_velocity(0.1,od,obs,0.25,0.0).reason,'obstacle_stop')
+
+    def test_docking_cap_caps_the_commanded_linear_speed(self):
+        from twin.navigation import DockingApproach
+        dock=DockingApproach(goal=(3,0,0),speed=0.06,approach_distance=1.5)
+        _,obs=self.inputs()
+        c=self.controller(docking=dock); c.start((3,0,0),False)
+        near=Odometry((2,0,0),0.1,source='test_fixture')  # 1.0 m from the dock goal
+        self.assertAlmostEqual(c.gate_velocity(0.1,near,obs,0.25,0.0).linear,0.06)
+        # Outside the approach zone the cap is inert (full commanded speed passes).
+        far=Odometry((0,0,0),0.1,source='test_fixture')  # 3.0 m from the dock goal
+        self.assertAlmostEqual(c.gate_velocity(0.1,far,obs,0.25,0.0).linear,c.max_speed)
+
     def test_wheel_odometry_straight_arc_and_time(self):
         wheel=WheelOdometry(0.1,0.5)
         wheel.update(0,0,0)

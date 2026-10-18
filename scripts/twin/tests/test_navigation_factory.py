@@ -92,6 +92,26 @@ class FactoryDispatchTests(unittest.TestCase):
         self.assertTrue(obj.require_temporal_map)
         self.assertAlmostEqual(obj.spec.cart_width, 0.72)
 
+    def test_docking_absent_leaves_controller_unchanged(self):
+        self.assertIsNone(_build('reference').docking)
+
+    def test_docking_block_flows_through(self):
+        obj = _build('reference', docking={'goal': [-4.46, 15.25, 0.0], 'speed': 0.08,
+                                           'approach_distance': 1.5, 'goal_tolerance': 0.3})
+        self.assertIsNotNone(obj.docking)
+        self.assertEqual(obj.docking.goal, (-4.46, 15.25, 0.0))
+        self.assertAlmostEqual(obj.docking.speed, 0.08)
+        self.assertAlmostEqual(obj.docking.approach_distance, 1.5)
+        self.assertAlmostEqual(obj.docking.goal_tolerance, 0.3)
+
+    def test_docking_requires_goal_and_fields(self):
+        for bad in ({'speed': 0.08, 'approach_distance': 1.5},
+                    {'goal': [-4.46, 15.25, 0.0], 'approach_distance': 1.5},
+                    {'goal': [-4.46, 15.25, 0.0], 'speed': 0.08},
+                    [1, 2, 3]):
+            with self.assertRaises(ValueError):
+                _build('reference', docking=bad)
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

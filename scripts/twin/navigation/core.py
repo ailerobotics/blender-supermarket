@@ -37,6 +37,40 @@ class Footprint:
 
 
 @dataclass(frozen=True)
+class DockingApproach:
+    """Config for the final-metre dock approach (e.g. seating the cart hitch at couple).
+
+    Within `approach_distance` of the dock `goal`, the controller caps the commanded
+    linear speed to `speed`. A slower command genuinely shortens the braking distance
+    (`stop_distance` is a real function of speed), so the forward braking capsule — and
+    the omnidirectional stop disk that bounds it — shrink honestly; the footprint radius
+    and every safety margin are UNCHANGED. This lets a no-reverse base dock beside static
+    geometry that sits in its *rear* hemisphere (which it can never drive into) without
+    the full-speed braking reach spuriously tripping `obstacle_stop`. It does NOT mask any
+    obstacle and does NOT widen a tolerance. Engaged only for a goal matching `goal`
+    within `goal_tolerance`; absent from config -> None -> disabled (run byte-identical,
+    real-rig defaults untouched).
+    """
+    goal: tuple  # (x, y, yaw) map pose of the dock this applies to
+    speed: float  # commanded linear-speed cap inside the approach zone (m/s)
+    approach_distance: float  # engage within this range of the dock goal (m)
+    goal_tolerance: float = 0.25  # XY match radius binding the active goal to this dock
+
+    def __post_init__(self):
+        if len(self.goal) != 3 or not all(math.isfinite(v) for v in self.goal):
+            raise ValueError('docking goal must be finite (x, y, yaw)')
+        if not (math.isfinite(self.speed) and self.speed > 0):
+            raise ValueError('docking speed must be positive')
+        if not (math.isfinite(self.approach_distance) and self.approach_distance > 0):
+            raise ValueError('docking approach_distance must be positive')
+        if not (math.isfinite(self.goal_tolerance) and self.goal_tolerance >= 0):
+            raise ValueError('docking goal_tolerance must be non-negative')
+
+    def matches(self, goal):
+        return math.dist(goal[:2], self.goal[:2]) <= self.goal_tolerance
+
+
+@dataclass(frozen=True)
 class Odometry:
     pose: tuple  # map x, y, yaw from localization, not a stage transform
     stamp: float
@@ -293,7 +327,7 @@ class Controller:
     """
     def __init__(self, grid, footprint, *, max_speed=0.25, max_angular=0.35,
                  brake_acceleration=0.4, stale_after=0.3, blocked_timeout=8.0,
-                 goal_timeout=180.0, allow_test_fixtures=False):
+                 goal_timeout=180.0, allow_test_fixtures=False, docking=None):
         self.grid, self.footprint = grid, footprint
         self.max_speed, self.max_angular = max_speed, max_angular
         self.brake_acceleration, self.stale_after = brake_acceleration, stale_after
@@ -301,18 +335,25 @@ class Controller:
         if not all(math.isfinite(v) and v > 0 for v in (max_speed,max_angular,
                    brake_acceleration,stale_after,blocked_timeout,goal_timeout)):
             raise ValueError('invalid controller limits')
+        if docking is not None and not isinstance(docking, DockingApproach):
+            raise ValueError('docking must be a DockingApproach or None')
         self.allow_test_fixtures = allow_test_fixtures
+        # Optional config-driven dock-approach speed cap; None -> disabled (unchanged run).
+        self.docking = docking
         self.goal = None
         self.coupled = False
         self.path = []
         self.elapsed = self.blocked = 0.0
         self.terminal = None
+        self._docking_active = False
 
     def start(self, goal, coupled):
         if len(goal) != 3 or not all(math.isfinite(v) for v in goal):
             raise ValueError('goal must be finite map [x,y,yaw]')
         self.goal, self.coupled = tuple(goal), bool(coupled)
         self.path, self.elapsed, self.blocked, self.terminal = [], 0.0, 0.0, None
+        # Engage the dock-approach cap only for the goal the config binds it to.
+        self._docking_active = self.docking is not None and self.docking.matches(self.goal)
 
     def cancel(self):
         self.terminal = Result(status='failed', reason='cancelled')
@@ -350,6 +391,12 @@ class Controller:
         if not all(math.isfinite(v) for v in (linear,angular)) or linear < 0:
             return Result(reason='reverse_or_invalid_command')
         v = min(linear,self.max_speed)
+        # Final-metre dock approach: cap the commanded speed near the dock goal so the
+        # braking distance (and the stop disk below) shrink honestly. Footprint and
+        # margins are untouched; this never masks an obstacle.
+        if (self._docking_active and self.goal is not None
+                and math.dist(odom.pose[:2],self.goal[:2]) <= self.docking.approach_distance):
+            v = min(v,self.docking.speed)
         w = max(-self.max_angular,min(angular,self.max_angular))
         if self.coupled and abs(w)*self.footprint.min_turn_radius > v+1e-9:
             return Result(reason='turn_radius')
