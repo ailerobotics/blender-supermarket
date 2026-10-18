@@ -60,6 +60,100 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.status,'succeeded')
         self.assertTrue(result.evidence['coupled'])
 
+    def test_couple_runs_fine_dock_servo_before_attach(self):
+        # With a fine_dock servo attached, couple must creep (commanding the base) until the
+        # servo reports 'ready', THEN attach -- not attach straight off the nav arrival.
+        from twin.restock.fine_dock import FineDockResult
+        seq = ['creeping', 'creeping', 'ready']
+        fd_calls = []
+        fine = NS(start=lambda now: fd_calls.append('start'),
+                  step=lambda dock, now: (fd_calls.append('step') or
+                      FineDockResult(seq.pop(0), 0.02, 0.01, 0.01, 0.0, 'x')))
+        attached = []
+        events = []
+        mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None,
+                    command=lambda *a, **k: self.commands.append(a),
+                    hold_cart_pin=lambda: events.append('pin'),
+                    attach=lambda obs: (attached.append(obs), events.append('attach')),
+                    coupling_state=lambda o: {'healthy': True})
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        adapter = RuntimeAdapter(self.nav, mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, fine_dock=fine,
+                                 hold_cart_through_couple=True)
+        adapter.start('couple', self.job)
+        self.assertEqual(events, ['pin'])  # cart pinned at couple start, before any base drive
+        # Nav succeeds this tick -> servo starts (no attach yet).
+        r = adapter.step(.1)
+        self.assertEqual(r.status, 'running'); self.assertIn('fine-dock', r.reason)
+        self.assertEqual(fd_calls, ['start']); self.assertEqual(attached, [])
+        # Two creeping ticks command the base and still do not attach.
+        for i in range(2):
+            self.p = replace(self.p, observation_id=f'f{i}', simulation_time=.2 + i * .1)
+            r = adapter.step(.1)
+            self.assertEqual(r.status, 'running'); self.assertEqual(attached, [])
+        self.assertTrue(self.commands)  # the servo drove the base
+        # 'ready' -> hand over to attach this same tick.
+        self.p = replace(self.p, observation_id='fr', simulation_time=.4)
+        r = adapter.step(.1)
+        self.assertEqual(r.status, 'running'); self.assertEqual(len(attached), 1)
+        # Post-attach observation shows coupled+healthy -> succeeded.
+        self.p = replace(self.p, observation_id='fc', simulation_time=.5, coupled=True)
+        self.assertEqual(adapter.step(.1).status, 'succeeded')
+
+    def _couple_seq_harness(self, poses_extra):
+        from twin.restock.fine_dock import FineDockResult
+        starts = []
+        nav = NS(start=lambda goal, coupled, **kw: starts.append((tuple(goal), kw)),
+                 step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                 cancel=lambda: None)
+        fine = NS(start=lambda now: None,
+                  step=lambda dock, now: FineDockResult('ready', 0., 0., 0.01, 0.0, 'ok'))
+        attached = []
+        mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None,
+                    command=lambda *a, **k: None, hold_cart_pin=lambda: None,
+                    attach=lambda obs: attached.append(obs), coupling_state=lambda o: {'healthy': True})
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'shelf_approach')}
+        poses['cart_dock'] = [-4.46, 15.25, 0.0]
+        poses.update(poses_extra)
+        adapter = RuntimeAdapter(nav, mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, fine_dock=fine, hold_cart_through_couple=True)
+        return adapter, starts, attached
+
+    def test_couple_navigates_approach_then_cart_dock_without_standoff(self):
+        # couple_approach but no standoff: approach -> cart_dock -> fine-dock (back-compat).
+        adapter, starts, attached = self._couple_seq_harness({'couple_approach': [-4.46, 16.2, 0.0]})
+        adapter.start('couple', self.job)
+        self.assertEqual(starts[-1][0], (-4.46, 16.2, 0.0))        # approach first
+        r = adapter.step(.1)
+        self.assertEqual(starts[-1][0], (-4.46, 15.25, 0.0))       # then cart_dock
+        self.assertIn('advancing', r.reason); self.assertEqual(attached, [])
+        self.p = replace(self.p, observation_id='f2', simulation_time=.2)
+        r = adapter.step(.1); self.assertIn('fine-dock', r.reason)  # dock reached -> fine-dock
+        self.p = replace(self.p, observation_id='f3', simulation_time=.3)
+        self.assertEqual(adapter.step(.1).status, 'running'); self.assertEqual(len(attached), 1)
+
+    def test_couple_navigates_approach_then_standoff_with_tight_arrival(self):
+        # couple_approach + couple_standoff: approach -> standoff (TIGHT arrival) -> fine-dock insert.
+        adapter, starts, attached = self._couple_seq_harness(
+            {'couple_approach': [-4.46, 16.0, 0.0], 'couple_standoff': [-4.06, 15.25, 0.0]})
+        adapter.start('couple', self.job)
+        self.assertEqual(starts[-1][0], (-4.46, 16.0, 0.0)); self.assertEqual(starts[-1][1], {})
+        r = adapter.step(.1)
+        self.assertEqual(starts[-1][0], (-4.06, 15.25, 0.0))       # standoff next
+        self.assertEqual(starts[-1][1], {'arrival_xy_tol': 0.05})  # with a TIGHT arrival
+        self.assertIn('advancing', r.reason); self.assertEqual(attached, [])
+        self.p = replace(self.p, observation_id='f2', simulation_time=.2)
+        r = adapter.step(.1); self.assertIn('insert', r.reason)    # standoff reached -> fine-dock insert
+        self.p = replace(self.p, observation_id='f3', simulation_time=.3)
+        self.assertEqual(adapter.step(.1).status, 'running'); self.assertEqual(len(attached), 1)
+
+    def test_couple_without_fine_dock_attaches_directly(self):
+        # Absent servo: unchanged legacy path (attach straight off the parked nav arrival).
+        self.adapter.start('couple', self.job)
+        self.assertEqual(self.adapter.step(.1).status, 'running')  # attach happened this tick
+        self.p = replace(self.p, observation_id='frame-2', simulation_time=.2, coupled=True)
+        self.assertEqual(self.adapter.step(.1).status, 'succeeded')
+
     def test_stale_packet_stops_every_adapter(self):
         self.adapter.start('outbound',self.job)
         self.p = replace(self.p,simulation_time=-2.)

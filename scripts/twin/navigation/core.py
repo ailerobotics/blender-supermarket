@@ -346,12 +346,18 @@ class Controller:
         self.elapsed = self.blocked = 0.0
         self.terminal = None
         self._docking_active = False
+        self.arrival_xy_tol = 0.08
 
-    def start(self, goal, coupled):
+    def start(self, goal, coupled, *, arrival_xy_tol=None):
         if len(goal) != 3 or not all(math.isfinite(v) for v in goal):
             raise ValueError('goal must be finite map [x,y,yaw]')
+        if arrival_xy_tol is not None and (not math.isfinite(arrival_xy_tol) or arrival_xy_tol <= 0):
+            raise ValueError('arrival_xy_tol must be positive')
         self.goal, self.coupled = tuple(goal), bool(coupled)
         self.path, self.elapsed, self.blocked, self.terminal = [], 0.0, 0.0, None
+        # Per-goal XY arrival tolerance (default 0.08 m); a tighter value is used for the on-axis
+        # couple standoff so the fine-dock insert starts close to the cart axis.
+        self.arrival_xy_tol = 0.08 if arrival_xy_tol is None else float(arrival_xy_tol)
         # Engage the dock-approach cap only for the goal the config binds it to.
         self._docking_active = self.docking is not None and self.docking.matches(self.goal)
 
@@ -438,7 +444,7 @@ class Controller:
             return self.terminal
         pose, obs = odometry.pose, observations
         radius = self.footprint.radius(self.coupled)+odometry.position_uncertainty
-        if math.dist(pose[:2],self.goal[:2]) <= 0.08:
+        if math.dist(pose[:2],self.goal[:2]) <= self.arrival_xy_tol:
             error = wrap(self.goal[2]-pose[2])
             if abs(error) <= 0.08:
                 if abs(odometry.linear) > 0.02 or abs(odometry.angular) > 0.03:

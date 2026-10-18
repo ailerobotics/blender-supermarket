@@ -87,6 +87,18 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(c.step(0.1,moving,ob).reason,'settling_at_goal')
         self.assertEqual(c.step(0.1,*self.inputs(od.pose,0.3)).status,'succeeded')
 
+    def test_tight_arrival_tolerance_delays_goal_success(self):
+        # A base 0.06 m from the goal (aligned, stopped) arrives with the default 0.08 m tol, but
+        # NOT with a tight 0.03 m tol (the on-axis couple standoff) -- it keeps closing instead.
+        grid=GridMap((-6,-6,6,6),resolution=0.25)
+        od,obs=self.inputs(pose=(0.06,0,0))  # 0.06 m short of goal (0,0,0), aligned, stopped
+        loose=self.controller(grid=grid); loose.start((0,0,0),False)
+        self.assertEqual(loose.step(0.1,od,obs,now=0.1).status,'succeeded')
+        tight=self.controller(grid=grid); tight.start((0,0,0),False,arrival_xy_tol=0.03)
+        self.assertEqual(tight.step(0.1,od,obs,now=0.1).status,'running')  # still closing
+        with self.assertRaises(ValueError):
+            self.controller(grid=grid).start((0,0,0),False,arrival_xy_tol=0.0)
+
     def test_reference_closed_loop_arrival(self):
         c=self.controller(); c.start((2,1,0.4),False)
         pose=(0.,0.,0.); v=w=0.

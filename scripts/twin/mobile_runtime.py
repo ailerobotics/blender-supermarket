@@ -53,6 +53,11 @@ class MobileController:
         self._held = False
         self._braked = False
         self._cart_braked = False
+        # Couple-phase cart hold (firstmate couple-free-cart-shove): when set, the cart stays
+        # pinned to the world through the WHOLE couple approach + fine-dock so the base cannot
+        # shove the free cart; only attach() force-releases it. All other release_cart_brake()
+        # callers (command(), the isaac_port per-tick action logic) no-op while held.
+        self._cart_hold = False
         self._base_full_braked = False
 
     DRIVE_DAMPING = 100.0
@@ -163,8 +168,25 @@ class MobileController:
         self._cart_braked = True
         print('CART_BRAKE engaged (fixed-to-world) at cart pose', flush=True)
 
-    def release_cart_brake(self):
-        """Release the cart parking brake so the cart is free to be coupled and towed."""
+    def hold_cart_pin(self):
+        """Pin the cart to the world and HOLD it through couple (approach + fine-dock).
+
+        Engages the sim cart brake at the cart's current pose and latches the hold, so every
+        other release_cart_brake() caller (command(), the isaac_port per-tick action logic)
+        no-ops until attach() force-releases it. Phase-local: the caller invokes this once at
+        couple start. SIM-only; the real cart brakes physically, so real-rig semantics are
+        untouched (this path is reached only when the couple runtime opts in)."""
+        self.engage_cart_brake()
+        self._cart_hold = True
+
+    def release_cart_brake(self, *, force=False):
+        """Release the cart parking brake so the cart is free to be coupled and towed.
+
+        No-op while the couple cart hold is latched (unless force=True), so the cart stays
+        pinned through the whole couple approach; attach() force-releases it once coupled."""
+        if self._cart_hold and not force:
+            return
+        self._cart_hold = False
         if getattr(self, '_cart_braked', False):
             self.stage.RemovePrim(self.CART_BRAKE_PATH)
             self._cart_braked = False
@@ -216,7 +238,7 @@ class MobileController:
     def command(self, v, omega, observation, *, transport_ready=False):
         self.release_brake()  # resuming driving: drop the sim parking brake before any base motion
         self.release_base_full_brake()  # and the pre-weld full base pin
-        self.release_cart_brake()  # and the cart pin, so the cart is free to be coupled/towed
+        self.release_cart_brake()  # cart pin -> free to couple/tow (NO-OP while couple cart-hold latched)
         self.release()  # resuming driving: drop the stationary wheel-hold before commanding wheels
         # Stale/missing kinematics must never leave a previous nonzero drive latched.
         if observation is None or not math.isfinite(observation.age) or not 0 <= observation.age <= 0.1:
@@ -236,8 +258,12 @@ class MobileController:
 
     def attach(self, observation):
         self.park()
+        # Author the robot↔cart hitch FIRST (raises if not seated within tolerance, leaving the
+        # cart still world-pinned for another fine-dock pass), THEN force-release the world pin so
+        # the now-coupled train is free to tow. Order: both constraints hold briefly, never neither.
         self.coupler.attach(observation, lambda: author_hitch(
             self.stage, self.robot_body, self.cart_body, self.hitch_path, self.spec))
+        self.release_cart_brake(force=True)
         return self.coupling_state(observation)
 
     def detach(self, observation):
