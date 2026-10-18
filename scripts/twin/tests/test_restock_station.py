@@ -182,6 +182,29 @@ def test_dropped_initial_prepare_does_not_wedge_the_handshake():
     assert client.ready(clock[0]) and client.collision_time > 0
 
 
+def test_supervisor_fault_names_host_stack_teardown_not_the_station():
+    # run-268/collect: the station was HEALTHY (ready, collision_time advancing) until move_group
+    # SIGABRT'd and the launch tore down the whole host stack, freezing the acks. This guard fires on
+    # the resulting staleness -- its reason must name the host-stack teardown so the real cause
+    # (a sibling host process death) is not masked as a station lifecycle bug.
+    wall=[0.]; stage=[1.]
+    channel=Channel()
+    client=StationClient(channel,wall_clock=lambda:wall[0],stage_clock=lambda:stage[0],
+                         heartbeat_s=1000.,stage_unavailable_s=3.0)
+    client.begin('restock_camera_source',1.)
+    stage[0]=1.1; wall[0]+=0.5
+    channel.reply=dict(epoch=1,stamp=1.1,state='ready',collision_time=1.05)
+    client.tick(0.,parked=True)
+    assert client.ready(0.)                              # healthy, collision map fresh
+    # Host stack torn down: acks freeze (same stale reply), stage keeps advancing past the bound.
+    stage[0]=1.1+3.1
+    with pytest.raises(RuntimeError) as exc:
+        client.tick(0.,parked=True)
+    assert 'heartbeat unavailable' in str(exc.value)     # substring kept for reason/log matching
+    assert 'host stack went silent' in str(exc.value) and 'move_group' in str(exc.value)
+    assert 'state=ready' in str(exc.value)
+
+
 def test_client_resets_restart_budget_on_healthy_progress():
     channel=Channel()
     client=StationClient(channel,wall_clock=lambda:0.)
