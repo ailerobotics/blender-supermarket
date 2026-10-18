@@ -21,7 +21,17 @@ _ACK_LAG = 1.0
 # host). Real-rig default 10 s. Under the sim's render-paced slow place swing a single accepted-command
 # gap legitimately exceeds 10 s (run-231 tripped it mid-place), so the sim profile raises it with
 # margin via StationClient(heartbeat_s=...); the 30 s /sensors wall backstop remains the one hard catch.
+# With the sim-clock primary guard below wired, this wall bound is only the frozen-sim backstop.
 _HEARTBEAT_UNAVAILABLE_S = 10.0
+# SIM-clock (stage) supervisor-liveness bound: fault if stage time has advanced this far past the last
+# accepted ack with no fresh ack. This is the PRIMARY liveness check -- it rides the render-paced /clock
+# so a legitimately slow full-res render tick cannot false-trip it (ds-015 got no station reply for 10 s
+# WALL during one slow warm tick and the pure-wall guard fired), while a genuinely dead/wedged station
+# still trips within a few stage seconds because the mission keeps stepping /clock. The wall bound above
+# stays only as a generous FROZEN-sim backstop (stage time can't advance to trip this then). Engaged only
+# when a stage_clock is wired (the sim profile); real-rig (stage_clock=None) keeps the wall bound alone.
+# See freshness-sim-clock-not-wall.
+_STAGE_UNAVAILABLE_S = 3.0
 
 
 class JsonChannel:
@@ -83,11 +93,18 @@ class StationClient:
     # stage_clock seam reads the same stage-time source native_transport publishes on /clock, at the
     # moment of publish, so both sides share one clock domain and the ack's bound stays untouched.
     def __init__(self, channel, *, wall_clock=time.monotonic, stage_clock=None, publish_lag=0.,
-                 heartbeat_s=_HEARTBEAT_UNAVAILABLE_S):
+                 heartbeat_s=_HEARTBEAT_UNAVAILABLE_S, stage_unavailable_s=_STAGE_UNAVAILABLE_S):
         self.channel,self.wall_clock=channel,wall_clock
         self.stage_clock=stage_clock
         # Wall heartbeat-unavailable bound (real-rig 10 s; sim profile raises it for the slow place).
+        # With a stage_clock wired it is the frozen-sim backstop behind the sim-clock primary guard.
         self.heartbeat_s=float(heartbeat_s)
+        # Sim-clock (stage) supervisor-liveness bound (primary when stage_clock is wired).
+        self.stage_unavailable_s=float(stage_unavailable_s)
+        # Stage time of the last accepted fresh ack, and of the epoch's first tick; the sim-clock
+        # liveness gap is measured against whichever is later. None until the stage clock is first read.
+        self._last_ack_stage=None
+        self._begin_stage=None
         # Stamp commands a touch in the PAST (one /clock value the ack is sure to already hold):
         # /clock and station/command are separate topics, and the small fast command can reach the
         # ack before the matching /clock update, leaving the ack's now() ~one step BEHIND the stamp
@@ -127,6 +144,8 @@ class StationClient:
         self.started=self.wall_clock()
         self.last_send=-1.
         self.last_reply=None
+        self._last_ack_stage=None
+        self._begin_stage=None
         self.tick(now,parked=True)
         return self
 
@@ -136,6 +155,8 @@ class StationClient:
         if self.stage_clock is not None:
             now=self.stage_clock()
         self.now=now
+        if self._begin_stage is None:
+            self._begin_stage=now
         reply=self.channel.read()
         if reply and reply.get('epoch')==self.epoch and reply!=self.latest:
             # Freshness window on the ack stamp vs the mission stage clock. The original tight
@@ -152,6 +173,12 @@ class StationClient:
                 raise ValueError('stale parked-station acknowledgement')
             self.latest=reply
             self.last_reply=self.wall_clock()
+            self._last_ack_stage=now
+            # A fresh healthy (warming/ready) reply is progress: reset the bounded re-prepare budget
+            # so transient faults recovered across a long place/verify do not accumulate toward the
+            # cap and surface a stale reason on a later, unrelated transient.
+            if reply.get('state') in ('warming','ready'):
+                self._restarts=0
         if not self.active:
             return
         if not parked:
@@ -168,6 +195,14 @@ class StationClient:
             self.sequence=0
             self._prepared=False
             self.latest=None
+        # Supervisor liveness. PRIMARY is the sim/stage clock (immune to render pacing): fault if stage
+        # time has advanced past the last fresh ack (or the epoch's first tick) by more than the stage
+        # bound. The WALL bound stays only as a generous frozen-sim backstop. Engaged on the stage clock
+        # only when it is wired (sim profile); real-rig (stage_clock=None) keeps the wall bound alone.
+        if self.stage_clock is not None:
+            ref_stage=self._last_ack_stage if self._last_ack_stage is not None else self._begin_stage
+            if ref_stage is not None and now-ref_stage>self.stage_unavailable_s:
+                raise RuntimeError('station supervisor heartbeat unavailable')
         if self.wall_clock()-(self.last_reply or self.started)>self.heartbeat_s:
             raise RuntimeError('station supervisor heartbeat unavailable')
         wall=self.wall_clock()
