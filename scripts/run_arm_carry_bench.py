@@ -96,7 +96,7 @@ class IsaacCarryStage(bench.ArmStage):
     def __init__(self, assembly, lift_joints, grasp_joints, *, carton_path='/RestockScenario/HandlingUnit',
                  pad_path_key='gripper_pad_tcp', render=False, carton_dims=(0.6, 0.4, 0.16),
                  obstacle_prims=None, no_carton=False, arm_contacts=False, start_at_lift=False,
-                 no_tool_colliders=False):
+                 no_tool_colliders=False, no_self_collision=False):
         from isaacsim.core.prims import SingleRigidPrim
         from pxr import UsdGeom
         self._UsdGeom = UsdGeom
@@ -146,76 +146,140 @@ class IsaacCarryStage(bench.ArmStage):
         self.dump_dynamics_model()           # inbox 016: tool link mass/inertia + carton constraints
         if no_tool_colliders:
             self._disable_tool_colliders()   # inbox 016 (A): is the pin the tool's own geometry?
+        if no_self_collision:
+            self._disable_self_collision()   # inbox 020 (1): does wrist_1 reach 0.9 with self-coll off?
+
+    def _disable_self_collision(self):
+        """inbox 020 (1): set enabledSelfCollisions=False on the articulation root, then reset so PhysX
+        re-parses. If wrist_1 then reaches its 0.9 goal where it otherwise pins at ~0.70, the stop IS
+        an arm-vs-arm self-collision (the one fm318/fm320's carton+tool filter does NOT cover)."""
+        try:
+            from pxr import PhysxSchema
+            art_path = self.assembly.paths['articulation']
+            prim = self.stage.GetPrimAtPath(art_path)
+            api = (PhysxSchema.PhysxArticulationAPI.Get(self.stage, art_path)
+                   or PhysxSchema.PhysxArticulationAPI.Apply(prim))
+            (api.GetEnabledSelfCollisionsAttr() or api.CreateEnabledSelfCollisionsAttr()).Set(False)
+            self.world.reset()
+            print('ARMBENCH_SELF_COLLISION_DISABLED on %s' % art_path, flush=True)
+        except Exception as exc:
+            print('ARMBENCH_SELF_COLLISION_DISABLE failed (%s)' % exc, flush=True)
 
     def dump_dynamics_model(self):
         """inbox 016: dump each arm/tool link's USD mass + diagonal inertia (a 0.45 kg carton cannot
         need 700 Nm, so an inflated tool mass/inertia would explain the effort-saturated pin), and
         enumerate every joint/constraint whose body0/body1 references the carton body (a native seal
-        joint PLUS the SIM_ATTACH_FALLBACK weld would fight, matching the 49 kN weld reaction)."""
-        from pxr import Usd, UsdPhysics
-        links = dict(self.arm_links)
-        # also the tool/gripper collision bodies seen contacting the carton
-        root = self.stage.GetPrimAtPath(self.assembly.paths['articulation'].rsplit('/', 1)[0])
-        if root:
-            for prim in Usd.PrimRange(root):
-                n = prim.GetName()
-                if (n.startswith('surface_plate') or n in ('cube_without_surface_plates', 'suction_cups')
-                        or n.startswith('ur_') and n.endswith('_link')):
-                    links.setdefault(n, str(prim.GetPath()))
-        for name, path in sorted(links.items()):
-            prim = self.stage.GetPrimAtPath(path)
-            if not prim:
-                continue
-            mapi = UsdPhysics.MassAPI.Get(prim) if prim.HasAPI(UsdPhysics.MassAPI) else None
-            mass = inertia = com = None
-            if mapi:
+        joint PLUS the SIM_ATTACH_FALLBACK weld would fight, matching the 49 kN weld reaction).
+
+        Fully guarded + BOUNDED to the robot + /RestockScenario subtrees (never the whole /Supermarket
+        store pseudo-root): this is diagnostic instrumentation and must never kill the trial."""
+        try:
+            from pxr import Usd, UsdPhysics
+            robot_root_path = self.assembly.paths['articulation'].rsplit('/', 1)[0]
+            robot_root = self.stage.GetPrimAtPath(robot_root_path)
+            links = dict(self.arm_links)
+            if robot_root:
+                for prim in Usd.PrimRange(robot_root):
+                    n = prim.GetName()
+                    if (n.startswith('surface_plate') or n in ('cube_without_surface_plates', 'suction_cups')
+                            or (n.startswith('ur_') and n.endswith('_link'))):
+                        links.setdefault(n, str(prim.GetPath()))
+            for name, path in sorted(links.items()):
+                prim = self.stage.GetPrimAtPath(path)
+                if not prim:
+                    continue
+                mass = inertia = None
                 try:
-                    mass = float(mapi.GetMassAttr().Get()) if mapi.GetMassAttr().HasAuthoredValue() else None
+                    mapi = UsdPhysics.MassAPI.Get(prim) if prim.HasAPI(UsdPhysics.MassAPI) else None
+                    if mapi:
+                        if mapi.GetMassAttr().HasAuthoredValue():
+                            mass = float(mapi.GetMassAttr().Get())
+                        di = mapi.GetDiagonalInertiaAttr().Get()
+                        if di is not None:
+                            inertia = [float(di[0]), float(di[1]), float(di[2])]
                 except Exception:
-                    mass = None
-                try:
-                    di = mapi.GetDiagonalInertiaAttr().Get()
-                    inertia = [float(di[0]), float(di[1]), float(di[2])] if di is not None else None
-                except Exception:
-                    inertia = None
-            print('ARMBENCH_LINK_MASS %s mass=%s diag_inertia=%s' % (name, mass, inertia), flush=True)
-        # constraints on the carton body
-        joints_on_carton = []
-        for prim in Usd.PrimRange(self.stage.GetPseudoRoot()):
-            if not (prim.IsA(UsdPhysics.Joint) or prim.HasAPI(UsdPhysics.DriveAPI)
-                    or 'Joint' in prim.GetTypeName()):
-                continue
+                    pass
+                print('ARMBENCH_LINK_MASS %s mass=%s diag_inertia=%s' % (name, mass, inertia), flush=True)
+            # USD mass is usually unauthored (PhysX auto-computes from collision geometry * density);
+            # read the REAL runtime per-body masses PhysX uses -- an implausibly heavy auto-massed tool
+            # (e.g. the gripper's big cube at default density = tens of kg) would need a large wrist
+            # torque and explain the effort-saturated pin without any contact.
             try:
-                j = UsdPhysics.Joint(prim)
-                tgts = list(j.GetBody0Rel().GetTargets()) + list(j.GetBody1Rel().GetTargets())
-            except Exception:
-                continue
-            if any(self.carton_path in str(t) for t in tgts):
-                joints_on_carton.append('%s (%s)' % (str(prim.GetPath()), prim.GetTypeName()))
-        print('ARMBENCH_CARTON_CONSTRAINTS n=%d %s' % (len(joints_on_carton), joints_on_carton), flush=True)
+                body_names = None
+                for attr in ('body_names', 'link_names'):
+                    body_names = getattr(self.robot, attr, None) or body_names
+                masses = None
+                candidates = [getattr(self.robot, g, None) for g in ('get_body_masses', 'get_masses')]
+                view = getattr(self.robot, '_articulation_view', None)
+                if view is not None:
+                    candidates += [getattr(view, g, None) for g in ('get_body_masses', 'get_masses')]
+                    if body_names is None:
+                        body_names = getattr(view, 'body_names', None)
+                for fn in candidates:
+                    if not fn:
+                        continue
+                    try:
+                        masses = np.asarray(fn(), float).reshape(-1)
+                        if masses.size:
+                            break
+                    except Exception:
+                        continue
+                if masses is not None:
+                    labelled = list(zip(body_names, masses.tolist())) if body_names else list(enumerate(masses.tolist()))
+                    print('ARMBENCH_RUNTIME_BODY_MASS total=%.2f kg per_body=%s'
+                          % (float(np.sum(masses)), [(str(n), round(float(m), 3)) for n, m in labelled]), flush=True)
+            except Exception as exc:
+                print('ARMBENCH_RUNTIME_BODY_MASS unavailable (%s)' % exc, flush=True)
+            # joints/constraints referencing the carton -- scan ONLY the robot + scenario subtrees
+            joints_on_carton = []
+            roots = [robot_root, self.stage.GetPrimAtPath('/RestockScenario')]
+            for r in roots:
+                if not r:
+                    continue
+                for prim in Usd.PrimRange(r):
+                    tname = str(prim.GetTypeName())
+                    if 'Joint' not in tname and not prim.HasAPI(UsdPhysics.DriveAPI):
+                        continue
+                    try:
+                        j = UsdPhysics.Joint(prim)
+                        tgts = list(j.GetBody0Rel().GetTargets()) + list(j.GetBody1Rel().GetTargets())
+                    except Exception:
+                        continue
+                    if any(self.carton_path in str(t) for t in tgts):
+                        joints_on_carton.append('%s (%s)' % (str(prim.GetPath()), tname))
+            print('ARMBENCH_CARTON_CONSTRAINTS n=%d %s' % (len(joints_on_carton), joints_on_carton), flush=True)
+        except Exception as exc:
+            print('ARMBENCH_DYNAMICS_DUMP unavailable (%s)' % exc, flush=True)
 
     def _disable_tool_colliders(self):
         """inbox 016 (A): disable collision on the gripper's own tool geometry (cube, surface plates,
         suction cups) so a NO-carton fold reveals whether the wrist_1 pin is the TOOL's geometry
         hitting the forearm/upper_arm (planner-ignored self-pairs) vs the dynamics model."""
-        from pxr import Usd, UsdPhysics
-        root = self.stage.GetPrimAtPath(self.assembly.paths['articulation'].rsplit('/', 1)[0])
         disabled = []
-        if root:
-            for prim in Usd.PrimRange(root):
-                n = prim.GetName()
-                if not (n.startswith('surface_plate') or n in ('cube_without_surface_plates', 'suction_cups')
-                        or n in ('gripper_pad_tcp', 'gripper_tcp', 'RestockPanelGripper')):
-                    continue
-                col = UsdPhysics.CollisionAPI.Get(prim)
-                if not col:
-                    continue
-                try:
-                    (col.GetCollisionEnabledAttr() or col.CreateCollisionEnabledAttr()).Set(False)
-                    disabled.append(n)
-                except Exception:
-                    pass
-        self.world.reset()   # re-parse so PhysX drops the disabled colliders
+        try:
+            from pxr import Usd, UsdPhysics
+            root = self.stage.GetPrimAtPath(self.assembly.paths['articulation'].rsplit('/', 1)[0])
+            tool_names = ('surface_plate', 'cube_without_surface_plates', 'suction_cups',
+                          'gripper_pad_tcp', 'gripper_tcp', 'RestockPanelGripper', 'big_cube')
+            if root:
+                for prim in Usd.PrimRange(root):
+                    # match a tool subtree by its own name OR an ancestor's name, then disable collision
+                    # on THIS prim if it carries CollisionAPI (the collider often sits on a child mesh)
+                    path = str(prim.GetPath())
+                    if not any(('/' + t in path) or path.rsplit('/', 1)[-1].startswith('surface_plate')
+                               or path.rsplit('/', 1)[-1] in tool_names for t in tool_names):
+                        continue
+                    if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                        continue
+                    try:
+                        col = UsdPhysics.CollisionAPI(prim)
+                        (col.GetCollisionEnabledAttr() or col.CreateCollisionEnabledAttr()).Set(False)
+                        disabled.append(path.rsplit('/', 1)[-1])
+                    except Exception:
+                        pass
+            self.world.reset()   # re-parse so PhysX drops the disabled colliders
+        except Exception as exc:
+            print('ARMBENCH_TOOL_COLLIDERS_DISABLE failed (%s)' % exc, flush=True)
         print('ARMBENCH_TOOL_COLLIDERS_DISABLED %s' % disabled, flush=True)
 
     def _discover_arm_joints(self):
@@ -840,7 +904,8 @@ def run(args):
             stage = IsaacCarryStage(assembly, lift_joints, grasp_joints, render=args.render,
                                     carton_dims=carton_dims, obstacle_prims=obstacle_override,
                                     no_carton=args.no_carton, arm_contacts=args.arm_contacts,
-                                    start_at_lift=args.start_at_lift, no_tool_colliders=args.no_tool_colliders)
+                                    start_at_lift=args.start_at_lift, no_tool_colliders=args.no_tool_colliders,
+                                    no_self_collision=args.no_self_collision)
             summary['obstacles'] = stage.obstacles
             summary['arm_links'] = sorted(stage.arm_links)
             if args.pinned_config is not None:
@@ -1036,6 +1101,9 @@ def main():
                    help='inbox 016 (A): disable collision on the gripper tool geometry (cube, surface '
                         'plates, suction cups) so a no-carton fold tells a tool self-collision pin apart '
                         'from a dynamics-model one')
+    p.add_argument('--no-self-collision', action='store_true',
+                   help='inbox 020 (1): set enabledSelfCollisions=false on the articulation root -- if '
+                        'wrist_1 then reaches 0.9 (vs pinning ~0.70), the stop is an arm-vs-arm self-collision')
     p.add_argument('--dt', type=float, default=1.0 / 60.0)
     p.add_argument('--max-sim-s', type=float, default=90.0, help='per-move sim-time budget')
     p.add_argument('--heavy-threshold-mb', type=int, choices=(1500, 2500), default=1500)

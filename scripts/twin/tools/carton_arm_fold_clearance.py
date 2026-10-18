@@ -91,6 +91,49 @@ def sweep_fold(urdf_path, xrdf_path, lift_joints, tuck_shape, *, label, dims=(0.
     return fc
 
 
+def sweep_arm_self_collision(urdf_path, xrdf_path, lift_joints, tuck_shape, *,
+                             distal=('ur_wrist_2_link', 'ur_wrist_3_link', 'gripper_pad_tcp',
+                                     'gripper_tcp', 'RestockPanelGripper', 'ur_tool0'),
+                             proximal=('ur_forearm_link', 'ur_upper_arm_link'),
+                             w1_lo=0.65, w1_hi=0.95, steps=30):
+    """inbox 020 (2): arm-vs-arm self-collision sweep. Hold the arm at the TUCK configuration (joint0 at
+    the lift pan, joints 1-5 at ``tuck_shape``) and sweep ONLY wrist_1 over [w1_lo, w1_hi]; at each
+    angle compute, from the PLANNER's own collision-sphere model (``arm_spheres_world`` = the XRDF
+    spheres), the min clearance between each DISTAL link (wrist_2/3 + tool) and each PROXIMAL link
+    (forearm/upper_arm). Returns (first_contact dict | None, profile list). first_contact names the
+    pair and the wrist_1 angle where a distal-vs-proximal pair first interpenetrates (<=0).
+
+    Because the sphere set IS the planner's model, a negative gap here means the geometry IS
+    representable to the planner -- so the planner would catch the pair UNLESS it is on the XRDF
+    self-collision ignore list (the known cuMotion attached-object / ignore-list gap)."""
+    base = np.array([float(lift_joints[0]), *[float(v) for v in tuck_shape]], float)
+    w1_idx = ARM_JOINTS.index('ur_wrist_1_joint')
+    profile, first = [], None
+    for i in range(steps + 1):
+        w1 = w1_lo + (w1_hi - w1_lo) * i / steps
+        q = base.copy(); q[w1_idx] = w1
+        cfg = dict(zip(ARM_JOINTS, q.tolist()))
+        ac, ar, owners = arm_spheres_world(urdf_path, xrdf_path, cfg)
+        owners = np.asarray(owners)
+        worst_gap, worst_pair = math.inf, ''
+        for dl in distal:
+            dmask = owners == dl
+            if not dmask.any():
+                continue
+            for pl in proximal:
+                pmask = owners == pl
+                if not pmask.any():
+                    continue
+                g = min_sphere_clearance(ac[dmask], ar[dmask], ac[pmask], ar[pmask])
+                if g < worst_gap:
+                    worst_gap, worst_pair = g, '%s<->%s' % (dl, pl)
+        profile.append((round(w1, 4), worst_pair, round(worst_gap, 4)))
+        if first is None and worst_gap <= 0.0:
+            first = dict(wrist1=round(w1, 4), pair=worst_pair, gap_mm=round(worst_gap * 1000, 1))
+    present = sorted({o for o in {*distal, *proximal} if (np.asarray(owners) == o).any()})
+    return first, profile, present
+
+
 def _cli(argv=None):
     import argparse
     ap = argparse.ArgumentParser(description='CPU carton-vs-arm clearance along the carry tuck fold.')
@@ -101,9 +144,24 @@ def _cli(argv=None):
                     help='a tuck shape (joints 1-5) to sweep, e.g. old=-2.3,1.0,2.1066,0.8,-1.2545; repeatable')
     ap.add_argument('--carton-dims', default='0.6,0.4,0.16')
     ap.add_argument('--steps', type=int, default=20)
+    ap.add_argument('--self-collision', action='store_true',
+                    help='inbox 020 (2): arm-vs-arm (wrist_2/3+tool vs forearm/upper_arm) sweep over '
+                         'wrist_1 in [0.65,0.95] at the (first) tuck shape, naming the pair + first-contact angle')
     args = ap.parse_args(argv)
     lift = [float(v) for v in args.lift.split(',')]
     dims = [float(v) for v in args.carton_dims.split(',')]
+    if args.self_collision:
+        label, _, vals = (args.tuck_shape[0] if args.tuck_shape else 'tuck=-2.3,1.0,0.9,0.8,-1.2545').partition('=')
+        shape = [float(v) for v in vals.split(',')]
+        first, profile, present = sweep_arm_self_collision(args.urdf, args.xrdf, lift, shape)
+        print('arm-vs-arm self-collision sweep (planner XRDF sphere model), wrist_1 in [0.65,0.95]')
+        print('distal links present:', [p for p in present if 'forearm' not in p and 'upper_arm' not in p])
+        print('proximal links present:', [p for p in present if 'forearm' in p or 'upper_arm' in p])
+        print('FIRST CONTACT:', first if first else 'NONE (no distal-vs-proximal interpenetration in range)')
+        print('\nwrist_1    worst_pair                                   gap_mm')
+        for w1, pair, gap in profile:
+            print('%+8.4f  %-44s %+8.1f' % (w1, pair or '-', gap * 1000))
+        return 0 if first is None else 1
     folds = []
     for item in args.tuck_shape:
         label, _, vals = item.partition('=')
