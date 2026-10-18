@@ -191,6 +191,115 @@ class PlanningWallExceeded(unittest.TestCase):
         self.assertTrue(self._port('plan_result', self._PlanF(False), 65, cap=60.0).planning_wall_exceeded())
 
 
+class _FakeFuture:
+    """send_goal_async future stub: records that a goal re-send happened; accepts a done callback."""
+    def add_done_callback(self, cb):
+        self._cb = cb
+
+
+class _FakePlan:
+    """MoveGroup/ExecuteTrajectory action-client stub with a toggleable server_is_ready() to model a
+    move_group PROCESS crash (server vanishes) and its respawn (server returns)."""
+    def __init__(self, ready=True):
+        self.ready = ready
+        self.sent = []
+    def server_is_ready(self):
+        return self.ready
+    def send_goal_async(self, goal):
+        self.sent.append(goal)
+        return _FakeFuture()
+
+
+class MoveGroupCrashRetry(unittest.TestCase):
+    """Resilience to a move_group PROCESS crash (SIGABRT double-free, run-266/268): the launch now
+    RESPAWNS move_group instead of tearing the host stack down, and the planning client holds the move
+    open for the respawn, then re-sends the SAME plan goal -- a logged, bounded retry instead of a lost
+    20-30 min GPU run. These exercise the pure budget helper and the _handle_server_crash state path on
+    a port built via __new__ (no ROS node, no GPU)."""
+
+    def test_pure_helper_retries_within_budget(self):
+        from twin.restock_manipulation.ros_adapter import _should_crash_retry, MOVE_GROUP_CRASH_RETRY_MAX
+        for n in range(MOVE_GROUP_CRASH_RETRY_MAX):
+            self.assertTrue(_should_crash_retry(n, has_plan_goal=True), n)
+
+    def test_pure_helper_stops_at_budget(self):
+        from twin.restock_manipulation.ros_adapter import _should_crash_retry, MOVE_GROUP_CRASH_RETRY_MAX
+        self.assertFalse(_should_crash_retry(MOVE_GROUP_CRASH_RETRY_MAX, has_plan_goal=True))
+
+    def test_pure_helper_needs_a_stored_goal(self):
+        from twin.restock_manipulation.ros_adapter import _should_crash_retry
+        self.assertFalse(_should_crash_retry(0, has_plan_goal=False))
+
+    @staticmethod
+    def _port(state='plan_result', ready=True, plan_goal='GOAL', crash_retries=0, awaiting=False):
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state = state
+        p.timeout = 25.0
+        p.generation = 7
+        p.handle = object()
+        p._plan_goal = plan_goal
+        p._server_crash_retries = crash_retries
+        p._awaiting_server_respawn = awaiting
+        p._replan_attempts = 5
+        p.plan = _FakePlan(ready)
+        p.execute = _FakePlan(ready)
+        return p
+
+    def test_live_server_is_inert(self):
+        p = self._port(ready=True)
+        self.assertIsNone(p._handle_server_crash())          # server up -> poll() proceeds normally
+        self.assertFalse(p._awaiting_server_respawn)
+        self.assertEqual(p.plan.sent, [])
+
+    def test_server_loss_holds_the_move_open(self):
+        p = self._port(ready=False)
+        self.assertEqual(p._handle_server_crash(), 'running')  # wait for the respawn, do not fail
+        self.assertTrue(p._awaiting_server_respawn)
+        self.assertEqual(p.plan.sent, [])                      # nothing re-sent until the server is back
+
+    def test_respawn_resends_the_same_plan_goal_as_a_retry(self):
+        p = self._port(ready=False)
+        p._handle_server_crash()                               # notice the crash, start awaiting
+        p.plan.ready = p.execute.ready = True                  # move_group respawned
+        self.assertEqual(p._handle_server_crash(), 'running')
+        self.assertEqual(p.plan.sent, ['GOAL'])                # SAME goal re-sent
+        self.assertEqual(p.state, 'plan_accept')               # back into the plan handshake
+        self.assertEqual(p._server_crash_retries, 1)           # retry counted
+        self.assertFalse(p._awaiting_server_respawn)
+        self.assertEqual(p._replan_attempts, 0)                # fresh re-plan budget for the retry
+
+    def test_execute_phase_crash_recovers_by_replanning(self):
+        p = self._port(state='execute_result', ready=False)
+        self.assertEqual(p._handle_server_crash(), 'running')  # execute server lost -> hold open
+        p.plan.ready = p.execute.ready = True
+        self.assertEqual(p._handle_server_crash(), 'running')
+        self.assertEqual(p.plan.sent, ['GOAL'])                # re-plan (not re-execute) the same goal
+        self.assertEqual(p.state, 'plan_accept')
+
+    def test_budget_exhausted_falls_through_to_failure(self):
+        from twin.restock_manipulation.ros_adapter import MOVE_GROUP_CRASH_RETRY_MAX
+        p = self._port(ready=False, crash_retries=MOVE_GROUP_CRASH_RETRY_MAX)
+        self.assertIsNone(p._handle_server_crash())            # no retry left -> normal failure path
+        self.assertEqual(p.plan.sent, [])
+
+    def test_no_stored_goal_falls_through(self):
+        p = self._port(ready=False, plan_goal=None)
+        self.assertIsNone(p._handle_server_crash())            # e.g. straight-line descent -> normal path
+
+    def test_non_action_state_is_inert(self):
+        for state in ('ik', 'idle', 'succeeded', 'failed'):
+            p = self._port(state=state, ready=False)
+            self.assertIsNone(p._handle_server_crash(), state)
+
+    def test_respawn_wait_cap_surfaces_an_unrecoverable_crash(self):
+        import time
+        from twin.restock_manipulation.ros_adapter import RESPAWN_WAIT_CAP_S
+        p = self._port(ready=False, awaiting=True)
+        p._respawn_wait_started = time.monotonic() - (RESPAWN_WAIT_CAP_S + 1)  # server never came back
+        with self.assertRaises(RuntimeError):
+            p._handle_server_crash()                           # poll() wraps this into a clean 'failed'
+
+
 class Drain(unittest.TestCase):
     """drain() advances the PLANNING state machine off the independent watchdog tick (firstmate 290
     option b / run-237), so a move_group result is consumed within 0.1 s of arrival regardless of the
