@@ -24,11 +24,20 @@ def scenario():
     }
 
 
+def transfer_scenario():
+    """A transfer-start variant: robot+cart spawned parked+coupled at the shelf (cart yaw pi)."""
+    sc = scenario()
+    sc['initial_staging']['cart_body_pose'] = [-1.78, 6.0, math.pi]
+    sc['initial_staging']['unit_yaws_world']['cart'] = math.pi / 2  # carton world yaw on the pi-yaw cart
+    return sc
+
+
 class PlanStartStateTests(unittest.TestCase):
     def test_couple_places_carton_at_cart_load_centre(self):
         plan = plan_start_state(scenario(), 'couple')
         self.assertIsInstance(plan, StartState)
         self.assertEqual(plan.skipped, ('collect',))
+        self.assertFalse(plan.couple_cart)  # the real couple stage couples the cart, not the shortcut
         # cart yaw 0 => load centre xy is the cart pose plus the body-frame offset.
         self.assertAlmostEqual(plan.carton_position[0], -5.73 + 0.08)
         self.assertAlmostEqual(plan.carton_position[1], 15.25)
@@ -47,8 +56,18 @@ class PlanStartStateTests(unittest.TestCase):
         self.assertAlmostEqual(plan.carton_position[0], 1.0, places=6)
         self.assertAlmostEqual(plan.carton_position[1], 2.5, places=6)
 
+    def test_transfer_places_carton_on_coupled_cart_at_shelf(self):
+        plan = plan_start_state(transfer_scenario(), 'transfer')
+        self.assertEqual(plan.skipped, ('collect', 'couple', 'outbound', 'park'))
+        self.assertTrue(plan.couple_cart)  # couple/outbound/park skipped -> shortcut authors the hitch
+        # cart yaw pi: +x body load offset rotates to -x world.
+        self.assertAlmostEqual(plan.carton_position[0], -1.78 - 0.08, places=6)
+        self.assertAlmostEqual(plan.carton_position[1], 6.0, places=6)
+        self.assertAlmostEqual(plan.carton_position[2], 0.9325 + 0.16 / 2, places=6)
+        self.assertAlmostEqual(plan.carton_orientation_wxyz[0], math.cos(math.pi / 4), places=6)
+
     def test_unsupported_start_at_refuses(self):
-        for bad in ('transfer', 'outbound', 'park'):
+        for bad in ('outbound', 'park', 'verify'):
             with self.assertRaises(ValueError):
                 plan_start_state(scenario(), bad)
 

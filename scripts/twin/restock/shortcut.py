@@ -31,10 +31,18 @@ from dataclasses import dataclass
 
 from .mission import ACTIONS
 
-# Stages whose physical end state this module knows how to synthesize, keyed by the single stage
-# each one skips. Extending to 'transfer' (skip collect+couple+outbound+park) additionally needs
-# the coupled-cart + parked-at-shelf state and is a deliberate follow-up, not a silent default.
-_SUPPORTED_START_AT = ('couple',)
+# Stages whose physical end state this module knows how to synthesize.
+#   'couple'   -- skip only collect: carton placed resting on the cart at its DOCK spawn; the real
+#                 couple->outbound->park then run (cart gets physically coupled/towed by the mission).
+#   'transfer' -- skip collect+couple+outbound+park: carton on the cart AND the cart physically
+#                 coupled behind the robot. The robot+cart are spawned already parked at the shelf
+#                 (a variant scenario's initial_staging, the sanctioned build-time pose -- NOT a
+#                 runtime teleport, which physics_setup forbids); this module places the carton and
+#                 authors the hitch so transfer->verify run against a coupled, loaded, parked train.
+_SUPPORTED_START_AT = ('couple', 'transfer')
+# Exact in-order prefix each supported start_at must skip (a guard against a mis-ordered stages list).
+_EXPECTED_SKIP = {'couple': ('collect',),
+                  'transfer': ('collect', 'couple', 'outbound', 'park')}
 
 
 def _yaw_to_wxyz(yaw):
@@ -53,6 +61,7 @@ class StartState:
     skipped: tuple               # stages the shortcut skips (in ACTIONS order)
     carton_position: tuple       # world (x, y, z) of the carton CENTRE
     carton_orientation_wxyz: tuple
+    couple_cart: bool            # author the physical robot<->cart hitch at synthesis (transfer start)
     note: str
 
 
@@ -70,9 +79,9 @@ def plan_start_state(scenario, start_at, stages=None):
             f'start-phase shortcut does not yet synthesize start_at={start_at!r}; '
             f'supported: {_SUPPORTED_START_AT}')
     skipped = tuple(stages[:stages.index(start_at)])
-    if skipped != ('collect',):
-        raise ValueError(f'start_at={start_at!r} would skip {skipped}; only skipping '
-                         "('collect',) is synthesized today")
+    if skipped != _EXPECTED_SKIP[start_at]:
+        raise ValueError(f'start_at={start_at!r} skips {skipped}; expected {_EXPECTED_SKIP[start_at]} '
+                         '(mission stages must be the canonical in-order prefix)')
 
     staging = scenario.get('initial_staging') if isinstance(scenario, dict) else None
     if not isinstance(staging, dict):
@@ -102,12 +111,15 @@ def plan_start_state(scenario, start_at, stages=None):
     wx = cx + lx * cos_y - ly * sin_y
     wy = cy + lx * sin_y + ly * cos_y
     wz = float(support_z) + float(dims[2]) / 2.0   # carton CENTRE sits half its height above the deck
+    couple_cart = start_at == 'transfer'
     return StartState(
         start_at=start_at, skipped=skipped,
         carton_position=(wx, wy, wz),
         carton_orientation_wxyz=_yaw_to_wxyz(float(cart_yaw_on_unit)),
-        note=('synthesized post-collect: carton resting at the cart load centre '
-              '(not welded; transfer must re-grasp it)'))
+        couple_cart=couple_cart,
+        note=('synthesized carton resting at the cart load centre (not welded; the arm re-grasps it)'
+              + ('; cart physically coupled behind the robot (hitch authored), parked at the shelf'
+                 if couple_cart else '; cart at the dock, left uncoupled for the real couple stage')))
 
 
 def apply_start_state(assembly, config, scenario, *, settle_steps=30, _rigid_prim=None):
@@ -130,11 +142,48 @@ def apply_start_state(assembly, config, scenario, *, settle_steps=30, _rigid_pri
     carton.set_linear_velocity(np.zeros(3))
     carton.set_angular_velocity(np.zeros(3))
     # Let the carton settle onto the cart deck and the contact solver quiesce before the mission
-    # ticks, so couple/outbound start from a stationary, resting payload.
+    # ticks, so the downstream phases start from a stationary, resting payload.
     for _ in range(int(settle_steps)):
         assembly.world.step(render=False)
+    coupling = None
+    if plan.couple_cart:
+        # transfer start: the couple/outbound/park stages are skipped, so the cart must already be
+        # physically coupled behind the robot (both spawned parked+aligned at the shelf by the
+        # variant scenario). Author the real hitch through the SAME mobile.attach contract the couple
+        # stage uses (fresh, stopped, aligned observation), then assert the latch is healthy -- a
+        # silent uncoupled cart would let the arm's transfer reaction shove it.
+        assembly.mobile.park()
+        for _ in range(int(settle_steps)):
+            assembly.hold()
+            assembly.world.step(render=False)
+        dock = _dock_observation(assembly)
+        pre = assembly.mobile.coupling_state(dock)
+        if pre['joint_present']:
+            raise RuntimeError('shortcut: stage already coupled before the synthetic hitch request')
+        coupling = assembly.mobile.attach(dock)
+        if not coupling.get('healthy'):
+            raise RuntimeError('shortcut: synthetic cart coupling is not healthy '
+                               f"(residual {coupling.get('hitch_error_m')} m); check the variant "
+                               'scenario cart_body_pose vs robot_base_pose hitch alignment')
+        for _ in range(int(settle_steps)):
+            assembly.hold()
+            assembly.world.step(render=False)
     print(f'START_PHASE_SHORTCUT applied start_at={plan.start_at} skipped={list(plan.skipped)} '
           f'carton_pos={tuple(round(v, 4) for v in plan.carton_position)} '
-          f'carton_quat_wxyz={tuple(round(v, 4) for v in plan.carton_orientation_wxyz)}',
+          f'carton_quat_wxyz={tuple(round(v, 4) for v in plan.carton_orientation_wxyz)} '
+          f'coupled={None if coupling is None else coupling.get("healthy")}',
           flush=True)
     return plan
+
+
+def _dock_observation(assembly, *, age=0.0):
+    """Measured DockObservation for the synthetic hitch (same shape as coupling_check.dock_observation)."""
+    import numpy as np
+    from twin.mobile import DockObservation
+    from .isaac_port import body_measurement
+    r, rz, rv, rw = body_measurement(assembly.robot_body)
+    c, cz, cv, cw = body_measurement(assembly.cart_body)
+    frames = assembly.mobile.spec.manifest()
+    return DockObservation(r, c, rz + frames['robot_hitch_local'][2],
+        cz + frames['cart_hitch_local'][2], float(np.linalg.norm(rv)), float(np.linalg.norm(cv)),
+        float(rw[2]), float(cw[2]), age=age)
