@@ -161,6 +161,21 @@ def main():
     for spec in config.get('world_obstacles', []):
         boxes = [(b['size'], b['center'], b.get('rpy', (0.0, 0.0, 0.0))) for b in spec['boxes']]
         payload.add_world_obstacle(spec['id'], boxes)
+    # fm351 activation assertion: log the HOST's EFFECTIVE place/cage config as actually loaded, so a
+    # console grep proves a batch key activated in the process that consumes it. run-277 lost a full GPU
+    # run to a cage key authored into the wrong config file (silently inert); this line + the orchestrator
+    # --require preflight (config_preflight) make that failure impossible to repeat unnoticed.
+    print('HOST_EFFECTIVE_CONFIG ' + json.dumps({
+        'cart_cage_place': controller.cart_cage_place,
+        'cage_preplace_shape': controller.cage_preplace_shape,
+        'cage_axis': controller.cage_axis, 'cage_mouth_standoff': controller.cage_mouth_standoff,
+        'cage_insert_gap': controller.cage_insert_gap,
+        'staged_cart_swing': controller.staged_cart_swing, 'cart_pan_joint0': controller.cart_pan_joint0,
+        'cart_tuck_shape': controller.cart_tuck_shape,
+        'sim_cart_place_policy': _policy is not None and bool(config.get('sim_cart_place_policy')),
+        'base_collision_object': bool(config.get('base_collision_object', False)),
+        'world_obstacles': [s['id'] for s in config.get('world_obstacles', [])],
+    }), flush=True)
     try:
         rclpy.spin(node)
     finally:
