@@ -47,6 +47,12 @@ class OwnedProcess:
             self.stream.close()
 
 
+# Loose wall-clock liveness backstop (s). Only guards against a FROZEN sim clock; the sim-clock
+# heartbeat gap (0.5 s) + process_alive are the primary liveness checks. Kept well above the slowest
+# render-paced mission tick so a heavy full-res sensing render cannot false-trip a station fault.
+_WALL_HEARTBEAT_BACKSTOP_S = 15.0
+
+
 class StationState:
     """Fresh parked epochs and real mapper acknowledgements; no receipt shortcuts."""
     def __init__(self, *, wall_clock=time.monotonic):
@@ -105,8 +111,15 @@ class StationState:
         self.collision_time=stamp
 
     def snapshot(self, now, *, endpoints_ready, process_alive):
+        # Liveness is primarily the SIM/node-clock heartbeat gap (0.5 s; the mission heartbeats every
+        # physics tick, so this trips only on a genuinely stalled mission whose sim clock still
+        # advances) plus process_alive. The WALL-clock check is only a loose backstop for a frozen
+        # sim clock; at the real-rig 1 s it FALSE-TRIPS under render pacing -- a single full-res
+        # sensing render during the transfer warm pushes one tick past 1 s wall and faulted the
+        # station mid-warm (ds-011/013). Widen the wall backstop so it no longer false-trips while
+        # the sim-clock gap + process_alive remain the real guards. See freshness-sim-clock-not-wall.
         if self.active and (not process_alive or now-self.last_heartbeat>.5
-                            or self.wall_clock()-self.wall_heartbeat>1.):
+                            or self.wall_clock()-self.wall_heartbeat>_WALL_HEARTBEAT_BACKSTOP_S):
             self.fault='station process or parked heartbeat lost'
         ready=(self.active and not self.fault and endpoints_ready
                and 0<=now-self.collision_time<=.5 and self.collision_time>self.parked_since)
