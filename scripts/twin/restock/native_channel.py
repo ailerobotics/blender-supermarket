@@ -119,10 +119,17 @@ class StationClient:
         self.last_wall_send=-1.
         self.epoch=0
         self.sequence=0
-        # Send exactly one prepare (seq 0) per epoch, then heartbeats with a strictly increasing
-        # sequence regardless of whether a reply has arrived -- the ack accepts heartbeats as soon as
-        # it has accepted the prepare, and answers a DUPLICATE prepare with 'ignored' (seq<=last),
-        # which previously stalled the sequence and tripped the ack's 1 s wall heartbeat guard.
+        # Keep sending the prepare (seq 0) every cadence tick UNTIL the host acknowledges this epoch
+        # (a reply carrying epoch == self.epoch), then switch to heartbeats with a strictly increasing
+        # sequence. The initial prepare can be DROPPED before pub/sub discovery completes (the station
+        # subprocess's status topic had just been created); the old code sent exactly one prepare then
+        # advanced to heartbeats, so a dropped prepare left the host idle at epoch 0 while the client
+        # heart-beat at epoch 1 -- the host faulted 'no active matching epoch' on the first heartbeat
+        # and the client IGNORED every epoch-0 reply (epoch mismatch), a permanent cross-epoch wedge
+        # (hl-001: snapshot=None, collision_time=-1 the whole warm). Re-sending seq-0 prepares is safe:
+        # the host accepts it while still behind (epoch 0 -> opens the epoch) and answers a duplicate at
+        # the accepted epoch with 'ignored' (seq<=last), which does NOT advance its heartbeat clock --
+        # so we stop re-preparing the instant a reply for our epoch lands. _prepared means ACKNOWLEDGED.
         self._prepared=False
         self._restarts=0
         self.active=False
@@ -174,6 +181,10 @@ class StationClient:
             self.latest=reply
             self.last_reply=self.wall_clock()
             self._last_ack_stage=now
+            # A reply carrying our epoch proves the host accepted our prepare: stop re-preparing and
+            # switch to heartbeats. (A dropped initial prepare leaves the host behind at a lower epoch,
+            # so this never latches until the prepare actually lands.)
+            self._prepared=True
             # A fresh healthy (warming/ready) reply is progress: reset the bounded re-prepare budget
             # so transient faults recovered across a long place/verify do not accumulate toward the
             # cap and surface a stale reason on a later, unrelated transient.
@@ -207,11 +218,12 @@ class StationClient:
             raise RuntimeError('station supervisor heartbeat unavailable')
         wall=self.wall_clock()
         if self.last_send<0 or wall-self.last_wall_send>=_HEARTBEAT_WALL_S:
-            # One prepare (seq 0) per epoch; then heartbeats with a strictly increasing sequence,
-            # on the wall-paced cadence, regardless of whether a reply has arrived yet.
+            # Re-send the prepare (seq 0) each cadence tick until the host acknowledges this epoch
+            # (_prepared is set on the first reply carrying our epoch); then heartbeats with a strictly
+            # increasing sequence. A dropped prepare no longer wedges the handshake -- the next tick
+            # re-prepares, and a duplicate once accepted is answered 'ignored' (seq<=last, harmless).
             if not self._prepared:
                 action,seq='prepare',0
-                self._prepared=True
             else:
                 action,seq='heartbeat',self.sequence
             self.channel.publish(dict(action=action,epoch=self.epoch,sequence=seq,
