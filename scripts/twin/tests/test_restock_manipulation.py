@@ -18,12 +18,18 @@ class FixtureMotion:
         self.stows = []
         self.outcome, self.attach_ok = 'succeeded', True
 
-    def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None):
+    def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
+              slow=False, goal_tol=None):
         self.moves.append(pose)
         self.joint_space_moves = getattr(self, 'joint_space_moves', [])
         self.joint_space_moves.append(joint_space)
         self.wrist1_caps = getattr(self, 'wrist1_caps', [])
         self.wrist1_caps.append(wrist1_cap)
+        # fm345: per-move PLACE slow + widened goal-gate tolerance (recorded for assertions).
+        self.slows = getattr(self, 'slows', [])
+        self.slows.append(slow)
+        self.goal_tols = getattr(self, 'goal_tols', [])
+        self.goal_tols.append(goal_tol)
 
     def poll(self):
         return self.outcome

@@ -298,8 +298,16 @@ class TransferController:
                 # tuck/pan joint goals already use cart_tuck_shape wrist_1=0.65. None elsewhere (the pick
                 # approach may need wrist_1 above the stop to reach the backstock).
                 carry_cap = self.carry_wrist1_cap if self.phase == 'lift' else None
+                # fm345 smaller-problems-later: the carton-loaded PLACE extend (preplace/place) is too
+                # fast for the soft arm drive to track the cuMotion min-jerk timing (run-270 sagged
+                # 0.567 rad short at rest). Slow those two moves to ~half and widen their terminal
+                # goal-gate tolerance so a converging lag does not abort mid-place; every other move
+                # (pick approach/contact/grasp/lift, and the empty-handed retreat) keeps full speed and
+                # the tight gate. Retreat is post-release and empty, so it is NOT relaxed.
+                place_move = self.phase in ('preplace', 'place')
                 self.motion.begin(target, s.joint_positions, straight_line=straight,
-                                  joint_space=joint_space, wrist1_cap=carry_cap)
+                                  joint_space=joint_space, wrist1_cap=carry_cap,
+                                  slow=place_move, goal_tol=(0.12 if place_move else None))
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': self.poses[self.phase]},))
             if self.phase == 'contact' and not self._contact_suction:

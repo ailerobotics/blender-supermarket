@@ -46,6 +46,9 @@ RESPAWN_WAIT_CAP_S = 45.0
 # wall time for a single move below the backstop so an unplannable pose surfaces as a motion failure
 # fast. Legit stochastic retries succeed in ~1 s each and never approach this.
 PLAN_TOTAL_WALL_CAP_S = 22.0
+# fm345 (c): the tight terminal goal-gate position tolerance (matches trajectory_host GOAL_POSITION_TOL);
+# the per-move PLACE relaxation widens it only for the carton-loaded extend, reset to this otherwise.
+GOAL_POSITION_TOL_DEFAULT = 0.01
 
 
 def _should_replan(replan_attempts, has_plan_goal):
@@ -173,6 +176,20 @@ class RosMotionPort:
         self.execute = ActionClient(node, ExecuteTrajectory, namespace + '/execute_trajectory')
         self.state, self.handle, self.future = 'idle', None, None
         self.generation = 0
+        # fm345 smaller-problems-later: per-move PLACE relaxations for the carton-loaded extend.
+        # (b) _move_speed_scale slows the cuMotion joint-space plan (preplace/place) to ~half so the
+        # soft arm drive (3e5/8000/400) can track the min-jerk timing it lagged in run-270 (sagged
+        # 0.567 rad short). (c) a latched side-channel topic carries a WIDER terminal goal-gate
+        # tolerance to the trajectory_host for those moves (the FJT goal_tolerance is unreachable
+        # through MoveIt's ExecuteTrajectory), reset to the tight default on every other move so the
+        # contact-descent precision is untouched. TRANSIENT_LOCAL so the executor sees the latest
+        # value even though it subscribes after this publisher is created.
+        from rclpy.qos import QoSProfile, DurabilityPolicy
+        from std_msgs.msg import Float64
+        self._move_speed_scale = 1.0
+        self._goal_tol_pub = node.create_publisher(
+            Float64, namespace + '/arm_controller/goal_position_tol',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         # Deadlines: IK/planning are compute-bound -> WALL clock. Trajectory EXECUTION is paced by the
         # simulator: under render pacing executing D sim-seconds takes far more WALL time, so a wall
         # execution deadline false-fails a healthy grasp (run-93). The execute deadline is therefore
@@ -180,7 +197,17 @@ class RosMotionPort:
         self._sim_now = lambda: self.node.get_clock().now().nanoseconds * 1e-9
         self.deadline_clock = time.monotonic
 
-    def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None):
+    def _publish_goal_tol(self, goal_tol):
+        """fm345 (c): latch the trajectory_host terminal goal-gate position tolerance for the NEXT
+        move. goal_tol=None restores the tight default (GOAL_POSITION_TOL); a wider value is set only
+        for the carton-loaded PLACE extend. Published BEFORE planning so it latches well before the
+        executor receives the FJT goal (planning takes ~1 s). The executor clamps it to a sane band."""
+        from std_msgs.msg import Float64
+        tol = GOAL_POSITION_TOL_DEFAULT if goal_tol is None else float(goal_tol)
+        self._goal_tol_pub.publish(Float64(data=tol))
+
+    def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
+              slow=False, goal_tol=None):
         from moveit_msgs.srv import GetPositionIK
         if self.state not in ('idle', 'succeeded', 'failed'):
             raise RuntimeError('motion already active')
@@ -190,6 +217,10 @@ class RosMotionPort:
                 or any(not math.isfinite(q) or not lo <= q <= hi for q, (lo, hi) in zip(joints, self.limits))):
             raise ValueError('invalid pose or measured start')
         self.start = tuple(joints)
+        # fm345 (b)+(c): slow the carton-loaded PLACE extend to ~half and widen its terminal goal gate;
+        # both reset to the full-speed / tight-tolerance default on every non-place move.
+        self._move_speed_scale = 0.5 if slow else 1.0
+        self._publish_goal_tol(goal_tol)
         self._replan_attempts = 0          # fresh-seed re-plan budget for this move (see REPLAN_MAX)
         self._server_crash_retries = 0     # move_group-respawn re-send budget (see MOVE_GROUP_CRASH_RETRY_MAX)
         self._awaiting_server_respawn = False  # True while holding the move open for a respawned move_group
@@ -429,6 +460,10 @@ class RosMotionPort:
                     for q,(lo,hi) in zip(positions,self.limits)):
                 raise ValueError('invalid joint goal or measured start')
         self.start=tuple(measured_joints)
+        # fm345 (c): tuck/pan keep the tight terminal goal gate -- reset the latched tolerance so a
+        # wider PLACE value from a prior move cannot carry into these folds (begin_joint_goal moves
+        # are not the carton-loaded place extend).
+        self._publish_goal_tol(None)
         # Reset the planning anchors for THIS move, exactly as begin() does (firstmate 292 / run-238):
         # without a fresh _plan_started_wall the total-planning-wall cap carried the stale anchor from
         # the previous pose-goal move (lift), so the tuck/pan/stow joint goal tripped
@@ -685,8 +720,11 @@ class RosMotionPort:
             req.group_name, req.pipeline_id = self.group, self.pipeline
             req.allowed_planning_time = 5.0
             req.num_planning_attempts = 1
-            req.max_velocity_scaling_factor = self.velocity_scale
-            req.max_acceleration_scaling_factor = .05
+            # fm345 (b): this is the seeded-KDL -> cuMotion JOINT-space plan used by the cart PLACE
+            # moves (preplace/place); _move_speed_scale (0.5 for those, 1.0 otherwise) halves the
+            # planned speed so the soft drive tracks the min-jerk timing it lagged in run-270.
+            req.max_velocity_scaling_factor = self.velocity_scale * self._move_speed_scale
+            req.max_acceleration_scaling_factor = .05 * self._move_speed_scale
             req.start_state.joint_state.name = list(JOINTS)
             req.start_state.joint_state.position = list(self.start)
             constraints = Constraints()

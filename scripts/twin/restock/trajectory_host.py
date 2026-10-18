@@ -225,7 +225,12 @@ def main():
         raise RuntimeError('trajectory executor requires simulation domain 88')
     lock=threading.RLock()
     state=dict(feedback=None,received=0.,fault=None,active=False,target=None,plan=None,start=None,
-               miss_count=0,miss_stamp=None,contact=False)
+               miss_count=0,miss_stamp=None,contact=False,
+               # fm345 (c): terminal goal-gate position tolerance, default tight (GOAL_POSITION_TOL).
+               # The controller latches a WIDER value on the carton-loaded PLACE extend via the
+               # goal_position_tol side-channel topic (the FJT goal_tolerance is unreachable through
+               # MoveIt's ExecuteTrajectory) and resets it to the default on every other move.
+               goal_pos_tol=GOAL_POSITION_TOL)
     group=ReentrantCallbackGroup()
     command=node.create_publisher(JointState,'/restock_sim/arm_joint_command',10)
     stop=node.create_publisher(Bool,'/restock_sim/manipulation/stop',10)
@@ -351,10 +356,25 @@ def main():
                     raise ValueError('multi-DOF commands unsupported')
                 if request.trajectory.header.stamp.sec or request.trajectory.header.stamp.nanosec:
                     raise ValueError('only immediate simulation goals supported')
-                # This bounded executor declares its fixed tolerance policy explicitly.
-                if request.path_tolerance or request.goal_tolerance:
-                    raise ValueError('custom tolerance policy unsupported')
+                # This bounded executor still declares a fixed PATH-tolerance policy (unsupported), but
+                # fm345 (c) now ACCEPTS a per-goal GOAL tolerance: if the FJT goal carries one, use its
+                # max position tolerance for the terminal gate (clamped to a sane band); otherwise the
+                # latched goal_position_tol side-channel value governs. Path tolerance stays rejected.
+                if request.path_tolerance:
+                    raise ValueError('custom path tolerance policy unsupported')
+                if request.goal_tolerance:
+                    _pos=[abs(float(t.position)) for t in request.goal_tolerance if t.position]
+                    if _pos:
+                        state['goal_pos_tol']=min(0.2,max(GOAL_POSITION_TOL,max(_pos)))
                 Plan(request.trajectory,state['feedback'][1],limits,max_speed=max_speed,max_acceleration=max_acceleration)
+                # fm345 (d): dump the accepted cuMotion plan (joint names + per-point t/positions) so a
+                # future offline replay is possible if the place fails again. One line per accepted goal;
+                # no run-dir is passed to this executor, so it rides host-stack.log via stdout.
+                _jt=request.trajectory.joint_trajectory
+                _pts=[(round(p.time_from_start.sec+p.time_from_start.nanosec*1e-9,4),
+                       [round(float(x),4) for x in p.positions]) for p in _jt.points]
+                print(f'TRAJ_HOST_PLAN names={list(_jt.joint_names)} npoints={len(_pts)} '
+                      f'goal_pos_tol={state["goal_pos_tol"]:.3f} points={_pts}',flush=True)
                 state['active']=True
                 return GoalResponse.ACCEPT
             except ValueError:
@@ -421,7 +441,7 @@ def main():
                         # though <=0.1 s SIM apart (run-106 reached the trajectory end with the arm at
                         # the goal, then faulted on the wall term). The feedback-staleness watchdog
                         # (tick(), 30 s wall backstop) still hard-stops a genuinely frozen sim.
-                        if now()-measured[0]<=.2 and pos_err<=GOAL_POSITION_TOL and vel_mag<=GOAL_VELOCITY_TOL:
+                        if now()-measured[0]<=.2 and pos_err<=state['goal_pos_tol'] and vel_mag<=GOAL_VELOCITY_TOL:
                             state['target']=plan.end.copy()
                             state['plan']=None
                             handle.succeed()
@@ -458,8 +478,23 @@ def main():
         # holding the current pose -- no cancel, no fault, so goal() keeps accepting the following lift.
         with lock:
             state['contact']=bool(msg.data)
+    def goal_tol_signal(msg):
+        # fm345 (c): latched per-move terminal goal-gate position tolerance from the controller. The
+        # carton-loaded PLACE extend sets it wider so a converging lag does not abort mid-place; every
+        # other move resets it to the tight GOAL_POSITION_TOL. Clamped to a sane band either way, so a
+        # stray/large value cannot silently disable the gate; the contact-descent precision is untouched
+        # (the controller never widens it for the grasp).
+        with lock:
+            state['goal_pos_tol']=min(0.2,max(GOAL_POSITION_TOL,float(msg.data)))
     node.create_subscription(JointState,'/restock_sim/joint_states',feedback,10,callback_group=group)
     node.create_subscription(Bool,'/restock_sim/arm_contact',contact_signal,10,callback_group=group)
+    # TRANSIENT_LOCAL (latched) so the latest controller-set tolerance is delivered even though this
+    # executor subscribes after the controller's publisher is created (fm345 (c)).
+    from rclpy.qos import QoSProfile, DurabilityPolicy
+    from std_msgs.msg import Float64
+    node.create_subscription(Float64,'/restock_sim/arm_controller/goal_position_tol',goal_tol_signal,
+                             QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL),
+                             callback_group=group)
     node.create_timer(.02,tick,callback_group=group)
     server=ActionServer(node,FollowJointTrajectory,'/restock_sim/arm_controller/follow_joint_trajectory',
         execute_callback=execute,goal_callback=goal,
