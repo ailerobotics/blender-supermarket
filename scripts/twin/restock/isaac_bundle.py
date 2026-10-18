@@ -171,10 +171,16 @@ def plan_bundle(manifest, scenario, config):
         raise ValueError('config and scenario must be objects')
 
     poses_in = config.get('mission_poses')
-    if not isinstance(poses_in, dict) or set(poses_in) != set(NAV_GOALS):
-        raise ValueError(f'config.mission_poses must provide exactly {NAV_GOALS}')
+    # Required nav goals, plus OPTIONAL couple waypoints: `couple_approach` (east of/clear of the
+    # pinned cart) and `couple_standoff` (on the cart hitch axis, east of the dock) the couple
+    # stage navigates to before the fine-dock insert.
+    _couple_extra = {'couple_approach', 'couple_standoff'}
+    if not isinstance(poses_in, dict) or not set(NAV_GOALS) <= set(poses_in) \
+            or not set(poses_in) <= set(NAV_GOALS) | _couple_extra:
+        raise ValueError(f'config.mission_poses must provide {NAV_GOALS} '
+                         f'(plus optional {sorted(_couple_extra)})')
     poses = {}
-    for name in NAV_GOALS:
+    for name in NAV_GOALS + tuple(n for n in ('couple_approach', 'couple_standoff') if n in poses_in):
         if not _finite_pose(poses_in[name]):
             raise ValueError(f'mission pose {name!r} must be finite (x, y, yaw)')
         poses[name] = tuple(float(v) for v in poses_in[name])
@@ -325,9 +331,16 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
         route_alerts = build_from_config(config, output_dir=output, frame_builder=frame_builder,
                                          robot_id=config.get('route_alerts_robot_id', 'shelfbot'))
 
+    # Opt-in final fine-docking servo (twin.restock.fine_dock). Built ONLY when the config
+    # carries a `fine_dock` block; absent => None and the couple stage attaches directly
+    # (byte-identical). Sim and real-rig creep/gain/tolerance values live in separate blocks.
+    from twin.restock.fine_dock import build as build_fine_dock
+    fine_dock = build_fine_dock(config, spec=getattr(mobile, 'spec', None))
+
     adapter = RuntimeAdapter(navigation, mobile, manipulation, port, plan.poses,
                              fixture_mode=False, goal_articulation=plan.goal_articulation,
-                             route_alerts=route_alerts)
+                             route_alerts=route_alerts, fine_dock=fine_dock,
+                             hold_cart_through_couple=bool(config.get('hold_cart_through_couple')))
 
     # Opt-in warm-session reset provider (dev iteration): config['warm_reset'] names a
     # lane-owned builder `module:function` called once here with the live scene; it returns the

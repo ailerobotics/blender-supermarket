@@ -221,6 +221,52 @@ byte-identical, real-rig defaults untouched. Parsed by `navigation/factory.py`
 (`DockingApproach` in `navigation/core.py`); CPU tests in `tests/test_navigation.py`
 and `tests/test_navigation_factory.py`.
 
+### Couple cart-hold + final fine-docking servo (opt-in, default-off)
+
+Navigation parks at `cart_dock` within its arrival tolerance (0.08 m / 0.08 rad), but the
+physical coupling `attach` (`twin.mobile.Coupler.attach`) is far tighter — hitch-point distance
+≤ 25 mm, hitch-z ≤ 15 mm, yaw ≤ 5°, fully stationary — and those tolerances model a real hitch
+and are **not** loosened.
+
+**Intermediate couple approach waypoint** (`mission_poses['couple_approach']`, optional). The robot
+ends collect directly NORTH of the cart, while the drawbar/dock is EAST of it. With the cart pinned
+(below) the robot cannot shove it aside, so driving straight at `cart_dock` wedges against the cart.
+When `couple_approach` is set, the couple stage navigates to it FIRST (east of / clear of the pinned
+cart) and then to `cart_dock`, so the robot rounds the cart. Phase-local to couple; absent ⇒ couple
+goes straight to `cart_dock` (unchanged). Like `cart_dock`, the integration mission config must carry
+the same waypoint value.
+
+**Cart-hold through the approach** (`config['hold_cart_through_couple']`, SIM-only). The cart is a
+free body on bearing-damped casters. `mobile_runtime.command()` used to release the cart's
+fixed-to-world sim brake on the first base motion, so the cart was free for the whole couple
+approach; an angled nav approach then swept the rear hitch (0.62 m behind the base) into the cart
+and shoved it hundreds of mm before docking began. With the flag set, `mobile_runtime.hold_cart_pin()`
+pins the cart at couple start and `release_cart_brake()` **no-ops while the hold is latched** (so
+neither `command()` nor the `isaac_port` per-tick action logic can drop it); `attach()` authors the
+robot↔cart hitch THEN force-releases the world pin. The cart therefore stays at its known pose
+through the approach, so the hitch seats with a small residual. The real cart brakes physically, so
+real-rig semantics are untouched; absent flag ⇒ unchanged run.
+
+**Fine-docking servo** `twin.restock.fine_dock.FineDock` spans the final residual: once the couple
+nav goal is reached it runs a slow closed-loop creep that seats the rear hitch on the **measured**
+cart drawbar (per-tick), then hands to `attach`. The rear hitch's planar velocity is a non-singular
+linear map of (v, ω) (the inverse-hitch Jacobian, determinant `hitch_x` ≠ 0), so a proportional law
+on the measured hitch error gives a **translation-dominant** command: `v` along heading
+(REVERSE-capable) + a small `ω` for lateral+yaw. It **never rotates in place** — a real differential
+base does not pivot about its measured centre, so an in-place spin drifts the base and never
+converges (observed on cn-002). Motion only: it drives the base through the same
+`mobile.command(v, omega, dock, ...)` seam navigation uses; the `mobile.py` latch stays the
+coupling-joint side's. Bounded by `time_cap_s`; on expiry it fails HONESTLY with the residuals.
+
+Config `config['fine_dock']` (top-level, NOT under `navigation`; consumed by `isaac_bundle` →
+`RuntimeAdapter`): `creep_speed`, `creep_yaw_rate`, `gain_lin`, `gain_yaw`, `hitch_tol_m` (< 25 mm),
+`yaw_tol_rad` (< 5°), `settle_speed`, `time_cap_s`. Absent ⇒ no servo ⇒ couple attaches directly off
+the nav arrival, byte-identical. **Sim and real-rig values live in SEPARATE config blocks** (the real
+rig carries its own, more conservative tuning). CPU tests: `tests/test_restock_fine_dock.py`
+(servo + drift-augmented closed-loop convergence + reverse + honest time-cap) and
+`tests/test_restock_runtime.py` (couple nav→fine_dock→attach handover + cart pin at start /
+release at attach).
+
 ## In-process route
 
 `Controller` supplies A* over swept-clearance-checked grid edges, dynamic replan,

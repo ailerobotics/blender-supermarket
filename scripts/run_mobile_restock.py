@@ -362,6 +362,9 @@ def run(args, manifest, scenario):
                                    indent=2, allow_nan=False) + '\n')
                     return 0 if summary['state'] == 'complete' else 1
                 def _make_mission():
+                    # Per-stage timeout (default 120 s). The couple stage's rounded approach
+                    # (couple_approach waypoint + slow dock-approach cap) travels farther than a
+                    # direct dock run, so it may need more than the default; config-settable.
                     return Mission(db, Job(**scenario['job']), bundle.adapter,
                                    stages=config.get('stages'), start_at=config.get('start_at'),
                                    timeout_s=float(config.get('stage_timeout_s', 120.)),

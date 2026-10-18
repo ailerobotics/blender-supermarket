@@ -77,11 +77,13 @@ class NavigationBridge:
             raise ValueError('detection_source requires nav_mode "sensor"')
         self.detection_source = detection_source
 
-    def start(self, goal, coupled, *, goal_articulation=None):
-        if goal_articulation is None:
-            self.controller.start(goal, coupled)
-        else:
-            self.controller.start(goal, coupled, goal_articulation=goal_articulation)
+    def start(self, goal, coupled, *, goal_articulation=None, arrival_xy_tol=None):
+        kw = {}
+        if goal_articulation is not None:
+            kw['goal_articulation'] = goal_articulation
+        if arrival_xy_tol is not None:
+            kw['arrival_xy_tol'] = arrival_xy_tol
+        self.controller.start(goal, coupled, **kw)
 
     def step(self, dt, packet):
         if self.sensor_navigation:
@@ -149,8 +151,20 @@ class ManipulationBridge:
 class RuntimeAdapter:
     def __init__(self, navigation, mobile, manipulation, port: Port, poses,
                  *, fixture_mode=False, goal_articulation=None,
-                 stall_window_s=_SENSOR_STALL_WINDOW_S, route_alerts=None):
+                 stall_window_s=_SENSOR_STALL_WINDOW_S, route_alerts=None, fine_dock=None,
+                 hold_cart_through_couple=False):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
+        # Opt-in final fine-docking servo (twin.restock.fine_dock.FineDock). None (default) =>
+        # the couple stage hands the parked base straight to attach, byte-identical. When present
+        # it creeps the rear hitch onto the measured cart drawbar after nav parks, closing the
+        # nav-arrival residual to inside the attach handshake before handover (motion only; the
+        # physical latch stays in mobile.py). See fine_dock.py.
+        self.fine_dock = fine_dock
+        # Opt-in couple cart-hold: pin the cart to the world through the whole couple approach +
+        # fine-dock so the base cannot shove the free cart (the cart stays at its known pose so the
+        # hitch seats), released only at attach. False (default) => unchanged run. SIM-only; the
+        # real cart brakes physically (real-rig semantics untouched).
+        self.hold_cart_through_couple = bool(hold_cart_through_couple)
         # Opt-in mobile store-sensor hook (twin.route_alerts). None (default) =>
         # byte-identical run. When attached it runs the read-only store-vision
         # detectors over the drive camera during navigate; it is self-disabling and
@@ -177,6 +191,12 @@ class RuntimeAdapter:
             pose = poses.get(name, ())
             if len(pose) != 3 or not all(math.isfinite(v) for v in pose):
                 raise ValueError(f'missing/invalid pose: {name}')
+        # Optional couple approach waypoint + on-axis standoff; validated only when supplied.
+        for name in ('couple_approach', 'couple_standoff'):
+            if name in poses:
+                wp = poses[name]
+                if len(wp) != 3 or not all(math.isfinite(v) for v in wp):
+                    raise ValueError(f'invalid pose: {name}')
         self.time = 0.
         self.action = None
         self.last_packet_id = None
@@ -188,9 +208,26 @@ class RuntimeAdapter:
         self.action, self.job = action, job
         self.phase = 'execute'
         self._reach_start = None          # set on the first execute tick of a collect/transfer reach
-        if action in ('collect', 'couple', 'outbound', 'return'):
-            goal = {'collect': 'pickup', 'couple': 'cart_dock',
-                    'outbound': 'shelf_approach', 'return': 'home'}[action]
+        if action == 'couple':
+            # Couple nav runs an in-order sequence of waypoints ending at the ON-AXIS standoff,
+            # then the fine-dock servo inserts STRAIGHT along the cart axis to the drawbar:
+            #   couple_approach (round the pinned cart, east of it) -> couple_standoff (on the cart
+            #   hitch axis, ~0.4 m east of the dock, TIGHT arrival) -> fine-dock insert.
+            # Approaching on-axis turns the lateral error into cross-track the servo nulls WHILE
+            # reversing, instead of a residual nobody can close at zero speed. Absent both poses =>
+            # the old single cart_dock nav + fine-dock from there.
+            self._couple_seq = (['couple_approach'] if 'couple_approach' in self.poses else [])
+            self._couple_seq.append('couple_standoff' if 'couple_standoff' in self.poses else 'cart_dock')
+            self._couple_seq_i = 0
+            self._couple_nav_goal = self._couple_seq[0]
+            self._start_couple_nav(self._couple_nav_goal)
+            self.phase = 'navigate'
+            if self.hold_cart_through_couple:
+                # Pin the cart NOW (at its known pose, before the base drives) so the approach
+                # cannot shove the free cart; attach() releases it once coupled.
+                self.mobile.hold_cart_pin()
+        elif action in ('collect', 'outbound', 'return'):
+            goal = {'collect': 'pickup', 'outbound': 'shelf_approach', 'return': 'home'}[action]
             kwargs = ({'goal_articulation':self.goal_articulation[action]}
                       if action in self.goal_articulation else {})
             self.nav.start(self.poses[goal], action in ('outbound', 'return'), **kwargs)
@@ -205,6 +242,12 @@ class RuntimeAdapter:
             self._warmn = 0
         elif action not in ('park', 'verify'):
             raise ValueError(f'unsupported action: {action}')
+
+    def _start_couple_nav(self, goal_name):
+        # Tight XY arrival for the on-axis standoff so the fine-dock insert starts near the cart
+        # axis (its cross-track is what the servo nulls while reversing); normal arrival otherwise.
+        kw = {'arrival_xy_tol': 0.05} if goal_name == 'couple_standoff' else {}
+        self.nav.start(self.poses[goal_name], False, **kw)
 
     def stop(self):
         errors = []
@@ -304,6 +347,20 @@ class RuntimeAdapter:
                 self.phase = 'warm'
                 self._warmn = 0
                 return Result('running', reason='warming collision map before grasp')
+            if self.action == 'couple' and self._couple_seq_i < len(self._couple_seq) - 1:
+                # Reached a couple nav waypoint; advance to the next (ending at the standoff).
+                self._couple_seq_i += 1
+                self._couple_nav_goal = self._couple_seq[self._couple_seq_i]
+                self._start_couple_nav(self._couple_nav_goal)
+                self.phase = 'navigate'
+                return Result('running', reason=f'couple nav advancing to {self._couple_nav_goal}')
+            if self.action == 'couple' and self.fine_dock is not None:
+                # At the on-axis standoff (or cart_dock when no standoff): insert the rear hitch
+                # STRAIGHT along the cart axis onto the measured drawbar before attach. Motion only.
+                self.fine_dock.start(self.time)
+                self._fdn = 0
+                self.phase = 'fine_dock'
+                return Result('running', reason='nav at standoff; starting fine-dock insert')
             self.phase = 'execute'
         if self.phase == 'warm':
             self.mobile.hold()   # stationary manipulation: brake the base against arm reaction
@@ -329,6 +386,27 @@ class RuntimeAdapter:
                 return Result('running', reason=('collision map warm; dispatching grasp' if ready
                                                  else 'warm-up tick cap reached; dispatching grasp'))
             return Result('running', reason='warming collision map')
+        if self.phase == 'fine_dock':
+            # Slow closed-loop creep onto the MEASURED cart drawbar until inside the attach
+            # handshake, then hand over. Bounded + honest failure with residuals (motion only).
+            r = self.fine_dock.step(p.docking, self.time)
+            self._fdn = getattr(self, '_fdn', 0) + 1
+            if self._fdn % 30 == 1 or r.status != 'creeping':
+                print(f'FINE_DOCK_DIAG status={r.status} hitch_mm={r.hitch_residual_m*1000:.1f} '
+                      f'yaw_deg={math.degrees(r.yaw_residual_rad):.2f} v={r.linear:.3f} '
+                      f'w={r.angular:.3f} reason={r.reason!r}', flush=True)
+            if r.status == 'failed':
+                self.mobile.park()
+                return Result('failed', reason=r.reason)
+            if r.status == 'ready':
+                self.mobile.park()
+                if not p.parked:
+                    return Result('running', reason='fine-dock settling; waiting for measured parking')
+                self.phase = 'execute'   # settled inside tolerance: fall through to attach
+            else:
+                self.mobile.command(r.linear, r.angular, p.docking,
+                                    transport_ready=p.transport_ready)
+                return Result('running', reason=r.reason)
         self.mobile.hold()   # stationary manipulation: brake the base against stiff-arm reaction
         if not p.parked:
             return Result('failed', reason='base moved during stationary operation')
