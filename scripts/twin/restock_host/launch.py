@@ -38,9 +38,17 @@ def description(config):
     xrdf = yaml.safe_load(Path(robot['xrdf']).read_text())
     limits = {j: {'has_acceleration_limits': True, 'max_acceleration': float(a)}
               for j, a in zip(JOINTS, xrdf['cspace']['acceleration_limits'])}
+    # Respawn move_group on death instead of tearing the whole host stack down. An intermittent
+    # SIGABRT double-free in the cuMotion result handling (run-266/268: crash right after a SUCCESSFUL
+    # plan) killed move_group, whose OnProcessExit shutdown guard then SIGINT'd the entire stack and
+    # cost a whole 20-30 min GPU run. move_group holds no mid-plan state the mission needs (the
+    # trajectory host owns execution/settle), so a respawn re-advertises the action servers and the
+    # mission's planning client re-sends the same goal (ros_adapter _handle_server_crash). The short
+    # delay lets the old process fully release its endpoints before the replacement binds them.
+    # move_group is deliberately NOT in the shutdown-guard set below (see `guarded`).
     moveit = Node(
         package='moveit_ros_move_group', executable='move_group', namespace=NS,
-        name='move_group', output='screen', parameters=[{
+        name='move_group', output='screen', respawn=True, respawn_delay=3.0, parameters=[{
             **common, 'robot_description': Path(robot['urdf']).read_text(),
             'robot_description_semantic': Path(robot['srdf']).read_text(),
             'robot_description_kinematics': {'ur_manipulator': {
@@ -197,10 +205,14 @@ def description(config):
     trajectory = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock.trajectory_host',
         '--urdf', robot['urdf']], output='screen')
     processes = [moveit, container, masker, manipulation, trajectory]
-    # Losing mapping/masking must not leave an apparently healthy planner behind.
+    # Losing mapping/masking must not leave an apparently healthy planner behind -- these exits DO tear
+    # the stack down. move_group is excluded: it respawns (above), so its (recoverable) crash must not
+    # propagate SIGINT to the rest of the stack; propagating it is exactly the run-266/268 whole-run
+    # loss this lane fixes. The other components stay genuinely fatal (host-lifecycle lane territory).
+    guarded = [container, masker, manipulation, trajectory]
     guards = [RegisterEventHandler(OnProcessExit(target_action=process,
               on_exit=[EmitEvent(event=Shutdown(reason='restock host component exited'))]))
-              for process in processes]
+              for process in guarded]
     # Host-published nvblox mapper-incorporation acknowledgement. nvblox runs
     # update_esdf_rate_hz 0.0 (on-request only), so this node's ESDF service poll is what
     # integrates pending masked depth, and it publishes the real NVIDIA incorporation

@@ -26,6 +26,19 @@ EXECUTE_SETTLE_MARGIN_S = 25.0
 # seed-variant base/plate collision (INVALID_MOTION_PLAN, run-129/134 ~half of seeds) into a
 # near-certain pass at ~1 s of planning per retry (firstmate standing-authority lever).
 REPLAN_MAX = 12
+# Bounded recovery from a move_group PROCESS crash (SIGABRT double-free in the cuMotion result
+# handling, run-266/268): the action server VANISHES mid-move. The launch now respawns move_group
+# instead of tearing the host stack down, so the planning client waits for the respawned server and
+# re-sends the SAME plan goal (a fresh plan -> execute) up to this many times, turning an abort during
+# a stage into a logged retry instead of a lost 20-30 min GPU run. Distinct from REPLAN_MAX, which
+# reacts to a DELIVERED plan rejection; here no result is ever delivered because the server died.
+MOVE_GROUP_CRASH_RETRY_MAX = 3
+# Wall cap on how long a single crash-retry holds the move open waiting for move_group to respawn and
+# re-advertise its action servers. The launch respawns with a short delay and the CumotionPlanner
+# plugin re-init blocks on the (still-live) nvblox ESDF service, so a healthy respawn re-advertises in
+# a few seconds; this generous bound makes an UNRECOVERABLE crash (respawn exhausted, or the launch
+# itself down) surface as a clean motion failure instead of an unbounded hold.
+RESPAWN_WAIT_CAP_S = 45.0
 # Fail FAST on a persistently-failing plan (firstmate run-216/279): an IK-infeasible goal churns the
 # 12 replans + every seed, each resetting a fresh per-attempt deadline, so the move could retry well
 # past the host's 30 s /sensors wall backstop -- which then fired as the mission reason instead of a
@@ -39,6 +52,16 @@ def _should_replan(replan_attempts, has_plan_goal):
     """On a MoveIt plan rejection, re-plan the SAME goal (a fresh stochastic cuMotion seed) up to
     REPLAN_MAX times before falling back to the next IK seed / failing. Pure for CPU testing."""
     return replan_attempts < REPLAN_MAX and has_plan_goal
+
+
+def _should_crash_retry(crash_retries, has_plan_goal):
+    """After a move_group PROCESS crash (its action server vanished mid-move, run-266/268), re-send the
+    SAME plan goal to the respawned server up to MOVE_GROUP_CRASH_RETRY_MAX times. Distinct from
+    _should_replan: that reacts to a DELIVERED plan rejection; here the server itself died, so there is
+    no result to react to -- the launch respawns move_group and the whole move is re-planned. A re-send
+    needs a stored plan goal (the straight-line contact descent has none -> normal failure path). Pure
+    for CPU testing."""
+    return has_plan_goal and crash_retries < MOVE_GROUP_CRASH_RETRY_MAX
 
 
 def planner_velocity_scale(urdf, *, command_limit=.15, scale_cap=.05):
@@ -168,6 +191,8 @@ class RosMotionPort:
             raise ValueError('invalid pose or measured start')
         self.start = tuple(joints)
         self._replan_attempts = 0          # fresh-seed re-plan budget for this move (see REPLAN_MAX)
+        self._server_crash_retries = 0     # move_group-respawn re-send budget (see MOVE_GROUP_CRASH_RETRY_MAX)
+        self._awaiting_server_respawn = False  # True while holding the move open for a respawned move_group
         self._plan_goal = None             # the MoveGroup goal to re-send on a plan rejection
         self._plan_started_wall = time.monotonic()   # total planning-wall cap anchor (see PLAN_TOTAL_WALL_CAP_S)
         # Straight-line contact descent (firstmate run-191). The contact move is BY DEFINITION a short
@@ -411,6 +436,8 @@ class RosMotionPort:
         # (PLAN_WALL_DIAG elapsed=49.6 s on a plan that had just started). A joint goal does not re-plan
         # a stored pose, so _plan_goal stays None (poll's REPLAN path is a no-op for it).
         self._replan_attempts=0
+        self._server_crash_retries=0
+        self._awaiting_server_respawn=False
         self._plan_goal=None
         self._straight_line=False
         self._plan_started_wall=time.monotonic()
@@ -538,6 +565,64 @@ class RosMotionPort:
         except Exception:
             return True                              # a result future that raised is a failure too
 
+    def _server_action_for_state(self):
+        """The MoveGroup/ExecuteTrajectory action client whose server must be live for the current
+        state, or None outside a planning/execution state. Used to notice a move_group PROCESS crash
+        (the server vanishes) distinctly from a slow-but-alive server."""
+        if self.state in ('plan_accept', 'plan_result'):
+            return self.plan
+        if self.state in ('execute_accept', 'execute_result'):
+            return self.execute
+        return None
+
+    def _handle_server_crash(self):
+        """Recover a move_group PROCESS crash (SIGABRT double-free, run-266/268) without failing the
+        move. While the action server for the current state is down, hold the move open (the launch
+        respawns move_group); once it is back, re-send the SAME plan goal as a bounded, logged retry
+        (a fresh plan -> execute). Returns 'running' while recovering, or None to let poll() proceed
+        normally. No-op when there is no stored plan goal or the crash-retry budget is spent -- the
+        normal wall-cap/failure path then owns it, so an unrecoverable hang still surfaces."""
+        server = self._server_action_for_state()
+        if server is None:
+            return None
+        if not server.server_is_ready():
+            # Server down: crashed, or in the respawn gap. Keep the move alive for the respawn only if
+            # we have a goal to re-send and crash-retry budget remains.
+            if not _should_crash_retry(getattr(self, '_server_crash_retries', 0),
+                                       getattr(self, '_plan_goal', None) is not None):
+                return None                     # no goal / budget spent -> normal failure path owns it
+            now = time.monotonic()
+            if not getattr(self, '_awaiting_server_respawn', False):
+                self._awaiting_server_respawn = True
+                self._respawn_wait_started = now
+                print('MOVE_GROUP_CRASH_RETRY state=%s action server lost; awaiting respawn (retry %d/%d)'
+                      % (self.state, getattr(self, '_server_crash_retries', 0) + 1,
+                         MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
+            if now - getattr(self, '_respawn_wait_started', now) > RESPAWN_WAIT_CAP_S:
+                # move_group did not come back within the cap -> unrecoverable; fail the move cleanly
+                # (poll() wraps this into stop() -> 'failed') instead of holding the move open forever.
+                raise RuntimeError('move_group did not respawn within %.0fs' % RESPAWN_WAIT_CAP_S)
+            # Hold the deadline ahead of the respawn wait so the move does not fail while down.
+            self.deadline_clock = time.monotonic
+            self.deadline = now + self.timeout
+            return 'running'
+        if getattr(self, '_awaiting_server_respawn', False):
+            # Respawned server is back -> re-plan the SAME goal from scratch (plan -> execute). Reset
+            # the per-move planning anchors for a full fresh budget; count the crash retry.
+            self._awaiting_server_respawn = False
+            self._server_crash_retries = getattr(self, '_server_crash_retries', 0) + 1
+            self._replan_attempts = 0
+            self.handle = None
+            self.generation += 1
+            self.deadline_clock = time.monotonic
+            self.deadline = time.monotonic() + self.timeout
+            self._plan_started_wall = time.monotonic()
+            print('MOVE_GROUP_CRASH_RETRY resending plan goal after respawn (retry %d/%d)'
+                  % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
+            self._send(self.plan, self._plan_goal, 'plan_accept')
+            return 'running'
+        return None
+
     def poll(self):
         try:
             return self._poll()
@@ -550,6 +635,12 @@ class RosMotionPort:
         from moveit_msgs.msg import Constraints, JointConstraint
         if self.state in ('succeeded', 'failed'):
             return self.state
+        # A move_group SIGABRT (double-free in cuMotion result handling, run-266/268) makes its action
+        # server vanish mid-move. Checked BEFORE the deadline so the move is held open for the launch's
+        # respawn and re-sent, rather than timing out to 'failed'. Inert when the server is live.
+        crashed = self._handle_server_crash()
+        if crashed is not None:
+            return crashed
         if self.deadline_clock() > self.deadline:
             self.stop()
             return 'failed'
