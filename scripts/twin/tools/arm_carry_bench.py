@@ -116,15 +116,35 @@ class DriveGains:
 
 @dataclass(frozen=True)
 class CarryProfile:
-    """Velocity/acceleration SCALING of a carrying move, as the generated rest-to-rest
-    trajectory's per-joint peak speed (rad/s) and peak acceleration (rad/s^2) caps."""
+    """Velocity/acceleration SCALING of a carrying move, as the generated trajectory's per-joint
+    peak speed (rad/s) and peak acceleration (rad/s^2) caps.
+
+    ``profile`` selects the velocity shape of the generated move:
+      'cubic'      a single rest-to-rest cubic (smooth parabolic velocity, 0 at both ends). Gentle
+                   on arrival -- the arm reaches the goal essentially at rest, in the drive's LINEAR
+                   regime, so a soft drive damps any residual. Good for a clean terminal-settle probe,
+                   but it does NOT reproduce the live fold's arrival overshoot (see 'trapezoid').
+      'trapezoid'  a synchronized trapezoidal (MoveIt time-optimal / TOTG-shaped) profile: ramp to a
+                   flat CRUISE at peak_speed, then a hard constant-accel DECEL to rest at the goal.
+                   The physical arm LAGS that terminal decel and ARRIVES OVERSHOOTING -- which, with a
+                   stiff acceleration-drive + a low effort ceiling, kicks the terminal hold into the
+                   effort-saturation BANG-BANG limit cycle the mission hits (run-248/256). This is the
+                   faithful "replay the real planned tuck path" arrival: the live mission launches
+                   trajectory_host at its default max_speed 0.3 / max_accel 1.0 and MoveIt
+                   time-parameterises the fold to that envelope, so the planned waypoint stream (which
+                   is not logged) is reconstructed here from the fold's measured endpoints + that same
+                   speed/accel envelope. A rest-to-rest cubic at the SAME caps under-predicts the ring
+                   because its arrival decel is a gentle parabola, not a flat cruise braking hard."""
     peak_speed: float
     peak_accel: float
+    profile: str = 'cubic'
 
     def validate(self):
         if not (math.isfinite(self.peak_speed) and self.peak_speed > 0
                 and math.isfinite(self.peak_accel) and self.peak_accel > 0):
             raise ValueError('invalid carry velocity/acceleration profile')
+        if self.profile not in ('cubic', 'trapezoid'):
+            raise ValueError("carry profile must be 'cubic' or 'trapezoid'")
         return self
 
 
@@ -185,16 +205,91 @@ def move_duration(start, goal, peak_speed, peak_accel):
     return max(t_speed, t_accel)
 
 
+def trapezoid_timing(d, peak_speed, peak_accel):
+    """Synchronized trapezoidal timing for a binding travel ``d`` (rad) under the cruise-speed and
+    acceleration caps. Returns ``(t_accel, t_cruise, total, v_peak)``: the accel ramp duration, the
+    flat-cruise duration, the total duration, and the cruise velocity actually reached (lower than
+    peak_speed when the move is too short to reach cruise -- the triangular case)."""
+    if d <= 1e-12:
+        return 0.0, 0.0, 0.0, 0.0
+    t_a = peak_speed / peak_accel
+    d_a = 0.5 * peak_accel * t_a * t_a           # distance covered in one accel ramp
+    if 2.0 * d_a <= d:                           # trapezoid: reaches cruise
+        d_c = d - 2.0 * d_a
+        t_c = d_c / peak_speed
+        return t_a, t_c, 2.0 * t_a + t_c, peak_speed
+    t_a = math.sqrt(d / peak_accel)              # triangular: peaks below cruise and decelerates
+    return t_a, 0.0, 2.0 * t_a, peak_accel * t_a
+
+
+def _trapezoid_state(tau, t_a, t_c, total, v_peak, accel):
+    """Position fraction (0..1 of the binding travel) and velocity (signed binding units) at time
+    ``tau`` along a symmetric trapezoid of total ``total`` with accel ramp ``t_a``, cruise ``t_c``."""
+    if total <= 0:
+        return 1.0, 0.0
+    tau = min(max(tau, 0.0), total)
+    d_a = 0.5 * accel * t_a * t_a
+    d_total = 2.0 * d_a + v_peak * t_c
+    if tau <= t_a:                               # accelerating
+        s = 0.5 * accel * tau * tau
+        v = accel * tau
+    elif tau <= t_a + t_c:                       # cruising
+        s = d_a + v_peak * (tau - t_a)
+        v = v_peak
+    else:                                        # decelerating
+        td = tau - t_a - t_c
+        s = d_a + v_peak * t_c + v_peak * td - 0.5 * accel * td * td
+        v = v_peak - accel * td
+    return (s / d_total if d_total > 0 else 1.0), v
+
+
+def build_trapezoid_trajectory(start, goal, carry: CarryProfile, *, min_points=10):
+    """A synchronized trapezoidal (TOTG-shaped) joint move: all joints ramp to cruise, hold a flat
+    cruise, then brake hard to rest together, each scaled to its own travel so they arrive at once.
+    Densely sampled (so each cubic segment the real Plan builds is near-linear and stays within the
+    caps) with the EXACT per-point position AND velocity -- so the executor's sampled command stream
+    carries the real nonzero cruise velocity and the hard terminal decel the live fold has."""
+    start = np.asarray([float(v) for v in start], float)
+    goal = np.asarray([float(v) for v in goal], float)
+    if start.shape != (6,) or goal.shape != (6,):
+        raise ValueError('carry start/goal must be six joints each')
+    carry.validate()
+    delta = goal - start
+    d = float(np.max(np.abs(delta)))
+    if d <= 1e-9:
+        return _Trajectory(ARM_JOINTS, [_Point(start, [0.0] * 6, 0.0),
+                                        _Point(goal, [0.0] * 6, 1e-3)]), 0.0
+    t_a, t_c, total, v_peak = trapezoid_timing(d, carry.peak_speed, carry.peak_accel)
+    accel = carry.peak_accel if t_c > 0 else (v_peak / t_a if t_a > 0 else carry.peak_accel)
+    sign = np.sign(delta)                        # per-joint direction
+    scale = np.abs(delta) / d                    # per-joint travel fraction of the binding joint
+    n = max(min_points, int(math.ceil(total / 0.05)) + 1)
+    pts = []
+    for k in range(n + 1):
+        tau = total * k / n
+        frac, vbind = _trapezoid_state(tau, t_a, t_c, total, v_peak, accel)
+        q = start + sign * (frac * d) * scale    # frac*d is the binding joint's covered distance
+        v = sign * vbind * scale
+        if k == 0 or k == n:
+            v = np.zeros(6)                      # pin exact rest at both ends (Plan requires start at rest)
+        pts.append(_Point(q, v, tau))
+    pts[-1] = _Point(goal, [0.0] * 6, total)     # land exactly on the goal
+    return _Trajectory(ARM_JOINTS, pts), total
+
+
 def build_carry_trajectory(start, goal, carry: CarryProfile):
-    """A single rest-to-rest joint move from ``start`` to ``goal`` (both 6-vectors in
-    ARM_JOINTS order), time-parameterised to the carry profile. Returns ``(trajectory, plan)``
-    where ``plan`` is the REAL trajectory_host.Plan (so the bench samples/validates exactly as
-    the executor does). ``plan`` is None for a zero-travel move."""
+    """A single joint move from ``start`` to ``goal`` (both 6-vectors in ARM_JOINTS order),
+    time-parameterised to the carry profile. ``carry.profile`` selects the velocity shape:
+    'cubic' (gentle rest-to-rest) or 'trapezoid' (faithful TOTG arrival; see CarryProfile).
+    Returns ``(trajectory, duration)``. The REAL trajectory_host.Plan is built by run_move so the
+    bench samples/validates exactly as the executor does."""
+    carry.validate()
+    if carry.profile == 'trapezoid':
+        return build_trapezoid_trajectory(start, goal, carry)
     start = [float(v) for v in start]
     goal = [float(v) for v in goal]
     if len(start) != 6 or len(goal) != 6:
         raise ValueError('carry start/goal must be six joints each')
-    carry.validate()
     T = move_duration(start, goal, carry.peak_speed, carry.peak_accel)
     traj = _Trajectory(ARM_JOINTS, [
         _Point(start, [0.0] * 6, 0.0),
@@ -224,6 +319,14 @@ class MoveMetrics:
     clearance_at_wrist1: dict = field(default_factory=dict)  # obstacle name -> wrist_1 (rad) at that min gap
     contact_prims: list = field(default_factory=list)      # distinct prims the carton physically contacted
     first_contact: dict | None = None        # {sim_time, fold_fraction, wrist1_rad, prim, position} at first touch
+    # --- inbox 013: the contact/constraint FIGHT (which link the carton touches + with what force) ---
+    peak_contact_force_N: dict = field(default_factory=dict)  # contacted prim-pair -> peak |contact force| (N)
+    peak_weld_reaction_N: float = 0.0        # peak SIM_ATTACH_FALLBACK fixed-joint reaction force (N); 0 if unread
+    # --- inbox 015: is a joint at its effort cap while sitting short of goal? (drive saturation) ---
+    peak_applied_effort: list = field(default_factory=lambda: [0.0] * 6)  # per-joint peak |applied effort| (Nm)
+    effort_cap: list = field(default_factory=lambda: [0.0] * 6)           # per-joint max-effort cap (Nm)
+    effort_saturated: list = field(default_factory=lambda: [False] * 6)   # per joint: ever at >=98% of its cap
+    terminal_applied_effort: list = field(default_factory=lambda: [0.0] * 6)  # per-joint applied effort at end
 
     @property
     def ok(self):
@@ -261,9 +364,24 @@ class ArmStage:
         Negative = the carton's bounding volume overlaps the obstacle's."""
         return {}
     def probe_contacts(self):
-        """List of {'prim': str, 'position': [x,y,z]} the carton is PHYSICALLY contacting THIS
-        tick (PhysX contact reports, hollow-geometry-aware)."""
+        """List of {'prim': str, 'position': [x,y,z], 'force_N': float} the carton is PHYSICALLY
+        contacting THIS tick (PhysX contact reports, hollow-geometry-aware). ``force_N`` is the
+        contact-force magnitude (impulse/dt) when available, else 0."""
         return []
+
+    def weld_reaction_force(self):
+        """Magnitude (N) of the SIM_ATTACH_FALLBACK fixed-joint reaction THIS tick, or None if the
+        stage cannot report it. The weld transmits the carton's weight + whatever the contact fight
+        pushes back, so a large reaction co-timed with a link contact is the constraint-fight signal
+        (inbox 013)."""
+        return None
+
+    def applied_efforts(self):
+        """(efforts, caps) as 6-vectors in ARM_JOINTS order: the per-joint APPLIED/measured drive
+        effort (Nm) this tick and the per-joint max-effort cap. Empty tuple () if the stage cannot
+        report it. Lets the bench flag a joint pinned AT its effort cap while short of goal -- the
+        drive-saturation question (inbox 015)."""
+        return ()
 
 
 def run_move(stage: ArmStage, start, goal, carry: CarryProfile, tol: Tolerances,
@@ -277,16 +395,22 @@ def run_move(stage: ArmStage, start, goal, carry: CarryProfile, tol: Tolerances,
     traj, duration = build_carry_trajectory(start, goal, carry)
     m = MoveMetrics(label=label, duration_s=duration)
     limits = [(-2 * math.pi, 2 * math.pi)] * 6   # generous; the generated move stays well within
-    # Plan guards the generated trajectory; set its speed/accel ceilings just above the
-    # generated peaks (the generator already respects the carry caps).
+    # Plan guards the generated trajectory; set its speed/accel ceilings just above the generated
+    # peaks (the generator already respects the carry caps, so this never rejects a well-formed move).
     delta = float(np.max(np.abs(np.asarray(goal, float) - np.asarray(start, float))))
-    if duration > 0:
-        peak_speed = 1.5 * delta / duration
-        peak_accel = 6.0 * delta / (duration * duration)
+    if carry.profile == 'trapezoid':
+        # The trapezoid is densely sampled at exactly the cruise/accel caps; the Plan re-interpolates
+        # each tiny segment as a cubic that can marginally overshoot the sampled peaks, so give modest
+        # headroom (the shape, not the ceiling, is what reproduces the arrival).
+        plan_max_speed = carry.peak_speed * 1.2 + 1e-6
+        plan_max_accel = carry.peak_accel * 2.5 + 1e-6
+    elif duration > 0:
+        plan_max_speed = (1.5 * delta / duration) * 1.05 + 1e-6
+        plan_max_accel = (6.0 * delta / (duration * duration)) * 1.05 + 1e-6
     else:
-        peak_speed = peak_accel = 1e-6
+        plan_max_speed = plan_max_accel = 1e-6
     plan = Plan(traj, np.asarray(start, float), limits,
-                max_speed=peak_speed * 1.05 + 1e-6, max_acceleration=peak_accel * 1.05 + 1e-6)
+                max_speed=plan_max_speed, max_acceleration=plan_max_accel)
 
     start_sim = stage.sim_time()
     base0 = np.asarray(stage.base_xy(), float)
@@ -346,9 +470,25 @@ def run_move(stage: ArmStage, start, goal, carry: CarryProfile, tol: Tolerances,
             prim = hit.get('prim')
             if prim and prim not in m.contact_prims:
                 m.contact_prims.append(prim)
+            force = float(hit.get('force_N') or 0.0)
+            if prim and force > m.peak_contact_force_N.get(prim, 0.0):
+                m.peak_contact_force_N[prim] = force
             if m.first_contact is None and prim:
                 m.first_contact = dict(sim_time=float(stage.sim_time()), fold_fraction=fold_fraction,
-                                       wrist1_rad=wrist1, prim=prim, position=hit.get('position'))
+                                       wrist1_rad=wrist1, prim=prim, position=hit.get('position'),
+                                       force_N=force)
+        wr = stage.weld_reaction_force()
+        if wr is not None and float(wr) > m.peak_weld_reaction_N:
+            m.peak_weld_reaction_N = float(wr)
+        eff = stage.applied_efforts()
+        if eff:
+            efforts, caps = np.abs(np.asarray(eff[0], float)), np.asarray(eff[1], float)
+            m.peak_applied_effort = np.maximum(m.peak_applied_effort, efforts).tolist()
+            m.effort_cap = caps.tolist()
+            m.terminal_applied_effort = efforts.tolist()
+            for j in range(6):
+                if caps[j] > 0 and efforts[j] >= 0.98 * caps[j]:
+                    m.effort_saturated[j] = True
         # terminal settle gate (sim-clocked), mirroring trajectory_host.execute()
         if elapsed >= plan.times[-1]:
             pos_err = float(np.max(np.abs(measured - plan.end)))
@@ -487,10 +627,23 @@ def contact_summary(moves):
     for m in moves:
         if m.first_contact:
             fc = m.first_contact
-            lines.append('%s: FIRST CONTACT prim=%s at fold_fraction=%.2f wrist1=%.3f rad pos=%s'
-                         % (m.label, fc['prim'], fc['fold_fraction'], fc['wrist1_rad'], fc['position']))
+            lines.append('%s: FIRST CONTACT prim=%s at fold_fraction=%.2f wrist1=%.3f rad force=%.1f N pos=%s'
+                         % (m.label, fc['prim'], fc['fold_fraction'], fc['wrist1_rad'],
+                            fc.get('force_N', 0.0), fc['position']))
         if m.contact_prims:
             lines.append('%s: contacted prims=%s' % (m.label, m.contact_prims))
+        for prim, force in sorted(m.peak_contact_force_N.items(), key=lambda kv: -kv[1]):
+            lines.append('%s: peak contact force on %s = %.1f N' % (m.label, prim, force))
+        if m.peak_weld_reaction_N:
+            lines.append('%s: peak SIM_ATTACH weld reaction = %.1f N' % (m.label, m.peak_weld_reaction_N))
+        if any(m.effort_cap):
+            names = ['pan', 'lift', 'elbow', 'wrist1', 'wrist2', 'wrist3']
+            sat = [names[j] for j in range(6) if m.effort_saturated[j]]
+            lines.append('%s: per-joint applied effort (Nm) %s / cap %s; SATURATED=%s'
+                         % (m.label,
+                            [round(x, 1) for x in m.peak_applied_effort],
+                            [round(x, 1) for x in m.effort_cap],
+                            (sat or 'none')))
         for name, gap in sorted(m.min_clearance_m.items()):
             lines.append('%s: min clearance to %s = %.1f mm (at wrist1=%.3f rad)'
                          % (m.label, name, gap * 1000, m.clearance_at_wrist1.get(name, float('nan'))))

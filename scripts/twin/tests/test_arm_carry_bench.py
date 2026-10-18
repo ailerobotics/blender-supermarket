@@ -10,8 +10,8 @@ import pytest
 from twin.tools import arm_carry_bench as bench
 from twin.tools.arm_carry_bench import (
     CarryProfile, DriveGains, Tolerances, TrialSpec, WRIST_1,
-    build_carry_trajectory, move_duration, run_move, carry_goals,
-    sweep_grid, summarize, metrics_table)
+    build_carry_trajectory, build_trapezoid_trajectory, trapezoid_timing,
+    move_duration, run_move, carry_goals, sweep_grid, summarize, metrics_table)
 
 
 # ---- a scripted ArmStage that drives the executor into a chosen regime ----------
@@ -21,7 +21,7 @@ class ScriptedArm(bench.ArmStage):
     The real ArmCommandGate + PhysX drive are exercised on the GPU, not here."""
 
     def __init__(self, start, goal, regime, *, dt=1.0 / 60.0, stall_cap=0.4,
-                 contact_prim=None, contact_at_wrist1=None):
+                 contact_prim=None, contact_at_wrist1=None, contact_force_N=0.0, weld_reaction_N=None):
         self.start = np.asarray(start, float)
         self.goal = np.asarray(goal, float)
         self.regime = regime
@@ -29,6 +29,8 @@ class ScriptedArm(bench.ArmStage):
         self.stall_cap = stall_cap
         self.contact_prim = contact_prim          # emit a physical contact once wrist_1 passes...
         self.contact_at_wrist1 = contact_at_wrist1  # ...this measured value
+        self.contact_force_N = contact_force_N
+        self.weld_reaction_N = weld_reaction_N
         self.t = 0.0
         self._last_cmd = self.start.copy()
         self._k = 0
@@ -79,8 +81,17 @@ class ScriptedArm(bench.ArmStage):
         if self.contact_prim is None or self.contact_at_wrist1 is None:
             return []
         if float(self._last_cmd[WRIST_1]) >= self.contact_at_wrist1:
-            return [{'prim': self.contact_prim, 'position': [0.0, -0.75, 1.1]}]
+            return [{'prim': self.contact_prim, 'position': [0.0, -0.75, 1.1],
+                     'force_N': self.contact_force_N}]
         return []
+
+    def weld_reaction_force(self):
+        return self.weld_reaction_N
+
+    applied = None   # optionally set to (efforts6, caps6) to exercise the saturation flag
+
+    def applied_efforts(self):
+        return self.applied or ()
 
 
 FAST_TOL = Tolerances(goal_settle_margin_s=0.3)   # keep goal-miss tests short
@@ -110,6 +121,85 @@ def test_build_trajectory_passes_the_real_plan():
     # generated caps) -- run_move builds it internally, so a 'perfect' run proves acceptance.
     m = run_move(ScriptedArm(START, GOAL, 'perfect'), START, GOAL, CARRY, FAST_TOL, 'probe')
     assert m.outcome == 'settled' and len(m.peak_tracking_error) == 6
+
+
+# ---- trapezoid (faithful TOTG arrival) replay ---------------------------------
+def test_trapezoid_timing_trapezoid_vs_triangular():
+    # a long move reaches cruise (trapezoid: t_cruise > 0, v_peak == cap)
+    t_a, t_c, total, v_peak = trapezoid_timing(2.3, peak_speed=0.3, peak_accel=1.0)
+    assert t_c > 0 and v_peak == pytest.approx(0.3)
+    assert total == pytest.approx(2 * t_a + t_c)
+    # a short move never reaches cruise (triangular: t_cruise == 0, v_peak < cap)
+    t_a2, t_c2, total2, v_peak2 = trapezoid_timing(0.02, peak_speed=0.3, peak_accel=1.0)
+    assert t_c2 == 0.0 and v_peak2 < 0.3
+
+
+def test_trapezoid_trajectory_cruises_then_brakes_to_the_goal():
+    # the mission tuck: big wrist travel, at the mission envelope
+    start = [1.4051, -1.0499, 0.8940, -1.4149, -1.5708, -0.1657]
+    goal = [1.2618, -2.3, 1.0, 0.9, 0.8, -1.2545]
+    carry = CarryProfile(peak_speed=0.3, peak_accel=1.0, profile='trapezoid')
+    traj, total = build_trapezoid_trajectory(start, goal, carry)
+    assert total > 0 and len(traj.points) >= 10
+    # starts and ends at rest, lands exactly on the goal
+    assert max(abs(v) for v in traj.points[0].velocities) == 0.0
+    assert max(abs(v) for v in traj.points[-1].velocities) == 0.0
+    assert traj.points[-1].positions == pytest.approx(goal)
+    # the binding joint actually CRUISES at a nonzero speed mid-move (the arrival overshoot driver),
+    # unlike the cubic which only reaches peak momentarily
+    binding = int(np.argmax(np.abs(np.asarray(goal) - np.asarray(start))))
+    speeds = [abs(p.velocities[binding]) for p in traj.points]
+    assert max(speeds) == pytest.approx(0.3, abs=0.02)      # reaches the cruise cap
+    at_cruise = [s for s in speeds if s >= 0.29]
+    assert len(at_cruise) >= 3                              # a sustained cruise plateau, not a brief spike
+
+
+def test_trapezoid_joints_are_synchronized():
+    # all joints start and finish together; the slower joints scale their speed to their travel
+    start = [0.0] * 6
+    goal = [0.1, -0.2, 0.15, 2.0, 0.1, -0.1]   # wrist_1 binds
+    carry = CarryProfile(peak_speed=0.3, peak_accel=1.0, profile='trapezoid')
+    traj, total = build_trapezoid_trajectory(start, goal, carry)
+    # a small-travel joint never exceeds the binding joint's cruise, scaled by its travel fraction
+    small = 1   # shoulder_lift travels 0.2 vs wrist_1's 2.0 -> 0.1x the speed
+    peak_small = max(abs(p.velocities[small]) for p in traj.points)
+    assert peak_small == pytest.approx(0.3 * (0.2 / 2.0), abs=0.02)
+
+
+def test_trapezoid_passes_the_real_plan_and_settles_under_perfect_tracking():
+    start, goal = [0.0] * 6, [0.1, -0.2, 0.15, 2.0, 0.1, -0.1]
+    carry = CarryProfile(peak_speed=0.3, peak_accel=1.0, profile='trapezoid')
+    # a perfectly-tracking arm still settles -- the real Plan accepts the densely-sampled trapezoid
+    m = run_move(ScriptedArm(start, goal, 'perfect'), start, goal, carry, FAST_TOL, 'tuck')
+    assert m.outcome == 'settled' and m.ok
+    assert m.duration_s > 0
+
+
+def test_carry_profile_rejects_unknown_profile():
+    with pytest.raises(ValueError):
+        CarryProfile(0.3, 1.0, profile='spline').validate()
+
+
+def test_gain_set_pairs_stiffness_with_its_own_damping():
+    # the runner's --gain-set turns each explicit "kp,kd,eff[,type[,pj]]" into ONE trial, so a
+    # stiffness is paired with its own (near-critical) damping instead of the --sweep cartesian product
+    import types
+    R = pytest.importorskip('run_arm_carry_bench')   # needs PYTHONPATH=scripts; CPU-safe imports only
+    a = types.SimpleNamespace(
+        replay=True, carry_speed=0.3, carry_accel=1.0, start_at_lift=True,
+        diagnose=False, expect='report', reproduce=False, pose_sweep=False,
+        sweep=False, carry_speeds=None, stiffnesses=[], dampings=[], max_efforts=[],
+        drive_types=['acceleration'], per_joint_effort=False,
+        gain_set=['3e5,8000,400', '1e4,200,400', '500,80,56,force,1'])
+    jobs = R.build_jobs(a, [1.26, -1.05, 0.894, -1.41, -1.57, -0.17],
+                        [-2.3, 1.0, 0.9, 0.8, -1.2545], -0.8605, None)
+    assert len(jobs) == 3
+    specs = {label: spec for label, _goals, spec in jobs}
+    paired = next(s for lbl, s in specs.items() if 'kp10000_kd200' in lbl)
+    assert paired.gains.stiffness == 1e4 and paired.gains.damping == 200    # the pairing held
+    forced = next(s for lbl, s in specs.items() if lbl.endswith('_pj'))
+    assert forced.gains.drive_type == 'force' and forced.gains.per_joint_effort
+    assert all(s.carry.profile == 'trapezoid' for s in specs.values())      # --replay propagated
 
 
 # ---- executor regimes ---------------------------------------------------------
@@ -152,6 +242,34 @@ def test_records_carton_contact_and_clearance():
     assert m.first_contact['wrist1_rad'] >= 0.95   # measured, ~one tick behind the command trip
     assert '/World/Cart/cage_bar' in m.contact_prims
     assert m.min_clearance_m['cart_cage'] < 0.0           # the overlap the integration lane predicted
+
+
+def test_records_contact_force_and_weld_reaction():
+    # inbox 013: which link the carton touches + with what force, and the weld reaction force
+    arm = ScriptedArm(START, GOAL, 'perfect', contact_prim='ur_upper_arm_link<->HandlingUnit',
+                      contact_at_wrist1=1.0, contact_force_N=37.5, weld_reaction_N=42.0)
+    m = run_move(arm, START, GOAL, CARRY, FAST_TOL, 'tuck')
+    assert m.peak_contact_force_N['ur_upper_arm_link<->HandlingUnit'] == pytest.approx(37.5)
+    assert m.first_contact['force_N'] == pytest.approx(37.5)
+    assert m.peak_weld_reaction_N == pytest.approx(42.0)
+    # the contact summary names the link + its force
+    from twin.tools.arm_carry_bench import contact_summary
+    s = contact_summary([m])
+    assert 'ur_upper_arm_link' in s and '37.5 N' in s and 'weld reaction' in s
+
+
+def test_flags_effort_saturation_when_a_joint_pins_at_its_cap():
+    # inbox 015: is wrist_1 at its effort cap while short of goal? flag the joint at >=98% of its cap.
+    arm = ScriptedArm(START, GOAL, 'wrist_stall', stall_cap=0.3)
+    # wrist_1 (idx 3) pinned at its 56 Nm cap; others well under
+    arm.applied = ([5.0, 10.0, 8.0, 56.0, 3.0, 2.0], [330.0, 330.0, 330.0, 56.0, 56.0, 56.0])
+    m = run_move(arm, START, GOAL, CARRY, FAST_TOL, 'tuck')
+    assert m.effort_saturated[WRIST_1] is True                 # wrist_1 at the cap
+    assert not any(m.effort_saturated[j] for j in (0, 1, 2, 4, 5))  # others not saturated
+    assert m.peak_applied_effort[WRIST_1] == pytest.approx(56.0)
+    assert m.effort_cap[WRIST_1] == pytest.approx(56.0)
+    from twin.tools.arm_carry_bench import contact_summary
+    assert 'SATURATED=' in contact_summary([m]) and 'wrist1' in contact_summary([m])
 
 
 def test_contact_makes_trial_not_robust_even_if_settled():
