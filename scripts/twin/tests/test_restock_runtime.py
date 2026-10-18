@@ -399,6 +399,26 @@ class StallGuardTests(unittest.TestCase):
         self.assertEqual(result.status, 'running')
         self.assertEqual(i, 400)
 
+    def test_collect_freshness_checked_on_sim_clock_not_wall(self):
+        # fm346 / freshness-sim-clock-not-wall (run-272 regression guard): the collect/transfer reach
+        # re-checks p.manipulation.valid_until_steady -- a SIM-clock deadline -- and MUST use the sim
+        # clock (packet.simulation_time), never wall time.monotonic. Before the fix the adapter passed
+        # time.monotonic (a different epoch, seconds-since-boot), so the check tripped the instant the
+        # place first set valid_until_steady with a passing status. Case A proves a sim-FRESH deadline
+        # passes even though wall is far ahead (a revert to the wall clock would fail this); Case B
+        # proves a sim-STALE deadline still fails fast with the freshness reason.
+        adapter, _ = self._collect_adapter(self._sensing_controller(advance_sensor=True))
+        t = round(adapter.time + .1, 6)
+        self._pkt[0] = Packet('fresh-a', 'test_fixture', t, None, None, None,
+                              NS(valid_until_steady=t + 1.0), True, False, 0., True)
+        self.assertEqual(adapter.step(.1).status, 'running')   # sim-fresh -> passes (wall is huge)
+        t = round(adapter.time + .1, 6)
+        self._pkt[0] = Packet('stale-b', 'test_fixture', t, None, None, None,
+                              NS(valid_until_steady=t - 1.0), True, False, 0., True)
+        r = adapter.step(.1)                                   # sim-stale -> fails fast
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('freshness', r.reason)
+
     def test_scoped_to_observe_and_approach(self):
         # contact/lift (arm grasping) is out of scope; host watchdog backstops it.
         adapter, _ = self._collect_adapter(self._sensing_controller(phase='contact', advance_sensor=False))

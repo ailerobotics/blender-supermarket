@@ -431,7 +431,14 @@ class RuntimeAdapter:
                 return Result('failed', reason=stalled)
             deadline=getattr(p.manipulation,'valid_until_steady',None)
             if deadline is not None and r.status not in ('failed','unavailable'):
-                require_fresh(deadline,time.monotonic)
+                # fm346 / freshness-sim-clock-not-wall: valid_until_steady is a SIM-clock deadline, so
+                # check it on the SIM clock (packet.simulation_time), NOT wall time.monotonic -- under
+                # render pacing wall races far ahead of sim and (since the two clocks are different
+                # epochs) a wall check trips the instant a place sets valid_until_steady (run-272 'adapter
+                # failure: acquisition-to-use freshness expired', first run to reach the place with a
+                # passing status). A genuinely hung sim is still caught by _sensor_stall (stall_window_s)
+                # + the 30 s /sensors wall backstop, so no separate wall bound is needed here.
+                require_fresh(deadline, lambda: p.simulation_time)
             # MotionPort owns trajectory commands; port must only dispatch
             # gripper/stop controls, never issue a second trajectory for `move`.
             self.port.controls(r.controls)
