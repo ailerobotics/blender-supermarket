@@ -308,6 +308,11 @@ class RuntimeAdapter:
         if self.phase == 'warm':
             self.mobile.hold()   # stationary manipulation: brake the base against arm reaction
             self._warmn += 1
+            # Pump the station (masked depth + heartbeat) EVERY warm tick, including the settle grace
+            # below: the station host faults 'heartbeat lost' if it is not pumped within its wall/sim
+            # heartbeat gap, and under per-tick rendering a few ticks of silence already blow the wall
+            # gap. (Regression guard: the settle grace must never skip this pump -- ds-011.)
+            ready = self.manip.warm(dt, p)
             if not p.parked:
                 # A start-phase shortcut begins the mission AT this warm, so the port's stationarity
                 # window has not filled yet and `parked` is False even with the base held still. Let it
@@ -316,7 +321,6 @@ class RuntimeAdapter:
                 if self._warmn <= _WARM_SETTLE_GRACE_TICKS:
                     return Result('running', reason='warm-up settling (stationarity window filling)')
                 return Result('failed', reason='base moved during collision-map warm-up')
-            ready = self.manip.warm(dt, p)
             if ready or self._warmn >= _WARM_MAX_TICKS:
                 self.phase = 'execute'
                 # Dispatch the current manipulation job (collect or transfer) now the collision map
