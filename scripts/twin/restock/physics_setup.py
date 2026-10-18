@@ -271,6 +271,21 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     context=world.get_physics_context()
     context.enable_stablization(True)
     scene_physics['set_via']='isaacsim PhysicsContext.enable_stablization before world.reset'
+    # fm322: optional FORCE-mode arm drive. The URDF import makes the arm drives ACCELERATION-type, whose
+    # gains are inertia-normalised -- kp 3e4..1e6 behaves like thousands of Nm/rad, so any error slams the
+    # effort cap (the saturation ring the bench measured on the loaded wrist). A FORCE-type drive (applied
+    # torque = kp*err + kd*verr, capped at maxForce) was the only family that converged. Author the type
+    # on the USD arm joint drives BEFORE world.reset() so PhysX parses force-mode; the absolute gains
+    # below (arm_stiffness_abs/damping_abs/max_effort) then act as force-mode gains. Default unset =
+    # unchanged (acceleration). Keyed carry-phase via the runtime config, a one-line choice.
+    if config.get('arm_drive_type') == 'force':
+        _ndt = 0
+        for _jp in stage.Traverse():
+            if _jp.GetName() in tool.arm_joints and _jp.HasAPI(UsdPhysics.DriveAPI, 'angular'):
+                UsdPhysics.DriveAPI(_jp, 'angular').CreateTypeAttr().Set('force')
+                _ndt += 1
+        scene_physics['arm_drive_type'] = 'force'
+        print(f'ARM_DRIVE_TYPE force authored on {_ndt} arm joint drives (pre-reset)', flush=True)
     robot=world.scene.add(SingleArticulation(prim_path=paths['articulation'],name='restock_robot'))
     robot_body=world.scene.add(SingleRigidPrim(prim_path=paths['base_link'],name='restock_base'))
     cart_body=world.scene.add(SingleRigidPrim(prim_path=cart_path,name='restock_cart'))
