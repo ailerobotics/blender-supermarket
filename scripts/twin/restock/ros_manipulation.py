@@ -75,8 +75,16 @@ class RosManipulationRuntime:
         # collision_time onto the feedback BEFORE any capture reads it (capture gates on freshness).
         if self.station is not None and self.feedback is not None:
             if not self._station_started:
-                self.station.begin(self.station_camera_frame, simulation_time)
-                self._station_started = True
+                # The parked-mapper epoch can only be OPENED with a measured parked base: StationState
+                # rejects a 'prepare' whose command carries parked != True. When the mission BEGINS at a
+                # manipulation stage (a start-phase shortcut, e.g. --start-at transfer) the first warm
+                # ticks are not yet parked while the port's stationarity window fills, so beginning here
+                # would be rejected AND still latch _station_started -> the station could never activate
+                # (ds-012: station stuck 'idle', collision_time never advanced). Defer the first begin
+                # until parked. Collect enters warm already parked (post-nav) so it begins immediately.
+                if bool(self.feedback.parked()):
+                    self.station.begin(self.station_camera_frame, simulation_time)
+                    self._station_started = True
             else:
                 self.station.tick(simulation_time, parked=bool(self.feedback.parked()))
             self.feedback.collision_time = self.station.collision_time
