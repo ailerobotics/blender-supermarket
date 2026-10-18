@@ -71,6 +71,34 @@ def _build_spec(nav):
     return MobileSpec(**spec_cfg)
 
 
+def _build_docking(nav):
+    """Build the opt-in dock-approach speed cap from `navigation.docking`.
+
+    Returns None when the key is absent (default-off, byte-identical run). The config
+    object maps onto DockingApproach fields; it caps the commanded speed near a named
+    dock goal (e.g. the cart hitch-meet pose at couple) so the braking disk shrinks
+    honestly without touching the footprint, any margin, or the real-rig defaults.
+    """
+    cfg = nav.get('docking')
+    if cfg is None:
+        return None
+    if not isinstance(cfg, dict):
+        raise ValueError('navigation.docking must be an object')
+    from .core import DockingApproach
+    try:
+        goal = tuple(float(v) for v in cfg['goal'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError('navigation.docking needs goal (x, y, yaw)') from exc
+    extra = {k: float(cfg[k]) for k in ('goal_tolerance',) if k in cfg}
+    try:
+        speed = float(cfg['speed'])
+        approach_distance = float(cfg['approach_distance'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError('navigation.docking needs speed and approach_distance') from exc
+    return DockingApproach(goal=goal, speed=speed,
+                           approach_distance=approach_distance, **extra)
+
+
 def _controller_kwargs(nav):
     kwargs = {}
     for limit in ('goal_timeout', 'blocked_timeout', 'max_speed', 'max_angular',
@@ -81,6 +109,9 @@ def _controller_kwargs(nav):
             # giving up the goal. Raising it lets the mission wait out a transient
             # dynamic block and resume rather than fail. Default is unchanged.
             kwargs[limit] = nav[limit]
+    docking = _build_docking(nav)
+    if docking is not None:
+        kwargs['docking'] = docking
     # Production never accepts fixtures: the knob is intentionally not exposed.
     if nav.get('allow_test_fixtures'):
         raise ValueError('allow_test_fixtures is forbidden in a production bundle')

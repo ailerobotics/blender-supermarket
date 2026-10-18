@@ -193,6 +193,34 @@ The environment/mission must supply a reachable wide staging area, park the cart
 and use an uncoupled approach where feasible. The gate never shrinks a footprint
 to make a route succeed.
 
+### Dock-approach speed cap (opt-in, default-off)
+
+The `obstacle_stop` gate bounds every possible braking arc with an **omnidirectional
+disk** of `footprint.radius + stop_distance`, where `stop_distance` grows with the
+commanded/measured speed. A no-reverse base braking forward can never drive into
+geometry in its *rear* hemisphere, yet at full approach speed the disk's rearward
+reach still trips on static geometry behind the parked start pose. At the cart
+hitch-meet (couple), the backstock staging support sits ~0.81 m behind the base — 0.06 m
+outside the bare footprint — so the full-speed disk (≈0.90 m) falsely stops the dock.
+
+`navigation.docking` caps the commanded linear speed to `speed` within
+`approach_distance` of a named dock `goal` (bound to the active goal within
+`goal_tolerance`, default 0.25 m). A slower command genuinely shortens
+`stop_distance`, so the braking disk shrinks **honestly**:
+
+```json
+"docking": {"goal": [-4.46, 15.25, 0.0], "speed": 0.08,
+            "approach_distance": 1.5, "goal_tolerance": 0.25}
+```
+
+It is **not** a mask and **not** a widened tolerance: the footprint radius and every
+margin are unchanged (an obstacle inside the bare footprint still stops), and no
+obstacle is hidden — a real forward blocker still refuses. The `goal` must equal the
+couple-phase `mission_poses.cart_dock`. Absent from config ⇒ disabled, run
+byte-identical, real-rig defaults untouched. Parsed by `navigation/factory.py`
+(`DockingApproach` in `navigation/core.py`); CPU tests in `tests/test_navigation.py`
+and `tests/test_navigation_factory.py`.
+
 ## In-process route
 
 `Controller` supplies A* over swept-clearance-checked grid edges, dynamic replan,
