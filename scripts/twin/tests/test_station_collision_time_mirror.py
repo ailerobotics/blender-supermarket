@@ -87,9 +87,16 @@ def test_heartbeat_is_wall_paced_not_stage_paced():
 def test_heartbeat_force_sends_to_bracket_a_long_step():
     # heartbeat() forces an extra accepted command immediately (no wall-cadence gate) so a known-long
     # capture render tick is bracketed and the ack's wall heartbeat gap stays ~the render duration.
+    # It is a no-op until the epoch is ACKNOWLEDGED (forcing one before the host accepts the prepare
+    # would only be rejected 'no active matching epoch').
     ch = FakeChannel()
     st = StationClient(ch, wall_clock=lambda c=itertools.count(100., .001): next(c))
-    st.begin('restock_camera_arm', now=5.0)                  # prepare -> _prepared
+    st.begin('restock_camera_arm', now=5.0)                  # prepare (not yet acknowledged)
+    n_pre = len(ch.sent)
+    st.heartbeat()
+    assert len(ch.sent) == n_pre                             # no-op: epoch not acknowledged yet
+    ch.snapshot = {'state': 'warming', 'stamp': 5.0, 'collision_time': -1.0, 'epoch': st.epoch}
+    st.tick(5.0, parked=True)                                # reads the ack -> _prepared
     n0 = len(ch.sent)
     st.heartbeat()
     st.heartbeat()
@@ -103,23 +110,29 @@ def test_heartbeat_force_sends_to_bracket_a_long_step():
     assert st2.channel.sent == []
 
 
-def test_sequence_discipline_one_prepare_then_increasing_heartbeats_regardless_of_reply():
-    # The ack accepts heartbeats once it has accepted the prepare and ignores a duplicate prepare
-    # (seq<=last); so send exactly ONE prepare (seq 0) then heartbeats with a strictly increasing
-    # sequence on the wall cadence, WITHOUT waiting for a reply.
+def test_reprepares_until_acknowledged_then_increasing_heartbeats():
+    # A dropped initial prepare must not wedge the handshake (hl-001): keep re-sending the prepare
+    # (seq 0) each wall cadence UNTIL a reply carries our epoch, THEN heartbeats with a strictly
+    # increasing sequence. Re-sending seq-0 is idempotent on the host (accepted while behind, else
+    # 'ignored' seq<=last).
     ch = FakeChannel()
     wall = {'t': 1000.0}
     st = StationClient(ch, wall_clock=lambda: wall['t'])
     st.begin('restock_camera_arm', now=5.0)
     assert ch.sent[-1]['action'] == 'prepare' and ch.sent[-1]['sequence'] == 0
-    sent = []
-    for i in range(3):
-        wall['t'] += 0.4                       # past the 0.3 s wall gate; no reply set
+    for i in range(2):                          # no reply yet -> re-prepare (dropped prepare survives)
+        wall['t'] += 0.4
         st.tick(5.0 + 0.01 * i, parked=True)
-        sent.append((ch.sent[-1]['action'], ch.sent[-1]['sequence']))
-    assert all(a == 'heartbeat' for a, _ in sent), sent      # never a duplicate prepare
-    seqs = [s for _, s in sent]
-    assert seqs == sorted(seqs) and len(set(seqs)) == 3 and min(seqs) >= 1, seqs  # strictly increasing >0
+        assert ch.sent[-1]['action'] == 'prepare' and ch.sent[-1]['sequence'] == 0
+    ch.snapshot = {'state': 'warming', 'stamp': 5.05, 'collision_time': -1.0, 'epoch': st.epoch}
+    hb = []
+    for i in range(3):                          # epoch acknowledged -> heartbeats, strictly increasing
+        wall['t'] += 0.4
+        st.tick(5.1 + 0.01 * i, parked=True)
+        hb.append((ch.sent[-1]['action'], ch.sent[-1]['sequence']))
+    assert all(a == 'heartbeat' for a, _ in hb), hb
+    seqs = [s for _, s in hb]
+    assert seqs == sorted(seqs) and len(set(seqs)) == 3 and min(seqs) >= 1, seqs
 
 
 def test_failed_reply_for_current_epoch_reprepares_new_epoch_then_fails_bounded():

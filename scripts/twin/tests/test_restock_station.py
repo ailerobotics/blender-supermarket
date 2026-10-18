@@ -136,6 +136,52 @@ def test_client_supervisor_heartbeat_is_sim_clocked_not_wall():
         client.tick(0.,parked=True)    # > 3 s stage gap with no ack: dead station
 
 
+class CoupledChannel:
+    """Couple a StationClient to a REAL StationState host through one in-memory hop, dropping the
+    first ``drop`` client->host messages (pub/sub not yet matched when the status topic is fresh)."""
+    def __init__(self, host, host_now, *, drop=0):
+        self.host, self.host_now, self.drop = host, host_now, drop
+        self._status = None
+    def publish(self, cmd):
+        if self.drop > 0:
+            self.drop -= 1
+            return                          # lost before discovery
+        try:
+            self.host.accept(cmd, self.host_now())
+        except Exception as exc:            # a rejected command faults the host, as station_host does
+            self.host.fault = str(exc)
+        self._status = self.host.snapshot(self.host_now(), endpoints_ready=True, process_alive=True)
+    def read(self):
+        return self._status
+
+
+def test_dropped_initial_prepare_does_not_wedge_the_handshake():
+    # hl-001: the first prepare was dropped before discovery; the old client sent exactly one prepare
+    # then heart-beat, so the host stayed idle at epoch 0, faulted 'no active matching epoch' on the
+    # first heartbeat, and the client ignored every epoch-0 reply -> permanent cross-epoch wedge.
+    # Re-preparing until acknowledged (plus bounded host recovery) must break it.
+    clock = [1.0]; wallc = [0.0]                               # render pacing: wall fast, stage slow
+    host = StationState(wall_clock=lambda: wallc[0])
+    channel = CoupledChannel(host, lambda: clock[0], drop=1)   # drop the first (begin's) prepare
+    client = StationClient(channel, wall_clock=lambda: wallc[0], stage_clock=lambda: clock[0])
+    client.begin('restock_camera_source', clock[0])            # prepare #1 -> dropped
+    for _ in range(6):
+        clock[0] += 0.05; wallc[0] += 0.5                      # tiny sim step, big wall step per tick
+        client.tick(clock[0], parked=True)
+    # The host accepted a (re-sent) prepare and is on the client's epoch, warming -- not wedged.
+    assert host.active and host.epoch == client.epoch
+    assert client._prepared
+    assert host.snapshot(clock[0], endpoints_ready=True, process_alive=True)['state'] == 'warming'
+    # Once nvblox incorporates, the client sees a fresh collision_time (handshake fully live). A
+    # couple of ticks carry the host's refreshed snapshot across the one-hop read/publish lag.
+    host.acknowledge(clock[0], host.epoch)
+    for _ in range(3):
+        clock[0] += 0.05; wallc[0] += 0.5
+        host.acknowledge(clock[0], host.epoch)        # nvblox keeps incorporating each warm tick
+        client.tick(clock[0], parked=True)
+    assert client.ready(clock[0]) and client.collision_time > 0
+
+
 def test_client_resets_restart_budget_on_healthy_progress():
     channel=Channel()
     client=StationClient(channel,wall_clock=lambda:0.)
