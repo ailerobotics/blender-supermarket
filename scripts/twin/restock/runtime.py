@@ -18,6 +18,14 @@ from .mission import Result
 # startup grace -- not an unbounded warm-up -- bounds a genuinely stuck mapper.
 _WARM_MAX_TICKS = 300
 
+# Grace for the parked-stationarity window to fill at the START of a warm phase. The port's `parked`
+# needs ~0.25 s of pose history; when the mission BEGINS directly at a manipulation stage (a start-phase
+# shortcut, e.g. --start-at transfer), that window is empty on the first ticks, so `parked` is False even
+# though the held base is still. Hold and let it fill for this many ticks (~0.33 s at 60 Hz) before
+# treating not-parked as a motion fault. In the normal flow the robot enters warm already parked (window
+# filled by the preceding nav), so this grace never engages; a genuinely drifting base still fails after it.
+_WARM_SETTLE_GRACE_TICKS = 20
+
 # Fail-fast on an unrecoverable collect/transfer reach stall. The sensing capture publishes a
 # fresh /sensors frame every tick under a healthy reach (incl. the PR#80 occlusion hold, which
 # re-publishes the held registration each tick). If NO fresh /sensors frame is accepted for
@@ -299,10 +307,16 @@ class RuntimeAdapter:
             self.phase = 'execute'
         if self.phase == 'warm':
             self.mobile.hold()   # stationary manipulation: brake the base against arm reaction
+            self._warmn += 1
             if not p.parked:
+                # A start-phase shortcut begins the mission AT this warm, so the port's stationarity
+                # window has not filled yet and `parked` is False even with the base held still. Let it
+                # fill before treating not-parked as a fault; a base still not parked after the grace is
+                # a genuine motion fault. The normal flow enters warm already parked and skips this.
+                if self._warmn <= _WARM_SETTLE_GRACE_TICKS:
+                    return Result('running', reason='warm-up settling (stationarity window filling)')
                 return Result('failed', reason='base moved during collision-map warm-up')
             ready = self.manip.warm(dt, p)
-            self._warmn += 1
             if ready or self._warmn >= _WARM_MAX_TICKS:
                 self.phase = 'execute'
                 # Dispatch the current manipulation job (collect or transfer) now the collision map
