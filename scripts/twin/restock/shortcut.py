@@ -141,6 +141,30 @@ def apply_start_state(assembly, config, scenario, *, settle_steps=30, _rigid_pri
                           orientation=np.asarray(plan.carton_orientation_wxyz, dtype=float))
     carton.set_linear_velocity(np.zeros(3))
     carton.set_angular_velocity(np.zeros(3))
+    # Transfer warm-up observe pose (firstmate decision B, sim-config driven, phase-local to transfer):
+    # the mission warm pumps the station + arm masked-depth but does NOT move the arm, so at a stowed
+    # spawn the eye-in-hand never sees the shelf/cart reach workspace and the host collision_time never
+    # goes fresh (ds-009). Spawn the arm at a configured observe pose that aims the eye-in-hand at the
+    # reach workspace, mirroring collect's observe-then-execute. Absent => arm stays at the transport
+    # default (hook is a no-op). Joint-name keyed; unknown names are ignored by the articulation.
+    observe = config.get('transfer_observe_joints') if plan.couple_cart else None
+    if observe:
+        robot = assembly.robot
+        q = np.asarray(robot.get_joint_positions(), dtype=float).copy()
+        applied = []
+        for name, value in observe.items():
+            try:
+                idx = robot.get_dof_index(name)
+            except Exception:
+                idx = None
+            if idx is not None:
+                q[idx] = float(value); applied.append(name)
+        robot.set_joint_positions(q)
+        try:
+            robot.set_joint_velocities(np.zeros_like(q))
+        except Exception:
+            pass
+        print(f'START_PHASE_SHORTCUT transfer observe pose applied to {applied}', flush=True)
     # Let the carton settle onto the cart deck and the contact solver quiesce before the mission
     # ticks, so the downstream phases start from a stationary, resting payload.
     for _ in range(int(settle_steps)):
