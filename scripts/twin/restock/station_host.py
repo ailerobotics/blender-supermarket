@@ -13,7 +13,7 @@ import time
 from twin.restock_host.config import isolated_environment,launch_plan
 from twin.restock_host.preflight import incorporated_time
 from twin.restock_host.readiness import missing_endpoints
-from .station import OwnedProcess,StationState
+from .station import OwnedProcess,StationState,_MAX_RECOVERIES
 
 
 def main():
@@ -63,10 +63,17 @@ def main():
     def command(message):
         nonlocal child,last_discovery
         try:
+            prior_fault=state.fault
             action=state.accept(json.loads(message.data),now())
             if action in ('prepare','stop'):
                 shutdown_station()
             if action=='prepare':
+                # A prepare that cleared a latched fault is a bounded recovery: log it (with the
+                # fault it recovered from) and restart the mapper child, rather than rejecting the
+                # re-prepare forever (ds-015).
+                if prior_fault:
+                    print(f'STATION_RECOVER epoch={state.epoch} from={prior_fault!r} '
+                          f'recoveries={state.recoveries}/{_MAX_RECOVERIES}',flush=True)
                 script=Path(__file__).resolve().parents[2]/'run_restock_host.py'
                 child=OwnedProcess([sys.executable,str(script),'--config',str(args.config),'--launch'],
                     args.output/f'station-{state.epoch}.log',env=env)

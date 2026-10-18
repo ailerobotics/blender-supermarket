@@ -1,6 +1,6 @@
 import pytest
 
-from twin.restock.station import StationState
+from twin.restock.station import StationState, _MAX_RECOVERIES
 from twin.restock.native_channel import StationClient
 
 
@@ -62,10 +62,93 @@ def test_wall_backstop_tolerates_render_pacing_but_catches_frozen_sim():
     assert state.snapshot(1.1,endpoints_ready=True,process_alive=True)['state']=='failed'
 
 
+def test_faulted_station_recovers_on_a_fresh_parked_epoch():
+    # A station fault (dead mapper child / lost heartbeat) must NOT reject the mission client's
+    # re-prepare forever (ds-015). A FRESH measured parked epoch clears the fault, counted, logged.
+    state=StationState(wall_clock=lambda:0.)
+    state.accept(message(),1.)
+    assert state.snapshot(1.1,endpoints_ready=True,process_alive=False)['state']=='failed'
+    assert state.fault
+    # A heartbeat/stop against the faulted epoch is still refused -- only a fresh prepare recovers.
+    with pytest.raises(RuntimeError,match='explicit recovery'):
+        state.accept(message('heartbeat',epoch=1,sequence=1,stamp=1.2),1.2)
+    # A fresh parked epoch recovers: fault cleared, recovery counted, warming again.
+    assert state.accept(message(epoch=2,stamp=2.),2.)=='prepare'
+    assert state.fault is None
+    assert state.recoveries==1
+    assert state.recovered_from=='station process or parked heartbeat lost'
+    assert state.snapshot(2.1,endpoints_ready=True,process_alive=True)['state']=='warming'
+    state.acknowledge(2.1,2)
+    assert state.snapshot(2.2,endpoints_ready=True,process_alive=True)['state']=='ready'
+
+
+def test_recovery_is_bounded_so_a_persistently_broken_mapper_surfaces():
+    state=StationState(wall_clock=lambda:0.)
+    state.accept(message(epoch=1,stamp=1.),1.)          # first clean epoch
+    for ep in range(2,2+_MAX_RECOVERIES):
+        # kill the mapper child -> fault, then recover with a fresh epoch.
+        assert state.snapshot(float(ep)-0.5,endpoints_ready=True,process_alive=False)['state']=='failed'
+        assert state.accept(message(epoch=ep,stamp=float(ep)),float(ep))=='prepare'
+    assert state.recoveries==_MAX_RECOVERIES
+    # Budget exhausted: fault once more, the next fresh prepare is refused honestly with the reason.
+    nxt=2+_MAX_RECOVERIES
+    assert state.snapshot(float(nxt)-0.5,endpoints_ready=True,process_alive=False)['state']=='failed'
+    with pytest.raises(RuntimeError,match='recovery budget exhausted'):
+        state.accept(message(epoch=nxt,stamp=float(nxt)),float(nxt))
+
+
+def test_malformed_recovery_prepare_leaves_fault_latched():
+    state=StationState(wall_clock=lambda:0.)
+    state.accept(message(),1.)
+    assert state.snapshot(1.1,endpoints_ready=True,process_alive=False)['state']=='failed'
+    bad=message(epoch=2,stamp=2.);bad['camera_frame']='wrong_frame'
+    with pytest.raises(ValueError):
+        state.accept(bad,2.)
+    assert state.fault and state.recoveries==0   # not counted; still faulted
+
+
 class Channel:
     def __init__(self): self.messages=[];self.reply=None
     def publish(self,value): self.messages.append(value)
     def read(self): return self.reply
+
+
+def test_client_supervisor_heartbeat_is_sim_clocked_not_wall():
+    # PRIMARY liveness is the stage (sim) clock: a dead station (no fresh ack) trips in a few stage
+    # seconds regardless of how slow wall time is, and a render-paced tick (huge wall gap, fresh acks)
+    # must NOT false-trip (ds-015). Wall is only a frozen-sim backstop.
+    wall=[0.];stage=[1.]
+    channel=Channel()
+    client=StationClient(channel,wall_clock=lambda:wall[0],stage_clock=lambda:stage[0],
+                         heartbeat_s=1000.,stage_unavailable_s=3.0)
+    client.begin('restock_camera_source',1.)
+    # Fresh acks keep arriving even though WALL jumps far past the old 10 s guard: no false trip.
+    for s in (1.1,1.5,2.0,2.6):
+        stage[0]=s; wall[0]+=12.
+        channel.reply=dict(epoch=1,stamp=s,state='warming',collision_time=-1.)
+        client.tick(0.,parked=True)   # now overridden by stage_clock
+    # Station goes dead: no new ack. Stage advances (mission keeps stepping) -> sim guard fires.
+    channel.reply=None
+    stage[0]=2.6+2.9
+    client.tick(0.,parked=True)        # within 3 s of last ack (2.6): tolerated
+    stage[0]=2.6+3.1
+    with pytest.raises(RuntimeError,match='heartbeat unavailable'):
+        client.tick(0.,parked=True)    # > 3 s stage gap with no ack: dead station
+
+
+def test_client_resets_restart_budget_on_healthy_progress():
+    channel=Channel()
+    client=StationClient(channel,wall_clock=lambda:0.)
+    client.begin('restock_camera_source',1.)
+    # Two failed epochs bump the restart counter toward the cap.
+    for ep in (1,2):
+        channel.reply=dict(epoch=ep,stamp=1.,state='failed',collision_time=-1.,reason='x')
+        client.tick(1.1,parked=True)
+    assert client._restarts==2
+    # A healthy reply is progress -> budget resets, so a later transient does not surface stale.
+    channel.reply=dict(epoch=client.epoch,stamp=1.1,state='warming',collision_time=-1.)
+    client.tick(1.2,parked=True)
+    assert client._restarts==0
 
 
 def test_client_does_not_promote_heartbeat_to_mapping_readiness():
