@@ -129,6 +129,10 @@ def test_executor_exit_is_honest_and_bounded_tolerant():
     # Clean rclpy shutdown (no exception, context closed) -> stop, no fault.
     assert executor_exit_action(raised_exc=None, prior_fault=None,
                                 context_ok=False, transient_budget=5) == ('stop', None)
+    # run-266: ExternalShutdownException tore the context down mid-move -> stop (NOT a futile re-spin),
+    # no new masking fault; the real cause was already logged.
+    assert executor_exit_action(raised_exc='ExternalShutdownException()', prior_fault=None,
+                                context_ok=False, transient_budget=5) == ('stop', None)
     # Transient spin exit with budget left -> re-enter spin() instead of stopping a healthy move.
     assert executor_exit_action(raised_exc='RCLError()', prior_fault=None,
                                 context_ok=True, transient_budget=3) == ('retry', None)

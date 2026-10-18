@@ -97,8 +97,11 @@ def executor_exit_action(*, raised_exc, prior_fault, context_ok, transient_budge
     """
     if prior_fault is not None:
         return ('stop', None)                     # a callback latched the true cause already
-    if raised_exc is None and not context_ok:
-        return ('stop', None)                     # clean rclpy shutdown: normal exit
+    if not context_ok:
+        # The rclpy context is gone (normal rclpy.shutdown, or run-266's ExternalShutdownException
+        # that externally tore the context down mid-move). Re-entering spin() can only re-raise, so
+        # stop; the TRAJ_HOST_EXECUTOR_EXC log line already named the real cause. No new fault.
+        return ('stop', None)
     if transient_budget <= 0:
         reason = (f'executor spin failed repeatedly: {raised_exc}' if raised_exc is not None
                   else 'executor spin returned without shutdown or tracking fault')
@@ -232,7 +235,12 @@ def main():
         state['fault']=reason
         state['plan']=None
         print(f'TRAJ_HOST_FAULT {reason}',flush=True)  # diagnostic: the stop source is otherwise unlogged
-        stop.publish(Bool(data=True))
+        # Guard the emergency-stop publish on a live context: run-266 faulted DURING an external
+        # context shutdown, and the unguarded publish raised a secondary RCLError ('publisher's
+        # context is invalid') that buried the real cause. With the context already gone the stop is
+        # moot (everything is tearing down), so skip it rather than crash the teardown.
+        if rclpy.ok():
+            stop.publish(Bool(data=True))
 
     def feedback(msg):
         with lock:
