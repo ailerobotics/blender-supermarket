@@ -127,6 +127,12 @@ The GPU is a single RTX 3060 under `/tmp/aile-gpu.lock`; the integration lane no
 across its whole commission-plus-mission sequence, so take the lock only when it is free and keep
 sessions short (this lane is lowest priority, ≤15 min).
 
+**ROS event subscriber is opt-in** (`"bt_ros_events": true`, default off): it creates a second rclpy
+node inside the Isaac process, which already runs its own ROS2 bridge — doing so unconditionally
+SIGABRTs the simulator (observed in the sim-restock-bt-v1 GPU proof). A scripted-scenario run needs
+no ROS (events come from the `ScenarioEventSource`); the humans/dynobs lanes enable it only when they
+publish live detections on `/restock_bt/events`.
+
 **Opt-in GPU/live run:** add `"bt": true` to the runtime-config passed to
 `scripts/run_mobile_restock.py` (compose with `start_at` and a scenario `events` list for a scripted
 proof). The run drives the same mission through the tree and writes the live view into the run

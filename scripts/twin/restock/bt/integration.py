@@ -80,8 +80,14 @@ def run_once_bt(db, scenario, bundle, config, output_dir, *, mission_factory, is
 
     mission = mission_factory()
     bus, queue = build_bus(scenario)
-    shutdown = start_event_subscriber(queue)
+    # Write the live view FIRST so bt_view.html exists even if a later step fails.
     writer = SnapshotWriter(output_dir, title=f"restock {scenario.get('job', {}).get('job_id', '')}")
+    # The ROS event subscriber is OPT-IN (config 'bt_ros_events'): it creates a second rclpy node
+    # inside the Isaac process, which already runs its own ROS2 bridge -- doing so unconditionally
+    # SIGABRTs the simulator (proven in the sim-restock-bt-v1 GPU proof). A scripted-scenario run
+    # needs no ROS at all (events come from the ScenarioEventSource), so default off keeps the
+    # mission stable; the humans/dynobs lanes enable it only when they publish live detections.
+    shutdown = start_event_subscriber(queue) if config.get('bt_ros_events') else None
     try:
         ctx, root, summary = run_mission_tree(
             mission, bus, reactions=make_reactions(bundle), snapshot=writer,
