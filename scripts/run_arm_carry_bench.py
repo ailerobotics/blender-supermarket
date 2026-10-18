@@ -96,7 +96,7 @@ class IsaacCarryStage(bench.ArmStage):
     def __init__(self, assembly, lift_joints, grasp_joints, *, carton_path='/RestockScenario/HandlingUnit',
                  pad_path_key='gripper_pad_tcp', render=False, carton_dims=(0.6, 0.4, 0.16),
                  obstacle_prims=None, no_carton=False, arm_contacts=False, start_at_lift=False,
-                 no_tool_colliders=False):
+                 no_tool_colliders=False, no_self_collision=False):
         from isaacsim.core.prims import SingleRigidPrim
         from pxr import UsdGeom
         self._UsdGeom = UsdGeom
@@ -146,6 +146,24 @@ class IsaacCarryStage(bench.ArmStage):
         self.dump_dynamics_model()           # inbox 016: tool link mass/inertia + carton constraints
         if no_tool_colliders:
             self._disable_tool_colliders()   # inbox 016 (A): is the pin the tool's own geometry?
+        if no_self_collision:
+            self._disable_self_collision()   # inbox 020 (1): does wrist_1 reach 0.9 with self-coll off?
+
+    def _disable_self_collision(self):
+        """inbox 020 (1): set enabledSelfCollisions=False on the articulation root, then reset so PhysX
+        re-parses. If wrist_1 then reaches its 0.9 goal where it otherwise pins at ~0.70, the stop IS
+        an arm-vs-arm self-collision (the one fm318/fm320's carton+tool filter does NOT cover)."""
+        try:
+            from pxr import PhysxSchema
+            art_path = self.assembly.paths['articulation']
+            prim = self.stage.GetPrimAtPath(art_path)
+            api = (PhysxSchema.PhysxArticulationAPI.Get(self.stage, art_path)
+                   or PhysxSchema.PhysxArticulationAPI.Apply(prim))
+            (api.GetEnabledSelfCollisionsAttr() or api.CreateEnabledSelfCollisionsAttr()).Set(False)
+            self.world.reset()
+            print('ARMBENCH_SELF_COLLISION_DISABLED on %s' % art_path, flush=True)
+        except Exception as exc:
+            print('ARMBENCH_SELF_COLLISION_DISABLE failed (%s)' % exc, flush=True)
 
     def dump_dynamics_model(self):
         """inbox 016: dump each arm/tool link's USD mass + diagonal inertia (a 0.45 kg carton cannot
@@ -886,7 +904,8 @@ def run(args):
             stage = IsaacCarryStage(assembly, lift_joints, grasp_joints, render=args.render,
                                     carton_dims=carton_dims, obstacle_prims=obstacle_override,
                                     no_carton=args.no_carton, arm_contacts=args.arm_contacts,
-                                    start_at_lift=args.start_at_lift, no_tool_colliders=args.no_tool_colliders)
+                                    start_at_lift=args.start_at_lift, no_tool_colliders=args.no_tool_colliders,
+                                    no_self_collision=args.no_self_collision)
             summary['obstacles'] = stage.obstacles
             summary['arm_links'] = sorted(stage.arm_links)
             if args.pinned_config is not None:
@@ -1082,6 +1101,9 @@ def main():
                    help='inbox 016 (A): disable collision on the gripper tool geometry (cube, surface '
                         'plates, suction cups) so a no-carton fold tells a tool self-collision pin apart '
                         'from a dynamics-model one')
+    p.add_argument('--no-self-collision', action='store_true',
+                   help='inbox 020 (1): set enabledSelfCollisions=false on the articulation root -- if '
+                        'wrist_1 then reaches 0.9 (vs pinning ~0.70), the stop is an arm-vs-arm self-collision')
     p.add_argument('--dt', type=float, default=1.0 / 60.0)
     p.add_argument('--max-sim-s', type=float, default=90.0, help='per-move sim-time budget')
     p.add_argument('--heavy-threshold-mb', type=int, choices=(1500, 2500), default=1500)
