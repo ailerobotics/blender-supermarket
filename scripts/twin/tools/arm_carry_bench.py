@@ -322,6 +322,11 @@ class MoveMetrics:
     # --- inbox 013: the contact/constraint FIGHT (which link the carton touches + with what force) ---
     peak_contact_force_N: dict = field(default_factory=dict)  # contacted prim-pair -> peak |contact force| (N)
     peak_weld_reaction_N: float = 0.0        # peak SIM_ATTACH_FALLBACK fixed-joint reaction force (N); 0 if unread
+    # --- inbox 015: is a joint at its effort cap while sitting short of goal? (drive saturation) ---
+    peak_applied_effort: list = field(default_factory=lambda: [0.0] * 6)  # per-joint peak |applied effort| (Nm)
+    effort_cap: list = field(default_factory=lambda: [0.0] * 6)           # per-joint max-effort cap (Nm)
+    effort_saturated: list = field(default_factory=lambda: [False] * 6)   # per joint: ever at >=98% of its cap
+    terminal_applied_effort: list = field(default_factory=lambda: [0.0] * 6)  # per-joint applied effort at end
 
     @property
     def ok(self):
@@ -370,6 +375,13 @@ class ArmStage:
         pushes back, so a large reaction co-timed with a link contact is the constraint-fight signal
         (inbox 013)."""
         return None
+
+    def applied_efforts(self):
+        """(efforts, caps) as 6-vectors in ARM_JOINTS order: the per-joint APPLIED/measured drive
+        effort (Nm) this tick and the per-joint max-effort cap. Empty tuple () if the stage cannot
+        report it. Lets the bench flag a joint pinned AT its effort cap while short of goal -- the
+        drive-saturation question (inbox 015)."""
+        return ()
 
 
 def run_move(stage: ArmStage, start, goal, carry: CarryProfile, tol: Tolerances,
@@ -468,6 +480,15 @@ def run_move(stage: ArmStage, start, goal, carry: CarryProfile, tol: Tolerances,
         wr = stage.weld_reaction_force()
         if wr is not None and float(wr) > m.peak_weld_reaction_N:
             m.peak_weld_reaction_N = float(wr)
+        eff = stage.applied_efforts()
+        if eff:
+            efforts, caps = np.abs(np.asarray(eff[0], float)), np.asarray(eff[1], float)
+            m.peak_applied_effort = np.maximum(m.peak_applied_effort, efforts).tolist()
+            m.effort_cap = caps.tolist()
+            m.terminal_applied_effort = efforts.tolist()
+            for j in range(6):
+                if caps[j] > 0 and efforts[j] >= 0.98 * caps[j]:
+                    m.effort_saturated[j] = True
         # terminal settle gate (sim-clocked), mirroring trajectory_host.execute()
         if elapsed >= plan.times[-1]:
             pos_err = float(np.max(np.abs(measured - plan.end)))
@@ -615,6 +636,14 @@ def contact_summary(moves):
             lines.append('%s: peak contact force on %s = %.1f N' % (m.label, prim, force))
         if m.peak_weld_reaction_N:
             lines.append('%s: peak SIM_ATTACH weld reaction = %.1f N' % (m.label, m.peak_weld_reaction_N))
+        if any(m.effort_cap):
+            names = ['pan', 'lift', 'elbow', 'wrist1', 'wrist2', 'wrist3']
+            sat = [names[j] for j in range(6) if m.effort_saturated[j]]
+            lines.append('%s: per-joint applied effort (Nm) %s / cap %s; SATURATED=%s'
+                         % (m.label,
+                            [round(x, 1) for x in m.peak_applied_effort],
+                            [round(x, 1) for x in m.effort_cap],
+                            (sat or 'none')))
         for name, gap in sorted(m.min_clearance_m.items()):
             lines.append('%s: min clearance to %s = %.1f mm (at wrist1=%.3f rad)'
                          % (m.label, name, gap * 1000, m.clearance_at_wrist1.get(name, float('nan'))))

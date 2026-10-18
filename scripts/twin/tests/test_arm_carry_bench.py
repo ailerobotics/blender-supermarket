@@ -88,6 +88,11 @@ class ScriptedArm(bench.ArmStage):
     def weld_reaction_force(self):
         return self.weld_reaction_N
 
+    applied = None   # optionally set to (efforts6, caps6) to exercise the saturation flag
+
+    def applied_efforts(self):
+        return self.applied or ()
+
 
 FAST_TOL = Tolerances(goal_settle_margin_s=0.3)   # keep goal-miss tests short
 START = [0.0] * 6
@@ -251,6 +256,20 @@ def test_records_contact_force_and_weld_reaction():
     from twin.tools.arm_carry_bench import contact_summary
     s = contact_summary([m])
     assert 'ur_upper_arm_link' in s and '37.5 N' in s and 'weld reaction' in s
+
+
+def test_flags_effort_saturation_when_a_joint_pins_at_its_cap():
+    # inbox 015: is wrist_1 at its effort cap while short of goal? flag the joint at >=98% of its cap.
+    arm = ScriptedArm(START, GOAL, 'wrist_stall', stall_cap=0.3)
+    # wrist_1 (idx 3) pinned at its 56 Nm cap; others well under
+    arm.applied = ([5.0, 10.0, 8.0, 56.0, 3.0, 2.0], [330.0, 330.0, 330.0, 56.0, 56.0, 56.0])
+    m = run_move(arm, START, GOAL, CARRY, FAST_TOL, 'tuck')
+    assert m.effort_saturated[WRIST_1] is True                 # wrist_1 at the cap
+    assert not any(m.effort_saturated[j] for j in (0, 1, 2, 4, 5))  # others not saturated
+    assert m.peak_applied_effort[WRIST_1] == pytest.approx(56.0)
+    assert m.effort_cap[WRIST_1] == pytest.approx(56.0)
+    from twin.tools.arm_carry_bench import contact_summary
+    assert 'SATURATED=' in contact_summary([m]) and 'wrist1' in contact_summary([m])
 
 
 def test_contact_makes_trial_not_robust_even_if_settled():

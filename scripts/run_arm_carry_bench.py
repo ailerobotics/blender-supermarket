@@ -323,6 +323,8 @@ class IsaacCarryStage(bench.ArmStage):
             prev = best.get(h['prim'])
             if prev is None or h.get('force_N', 0.0) > prev.get('force_N', 0.0):
                 best[h['prim']] = h
+        # cache the net contact magnitude on the carton this tick for the weld-reaction estimate
+        self._last_net_contact = sum(h.get('force_N', 0.0) for h in best.values())
         return list(best.values())
 
     def weld_reaction_force(self):
@@ -330,24 +332,30 @@ class IsaacCarryStage(bench.ArmStage):
 
         The welded carton is a FREE rigid body held only by the fixed joint, so Newton on the carton
         gives F_weld = m*a - m*g - F_contact. Quasi-statically (a~0) the weld carries the carton weight
-        PLUS whatever a link-contact fight pushes back, so |F_weld| ~ m*g + |net contact force on the
-        carton|. The carton's measured net contact force is read via SingleRigidPrim; return None if the
-        build cannot report it (then the metric is simply absent, never fabricated)."""
+        PLUS whatever a link-contact fight pushes back, so |F_weld| ~ m*g + |contact force on the
+        carton|. ``get_net_contact_forces`` is unavailable on SingleRigidPrim in this build, so the
+        contact magnitude is taken from the SAME carton PhysX contact reports the per-link breakdown
+        uses (a magnitude upper bound, labelled as such in the report)."""
+        return self._carton_mass * 9.81 + float(getattr(self, '_last_net_contact', 0.0))
+
+    def applied_efforts(self):
+        """(efforts, caps) 6-vectors in ARM_JOINTS order: per-joint APPLIED/measured drive effort (Nm)
+        this tick + the current max-effort cap. The measured joint effort is the torque PhysX applied
+        through the position drive (clamped to the cap); a joint pinned at its cap while short of goal
+        is drive-saturated (inbox 015). () if the build cannot report it."""
         try:
-            f = self.carton.get_net_contact_forces()
+            e = self.robot.get_measured_joint_efforts()
         except Exception:
             try:
-                f = self.carton.get_net_contact_force()
+                e = self.robot.get_applied_joint_efforts()
             except Exception:
-                return None
+                return ()
         try:
-            arr = np.asarray(f, float).reshape(-1)
-            if arr.size < 3:
-                return None
-            contact_mag = float(np.linalg.norm(arr[:3]))
+            efforts = np.asarray(e, float).reshape(-1)[self.arm_idx]
+            caps = np.asarray(self.arm_ctrl.get_max_efforts(), float).reshape(-1)[self.arm_idx]
+            return (efforts.tolist(), caps.tolist())
         except Exception:
-            return None
-        return self._carton_mass * 9.81 + contact_mag
+            return ()
 
     def arm_link_clearances(self):
         """Signed carton-AABB gap (m) to each of the robot's OWN arm links -- the run-250 self-
@@ -576,11 +584,17 @@ def _run_trial(stage: IsaacCarryStage, spec: bench.TrialSpec, goals, dt, max_sim
                            label=phase, dt=dt, max_sim_s=max_sim_s)
         moves.append(m)
         j, err = m.worst_tracking()
+        _names = ['pan', 'lift', 'elbow', 'wrist1', 'wrist2', 'wrist3']
+        _sat = [_names[k] for k in range(6) if m.effort_saturated[k]]
         print('ARMBENCH_MOVE trial=%s phase=%s outcome=%s worst_j=%d worst_track=%.4f '
               'wrist1_track=%.4f term_vel_max=%.4f settle=%s hit=%s reason=%s' % (
                   spec.label, phase, m.outcome, j, err, m.peak_tracking_error[bench.WRIST_1],
                   max(abs(x) for x in m.terminal_velocity), m.settle_time_s,
                   [p.rsplit('/', 1)[-1] for p in m.contact_prims], m.reason), flush=True)
+        print('ARMBENCH_EFFORT trial=%s phase=%s applied=%s cap=%s saturated=%s term_poserr=%s' % (
+            spec.label, phase, [round(x, 1) for x in m.peak_applied_effort],
+            [round(x, 1) for x in m.effort_cap], (_sat or 'none'),
+            [round(x, 3) for x in m.terminal_pos_error]), flush=True)
         if m.first_contact:
             fc = m.first_contact
             print('ARMBENCH_FIRST_CONTACT trial=%s phase=%s prim=%s fold_fraction=%.2f wrist1=%.3f pos=%s'
@@ -612,7 +626,9 @@ def _move_dict(m: bench.MoveMetrics):
                 peak_base_displacement_m=m.peak_base_displacement_m, sim_elapsed_s=m.sim_elapsed_s,
                 min_clearance_m=m.min_clearance_m, clearance_at_wrist1=m.clearance_at_wrist1,
                 contact_prims=m.contact_prims, first_contact=m.first_contact,
-                peak_contact_force_N=m.peak_contact_force_N, peak_weld_reaction_N=m.peak_weld_reaction_N)
+                peak_contact_force_N=m.peak_contact_force_N, peak_weld_reaction_N=m.peak_weld_reaction_N,
+                peak_applied_effort=m.peak_applied_effort, effort_cap=m.effort_cap,
+                effort_saturated=m.effort_saturated, terminal_applied_effort=m.terminal_applied_effort)
 
 
 # Candidate carry-shape reshapings (deltas on cart_tuck_shape joints 1-5: shoulder_lift, elbow,
@@ -833,7 +849,11 @@ def _rehydrate(move_dicts):
                               contact_prims=d.get('contact_prims', []),
                               first_contact=d.get('first_contact'),
                               peak_contact_force_N=d.get('peak_contact_force_N', {}),
-                              peak_weld_reaction_N=d.get('peak_weld_reaction_N', 0.0))
+                              peak_weld_reaction_N=d.get('peak_weld_reaction_N', 0.0),
+                              peak_applied_effort=d.get('peak_applied_effort', [0.0] * 6),
+                              effort_cap=d.get('effort_cap', [0.0] * 6),
+                              effort_saturated=d.get('effort_saturated', [False] * 6),
+                              terminal_applied_effort=d.get('terminal_applied_effort', [0.0] * 6))
         out.append(m)
     return out
 
