@@ -193,52 +193,36 @@ class HostTests(unittest.TestCase):
         self.assertNotIn('caster_roll', xrdf['default_joint_positions'])
         # The pruned base links are still covered by collision spheres.
         self.assertTrue(xrdf['geometry']['mobile_cad']['spheres'].get('caster_wheel'))
-        # The attached carton (added at runtime as link 'attached_object') must be REGISTERED the way
-        # the vendor reference XRDF registers it for this same ObjectAttachmentNode: (1) an add_frame
-        # modifier that inserts it into the kinematic model as a FIXED child of the grasp frame
-        # (gripper_pad_tcp), (2) a collision.buffer_distance slot, (3) a self_collision.ignore row
-        # exempting only the gripper-seat links. The add_frame is the ingredient PR #131/#136 lacked:
-        # geometry spheres alone (placeholder or runtime) are orphaned and dropped, so the carton
-        # never entered curobo's self-collision set (run-256/259).
+        # The attached carton (added at runtime as link 'attached_object') must NOT be registered as a
+        # cuMotion self-collision frame (firstmate sim-restock-planner-obstacles-v1, decision A1): no
+        # add_frame modifier, no collision.buffer_distance slot, no self_collision.ignore row. Making
+        # it a planner collision body (PR #139's add_frame) made the carry UNPLANNABLE (run-261: a
+        # just-picked carton is born in collision with the source-shelf ESDF); without the frame its
+        # runtime spheres stay orphaned and dropped, exactly as in the plannable run-260. The arm-vs-arm
+        # carry stop is handled at the IK layer by the integration lane's caps, not the sphere model.
         from twin.restock_host.world_obstacles import (resolve_self_collision_masks,
                                                         simulate_object_attachment_reload)
         add_frames = {m['add_frame']['frame_name']: m['add_frame']
                       for m in xrdf['modifiers'] if isinstance(m, dict) and 'add_frame' in m}
-        self.assertIn('attached_object', add_frames)
-        self.assertEqual(add_frames['attached_object']['parent_frame_name'], 'gripper_pad_tcp')
-        self.assertEqual(add_frames['attached_object']['joint_type'], 'FIXED')
-        self.assertIn('attached_object', xrdf['collision'].get('buffer_distance', {}))
-        self.assertIn('attached_object', xrdf['self_collision']['ignore'])
-        # Vendor pattern: NO attached_object spheres are emitted at generation -- the frame is
-        # correctly inactive pre-attach (benign "no spheres" warning at load), and the runtime attach
-        # populates the real carton spheres.
+        self.assertNotIn('attached_object', add_frames)
+        self.assertNotIn('attached_object', xrdf['collision'].get('buffer_distance', {}))
+        self.assertNotIn('attached_object', xrdf['self_collision']['ignore'])
         self.assertNotIn('attached_object', xrdf['geometry']['mobile_cad']['spheres'])
         # Exercise the SAME reload code path the node runs (UpdateRobotDescriptionWithSpheres: write
-        # the carton spheres under geometry.spheres.attached_object, reload) and model cuMotion's
-        # mask resolution. AFTER the reload every attached_object ignore pair must resolve (none
-        # skipped for a sphereless/unregistered frame) -- the fix for the run-259 warning.
+        # the carton spheres under geometry.spheres.attached_object, reload) and model cuMotion's mask
+        # resolution. Because attached_object is NOT an add_frame kinematic frame, the reloaded carton
+        # spheres are orphaned and every attached_object mask is SKIPPED -- the invisible-carton state
+        # that let run-260 plan. (This is the deliberate A1 behaviour, not the run-256/259 bug.)
         urdf_links = set(parse_urdf(str(d / 'robot.urdf')).links)
         reloaded = simulate_object_attachment_reload(xrdf)
         masks = resolve_self_collision_masks(reloaded, urdf_links)
-        self.assertEqual([p for p in masks['skipped'] if 'attached_object' in p], [],
-                         'after the runtime attach reload, every attached_object mask must resolve')
-        self.assertTrue(any('attached_object' in p for p in masks['resolved']))
-        # Regression guard: WITHOUT the add_frame modifier the exact same reloaded spheres are
-        # orphaned and every attached_object mask is SKIPPED (reproduces run-256/259) -- proving the
-        # add_frame is load-bearing, not the spheres.
-        no_frame = yaml.safe_load(yaml.safe_dump(reloaded))
-        no_frame['modifiers'] = [m for m in no_frame['modifiers']
-                                 if not (isinstance(m, dict) and 'add_frame' in m)]
-        broken = resolve_self_collision_masks(no_frame, urdf_links)
-        self.assertEqual([p for p in broken['resolved'] if 'attached_object' in p], [],
-                         'without add_frame the carton spheres are orphaned (run-256/259 bug)')
+        self.assertEqual([p for p in masks['resolved'] if 'attached_object' in p], [],
+                         'attached_object must not enter the self-collision set (A1: carton invisible)')
 
     def test_attached_object_excluded_from_static_model_and_overlap_gate(self):
-        # The carried carton (attached_object) is registered via add_frame with its spheres supplied
-        # at runtime -- so at generation it must NOT appear in the geometry, the arm/body sphere_count,
-        # the covered-links model, or the static transport self-overlap gate (the attached object is
-        # dynamic, and the folded stow pose is exactly where the carried carton contacts upper_arm, so
-        # a static carton there would falsely fail generation / block the plan start).
+        # The carried carton (attached_object) is dynamic (added at runtime) and, per decision A1, is
+        # NOT a cuMotion collision frame -- so at generation it must NOT appear in the geometry, the
+        # arm/body sphere_count, the covered-links model, or the static transport self-overlap gate.
         import yaml
         from twin.restock_host.generate_assets import build_assets
         source_urdf = Path(self.config['mobile_manifest']).parent / 'robot.urdf'
@@ -248,7 +232,12 @@ class HostTests(unittest.TestCase):
         geom = xrdf['geometry']['mobile_cad']['spheres']
         self.assertNotIn('attached_object', geom)
         self.assertNotIn('attached_object', report['covered_links'])
-        self.assertEqual(report['attached_object_registration'], 'add_frame')
+        self.assertEqual(report['attached_object_registration'], 'none')
+        # Not a planner collision frame: no add_frame modifier, no self-collision / buffer slot.
+        self.assertNotIn('attached_object', [m.get('add_frame', {}).get('frame_name')
+                                             for m in xrdf['modifiers'] if isinstance(m, dict)])
+        self.assertNotIn('attached_object', xrdf['self_collision']['ignore'])
+        self.assertNotIn('buffer_distance', xrdf['collision'])
         # sphere_count is exactly the emitted (arm/body) geometry: no attached_object contribution.
         self.assertEqual(report['sphere_count'], sum(len(v) for v in geom.values()))
         self.assertTrue(report['transport_collision_check_passed'])
@@ -473,7 +462,7 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     'arm_max_speed', 'startup_grace_seconds',
                                     'sim_cart_place_policy', 'payload_ack_wall_s', 'staged_cart_swing',
                                     'cart_pan_joint0', 'cart_tuck_shape', 'plan_wall_cap_s',
-                                    'base_collision_object'})
+                                    'base_collision_object', 'carry_wrist1_cap'})
         for k in ('sim_cart_place_policy', 'staged_cart_swing', 'base_collision_object'):
             self.assertIsInstance(cfg[k], bool)
         for k in ('payload_ack_wall_s', 'cart_pan_joint0', 'plan_wall_cap_s'):

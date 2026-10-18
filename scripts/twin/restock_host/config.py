@@ -131,20 +131,21 @@ def validate_config(config):
         raise ValueError('XRDF must use CAD gripper_pad_tcp')
     if {'set_base_frame': FRAME} not in xrdf.get('modifiers', []):
         raise ValueError('XRDF must set base frame ur_base_link')
-    # The runtime-attached carton (link 'attached_object') must be REGISTERED as a kinematic frame via
-    # an add_frame modifier (FIXED child of the grasp frame = gripper_pad_tcp). Without it the spheres
-    # the ObjectAttachmentNode reloads are orphaned and curobo never self-collision-checks the carton
-    # against the arm (run-256/259). buffer_distance + self_collision.ignore are the matching vendor
-    # declaration; the collision spheres themselves are supplied at runtime, not here.
+    # The runtime-attached carton (link 'attached_object') is deliberately NOT registered as a cuMotion
+    # collision frame (firstmate sim-restock-planner-obstacles-v1, decision A1). Registering it (PR
+    # #139's add_frame) made the carton a planner collision body and the carry UNPLANNABLE (run-261: a
+    # just-picked carton is born in collision with the source-shelf ESDF); without the frame its runtime
+    # spheres stay orphaned, the plannable run-260 behaviour. The carton is a MoveIt attached object
+    # only; the arm-vs-arm carry stop is handled at the IK layer by the integration lane's caps. Guard
+    # the revert: attached_object must NOT carry an add_frame / buffer_distance / self_collision row.
     add_frames = {m['add_frame']['frame_name']: m['add_frame']
                   for m in xrdf.get('modifiers', []) if isinstance(m, dict) and 'add_frame' in m}
-    carton = add_frames.get('attached_object')
-    if not carton or carton.get('parent_frame_name') != TCP or carton.get('joint_type') != 'FIXED':
-        raise ValueError('XRDF must add_frame attached_object as a FIXED child of gripper_pad_tcp')
-    if 'attached_object' not in (xrdf.get('collision', {}).get('buffer_distance', {}) or {}):
-        raise ValueError('XRDF must reserve attached_object in collision.buffer_distance')
-    if 'attached_object' not in (xrdf.get('self_collision', {}).get('ignore', {}) or {}):
-        raise ValueError('XRDF must give attached_object a self_collision.ignore row')
+    if 'attached_object' in add_frames:
+        raise ValueError('XRDF must NOT add_frame attached_object (A1: carton not a planner collision body)')
+    if 'attached_object' in (xrdf.get('collision', {}).get('buffer_distance', {}) or {}):
+        raise ValueError('XRDF must NOT reserve attached_object in collision.buffer_distance (A1)')
+    if 'attached_object' in (xrdf.get('self_collision', {}).get('ignore', {}) or {}):
+        raise ValueError('XRDF must NOT give attached_object a self_collision.ignore row (A1)')
     for section in ('collision', 'self_collision'):
         geometry = xrdf.get(section, {}).get('geometry')
         spheres = xrdf.get('geometry', {}).get(geometry, {}).get('spheres', {}) if isinstance(geometry, str) else {}
