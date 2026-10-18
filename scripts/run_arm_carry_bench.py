@@ -182,6 +182,29 @@ class IsaacCarryStage(bench.ArmStage):
                 except Exception:
                     pass
                 print('ARMBENCH_LINK_MASS %s mass=%s diag_inertia=%s' % (name, mass, inertia), flush=True)
+            # USD mass is usually unauthored (PhysX auto-computes from collision geometry * density);
+            # read the REAL runtime per-body masses PhysX uses -- an implausibly heavy auto-massed tool
+            # (e.g. the gripper's big cube at default density = tens of kg) would need a large wrist
+            # torque and explain the effort-saturated pin without any contact.
+            try:
+                body_names = None
+                for attr in ('body_names', 'link_names'):
+                    body_names = getattr(self.robot, attr, None) or body_names
+                masses = None
+                for getter in ('get_body_masses', 'get_masses'):
+                    fn = getattr(self.robot, getter, None)
+                    if fn:
+                        try:
+                            masses = np.asarray(fn(), float).reshape(-1)
+                            break
+                        except Exception:
+                            continue
+                if masses is not None:
+                    labelled = list(zip(body_names, masses.tolist())) if body_names else list(enumerate(masses.tolist()))
+                    print('ARMBENCH_RUNTIME_BODY_MASS total=%.2f kg per_body=%s'
+                          % (float(np.sum(masses)), [(str(n), round(float(m), 3)) for n, m in labelled]), flush=True)
+            except Exception as exc:
+                print('ARMBENCH_RUNTIME_BODY_MASS unavailable (%s)' % exc, flush=True)
             # joints/constraints referencing the carton -- scan ONLY the robot + scenario subtrees
             joints_on_carton = []
             roots = [robot_root, self.stage.GetPrimAtPath('/RestockScenario')]
