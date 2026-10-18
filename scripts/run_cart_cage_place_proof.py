@@ -1,22 +1,32 @@
 #!/usr/bin/env python3
-"""CPU proof (no GPU) gating the cart-cage open-face place (firstmate 350).
+"""CPU proof (no GPU) gating the cart-cage open-face place (firstmate 350, corrected run-279).
 
-The place-onto-cart routes the carried carton THROUGH the cart's single OPEN loading face. The
-composed /Rollwagen cage is a three-sided box (deck + back wall + two side walls, OPEN +x toward
-the robot) modelled in the ur_base_link frame -- the geometry is CPU-extracted from the composed
-mission stage (``--stage`` re-derives and asserts it; the committed CANONICAL_CAGE below is that
-dump). This script proves, with the SAME sphere predicate the place-phase gate uses
-(``twin.restock_host.world_obstacles``), that:
+The place-onto-cart routes the carried carton THROUGH the cart's single OPEN +x loading face onto
+the shelf. The mission's REAL /Rollwagen (read from the mission's OWN scene, run-*/mission.usda,
+NOT the compose_robot_in_store stage) sits BESIDE the robot on -y in ur_base_link: deck
+[0,-0.75,-0.30], back wall x=-0.38, side walls y=-0.43/-1.07, open +x. ``--stage`` re-derives and
+asserts the committed CANONICAL_CAGE below.
 
-  (i)  the carry fold (stow -> tuck -> pan) with the carton welded clears all THREE walls + the deck
-       (there is NO top box -- the carry rises ABOVE the open cage), and
-  (ii) a straight open-face insert exists: interpolating the carton box from the mouth standoff
-       (preplace) down the open +x axis onto the deck (place) stays clear of every wall at every
-       step, and reports the final insert-to-deck gap.
+run-279 correction: fm350 modelled the cart as a SOLID cuMotion obstacle, but the real beside-cart
+PHYSICALLY INTERLEAVES the arm/mobile-base (arm-only clearance -44 mm at the deck, -37..-47 mm at the
+near side wall, at every pose) -- so publishing it as a solid obstacle makes cuMotion refuse every
+plan, and a cage-clearance pass/fail gate is UNSATISFIABLE (it false-fails TUCK/PAN, which physically
+succeeded in run-278). There is no real cage to route around; run-278 planned the place freely and
+jammed ONLY on a wrist_1 self-collision (pose-IK flipped wrist_1 to 1.99, above the ur_wrist_2-vs-
+ur_forearm stop ~0.70, and it stuck at 0.69). The carton-vs-wall clearances are therefore reported as
+INFORMATIONAL ONLY, never a gate.
 
-Exit 0 iff both hold (every wall cleared along the fold AND a collision-free insert exists). This is
-firstmate 350's actual gate -- it replaces the mis-sourced bench carton-vs-cart-AABB anchor, which
-measured carton-vs-arm clearance, not carton-vs-cage-walls.
+This script instead PROVES the wrist_1-safe fixed PREPLACE shape (``cage_preplace_shape``, driven via
+begin_joint_goal) is correct, with CPU forward kinematics (``twin.urdf_probe``):
+
+  (a) its wrist_1 is at/below the self-collision stop (<= WRIST1_STOP);
+  (b) its FK tool pose REACHES the recorded sensed mouth standoff (pos + orientation), so the carton
+      presents at the open +x face exactly as the pose-IK preplace intended;
+  (c) the straight-line insert along -x from there lands the carton INSIDE the cart footprint on the
+      shelf (a valid open-face landing), and
+  (d) the joint travel from the pan config to the shape is modest (< pi on every joint).
+
+Exit 0 iff (a)-(d) hold (and, with --stage, the re-derived cage matches CANONICAL_CAGE).
 """
 import argparse
 import json
@@ -29,27 +39,47 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+from twin import urdf_probe as up  # noqa: E402
 from twin.restock_manipulation.cad_tool import ARM_JOINTS  # noqa: E402
 from twin.restock_host.world_obstacles import (  # noqa: E402
     Box, boxes_from_specs, carton_cover_local, check_configuration)
 
-# Authoritative cage, ur_base_link frame (walls-only, OPEN +x). CPU-dumped from the composed stage
-# /Rollwagen (cart 1.27 m directly behind the base, same y; deck surface at z=-0.275), stable across
-# the assembly/coupling composed stages. --stage re-derives and asserts these.
+# Authoritative cage, ur_base_link frame (walls-only, OPEN +x). Re-derived from the mission's OWN
+# /Rollwagen (BESIDE the robot on -y; deck surface z=-0.275, shelf z=0.42). --stage re-derives +
+# asserts these against run-*/mission.usda.
 CANONICAL_CAGE = [
-    {'id': 'cart_deck',  'size': [0.80, 0.68, 0.05], 'center': [-1.270, 0.000, -0.300]},
-    {'id': 'cart_back',  'size': [0.02, 0.68, 1.45], 'center': [-1.650, 0.000,  0.425]},
-    {'id': 'cart_side0', 'size': [0.80, 0.02, 1.45], 'center': [-1.270, -0.320, 0.425]},
-    {'id': 'cart_side1', 'size': [0.80, 0.02, 1.45], 'center': [-1.270,  0.320, 0.425]},
+    {'id': 'cart_deck',  'size': [0.80, 0.68, 0.05], 'center': [ 0.000, -0.750, -0.300]},
+    {'id': 'cart_back',  'size': [0.02, 0.68, 1.45], 'center': [-0.380, -0.750,  0.425]},
+    {'id': 'cart_side0', 'size': [0.80, 0.02, 1.45], 'center': [ 0.000, -1.070,  0.425]},
+    {'id': 'cart_side1', 'size': [0.80, 0.02, 1.45], 'center': [ 0.000, -0.430,  0.425]},
 ]
-# The open loading face: +x in ur_base_link (toward the robot). Deck top z = center_z + size_z/2.
+# The open loading face: +x in ur_base_link. Deck top / shelf z for the landing check.
 CAGE_AXIS = (1.0, 0.0, 0.0)
 DECK_TOP_Z = -0.300 + 0.05 / 2.0
+SHELF_TOP_Z = 0.420 + 0.025 / 2.0
+CART_FRONT_X = 0.000 + 0.80 / 2.0   # open +x face plane (deck x-extent)
+
+# wrist_1 self-collision stop (ur_wrist_2-vs-ur_forearm); the fixed preplace shape must stay at/below.
+WRIST1_STOP = 0.65
+# The sensed preplace mouth TCP (ur_base_link) the pose-IK preplace aimed at in run-278 (FK of its
+# recorded goal); the fixed shape must reach the SAME tool pose.
+RECORDED_MOUTH_TCP = (0.6298, -0.9527, 0.8024)
+RECORDED_MOUTH_SHAPE = (-3.7024, -3.1293, 1.1383, 1.9909, -0.5614, -3.1416)  # run-278 pose-IK goal (jams)
+# fm351/run-279: the wrist_1-safe fixed PREPLACE shape (begin_joint_goal target), CPU-IK-solved to the
+# RECORDED_MOUTH_TCP with wrist_1 below the stop. Must match ros_host_config.json cage_preplace_shape.
+CAGE_PREPLACE_SHAPE = (-3.702, -3.486, 1.425, -1.081, 0.561, 0.0)
 
 # Carry-fold joint configs (arm joints 1-5 = the carry shape cart_tuck_shape; joint0 = shoulder_pan).
-# tuck folds at the measured lift pan; pan rotates joint0 to cart_pan_joint0 (run-276 values).
 CART_TUCK_SHAPE = (-2.27, 1.0, 0.65, 0.8, -1.2545)
 CART_PAN_JOINT0 = -1.822
+PAN_CONFIG = (CART_PAN_JOINT0, *CART_TUCK_SHAPE)
+
+
+def _tcp_transform(robot, config):
+    """FK 4x4 of the gripper_pad_tcp in ur_base_link at an ARM-order joint config."""
+    world = up.link_world_transforms(robot, dict(zip(ARM_JOINTS, config)))
+    key = next(k for k in world if k.endswith('gripper_pad_tcp'))
+    return np.asarray(world[key], dtype=float)
 
 
 def _quat_matrix(q):
@@ -136,77 +166,85 @@ def main(argv=None):
         specs = derived
     boxes = boxes_from_specs(specs)
     carton = dict(dims=args.dims, offset_tcp=args.offset_tcp)
+    robot = up.parse_urdf(args.urdf)
+    shape = CAGE_PREPLACE_SHAPE
 
-    # (i) Carry-fold clearance: stow -> tuck -> pan, carton welded, vs all 3 walls + deck.
+    # ---- GATE: the wrist_1-safe fixed PREPLACE shape (FK, no cage clearance -- the arm interleaves) ----
+    tcp = _tcp_transform(robot, shape)
+    tcp_pos = tcp[:3, 3]
+    # carton centre = tool pose * offset_tcp (tool frame); same convention check_configuration uses.
+    carton_center = tcp_pos + tcp[:3, :3] @ np.asarray(args.offset_tcp, dtype=float)
+    ref = _tcp_transform(robot, RECORDED_MOUTH_SHAPE)      # the pose-IK goal the shape must match
+    pos_err = float(np.linalg.norm(tcp_pos - ref[:3, 3]))
+    # orientation error vs the recorded goal's tool frame (so the straight insert is axis-aligned)
+    rot_err = float(np.arccos(np.clip((np.trace(tcp[:3, :3].T @ ref[:3, :3]) - 1.0) / 2.0, -1.0, 1.0)))
+    wrist1 = shape[3]
+    a = np.array(CAGE_AXIS, dtype=float); a = a / np.linalg.norm(a)
+    # The straight -x insert drives the TOOL from the mouth standoff into the open +x face. Gate on the
+    # TOOL insert point (pure FK, no offset/quat approximation); the carton hangs off it (reported as
+    # informational carton_center -- its exact rest depends on the SENSED place target at runtime).
+    tcp_place = tcp_pos - a * args.mouth_standoff
+    carton_place = carton_center - a * args.mouth_standoff
+    half = carton_world_extents(args.tcp_quat, args.dims)
+    travel = np.abs(np.array(shape) - np.array(PAN_CONFIG))
+
+    g_wrist1 = wrist1 <= WRIST1_STOP
+    g_reach = pos_err <= 0.01 and rot_err <= math.radians(5)
+    g_preplace_outside = (tcp_pos[0]) >= CART_FRONT_X        # tool presents outside the +x mouth
+    # (c) the -x insert drives the tool INSIDE the cart footprint, above the deck (a valid open-face
+    # landing onto the shelf). Footprint = cart x/y extent (+ small margin); z above the deck top.
+    g_land = (-0.45 <= tcp_place[0] <= 0.45 and -1.10 <= tcp_place[1] <= -0.40
+              and DECK_TOP_Z < tcp_place[2] < 1.50)
+    g_travel = bool(np.all(travel < math.pi))
+    ok = (g_wrist1 and g_reach and g_preplace_outside and g_land and g_travel
+          and (stage_ok is not False))
+
+    # ---- INFORMATIONAL ONLY: carton-vs-wall clearances along the fold + insert. NOT a gate: the real
+    # beside-cart interleaves the arm/mobile-base, so these read negative at poses that physically work.
     manifest = json.loads(Path(args.manifest).read_text())['transport_positions']
-    fold = {
-        'STOW': [manifest[n] for n in ARM_JOINTS],
-        'TUCK': [manifest[ARM_JOINTS[0]], *CART_TUCK_SHAPE],
-        'PAN':  [CART_PAN_JOINT0, *CART_TUCK_SHAPE],
-    }
-    fold_rows, fold_min = [], {b.id: math.inf for b in boxes}
-    for name, q in fold.items():
+    fold = {'STOW': [manifest[n] for n in ARM_JOINTS],
+            'TUCK': [manifest[ARM_JOINTS[0]], *CART_TUCK_SHAPE],
+            'PAN':  list(PAN_CONFIG),
+            'PREPLACE': list(shape)}
+    fold_min = {b.id: math.inf for b in boxes}
+    for q in fold.values():
         r = check_configuration(args.urdf, args.xrdf, boxes, dict(zip(ARM_JOINTS, q)), carton=carton)
-        per = {b['box']: b['clearance_m'] for b in r['boxes']}
-        for k, v in per.items():
-            fold_min[k] = min(fold_min[k], v)
-        worst = min(r['boxes'], key=lambda b: b['clearance_m'])
-        fold_rows.append((name, worst['box'], worst['clearance_m'], worst['worst_set'], per))
-    fold_clear = all(v > 0 for v in fold_min.values())
+        for b in r['boxes']:
+            fold_min[b['box']] = min(fold_min[b['box']], b['clearance_m'])
 
-    # (ii) Open-face insert sweep: the CARTON (exact box, side-grip orientation) travels from the mouth
-    # standoff (preplace) down the +x axis onto the deck (place). The deck rest centres the carton on
-    # the deck load centre with its underside insert_gap above the deck top; preplace offsets it out
-    # the +x mouth. Fixed orientation throughout (a rigid straight insert).
-    a = np.array(CAGE_AXIS, dtype=float)
-    a = a / np.linalg.norm(a)
-    half = carton_world_extents(args.tcp_quat, args.dims)  # world AABB half-extents of the oriented carton
-    deck_center_xy = np.array([-1.270, 0.0])               # cart load centre (deck AABB centre, ur frame)
-    place_center = np.array([deck_center_xy[0], deck_center_xy[1], DECK_TOP_Z + args.insert_gap + half[2]])
-    preplace_center = place_center + a * args.mouth_standoff
-    sweep_min = {b.id: math.inf for b in boxes}
-    for t in np.linspace(0.0, 1.0, args.steps):
-        c = preplace_center + (place_center - preplace_center) * t  # mouth -> deck (into the open face)
-        pts = carton_box_points(c, args.tcp_quat, args.dims)
-        for b in boxes:
-            g = float(np.min(b.signed_distance(pts)))
-            sweep_min[b.id] = min(sweep_min[b.id], g)
-    deck = next(b for b in boxes if b.id == 'cart_deck')
-    insert_to_deck = float(np.min(deck.signed_distance(carton_box_points(place_center, args.tcp_quat, args.dims))))
-    walls = [b for b in boxes if b.id != 'cart_deck']
-    insert_walls_clear = all(sweep_min[b.id] > 0 for b in walls)
-    # preplace must present the carton OUTSIDE the open mouth (back face clear of the deck front plane)
-    mouth_x = -1.270 + 0.80 / 2.0
-    preplace_outside = (preplace_center[0] - half[0]) >= mouth_x
-
-    ok = fold_clear and insert_walls_clear and preplace_outside and (stage_ok is not False)
     result = {
         'cage_specs': specs, 'stage_asserted': stage_ok,
-        'carton_world_half_extents_m': [round(v, 4) for v in half],
-        'fold_min_clearance_m': {k: round(v, 4) for k, v in fold_min.items()}, 'fold_clear': fold_clear,
-        'insert_min_clearance_m': {k: round(v, 4) for k, v in sweep_min.items()},
-        'insert_to_deck_gap_m': round(insert_to_deck, 4), 'insert_walls_clear': insert_walls_clear,
-        'preplace_outside_mouth': bool(preplace_outside),
-        'mouth_standoff_m': args.mouth_standoff, 'insert_gap_m': args.insert_gap, 'ok': ok,
+        'cage_preplace_shape': list(shape), 'wrist1': wrist1, 'wrist1_stop': WRIST1_STOP,
+        'tcp_pos': [round(v, 4) for v in tcp_pos], 'recorded_mouth_tcp': list(RECORDED_MOUTH_TCP),
+        'pos_err_m': round(pos_err, 4), 'rot_err_deg': round(math.degrees(rot_err), 3),
+        'carton_center': [round(v, 4) for v in carton_center],
+        'tcp_place': [round(v, 4) for v in tcp_place],
+        'carton_place_informational': [round(v, 4) for v in carton_place],
+        'travel_per_joint': [round(v, 3) for v in travel], 'travel_max': round(float(travel.max()), 3),
+        'gate': {'wrist1<=stop': g_wrist1, 'reach_mouth': g_reach, 'preplace_outside_mouth': g_preplace_outside,
+                 'insert_lands_in_cart': g_land, 'travel<pi': g_travel, 'stage_ok': stage_ok},
+        'informational_wall_clearance_mm': {k: round(v * 1000) for k, v in fold_min.items()},
+        'ok': ok,
     }
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print('CART-CAGE OPEN-FACE PLACE PROOF (CPU, no GPU)')
-        print('  cage source:', 'composed stage (asserted=%s)' % stage_ok if args.stage else 'committed CANONICAL_CAGE')
-        print('  (i) carry-fold clearance (carton welded, vs 3 walls + deck, NO top):')
-        for name, box, cl, wset, per in fold_rows:
-            print('      %-5s worst %-11s %7.0f mm (%s)   %s' % (
-                name, box, cl * 1000, wset, {k: round(v * 1000) for k, v in per.items()}))
-        print('      min per box along fold: %s  => %s' % (
-            {k: round(v * 1000) for k, v in fold_min.items()}, 'CLEAR' if fold_clear else 'BLOCKED'))
-        print('      carton world half-extents (side-grip): %s m  (y-face spans the narrow cage gap)'
-              % [round(v, 3) for v in half])
-        print('  (ii) open-face insert sweep (mouth standoff %.2f m -> deck, +x into open face):' % args.mouth_standoff)
-        print('      min wall clearance along insert: %s' % {k: round(v * 1000) for k, v in sweep_min.items() if k != 'cart_deck'})
-        print('      preplace carton outside mouth: %s' % preplace_outside)
-        print('      insert-to-deck final gap: %.0f mm  (walls %s)' % (
-            insert_to_deck * 1000, 'CLEAR' if insert_walls_clear else 'BLOCKED'))
+        print('CART-CAGE OPEN-FACE PLACE PROOF (CPU, no GPU) -- wrist_1-safe fixed preplace (run-279)')
+        print('  cage source:', 'mission stage (asserted=%s)' % stage_ok if args.stage else 'committed CANONICAL_CAGE (beside-cart)')
+        print('  (a) wrist_1 of cage_preplace_shape: %.3f  (stop %.2f)  => %s' % (
+            wrist1, WRIST1_STOP, 'OK' if g_wrist1 else 'FAIL'))
+        print('  (b) FK TCP %s vs recorded mouth %s: pos_err %.1f mm, rot_err %.2f deg  => %s' % (
+            [round(v, 3) for v in tcp_pos], [round(v, 3) for v in RECORDED_MOUTH_TCP],
+            pos_err * 1000, math.degrees(rot_err), 'OK' if g_reach else 'FAIL'))
+        print('      preplace tool outside +x mouth (x>%.2f): %s  => %s' % (
+            CART_FRONT_X, round(float(tcp_pos[0]), 3), 'OK' if g_preplace_outside else 'FAIL'))
+        print('  (c) -x insert drives tool to %s (cart footprint, above deck; carton ~%s): %s' % (
+            [round(v, 3) for v in tcp_place], [round(v, 3) for v in carton_place],
+            'OK' if g_land else 'FAIL'))
+        print('  (d) pan->shape joint travel: %s max %.2f rad (<pi)  => %s' % (
+            [round(v, 2) for v in travel], travel.max(), 'OK' if g_travel else 'FAIL'))
+        print('  informational carton-vs-wall min clearance (arm interleaves the real cart, NOT a gate): %s'
+              % result['informational_wall_clearance_mm'])
         print('  VERDICT:', 'PASS (safe to boot)' if ok else 'FAIL')
     return 0 if ok else 1
 

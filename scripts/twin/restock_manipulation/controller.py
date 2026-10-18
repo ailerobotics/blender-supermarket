@@ -23,7 +23,8 @@ class TransferController:
                  staged_cart_swing: bool = False, cart_pan_joint0: float = 0.0,
                  cart_tuck_shape=None, carry_wrist1_cap=None,
                  cart_cage_place: bool = False, cage_axis=(1.0, 0.0, 0.0),
-                 cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03):
+                 cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03,
+                 cage_preplace_shape=None):
         self.steady_clock=steady_clock
         # fm327 belt-and-braces wrist_1 cap for the task-space LIFT carry move (None = off).
         self.carry_wrist1_cap = None if carry_wrist1_cap is None else float(carry_wrist1_cap)
@@ -100,6 +101,17 @@ class TransferController:
                 raise ValueError('cart cage place requires a non-zero finite cage_axis, a positive '
                                  'mouth standoff and a non-negative insert gap')
             self.cage_axis = tuple(v / n for v in self.cage_axis)  # unit open-face direction
+        # Fixed-shape PREPLACE (run-279): the pose-IK preplace flips wrist_1 above the ur_wrist_2-vs-
+        # ur_forearm self-collision stop (~0.70) and jams at execution (run-278: wrist_1 stuck 0.69 vs
+        # cmd 1.99). When set, preplace is driven as a fixed collision-planned begin_joint_goal to this
+        # CPU-IK-solved 6-joint config (wrist_1 below the stop; FK TCP = the sensed mouth standoff), and
+        # the straight-line insert (place) still tracks the SENSED place target. None => pose-IK preplace
+        # (byte-identical). Only meaningful with cart_cage_place.
+        self.cage_preplace_shape = (tuple(float(v) for v in cage_preplace_shape)
+                                    if cage_preplace_shape is not None else None)
+        if self.cage_preplace_shape is not None and (len(self.cage_preplace_shape) != 6
+                or not all(map(math.isfinite, self.cage_preplace_shape))):
+            raise ValueError('cage_preplace_shape must be 6 finite joint values')
         self.cart_location, self.max_age = cart_location, max_age
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
@@ -326,6 +338,18 @@ class TransferController:
             if not self.issued:
                 if s.valid_until_steady is not None:
                     require_fresh(s.valid_until_steady,self.steady_clock)
+                # run-279: wrist_1-safe fixed-shape PREPLACE. The pose-IK preplace flips wrist_1 above the
+                # ur_wrist_2-vs-ur_forearm self-collision stop (~0.70) and jams at execution (run-278:
+                # wrist_1 stuck 0.69 vs cmd 1.99). When a CPU-IK-solved cage_preplace_shape is configured,
+                # drive preplace as a fixed collision-planned begin_joint_goal to it (wrist_1 below the
+                # stop; FK TCP = the sensed mouth); the straight-line insert (place) below still tracks the
+                # SENSED place target. Carton-loaded -> slow fold. Absent => the pose-IK preplace, and the
+                # poll/transition (preplace->place) + target re-validation above are shared unchanged.
+                if (self.phase == 'preplace' and self.cart_cage_place
+                        and self.cage_preplace_shape is not None):
+                    self.motion.begin_joint_goal(self.cage_preplace_shape, s.joint_positions, slow=True)
+                    self.issued = True
+                    return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
                 straight_contact = self.phase == 'contact' and self.contact_straight_line
                 # Cart-cage open-face place: the INSERT (place) and empty-handed RETREAT are straight-line
                 # moves THROUGH the single open +x face (begin(straight_line=True): collision-off seeded

@@ -490,14 +490,19 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     'sim_cart_place_policy', 'payload_ack_wall_s', 'staged_cart_swing',
                                     'cart_pan_joint0', 'cart_tuck_shape', 'plan_wall_cap_s',
                                     'base_collision_object',
-                                    # fm350(B) cart-cage open-face place (host-config keys read by ros_host).
-                                    'world_obstacles', 'cart_cage_place', 'cage_axis',
-                                    'cage_mouth_standoff', 'cage_insert_gap'})
+                                    # Cart-cage open-face place (host-config keys read by ros_host). run-279
+                                    # dropped world_obstacles (the real beside-cart interleaves the arm, so a
+                                    # solid obstacle breaks planning) and added the wrist_1-safe fixed
+                                    # cage_preplace_shape (begin_joint_goal preplace below the self-collision stop).
+                                    'cart_cage_place', 'cage_axis', 'cage_mouth_standoff',
+                                    'cage_insert_gap', 'cage_preplace_shape'})
         for k in ('sim_cart_place_policy', 'staged_cart_swing', 'base_collision_object', 'cart_cage_place'):
             self.assertIsInstance(cfg[k], bool)
         for k in ('payload_ack_wall_s', 'cart_pan_joint0', 'plan_wall_cap_s'):
             self.assertIsInstance(cfg[k], (int, float))
         self.assertEqual(len(cfg['cart_tuck_shape']), 5)   # arm joints 1-5 of the high carry pose
+        self.assertEqual(len(cfg['cage_preplace_shape']), 6)  # full 6-joint begin_joint_goal preplace target
+        self.assertLessEqual(cfg['cage_preplace_shape'][3], 0.65)  # wrist_1 at/below the self-collision stop
         self.assertIsInstance(cfg['pose_goal'], bool)
         # contact_straight_line opts the contact descent into the host-executor straight-line path
         # (bypassing the collision planner for that move only); optional bool read via config.get.

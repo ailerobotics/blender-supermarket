@@ -125,6 +125,7 @@ def main():
         cage_axis=tuple(config.get('cage_axis', (1.0, 0.0, 0.0))),
         cage_mouth_standoff=float(config.get('cage_mouth_standoff', 0.55)),
         cage_insert_gap=float(config.get('cage_insert_gap', 0.03)),
+        cage_preplace_shape=config.get('cage_preplace_shape'),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # The first decode-grade frame + support registration under render pacing needs several

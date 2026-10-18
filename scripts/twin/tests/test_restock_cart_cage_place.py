@@ -10,31 +10,28 @@ The live clearance/fold numbers against the real URDF/XRDF are produced by scrip
 (it needs the dataset CAD); these tests pin the logic and the open-face geometry that gate it.
 """
 import importlib.util
-import math
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from scripts.twin.restock_manipulation import (
     Observation, ProductProfile, Sensors, Target, TransferController)
 
-# Load the proof module (pure geometry helpers + the committed authoritative cage) by file path.
+# Load the proof module (committed authoritative cage + the wrist_1-safe shape constants) by file path.
 _PROOF = Path(__file__).resolve().parents[2] / 'run_cart_cage_place_proof.py'
 _spec = importlib.util.spec_from_file_location('cart_cage_place_proof', _PROOF)
 proof = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(proof)
-
-from scripts.twin.restock_host.world_obstacles import boxes_from_specs  # noqa: E402
 
 PROFILE = ProductProfile('sku-box', (.6, .4, .16), (.5, .5, .5, .5), max_reach=1.3, grasp_mode='top')
 JOB = dict(job_id='job-1', sku='sku-box', quantity=1, source_bin='backroom', shelf_id='shelf-a')
 
 
 class FixtureMotion:
-    """Records every begin() flag so the test can assert the insert is a straight-line move."""
+    """Records every begin()/begin_joint_goal() so the test can assert move routing."""
     def __init__(self):
         self.moves, self.straights, self.joint_spaces, self.payloads = [], [], [], []
+        self.joint_goals = []
         self.outcome, self.attach_ok = 'succeeded', True
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
@@ -47,7 +44,7 @@ class FixtureMotion:
         return self.outcome
 
     def begin_joint_goal(self, goal, measured, slow=False):
-        pass
+        self.joint_goals.append(tuple(goal))
 
     def stop(self):
         pass
@@ -148,47 +145,64 @@ def test_cart_cage_place_rejects_invalid_params(bad):
         TransferController(FixtureMotion(), {'sku-box': PROFILE}, cart_cage_place=True, **bad)
 
 
-# ----------------------------------------------------------------------------- cage geometry
+# ------------------------------------------------- fixed wrist_1-safe preplace (begin_joint_goal)
 
-def test_open_face_insert_clears_walls_and_deck():
-    # The carton (exact side-grip box) inserted down the open +x axis onto the deck clears both side
-    # walls + the back wall at every step, and rests insert_gap above the deck.
-    boxes = boxes_from_specs(proof.CANONICAL_CAGE)
-    quat, dims = (.5, .5, .5, .5), (.6, .4, .16)
-    half = proof.carton_world_extents(quat, dims)
-    a = np.array(proof.CAGE_AXIS, float)
-    place = np.array([-1.27, 0., proof.DECK_TOP_Z + 0.03 + half[2]])
-    preplace = place + a * 0.55
-    mins = {b.id: math.inf for b in boxes}
-    for t in np.linspace(0, 1, 24):
-        pts = proof.carton_box_points(preplace + (place - preplace) * t, quat, dims)
-        for b in boxes:
-            mins[b.id] = min(mins[b.id], float(np.min(b.signed_distance(pts))))
-    walls = [b.id for b in boxes if b.id != 'cart_deck']
-    assert all(mins[w] > 0 for w in walls), mins          # collision-free insert exists
-    deck = next(b for b in boxes if b.id == 'cart_deck')
-    rest = float(np.min(deck.signed_distance(proof.carton_box_points(place, quat, dims))))
-    assert rest == pytest.approx(0.03, abs=5e-3)          # a few cm above the deck
+SHAPE = proof.CAGE_PREPLACE_SHAPE
 
 
-def test_side_grip_carton_spans_the_narrow_cage_gap():
-    # The side grip (quat 0.5,0.5,0.5,0.5) maps the carton's 0.6 m face across the cage's ~0.63 m
-    # interior y-gap -> the side-wall clearance is small but POSITIVE (~10 mm). This is the inherent
-    # tight fit (smaller-problems-later), not fixable by a shallower deck or closer base.
-    half = proof.carton_world_extents((.5, .5, .5, .5), (.6, .4, .16))
-    assert half[1] == pytest.approx(0.30, abs=1e-6)       # 0.6 m dimension spans +-y
-    boxes = {b.id: b for b in boxes_from_specs(proof.CANONICAL_CAGE)}
-    pts = proof.carton_box_points((-1.27, 0., proof.DECK_TOP_Z + 0.03 + half[2]), (.5, .5, .5, .5), (.6, .4, .16))
-    side = min(float(np.min(boxes[s].signed_distance(pts))) for s in ('cart_side0', 'cart_side1'))
-    assert 0 < side < 0.03, side                          # positive but tight
+def test_cage_preplace_shape_routes_begin_joint_goal():
+    # run-279: with cart_cage_place + cage_preplace_shape, PREPLACE is a fixed begin_joint_goal to the
+    # shape (wrist_1 below the self-collision stop) instead of the pose-IK move that jammed in run-278.
+    # The PLACE insert stays a straight-line move to the SENSED target.
+    c, m = make_controller(cart_cage_place=True, cage_mouth_standoff=0.30, cage_preplace_shape=SHAPE)
+    run_to(c, 'preplace')
+    before = len(m.joint_goals)
+    c.step(.1, packet(c, 9.0)); assert c.phase == 'preplace'   # issue preplace
+    assert len(m.joint_goals) == before + 1                    # routed to begin_joint_goal...
+    assert m.joint_goals[-1] == pytest.approx(SHAPE)           # ...with the fixed wrist_1-safe shape
+    c.step(.1, packet(c, 9.1)); assert c.phase == 'place'      # preplace poll -> place
+    c.step(.1, packet(c, 9.2))                                 # issue the insert
+    assert m.straights[-1] is True                             # place still a straight-line insert
 
 
-def test_insert_the_wrong_way_hits_the_back_wall():
-    # Driving the carton PAST the deck toward the back wall (-x, the CLOSED face) collides -- proving
-    # the only open face is +x.
-    boxes = {b.id: b for b in boxes_from_specs(proof.CANONICAL_CAGE)}
-    quat, dims = (.5, .5, .5, .5), (.6, .4, .16)
-    half = proof.carton_world_extents(quat, dims)
-    into_back = np.array([-1.65 + half[0], 0., proof.DECK_TOP_Z + 0.03 + half[2]])  # against the back wall
-    pts = proof.carton_box_points(into_back, quat, dims)
-    assert float(np.min(boxes['cart_back'].signed_distance(pts))) <= 0.02
+def test_cage_preplace_shape_absent_keeps_pose_ik_preplace():
+    # cart_cage_place ON but cage_preplace_shape ABSENT => preplace is the pose-IK move (byte-identical
+    # to before the fix): a begin() collision-aware move, never begin_joint_goal.
+    c, m = make_controller(cart_cage_place=True, cage_mouth_standoff=0.30)
+    run_to(c, 'preplace')
+    goals_before = len(m.joint_goals)
+    c.step(.1, packet(c, 9.0)); assert c.phase == 'preplace'
+    assert len(m.joint_goals) == goals_before                  # no begin_joint_goal for preplace
+    assert m.straights[-1] is False                            # pose-IK collision-aware preplace
+
+
+@pytest.mark.parametrize('bad', [(0., 0., 0.), (1.,) * 5, (1.,) * 7,
+                                 (1., 2., float('nan'), 4., 5., 6.)])
+def test_cage_preplace_shape_rejects_invalid(bad):
+    with pytest.raises(ValueError):
+        TransferController(FixtureMotion(), {'sku-box': PROFILE}, cart_cage_place=True,
+                           cage_preplace_shape=bad)
+
+
+# ----------------------------------------------------------- authoritative cage + shape (run-279 pin)
+
+def test_canonical_cage_is_the_beside_cart_open_plus_x():
+    # run-279 correction: CANONICAL_CAGE is the mission's REAL /Rollwagen BESIDE the robot on -y, open
+    # +x -- NOT the stale behind-cart (deck -1.27) from the compose_robot_in_store stage.
+    by_id = {s['id']: s for s in proof.CANONICAL_CAGE}
+    assert by_id['cart_deck']['center'] == pytest.approx([0.0, -0.75, -0.30], abs=1e-6)
+    assert by_id['cart_back']['center'][0] == pytest.approx(-0.38, abs=1e-6)    # back wall at -x
+    assert by_id['cart_side0']['center'][1] == pytest.approx(-1.07, abs=1e-6)   # side walls straddle -0.75
+    assert by_id['cart_side1']['center'][1] == pytest.approx(-0.43, abs=1e-6)
+    assert proof.CAGE_AXIS == (1.0, 0.0, 0.0)                                    # open +x
+
+
+def test_cage_preplace_shape_wrist1_safe_and_matches_host_config():
+    # The committed shape keeps wrist_1 at/below the ur_wrist_2-vs-ur_forearm self-collision stop, and
+    # the proof constant matches the host config ros_host actually reads (and the solid cage is dropped).
+    import json
+    assert proof.CAGE_PREPLACE_SHAPE[3] <= proof.WRIST1_STOP
+    cfg = json.loads((Path(__file__).resolve().parents[2]
+                      / 'twin/restock_manipulation/ros_host_config.json').read_text())
+    assert cfg['cage_preplace_shape'] == pytest.approx(list(proof.CAGE_PREPLACE_SHAPE))
+    assert 'world_obstacles' not in cfg                        # the solid cage obstacle is dropped

@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from twin.restock_manipulation import config_preflight as cp  # noqa: E402
 
-CAGE_KEYS = ['cart_cage_place', 'world_obstacles', 'cage_axis',
+CAGE_KEYS = ['cart_cage_place', 'cage_preplace_shape', 'cage_axis',
              'cage_mouth_standoff', 'cage_insert_gap']
 
 

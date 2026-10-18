@@ -40,6 +40,7 @@ KEY_CONSUMER = {
     'cage_insert_gap': HOST,
     'staged_cart_swing': HOST,
     'sim_cart_place_policy': HOST,
+    'cage_preplace_shape': HOST,
     'cart_pan_joint0': HOST,
     'cart_tuck_shape': HOST,
     'base_collision_object': HOST,
