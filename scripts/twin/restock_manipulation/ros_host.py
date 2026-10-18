@@ -117,6 +117,14 @@ def main():
         staged_cart_swing=staged, cart_pan_joint0=float(config.get('cart_pan_joint0', 0.0)),
         cart_tuck_shape=config.get('cart_tuck_shape'),
         carry_wrist1_cap=config.get('carry_wrist1_cap'),
+        # Cart-cage open-face place (firstmate 350): route the place THROUGH the cart's open +x face --
+        # cuMotion plans PREPLACE around the published cage walls (config['world_obstacles']) to a mouth
+        # standoff, then a straight-line insert drives onto the deck. Absent => the existing pose-IK
+        # preplace/place (byte-identical). cage_axis/standoff/gap in ur_base_link.
+        cart_cage_place=bool(config.get('cart_cage_place', False)),
+        cage_axis=tuple(config.get('cage_axis', (1.0, 0.0, 0.0))),
+        cage_mouth_standoff=float(config.get('cage_mouth_standoff', 0.55)),
+        cage_insert_gap=float(config.get('cage_insert_gap', 0.03)),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # The first decode-grade frame + support registration under render pacing needs several

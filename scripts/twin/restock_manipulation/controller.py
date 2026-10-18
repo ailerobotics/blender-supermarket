@@ -21,7 +21,9 @@ class TransferController:
                  steady_clock=time.monotonic, contact_straight_line: bool = False,
                  contact_overpress_step_m: float = 0.0, contact_overpress_cap_m: float = 0.0,
                  staged_cart_swing: bool = False, cart_pan_joint0: float = 0.0,
-                 cart_tuck_shape=None, carry_wrist1_cap=None):
+                 cart_tuck_shape=None, carry_wrist1_cap=None,
+                 cart_cage_place: bool = False, cage_axis=(1.0, 0.0, 0.0),
+                 cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03):
         self.steady_clock=steady_clock
         # fm327 belt-and-braces wrist_1 cap for the task-space LIFT carry move (None = off).
         self.carry_wrist1_cap = None if carry_wrist1_cap is None else float(carry_wrist1_cap)
@@ -75,6 +77,29 @@ class TransferController:
         if self.staged_cart_swing and (not math.isfinite(self.cart_pan_joint0)
                 or len(self.cart_tuck_shape) != 5 or not all(map(math.isfinite, self.cart_tuck_shape))):
             raise ValueError('staged cart swing requires a finite cart_pan_joint0 and 5-joint cart_tuck_shape')
+        # CART-CAGE open-face place (firstmate 350). The place-onto-cart is a two-step move THROUGH the
+        # cart's single OPEN loading face (the composed /Rollwagen cage is modelled as world_obstacles:
+        # deck + back + two side walls, open +x toward the robot -- CPU-derived from the composed stage,
+        # ur_base_link frame). cuMotion plans the PREPLACE (collision-aware joint-space, seeded near the
+        # pan branch) around those walls to a standoff JUST OUTSIDE the +x mouth; the PLACE then INSERTS
+        # straight along the cage axis (begin(straight_line=True): collision-off seeded 2-point move)
+        # -(axis) through the open face onto the deck target, stopping ``cage_insert_gap`` above the deck
+        # so the carton settles the last cm on release. retreat backs straight out the same face.
+        # ``cage_axis`` is the open-face direction in ur_base_link (default +x, the authoritative cart
+        # pose: 1.27 m directly behind the base, mouth toward the robot). Gated on cart_cage_place; off
+        # => the existing pose-IK preplace/place (byte-identical).
+        self.cart_cage_place = bool(cart_cage_place)
+        self.cage_axis = tuple(float(v) for v in cage_axis)
+        self.cage_mouth_standoff = float(cage_mouth_standoff)
+        self.cage_insert_gap = float(cage_insert_gap)
+        if self.cart_cage_place:
+            n = math.sqrt(sum(v * v for v in self.cage_axis))
+            if (len(self.cage_axis) != 3 or not all(map(math.isfinite, self.cage_axis)) or n < 1e-6
+                    or not math.isfinite(self.cage_mouth_standoff) or self.cage_mouth_standoff <= 0
+                    or not math.isfinite(self.cage_insert_gap) or self.cage_insert_gap < 0):
+                raise ValueError('cart cage place requires a non-zero finite cage_axis, a positive '
+                                 'mouth standoff and a non-negative insert gap')
+            self.cage_axis = tuple(v / n for v in self.cage_axis)  # unit open-face direction
         self.cart_location, self.max_age = cart_location, max_age
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
@@ -252,6 +277,21 @@ class TransferController:
                               place=place, retreat=pose(target.pose, p.dimensions[2] + p.approach))
             if self.pose_policy is not None:
                 self.poses = self.pose_policy.build(source, target, p)
+            if self.cart_cage_place:
+                # Re-chain the place for the open-face insert, keeping the policy's reachable PLACE
+                # orientation + sensed deck position. PREPLACE = the deck place pushed out the +x mouth
+                # by the mouth standoff (so cuMotion routes the carton clear of the walls to a pose fully
+                # OUTSIDE the cage); the insert (place phase, straight-line) then drives -(axis) back in.
+                # The place target itself is lifted cage_insert_gap above the deck so the carton drops
+                # the last cm on release instead of being driven into the deck collider. retreat = the
+                # same mouth standoff (back straight out, empty-handed). Orientation is unchanged.
+                base = self.poses['place']
+                a = self.cage_axis
+                place = (base[0], base[1], base[2] + self.cage_insert_gap, *base[3:])
+                mouth = (place[0] + a[0] * self.cage_mouth_standoff,
+                         place[1] + a[1] * self.cage_mouth_standoff,
+                         place[2] + a[2] * self.cage_mouth_standoff, *base[3:])
+                self.poses['place'], self.poses['preplace'], self.poses['retreat'] = place, mouth, mouth
             if not all(self._pose_ok(v) for v in self.poses.values()):
                 import math as _m
                 bad = {k: round(_m.dist(v[:3], (0, 0, 0)), 3) for k, v in self.poses.items()
@@ -286,8 +326,14 @@ class TransferController:
             if not self.issued:
                 if s.valid_until_steady is not None:
                     require_fresh(s.valid_until_steady,self.steady_clock)
-                straight = self.phase == 'contact' and self.contact_straight_line
-                target = self._overpressed_contact(self._contact_step) if straight else self.poses[self.phase]
+                straight_contact = self.phase == 'contact' and self.contact_straight_line
+                # Cart-cage open-face place: the INSERT (place) and empty-handed RETREAT are straight-line
+                # moves THROUGH the single open +x face (begin(straight_line=True): collision-off seeded
+                # 2-point). The cage walls are published only so cuMotion routes the collision-aware
+                # PREPLACE around them to the mouth standoff; the insert then deliberately drives into the
+                # open mouth and back out, never crossing a wall (CPU-proven by the fold->insert sweep).
+                straight = straight_contact or (self.cart_cage_place and self.phase in ('place', 'retreat'))
+                target = self._overpressed_contact(self._contact_step) if straight_contact else self.poses[self.phase]
                 # Per-move goal type (firstmate msg 284/285): the cart PLACE poses have no cuMotion
                 # task-space IK solution (the solver is systemically broken here); route them through
                 # the reliable seeded-KDL -> joint-space path. The pick (approach/lift) keeps its proven
