@@ -164,6 +164,7 @@ class HostTests(unittest.TestCase):
         # collision spheres. Build a robot with an extra continuous base chain and check.
         import yaml
         from twin.restock_host.generate_assets import generate
+        from twin.urdf_probe import parse_urdf
         d = Path(self.temp.name) / 'wheeled'
         d.mkdir()
         links = ['base_link', 'arm_mount', FRAME, 'suction_cups', 'gripper_pad_tcp',
@@ -192,41 +193,52 @@ class HostTests(unittest.TestCase):
         self.assertNotIn('caster_roll', xrdf['default_joint_positions'])
         # The pruned base links are still covered by collision spheres.
         self.assertTrue(xrdf['geometry']['mobile_cad']['spheres'].get('caster_wheel'))
-        # The attached carton (added at runtime as 'attached_object') must be DECLARED so cuMotion
-        # self-collision-checks it against the arm: reserved in collision.buffer_distance and present
-        # in the self_collision.ignore map (exempting only its gripper-seat links). Without this the
-        # reloaded carton lands only in world-collision and the planner swings it through the arm.
+        # The attached carton (added at runtime as link 'attached_object') must be REGISTERED the way
+        # the vendor reference XRDF registers it for this same ObjectAttachmentNode: (1) an add_frame
+        # modifier that inserts it into the kinematic model as a FIXED child of the grasp frame
+        # (gripper_pad_tcp), (2) a collision.buffer_distance slot, (3) a self_collision.ignore row
+        # exempting only the gripper-seat links. The add_frame is the ingredient PR #131/#136 lacked:
+        # geometry spheres alone (placeholder or runtime) are orphaned and dropped, so the carton
+        # never entered curobo's self-collision set (run-256/259).
+        from twin.restock_host.world_obstacles import (resolve_self_collision_masks,
+                                                        simulate_object_attachment_reload)
+        add_frames = {m['add_frame']['frame_name']: m['add_frame']
+                      for m in xrdf['modifiers'] if isinstance(m, dict) and 'add_frame' in m}
+        self.assertIn('attached_object', add_frames)
+        self.assertEqual(add_frames['attached_object']['parent_frame_name'], 'gripper_pad_tcp')
+        self.assertEqual(add_frames['attached_object']['joint_type'], 'FIXED')
         self.assertIn('attached_object', xrdf['collision'].get('buffer_distance', {}))
         self.assertIn('attached_object', xrdf['self_collision']['ignore'])
-        # ... AND it must carry SPHERES in the (self_collision) geometry. Declaring it in
-        # buffer_distance + ignore but with NO spheres left curobo logging "frame 'attached_object'
-        # has no self-collision spheres specified; mask will not be added" and never self-checking the
-        # carton against the arm (run-256), because the self-collision frame set is fixed at the first
-        # XRDF load. The generator emits a small placeholder cluster that registers the frame; the
-        # runtime ObjectAttachmentNode overwrites it with the real carton spheres on attach.
-        geom = xrdf['geometry']['mobile_cad']['spheres']
-        self.assertTrue(geom.get('attached_object'), 'attached_object must carry placeholder spheres')
-        self.assertGreaterEqual(len(geom['attached_object']), 34,
-                                'reserve >= the runtime carton sphere count (34)')
-        for s in geom['attached_object']:
-            self.assertEqual(len(s['center']), 3)
-            self.assertGreater(s['radius'], 0.0)  # config.validate_config rejects radius <= 0
-        # Parse the XRDF exactly as cuMotion builds the self-collision masks: a mask between frames A
-        # and B is ADDED only if BOTH carry spheres in the self_collision geometry. Assert every
-        # attached_object ignore pair resolves -- i.e. cuMotion would skip NONE of them.
-        self_geom_name = xrdf['self_collision']['geometry']
-        self_geom = xrdf['geometry'][self_geom_name]['spheres']
-        skipped = [(a, b) for a, bs in xrdf['self_collision']['ignore'].items() for b in bs
-                   if not self_geom.get(a) or not self_geom.get(b)]
-        self.assertEqual([p for p in skipped if 'attached_object' in p], [],
-                         'every attached_object self-collision mask must resolve (no sphereless frame)')
+        # Vendor pattern: NO attached_object spheres are emitted at generation -- the frame is
+        # correctly inactive pre-attach (benign "no spheres" warning at load), and the runtime attach
+        # populates the real carton spheres.
+        self.assertNotIn('attached_object', xrdf['geometry']['mobile_cad']['spheres'])
+        # Exercise the SAME reload code path the node runs (UpdateRobotDescriptionWithSpheres: write
+        # the carton spheres under geometry.spheres.attached_object, reload) and model cuMotion's
+        # mask resolution. AFTER the reload every attached_object ignore pair must resolve (none
+        # skipped for a sphereless/unregistered frame) -- the fix for the run-259 warning.
+        urdf_links = set(parse_urdf(str(d / 'robot.urdf')).links)
+        reloaded = simulate_object_attachment_reload(xrdf)
+        masks = resolve_self_collision_masks(reloaded, urdf_links)
+        self.assertEqual([p for p in masks['skipped'] if 'attached_object' in p], [],
+                         'after the runtime attach reload, every attached_object mask must resolve')
+        self.assertTrue(any('attached_object' in p for p in masks['resolved']))
+        # Regression guard: WITHOUT the add_frame modifier the exact same reloaded spheres are
+        # orphaned and every attached_object mask is SKIPPED (reproduces run-256/259) -- proving the
+        # add_frame is load-bearing, not the spheres.
+        no_frame = yaml.safe_load(yaml.safe_dump(reloaded))
+        no_frame['modifiers'] = [m for m in no_frame['modifiers']
+                                 if not (isinstance(m, dict) and 'add_frame' in m)]
+        broken = resolve_self_collision_masks(no_frame, urdf_links)
+        self.assertEqual([p for p in broken['resolved'] if 'attached_object' in p], [],
+                         'without add_frame the carton spheres are orphaned (run-256/259 bug)')
 
-    def test_attached_object_placeholder_excluded_from_static_model_and_overlap_gate(self):
-        # The attached_object placeholder is emitted into the XRDF geometry ONLY: it must not enter
-        # the arm/body sphere_count, the covered-links model, or the static transport self-overlap
-        # gate (the attached object is dynamic, and the folded stow pose is exactly where the carried
-        # carton contacts upper_arm -- a phantom carton there would falsely fail generation / block
-        # the plan start). A small cluster at the attach-frame origin never does either.
+    def test_attached_object_excluded_from_static_model_and_overlap_gate(self):
+        # The carried carton (attached_object) is registered via add_frame with its spheres supplied
+        # at runtime -- so at generation it must NOT appear in the geometry, the arm/body sphere_count,
+        # the covered-links model, or the static transport self-overlap gate (the attached object is
+        # dynamic, and the folded stow pose is exactly where the carried carton contacts upper_arm, so
+        # a static carton there would falsely fail generation / block the plan start).
         import yaml
         from twin.restock_host.generate_assets import build_assets
         source_urdf = Path(self.config['mobile_manifest']).parent / 'robot.urdf'
@@ -234,11 +246,11 @@ class HostTests(unittest.TestCase):
                                          self.config['shelfbot_root'])
         xrdf = yaml.safe_load(artifacts['mobile.xrdf'])
         geom = xrdf['geometry']['mobile_cad']['spheres']
-        self.assertIn('attached_object', geom)
+        self.assertNotIn('attached_object', geom)
         self.assertNotIn('attached_object', report['covered_links'])
-        self.assertEqual(report['attached_object_placeholder_sphere_count'], len(geom['attached_object']))
-        # sphere_count is the arm/body model, placeholder-free.
-        self.assertEqual(report['sphere_count'], sum(len(v) for k, v in geom.items() if k != 'attached_object'))
+        self.assertEqual(report['attached_object_registration'], 'add_frame')
+        # sphere_count is exactly the emitted (arm/body) geometry: no attached_object contribution.
+        self.assertEqual(report['sphere_count'], sum(len(v) for v in geom.values()))
         self.assertTrue(report['transport_collision_check_passed'])
         self.assertEqual(report['transport_sphere_overlaps'], [])
 

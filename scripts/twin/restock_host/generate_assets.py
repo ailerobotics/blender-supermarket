@@ -19,7 +19,7 @@ from ..urdf_probe import (link_world_transforms, parse_urdf,
 from .config import FRAME, JOINTS, TCP
 from .coverage import ALGORITHM, VolumeCover, transport_overlaps
 from .separation import prove_separation
-from .world_obstacles import CARTON_SEAT_LINKS, carton_cover_local
+from .world_obstacles import CARTON_SEAT_LINKS
 
 
 def cover_bounds(low, high, pitch):
@@ -79,9 +79,7 @@ def kinematic_exclusions(robot):
 
 
 def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
-                 acceleration=1., jerk=10., collision_buffer=None, self_collision_buffer_m=0.0,
-                 attached_object_dims=(0.1, 0.1, 0.15), attached_object_offset_tcp=(0.0, 0.0, 0.0),
-                 attached_object_pitch=0.05):
+                 acceleration=1., jerk=10., collision_buffer=None, self_collision_buffer_m=0.0):
     """Pure CPU reconstruction used by both generator and strict evidence check.
 
     ``collision_buffer`` optionally inflates a named link's collision-sphere radii by a fixed margin
@@ -233,41 +231,30 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
         ignore.setdefault(a, []).append(b)
     # Attached-carton self-collision (firstmate sim-restock-planner-obstacles-v1).
     # The carried carton is added at runtime by the cuMotion ObjectAttachmentNode as link
-    # 'attached_object' (34 spheres written into geometry[mobile_cad][spheres][attached_object], then
-    # set_robot_description reload). For curobo to SELF-collision-check the carton against the arm (not
-    # only the nvblox world), the XRDF must DECLARE attached_object: reserve it in
-    # collision.buffer_distance, give it a self_collision.ignore row that exempts ONLY the gripper
-    # seat + adjacent wrist links it rests on (leaving it CHECKED vs ur_wrist_1/forearm/upper_arm/
-    # shoulder), AND -- the fix this lane ships -- carry PLACEHOLDER spheres in the geometry at init.
-    # Rationale (run-256): declaring attached_object in buffer_distance + ignore but with NO spheres in
-    # the geometry left curobo logging "Found self-collision mask between <link> and 'attached_object',
-    # but 'attached_object' has no self-collision spheres specified; mask will not be added" -- BOTH at
-    # XRDF load AND after the runtime attach's set_robot_description reload (which carries the 34 real
-    # spheres). So the carton never entered curobo's SELF-collision set: the self-collision link set is
-    # fixed when the planner first loads the host-cad XRDF (a frame with zero spheres then is never
-    # re-registered on reload), so attached_object must carry spheres in the generated XRDF at startup.
-    #
-    # The placeholder is a SMALL cluster of ~36 spheres at the attach-frame (TCP) origin -- its ONLY
-    # job is to REGISTER attached_object as a self-collision frame and reserve >=34 slots; it is NOT a
-    # carton model. The ObjectAttachmentNode OVERWRITES it with the real carton spheres (34 in the grasp
-    # frame) on attach, so the carried-carton geometry comes from the runtime, not here. It must be a
-    # small cluster at the origin (NOT the real carton, offset ~0.20 m along tool-z) because the carton
-    # contacts ur_upper_arm at the FOLDED stow pose (CPU: carton -0.098 m into upper_arm at stow): a
-    # faithful carton phantom, active before any object is attached, would self-collide at the plan
-    # START and abort the grasp-approach plan with INVALID_INITIAL_CSPACE (the base-box lesson). The
-    # origin cluster is CPU-proven clear of every non-seat arm link at stow (>=+0.096 m), so it never
-    # blocks a pre-attach start, whatever curobo's attached-link activation. It is injected ONLY into
-    # the emitted geometry (not the FK/overlap `spheres`): the attached object is dynamic and must not
-    # enter the static transport self-overlap gate. The seat set is the shared CARTON_SEAT_LINKS
-    # (gripper seat + adjacent wrists the carton rests on), intersected with links that carry spheres.
+    # 'attached_object': it generates the carton collision spheres, transforms them into the GRASP
+    # frame (gripper_pad_tcp -- the attach marker's header.frame_id, see restock_manipulation/
+    # ros_payload.py) and writes them into geometry[mobile_cad][spheres][attached_object], then calls
+    # set_robot_description to reload. For curobo to SELF-collision-check the carton against the arm
+    # (not only the nvblox world) the XRDF must register attached_object the way the vendor reference
+    # (isaac_ros_cumotion_robot_description/xrdf/ur10e_robotiq_2f_85.xrdf) does for THIS SAME node:
+    #   1. an `add_frame` modifier that inserts attached_object into the kinematic model as a FIXED
+    #      child of the grasp frame (gripper_pad_tcp) -- THIS is what makes curobo treat geometry
+    #      spheres keyed by that name as a collision frame;
+    #   2. collision.buffer_distance[attached_object] (reserve its collision-model slot, vendor 0.005);
+    #   3. a self_collision.ignore row exempting ONLY the gripper seat + adjacent wrist links it rests
+    #      on (leaving it CHECKED vs ur_wrist_1/forearm/upper_arm/shoulder).
+    # NO spheres are emitted here (exactly like the vendor): curobo logs the benign "attached_object
+    # has no self-collision spheres specified" at the pre-attach load, where attached_object is
+    # correctly inactive, and the ObjectAttachmentNode's reload populates its 34 real carton spheres.
+    # History: PR #131 declared buffer_distance+ignore with NO frame and NO spheres (run-256 warning);
+    # PR #136 added a placeholder sphere cluster but STILL no add_frame (run-259: warning persisted at
+    # load AND after the reload's 34 real spheres). Both failures share the one missing ingredient the
+    # vendor has -- the add_frame modifier. geometry spheres WITHOUT add_frame are orphaned and dropped
+    # (so a placeholder neither registers the frame nor reserves slots; it is removed). A placeholder
+    # would also, once add_frame makes the frame real, add a pre-attach self-collision phantom near the
+    # gripper (base-box lesson) for no benefit -- the reload supplies the real geometry.
     ATTACHED = 'attached_object'
     ignore[ATTACHED] = sorted(l for l in CARTON_SEAT_LINKS if l in spheres)
-    _ph_centres, _ph_radius = carton_cover_local(attached_object_dims,
-                                                 offset_tcp=attached_object_offset_tcp,
-                                                 pitch=attached_object_pitch)
-    attached_placeholder = [{'center': [float(x) for x in c], 'radius': _ph_radius}
-                            for c in _ph_centres]
-    geom_spheres = {**spheres, ATTACHED: attached_placeholder}
     # cuMotion/cuRobo builds a reduced kinematic tree to the tool frames and prunes
     # off-path branches (e.g. the mobile base's two-joint caster chains
     # swivel->fork->roll->wheel), so a default position for a pruned joint
@@ -278,7 +265,15 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
     # drives FK/overlap above and the collision spheres below.
     arm_defaults = {name: positions[name] for name in JOINTS}
     xrdf = {'format': 'xrdf', 'format_version': 1.0,
-            'modifiers': [{'set_base_frame': FRAME}],
+            # add_frame registers the runtime-attached carton (link 'attached_object') as a FIXED
+            # child of the grasp frame (gripper_pad_tcp), so the spheres the ObjectAttachmentNode
+            # reloads into geometry become active self-collision spheres (vendor reference pattern).
+            'modifiers': [{'set_base_frame': FRAME},
+                          {'add_frame': {'frame_name': ATTACHED, 'parent_frame_name': TCP,
+                                         'joint_name': 'attach_joint', 'joint_type': 'FIXED',
+                                         'fixed_transform': {'position': [0.0, 0.0, 0.0],
+                                                             'orientation': {'w': 1.0,
+                                                                             'xyz': [0.0, 0.0, 0.0]}}}}],
             'default_joint_positions': arm_defaults, 'tool_frames': [TCP],
             'cspace': {'joint_names': list(JOINTS), 'acceleration_limits': [acceleration]*6,
                        'jerk_limits': [jerk]*6},
@@ -293,7 +288,7 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
                                                        for l in ('ur_upper_arm_link', 'ur_forearm_link',
                                                                  'ur_wrist_1_link', ATTACHED)}}
                                   if self_collision_buffer_m else {})},
-            'geometry': {'mobile_cad': {'spheres': geom_spheres}}}
+            'geometry': {'mobile_cad': {'spheres': spheres}}}
     # Resolve all visual/collision package references without changing geometry.
     normalized = ET.parse(urdf)
     for mesh in normalized.findall('.//mesh'):
@@ -310,12 +305,11 @@ def build_assets(urdf, manifest, shelfbot_root, *, pitch=.05, min_pitch=.00625,
               'collision_elements': [entry for rows in coverage_by_link.values() for entry in rows],
               'sphere_count': sum(map(len, spheres.values())),
               'covered_links': sorted(spheres),
-              # The attached_object placeholder is emitted into the XRDF geometry only (to register the
-              # carried carton as a self-collision frame at planner load and reserve its slots); it is a
-              # small cluster at the attach-frame origin, NOT part of the static arm/body sphere model
-              # above, and is OVERWRITTEN by the real carton spheres at runtime.
-              'attached_object_placeholder_sphere_count': len(attached_placeholder),
-              'attached_object_placeholder_cluster_m': [float(v) for v in attached_object_dims],
+              # The carried carton (link 'attached_object') is registered via the add_frame modifier
+              # as a FIXED child of the grasp frame; its collision spheres are supplied by the runtime
+              # ObjectAttachmentNode on attach, never emitted here (vendor reference pattern).
+              'attached_object_registration': 'add_frame',
+              'attached_object_grasp_frame': TCP,
               'exclusion_rule': 'fixed/adjacent kinematic assemblies or individually proven full-range separation',
               'separation_proofs': proofs,
               'excluded_pairs': [{'links': list(pair), 'reason': reason} for pair, reason in sorted(excluded.items())],
