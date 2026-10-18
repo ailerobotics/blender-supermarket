@@ -66,7 +66,15 @@ def description(config):
             # long ... Stopping trajectory' -> TIMED_OUT, run-111). trajectory_host owns sim-clocked
             # completion/tracking/settle, and the mission bounds each stage on the sim clock, so this
             # wall monitor is redundant here. Render-pacing watchdog (standing authority 212).
-            'trajectory_execution': {'execution_duration_monitoring': False},
+            # fm356 (2): raise the start-state validation tolerance to 0.05 rad, SIM-ONLY (this launch
+            # is the sim host; the real rig uses the moveit_controllers.yaml default 0.01). Under render
+            # pacing a joint can hold a small steady tracking residual at a move's end (e.g. the carton-
+            # loaded extend), so the NEXT move's planned start deviates from the measured state: MoveIt's
+            # trajectory_execution_manager then rejects it ('start point deviates ... more than 0.01 at
+            # ur_shoulder_pan_joint' -> ABORTED, run-280 retreat). 0.05 absorbs that residual while
+            # staying far below a real mis-seed; the gravity_ff fix removes the gross bias separately.
+            'trajectory_execution': {'execution_duration_monitoring': False,
+                                     'allowed_start_tolerance': 0.05},
             'moveit_manage_controllers': False,
             'moveit_controller_manager': 'moveit_simple_controller_manager/MoveItSimpleControllerManager',
             'moveit_simple_controller_manager': {

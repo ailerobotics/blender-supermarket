@@ -230,6 +230,23 @@ class PhysicsAssembly:
         self.command_gate.hold()
 
 
+def map_arm_gravity(gfull, view_dof_names, arm_names):
+    """Extract the arm joints' generalized-gravity terms from the articulation's FULL-DOF gravity
+    vector, mapping each arm joint by its name's index in the VIEW's dof-name order.
+
+    fm355: the per-joint ``get_generalized_gravity_forces(joint_names=...)`` query mis-assigned the
+    terms in this Isaac build -- run-279 read ~ -78.76 Nm on the VERTICAL-axis ur_shoulder_pan whose
+    true gravity torque is identically 0 (r x F about a vertical axis with vertical gravity), feeding a
+    spurious +78.76 Nm bias that stalled the pan 0.176 rad short. The articulation VIEW's dof order
+    also differs from ``robot.get_dof_index`` (run-153/154), so the robust mapping is BY NAME against
+    the view's own ``dof_names``, aligned to the full-DOF vector the view returns. Pure for CPU test;
+    raises ValueError if an arm joint name is absent from the view dof names (caller guards)."""
+    gfull = np.asarray(gfull, float).reshape(-1)
+    view_dof_names = list(view_dof_names)
+    idx = [view_dof_names.index(n) for n in arm_names]
+    return gfull[np.asarray(idx, int)]
+
+
 def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     """Import actual mobile CAD, compose scratch USD and initialize drive control.
 
@@ -440,21 +457,30 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     except Exception as exc:
         print(f'ARM_GRAVITY_FULL_UNAVAILABLE {exc}',flush=True)
     _arm_names=list(tool.arm_joints)
+    # fm355: the view's OWN dof-name order (the order its full-DOF gravity vector is returned in), read
+    # once. The arm gravity is then mapped BY NAME from the full vector (map_arm_gravity) -- NOT via the
+    # per-joint joint_names= query (which mis-assigned pan in this build) nor robot.get_dof_index (whose
+    # order differs from the view). None => the guard below disables the ff (never a crash).
+    try:
+        _view_dof_names=list(_view.dof_names) if _view is not None else None
+    except Exception as exc:
+        _view_dof_names=None
+        print(f'ARM_GRAVITY_FF_VIEWNAMES_UNAVAILABLE {exc}',flush=True)
     def apply(q,v,indices):
         efforts=None
-        # The gate commands all 6 arm joints together, in arm_joints order == dof indices [6..11]
-        # (ARM_GRAVITY_FF idx=[6,7,8,9,10,11]). Query gravity BY JOINT NAME: run-153/154 proved the
-        # physics view's DOF order differs from robot.get_dof_index (the arm's real gravity is at view
-        # indices 2-4, not 6-11), so index-based reads hit the wrong near-zero DOFs. joint_names is
-        # order-independent and returns the terms in arm_joints order, aligned to q/indices.
-        if _grav_ff and _view is not None and list(indices)==list(_arm_idx):
+        # fm355: gravity-comp feedforward from the FULL-DOF gravity vector, arm terms mapped by name
+        # against the view's dof_names (map_arm_gravity). Fixes run-279's spurious +78.76 Nm on the
+        # vertical-axis shoulder_pan (true gravity 0) that stalled the pan 0.176 rad short; the real
+        # loads are on shoulder_lift/elbow. Threshold + sign unchanged. Fully guarded: any failure
+        # (missing view, missing dof name, API error) => efforts=None (clean position drive, as off).
+        if _grav_ff and _view is not None and _view_dof_names is not None and list(indices)==list(_arm_idx):
             try:
-                g=np.asarray(_view.get_generalized_gravity_forces(joint_names=_arm_names),
-                             float).reshape(-1)
+                g=map_arm_gravity(_view.get_generalized_gravity_forces(),_view_dof_names,_arm_names)
                 efforts=np.where(np.abs(g)>=_ff_min_nm,_ff_sign*g,0.0)
                 if _ff_log[0]<3:
                     _ff_log[0]+=1
                     print(f'ARM_GRAVITY_FF names={_arm_names} '
+                          f'g={np.array2string(np.asarray(g),precision=2,separator=",")} '
                           f'ff={np.array2string(efforts,precision=2,separator=",")}',flush=True)
             except Exception as exc:
                 if _ff_log[0]<1:

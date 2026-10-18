@@ -54,6 +54,12 @@ KEY_CONSUMER = {
     'arm_gravity_ff': RUNTIME,
     'stage_timeout_s': RUNTIME,
     'commissioning_dir': RUNTIME,
+    # couple/outbound/park activation (fm356): the nav stack + mode that drive the post-collect stages
+    # (coupling planner PR150, outbound tow, park) -- asserted present so a run that finally clears
+    # collect actually attempts them instead of stopping configured-off.
+    'nav_factory': RUNTIME,
+    'nav_mode': RUNTIME,
+    'navigation': RUNTIME,
 }
 
 
