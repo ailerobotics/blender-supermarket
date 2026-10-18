@@ -43,6 +43,5 @@
     -1.2545
   ],
   "plan_wall_cap_s": 60.0,
-  "base_collision_object": false,
-  "carry_wrist1_cap": 0.7
+  "base_collision_object": false
 }
