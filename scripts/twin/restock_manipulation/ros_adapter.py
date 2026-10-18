@@ -157,7 +157,7 @@ class RosMotionPort:
         self._sim_now = lambda: self.node.get_clock().now().nanoseconds * 1e-9
         self.deadline_clock = time.monotonic
 
-    def begin(self, pose, joints, straight_line=False, joint_space=False):
+    def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None):
         from moveit_msgs.srv import GetPositionIK
         if self.state not in ('idle', 'succeeded', 'failed'):
             raise RuntimeError('motion already active')
@@ -189,7 +189,7 @@ class RosMotionPort:
         if self.pose_goal and not self._straight_line and not joint_space:
             self.generation += 1
             self.handle = None
-            self._plan_goal = self._pose_plan_goal(pose, joints)
+            self._plan_goal = self._pose_plan_goal(pose, joints, wrist1_cap=wrist1_cap)
             self._send(self.plan, self._plan_goal, 'plan_accept')
             self.deadline_clock = time.monotonic
             self.deadline = time.monotonic() + self.timeout
@@ -329,13 +329,15 @@ class RosMotionPort:
             return True
         return False
 
-    def _pose_plan_goal(self, pose, joints):
+    def _pose_plan_goal(self, pose, joints, wrist1_cap=None):
         """MoveGroup plan request to a cartesian TCP pose (position+orientation goal constraints in
         ur_base_link); cuMotion does its own collision-aware IK, so a single collision model (XRDF)
         decides feasibility. Mirrors begin_joint_goal's request fields; plan_only (the port executes
-        a validated trajectory separately)."""
+        a validated trajectory separately). wrist1_cap (fm327, sim-only) adds a GOAL joint constraint
+        ur_wrist_1_joint <= wrist1_cap so cuMotion IKs a carry pose (the lift) BELOW the ur_wrist_2-vs-
+        ur_forearm self-collision stop (~0.70) even before the planner catches that pair."""
         from moveit_msgs.action import MoveGroup
-        from moveit_msgs.msg import Constraints, PositionConstraint, OrientationConstraint, BoundingVolume
+        from moveit_msgs.msg import Constraints, PositionConstraint, OrientationConstraint, BoundingVolume, JointConstraint
         from shape_msgs.msg import SolidPrimitive
         from geometry_msgs.msg import Pose as GPose
         goal = MoveGroup.Goal()
@@ -367,6 +369,12 @@ class RosMotionPort:
         c = Constraints()
         c.position_constraints.append(pc)
         c.orientation_constraints.append(oc)
+        if wrist1_cap is not None:
+            _low = -2.0   # cap only the UPPER bound at wrist1_cap; generous lower bound
+            c.joint_constraints.append(JointConstraint(
+                joint_name='ur_wrist_1_joint', position=(_low + float(wrist1_cap)) / 2.,
+                tolerance_above=(float(wrist1_cap) - _low) / 2.,
+                tolerance_below=(float(wrist1_cap) - _low) / 2., weight=1.))
         req.goal_constraints = [c]
         goal.planning_options.plan_only = True
         return goal

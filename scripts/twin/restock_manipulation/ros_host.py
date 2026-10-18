@@ -116,6 +116,7 @@ def main():
         contact_overpress_cap_m=float(config.get('contact_overpress_cap_m', 0.0)),
         staged_cart_swing=staged, cart_pan_joint0=float(config.get('cart_pan_joint0', 0.0)),
         cart_tuck_shape=config.get('cart_tuck_shape'),
+        carry_wrist1_cap=config.get('carry_wrist1_cap'),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # The first decode-grade frame + support registration under render pacing needs several

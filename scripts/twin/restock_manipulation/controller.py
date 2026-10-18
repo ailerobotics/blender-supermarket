@@ -21,8 +21,10 @@ class TransferController:
                  steady_clock=time.monotonic, contact_straight_line: bool = False,
                  contact_overpress_step_m: float = 0.0, contact_overpress_cap_m: float = 0.0,
                  staged_cart_swing: bool = False, cart_pan_joint0: float = 0.0,
-                 cart_tuck_shape=None):
+                 cart_tuck_shape=None, carry_wrist1_cap=None):
         self.steady_clock=steady_clock
+        # fm327 belt-and-braces wrist_1 cap for the task-space LIFT carry move (None = off).
+        self.carry_wrist1_cap = None if carry_wrist1_cap is None else float(carry_wrist1_cap)
         # Execute the contact descent as a seeded straight-line move through the trajectory host instead
         # of a cuMotion plan (the motion port's begin(straight_line=True) path). Default False keeps the
         # real-rig collision-planned descent; the sim mission opts in via config -- a one-flag revert.
@@ -291,7 +293,13 @@ class TransferController:
                 # the reliable seeded-KDL -> joint-space path. The pick (approach/lift) keeps its proven
                 # task-space goal -- a global switch oscillated the pick's joint-space trajectory (run-226).
                 joint_space = self.phase in ('preplace', 'place', 'retreat')
-                self.motion.begin(target, s.joint_positions, straight_line=straight, joint_space=joint_space)
+                # fm327 belt-and-braces: cap wrist_1 on the LIFT (the one task-space CARRY pose goal) so
+                # cuMotion IKs it below the ur_wrist_2-vs-ur_forearm self-collision stop (~0.70); the
+                # tuck/pan joint goals already use cart_tuck_shape wrist_1=0.65. None elsewhere (the pick
+                # approach may need wrist_1 above the stop to reach the backstock).
+                carry_cap = self.carry_wrist1_cap if self.phase == 'lift' else None
+                self.motion.begin(target, s.joint_positions, straight_line=straight,
+                                  joint_space=joint_space, wrist1_cap=carry_cap)
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': self.poses[self.phase]},))
             if self.phase == 'contact' and not self._contact_suction:
