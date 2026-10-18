@@ -191,14 +191,21 @@ class IsaacCarryStage(bench.ArmStage):
                 for attr in ('body_names', 'link_names'):
                     body_names = getattr(self.robot, attr, None) or body_names
                 masses = None
-                for getter in ('get_body_masses', 'get_masses'):
-                    fn = getattr(self.robot, getter, None)
-                    if fn:
-                        try:
-                            masses = np.asarray(fn(), float).reshape(-1)
+                candidates = [getattr(self.robot, g, None) for g in ('get_body_masses', 'get_masses')]
+                view = getattr(self.robot, '_articulation_view', None)
+                if view is not None:
+                    candidates += [getattr(view, g, None) for g in ('get_body_masses', 'get_masses')]
+                    if body_names is None:
+                        body_names = getattr(view, 'body_names', None)
+                for fn in candidates:
+                    if not fn:
+                        continue
+                    try:
+                        masses = np.asarray(fn(), float).reshape(-1)
+                        if masses.size:
                             break
-                        except Exception:
-                            continue
+                    except Exception:
+                        continue
                 if masses is not None:
                     labelled = list(zip(body_names, masses.tolist())) if body_names else list(enumerate(masses.tolist()))
                     print('ARMBENCH_RUNTIME_BODY_MASS total=%.2f kg per_body=%s'
@@ -234,18 +241,22 @@ class IsaacCarryStage(bench.ArmStage):
         try:
             from pxr import Usd, UsdPhysics
             root = self.stage.GetPrimAtPath(self.assembly.paths['articulation'].rsplit('/', 1)[0])
+            tool_names = ('surface_plate', 'cube_without_surface_plates', 'suction_cups',
+                          'gripper_pad_tcp', 'gripper_tcp', 'RestockPanelGripper', 'big_cube')
             if root:
                 for prim in Usd.PrimRange(root):
-                    n = prim.GetName()
-                    if not (n.startswith('surface_plate') or n in ('cube_without_surface_plates', 'suction_cups')
-                            or n in ('gripper_pad_tcp', 'gripper_tcp', 'RestockPanelGripper')):
+                    # match a tool subtree by its own name OR an ancestor's name, then disable collision
+                    # on THIS prim if it carries CollisionAPI (the collider often sits on a child mesh)
+                    path = str(prim.GetPath())
+                    if not any(('/' + t in path) or path.rsplit('/', 1)[-1].startswith('surface_plate')
+                               or path.rsplit('/', 1)[-1] in tool_names for t in tool_names):
                         continue
-                    col = UsdPhysics.CollisionAPI.Get(prim)
-                    if not col:
+                    if not prim.HasAPI(UsdPhysics.CollisionAPI):
                         continue
                     try:
+                        col = UsdPhysics.CollisionAPI(prim)
                         (col.GetCollisionEnabledAttr() or col.CreateCollisionEnabledAttr()).Set(False)
-                        disabled.append(n)
+                        disabled.append(path.rsplit('/', 1)[-1])
                     except Exception:
                         pass
             self.world.reset()   # re-parse so PhysX drops the disabled colliders
