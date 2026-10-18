@@ -151,71 +151,83 @@ class IsaacCarryStage(bench.ArmStage):
         """inbox 016: dump each arm/tool link's USD mass + diagonal inertia (a 0.45 kg carton cannot
         need 700 Nm, so an inflated tool mass/inertia would explain the effort-saturated pin), and
         enumerate every joint/constraint whose body0/body1 references the carton body (a native seal
-        joint PLUS the SIM_ATTACH_FALLBACK weld would fight, matching the 49 kN weld reaction)."""
-        from pxr import Usd, UsdPhysics
-        links = dict(self.arm_links)
-        # also the tool/gripper collision bodies seen contacting the carton
-        root = self.stage.GetPrimAtPath(self.assembly.paths['articulation'].rsplit('/', 1)[0])
-        if root:
-            for prim in Usd.PrimRange(root):
-                n = prim.GetName()
-                if (n.startswith('surface_plate') or n in ('cube_without_surface_plates', 'suction_cups')
-                        or n.startswith('ur_') and n.endswith('_link')):
-                    links.setdefault(n, str(prim.GetPath()))
-        for name, path in sorted(links.items()):
-            prim = self.stage.GetPrimAtPath(path)
-            if not prim:
-                continue
-            mapi = UsdPhysics.MassAPI.Get(prim) if prim.HasAPI(UsdPhysics.MassAPI) else None
-            mass = inertia = com = None
-            if mapi:
+        joint PLUS the SIM_ATTACH_FALLBACK weld would fight, matching the 49 kN weld reaction).
+
+        Fully guarded + BOUNDED to the robot + /RestockScenario subtrees (never the whole /Supermarket
+        store pseudo-root): this is diagnostic instrumentation and must never kill the trial."""
+        try:
+            from pxr import Usd, UsdPhysics
+            robot_root_path = self.assembly.paths['articulation'].rsplit('/', 1)[0]
+            robot_root = self.stage.GetPrimAtPath(robot_root_path)
+            links = dict(self.arm_links)
+            if robot_root:
+                for prim in Usd.PrimRange(robot_root):
+                    n = prim.GetName()
+                    if (n.startswith('surface_plate') or n in ('cube_without_surface_plates', 'suction_cups')
+                            or (n.startswith('ur_') and n.endswith('_link'))):
+                        links.setdefault(n, str(prim.GetPath()))
+            for name, path in sorted(links.items()):
+                prim = self.stage.GetPrimAtPath(path)
+                if not prim:
+                    continue
+                mass = inertia = None
                 try:
-                    mass = float(mapi.GetMassAttr().Get()) if mapi.GetMassAttr().HasAuthoredValue() else None
+                    mapi = UsdPhysics.MassAPI.Get(prim) if prim.HasAPI(UsdPhysics.MassAPI) else None
+                    if mapi:
+                        if mapi.GetMassAttr().HasAuthoredValue():
+                            mass = float(mapi.GetMassAttr().Get())
+                        di = mapi.GetDiagonalInertiaAttr().Get()
+                        if di is not None:
+                            inertia = [float(di[0]), float(di[1]), float(di[2])]
                 except Exception:
-                    mass = None
-                try:
-                    di = mapi.GetDiagonalInertiaAttr().Get()
-                    inertia = [float(di[0]), float(di[1]), float(di[2])] if di is not None else None
-                except Exception:
-                    inertia = None
-            print('ARMBENCH_LINK_MASS %s mass=%s diag_inertia=%s' % (name, mass, inertia), flush=True)
-        # constraints on the carton body
-        joints_on_carton = []
-        for prim in Usd.PrimRange(self.stage.GetPseudoRoot()):
-            if not (prim.IsA(UsdPhysics.Joint) or prim.HasAPI(UsdPhysics.DriveAPI)
-                    or 'Joint' in prim.GetTypeName()):
-                continue
-            try:
-                j = UsdPhysics.Joint(prim)
-                tgts = list(j.GetBody0Rel().GetTargets()) + list(j.GetBody1Rel().GetTargets())
-            except Exception:
-                continue
-            if any(self.carton_path in str(t) for t in tgts):
-                joints_on_carton.append('%s (%s)' % (str(prim.GetPath()), prim.GetTypeName()))
-        print('ARMBENCH_CARTON_CONSTRAINTS n=%d %s' % (len(joints_on_carton), joints_on_carton), flush=True)
+                    pass
+                print('ARMBENCH_LINK_MASS %s mass=%s diag_inertia=%s' % (name, mass, inertia), flush=True)
+            # joints/constraints referencing the carton -- scan ONLY the robot + scenario subtrees
+            joints_on_carton = []
+            roots = [robot_root, self.stage.GetPrimAtPath('/RestockScenario')]
+            for r in roots:
+                if not r:
+                    continue
+                for prim in Usd.PrimRange(r):
+                    tname = str(prim.GetTypeName())
+                    if 'Joint' not in tname and not prim.HasAPI(UsdPhysics.DriveAPI):
+                        continue
+                    try:
+                        j = UsdPhysics.Joint(prim)
+                        tgts = list(j.GetBody0Rel().GetTargets()) + list(j.GetBody1Rel().GetTargets())
+                    except Exception:
+                        continue
+                    if any(self.carton_path in str(t) for t in tgts):
+                        joints_on_carton.append('%s (%s)' % (str(prim.GetPath()), tname))
+            print('ARMBENCH_CARTON_CONSTRAINTS n=%d %s' % (len(joints_on_carton), joints_on_carton), flush=True)
+        except Exception as exc:
+            print('ARMBENCH_DYNAMICS_DUMP unavailable (%s)' % exc, flush=True)
 
     def _disable_tool_colliders(self):
         """inbox 016 (A): disable collision on the gripper's own tool geometry (cube, surface plates,
         suction cups) so a NO-carton fold reveals whether the wrist_1 pin is the TOOL's geometry
         hitting the forearm/upper_arm (planner-ignored self-pairs) vs the dynamics model."""
-        from pxr import Usd, UsdPhysics
-        root = self.stage.GetPrimAtPath(self.assembly.paths['articulation'].rsplit('/', 1)[0])
         disabled = []
-        if root:
-            for prim in Usd.PrimRange(root):
-                n = prim.GetName()
-                if not (n.startswith('surface_plate') or n in ('cube_without_surface_plates', 'suction_cups')
-                        or n in ('gripper_pad_tcp', 'gripper_tcp', 'RestockPanelGripper')):
-                    continue
-                col = UsdPhysics.CollisionAPI.Get(prim)
-                if not col:
-                    continue
-                try:
-                    (col.GetCollisionEnabledAttr() or col.CreateCollisionEnabledAttr()).Set(False)
-                    disabled.append(n)
-                except Exception:
-                    pass
-        self.world.reset()   # re-parse so PhysX drops the disabled colliders
+        try:
+            from pxr import Usd, UsdPhysics
+            root = self.stage.GetPrimAtPath(self.assembly.paths['articulation'].rsplit('/', 1)[0])
+            if root:
+                for prim in Usd.PrimRange(root):
+                    n = prim.GetName()
+                    if not (n.startswith('surface_plate') or n in ('cube_without_surface_plates', 'suction_cups')
+                            or n in ('gripper_pad_tcp', 'gripper_tcp', 'RestockPanelGripper')):
+                        continue
+                    col = UsdPhysics.CollisionAPI.Get(prim)
+                    if not col:
+                        continue
+                    try:
+                        (col.GetCollisionEnabledAttr() or col.CreateCollisionEnabledAttr()).Set(False)
+                        disabled.append(n)
+                    except Exception:
+                        pass
+            self.world.reset()   # re-parse so PhysX drops the disabled colliders
+        except Exception as exc:
+            print('ARMBENCH_TOOL_COLLIDERS_DISABLE failed (%s)' % exc, flush=True)
         print('ARMBENCH_TOOL_COLLIDERS_DISABLED %s' % disabled, flush=True)
 
     def _discover_arm_joints(self):
