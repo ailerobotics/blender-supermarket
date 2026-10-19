@@ -31,7 +31,8 @@
  "contact_overpress_cap_m": 0.02,
  "arm_max_speed": 0.3,
  "startup_grace_seconds": 60.0,
- "sim_cart_place_policy": true,
+ "sim_cart_place_policy": false,
+ "reposition_before_place": true,
  "payload_ack_wall_s": 15.0,
  "staged_cart_swing": true,
  "cart_pan_joint0": -1.822,
@@ -44,7 +45,7 @@
  ],
  "plan_wall_cap_s": 60.0,
  "base_collision_object": false,
- "cart_cage_place": true,
+ "cart_cage_place": false,
  "cage_axis": [
   1.0,
   0.0,
