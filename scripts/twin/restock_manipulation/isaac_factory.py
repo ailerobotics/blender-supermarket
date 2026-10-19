@@ -299,7 +299,7 @@ class CollectTargetBridge:
     """
     def __init__(self, *, stage, arm_camera, arm_camera_path, base_path, profiles,
                  motion, contact, joints, source_location, cart_placement=None, cart_root=None,
-                 mobile_base_path=None):
+                 mobile_base_path=None, cart_support_path=None, verify_place=False):
         self.stage, self.arm_camera, self.arm_camera_path = stage, arm_camera, arm_camera_path
         self.base_path, self.profiles = base_path, profiles
         # The arm executes relative to the MOBILE chassis (base_link), which carries the dock yaw
@@ -315,6 +315,25 @@ class CollectTargetBridge:
         # cart is a controlled asset, so this is not a fabricated inventory observation.
         self.cart_placement = dict(cart_placement or {})
         self.cart_root = cart_root
+        # fm389 deck-interior placement (opt-in via RESTOCK_PLACE_ON_DECK, plumbed from the composition's
+        # stock_supports[0]): when set, the placement Target is the live support PRIM's measured world AABB
+        # centre+top (the real deck interior, wall-clearance-centred) instead of the cart-origin +
+        # load_center_body_xy offset at the scenario support_z_world constant -- which aimed the carton at
+        # the UPPER shelf (z=0.9325), 0.71 m above the deck and 0.08 m east of centre (run-300e: carton
+        # released off the east edge to the floor). None => legacy constants (byte-identical). Cached in
+        # cart-root-local on first read (rigid w.r.t. the cart) so the per-tick cost stays one XformCache.
+        self.cart_support_path = cart_support_path
+        self._deck_local = None
+        self._deck_extent = None
+        # fm389 physical PLACE verification (opt-in via RESTOCK_VERIFY_PLACE): measure the carton's live
+        # world pose (the fixed handling-unit prim) and thread its centre onto the host packet so the
+        # collect `verify` phase can REFUSE an empty-gripper 'success' when the carton is not resting on
+        # the deck. A controlled-asset ground-truth read for the PLACE physics gate only -- NOT inventory
+        # (the mission `verify` stage still commits stock from sensor evidence). Off => placed_pose stays
+        # None => byte-identical. Cached carton-local centre (rigid) keeps the per-tick cost at one XformCache.
+        self.verify_place = bool(verify_place)
+        self._handling_unit_path = '/RestockScenario/HandlingUnit'
+        self._unit_local_center = None
         self.provider = None
         # Transfer stage (cart is the SOURCE, shelf the DESTINATION): the shelf slot target comes
         # from the camera lane's fixed-shelf provider (PR62, set after build_sensing); the carton on
@@ -451,20 +470,66 @@ class CollectTargetBridge:
         if not cp or not self.cart_root:
             return None
         import numpy as np, math
-        from pxr import UsdGeom
-        if not self.stage.GetPrimAtPath(self.cart_root):
+        from pxr import Usd, UsdGeom
+        cart_prim = self.stage.GetPrimAtPath(self.cart_root)
+        if not cart_prim:
             return None
         cache = UsdGeom.XformCache()
-        Tc = np.asarray(cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.cart_root))).T
+        Tc = np.asarray(cache.GetLocalToWorldTransform(cart_prim)).T
         Tub = np.asarray(cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.base_path))).T
         cyaw = math.atan2(float(Tc[1, 0]), float(Tc[0, 0]))          # cart yaw in world
-        lx, ly = cp['load_center_body_xy']
-        world = np.array([float(Tc[0, 3]) + math.cos(cyaw) * lx - math.sin(cyaw) * ly,
-                          float(Tc[1, 3]) + math.sin(cyaw) * lx + math.cos(cyaw) * ly,
-                          float(cp['support_z_world']), 1.0])
+        if self.cart_support_path is not None:
+            # DECK-interior load centre from the live support PRIM: its measured world AABB centre (xy) +
+            # top (z). Cached in cart-root-local on first read (the deck is rigid w.r.t. the cart, so this
+            # tracks the cart's live yaw+translation with one XformCache/tick instead of a per-tick mesh
+            # BBox traversal). Centring on the deck AABB is the wall clearance (the deck footprint strictly
+            # contains the carton -- validated by the controller's axis_fits gate on free_dimensions).
+            deck_prim = self.stage.GetPrimAtPath(self.cart_support_path)
+            if not deck_prim:
+                return None
+            if self._deck_local is None:
+                bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                         [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+                rng = bbox.ComputeWorldBound(deck_prim).ComputeAlignedRange()
+                mn, mx = rng.GetMin(), rng.GetMax()
+                wc = np.array([(mn[0] + mx[0]) / 2.0, (mn[1] + mx[1]) / 2.0, float(mx[2]), 1.0])
+                self._deck_local = np.linalg.inv(Tc) @ wc            # rigid in the cart frame
+                self._deck_extent = (float(mx[0] - mn[0]), float(mx[1] - mn[1]))
+            w = Tc @ self._deck_local
+            world = np.array([float(w[0]), float(w[1]), float(w[2]), 1.0])
+        else:
+            lx, ly = cp['load_center_body_xy']
+            world = np.array([float(Tc[0, 3]) + math.cos(cyaw) * lx - math.sin(cyaw) * ly,
+                              float(Tc[1, 3]) + math.sin(cyaw) * lx + math.cos(cyaw) * ly,
+                              float(cp['support_z_world']), 1.0])
         p = np.linalg.inv(Tub) @ world                                # load centre in ur_base_link
         ub_yaw = math.atan2(float(Tub[1, 0]), float(Tub[0, 0]))
         return (float(p[0]), float(p[1]), float(p[2])), float(cyaw - ub_yaw)
+
+    def _carton_center_station(self):
+        """The carton CENTRE in ur_base_link from the live handling-unit prim (controlled-asset ground
+        truth, for the PLACE physics gate only). None when disabled / the prim is absent. Caches the
+        carton-local centre offset on first read (rigid body) so the per-tick cost is one XformCache."""
+        if not self.verify_place or self.stage is None:
+            return None
+        import numpy as np
+        from pxr import Usd, UsdGeom
+        unit = self.stage.GetPrimAtPath(self._handling_unit_path)
+        if not unit:
+            return None
+        cache = UsdGeom.XformCache()
+        Tu = np.asarray(cache.GetLocalToWorldTransform(unit)).T
+        if self._unit_local_center is None:
+            bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                     [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+            rng = bbox.ComputeWorldBound(unit).ComputeAlignedRange()
+            mn, mx = rng.GetMin(), rng.GetMax()
+            wc = np.array([(mn[0] + mx[0]) / 2.0, (mn[1] + mx[1]) / 2.0, (mn[2] + mx[2]) / 2.0, 1.0])
+            self._unit_local_center = np.linalg.inv(Tu) @ wc
+        w = Tu @ self._unit_local_center
+        Tub = np.asarray(cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.base_path))).T
+        p = np.linalg.inv(Tub) @ np.array([float(w[0]), float(w[1]), float(w[2]), 1.0])
+        return (float(p[0]), float(p[1]), float(p[2]), 0.0, 0.0, 0.0, 1.0)
 
     def _capture_transfer(self, now):
         """Transfer sensing: the carton on the cart (derived cart pose, controlled asset) as the
@@ -573,9 +638,16 @@ class CollectTargetBridge:
         # contact/grasp suction guard (require_fresh) needs to enable the gripper (run-140). None
         # when not suspended -- the rendered collect packet carried no deadline before, so gate-off
         # is byte-identical.
+        try:                                      # ground-truth PLACE-gate read must never starve /sensors
+            placed_pose = self._carton_center_station()
+        except Exception as exc:
+            placed_pose = None
+            if self._calls % 10 == 1:
+                print(f'COLLECT_CAPTURE calls={self._calls} placed_pose_error={type(exc).__name__}:{exc}',
+                      flush=True)
         return Sensors(now, (obs,), cart_target, parked, bool(self.contact.read()), now,
                        float(self.motion.collision_time), joints, (), float(target.stamp),
-                       target.valid_until_steady)
+                       target.valid_until_steady, placed_pose)
 
 
 def _build_runtime(*, app, assembly, params, output):
@@ -666,8 +738,24 @@ def _build_runtime(*, app, assembly, params, output):
     # The collect PLACEMENT target (destination = staged cart) is derived from the cart asset's
     # measured pose; the cart's root prim comes from the composition evidence when configured.
     cart_root = None
+    cart_support_path = None
+    import os
+    verify_place = params.cart_placement and os.environ.get('RESTOCK_VERIFY_PLACE', '0') != '0'
     if params.cart_placement:
-        cart_root = assembly.evidence['composition']['assets']['cart']['root']
+        cart_asset = assembly.evidence['composition']['assets']['cart']
+        cart_root = cart_asset['root']
+        # fm389: aim the collect placement at the DECK INTERIOR, derived from the live support prim, not
+        # the scenario support_z_world constant (which targeted the UPPER shelf, 0.71 m too high). Opt-in
+        # via RESTOCK_PLACE_ON_DECK so an unset env is byte-identical with the legacy constant path. The
+        # prim path comes from the composition's own stock_supports (the deck is index 0), never a
+        # hand-pinned path. Asserted at boot so a mis-set env is visible (host/runtime-split lesson).
+        import os
+        if os.environ.get('RESTOCK_PLACE_ON_DECK', '0') != '0':
+            supports = cart_asset.get('stock_supports') or []
+            cart_support_path = supports[0] if supports else None
+        print('PLACE_ON_DECK env=%s support_prim=%s (None => legacy support_z_world=%s) VERIFY_PLACE=%s'
+              % (os.environ.get('RESTOCK_PLACE_ON_DECK', '0'), cart_support_path,
+                 params.cart_placement.get('support_z_world'), bool(verify_place)), flush=True)
     collect_bridge = CollectTargetBridge(
         stage=stage, arm_camera=camera, arm_camera_path=camera_path,
         base_path=assembly.paths['ur_base_link'], profiles=params.profiles,
@@ -675,7 +763,8 @@ def _build_runtime(*, app, assembly, params, output):
         motion=feedback, contact=contact,
         joints=feedback.joint_positions,
         source_location=params.collect_source_location,
-        cart_placement=params.cart_placement, cart_root=cart_root)
+        cart_placement=params.cart_placement, cart_root=cart_root,
+        cart_support_path=cart_support_path, verify_place=bool(verify_place))
 
     sensing_bridge = None
     if params.masked_depth.get('enabled'):

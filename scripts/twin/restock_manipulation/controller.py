@@ -44,6 +44,15 @@ def _retry_max_env(var, default):
         return int(default)
 
 
+def _float_env(var, default):
+    """fm389: SIM-ONLY positive-float env override (e.g. a place-verify tolerance). Env unset/malformed
+    => the module default; set => the parsed value clamped to (0, 5] m."""
+    try:
+        return max(1e-3, min(5.0, float(os.environ.get(var, default))))
+    except (TypeError, ValueError):
+        return float(default)
+
+
 class TransferController:
     def __init__(self, motion: MotionPort, profiles: dict[str, ProductProfile], *,
                  cart_location: str = 'rollwagen', max_age: float = 0.5,
@@ -154,6 +163,14 @@ class TransferController:
         # streak across the long collect cart-swing re-rolls instead of ending the mission.
         self._staged_move_retry_max = _retry_max_env('RESTOCK_STAGED_MOVE_RETRY_MAX', STAGED_MOVE_RETRY_MAX)
         self._move_deadline_retry_max = _retry_max_env('RESTOCK_MOVE_DEADLINE_RETRY_MAX', MOVE_DEADLINE_RETRY_MAX)
+        # fm389 direct PLACE verification tolerances (SIM-ONLY env-tunable). When the driver threads a
+        # measured carton pose (s.placed_pose, RESTOCK_VERIFY_PLACE), the collect `verify` phase refuses an
+        # empty-gripper success unless the carton rests on the support: centre within xy_tol of the sensed
+        # support xy AND the carton bottom within z_tol of the support top. A carton that fell BELOW the
+        # support (floor) is a fast hard-fail. Unset => defaults => the camera 2-frame verify is unchanged.
+        self._place_verify_xy_tol = _float_env('RESTOCK_PLACE_VERIFY_XY_TOL', 0.25)
+        self._place_verify_z_tol = _float_env('RESTOCK_PLACE_VERIFY_Z_TOL', 0.12)
+        self._place_offdeck_frames = 0
         self.evidence = []
         self.reason = ''
         self.last_time = None
@@ -689,6 +706,37 @@ class TransferController:
         if self.phase == 'verify':
             if s.contact:
                 return self._fail('release contact returned')
+            # fm389 DIRECT place verification (sim-only, active only when the driver threads a measured
+            # carton pose). The collect destination is the robot's own staged cart, which no fixed camera
+            # frames post-release (the 2-frame sensor verify below never gets a cart observation), so the
+            # carton-on-deck physics is proven from the controlled-asset ground-truth carton pose instead:
+            # the carton must rest on the SENSED support (centre within xy_tol, bottom within z_tol of the
+            # support top) for two distinct frames. A carton that fell BELOW the support (run-300e: onto the
+            # floor east of the cart) is a fast hard-fail so an empty-gripper 'success' cannot propagate.
+            if s.placed_pose is not None:
+                c = s.placed_pose
+                half_h = self.profile.dimensions[2] / 2.0
+                xy = math.dist(c[:2], self.target_surface[:2])
+                bottom_gap = (c[2] - half_h) - self.target_surface[2]
+                on_deck = xy <= self._place_verify_xy_tol and abs(bottom_gap) <= self._place_verify_z_tol
+                if bottom_gap < -self._place_verify_z_tol:   # carton bottom settled BELOW the support top
+                    self._place_offdeck_frames += 1
+                    if self._place_offdeck_frames >= 3:
+                        return self._fail('place verification failed: carton not on deck '
+                                          '(xy=%.3f bottom_gap=%.3f)' % (xy, bottom_gap))
+                else:
+                    self._place_offdeck_frames = 0
+                if on_deck:
+                    self.verify_ids.add(('place_gt', round(now, 3)))
+                    if len({t for _, t in self.verify_ids}) >= 2:
+                        self.evidence.append({'source': 'ground_truth_place_check', 'location': self.destination,
+                                              'simulation_time': float(now), 'carton_pose_station': tuple(c),
+                                              'support_pose_station': tuple(self.target_surface),
+                                              'xy_offset': float(xy), 'bottom_gap': float(bottom_gap)})
+                        self._transition('succeeded')
+                else:
+                    self.verify_ids = {x for x in self.verify_ids if x[0] != 'place_gt'}
+                return self._result()
             matches = [o for o in s.observations if o.location == self.destination
                        and o.sku == self.job['sku'] and type(o.quantity) is int and o.quantity == 1
                        and o.family == 'sealed_box' and math.isfinite(o.confidence)

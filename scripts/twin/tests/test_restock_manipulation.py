@@ -355,6 +355,42 @@ def test_failed_verification_never_credits_stock():
     assert len(r.evidence) == 1
 
 
+def test_direct_place_verify_succeeds_when_carton_rests_on_deck():
+    # fm389: with a measured carton pose threaded (s.placed_pose), the collect verify phase proves the
+    # carton rests on the SENSED support directly (controlled-asset ground truth) -- the cart destination
+    # has no post-release camera. target_surface = packet() target (.5,.2,.1); a 0.10-tall carton resting
+    # on it has centre z = .1 + .05. Two distinct on-deck frames -> succeeded, with labelled evidence.
+    c, m = make_controller('collect')
+    t = run_to(c, 'verify')
+    on = (.5, .2, .15, 0., 0., 0., 1.)
+    assert c.step(.1, packet(c, t, placed_pose=on)).status == 'running'
+    r = c.step(.1, packet(c, t + .1, placed_pose=on))
+    assert r.status == 'succeeded'
+    assert any(e.get('source') == 'ground_truth_place_check' for e in r.evidence)
+
+
+def test_direct_place_verify_hard_fails_when_carton_fell_to_the_floor():
+    # run-300e: carton released off the east edge, settled on the floor (bottom well BELOW the support
+    # top). The direct gate must refuse the empty-gripper 'success' -- not let it propagate into couple.
+    c, m = make_controller('collect')
+    t = run_to(c, 'verify')
+    c.target_surface = (.5, .2, .3, 0., 0., 0., 1.)       # a deck-height support
+    floor = (.5, .2, .05, 0., 0., 0., 1.)                 # carton on the floor (bottom ~0, 0.3 below)
+    r = None
+    for i in range(4):
+        r = c.step(.1, packet(c, t + i * .1, placed_pose=floor))
+    assert r.status == 'failed' and 'place verification failed' in r.reason
+    assert not any(e.get('source') == 'ground_truth_place_check' for e in c.evidence)
+
+
+def test_placed_pose_absent_keeps_the_camera_two_frame_verify_byte_identical():
+    # Unset RESTOCK_VERIFY_PLACE => placed_pose None => the existing sensor verify path is untouched.
+    c, m = make_controller('collect')
+    t = run_to(c, 'verify')
+    assert c.step(.1, packet(c, t)).status == 'running'   # no placed_pose, no ground-truth branch taken
+    assert not any(x[0] == 'place_gt' for x in c.verify_ids)
+
+
 def test_ambiguous_duplicate_and_unreachable_source_wait_without_motion():
     for mutate in (lambda o: (replace(o, confidence=.2),), lambda o: (o,o),
                    lambda o: (replace(o, pose=(3.,0.,0.,0.,0.,0.,1.)),)):

@@ -52,7 +52,8 @@ def _bridge(*, phase='observe', first_frame=False, job_age=None,
     b.node = _FakeClock(SIM_NOW)
     emitted = []
     b._emit = lambda result: emitted.append(result)
-    b.controller = NS(phase=phase, _fail=lambda reason: NS(reason=reason, controls=()))
+    b.controller = NS(phase=phase, _fail=lambda reason: NS(reason=reason, controls=()),
+                      retry_or_fail_move=lambda reason: NS(reason=reason, controls=()))
     return b, emitted
 
 

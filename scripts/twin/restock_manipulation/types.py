@@ -59,6 +59,13 @@ class Sensors:
     scanned_locations: tuple[str, ...] = ()
     scan_time: float = -1.0
     valid_until_steady: float | None = None
+    # fm389 (sim-only, opt-in): the measured world pose of the carried/placed handling unit, in the
+    # controller frame (ur_base_link), as (x, y, z, *quat) of the carton CENTRE. None unless the driver
+    # computes it (RESTOCK_VERIFY_PLACE) -- a controlled-asset GROUND-TRUTH read for the PLACE physics
+    # gate only (NOT inventory, which the mission `verify` stage still commits from sensor evidence). Lets
+    # the collect `verify` phase refuse an empty-gripper 'success' when the carton is not resting on the
+    # cart deck (run-300e placed it on the floor). Default None => byte-identical.
+    placed_pose: tuple[float, ...] | None = None
     # Driver must reject stale/absent joint/contact/odom data before making a packet.
 
 

@@ -439,6 +439,7 @@ def test_sim_attach_fallback_gating_default_off_and_contact_gated():
     """The labelled sim attach-fallback (firstmate run-202) must be a no-op by default, must weld ONLY
     on a measured near-zero flush contact with suction on, must prefer the native latch, and must
     release on suction off. The weld itself needs USD; here we stub it to test the gating on CPU."""
+    pytest.importorskip('pxr')   # fm388 carry/release collision-toggle imports pxr -> run under usd-core
     from scripts.twin.restock_manipulation.cad_tool import (NativePanelContact, SIM_ATTACH_CONTACT_MM,
                                                             SIM_ATTACH_FLUSH_DEG)
     def bridge(*, enabled, fallback, gripped=(), status=None, probe=None):
@@ -481,6 +482,9 @@ def test_sim_attach_fallback_gating_default_off_and_contact_gated():
     # suction off -> not ready and releases an existing weld
     a = bridge(enabled=False, fallback=True, probe=contact)
     a._fallback_body, a._fallback_joint = '/World/Carton', '/Grip/j'
-    a.stage = NS(RemovePrim=lambda p: a._releases.append(p))
+    # Release now also restores the carton/tool colliders (fm388 collision-toggle); stub the stage reads
+    # it makes (no CollisionAPI prims on CPU -> a no-op toggle) so the weld-joint removal path is exercised.
+    a.stage = NS(RemovePrim=lambda p: a._releases.append(p),
+                 GetPrimAtPath=lambda p: None, Traverse=lambda: [])
     assert a.sim_attach_contact_ready() is False
     assert a._fallback_body is None and a._releases == ['/Grip/j']
