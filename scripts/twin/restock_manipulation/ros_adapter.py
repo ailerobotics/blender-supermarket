@@ -749,6 +749,24 @@ class RosMotionPort:
             return 'running'
         return None
 
+    def _live_measured_start(self):
+        """fm368: the live measured arm pose as an ordered six-tuple in JOINTS order, or None when no
+        fresh live state is available (real rig / not yet fresh). Used to re-anchor a post-move_group-
+        respawn plan whose start drifted from the stale self.start -- await_settle reseeds the first
+        waypoint to this same live state before execute, so accepting against it is consistent."""
+        if self._live_arm_state is None:
+            return None
+        live = self._live_arm_state()
+        if live is None:
+            return None
+        pos_by_name, _vel_by_name, fresh = live
+        if not fresh or not pos_by_name:
+            return None
+        try:
+            return tuple(float(pos_by_name[j]) for j in JOINTS)
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def last_fault_was_sim_deadline(self):
         """fm367: True iff the most recent 'failed' poll was a SIM-clock move/settle deadline miss (a
         render-pacing transient the controller may re-attempt), False for a collision/plan rejection or
@@ -915,7 +933,28 @@ class RosMotionPort:
             print('PLAN_DELIVERY elapsed=%.2f'
                   % (time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())), flush=True)
             trajectory = result.result.planned_trajectory
-            validate_trajectory(trajectory.joint_trajectory, self.start, self.limits)
+            try:
+                validate_trajectory(trajectory.joint_trajectory, self.start, self.limits)
+            except ValueError as exc:
+                # fm368: a move_group SIGABRT respawn (run-266/268/295) starves the in-flight plan -- the
+                # action server vanishes with no clean deregistration, so _handle_server_crash's
+                # server_is_ready() misses it; the WALL deadline fires -> STAGED_MOVE_RETRY re-plans. The
+                # respawned move_group plans from the arm's TRUE current pose via its re-subscribed state
+                # monitor, which can differ from the pre-crash self.start by >0.05 rad, so validate rejects
+                # an otherwise-valid plan on the START check alone and poll()'s except latches
+                # emergency_stop (run-295 died here: PLAN_DELIVERY succeeded, then validate start-drift ->
+                # 'host emergency stop'). await_settle already RE-SEEDS the first waypoint to the live
+                # measured state before execute, so re-anchor self.start to the live measured joints and
+                # re-validate: accept iff ONLY the start drifted and the plan starts at the real arm (every
+                # malformed / out-of-limits / nonmonotonic / not-at-rest check still hard-fails). No-op on
+                # the real rig (no live_arm_state) and whenever self.start already matched -> byte-identical.
+                live_start = self._live_measured_start()
+                if str(exc) != 'trajectory start differs from measured joints' or live_start is None:
+                    raise
+                validate_trajectory(trajectory.joint_trajectory, live_start, self.limits)
+                self.start = live_start
+                print('MOVE_GROUP_RESPAWN_RESEED start re-anchored to live measured joints '
+                      'after post-respawn plan start-drift', flush=True)
             end=trajectory.joint_trajectory.points[-1].time_from_start
             duration=end.sec+end.nanosec*1e-9
             if duration>110.:

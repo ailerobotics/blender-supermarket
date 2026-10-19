@@ -553,6 +553,132 @@ def test_actual_ros_message_request_and_async_progression(monkeypatch):
     assert stopped
 
 
+def _respawn_adapter(monkeypatch, *, first_wp, live_pos, limits=None):
+    """fm368 harness: a RosMotionPort with fake transport whose plan returns a trajectory STARTING at
+    first_wp (rad, all joints), and a live_arm_state reading live_pos (None disables it -> real-rig
+    path). Models a post-move_group-respawn plan whose start drifted from the recorded self.start.
+    Returns (port, stopped)."""
+    pytest.importorskip('rclpy')
+    from concurrent.futures import Future
+    from moveit_msgs.msg import RobotTrajectory
+    from trajectory_msgs.msg import JointTrajectoryPoint
+    from scripts.twin.restock_manipulation.ros_adapter import RosMotionPort
+    import rclpy.action
+
+    monkeypatch.setenv('ROS_DOMAIN_ID', '88')
+    monkeypatch.setenv('ROS_AUTOMATIC_DISCOVERY_RANGE', 'LOCALHOST')
+    monkeypatch.delenv('ROS_STATIC_PEERS', raising=False)
+
+    def ready(value):
+        f = Future(); f.set_result(value); return f
+
+    class Handle:
+        accepted = True
+        cancelled = False
+        def __init__(self, result):
+            self.result = result
+        def get_result_async(self):
+            return ready(self.result)
+        def cancel_goal_async(self):
+            self.cancelled = True
+            return ready(None)
+
+    trajectory = RobotTrajectory()
+    trajectory.joint_trajectory.joint_names = list(JOINTS)
+    for index, val in enumerate((first_wp, first_wp + 0.02)):
+        point = JointTrajectoryPoint()
+        point.positions = [float(val)] * 6
+        point.time_from_start.sec = index
+        trajectory.joint_trajectory.points.append(point)
+    plan_result = NS(status=4, result=NS(error_code=NS(val=1), planned_trajectory=trajectory))
+    execute_result = NS(status=4, result=NS(error_code=NS(val=1)))
+
+    class Client:
+        def __init__(self, node, action_type, name):
+            self.name = name
+        def server_is_ready(self):
+            return True
+        def send_goal_async(self, goal):
+            return ready(Handle(plan_result if self.name.endswith('move_action') else execute_result))
+
+    monkeypatch.setattr(rclpy.action, 'ActionClient', Client)
+    from builtin_interfaces.msg import Time
+    node = NS(context=NS(get_domain_id=lambda: 88),
+              get_parameter=lambda name: NS(value=True),
+              get_clock=lambda: NS(now=lambda: NS(nanoseconds=0, to_msg=lambda: Time())),
+              create_client=lambda *args: NS(service_is_ready=lambda: True,
+                                             call_async=lambda req: ready(None)),
+              create_publisher=lambda *a, **k: NS(publish=lambda *a, **k: None))
+    stopped = []
+    live = None
+    if live_pos is not None:
+        live = lambda: ({j: float(live_pos) for j in JOINTS},
+                        {j: 0.0 for j in JOINTS}, True)
+    port = RosMotionPort(node, joint_limits=(limits or [(-1, 1)] * 6),
+                         payload_sync=lambda *a: True,
+                         emergency_stop=lambda: stopped.append(True),
+                         live_arm_state=live)
+    return port, stopped
+
+
+def _drive_to_terminal(port):
+    status = None
+    for _ in range(8):
+        status = port.poll()
+        if status in ('succeeded', 'failed'):
+            break
+    return status
+
+
+def test_move_group_respawn_start_drift_recovers_against_live_state(monkeypatch, capsys):
+    # fm368: a post-respawn plan whose first waypoint is the arm's TRUE pose (0.2) differs from the stale
+    # recorded start (0.0) by >0.05 rad. With a live measured state matching the plan start, the move
+    # RECOVERS (re-anchors self.start, settles, executes) instead of latching emergency_stop (run-295).
+    port, stopped = _respawn_adapter(monkeypatch, first_wp=0.2, live_pos=0.2)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert _drive_to_terminal(port) == 'succeeded'
+    assert not stopped
+    assert port.start == pytest.approx((0.2,) * 6)
+    assert 'MOVE_GROUP_RESPAWN_RESEED' in capsys.readouterr().out
+
+
+def test_move_group_respawn_drift_hard_fails_without_live_state(monkeypatch):
+    # Byte-identical real-rig path: no live_arm_state -> the start-drift validate raises as before ->
+    # poll's except latches emergency_stop and the move fails. run-295's actual behaviour, UNCHANGED.
+    port, stopped = _respawn_adapter(monkeypatch, first_wp=0.2, live_pos=None)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert _drive_to_terminal(port) == 'failed'
+    assert stopped
+
+
+def test_move_group_respawn_recovery_still_hard_fails_bad_plan(monkeypatch):
+    # The recovery is start-drift ONLY: an out-of-limits waypoint still hard-fails even WITH a live state,
+    # so a collision/garbage plan is never silently accepted.
+    port, stopped = _respawn_adapter(monkeypatch, first_wp=2.0, live_pos=2.0)   # 2.0 outside (-1, 1)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert _drive_to_terminal(port) == 'failed'
+    assert stopped
+
+
+def test_move_group_respawn_recovery_rejects_start_differing_from_live_too(monkeypatch):
+    # Not a blanket accept: if the plan start differs from the LIVE state as well (0.2 vs 0.9), the
+    # re-validate against live still raises start-drift -> the move hard-fails.
+    port, stopped = _respawn_adapter(monkeypatch, first_wp=0.2, live_pos=0.9)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert _drive_to_terminal(port) == 'failed'
+    assert stopped
+
+
+def test_move_group_respawn_happy_path_untouched(monkeypatch, capsys):
+    # Byte-identical happy path: plan start already matches self.start -> validate(self.start) passes and
+    # the live-state fallback never engages (no RESPAWN_RESEED print), the move succeeds.
+    port, stopped = _respawn_adapter(monkeypatch, first_wp=0.0, live_pos=0.0)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert _drive_to_terminal(port) == 'succeeded'
+    assert not stopped
+    assert 'MOVE_GROUP_RESPAWN_RESEED' not in capsys.readouterr().out
+
+
 def test_ensemble_calls_rgb_models_and_rejects_unknown():
     from scripts.twin.restock_manipulation.perception import EnsembleObservationPipeline
     bounds = np.array([[0,0,10,10]])
