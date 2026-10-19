@@ -71,3 +71,35 @@ class ReseedTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# --- run-284 regression: the reseeded first waypoint must satisfy trajectory_host.Plan ---
+import types as _types  # noqa: E402
+import os as _os, sys as _sys  # noqa: E402
+_sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), '..', '..'))
+from twin.restock_manipulation.ros_adapter import JOINTS as _JOINTS, reseed_first_waypoint as _reseed  # noqa: E402
+from twin.restock import trajectory_host as _th  # noqa: E402
+
+
+def _traj(first_positions, first_velocities):
+    def _pt(pos, vel, t):
+        return _types.SimpleNamespace(positions=list(pos), velocities=list(vel), effort=[],
+                                      time_from_start=_types.SimpleNamespace(sec=int(t), nanosec=int((t % 1) * 1e9)))
+    start = list(first_positions)
+    goal = [v + 0.001 for v in start]          # tiny, slow rest-to-rest move -> within accel limits
+    return _types.SimpleNamespace(joint_names=list(_JOINTS), points=[
+        _pt(first_positions, first_velocities, 0.0), _pt(goal, [0.0] * 6, 5.0)])
+
+
+def test_reseeded_first_waypoint_accepted_by_trajectory_host():
+    # The reseed overwrites point[0] positions to the live state and sets SIX zero velocities.
+    live = {n: 0.01 * i for i, n in enumerate(_JOINTS)}
+    limits = [(-6.3, 6.3)] * 6
+    planned_first = [0.0] * 6
+    reseeded = _reseed(list(_JOINTS), planned_first, live)
+    # The fix: six explicit zeros (run-284 used [] -> rejected).
+    _th.Plan(_traj(reseeded, [0.0] * 6), reseeded, limits)   # must NOT raise
+
+    import pytest
+    with pytest.raises(ValueError):                           # the run-284 bug: empty velocities
+        _th.Plan(_traj(reseeded, []), reseeded, limits)

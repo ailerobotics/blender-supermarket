@@ -744,7 +744,11 @@ class RosMotionPort:
                     if jt.points:
                         jt.points[0].positions = reseed_first_waypoint(
                             list(jt.joint_names), list(jt.points[0].positions), pos_by_name)
-                        jt.points[0].velocities = []   # start at rest at the live state
+                        # start at rest at the live state: SIX explicit zero velocities -- trajectory_host
+                        # requires every waypoint to carry exactly 6 velocities with the first ~0 (run-284
+                        # regressed: clearing to [] -> 'six explicit waypoint velocities required' -> the
+                        # FJT goal was rejected and the APPROACH aborted).
+                        jt.points[0].velocities = [0.0] * 6
             goal = ExecuteTrajectory.Goal()
             goal.trajectory = self._pending_exec
             self._pending_exec = None
