@@ -415,10 +415,25 @@ class NativePanelContact:
 
     def _release_fallback(self):
         if getattr(self, '_fallback_joint', None) is not None:
-            if getattr(self, '_fallback_body', None) is not None:
-                self._set_carton_collision(self._fallback_body, True)   # restore for the cart drop
+            body = getattr(self, '_fallback_body', None)
+            if body is not None:
+                self._set_carton_collision(body, True)   # restore for the cart drop
             self.stage.RemovePrim(self._fallback_joint)
-            print('SIM_ATTACH_FALLBACK release body=%s' % self._fallback_body, flush=True)
+            # fm379 mitigation 3: SIM-ONLY opt-in -- for a proof run, keep the released carton KINEMATIC
+            # at the release pose instead of letting it become a FREE DYNAMIC body. This avoids adding a
+            # new dynamic body to PhysX / the RTX acceleration structure at release (the hypothesised
+            # +2.68 GB rebuild trigger). The carton stays visually placed; it does not settle physically.
+            # Unset => the carton is free dynamic exactly as before (byte-identical).
+            if body is not None and os.environ.get('RESTOCK_RELEASE_KINEMATIC'):
+                from pxr import UsdPhysics
+                prim = self.stage.GetPrimAtPath(body)
+                if prim and prim.IsValid():
+                    rb = (UsdPhysics.RigidBodyAPI(prim) if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+                          else UsdPhysics.RigidBodyAPI.Apply(prim))
+                    rb.CreateKinematicEnabledAttr(True)
+                    print('SIM_ATTACH_FALLBACK release KINEMATIC body=%s (proof-run, no dynamic add)'
+                          % body, flush=True)
+            print('SIM_ATTACH_FALLBACK release body=%s' % body, flush=True)
         self._fallback_joint = self._fallback_body = None
 
     def read(self):

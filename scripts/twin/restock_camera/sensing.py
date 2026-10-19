@@ -221,7 +221,14 @@ def build_sensing(*, app, assembly, plan, config, output):
     the bundle can call it as ``capture(now, source, destination)``.
     """
     sources = _get_sources(assembly)
+    # fm376: SIM-ONLY opt-in to drop the walkthrough render product (recording_camera). When set, the
+    # recording camera is optional (None) -- the bundle skips the Recorder and the port self-disables
+    # the record cadence; the walkthrough is composed offline from sensing frames. Unset => required
+    # exactly as before (byte-identical).
+    _no_walkthrough = bool(os.environ.get('RESTOCK_NO_WALKTHROUGH_RENDER'))
     for key in _REQUIRED:
+        if _no_walkthrough and key == 'recording_camera':
+            continue
         _get(sources, key)
     context_providers = _get(sources, 'context_providers')
     # Optional boot-time commissioning: if the runtime-config names a commissioning dataset
@@ -269,7 +276,8 @@ def build_sensing(*, app, assembly, plan, config, output):
         """Fresh multi-camera inventory scan under the standing gates; never fabricated."""
         return station.capture(now, source, destination, motion, contact)
 
-    result = {'capture': capture, 'recording_camera': _get(sources, 'recording_camera'),
+    result = {'capture': capture,
+              'recording_camera': None if _no_walkthrough else _get(sources, 'recording_camera'),
               # Integration seam for the opt-in sensing gate: the runtime calls this each tick with
               # ``not sensing_render_required(controller.phase)`` to suspend/resume the decode-camera
               # render. A no-op when config['sensing_execution_gate'] is unset (default).

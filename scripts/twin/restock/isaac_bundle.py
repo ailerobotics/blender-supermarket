@@ -465,7 +465,9 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     range_sensor = IsaacRangeSensor(
         get_sensor_pose=lambda: _lidar_pose(assembly.robot_body, _lidar_xyz[0], _lidar_xyz[1]),
         sensor_to_base=_lidar_xyz, self_paths=(robot_root,), coupled_self_paths=cart_self_paths)
-    recorder = Recorder(output / 'mission-frames', fps=plan.recording_fps)
+    # fm376: no walkthrough render product (recording_camera None) => no Recorder; the port then
+    # self-disables the record cadence and the walkthrough is composed offline from sensing frames.
+    recorder = Recorder(output / 'mission-frames', fps=plan.recording_fps) if recording_camera is not None else None
     verifier = InventoryVerifier(capture, source=plan.verification_source)
 
     def on_action(action, job):

@@ -22,6 +22,7 @@ tested; the real builder runs only inside the guarded app. No observation is fab
 """
 from __future__ import annotations
 
+import os
 import time as _time
 
 from twin.restock_camera.config import camera_config as build_camera_design
@@ -132,8 +133,25 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
     }
 
 
-def station_camera_specs(design, parent_paths):
+def _unused_sensing_camera_ids(design):
+    """fm379 mitigation 2 (pure): camera ids serving ONLY the shelf support -- read by the transfer
+    stage, which this mission does not run. Returns the shelf support's camera_id unless that camera
+    also serves another (still-used) support. Empty if there is no shelf support."""
+    supports = design.get('supports', {})
+    shelf = supports.get('shelf')
+    if not shelf:
+        return ()
+    shelf_cam = shelf['camera_id']
+    others = {s['camera_id'] for n, s in supports.items() if n != 'shelf'}
+    return () if shelf_cam in others else (shelf_cam,)
+
+
+def station_camera_specs(design, parent_paths, *, drop_camera_ids=()):
     """CameraRig specs for the FIXED station cameras only (pure; no Isaac).
+
+    ``drop_camera_ids`` (fm379 mitigation 2): camera ids to OMIT so their RTX render product is never
+    created -- for a mission whose active stages never read that camera (e.g. the shelf camera when
+    there is no transfer stage). Empty (default) => every eligible camera, byte-identical.
 
     The camera design keeps camera bodies and their mount collision boxes in separate lists
     (``cameras`` + ``solids`` with ``dimensions_m``); CameraRig expects each camera to carry its
@@ -149,8 +167,11 @@ def station_camera_specs(design, parent_paths):
     """
     solids_by_id = {s['id']: s for s in design.get('solids', [])}
     specs = []
+    drop = set(drop_camera_ids)
     for name, camera in design['cameras'].items():
         if camera.get('parent') not in parent_paths:
+            continue
+        if name in drop:
             continue
         collision_solids = []
         for suffix in ('_housing', '_bracket'):
@@ -175,7 +196,13 @@ def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
     if not assembly.stage.GetPrimAtPath('/World'):
         UsdGeom.Xform.Define(assembly.stage, '/World')
     parent_paths = {'map': '/World', 'cart_chassis': cart_root}
-    specs = station_camera_specs(design, parent_paths)
+    # fm379 mitigation 2: SIM-ONLY opt-in to skip creating sensing cameras no active stage reads, so
+    # their RTX render product never allocates. RESTOCK_DROP_UNUSED_SENSING set => drop the SHELF
+    # camera, which only serves the TRANSFER stage; this mission has no transfer (stages collect/
+    # couple/outbound/park, transfer_shelf_location None) so it is pure overhead. Unset => byte-
+    # identical. (Explicit to the shelf camera: a mission WITH transfer must not set this.)
+    _drop_ids = _unused_sensing_camera_ids(design) if os.environ.get('RESTOCK_DROP_UNUSED_SENSING') else ()
+    specs = station_camera_specs(design, parent_paths, drop_camera_ids=_drop_ids)
     rig = CameraRig(stage=assembly.stage, specs=specs, parent_paths=parent_paths, frequency=-1,
                     render_scale=render_scale, camera_render_scales=camera_render_scales)
     # CameraRig authors only the camera prims + their mount collision boxes. The support
@@ -194,31 +221,51 @@ def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
     # extra camera (the fixed station cameras are unchanged for sensing); rendered on the recorder
     # cadence. Framing (height/FOV/tilt) is tuned from the first recorded run.
     import numpy as _np
-    from .native_cameras import initialize_camera
-    from twin.restock_camera.geometry import Intrinsics
-    chase_path = base_root.rstrip('/') + '/walkthrough_chase'
-    chase_k = Intrinsics(width=960, height=720, fx=430., fy=430., cx=480., cy=360., near=.1, far=14.)
-    chase = initialize_camera(chase_path, chase_k, name='walkthrough_chase')
-    # Prim frame == base frame at identity orientation; a USD camera looks down its own -Z, so an
-    # identity-oriented child 2.6 m up the base +Z points straight down at the base. camera_axes='usd'
-    # keeps the raw prim-frame convention (no world/ROS optical-axis remap).
-    chase.set_local_pose(translation=_np.array([0., 0., 2.6]),
-                         orientation=_np.array([1., 0., 0., 0.]), camera_axes='usd')
-    # Fill light riding with the chase camera so the overhead walkthrough is LIT (firstmate 222): the
-    # store ceiling rig alone leaves the top-down view dark (run-110). A broad downward disk light
-    # above the base illuminates the robot, arm, towed cart and the support in frame without touching
-    # the sensing cameras' own exposure. UsdLux lights emit along -Z, so an identity-oriented child up
-    # the base +Z shines straight down. Intensity tuned from the recorded run.
-    from pxr import UsdLux, Gf
-    fill_path = base_root.rstrip('/') + '/walkthrough_fill'
-    fill = UsdLux.DiskLight.Define(assembly.stage, fill_path)
-    fill.CreateIntensityAttr(28000.)
-    fill.CreateRadiusAttr(1.6)
-    fill.CreateColorAttr(Gf.Vec3f(1., .97, .92))
-    UsdGeom.Xformable(fill.GetPrim()).AddTranslateOp().Set(Gf.Vec3d(0., 0., 2.4))
+    # fm376: SIM-ONLY opt-in to drop the walkthrough_chase render product (a 960x720 RTX camera, a
+    # major VRAM consumer on a long run) WITHOUT touching the station sensing cameras or any mission
+    # logic. RESTOCK_NO_WALKTHROUGH_RENDER set => no chase camera / no fill light, recording_camera=None
+    # (the port self-disables the record cadence); the walkthrough video is then composed offline from
+    # the captured sensing frames + telemetry. Unset => byte-identical (chase + fill created as before).
+    recording_camera = None
+    if not os.environ.get('RESTOCK_NO_WALKTHROUGH_RENDER'):
+        from .native_cameras import initialize_camera
+        from twin.restock_camera.geometry import Intrinsics
+        chase_path = base_root.rstrip('/') + '/walkthrough_chase'
+        # fm377: SIM-ONLY env knob for the walkthrough_chase render resolution (the 960x720 RTX product).
+        # Default 960x720 => byte-identical; a lower res (e.g. 480x360, quarter pixels) scales fx/fy/cx/cy
+        # by the SAME factor to keep the identical FOV/framing, just fewer rendered pixels. Bounded sane.
+        def _wt_dim(var, default):   # tolerate unset / empty / malformed => default (never crash boot)
+            try:
+                return int(os.environ.get(var) or default)
+            except (TypeError, ValueError):
+                return default
+        _cw = max(120, min(960, _wt_dim('RESTOCK_WALKTHROUGH_WIDTH', 960)))
+        _ch = max(90, min(720, _wt_dim('RESTOCK_WALKTHROUGH_HEIGHT', 720)))
+        _sx, _sy = _cw / 960.0, _ch / 720.0
+        chase_k = Intrinsics(width=_cw, height=_ch, fx=430. * _sx, fy=430. * _sy,
+                             cx=480. * _sx, cy=360. * _sy, near=.1, far=14.)
+        chase = initialize_camera(chase_path, chase_k, name='walkthrough_chase')
+        # Prim frame == base frame at identity orientation; a USD camera looks down its own -Z, so an
+        # identity-oriented child 2.6 m up the base +Z points straight down at the base. camera_axes='usd'
+        # keeps the raw prim-frame convention (no world/ROS optical-axis remap).
+        chase.set_local_pose(translation=_np.array([0., 0., 2.6]),
+                             orientation=_np.array([1., 0., 0., 0.]), camera_axes='usd')
+        # Fill light riding with the chase camera so the overhead walkthrough is LIT (firstmate 222): the
+        # store ceiling rig alone leaves the top-down view dark (run-110). A broad downward disk light
+        # above the base illuminates the robot, arm, towed cart and the support in frame without touching
+        # the sensing cameras' own exposure. UsdLux lights emit along -Z, so an identity-oriented child up
+        # the base +Z shines straight down. Intensity tuned from the recorded run.
+        from pxr import UsdLux, Gf
+        fill_path = base_root.rstrip('/') + '/walkthrough_fill'
+        fill = UsdLux.DiskLight.Define(assembly.stage, fill_path)
+        fill.CreateIntensityAttr(28000.)
+        fill.CreateRadiusAttr(1.6)
+        fill.CreateColorAttr(Gf.Vec3f(1., .97, .92))
+        UsdGeom.Xformable(fill.GetPrim()).AddTranslateOp().Set(Gf.Vec3d(0., 0., 2.4))
+        recording_camera = chase
     return {'cameras': rig.cameras,
             'base_from_camera': lambda camera_id: rig.base_from_camera(camera_id, base_root),
-            'recording_camera': chase}
+            'recording_camera': recording_camera}
 
 
 def author_mission_markers(stage, design, parent_paths, *, support_names=('source', 'cart', 'shelf'),
