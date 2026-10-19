@@ -5,6 +5,8 @@ QR text is product identity; no USD object names, semantic IDs, poses or colors
 enter perception. A registered carton has a centred top label reading its SKU.
 """
 from dataclasses import dataclass, replace
+import os
+SENSOR_WALL_BACKSTOP_S = max(5.0, min(600.0, float(os.environ.get('RESTOCK_SENSOR_WALL_BACKSTOP_S', 60.0))))  # fm362 sim-only env widen
 import math
 import time
 
@@ -89,7 +91,7 @@ class CameraContext:
 class IsaacCartonSensors:
     def __init__(self, camera, *, pose_bridge_root, profiles, slots=(), base_from_camera=None,
                  context_provider=None, camera_id='camera', steady_clock=time.monotonic,
-                 wall_backstop_s=60., wall_clock=time.monotonic, execution_gate=False):
+                 wall_backstop_s=SENSOR_WALL_BACKSTOP_S, wall_clock=time.monotonic, execution_gate=False):
         # Injectable monotonic clock so acquisition-to-use freshness (and tests of it) do not
         # depend on real decode wall time; defaults to the process clock for native capture. For
         # the render-paced mission, build_sensing supplies the SIM/node clock here so a slow

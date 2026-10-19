@@ -38,14 +38,15 @@ MOVE_GROUP_CRASH_RETRY_MAX = 3
 # plugin re-init blocks on the (still-live) nvblox ESDF service, so a healthy respawn re-advertises in
 # a few seconds; this generous bound makes an UNRECOVERABLE crash (respawn exhausted, or the launch
 # itself down) surface as a clean motion failure instead of an unbounded hold.
-RESPAWN_WAIT_CAP_S = 45.0
+RESPAWN_WAIT_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_RESPAWN_WAIT_CAP_S', 45.0))))  # fm362
 # Fail FAST on a persistently-failing plan (firstmate run-216/279): an IK-infeasible goal churns the
 # 12 replans + every seed, each resetting a fresh per-attempt deadline, so the move could retry well
 # past the host's 30 s /sensors wall backstop -- which then fired as the mission reason instead of a
 # clean "planning failed" (the preplace IK failure manifested as a 30 s stall). Cap the TOTAL planning
 # wall time for a single move below the backstop so an unplannable pose surfaces as a motion failure
 # fast. Legit stochastic retries succeed in ~1 s each and never approach this.
-PLAN_TOTAL_WALL_CAP_S = 22.0
+MOVE_WALL_TIMEOUT_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_MOVE_WALL_TIMEOUT_S', 25.0))))  # fm362: the ik/plan-accept WALL deadline default
+PLAN_TOTAL_WALL_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_PLAN_WALL_CAP_S', 22.0))))  # fm362 sim-only env widen
 # fm345 (c): the tight terminal goal-gate position tolerance (matches trajectory_host GOAL_POSITION_TOL);
 # the per-move PLACE relaxation widens it only for the carton-loaded extend, reset to this otherwise.
 GOAL_POSITION_TOL_DEFAULT = 0.01
@@ -150,7 +151,7 @@ def reseed_first_waypoint(joint_names, planned_first_positions, live_by_name):
 class RosMotionPort:
     def __init__(self, node, *, joint_limits, payload_sync, emergency_stop,
                  group='ur_manipulator', tcp='gripper_pad_tcp', namespace='/restock_sim',
-                 pipeline='isaac_ros_cumotion', timeout=25.0, velocity_scale=.04, pose_goal=False,
+                 pipeline='isaac_ros_cumotion', timeout=MOVE_WALL_TIMEOUT_S, velocity_scale=.04, pose_goal=False,
                  stow_config=None, max_velocity_scale=.05, plan_wall_cap_s=PLAN_TOTAL_WALL_CAP_S,
                  live_arm_state=None, settle_vel=SETTLE_VEL_DEFAULT):
         require_sim_domain()

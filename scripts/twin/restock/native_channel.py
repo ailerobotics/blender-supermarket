@@ -1,4 +1,5 @@
 """Native JSON ROS transport for small simulation control-plane messages."""
+import os
 import json
 import time
 
@@ -22,7 +23,7 @@ _ACK_LAG = 1.0
 # gap legitimately exceeds 10 s (run-231 tripped it mid-place), so the sim profile raises it with
 # margin via StationClient(heartbeat_s=...); the 30 s /sensors wall backstop remains the one hard catch.
 # With the sim-clock primary guard below wired, this wall bound is only the frozen-sim backstop.
-_HEARTBEAT_UNAVAILABLE_S = 10.0
+_HEARTBEAT_UNAVAILABLE_S = max(2.0, min(120.0, float(os.environ.get('RESTOCK_HEARTBEAT_UNAVAILABLE_S', 10.0))))  # fm362
 # SIM-clock (stage) supervisor-liveness bound: fault if stage time has advanced this far past the last
 # accepted ack with no fresh ack. This is the PRIMARY liveness check -- it rides the render-paced /clock
 # so a legitimately slow full-res render tick cannot false-trip it (ds-015 got no station reply for 10 s
@@ -31,7 +32,7 @@ _HEARTBEAT_UNAVAILABLE_S = 10.0
 # stays only as a generous FROZEN-sim backstop (stage time can't advance to trip this then). Engaged only
 # when a stage_clock is wired (the sim profile); real-rig (stage_clock=None) keeps the wall bound alone.
 # See freshness-sim-clock-not-wall.
-_STAGE_UNAVAILABLE_S = 3.0
+_STAGE_UNAVAILABLE_S = max(1.0, min(120.0, float(os.environ.get('RESTOCK_STAGE_UNAVAILABLE_S', 3.0))))  # fm362
 
 
 class JsonChannel:

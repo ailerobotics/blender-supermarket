@@ -6,6 +6,7 @@ NVIDIA ESDF incorporation timestamps. No dummy planner, map, payload or feedback
 import argparse
 import json
 import os
+STATION_PENDING_WALL_S = max(0.5, min(120.0, float(os.environ.get('RESTOCK_STATION_PENDING_WALL_S', 2.0))))  # fm362 sim-only env widen
 from pathlib import Path
 import sys
 import time
@@ -104,7 +105,7 @@ def main():
                         state.acknowledge(incorporated,pending_epoch)
                     except (ValueError,AttributeError):
                         pass
-                if pending is not None and time.monotonic()-pending_wall>2.:
+                if pending is not None and time.monotonic()-pending_wall>STATION_PENDING_WALL_S:
                     pending.cancel()
                     pending=None
                 if pending is None and endpoints_ready and service.service_is_ready():

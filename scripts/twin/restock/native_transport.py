@@ -4,6 +4,7 @@ Construct after enabling isaacsim.ros2.bridge. No rclpy import, hardware endpoin
 joint-state teleport or planner fallback. Host execution supplies stamped arm
 commands; all completion feedback comes from the physical articulation.
 """
+import os
 import math
 import time
 
@@ -22,7 +23,7 @@ def _frame_id(path):
 # Arm-command heartbeat bounds. Primary bound is SIM time (does not false-trip under render pacing);
 # the wall bound is only a frozen-sim backstop, far larger than the worst render-paced command gap.
 ARM_HEARTBEAT_SIM_S = 0.5
-ARM_HEARTBEAT_WALL_BACKSTOP_S = 30.0
+ARM_HEARTBEAT_WALL_BACKSTOP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_ARM_HEARTBEAT_WALL_BACKSTOP_S', 30.0))))  # fm362 sim-only env widen
 
 
 def joint_states_payload(now, names, positions, velocities):
