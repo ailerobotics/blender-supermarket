@@ -427,8 +427,14 @@ class Controller:
         dyn = () if self.static_drive else obs.obstacles
         if not self.static_drive and not self._coverage_ok(odom, obs, radius, stop_distance, v, w):
             return Result(reason='insufficient_sensor_coverage')
-        # A disk expanded by stopping travel contains every possible braking arc.
-        if not self.grid.free(odom.pose,radius+stop_distance,dyn):
+        # A disk expanded by stopping travel contains every possible braking arc. fm396 (B)/run-308: on the
+        # trusted static reposition the braking inflation (stop_distance = stale_after*speed, with the 3 s
+        # render-paced stale_after) made this disk overlap the SOURCE SUPPORT 0.86 m away and trip
+        # obstacle_stop, though the footprint radius clears it and the plan routes clear against the static
+        # map. Use the footprint RADIUS only there (no braking lookahead) so a genuine static overlap still
+        # stops but the proven-clear short reposition is not blocked by the render-pacing margin.
+        stop_radius = radius if self.static_drive else radius + stop_distance
+        if not self.grid.free(odom.pose,stop_radius,dyn):
             return Result(reason='obstacle_stop')
         return Result(v,w,reason='tracking')
 

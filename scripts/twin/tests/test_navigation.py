@@ -47,6 +47,24 @@ class NavigationTests(unittest.TestCase):
         c = self.controller(); c.start((3, 0, 0), False)
         self.assertFalse(c.static_drive)
 
+    def test_static_drive_obstacle_stop_uses_footprint_radius_not_braking_disk(self):
+        # fm396/run-308: the braking inflation (stop_distance = stale_after*speed) made obstacle_stop trip
+        # on the source SUPPORT 0.86 m away though the footprint radius clears it. On the trusted static
+        # leg obstacle_stop uses the footprint RADIUS only; a NORMAL leg still stops on the braking disk.
+        r = self.fp.radius(False)                         # 0.5
+        d = r + 0.20                                      # static obstacle 0.70 m WEST (behind): radius+padding
+        grid = GridMap((-6, -6, 6, 6), ((-d - 2.0, -0.3, -d, 0.3),), 0.25)  # clears for the plan, braking disk overlaps
+        od = Odometry((0, 0, 0), 0.1, source='test_fixture')
+        obs = Observation(0.1, (), False, True, source='test_fixture', coverage_radius=10)
+        normal = Controller(grid, self.fp, allow_test_fixtures=True, max_speed=0.8, stale_after=1.0)
+        normal.start((3, 0, 0), False)                    # braking disk (radius+stop) overlaps the box
+        self.assertEqual(normal.step(0.1, od, obs).velocity, (0, 0))      # obstacle_stop -> no motion
+        trusted = Controller(grid, self.fp, allow_test_fixtures=True, max_speed=0.8, stale_after=1.0)
+        trusted.start((3, 0, 0), False, static_drive=True)                # radius-only clears the box
+        rr = trusted.step(0.1, od, obs)
+        self.assertNotEqual(rr.velocity, (0, 0))
+        self.assertEqual(rr.reason, 'tracking')
+
     def test_cart_rear_and_swing_obstacle(self):
         c=self.controller(); c.start((3,0,0),True)
         od,obs=self.inputs(coupled=True,obstacles=((-1.4,0),))
