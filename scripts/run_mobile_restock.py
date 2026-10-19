@@ -84,6 +84,11 @@ def _launch_host_stack(*, repo, plugin_env, nvidia_runtime, host_config, logpath
     env.update(RESTOCK_REPO=str(repo), RESTOCK_PLUGIN_ENV=str(plugin_env),
                RESTOCK_HOST_CONFIG=str(host_config), RESTOCK_NVIDIA_RUNTIME=str(nvidia_runtime),
                RESTOCK_WITH_GPU_USERSPACE='1',
+               # fm359: UNBUFFERED host-stack stdout (host python + every python child), so each line
+               # hits host-stack.log immediately. Piped-to-file python block-buffers stdout and the
+               # teardown kill drops the last block -- run-283 truncated mid-stream at the pan
+               # PLAN_DELIVERY, costing the failure reason. Unbuffered => the evidence survives a kill.
+               PYTHONUNBUFFERED='1',
                ROS_DOMAIN_ID='88', ROS_LOCALHOST_ONLY='1', ROS_AUTOMATIC_DISCOVERY_RANGE='LOCALHOST')
     script = str(Path(repo) / 'scripts/restock_runtime/launch_restock_host_stack.sh')
     log = open(logpath, 'wb')

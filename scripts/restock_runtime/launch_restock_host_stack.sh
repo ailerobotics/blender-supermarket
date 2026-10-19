@@ -33,4 +33,8 @@ export PYTHONPATH="$REPO/scripts:${PYTHONPATH:-}"
 export ROS_DOMAIN_ID=88 ROS_LOCALHOST_ONLY=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST ROS_STATIC_PEERS=''
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp FASTDDS_BUILTIN_TRANSPORTS=UDPv4 SKIP_DEFAULT_XML=1
 
-exec python3 "$REPO/scripts/run_restock_host.py" --config "$CONFIG" --launch
+# fm359: -u (and PYTHONUNBUFFERED from the launcher env) force UNBUFFERED host stdout so every line
+# reaches host-stack.log immediately. When stdout is a FILE, python block-buffers it; the teardown kill
+# then drops the last unflushed block -- run-283 lost the pan failure reason, truncated mid-stream at
+# PLAN_DELIVERY. Unbuffered => a transient can never again leave us without the evidence line.
+exec python3 -u "$REPO/scripts/run_restock_host.py" --config "$CONFIG" --launch
