@@ -679,6 +679,161 @@ def test_move_group_respawn_happy_path_untouched(monkeypatch, capsys):
     assert 'MOVE_GROUP_RESPAWN_RESEED' not in capsys.readouterr().out
 
 
+def _settle_adapter(monkeypatch, *, vel, settle_wait_s=None, settle_vel=None, live_pos=0.1):
+    """fm369/fm370 harness: a RosMotionPort whose fake plan resolves to a 1 s trajectory starting at the
+    measured start (0.0, so validate passes) and whose live_arm_state reports every joint at ``live_pos``
+    (the drifted pose the reseed must adopt) moving at ``vel`` rad/s. The node sim clock is a MUTABLE
+    container the test advances to drive the settle sub-budget. The sim knobs reach the port via ctor
+    params (env unset => env_wins keeps the passed value). Returns (port, clk, trajectory)."""
+    pytest.importorskip('rclpy')
+    from concurrent.futures import Future
+    from moveit_msgs.msg import RobotTrajectory
+    from trajectory_msgs.msg import JointTrajectoryPoint
+    from scripts.twin.restock_manipulation.ros_adapter import RosMotionPort
+    import rclpy.action
+
+    monkeypatch.setenv('ROS_DOMAIN_ID', '88')
+    monkeypatch.setenv('ROS_AUTOMATIC_DISCOVERY_RANGE', 'LOCALHOST')
+    monkeypatch.delenv('ROS_STATIC_PEERS', raising=False)
+    monkeypatch.delenv('RESTOCK_SETTLE_WAIT_S', raising=False)
+    monkeypatch.delenv('RESTOCK_SETTLE_VEL', raising=False)
+
+    def ready(value):
+        f = Future(); f.set_result(value); return f
+
+    class Handle:
+        accepted = True
+        cancelled = False
+        def __init__(self, result):
+            self.result = result
+        def get_result_async(self):
+            return ready(self.result)
+        def cancel_goal_async(self):
+            self.cancelled = True
+            return ready(None)
+
+    trajectory = RobotTrajectory()
+    trajectory.joint_trajectory.joint_names = list(JOINTS)
+    for index in range(2):
+        point = JointTrajectoryPoint()
+        point.positions = [0.0] * 6               # planned start == measured start 0.0 -> validate passes
+        point.time_from_start.sec = index         # 1 s trajectory -> exec budget (1+25)*scale
+        trajectory.joint_trajectory.points.append(point)
+    plan_result = NS(status=4, result=NS(error_code=NS(val=1), planned_trajectory=trajectory))
+    execute_result = NS(status=4, result=NS(error_code=NS(val=1)))
+
+    class Client:
+        def __init__(self, node, action_type, name):
+            self.name = name
+        def server_is_ready(self):
+            return True
+        def send_goal_async(self, goal):
+            return ready(Handle(plan_result if self.name.endswith('move_action') else execute_result))
+
+    monkeypatch.setattr(rclpy.action, 'ActionClient', Client)
+    from builtin_interfaces.msg import Time
+    clk = {'ns': 0}
+    node = NS(context=NS(get_domain_id=lambda: 88),
+              get_parameter=lambda name: NS(value=True),
+              get_clock=lambda: NS(now=lambda: NS(nanoseconds=clk['ns'], to_msg=lambda: Time())),
+              create_client=lambda *args: NS(service_is_ready=lambda: True,
+                                             call_async=lambda req: ready(None)),
+              create_publisher=lambda *a, **k: NS(publish=lambda *a, **k: None))
+    live = lambda: ({j: float(live_pos) for j in JOINTS}, {j: float(vel) for j in JOINTS}, True)
+    kwargs = {}
+    if settle_wait_s is not None:
+        kwargs['settle_wait_s'] = settle_wait_s
+    if settle_vel is not None:
+        kwargs['settle_vel'] = settle_vel
+    port = RosMotionPort(node, joint_limits=[(-1, 1)] * 6, payload_sync=lambda *a: True,
+                         emergency_stop=lambda: None, live_arm_state=live, **kwargs)
+    return port, clk, trajectory
+
+
+def _advance_to_await_settle(port):
+    for _ in range(8):
+        port.poll()
+        if port.state == 'await_settle':
+            return True
+    return False
+
+
+def test_await_settle_besteffort_dispatches_after_subbudget(monkeypatch, capsys):
+    # fm369: a non-settling arm (0.30 rad/s >> 0.05) with a 6 s settle sub-budget HOLDS until 6 sim-seconds
+    # pass, then dispatches BEST-EFFORT (run-296 RETREAT would have otherwise run the ~26 s exec deadline
+    # into a fault). The reseed still re-anchors the first waypoint to the live pose (0.1), and the exit
+    # log names the besteffort path.
+    port, clk, trajectory = _settle_adapter(monkeypatch, vel=0.30, settle_wait_s=6.0, live_pos=0.1)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert _advance_to_await_settle(port)
+    clk['ns'] = int(3e9)                 # 3 s < 6 s sub-budget -> still holding
+    assert port.poll() == 'running'
+    assert port.state == 'await_settle'
+    clk['ns'] = int(7e9)                 # 7 s > 6 s sub-budget (and < 26 s exec deadline) -> best-effort
+    assert _drive_to_terminal(port) == 'succeeded'
+    out = capsys.readouterr().out
+    assert 'AWAIT_SETTLE_EXIT path=besteffort' in out
+    assert trajectory.joint_trajectory.points[0].positions == pytest.approx((0.1,) * 6)  # reseeded to live
+
+
+def test_await_settle_byte_identical_holds_when_subbudget_unset(monkeypatch, capsys):
+    # Byte-identical real-rig: settle_wait_s defaults to +inf, so a non-settling arm HOLDS exactly as the
+    # original fm357 behaviour (never best-effort), bounded only by the execute deadline as before.
+    port, clk, _ = _settle_adapter(monkeypatch, vel=0.30, live_pos=0.1)   # no settle_wait_s -> inf default
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert _advance_to_await_settle(port)
+    clk['ns'] = int(10e9)                # 10 s (< 26 s exec deadline) -> still holding, no best-effort
+    assert port.poll() == 'running'
+    assert port.state == 'await_settle'
+    assert 'AWAIT_SETTLE_EXIT' not in capsys.readouterr().out
+
+
+def test_await_settle_vel_threshold_knob_counts_jitter_as_settled(monkeypatch, capsys):
+    # fm370: with the settle-velocity threshold raised to 0.15, an arm jittering at 0.12 rad/s counts as
+    # SETTLED on the NORMAL path (no best-effort, no hold) and dispatches immediately.
+    port, clk, _ = _settle_adapter(monkeypatch, vel=0.12, settle_vel=0.15, live_pos=0.1)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert _drive_to_terminal(port) == 'succeeded'
+    out = capsys.readouterr().out
+    assert 'AWAIT_SETTLE_EXIT path=settled' in out
+    assert 'path=besteffort' not in out
+
+
+def test_await_settle_vel_default_still_holds_jitter(monkeypatch, capsys):
+    # The 0.15 threshold is opt-in: at the real-rig default (0.05) the SAME 0.12 rad/s jitter is NOT
+    # settled, so it holds (byte-identical) rather than dispatching.
+    port, clk, _ = _settle_adapter(monkeypatch, vel=0.12, live_pos=0.1)   # default settle_vel 0.05
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert _advance_to_await_settle(port)
+    clk['ns'] = int(10e9)
+    assert port.poll() == 'running'
+    assert 'AWAIT_SETTLE_EXIT' not in capsys.readouterr().out
+
+
+def test_await_settle_settled_arm_normal_path_logs_settled(monkeypatch, capsys):
+    # A genuinely settled arm (0.0 rad/s) dispatches on the normal settled path and logs path=settled.
+    port, clk, trajectory = _settle_adapter(monkeypatch, vel=0.0, settle_wait_s=6.0, live_pos=0.1)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert _drive_to_terminal(port) == 'succeeded'
+    out = capsys.readouterr().out
+    assert 'AWAIT_SETTLE_EXIT path=settled' in out
+    assert trajectory.joint_trajectory.points[0].positions == pytest.approx((0.1,) * 6)  # reseeded to live
+
+
+def test_settle_env_knobs_win_over_passed_value(monkeypatch):
+    # fm369/fm370 env-win: env unset keeps the ctor-passed value (byte-identical real-rig default); env set
+    # wins. Mirrors the fm363 env_wins contract (module default already reflects the env at import).
+    from scripts.twin.restock_manipulation.ros_adapter import env_wins, SETTLE_VEL_DEFAULT
+    monkeypatch.delenv('RESTOCK_SETTLE_VEL', raising=False)
+    assert env_wins('RESTOCK_SETTLE_VEL', SETTLE_VEL_DEFAULT, SETTLE_VEL_DEFAULT) == pytest.approx(0.05)
+    monkeypatch.setenv('RESTOCK_SETTLE_VEL', '0.15')
+    assert env_wins('RESTOCK_SETTLE_VEL', SETTLE_VEL_DEFAULT, 0.15) == pytest.approx(0.15)
+    monkeypatch.delenv('RESTOCK_SETTLE_WAIT_S', raising=False)
+    assert env_wins('RESTOCK_SETTLE_WAIT_S', float('inf'), float('inf')) == float('inf')
+    monkeypatch.setenv('RESTOCK_SETTLE_WAIT_S', '6')
+    assert env_wins('RESTOCK_SETTLE_WAIT_S', float('inf'), 6.0) == pytest.approx(6.0)
+
+
 def test_ensemble_calls_rgb_models_and_rejects_unknown():
     from scripts.twin.restock_manipulation.perception import EnsembleObservationPipeline
     bounds = np.array([[0,0,10,10]])

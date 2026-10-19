@@ -162,6 +162,19 @@ def validate_trajectory(trajectory, start, limits):
 # the arm to ~rest, then re-seed the first waypoint to the LIVE measured state immediately before the
 # execute dispatch. Both are pure/CPU-testable; gated on a live-state provider (absent => byte-identical).
 SETTLE_VEL_DEFAULT = 0.05  # rad/s: max per-joint speed for the arm to count as settled before executing
+# fm369: SIM-ONLY best-effort settle sub-budget (sim seconds). The await_settle hold waits for the arm to
+# reach SETTLE_VEL_DEFAULT before dispatching execute; at a gravity/contact-jittery pose the arm can never
+# settle and the hold runs the whole ~40 s execute deadline, then faults and ends the mission (run-296: the
+# post-release RETREAT-start never dropped below 0.05 rad/s). When the arm has been held this many sim
+# seconds without settling, dispatch ANYWAY: the reseed re-anchors the first waypoint to the live pose, so
+# the start stays valid and MoveIt's ExecuteTrajectory start-tolerance is the real gate. +inf (env unset)
+# => byte-identical (hold to the execute deadline exactly as before).
+SETTLE_WAIT_S = max(0.5, float(os.environ.get('RESTOCK_SETTLE_WAIT_S', 'inf')))
+# fm370: SIM-ONLY settle-velocity THRESHOLD override (rad/s). Default SETTLE_VEL_DEFAULT (0.05) =
+# byte-identical real-rig; the sim raises it (0.15) so a soft-drive arm jittering a little at a loaded
+# pose counts as settled on the NORMAL path instead of always timing out into fm369 best-effort.
+# Independent of SETTLE_WAIT_S.
+SETTLE_VEL = max(0.001, min(2.0, float(os.environ.get('RESTOCK_SETTLE_VEL', SETTLE_VEL_DEFAULT))))
 
 
 def arm_settled(velocities, tol=SETTLE_VEL_DEFAULT):
@@ -183,7 +196,7 @@ class RosMotionPort:
                  group='ur_manipulator', tcp='gripper_pad_tcp', namespace='/restock_sim',
                  pipeline='isaac_ros_cumotion', timeout=MOVE_WALL_TIMEOUT_S, velocity_scale=.04, pose_goal=False,
                  stow_config=None, max_velocity_scale=.05, plan_wall_cap_s=PLAN_TOTAL_WALL_CAP_S,
-                 live_arm_state=None, settle_vel=SETTLE_VEL_DEFAULT):
+                 live_arm_state=None, settle_vel=SETTLE_VEL_DEFAULT, settle_wait_s=SETTLE_WAIT_S):
         require_sim_domain()
         # fm357 structural fix: live_arm_state() -> ({joint: pos}, {joint: vel}, fresh:bool) | None gives
         # the latest measured arm state; when present, each arm execute SETTLES the arm (<= settle_vel)
@@ -191,7 +204,10 @@ class RosMotionPort:
         # the render-paced plan->validate drift no longer aborts the move. None => byte-identical (no
         # settle/re-seed; the original direct execute dispatch).
         self._live_arm_state = live_arm_state if callable(live_arm_state) else None
-        self._settle_vel = float(settle_vel)
+        # fm370 / fm369: both SIM-ONLY (env wins over any config-passed value; default = real-rig).
+        self._settle_vel = env_wins('RESTOCK_SETTLE_VEL', settle_vel, SETTLE_VEL)
+        self._settle_wait_s = env_wins('RESTOCK_SETTLE_WAIT_S', settle_wait_s, SETTLE_WAIT_S)
+        self._settle_wait_start = None   # fm369: sim-time the current await_settle hold began
         self._pending_exec = None
         # Total planning-wall cap for a single move (ik/plan request/result). Real-rig default 22 s
         # (PLAN_TOTAL_WALL_CAP_S); the sim profile raises it (firstmate 293) because a plan that
@@ -816,10 +832,23 @@ class RosMotionPort:
         if self.state == 'await_settle':
             from moveit_msgs.action import ExecuteTrajectory
             live = self._live_arm_state() if self._live_arm_state is not None else None
+            waited = (self._sim_now() - self._settle_wait_start
+                      if self._settle_wait_start is not None else 0.0)
+            path, maxvel = 'settled', 0.0
             if live is not None:
                 pos_by_name, vel_by_name, fresh = live
-                if fresh and vel_by_name and not arm_settled(vel_by_name.values(), self._settle_vel):
-                    return 'running'   # still drifting; hold (arm drive keeps the pose)
+                if fresh and vel_by_name:
+                    maxvel = max((abs(v) for v in vel_by_name.values()), default=0.0)
+                    if not arm_settled(vel_by_name.values(), self._settle_vel):
+                        # fm369 best-effort: a gravity/contact-jittery loaded pose may never reach
+                        # settle_vel (run-296 RETREAT). After settle_wait_s sim-seconds stop holding and
+                        # dispatch ANYWAY -- the reseed below re-anchors the first waypoint to the live
+                        # pose so the start stays valid; MoveIt's ExecuteTrajectory start-tolerance is the
+                        # real gate. settle_wait_s = +inf (env unset) => hold to the execute deadline,
+                        # byte-identical to the original fm357 behaviour.
+                        if waited < self._settle_wait_s:
+                            return 'running'   # still drifting; hold (arm drive keeps the pose)
+                        path = 'besteffort'
                 if fresh:
                     jt = self._pending_exec.joint_trajectory
                     if jt.points:
@@ -830,9 +859,14 @@ class RosMotionPort:
                         # regressed: clearing to [] -> 'six explicit waypoint velocities required' -> the
                         # FJT goal was rejected and the APPROACH aborted).
                         jt.points[0].velocities = [0.0] * 6
+            # fm370: one line at EVERY await_settle exit -- which path (settled|besteffort), the exit joint
+            # speed, the sim-seconds waited -- so run-297's log shows, per move, which path it took.
+            print('AWAIT_SETTLE_EXIT path=%s maxvel=%.3f waited=%.2fs'
+                  % (path, maxvel, waited), flush=True)
             goal = ExecuteTrajectory.Goal()
             goal.trajectory = self._pending_exec
             self._pending_exec = None
+            self._settle_wait_start = None
             self._send(self.execute, goal, 'execute_accept')
             return 'running'
         if not self.future.done():
@@ -869,6 +903,7 @@ class RosMotionPort:
                     self._send(self.execute, goal, 'execute_accept')
                 else:                                   # fm357: settle + re-seed before dispatch
                     self._pending_exec = goal.trajectory
+                    self._settle_wait_start = self._sim_now()   # fm369: start the settle sub-budget clock
                     self.state = 'await_settle'
                 return 'running'
             # fm347 (3): the cart PLACE moves (near_start) branch to the config NEAREST the measured pan
@@ -971,6 +1006,7 @@ class RosMotionPort:
                 self._send(self.execute, goal, 'execute_accept')
             else:                                       # fm357: settle + re-seed before dispatch
                 self._pending_exec = trajectory
+                self._settle_wait_start = self._sim_now()   # fm369: start the settle sub-budget clock
                 self.state = 'await_settle'
         elif self.state == 'execute_result':
             if result.status != 4 or result.result.error_code.val != 1:
