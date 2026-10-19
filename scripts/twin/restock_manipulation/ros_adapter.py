@@ -123,12 +123,45 @@ def validate_trajectory(trajectory, start, limits):
         raise ValueError('trajectory does not end at rest')
 
 
+# fm357: the host plans from the joints measured at begin-time, then hands the trajectory to MoveIt's
+# ExecuteTrajectory, which validates the FIRST waypoint against the CURRENT /joint_states
+# (allowed_start_tolerance). Under render pacing the plan->validate gap is ~hundreds of seconds, and a
+# gravity-loaded joint DRIFTS in that window (run-280 shoulder_pan; run-282 ur_elbow), so the start no
+# longer matches and the move ABORTS ('start point deviates ...'). The structural fix (below): settle
+# the arm to ~rest, then re-seed the first waypoint to the LIVE measured state immediately before the
+# execute dispatch. Both are pure/CPU-testable; gated on a live-state provider (absent => byte-identical).
+SETTLE_VEL_DEFAULT = 0.05  # rad/s: max per-joint speed for the arm to count as settled before executing
+
+
+def arm_settled(velocities, tol=SETTLE_VEL_DEFAULT):
+    """True when every measured joint velocity magnitude is within ``tol`` (arm at rest, not drifting)."""
+    vs = list(velocities)
+    return bool(vs) and all(math.isfinite(v) and abs(v) <= tol for v in vs)
+
+
+def reseed_first_waypoint(joint_names, planned_first_positions, live_by_name):
+    """Return the first waypoint's positions with each joint overwritten by its LIVE measured value
+    (looked up by name), in the trajectory's own joint order. A joint absent from ``live_by_name``
+    keeps its planned value. So MoveIt's ExecuteTrajectory start-state check matches the current arm
+    state after the render-paced plan->validate drift. Pure/CPU-testable."""
+    return [float(live_by_name.get(n, p)) for n, p in zip(joint_names, planned_first_positions)]
+
+
 class RosMotionPort:
     def __init__(self, node, *, joint_limits, payload_sync, emergency_stop,
                  group='ur_manipulator', tcp='gripper_pad_tcp', namespace='/restock_sim',
                  pipeline='isaac_ros_cumotion', timeout=25.0, velocity_scale=.04, pose_goal=False,
-                 stow_config=None, max_velocity_scale=.05, plan_wall_cap_s=PLAN_TOTAL_WALL_CAP_S):
+                 stow_config=None, max_velocity_scale=.05, plan_wall_cap_s=PLAN_TOTAL_WALL_CAP_S,
+                 live_arm_state=None, settle_vel=SETTLE_VEL_DEFAULT):
         require_sim_domain()
+        # fm357 structural fix: live_arm_state() -> ({joint: pos}, {joint: vel}, fresh:bool) | None gives
+        # the latest measured arm state; when present, each arm execute SETTLES the arm (<= settle_vel)
+        # then RE-SEEDS the trajectory's first waypoint to the live state before ExecuteTrajectory, so
+        # the render-paced plan->validate drift no longer aborts the move. None => byte-identical (no
+        # settle/re-seed; the original direct execute dispatch).
+        self._live_arm_state = live_arm_state if callable(live_arm_state) else None
+        self._settle_vel = float(settle_vel)
+        self._pending_exec = None
         # Total planning-wall cap for a single move (ik/plan request/result). Real-rig default 22 s
         # (PLAN_TOTAL_WALL_CAP_S); the sim profile raises it (firstmate 293) because a plan that
         # move_group completes in ~1.4 s can take >20 s to DELIVER its ActionResult to this port under
@@ -695,6 +728,28 @@ class RosMotionPort:
         if self.deadline_clock() > self.deadline:
             self.stop()
             return 'failed'
+        # fm357: before dispatching ExecuteTrajectory, hold until the arm is settled, then re-seed the
+        # first waypoint to the live measured state. This state has NO pending future (the plan already
+        # resolved), so it is handled before the future-done check below. Bounded by self.deadline so a
+        # never-settling arm still faults.
+        if self.state == 'await_settle':
+            from moveit_msgs.action import ExecuteTrajectory
+            live = self._live_arm_state() if self._live_arm_state is not None else None
+            if live is not None:
+                pos_by_name, vel_by_name, fresh = live
+                if fresh and vel_by_name and not arm_settled(vel_by_name.values(), self._settle_vel):
+                    return 'running'   # still drifting; hold (arm drive keeps the pose)
+                if fresh:
+                    jt = self._pending_exec.joint_trajectory
+                    if jt.points:
+                        jt.points[0].positions = reseed_first_waypoint(
+                            list(jt.joint_names), list(jt.points[0].positions), pos_by_name)
+                        jt.points[0].velocities = []   # start at rest at the live state
+            goal = ExecuteTrajectory.Goal()
+            goal.trajectory = self._pending_exec
+            self._pending_exec = None
+            self._send(self.execute, goal, 'execute_accept')
+            return 'running'
         if not self.future.done():
             return 'running'
         result = self.future.result()
@@ -724,7 +779,11 @@ class RosMotionPort:
                 # Execution is sim-paced, exactly like the cuMotion plan path: bound on the NODE/SIM clock.
                 self.deadline_clock = self._sim_now
                 self.deadline = self._sim_now() + duration + EXECUTE_SETTLE_MARGIN_S
-                self._send(self.execute, goal, 'execute_accept')
+                if self._live_arm_state is None:
+                    self._send(self.execute, goal, 'execute_accept')
+                else:                                   # fm357: settle + re-seed before dispatch
+                    self._pending_exec = goal.trajectory
+                    self.state = 'await_settle'
                 return 'running'
             # fm347 (3): the cart PLACE moves (near_start) branch to the config NEAREST the measured pan
             # start, so shoulder_pan stays on the pan branch (no ~3.9 rad flip to the stow-nominal
@@ -798,9 +857,13 @@ class RosMotionPort:
             # render-paced execution legitimately took many wall seconds per sim second (run-93).
             self.deadline_clock=self._sim_now
             self.deadline=self._sim_now()+duration+EXECUTE_SETTLE_MARGIN_S
-            goal = ExecuteTrajectory.Goal()
-            goal.trajectory = trajectory
-            self._send(self.execute, goal, 'execute_accept')
+            if self._live_arm_state is None:
+                goal = ExecuteTrajectory.Goal()
+                goal.trajectory = trajectory
+                self._send(self.execute, goal, 'execute_accept')
+            else:                                       # fm357: settle + re-seed before dispatch
+                self._pending_exec = trajectory
+                self.state = 'await_settle'
         elif self.state == 'execute_result':
             if result.status != 4 or result.result.error_code.val != 1:
                 raise RuntimeError('execution failed')

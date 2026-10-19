@@ -76,6 +76,32 @@ def main():
     # Payload-ack WALL timeout: real-rig 1 s; sim profile widens it (render pacing stalls the host
     # between spins at grasp time) via config, >= 3x the measured worst-case service round-trip.
     payload = RosPayloadSync(ack_wall_s=float(config.get('payload_ack_wall_s', 1.0)))
+    # fm357: subscribe the measured arm /joint_states so the motion port can SETTLE the arm + RE-SEED
+    # each ExecuteTrajectory's first waypoint to the LIVE state. The render-paced plan->validate gap
+    # (~hundreds of sim seconds) lets a gravity-loaded joint drift off the planned start, so MoveIt's
+    # start-state check aborts the move (run-280 pan, run-282 elbow). The provider returns the latest
+    # arm positions/velocities by name + a sim-clock freshness flag; a stale/absent feed => the port
+    # falls back to the original direct dispatch (byte-identical).
+    from sensor_msgs.msg import JointState as _JointState
+    _arm_set = set(tool.arm_joints)
+    _live = {'pos': {}, 'vel': {}, 'stamp': None}
+    def _on_arm_joint_states(msg):
+        names = list(msg.name)
+        pos = {n: msg.position[i] for i, n in enumerate(names)
+               if n in _arm_set and i < len(msg.position)}
+        if len(pos) != len(_arm_set):
+            return
+        vel = {n: msg.velocity[i] for i, n in enumerate(names)
+               if n in _arm_set and i < len(msg.velocity)}
+        _live['pos'], _live['vel'] = pos, vel
+        _live['stamp'] = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+    node.create_subscription(_JointState, '/restock_sim/joint_states', _on_arm_joint_states, 10)
+    def live_arm_state():
+        if _live['stamp'] is None:
+            return None
+        now = node.get_clock().now().nanoseconds * 1e-9
+        fresh = (now - _live['stamp']) <= 10.0   # generous sim-clock bound (render-paced gap ~1.7-3.5 s)
+        return (dict(_live['pos']), dict(_live['vel']), bool(fresh))
     motion = RosMotionPort(node,joint_limits=tool.arm_limits,payload_sync=payload,
                            emergency_stop=lambda:stop.publish(Bool(data=True)),
                            velocity_scale=planner_velocity_scale(
@@ -83,7 +109,8 @@ def main():
                            max_velocity_scale=min(arm_max_speed,1.),
                            pose_goal=bool(config.get('pose_goal', False)),
                            stow_config=transport_joints,
-                           plan_wall_cap_s=float(config.get('plan_wall_cap_s', 22.0)))
+                           plan_wall_cap_s=float(config.get('plan_wall_cap_s', 22.0)),
+                           live_arm_state=live_arm_state)
     # Acquisition-to-use freshness (require_fresh on valid_until_steady) must be measured on the
     # SIM/node clock, not wall: the held sensing deadline is a SIM-time budget (world.current_time +
     # window remaining, sensing_sources.steady_clock) and under render pacing wall races far ahead of
