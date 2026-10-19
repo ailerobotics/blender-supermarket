@@ -47,6 +47,16 @@ RESPAWN_WAIT_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_RESPAWN_W
 # fast. Legit stochastic retries succeed in ~1 s each and never approach this.
 MOVE_WALL_TIMEOUT_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_MOVE_WALL_TIMEOUT_S', 25.0))))  # fm362: the ik/plan-accept WALL deadline default
 PLAN_TOTAL_WALL_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_PLAN_WALL_CAP_S', 22.0))))  # fm362 sim-only env widen
+
+
+def env_wins(env_var, passed, module_default):
+    """fm363: the SIM-ONLY env override WINS over any value a caller (ros_host config) passes to the
+    ctor, so a widen can never again be silently moot (run-290: RosMotionPort(plan_wall_cap_s=config[60])
+    shadowed RESTOCK_PLAN_WALL_CAP_S). Env set -> the env value; env unset -> the passed value (or the
+    module default). The module_default already clamps the env, so a set env reaches here as that value."""
+    if os.environ.get(env_var) is not None:
+        return float(module_default)
+    return float(passed if passed is not None else module_default)
 # fm345 (c): the tight terminal goal-gate position tolerance (matches trajectory_host GOAL_POSITION_TOL);
 # the per-move PLACE relaxation widens it only for the carton-loaded extend, reset to this otherwise.
 GOAL_POSITION_TOL_DEFAULT = 0.01
@@ -169,7 +179,8 @@ class RosMotionPort:
         # render pacing (run-234/237/239), so a 22 s cap cut off a succeeded plan. The 30 s /sensors
         # wall backstop stays the genuine hang catch; real-rig path untouched. Recorded with the other
         # render-pacing wall-window relaxations.
-        self.plan_wall_cap_s = float(plan_wall_cap_s)
+        # fm363: env WINS over the ros_host config value (run-290 shadow fix).
+        self.plan_wall_cap_s = env_wins('RESTOCK_PLAN_WALL_CAP_S', plan_wall_cap_s, PLAN_TOTAL_WALL_CAP_S)
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
             raise RuntimeError('node must use domain 88 and simulation clock')
         if namespace != '/restock_sim':
@@ -189,7 +200,10 @@ class RosMotionPort:
         from moveit_msgs.action import MoveGroup, ExecuteTrajectory
         from moveit_msgs.srv import GetPositionIK
         self.node, self.group, self.tcp = node, group, tcp
-        self.pipeline, self.limits, self.timeout = pipeline, joint_limits, timeout
+        # fm363: env WINS over any caller-passed timeout too (ros_host does not pass it today, but keep
+        # the ik/plan-accept deadline env-authoritative so it can never be silently shadowed either).
+        self.pipeline, self.limits = pipeline, joint_limits
+        self.timeout = env_wins('RESTOCK_MOVE_WALL_TIMEOUT_S', timeout, MOVE_WALL_TIMEOUT_S)
         self.velocity_scale=velocity_scale
         # pose_goal=True plans to the cartesian TCP pose with a MoveGroup pose-goal (cuMotion does
         # collision-aware IK against its own XRDF model) instead of KDL GetPositionIK -> c-space

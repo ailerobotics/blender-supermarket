@@ -7,12 +7,21 @@ provenance; production rejects it. No default/mock adapter is installed.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from .inventory import Inventory, Job
 
 ACTIONS = ('collect', 'couple', 'outbound', 'park', 'transfer', 'verify', 'return')
+
+# fm363 universal step-level bounded retry (OUTER net; inner per-move retries stay the first line).
+# SIM-ONLY: RESTOCK_STEP_RETRY_MAX default 0 == byte-identical real-rig behaviour (no outer retry); the
+# sim orchestrator sets 2. Scoped to the re-attemptable MANEUVER stages only: re-beginning one re-drives
+# a nav/dock/home maneuver from the LIVE pose, which is idempotent-ish. collect/transfer make irreversible
+# payload acts (grasp/place/release) and verify commits stock, so re-beginning them would DOUBLE-ACT --
+# those are excluded here and rely on their inner per-move retries instead (fm363's explicit scoping).
+_RETRYABLE_STAGES = ('couple', 'outbound', 'park', 'return')
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,10 @@ class Mission:
         self.max_evidence_age_s = max_evidence_age_s
         self.state, self.reason = 'new', ''
         self.time = self.elapsed = 0.
+        # fm363: per-stage outer-retry budget, read at construction (after the orchestrator sets env).
+        # 0 => byte-identical (no outer retry). Only _RETRYABLE_STAGES consult it.
+        self.step_retry_max = max(0, int(os.environ.get('RESTOCK_STEP_RETRY_MAX', 0)))
+        self._step_retries = {}
         # Stages attempted but reported 'unavailable' (a provisioned-capability gap, e.g.
         # in-process cuRobo). They are recorded FAILED and the mission keeps running so the
         # full choreography is exercised, but the overall outcome is forced to 'failed'.
@@ -207,7 +220,21 @@ class Mission:
         if outcome == 'running':
             return self.state
         if isinstance(outcome, tuple):     # ('failed', reason)
-            self.fail(outcome[1])
+            reason = outcome[1]
+            # fm363 universal OUTER retry: a maneuver stage that fails OR raised (step_stage turns both
+            # into ('failed', reason)) is re-attempted with a FRESH budget (re-_begin restarts the
+            # adapter + resets elapsed) up to step_retry_max, so one unlucky seed streak / timing trip /
+            # transient cannot end the mission. One log line per retry. Off (0) or a non-maneuver stage
+            # => the original immediate fail (byte-identical). Inner per-move retries still run first.
+            if (self.step_retry_max > 0 and self.state in _RETRYABLE_STAGES
+                    and self._step_retries.get(self.state, 0) < self.step_retry_max):
+                self._step_retries[self.state] = self._step_retries.get(self.state, 0) + 1
+                print('STEP_RETRY stage=%s attempt=%d/%d cause=%s'
+                      % (self.state, self._step_retries[self.state], self.step_retry_max, reason),
+                      flush=True)
+                self._begin(self.state)     # re-drive the maneuver from the live pose, fresh budget
+                return self.state
+            self.fail(reason)
             return self.state
         self._advance()                     # 'succeeded' or 'degraded'
         return self.state
