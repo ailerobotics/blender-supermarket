@@ -51,6 +51,8 @@ PLAN_TOTAL_WALL_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_PLAN_W
 # default 30 = byte-identical real-rig. The long carton-loaded collect's held sensing starves the
 # stream past 30 s wall -> sim sets 180.
 SENSOR_STREAM_WALL_BACKSTOP_S = max(5.0, min(600.0, float(os.environ.get('RESTOCK_SENSOR_STREAM_WALL_BACKSTOP_S', 30.0))))
+# fm366: RosTransferBridge startup-grace wall bound (ros_host passes config, default 5 s). Sim-only env.
+STARTUP_GRACE_S = max(1.0, min(120.0, float(os.environ.get('RESTOCK_STARTUP_GRACE_S', 5.0))))
 
 
 def env_wins(env_var, passed, module_default):
@@ -992,7 +994,7 @@ class RosTransferBridge:
         # unachievable; the approach warm-up + this grace make the first frame feasible without
         # weakening the moving-arm protection (before the first frame the arm has acted on nothing).
         self.watchdog_seconds = watchdog_seconds
-        self.startup_grace_seconds = startup_grace_seconds
+        self.startup_grace_seconds = env_wins('RESTOCK_STARTUP_GRACE_S', startup_grace_seconds, STARTUP_GRACE_S)
         self.wall_backstop_seconds = wall_backstop_seconds
         self.first_frame = False
         self.job_start_wall = None

@@ -3,8 +3,13 @@
 This never authors physics joints. The native CAD seal is already measured in
 Sensors before attach; loss of seal prevents a collision attachment request.
 """
+import os
 import threading
 import numpy as np
+
+# fm366: payload grasp/detach ack WALL timeout. ros_host passes config['payload_ack_wall_s'] (sim 15);
+# the sim-only env WINS over it when set (default None => the passed value, byte-identical real-rig).
+PAYLOAD_ACK_WALL_S = os.environ.get('RESTOCK_PAYLOAD_ACK_WALL_S')
 
 # Sim-clock lead tolerance (run-221): the gripper_pad_tcp /tf (and the Sensors feedback) are stamped
 # with Isaac's world.current_time, which can lead the payload node's relayed /clock by up to ~1
@@ -37,7 +42,8 @@ class RosPayloadSync:
         from rclpy.executors import SingleThreadedExecutor
         from tf2_ros import Buffer, TransformListener
         from moveit_msgs.srv import ApplyPlanningScene
-        self.ack_wall_s = float(ack_wall_s)
+        self.ack_wall_s = (max(1.0, min(120.0, float(PAYLOAD_ACK_WALL_S)))
+                           if PAYLOAD_ACK_WALL_S is not None else float(ack_wall_s))
         self.node = rclpy.create_node('restock_payload',namespace='/restock_sim',
                        parameter_overrides=[Parameter('use_sim_time',value=True)])
         self.tf = Buffer()

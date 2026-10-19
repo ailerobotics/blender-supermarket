@@ -99,9 +99,14 @@ class StationClient:
         self.stage_clock=stage_clock
         # Wall heartbeat-unavailable bound (real-rig 10 s; sim profile raises it for the slow place).
         # With a stage_clock wired it is the frozen-sim backstop behind the sim-clock primary guard.
-        self.heartbeat_s=float(heartbeat_s)
+        # fm366: the sim-only env WINS over any caller-passed value (isaac_factory passes config, which
+        # shadowed the env widen), unset => the passed value (byte-identical real-rig). Re-read + clamp
+        # the env at ctor time (robust whether the env was set before or after import).
+        self.heartbeat_s=(max(2.0,min(120.0,float(os.environ['RESTOCK_HEARTBEAT_UNAVAILABLE_S'])))
+                          if 'RESTOCK_HEARTBEAT_UNAVAILABLE_S' in os.environ else float(heartbeat_s))
         # Sim-clock (stage) supervisor-liveness bound (primary when stage_clock is wired).
-        self.stage_unavailable_s=float(stage_unavailable_s)
+        self.stage_unavailable_s=(max(1.0,min(120.0,float(os.environ['RESTOCK_STAGE_UNAVAILABLE_S'])))
+                                  if 'RESTOCK_STAGE_UNAVAILABLE_S' in os.environ else float(stage_unavailable_s))
         # Stage time of the last accepted fresh ack, and of the epoch's first tick; the sim-clock
         # liveness gap is measured against whichever is later. None until the stage clock is first read.
         self._last_ack_stage=None

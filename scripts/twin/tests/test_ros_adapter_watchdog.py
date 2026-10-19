@@ -101,7 +101,10 @@ class WallBackstop(unittest.TestCase):
         # advanced past the 30 s backstop -> a stalled simulator is still hard-stopped.
         b, emitted = _bridge(first_frame=True, sim_gap=0.0, packet_wall_age=31.0, wall_backstop=30.0)
         b._watchdog()
-        self.assertEqual([e.reason for e in emitted], ['sensor stream wall backstop expired'])
+        self.assertEqual(len(emitted), 1)
+        # reason now carries the measured gap vs backstop for diagnosis (fm362 gap logging).
+        self.assertTrue(emitted[0].reason.startswith('sensor stream wall backstop expired'), emitted[0].reason)
+        self.assertIn('gap=31.0s > 30.0s', emitted[0].reason)
 
     def test_within_backstop_does_not_trip(self):
         # Frozen clock, but within the wall backstop and within the sim bound -> no trip yet.

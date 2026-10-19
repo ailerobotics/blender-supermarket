@@ -60,6 +60,7 @@ in-process. Baselines are only ever produced by an observed commissioning run; a
 one is refused, never fabricated.
 """
 import math
+import os
 
 import numpy as np
 
@@ -246,6 +247,10 @@ def build_sensing(*, app, assembly, plan, config, output):
         station_kwargs['steady_clock'] = sim_clock
     if isinstance(config, dict) and config.get('sensor_wall_backstop_s') is not None:
         station_kwargs['wall_backstop_s'] = float(config['sensor_wall_backstop_s'])
+    elif os.environ.get('RESTOCK_SENSOR_WALL_BACKSTOP_S') is not None:
+        # fm366: when config does not set it, the sim-only env governs the binding sensor-stream wall
+        # backstop too (default unset => binding's own 60 s, byte-identical real-rig).
+        station_kwargs['wall_backstop_s'] = max(5.0, min(600.0, float(os.environ['RESTOCK_SENSOR_WALL_BACKSTOP_S'])))
     # Opt-in sensing gate (default off): when config['sensing_execution_gate'] is set, the capture
     # path can SUSPEND the decode-camera render during a controller execution phase and republish the
     # held registration (keeps /sensors alive without the render -- the run-126 wall lever). The
