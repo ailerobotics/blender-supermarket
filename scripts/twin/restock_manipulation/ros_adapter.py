@@ -47,6 +47,10 @@ RESPAWN_WAIT_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_RESPAWN_W
 # fast. Legit stochastic retries succeed in ~1 s each and never approach this.
 MOVE_WALL_TIMEOUT_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_MOVE_WALL_TIMEOUT_S', 25.0))))  # fm362: the ik/plan-accept WALL deadline default
 PLAN_TOTAL_WALL_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_PLAN_WALL_CAP_S', 22.0))))  # fm362 sim-only env widen
+# fm364/run-293: host /sensors stream wall backstop (RosTransferBridge default). Sim-only env widen;
+# default 30 = byte-identical real-rig. The long carton-loaded collect's held sensing starves the
+# stream past 30 s wall -> sim sets 180.
+SENSOR_STREAM_WALL_BACKSTOP_S = max(5.0, min(600.0, float(os.environ.get('RESTOCK_SENSOR_STREAM_WALL_BACKSTOP_S', 30.0))))
 
 
 def env_wins(env_var, passed, module_default):
@@ -952,7 +956,14 @@ class RosTransferBridge:
       moving-arm protection is not weakened.
     """
     def __init__(self, node, controller, *, watchdog_seconds=1.0, startup_grace_seconds=5.0,
-                 wall_backstop_seconds=30.0):
+                 wall_backstop_seconds=None):
+        # fm364/run-293: the host /sensors stream wall backstop is the THIRD wall gate the fm362 audit
+        # missed (effective value is this ctor default, not the module constants it widened). run-293 did
+        # the FULL collect manip incl retreat_tuck, then the held-sensing /sensors stream starved past the
+        # backstop during the long carton-loaded fold. Default now the sim-only env-overridable module
+        # constant (RESTOCK_SENSOR_STREAM_WALL_BACKSTOP_S, default 30 = byte-identical real-rig; sim 180).
+        if wall_backstop_seconds is None:
+            wall_backstop_seconds = SENSOR_STREAM_WALL_BACKSTOP_S
         require_sim_domain()
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
             raise RuntimeError('bridge requires isolated simulation node')
@@ -1078,7 +1089,9 @@ class RosTransferBridge:
         # Wall-time backstop: a frozen sim clock never advances sim_now, so the node-clock bound
         # above can never trip; this still hard-stops a stalled simulator.
         if wall_now - self.last_packet_wall > self.wall_backstop_seconds:
-            self._emit(self.controller._fail('sensor stream wall backstop expired'))
+            self._emit(self.controller._fail(
+                'sensor stream wall backstop expired (gap=%.1fs > %.1fs)'
+                % (wall_now - self.last_packet_wall, self.wall_backstop_seconds)))
 
 
 class NvbloxWorldBridge:

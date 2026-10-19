@@ -18,6 +18,8 @@ GATES = [
     ('twin.restock_manipulation.ros_adapter', 'MOVE_WALL_TIMEOUT_S', 25.0, 'RESTOCK_MOVE_WALL_TIMEOUT_S', 75.0),
     ('twin.restock.station_host', 'STATION_PENDING_WALL_S', 2.0, 'RESTOCK_STATION_PENDING_WALL_S', 8.0),
     ('twin.restock_manipulation.isaac_sensors', 'SENSOR_WALL_BACKSTOP_S', 60.0, 'RESTOCK_SENSOR_WALL_BACKSTOP_S', 180.0),
+    # fm364/run-293: the host /sensors stream wall backstop (RosTransferBridge default), the 3rd missed gate.
+    ('twin.restock_manipulation.ros_adapter', 'SENSOR_STREAM_WALL_BACKSTOP_S', 30.0, 'RESTOCK_SENSOR_STREAM_WALL_BACKSTOP_S', 180.0),
 ]
 
 
