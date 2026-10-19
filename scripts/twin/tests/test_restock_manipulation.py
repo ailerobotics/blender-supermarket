@@ -21,6 +21,12 @@ class FixtureMotion:
         # miss (retriable); default False => a collision/plan-rejection fault (fails immediately).
         self.sim_deadline_fault = False
         self.polls = 0
+        # fm372: inject an arbitrary exception class/message from poll() when outcome=='raise'
+        # (default None => the legacy plan-exhaust RuntimeError, so existing tests are unchanged).
+        # raise_times=N raises it N times then returns 'succeeded' (to prove a bounded retry recovers).
+        self.raise_exc = None
+        self.raise_times = None
+        self._raised_count = 0
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
               slow=False, goal_tol=None, near_start=False):
@@ -41,7 +47,10 @@ class FixtureMotion:
     def poll(self):
         self.polls += 1
         if self.outcome == 'raise':
-            raise RuntimeError('planning failed (exhausted within wall cap)')
+            if self.raise_times is not None and self._raised_count >= self.raise_times:
+                return 'succeeded'
+            self._raised_count += 1
+            raise self.raise_exc or RuntimeError('planning failed (exhausted within wall cap)')
         return self.outcome
 
     def last_fault_was_sim_deadline(self):
@@ -876,3 +885,126 @@ def test_ros_packet_rejects_string_booleans_and_scan_coverage():
     for key, value in (('parked', 'false'), ('contact', 1), ('scanned_locations', 'rollwagen')):
         with pytest.raises(ValueError):
             sensors_from_json(json.dumps(dict(data, **{key:value})))
+
+
+# ---------------------------------------------------------------------------
+# fm372: close the whole "a collect move poll() can raise/fail and kill the mission" family.
+# Every non-collision, non-joint-limit raise at any collect move phase -> bounded fresh-seed retry.
+# Collisions (returned 'failed', not sim-deadline) and joint-limit raises still hard-fail. Bounded.
+# ---------------------------------------------------------------------------
+
+# The real move-poll collect phases: tuck/pan (+ stow) are begin_joint_goal (staged budget);
+# preplace/place/retreat are begin (general / deadline budget). 'release' is a gripper detach, not a
+# move poll, so it is not injectable here.
+_FM372_MOVE_PHASES = ['tuck', 'pan', 'preplace', 'place', 'retreat', 'stow']
+_FM372_RETRYABLE_EXC = [
+    RuntimeError('planning failed (exhausted within wall cap)'),  # plan-exhaust
+    ValueError('trajectory does not end at rest'),                # validate (bad stochastic seed)
+    RuntimeError('execution failed'),                             # goal-tolerance / track miss
+    RuntimeError('measured-feedback staleness watchdog'),         # feedback-lost
+    Exception('an unforeseen move-path error'),                   # any other class
+]
+
+
+def _issue_move(c, m, phase, t0=1.0):
+    """Drive a staged-swing controller to a move phase and ISSUE that move (begin/begin_joint_goal),
+    so the NEXT step calls poll(). Returns the sim time for that first poll step."""
+    t = run_to(c, phase, t0=t0)
+    c.step(.1, packet(c, t))        # issue the move
+    return t + .1
+
+
+@pytest.mark.parametrize('phase', _FM372_MOVE_PHASES)
+@pytest.mark.parametrize('exc', _FM372_RETRYABLE_EXC,
+                         ids=lambda e: type(e).__name__ + '-' + str(e).split()[0])
+def test_fm372_move_poll_raise_retries_every_class_every_phase(phase, exc, capsys):
+    c, m = _staged_controller()
+    tp = _issue_move(c, m, phase)
+    m.outcome, m.raise_exc = 'raise', exc
+    r = c.step(.1, packet(c, tp))                 # poll() raises -> bounded fresh-seed retry
+    assert r.status != 'failed', (phase, exc, r.reason)
+    assert c.phase == phase                       # stays in the phase, mission alive
+    assert not c.issued                           # re-issue armed for the next tick
+    out = capsys.readouterr().out
+    assert 'MOVE_RETRY phase=%s cls=%s' % (phase, type(exc).__name__) in out
+
+
+@pytest.mark.parametrize('phase', ['pan', 'retreat'])   # one staged, one general
+def test_fm372_joint_limit_raise_hard_fails_not_retried(phase):
+    for msg in ('waypoint outside joint limits', 'IK outside joint limits',
+                'contact IK outside joint limits'):
+        c, m = _staged_controller()
+        tp = _issue_move(c, m, phase)
+        m.outcome, m.raise_exc = 'raise', ValueError(msg)
+        r = c.step(.1, packet(c, tp))
+        assert r.status == 'failed', (phase, msg)
+        assert 'joint-limit' in c.reason and m.stops >= 1
+
+
+def test_fm372_collision_returned_failed_still_hard_fails_general():
+    # A COLLISION is a RETURNED 'failed' (not sim-deadline, not a raise) -> fail-fast, unchanged.
+    c, m = _staged_controller()
+    tp = _issue_move(c, m, 'retreat')
+    m.outcome, m.sim_deadline_fault = 'failed', False
+    r = c.step(.1, packet(c, tp))
+    assert r.status == 'failed'
+    assert c.reason == 'collision planning or execution failed'
+
+
+def test_fm372_sim_deadline_returned_failed_retries_general():
+    # A sim-deadline fault is a RETURNED 'failed' flagged retriable -> re-issue (existing fm367 path).
+    c, m = _staged_controller()
+    tp = _issue_move(c, m, 'retreat')
+    m.outcome, m.sim_deadline_fault = 'failed', True
+    r = c.step(.1, packet(c, tp))
+    assert r.status != 'failed'
+    assert c.phase == 'retreat' and not c.issued
+
+
+def test_fm372_persistent_raise_exhausts_then_fails_bounded(monkeypatch):
+    # A persistent retryable raise must EXHAUST the (env-tunable) max and _fail -- never loop forever.
+    monkeypatch.setenv('RESTOCK_MOVE_DEADLINE_RETRY_MAX', '2')
+    c, m = _staged_controller()
+    tp = _issue_move(c, m, 'retreat')                       # general path -> deadline budget
+    m.outcome, m.raise_exc = 'raise', ValueError('trajectory does not end at rest')
+    t, failed = tp, False
+    for _ in range(40):                                     # bounded: must fail well within this
+        r = c.step(.1, packet(c, t)); t += .1
+        if r.status == 'failed':
+            failed = True
+            break
+    assert failed and 'does not end at rest' in c.reason
+    assert c._move_deadline_retries == 2                    # exactly the env max, then fail
+
+
+def test_fm372_bounded_retry_recovers_after_transient_raises(monkeypatch):
+    monkeypatch.setenv('RESTOCK_STAGED_MOVE_RETRY_MAX', '4')
+    c, m = _staged_controller()
+    tp = _issue_move(c, m, 'pan')                           # staged path
+    m.outcome, m.raise_exc, m.raise_times = 'raise', ValueError('trajectory does not end at rest'), 2
+    t = tp
+    for _ in range(12):
+        if c.phase == 'preplace':
+            break
+        c.step(.1, packet(c, t)); t += .1
+    assert c.phase == 'preplace'                            # 2 raises (within 4) then succeeded
+
+
+def test_fm372_retry_max_env_tunable(monkeypatch):
+    monkeypatch.setenv('RESTOCK_STAGED_MOVE_RETRY_MAX', '4')
+    monkeypatch.setenv('RESTOCK_MOVE_DEADLINE_RETRY_MAX', '4')
+    c, _ = _staged_controller()
+    assert c._staged_move_retry_max == 4 and c._move_deadline_retry_max == 4
+
+
+def test_fm372_retry_max_default_byte_identical():
+    c, _ = _staged_controller()
+    assert c._staged_move_retry_max == 2 and c._move_deadline_retry_max == 2
+
+
+def test_fm372_retry_max_env_clamped_and_malformed_safe(monkeypatch):
+    monkeypatch.setenv('RESTOCK_STAGED_MOVE_RETRY_MAX', '999')
+    monkeypatch.setenv('RESTOCK_MOVE_DEADLINE_RETRY_MAX', 'not-an-int')
+    c, _ = _staged_controller()
+    assert c._staged_move_retry_max == 8          # clamped to [0, 8]
+    assert c._move_deadline_retry_max == 2        # malformed -> module default

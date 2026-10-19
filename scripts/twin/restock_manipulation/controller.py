@@ -1,6 +1,7 @@
 """Bounded transfer state machine; all runtime evidence must originate in sensors."""
 from dataclasses import asdict
 import math
+import os
 import time
 from ..restock_camera.freshness import require_fresh
 
@@ -24,6 +25,16 @@ STAGED_MOVE_RETRY_MAX = 2
 # times before failing the phase. Mirrors STAGED_MOVE_RETRY_MAX but for the general move path, which
 # had NO retry. A collision/plan-rejection (port raised -> flag False) is NOT retried (fail-fast kept).
 MOVE_DEADLINE_RETRY_MAX = 2
+
+
+def _retry_max_env(var, default):
+    """fm371: SIM-ONLY env override for a bounded per-move retry budget. Env unset => the module
+    default (byte-identical real-rig); set => the env value clamped to [0, 8]. A malformed value
+    falls back to the default rather than raising at mission boot."""
+    try:
+        return max(0, min(8, int(os.environ.get(var, default))))
+    except (TypeError, ValueError):
+        return int(default)
 
 
 class TransferController:
@@ -131,6 +142,11 @@ class TransferController:
         self.held = False
         self._staged_retries = 0   # fm358: bounded retry of a failed staged cart-swing move
         self._move_deadline_retries = 0   # fm367: bounded retry of a sim-deadline fault on the general move path
+        # fm371: the two bounded per-move retry budgets, SIM-ONLY env-tunable (default = the module
+        # constant => byte-identical real-rig). The sim raises them so a stochastic cuMotion seed
+        # streak across the long collect cart-swing re-rolls instead of ending the mission.
+        self._staged_move_retry_max = _retry_max_env('RESTOCK_STAGED_MOVE_RETRY_MAX', STAGED_MOVE_RETRY_MAX)
+        self._move_deadline_retry_max = _retry_max_env('RESTOCK_MOVE_DEADLINE_RETRY_MAX', MOVE_DEADLINE_RETRY_MAX)
         self.evidence = []
         self.reason = ''
         self.last_time = None
@@ -223,6 +239,37 @@ class TransferController:
             self.reason += f'; stop adapter failed: {exc}'
         # Never drop a held object on failure. Recovery is an explicit new decision.
         return self._result(({'kind': 'stop'}, {'kind': 'gripper', 'enabled': self.held}))
+
+    def _raised_move_exc(self, exc, *, staged):
+        """fm371/fm372: a collect move's poll() RAISED. Close the whole "a move raise kills the mission"
+        family: route EVERY non-collision, non-joint-limit raise -- plan-exhaust (RuntimeError), a
+        bad-seed trajectory that fails validate (ValueError), a sim-deadline/goal-tolerance/track-miss/
+        feedback-lost surfaced as a raise, or any other class -- through the SAME bounded fresh-seed
+        retry (a fresh move = a fresh plan + seed), since all are run-to-run cuMotion variance, not an
+        unreachable pose. A JOINT-LIMIT violation is a hard geometric fault (the goal/plan is out of
+        range) and is NEVER retried -> fail fast. (A COLLISION is a returned ``outcome=='failed'``, not
+        a raise, so it never reaches here and keeps its own fail-fast branch.) Staged cart-swing moves
+        use the staged budget; the general path uses the deadline budget. One MOVE_RETRY line per retry
+        names the exception class + phase. Bounded: a persistent raise exhausts the (env-tunable) max
+        -> _fail (no infinite loop)."""
+        if 'outside joint limits' in str(exc):
+            return self._fail('%s joint-limit violation: %s' % (self.phase, exc))
+        if staged:
+            if self._staged_retries < self._staged_move_retry_max:
+                self._staged_retries += 1
+                attempt, cap = self._staged_retries, self._staged_move_retry_max
+            else:
+                return self._fail('staged cart-swing %s move failed: %s' % (self.phase, exc))
+        else:
+            if self._move_deadline_retries < self._move_deadline_retry_max:
+                self._move_deadline_retries += 1
+                attempt, cap = self._move_deadline_retries, self._move_deadline_retry_max
+            else:
+                return self._fail('general %s move failed: %s' % (self.phase, exc))
+        print('MOVE_RETRY phase=%s cls=%s attempt=%d/%d' %
+              (self.phase, type(exc).__name__, attempt, cap), flush=True)
+        self.issued = False   # re-plan + re-execute this move next tick
+        return self._result()
 
     def step(self, dt: float, sensors: Sensors) -> Result:
         if self.phase == 'idle':
@@ -431,18 +478,28 @@ class TransferController:
                 print(f'CONTACT_SUCTION enable valid_until={s.valid_until_steady!r} '
                       f'waits={self._contact_waits} contact={s.contact}', flush=True)
                 return self._result(({'kind': 'gripper', 'enabled': True},))
-            outcome = self.motion.poll()
+            try:
+                outcome = self.motion.poll()
+            except Exception as exc:  # noqa: BLE001 -- fm372: route EVERY non-collision raise to retry
+                # fm371/fm372: the general move path had NO guard around poll() -- a stochastic cuMotion
+                # seed that exhausts the plan budget (RuntimeError), yields a trajectory that fails validate
+                # (ValueError, run-298 tuck's sibling), or surfaces a sim-deadline/goal-tolerance/track-miss/
+                # feedback-lost/other raise all propagated UNCAUGHT and ended the mission. All are run-to-run
+                # variance, so route through the SAME bounded fresh-seed retry (joint-limit hard-fails inside
+                # the helper). A genuine collision returns 'failed' (handled below) -- NOT a raise -- and
+                # still fails fast.
+                return self._raised_move_exc(exc, staged=False)
             if outcome == 'failed':
                 # fm367: a SIM-clock move/settle deadline miss (the port flags it; a collision/plan
                 # rejection raises -> flag False) is a render-pacing transient, so re-issue the SAME
-                # move with a fresh deadline up to MOVE_DEADLINE_RETRY_MAX before failing the phase.
+                # move with a fresh deadline up to the deadline-retry max before failing the phase.
                 # This is the general move path (straight insert/retreat, free-space reach) that had no
                 # retry; a genuine collision/plan-rejection still fails immediately (fail-fast preserved).
                 if (getattr(self.motion, 'last_fault_was_sim_deadline', lambda: False)()
-                        and self._move_deadline_retries < MOVE_DEADLINE_RETRY_MAX):
+                        and self._move_deadline_retries < self._move_deadline_retry_max):
                     self._move_deadline_retries += 1
                     print('MOVE_DEADLINE_RETRY phase=%s attempt=%d/%d' %
-                          (self.phase, self._move_deadline_retries, MOVE_DEADLINE_RETRY_MAX), flush=True)
+                          (self.phase, self._move_deadline_retries, self._move_deadline_retry_max), flush=True)
                     self.issued = False   # re-issue this move (fresh deadline) next tick
                     return self._result()
                 return self._fail('collision planning or execution failed')
@@ -513,23 +570,24 @@ class TransferController:
                 return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
             try:
                 outcome = self.motion.poll()
-            except RuntimeError as exc:
+            except Exception as exc:  # noqa: BLE001 -- fm372: route EVERY non-collision raise to retry
                 # run-290: a staged move's cuMotion planning can EXHAUST its replan/seed budget on a bad
-                # stochastic streak and RAISE ('planning failed (exhausted within wall cap)') rather than
-                # return 'failed' -- run-289's tuck planned fine, run-290's did not, so it is variance, not
-                # an unreachable pose. Route the raise through the SAME bounded retry (a fresh move = a
-                # fresh full planning budget), instead of failing the whole mission on one unlucky streak.
-                print('STAGED_MOVE_POLL_RAISED phase=%s exc=%s' % (self.phase, exc), flush=True)
-                outcome = 'failed'
+                # stochastic streak and RAISE ('planning failed (exhausted within wall cap)'); fm371: a
+                # stochastic seed can ALSO yield a trajectory that fails validate (ValueError -- run-298's
+                # tuck died here, UNCAUGHT); fm372: likewise a sim-deadline/goal-tolerance/track-miss/
+                # feedback-lost/other raise. All are run-to-run variance, not an unreachable pose. Route
+                # every such raise through the SAME bounded fresh-seed retry (joint-limit hard-fails inside
+                # the helper); a returned 'failed' (plan->execute handoff transient, run-283) still retries
+                # below on the same budget; a genuine collision/invalid outcome still fails fast.
+                return self._raised_move_exc(exc, staged=True)
             if outcome == 'failed':
                 # fm358 guard: a staged move failed once at the plan->execute handoff (run-283 pan) after
-                # a normal plan -- a transient; OR cuMotion exhausted its budget (run-290, above). Re-issue
-                # (fresh plan + deadline + budget) up to STAGED_MOVE_RETRY_MAX before failing the stage.
-                # Does NOT loosen any tolerance.
-                if self._staged_retries < STAGED_MOVE_RETRY_MAX:
+                # a normal plan -- a transient. Re-issue (fresh plan + deadline + budget) up to the
+                # staged-move retry max before failing the stage. Does NOT loosen any tolerance.
+                if self._staged_retries < self._staged_move_retry_max:
                     self._staged_retries += 1
                     print('STAGED_MOVE_RETRY phase=%s attempt=%d/%d' %
-                          (self.phase, self._staged_retries, STAGED_MOVE_RETRY_MAX), flush=True)
+                          (self.phase, self._staged_retries, self._staged_move_retry_max), flush=True)
                     self.issued = False   # re-plan + re-execute this move next tick
                     return self._result()
                 return self._fail('staged cart-swing %s move failed' % self.phase)
@@ -572,7 +630,14 @@ class TransferController:
                 self.motion.begin_joint_goal(self.transport_joints,s.joint_positions)
                 self.issued=True
                 return self._result()
-            outcome=self.motion.poll()
+            try:
+                outcome=self.motion.poll()
+            except Exception as exc:  # noqa: BLE001 -- fm372: route EVERY non-collision raise to retry
+                # fm372: stow is the last collect move (begin_joint_goal) -- its poll() was unguarded, so a
+                # stochastic plan-exhaust/validate/other raise here also killed the mission. Route the raise
+                # through the SAME bounded staged retry (joint-limit hard-fails inside the helper); a
+                # returned 'failed' below still fails fast as a collision.
+                return self._raised_move_exc(exc, staged=True)
             if outcome == 'failed':
                 return self._fail('collision-planned transport stow failed')
             if outcome == 'succeeded':
