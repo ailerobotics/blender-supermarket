@@ -140,6 +140,45 @@ def test_staged_cart_swing_routes_lift_through_tuck_pan_and_retreat_through_tuck
     assert c.phase == 'stow'
 
 
+def _staged_controller():
+    stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    tuck_shape = (-2.3, 1.0, 2.1066, 0.8, -1.2545)
+    return make_controller(transport_joints=stow, staged_cart_swing=True,
+                           cart_pan_joint0=-0.8605, cart_tuck_shape=tuck_shape)
+
+
+def test_staged_move_retries_then_succeeds_on_transient():
+    # fm358: a staged move (run-283 pan) failed once at the plan->execute handoff after a normal plan.
+    # A transient 'failed' must RETRY (fresh plan) rather than fail the stage.
+    c, m = _staged_controller()
+    t = run_to(c, 'pan')
+    c.step(.1, packet(c, t))                 # issue the pan move
+    n = len(m.stows)
+    m.outcome = 'failed'
+    c.step(.1, packet(c, t + .1))            # poll fails -> retry (re-issue next tick), stays in pan
+    assert c.phase == 'pan'
+    c.step(.1, packet(c, t + .2))            # re-plan the pan move
+    assert len(m.stows) == n + 1             # a fresh begin_joint_goal was issued
+    m.outcome = 'succeeded'
+    c.step(.1, packet(c, t + .3))            # now it succeeds -> transition
+    assert c.phase == 'preplace'
+
+
+def test_staged_move_retry_exhausts_then_fails():
+    # The retry is BOUNDED: a persistently failing staged move still fails the stage (not an infinite loop).
+    c, m = _staged_controller()
+    t = run_to(c, 'pan')
+    c.step(.1, packet(c, t))                 # issue
+    m.outcome = 'failed'
+    result = None
+    for i in range(12):
+        result = c.step(.1, packet(c, t + (i + 1) * .1))
+        if c.phase == 'failed':
+            break
+    assert c.phase == 'failed'
+    assert 'staged cart-swing pan move failed' in (result.reason or '')
+
+
 def test_no_staged_swing_keeps_direct_lift_to_preplace():
     c, m = make_controller(transport_joints=(0.,)*6)      # staged off by default
     run_to(c, 'preplace')

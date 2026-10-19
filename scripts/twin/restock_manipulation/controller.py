@@ -11,6 +11,12 @@ from .types import MotionPort, ProductProfile, Result, Sensors
 # velocity decays to ~0 (the native SurfaceGripper seals a STATIONARY pad but not a moving one --
 # stations verdict, firstmate run-203). Each tick is a sensor frame = many physics steps under pacing.
 CONTACT_FREEZE_TICKS = 5
+# fm358 cheapest guard: a staged cart-swing joint move (tuck/pan/retreat_tuck) failed ONCE in run-283
+# at the plan->execute handoff -- its plan SUCCEEDED normally (~52 s, like runs 280/282) yet the move
+# failed, a run-to-run transient not pinnable from the truncated host telemetry (start-tol/duration/
+# tracking all ruled out). Retry a failed staged move this many times (fresh plan + deadline) before
+# failing the stage, mirroring the planner's plan-reject REPLAN but at the staged-move level.
+STAGED_MOVE_RETRY_MAX = 2
 
 
 class TransferController:
@@ -116,6 +122,7 @@ class TransferController:
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
         self.held = False
+        self._staged_retries = 0   # fm358: bounded retry of a failed staged cart-swing move
         self.evidence = []
         self.reason = ''
         self.last_time = None
@@ -192,6 +199,7 @@ class TransferController:
 
     def _transition(self, phase):
         self.phase, self.elapsed, self.issued = phase, 0.0, False
+        self._staged_retries = 0   # fm358: fresh retry budget per phase
 
     def _result(self, controls=()):
         status = self.phase if self.phase in ('failed', 'succeeded') else 'running'
@@ -484,6 +492,15 @@ class TransferController:
                 return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
             outcome = self.motion.poll()
             if outcome == 'failed':
+                # fm358 guard: a staged move failed once at the plan->execute handoff (run-283 pan) after
+                # a normal plan -- a transient. Re-issue (fresh plan + deadline) up to STAGED_MOVE_RETRY_MAX
+                # before failing the stage. Does NOT loosen any tolerance.
+                if self._staged_retries < STAGED_MOVE_RETRY_MAX:
+                    self._staged_retries += 1
+                    print('STAGED_MOVE_RETRY phase=%s attempt=%d/%d' %
+                          (self.phase, self._staged_retries, STAGED_MOVE_RETRY_MAX), flush=True)
+                    self.issued = False   # re-plan + re-execute this move next tick
+                    return self._result()
                 return self._fail('staged cart-swing %s move failed' % self.phase)
             if outcome == 'succeeded':
                 self._transition({'tuck': 'pan', 'pan': 'preplace', 'retreat_tuck': 'stow'}[self.phase])
