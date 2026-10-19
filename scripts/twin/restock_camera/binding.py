@@ -228,11 +228,30 @@ class StationSensors:
         for adapter in self.adapters.values():
             adapter.set_render_suspended(suspended)
 
+    def release_source(self):
+        """fm384 phase-aware collect capture (sim-only, opt-in): after grasp the SOURCE pick
+        observations are no longer needed (the carton is held; later collect moves are joint goals and
+        PLACE reads the destination/cart view). From here the capture renders the DESTINATION camera
+        ONLY -- the single target already comes from the destination (capture() returns
+        targets.get(destination); the source camera never provides it), and the destination renders a
+        REAL fresh frame so require_fresh is honoured end to end. The caller then destroys the source
+        render product to free its VRAM before the release peak. NO held/fabricated source packet.
+        Idempotent; inert unless called (so StationSensors is byte-identical until the integration flips
+        this at grasp-confirm behind RESTOCK_PHASE_AWARE_COLLECT_CAPTURE)."""
+        self._source_released = True
+
     def capture(self, now, source, destination, motion, contact):
         from ..restock_manipulation.types import Sensors
         self.sensed_target_bboxes,self.evidence = (),()
         wall_started = self.wall_clock()
-        selected = sorted({self.location_cameras[source],self.location_cameras[destination]})
+        # Default: render BOTH the source (pick observations) and destination (target) cameras. After
+        # release_source() (post-grasp, opt-in): destination camera ONLY -- source observations are no
+        # longer read and its render product is freed. The target + freshness still come from the real
+        # destination render, so every integrity check below holds unchanged.
+        if getattr(self, '_source_released', False):
+            selected = sorted({self.location_cameras[destination]})
+        else:
+            selected = sorted({self.location_cameras[source],self.location_cameras[destination]})
         packets = []
         for camera_id in selected:
             adapter = self.adapters[camera_id]

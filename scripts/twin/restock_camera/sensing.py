@@ -296,6 +296,23 @@ def build_sensing(*, app, assembly, plan, config, output):
         result['source_target_provider'] = build_source_target_provider(
             adapter, motion, contact, source_location=source_location,
             station_frame=config.get('station_frame', 'map'))
+        # fm384 phase-aware collect capture: a handle the integration calls ONCE at grasp-confirm (behind
+        # RESTOCK_PHASE_AWARE_COLLECT_CAPTURE) to (1) switch the capture to destination-only
+        # (station.release_source) and (2) DESTROY the now-unused source camera render product, freeing
+        # its VRAM before the release peak. Honest: the destination still renders a real fresh frame.
+        # Only meaningful when called; unset => never invoked => byte-identical.
+        _source_camera_id = location_cameras[source_location]
+        def release_source_capture():
+            from twin.restock.native_cameras import destroy_camera_render_product
+            station.release_source()
+            cams = sources.get('cameras') if isinstance(sources, dict) else getattr(sources, 'cameras', {})
+            cam = cams.get(_source_camera_id)
+            if cam is not None:
+                destroy_camera_render_product(cam, getattr(assembly, 'stage', None))
+            print('PHASE_AWARE_COLLECT source released + render product destroyed: %s'
+                  % _source_camera_id, flush=True)
+            return _source_camera_id
+        result['release_source_capture'] = release_source_capture
     # Transfer-stage shelf sensing from the FIXED shelf station camera + its commissioned
     # G3_back_s2 baseline: the empty-slot placement target and the post-placement verification,
     # both against the same baseline (see twin.restock_camera.shelf_target / the shelf contract).

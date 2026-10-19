@@ -120,13 +120,18 @@ class IsaacPort:
                  masked_depth=None, set_render_suspended=None,
                  stationary_dxy=0.005, stationary_dyaw=0.01, command_gate=None,
                  position_uncertainty=0.05, phase_drive=None, arm_joints=None,
-                 stage_scoped_teardown=None):
+                 stage_scoped_teardown=None, release_source_capture=None):
         self.world,self.robot=world,robot
         # fm380: optional callable to DESTROY the collect-only sensing cameras' render products at the
         # collect->couple boundary (stage-scoped sensing). None (default) => never called => byte-
         # identical. isaac_bundle passes it ONLY when RESTOCK_STAGE_SCOPED_SENSING is set.
         self._stage_scoped_teardown=stage_scoped_teardown
         self._stage_scoped_done=False
+        # fm384: optional callable to switch the collect capture to destination-only + DESTROY the source
+        # render product at grasp-confirm (phase-aware capture). None (default) => never called => byte-
+        # identical. isaac_bundle passes it ONLY when RESTOCK_PHASE_AWARE_COLLECT_CAPTURE is set.
+        self._release_source_capture=release_source_capture
+        self._release_source_done=False
         # fm347/348 (1): phase-dependent arm drive. The soft tuck-settle drive (3e5/8000/400) cannot
         # HOLD the carton-loaded place extend (run-274 shoulder_lift sagged 0.622 rad); the stiff
         # drive (1e6/1e4/2000, bench-s348d proved it extends+holds+settles the real cuMotion carry).
@@ -320,6 +325,7 @@ class IsaacPort:
         # cams untouched. None handle => off (byte-identical). begin_action keeps the call as a fallback.
         if self._carton_welded:
             self._fire_stage_scoped_teardown()
+            self._fire_release_source()   # fm384: switch capture to dest-only + free source render product
         # SIM PARKING BRAKE (firstmate run-210/232): while the arm works (a stationary sensing action),
         # lock the already-parked chassis to the world so the contact-press / welded-carton reaction
         # cannot shift it past the gate (the wheel-hold is translation+yaw-saturated). TWO regimes:
@@ -525,6 +531,19 @@ class IsaacPort:
             self._stage_scoped_teardown()
         except Exception as exc:                          # noqa: BLE001
             print('STAGE_SCOPED_SENSING teardown skipped: %r' % (exc,), flush=True)
+
+    def _fire_release_source(self):
+        """fm384: switch the collect capture to destination-only + DESTROY the source render product
+        ONCE at grasp-confirm (phase-aware capture). Guarded + fail-safe; no-op with no handle or once
+        done => byte-identical when RESTOCK_PHASE_AWARE_COLLECT_CAPTURE is off (isaac_bundle passes None).
+        Honest: the capture keeps a REAL fresh destination(cart) render after this; nothing fabricated."""
+        if self._release_source_capture is None or self._release_source_done:
+            return
+        self._release_source_done = True
+        try:
+            self._release_source_capture()
+        except Exception as exc:                          # noqa: BLE001
+            print('PHASE_AWARE_COLLECT release skipped: %r' % (exc,), flush=True)
 
     def begin_action(self,action,job):
         # fm380/fm381 stage-scoped sensing FALLBACK: the primary trigger is grasp-confirmed (before

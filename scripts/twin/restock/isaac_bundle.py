@@ -523,6 +523,10 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # torn down => byte-identical. The cart camera + nav/nvblox + walkthrough recorder are untouched.
         stage_scoped_teardown=(assembly.sensing_sources.get('stage_scoped_teardown')
                                if os.environ.get('RESTOCK_STAGE_SCOPED_SENSING') else None),
+        # fm384 phase-aware collect capture: at grasp-confirm, switch the capture to destination-only
+        # (real fresh cart render) + destroy the source render product. None unless the knob is set.
+        release_source_capture=(sensing.get('release_source_capture')
+                                if os.environ.get('RESTOCK_PHASE_AWARE_COLLECT_CAPTURE') else None),
         arm_joints=_ARM_JOINTS)
 
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
