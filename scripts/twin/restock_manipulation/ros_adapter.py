@@ -727,6 +727,14 @@ class RosMotionPort:
         if crashed is not None:
             return crashed
         if self.deadline_clock() > self.deadline:
+            # fm362 evidence: this is the ONLY path that returns 'failed' (-> 'collision planning or
+            # execution failed'), and it is silent. run-289's retreat died here with move_group all
+            # SUCCEEDED, so name the fired deadline: which clock (wall MOVE_WALL_TIMEOUT / sim settle),
+            # the overrun, and the state, so a wall-gate trip is unambiguous next run.
+            _clock = 'wall' if self.deadline_clock is time.monotonic else 'sim'
+            print('MOVE_DEADLINE_FAULT clock=%s over=%.2fs state=%s straight=%s'
+                  % (_clock, self.deadline_clock() - self.deadline, self.state,
+                     getattr(self, '_straight_line', False)), flush=True)
             self.stop()
             return 'failed'
         # fm357: before dispatching ExecuteTrajectory, hold until the arm is settled, then re-seed the
