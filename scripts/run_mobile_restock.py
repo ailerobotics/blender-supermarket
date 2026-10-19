@@ -72,6 +72,27 @@ def _apply_render_preset(config, name):
     return config
 
 
+def _render_app_config(width, height, *, low_vram):
+    """fm373: build the mission SimulationApp config dict + the list of post-launch carb (key, value)
+    render settings. ``low_vram=False`` => the heavy DEFAULT pipeline exactly as before (Isaac's
+    SimulationApp defaults are renderer=RaytracedLighting + anti_aliasing=3 (DLSS); the config is just
+    ``{'headless':True,'width':w,'height':h}`` and NO carb settings) -- byte-identical. ``low_vram=True``
+    => anti_aliasing 0 (no DLSS) + explicit RayTracedLighting + disable the indirect-diffuse GI /
+    reflections / AO render passes. Those are exactly the RTX render-pass buffers that OOM'd the 12 GB
+    card on a long run ('Indirect diffuse texture', 'DLSS Output', run-297/299); the output resolution
+    is NOT the lever (480x270 peaked ~= 640x360). The QR-decode sensing cameras stay full-res
+    (isaac_bundle) and a RayTracedLighting+aa=0 render is proven QR-decode-compatible (commissioning_
+    sources renders the markers that way). Returns ``(config_dict, [(carb_key, value), ...])``."""
+    config = {'headless': True, 'width': width, 'height': height}
+    settings = []
+    if low_vram:
+        config.update({'renderer': 'RayTracedLighting', 'anti_aliasing': 0, 'multi_gpu': False})
+        settings = [('/rtx/indirectDiffuse/enabled', False),
+                    ('/rtx/reflections/enabled', False),
+                    ('/rtx/ambientOcclusion/enabled', False)]
+    return config, settings
+
+
 def _launch_host_stack(*, repo, plugin_env, nvidia_runtime, host_config, logpath):
     """Co-launch the task-isolated MoveIt/cuMotion planner stack + nvblox mapper on
     domain 88, inside the caller's single GPU-lock hold (the launch recipe does NOT
@@ -354,7 +375,29 @@ def run(args, manifest, scenario):
                 # card. Bounded to sane values.
                 _rw = max(160, min(1920, int(os.environ.get('RESTOCK_RENDER_WIDTH', 960))))
                 _rh = max(120, min(1080, int(os.environ.get('RESTOCK_RENDER_HEIGHT', 540))))
-                app = SimulationApp({'headless': True, 'width': _rw, 'height': _rh})
+                # fm373: SIM-ONLY opt-in low-VRAM render. Unset => byte-identical heavy default
+                # (DLSS + indirect-diffuse GI); set => disable those passes (the RTX buffers that OOM'd
+                # the 12 GB card on a long run, run-297/299). Mission logic + full-res QR sensing unchanged.
+                _low_vram = bool(os.environ.get('RESTOCK_LOW_VRAM_RENDER'))
+                _app_config, _rtx_settings = _render_app_config(_rw, _rh, low_vram=_low_vram)
+                print('RENDER_MODE %s renderer=%s aa=%s gi=%s' % (
+                    'low_vram' if _low_vram else 'default',
+                    _app_config.get('renderer', 'default'),
+                    _app_config.get('anti_aliasing', 'default'),
+                    'off' if _low_vram else 'on'), flush=True)
+                app = SimulationApp(_app_config)
+                if _rtx_settings:
+                    # Disable the GI/reflection/AO render passes AFTER app start; never let a render
+                    # tweak crash the boot (a wrong/absent key is a silent no-op).
+                    try:
+                        import carb
+                        _s = carb.settings.get_settings()
+                        for _k, _v in _rtx_settings:
+                            _s.set(_k, _v)
+                        print('RENDER_MODE low_vram carb-disabled: %s'
+                              % ','.join(k for k, _ in _rtx_settings), flush=True)
+                    except Exception as _exc:  # noqa: BLE001
+                        print('RENDER_MODE low_vram carb-settings skipped: %s' % _exc, flush=True)
                 module, name = args.factory.split(':', 1)
                 factory = getattr(importlib.import_module(module), name)
                 # Factory authors stage, initializes sensors and returns an object with
