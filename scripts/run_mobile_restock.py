@@ -346,7 +346,15 @@ def run(args, manifest, scenario):
                     summary['host_stack_warmup_s'] = round(time.monotonic() - warm, 1)
                 # NVIDIA requires runtime/plugin imports after SimulationApp startup.
                 from isaacsim import SimulationApp
-                app = SimulationApp({'headless': True, 'width': 960, 'height': 540})
+                # fm360: render resolution is a SIM/boot knob (propagates to the kit
+                # --/app/renderer/resolution args), env-overridable so a VRAM-bounded run can render at
+                # 640x360 instead of 960x540 without any mission-logic change. Unset => 960x540, byte-
+                # identical. run-285 crashed on GPU VRAM over-subscription (13.14 GB on a 12 GiB card) once
+                # the run got long enough (full collect); the lower render buffer keeps the peak under the
+                # card. Bounded to sane values.
+                _rw = max(160, min(1920, int(os.environ.get('RESTOCK_RENDER_WIDTH', 960))))
+                _rh = max(120, min(1080, int(os.environ.get('RESTOCK_RENDER_HEIGHT', 540))))
+                app = SimulationApp({'headless': True, 'width': _rw, 'height': _rh})
                 module, name = args.factory.split(':', 1)
                 factory = getattr(importlib.import_module(module), name)
                 # Factory authors stage, initializes sensors and returns an object with
