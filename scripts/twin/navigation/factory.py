@@ -30,6 +30,7 @@ ROS; it is exercised by integration inside the live app, never by CPU tests.
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
 
 from .scenario import environment_grid
@@ -99,6 +100,26 @@ def _build_docking(nav):
                            approach_distance=approach_distance, **extra)
 
 
+# fm386: the SIM-clock nav bounds (couple/outbound/park). stale_after is the per-frame sensor-staleness
+# (now-odom/obs stamp > stale_after -> 'stale_sensing'); on a render-paced tow/dock the stamp can lag
+# past the tight 0.3 s default -- the sibling of the 1.0 s /sensors watchdog that tripped at retreat.
+# blocked_timeout / goal_timeout are the no-progress / overall SIM-clock caps. Each SIM-only env-
+# overridable; the env WINS over a config value (never shadowed -- the run-290 lesson); unset => the
+# config value or the SensorNavigation ctor default, byte-identical. (max_speed/max_angular/
+# brake_acceleration are NOT time bounds -> config-only, untouched.)
+_NAV_SIM_BOUNDS = {'stale_after': ('RESTOCK_NAV_STALE_AFTER_S', 0.05, 30.0),
+                   'blocked_timeout': ('RESTOCK_NAV_BLOCKED_TIMEOUT_S', 1.0, 600.0),
+                   'goal_timeout': ('RESTOCK_NAV_GOAL_TIMEOUT_S', 10.0, 1800.0)}
+
+
+def _nav_sim_env(var, lo, hi):
+    """Clamped sim-clock bound from the env, or None when unset/malformed (=> caller keeps config/default)."""
+    try:
+        return max(lo, min(hi, float(os.environ[var])))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _controller_kwargs(nav):
     kwargs = {}
     for limit in ('goal_timeout', 'blocked_timeout', 'max_speed', 'max_angular',
@@ -109,6 +130,11 @@ def _controller_kwargs(nav):
             # giving up the goal. Raising it lets the mission wait out a transient
             # dynamic block and resume rather than fail. Default is unchanged.
             kwargs[limit] = nav[limit]
+    # fm386: SIM-clock bound env overrides win over config/default (unset => unchanged, byte-identical).
+    for limit, (var, lo, hi) in _NAV_SIM_BOUNDS.items():
+        override = _nav_sim_env(var, lo, hi)
+        if override is not None:
+            kwargs[limit] = override
     docking = _build_docking(nav)
     if docking is not None:
         kwargs['docking'] = docking
