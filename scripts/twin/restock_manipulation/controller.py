@@ -25,6 +25,13 @@ STAGED_MOVE_RETRY_MAX = 2
 # times before failing the phase. Mirrors STAGED_MOVE_RETRY_MAX but for the general move path, which
 # had NO retry. A collision/plan-rejection (port raised -> flag False) is NOT retried (fail-fast kept).
 MOVE_DEADLINE_RETRY_MAX = 2
+# fm387: which collect phases issue an arm MOVE (and so can suffer a goal-tolerance/track-miss the
+# host-stack WATCHDOG surfaces -- ros_adapter failed_result_pending / drain -- OUTSIDE poll(), where
+# fm372's in-poll retry never saw it). Staged moves (begin_joint_goal) use the staged budget; the rest
+# of the move phases use the deadline budget. Non-move phases (observe/grasp/release/verify/idle) issue
+# no begin, so a watchdog motion fault there is not re-issuable -> hard fail.
+_STAGED_MOVE_PHASES = frozenset({'tuck', 'pan', 'retreat_tuck', 'stow'})
+_GENERAL_MOVE_PHASES = frozenset({'approach', 'contact', 'lift', 'preplace', 'place', 'retreat'})
 
 
 def _retry_max_env(var, default):
@@ -270,6 +277,23 @@ class TransferController:
               (self.phase, type(exc).__name__, attempt, cap), flush=True)
         self.issued = False   # re-plan + re-execute this move next tick
         return self._result()
+
+    def retry_or_fail_move(self, reason):
+        """fm387: a motion fault surfaced by the host-stack WATCHDOG (goal-tolerance / track-miss /
+        watchdog-drain -- ros_adapter failed_result_pending()/drain()) fires on its 0.1 s timer OUTSIDE
+        poll(), so fm372's in-poll bounded retry never saw it (run-300d: a stochastic move_group crash
+        disrupted the LIFT execute -> goal-miss -> the watchdog _fail'd the mission with no MOVE_RETRY).
+        Route it through the SAME bounded move retry: a goal-miss is transient (a fresh move = fresh plan
+        + execute), so re-issue up to the bounded budget; a persistent miss exhausts -> _fail. A non-move
+        phase (no begin to re-issue) -> _fail. Clears the port's terminal/broken state FIRST so the 0.1 s
+        watchdog does not re-fire the same stale result before the controller re-issues next tick."""
+        staged = self.phase in _STAGED_MOVE_PHASES
+        if not (staged or self.phase in _GENERAL_MOVE_PHASES):
+            return self._fail(reason)
+        ack = getattr(self.motion, 'ack_failed_result', None)
+        if callable(ack):
+            ack()
+        return self._raised_move_exc(RuntimeError(reason), staged=staged)
 
     def step(self, dt: float, sensors: Sensors) -> Result:
         if self.phase == 'idle':

@@ -714,6 +714,16 @@ class RosMotionPort:
         except Exception:
             return True                              # a result future that raised is a failure too
 
+    def ack_failed_result(self):
+        """fm387: the bridge watchdog consumed a failed/broken motion result (failed_result_pending or a
+        drain() raise) and routed it to the controller's bounded move retry. Reset the port to idle so
+        the 0.1 s watchdog does NOT re-fire the same stale result (failed_result_pending needs
+        'execute_result'; drain() is a no-op outside _DRAIN_STATES) before the controller re-issues the
+        move next tick. The re-issue (begin/begin_joint_goal) bumps the generation and sets up a fresh
+        plan+execute; generation++ here invalidates any late action callback from the abandoned move."""
+        self.generation += 1
+        self.state, self.handle, self.future = 'idle', None, None
+
     def _server_action_for_state(self):
         """The MoveGroup/ExecuteTrajectory action client whose server must be live for the current
         state, or None outside a planning/execution state. Used to notice a move_group PROCESS crash
@@ -1178,7 +1188,9 @@ class RosTransferBridge:
             try:
                 motion.drain()
             except Exception:
-                self._emit(self.controller._fail('arm motion failed (watchdog drain)'))
+                # fm387: route through the bounded move retry (not a direct _fail) -- a drain-time plan
+                # raise is run-to-run cuMotion variance; a persistent one exhausts the budget -> _fail.
+                self._emit(self.controller.retry_or_fail_move('arm motion failed (watchdog drain)'))
                 return
         if motion is not None and getattr(motion, 'planning_wall_exceeded', lambda: False)():
             diag = getattr(motion, 'plan_wall_diag', lambda: '')()
@@ -1190,7 +1202,11 @@ class RosTransferBridge:
         # poll() stops draining the action result -- surface the failed result here independently
         # (run-224 hung ~20 min to the wall cap instead of failing when the lift missed its goal).
         if motion is not None and getattr(motion, 'failed_result_pending', lambda: False)():
-            self._emit(self.controller._fail('arm motion failed (goal tolerance not reached)'))
+            # fm387: a terminal EXECUTE goal-miss (run-300d LIFT, after a stochastic move_group crash)
+            # is transient variance -- route through the bounded move retry (re-issue a fresh plan+exec)
+            # instead of a direct _fail; a persistent miss exhausts the budget -> _fail. ack_failed_result
+            # (inside retry_or_fail_move) clears the port so this 0.1 s check does not re-fire meanwhile.
+            self._emit(self.controller.retry_or_fail_move('arm motion failed (goal tolerance not reached)'))
             return
         if not self.first_frame:
             # No /sensors yet: the looser startup grace (not the 1 s per-frame bound) applies, so a
