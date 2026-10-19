@@ -101,8 +101,9 @@ class RuntimeTests(unittest.TestCase):
         # reposition drives pickup -> stage -> place_approach, and base_repositioned is set ONLY at the
         # final goal (the staging waypoint must not resume the arm).
         nav_goals = []
+        nav_kw = []
         repositioned_at = []
-        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append(tuple(goal)),
+        self.nav = NS(start=lambda goal, coupled, **kw: (nav_goals.append(tuple(goal)), nav_kw.append(kw)),
                       step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
                       cancel=lambda: None)
         ticks = [0]
@@ -140,6 +141,11 @@ class RuntimeTests(unittest.TestCase):
                          [(0, 0, 0), (-4.5, 16.0, 0.0), (-4.5, 15.25, 3.14159)])  # pickup -> stage -> mouth
         # base_repositioned never set while the staging waypoint was the latest goal
         self.assertFalse(any(rep for goal, rep in repositioned_at if goal == (-4.5, 16.0, 0.0)))
+        # fm396 (B): the pickup->pickup nav (goal 0) is a normal drive; BOTH reposition legs (stage + mouth)
+        # are trusted-static drives (static_drive=True), so the carry-fold self-return ring cannot block them.
+        self.assertEqual(nav_kw[0].get('static_drive'), None)         # the initial drive is NOT static
+        self.assertTrue(nav_kw[1].get('static_drive'))                # pickup -> stage
+        self.assertTrue(nav_kw[2].get('static_drive'))                # stage -> place_approach
 
     def test_coupling_needs_later_observation(self):
         self.adapter.start('couple',self.job)

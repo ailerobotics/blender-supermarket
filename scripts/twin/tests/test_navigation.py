@@ -28,6 +28,25 @@ class NavigationTests(unittest.TestCase):
         self.assertTrue(grid.plan((-3,0),(3,0),self.fp.radius(False)))
         self.assertFalse(grid.plan((-3,0),(3,0),self.fp.radius(True)))
 
+    def test_static_drive_ignores_dynamic_obstacles(self):
+        # fm396 (B): the trusted static reposition leg plans + gates against the STATIC map only, so a live
+        # scan obstacle on the path (the carry-fold self-return ring) cannot block it; every other leg
+        # (static_drive off, default) still stops for the same obstacle.
+        ring = tuple((math.cos(math.radians(a)) * 0.78, math.sin(math.radians(a)) * 0.78)
+                     for a in range(0, 360, 6))        # a 0.78 m ring around the base -- blocks normally
+        c = self.controller(); c.start((3, 0, 0), False)           # default: live obstacles honoured
+        od, obs = self.inputs(obstacles=ring)
+        self.assertEqual(c.step(0.1, od, obs).velocity, (0, 0))    # boxed in by the ring -> no motion
+        c2 = self.controller(); c2.start((3, 0, 0), False, static_drive=True)
+        r = c2.step(0.1, *self.inputs(obstacles=ring))
+        self.assertNotEqual(r.velocity, (0, 0))                    # static-only: the ring is ignored, it drives
+        self.assertEqual(r.reason, 'tracking')
+
+    def test_static_drive_off_is_byte_identical(self):
+        # Absent static_drive the controller is unchanged (defaults to live obstacles).
+        c = self.controller(); c.start((3, 0, 0), False)
+        self.assertFalse(c.static_drive)
+
     def test_cart_rear_and_swing_obstacle(self):
         c=self.controller(); c.start((3,0,0),True)
         od,obs=self.inputs(coupled=True,obstacles=((-1.4,0),))

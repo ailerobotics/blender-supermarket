@@ -348,8 +348,17 @@ class Controller:
         self.terminal = None
         self._docking_active = False
         self.arrival_xy_tol = 0.08
+        # fm396 (B): SIM-only TRUSTED STATIC drive for the mid-collect reposition legs. When set, the route
+        # + the obstacle_stop/coverage gates use the STATIC map only (empty live-scan obstacles): the short
+        # reposition in front of the parked cart is geometrically proven clear against the static map AND
+        # the base/cart footprint (scripts/check_place_approach_nav.py), but the live lidar is polluted by
+        # the carry-fold self-geometry (a ~0.78 m ring just outside the 0.75 m footprint -> no route;
+        # run-304/307) that the per-tick carry mask did not clear live. Default False => every other leg
+        # keeps full live-scan obstacle avoidance (byte-identical). Set only on the uncoupled reposition legs.
+        self.static_drive = False
 
-    def start(self, goal, coupled, *, arrival_xy_tol=None):
+    def start(self, goal, coupled, *, arrival_xy_tol=None, static_drive=False):
+        self.static_drive = bool(static_drive)
         if len(goal) != 3 or not all(math.isfinite(v) for v in goal):
             raise ValueError('goal must be finite map [x,y,yaw]')
         if arrival_xy_tol is not None and (not math.isfinite(arrival_xy_tol) or arrival_xy_tol <= 0):
@@ -411,10 +420,15 @@ class Controller:
         speed = max(v,abs(odom.linear))
         stop_distance = speed*self.stale_after + speed*speed/(2*self.brake_acceleration)
         radius = self.footprint.radius(self.coupled)+odom.position_uncertainty
-        if not self._coverage_ok(odom, obs, radius, stop_distance, v, w):
+        # fm396 (B): the trusted static reposition leg drives against the static map only -- the carry-fold
+        # self-geometry pollutes the live scan (coverage + a phantom near-footprint ring the per-tick mask
+        # did not clear), so skip the live coverage certification and use empty live obstacles for the
+        # braking-disk stop check. Every other leg keeps the full live coverage + obstacle_stop.
+        dyn = () if self.static_drive else obs.obstacles
+        if not self.static_drive and not self._coverage_ok(odom, obs, radius, stop_distance, v, w):
             return Result(reason='insufficient_sensor_coverage')
         # A disk expanded by stopping travel contains every possible braking arc.
-        if not self.grid.free(odom.pose,radius+stop_distance,obs.obstacles):
+        if not self.grid.free(odom.pose,radius+stop_distance,dyn):
             return Result(reason='obstacle_stop')
         return Result(v,w,reason='tracking')
 
@@ -458,10 +472,14 @@ class Controller:
             result = self.gate_velocity(now,odometry,obs,0.0,2*error)
         else:
             # Replan with current observations whenever any remaining segment is blocked.
+            # fm396 (B): the trusted static reposition leg plans against the static map only (empty live
+            # obstacles) -- the short, proven-clear reposition must not be blocked by the carry-fold
+            # self-return ring in the live scan (run-304/307). Every other leg uses the live obstacles.
+            dyn = () if self.static_drive else obs.obstacles
             points = [pose[:2]]+self.path
-            if not self.path or any(not self.grid.segment_free(a,b,radius,obs.obstacles)
+            if not self.path or any(not self.grid.segment_free(a,b,radius,dyn)
                                    for a,b in zip(points,points[1:])):
-                self.path = self.grid.plan(pose,self.goal,radius,obs.obstacles)
+                self.path = self.grid.plan(pose,self.goal,radius,dyn)
             if not self.path:
                 # fm390 diagnostic (RESTOCK_NAV_DIAG, byte-identical off): why the plan is empty -- is the
                 # START boxed in, the GOAL blocked, or the straight line crossed? Prints free(start)/

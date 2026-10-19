@@ -5,6 +5,7 @@ only to generate ranges. Its world pose never enters the localization output.
 """
 from dataclasses import dataclass
 import math
+import os
 from .core import Odometry, Observation, CoverageField, wrap
 
 
@@ -218,6 +219,13 @@ class IsaacRangeSensor:
             raise ValueError('invalid range sensor pose or timestamp')
         ranges=[];unknown=[];external=[]
         increment=2*math.pi/self.beams
+        # fm396 mask instrumentation (RESTOCK_NAV_DIAG, byte-identical off): count hits the carry mask
+        # removed and SAMPLE the near-field (0.3-1.5 m) non-self hit prim paths + distances, so a run
+        # records FOR FREE why the carry mask was (in)active -- carry_active state, how many hits it
+        # masked, and WHAT the ~0.78 m ring actually is (self subtree vs carton vs environment).
+        _diag = bool(os.environ.get('RESTOCK_NAV_DIAG'))
+        carry_masked = 0
+        near_hits = []   # (round(distance,3), prim_path) for non-self hits in the ring band
         for i in range(self.beams):
             angle=yaw-math.pi+i*increment
             best=self.range_max
@@ -228,15 +236,29 @@ class IsaacRangeSensor:
                     distance=float(hit['distance'])
                     if not math.isfinite(distance) or not 0<=distance<=self.range_max:
                         raise ValueError('invalid closest-hit distance')
-                    if self._self_hit(hit) or (self.carry_active
-                                               and distance<self.carry_self_radius):
+                    self_hit=self._self_hit(hit)
+                    carry_hit=(not self_hit) and self.carry_active and distance<self.carry_self_radius
+                    if self_hit or carry_hit:
                         hidden=True
+                        if carry_hit:
+                            carry_masked+=1
                     else:
                         best=min(best,max(0.001,distance))
+                    if _diag and (not self_hit) and 0.3<=distance<=1.5 and len(near_hits)<10:
+                        near_hits.append((round(distance,3),
+                                          hit.get('rigidBody') or hit.get('collision') or '?'))
             unknown.append(hidden)
             ranges.append(math.nan if hidden else best)
             if hidden and best<self.range_max:
                 external.append((i,best))
+        if _diag:
+            self._range_diag_n=getattr(self,'_range_diag_n',0)+1
+            if self._range_diag_n%60==1:
+                obstacle_beams=sum(1 for r in ranges if math.isfinite(r) and 0<r<self.range_max)+len(external)
+                print('RANGE_DIAG carry_active=%s carry_self_radius=%.2f carry_masked_hits=%d '
+                      'obstacle_beams=%d near_nonself_hits=%s'
+                      % (self.carry_active, self.carry_self_radius, carry_masked, obstacle_beams,
+                         near_hits[:8]), flush=True)
         return Scan(stamp,tuple(ranges),-math.pi,increment,self.range_max,
                     sensor_to_base=self.sensor_to_base,unknown=tuple(unknown),
                     external_returns=tuple(external))
