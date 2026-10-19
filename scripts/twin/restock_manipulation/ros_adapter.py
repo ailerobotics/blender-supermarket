@@ -67,6 +67,13 @@ PLAN_TOTAL_WALL_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_PLAN_W
 SENSOR_STREAM_WALL_BACKSTOP_S = max(5.0, min(600.0, float(os.environ.get('RESTOCK_SENSOR_STREAM_WALL_BACKSTOP_S', 30.0))))
 # fm366: RosTransferBridge startup-grace wall bound (ros_host passes config, default 5 s). Sim-only env.
 STARTUP_GRACE_S = max(1.0, min(120.0, float(os.environ.get('RESTOCK_STARTUP_GRACE_S', 5.0))))
+# fm385/run-300c: the host /sensors PER-FRAME bound, in SIM/node seconds. During a long render-paced
+# move (e.g. retreat) the collect capture holds (motion-completion feedback stale) and emits no fresh
+# station snapshot; a 1 s SIM bound then trips mid-retreat even with the render alive and no OOM (run-300c
+# reached sim 241 past the release peak, zero OOM, then this gate fired). SIM-only widen tolerates the
+# held-sensing move; the WALL backstop (SENSOR_STREAM_WALL_BACKSTOP_S) stays the true dead-stream detector
+# (a frozen sim clock never advances this bound). Default 1.0 = byte-identical real-rig (sim == wall).
+SENSOR_WATCHDOG_S = max(0.5, min(120.0, float(os.environ.get('RESTOCK_SENSOR_WATCHDOG_S', 1.0))))
 
 
 def env_wins(env_var, passed, module_default):
@@ -1104,7 +1111,7 @@ class RosTransferBridge:
         # incorporation is ~1.0-1.05 s on this GPU, so a 1 s bound from a cold job start is
         # unachievable; the approach warm-up + this grace make the first frame feasible without
         # weakening the moving-arm protection (before the first frame the arm has acted on nothing).
-        self.watchdog_seconds = watchdog_seconds
+        self.watchdog_seconds = env_wins('RESTOCK_SENSOR_WATCHDOG_S', watchdog_seconds, SENSOR_WATCHDOG_S)
         self.startup_grace_seconds = env_wins('RESTOCK_STARTUP_GRACE_S', startup_grace_seconds, STARTUP_GRACE_S)
         self.wall_backstop_seconds = wall_backstop_seconds
         self.first_frame = False
