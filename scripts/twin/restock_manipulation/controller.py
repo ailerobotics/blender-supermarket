@@ -64,8 +64,15 @@ class TransferController:
                  cart_tuck_shape=None, carry_wrist1_cap=None,
                  cart_cage_place: bool = False, cage_axis=(1.0, 0.0, 0.0),
                  cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03,
-                 cage_preplace_shape=None):
+                 cage_preplace_shape=None, reposition_before_place: bool = False):
         self.steady_clock=steady_clock
+        # fm390: drive the BASE in front of the rollwagen mouth between the carry fold and the place,
+        # instead of reaching the place around from the collect station pose. When set (with the staged
+        # cart swing), the carry fold goes lift -> tuck -> TRANSIT (hold, emit one reposition_base control)
+        # and the arm waits -- the adapter pauses stepping us, drives the base to place_approach, then sets
+        # base_repositioned so TRANSIT -> preplace proceeds at the new pose. Default off => byte-identical.
+        self.reposition_before_place = bool(reposition_before_place)
+        self.base_repositioned = False
         # fm327 belt-and-braces wrist_1 cap for the task-space LIFT carry move (None = off).
         self.carry_wrist1_cap = None if carry_wrist1_cap is None else float(carry_wrist1_cap)
         # Execute the contact descent as a seeded straight-line move through the trajectory host instead
@@ -633,9 +640,22 @@ class TransferController:
                     return self._result()
                 return self._fail('staged cart-swing %s move failed' % self.phase)
             if outcome == 'succeeded':
-                self._transition({'tuck': 'pan', 'pan': 'preplace', 'retreat_tuck': 'stow'}[self.phase])
+                nxt = {'tuck': 'pan', 'pan': 'preplace', 'retreat_tuck': 'stow'}[self.phase]
+                if self.phase == 'tuck' and self.reposition_before_place:
+                    nxt = 'transit'   # fm390: hold the carry fold; the base drives to place_approach next
+                self._transition(nxt)
             elif outcome != 'running':
                 return self._fail('invalid staged cart-swing motion outcome')
+            return self._result()
+        if self.phase == 'transit':
+            # fm390: carton held in the carry (tuck) pose; the BASE must drive to place_approach in front
+            # of the rollwagen mouth before the arm lowers onto the deck. HOLD (no arm move) -- the adapter
+            # sees phase=='transit' and PAUSES stepping us while it drives the base, then sets
+            # base_repositioned so TRANSIT -> preplace proceeds at the new pose. Because we are only ticked
+            # while parked (at the pick pose, then at place_approach), the per-tick parked gate and the
+            # per-phase elapsed timeout never see the base motion.
+            if self.base_repositioned:
+                self._transition('preplace')
             return self._result()
         if self.phase == 'grasp':
             if not self.issued:

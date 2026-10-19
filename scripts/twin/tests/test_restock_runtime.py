@@ -52,6 +52,49 @@ class RuntimeTests(unittest.TestCase):
         self.adapter = RuntimeAdapter(self.nav,self.mobile,self.manip,self.port,poses,fixture_mode=True)
         self.job = Job('j','milk',1,'back','shelf')
 
+    def test_collect_drives_to_place_approach_between_pick_and_place(self):
+        # fm390: when the arm reaches TRANSIT (carry fold done) and a place_approach pose is configured,
+        # the adapter drives the base there (carton carried), re-warms WITHOUT re-dispatching the grasp,
+        # then resumes the paused arm to place. Sequence: navigate(pickup) -> warm -> execute(transit) ->
+        # navigate(place_approach) -> rewarm -> execute(place) -> loaded.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append(tuple(goal)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        ticks = [0]            # fresh packet each tick: unique obs id + sim_time tracking adapter.time
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+
+        class M:   # the raw controller the adapter wraps in a ManipulationBridge; base_repositioned is
+            cart_location = 'rollwagen'              # the attr the bridge sets (real TransferController contract)
+            def __init__(s): s.started = []; s.base_repositioned = False
+            def start(s, a, j): s.started.append(a)
+            def warm(s, dt, p): return True
+            def step(s, dt, p):
+                if not s.base_repositioned:
+                    return NS(status='running', reason='', controls=(), phase='transit')
+                return NS(status='succeeded', reason='', controls=(), phase='place',
+                          evidence=({'source': 'test_fixture', 'sku': 'milk', 'location': 'rollwagen',
+                                     'quantity': 1, 'observation_id': 'o', 'simulation_time': .1},))
+        manip = M()
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach'] = [-4.5, 15.25, 3.14159]
+        adapter = RuntimeAdapter(self.nav, self.mobile, manip, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        phases = []
+        for _ in range(8):
+            r = adapter._step(.1)
+            phases.append(adapter.phase)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence.get('loaded'))
+        self.assertEqual(manip.started, ['collect'])          # grasp dispatched ONCE (rewarm must not re-start)
+        self.assertEqual(nav_goals, [(0, 0, 0), (-4.5, 15.25, 3.14159)])  # pickup then place_approach
+        self.assertIn('rewarm', phases)                        # re-warmed at place_approach
+
     def test_coupling_needs_later_observation(self):
         self.adapter.start('couple',self.job)
         self.assertEqual(self.adapter.step(.1).status,'running')

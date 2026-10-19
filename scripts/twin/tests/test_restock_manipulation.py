@@ -166,6 +166,37 @@ def _staged_controller():
                            cart_pan_joint0=-0.8605, cart_tuck_shape=tuck_shape)
 
 
+def test_reposition_before_place_holds_in_transit_until_base_repositioned():
+    # fm390: with reposition_before_place, the carry fold routes lift -> tuck -> TRANSIT (not pan); the
+    # arm HOLDS in TRANSIT (no further joint goal) until the adapter sets base_repositioned, then proceeds
+    # to preplace at the new base pose. The pan (station-pose joint0 swing) is skipped -- base nav replaces it.
+    stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    tuck_shape = (-2.3, 1.0, 2.1066, 0.8, -1.2545)
+    c, m = make_controller(transport_joints=stow, staged_cart_swing=True, cart_pan_joint0=-0.8605,
+                           cart_tuck_shape=tuck_shape, reposition_before_place=True)
+    t = run_to(c, 'tuck')
+    c.step(.1, packet(c, t))                      # issue the tuck fold
+    c.step(.1, packet(c, t + .1))                 # tuck succeeds -> TRANSIT (not pan)
+    assert c.phase == 'transit'
+    n = len(m.stows) + len(m.moves)
+    r = c.step(.1, packet(c, t + .2))             # HOLD: no new arm goal while the base drives
+    assert c.phase == 'transit' and r.status == 'running'
+    assert len(m.stows) + len(m.moves) == n       # nothing issued during the hold
+    c.base_repositioned = True                    # adapter drove the base to place_approach
+    c.step(.1, packet(c, t + .3))
+    assert c.phase == 'preplace'                  # resumes the place at the new pose
+
+
+def test_reposition_before_place_off_keeps_pan_byte_identical():
+    stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    tuck_shape = (-2.3, 1.0, 2.1066, 0.8, -1.2545)
+    c, m = make_controller(transport_joints=stow, staged_cart_swing=True, cart_pan_joint0=-0.8605,
+                           cart_tuck_shape=tuck_shape)        # reposition_before_place defaults off
+    t = run_to(c, 'tuck')
+    c.step(.1, packet(c, t)); c.step(.1, packet(c, t + .1))
+    assert c.phase == 'pan'                        # unchanged: tuck -> pan
+
+
 def test_staged_move_retries_then_succeeds_on_transient():
     # fm358: a staged move (run-283 pan) failed once at the plan->execute handoff after a normal plan.
     # A transient 'failed' must RETRY (fresh plan) rather than fail the stage.

@@ -147,6 +147,13 @@ class ManipulationBridge:
             else:
                 self.controller.motion.stop()
 
+    def set_base_repositioned(self):
+        """fm390: tell the arm controller the base has driven to place_approach, so its held TRANSIT
+        phase proceeds to preplace. Reaches the real TransferController through the sensor-owning wrapper."""
+        core = (self.controller.controller if self.owns_sensor_io
+                and not hasattr(self.controller, 'cart_location') else self.controller)
+        core.base_repositioned = True
+
 
 class RuntimeAdapter:
     def __init__(self, navigation, mobile, manipulation, port: Port, poses,
@@ -210,6 +217,10 @@ class RuntimeAdapter:
         self.action, self.job = action, job
         self.phase = 'execute'
         self._reach_start = None          # set on the first execute tick of a collect/transfer reach
+        # fm390 mid-collect base reposition: driven once per collect when the arm reaches TRANSIT (carry
+        # fold done) and a place_approach pose is configured. Reset here so a re-begun collect starts clean.
+        self._collect_reposition_pending = False
+        self._collect_repositioned = False
         if action == 'couple':
             # Couple nav runs an in-order sequence of waypoints ending at the ON-AXIS standoff,
             # then the fine-dock servo inserts STRAIGHT along the cart axis to the drawbar:
@@ -342,6 +353,16 @@ class RuntimeAdapter:
                     raise ValueError('cart articulation exceeds manipulation/return goal tolerance')
                 key = 'arrived' if self.action == 'outbound' else 'home'
                 return Result('succeeded', self._evidence(p, **{key: True}))
+            if self.action == 'collect' and self._collect_reposition_pending:
+                # fm390: arrived at place_approach with the carton carried. Resume the PAUSED arm (its
+                # TRANSIT -> preplace) after re-warming the collision map at the new base pose; do NOT
+                # re-begin the manipulation (the controller is mid-run, holding the carry pose).
+                self.manip.set_base_repositioned()
+                self._collect_reposition_pending = False
+                self._collect_repositioned = True
+                self.phase = 'rewarm'
+                self._warmn = 0
+                return Result('running', reason='at place_approach; re-warming before place')
             if self.action == 'collect':
                 # Warm the host collision map (ESDF + a fresh collision_time) while parked BEFORE
                 # dispatching the grasp, so the first /sensors frame lands within the host's sensor
@@ -388,6 +409,21 @@ class RuntimeAdapter:
                 return Result('running', reason=('collision map warm; dispatching grasp' if ready
                                                  else 'warm-up tick cap reached; dispatching grasp'))
             return Result('running', reason='warming collision map')
+        if self.phase == 'rewarm':
+            # fm390: re-warm the collision map at place_approach, then RESUME the paused arm WITHOUT
+            # re-beginning the manipulation (it is mid-run, holding the carry pose in TRANSIT). Mirrors
+            # 'warm' except for the missing manip.start -- the base must stay parked here.
+            self.mobile.hold()
+            self._warmn += 1
+            ready = self.manip.warm(dt, p)
+            if not p.parked:
+                if self._warmn <= _WARM_SETTLE_GRACE_TICKS:
+                    return Result('running', reason='place_approach warm settling (stationarity filling)')
+                return Result('failed', reason='base moved during place_approach re-warm')
+            if ready or self._warmn >= _WARM_MAX_TICKS:
+                self.phase = 'execute'
+                return Result('running', reason='re-warm done; resuming place from place_approach')
+            return Result('running', reason='re-warming collision map at place_approach')
         if self.phase == 'fine_dock':
             # Slow closed-loop creep onto the MEASURED cart drawbar until inside the attach
             # handshake, then hand over. Bounded + honest failure with residuals (motion only).
@@ -428,6 +464,16 @@ class RuntimeAdapter:
         if self.action in ('collect', 'transfer'):
             r = self.manip.step(dt, p)
             self._last_manip_phase = getattr(r, 'phase', None)  # feeds next tick's port.gate()
+            # fm390: the arm has folded to the carry pose and is HOLDING in TRANSIT -- drive the base to
+            # place_approach (carton carried) before it places onto the deck. Pause stepping the arm (do
+            # not dispatch its controls); nav takes over. One-shot per collect; absent place_approach =>
+            # the arm never enters TRANSIT (reposition_before_place off) so this path is byte-identical.
+            if (self.action == 'collect' and self._last_manip_phase == 'transit'
+                    and 'place_approach' in self.poses and not self._collect_repositioned):
+                self.nav.start(self.poses['place_approach'], False)
+                self.phase = 'navigate'
+                self._collect_reposition_pending = True
+                return Result('running', reason='pick done; driving base to place_approach')
             stalled = self._sensor_stall(r)
             if stalled is not None:                       # unrecoverable reach -> fail fast
                 return Result('failed', reason=stalled)

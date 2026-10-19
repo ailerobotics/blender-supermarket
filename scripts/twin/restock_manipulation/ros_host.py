@@ -153,6 +153,10 @@ def main():
         cage_mouth_standoff=float(config.get('cage_mouth_standoff', 0.55)),
         cage_insert_gap=float(config.get('cage_insert_gap', 0.03)),
         cage_preplace_shape=config.get('cage_preplace_shape'),
+        # fm390: drive the base in front of the rollwagen mouth between the carry fold and the place
+        # (lift->tuck->TRANSIT->[base nav]->preplace), instead of the arm-only cage insert. Absent =>
+        # byte-identical. Mutually exclusive in practice with cart_cage_place (base nav replaces it).
+        reposition_before_place=bool(config.get('reposition_before_place', False)),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # The first decode-grade frame + support registration under render pacing needs several
@@ -199,6 +203,7 @@ def main():
         'cage_insert_gap': controller.cage_insert_gap,
         'staged_cart_swing': controller.staged_cart_swing, 'cart_pan_joint0': controller.cart_pan_joint0,
         'cart_tuck_shape': controller.cart_tuck_shape,
+        'reposition_before_place': controller.reposition_before_place,
         'sim_cart_place_policy': _policy is not None and bool(config.get('sim_cart_place_policy')),
         'base_collision_object': bool(config.get('base_collision_object', False)),
         'world_obstacles': [s['id'] for s in config.get('world_obstacles', [])],
