@@ -59,6 +59,14 @@ class IncorporationAckState:
     """
     def __init__(self, *, wall_clock=time.monotonic):
         self.wall_clock = wall_clock
+        # fm399 (2): the parked-heartbeat liveness gaps are SIM-ONLY env-widenable so a long
+        # render-paced reposition transit + re-incorporation window does not spuriously fault the
+        # station before a fresh ESDF integrates at the new base pose. Unset => 0.5 s sim / 3.0 s wall
+        # (the documented real-rig contract) => byte-identical. Clamped; a dead host is still caught.
+        self.sim_gap_s = (max(.5, min(600., float(os.environ['RESTOCK_STATION_SIM_GAP_S'])))
+                          if 'RESTOCK_STATION_SIM_GAP_S' in os.environ else .5)
+        self.wall_gap_s = (max(3., min(600., float(os.environ['RESTOCK_STATION_WALL_GAP_S'])))
+                           if 'RESTOCK_STATION_WALL_GAP_S' in os.environ else 3.)
         self.epoch = 0
         self.sequence = -1
         self.parked_since = -1.
@@ -134,9 +142,9 @@ class IncorporationAckState:
             wall_gap = self.wall_clock() - self.wall_heartbeat
             if not process_alive:
                 self.fault = 'station process lost'
-            elif sim_gap > .5:
+            elif sim_gap > self.sim_gap_s:
                 self.fault = f'parked heartbeat lost: sim gap {sim_gap:.2f} s'
-            elif wall_gap > 3.:
+            elif wall_gap > self.wall_gap_s:
                 self.fault = f'parked heartbeat lost: wall gap {wall_gap:.2f} s'
         ready = (self.active and not self.fault and endpoints_ready
                  and 0 <= now - self.collision_time <= .5 and self.collision_time > self.parked_since)

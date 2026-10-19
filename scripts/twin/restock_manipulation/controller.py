@@ -760,16 +760,24 @@ class TransferController:
                 # fm395 (A): count CONSECUTIVE confirmed-attachment ticks; advance only once the hold is
                 # stable for grasp_confirm_ticks (never on a single transient weld/grip).
                 self._grasp_confirm += 1
-                self._grasp_waits = 0
                 if self._grasp_confirm >= self.grasp_confirm_ticks:
                     self.held = True
                     if not self.motion.update_payload(True, self.profile):
                         return self._fail('payload collision attachment not acknowledged')
                     self._transition('lift')
-                return self._result()
-            # No confirmed attachment this tick. A seal that formed then dropped before confirming is a
-            # failed attempt -> reset the streak (never carry a transient toward the confirm threshold).
-            self._grasp_confirm = 0
+                    return self._result()
+            else:
+                # A seal that formed then dropped before confirming is a failed attempt -> reset the
+                # streak (never carry a transient toward the confirm threshold).
+                self._grasp_confirm = 0
+            # fm399: the confirm-wait budget is MONOTONIC in ticks since grasp-entry / last re-seat,
+            # incremented EVERY tick regardless of contact. The old code reset it on every contact
+            # tick, so a FLICKERING contact (True/False/True...) kept the consecutive _grasp_confirm
+            # streak below the threshold AND kept resetting the wait -> the grasp could neither confirm
+            # nor retry/fail and live-locked until the coarse phase_timeout (run-309; CPU-proven,
+            # grasp-confirm-wait-livelock). Counting every tick makes a flicker retry or fail honestly
+            # within the budget. Off by default (grasp_retry_max=0) => byte-identical; grasp_wait_ticks
+            # (default 40) is >> grasp_confirm_ticks so a genuine stable hold still confirms first.
             if self.grasp_retry_max > 0:          # fm395 bounded grasp retry (off by default => byte-identical)
                 self._grasp_waits += 1
                 if self._grasp_waits >= self.grasp_wait_ticks:

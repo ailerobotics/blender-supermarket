@@ -105,6 +105,23 @@ class RosManipulationRuntime:
             sc = getattr(self.station, 'stage_clock', None) if self.station is not None else None
             self.sensing_bridge.publish(sc() if sc is not None else simulation_time)
 
+    def repark_station(self, simulation_time):
+        """fm399 (1): discard the pickup-pose parked epoch and re-open a FRESH one at the new base
+        pose after the reposition drive. The base moved, so the pickup ESDF is wrong here (a moving
+        base invalidates the parked mapper by contract). Stopping the active epoch + clearing
+        _station_started makes the next _pump begin() a fresh epoch (parked, at place_approach); its
+        ESDF re-incorporates from the new pose and the incorporation-ack parked_since gate only lets
+        collision_time (hence ready) advance with that fresh integration. collision_time is cleared so
+        no stale value survives the hand-off."""
+        if self.station is not None:
+            try:
+                self.station.stop()
+            except Exception:
+                pass            # a faulted/idle epoch may already be down; begin() still re-opens cleanly
+            if self.feedback is not None:
+                self.feedback.collision_time = -1.
+        self._station_started = False
+
     def warm(self, simulation_time, parked=None):
         """Approach/parked warm-up tick (no job dispatch, no capture): pump the station + masked
         depth so the ESDF builds and collision_time goes fresh before the collect job is sent.

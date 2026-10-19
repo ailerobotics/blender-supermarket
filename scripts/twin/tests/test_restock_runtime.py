@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from twin.restock.runtime import Packet, RuntimeAdapter, NavigationBridge, ManipulationBridge
+from twin.restock_manipulation.types import Result as ManipResult
 from twin.restock.inventory import Job
 from twin.restock.scenario import validate
 from twin.restock import guard
@@ -94,6 +95,96 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(manip.started, ['collect'])          # grasp dispatched ONCE (rewarm must not re-start)
         self.assertEqual(nav_goals, [(0, 0, 0), (-4.5, 15.25, 3.14159)])  # pickup then place_approach
         self.assertIn('rewarm', phases)                        # re-warmed at place_approach
+
+    def test_reposition_rewarm_fails_honestly_without_a_fresh_collision_map(self):
+        # fm399 (1): the place_approach re-warm must NOT place on a stale map. When no fresh ESDF is
+        # re-incorporated at the new pose (warm never ready), the re-warm FAILS honestly after its
+        # bound -- it never force-proceeds to execute(place) like the pre-grasp warm does.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append(tuple(goal)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+
+        class Owned:   # sensor-owning runtime: the bridge delegates warm()/step() to it
+            cart_location = 'rollwagen'
+            def __init__(s): s.base_repositioned = False
+            def start(s, a, j): pass
+            def warm(s, t, parked=None): return not s.base_repositioned  # pre-grasp ready; re-warm NEVER ready
+            def repark_station(s, t): pass
+            def step(s, dt, t, parked=None):
+                return ManipResult('running', 'transit')
+        manip = ManipulationBridge(Owned(), owns_sensor_io=True)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach'] = [-4.5, 15.25, 3.14159]
+        adapter = RuntimeAdapter(self.nav, self.mobile, manip, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        phases, result = [], None
+        with patch('twin.restock.runtime._REWARM_MAX_TICKS', 4):
+            for _ in range(60):
+                r = adapter._step(.1)
+                phases.append(adapter.phase)
+                if r.status in ('succeeded', 'failed'):
+                    result = r
+                    break
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, 'failed')
+        self.assertIn('fresh collision map', result.reason)
+        self.assertIn('rewarm', phases)
+        self.assertNotIn('execute', phases[phases.index('rewarm'):])  # never reached place on a stale map
+
+    def test_reposition_arrival_reparks_station_before_rewarm(self):
+        # fm399 (1): on arrival at place_approach the adapter RE-PARKS the station (discarding the
+        # pickup-pose ESDF) before re-warming, so a fresh epoch is incorporated at the new pose.
+        reparks = []
+        class Owned:   # a sensor-owning runtime exposing repark_station (RosManipulationRuntime contract)
+            cart_location = 'rollwagen'
+            def __init__(s): s.base_repositioned = False
+            def start(s, a, j): pass
+            def warm(s, t, parked=None): return True
+            def repark_station(s, t): reparks.append(t)
+            def step(s, dt, t, parked=None):
+                return ManipResult('running', 'transit')
+        owned = Owned()
+        bridge = ManipulationBridge(owned, owns_sensor_io=True)
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append(tuple(goal)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach'] = [-4.5, 15.25, 3.14159]
+        adapter = RuntimeAdapter(self.nav, self.mobile, bridge, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        for _ in range(8):
+            r = adapter._step(.1)
+            if adapter.phase == 'rewarm':
+                break
+        self.assertEqual(len(reparks), 1)                      # re-parked exactly once, at arrival
+        self.assertTrue(owned.base_repositioned)               # and the arm was told to resume
+
+    def test_repark_station_resets_runtime_for_fresh_epoch(self):
+        # fm399 (1): RosManipulationRuntime.repark_station stops the active epoch, clears
+        # collision_time and arms a fresh begin() on the next pump.
+        from twin.restock.ros_manipulation import RosManipulationRuntime
+        stops = []
+        station = NS(stop=lambda: stops.append('stop'))
+        feedback = NS(collision_time=42.0)
+        rt = RosManipulationRuntime(NS(), lambda *a: None, prepare_station=lambda *a: None,
+                                    station=station, feedback=feedback)
+        rt._station_started = True
+        rt.repark_station(99.0)
+        self.assertEqual(stops, ['stop'])
+        self.assertEqual(feedback.collision_time, -1.)
+        self.assertFalse(rt._station_started)
 
     def test_collect_reposition_stages_via_east_waypoint(self):
         # fm390 nav proof #2: a direct diagonal to place_approach clips the parked cart, so the base must

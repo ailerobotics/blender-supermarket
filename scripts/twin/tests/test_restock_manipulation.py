@@ -149,6 +149,46 @@ def test_grasp_retries_then_fails_honestly_never_lifting_air():
     assert m.payloads == []                                 # update_payload(True) never issued -> no false attach
 
 
+def test_grasp_flicker_does_not_livelock_retries_or_fails_within_budget():
+    # fm399 (run-309 regression): a FLICKERING contact (True/False/True...) must NOT live-lock the
+    # grasp. The old wait budget reset on every contact tick, so a flicker never reached the
+    # consecutive confirm threshold AND never accrued the retry/fail budget -- the phase looped until
+    # the coarse 120 s phase_timeout. The monotonic budget retries then fails honestly, never lifting.
+    c, m = make_controller('collect')
+    c.grasp_confirm_ticks = 3        # needs 3 CONSECUTIVE; a flicker never delivers 3 in a row
+    c.grasp_retry_max = 2
+    c.grasp_wait_ticks = 6
+    t = run_to(c, 'grasp')
+    c.step(.1, packet(c, t, contact=False))                 # issue the gripper enable
+    result = None
+    for i in range(1, 400):
+        r = c.step(.1, packet(c, t + i * .1, contact=(i % 2 == 1)))   # perfect T/F/T/F flicker
+        assert c.phase != 'lift', 'must never lift without a stable confirmed attachment'
+        if r.status == 'failed':
+            result = r
+            break
+    # It fails via the HONEST grasp reason (bounded retries exhausted), NOT by the coarse phase_timeout.
+    assert result is not None, 'flicker live-locked (no honest failure within the retry budget)'
+    assert 'did not confirm a held carton' in result.reason
+    assert c._grasp_retries == c.grasp_retry_max
+    assert m.payloads == []
+
+
+def test_grasp_stable_hold_still_confirms_under_monotonic_budget():
+    # fm399: the monotonic wait must NOT pre-empt a genuine stable hold: with wait_ticks >> confirm_ticks
+    # a steady contact confirms and lifts well inside the budget (no spurious retry).
+    c, m = make_controller('collect')
+    c.grasp_confirm_ticks = 3
+    c.grasp_retry_max = 2
+    c.grasp_wait_ticks = 40
+    t = run_to(c, 'grasp')
+    c.step(.1, packet(c, t, contact=False))                 # issue
+    for i in range(1, 5):
+        c.step(.1, packet(c, t + i * .1, contact=True))
+    assert c.phase == 'lift'
+    assert c._grasp_retries == 0
+
+
 @pytest.mark.parametrize('operation', ['collect', 'transfer'])
 def test_success_needs_two_new_observations_and_source_scan(operation):
     c, m = make_controller(operation)

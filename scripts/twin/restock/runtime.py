@@ -18,6 +18,13 @@ from .mission import Result
 # startup grace -- not an unbounded warm-up -- bounds a genuinely stuck mapper.
 _WARM_MAX_TICKS = 300
 
+# fm399 (1): the reposition RE-warm at place_approach must NOT place on a stale/wrong-pose collision
+# map. Unlike the pre-grasp 'warm' (which force-dispatches on the cap so the host startup grace bounds
+# a stuck mapper), the re-warm REQUIRES a fresh incorporation at the NEW parked epoch before resuming
+# place -- a generous bound (the fresh re-park + a few nvblox integration cycles, stretched by render
+# pacing) after which it FAILS the collect honestly rather than placing blind.
+_REWARM_MAX_TICKS = 900
+
 # Grace for the parked-stationarity window to fill at the START of a warm phase. The port's `parked`
 # needs ~0.25 s of pose history; when the mission BEGINS directly at a manipulation stage (a start-phase
 # shortcut, e.g. --start-at transfer), that window is empty on the first ticks, so `parked` is False even
@@ -155,6 +162,16 @@ class ManipulationBridge:
         core = (self.controller.controller if self.owns_sensor_io
                 and not hasattr(self.controller, 'cart_location') else self.controller)
         core.base_repositioned = True
+
+    def repark_station(self, simulation_time):
+        """fm399 (1): after the reposition drive the parked ESDF from the pickup pose is wrong at
+        place_approach (the base moved -- a moving base invalidates the parked mapper by contract).
+        Discard it and re-open a FRESH parked epoch at the new pose, so the re-warm re-incorporates a
+        fresh ESDF whose stamp is strictly after the new parked epoch; the incorporation-ack
+        parked_since gate then makes collision_time (hence ready) only reachable with that fresh
+        integration. No-op for a runtime that does not own sensor I/O (byte-identical)."""
+        if self.owns_sensor_io and hasattr(self.controller, 'repark_station'):
+            self.controller.repark_station(simulation_time)
 
 
 class RuntimeAdapter:
@@ -368,12 +385,16 @@ class RuntimeAdapter:
                 # fm390: arrived at place_approach with the carton carried. Resume the PAUSED arm (its
                 # TRANSIT -> preplace) after re-warming the collision map at the new base pose; do NOT
                 # re-begin the manipulation (the controller is mid-run, holding the carry pose).
+                # fm399 (1): RE-PARK the station first -- the pickup-pose ESDF is wrong here (run-309
+                # stopped on exactly this stale collision world at arrival). repark opens a fresh epoch
+                # so the re-warm below re-incorporates a fresh ESDF at the new pose before place.
+                self.manip.repark_station(self.time)
                 self.manip.set_base_repositioned()
                 self._collect_reposition_pending = False
                 self._collect_repositioned = True
                 self.phase = 'rewarm'
                 self._warmn = 0
-                return Result('running', reason='at place_approach; re-warming before place')
+                return Result('running', reason='at place_approach; re-parking + re-warming before place')
             if self.action == 'collect':
                 # Warm the host collision map (ESDF + a fresh collision_time) while parked BEFORE
                 # dispatching the grasp, so the first /sensors frame lands within the host's sensor
@@ -431,9 +452,15 @@ class RuntimeAdapter:
                 if self._warmn <= _WARM_SETTLE_GRACE_TICKS:
                     return Result('running', reason='place_approach warm settling (stationarity filling)')
                 return Result('failed', reason='base moved during place_approach re-warm')
-            if ready or self._warmn >= _WARM_MAX_TICKS:
+            # fm399 (1): REQUIRE a fresh incorporation at the re-parked epoch before resuming place --
+            # do NOT force-proceed on the cap (that would place on the stale pickup-pose map, the
+            # run-309 failure). The incorporation-ack parked_since gate guarantees `ready` can only be
+            # True once a fresh ESDF has integrated strictly after the new parked epoch at this pose.
+            if ready:
                 self.phase = 'execute'
-                return Result('running', reason='re-warm done; resuming place from place_approach')
+                return Result('running', reason='re-warm done; fresh collision map; resuming place from place_approach')
+            if self._warmn >= _REWARM_MAX_TICKS:
+                return Result('failed', reason='no fresh collision map re-incorporated at place_approach')
             return Result('running', reason='re-warming collision map at place_approach')
         if self.phase == 'fine_dock':
             # Slow closed-loop creep onto the MEASURED cart drawbar until inside the attach

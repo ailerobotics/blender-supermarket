@@ -404,6 +404,40 @@ class IncorporationAckTest(unittest.TestCase):
         self.assertEqual(snap['state'], 'failed')
         self.assertEqual(snap['reason'], 'parked heartbeat lost: wall gap 3.40 s')
 
+    def test_default_gap_budgets_are_byte_identical(self):
+        # fm399 (2): unset env => the documented real-rig contract (0.5 s sim / 3.0 s wall).
+        st, _ = self.state()
+        self.assertEqual(st.sim_gap_s, .5)
+        self.assertEqual(st.wall_gap_s, 3.)
+
+    def test_sim_only_env_widens_gap_budgets_to_survive_render_paced_transit(self):
+        # fm399 (2): a widened sim-gap budget lets a long render-paced reposition/re-incorporation
+        # window pass without a spurious re-fault, while a dead host (process_alive False) is still
+        # caught immediately. Clamped to the floor so it can never go BELOW the real-rig contract.
+        from twin.restock_host.incorporation_ack import IncorporationAckState
+        with patch.dict(os.environ, {'RESTOCK_STATION_SIM_GAP_S': '30',
+                                           'RESTOCK_STATION_WALL_GAP_S': '45'}):
+            st = IncorporationAckState(wall_clock=lambda: 100.0)
+        self.assertEqual(st.sim_gap_s, 30.)
+        self.assertEqual(st.wall_gap_s, 45.)
+        st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=10.0, parked=True,
+                       camera_frame='restock_camera_collect'), 10.0)
+        st.acknowledge(10.2, 1)
+        # A 5 s sim gap that WOULD fault under the 0.5 s default is tolerated here.
+        snap = st.snapshot(15.2, endpoints_ready=True, process_alive=True)
+        self.assertNotEqual(snap['state'], 'failed')
+        # A dead host is still caught regardless of the widened gap budgets.
+        self.assertEqual(st.snapshot(15.3, endpoints_ready=True, process_alive=False)['state'], 'failed')
+
+    def test_gap_budgets_clamped_to_real_rig_floor(self):
+        # fm399 (2): a value below the real-rig contract is clamped up, never weakening the guard.
+        from twin.restock_host.incorporation_ack import IncorporationAckState
+        with patch.dict(os.environ, {'RESTOCK_STATION_SIM_GAP_S': '0.01',
+                                           'RESTOCK_STATION_WALL_GAP_S': '0.1'}):
+            st = IncorporationAckState(wall_clock=lambda: 100.0)
+        self.assertEqual(st.sim_gap_s, .5)
+        self.assertEqual(st.wall_gap_s, 3.)
+
     def test_fault_recovers_on_fresh_parked_epoch_bounded(self):
         from twin.restock_host.incorporation_ack import _MAX_RECOVERIES
         st, _ = self.prepared()  # epoch 1 at sim 10.0
