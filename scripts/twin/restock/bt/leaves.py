@@ -22,6 +22,8 @@ from py_trees.common import Status
 
 from .events import (Event, RECOVERY_FOR, STAGE_FAILURE_TYPES, classify_stage_failure)
 
+from .view_labels import collect_substep as _collect_substep
+
 RUNNING, SUCCESS, FAILURE = Status.RUNNING, Status.SUCCESS, Status.FAILURE
 
 
@@ -212,7 +214,11 @@ class Stage(py_trees.behaviour.Behaviour):
         ctx.release_hold()
         outcome = ctx.mission.step_stage(ctx.dt)
         if outcome == 'running':
-            self.feedback_message = f'{self.action}: running'
+            # fm390: for collect, show the live position-first sub-step (nav -> perceive -> place ->
+            # verify) so the view renders the step-by-step placement, not an opaque 'collect: running'.
+            substep = _collect_substep(ctx.mission) if self.action == 'collect' else None
+            self.feedback_message = (f'{self.action}: {substep}' if substep
+                                     else f'{self.action}: running')
             return RUNNING
         if outcome in ('succeeded', 'degraded'):
             self.feedback_message = f'{self.action}: {outcome}'

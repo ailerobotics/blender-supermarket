@@ -119,6 +119,27 @@ class PureContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ev.parse_scenario_events(bad)
 
+    def test_collect_substep_view_label(self):
+        # fm390: the view shows the position-first collect arc. The adapter drive/warm phase overrides the
+        # finer manipulation phase; otherwise the controller phase maps to the step. No phase => no label.
+        from twin.restock.bt import view_labels as vl
+
+        class Adapter:
+            def __init__(self, phase=None, manip=None):
+                self.phase, self._last_manip_phase = phase, manip
+
+        class M:
+            def __init__(self, adapter): self.adapter = adapter
+
+        self.assertEqual(vl.collect_substep(M(Adapter('navigate', 'transit'))), 'nav (navigate)')
+        self.assertEqual(vl.collect_substep(M(Adapter('rewarm', 'transit'))), 'perceive (rewarm)')
+        self.assertEqual(vl.collect_substep(M(Adapter('execute', 'preplace'))), 'place (preplace)')
+        self.assertEqual(vl.collect_substep(M(Adapter('execute', 'grasp'))), 'pick (grasp)')
+        self.assertEqual(vl.collect_substep(M(Adapter('execute', 'verify'))), 'verify (verify)')
+        self.assertIsNone(vl.collect_substep(M(Adapter(None, None))))      # no phase exposed
+        self.assertIsNone(vl.collect_substep(M(None)))                     # no adapter
+        self.assertIsNone(vl.collect_substep(object()))                    # plain mission
+
     def test_classify_stage_failure(self):
         self.assertEqual(ev.classify_stage_failure('collect', 'reach stalled: no frame'), 'grasp_failed')
         self.assertEqual(ev.classify_stage_failure('transfer', 'transfer evidence mismatch'), 'seal_failed')
