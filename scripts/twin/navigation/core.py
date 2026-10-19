@@ -7,6 +7,7 @@ access to narrow aisles for a simple conservative swept-clearance guarantee.
 from dataclasses import dataclass
 import heapq
 import math
+import os
 
 
 def wrap(a):
@@ -462,6 +463,23 @@ class Controller:
                                    for a,b in zip(points,points[1:])):
                 self.path = self.grid.plan(pose,self.goal,radius,obs.obstacles)
             if not self.path:
+                # fm390 diagnostic (RESTOCK_NAV_DIAG, byte-identical off): why the plan is empty -- is the
+                # START boxed in, the GOAL blocked, or the straight line crossed? Prints free(start)/
+                # free(goal), the dynamic-obstacle count, the nearest few to the base, and how many sit
+                # inside the footprint disk at start/goal. Throttled.
+                if os.environ.get('RESTOCK_NAV_DIAG'):
+                    self._ndiag = getattr(self, '_ndiag', 0) + 1
+                    if self._ndiag % 20 == 1:
+                        ob = obs.obstacles
+                        d_start = sorted(math.hypot(pose[0]-q[0], pose[1]-q[1]) for q in ob)[:5]
+                        in_s = sum(1 for q in ob if math.hypot(pose[0]-q[0], pose[1]-q[1]) <= radius)
+                        in_g = sum(1 for q in ob if math.hypot(self.goal[0]-q[0], self.goal[1]-q[1]) <= radius)
+                        print('NAV_DIAG blocked_no_route goal=%s pose=%s r=%.3f free_start=%s free_goal=%s '
+                              'seg_free=%s n_obs=%d near5=%s in_start=%d in_goal=%d'
+                              % (tuple(round(c, 2) for c in self.goal), tuple(round(c, 2) for c in pose),
+                                 radius, self.grid.free(pose, radius, ob), self.grid.free(self.goal, radius, ob),
+                                 self.grid.segment_free(pose, self.goal, radius, ob), len(ob),
+                                 [round(d, 3) for d in d_start], in_s, in_g), flush=True)
                 return self._wait(dt,'blocked_no_route')
             while len(self.path) > 1 and math.dist(pose[:2],self.path[0]) < 0.10:
                 self.path.pop(0)
