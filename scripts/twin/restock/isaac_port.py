@@ -15,6 +15,7 @@ from twin.navigation.sensors import observation as nav_observation
 from twin.urdf_probe import parse_urdf, link_world_transforms, geometry_world_points, resolve_package_uri
 from twin.restock_manipulation.isaac_sensors import sensing_render_required
 from .runtime import Packet
+from .collect_capture_gate import release_after_lift
 
 # Stages whose work consumes freshly rendered pixels (inventory perception, the
 # manipulation camera->nvblox depth, the final inventory verification). Only these
@@ -317,15 +318,17 @@ class IsaacPort:
         # Authoritative live grip signal (native grippedObjects OR the sim attach-fallback weld; a
         # stable bool, keyed on grippedObjects not the flickering status -- cad_tool.read()).
         self._carton_welded = bool(self.contact.read())
-        # fm381 stage-scoped sensing (EARLIEST safe point): the moment the carton grasp is CONFIRMED
-        # (weld latched -> _carton_welded True), BEFORE lift, free the collect-only source station
-        # camera render product. source (backstock pick target) is not read again this mission, and
-        # freeing it HERE returns its VRAM BEFORE the release-peak (sim ~223) where the run OOMs -- the
-        # begin_action (collect->couple) teardown fired AFTER the peak, too late to help it. cart + arm
-        # cams untouched. None handle => off (byte-identical). begin_action keeps the call as a fallback.
-        if self._carton_welded:
+        # fm381/384 render-product teardown, fm394 TIMING: free the collect-only source render product
+        # (stage-scoped teardown + phase-aware dest-only switch) to return its VRAM BEFORE the release peak
+        # (sim ~223) -- but only AFTER the carton LIFT has COMPLETED (a post-lift phase), never during the
+        # lift. Firing it at grasp-confirm tore the sensing/render loop down mid-lift and the lift
+        # goal-missed 2/2 (runs 300d, 305); run-300c lifted cleanly without it. release_after_lift() holds
+        # the teardown through observe/approach/contact/grasp/lift and fires at the first post-lift tick
+        # (tuck for the staged/reposition flow, else preplace) -- still well before the release peak. None
+        # handles => off (byte-identical). begin_action (collect->couple) keeps both calls as a fallback.
+        if release_after_lift(self._phase, self._carton_welded):
             self._fire_stage_scoped_teardown()
-            self._fire_release_source()   # fm384: switch capture to dest-only + free source render product
+            self._fire_release_source()
         # SIM PARKING BRAKE (firstmate run-210/232): while the arm works (a stationary sensing action),
         # lock the already-parked chassis to the world so the contact-press / welded-carton reaction
         # cannot shift it past the gate (the wheel-hold is translation+yaw-saturated). TWO regimes:
