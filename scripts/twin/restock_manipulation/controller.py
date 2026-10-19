@@ -663,6 +663,20 @@ class TransferController:
                 # returned 'failed' below still fails fast as a collision.
                 return self._raised_move_exc(exc, staged=True)
             if outcome == 'failed':
+                # fm389/run-300e: a returned 'failed' at STOW was hard-failed here, UNLIKE the other staged
+                # moves (tuck/pan/retreat_tuck) which bounded-retry a returned 'failed' (fm358). run-300e
+                # reached stow (deepest ever -- lift/place/release/retreat all cleared) and the stochastic
+                # move_group double-free crashed in its action-result handler RIGHT AFTER the stow plan
+                # SUCCEEDED (0 collision/IK rejects, arm hit_bodies=[]), surfacing as this returned 'failed'
+                # -> hard-fail, no retry. Route it through the SAME bounded staged retry so the crash-induced
+                # transient re-plans on the respawned move_group; a genuine persistent stow fail still
+                # exhausts -> _fail. Consistent with the tuck/pan returned-'failed' branch.
+                if self._staged_retries < self._staged_move_retry_max:
+                    self._staged_retries += 1
+                    print('STAGED_MOVE_RETRY phase=%s attempt=%d/%d' %
+                          (self.phase, self._staged_retries, self._staged_move_retry_max), flush=True)
+                    self.issued = False   # re-plan + re-execute the stow next tick
+                    return self._result()
                 return self._fail('collision-planned transport stow failed')
             if outcome == 'succeeded':
                 if len(s.joint_positions) != 6 or max(abs(a-b) for a,b in
