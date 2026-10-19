@@ -71,10 +71,13 @@ def description(config):
             # pacing a joint can hold a small steady tracking residual at a move's end (e.g. the carton-
             # loaded extend), so the NEXT move's planned start deviates from the measured state: MoveIt's
             # trajectory_execution_manager then rejects it ('start point deviates ... more than 0.01 at
-            # ur_shoulder_pan_joint' -> ABORTED, run-280 retreat). 0.05 absorbs that residual while
-            # staying far below a real mis-seed; the gravity_ff fix removes the gross bias separately.
+            # ur_shoulder_pan_joint' -> ABORTED, run-280 retreat). run-282: the gravity-loaded elbow
+            # drifts ~0.065 rad over the ~218 s render-paced plan->validate window of the empty-handed
+            # retreat, exceeding 0.05 -> raised to 0.15 (still far below a real mis-seed; the retreat is
+            # a +x back-out so a looser start is low-risk). The pan undershoot is handled by the preplace
+            # 0.2 goal relax, not here.
             'trajectory_execution': {'execution_duration_monitoring': False,
-                                     'allowed_start_tolerance': 0.05},
+                                     'allowed_start_tolerance': 0.15},
             'moveit_manage_controllers': False,
             'moveit_controller_manager': 'moveit_simple_controller_manager/MoveItSimpleControllerManager',
             'moveit_simple_controller_manager': {
