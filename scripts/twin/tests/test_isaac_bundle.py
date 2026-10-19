@@ -76,6 +76,26 @@ class PlanBundleTests(unittest.TestCase):
         # absent => not present, bundle still valid (byte-identical with today)
         self.assertNotIn('place_approach', plan_bundle(MANIFEST, SCENARIO, base_config()).poses)
 
+    def test_place_approach_stage_optional_pose_accepted(self):
+        # fm390 nav proof #2: place_approach_stage is the east staging waypoint the base drives to before
+        # place_approach (a direct diagonal clips the cart). Optional + plumbed when supplied.
+        cfg = base_config()
+        cfg['mission_poses']['place_approach'] = [-4.5, 15.25, math.pi]
+        cfg['mission_poses']['place_approach_stage'] = [-4.5, 16.0, 0.0]
+        p = plan_bundle(MANIFEST, SCENARIO, cfg)
+        self.assertEqual(p.poses['place_approach_stage'], (-4.5, 16.0, 0.0))
+        self.assertNotIn('place_approach_stage', plan_bundle(MANIFEST, SCENARIO, base_config()).poses)
+
+    def test_derive_place_approach_stage_translates_east_at_pick_heading(self):
+        # The staging pose sits at place_approach's x but the pick pose's lateral line + heading, so leg 1
+        # is a straight translate out of the cart's north gap before the turn onto the mouth.
+        pickup = (-5.73, 16.0, 0.0)
+        place_approach = isaac_bundle.derive_place_approach((-5.73, 15.25), 0.0, 1.15)
+        stage = isaac_bundle.derive_place_approach_stage(place_approach, pickup)
+        self.assertAlmostEqual(stage[0], place_approach[0], places=6)  # place_approach's standoff x
+        self.assertAlmostEqual(stage[1], 16.0, places=6)               # pick pose's y (clear of the cart)
+        self.assertAlmostEqual(stage[2], 0.0, places=6)                # pick heading (straight translate)
+
     def test_derive_place_approach_from_mission_cart(self):
         # Mission cart /Rollwagen at (-5.73,15.25) yaw 0, open +x face; proven standoff ~1.23 m east.
         x, y, yaw = isaac_bundle.derive_place_approach((-5.73, 15.25), 0.0, 1.23)

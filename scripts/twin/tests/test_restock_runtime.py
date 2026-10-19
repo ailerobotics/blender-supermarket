@@ -95,6 +95,52 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(nav_goals, [(0, 0, 0), (-4.5, 15.25, 3.14159)])  # pickup then place_approach
         self.assertIn('rewarm', phases)                        # re-warmed at place_approach
 
+    def test_collect_reposition_stages_via_east_waypoint(self):
+        # fm390 nav proof #2: a direct diagonal to place_approach clips the parked cart, so the base must
+        # stage EAST first. With a staging waypoint (place_approach_stage, else couple_approach) the
+        # reposition drives pickup -> stage -> place_approach, and base_repositioned is set ONLY at the
+        # final goal (the staging waypoint must not resume the arm).
+        nav_goals = []
+        repositioned_at = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append(tuple(goal)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+
+        class M:
+            cart_location = 'rollwagen'
+            def __init__(s): s.started = []; s.base_repositioned = False
+            def start(s, a, j): s.started.append(a)
+            def warm(s, dt, p): return True
+            def step(s, dt, p):
+                if not s.base_repositioned:
+                    return NS(status='running', reason='', controls=(), phase='transit')
+                return NS(status='succeeded', reason='', controls=(), phase='place',
+                          evidence=({'source': 'test_fixture', 'sku': 'milk', 'location': 'rollwagen',
+                                     'quantity': 1, 'observation_id': 'o', 'simulation_time': .1},))
+        manip = M()
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach_stage'] = [-4.5, 16.0, 0.0]
+        poses['place_approach'] = [-4.5, 15.25, 3.14159]
+        adapter = RuntimeAdapter(self.nav, self.mobile, manip, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        for _ in range(10):
+            # the arm must NOT be resumed until the final goal: assert base stays un-repositioned
+            # while the staging goal is still the active reposition target
+            r = adapter._step(.1)
+            repositioned_at.append((tuple(nav_goals[-1]) if nav_goals else None, manip.base_repositioned))
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertEqual(nav_goals,
+                         [(0, 0, 0), (-4.5, 16.0, 0.0), (-4.5, 15.25, 3.14159)])  # pickup -> stage -> mouth
+        # base_repositioned never set while the staging waypoint was the latest goal
+        self.assertFalse(any(rep for goal, rep in repositioned_at if goal == (-4.5, 16.0, 0.0)))
+
     def test_coupling_needs_later_observation(self):
         self.adapter.start('couple',self.job)
         self.assertEqual(self.adapter.step(.1).status,'running')

@@ -201,7 +201,7 @@ class RuntimeAdapter:
         # Optional couple approach waypoint + on-axis standoff, and the fm390 place_approach waypoint
         # (in front of the rollwagen mouth) the collect stage drives to before placing; validated only
         # when supplied.
-        for name in ('couple_approach', 'couple_standoff', 'place_approach'):
+        for name in ('couple_approach', 'couple_standoff', 'place_approach', 'place_approach_stage'):
             if name in poses:
                 wp = poses[name]
                 if len(wp) != 3 or not all(math.isfinite(v) for v in wp):
@@ -221,6 +221,8 @@ class RuntimeAdapter:
         # fold done) and a place_approach pose is configured. Reset here so a re-begun collect starts clean.
         self._collect_reposition_pending = False
         self._collect_repositioned = False
+        self._reposition_seq = []          # fm390 nav proof #2: staged drive to place_approach
+        self._reposition_seq_i = 0
         if action == 'couple':
             # Couple nav runs an in-order sequence of waypoints ending at the ON-AXIS standoff,
             # then the fine-dock servo inserts STRAIGHT along the cart axis to the drawbar:
@@ -354,6 +356,13 @@ class RuntimeAdapter:
                 key = 'arrived' if self.action == 'outbound' else 'home'
                 return Result('succeeded', self._evidence(p, **{key: True}))
             if self.action == 'collect' and self._collect_reposition_pending:
+                if self._reposition_seq_i < len(self._reposition_seq) - 1:
+                    # Reached the staging waypoint (east of the cart); advance to place_approach.
+                    self._reposition_seq_i += 1
+                    self.nav.start(self._reposition_seq[self._reposition_seq_i], False)
+                    self.phase = 'navigate'
+                    return Result('running',
+                                  reason=f'reposition advancing to {self._reposition_seq[self._reposition_seq_i]}')
                 # fm390: arrived at place_approach with the carton carried. Resume the PAUSED arm (its
                 # TRANSIT -> preplace) after re-warming the collision map at the new base pose; do NOT
                 # re-begin the manipulation (the controller is mid-run, holding the carry pose).
@@ -470,10 +479,21 @@ class RuntimeAdapter:
             # the arm never enters TRANSIT (reposition_before_place off) so this path is byte-identical.
             if (self.action == 'collect' and self._last_manip_phase == 'transit'
                     and 'place_approach' in self.poses and not self._collect_repositioned):
-                self.nav.start(self.poses['place_approach'], False)
+                # fm390 nav proof #2 (scripts/check_place_approach_nav.py): a DIRECT diagonal drive to
+                # place_approach clips the parked cart -- the base must translate EAST clear of the cart
+                # before turning to face the mouth. The parked cart is NOT a nav obstacle at these docking
+                # distances (couple backs the base onto its hitch), so this SEQUENCING, not the planner,
+                # keeps the base clear. Route via a staging waypoint (explicit place_approach_stage, else
+                # the proven couple_approach) then place_approach; only the FINAL goal sets base_repositioned.
+                stage = self.poses.get('place_approach_stage') or self.poses.get('couple_approach')
+                self._reposition_seq = ([stage, self.poses['place_approach']] if stage is not None
+                                        else [self.poses['place_approach']])
+                self._reposition_seq_i = 0
+                self.nav.start(self._reposition_seq[0], False)
                 self.phase = 'navigate'
                 self._collect_reposition_pending = True
-                return Result('running', reason='pick done; driving base to place_approach')
+                return Result('running', reason=f'pick done; staging base to {self._reposition_seq[0]} '
+                                                 f'en route to place_approach')
             stalled = self._sensor_stall(r)
             if stalled is not None:                       # unrecoverable reach -> fail fast
                 return Result('failed', reason=stalled)

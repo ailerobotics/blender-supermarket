@@ -181,6 +181,18 @@ def derive_place_approach(cart_xy, cart_yaw, standoff, *,
     return (deck[0] + mx * standoff, deck[1] + my * standoff, math.atan2(-my, -mx))
 
 
+def derive_place_approach_stage(place_approach, pickup):
+    """fm390 nav proof #2: the staging waypoint the base drives to BEFORE place_approach.
+
+    A DIRECT diagonal drive from the pick pose to place_approach clips the parked cart -- the base must
+    translate out along the mouth axis (clear of the cart, keeping the pick-pose heading) BEFORE turning
+    to face the mouth (``scripts/check_place_approach_nav.py``). The staging pose sits at place_approach's
+    standoff distance (its x) but on the pick pose's lateral line, at the pick heading, so leg 1 is a
+    straight translate that never swings a corner into the cart; leg 2 then turns + closes onto the mouth.
+    """
+    return (place_approach[0], pickup[1], pickup[2])
+
+
 def plan_bundle(manifest, scenario, config):
     """Pure mission-bundle contract from manifest+scenario+config. No Isaac import.
 
@@ -199,7 +211,7 @@ def plan_bundle(manifest, scenario, config):
     # stage navigates to before the fine-dock insert; and `place_approach` (fm390: in front of the
     # rollwagen's open +x face, facing the mouth, at an arm-reach standoff) the collect stage drives to
     # WITH the carton carried before lowering it onto the deck, instead of reaching around from pickup.
-    _optional_extra = {'couple_approach', 'couple_standoff', 'place_approach'}
+    _optional_extra = {'couple_approach', 'couple_standoff', 'place_approach', 'place_approach_stage'}
     if not isinstance(poses_in, dict) or not set(NAV_GOALS) <= set(poses_in) \
             or not set(poses_in) <= set(NAV_GOALS) | _optional_extra:
         raise ValueError(f'config.mission_poses must provide {NAV_GOALS} '
