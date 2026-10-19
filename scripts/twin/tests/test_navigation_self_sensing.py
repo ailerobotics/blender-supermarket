@@ -197,4 +197,32 @@ class SelfSensingTests(unittest.TestCase):
             self.assertLessEqual(abs(local_y),MobileSpec().cart_width/2+1e-8)
 
 
+class CarrySelfMaskTests(unittest.TestCase):
+    """fm393: while carrying, near-field returns (the carry-fold arm/carton ring) are masked as self;
+    returns beyond the radius stay real obstacles. Off (radius 0 or carry_active False) => byte-identical."""
+    def _sensor(self, boxes, carry_self_radius):
+        # lidar at origin facing +x (yaw 0); heights pick the box's z=0.78.
+        return IsaacRangeSensor(lambda: (0.0, 0.0, 0.0), query=BoxQuery(boxes),
+                                self_paths=('/Robot',), heights=(0.78,), beams=8,
+                                carry_self_radius=carry_self_radius)
+
+    def test_near_ring_masked_only_while_carrying(self):
+        ring = [('/Store/clutter', (0.78, 0.0, 0.78), (0.05, 0.05, 0.1), 0.0)]  # non-self, 0.78 m ahead
+        # carry OFF (byte-identical): the near return is a real obstacle point
+        s_off = self._sensor(ring, 0.0); s_off.carry_active = True   # radius 0 => no masking even if active
+        self.assertGreater(len(s_off.read(.1).points((0, 0, 0))), 0)
+        s_default = self._sensor(ring, 0.85)                          # radius set but carry_active False
+        self.assertGreater(len(s_default.read(.1).points((0, 0, 0))), 0)
+        # carry ON with the radius: the 0.78 m ring return is masked (unknown), no obstacle point
+        s_on = self._sensor(ring, 0.85); s_on.carry_active = True
+        scan = s_on.read(.1)
+        self.assertEqual(scan.points((0, 0, 0)), ())
+        self.assertGreater(sum(scan.unknown), 0)
+
+    def test_far_obstacle_survives_carry_mask(self):
+        far = [('/Store/shelf', (1.20, 0.0, 0.78), (0.05, 0.05, 0.1), 0.0)]      # 1.2 m > 0.85 m radius
+        s = self._sensor(far, 0.85); s.carry_active = True
+        self.assertGreater(len(s.read(.1).points((0, 0, 0))), 0)                 # real avoidance intact
+
+
 if __name__=='__main__':unittest.main()

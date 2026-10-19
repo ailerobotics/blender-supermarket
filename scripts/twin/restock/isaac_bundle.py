@@ -499,9 +499,16 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # The robot root is always self; the towed cart root is self ONLY while coupled (IsaacPort sets
     # range_sensor.coupled each tick from the measured latch). Otherwise rear beams off the coupled
     # cart read as a phantom obstacle behind the robot, blocking any turn-in-place/return maneuver.
+    # fm393 carry self-mask radius: while the port flags the reposition carry, returns closer than this
+    # are masked as self (the carry-fold arm/carton ring); beyond it stays a real obstacle. 0.0 => off =>
+    # byte-identical (also inert unless the port sets range_sensor.carry_active during the carry).
+    _carry_self_radius = float(config.get('carry_self_radius_m', 0.0))
+    print('CARRY_SELF_MASK carry_self_radius_m=%.3f (0 => off; masks near-field self only while carrying)'
+          % _carry_self_radius, flush=True)
     range_sensor = IsaacRangeSensor(
         get_sensor_pose=lambda: _lidar_pose(assembly.robot_body, _lidar_xyz[0], _lidar_xyz[1]),
-        sensor_to_base=_lidar_xyz, self_paths=(robot_root,), coupled_self_paths=cart_self_paths)
+        sensor_to_base=_lidar_xyz, self_paths=(robot_root,), coupled_self_paths=cart_self_paths,
+        carry_self_radius=_carry_self_radius)
     # fm376: no walkthrough render product (recording_camera None) => no Recorder; the port then
     # self-disables the record cadence and the walkthrough is composed offline from sensing frames.
     recorder = Recorder(output / 'mission-frames', fps=plan.recording_fps) if recording_camera is not None else None

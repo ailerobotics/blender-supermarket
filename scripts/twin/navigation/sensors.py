@@ -162,7 +162,8 @@ class IsaacRangeSensor:
     Heights are WORLD Z values; they are not offsets from the lidar_frame.
     """
     def __init__(self,get_sensor_pose,*,heights=(0.15,0.5,1.0),beams=360,range_max=10.0,
-                 sensor_to_base=(0.0,0.0,0.0),self_paths=(),coupled_self_paths=(),query=None):
+                 sensor_to_base=(0.0,0.0,0.0),self_paths=(),coupled_self_paths=(),query=None,
+                 carry_self_radius=0.0):
         if query is None:
             from omni.physx import get_physx_scene_query_interface
             query=get_physx_scene_query_interface()
@@ -180,6 +181,16 @@ class IsaacRangeSensor:
         # WITHOUT asserting `coupled` -- so the footprint stays the uncoupled base radius (no swept-train
         # envelope) and no coupling is implied. Decoupled + not placing => the cart is a real obstacle.
         self.workspace_self=False
+        # fm393 carry self-mask (sim-only, real-rig posture: the carried load is masked by its OWN
+        # near-field geometry, never by ignoring the scan). While `carry_active` (set by the caller only
+        # during the mid-collect reposition carry), a return CLOSER than `carry_self_radius` is treated as
+        # self (the carry-fold arm/carton forms a dense ~0.78 m ring just outside the 0.75 m footprint --
+        # run-304 -- that boxes the planner in). Returns BEYOND the radius stay real obstacles, so genuine
+        # avoidance is intact. 0.0 (default) or carry_active False => no masking => byte-identical.
+        if not (math.isfinite(carry_self_radius) and carry_self_radius>=0):
+            raise ValueError('carry_self_radius must be finite and non-negative')
+        self.carry_self_radius=float(carry_self_radius)
+        self.carry_active=False
         if any(not p.startswith('/') or p=='/' or not p or '//' in p or
                any(s in ('.','..') for s in p.split('/'))
                for p in self.self_paths+self.coupled_self_paths):
@@ -217,7 +228,8 @@ class IsaacRangeSensor:
                     distance=float(hit['distance'])
                     if not math.isfinite(distance) or not 0<=distance<=self.range_max:
                         raise ValueError('invalid closest-hit distance')
-                    if self._self_hit(hit):
+                    if self._self_hit(hit) or (self.carry_active
+                                               and distance<self.carry_self_radius):
                         hidden=True
                     else:
                         best=min(best,max(0.001,distance))

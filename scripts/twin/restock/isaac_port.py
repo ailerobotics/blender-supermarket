@@ -448,6 +448,10 @@ class IsaacPort:
         # base radius (no swept-train envelope) and no coupling is implied. Every OTHER action (outbound/
         # park/transfer/verify/return) leaves the cart a real obstacle (when coupled it is coupled-self).
         self.range_sensor.workspace_self=(self.current_action in ('collect','couple'))
+        # fm393: mask the carry-fold arm/carton near-field ring from the lidar ONLY during the mid-collect
+        # reposition carry (the controller holds TRANSIT while the base drives to place_approach). Precise
+        # signal: self._phase=='transit'. Inert unless carry_self_radius_m is configured => byte-identical.
+        self.range_sensor.carry_active=(self._phase=='transit')
         scan=self.range_sensor.read(now)
         articulation=wrap(r.yaw-c.yaw)
         # Reference navigation consumes a localized Odometry + an obstacle Observation,
