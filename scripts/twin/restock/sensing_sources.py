@@ -114,12 +114,16 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
     profiles = dict(getattr(manip_runtime.controller, 'profiles', {}))
 
     def stage_scoped_teardown():
-        """fm380: DESTROY (free VRAM, not just pause) the collect-only station cameras' render
-        products. Called ONCE by IsaacPort at the collect->couple boundary when
-        RESTOCK_STAGE_SCOPED_SENSING is set. Keeps the cart camera + nav; fail-safe (never raises)."""
+        """fm381: DESTROY (free VRAM, not just pause) the station cameras this mission NEVER reads --
+        i.e. the SHELF camera (transfer-only; no transfer stage here), via _unused_sensing_camera_ids.
+        Called ONCE by IsaacPort at grasp-confirmed (before the sim-223 release peak). Deliberately does
+        NOT touch the SOURCE camera: run-300b showed the collect capture HOLDS source through the whole
+        cart-swing (destroying it mid-collect starved /sensors -> sensor-stream watchdog). source stays
+        resident; shelf alone (~0.95 GB freed before the peak) keeps the peak under the card. cart + nav
+        + source untouched; fail-safe (never raises)."""
         from .native_cameras import destroy_camera_render_product
         freed = []
-        for cid in _stage_scoped_teardown_camera_ids(design):
+        for cid in _unused_sensing_camera_ids(design):
             cam = cameras.get(cid)
             if cam is not None:
                 destroy_camera_render_product(cam, getattr(assembly, 'stage', None))
