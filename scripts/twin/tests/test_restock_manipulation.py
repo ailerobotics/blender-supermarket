@@ -383,6 +383,19 @@ def test_direct_place_verify_hard_fails_when_carton_fell_to_the_floor():
     assert not any(e.get('source') == 'ground_truth_place_check' for e in c.evidence)
 
 
+def test_direct_place_verify_hard_fails_when_carton_left_on_the_upper_shelf():
+    # fm390 wants deck vs shelf vs floor distinguished. With the DECK as the target, a carton settled on
+    # the upper SHELF (bottom well ABOVE the deck top) is a mis-place -> hard-fail, same as the floor case.
+    c, m = make_controller('collect')
+    t = run_to(c, 'verify')
+    c.target_surface = (.5, .2, .225, 0., 0., 0., 1.)     # deck top
+    shelf = (.5, .2, 1.0, 0., 0., 0., 1.)                 # carton on the upper shelf (bottom ~0.95)
+    r = None
+    for i in range(4):
+        r = c.step(.1, packet(c, t + i * .1, placed_pose=shelf))
+    assert r.status == 'failed' and 'place verification failed' in r.reason
+
+
 def test_placed_pose_absent_keeps_the_camera_two_frame_verify_byte_identical():
     # Unset RESTOCK_VERIFY_PLACE => placed_pose None => the existing sensor verify path is untouched.
     c, m = make_controller('collect')

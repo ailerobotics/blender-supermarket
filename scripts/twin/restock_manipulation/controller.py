@@ -719,10 +719,16 @@ class TransferController:
                 xy = math.dist(c[:2], self.target_surface[:2])
                 bottom_gap = (c[2] - half_h) - self.target_surface[2]
                 on_deck = xy <= self._place_verify_xy_tol and abs(bottom_gap) <= self._place_verify_z_tol
-                if bottom_gap < -self._place_verify_z_tol:   # carton bottom settled BELOW the support top
+                # A settled carton clearly OFF the deck -- on the floor (bottom_gap << 0), on the upper
+                # shelf (bottom_gap >> 0), or beside the cart (xy far) -- is a fast hard-fail so an
+                # empty-gripper 'success' cannot propagate. The band between on_deck and far relies on the
+                # phase timeout. Thresholds are 2x the accept tolerances (sim-only env-tunable).
+                far = (xy > 2 * self._place_verify_xy_tol
+                       or abs(bottom_gap) > 2 * self._place_verify_z_tol)
+                if far:
                     self._place_offdeck_frames += 1
                     if self._place_offdeck_frames >= 3:
-                        return self._fail('place verification failed: carton not on deck '
+                        return self._fail('place verification failed: carton not resting on deck '
                                           '(xy=%.3f bottom_gap=%.3f)' % (xy, bottom_gap))
                 else:
                     self._place_offdeck_frames = 0
