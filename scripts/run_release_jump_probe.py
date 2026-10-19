@@ -118,6 +118,7 @@ def run(args):
             # scales-with-render-products test. Reuses _real_rig verbatim, so it ALSO honours the
             # RESTOCK_DROP_UNUSED_SENSING / RESTOCK_NO_WALKTHROUGH_RENDER / RESTOCK_WALKTHROUGH_* knobs.
             cams_note = 'viewport-only'
+            _rig = _design = None
             if args.full_cameras:
                 from twin.restock.sensing_sources import _real_rig
                 from twin.restock_camera.config import camera_config as _camera_config
@@ -157,6 +158,35 @@ def run(args):
             # 3) welded baseline
             _hold_and_sample(stage, trace, 'welded', reset_pose,
                              steps=args.welded_steps, sample_every=args.sample_every, t0=t0)
+            # fm380 STAGE-SCOPED SENSING measurement: after the welded (full-camera) baseline, DESTROY
+            # the collect-only station cameras' render products the way the collect->couple transition
+            # would, step render a few seconds, and measure how much VRAM Isaac actually RETURNS (it may
+            # pool and return ~0). Needs --full-cameras (so there are station render products to free).
+            if args.destroy_sensing:
+                if _rig is None:
+                    raise ValueError('--destroy-sensing requires --full-cameras (needs station cameras)')
+                from twin.restock.native_cameras import destroy_camera_render_product
+                from twin.restock.sensing_sources import _stage_scoped_teardown_camera_ids
+                base_mib = probe.vram_used_mib()
+                ids = _stage_scoped_teardown_camera_ids(_design)
+                for cid in ids:
+                    cam = _rig['cameras'].get(cid)
+                    if cam is not None:
+                        destroy_camera_render_product(cam, assembly.stage)
+                for i in range(args.post_steps):
+                    stage.gate.apply(reset_pose, np.zeros(6), stage.gate.indices)
+                    stage.world.step(render=True)
+                    if i % args.post_sample_every == 0 or i == args.post_steps - 1:
+                        trace.add('post_destroy', time.monotonic() - t0, probe.vram_used_mib())
+                after_mib = probe.vram_used_mib()
+                returned = base_mib - after_mib
+                print('STAGE_SCOPED_FREED baseline=%d after_destroy=%d returned=%d ids=%s'
+                      % (base_mib, after_mib, returned, ','.join(ids) or 'none'), flush=True)
+                summary['stage_scoped'] = dict(baseline_mib=base_mib, after_destroy_mib=after_mib,
+                                               returned_mib=returned, torn_down=list(ids))
+                summary.update(state='complete', reason='', samples=trace.samples)
+                _persist(args.output / 'release-jump.json', summary)
+                return 0
             # 4) DETACH: the exact mission release scene-graph change
             print('RELEASE_PROBE detaching (contact._release_fallback) now', flush=True)
             stage.contact._release_fallback()
@@ -197,6 +227,9 @@ def main():
                    help='author the mission full camera set (4 station cams + walkthrough_chase) via _real_rig')
     p.add_argument('--prewarm', action='store_true',
                    help='run one weld+release cycle before the measured sequence (pre-size the RTX pool)')
+    p.add_argument('--destroy-sensing', action='store_true',
+                   help='fm380: after the welded baseline, DESTROY the collect-only station cameras '
+                        '(source+shelf; keeps cart) and measure VRAM returned (needs --full-cameras)')
     p.add_argument('--width', type=int, default=480)
     p.add_argument('--height', type=int, default=270)
     p.add_argument('--pre-steps', type=int, default=120, help='render steps before the weld')

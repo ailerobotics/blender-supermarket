@@ -518,6 +518,11 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # fm347/348 (1): opt-in phase-dependent arm drive (soft tuck-settle / stiff loaded-place).
         # Absent config['phase_drive'] => None => the assemble() drive stays (byte-identical).
         phase_drive=config.get('phase_drive'),
+        # fm380: stage-scoped sensing -- destroy the collect-only station cameras' render products at
+        # the collect->couple boundary to return their VRAM. SIM-ONLY, opt-in; unset => None => never
+        # torn down => byte-identical. The cart camera + nav/nvblox + walkthrough recorder are untouched.
+        stage_scoped_teardown=(assembly.sensing_sources.get('stage_scoped_teardown')
+                               if os.environ.get('RESTOCK_STAGE_SCOPED_SENSING') else None),
         arm_joints=_ARM_JOINTS)
 
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}

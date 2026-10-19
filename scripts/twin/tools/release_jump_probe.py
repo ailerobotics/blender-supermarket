@@ -12,7 +12,7 @@ scene, welds the carton and calls the real ``contact._release_fallback()`` lives
 import subprocess
 
 # The sample phases, in order. 'detach' marks the single tick the release is issued.
-PHASES = ('pre_weld', 'welded', 'detach', 'post_detach')
+PHASES = ('pre_weld', 'welded', 'detach', 'post_detach', 'post_destroy')
 
 
 def vram_used_mib():

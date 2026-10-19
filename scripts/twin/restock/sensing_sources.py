@@ -113,8 +113,23 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
 
     profiles = dict(getattr(manip_runtime.controller, 'profiles', {}))
 
+    def stage_scoped_teardown():
+        """fm380: DESTROY (free VRAM, not just pause) the collect-only station cameras' render
+        products. Called ONCE by IsaacPort at the collect->couple boundary when
+        RESTOCK_STAGE_SCOPED_SENSING is set. Keeps the cart camera + nav; fail-safe (never raises)."""
+        from .native_cameras import destroy_camera_render_product
+        freed = []
+        for cid in _stage_scoped_teardown_camera_ids(design):
+            cam = cameras.get(cid)
+            if cam is not None:
+                destroy_camera_render_product(cam, getattr(assembly, 'stage', None))
+                freed.append(cid)
+        print('STAGE_SCOPED_SENSING torn down: %s' % (freed or 'none'), flush=True)
+        return freed
+
     return {
         'cameras': cameras,
+        'stage_scoped_teardown': stage_scoped_teardown,
         'context_providers': context_providers,
         'location_cameras': location_cameras,
         'profiles': profiles,
@@ -144,6 +159,18 @@ def _unused_sensing_camera_ids(design):
     shelf_cam = shelf['camera_id']
     others = {s['camera_id'] for n, s in supports.items() if n != 'shelf'}
     return () if shelf_cam in others else (shelf_cam,)
+
+
+def _stage_scoped_teardown_camera_ids(design):
+    """fm380 (pure): station camera ids safe to DESTROY at the collect->couple boundary -- those
+    serving ONLY the ``source`` and/or ``shelf`` supports (read in collect / transfer-only). NEVER the
+    cart camera (kept for couple/verify + nav) and never a camera shared with any support outside
+    {source, shelf}. Empty if neither exists. Mirrors the usage analysis: couple/outbound/park read no
+    station QR camera, and source is read only in collect."""
+    supports = design.get('supports', {})
+    scoped = {s['camera_id'] for n, s in supports.items() if n in ('source', 'shelf')}
+    keep = {s['camera_id'] for n, s in supports.items() if n not in ('source', 'shelf')}
+    return tuple(sorted(scoped - keep))
 
 
 def station_camera_specs(design, parent_paths, *, drop_camera_ids=()):

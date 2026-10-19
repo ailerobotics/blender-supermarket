@@ -108,6 +108,63 @@ def set_camera_render_products_enabled(camera, enabled):
         return False
 
 
+def destroy_camera_render_product(rendered_camera, stage=None):
+    """fm380: best-effort DESTROY an Isaac camera's RTX render product to RETURN its VRAM -- unlike
+    :func:`set_camera_render_products_enabled`, which only PAUSES hydra updates (the buffers stay
+    resident). Used by stage-scoped sensing to free the collect-only station cameras at the
+    collect->couple boundary, and by the release-bench ``--destroy-sensing`` mode to MEASURE how much
+    VRAM Isaac actually returns (it may pool and return ~0). Layered best-effort: stop updates, call
+    the render product's own ``destroy()`` (releases the GPU render target), then RemovePrim the
+    render-product + camera prims so a later ``world.step`` cannot re-create them. Pure optimisation:
+    logs what applied and returns that dict; NEVER raises (a failed teardown must not crash a tick)."""
+    applied = {}
+    camera = getattr(rendered_camera, 'camera', rendered_camera)
+    try:
+        set_camera_render_products_enabled(camera, False)
+        applied['paused'] = True
+    except Exception as exc:                                  # noqa: BLE001
+        applied['paused'] = repr(exc)
+    # Destroy the render product object(s) -- this is what frees the GPU render-target buffers.
+    try:
+        products = getattr(camera, '_render_product', None)
+        rp_paths = []
+        for rp in (products if isinstance(products, (list, tuple)) else [products]):
+            if rp is None:
+                continue
+            path = getattr(rp, 'path', None) or getattr(rp, 'prim_path', None)
+            if path:
+                rp_paths.append(str(path))
+            fn = getattr(rp, 'destroy', None)
+            if callable(fn):
+                fn()
+                applied.setdefault('rp_destroyed', 0)
+                applied['rp_destroyed'] += 1
+        if not rp_paths:
+            getter = getattr(camera, 'get_render_product_path', None)
+            if callable(getter):
+                rp_paths.append(str(getter()))
+        applied['rp_paths'] = rp_paths
+    except Exception as exc:                                  # noqa: BLE001
+        applied['rp_destroy'] = repr(exc)
+    # Remove the render-product + camera prims so nothing re-allocates them on the next step.
+    if stage is not None:
+        try:
+            removed = []
+            for p in applied.get('rp_paths', []):
+                if p and stage.GetPrimAtPath(p):
+                    stage.RemovePrim(p)
+                    removed.append(p)
+            cam_path = getattr(camera, 'prim_path', None)
+            if cam_path and stage.GetPrimAtPath(cam_path):
+                stage.RemovePrim(cam_path)
+                removed.append(str(cam_path))
+            applied['prims_removed'] = removed
+        except Exception as exc:                              # noqa: BLE001
+            applied['prims_removed'] = repr(exc)
+    print('DESTROY_RENDER_PRODUCT %r' % applied, flush=True)
+    return applied
+
+
 def initialize_camera(path,k,*,name,frequency=-1,session_id=None,steady_domain=None,resolution=None):
     """Initialize one authored optical view; clock metadata is captured in callback.
 
