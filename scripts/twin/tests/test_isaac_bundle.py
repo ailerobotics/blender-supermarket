@@ -67,6 +67,29 @@ class PlanBundleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             plan_bundle(MANIFEST, SCENARIO, cfg)
 
+    def test_place_approach_optional_pose_accepted(self):
+        # fm390: place_approach is an optional nav goal (collect drives there before placing).
+        cfg = base_config()
+        cfg['mission_poses']['place_approach'] = [-4.5, 15.25, math.pi]
+        p = plan_bundle(MANIFEST, SCENARIO, cfg)
+        self.assertEqual(p.poses['place_approach'], (-4.5, 15.25, math.pi))
+        # absent => not present, bundle still valid (byte-identical with today)
+        self.assertNotIn('place_approach', plan_bundle(MANIFEST, SCENARIO, base_config()).poses)
+
+    def test_derive_place_approach_from_mission_cart(self):
+        # Mission cart /Rollwagen at (-5.73,15.25) yaw 0, open +x face; proven standoff ~1.23 m east.
+        x, y, yaw = isaac_bundle.derive_place_approach((-5.73, 15.25), 0.0, 1.23)
+        self.assertAlmostEqual(x, -4.50, places=2)
+        self.assertAlmostEqual(y, 15.25, places=2)
+        self.assertAlmostEqual(math.cos(yaw), -1.0, places=6)  # faces the mouth (-x); +-pi both valid
+        self.assertAlmostEqual(math.sin(yaw), 0.0, places=6)
+        # a cart yawed -90deg rotates the mouth axis with it (derived, not pinned)
+        x2, y2, yaw2 = isaac_bundle.derive_place_approach((-5.73, 15.25), -math.pi / 2, 1.23)
+        self.assertAlmostEqual(x2, -5.73, places=2)
+        self.assertAlmostEqual(y2, 15.25 - 1.23, places=2)   # mouth now points -y
+        self.assertAlmostEqual(math.cos(yaw2), 0.0, places=6)  # faces +y back toward the mouth
+        self.assertAlmostEqual(math.sin(yaw2), 1.0, places=6)
+
     def test_articulation_bounds(self):
         with self.assertRaises(ValueError):
             plan_bundle(MANIFEST, SCENARIO, base_config(goal_articulation={'outbound': math.radians(80)}))

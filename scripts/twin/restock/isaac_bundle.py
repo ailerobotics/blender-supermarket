@@ -158,6 +158,29 @@ def require_transport_positions(mobile_manifest):
     return positions
 
 
+def derive_place_approach(cart_xy, cart_yaw, standoff, *,
+                          mouth_axis_body=(1.0, 0.0), deck_center_body_xy=(0.0, 0.0)):
+    """fm390: a `place_approach` BASE pose (x, y, yaw) in front of the cart's open-face mouth, facing it.
+
+    Derived from the cart's MEASURED pose (not a bench guess): the deck centre is
+    ``cart_xy + R(cart_yaw)*deck_center_body_xy``; the base sits ``standoff`` metres out along the mouth
+    axis (``R(cart_yaw)*mouth_axis_body``, the open-face direction in the cart body frame) and faces back
+    toward the mouth. ``standoff`` is the arm-reach standoff proven by ``scripts/check_place_approach_reach.py``
+    (deck reachable AND base clear of the drawbar). This is the single reproducible source for the value a
+    mission's ``mission_poses['place_approach']`` carries; the cart is static pre-couple, so its staged
+    pose equals the live /Rollwagen prim pose.
+    """
+    c, s = math.cos(cart_yaw), math.sin(cart_yaw)
+    def rot(v):
+        return (c * v[0] - s * v[1], s * v[0] + c * v[1])
+    dcx, dcy = rot(deck_center_body_xy)
+    deck = (cart_xy[0] + dcx, cart_xy[1] + dcy)
+    mx, my = rot(mouth_axis_body)
+    norm = math.hypot(mx, my) or 1.0
+    mx, my = mx / norm, my / norm
+    return (deck[0] + mx * standoff, deck[1] + my * standoff, math.atan2(-my, -mx))
+
+
 def plan_bundle(manifest, scenario, config):
     """Pure mission-bundle contract from manifest+scenario+config. No Isaac import.
 
@@ -171,16 +194,18 @@ def plan_bundle(manifest, scenario, config):
         raise ValueError('config and scenario must be objects')
 
     poses_in = config.get('mission_poses')
-    # Required nav goals, plus OPTIONAL couple waypoints: `couple_approach` (east of/clear of the
-    # pinned cart) and `couple_standoff` (on the cart hitch axis, east of the dock) the couple
-    # stage navigates to before the fine-dock insert.
-    _couple_extra = {'couple_approach', 'couple_standoff'}
+    # Required nav goals, plus OPTIONAL waypoints: the couple waypoints `couple_approach` (east of/clear
+    # of the pinned cart) and `couple_standoff` (on the cart hitch axis, east of the dock) the couple
+    # stage navigates to before the fine-dock insert; and `place_approach` (fm390: in front of the
+    # rollwagen's open +x face, facing the mouth, at an arm-reach standoff) the collect stage drives to
+    # WITH the carton carried before lowering it onto the deck, instead of reaching around from pickup.
+    _optional_extra = {'couple_approach', 'couple_standoff', 'place_approach'}
     if not isinstance(poses_in, dict) or not set(NAV_GOALS) <= set(poses_in) \
-            or not set(poses_in) <= set(NAV_GOALS) | _couple_extra:
+            or not set(poses_in) <= set(NAV_GOALS) | _optional_extra:
         raise ValueError(f'config.mission_poses must provide {NAV_GOALS} '
-                         f'(plus optional {sorted(_couple_extra)})')
+                         f'(plus optional {sorted(_optional_extra)})')
     poses = {}
-    for name in NAV_GOALS + tuple(n for n in ('couple_approach', 'couple_standoff') if n in poses_in):
+    for name in NAV_GOALS + tuple(n for n in sorted(_optional_extra) if n in poses_in):
         if not _finite_pose(poses_in[name]):
             raise ValueError(f'mission pose {name!r} must be finite (x, y, yaw)')
         poses[name] = tuple(float(v) for v in poses_in[name])

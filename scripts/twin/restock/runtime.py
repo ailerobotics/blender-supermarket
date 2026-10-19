@@ -191,8 +191,10 @@ class RuntimeAdapter:
             pose = poses.get(name, ())
             if len(pose) != 3 or not all(math.isfinite(v) for v in pose):
                 raise ValueError(f'missing/invalid pose: {name}')
-        # Optional couple approach waypoint + on-axis standoff; validated only when supplied.
-        for name in ('couple_approach', 'couple_standoff'):
+        # Optional couple approach waypoint + on-axis standoff, and the fm390 place_approach waypoint
+        # (in front of the rollwagen mouth) the collect stage drives to before placing; validated only
+        # when supplied.
+        for name in ('couple_approach', 'couple_standoff', 'place_approach'):
             if name in poses:
                 wp = poses[name]
                 if len(wp) != 3 or not all(math.isfinite(v) for v in wp):
