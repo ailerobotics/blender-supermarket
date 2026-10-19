@@ -102,6 +102,26 @@ SIM_MAX_GRIP_DISTANCE = .020
 # gap + flush pad with suction on, and released on suction off -- never a fabricated hold.
 SIM_ATTACH_CONTACT_MM = 0.5
 SIM_ATTACH_FLUSH_DEG = 2.0
+# fm395 (B): a formed fallback weld must survive a TRANSIENT Open status flicker (the gripper command is
+# applied on a different NativePanelContact instance than IsaacPort ticks, so this instance sees the
+# plugin status with a cross-instance lag, and the plugin status itself flickers). Release a HELD weld
+# only after this many CONSECUTIVE Open readings -- a SUSTAINED Open = a real suction-off. The commanded
+# release path (command(enabled=False)) still releases immediately, so this only debounces the
+# cross-instance backstop. Env-overridable; a single flicker (run-306: a one-tick weld torn down) no
+# longer detaches the carton mid-grasp/lift.
+try:
+    SIM_ATTACH_OPEN_RELEASE_TICKS = max(1, min(600, int(os.environ.get('RESTOCK_SIM_ATTACH_OPEN_RELEASE_TICKS', 15))))
+except (TypeError, ValueError):
+    SIM_ATTACH_OPEN_RELEASE_TICKS = 15
+
+
+def _release_held_on_open(held, open_streak, release_ticks):
+    """fm395 (B): given a plugin status reading of Open, should the sim fallback weld be released?
+
+    With NO weld held there is nothing to lose, so Open always skips (release is a no-op). With a weld
+    HELD, release only on SUSTAINED Open (``open_streak >= release_ticks``) -- a transient flicker holds
+    the weld. Pure/CPU-testable; the caller owns the streak counter and the actual PhysX release."""
+    return (not held) or open_streak >= release_ticks
 
 
 def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
@@ -272,6 +292,7 @@ class NativePanelContact:
         # welded carton path while attached; _fallback_joint is the explicit FixedJoint prim path.
         self._sim_attach_fallback = bool(sim_attach_fallback)
         self._fallback_body = None
+        self._open_streak = 0   # fm395 (B): consecutive Open-status readings, for the weld-release debounce
         self._fallback_joint = None
         self.api = surface_gripper.acquire_surface_gripper_interface()
         self.api.set_write_to_usd(True)
@@ -321,10 +342,17 @@ class NativePanelContact:
             return False
         self._fb_n = getattr(self, '_fb_n', 0) + 1
         if self.api.get_gripper_status(self.path) == self.open_status:
-            if self._fb_n % 120 == 1:
-                print('SIM_ATTACH_DIAG skip=suction_off', flush=True)
-            self._release_fallback()
+            # fm395 (B): hold a formed weld through a TRANSIENT Open flicker; release only on sustained Open.
+            self._open_streak += 1
+            if _release_held_on_open(self._fallback_body is not None, self._open_streak,
+                                     SIM_ATTACH_OPEN_RELEASE_TICKS):
+                if self._fb_n % 120 == 1:
+                    print('SIM_ATTACH_DIAG skip=suction_off', flush=True)
+                self._release_fallback()
+            elif self._fb_n % 120 == 1:
+                print('SIM_ATTACH_DIAG open_flicker streak=%d (holding weld)' % self._open_streak, flush=True)
             return False
+        self._open_streak = 0
         if self._fallback_body is not None or self.read():   # already held (weld or native) -- prefer it
             return False
         info = self.probe()

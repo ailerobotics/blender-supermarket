@@ -56,6 +56,15 @@ def _float_env(var, default):
         return float(default)
 
 
+def _int_env(var, default, lo, hi):
+    """fm395: SIM-ONLY positive-int env override (grasp confirm/wait tick counts). Env unset/malformed
+    => the module default; set => the parsed value clamped to [lo, hi]."""
+    try:
+        return max(lo, min(hi, int(os.environ.get(var, default))))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 class TransferController:
     def __init__(self, motion: MotionPort, profiles: dict[str, ProductProfile], *,
                  cart_location: str = 'rollwagen', max_age: float = 0.5,
@@ -77,6 +86,19 @@ class TransferController:
         self.reposition_before_place = bool(reposition_before_place)
         self.base_repositioned = False
         self._source_obs = None   # fm390: the matched source observation, for re-running the place policy
+        # fm395 (A): require a STABLE confirmed attachment (s.contact = native grippedObjects OR the sim
+        # fallback weld) for grasp_confirm_ticks consecutive ticks before lifting -- never advance to lift
+        # on a single transient contact (run-306: a one-tick weld, released by a status flicker, let the
+        # arm lift air and the carton-less lift cuMotion-collision-failed). If no stable hold forms within
+        # grasp_wait_ticks, bounded-RETRY the grasp (re-seat: re-press via 'contact', re-fire the gripper)
+        # up to grasp_retry_max, then FAIL collect honestly -- never lift without a held carton. Defaults
+        # (1 confirm tick, 0 retries) reproduce the old single-tick advance => byte-identical when off.
+        self.grasp_confirm_ticks = _int_env('RESTOCK_GRASP_CONFIRM_TICKS', 1, 1, 60)
+        self.grasp_retry_max = _retry_max_env('RESTOCK_GRASP_RETRY_MAX', 0)
+        self.grasp_wait_ticks = _int_env('RESTOCK_GRASP_WAIT_TICKS', 40, 2, 600)
+        self._grasp_confirm = 0
+        self._grasp_waits = 0
+        self._grasp_retries = 0
         # fm327 belt-and-braces wrist_1 cap for the task-space LIFT carry move (None = off).
         self.carry_wrist1_cap = None if carry_wrist1_cap is None else float(carry_wrist1_cap)
         # Execute the contact descent as a seeded straight-line move through the trajectory host instead
@@ -288,6 +310,9 @@ class TransferController:
         self._contact_waits = 0         # bounded grace ticks awaiting a fresh acquisition deadline
         self._contact_step = 0.0        # cumulative contact-feedback over-press travel (m); see __init__
         self._contact_freeze = 0        # freeze-settle hold ticks at a contact step (see CONTACT_FREEZE_TICKS)
+        self._grasp_confirm = 0         # fm395: consecutive confirmed-attachment ticks in grasp
+        self._grasp_waits = 0           # fm395: ticks awaiting a confirmed attachment before a grasp retry
+        self._grasp_retries = 0         # fm395: bounded grasp re-seat retries used this operation
         self.verify_ids = set()
         self.release_time = None
 
@@ -728,12 +753,35 @@ class TransferController:
                 if s.valid_until_steady is not None:
                     require_fresh(s.valid_until_steady,self.steady_clock)
                 self.issued = True
+                self._grasp_confirm = 0
+                self._grasp_waits = 0
                 return self._result(({'kind': 'gripper', 'enabled': True},))
             if s.contact:
-                self.held = True
-                if not self.motion.update_payload(True, self.profile):
-                    return self._fail('payload collision attachment not acknowledged')
-                self._transition('lift')
+                # fm395 (A): count CONSECUTIVE confirmed-attachment ticks; advance only once the hold is
+                # stable for grasp_confirm_ticks (never on a single transient weld/grip).
+                self._grasp_confirm += 1
+                self._grasp_waits = 0
+                if self._grasp_confirm >= self.grasp_confirm_ticks:
+                    self.held = True
+                    if not self.motion.update_payload(True, self.profile):
+                        return self._fail('payload collision attachment not acknowledged')
+                    self._transition('lift')
+                return self._result()
+            # No confirmed attachment this tick. A seal that formed then dropped before confirming is a
+            # failed attempt -> reset the streak (never carry a transient toward the confirm threshold).
+            self._grasp_confirm = 0
+            if self.grasp_retry_max > 0:          # fm395 bounded grasp retry (off by default => byte-identical)
+                self._grasp_waits += 1
+                if self._grasp_waits >= self.grasp_wait_ticks:
+                    if self._grasp_retries < self.grasp_retry_max:
+                        self._grasp_retries += 1
+                        print('GRASP_RETRY attempt=%d/%d (no confirmed carton attachment in %d ticks) '
+                              '-- re-seating via contact' % (self._grasp_retries, self.grasp_retry_max,
+                                                             self.grasp_wait_ticks), flush=True)
+                        self._grasp_waits = 0
+                        self._transition('contact')   # re-press / re-seat the pad; grasp re-fires on return
+                        return self._result()
+                    return self._fail('grasp did not confirm a held carton within the retry budget')
             return self._result()
         if self.phase == 'release':
             if not self.issued:

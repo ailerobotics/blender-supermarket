@@ -104,6 +104,51 @@ def run_to(c, phase, t0=1.0):
     pytest.fail('phase not reached')
 
 
+def test_grasp_requires_stable_confirmed_attachment_before_lift():
+    # fm395 (A): with grasp_confirm_ticks=3 the grasp must NOT advance to lift on a single transient
+    # contact -- it needs 3 consecutive confirmed-attachment ticks (never lift on a one-tick weld).
+    c, m = make_controller('collect')
+    c.grasp_confirm_ticks = 3
+    t = run_to(c, 'grasp')
+    c.step(.1, packet(c, t, contact=False))                 # issue the gripper enable (not issued -> issued)
+    r = c.step(.1, packet(c, t + .1, contact=True))         # confirm 1/3
+    assert c.phase == 'grasp' and r.status == 'running'
+    c.step(.1, packet(c, t + .2, contact=True))             # confirm 2/3
+    assert c.phase == 'grasp'
+    c.step(.1, packet(c, t + .3, contact=True))             # confirm 3/3 -> lift
+    assert c.phase == 'lift'
+
+    # A contact that DROPS before the streak completes must reset it (never advance on a flicker).
+    c2, _ = make_controller('collect'); c2.grasp_confirm_ticks = 3
+    t2 = run_to(c2, 'grasp')
+    c2.step(.1, packet(c2, t2, contact=False))              # issue
+    c2.step(.1, packet(c2, t2 + .1, contact=True))          # 1/3
+    c2.step(.1, packet(c2, t2 + .2, contact=False))         # drop -> reset
+    c2.step(.1, packet(c2, t2 + .3, contact=True))          # 1/3 again
+    c2.step(.1, packet(c2, t2 + .4, contact=True))          # 2/3
+    assert c2.phase == 'grasp'                              # still not lifted (only 2 since the reset)
+
+
+def test_grasp_retries_then_fails_honestly_never_lifting_air():
+    # fm395 (A): when no attachment ever confirms, the grasp bounded-retries (re-seat via contact) then
+    # FAILS collect honestly -- it must NEVER advance to lift without a held carton (run-306 lifted air).
+    c, m = make_controller('collect')
+    c.grasp_retry_max = 2
+    c.grasp_wait_ticks = 3
+    t = run_to(c, 'grasp')
+    retries = 0
+    result = None
+    for i in range(200):
+        r = c.step(.1, packet(c, t + i * .1, contact=False))   # the seal/weld never forms
+        assert c.phase != 'lift', 'must never lift without a confirmed carton attachment'
+        if r.status == 'failed':
+            result = r
+            break
+    assert result is not None and 'did not confirm a held carton' in result.reason
+    assert c.phase == 'failed'
+    assert m.payloads == []                                 # update_payload(True) never issued -> no false attach
+
+
 @pytest.mark.parametrize('operation', ['collect', 'transfer'])
 def test_success_needs_two_new_observations_and_source_scan(operation):
     c, m = make_controller(operation)
