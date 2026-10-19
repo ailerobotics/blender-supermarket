@@ -32,6 +32,9 @@ MOVE_DEADLINE_RETRY_MAX = 2
 # no begin, so a watchdog motion fault there is not re-issuable -> hard fail.
 _STAGED_MOVE_PHASES = frozenset({'tuck', 'pan', 'retreat_tuck', 'stow'})
 _GENERAL_MOVE_PHASES = frozenset({'approach', 'contact', 'lift', 'preplace', 'place', 'retreat'})
+# fm390: the place-side poses are re-registered in the place_approach base frame after the base drives
+# in front of the cart mouth, so they are NOT reach-gated in the pickup frame during observe.
+_PLACE_SIDE_PHASES = frozenset({'preplace', 'place', 'retreat'})
 
 
 def _retry_max_env(var, default):
@@ -73,6 +76,7 @@ class TransferController:
         # base_repositioned so TRANSIT -> preplace proceeds at the new pose. Default off => byte-identical.
         self.reposition_before_place = bool(reposition_before_place)
         self.base_repositioned = False
+        self._source_obs = None   # fm390: the matched source observation, for re-running the place policy
         # fm327 belt-and-braces wrist_1 cap for the task-space LIFT carry move (None = off).
         self.carry_wrist1_cap = None if carry_wrist1_cap is None else float(carry_wrist1_cap)
         # Execute the contact descent as a seeded straight-line move through the trajectory host instead
@@ -198,6 +202,54 @@ class TransferController:
         step = offset / n
         return (contact[0] + d[0] * step, contact[1] + d[1] * step, contact[2] + d[2] * step,
                 contact[3], contact[4], contact[5], contact[6])
+
+    def _reregister_place(self, s, now):
+        """fm390 PERCEIVE step. After the base has driven to place_approach in front of the rollwagen
+        mouth, re-read the live deck target in the NEW arm-base frame and rebuild the place-side poses
+        (preplace/place/retreat) + target_surface/target_pose from it. The place poses were registered
+        in the PICKUP base frame during observe; the base has since moved, so placing from them would
+        drive the arm to stale coordinates. Confirms the deck is still clear and the fresh target is
+        reachable from here (the deck IS reachable from place_approach -- reach proof
+        scripts/check_place_approach_reach.py). Returns a _fail Result on refusal, else None with the
+        place-side poses rebuilt in place -- an empty-gripper 'placed off the deck' can never follow."""
+        t = s.target
+        if not t or t.location != self.destination or not self._provenance(t, now):
+            return self._fail('reposition: deck target not reacquired at place_approach')
+        if not t.clear:
+            return self._fail('reposition: deck not clear at place_approach')
+        if not self._pose_ok(t.pose) or not axis_fits(t.free_dimensions, self.profile.dimensions):
+            return self._fail('reposition: deck target unreachable or undersized from place_approach')
+        p = self.profile
+        def pose(xyz, dz):
+            return (*xyz[:2], xyz[2] + dz + p.tcp_surface_offset, *p.tcp_quaternion)
+        if self.pose_policy is not None:
+            # The place-side poses (preplace/place/retreat) depend only on the TARGET; the policy's
+            # pick-side poses are recomputed against the stale source and discarded. cart_cage_place is
+            # OFF in reposition mode -- the base nav replaces the arm-only +x mouth insert, so the place
+            # is the policy's own reachable outward standoff + straight lower onto the deck interior.
+            try:
+                rebuilt = self.pose_policy.build(self._source_obs, t, p)
+            except ValueError as exc:
+                return self._fail('reposition: place policy refused fresh deck target: ' + str(exc))
+            place_side = {k: tuple(rebuilt[k]) for k in _PLACE_SIDE_PHASES}
+        else:
+            place_side = dict(preplace=pose(t.pose, p.dimensions[2] + p.approach),
+                              place=pose(t.pose, p.dimensions[2]),
+                              retreat=pose(t.pose, p.dimensions[2] + p.approach))
+        for k, v in place_side.items():
+            if not self._pose_ok(v):
+                print('REPOSITION_REACH_FAIL phase=%s mag=%.3f max_reach=%s deck=%s'
+                      % (k, math.dist(v[:3], (0, 0, 0)), p.max_reach,
+                         tuple(round(c, 3) for c in t.pose[:3])), flush=True)
+                return self._fail('reposition: rebuilt place pose outside reach envelope')
+        self.poses.update(place_side)
+        self.target_pose = (*t.pose[:2], t.pose[2] + p.dimensions[2], *t.pose[3:])
+        self.target_surface = t.pose
+        print('REPOSITION_REREGISTER deck=%s place=%s preplace=%s'
+              % (tuple(round(c, 3) for c in t.pose[:3]),
+                 tuple(round(c, 3) for c in place_side['place'][:3]),
+                 tuple(round(c, 3) for c in place_side['preplace'][:3])), flush=True)
+        return None
 
     def start(self, operation: str, job: dict) -> None:
         if self.phase not in ('idle', 'succeeded', 'failed') or self.held:
@@ -416,9 +468,16 @@ class TransferController:
                          place[1] + a[1] * self.cage_mouth_standoff,
                          place[2] + a[2] * self.cage_mouth_standoff, *base[3:])
                 self.poses['place'], self.poses['preplace'], self.poses['retreat'] = place, mouth, mouth
-            if not all(self._pose_ok(v) for v in self.poses.values()):
+            # fm390: when the base repositions before placing, the PLACE-side poses (preplace/place/
+            # retreat) are built in the PICKUP base frame here but the arm never reaches them from this
+            # pose -- the deck is only reachable once the base has driven to place_approach (reach proof
+            # scripts/check_place_approach_reach.py). Gate only the PICK-side poses now; the place-side
+            # poses are re-registered in the place_approach frame and reach-gated there (_reregister_place).
+            gate_poses = (self.poses if not self.reposition_before_place
+                          else {k: v for k, v in self.poses.items() if k not in _PLACE_SIDE_PHASES})
+            if not all(self._pose_ok(v) for v in gate_poses.values()):
                 import math as _m
-                bad = {k: round(_m.dist(v[:3], (0, 0, 0)), 3) for k, v in self.poses.items()
+                bad = {k: round(_m.dist(v[:3], (0, 0, 0)), 3) for k, v in gate_poses.items()
                        if not self._pose_ok(v)}
                 print('REACH_ENVELOPE_FAIL max_reach=%s bad=%s source=%s target=%s'
                       % (self.profile.max_reach, bad, tuple(round(c, 3) for c in source.pose[:3]),
@@ -427,6 +486,7 @@ class TransferController:
             self.target_pose = (*target.pose[:2], target.pose[2] + p.dimensions[2], *target.pose[3:])
             self.target_surface = target.pose
             self.source_pose = source.pose
+            self._source_obs = source   # fm390: re-run the place policy against a fresh target after repositioning
             self.evidence.append(asdict(source))
             self._transition('approach')
         if self.phase in self.poses:
@@ -655,6 +715,12 @@ class TransferController:
             # while parked (at the pick pose, then at place_approach), the per-tick parked gate and the
             # per-phase elapsed timeout never see the base motion.
             if self.base_repositioned:
+                # fm390 PERCEIVE: re-read the live deck target in the NEW (place_approach) base frame and
+                # rebuild the place-side poses from it before placing. The poses registered during observe
+                # are in the stale PICKUP frame; placing from them would drive the arm to the wrong point.
+                res = self._reregister_place(s, now)
+                if res is not None:
+                    return res
                 self._transition('preplace')
             return self._result()
         if self.phase == 'grasp':

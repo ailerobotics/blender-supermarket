@@ -132,9 +132,13 @@ def main():
         _policy = SimCartPlacePolicy(_policy)
     # Staged cart-swing (firstmate 292): route lift->preplace through body-clear joint-space via points
     # (tuck/pan) so the welded carton does not sweep the un-sphered chassis/arm-mount (run-236 joint0
-    # stall). Only in the sim cart-place scenario (the policy + flag); cart_pan_joint0 is CPU-verified
-    # body-clear for the fixed cart dock (staged_swing_verify.py).
-    staged = bool(config.get('staged_cart_swing', False)) and _policy is not None and bool(config.get('sim_cart_place_policy'))
+    # stall). Needs a place policy + EITHER the sim cart-place flag (arm-only cage/mirror place) OR
+    # fm390 reposition_before_place (the carry fold tucks the carton compact so the BASE can drive it to
+    # place_approach; lift->tuck->TRANSIT, pan skipped). cart_pan_joint0 is CPU-verified body-clear for
+    # the fixed cart dock (staged_swing_verify.py).
+    staged = (bool(config.get('staged_cart_swing', False)) and _policy is not None
+              and (bool(config.get('sim_cart_place_policy'))
+                   or bool(config.get('reposition_before_place'))))
     controller = TransferController(motion,profiles,frame=tool.base_frame,
         phase_timeout=120.,pose_policy=_policy,
         transport_joints=transport_joints,

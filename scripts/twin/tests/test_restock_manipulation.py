@@ -187,6 +187,81 @@ def test_reposition_before_place_holds_in_transit_until_base_repositioned():
     assert c.phase == 'preplace'                  # resumes the place at the new pose
 
 
+def test_reposition_reregisters_deck_target_in_new_base_frame():
+    # fm390 PERCEIVE: after the base reaches place_approach, the controller re-reads the live deck target
+    # in the NEW base frame and rebuilds the place-side poses from it -- the observe-time poses are in the
+    # stale pickup frame. A fresh target at a different position must re-anchor target_surface + place.
+    stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    tuck_shape = (-2.3, 1.0, 2.1066, 0.8, -1.2545)
+    c, m = make_controller(transport_joints=stow, staged_cart_swing=True, cart_pan_joint0=-0.8605,
+                           cart_tuck_shape=tuck_shape, reposition_before_place=True)
+    t = run_to(c, 'tuck')
+    c.step(.1, packet(c, t)); c.step(.1, packet(c, t + .1))      # tuck -> TRANSIT
+    assert c.phase == 'transit'
+    fresh = Target('deck-new', 'test_fixture', t + .2, c.destination,
+                   (.55, -.05, .12, 0., 0., 0., 1.), True, (.3, .3, .4))
+    c.base_repositioned = True
+    r = c.step(.1, packet(c, t + .2, target=fresh))
+    assert r.status == 'running' and c.phase == 'preplace'
+    assert c.target_surface[:3] == (.55, -.05, .12)              # re-anchored to the fresh deck read
+    assert c.poses['place'][:2] == (.55, -.05)                   # place rebuilt in the new frame
+
+
+def test_reposition_fails_if_deck_not_clear_at_place_approach():
+    # fm390: the PERCEIVE step must FAIL (never place blindly) if the deck is not clear from the new pose.
+    stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    tuck_shape = (-2.3, 1.0, 2.1066, 0.8, -1.2545)
+    c, m = make_controller(transport_joints=stow, staged_cart_swing=True, cart_pan_joint0=-0.8605,
+                           cart_tuck_shape=tuck_shape, reposition_before_place=True)
+    t = run_to(c, 'tuck')
+    c.step(.1, packet(c, t)); c.step(.1, packet(c, t + .1))
+    assert c.phase == 'transit'
+    blocked = Target('deck-occ', 'test_fixture', t + .2, c.destination,
+                     (.5, .2, .1, 0., 0., 0., 1.), False, (.3, .3, .4))
+    c.base_repositioned = True
+    r = c.step(.1, packet(c, t + .2, target=blocked))
+    assert r.status == 'failed' and 'deck not clear' in r.reason
+
+
+def test_reposition_full_place_path_reaches_verify():
+    # fm390 end-to-end (controller tier): collect with reposition_before_place drives observe -> ... ->
+    # lift -> tuck -> TRANSIT -> (base drives) -> PERCEIVE re-register -> preplace -> place -> release ->
+    # retreat -> retreat_tuck -> stow -> verify. The deck target is held constant (parked at place_approach)
+    # so the preplace re-validation holds. Proves the place-side sequence completes in reposition mode.
+    stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    tuck_shape = (-2.3, 1.0, 2.1066, 0.8, -1.2545)
+    c, m = make_controller('collect', transport_joints=stow, staged_cart_swing=True,
+                           cart_pan_joint0=-0.8605, cart_tuck_shape=tuck_shape,
+                           reposition_before_place=True)
+    t0 = 1.0
+    for i in range(120):
+        if c.phase == 'verify':
+            break
+        if c.phase == 'transit':
+            c.base_repositioned = True      # the adapter drove the base to place_approach
+        contact = c.held or (c.phase == 'grasp' and c.issued)
+        if c.phase == 'release' and c.issued:
+            contact = False
+        extra = {'joint_positions': stow} if c.phase == 'stow' else {}  # stow confirms transport feedback
+        r = c.step(.1, packet(c, t0 + i * .1, contact=contact, **extra))
+        assert r.status != 'failed', (c.phase, r.reason)
+    assert c.phase == 'verify'
+
+
+def test_reposition_fails_if_deck_target_not_reacquired():
+    # fm390: a missing/mislocated deck read at place_approach must FAIL, not fall through to a blind place.
+    stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    tuck_shape = (-2.3, 1.0, 2.1066, 0.8, -1.2545)
+    c, m = make_controller(transport_joints=stow, staged_cart_swing=True, cart_pan_joint0=-0.8605,
+                           cart_tuck_shape=tuck_shape, reposition_before_place=True)
+    t = run_to(c, 'tuck')
+    c.step(.1, packet(c, t)); c.step(.1, packet(c, t + .1))
+    assert c.phase == 'transit'
+    c.base_repositioned = True
+    r = c.step(.1, packet(c, t + .2, target=None))
+    assert r.status == 'failed' and 'not reacquired' in r.reason
+
+
 def test_reposition_before_place_off_keeps_pan_byte_identical():
     stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
     tuck_shape = (-2.3, 1.0, 2.1066, 0.8, -1.2545)
