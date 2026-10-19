@@ -40,6 +40,7 @@ KEY_CONSUMER = {
     'cage_insert_gap': HOST,
     'staged_cart_swing': HOST,
     'sim_cart_place_policy': HOST,
+    'reposition_before_place': HOST,   # fm390: ros_host builds the controller with it (base drives to place_approach)
     'cage_preplace_shape': HOST,
     'cart_pan_joint0': HOST,
     'cart_tuck_shape': HOST,
