@@ -35,6 +35,8 @@ class FixtureMotion:
         self.near_starts.append(near_start)
 
     def poll(self):
+        if self.outcome == 'raise':
+            raise RuntimeError('planning failed (exhausted within wall cap)')
         return self.outcome
 
     def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None):
@@ -161,6 +163,23 @@ def test_staged_move_retries_then_succeeds_on_transient():
     assert len(m.stows) == n + 1             # a fresh begin_joint_goal was issued
     m.outcome = 'succeeded'
     c.step(.1, packet(c, t + .3))            # now it succeeds -> transition
+    assert c.phase == 'preplace'
+
+
+def test_staged_move_retries_on_plan_exhaust_raise():
+    # run-290: a staged move's cuMotion planning can RAISE 'planning failed (exhausted within wall cap)'
+    # on a stochastic bad streak; it must be caught and retried (fresh budget), not fail the mission.
+    c, m = _staged_controller()
+    t = run_to(c, 'pan')
+    c.step(.1, packet(c, t))                 # issue the pan move
+    n = len(m.stows)
+    m.outcome = 'raise'                      # poll() raises the plan-exhaust RuntimeError
+    c.step(.1, packet(c, t + .1))            # caught -> retry, stays in pan (not failed)
+    assert c.phase == 'pan'
+    c.step(.1, packet(c, t + .2))            # re-plan with a fresh budget
+    assert len(m.stows) == n + 1
+    m.outcome = 'succeeded'
+    c.step(.1, packet(c, t + .3))
     assert c.phase == 'preplace'
 
 

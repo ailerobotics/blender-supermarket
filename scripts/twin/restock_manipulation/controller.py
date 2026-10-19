@@ -490,11 +490,21 @@ class TransferController:
                                              slow=self.phase in ('tuck', 'pan'))
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
-            outcome = self.motion.poll()
+            try:
+                outcome = self.motion.poll()
+            except RuntimeError as exc:
+                # run-290: a staged move's cuMotion planning can EXHAUST its replan/seed budget on a bad
+                # stochastic streak and RAISE ('planning failed (exhausted within wall cap)') rather than
+                # return 'failed' -- run-289's tuck planned fine, run-290's did not, so it is variance, not
+                # an unreachable pose. Route the raise through the SAME bounded retry (a fresh move = a
+                # fresh full planning budget), instead of failing the whole mission on one unlucky streak.
+                print('STAGED_MOVE_POLL_RAISED phase=%s exc=%s' % (self.phase, exc), flush=True)
+                outcome = 'failed'
             if outcome == 'failed':
                 # fm358 guard: a staged move failed once at the plan->execute handoff (run-283 pan) after
-                # a normal plan -- a transient. Re-issue (fresh plan + deadline) up to STAGED_MOVE_RETRY_MAX
-                # before failing the stage. Does NOT loosen any tolerance.
+                # a normal plan -- a transient; OR cuMotion exhausted its budget (run-290, above). Re-issue
+                # (fresh plan + deadline + budget) up to STAGED_MOVE_RETRY_MAX before failing the stage.
+                # Does NOT loosen any tolerance.
                 if self._staged_retries < STAGED_MOVE_RETRY_MAX:
                     self._staged_retries += 1
                     print('STAGED_MOVE_RETRY phase=%s attempt=%d/%d' %
