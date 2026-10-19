@@ -291,7 +291,13 @@ def main():
             # tracking freshness. A GENEROUS wall backstop still hard-stops a genuinely frozen sim
             # clock (a dead Isaac), where the sim bound can never advance to trip.
             if feedback_stale(now(), state['feedback'][0], time.monotonic(), state['received']):
-                fault('measured joint feedback lost')
+                # fm359-style: log WHICH bound tripped and by how much, so a render-pacing margin
+                # (widen the sim bound) is told apart from a real feedback/relay stall (fix the relay).
+                # run-287 e-stopped the pan here ('measured joint feedback lost') with no gap recorded.
+                _sg = now() - state['feedback'][0]
+                _wg = time.monotonic() - state['received']
+                fault(f'measured joint feedback lost (sim_gap={_sg:.3f}s>{FEEDBACK_SIM_STALE_S} '
+                      f'wall_gap={_wg:.3f}s>{FEEDBACK_WALL_BACKSTOP_S})')
                 return
             q,v=state['target'],np.zeros(6)
             if state['plan'] is not None:
