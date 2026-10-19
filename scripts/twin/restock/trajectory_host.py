@@ -53,6 +53,18 @@ EXECUTE_WALL_BACKSTOP_S = 1800.0
 GOAL_POSITION_TOL = 0.01
 GOAL_VELOCITY_TOL = 0.70
 GOAL_SETTLE_MARGIN_S = 20.0  # < EXECUTE_SETTLE 25 so GOAL_MISS prints terminal per-joint first
+# fm367: SIM-ONLY multiplier on the terminal-settle budget (same env + default as the host's
+# EXECUTE_SETTLE_MARGIN_S scale). 1.0 => byte-identical; the sim profile sets 1.5. The base ordering
+# GOAL_SETTLE_MARGIN_S (20) < EXECUTE_SETTLE_MARGIN_S (25) is preserved under a common scale (20*s <
+# 25*s), so TRAJ_HOST_GOAL_MISS still prints the terminal per-joint error before the host's execute
+# deadline fires. Clamped sane; the WALL backstop (EXECUTE_WALL_BACKSTOP_S) is unaffected.
+MOVE_SIM_DEADLINE_SCALE = max(1.0, min(5.0, float(os.environ.get('RESTOCK_MOVE_SIM_DEADLINE_SCALE', 1.0))))
+
+
+def goal_settle_budget(scale=None):
+    """Sim-clock terminal-settle window past a trajectory's end: GOAL_SETTLE_MARGIN_S * the sim-only
+    MOVE_SIM_DEADLINE_SCALE. Pure + importable so the scale is CPU-testable."""
+    return GOAL_SETTLE_MARGIN_S * (MOVE_SIM_DEADLINE_SCALE if scale is None else scale)
 # Max allowed command-vs-measured divergence (rad) during execution. Compared at the FEEDBACK's own
 # timestamp (see tick()) so render-paced feedback lag is not mistaken for a tracking error. With the
 # arm drive stiffened (physics_setup arm_stiffness_gain) the steady-state following error is flat and
@@ -463,7 +475,7 @@ def main():
                             handle.succeed()
                             result.error_code=result.SUCCESSFUL
                             return result
-                        if elapsed>plan.times[-1]+GOAL_SETTLE_MARGIN_S:
+                        if elapsed>plan.times[-1]+goal_settle_budget():   # fm367: sim-scaled settle window
                             # Diagnostic: the exact terminal error so a miss is attributable (settle
                             # tolerance vs a genuine tracking error) without another blind run.
                             perr=measured[1]-plan.end

@@ -17,6 +17,10 @@ class FixtureMotion:
         self.moves, self.payloads, self.stops = [], [], 0
         self.stows = []
         self.outcome, self.attach_ok = 'succeeded', True
+        # fm367: when True, a 'failed' outcome is reported to the controller as a SIM-clock deadline
+        # miss (retriable); default False => a collision/plan-rejection fault (fails immediately).
+        self.sim_deadline_fault = False
+        self.polls = 0
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
               slow=False, goal_tol=None, near_start=False):
@@ -35,9 +39,13 @@ class FixtureMotion:
         self.near_starts.append(near_start)
 
     def poll(self):
+        self.polls += 1
         if self.outcome == 'raise':
             raise RuntimeError('planning failed (exhausted within wall cap)')
         return self.outcome
+
+    def last_fault_was_sim_deadline(self):
+        return self.sim_deadline_fault
 
     def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None):
         self.stows.append((goal,measured,slow))

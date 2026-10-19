@@ -21,6 +21,20 @@ JOINTS = ARM_JOINTS
 # Sim-time settle margin added to a trajectory's own sim duration for the execution deadline (the
 # node-clock bound on ExecuteTrajectory). Covers start handshake + terminal settle in SIM seconds.
 EXECUTE_SETTLE_MARGIN_S = 25.0
+# fm367: SIM-ONLY multiplier on EVERY sim-clock move/settle deadline's added budget (the trajectory's
+# own sim duration + the settle margin). Default 1.0 = byte-identical real-rig; the sim profile sets
+# 1.5 so a render-paced settle can never miss its sim deadline by a hair and end the mission (run-294:
+# the straight insert/retreat settled 10 ms past its await_settle sim deadline at RELEASE). Clamped
+# sane; WALL deadlines (time.monotonic) are the wall sweep's job and are NOT scaled here.
+MOVE_SIM_DEADLINE_SCALE = max(1.0, min(5.0, float(os.environ.get('RESTOCK_MOVE_SIM_DEADLINE_SCALE', 1.0))))
+
+
+def sim_execute_budget(duration, scale=None):
+    """Sim-clock execution budget for one trajectory: (its own sim ``duration`` + EXECUTE_SETTLE_MARGIN_S),
+    multiplied by MOVE_SIM_DEADLINE_SCALE (sim-only; 1.0 => byte-identical). Added to self._sim_now() at
+    dispatch to form the node-clock execution deadline. Pure + importable so the scale is CPU-testable
+    without a ROS node (the inline _poll() dispatch cannot be reached on CPU)."""
+    return (duration + EXECUTE_SETTLE_MARGIN_S) * (MOVE_SIM_DEADLINE_SCALE if scale is None else scale)
 # Bounded re-plan of the SAME goal on a MoveIt plan rejection. MoveIt's FCL ValidateSolution is
 # ground truth and cuMotion is stochastic, so re-planning draws a fresh seed; a few retries turn the
 # seed-variant base/plate collision (INVALID_MOTION_PLAN, run-129/134 ~half of seeds) into a
@@ -230,6 +244,11 @@ class RosMotionPort:
         self.execute = ActionClient(node, ExecuteTrajectory, namespace + '/execute_trajectory')
         self.state, self.handle, self.future = 'idle', None, None
         self.generation = 0
+        # fm367: True when the move that just returned 'failed' did so on a SIM-clock move/settle
+        # deadline miss (a render-pacing transient, safe to re-attempt) rather than a collision/plan
+        # rejection (a port raise). The controller reads it after a 'failed' poll to retry ONLY the
+        # former with a fresh deadline. A wall-clock deadline miss (the wall sweep's job) stays False.
+        self._last_fault_sim_deadline = False
         # fm345 smaller-problems-later: per-move PLACE relaxations for the carton-loaded extend.
         # (b) _move_speed_scale slows the cuMotion joint-space plan (preplace/place) to ~half so the
         # soft arm drive (3e5/8000/400) can track the min-jerk timing it lagged in run-270 (sagged
@@ -282,6 +301,7 @@ class RosMotionPort:
         # measured (pan) config FIRST and branch to the config NEAREST the measured start, so the
         # preplace stays on the pan branch (small joint move, cart-cage clearance preserved).
         self._near_start = bool(near_start)
+        self._last_fault_sim_deadline = False   # fm367: fresh deadline-fault signal per move
         self._replan_attempts = 0          # fresh-seed re-plan budget for this move (see REPLAN_MAX)
         self._server_crash_retries = 0     # move_group-respawn re-send budget (see MOVE_GROUP_CRASH_RETRY_MAX)
         self._awaiting_server_respawn = False  # True while holding the move open for a respawned move_group
@@ -540,6 +560,7 @@ class RosMotionPort:
         # 'planning failed (exhausted within wall cap)' the instant it entered planning
         # (PLAN_WALL_DIAG elapsed=49.6 s on a plan that had just started). A joint goal does not re-plan
         # a stored pose, so _plan_goal stays None (poll's REPLAN path is a no-op for it).
+        self._last_fault_sim_deadline=False   # fm367: fresh deadline-fault signal per move
         self._replan_attempts=0
         self._server_crash_retries=0
         self._awaiting_server_respawn=False
@@ -728,10 +749,19 @@ class RosMotionPort:
             return 'running'
         return None
 
+    def last_fault_was_sim_deadline(self):
+        """fm367: True iff the most recent 'failed' poll was a SIM-clock move/settle deadline miss (a
+        render-pacing transient the controller may re-attempt), False for a collision/plan rejection or
+        a wall-clock miss. Cleared at the start of every move (begin/begin_joint_goal)."""
+        return bool(getattr(self, '_last_fault_sim_deadline', False))
+
     def poll(self):
         try:
             return self._poll()
         except Exception:
+            # fm367: a port RAISE is a collision/plan-rejection/crash fault, never a sim-deadline miss ->
+            # clear the flag so the controller's deadline retry does not fire (fail-fast preserved).
+            self._last_fault_sim_deadline = False
             self.stop()
             return 'failed'
 
@@ -755,6 +785,10 @@ class RosMotionPort:
             print('MOVE_DEADLINE_FAULT clock=%s over=%.2fs state=%s straight=%s'
                   % (_clock, self.deadline_clock() - self.deadline, self.state,
                      getattr(self, '_straight_line', False)), flush=True)
+            # fm367: a SIM-clock miss is a render-pacing transient (not a collision), so flag it so the
+            # controller can re-issue the SAME move with a fresh deadline (bounded). A WALL miss is the
+            # wall sweep's job and the planner's fail-fast -- do NOT flag it for the deadline retry.
+            self._last_fault_sim_deadline = (_clock == 'sim')
             self.stop()
             return 'failed'
         # fm357: before dispatching ExecuteTrajectory, hold until the arm is settled, then re-seed the
@@ -810,8 +844,9 @@ class RosMotionPort:
                 end = goal.trajectory.joint_trajectory.points[-1].time_from_start
                 duration = end.sec + end.nanosec * 1e-9
                 # Execution is sim-paced, exactly like the cuMotion plan path: bound on the NODE/SIM clock.
+                # fm367: the sim budget (duration + settle margin) is MOVE_SIM_DEADLINE_SCALE-scaled.
                 self.deadline_clock = self._sim_now
-                self.deadline = self._sim_now() + duration + EXECUTE_SETTLE_MARGIN_S
+                self.deadline = self._sim_now() + sim_execute_budget(duration)
                 if self._live_arm_state is None:
                     self._send(self.execute, goal, 'execute_accept')
                 else:                                   # fm357: settle + re-seed before dispatch
@@ -888,8 +923,9 @@ class RosMotionPort:
             # Execution is simulator-paced, so bound it on the NODE/SIM clock: the trajectory's own
             # sim duration plus a settle margin. A wall bound here false-failed a healthy grasp whose
             # render-paced execution legitimately took many wall seconds per sim second (run-93).
+            # fm367: the sim budget (duration + settle margin) is MOVE_SIM_DEADLINE_SCALE-scaled.
             self.deadline_clock=self._sim_now
-            self.deadline=self._sim_now()+duration+EXECUTE_SETTLE_MARGIN_S
+            self.deadline=self._sim_now()+sim_execute_budget(duration)
             if self._live_arm_state is None:
                 goal = ExecuteTrajectory.Goal()
                 goal.trajectory = trajectory

@@ -17,6 +17,13 @@ CONTACT_FREEZE_TICKS = 5
 # tracking all ruled out). Retry a failed staged move this many times (fresh plan + deadline) before
 # failing the stage, mirroring the planner's plan-reject REPLAN but at the staged-move level.
 STAGED_MOVE_RETRY_MAX = 2
+# fm367: a general-path collect move (the straight-line insert/retreat, or any free-space reach) that
+# returns 'failed' on a SIM-CLOCK move/settle deadline miss -- a render-pacing transient, NOT a
+# collision/plan-rejection (run-294: the straight insert/retreat settled 10 ms past its await_settle
+# sim deadline at RELEASE and ended the mission) -- is re-issued with a fresh deadline up to this many
+# times before failing the phase. Mirrors STAGED_MOVE_RETRY_MAX but for the general move path, which
+# had NO retry. A collision/plan-rejection (port raised -> flag False) is NOT retried (fail-fast kept).
+MOVE_DEADLINE_RETRY_MAX = 2
 
 
 class TransferController:
@@ -123,6 +130,7 @@ class TransferController:
         self.phase = 'idle'
         self.held = False
         self._staged_retries = 0   # fm358: bounded retry of a failed staged cart-swing move
+        self._move_deadline_retries = 0   # fm367: bounded retry of a sim-deadline fault on the general move path
         self.evidence = []
         self.reason = ''
         self.last_time = None
@@ -200,6 +208,7 @@ class TransferController:
     def _transition(self, phase):
         self.phase, self.elapsed, self.issued = phase, 0.0, False
         self._staged_retries = 0   # fm358: fresh retry budget per phase
+        self._move_deadline_retries = 0   # fm367: fresh deadline-retry budget per phase
 
     def _result(self, controls=()):
         status = self.phase if self.phase in ('failed', 'succeeded') else 'running'
@@ -424,6 +433,18 @@ class TransferController:
                 return self._result(({'kind': 'gripper', 'enabled': True},))
             outcome = self.motion.poll()
             if outcome == 'failed':
+                # fm367: a SIM-clock move/settle deadline miss (the port flags it; a collision/plan
+                # rejection raises -> flag False) is a render-pacing transient, so re-issue the SAME
+                # move with a fresh deadline up to MOVE_DEADLINE_RETRY_MAX before failing the phase.
+                # This is the general move path (straight insert/retreat, free-space reach) that had no
+                # retry; a genuine collision/plan-rejection still fails immediately (fail-fast preserved).
+                if (getattr(self.motion, 'last_fault_was_sim_deadline', lambda: False)()
+                        and self._move_deadline_retries < MOVE_DEADLINE_RETRY_MAX):
+                    self._move_deadline_retries += 1
+                    print('MOVE_DEADLINE_RETRY phase=%s attempt=%d/%d' %
+                          (self.phase, self._move_deadline_retries, MOVE_DEADLINE_RETRY_MAX), flush=True)
+                    self.issued = False   # re-issue this move (fresh deadline) next tick
+                    return self._result()
                 return self._fail('collision planning or execution failed')
             if outcome not in ('running', 'succeeded'):
                 return self._fail('invalid motion outcome')
