@@ -423,7 +423,15 @@ class IsaacPort:
                   f'braked={getattr(self.mobile,"_braked",None)} now={now:.2f}',flush=True)
         if self.after_step is not None:
             self.after_step(now,parked)
-        ready=self.transport.contains(positions) and not self.contact.read()
+        # fm390: during the mid-collect reposition carry (the controller holds the carry fold in TRANSIT
+        # while the BASE drives to place_approach), the gripper is DELIBERATELY holding the carton, so the
+        # empty-gripper requirement must not block the drive (run-302 failed 'arm_not_in_transport_timeout'
+        # here -- the base refused to move because contact was held). The arm is still gated on the transport
+        # ENVELOPE (contains), which the compact carry fold satisfies (CPU-verified 0.62 m <= 0.65 m radius);
+        # only the held-payload check is relaxed, and ONLY in TRANSIT -- a phase that exists solely in
+        # reposition mode, so an absent reposition leaves this byte-identical.
+        carrying_reposition = (self._phase == 'transit')
+        ready=self.transport.contains(positions) and (carrying_reposition or not self.contact.read())
         # A towed cart is rig self-geometry only while physically coupled: tell the range sensor
         # the measured latch state so its rear beams hitting the cart become self/unknown (not a
         # phantom obstacle behind the robot) while coupled, and a decoupled cart stays a real
