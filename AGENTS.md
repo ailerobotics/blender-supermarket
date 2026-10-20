@@ -372,6 +372,17 @@ repo's `scenes/`, `export/` or `renders/`.
 - GitHub remote is `ailerobotics/blender-supermarket` (origin); changes land via PR
   (see the merged-PR history). Use **gh-axi** for GitHub operations; never push to or
   merge into the default branch yourself.
+- **Choreographed demo video** (`scripts/twin/demo/`, `scripts/run_demo_gpu.sh`): a SEPARATE
+  demo mode that renders a scripted seven-stage restock walkthrough in the mission's Isaac
+  scene with a live decision/reason-tree panel. Never changes the autonomous mission. Reuses
+  `restock.scene.build` (same store/robot/cart/carton) WITHOUT the autonomy stack
+  `physics_setup.assemble` adds (so it's light on VRAM and spawns no host/ROS); the base/cart
+  are kinematic along the PR154 tow lanes, the arm IK-tracks the scripted carton
+  (`demo/arm_ik.py`), and every panel value is READ from the live stage each frame into
+  `decision_log.json`. Capture needs the mission chase-camera + fill-light recipe (plain
+  Camera/viewport render black). Encodes with `restock.recording.Recorder`. CPU tests:
+  `scripts/twin/demo/tests/`; design + choreographed-vs-measured split:
+  `~/firstmate/data/sim-demo-video-v1/report.md`.
 
 ## Maintaining this file
 
