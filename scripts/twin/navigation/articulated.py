@@ -400,11 +400,24 @@ class ArticulatedPlanner:
 
 class ArticulatedController(Controller):
     """Measured-state route following and braking sweep for the physical tow rig."""
-    def __init__(self, grid, spec=None, *, require_temporal_map=False, **kwargs):
+    def __init__(self, grid, spec=None, *, require_temporal_map=False, planner_timeout=None, **kwargs):
         self.require_temporal_map=require_temporal_map
         self.spec=spec or MobileSpec()
         self.world=ArticulatedMap(grid,self.spec)
-        self.planner=ArticulatedPlanner(self.world)
+        # Coupled-train A* wall-clock budget. The coupled outbound/return plan normally resolves in
+        # ~30 ms via the cheap corridor route (map passage hints), never touching the full search; but
+        # if the corridor is perturbed and the plan falls to the full search, a HEAVILY LOADED host
+        # (the mission shares the box with Isaac render + commissioning) can starve the search inside
+        # the default 30 s wall deadline and return 'planning_timeout' -> blocked_no_route_timeout
+        # (the failure mode the fullscope nav05 proof hit under load). This is a COMPUTE budget, not a
+        # collision tolerance: raising it never accepts any unverified geometry. None => default 30 s.
+        if planner_timeout is None:
+            self.planner=ArticulatedPlanner(self.world)
+        else:
+            if not (isinstance(planner_timeout,(int,float)) and math.isfinite(planner_timeout)
+                    and planner_timeout>0):
+                raise ValueError('planner_timeout must be a positive, finite number of seconds')
+            self.planner=ArticulatedPlanner(self.world,timeout=float(planner_timeout))
         super().__init__(grid,Footprint(self.spec.transport_radius,abs(self.spec.hitch_x),
                          math.hypot(self.spec.cart_hitch_x+self.spec.cart_length/2,self.spec.cart_width/2),
                          margin=0.05,min_turn_radius=1.5,

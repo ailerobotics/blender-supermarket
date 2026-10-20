@@ -186,7 +186,7 @@ class RuntimeAdapter:
     def __init__(self, navigation, mobile, manipulation, port: Port, poses,
                  *, fixture_mode=False, goal_articulation=None,
                  stall_window_s=_SENSOR_STALL_WINDOW_S, route_alerts=None, fine_dock=None,
-                 hold_cart_through_couple=False):
+                 hold_cart_through_couple=False, couple_static_drive=False):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         # Opt-in final fine-docking servo (twin.restock.fine_dock.FineDock). None (default) =>
         # the couple stage hands the parked base straight to attach, byte-identical. When present
@@ -199,6 +199,19 @@ class RuntimeAdapter:
         # hitch seats), released only at attach. False (default) => unchanged run. SIM-only; the
         # real cart brakes physically (real-rig semantics untouched).
         self.hold_cart_through_couple = bool(hold_cart_through_couple)
+        # Opt-in: drive the couple nav legs against the STATIC map only (empty live obstacles),
+        # the same TRUSTED-STATIC pattern as the mid-collect reposition legs (fm396). The couple
+        # corridor is geometrically proven clear against the static map -- the backstock Support's
+        # TRUE AABB (scenario staging) clears the footprint -- but the LIVE Support returns sit a
+        # few cm proud of that surface (localisation/raycast-height bias), which erases the thin
+        # margin and makes the planner refuse the route from the shortcut start pose directly south
+        # of the Support (the real collect leaves the base at place_approach, EAST of the Support,
+        # from which couple routes fine either way). Static only for the UNCOUPLED couple approach
+        # legs; the standoff->drawbar insert is the motion-only fine-dock servo, not a nav plan.
+        # False (default) => every couple leg keeps full live-scan obstacle avoidance
+        # (byte-identical). SIM-only; the real rig keeps live avoidance (real-rig semantics
+        # untouched). See core.Controller.static_drive and data/sim-restock-couple-nav-v1/report.md.
+        self.couple_static_drive = bool(couple_static_drive)
         # Opt-in mobile store-sensor hook (twin.route_alerts). None (default) =>
         # byte-identical run. When attached it runs the read-only store-vision
         # detectors over the drive camera during navigate; it is self-disabling and
@@ -289,6 +302,10 @@ class RuntimeAdapter:
         # Tight XY arrival for the on-axis standoff so the fine-dock insert starts near the cart
         # axis (its cross-track is what the servo nulls while reversing); normal arrival otherwise.
         kw = {'arrival_xy_tol': 0.05} if goal_name == 'couple_standoff' else {}
+        # Opt-in trusted-static couple approach: route against the static map so the thin live
+        # margin at the backstock Support cannot false-block the leg (see self.couple_static_drive).
+        if self.couple_static_drive:
+            kw['static_drive'] = True
         self.nav.start(self.poses[goal_name], False, **kw)
 
     def stop(self):

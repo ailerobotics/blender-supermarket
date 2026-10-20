@@ -127,6 +127,17 @@ repo's `scenes/`, `export/` or `renders/`.
   clearance uses the independent base/cart swept envelope, so straight cart width alone does
   not prove aisle feasibility. Simulator/Nav2 execution still needs integration
   evidence; fixture tests must not be presented as a physics demonstration.
+  **Couple dock approach** (`run_mobile_restock.py --start-at couple`): the backstock
+  `/RestockScenario/Support` clears the `y=16.0` couple corridor by only ~0.11 m, and its live
+  lidar returns sit a few cm proud of the true AABB — so from the shortcut start pose (directly
+  south of the support) the PLANNER refuses the straight leg (`blocked_no_route`, speed-independent;
+  the PR-142 `navigation.docking` cap only shrinks the braking disk, not the footprint). Fix:
+  `config['couple_static_drive']` routes the couple legs against the static map (the fm396
+  trusted-static pattern; default off, sim-only). **Coupled outbound** resolves cheaply via the
+  `sales_backroom_portal` corridor route; a loaded host can starve the full-A\* fallback into
+  `planning_timeout` — `navigation.planner_timeout_s` is the wall-budget backstop (default 30 s).
+  Offline proof for both (CPU): `scripts/check_couple_nav.py`; design + numbers in
+  `data/sim-restock-couple-nav-v1/report.md` (relaunch section) and its `handoff.md`.
 - **Moving obstacles** (opt-in, default-off): `navigation/dynamic.py` tracks
   per-frame `Detection(position,radius,source)` into velocity-predicted occupancy
   points unioned (add-only) into `Observation.obstacles`, so the existing gates

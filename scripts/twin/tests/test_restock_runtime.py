@@ -341,7 +341,7 @@ class RuntimeTests(unittest.TestCase):
         self.p = replace(self.p, observation_id='fc', simulation_time=.5, coupled=True)
         self.assertEqual(adapter.step(.1).status, 'succeeded')
 
-    def _couple_seq_harness(self, poses_extra):
+    def _couple_seq_harness(self, poses_extra, *, couple_static_drive=False):
         from twin.restock.fine_dock import FineDockResult
         starts = []
         nav = NS(start=lambda goal, coupled, **kw: starts.append((tuple(goal), kw)),
@@ -357,7 +357,8 @@ class RuntimeTests(unittest.TestCase):
         poses['cart_dock'] = [-4.46, 15.25, 0.0]
         poses.update(poses_extra)
         adapter = RuntimeAdapter(nav, mobile, self.manip, self.port, poses,
-                                 fixture_mode=True, fine_dock=fine, hold_cart_through_couple=True)
+                                 fixture_mode=True, fine_dock=fine, hold_cart_through_couple=True,
+                                 couple_static_drive=couple_static_drive)
         return adapter, starts, attached
 
     def test_couple_navigates_approach_then_cart_dock_without_standoff(self):
@@ -387,6 +388,30 @@ class RuntimeTests(unittest.TestCase):
         r = adapter.step(.1); self.assertIn('insert', r.reason)    # standoff reached -> fine-dock insert
         self.p = replace(self.p, observation_id='f3', simulation_time=.3)
         self.assertEqual(adapter.step(.1).status, 'running'); self.assertEqual(len(attached), 1)
+
+    def test_couple_static_drive_routes_legs_against_static_map(self):
+        # couple_static_drive=True: BOTH couple nav legs are trusted-static drives so the thin live
+        # margin at the backstock Support cannot false-block the leg from the shortcut start pose.
+        adapter, starts, attached = self._couple_seq_harness(
+            {'couple_approach': [-4.46, 16.0, 0.0], 'couple_standoff': [-4.06, 15.25, 0.0]},
+            couple_static_drive=True)
+        adapter.start('couple', self.job)
+        self.assertEqual(starts[-1][0], (-4.46, 16.0, 0.0))        # approach first
+        self.assertTrue(starts[-1][1].get('static_drive'))        # ... as a static drive
+        r = adapter.step(.1)
+        self.assertEqual(starts[-1][0], (-4.06, 15.25, 0.0))       # standoff next
+        self.assertTrue(starts[-1][1].get('static_drive'))        # ... also static
+        self.assertEqual(starts[-1][1].get('arrival_xy_tol'), 0.05)  # keeping the TIGHT arrival
+        self.assertIn('advancing', r.reason)
+
+    def test_couple_static_drive_default_off_is_byte_identical(self):
+        # Default (flag absent): couple legs carry NO static_drive -> unchanged live-scan avoidance.
+        adapter, starts, _ = self._couple_seq_harness(
+            {'couple_approach': [-4.46, 16.0, 0.0], 'couple_standoff': [-4.06, 15.25, 0.0]})
+        adapter.start('couple', self.job)
+        self.assertIsNone(starts[-1][1].get('static_drive'))      # approach: live avoidance
+        adapter.step(.1)
+        self.assertIsNone(starts[-1][1].get('static_drive'))      # standoff: live avoidance
 
     def test_couple_without_fine_dock_attaches_directly(self):
         # Absent servo: unchanged legacy path (attach straight off the parked nav arrival).
