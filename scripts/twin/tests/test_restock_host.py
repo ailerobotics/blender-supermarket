@@ -404,6 +404,25 @@ class IncorporationAckTest(unittest.TestCase):
         self.assertEqual(snap['state'], 'failed')
         self.assertEqual(snap['reason'], 'parked heartbeat lost: wall gap 3.40 s')
 
+    def test_stopped_station_does_not_fault_across_a_long_gap_run309_replay(self):
+        # fm399 (1) run-309 replay at the host-ack level: the host tick() publishes emergency stop on
+        # every tick that state.fault is set, and an ACTIVE parked epoch faults on the 0.5 s sim gap
+        # the instant it stops being heartbeat-ed -- which is what spammed /manipulation/stop through
+        # the ~190 s-sim / ~1400 s-wall reposition drive. The fix CLEANLY STOPS the station before the
+        # drive: a stopped (idle) epoch must NOT fault across that same long gap, so NO emergency stop.
+        st, clock = self.prepared()
+        st.acknowledge(10.2, 1)
+        st.accept(dict(action='stop', epoch=1, sequence=1, stamp=10.3, parked=True), 10.3)
+        clock[0] = 100.0 + 1400.0   # ~1400 s WALL later
+        snap = st.snapshot(10.3 + 190.0, endpoints_ready=True, process_alive=True)  # ~190 s SIM later
+        self.assertEqual(snap['state'], 'idle')          # idle, NOT failed -> tick() publishes no stop
+        self.assertEqual(snap['reason'], '')
+        # Contrast: an ACTIVE un-heartbeat-ed epoch DOES fault across the same gap (the run-309 trigger).
+        st2, _ = self.prepared()
+        st2.acknowledge(10.2, 1)
+        self.assertEqual(st2.snapshot(10.3 + 190.0, endpoints_ready=True,
+                                      process_alive=True)['state'], 'failed')
+
     def test_default_gap_budgets_are_byte_identical(self):
         # fm399 (2): unset env => the documented real-rig contract (0.5 s sim / 3.0 s wall).
         st, _ = self.state()
