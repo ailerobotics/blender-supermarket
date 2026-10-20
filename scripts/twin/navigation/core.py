@@ -475,6 +475,21 @@ class Controller:
             return self.terminal
         pose, obs = odometry.pose, observations
         radius = self.footprint.radius(self.coupled)+odometry.position_uncertainty
+        # fm406 diag (RESTOCK_NAV_DIAG, byte-identical off): why the reposition never latches arrival --
+        # the nav's OWN measured xy/yaw error vs the active tolerances + the stop velocities, logged when
+        # near the goal (runs 313/314 pinned the base ~0.08-0.12 m short with nav 'tracking' forever and
+        # 0 settling_at_goal). Reveals whether the tol is effective at runtime and whether odom sees a
+        # larger error than the ground-truth nav-trace. Throttled.
+        if os.environ.get('RESTOCK_NAV_DIAG'):
+            _xy = math.dist(pose[:2], self.goal[:2])
+            if _xy < 0.4:
+                self._adiag = getattr(self, '_adiag', 0) + 1
+                if self._adiag % 20 == 1:
+                    print('NAV_ARRIVAL_DIAG xy=%.4f xy_tol=%.3f yaw_err=%.4f yaw_tol=%.3f lin=%.4f ang=%.4f '
+                          'pose=%s goal=%s'
+                          % (_xy, self.arrival_xy_tol, abs(wrap(self.goal[2]-pose[2])), self.arrival_yaw_tol,
+                             odometry.linear, odometry.angular, tuple(round(c,3) for c in pose),
+                             tuple(round(c,3) for c in self.goal)), flush=True)
         if math.dist(pose[:2],self.goal[:2]) <= self.arrival_xy_tol:
             error = wrap(self.goal[2]-pose[2])
             if abs(error) <= self.arrival_yaw_tol:
