@@ -400,10 +400,19 @@ class ArticulatedPlanner:
 
 class ArticulatedController(Controller):
     """Measured-state route following and braking sweep for the physical tow rig."""
-    def __init__(self, grid, spec=None, *, require_temporal_map=False, planner_timeout=None, **kwargs):
+    def __init__(self, grid, spec=None, *, require_temporal_map=False, planner_timeout=None,
+                 lane_graph=None, **kwargs):
         self.require_temporal_map=require_temporal_map
         self.spec=spec or MobileSpec()
         self.world=ArticulatedMap(grid,self.spec)
+        # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
+        # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
+        # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
+        # loaded host cannot starve it into a planning_timeout, and the reorientation loop that made
+        # the east-facing return time out is replaced by the authored west-facing path). Lanes are
+        # expanded against the static map by the factory before the controller is used.
+        self.lane_graph=lane_graph
+        self._active_lane=None
         # Coupled-train A* wall-clock budget. The coupled outbound/return plan normally resolves in
         # ~30 ms via the cheap corridor route (map passage hints), never touching the full search; but
         # if the corridor is perturbed and the plan falls to the full search, a HEAVILY LOADED host
@@ -432,14 +441,53 @@ class ArticulatedController(Controller):
         self.index=0
         self.planning_stop=False
         self.goal_articulation=self.spec.max_articulation if goal_articulation is None else goal_articulation
+        # Resolve the authored tow lane for this COUPLED goal (if any). Uncoupled drives never use a
+        # lane. Pose acquirability + live-obstacle swept validation are checked when the route is built.
+        self._active_lane=(self.lane_graph.resolve_goal(self.goal)
+                           if (coupled and self.lane_graph) else None)
+        if self._active_lane is not None:
+            # The lane is the authority on its OWN kinematically-achievable terminal state, so arrival
+            # articulation follows the lane (not a generic per-action value the coupled train may be
+            # unable to reach into this goal). Documented in docs/restock_navigation.md.
+            self.goal_articulation=self._active_lane.goal_articulation
 
     def plan_observed_route(self,state,obs,uncertainty):
         """Plan against current nvblox unknown/occupied cells when configured."""
+        if self._active_lane is not None:
+            return self._plan_lane(state,obs,uncertainty)
         planner=self.planner
         if obs.temporal_map is not None:
             planner=ArticulatedPlanner(ArticulatedMap(obs.temporal_map.planning_grid(self.grid),self.spec))
             uncertainty=max(.10,uncertainty)
         return planner.plan(state,self.goal,obs.obstacles,uncertainty,self.goal_articulation)
+
+    def _plan_lane(self,state,obs,uncertainty):
+        """Follow the active authored tow lane instead of free planning.
+
+        The lane's trajectory was expanded + validated against the static map at build time; here
+        it is re-validated against the LIVE obstacle observation (the same swept-envelope replay
+        `validate_seed` performs) from the lane's OWN authored start -- so acceptance means the
+        authored centreline is still clear, not that an open-loop replay from the jittered measured
+        pose happens to land on the goal (the controller closes that loop by tracking the route).
+        The measured base must be close enough to acquire the lane; a live obstacle on the lane
+        blocks the tow. Crucially this NEVER runs the expensive hybrid-A* search, so the coupled
+        drive is bounded in CPU and cannot be starved into a planning_timeout under host load.
+        """
+        lane=self._active_lane
+        if not lane.acquirable(state.pose,state.cart_yaw):
+            return Route([],[],'lane_not_acquired')
+        if obs.temporal_map is not None:
+            world=ArticulatedMap(obs.temporal_map.planning_grid(self.grid),self.spec)
+            uncertainty=max(.10,uncertainty)
+            planner=ArticulatedPlanner(world,timeout=self.planner.timeout)
+        else:
+            planner=self.planner
+        checked=planner.validate_seed(lane.route,lane.start_state(),self.goal,obs.obstacles,
+                                      max(.02,uncertainty),self.goal_articulation)
+        if not checked.states:
+            return Route([],[],'lane_blocked')
+        checked.reason='validated_lane'
+        return checked
 
     def _coverage_ok(self,odom,obs,radius,stop_distance,v,w):
         """Uncoupled braking-sweep coverage (the reference base path via super()).

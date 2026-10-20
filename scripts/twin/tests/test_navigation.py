@@ -66,21 +66,20 @@ class NavigationTests(unittest.TestCase):
 
     def test_static_drive_obstacle_stop_uses_footprint_radius_not_braking_disk(self):
         # fm396/run-308: the braking inflation (stop_distance = stale_after*speed) made obstacle_stop trip
-        # on the source SUPPORT 0.86 m away though the footprint radius clears it. On the trusted static
-        # leg obstacle_stop uses the footprint RADIUS only; a NORMAL leg still stops on the braking disk.
-        r = self.fp.radius(False)                         # 0.5
-        d = r + 0.20                                      # static obstacle 0.70 m WEST (behind): radius+padding
-        grid = GridMap((-6, -6, 6, 6), ((-d - 2.0, -0.3, -d, 0.3),), 0.25)  # clears for the plan, braking disk overlaps
+        # though the footprint radius clears it. On the trusted static leg obstacle_stop uses the footprint
+        # RADIUS only; a NORMAL leg still stops on the forward braking capsule. The obstacle is placed
+        # AHEAD (within the forward braking reach but outside the footprint) so the direction-aware zone
+        # still stops the normal leg here.
+        r = self.fp.radius(False) + 0.05                  # 0.55 (radius + default 0.05 position uncertainty)
+        d = r + 0.20                                      # live obstacle 0.75 m AHEAD: inside braking reach, outside footprint
         od = Odometry((0, 0, 0), 0.1, source='test_fixture')
-        obs = Observation(0.1, (), False, True, source='test_fixture', coverage_radius=10)
-        normal = Controller(grid, self.fp, allow_test_fixtures=True, max_speed=0.8, stale_after=1.0)
-        normal.start((3, 0, 0), False)                    # braking disk (radius+stop) overlaps the box
-        self.assertEqual(normal.step(0.1, od, obs).velocity, (0, 0))      # obstacle_stop -> no motion
-        trusted = Controller(grid, self.fp, allow_test_fixtures=True, max_speed=0.8, stale_after=1.0)
-        trusted.start((3, 0, 0), False, static_drive=True)                # radius-only clears the box
-        rr = trusted.step(0.1, od, obs)
-        self.assertNotEqual(rr.velocity, (0, 0))
-        self.assertEqual(rr.reason, 'tracking')
+        obs = Observation(0.1, ((d, 0.0),), False, True, source='test_fixture', coverage_radius=10)
+        normal = Controller(self.grid, self.fp, allow_test_fixtures=True, max_speed=0.8, stale_after=1.0)
+        normal.start((3, 0, 0), False)
+        self.assertEqual(normal.gate_velocity(0.1, od, obs, 0.8, 0.0).reason, 'obstacle_stop')
+        trusted = Controller(self.grid, self.fp, allow_test_fixtures=True, max_speed=0.8, stale_after=1.0)
+        trusted.start((3, 0, 0), False, static_drive=True)                # radius-only, ignores live obstacles
+        self.assertEqual(trusted.gate_velocity(0.1, od, obs, 0.8, 0.0).reason, 'tracking')
 
     def test_cart_rear_and_swing_obstacle(self):
         c=self.controller(); c.start((3,0,0),True)
@@ -181,17 +180,32 @@ class NavigationTests(unittest.TestCase):
         _,obs=self.inputs(obstacles=((1.2,0),))
         self.assertEqual(c.gate_velocity(0.1,od,obs,0,0).reason,'obstacle_stop')
 
-    def test_docking_cap_shrinks_braking_disk_past_rear_obstacle(self):
-        # ds-007 shape: a dock goal (3,0,0) with the robot 1.0 m short of it (2,0,0) and
-        # the backstock staging support sensed 0.60 m directly BEHIND it (rear hemisphere
-        # of a no-reverse base). radius(False)=0.50 + default 0.05 position uncertainty
-        # = 0.55; at full speed stop=0.153 so the omnidirectional disk 0.703 engulfs the
-        # rear return -> obstacle_stop. The dock cap (0.05 m/s -> stop 0.018 -> disk 0.568)
-        # clears it; the footprint radius itself is UNCHANGED.
+    def test_directional_zone_clears_rear_obstacle_still_stops_ahead(self):
+        # ds-007 / run-319b shape: the robot at (2,0,0) facing +x driving toward a dock, the backstock
+        # staging support sensed 0.60 m directly BEHIND it (rear hemisphere of a no-reverse base).
+        # radius(False)=0.50 + 0.05 unc = 0.55; at full speed stop=0.153 so the LEGACY omnidirectional
+        # disk 0.703 engulfs the rear return -> obstacle_stop. The direction-aware zone (default) checks
+        # the footprint all around (never shrunk) plus the braking extension only AHEAD, so the rear
+        # obstacle a forward-only base can never reach does NOT trip, while the same return AHEAD does.
+        fp=Footprint(0.45,0.5,1.0,margin=0.05)  # radius(False)=0.50, +0.05 unc = 0.55
+        rear=self.inputs(obstacles=((1.40,0.0),))[1]   # 0.60 m BEHIND the robot at (2,0)
+        ahead=self.inputs(obstacles=((2.60,0.0),))[1]  # 0.60 m AHEAD (within radius+stop=0.703, outside footprint)
+        od=Odometry((2,0,0),0.1,source='test_fixture')
+        base=self.controller(fp=fp); base.start((3,0,0),False)
+        self.assertEqual(base.gate_velocity(0.1,od,rear,0.25,0.0).reason,'tracking')       # rear: no trip
+        self.assertEqual(base.gate_velocity(0.1,od,ahead,0.25,0.0).reason,'obstacle_stop') # ahead: still stops
+        # The legacy omnidirectional disk (directional_zone=False) DOES trip on the rear return.
+        legacy=self.controller(fp=fp,directional_zone=False); legacy.start((3,0,0),False)
+        self.assertEqual(legacy.gate_velocity(0.1,od,rear,0.25,0.0).reason,'obstacle_stop')
+
+    def test_docking_cap_still_shrinks_forward_braking_reach(self):
+        # The dock speed cap is orthogonal to the direction-aware zone: it shrinks the FORWARD braking
+        # reach near a dock. An obstacle AHEAD inside the full-speed capsule but beyond the capped
+        # capsule stops at full speed and clears under the cap; the footprint is UNCHANGED.
         from twin.navigation import DockingApproach
-        fp=Footprint(0.45,0.5,1.0,margin=0.05)  # radius(False)=0.50
+        fp=Footprint(0.45,0.5,1.0,margin=0.05)  # radius(False)=0.50, +0.05 unc = 0.55
         dock=DockingApproach(goal=(3,0,0),speed=0.05,approach_distance=1.5)
-        _,obs=self.inputs(obstacles=((1.40,0.0),))  # 0.60 m behind the robot at (2,0)
+        _,obs=self.inputs(obstacles=((2.60,0.0),))  # 0.60 m AHEAD of the robot at (2,0)
         od=Odometry((2,0,0),0.1,source='test_fixture')
         base=self.controller(fp=fp); base.start((3,0,0),False)
         self.assertEqual(base.gate_velocity(0.1,od,obs,0.25,0.0).reason,'obstacle_stop')

@@ -138,10 +138,44 @@ def _controller_kwargs(nav):
     docking = _build_docking(nav)
     if docking is not None:
         kwargs['docking'] = docking
+    # Direction-aware braking zone (default on). Explicit False restores the legacy
+    # omnidirectional stop disk; the footprint radius/margins are identical either way.
+    if 'directional_zone' in nav:
+        if not isinstance(nav['directional_zone'], bool):
+            raise ValueError('navigation.directional_zone must be a boolean')
+        kwargs['directional_zone'] = nav['directional_zone']
     # Production never accepts fixtures: the knob is intentionally not exposed.
     if nav.get('allow_test_fixtures'):
         raise ValueError('allow_test_fixtures is forbidden in a production bundle')
     return kwargs
+
+
+def _build_lane_graph(nav, grid, spec):
+    """Build + expand the opt-in authored tow lanes from `navigation.tow_lanes`.
+
+    Returns None when the key is absent (default-off, byte-identical run: coupled drives
+    free-plan as before). When present, every lane is expanded ONCE against the static
+    navigation map here, at build time (never under the per-tick budget); a lane that cannot
+    be realised raises, so a broken lane fails the build rather than the mission.
+    """
+    cfg = nav.get('tow_lanes')
+    if cfg is None:
+        return None
+    from .lanes import TowLaneGraph
+    from .articulated import ArticulatedMap
+    graph = TowLaneGraph.from_config(cfg)
+    if graph is None or not graph.lanes:
+        return None
+    build = nav.get('tow_lane_build', {})
+    if not isinstance(build, dict):
+        raise ValueError('navigation.tow_lane_build must be an object')
+    kw = {}
+    if 'build_margin' in build:
+        kw['build_margin'] = float(build['build_margin'])
+    if 'build_timeout' in build:
+        kw['build_timeout'] = float(build['build_timeout'])
+    graph.expand_all(ArticulatedMap(grid, spec), **kw)
+    return graph
 
 
 def _build_dynamic_layer(nav):
@@ -270,6 +304,7 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
     controller = ArticulatedController(grid, spec,
                                        require_temporal_map=bool(nav.get('require_temporal_map', False)),
                                        planner_timeout=nav.get('planner_timeout_s'),
+                                       lane_graph=_build_lane_graph(nav, grid, spec),
                                        **_controller_kwargs(nav))
 
     if 'dynamic_obstacles' in nav and mode != 'sensor':

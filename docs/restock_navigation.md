@@ -193,15 +193,53 @@ The environment/mission must supply a reachable wide staging area, park the cart
 and use an uncoupled approach where feasible. The gate never shrinks a footprint
 to make a route succeed.
 
+### Direction-aware braking zone (config-driven, default-on)
+
+The `obstacle_stop` gate always checks the **circular footprint all around the base** —
+`footprint.radius` (which circumscribes the whole train) plus the localization uncertainty —
+and that disk is **never shrunk**: any obstacle inside the body stops the robot regardless of
+heading. It then adds the braking-distance extension (`stop_distance`, which grows with the
+commanded/measured forward speed). The **shape of that extension** is the direction-aware zone:
+
+- **Direction-aware** (`navigation.directional_zone: true`, the default): the extension is applied
+  **only along the forward motion** — the footprint disk swept `stop_distance` metres down the
+  heading, i.e. a forward **capsule** (`Controller._braking_zone_free` →
+  `GridMap.segment_free(pose, pose + stop_distance·heading, radius)`). `stop_distance` is derived
+  from the forward speed `max(commanded, measured)`, so a stop or a rotate-in-place command with no
+  residual forward motion has no extension and only the all-around footprint is checked (a circular
+  footprint sweeps onto itself under rotation). A base still physically coasting forward while
+  commanded to stop keeps the capsule, because that travel is real. A no-reverse base can never drive
+  into geometry in its **rear hemisphere**, so a rear obstacle outside the footprint does NOT trip;
+  an obstacle the same distance AHEAD (inside the capsule) still does.
+- **Legacy omnidirectional** (`navigation.directional_zone: false`): the extension is added in every
+  direction (`radius + stop_distance` disk), so the rearward reach a forward-only base can never
+  collide with still trips on static geometry behind the parked start pose.
+
+This directly fixes the ds-007 / run-319b couple-dock false stop: the backstock staging support,
+sensed ~0.81 m in the robot's **rear** hemisphere while it drives forward and away, no longer trips
+`obstacle_stop` under the direction-aware zone (the full-speed omnidirectional disk ≈0.90 m used to
+engulf it). The footprint radius and every margin are identical in both modes — this is **not** a
+mask or a widened tolerance; it only governs whether the braking inflation is omnidirectional or
+forward-only. The coupled gate (`ArticulatedController.gate_velocity`) is already direction-aware by
+construction: it rolls the braking **sweep** forward along the commanded curvature
+(`world.rollout`) rather than bounding the arc with an omnidirectional disk, so a rear obstacle
+beyond the train never trips there either. Parsed by `navigation/factory.py`; CPU tests in
+`tests/test_navigation.py` (forward / rear-clears / rotate / legacy) and
+`tests/test_articulated_navigation.py` (coupled).
+
+> Note — the trusted-static couple/reposition legs (`couple_static_drive`, `static_drive`) drop the
+> braking lookahead entirely (footprint RADIUS only) and remain unchanged; they are orthogonal to the
+> directional zone. Whether the merged `couple_static_drive` / dock speed-cap workarounds can be
+> retired is discussed in `data/sim-restock-nav-lanes-v1/report.md` (the direction-aware zone retires
+> the GATE false-stop, but the `blocked_no_route` PLANNER margin that `couple_static_drive` actually
+> addresses is separate and is NOT retired here).
+
 ### Dock-approach speed cap (opt-in, default-off)
 
-The `obstacle_stop` gate bounds every possible braking arc with an **omnidirectional
-disk** of `footprint.radius + stop_distance`, where `stop_distance` grows with the
-commanded/measured speed. A no-reverse base braking forward can never drive into
-geometry in its *rear* hemisphere, yet at full approach speed the disk's rearward
-reach still trips on static geometry behind the parked start pose. At the cart
-hitch-meet (couple), the backstock staging support sits ~0.81 m behind the base — 0.06 m
-outside the bare footprint — so the full-speed disk (≈0.90 m) falsely stops the dock.
+With the direction-aware zone the dock-approach speed cap is no longer needed to clear a **rear**
+obstacle at couple; it remains available for shrinking the **forward** braking reach near a dock
+(e.g. a genuine forward blocker close to a dock goal). A no-reverse base braking forward can never
+drive into geometry in its *rear* hemisphere.
 
 `navigation.docking` caps the commanded linear speed to `speed` within
 `approach_distance` of a named dock `goal` (bound to the active goal within
@@ -266,6 +304,54 @@ rig carries its own, more conservative tuning). CPU tests: `tests/test_restock_f
 (servo + drift-augmented closed-loop convergence + reverse + honest time-cap) and
 `tests/test_restock_runtime.py` (couple nav→fine_dock→attach handover + cart pin at start /
 release at attach).
+
+### Pre-planned tow lanes for coupled drives (opt-in, default-off)
+
+Free hybrid-A* planning of the long, wide coupled robot+cart train is where the tow stalls: the
+outbound tow blocked earlier, and the coupled RETURN to the east-facing `home` **times out** — the
+planner finds a valid route but it is a 23.9 m loop for a 10.4 m direct, because the goal yaw forces
+a reorientation from the southbound portal arrival (a loaded host then starves the search inside its
+wall budget). `navigation.tow_lanes` replaces free planning for coupled drives with **authored lanes**.
+
+A tow lane (`navigation/lanes.py` `TowLane`) is an authored centreline — a `start` pose, an ordered
+list of `waypoints` (x, y, yaw through the backroom/aisles) and a `goal` pose — plus `start_cart_yaw`
+and `goal_articulation`. The **lane graph is expanded once, at build time**, against the static map
+by `navigation/factory.py` (`ArticulatedPlanner`, run at mission boot, never under the per-tick
+budget): each lane becomes a kinematically valid, swept-envelope-clear train trajectory, and the
+authored waypoints are asserted to lie on the realised centreline (a broken lane fails the build).
+
+At runtime, when a COUPLED drive's goal matches a lane (and the measured base is close enough to the
+lane start to acquire it), `ArticulatedController` follows that lane's trajectory
+(`_plan_lane`): it re-validates the stored trajectory's swept robot+cart envelope against the **live**
+obstacle observation (cheap `validate_seed` replay, ~0.1 s) and tracks it closed-loop, and it
+**never falls through to the expensive hybrid-A\* search** — so a loaded host cannot starve a coupled
+drive into `planning_timeout`, and the authored lane (not a free detour) is the sanctioned path. A
+live obstacle on the lane **blocks** the tow (`lane_blocked`, bounded) rather than silently
+re-routing; a base too far from the lane start waits (`lane_not_acquired`). When a lane is active, the
+**arrival articulation follows the lane's `goal_articulation`** — the lane is the authority on its own
+kinematically-achievable terminal cart pose. Uncoupled drives carry no lane and keep the full planner
+unchanged; absent `navigation.tow_lanes` ⇒ every coupled drive free-plans exactly as before
+(byte-identical).
+
+The authored mission lanes (example fragment `docs/examples/tow-lanes-mission-fragment.json`):
+
+| lane | start → goal | authored arrival | route | notes |
+|------|--------------|------------------|-------|-------|
+| `outbound_dock_to_shelf` | couple dock `[-4.46, 15.25, 0]` → shelf park `[-3.05, 6.0, π]` | `goal_articulation 0.9` | 22.2 m via the `sales_backroom_portal` corridor | the coupled train can only curve into this pull-through shelf, arriving at ~0.8 rad articulation — aligning to a tighter arrival is not kinematically feasible here (see the report; a transfer/station concern) |
+| `return_shelf_to_cart_parking` | shelf park `[-3.05, 6.0, π]` → **cart parking** `[-9.0, 16.0, π]` | `goal_articulation 0.2` | 15.1 m, arrival articulation 0.18 | west-facing park: no reorientation loop (ratio 1.3 vs the 2.3 of the east-facing `home` that timed out) |
+
+**Cart parking spot** (`mission_poses.cart_parking = [-9.0, 16.0, π]`, robot base pose): the coupled
+return ends here (in the backroom `rollwagen_parking` zone, near the dock); the cart trails to
+~`[-7.73, 16.0]` and the robot, facing west, has a clear forward escape to drive away empty. The
+behaviour-tree lane (`sim-restock-bt-driver-v1`) owns the uncouple step on this pose and the empty
+drive home. The integration/orchestrator mission config wires `mission_poses.cart_parking` and the
+return nav goal (like `cart_dock`); absent ⇒ the coupled return uses today's goal.
+
+Offline proof (CPU, the mission's real inputs): `scripts/check_tow_lanes.py`
+(`--environment … --scenario … --camera-config … --lanes docs/examples/tow-lanes-mission-fragment.json`)
+drives the real controller/planner and asserts the direction-aware zone + both lanes end to end;
+design and numbers in `data/sim-restock-nav-lanes-v1/report.md`. CPU unit tests:
+`tests/test_navigation_lanes.py`, `tests/test_navigation_factory.py`.
 
 ## In-process route
 

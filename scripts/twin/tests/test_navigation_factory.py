@@ -125,6 +125,35 @@ class FactoryDispatchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _build('reference', docking=bad)
 
+    def test_directional_zone_default_on_and_config_toggle(self):
+        self.assertTrue(_build('reference').directional_zone)                 # default on
+        self.assertFalse(_build('reference', directional_zone=False).directional_zone)
+        self.assertTrue(_build('reference', directional_zone=True).directional_zone)
+
+    def test_directional_zone_rejects_non_bool(self):
+        with self.assertRaises(ValueError):
+            _build('reference', directional_zone='yes')
+
+    def test_tow_lanes_absent_leaves_no_lane_graph(self):
+        self.assertIsNone(_build('reference').lane_graph)
+
+    def test_tow_lanes_built_and_expanded(self):
+        # A straight coupled lane through the open centre of the fixture grid expands at build time.
+        lane = {'name': 'demo', 'start': [-3, 0, 0], 'goal': [3, 0, 0],
+                'start_cart_yaw': 0.0, 'goal_articulation': 0.3, 'waypoints': [[0, 0, 0]]}
+        obj = _build('reference', tow_lanes=[lane])
+        self.assertIsNotNone(obj.lane_graph)
+        self.assertEqual([ln.name for ln in obj.lane_graph.lanes], ['demo'])
+        self.assertIsNotNone(obj.lane_graph.lanes[0].route)                   # expanded at build
+        self.assertIs(obj.lane_graph.resolve_goal((3.0, 0.0, 0.0)), obj.lane_graph.lanes[0])
+
+    def test_tow_lane_that_cannot_expand_fails_the_build(self):
+        # A lane whose start sits inside a wall cannot be realised -> the build raises (fail-closed).
+        lane = {'name': 'in_wall', 'start': [5.9, 0, 0], 'goal': [3, 0, 0],
+                'start_cart_yaw': 0.0, 'goal_articulation': 0.3}
+        with self.assertRaises(ValueError):
+            _build('reference', tow_lanes=[lane])
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

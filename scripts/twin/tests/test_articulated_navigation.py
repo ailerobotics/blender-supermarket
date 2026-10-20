@@ -164,6 +164,24 @@ class ArticulatedTests(unittest.TestCase):
         self.assertTrue(ArticulatedPlanner(wall).validate_seed(seed,state,(4,0,0),extra_margin=0).states)
         self.assertFalse(ArticulatedPlanner(wall).validate_seed(seed,state,(4,0,0),extra_margin=.02).states)
 
+    def test_coupled_gate_is_direction_aware_rear_clears_ahead_stops(self):
+        # The coupled gate already rolls the braking sweep FORWARD along the commanded curvature
+        # (it never bounds the arc with an omnidirectional disk): a static return in the train's
+        # rear hemisphere does not trip, while the same return AHEAD, inside the forward braking
+        # rollout, does. This locks the coupled equivalent of the direction-aware base zone.
+        spec = MobileSpec()
+        world = ArticulatedMap(GridMap((-20, -20, 20, 20)))
+        c = ArticulatedController(GridMap((-20, -20, 20, 20)), spec, allow_test_fixtures=True)
+        c.start((5, 0, 0), True)
+        od = Odometry((0, 0, 0), 0.1, 0.0, 0.0, 'test_fixture', 0.05)
+        # The train spans robot nose (+0.5) to cart rear (~-1.77 with margins). An obstacle BEYOND
+        # the cart rear (-2.0) is behind the whole no-reverse train -> no trip; one just beyond the
+        # nose, inside the forward braking rollout (~0.7 m), stops.
+        rear = Observation(0.1, ((-2.0, 0.0),), True, True, 0.0, 'test_fixture', 10.0)
+        ahead = Observation(0.1, ((0.7, 0.0),), True, True, 0.0, 'test_fixture', 10.0)
+        self.assertEqual(c.gate_velocity(0.1, od, rear, 0.25, 0.0).reason, 'tracking')
+        self.assertEqual(c.gate_velocity(0.1, od, ahead, 0.25, 0.0).reason, 'obstacle_stop')
+
     def test_seed_rejects_teleport(self):
         from twin.navigation.articulated import Route
         a=TrainState(0,0,0,0)

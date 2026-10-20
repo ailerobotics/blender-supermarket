@@ -138,6 +138,17 @@ repo's `scenes/`, `export/` or `renders/`.
   `planning_timeout` — `navigation.planner_timeout_s` is the wall-budget backstop (default 30 s).
   Offline proof for both (CPU): `scripts/check_couple_nav.py`; design + numbers in
   `data/sim-restock-couple-nav-v1/report.md` (relaunch section) and its `handoff.md`.
+  **Direction-aware braking zone** (`navigation.directional_zone`, default ON): the base
+  `obstacle_stop` gate checks the footprint all around (never shrunk) + the braking extension
+  ONLY along the forward heading (a capsule), so rear static geometry a no-reverse base can't
+  reach no longer false-stops; `false` restores the legacy omnidirectional disk. Coupled gate
+  was already forward-sweep direction-aware. **Pre-planned tow lanes** (`navigation.tow_lanes`,
+  opt-in): authored centrelines in `navigation/lanes.py` expanded at build, followed +
+  swept-validated closed-loop for every COUPLED drive (NO free search → no `planning_timeout`,
+  and the east-facing `home` reorientation-loop return is replaced by the west-facing
+  `mission_poses.cart_parking` `[-9,16,π]`); uncoupled drives unchanged. Example fragment
+  `docs/examples/tow-lanes-mission-fragment.json`; offline proof `scripts/check_tow_lanes.py`;
+  design in `data/sim-restock-nav-lanes-v1/report.md`.
 - **Moving obstacles** (opt-in, default-off): `navigation/dynamic.py` tracks
   per-frame `Detection(position,radius,source)` into velocity-predicted occupancy
   points unioned (add-only) into `Observation.obstacles`, so the existing gates
