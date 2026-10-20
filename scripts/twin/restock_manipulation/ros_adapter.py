@@ -105,6 +105,17 @@ def _should_crash_retry(crash_retries, has_plan_goal):
     return has_plan_goal and crash_retries < MOVE_GROUP_CRASH_RETRY_MAX
 
 
+def _should_deadline_crash_retry(clock, state, has_plan_goal, crash_retries):
+    """fm404 B-lite: a move_group SIGABRT+respawn that completes BETWEEN poll()s is invisible to
+    _should_crash_retry (the server reads ready again), so the lost plan request hangs until its WALL
+    deadline and the host e-stops (run-312). When a WALL deadline fires while WAITING FOR A PLAN RESULT
+    with a stored goal and budget left, re-send the plan as a bounded crash-retry instead of failing --
+    a genuinely slow/stuck planner still exhausts the budget and fails honestly. Execute-state and
+    SIM-clock (render-pacing) deadlines are NOT this case. Pure for CPU testing."""
+    return (clock == 'wall' and state in ('plan_accept', 'plan_result')
+            and bool(has_plan_goal) and crash_retries < MOVE_GROUP_CRASH_RETRY_MAX)
+
+
 def planner_velocity_scale(urdf, *, command_limit=.15, scale_cap=.05):
     """Keep planner URDF-scaled speeds below the simulator's absolute gate.
 
@@ -844,6 +855,31 @@ class RosMotionPort:
             print('MOVE_DEADLINE_FAULT clock=%s over=%.2fs state=%s straight=%s'
                   % (_clock, self.deadline_clock() - self.deadline, self.state,
                      getattr(self, '_straight_line', False)), flush=True)
+            # fm404 B-lite: a WALL deadline while WAITING FOR A PLAN RESULT can be a move_group
+            # SIGABRT+respawn that completed BETWEEN polls -- _handle_server_crash above only fires while
+            # the server is DOWN, so a crash that respawned before the next poll leaves the lost plan
+            # request hanging until this wall deadline (run-312: move_group died pid 1937157 -> respawned
+            # pid 2066726, but the lost plan's wall deadline then e-stopped the host). Re-send the SAME
+            # plan goal to the (now-respawned) server as a BOUNDED crash-retry instead of failing; a
+            # genuinely stuck/slow planner still exhausts MOVE_GROUP_CRASH_RETRY_MAX and fails honestly.
+            # The post-respawn plan result is re-anchored to the live measured start by the validate path
+            # below (fm368), so a start-drift during the crash gap does not reject it. plan states only
+            # (execute is the trajectory host, not move_group).
+            if _should_deadline_crash_retry(_clock, self.state, self._plan_goal is not None,
+                                            getattr(self, '_server_crash_retries', 0)):
+                self._server_crash_retries = getattr(self, '_server_crash_retries', 0) + 1
+                self._replan_attempts = 0
+                self._awaiting_server_respawn = False
+                self.handle = None
+                self.generation += 1
+                self.deadline_clock = time.monotonic
+                self.deadline = time.monotonic() + self.timeout
+                self._plan_started_wall = time.monotonic()
+                print('MOVE_GROUP_CRASH_RETRY plan-result wall-deadline (likely move_group crash+respawn '
+                      'between polls); resending plan goal (retry %d/%d)'
+                      % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
+                self._send(self.plan, self._plan_goal, 'plan_accept')
+                return 'running'
             # fm367: a SIM-clock miss is a render-pacing transient (not a collision), so flag it so the
             # controller can re-issue the SAME move with a fresh deadline (bounded). A WALL miss is the
             # wall sweep's job and the planner's fail-fast -- do NOT flag it for the deadline retry.

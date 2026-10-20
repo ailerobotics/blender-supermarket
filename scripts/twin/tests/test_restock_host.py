@@ -525,6 +525,22 @@ class RosHostLaunchWiring(unittest.TestCase):
             plan = launch_plan(fixture(tmp))
         self.assertIn('twin.restock.trajectory_host', plan['nodes'])
 
+    def test_move_group_respawns_and_is_excluded_from_teardown_guard_fm404(self):
+        # fm404 B-lite: a move_group SIGABRT (run-266/268/312) must RESPAWN, not tear the host stack
+        # down. The move_group Node declares respawn=True + a respawn delay, and move_group is NOT in the
+        # OnProcessExit shutdown-guard set (whose exits EmitEvent Shutdown), so its recoverable crash does
+        # not SIGINT the rest of the stack; the other components stay genuinely fatal.
+        src = (Path(__file__).resolve().parents[1] / 'restock_host' / 'launch.py').read_text()
+        self.assertRegex(src, r"name='move_group'[^\n]*respawn=True")      # move_group respawns
+        self.assertRegex(src, r"respawn_delay=[0-9.]+")                    # with a delay
+        guarded_line = next(l for l in src.splitlines() if l.strip().startswith('guarded ='))
+        self.assertNotIn('moveit', guarded_line)                          # move_group excluded from teardown
+        for comp in ('container', 'masker', 'manipulation', 'trajectory'):
+            self.assertIn(comp, guarded_line)                             # the genuinely-fatal set stays
+        # The OnProcessExit guards are built over `guarded` (not all processes), so move_group's exit
+        # does NOT EmitEvent Shutdown -- it respawns instead.
+        self.assertRegex(src, r"for process in guarded")
+
     def test_ros_host_config_fixture_is_usable(self):
         from twin.restock_manipulation.types import ProductProfile
         cfg = json.loads((Path(__file__).resolve().parents[1]

@@ -230,6 +230,21 @@ class MoveGroupCrashRetry(unittest.TestCase):
         from twin.restock_manipulation.ros_adapter import _should_crash_retry
         self.assertFalse(_should_crash_retry(0, has_plan_goal=False))
 
+    def test_deadline_crash_retry_covers_respawn_between_polls_fm404(self):
+        # fm404 B-lite (run-312): a move_group SIGABRT that RESPAWNS between polls is invisible to
+        # _handle_server_crash (server ready again), so the lost plan request hangs to its WALL deadline.
+        # A wall plan-result deadline with a stored goal + budget must re-send (crash-retry), not fail.
+        from twin.restock_manipulation.ros_adapter import (
+            _should_deadline_crash_retry as R, MOVE_GROUP_CRASH_RETRY_MAX)
+        self.assertTrue(R('wall', 'plan_result', True, 0))
+        self.assertTrue(R('wall', 'plan_accept', True, MOVE_GROUP_CRASH_RETRY_MAX - 1))
+        # NOT this case: sim-clock (render pacing), execute state, no goal, or budget exhausted.
+        self.assertFalse(R('sim', 'plan_result', True, 0))
+        self.assertFalse(R('wall', 'execute_result', True, 0))
+        self.assertFalse(R('wall', 'await_settle', True, 0))
+        self.assertFalse(R('wall', 'plan_result', False, 0))
+        self.assertFalse(R('wall', 'plan_result', True, MOVE_GROUP_CRASH_RETRY_MAX))
+
     @staticmethod
     def _port(state='plan_result', ready=True, plan_goal='GOAL', crash_retries=0, awaiting=False):
         p = RosMotionPort.__new__(RosMotionPort)
