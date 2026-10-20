@@ -739,7 +739,11 @@ class TransferController:
             # base_repositioned so TRANSIT -> preplace proceeds at the new pose. Because we are only ticked
             # while parked (at the pick pose, then at place_approach), the per-tick parked gate and the
             # per-phase elapsed timeout never see the base motion.
-            if self.base_repositioned:
+            if self.base_repositioned or s.base_repositioned:
+                # fm400: the host controller runs in the HOST process, so the Isaac adapter cannot set our
+                # in-process self.base_repositioned -- it signals arrival on the sensor packet
+                # (s.base_repositioned) instead. The in-process fixture path (adapter steps us directly)
+                # still uses self.base_repositioned. Either resumes TRANSIT -> preplace at the new pose.
                 # fm390 PERCEIVE: re-read the live deck target in the NEW (place_approach) base frame and
                 # rebuild the place-side poses from it before placing. The poses registered during observe
                 # are in the stale PICKUP frame; placing from them would drive the arm to the wrong point.

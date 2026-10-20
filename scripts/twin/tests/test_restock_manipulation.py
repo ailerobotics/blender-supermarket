@@ -272,6 +272,25 @@ def test_reposition_before_place_holds_in_transit_until_base_repositioned():
     assert c.phase == 'preplace'                  # resumes the place at the new pose
 
 
+def test_transit_resumes_on_sensor_carried_base_repositioned_fm400():
+    # fm400 handshake, host side: the host controller runs in a SEPARATE process, so the adapter cannot
+    # set its in-process self.base_repositioned -- it carries arrival on the Sensors packet
+    # (s.base_repositioned). TRANSIT must resume to preplace on the sensor flag even though
+    # self.base_repositioned stays False (the run-310 gap: arrival never reached the host controller).
+    stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    tuck_shape = (-2.3, 1.0, 2.1066, 0.8, -1.2545)
+    c, m = make_controller(transport_joints=stow, staged_cart_swing=True, cart_pan_joint0=-0.8605,
+                           cart_tuck_shape=tuck_shape, reposition_before_place=True)
+    t = run_to(c, 'tuck')
+    c.step(.1, packet(c, t)); c.step(.1, packet(c, t + .1))      # tuck -> TRANSIT
+    assert c.phase == 'transit'
+    c.step(.1, packet(c, t + .2))                                # still held; no sensor flag yet
+    assert c.phase == 'transit' and c.base_repositioned is False
+    c.step(.1, packet(c, t + .3, base_repositioned=True))        # arrival carried ON THE SENSOR PACKET
+    assert c.phase == 'preplace'                                 # resumes even though self.base_repositioned is False
+    assert c.base_repositioned is False
+
+
 def test_reposition_reregisters_deck_target_in_new_base_frame():
     # fm390 PERCEIVE: after the base reaches place_approach, the controller re-reads the live deck target
     # in the NEW base frame and rebuilds the place-side poses from it -- the observe-time poses are in the

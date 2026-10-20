@@ -157,11 +157,16 @@ class ManipulationBridge:
                 self.controller.motion.stop()
 
     def set_base_repositioned(self):
-        """fm390: tell the arm controller the base has driven to place_approach, so its held TRANSIT
-        phase proceeds to preplace. Reaches the real TransferController through the sensor-owning wrapper."""
+        """fm390/fm400: tell the arm controller the base has driven to place_approach, so its held
+        TRANSIT phase proceeds to preplace. Two shapes: the HOST-cuMotion wrapper forwards arrival across
+        the ROS boundary via set_base_repositioned() (the host controller is a separate process); the
+        in-process fixture TransferController just sets its own base_repositioned attr."""
         core = (self.controller.controller if self.owns_sensor_io
                 and not hasattr(self.controller, 'cart_location') else self.controller)
-        core.base_repositioned = True
+        if hasattr(core, 'set_base_repositioned'):
+            core.set_base_repositioned()
+        else:
+            core.base_repositioned = True
 
     def pause_station(self, simulation_time):
         """fm399 (1): cleanly STOP the parked station at the START of the reposition drive, while the

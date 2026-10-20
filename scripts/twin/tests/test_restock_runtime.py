@@ -96,6 +96,52 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(nav_goals, [(0, 0, 0), (-4.5, 15.25, 3.14159)])  # pickup then place_approach
         self.assertIn('rewarm', phases)                        # re-warmed at place_approach
 
+    def test_reposition_handshake_end_to_end_across_host_boundary_fm400(self):
+        # fm400 end-to-end replay of the whole reposition handshake at the adapter level, modelling the
+        # host round-trip: station STOP at drive-start -> base drives -> arrival -> set_base_repositioned
+        # -> the (host-process) controller resumes TRANSIT->place ONLY after arrival was carried -> load.
+        events = []
+        class HostLike:   # a sensor-owning manip that models the separate-process host controller
+            cart_location = 'rollwagen'
+            def __init__(s): s._flagged = False; s._resumed = False
+            def start(s, a, j): events.append('start')
+            def warm(s, t, parked=None): return True                 # re-warm ready (fresh ESDF)
+            def pause_station(s, t): events.append('pause_station')   # clean stop at drive-start
+            def set_base_repositioned(s): s._flagged = True; events.append('set_base_repositioned')
+            def step(s, dt, t, parked=None):
+                if s._flagged:                                        # arrival carried on the packet
+                    s._resumed = True
+                if s._resumed:
+                    return ManipResult('succeeded', 'place', evidence=(
+                        {'source': 'test_fixture', 'sku': 'milk', 'location': 'rollwagen',
+                         'quantity': 1, 'observation_id': 'o', 'simulation_time': .1},))
+                return ManipResult('running', 'transit')              # HOLD in transit until arrival
+        manip = ManipulationBridge(HostLike(), owns_sensor_io=True)
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append(tuple(goal)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach'] = [-4.5, 15.25, 3.14159]
+        adapter = RuntimeAdapter(self.nav, self.mobile, manip, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        r = None
+        for _ in range(10):
+            r = adapter._step(.1)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence.get('loaded'))
+        # pause_station fired at drive-start, BEFORE arrival was signalled; the manip resumed only after.
+        self.assertIn('pause_station', events)
+        self.assertIn('set_base_repositioned', events)
+        self.assertLess(events.index('pause_station'), events.index('set_base_repositioned'))
+
     def test_reposition_rewarm_fails_honestly_without_a_fresh_collision_map(self):
         # fm399 (1): the place_approach re-warm must NOT place on a stale map. When no fresh ESDF is
         # re-incorporated at the new pose (warm never ready), the re-warm FAILS honestly after its

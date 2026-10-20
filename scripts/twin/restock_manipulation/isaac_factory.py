@@ -283,6 +283,25 @@ class HostManipulationRuntime:
     def stop(self):
         return self._runtime.stop()
 
+    def pause_station(self, simulation_time):
+        # fm399/fm400: cleanly stop the parked station at reposition drive-start. This wrapper is what
+        # the mission's ManipulationBridge probes with hasattr -- delegate so it is NOT a silent no-op
+        # (the run-310 failure: the station stayed active through the drive and faulted -> emergency stop).
+        return self._runtime.pause_station(simulation_time)
+
+    def set_base_repositioned(self):
+        # fm400: the base arrived at place_approach. Delegate so the inner runtime latches it onto the
+        # published sensor packet, carrying arrival across the ROS boundary to the host controller's
+        # TRANSIT gate (set_base_repositioned on this wrapper cannot reach the separate host process).
+        return self._runtime.set_base_repositioned()
+
+    @property
+    def last_sensor_time(self):
+        # fm400: the RuntimeAdapter's reach-stall watchdog probes getattr(core, 'last_sensor_time').
+        # Expose the inner runtime's value so the watchdog is NOT silently inert on the mission path
+        # (same silent-no-op family as the missing pause_station delegation).
+        return self._runtime.last_sensor_time
+
 
 class CollectTargetBridge:
     """Collect pick target from the FIXED source camera, reprojected for the moving arm.

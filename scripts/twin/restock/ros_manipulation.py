@@ -5,6 +5,7 @@ latched heartbeat stop. Camera capture and mapper acknowledgement remain real
 runtime dependencies supplied by the guarded simulator bundle.
 """
 import math
+from dataclasses import replace
 
 from twin.restock_manipulation.types import Result
 
@@ -33,6 +34,9 @@ class RosManipulationRuntime:
         self.sensing_bridge = sensing_bridge
         self.last_sensor_time = -1.
         self.latest = Result('running','idle')
+        # fm400: set True by the Isaac adapter at place_approach arrival; stamped onto the published
+        # sensor packet so the HOST controller's TRANSIT gate (a separate process) resumes to preplace.
+        self._base_repositioned = False
 
     def start(self, operation, job):
         if operation not in ('collect','transfer'):
@@ -105,6 +109,13 @@ class RosManipulationRuntime:
             sc = getattr(self.station, 'stage_clock', None) if self.station is not None else None
             self.sensing_bridge.publish(sc() if sc is not None else simulation_time)
 
+    def set_base_repositioned(self):
+        """fm400: the Isaac adapter has driven the carried carton to place_approach. Latch it so the next
+        published sensor packet carries base_repositioned=True across the ROS boundary to the HOST
+        controller's TRANSIT gate (the host controller is a separate process; the adapter cannot set its
+        in-process self.base_repositioned)."""
+        self._base_repositioned = True
+
     def pause_station(self, simulation_time):
         """fm399 (1): cleanly stop the current parked epoch at the START of the reposition drive, while
         still parked. A moving base invalidates the parked mapper, and the host faults + spams
@@ -166,6 +177,8 @@ class RosManipulationRuntime:
                 items = list(packet.observations)+([packet.target] if packet.target else [])
                 if any(item.source != 'sensor' for item in items):
                     raise ValueError('production manipulation requires sensor provenance')
+                if self._base_repositioned and not packet.base_repositioned:
+                    packet = replace(packet, base_repositioned=True)   # fm400: carry arrival to the host
                 self.graph.publish_sensors(packet)
                 self.last_sensor_time = stamp
             if self.station is not None:

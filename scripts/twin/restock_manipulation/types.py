@@ -66,6 +66,11 @@ class Sensors:
     # the collect `verify` phase refuse an empty-gripper 'success' when the carton is not resting on the
     # cart deck (run-300e placed it on the floor). Default None => byte-identical.
     placed_pose: tuple[float, ...] | None = None
+    # fm400 (reposition handshake): True once the base has driven the carried carton to place_approach,
+    # carried across the Isaac-adapter -> host-controller ROS boundary on the sensor packet (asdict ->
+    # JSON -> Sensors(**data)). The host controller's TRANSIT phase resumes to preplace on this OR its
+    # own self.base_repositioned (the in-process fixture path). Default False => byte-identical.
+    base_repositioned: bool = False
     # Driver must reject stale/absent joint/contact/odom data before making a packet.
 
 
