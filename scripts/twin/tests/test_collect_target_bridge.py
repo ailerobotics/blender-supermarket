@@ -6,8 +6,10 @@ The Isaac-only live arm pose read (`_arm_base_from_camera`) is stubbed; everythi
 import numpy as np
 import pytest
 
+import math
 from scripts.twin.restock_manipulation.isaac_factory import (
-    CollectTargetBridge, survive_collect_occlusion)
+    CollectTargetBridge, survive_collect_occlusion, base_parked_by_displacement,
+    _ArticulationParked)
 from scripts.twin.restock_manipulation.types import ProductProfile
 from scripts.twin.restock_camera.source_target import SourceTarget
 
@@ -131,3 +133,44 @@ def test_occlusion_survival_off_by_default_is_byte_identical_fm410(monkeypatch):
     b = _bridge(lambda now: None)
     b.contact = NS(read=lambda: True)
     assert b.capture(2.0, 'backstock_00', 'rollwagen') is None
+
+
+# ---- fm411 (run-317): base parked by DISPLACEMENT, not TGS instantaneous velocity ----
+
+def test_base_parked_by_displacement_basic_fm411():
+    assert base_parked_by_displacement([]) is True                       # no samples yet -> parked
+    assert base_parked_by_displacement([(1.0, 2.0, 0.5)]) is True        # <2 samples -> parked
+    assert base_parked_by_displacement([(1.0, 2.0, 0.5), (1.0, 2.0, 0.5)]) is True   # frozen
+    # tiny jitter within tol -> parked (this is the run-317 case: base brake-held, pose ~constant,
+    # while the TGS velocity SPIKED -- velocity is no longer an input, so it cannot trip)
+    assert base_parked_by_displacement([(0.0, 0.0, 0.0), (0.001, 0.0005, 0.002), (0.0, 0.0, 0.0)]) is True
+    # a driving base accumulates displacement past tol -> not parked
+    assert base_parked_by_displacement([(0.0, 0.0, 0.0), (0.02, 0.0, 0.0)]) is False
+    assert base_parked_by_displacement([(0.0, 0.0, 0.0), (0.0, 0.0, 0.1)]) is False   # yaw drive
+    # non-finite reading is a real fault, never silently parked
+    assert base_parked_by_displacement([(0.0, 0.0, 0.0), (float('nan'), 0.0, 0.0)]) is False
+
+
+def test_base_parked_yaw_wrap_at_pi_fm411():
+    # The collect base sits at yaw ~= pi. Tiny jitter straddling the +/-pi branch must still read PARKED
+    # (a raw max-min would be ~2*pi and falsely non-parked -- the yaw-wrap is the whole point here).
+    poses = [(0.0, 0.0, math.pi - 0.001), (0.0, 0.0, -math.pi + 0.001), (0.0, 0.0, math.pi - 0.0005)]
+    assert base_parked_by_displacement(poses) is True
+    # a genuine ~0.1 rad swing near pi is still caught as not parked
+    assert base_parked_by_displacement([(0.0, 0.0, math.pi - 0.001), (0.0, 0.0, math.pi - 0.11)]) is False
+
+
+def test_articulation_parked_ignores_velocity_spike_fm411():
+    # _ArticulationParked no longer reads get_linear_velocity: a frozen pose reads parked even if the
+    # solver reports a wild velocity (the run-317 brake-transition spike). get_world_pose is wxyz.
+    robot = NS(get_world_pose=lambda: ((1.5, 2.5, 0.0), (0.0, 0.0, 0.0, 1.0)),   # yaw ~= pi (wxyz w=0,z=1)
+               get_linear_velocity=lambda: (9.9, 9.9, 9.9),                       # huge -- must be ignored
+               get_angular_velocity=lambda: (9.9, 9.9, 9.9))
+    p = _ArticulationParked(robot)
+    for _ in range(5):
+        assert p.parked() is True            # frozen pose -> parked despite the velocity spike
+    # now move the base pose past tol -> not parked
+    robot.get_world_pose = lambda: ((1.6, 2.5, 0.0), (0.0, 0.0, 0.0, 1.0))
+    # it takes the moved sample entering the window; once present, the spread exceeds tol
+    saw_false = any(p.parked() is False for _ in range(3))
+    assert saw_false

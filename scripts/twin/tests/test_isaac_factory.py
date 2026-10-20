@@ -170,7 +170,7 @@ class HostRuntimeTests(unittest.TestCase):
     """The host cuMotion runtime: delegates to RosManipulationRuntime and exposes the
     base-parked / profile views the sensing lane reads. No in-process cuRobo."""
 
-    def _host(self, lin=(0, 0, 0), ang=(0, 0, 0)):
+    def _host(self, art=None):
         from twin.restock_manipulation.isaac_factory import HostManipulationRuntime, _ArticulationParked
         calls = []
         inner = SimpleNamespace(
@@ -178,7 +178,9 @@ class HostRuntimeTests(unittest.TestCase):
             step=lambda dt, t, parked=None: calls.append(('step', t)) or 'result',
             stop=lambda: calls.append(('stop',)))
         sensors = SimpleNamespace(slots=None, transform=None, last_frame='old')
-        art = SimpleNamespace(get_linear_velocity=lambda: lin, get_angular_velocity=lambda: ang)
+        # fm411: parked() reads get_world_pose() displacement (wxyz quat), not instantaneous velocity.
+        if art is None:
+            art = SimpleNamespace(get_world_pose=lambda: ((0., 0., 0.), (1., 0., 0., 0.)))  # frozen -> parked
         rt = HostManipulationRuntime(runtime=inner, sensors=sensors,
                                      motion=_ArticulationParked(art), profiles={JOB_SKU: 'p'})
         return rt, calls, sensors
@@ -191,12 +193,20 @@ class HostRuntimeTests(unittest.TestCase):
         self.assertNotIn('build_cad_planner', src)
 
     def test_exposes_parked_and_profiles_for_sensing_lane(self):
-        rt, _, _ = self._host(lin=(0, 0, 0), ang=(0, 0, 0))
+        rt, _, _ = self._host()                      # frozen pose -> parked
         self.assertEqual(rt.cart_location, 'rollwagen')
         self.assertTrue(rt.motion.parked())
         self.assertEqual(rt.controller.profiles, {JOB_SKU: 'p'})
-        moving, _, _ = self._host(lin=(0.2, 0, 0))
-        self.assertFalse(moving.motion.parked())
+        # fm411: a DRIVING base (pose advances each read) reads not-parked once the window shows net
+        # displacement past tol -- the displacement gate, not the (bias-prone) instantaneous velocity.
+        x = [0.0]
+        def driving():
+            x[0] += 0.05
+            return ((x[0], 0., 0.), (1., 0., 0., 0.))
+        moving, _, _ = self._host(art=SimpleNamespace(get_world_pose=driving))
+        results = [moving.motion.parked() for _ in range(4)]
+        self.assertFalse(all(results))      # a driving base is detected as NOT parked within a couple ticks
+        self.assertFalse(results[-1])       # and stays not-parked while it keeps moving
 
     def test_delegates_and_reconfigures_station(self):
         rt, calls, sensors = self._host()

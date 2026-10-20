@@ -36,6 +36,35 @@ def _finite_matrix4(m):
                     and all(isinstance(v, (int, float)) and math.isfinite(v) for v in r) for r in m))
 
 
+def _wrap_angle(a):
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def base_parked_by_displacement(poses, *, xy_tol=0.006, yaw_tol=0.02):
+    """fm411 (run-317): base stationarity from MEASURED NET POSE DISPLACEMENT over a short window, NOT the
+    TGS-reported instantaneous velocity. The PhysX solver carries a documented velocity bias (~14 mm/s on a
+    provably frozen body) and SPIKES the reported base velocity when a parking-brake FixedJoint is created
+    at a phase transition (run-317: the grasp->lift yaw-lock->full-lock switch tripped the controller's
+    `parked` top-of-step invariant and e-stopped collect while base_dxy was ~0). `poses` is a window of
+    (x, y, yaw) in metres/rad; parked when the xy spread and the YAW-WRAPPED yaw spread across the window
+    are within tol (yaw wrap matters: the collect base sits at yaw ~= pi, so a raw max-min straddling the
+    +/-pi branch would falsely read huge). < 2 samples -> True (just-arrived base, no window yet); any
+    non-finite reading -> False (a real fault, never silently parked). Pure for CPU testing; mirrors
+    settle_metrics / isaac_port's displacement gate."""
+    pts = list(poses)
+    if any(p is None or not all(math.isfinite(v) for v in p) for p in pts):
+        return False
+    if len(pts) < 2:
+        return True
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    xy_spread = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    y0 = pts[0][2]
+    dyaws = [_wrap_angle(p[2] - y0) for p in pts]
+    yaw_spread = max(dyaws) - min(dyaws)
+    return xy_spread <= xy_tol and yaw_spread <= yaw_tol
+
+
 def survive_collect_occlusion(enabled, attached, parked):
     """fm410 (run-316): decide whether a SOURCE-OCCLUDED collect capture should still emit a packet.
 
@@ -230,16 +259,30 @@ def _parse_cart_placement(entry):
 class _ArticulationParked:
     """Base stationarity read from the real articulation. The host owns arm motion on
     the cuMotion path, so the Isaac side only certifies the base is parked (the view the
-    station sensing reads); it never commands or teleports a joint."""
-    def __init__(self, articulation):
+    station sensing reads); it never commands or teleports a joint.
+
+    fm411 (run-317): gated on MEASURED NET POSE DISPLACEMENT over a short window, not the TGS instantaneous
+    velocity (`get_linear_velocity`), which spikes when the parking-brake FixedJoint is (re)created at a
+    phase transition and false-tripped the controller's `parked` invariant mid-collect. See
+    base_parked_by_displacement."""
+    def __init__(self, articulation, *, xy_tol=0.006, yaw_tol=0.02, window=10):
         self._robot = articulation
+        self._xy_tol, self._yaw_tol, self._window = float(xy_tol), float(yaw_tol), int(window)
+        self._hist = []
 
     def parked(self):
         import numpy as np
-        linear = np.asarray(self._robot.get_linear_velocity(), float)
-        angular = np.asarray(self._robot.get_angular_velocity(), float)
-        return bool(np.isfinite(linear).all() and np.isfinite(angular).all()
-                    and np.linalg.norm(linear) < .005 and np.linalg.norm(angular) < .005)
+        position, quaternion = self._robot.get_world_pose()  # Isaac quaternion is wxyz
+        pos = np.asarray(position, float)
+        quat = np.asarray(quaternion, float)
+        if pos.shape != (3,) or quat.shape != (4,) or not np.isfinite(pos).all() or not np.isfinite(quat).all():
+            return False
+        w, x, y, z = quat
+        yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+        self._hist.append((float(pos[0]), float(pos[1]), float(yaw)))
+        if len(self._hist) > self._window:
+            self._hist = self._hist[-self._window:]
+        return base_parked_by_displacement(self._hist, xy_tol=self._xy_tol, yaw_tol=self._yaw_tol)
 
 
 class HostManipulationRuntime:

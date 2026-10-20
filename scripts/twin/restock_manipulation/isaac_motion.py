@@ -64,6 +64,7 @@ class IsaacCadMotion:
         self.collision_time = -1.
         self.attachment = None
         self.last_grid = None
+        self._parked_hist = []   # fm411: base pose window for displacement-based parked (not TGS velocity)
         self.goal_pose = None
 
     def joint_positions(self):
@@ -73,10 +74,22 @@ class IsaacCadMotion:
         return tuple(q)
 
     def parked(self):
-        linear = np.asarray(self.robot.get_linear_velocity(), float)
-        angular = np.asarray(self.robot.get_angular_velocity(), float)
-        return bool(np.isfinite(linear).all() and np.isfinite(angular).all()
-                    and np.linalg.norm(linear) < .005 and np.linalg.norm(angular) < .005)
+        # fm411 (run-317): displacement-based, not TGS instantaneous velocity (which spikes on a
+        # parking-brake FixedJoint transition while the base is provably frozen). Mirrors
+        # isaac_factory._ArticulationParked; this in-process path is retired but kept consistent.
+        import math
+        from .isaac_factory import base_parked_by_displacement
+        position, quaternion = self.robot.get_world_pose()
+        pos = np.asarray(position, float)
+        quat = np.asarray(quaternion, float)
+        if pos.shape != (3,) or quat.shape != (4,) or not np.isfinite(pos).all() or not np.isfinite(quat).all():
+            return False
+        w, x, y, z = quat
+        yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+        self._parked_hist.append((float(pos[0]), float(pos[1]), float(yaw)))
+        if len(self._parked_hist) > 10:
+            self._parked_hist = self._parked_hist[-10:]
+        return base_parked_by_displacement(self._parked_hist)
 
     def observe_source(self, observation):
         if observation.source != 'sensor' or observation.frame != 'ur_base_link':
