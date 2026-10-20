@@ -446,7 +446,24 @@ class TransferController:
                 or not self._fresh(sensors.collision_time, now)
                 or len(sensors.joint_positions) != 6
                 or not all(math.isfinite(x) for x in sensors.joint_positions)):
-            return self._fail('base moving or stale/missing feedback/collision world')
+            # fm412 (run-317/318): this invariant is a 5-condition OR and its single reason string left the
+            # ACTUAL tripping field ambiguous (two runs died here at the grasp->weld boundary with no way to
+            # tell parked vs a collision/feedback staleness). Name the exact failed condition(s) + values so
+            # the next run is self-diagnosing instead of guessed-at.
+            why = []
+            if sensors.parked is not True: why.append(f'parked={sensors.parked!r}')
+            if type(sensors.contact) is not bool: why.append(f'contact_type={type(sensors.contact).__name__}')
+            if not self._fresh(sensors.feedback_time, now):
+                why.append(f'feedback_dt={now - sensors.feedback_time:.4f}(max {self.max_age})')
+            if not self._fresh(sensors.collision_time, now):
+                why.append(f'collision_dt={now - sensors.collision_time:.4f}(max {self.max_age})')
+            if len(sensors.joint_positions) != 6:
+                why.append(f'njoints={len(sensors.joint_positions)}')
+            elif not all(math.isfinite(x) for x in sensors.joint_positions):
+                why.append('joints_nonfinite')
+            print('CONTROLLER_INVARIANT_TRIP phase=%s now=%.3f %s' % (self.phase, now, ' '.join(why)),
+                  flush=True)
+            return self._fail('base moving or stale/missing feedback/collision world [' + ','.join(why) + ']')
         if self.held and self.phase != 'release' and not sensors.contact:
             return self._fail('lost grasp')
         try:

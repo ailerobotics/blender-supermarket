@@ -218,6 +218,17 @@ def test_task_space_lift_fallback_carries_both_wrist_guards_fm403():
     assert 0.0 in [x for x in m.wrist2_mins if x is not None], m.wrist2_mins
 
 
+def test_invariant_trip_names_the_failed_condition_fm412():
+    # fm412 (run-317/318): the top-of-step invariant is a 5-condition OR; its reason must name the ACTUAL
+    # failed field + value so a run that dies here is self-diagnosing (both runs died here ambiguously).
+    c, _ = make_controller('collect')
+    r = c.step(.1, packet(c, 1.0, parked=False))
+    assert r.status == 'failed' and 'parked=False' in r.reason, r.reason
+    c2, _ = make_controller('collect')
+    r2 = c2.step(.1, packet(c2, 5.0, collision_time=1.0))   # collision 4s old >> max_age -> stale
+    assert r2.status == 'failed' and 'collision_dt=' in r2.reason, r2.reason
+
+
 def _confirm_grasp_with_carton(c, z0, t0=1.0):
     """Drive to grasp and confirm the attachment with a MEASURED carton pose (physics confirm), latching
     z0 as the lift-probe baseline. Returns the next packet time. Uses no source observation at confirm."""
