@@ -211,7 +211,8 @@ def plan_bundle(manifest, scenario, config):
     # stage navigates to before the fine-dock insert; and `place_approach` (fm390: in front of the
     # rollwagen's open +x face, facing the mouth, at an arm-reach standoff) the collect stage drives to
     # WITH the carton carried before lowering it onto the deck, instead of reaching around from pickup.
-    _optional_extra = {'couple_approach', 'couple_standoff', 'place_approach', 'place_approach_stage'}
+    _optional_extra = {'couple_approach', 'couple_standoff', 'place_approach', 'place_approach_stage',
+                       'cart_parking', 'cart_parking_backaway'}
     if not isinstance(poses_in, dict) or not set(NAV_GOALS) <= set(poses_in) \
             or not set(poses_in) <= set(NAV_GOALS) | _optional_extra:
         raise ValueError(f'config.mission_poses must provide {NAV_GOALS} '
@@ -378,7 +379,8 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              fixture_mode=False, goal_articulation=plan.goal_articulation,
                              route_alerts=route_alerts, fine_dock=fine_dock,
                              hold_cart_through_couple=bool(config.get('hold_cart_through_couple')),
-                             couple_static_drive=bool(config.get('couple_static_drive')))
+                             couple_static_drive=bool(config.get('couple_static_drive')),
+                             uncouple_on_return=bool(config.get('uncouple_on_return')))
 
     # Opt-in warm-session reset provider (dev iteration): config['warm_reset'] names a
     # lane-owned builder `module:function` called once here with the live scene; it returns the

@@ -1,11 +1,17 @@
-# Behaviour-tree mission layer (opt-in)
+# Behaviour-tree mission layer (the mission driver)
 
-An **alternative orchestrator** for the Isaac supermarket restock mission that drives the *same*
+The mission **run driver** for the Isaac supermarket restock mission: it drives the *same*
 `mission.Mission` state machine through a [py_trees](https://py-trees.readthedocs.io) behaviour
-tree, adding **reactive event handling** and a **live, phone-friendly visualization** of the tree
-and of how each event is handled. It is **default-off**: nothing here runs unless a caller opts in
-(`"bt": true` in the runtime-config). The state machine (`Mission.tick`) stays the production path;
-the tree reproduces it stage-for-stage and is byte-identical on the no-event path.
+tree, as a **subtree of explicit position-first leaves per stage** (navigate → perceive →
+manipulate, step by step), plus **reactive event handling** and a **live, phone-friendly
+visualization** of the tree and of how each event is handled.
+
+Selected with `"bt": true` in the runtime-config (the integration lane's mission-runtime configs set
+this); `"bt": false` keeps the sequential `Mission.tick` state machine as the unchanged fallback. The
+tree reproduces the state machine stage-for-stage and **byte-identically** (same `begin_stage` /
+`step_stage` / `finalize` calls, same inventory, evidence and durable record), proved on CPU by
+`test_parity_with_state_machine` (single-leaf fixtures) and `test_restock_bt_phases.py` (the phased,
+decomposed drive, step-for-step).
 
 Modules live in `scripts/twin/restock/bt/`. Design, the full event contract, view paths, commands
 and the proof record are in `data/sim-restock-bt-v1/report.md`.
@@ -31,27 +37,52 @@ restock_root  (Sequence, memory=False)        -- re-evaluated every tick
   |    |- obstacle_avoid    dynamic obstacle / blocked aisle -> wait + re-plan -> resume
   |    `- baseline_guard    baseline_expired -> re-commission via the stations lane's provider
   `- mission   (Sequence, memory=True)        -- resumes at the running stage
-       |- stage:collect   bounded retry + re-observe recovery
+       |- stage:collect  (StageRetry) -> "collect steps" (Sequence, memory=True):
+       |      drive->pick · perceive carton · grasp·lift·tuck · drive->rollwagen ·
+       |      perceive deck · place · verify placed      (explicit position-first leaves)
        |- stage:couple / outbound / park / transfer / verify / return  (start_at-aware subset)
        `- finalize        mission.finalize once (stop adapter + record complete/failed)
 ```
 
+Each stage is a **subtree of explicit position-first leaves** — one `PhaseGate` per step in the
+stage's plan (`bt/stage_phases.py` `PLANS`), in the navigate → perceive → manipulate order the
+runtime already follows (for `collect`: drive to the pick pose, perceive the carton, grasp/lift/tuck,
+drive to `place_approach` in front of the rollwagen, perceive the deck, place, verify). **A new step
+is a new entry in `PLANS` (a new leaf).** The whole seven-stage cycle runs this way by default.
+
 `event_pump` and `reactive` run **before** `mission` every tick, so a safety event is observed and
-the control flags/physical reactions are applied before the active stage decides whether to step.
-The `Stage` leaf reads the `/control/pause` flag and **holds** (safety stop, payload preserved)
-instead of stepping — so "the reactive subtree handles the event while the mission continues, then
-resumes" is literally what the tree does. A `Stage` failure is classified onto the timeline and
-retried within a bounded budget with a recovery reaction (re-observe / re-plan / wait); on
+the control flags/physical reactions are applied before the active leaf decides whether to step. The
+active leaf reads the `/control/pause` flag and **holds** (safety stop, payload preserved) instead of
+stepping — so "the reactive subtree handles the event while the mission continues, then resumes" is
+literally what the tree does. A step failure is classified onto the timeline (naming the exact failed
+field — the fm412 diagnostic) and retried within a bounded budget by the `StageRetry` node with a
+recovery reaction (re-observe / re-plan / wait), re-entering the phase sequence from step 0; on
 exhaustion it calls `mission.fail` honestly. `health_guard` is the only reactive leaf that FAILS, so
 an abort short-circuits before the mission ticks.
 
-### No duplicated stage logic
+### No duplicated stage logic / byte-identical parity
 
-Stages call the mission seams `begin_stage()` / `step_stage()` / `finalize()` (added to
-`mission.py`, behaviour-preserving: `Mission.tick` now wraps the same seams). Evidence validation,
-inventory recording and the verify stock-commit gate live in exactly one place — the mission — so
-inventory and the durable record are byte-identical to the state machine (proved by
-`test_parity_with_state_machine`).
+The leaves never issue a navigation/manipulation command themselves: one shared `StageRun` steps the
+real `step_stage()` seam **at most once per tree tick**, and each leaf is a faithful *view* of that
+one stepping, RUNNING while the adapter's observed phase is on its step and SUCCESS once it has
+advanced past it (`stage_phases.milestone`). Because the `begin_stage` / `step_stage` / `finalize`
+calls are identical in count and order to `Mission.tick`, evidence validation, inventory recording
+and the verify stock-commit gate — all in the mission, one place — produce a byte-identical durable
+record and stock. An adapter that exposes no `phase` (a plain mock/fixture) collapses each stage to a
+single leaf (the former opaque behaviour), so the offline/mock harnesses are unchanged.
+
+### Uncouple at the cart parking spot (return)
+
+By default `return` tows the cart home coupled. With `"uncouple_on_return": true` **and** a
+`cart_parking` mission pose (owned by the `sim-restock-nav-lanes-v1` lane; build against a clearly
+named placeholder until it lands), the `return` subtree becomes five explicit leaves:
+tow→cart park (coupled) · brake cart · uncouple · back away · drive→home (empty). The runtime
+(`RuntimeAdapter`) tows to the parking spot, pins the parked cart (`mobile.hold_cart_pin`), releases
+the tow coupling via the new `MobileController.uncouple(obs)` primitive (mirror of `attach`: pin the
+cart, then remove the hitch; the `_cart_hold` latch keeps the cart braked as the robot drives away),
+optionally backs away (`cart_parking_backaway`), then drives home with no coupled requirement. CPU
+proof: `test_restock_runtime.py` (choreography + nav-leg coupled flags) and `test_mobile_assets.py`
+(`test_uncouple_leaves_cart_parked_and_frees_the_robot`). Default off ⇒ byte-identical tow-home.
 
 ## Event contract
 
