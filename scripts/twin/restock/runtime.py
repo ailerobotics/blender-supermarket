@@ -387,7 +387,7 @@ class RuntimeAdapter:
                     # Reached the staging waypoint (east of the cart); advance to place_approach.
                     self._reposition_seq_i += 1
                     self.nav.start(self._reposition_seq[self._reposition_seq_i], False, static_drive=True,
-                                   arrival_xy_tol=0.12, arrival_yaw_tol=0.12)  # fm406: place_approach is a standoff
+                                   arrival_xy_tol=0.15, arrival_yaw_tol=0.20)  # fm408: cover the base static-drive residual (run-315 diag: xy~0.11, yaw~0.16)
                     self.phase = 'navigate'
                     return Result('running',
                                   reason=f'reposition advancing to {self._reposition_seq[self._reposition_seq_i]}')
@@ -538,7 +538,7 @@ class RuntimeAdapter:
                 # did not clear). Static-only route + gates for these legs only; every other leg keeps full
                 # live obstacle avoidance.
                 self.nav.start(self._reposition_seq[0], False, static_drive=True,
-                               arrival_xy_tol=0.12, arrival_yaw_tol=0.12)  # fm406: relaxed reposition arrival (standoff)
+                               arrival_xy_tol=0.15, arrival_yaw_tol=0.20)  # fm408: cover the static-drive yaw residual (run-315 diag)
                 self.phase = 'navigate'
                 self._collect_reposition_pending = True
                 return Result('running', reason=f'pick done; staging base to {self._reposition_seq[0]} '

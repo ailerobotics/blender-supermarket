@@ -290,8 +290,8 @@ class RuntimeTests(unittest.TestCase):
         # deck re-registers in the new frame), so the achievable park (run-313 settled ~0.076m/0.078rad
         # short, right at the 0.08 default) declares arrived_stopped instead of sitting until a watchdog.
         for leg in (nav_kw[1], nav_kw[2]):
-            self.assertEqual(leg.get('arrival_xy_tol'), 0.12)
-            self.assertEqual(leg.get('arrival_yaw_tol'), 0.12)
+            self.assertEqual(leg.get('arrival_xy_tol'), 0.15)
+            self.assertEqual(leg.get('arrival_yaw_tol'), 0.20)
 
     def test_coupling_needs_later_observation(self):
         self.adapter.start('couple',self.job)
