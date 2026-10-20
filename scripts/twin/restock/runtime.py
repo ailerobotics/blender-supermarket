@@ -84,12 +84,15 @@ class NavigationBridge:
             raise ValueError('detection_source requires nav_mode "sensor"')
         self.detection_source = detection_source
 
-    def start(self, goal, coupled, *, goal_articulation=None, arrival_xy_tol=None, static_drive=False):
+    def start(self, goal, coupled, *, goal_articulation=None, arrival_xy_tol=None,
+              arrival_yaw_tol=None, static_drive=False):
         kw = {}
         if goal_articulation is not None:
             kw['goal_articulation'] = goal_articulation
         if arrival_xy_tol is not None:
             kw['arrival_xy_tol'] = arrival_xy_tol
+        if arrival_yaw_tol is not None:
+            kw['arrival_yaw_tol'] = arrival_yaw_tol
         if static_drive:
             kw['static_drive'] = True
         self.controller.start(goal, coupled, **kw)
@@ -383,7 +386,8 @@ class RuntimeAdapter:
                 if self._reposition_seq_i < len(self._reposition_seq) - 1:
                     # Reached the staging waypoint (east of the cart); advance to place_approach.
                     self._reposition_seq_i += 1
-                    self.nav.start(self._reposition_seq[self._reposition_seq_i], False, static_drive=True)
+                    self.nav.start(self._reposition_seq[self._reposition_seq_i], False, static_drive=True,
+                                   arrival_xy_tol=0.12, arrival_yaw_tol=0.12)  # fm406: place_approach is a standoff
                     self.phase = 'navigate'
                     return Result('running',
                                   reason=f'reposition advancing to {self._reposition_seq[self._reposition_seq_i]}')
@@ -533,7 +537,8 @@ class RuntimeAdapter:
                 # but the carry-fold self-geometry pollutes the live scan (run-304/307 ring the per-tick mask
                 # did not clear). Static-only route + gates for these legs only; every other leg keeps full
                 # live obstacle avoidance.
-                self.nav.start(self._reposition_seq[0], False, static_drive=True)
+                self.nav.start(self._reposition_seq[0], False, static_drive=True,
+                               arrival_xy_tol=0.12, arrival_yaw_tol=0.12)  # fm406: relaxed reposition arrival (standoff)
                 self.phase = 'navigate'
                 self._collect_reposition_pending = True
                 return Result('running', reason=f'pick done; staging base to {self._reposition_seq[0]} '

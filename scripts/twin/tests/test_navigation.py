@@ -47,6 +47,23 @@ class NavigationTests(unittest.TestCase):
         c = self.controller(); c.start((3, 0, 0), False)
         self.assertFalse(c.static_drive)
 
+    def test_reposition_arrival_needs_relaxed_yaw_tol_fm406(self):
+        # fm406 (run-313): at place_approach the base parks ~0.078 rad short of the goal yaw -- right at
+        # the 0.08 default -- so arrival never latches and it sits at the goal until a watchdog e-stops
+        # (sat ~44 s). A relaxed per-goal yaw tolerance lets the achievable park declare arrived_stopped.
+        goal = (0.5, 0.0, 0.10)                           # 0.10 rad yaw: > 0.08 default, < 0.12 relaxed
+        od, obs = self.inputs(pose=(0.5, 0.0, 0.0))        # AT the goal xy, stopped (lin/ang default 0)
+        c = self.controller(); c.start(goal, False)                       # default yaw tol 0.08
+        self.assertNotEqual(c.step(0.1, od, obs).reason, 'arrived_stopped')   # 0.10 > 0.08 -> not arrived
+        c2 = self.controller(); c2.start(goal, False, arrival_yaw_tol=0.12)   # fm406 relaxed
+        self.assertEqual(c2.step(0.1, od, obs).reason, 'arrived_stopped')     # 0.10 <= 0.12 -> arrived
+
+    def test_arrival_yaw_tol_default_byte_identical_fm406(self):
+        c = self.controller(); c.start((0.5, 0, 0), False)
+        self.assertEqual(c.arrival_yaw_tol, 0.08)         # unset => the original 0.08 (byte-identical)
+        with self.assertRaises(ValueError):
+            self.controller().start((0.5, 0, 0), False, arrival_yaw_tol=-1.0)  # positive-only
+
     def test_static_drive_obstacle_stop_uses_footprint_radius_not_braking_disk(self):
         # fm396/run-308: the braking inflation (stop_distance = stale_after*speed) made obstacle_stop trip
         # on the source SUPPORT 0.86 m away though the footprint radius clears it. On the trusted static

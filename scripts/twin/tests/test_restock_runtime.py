@@ -286,6 +286,12 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(nav_kw[0].get('static_drive'), None)         # the initial drive is NOT static
         self.assertTrue(nav_kw[1].get('static_drive'))                # pickup -> stage
         self.assertTrue(nav_kw[2].get('static_drive'))                # stage -> place_approach
+        # fm406: both reposition legs relax the arrival tolerance -- place_approach is a standoff (the
+        # deck re-registers in the new frame), so the achievable park (run-313 settled ~0.076m/0.078rad
+        # short, right at the 0.08 default) declares arrived_stopped instead of sitting until a watchdog.
+        for leg in (nav_kw[1], nav_kw[2]):
+            self.assertEqual(leg.get('arrival_xy_tol'), 0.12)
+            self.assertEqual(leg.get('arrival_yaw_tol'), 0.12)
 
     def test_coupling_needs_later_observation(self):
         self.adapter.start('couple',self.job)

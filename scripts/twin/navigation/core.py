@@ -348,6 +348,7 @@ class Controller:
         self.terminal = None
         self._docking_active = False
         self.arrival_xy_tol = 0.08
+        self.arrival_yaw_tol = 0.08
         # fm396 (B): SIM-only TRUSTED STATIC drive for the mid-collect reposition legs. When set, the route
         # + the obstacle_stop/coverage gates use the STATIC map only (empty live-scan obstacles): the short
         # reposition in front of the parked cart is geometrically proven clear against the static map AND
@@ -357,17 +358,26 @@ class Controller:
         # keeps full live-scan obstacle avoidance (byte-identical). Set only on the uncoupled reposition legs.
         self.static_drive = False
 
-    def start(self, goal, coupled, *, arrival_xy_tol=None, static_drive=False):
+    def start(self, goal, coupled, *, arrival_xy_tol=None, arrival_yaw_tol=None, static_drive=False):
         self.static_drive = bool(static_drive)
         if len(goal) != 3 or not all(math.isfinite(v) for v in goal):
             raise ValueError('goal must be finite map [x,y,yaw]')
         if arrival_xy_tol is not None and (not math.isfinite(arrival_xy_tol) or arrival_xy_tol <= 0):
             raise ValueError('arrival_xy_tol must be positive')
+        if arrival_yaw_tol is not None and (not math.isfinite(arrival_yaw_tol) or arrival_yaw_tol <= 0):
+            raise ValueError('arrival_yaw_tol must be positive')
         self.goal, self.coupled = tuple(goal), bool(coupled)
         self.path, self.elapsed, self.blocked, self.terminal = [], 0.0, 0.0, None
         # Per-goal XY arrival tolerance (default 0.08 m); a tighter value is used for the on-axis
         # couple standoff so the fine-dock insert starts close to the cart axis.
         self.arrival_xy_tol = 0.08 if arrival_xy_tol is None else float(arrival_xy_tol)
+        # fm406: per-goal YAW arrival tolerance (default 0.08 rad). The fm390 reposition goal
+        # place_approach is only a STANDOFF in front of the cart mouth (the deck target re-registers in
+        # the new base frame, with the reach gate as the safety net), and the slow static-drive + soft
+        # base settle ~0.078 rad / ~0.076 m short -- right at the 0.08 default, so arrival never cleanly
+        # latches and the base sits at the goal until a watchdog e-stops (run-313 sat ~44 s). A relaxed
+        # reposition tolerance lets the achievable park declare arrived_stopped -> advance to place.
+        self.arrival_yaw_tol = 0.08 if arrival_yaw_tol is None else float(arrival_yaw_tol)
         # Engage the dock-approach cap only for the goal the config binds it to.
         self._docking_active = self.docking is not None and self.docking.matches(self.goal)
 
@@ -467,7 +477,7 @@ class Controller:
         radius = self.footprint.radius(self.coupled)+odometry.position_uncertainty
         if math.dist(pose[:2],self.goal[:2]) <= self.arrival_xy_tol:
             error = wrap(self.goal[2]-pose[2])
-            if abs(error) <= 0.08:
+            if abs(error) <= self.arrival_yaw_tol:
                 if abs(odometry.linear) > 0.02 or abs(odometry.angular) > 0.03:
                     return Result(reason='settling_at_goal')
                 clear = self.gate_velocity(now,odometry,obs,0.0,0.0)
