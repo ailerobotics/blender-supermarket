@@ -101,6 +101,14 @@ class TransferController:
         self._grasp_confirm = 0
         self._grasp_waits = 0
         self._grasp_retries = 0
+        # fm415 (run-319): bounded tolerance (ticks) for a COLLISION-only staleness while a carton is HELD
+        # -- the weld/attach ESDF re-incorporation can lag the host collision_time a few ticks. Tolerate up
+        # to this many CONSECUTIVE collision-stale ticks (logged), reset on any fresh tick, then fail
+        # honestly; scoped to held (post-attach) only -- pre-grasp collision stays zero-tolerance. The
+        # capture's hold-last-good (isaac_factory) already blocks the -1 mirror-gap; this covers a genuine
+        # brief lag. 0 => off => byte-identical.
+        self.collision_stale_cap = _int_env('RESTOCK_COLLISION_STALE_TOL_TICKS', 5, 0, 60)
+        self._collision_stale_waits = 0
         # fm327 belt-and-braces wrist_1 cap for the task-space LIFT carry move (None = off).
         self.carry_wrist1_cap = None if carry_wrist1_cap is None else float(carry_wrist1_cap)
         # fm403: route the loaded LIFT to a FIXED joint-space clear-region carry shape via
@@ -344,6 +352,7 @@ class TransferController:
         self._grasp_waits = 0           # fm395: ticks awaiting a confirmed attachment before a grasp retry
         self._grasp_retries = 0         # fm395: bounded grasp re-seat retries used this operation
         self._carton_z_at_grasp = None  # fm410: latched at grasp-confirm; the lift-probe tracking baseline
+        self._collision_stale_waits = 0  # fm415: consecutive tolerated collision-stale ticks (held window)
         self.verify_ids = set()
         self.release_time = None
 
@@ -441,9 +450,12 @@ class TransferController:
         self.elapsed += dt
         if self.elapsed > self.phase_timeout:
             return self._fail('phase timeout: ' + self.phase)
+        collision_fresh = self._fresh(sensors.collision_time, now)
+        if collision_fresh:
+            self._collision_stale_waits = 0   # fm415: a fresh tick resets the bounded weld-window tolerance
         if (sensors.parked is not True or type(sensors.contact) is not bool
                 or not self._fresh(sensors.feedback_time, now)
-                or not self._fresh(sensors.collision_time, now)
+                or not collision_fresh
                 or len(sensors.joint_positions) != 6
                 or not all(math.isfinite(x) for x in sensors.joint_positions)):
             # fm412 (run-317/318): this invariant is a 5-condition OR and its single reason string left the
@@ -455,15 +467,25 @@ class TransferController:
             if type(sensors.contact) is not bool: why.append(f'contact_type={type(sensors.contact).__name__}')
             if not self._fresh(sensors.feedback_time, now):
                 why.append(f'feedback_dt={now - sensors.feedback_time:.4f}(max {self.max_age})')
-            if not self._fresh(sensors.collision_time, now):
+            if not collision_fresh:
                 why.append(f'collision_dt={now - sensors.collision_time:.4f}(max {self.max_age})')
             if len(sensors.joint_positions) != 6:
                 why.append(f'njoints={len(sensors.joint_positions)}')
             elif not all(math.isfinite(x) for x in sensors.joint_positions):
                 why.append('joints_nonfinite')
-            print('CONTROLLER_INVARIANT_TRIP phase=%s now=%.3f %s' % (self.phase, now, ' '.join(why)),
-                  flush=True)
-            return self._fail('base moving or stale/missing feedback/collision world [' + ','.join(why) + ']')
+            # fm415 (run-319): a COLLISION-only staleness while the carton is HELD is the weld/attach ESDF
+            # re-incorporation lag -- tolerate up to collision_stale_cap CONSECUTIVE ticks (logged) instead
+            # of e-stopping, then fail honestly. Scoped to held (post-attach) + collision-sole so it can
+            # never mask a base-moving / feedback / pre-grasp fault. 0 cap => off => byte-identical.
+            if (len(why) == 1 and why[0].startswith('collision_dt') and self.held
+                    and self._collision_stale_waits < self.collision_stale_cap):
+                self._collision_stale_waits += 1
+                print('COLLISION_STALE_TOLERATED phase=%s now=%.3f %s wait=%d/%d' % (
+                    self.phase, now, why[0], self._collision_stale_waits, self.collision_stale_cap), flush=True)
+            else:
+                print('CONTROLLER_INVARIANT_TRIP phase=%s now=%.3f %s' % (self.phase, now, ' '.join(why)),
+                      flush=True)
+                return self._fail('base moving or stale/missing feedback/collision world [' + ','.join(why) + ']')
         if self.held and self.phase != 'release' and not sensors.contact:
             return self._fail('lost grasp')
         try:

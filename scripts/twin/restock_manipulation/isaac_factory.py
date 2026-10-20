@@ -65,6 +65,19 @@ def base_parked_by_displacement(poses, *, xy_tol=0.006, yaw_tol=0.02):
     return xy_spread <= xy_tol and yaw_spread <= yaw_tol
 
 
+def hold_last_good_collision(read, last_good):
+    """fm415 (run-319): the host packet must NEVER carry the uninitialized collision_time default (-1).
+    The station/status->feedback mirror momentarily reads -1 for one tick at the weld/attach ESDF
+    re-incorporation (run-319 died collision_dt=31.6 = now-(-1), while the station /status kept publishing
+    a FRESH collision_time). A read < 0 is that mirror gap, NOT a real measured staleness, so emit the last
+    genuinely-measured incorporation time instead -- honest (the most recent REAL value, never fabricated;
+    if it has since genuinely gone stale the controller's freshness gate still catches it). A read >= 0
+    updates and passes through. Returns (emit, new_last_good). Pure for CPU testing."""
+    if read >= 0:
+        return read, read
+    return (last_good if last_good is not None else read), last_good
+
+
 def survive_collect_occlusion(enabled, attached, parked):
     """fm410 (run-316): decide whether a SOURCE-OCCLUDED collect capture should still emit a packet.
 
@@ -650,7 +663,14 @@ class CollectTargetBridge:
         print(f'TRANSFER_CAPTURE calls={self._calls} sku={sku} cart=({cx:.2f},{cy:.2f},{cz:.2f}) '
               f'shelf={slot.location} clear={slot.clear}', flush=True)
         return Sensors(now, (obs,), tgt, parked, bool(self.contact.read()), now,
-                       float(self.motion.collision_time), joints, (), float(now))
+                       self._collision_time(), joints, (), float(now))
+
+    def _collision_time(self):
+        # fm415: hold last-good collision_time so a -1 mirror-gap tick at the weld never reaches the
+        # controller freshness gate (run-319). See hold_last_good_collision.
+        emit, self._last_good_collision = hold_last_good_collision(
+            float(self.motion.collision_time), getattr(self, "_last_good_collision", None))
+        return emit
 
     def _carton_attached(self):
         """True once the carton is physically held -- native grippedObjects OR the SIM_ATTACH_FALLBACK weld
@@ -695,7 +715,7 @@ class CollectTargetBridge:
             print(f'COLLECT_SURVIVE calls={self._calls} source-occluded, carton attached + parked -> '
                   f'arm-feedback packet (contact={bool(self.contact.read())})', flush=True)
         return Sensors(now, (), None, parked, bool(self.contact.read()), now,
-                       float(self.motion.collision_time), joints, (), float(now), None, placed_pose)
+                       self._collision_time(), joints, (), float(now), None, placed_pose)
 
     def capture(self, now, source, destination):
         from twin.restock_manipulation.types import Sensors, Observation
@@ -766,7 +786,7 @@ class CollectTargetBridge:
                 print(f'COLLECT_CAPTURE calls={self._calls} placed_pose_error={type(exc).__name__}:{exc}',
                       flush=True)
         return Sensors(now, (obs,), cart_target, parked, bool(self.contact.read()), now,
-                       float(self.motion.collision_time), joints, (), float(target.stamp),
+                       self._collision_time(), joints, (), float(target.stamp),
                        target.valid_until_steady, placed_pose)
 
 

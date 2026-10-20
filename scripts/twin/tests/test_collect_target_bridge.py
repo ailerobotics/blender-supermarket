@@ -9,7 +9,7 @@ import pytest
 import math
 from scripts.twin.restock_manipulation.isaac_factory import (
     CollectTargetBridge, survive_collect_occlusion, base_parked_by_displacement,
-    _ArticulationParked)
+    _ArticulationParked, hold_last_good_collision)
 from scripts.twin.restock_manipulation.types import ProductProfile
 from scripts.twin.restock_camera.source_target import SourceTarget
 
@@ -174,3 +174,22 @@ def test_articulation_parked_ignores_velocity_spike_fm411():
     # it takes the moved sample entering the window; once present, the spread exceeds tol
     saw_false = any(p.parked() is False for _ in range(3))
     assert saw_false
+
+
+# ---- fm415 (run-319): never emit collision_time=-1; hold last-good through the weld re-incorporation ----
+
+def test_hold_last_good_collision_truth_table_fm415():
+    assert hold_last_good_collision(5.0, None) == (5.0, 5.0)     # first real read: pass + remember
+    assert hold_last_good_collision(6.0, 5.0) == (6.0, 6.0)      # real read: update
+    assert hold_last_good_collision(-1.0, 5.0) == (5.0, 5.0)     # -1 mirror gap: hold last-good
+    assert hold_last_good_collision(-1.0, None) == (-1.0, None)  # no last-good yet (early): pass -1 honestly
+
+
+def test_bridge_collision_time_holds_last_good_over_minus1_fm415():
+    b = _bridge(lambda now: None)
+    b.motion = NS(parked=lambda: True, collision_time=30.5)
+    assert b._collision_time() == 30.5                 # real read remembered
+    b.motion.collision_time = -1.0                      # the weld-tick mirror gap (run-319)
+    assert b._collision_time() == 30.5                 # held last-good -- NEVER emits -1 to the controller
+    b.motion.collision_time = 31.0
+    assert b._collision_time() == 31.0                 # fresh read resumes
