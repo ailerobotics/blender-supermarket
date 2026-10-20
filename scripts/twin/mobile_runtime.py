@@ -274,6 +274,27 @@ class MobileController:
         self.coupler.detach(observation, remove)
         return self.coupling_state(observation)
 
+    def uncouple(self, observation):
+        """Leave the cart PARKED and release the tow coupling so the robot can drive home empty.
+
+        The mirror of :meth:`attach` (which authors the hitch, then force-releases the cart's
+        world pin so the coupled train is free to tow): here we first pin the parked cart to the
+        world (``hold_cart_pin`` -- engage the cart brake and LATCH it) so releasing the tow joint
+        cannot let the just-parked cart drift, THEN ``detach`` removes the hitch. The latch keeps
+        the cart braked after the robot leaves -- every later ``release_cart_brake`` (e.g. the one
+        ``command`` issues when the base drives away) no-ops while ``_cart_hold`` is set, so the
+        cart stays parked for the rest of the mission. Returns the post-detach ``coupling_state``
+        (``joint_present`` False, ``requested_attached`` False once released).
+
+        SIM-only (the real cart brakes on its caster brakes and a real coupler releases the
+        physical latch); reached only when the return runtime opts into leaving the cart parked.
+        """
+        self.park()
+        self.hold_cart_pin()          # pin + latch the parked cart before releasing the tow joint
+        state = self.detach(observation)
+        print('UNCOUPLE: tow hitch released; cart left parked (world-pinned, braked)', flush=True)
+        return state
+
     def coupling_state(self, observation):
         from pxr import UsdPhysics
         joint = UsdPhysics.RevoluteJoint.Get(self.stage, self.hitch_path)

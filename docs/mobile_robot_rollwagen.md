@@ -80,8 +80,13 @@ such in integration evidence. The controller does not synthesize odometry.
 It then authors a real `UsdPhysics.RevoluteJoint` between the rigid bodies, excluded
 from the reduced-coordinate robot articulation. It changes no transforms. A
 callback failure leaves the logical state unchanged. `detach(observation)` requires
-fresh stopped bodies and removes the joint. Run these calls on the simulator
-thread between steps, with the stage's writable edit target selected.
+fresh stopped bodies and removes the joint. `uncouple(observation)` is the mission-level
+leave-the-cart-parked primitive on `return` (mirror of `attach`): it pins the parked cart
+to the world (`hold_cart_pin`, a latched cart brake) *before* releasing the tow joint
+(`detach`), so the cart stays braked as the robot drives home empty — every later
+`release_cart_brake`, including the one `command()` issues on drive-away, no-ops while the
+latch is set. Run these calls on the simulator thread between steps, with the stage's
+writable edit target selected.
 
 `coupling_state(observation)` reports requested state, enabled joint presence and
 measured hitch residual. Residual >0.04 m, stale state or excessive articulation

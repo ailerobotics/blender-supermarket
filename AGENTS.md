@@ -235,17 +235,31 @@ repo's `scenes/`, `export/` or `renders/`.
   that degrades when store-vision/pydantic is absent. Also runs at mission end behind
   `run_mobile_restock.py --smart-verify` (byte-identical when absent). RUNBOOK §11b;
   write-up `data/sim-smart-verify-v1/report.md`.
-- **Behaviour-tree mission layer (opt-in)**: `scripts/twin/restock/bt/` adds a py_trees
-  orchestrator that drives the SAME `mission.Mission` (via the `begin_stage`/`step_stage`/
-  `finalize` seams, so inventory + evidence stay byte-identical) with reactive event handling and
-  a live phone view. **Default-off**: nothing runs unless the runtime-config sets `"bt": true`;
-  the state machine (`Mission.tick`) stays production. Event contract (ROS topic
-  `/restock_bt/events` + blackboard + scenario `events` list), tree shape, view paths
-  (`bt_view.html`/`bt_snapshot.json`/`bt_events.jsonl` in the run dir) and commands:
-  [docs/restock_bt.md](docs/restock_bt.md). py_trees is task-venv-only (`.venv-bt`, gitignored);
-  the pure `bt.events` contract imports with no py_trees/ROS so `scenario.py` validates scenario
-  events. Tests: `scripts/twin/tests/test_restock_bt.py` (pure tier runs anywhere; tree tier needs
-  py_trees). Design + proof: `data/sim-restock-bt-v1/report.md`.
+- **Behaviour-tree mission DRIVER**: `scripts/twin/restock/bt/` drives the SAME `mission.Mission`
+  (via the `begin_stage`/`step_stage`/`finalize` seams, so inventory + evidence stay byte-identical)
+  with reactive event handling and a live phone view (port 8795). Selected by runtime-config
+  `"bt": true`; `"bt": false`/absent keeps the sequential `Mission.tick` state machine as the
+  unchanged fallback. **Each stage is a subtree of explicit position-first leaves** (navigate →
+  perceive → manipulate; plans in `bt/stage_phases.py` `PLANS`): one shared `StageRun` steps once per
+  tick and the `PhaseGate` leaves are faithful views of that one stepping gated on the adapter's
+  observed `phase`, so the decomposed drive is byte-identical to the state machine; `StageRetry` holds
+  bounded retry/recovery as one node; a non-phased fixture collapses a stage to one leaf. **A new step
+  is a new `PLANS` entry (a new leaf).** Event contract (ROS topic `/restock_bt/events` + blackboard +
+  scenario `events` list), tree shape, view paths, the uncouple-on-return plan and commands:
+  [docs/restock_bt.md](docs/restock_bt.md); example runtime-config fragment
+  `docs/examples/bt-driver-mission-fragment.json`. py_trees is task-venv-only (`.venv-bt`, gitignored);
+  the pure `bt.events`/`bt.stage_phases` modules import with no py_trees/ROS so `scenario.py` validates
+  scenario events. Tests: `test_restock_bt.py` + `test_restock_bt_phases.py` (phased decomposition +
+  parity; tree tier needs py_trees). Design + proof: `data/sim-restock-bt-driver-v1/report.md`
+  (superseding the original `data/sim-restock-bt-v1/report.md`).
+- **Uncouple-at-parking-spot on return** (opt-in, default-off): `return` tows the cart home coupled
+  unless `config['uncouple_on_return']` + a `cart_parking` mission pose are set, when it tows the cart
+  to the parking spot, brakes it, releases the tow coupling via `MobileController.uncouple(obs)` (new,
+  beside `release_cart_brake`: pin cart then detach hitch; the `_cart_hold` latch keeps the cart braked
+  as the robot drives home empty), optionally backs away (`cart_parking_backaway`) and drives home
+  uncoupled. The parking poses + lane are owned by `sim-restock-nav-lanes-v1`. Absent ⇒ byte-identical
+  tow-home. Runtime legs in `twin/restock/runtime.py`; CPU tests in `test_restock_runtime.py` +
+  `test_mobile_assets.py`.
 - **Demand-driven mission job** (opt-in, default-off): `--job-from <export.json>`
   on `run_mobile_restock.py` substitutes an approved store-vision restock plan
   (schema `storevision.restock.job_plan/v1`) for the scenario's hardcoded job.

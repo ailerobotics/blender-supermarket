@@ -301,6 +301,98 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.status,'succeeded')
         self.assertTrue(result.evidence['coupled'])
 
+    def test_return_default_tows_cart_home_coupled(self):
+        # Default (uncouple_on_return off): return navigates straight to home as a COUPLED tow and
+        # succeeds with home=True -- byte-identical legacy behaviour.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        self.p = replace(self.p, coupled=True, parked=True)
+        self.port = NS(advance=lambda dt: self.p, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True)
+        adapter.start('return', self.job)
+        r = adapter.step(.1)
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence['home'])
+        self.assertEqual(nav_goals, [((0, 0, 0), True)])   # single coupled tow to home
+
+    def test_return_uncouples_at_parking_spot_then_drives_home_empty(self):
+        # Captain 2026-10-20 "robot should uncouple at the parking spot": with uncouple_on_return on
+        # and a cart_parking pose, return tows the cart to the parking spot (coupled), brakes it,
+        # releases the coupling, backs away and drives home EMPTY. Position-first, step by step.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        events = []
+        state_uncoupled = {'joint_present': False, 'requested_attached': False, 'healthy': False}
+        self.mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None,
+                         command=lambda *a, **k: self.commands.append(a),
+                         hold_cart_pin=lambda: events.append('brake'),
+                         uncouple=lambda obs: (events.append('uncouple'), state_uncoupled)[1],
+                         attach=lambda obs: None, coupling_state=lambda o: {'healthy': True})
+        # coupled is True while towing + braking + at uncouple-dispatch; goes False once released.
+        coupled_seq = [True, True, True, False, False, False, False, False]
+        ticks = [0]
+        def advance(dt):
+            i = ticks[0]; ticks[0] += 1
+            return replace(self.p, observation_id=f'f{i}', simulation_time=(i + 1) * .1,
+                           coupled=coupled_seq[min(i, len(coupled_seq) - 1)], parked=True)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['cart_parking'] = [2.0, -1.0, 1.57]
+        poses['cart_parking_backaway'] = [3.0, -1.0, 1.57]
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, uncouple_on_return=True)
+        adapter.start('return', self.job)
+        r = None
+        for _ in range(12):
+            r = adapter.step(.1)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence['home'])
+        # The sequence: brake the cart, then release the coupling -- in that order.
+        self.assertEqual(events, ['brake', 'uncouple'])
+        # Nav legs: coupled tow to the parking spot, then uncoupled back-away and uncoupled drive home.
+        self.assertEqual(nav_goals, [((2.0, -1.0, 1.57), True),    # tow to parking spot, coupled
+                                     ((3.0, -1.0, 1.57), False),   # back away, uncoupled
+                                     ((0, 0, 0), False)])          # home, empty
+
+    def test_return_uncouple_without_backaway_drives_straight_home(self):
+        # No cart_parking_backaway waypoint: after uncouple the robot drives straight home, empty.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        state_uncoupled = {'joint_present': False, 'requested_attached': False, 'healthy': False}
+        self.mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None,
+                         command=lambda *a, **k: None, hold_cart_pin=lambda: None,
+                         uncouple=lambda obs: state_uncoupled,
+                         attach=lambda obs: None, coupling_state=lambda o: {'healthy': True})
+        coupled_seq = [True, True, True, False, False, False]
+        ticks = [0]
+        def advance(dt):
+            i = ticks[0]; ticks[0] += 1
+            return replace(self.p, observation_id=f'f{i}', simulation_time=(i + 1) * .1,
+                           coupled=coupled_seq[min(i, len(coupled_seq) - 1)], parked=True)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['cart_parking'] = [2.0, -1.0, 1.57]
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, uncouple_on_return=True)
+        adapter.start('return', self.job)
+        r = None
+        for _ in range(12):
+            r = adapter.step(.1)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence['home'])
+        self.assertEqual(nav_goals, [((2.0, -1.0, 1.57), True), ((0, 0, 0), False)])
+
     def test_couple_runs_fine_dock_servo_before_attach(self):
         # With a fine_dock servo attached, couple must creep (commanding the base) until the
         # servo reports 'ready', THEN attach -- not attach straight off the nav arrival.

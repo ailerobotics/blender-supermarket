@@ -186,8 +186,20 @@ class RuntimeAdapter:
     def __init__(self, navigation, mobile, manipulation, port: Port, poses,
                  *, fixture_mode=False, goal_articulation=None,
                  stall_window_s=_SENSOR_STALL_WINDOW_S, route_alerts=None, fine_dock=None,
-                 hold_cart_through_couple=False, couple_static_drive=False):
+                 hold_cart_through_couple=False, couple_static_drive=False,
+                 uncouple_on_return=False):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
+        # Opt-in uncouple-at-parking-spot on return (captain 2026-10-20: "robot should uncouple at the
+        # parking spot"): instead of towing the cart home coupled, the return stage tows it to a cart
+        # parking spot (`cart_parking` pose, from the nav-lanes lane), brakes the cart, releases the tow
+        # coupling (mobile.uncouple), optionally backs away (`cart_parking_backaway`) and drives home
+        # EMPTY. False (default) => the legacy tow-home return, byte-identical. See _uncouple_return +
+        # the return legs in start()/_step(), and data/mobile-restock-v2 for the deferred-item history.
+        self.uncouple_on_return = bool(uncouple_on_return)
+        # Set in start(); declared here so the opt-in behaviour-tree layer can tell at tree-build time
+        # (before any stage begins) that this adapter exposes per-stage phases (vs a plain fixture).
+        self.phase = None
+        self._return_leg = None
         # Opt-in final fine-docking servo (twin.restock.fine_dock.FineDock). None (default) =>
         # the couple stage hands the parked base straight to attach, byte-identical. When present
         # it creeps the rear hitch onto the measured cart drawbar after nav parks, closing the
@@ -241,7 +253,8 @@ class RuntimeAdapter:
         # Optional couple approach waypoint + on-axis standoff, and the fm390 place_approach waypoint
         # (in front of the rollwagen mouth) the collect stage drives to before placing; validated only
         # when supplied.
-        for name in ('couple_approach', 'couple_standoff', 'place_approach', 'place_approach_stage'):
+        for name in ('couple_approach', 'couple_standoff', 'place_approach', 'place_approach_stage',
+                     'cart_parking', 'cart_parking_backaway'):
             if name in poses:
                 wp = poses[name]
                 if len(wp) != 3 or not all(math.isfinite(v) for v in wp):
@@ -256,6 +269,7 @@ class RuntimeAdapter:
             self.port.begin_action(action,job)
         self.action, self.job = action, job
         self.phase = 'execute'
+        self._return_leg = None           # set when the uncouple-on-return multi-leg return runs
         self._reach_start = None          # set on the first execute tick of a collect/transfer reach
         # fm390 mid-collect base reposition: driven once per collect when the arm reaches TRANSIT (carry
         # fold done) and a place_approach pose is configured. Reset here so a re-begun collect starts clean.
@@ -282,11 +296,21 @@ class RuntimeAdapter:
                 # cannot shove the free cart; attach() releases it once coupled.
                 self.mobile.hold_cart_pin()
         elif action in ('collect', 'outbound', 'return'):
-            goal = {'collect': 'pickup', 'outbound': 'shelf_approach', 'return': 'home'}[action]
-            kwargs = ({'goal_articulation':self.goal_articulation[action]}
-                      if action in self.goal_articulation else {})
-            self.nav.start(self.poses[goal], action in ('outbound', 'return'), **kwargs)
-            self.phase = 'navigate'
+            if action == 'return' and self._uncouple_return():
+                # Uncouple-at-parking-spot return: tow the cart to its parking spot FIRST (still
+                # coupled), then brake it, release the coupling and drive home empty. The first leg is a
+                # coupled tow, so it keeps the return goal-articulation tolerance.
+                kwargs = ({'goal_articulation': self.goal_articulation['return']}
+                          if 'return' in self.goal_articulation else {})
+                self.nav.start(self.poses['cart_parking'], True, **kwargs)
+                self.phase = 'navigate'
+                self._return_leg = 'cart_parking'
+            else:
+                goal = {'collect': 'pickup', 'outbound': 'shelf_approach', 'return': 'home'}[action]
+                kwargs = ({'goal_articulation':self.goal_articulation[action]}
+                          if action in self.goal_articulation else {})
+                self.nav.start(self.poses[goal], action in ('outbound', 'return'), **kwargs)
+                self.phase = 'navigate'
         elif action == 'transfer':
             # Mirror the collect warm-up: make the shelf station's host ESDF + collision_time fresh
             # BEFORE dispatching the place grasp, so the first transfer observe sees a fresh
@@ -307,6 +331,12 @@ class RuntimeAdapter:
         if self.couple_static_drive:
             kw['static_drive'] = True
         self.nav.start(self.poses[goal_name], False, **kw)
+
+    def _uncouple_return(self):
+        """True when the return stage leaves the cart parked and drives home empty, instead of towing
+        it home coupled: opted in via config (``uncouple_on_return``) AND a ``cart_parking`` pose is
+        configured. Default off (or no parking pose) => the legacy tow-home return, byte-identical."""
+        return self.uncouple_on_return and 'cart_parking' in self.poses
 
     def stop(self):
         errors = []
@@ -391,14 +421,44 @@ class RuntimeAdapter:
             self.mobile.park()
             if not p.parked:
                 return Result('running', reason='waiting for measured parking')
-            if self.action in ('outbound', 'return'):
+            if self.action == 'outbound':
                 if not p.coupled:
                     raise ValueError('cart lost at destination')
-                limit = self.goal_articulation.get(self.action)
+                limit = self.goal_articulation.get('outbound')
                 if limit is not None and abs(p.articulation) >= limit:
                     raise ValueError('cart articulation exceeds manipulation/return goal tolerance')
-                key = 'arrived' if self.action == 'outbound' else 'home'
-                return Result('succeeded', self._evidence(p, **{key: True}))
+                return Result('succeeded', self._evidence(p, arrived=True))
+            if self.action == 'return':
+                if not self._uncouple_return():
+                    # Legacy tow-home: the cart is still coupled at home (byte-identical path).
+                    if not p.coupled:
+                        raise ValueError('cart lost at destination')
+                    limit = self.goal_articulation.get('return')
+                    if limit is not None and abs(p.articulation) >= limit:
+                        raise ValueError('cart articulation exceeds manipulation/return goal tolerance')
+                    return Result('succeeded', self._evidence(p, home=True))
+                # Uncouple-at-parking-spot legs reached by navigate completion:
+                if self._return_leg == 'cart_parking':
+                    # Towed to the parking spot: the cart must still be coupled here. Hand off to the
+                    # execute phase, which brakes the cart and releases the coupling.
+                    if not p.coupled:
+                        raise ValueError('cart lost before the parking spot')
+                    limit = self.goal_articulation.get('return')
+                    if limit is not None and abs(p.articulation) >= limit:
+                        raise ValueError('cart articulation exceeds manipulation/return goal tolerance')
+                    self.phase = 'execute'
+                    self._return_leg = 'brake'
+                    return Result('running', reason='towed to cart parking spot; braking cart before uncouple')
+                if self._return_leg == 'cart_parking_backaway':
+                    # Backed clear of the parked cart (uncoupled): drive home empty.
+                    self.nav.start(self.poses['home'], False)
+                    self.phase = 'navigate'
+                    self._return_leg = 'home'
+                    return Result('running', reason='backed away from parked cart; driving home empty')
+                if self._return_leg == 'home':
+                    # Home, empty: the cart was left parked, so no coupled requirement here.
+                    return Result('succeeded', self._evidence(p, home=True))
+                raise RuntimeError(f'invalid return leg at navigate: {self._return_leg!r}')
             if self.action == 'collect' and self._collect_reposition_pending:
                 if self._reposition_seq_i < len(self._reposition_seq) - 1:
                     # Reached the staging waypoint (east of the cart); advance to place_approach.
@@ -524,6 +584,33 @@ class RuntimeAdapter:
             if not p.coupled:
                 return Result('failed', reason='cart lost before transfer')
             return Result('succeeded', self._evidence(p, stationary=True))
+        if self.action == 'return' and self._uncouple_return():
+            # Uncouple-at-parking-spot execute legs: brake the parked cart, then release the tow
+            # coupling, each a distinct observable step so the behaviour tree shows them in series.
+            if self._return_leg == 'brake':
+                self.mobile.hold_cart_pin()   # pin the parked cart to the world before releasing the joint
+                self._return_leg = 'uncouple'
+                return Result('running', reason='cart braked at parking spot; releasing coupling next')
+            if self._return_leg == 'uncouple':
+                state = self.mobile.uncouple(p.docking)   # release the tow coupling (once)
+                if state.get('joint_present'):
+                    return Result('failed', reason='uncouple failed: tow coupling still present')
+                self._return_leg = 'uncouple_wait'
+                return Result('running', reason='coupling released; awaiting measured uncoupled observation')
+            if self._return_leg == 'uncouple_wait':
+                if p.coupled:
+                    return Result('running', reason='awaiting measured uncoupled observation')
+                backaway = self.poses.get('cart_parking_backaway')
+                if backaway is not None:
+                    self.nav.start(backaway, False)   # reverse clear of the parked cart, uncoupled
+                    self.phase = 'navigate'
+                    self._return_leg = 'cart_parking_backaway'
+                    return Result('running', reason='uncoupled; backing away from the parked cart')
+                self.nav.start(self.poses['home'], False)   # no back-away waypoint: drive home empty
+                self.phase = 'navigate'
+                self._return_leg = 'home'
+                return Result('running', reason='uncoupled; driving home empty')
+            raise RuntimeError(f'invalid return leg at execute: {self._return_leg!r}')
         if self.action in ('collect', 'transfer'):
             r = self.manip.step(dt, p)
             self._last_manip_phase = getattr(r, 'phase', None)  # feeds next tick's port.gate()

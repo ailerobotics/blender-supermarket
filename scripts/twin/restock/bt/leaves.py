@@ -21,8 +21,7 @@ import py_trees
 from py_trees.common import Status
 
 from .events import (Event, RECOVERY_FOR, STAGE_FAILURE_TYPES, classify_stage_failure)
-
-from .view_labels import collect_substep as _collect_substep
+from .stage_phases import milestone as _milestone
 
 RUNNING, SUCCESS, FAILURE = Status.RUNNING, Status.SUCCESS, Status.FAILURE
 
@@ -172,76 +171,150 @@ class BaselineGuard(py_trees.behaviour.Behaviour):
         return SUCCESS
 
 
-class Stage(py_trees.behaviour.Behaviour):
-    """Drive ONE mission stage through the real ``begin_stage`` / ``step_stage`` seams, with bounded
-    retry + a recovery reaction, and honest abort on exhaustion.
+class StageRun:
+    """Shared per-stage driver: begins ONE mission stage and steps it through the real
+    ``begin_stage`` / ``step_stage`` seams **at most once per tree tick**, exposing which position-
+    first step it is on (``milestone``) and its outcome. The phase-gate leaves share one of these
+    (so they are pure views, never a second stepping path) and the :class:`StageRetry` decorator
+    reads ``fail_reason`` to retry or abort. Keeping stepping here -- in one place, one call per tick,
+    identical in count and order to ``Mission.tick`` -- is what makes the decomposition byte-identical
+    to the state machine (parity): the tree never issues a nav/manip command, it only steps + reads.
 
-    * First tick begins the stage (records the action, starts the adapter).
-    * While a safety event holds the mission (``ctx.paused``) the stage performs an idempotent
-      safety hold and returns RUNNING -- it does NOT step the mission, so the sim clock and the
-      stage make no progress during the hold; it resumes stepping when the hold clears.
-    * ``step_stage`` outcomes map to ``RUNNING`` / ``SUCCESS`` (succeeded or degraded-unavailable,
-      which keeps the mission moving but forces a failed finalize) / a failure path.
-    * On failure: emit a classified stage-failure event onto the timeline, and if retries remain
-      request the recovery reaction (re-observe / re-plan / wait) and re-begin the stage; otherwise
-      ``mission.fail`` and return FAILURE.
+    * First tick of a stage begins it (records the action, starts the adapter) and does NOT step --
+      the state machine's begin is likewise free (folded into ``start`` / the advancing tick).
+    * While a safety event holds the mission (``ctx.paused``) the run performs an idempotent safety
+      hold and does not step, so the sim clock and the stage make no progress during the hold.
+    * ``step_stage`` -> ``running`` (advance ``milestone`` off the adapter's observed phase),
+      ``succeeded`` / ``degraded`` (``done``), or ``('failed', reason)`` (``fail_reason``).
     """
-    def __init__(self, ctx, action, name=None, max_retries=2):
-        super().__init__(name or f'stage:{action}')
+    def __init__(self, ctx, action, n_steps):
         self.ctx = ctx
         self.action = action
-        self.max_retries = max(0, int(max_retries))
-        self._begun = False
-        self._retries = 0
+        self.n_steps = max(1, int(n_steps))
+        self.begun = False
+        self.done = None             # None | 'succeeded' | 'degraded'
+        self.fail_reason = None      # set the tick step_stage reports ('failed', reason)
+        self.milestone = 0
+        self._held = False
+        self._tick = None            # ctx.now of the last pump (one step per tree tick)
 
-    def _begin(self):
+    def begin(self):
         self.ctx.mission.begin_stage(self.action)
-        self._begun = True
+        self.begun = True
+        self.milestone = 0
+        self.fail_reason = None
+        self.done = None
 
-    def update(self):
+    def _classify(self):
+        idx = _milestone(self.action, getattr(self.ctx.mission, 'adapter', None))
+        # monotonic within an attempt, clamped to the plan length (a non-phased adapter -> step 0).
+        return max(self.milestone, min(int(idx), self.n_steps - 1))
+
+    def pump(self):
+        """Advance the stage by at most one ``step_stage`` per tree tick (idempotent per ``ctx.now``),
+        so a success-cascade across several gates in one tick never double-steps the mission."""
         ctx = self.ctx
-        if ctx.mission.terminal:
-            self.feedback_message = f'{self.action}: mission terminal'
-            return FAILURE if ctx.mission.state == 'failed' else SUCCESS
-        if not self._begun:
-            self._begin()
-            self.feedback_message = f'{self.action}: begun'
-            return RUNNING
+        if self._tick == ctx.now:
+            return
+        self._tick = ctx.now
+        if ctx.mission.terminal or self.done is not None or self.fail_reason is not None:
+            return
+        if not self.begun:
+            self.begin()
+            return                            # begin tick: no step (matches the free begin)
         if ctx.paused:
             ctx.safety_hold()
-            self.feedback_message = f'{self.action}: HOLD (event)'
-            return RUNNING
-        ctx.release_hold()
+            self._held = True
+            return
+        if self._held:
+            ctx.release_hold()
+            self._held = False
         outcome = ctx.mission.step_stage(ctx.dt)
         if outcome == 'running':
-            # fm390: for collect, show the live position-first sub-step (nav -> perceive -> place ->
-            # verify) so the view renders the step-by-step placement, not an opaque 'collect: running'.
-            substep = _collect_substep(ctx.mission) if self.action == 'collect' else None
-            self.feedback_message = (f'{self.action}: {substep}' if substep
-                                     else f'{self.action}: running')
-            return RUNNING
-        if outcome in ('succeeded', 'degraded'):
-            self.feedback_message = f'{self.action}: {outcome}'
+            self.milestone = self._classify()
+        elif outcome in ('succeeded', 'degraded'):
+            self.done = outcome
+        else:
+            self.fail_reason = outcome[1]      # ('failed', reason)
+
+    def reset_for_retry(self):
+        self.begin()
+
+
+class PhaseGate(py_trees.behaviour.Behaviour):
+    """One explicit position-first step (navigate / perceive / manipulate / couple / uncouple /
+    verify) of a stage. It drives the shared :class:`StageRun` (``pump`` steps the mission once per
+    tick) and reports: RUNNING while the stage is on this step (or held by a safety event), SUCCESS
+    once the stage has advanced past this step (or the whole stage finished), FAILURE when the step
+    failed -- naming the exact failed field in its feedback (the fm412 diagnostic). Preconditions are
+    structural: a gate only ticks once every earlier gate has SUCCEEDED (the memory sequence order)."""
+    def __init__(self, run, index, label, kind):
+        super().__init__(name=f'{run.action}:{label}')
+        self.run = run
+        self.index = index
+        self.kind = kind
+
+    def update(self):
+        run = self.run
+        run.pump()
+        if run.fail_reason is not None:
+            self.feedback_message = f'{self.kind}: FAILED {run.fail_reason}'
+            return FAILURE
+        if run.done is not None:
+            self.feedback_message = f'{self.kind}: {run.done}'
             return SUCCESS
-        # outcome == ('failed', reason)
-        reason = outcome[1]
-        etype = classify_stage_failure(self.action, reason)
-        ctx.emit_stage_failure(Event(etype, {'reason': reason, 'stage': self.action}))
-        if etype in STAGE_FAILURE_TYPES and self._retries < self.max_retries:
-            self._retries += 1
+        if run.ctx.mission.terminal:
+            # mission went terminal out-of-band (an upstream abort); do not claim this step passed.
+            self.feedback_message = f'{self.kind}: mission {run.ctx.mission.state}'
+            return SUCCESS if run.ctx.mission.state == 'complete' else FAILURE
+        if run.ctx.paused:
+            self.feedback_message = f'{self.kind}: HOLD (event)'
+            return RUNNING
+        if run.milestone > self.index:
+            self.feedback_message = f'{self.kind}: done'
+            return SUCCESS
+        self.feedback_message = f'{self.kind}: running'
+        return RUNNING
+
+
+class StageRetry(py_trees.decorators.Decorator):
+    """Wrap a stage's phase sequence with bounded retry + an explicit recovery reaction, aborting
+    honestly on exhaustion -- so retry/recovery is one named node in the tree (not hidden in a leaf)
+    and a new step is just a new leaf in the wrapped sequence.
+
+    On a step FAILURE: emit a classified stage-failure event onto the timeline (naming WHAT failed);
+    if the failure type is recoverable and retries remain, request the recovery reaction
+    (re-observe / re-plan / wait), re-begin the stage and re-enter the phase sequence from step 0
+    (RUNNING); otherwise record an honest ``mission.fail`` and FAIL."""
+    def __init__(self, child, run, *, max_retries=2, name=None):
+        super().__init__(name=name or f'stage:{run.action}', child=child)
+        self.run = run
+        self.max_retries = max(0, int(max_retries))
+        self.retries = 0
+
+    def update(self):
+        status = self.decorated.status
+        run = self.run
+        if status != FAILURE or run.fail_reason is None:
+            return status
+        reason = run.fail_reason
+        etype = classify_stage_failure(run.action, reason)
+        run.ctx.emit_stage_failure(Event(etype, {'reason': reason, 'stage': run.action}))
+        if etype in STAGE_FAILURE_TYPES and self.retries < self.max_retries:
+            self.retries += 1
             recovery = RECOVERY_FOR.get(etype)
             if recovery:
-                getattr(ctx.reactions, recovery)()
-            ctx.log(etype, {'reason': reason, 'retry': self._retries, 'recovery': recovery},
-                    action=f'recover:{recovery}')
-            self._begin()
-            self.feedback_message = (f'{self.action}: recover {etype} '
-                                     f'({self._retries}/{self.max_retries})')
+                getattr(run.ctx.reactions, recovery)()
+            run.ctx.log(etype, {'reason': reason, 'retry': self.retries, 'recovery': recovery},
+                        action=f'recover:{recovery}')
+            run.reset_for_retry()
+            self.decorated.stop(Status.INVALID)      # re-enter the phase sequence from step 0
+            self.feedback_message = f'recover {etype} ({self.retries}/{self.max_retries})'
             return RUNNING
-        # honest abort: retries exhausted (or non-recoverable)
-        ctx.log(etype, {'reason': reason}, action='abort')
-        ctx.mission.fail(reason)
-        self.feedback_message = f'{self.action}: FAILED {reason}'
+        run.ctx.log(etype, {'reason': reason}, action='abort')
+        if not run.ctx.mission.terminal:
+            run.ctx.mission.fail(reason)
+        self.feedback_message = f'FAILED {reason}'
         return FAILURE
 
 

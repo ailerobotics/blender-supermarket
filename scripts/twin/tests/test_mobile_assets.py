@@ -234,6 +234,36 @@ def test_cart_parking_brake_pins_cart_and_releases(stage):
     assert not c._cart_braked and not stage.GetPrimAtPath(c.CART_BRAKE_PATH)
 
 
+def test_uncouple_leaves_cart_parked_and_frees_the_robot(stage):
+    # Uncouple-at-parking-spot (fm/sim-restock-bt-driver-v1): on return the robot tows the cart to a
+    # parking spot, then uncouple() pins the parked cart to the world and releases the tow hitch so
+    # the robot drives home EMPTY. Mirror of attach() (author hitch -> free cart); here pin cart ->
+    # remove hitch. The cart stays braked after release (the _cart_hold latch makes later
+    # release_cart_brake -- including command()'s on drive-away -- a no-op), so the cart stays parked.
+    from pxr import UsdGeom, UsdPhysics
+    from twin.mobile import DockObservation, Pose2
+    from twin.mobile_runtime import MobileController
+    author_cart(stage)
+    robot = UsdGeom.Xform.Define(stage, '/Robot/base_link').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(robot)
+    wheels = ['/Robot/l', '/Robot/r']
+    for p in wheels:
+        UsdPhysics.RevoluteJoint.Define(stage, p)
+    c = MobileController(stage, str(robot.GetPath()), '/Rollwagen/chassis', wheels,
+                         wheel_angle_reader=lambda: [0.0, 0.0])
+    obs = DockObservation(Pose2(0, 0, 0), Pose2(-1.27, 0, 0), .28, .28, 0, 0, 0, 0)
+    assert c.attach(obs)['healthy']                       # towing: coupled train
+    assert UsdPhysics.RevoluteJoint.Get(stage, c.hitch_path)
+    state = c.uncouple(obs)
+    # tow hitch gone, cart left world-pinned (parked + braked), coupler no longer attached
+    assert state['joint_present'] is False and state['requested_attached'] is False
+    assert not stage.GetPrimAtPath(c.hitch_path)
+    assert c._cart_braked and c._cart_hold and stage.GetPrimAtPath(c.CART_BRAKE_PATH)
+    # robot drives home empty: command() must NOT free the parked cart (latch holds the brake)
+    c.command(.16, 0, obs, transport_ready=False)
+    assert c._cart_braked and stage.GetPrimAtPath(c.CART_BRAKE_PATH)
+
+
 def test_transport_measurement_and_missing_mesh_fail_closed(source, tmp_path):
     from twin.mobile_assets import measure_transport
     out = tmp_path/'mobile.urdf'
