@@ -23,7 +23,13 @@ RESTOCK_PYTHON="${RESTOCK_PYTHON:-python3}"
 for arg in "$@"; do
   if [ "$arg" = "--execute" ]; then
     unset AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH ROS_PACKAGE_PATH || true
-    export PYTHONPATH="$SCRIPT_DIR"
+    # fm419 (c): PYTHONPATH is set to ONLY this scripts dir (for twin.*) to keep the system ROS
+    # python3.12 site-packages out of the bundled-rclpy resolver. The opt-in behaviour tree
+    # (config "bt": true) needs py_trees, which must NOT be installed into the shared env_isaaclab.
+    # RESTOCK_BT_PYTHONPATH (set by the orchestrator for a bt=true run) points at a task-owned dir
+    # holding ONLY py_trees + a pyparsing-3.0.9-compatible pydot (no pyparsing -- Isaac's stays
+    # authoritative), appended here so it reaches the mission process alone. Absent => byte-identical.
+    export PYTHONPATH="$SCRIPT_DIR${RESTOCK_BT_PYTHONPATH:+:$RESTOCK_BT_PYTHONPATH}"
     export ROS_DISTRO=jazzy
     export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
     # The GPU guard mandates this exact domain-88 loopback isolation; set it

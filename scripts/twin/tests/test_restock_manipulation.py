@@ -218,51 +218,51 @@ def test_task_space_lift_fallback_carries_both_wrist_guards_fm403():
     assert 0.0 in [x for x in m.wrist2_mins if x is not None], m.wrist2_mins
 
 
-def test_collision_stale_tolerated_only_while_held_bounded_fm415():
-    # fm415 (run-319): a COLLISION-only staleness while the carton is HELD (the weld/attach ESDF
-    # re-incorporation lag) is tolerated for up to collision_stale_cap CONSECUTIVE ticks (logged), then
-    # fails honestly. Replays run-319's shape: held, collision goes stale, tolerate a few, then fail.
+def test_collision_stale_pauses_held_arm_within_max_age_then_trips_fm419():
+    # fm419 (run-320): a COLLISION-only staleness while the carton is HELD (the weld/attach ESDF
+    # re-incorporation lag) PAUSES the arm (holds pose, issues NO new move) while the stamp age
+    # (now - collision_time) is within collision_stale_tol_s, then trips honestly once the age passes
+    # the bound. Replays run-320's lift trace: collision_time frozen, so the age grows 0.52 -> 0.60 ...
+    # until it exceeds the bound. With tol 0.65 s, the run-320 0.60 s stall is PAUSED (not an e-stop).
     c, m = make_controller('collect')
-    c.collision_stale_cap = 3
+    c.collision_stale_tol_s = 0.65
     t = run_to(c, 'lift')
     assert c.held
     m.outcome = 'running'                      # lift stays in-flight -> phase stays lift, held True
     c.step(.1, packet(c, t, contact=True))     # issue the lift
-    for i in range(1, 4):                      # <= cap consecutive collision-stale ticks -> tolerated
-        r = c.step(.1, packet(c, t + i * .1, contact=True, collision_time=(t + i * .1) - 10.0))
-        assert r.status == 'running', (i, r.reason)
-        assert c._collision_stale_waits == i
-    r = c.step(.1, packet(c, t + .5, contact=True, collision_time=(t + .5) - 10.0))   # one past cap
+    frozen = t - 0.5                           # collision_time frozen 0.5 s behind -> age grows with now
+    moves_before = len(m.stows) + len(m.moves)
+    # ages 0.517..0.600 (<= 0.65) -> PAUSE: running, no NEW move issued, `issued` cleared for a re-plan
+    for now in (t + 0.017, t + 0.05, t + 0.10):
+        r = c.step(.1, packet(c, now, contact=True, collision_time=frozen))
+        assert r.status == 'running' and r.reason == '', (now, r.reason)
+        assert c.issued is False
+    assert len(m.stows) + len(m.moves) == moves_before   # paused: the lift was NOT re-issued while stale
+    # a FRESH stamp resumes: _advance re-issues the held lift (begin_joint_goal to the carry shape)
+    c.step(.1, packet(c, t + 0.12, contact=True))
+    assert c.issued is True
+    # if instead the stamp stays frozen until the age passes the bound (0.66 > 0.65) -> honest trip
+    r = c.step(.1, packet(c, frozen + 0.66, contact=True, collision_time=frozen))
     assert r.status == 'failed' and 'collision_dt=' in r.reason, r.reason
 
 
-def test_collision_stale_zero_tolerance_pre_grasp_fm415():
+def test_collision_stale_zero_tolerance_pre_grasp_fm419():
     # pre-attach (not held): collision staleness is a real fault (the parked mapper must be fresh before
-    # manipulating) -> zero tolerance, fail immediately naming collision.
+    # manipulating) -> zero tolerance, fail immediately naming collision, even within the max age.
     c, _ = make_controller('collect')
-    c.collision_stale_cap = 5
-    r = c.step(.1, packet(c, 5.0, collision_time=1.0))   # observe phase, not held
+    c.collision_stale_tol_s = 0.8
+    r = c.step(.1, packet(c, 5.0, collision_time=4.4))   # observe phase, not held; age 0.6 < tol
     assert r.status == 'failed' and 'collision_dt=' in r.reason, r.reason
 
 
-def test_collision_fresh_resets_the_tolerance_fm415():
+def test_collision_tolerance_off_by_default_zero_byte_identical_fm419():
+    # 0 s tolerance => no pause, trip exactly as before (byte-identical to the pre-fm415 invariant).
     c, m = make_controller('collect')
-    c.collision_stale_cap = 3
+    c.collision_stale_tol_s = 0.0             # off
     t = run_to(c, 'lift'); m.outcome = 'running'
     c.step(.1, packet(c, t, contact=True))
-    c.step(.1, packet(c, t + .1, contact=True, collision_time=(t + .1) - 10.0))   # 1 stale tolerated
-    assert c._collision_stale_waits == 1
-    c.step(.1, packet(c, t + .2, contact=True))                                   # fresh -> reset
-    assert c._collision_stale_waits == 0
-
-
-def test_collision_tolerance_off_by_default_cap_zero_byte_identical_fm415():
-    c, m = make_controller('collect')
-    c.collision_stale_cap = 0                  # off
-    t = run_to(c, 'lift'); m.outcome = 'running'
-    c.step(.1, packet(c, t, contact=True))
-    r = c.step(.1, packet(c, t + .1, contact=True, collision_time=(t + .1) - 10.0))
-    assert r.status == 'failed' and 'collision_dt=' in r.reason, r.reason   # zero cap -> no tolerance
+    r = c.step(.1, packet(c, t + .1, contact=True, collision_time=(t + .1) - 0.6))   # age 0.6
+    assert r.status == 'failed' and 'collision_dt=' in r.reason, r.reason   # zero tol -> no pause
 
 
 def test_invariant_trip_names_the_failed_condition_fm412():

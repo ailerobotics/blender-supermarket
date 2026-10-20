@@ -301,6 +301,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.status,'succeeded')
         self.assertTrue(result.evidence['coupled'])
 
+    def test_couple_commits_through_attach_parked_blip_fm419(self):
+        # fm419 (b) / run-320b: after fine-dock seated (20 mm / 2.16 deg), creating the drawbar joint
+        # SNAPS the cart onto the hitch and briefly makes parked=False for a tick. The couple stage must
+        # NOT fail 'base moved during stationary operation' at that attach -- that failure is what made the
+        # mission STEP_RETRY re-begin couple into the approach nav (started coupled=False) against an
+        # already-coupled cart, which then looped 'coupling_changed' to coupling_changed_timeout. A
+        # successful latch (coupled + healthy) declares couple DONE even across the attach parked blip.
+        self.adapter.start('couple', self.job)
+        self.assertEqual(self.adapter.step(.1).status, 'running')          # navigate -> execute -> attach
+        # the attach snaps the cart: parked=False this tick, coupling not yet confirmed -> STILL running,
+        # NOT failed (pre-fm419 the shared stationary guard returned 'base moved during stationary operation')
+        self.p = replace(self.p, observation_id='frame-2', simulation_time=.2, parked=False, coupled=False)
+        r = self.adapter.step(.1)
+        self.assertEqual(r.status, 'running', r.reason)
+        self.assertNotIn('base moved', r.reason)
+        # coupling becomes healthy while the base is still settling (parked=False) -> couple DONE
+        self.p = replace(self.p, observation_id='frame-3', simulation_time=.3, parked=False, coupled=True)
+        r2 = self.adapter.step(.1)
+        self.assertEqual(r2.status, 'succeeded')
+        self.assertTrue(r2.evidence['coupled'])
+
+    def test_non_couple_stationary_guard_still_fails_on_base_motion_fm419(self):
+        # The parked-guard relaxation is scoped to couple ONLY: a park/transfer/verify stage with a base
+        # that is not parked during stationary manipulation still fails honestly (guard intact).
+        self.adapter.start('park', self.job)
+        self.p = replace(self.p, observation_id='frame-2', parked=False)   # sim_time .1 matches adapter time
+        r = self.adapter.step(.1)
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('base moved during stationary operation', r.reason)
+
     def test_return_default_tows_cart_home_coupled(self):
         # Default (uncouple_on_return off): return navigates straight to home as a COUPLED tow and
         # succeeds with home=True -- byte-identical legacy behaviour.

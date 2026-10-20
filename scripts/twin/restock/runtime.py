@@ -569,9 +569,17 @@ class RuntimeAdapter:
                                     transport_ready=p.transport_ready)
                 return Result('running', reason=r.reason)
         self.mobile.hold()   # stationary manipulation: brake the base against stiff-arm reaction
-        if not p.parked:
-            return Result('failed', reason='base moved during stationary operation')
         if self.action == 'couple':
+            # fm419 (b): past fine-dock the couple stage is COMMITTED to the latch, so it is handled
+            # ABOVE the stationary parked-guard below. Creating the drawbar joint snaps the cart onto
+            # the hitch and briefly perturbs the cart/base (run-320b: a one-tick cart_dyaw ~26 mrad,
+            # parked=False blip) -- fine_dock already gated parked before handover (above), so a
+            # transient blip during the EXPECTED attach is not a fault. When it WAS a fault the mission
+            # STEP_RETRY re-began couple and restarted the approach nav coupled=False against an
+            # already-coupled cart, which loops 'coupling_changed' to coupling_changed_timeout (the
+            # run-320b failure after a physically good 20 mm / 2.16 deg seat). A successful latch
+            # (obs.coupled healthy) instead declares couple DONE and hands off to the coupled controller
+            # for outbound; a genuinely bad base is still caught by coupling_state['healthy'].
             if self.phase != 'attached':
                 self.mobile.attach(p.docking)
                 self.phase = 'attached'
@@ -580,6 +588,8 @@ class RuntimeAdapter:
             if p.coupled and state['healthy']:
                 return Result('succeeded', self._evidence(p, coupled=True))
             return Result('running', reason='awaiting healthy physical coupling')
+        if not p.parked:
+            return Result('failed', reason='base moved during stationary operation')
         if self.action == 'park':
             if not p.coupled:
                 return Result('failed', reason='cart lost before transfer')
