@@ -174,6 +174,23 @@ def test_grasp_flicker_does_not_livelock_retries_or_fails_within_budget():
     assert m.payloads == []
 
 
+def test_lift_passes_carry_wrist1_cap_to_motion_fm402():
+    # fm402 regression guard for the runs 300d/305/311 jam: with carry_wrist1_cap set, the 'lift' move
+    # MUST carry that wrist_1 cap to the planner so the loaded-lift IK stays below the wrist_2-vs-forearm
+    # self-collision stop; an absent/None cap on the lift is the silent un-cap that jammed those runs.
+    c, m = make_controller('collect', carry_wrist1_cap=0.65)
+    t = run_to(c, 'lift')
+    c.step(.1, packet(c, t, contact=True))     # issue the lift move
+    assert 0.65 in [x for x in m.wrist1_caps if x is not None], m.wrist1_caps
+    assert any(x is None for x in m.wrist1_caps)   # approach/contact moves pass None (lift-only cap)
+
+    # And with the cap UNSET (the run-311 config), the lift carries NO cap -> IK free to cross the stop.
+    c2, m2 = make_controller('collect')
+    t2 = run_to(c2, 'lift')
+    c2.step(.1, packet(c2, t2, contact=True))
+    assert all(x is None for x in m2.wrist1_caps)
+
+
 def test_grasp_stable_hold_still_confirms_under_monotonic_budget():
     # fm399: the monotonic wait must NOT pre-empt a genuine stable hold: with wait_ticks >> confirm_ticks
     # a steady contact confirms and lifts well inside the budget (no spurious retry).

@@ -548,7 +548,13 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     # solid obstacle breaks planning) and added the wrist_1-safe fixed
                                     # cage_preplace_shape (begin_joint_goal preplace below the self-collision stop).
                                     'cart_cage_place', 'cage_axis', 'cage_mouth_standoff',
-                                    'cage_insert_gap', 'cage_preplace_shape'})
+                                    'cage_insert_gap', 'cage_preplace_shape',
+                                    # fm402: the loaded-lift wrist_1 cap -- MUST be present (the preflight
+                                    # baseline enforces it) so the lift IK stays below the self-collision
+                                    # stop (runs 300d/305/311 jammed with it absent/uncapped).
+                                    'carry_wrist1_cap'})
+        self.assertIsInstance(cfg['carry_wrist1_cap'], (int, float))
+        self.assertLessEqual(cfg['carry_wrist1_cap'], 0.65)   # at/below the wrist_2-vs-forearm stop
         for k in ('sim_cart_place_policy', 'staged_cart_swing', 'base_collision_object', 'cart_cage_place',
                   'reposition_before_place'):
             self.assertIsInstance(cfg[k], bool)

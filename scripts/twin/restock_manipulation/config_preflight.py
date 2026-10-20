@@ -47,6 +47,15 @@ KEY_CONSUMER = {
     'base_collision_object': HOST,
     'contact_straight_line': HOST,
     'pose_goal': HOST,
+    # fm402: the controller reads these cap/limit keys OPTIONALLY via config.get(...) with a silent
+    # default, so an absent key silently un-caps/limits the arm (the run-277 class). carry_wrist1_cap
+    # absent = the loaded LIFT drives wrist_1 past the wrist_2-vs-forearm self-collision stop and jams
+    # (runs 300d/305/311). They are in BASELINE_REQUIRED so the preflight fails LOUDLY if any is missing.
+    'carry_wrist1_cap': HOST,
+    'contact_overpress_cap_m': HOST,
+    'contact_overpress_step_m': HOST,
+    'arm_max_speed': HOST,
+    'plan_wall_cap_s': HOST,
     # --- RUNTIME config (isaac_bundle / isaac_port / physics_setup) ---
     'phase_drive': RUNTIME,
     'arm_stiffness_abs': RUNTIME,
@@ -62,6 +71,18 @@ KEY_CONSUMER = {
     'nav_mode': RUNTIME,
     'navigation': RUNTIME,
 }
+
+# fm402: cap/limit keys the controller reads OPTIONALLY (config.get with a silent default). These are
+# ALWAYS asserted present (unioned into every run's --require), so a missing cap fails the launch loudly
+# instead of silently un-capping the arm -- the carry_wrist1_cap slip that let the loaded lift drive
+# wrist_1 into the self-collision stop (runs 300d/305/311). Add any future optional cap/limit key here.
+BASELINE_REQUIRED = (
+    'carry_wrist1_cap',
+    'contact_overpress_cap_m',
+    'contact_overpress_step_m',
+    'arm_max_speed',
+    'plan_wall_cap_s',
+)
 
 
 def check_activation(host_cfg, runtime_cfg, required):
@@ -109,10 +130,10 @@ def main(argv=None):
     parser.add_argument('--require', default='',
                         help='comma-separated batch keys this run needs ACTIVE')
     args = parser.parse_args(argv)
-    required = [k.strip() for k in args.require.split(',') if k.strip()]
-    if not required:
-        print('CONFIG_PREFLIGHT: no --require keys declared; nothing to assert')
-        return 0
+    declared = [k.strip() for k in args.require.split(',') if k.strip()]
+    # fm402: always assert the cap/limit baseline, even if a run forgets to --require it -- a missing
+    # cap must never silently un-cap the arm. Dedupe while preserving order (baseline first).
+    required = list(dict.fromkeys(list(BASELINE_REQUIRED) + declared))
     host_cfg = _load(args.host_config)
     runtime_cfg = _load(args.runtime_config)
     problems = check_activation(host_cfg, runtime_cfg, required)

@@ -207,6 +207,9 @@ def main():
         'cage_insert_gap': controller.cage_insert_gap,
         'staged_cart_swing': controller.staged_cart_swing, 'cart_pan_joint0': controller.cart_pan_joint0,
         'cart_tuck_shape': controller.cart_tuck_shape,
+        # fm402: log the EFFECTIVE loaded-lift wrist_1 cap so a console grep proves it activated (None =
+        # uncapped -> the loaded lift drives wrist_1 into the self-collision stop, runs 300d/305/311).
+        'carry_wrist1_cap': controller.carry_wrist1_cap,
         'reposition_before_place': controller.reposition_before_place,
         'sim_cart_place_policy': _policy is not None and bool(config.get('sim_cart_place_policy')),
         'base_collision_object': bool(config.get('base_collision_object', False)),
