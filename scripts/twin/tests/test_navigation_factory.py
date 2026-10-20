@@ -95,6 +95,19 @@ class FactoryDispatchTests(unittest.TestCase):
     def test_docking_absent_leaves_controller_unchanged(self):
         self.assertIsNone(_build('reference').docking)
 
+    def test_planner_timeout_absent_is_default_30s(self):
+        # Absent navigation.planner_timeout_s => the coupled planner keeps its 30 s default budget.
+        self.assertEqual(_build('reference').planner.timeout, 30.0)
+
+    def test_planner_timeout_flows_through(self):
+        # Config-driven coupled-plan wall budget: a loaded host can be given more time so the full
+        # search is not starved into 'planning_timeout' (a compute budget, not a collision tolerance).
+        self.assertEqual(_build('reference', planner_timeout_s=120.0).planner.timeout, 120.0)
+
+    def test_planner_timeout_rejects_nonpositive(self):
+        with self.assertRaises(ValueError):
+            _build('reference', planner_timeout_s=0)
+
     def test_docking_block_flows_through(self):
         obj = _build('reference', docking={'goal': [-4.46, 15.25, 0.0], 'speed': 0.08,
                                            'approach_distance': 1.5, 'goal_tolerance': 0.3})

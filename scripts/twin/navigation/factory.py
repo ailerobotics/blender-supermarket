@@ -269,6 +269,7 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
     spec = _build_spec(nav)
     controller = ArticulatedController(grid, spec,
                                        require_temporal_map=bool(nav.get('require_temporal_map', False)),
+                                       planner_timeout=nav.get('planner_timeout_s'),
                                        **_controller_kwargs(nav))
 
     if 'dynamic_obstacles' in nav and mode != 'sensor':
