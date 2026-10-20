@@ -198,7 +198,7 @@ def test_lift_routes_to_joint_space_clear_shape_when_configured_fm403():
     # carry shape (w1<=0.65, w2>=0), NOT a task-space IK that can land in the wrist_2-vs-forearm
     # self-colliding branch (runs 300d/305/311 jammed even with wrist_1 capped). The shape must be the
     # joint goal; no task-space begin() is issued for the lift.
-    shape = [-1.822, -2.27, 1.0, 0.65, 0.8, -1.2545]
+    shape = [1.2675, -2.27, 1.0, 0.65, 0.8, -1.2545]
     c, m = make_controller('collect', carry_lift_shape=shape)
     moves_before = len(m.moves)
     t = run_to(c, 'lift')
