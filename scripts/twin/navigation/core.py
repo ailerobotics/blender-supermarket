@@ -485,11 +485,16 @@ class Controller:
             if _xy < 0.4:
                 self._adiag = getattr(self, '_adiag', 0) + 1
                 if self._adiag % 20 == 1:
+                    # fm407 pin-cause: also report the gate's verdict at a ZERO command (obstacle_stop /
+                    # coverage vs tracking) and the heading error to the goal -- so a stall at the goal is
+                    # attributable to the nav gate (footprint vs cart on the static map), a non-'tracking'
+                    # gate, or simply the odom xy reading > tol (else-branch, no arrival branch entered).
+                    _gate = self.gate_velocity(now, odometry, obs, 0.0, 0.0)
                     print('NAV_ARRIVAL_DIAG xy=%.4f xy_tol=%.3f yaw_err=%.4f yaw_tol=%.3f lin=%.4f ang=%.4f '
-                          'pose=%s goal=%s'
+                          'gate0=%r in_xy=%s pose=%s goal=%s'
                           % (_xy, self.arrival_xy_tol, abs(wrap(self.goal[2]-pose[2])), self.arrival_yaw_tol,
-                             odometry.linear, odometry.angular, tuple(round(c,3) for c in pose),
-                             tuple(round(c,3) for c in self.goal)), flush=True)
+                             odometry.linear, odometry.angular, _gate.reason, _xy <= self.arrival_xy_tol,
+                             tuple(round(c,3) for c in pose), tuple(round(c,3) for c in self.goal)), flush=True)
         if math.dist(pose[:2],self.goal[:2]) <= self.arrival_xy_tol:
             error = wrap(self.goal[2]-pose[2])
             if abs(error) <= self.arrival_yaw_tol:
