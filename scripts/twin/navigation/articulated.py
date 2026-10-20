@@ -163,6 +163,29 @@ class ArticulatedMap:
             samples.append(nxt)
         return samples
 
+    def near_static(self,x,y,tol):
+        """True iff the point (x,y) lies within `tol` of any static-map obstacle AABB.
+
+        A measured lidar/ESDF return sitting a few cm PROUD of known static geometry (the
+        documented couple-corridor effect: live returns register a few cm toward free space of
+        the true AABB) is classified here as a known-static return, NOT a new obstacle. Uses the
+        same integer-cell index as clear_polygon; `tol` must be < 1 cell (one grid unit), which
+        the caller (the tow-lane proud tolerance) enforces. Only returns within `tol` of static
+        geometry are matched -- a genuinely new obstacle in open space is never near_static."""
+        cx,cy=math.floor(x),math.floor(y)
+        seen=set()
+        for i in range(cx-1,cx+2):
+            for j in range(cy-1,cy+2):
+                for oi in self.index.get((i,j),()):
+                    if oi in seen:
+                        continue
+                    seen.add(oi)
+                    xmin,ymin,xmax,ymax=self.grid.obstacles[oi]
+                    dx=max(xmin-x,0.0,x-xmax); dy=max(ymin-y,0.0,y-ymax)
+                    if math.hypot(dx,dy)<=tol:
+                        return True
+        return False
+
 
 @dataclass
 class Route:
@@ -401,10 +424,25 @@ class ArticulatedPlanner:
 class ArticulatedController(Controller):
     """Measured-state route following and braking sweep for the physical tow rig."""
     def __init__(self, grid, spec=None, *, require_temporal_map=False, planner_timeout=None,
-                 lane_graph=None, **kwargs):
+                 lane_graph=None, lane_static_tol=0.0, **kwargs):
         self.require_temporal_map=require_temporal_map
         self.spec=spec or MobileSpec()
         self.world=ArticulatedMap(grid,self.spec)
+        # Opt-in lidar-proud tolerance for the AUTHORED tow lanes only (navigation.tow_lane_static_tol_m).
+        # 0.0 (default) => OFF: a lane is re-validated against the full live obstacle cloud exactly as
+        # before (byte-identical). When >0, a live return within this distance of KNOWN static-map
+        # geometry is discounted as a proud return of that geometry when re-validating a lane's swept
+        # envelope -- so the authored centreline that clears the STATIC map (verified at build) is not
+        # falsely blocked by returns sitting a few cm proud of a shelf/support it hugs (the run-321b
+        # outbound lane_blocked). This NEVER touches the live braking gate (gate_velocity stays fully
+        # live against obs.obstacles), and a genuinely NEW obstacle -- not within the tolerance of any
+        # static geometry -- is kept, so it still blocks the lane at plan time AND the forward
+        # directional braking zone still stops the tow for it. Mirrors couple_static_drive's
+        # config-driven, default-off trusted-static style but scoped to lane plan-validation alone.
+        if not (isinstance(lane_static_tol,(int,float)) and math.isfinite(lane_static_tol)
+                and 0.0<=lane_static_tol<1.0):
+            raise ValueError('lane_static_tol must be a finite distance in [0, 1) metres')
+        self.lane_static_tol=float(lane_static_tol)
         # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
         # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
         # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
@@ -481,10 +519,30 @@ class ArticulatedController(Controller):
             uncertainty=max(.10,uncertainty)
             planner=ArticulatedPlanner(world,timeout=self.planner.timeout)
         else:
+            world=self.world
             planner=self.planner
-        checked=planner.validate_seed(lane.route,lane.start_state(),self.goal,obs.obstacles,
+        # Re-validate the authored lane against the LIVE obstacle cloud. When the opt-in proud
+        # tolerance is set, discount live returns within that distance of KNOWN static geometry
+        # (proud returns of the shelf/support the lane hugs) so they cannot false-block the lane;
+        # genuinely new returns in open space are kept and still block. OFF (0.0) => the full live
+        # cloud, byte-identical.
+        dyn=obs.obstacles
+        discounted=0
+        if self.lane_static_tol>0 and dyn:
+            kept=tuple((x,y) for (x,y) in dyn if not world.near_static(x,y,self.lane_static_tol))
+            discounted=len(dyn)-len(kept)
+            dyn=kept
+        checked=planner.validate_seed(lane.route,lane.start_state(),self.goal,dyn,
                                       max(.02,uncertainty),self.goal_articulation)
         if not checked.states:
+            # Keep the contract reason 'lane_blocked', but never leave WHY opaque again (run-321b
+            # burned an hour on a bare 'lane_blocked'): name the specific validate_seed rejection and
+            # the live/discounted cloud sizes so the next run's cause is readable from the console.
+            print('LANE_BLOCKED_DIAG lane=%r vseed_reason=%s live_pts=%d discounted_near_static=%d '
+                  'kept=%d proud_tol_m=%.3f start=%s goal=%s'
+                  % (lane.name,checked.reason,len(obs.obstacles),discounted,len(dyn),
+                     self.lane_static_tol,tuple(round(c,2) for c in lane.start),
+                     tuple(round(c,2) for c in self.goal)),flush=True)
             return Route([],[],'lane_blocked')
         checked.reason='validated_lane'
         return checked

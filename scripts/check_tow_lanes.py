@@ -95,6 +95,63 @@ def _obstacle_points(grid, step=0.25):
     return tuple(pts)
 
 
+def _proud_points(grid, delta, step=0.25):
+    """A LIVE cloud of the static-obstacle face returns pushed `delta` m OUTWARD (away from each
+    AABB centre) -- the documented lidar/ESDF effect that returns register a few cm PROUD of the
+    true surface toward free space. This reproduces the run-321b outbound `lane_blocked`: the
+    authored centreline clears the true static map but a proud return of a shelf/support it hugs
+    (tightest outbound clearance ~0.089 m) intrudes the swept envelope."""
+    pts = []
+    for xmin, ymin, xmax, ymax in grid.obstacles:
+        cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
+        nx = max(1, int((xmax - xmin) / step)); ny = max(1, int((ymax - ymin) / step))
+        face = []
+        for i in range(nx + 1):
+            x = xmin + (xmax - xmin) * i / nx
+            face.append((x, ymin)); face.append((x, ymax))
+        for j in range(ny + 1):
+            y = ymin + (ymax - ymin) * j / ny
+            face.append((xmin, y)); face.append((xmax, y))
+        for x, y in face:
+            dx, dy = x - cx, y - cy
+            n = math.hypot(dx, dy) or 1.0
+            pts.append((x + delta * dx / n, y + delta * dy / n))
+    return tuple(pts)
+
+
+def check_proud_tolerance(grid, lanes_cfg, report):
+    """fm423(a): reproduce the run-321b live `lane_blocked` with a lidar-proud cloud model and prove
+    the opt-in proud tolerance (navigation.tow_lane_static_tol_m) reopens the lane WITHOUT blanket-
+    trusting the static map -- a genuinely NEW obstacle on the lane still blocks the tow at plan time
+    (and the live directional braking gate, untouched, still stops it)."""
+    spec = MobileSpec()
+    nav = lanes_cfg['navigation']
+    graph = TowLaneGraph.from_config(nav['tow_lanes'])
+    graph.expand_all(ArticulatedMap(grid, spec))
+    lane = next((ln for ln in graph.lanes if 'outbound' in ln.name), graph.lanes[0])
+    PROUD, TOL = 0.10, 0.12   # proud blocks (tightest outbound clearance ~0.089 m); tol covers it
+    proud = _proud_points(grid, PROUD)
+
+    def plan_reason(lane_static_tol, extra=()):
+        c = ArticulatedController(grid, spec, allow_test_fixtures=True, lane_graph=graph,
+                                  lane_static_tol=lane_static_tol)
+        c.start(lane.goal, True)
+        state = lane.start_state()
+        obs = Observation(0.1, tuple(proud) + tuple(extra), True, True,
+                          state.articulation, 'test_fixture', 10.0)
+        return c.plan_observed_route(state, obs, 0.05).reason
+
+    _record(report, 'proud_cloud_reproduces_live_lane_blocked',
+            plan_reason(0.0) == 'lane_blocked', proud_m=PROUD, reason=plan_reason(0.0))
+    _record(report, 'proud_tolerance_reopens_lane',
+            plan_reason(TOL) == 'validated_lane', tol_m=TOL, reason=plan_reason(TOL))
+    # SAFETY: a new obstacle on the lane centre, far from any static geometry, is NEVER discounted.
+    mid = lane.route.states[len(lane.route.states) // 2]
+    _record(report, 'new_obstacle_on_lane_still_blocks_tow',
+            plan_reason(TOL, extra=[(mid.x, mid.y)]) == 'lane_blocked',
+            new_obstacle=(round(mid.x, 2), round(mid.y, 2)), reason=plan_reason(TOL, extra=[(mid.x, mid.y)]))
+
+
 def _drive_lane(controller, spec, lane, goal, *, jitter, report, label, direct_xy):
     """Drive the REAL ArticulatedController following the lane closed-loop from a jittered start."""
     import time as _time
@@ -203,6 +260,7 @@ def main():
     print(f'grid: {len(grid.obstacles)} static obstacles, bounds {grid.bounds}', flush=True)
     check_directional_zone(grid, report)
     check_tow_lanes(grid, lanes_cfg, report)
+    check_proud_tolerance(grid, lanes_cfg, report)
     print('TOW_LANES_PROOF ' + ('PASS' if report['ok'] else 'FAIL'), flush=True)
     return 0 if report['ok'] else 1
 

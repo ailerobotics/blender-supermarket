@@ -141,5 +141,79 @@ class CoupledLaneFollowerTests(unittest.TestCase):
                          ('validated_lane', 'lane_blocked', 'lane_not_acquired'))
 
 
+class LaneStaticProudToleranceTests(unittest.TestCase):
+    """fm423(a) / run-321b outbound lane_blocked: discount lidar-proud returns of KNOWN static
+    geometry (a few cm proud of a shelf/support the lane hugs) when re-validating a tow lane, so
+    they do not false-block the authored centreline -- while a genuinely NEW obstacle on the lane
+    still blocks it and the live braking gate is untouched. Geometry: the straight lane's swept
+    envelope half-width is ~0.77 m (blocks a return at |y|<=0.76, clears at |y|>=0.78)."""
+
+    def setUp(self):
+        self.spec = MobileSpec()
+        # A static box whose SOUTH edge (y=0.80) just clears the lane's ~0.77 m envelope, so the
+        # lane expands + validates against the true static map exactly as before.
+        self.box = (-0.5, 0.80, 0.5, 2.0)
+        self.grid = GridMap((-8, -8, 8, 8), (self.box,), 0.20)
+        self.lane = _straight_lane()
+        self.graph = TowLaneGraph([self.lane]).expand_all(ArticulatedMap(self.grid, self.spec))
+        self.state = TrainState(-4.0, 0.0, 0.0, 0.0)
+        # A proud return of that box: at y=0.74 it INTRUDES the envelope (blocks) but is only 6 cm
+        # (<= 8 cm tol) from the box's south edge, so it is a known-static proud return.
+        self.proud = (0.0, 0.74)
+        # A genuinely new obstacle on the lane centre, 0.80 m from the box (NOT near static).
+        self.newobs = (0.0, 0.0)
+
+    def _controller(self, lane_static_tol):
+        c = ArticulatedController(self.grid, self.spec, allow_test_fixtures=True,
+                                  lane_graph=self.graph, lane_static_tol=lane_static_tol)
+        c.start((4, 0, 0), True)
+        return c
+
+    def _obs(self, points):
+        return Observation(0.1, tuple(points), True, True, 0.0, 'test_fixture', 10.0)
+
+    def test_near_static_classifies_proud_vs_new(self):
+        world = ArticulatedMap(self.grid, self.spec)
+        self.assertTrue(world.near_static(*self.proud, 0.08))    # 6 cm proud of the box edge
+        self.assertFalse(world.near_static(*self.proud, 0.04))   # tighter tol no longer matches
+        self.assertFalse(world.near_static(*self.newobs, 0.08))  # 0.80 m away: a new obstacle
+
+    def test_default_off_proud_return_blocks_byte_identical(self):
+        c = self._controller(lane_static_tol=0.0)               # default: full live cloud
+        self.assertEqual(c.plan_observed_route(self.state, self._obs([self.proud]), 0.05).reason,
+                         'lane_blocked')
+
+    def test_proud_static_return_discounted_reopens_lane(self):
+        c = self._controller(lane_static_tol=0.08)
+        self.assertEqual(c.plan_observed_route(self.state, self._obs([self.proud]), 0.05).reason,
+                         'validated_lane')
+
+    def test_new_obstacle_on_lane_still_blocks_with_tolerance(self):
+        # SAFETY: a new obstacle not near any static geometry is NEVER discounted, so the tow still
+        # stops at plan time even with the proud tolerance enabled (plus the live braking gate).
+        c = self._controller(lane_static_tol=0.08)
+        self.assertEqual(
+            c.plan_observed_route(self.state, self._obs([self.proud, self.newobs]), 0.05).reason,
+            'lane_blocked')
+
+    def test_lane_blocked_diag_names_the_vseed_reason(self):
+        # The opaque bare 'lane_blocked' (run-321b burned an hour on it) now logs the specific
+        # validate_seed rejection + cloud sizes.
+        import contextlib, io
+        c = self._controller(lane_static_tol=0.0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            c.plan_observed_route(self.state, self._obs([self.proud]), 0.05)
+        out = buf.getvalue()
+        self.assertIn('LANE_BLOCKED_DIAG', out)
+        self.assertIn('vseed_reason=', out)
+
+    def test_lane_static_tol_validation(self):
+        with self.assertRaises(ValueError):
+            ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, lane_static_tol=1.0)
+        with self.assertRaises(ValueError):
+            ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, lane_static_tol=-0.1)
+
+
 if __name__ == '__main__':
     unittest.main()

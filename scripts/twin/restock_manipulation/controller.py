@@ -237,6 +237,20 @@ class TransferController:
                 or not all(map(math.isfinite, self.cage_preplace_shape))):
             raise ValueError('cage_preplace_shape must be 6 finite joint values')
         self.cart_location, self.max_age = cart_location, max_age
+        # fm423 (b) / run-321 cold collect: the relayed host stamps (collision_time from
+        # station/status, feedback_time from /joint_states) ride a DIFFERENT clock relay than the
+        # controller's node `now`, so under render pacing a freshly-incorporated stamp can arrive
+        # marginally AHEAD of `now` (a one-to-few physics-step delivery-order lead). The freshness
+        # lower bound `0 <= now-stamp` then wrongly flags that fresh-but-future stamp as not-fresh,
+        # tripping the top-of-step invariant; with a carton HELD the fm419(a) COLLISION_STALE_PAUSE
+        # then holds the lift every tick (run-321: collision_dt=-0.0167s, phase=lift) -- an indefinite
+        # spurious pause that stalled the arm and starved the 90 s arm-command heartbeat ('arm command
+        # heartbeat lost'). Tolerate that sub-step lead exactly as restock_camera.freshness (_RENDER_LEAD)
+        # and trajectory_host.feedback_fresh (FEEDBACK_RENDER_LEAD_S) already do: a stamp up to
+        # render_lead seconds in the future is fresh (strictly MORE current data -- safe); a genuinely
+        # STALE stamp (age > max_age) is still rejected, and a wildly-future stamp (> render_lead) still
+        # trips. Default 0.2 s matches trajectory_host's relayed-stamp-vs-node-clock race.
+        self.render_lead = _float_env_bounded('RESTOCK_FRESH_RENDER_LEAD_S', 0.2, 0.0, 0.5)
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
         self.held = False
@@ -369,7 +383,7 @@ class TransferController:
         self.release_time = None
 
     def _fresh(self, stamp, now):
-        return math.isfinite(stamp) and 0 <= now - stamp <= self.max_age
+        return math.isfinite(stamp) and -self.render_lead <= now - stamp <= self.max_age
 
     def _provenance(self, item, now):
         allowed = ('sensor', 'test_fixture') if self.fixture_mode else ('sensor',)
@@ -476,9 +490,9 @@ class TransferController:
             if sensors.parked is not True: why.append(f'parked={sensors.parked!r}')
             if type(sensors.contact) is not bool: why.append(f'contact_type={type(sensors.contact).__name__}')
             if not self._fresh(sensors.feedback_time, now):
-                why.append(f'feedback_dt={now - sensors.feedback_time:.4f}(max {self.max_age})')
+                why.append(f'feedback_dt={now - sensors.feedback_time:.4f}(band [{-self.render_lead},{self.max_age}])')
             if not collision_fresh:
-                why.append(f'collision_dt={now - sensors.collision_time:.4f}(max {self.max_age})')
+                why.append(f'collision_dt={now - sensors.collision_time:.4f}(band [{-self.render_lead},{self.max_age}])')
             if len(sensors.joint_positions) != 6:
                 why.append(f'njoints={len(sensors.joint_positions)}')
             elif not all(math.isfinite(x) for x in sensors.joint_positions):
@@ -491,10 +505,15 @@ class TransferController:
             # the move RE-PLANS from the held pose on the first fresh stamp. A frozen stamp's age keeps
             # growing and trips honestly once it passes the bound (no livelock). Scoped to held (post-attach)
             # + collision-sole so it can never mask a base-moving / feedback / pre-grasp fault; pre-grasp
-            # stays zero-tolerance. 0 s => off => byte-identical.
+            # stays zero-tolerance. 0 s => off => byte-identical. fm423 (b): the pause is for a genuinely
+            # STALE stamp only -- the age must be on the stale side of the fresh band (> max_age). A
+            # fresh-but-marginally-FUTURE stamp (render-pacing clock lead) is already fresh (render_lead),
+            # so it never reaches here; a wildly-FUTURE stamp (age < -render_lead) is a real anomaly that
+            # must TRIP honestly, NOT pause (a persistent future lead must never hold the arm forever --
+            # the run-321 cold-collect failure mode).
             if (len(why) == 1 and why[0].startswith('collision_dt') and self.held
                     and self.collision_stale_tol_s > 0 and math.isfinite(sensors.collision_time)
-                    and now - sensors.collision_time <= self.collision_stale_tol_s):
+                    and self.max_age < now - sensors.collision_time <= self.collision_stale_tol_s):
                 self.issued = False   # resume = re-plan the held move from the current (held) pose
                 print('COLLISION_STALE_PAUSE phase=%s now=%.3f %s (max_age %.3f)' % (
                     self.phase, now, why[0], self.collision_stale_tol_s), flush=True)

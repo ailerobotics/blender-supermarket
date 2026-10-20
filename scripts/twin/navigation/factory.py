@@ -305,6 +305,7 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
                                        require_temporal_map=bool(nav.get('require_temporal_map', False)),
                                        planner_timeout=nav.get('planner_timeout_s'),
                                        lane_graph=_build_lane_graph(nav, grid, spec),
+                                       lane_static_tol=float(nav.get('tow_lane_static_tol_m', 0.0)),
                                        **_controller_kwargs(nav))
 
     if 'dynamic_obstacles' in nav and mode != 'sensor':

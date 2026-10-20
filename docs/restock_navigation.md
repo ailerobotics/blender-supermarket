@@ -347,11 +347,29 @@ behaviour-tree lane (`sim-restock-bt-driver-v1`) owns the uncouple step on this 
 drive home. The integration/orchestrator mission config wires `mission_poses.cart_parking` and the
 return nav goal (like `cart_dock`); absent ⇒ the coupled return uses today's goal.
 
+**Lidar-proud tolerance for lane re-validation** (`navigation.tow_lane_static_tol_m`, opt-in,
+default `0.0` = off ⇒ full live cloud, byte-identical): a lane's swept envelope is re-validated each
+tick against the LIVE obstacle cloud, but live lidar/ESDF returns sit a few cm **proud** of the true
+static AABB (toward free space). Where the authored centreline hugs a shelf/support (the outbound
+lane's tightest clearance is ~0.089 m, at a shelf near the pull-through goal), those proud returns
+intrude the swept envelope and the lane re-validation returns `lane_blocked` even though the lane
+clears the static map at build — the run-321b outbound stall (`lane_blocked` for ~56 min, never
+advancing). When set, a live return within this distance of KNOWN static geometry is discounted as a
+proud return of that geometry during lane re-validation **only** (`ArticulatedMap.near_static`); a
+genuinely NEW return — not within the tolerance of any static geometry — is kept, so it still blocks
+the lane at plan time AND the live directional braking gate (unchanged) still stops the tow for it.
+This touches the lane plan-validation alone, never the braking gate, mirroring `couple_static_drive`'s
+config-driven trusted-static style but narrower. Staged value `0.12 m` (covers the measured ~0.089 m
+clearance + the ~0.10 m proud offset that reproduces the live block). The opaque bare `lane_blocked`
+now also logs `LANE_BLOCKED_DIAG` with the specific `validate_seed` rejection + discounted/kept cloud
+sizes, so a future stall names its cause.
+
 Offline proof (CPU, the mission's real inputs): `scripts/check_tow_lanes.py`
 (`--environment … --scenario … --camera-config … --lanes docs/examples/tow-lanes-mission-fragment.json`)
-drives the real controller/planner and asserts the direction-aware zone + both lanes end to end;
-design and numbers in `data/sim-restock-nav-lanes-v1/report.md`. CPU unit tests:
-`tests/test_navigation_lanes.py`, `tests/test_navigation_factory.py`.
+drives the real controller/planner and asserts the direction-aware zone + both lanes end to end, plus
+(fm423) reproduces the proud-cloud `lane_blocked` and proves the tolerance reopens the lane while a new
+on-lane obstacle still blocks the tow; design and numbers in `data/sim-restock-nav-lanes-v1/report.md`.
+CPU unit tests: `tests/test_navigation_lanes.py`, `tests/test_navigation_factory.py`.
 
 ## In-process route
 

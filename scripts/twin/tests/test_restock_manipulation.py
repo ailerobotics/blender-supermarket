@@ -265,6 +265,46 @@ def test_collision_tolerance_off_by_default_zero_byte_identical_fm419():
     assert r.status == 'failed' and 'collision_dt=' in r.reason, r.reason   # zero tol -> no pause
 
 
+def test_future_lead_collision_stamp_is_fresh_no_pause_fm423():
+    # fm423 (b) / run-321 cold collect: a relayed collision stamp can arrive marginally AHEAD of the
+    # controller's node `now` (a render-pacing clock-relay lead). It is FRESH (within render_lead), so
+    # the held lift must NOT trip the invariant and must NOT enter COLLISION_STALE_PAUSE -- the bug that
+    # held the lift indefinitely and starved the 90 s arm-command heartbeat ('arm command heartbeat lost').
+    import contextlib, io
+    c, m = make_controller('collect')
+    assert c.render_lead == 0.2                 # default lead matches trajectory_host's relay race
+    t = run_to(c, 'lift'); assert c.held
+    m.outcome = 'running'
+    c.step(.1, packet(c, t, contact=True))      # issue the lift
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        # collision stamp 16.7 ms (one physics step) in the FUTURE -> age -0.0167, within -render_lead
+        r = c.step(.1, packet(c, t + .1, contact=True, collision_time=(t + .1) + 0.0167))
+    assert r.status == 'running' and r.reason == '', r.reason
+    assert c.issued is True                      # lift proceeds (not paused / not failed)
+    assert 'COLLISION_STALE_PAUSE' not in buf.getvalue()
+    assert 'CONTROLLER_INVARIANT_TRIP' not in buf.getvalue()
+
+
+def test_future_feedback_stamp_within_render_lead_is_fresh_fm423():
+    # The same render-lead tolerance applies to feedback_time (same relay family). A marginally-future
+    # feedback stamp pre-grasp is fresh, not a fault.
+    c, _ = make_controller('collect')
+    r = c.step(.1, packet(c, 5.0, feedback_time=5.0 + 0.1, collision_time=5.0 + 0.1))  # 0.1 s lead < 0.2
+    assert r.status != 'failed', r.reason
+
+
+def test_wildly_future_collision_stamp_still_trips_fm423():
+    # A stamp beyond render_lead in the future is a real clock anomaly: it must TRIP honestly (never a
+    # pause -- a persistent future lead must not hold the arm forever).
+    c, m = make_controller('collect')
+    t = run_to(c, 'lift'); assert c.held
+    m.outcome = 'running'
+    c.step(.1, packet(c, t, contact=True))
+    r = c.step(.1, packet(c, t + .1, contact=True, collision_time=(t + .1) + 0.5))   # 0.5 s future >> lead
+    assert r.status == 'failed' and 'collision_dt=' in r.reason, r.reason
+
+
 def test_invariant_trip_names_the_failed_condition_fm412():
     # fm412 (run-317/318): the top-of-step invariant is a 5-condition OR; its reason must name the ACTUAL
     # failed field + value so a run that dies here is self-diagnosing (both runs died here ambiguously).
