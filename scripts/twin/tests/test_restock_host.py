@@ -549,12 +549,18 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     # cage_preplace_shape (begin_joint_goal preplace below the self-collision stop).
                                     'cart_cage_place', 'cage_axis', 'cage_mouth_standoff',
                                     'cage_insert_gap', 'cage_preplace_shape',
-                                    # fm402: the loaded-lift wrist_1 cap -- MUST be present (the preflight
-                                    # baseline enforces it) so the lift IK stays below the self-collision
-                                    # stop (runs 300d/305/311 jammed with it absent/uncapped).
-                                    'carry_wrist1_cap'})
+                                    # fm402/fm403: the loaded-lift self-collision guards -- MUST be present
+                                    # (the preflight baseline enforces them). carry_wrist1_cap + the
+                                    # clear-region joint goal carry_lift_shape + the wrist_2 lower bound
+                                    # keep the lift off the wrist_2-vs-forearm stop (runs 300d/305/311).
+                                    'carry_wrist1_cap', 'carry_lift_shape', 'carry_wrist2_min'})
         self.assertIsInstance(cfg['carry_wrist1_cap'], (int, float))
         self.assertLessEqual(cfg['carry_wrist1_cap'], 0.65)   # at/below the wrist_2-vs-forearm stop
+        self.assertEqual(len(cfg['carry_lift_shape']), 6)     # full 6-joint clear-region lift goal
+        self.assertLessEqual(cfg['carry_lift_shape'][3], 0.65)  # wrist_1 at/below the stop
+        self.assertGreaterEqual(cfg['carry_lift_shape'][4], 0.0)  # wrist_2 on the clear (positive) side
+        self.assertIsInstance(cfg['carry_wrist2_min'], (int, float))
+        self.assertGreaterEqual(cfg['carry_wrist2_min'], 0.0)  # wrist_2 lower bound on the clear side
         for k in ('sim_cart_place_policy', 'staged_cart_swing', 'base_collision_object', 'cart_cage_place',
                   'reposition_before_place'):
             self.assertIsInstance(cfg[k], bool)

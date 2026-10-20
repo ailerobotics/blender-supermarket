@@ -74,6 +74,7 @@ class TransferController:
                  contact_overpress_step_m: float = 0.0, contact_overpress_cap_m: float = 0.0,
                  staged_cart_swing: bool = False, cart_pan_joint0: float = 0.0,
                  cart_tuck_shape=None, carry_wrist1_cap=None,
+                 carry_lift_shape=None, carry_wrist2_min=None,
                  cart_cage_place: bool = False, cage_axis=(1.0, 0.0, 0.0),
                  cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03,
                  cage_preplace_shape=None, reposition_before_place: bool = False):
@@ -101,6 +102,21 @@ class TransferController:
         self._grasp_retries = 0
         # fm327 belt-and-braces wrist_1 cap for the task-space LIFT carry move (None = off).
         self.carry_wrist1_cap = None if carry_wrist1_cap is None else float(carry_wrist1_cap)
+        # fm403: route the loaded LIFT to a FIXED joint-space clear-region carry shape via
+        # begin_joint_goal (like cage_preplace_shape), not a task-space IK -- the task-space lift IK can
+        # land in the wrist_2-vs-forearm self-collision branch (w2 swung negative; runs 300d/305/311
+        # jammed even with wrist_1 capped, because wrist_2 still crossed the stop; bench-proven). The lift
+        # only needs to raise the carton clear of the shelf before the carry fold, so a joint goal is the
+        # right primitive. None => the legacy task-space lift (with carry_wrist1_cap). 6 finite joints.
+        self.carry_lift_shape = (tuple(float(v) for v in carry_lift_shape)
+                                 if carry_lift_shape is not None else None)
+        if self.carry_lift_shape is not None and (len(self.carry_lift_shape) != 6
+                or not all(map(math.isfinite, self.carry_lift_shape))):
+            raise ValueError('carry_lift_shape must be 6 finite joint values')
+        # fm403: wrist_2 LOWER bound (rad) guarding any remaining task-space carry move (the lift
+        # fallback when carry_lift_shape is unset) so cuMotion cannot pick the w2-negative self-colliding
+        # branch. None = off => byte-identical.
+        self.carry_wrist2_min = None if carry_wrist2_min is None else float(carry_wrist2_min)
         # Execute the contact descent as a seeded straight-line move through the trajectory host instead
         # of a cuMotion plan (the motion port's begin(straight_line=True) path). Default False keeps the
         # real-rig collision-planned descent; the sim mission opts in via config -- a one-flag revert.
@@ -555,6 +571,19 @@ class TransferController:
                                                  slow=True, goal_tol=0.2)
                     self.issued = True
                     return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+                # fm403: wrist_2-safe fixed-shape LIFT. The task-space lift IK can flip wrist_2 to the
+                # negative self-colliding branch (w2 -> -1.25 crosses the ur_wrist_2-vs-ur_forearm stop;
+                # runs 300d/305/311 jammed even with wrist_1 capped -- the bench showed w1 cleared but w2
+                # stuck 0.38 short). Drive the lift as a fixed collision-planned begin_joint_goal to the
+                # clear-region carry shape (w1<=0.65, w2>=0, bench-proven 10/10), exactly as
+                # cage_preplace_shape fixed the preplace. Carton-loaded -> slow; the big shoulder_pan swing
+                # into the shape settles a little short on joint0 only, so relax THIS move's terminal gate
+                # (the subsequent tuck/transit re-anchor). Absent carry_lift_shape => legacy task-space lift.
+                if self.phase == 'lift' and self.carry_lift_shape is not None:
+                    self.motion.begin_joint_goal(self.carry_lift_shape, s.joint_positions,
+                                                 slow=True, goal_tol=0.2)
+                    self.issued = True
+                    return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
                 straight_contact = self.phase == 'contact' and self.contact_straight_line
                 # Cart-cage open-face place: the INSERT (place) and empty-handed RETREAT are straight-line
                 # moves THROUGH the single open +x face (begin(straight_line=True): collision-off seeded
@@ -573,6 +602,9 @@ class TransferController:
                 # tuck/pan joint goals already use cart_tuck_shape wrist_1=0.65. None elsewhere (the pick
                 # approach may need wrist_1 above the stop to reach the backstock).
                 carry_cap = self.carry_wrist1_cap if self.phase == 'lift' else None
+                # fm403: belt-and-braces wrist_2 lower bound on the task-space LIFT fallback (carry_lift_shape
+                # unset) so the IK cannot pick the w2-negative self-colliding branch. None elsewhere.
+                carry_w2min = self.carry_wrist2_min if self.phase == 'lift' else None
                 # fm345 smaller-problems-later: the carton-loaded PLACE extend (preplace/place) is too
                 # fast for the soft arm drive to track the cuMotion min-jerk timing (run-270 sagged
                 # 0.567 rad short at rest). Slow those two moves to ~half and widen their terminal
@@ -584,7 +616,7 @@ class TransferController:
                 # nearest config to it, so shoulder_pan stays on the pan branch (cart_pan_joint0) instead
                 # of flipping to a far stow-nominal branch (run-273: ~3.9 rad base rotation stalled j0).
                 self.motion.begin(target, s.joint_positions, straight_line=straight,
-                                  joint_space=joint_space, wrist1_cap=carry_cap,
+                                  joint_space=joint_space, wrist1_cap=carry_cap, wrist2_min=carry_w2min,
                                   slow=place_move, goal_tol=(0.12 if place_move else None),
                                   near_start=place_move)
                 self.issued = True

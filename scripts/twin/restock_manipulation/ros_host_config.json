@@ -61,5 +61,14 @@
   0.561,
   0.0
  ],
- "carry_wrist1_cap": 0.65
+ "carry_wrist1_cap": 0.65,
+ "carry_lift_shape": [
+  -1.822,
+  -2.27,
+  1.0,
+  0.65,
+  0.8,
+  -1.2545
+ ],
+ "carry_wrist2_min": 0.0
 }

@@ -148,6 +148,8 @@ def main():
         staged_cart_swing=staged, cart_pan_joint0=float(config.get('cart_pan_joint0', 0.0)),
         cart_tuck_shape=config.get('cart_tuck_shape'),
         carry_wrist1_cap=config.get('carry_wrist1_cap'),
+        carry_lift_shape=config.get('carry_lift_shape'),
+        carry_wrist2_min=config.get('carry_wrist2_min'),
         # Cart-cage open-face place (firstmate 350): route the place THROUGH the cart's open +x face --
         # cuMotion plans PREPLACE around the published cage walls (config['world_obstacles']) to a mouth
         # standoff, then a straight-line insert drives onto the deck. Absent => the existing pose-IK
@@ -207,9 +209,13 @@ def main():
         'cage_insert_gap': controller.cage_insert_gap,
         'staged_cart_swing': controller.staged_cart_swing, 'cart_pan_joint0': controller.cart_pan_joint0,
         'cart_tuck_shape': controller.cart_tuck_shape,
-        # fm402: log the EFFECTIVE loaded-lift wrist_1 cap so a console grep proves it activated (None =
-        # uncapped -> the loaded lift drives wrist_1 into the self-collision stop, runs 300d/305/311).
+        # fm402/fm403: log the EFFECTIVE loaded-lift self-collision guards so a console grep proves they
+        # activated. carry_lift_shape routes the lift to a fixed clear-region joint goal; carry_wrist1_cap
+        # + carry_wrist2_min bound any remaining task-space carry move below/above the wrist_2-vs-forearm
+        # stop (None on any = that guard inactive -> the lift can jam, runs 300d/305/311).
         'carry_wrist1_cap': controller.carry_wrist1_cap,
+        'carry_lift_shape': controller.carry_lift_shape,
+        'carry_wrist2_min': controller.carry_wrist2_min,
         'reposition_before_place': controller.reposition_before_place,
         'sim_cart_place_policy': _policy is not None and bool(config.get('sim_cart_place_policy')),
         'base_collision_object': bool(config.get('base_collision_object', False)),

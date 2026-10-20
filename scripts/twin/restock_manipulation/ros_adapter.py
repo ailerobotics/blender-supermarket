@@ -303,7 +303,7 @@ class RosMotionPort:
         self._goal_tol_pub.publish(Float64(data=tol))
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
-              slow=False, goal_tol=None, near_start=False):
+              wrist2_min=None, slow=False, goal_tol=None, near_start=False):
         from moveit_msgs.srv import GetPositionIK
         if self.state not in ('idle', 'succeeded', 'failed'):
             raise RuntimeError('motion already active')
@@ -349,7 +349,7 @@ class RosMotionPort:
         if self.pose_goal and not self._straight_line and not joint_space:
             self.generation += 1
             self.handle = None
-            self._plan_goal = self._pose_plan_goal(pose, joints, wrist1_cap=wrist1_cap)
+            self._plan_goal = self._pose_plan_goal(pose, joints, wrist1_cap=wrist1_cap, wrist2_min=wrist2_min)
             self._send(self.plan, self._plan_goal, 'plan_accept')
             self.deadline_clock = time.monotonic
             self.deadline = time.monotonic() + self.timeout
@@ -492,13 +492,15 @@ class RosMotionPort:
             return True
         return False
 
-    def _pose_plan_goal(self, pose, joints, wrist1_cap=None):
+    def _pose_plan_goal(self, pose, joints, wrist1_cap=None, wrist2_min=None):
         """MoveGroup plan request to a cartesian TCP pose (position+orientation goal constraints in
         ur_base_link); cuMotion does its own collision-aware IK, so a single collision model (XRDF)
         decides feasibility. Mirrors begin_joint_goal's request fields; plan_only (the port executes
         a validated trajectory separately). wrist1_cap (fm327, sim-only) adds a GOAL joint constraint
         ur_wrist_1_joint <= wrist1_cap so cuMotion IKs a carry pose (the lift) BELOW the ur_wrist_2-vs-
-        ur_forearm self-collision stop (~0.70) even before the planner catches that pair."""
+        ur_forearm self-collision stop (~0.70) even before the planner catches that pair. wrist2_min
+        (fm403, sim-only) adds the companion LOWER bound ur_wrist_2_joint >= wrist2_min so the IK cannot
+        pick the w2-negative self-colliding branch (the bench showed w1-cap alone leaves w2 jamming)."""
         from moveit_msgs.action import MoveGroup
         from moveit_msgs.msg import Constraints, PositionConstraint, OrientationConstraint, BoundingVolume, JointConstraint
         from shape_msgs.msg import SolidPrimitive
@@ -538,6 +540,12 @@ class RosMotionPort:
                 joint_name='ur_wrist_1_joint', position=(_low + float(wrist1_cap)) / 2.,
                 tolerance_above=(float(wrist1_cap) - _low) / 2.,
                 tolerance_below=(float(wrist1_cap) - _low) / 2., weight=1.))
+        if wrist2_min is not None:
+            _high = 2.0   # fm403: bound only the LOWER side at wrist2_min; generous upper bound
+            c.joint_constraints.append(JointConstraint(
+                joint_name='ur_wrist_2_joint', position=(float(wrist2_min) + _high) / 2.,
+                tolerance_above=(_high - float(wrist2_min)) / 2.,
+                tolerance_below=(_high - float(wrist2_min)) / 2., weight=1.))
         req.goal_constraints = [c]
         goal.planning_options.plan_only = True
         return goal

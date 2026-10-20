@@ -29,12 +29,14 @@ class FixtureMotion:
         self._raised_count = 0
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
-              slow=False, goal_tol=None, near_start=False):
+              wrist2_min=None, slow=False, goal_tol=None, near_start=False):
         self.moves.append(pose)
         self.joint_space_moves = getattr(self, 'joint_space_moves', [])
         self.joint_space_moves.append(joint_space)
         self.wrist1_caps = getattr(self, 'wrist1_caps', [])
         self.wrist1_caps.append(wrist1_cap)
+        self.wrist2_mins = getattr(self, 'wrist2_mins', [])
+        self.wrist2_mins.append(wrist2_min)
         # fm345: per-move PLACE slow + widened goal-gate tolerance (recorded for assertions).
         self.slows = getattr(self, 'slows', [])
         self.slows.append(slow)
@@ -189,6 +191,31 @@ def test_lift_passes_carry_wrist1_cap_to_motion_fm402():
     t2 = run_to(c2, 'lift')
     c2.step(.1, packet(c2, t2, contact=True))
     assert all(x is None for x in m2.wrist1_caps)
+
+
+def test_lift_routes_to_joint_space_clear_shape_when_configured_fm403():
+    # fm403: with carry_lift_shape set, the loaded LIFT is a FIXED begin_joint_goal to the clear-region
+    # carry shape (w1<=0.65, w2>=0), NOT a task-space IK that can land in the wrist_2-vs-forearm
+    # self-colliding branch (runs 300d/305/311 jammed even with wrist_1 capped). The shape must be the
+    # joint goal; no task-space begin() is issued for the lift.
+    shape = [-1.822, -2.27, 1.0, 0.65, 0.8, -1.2545]
+    c, m = make_controller('collect', carry_lift_shape=shape)
+    moves_before = len(m.moves)
+    t = run_to(c, 'lift')
+    moves_at_lift = len(m.moves)
+    c.step(.1, packet(c, t, contact=True))     # issue the lift
+    assert any(list(g[0]) == shape for g in m.stows), m.stows   # lift went through begin_joint_goal
+    assert len(m.moves) == moves_at_lift                        # NO task-space begin() added by the lift
+
+
+def test_task_space_lift_fallback_carries_both_wrist_guards_fm403():
+    # fm403: when carry_lift_shape is UNSET, the task-space lift fallback carries BOTH guards -- the
+    # wrist_1 cap AND the wrist_2 lower bound -- so the IK cannot pick the w2-negative self-colliding branch.
+    c, m = make_controller('collect', carry_wrist1_cap=0.65, carry_wrist2_min=0.0)
+    t = run_to(c, 'lift')
+    c.step(.1, packet(c, t, contact=True))
+    assert 0.65 in [x for x in m.wrist1_caps if x is not None], m.wrist1_caps
+    assert 0.0 in [x for x in m.wrist2_mins if x is not None], m.wrist2_mins
 
 
 def test_grasp_stable_hold_still_confirms_under_monotonic_budget():

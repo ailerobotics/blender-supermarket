@@ -52,6 +52,8 @@ KEY_CONSUMER = {
     # absent = the loaded LIFT drives wrist_1 past the wrist_2-vs-forearm self-collision stop and jams
     # (runs 300d/305/311). They are in BASELINE_REQUIRED so the preflight fails LOUDLY if any is missing.
     'carry_wrist1_cap': HOST,
+    'carry_lift_shape': HOST,     # fm403: fixed clear-region joint goal for the loaded lift
+    'carry_wrist2_min': HOST,     # fm403: wrist_2 lower-bound guard on task-space carry moves
     'contact_overpress_cap_m': HOST,
     'contact_overpress_step_m': HOST,
     'arm_max_speed': HOST,
@@ -78,6 +80,8 @@ KEY_CONSUMER = {
 # wrist_1 into the self-collision stop (runs 300d/305/311). Add any future optional cap/limit key here.
 BASELINE_REQUIRED = (
     'carry_wrist1_cap',
+    'carry_lift_shape',
+    'carry_wrist2_min',
     'contact_overpress_cap_m',
     'contact_overpress_step_m',
     'arm_max_speed',
