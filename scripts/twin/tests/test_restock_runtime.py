@@ -137,16 +137,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn('rewarm', phases)
         self.assertNotIn('execute', phases[phases.index('rewarm'):])  # never reached place on a stale map
 
-    def test_reposition_arrival_reparks_station_before_rewarm(self):
-        # fm399 (1): on arrival at place_approach the adapter RE-PARKS the station (discarding the
-        # pickup-pose ESDF) before re-warming, so a fresh epoch is incorporated at the new pose.
-        reparks = []
-        class Owned:   # a sensor-owning runtime exposing repark_station (RosManipulationRuntime contract)
+    def test_reposition_pauses_station_at_drive_start_before_navigate(self):
+        # fm399 (1): a moving base invalidates the parked mapper and the host spams emergency-stop
+        # while a parked station is un-heartbeat-ed (run-309). The adapter must CLEANLY stop the
+        # station at the START of the reposition drive -- while still parked, BEFORE navigate -- so it
+        # goes idle (not faulted). It is re-begun fresh in the place_approach re-warm.
+        pauses = []
+        class Owned:   # a sensor-owning runtime exposing pause_station (RosManipulationRuntime contract)
             cart_location = 'rollwagen'
             def __init__(s): s.base_repositioned = False
             def start(s, a, j): pass
             def warm(s, t, parked=None): return True
-            def repark_station(s, t): reparks.append(t)
+            def pause_station(s, t): pauses.append((t, s.base_repositioned))
             def step(s, dt, t, parked=None):
                 return ManipResult('running', 'transit')
         owned = Owned()
@@ -165,14 +167,15 @@ class RuntimeTests(unittest.TestCase):
         adapter = RuntimeAdapter(self.nav, self.mobile, bridge, self.port, poses, fixture_mode=True)
         adapter.start('collect', self.job)
         for _ in range(8):
-            r = adapter._step(.1)
+            adapter._step(.1)
             if adapter.phase == 'rewarm':
                 break
-        self.assertEqual(len(reparks), 1)                      # re-parked exactly once, at arrival
-        self.assertTrue(owned.base_repositioned)               # and the arm was told to resume
+        self.assertEqual(len(pauses), 1)                       # paused exactly once
+        self.assertFalse(pauses[0][1])                         # paused while NOT yet repositioned (at drive start)
+        self.assertTrue(owned.base_repositioned)               # arm told to resume on arrival
 
-    def test_repark_station_resets_runtime_for_fresh_epoch(self):
-        # fm399 (1): RosManipulationRuntime.repark_station stops the active epoch, clears
+    def test_pause_station_resets_runtime_for_fresh_epoch(self):
+        # fm399 (1): RosManipulationRuntime.pause_station stops the active epoch, clears
         # collision_time and arms a fresh begin() on the next pump.
         from twin.restock.ros_manipulation import RosManipulationRuntime
         stops = []
@@ -181,7 +184,7 @@ class RuntimeTests(unittest.TestCase):
         rt = RosManipulationRuntime(NS(), lambda *a: None, prepare_station=lambda *a: None,
                                     station=station, feedback=feedback)
         rt._station_started = True
-        rt.repark_station(99.0)
+        rt.pause_station(99.0)
         self.assertEqual(stops, ['stop'])
         self.assertEqual(feedback.collision_time, -1.)
         self.assertFalse(rt._station_started)

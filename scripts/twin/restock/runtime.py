@@ -163,15 +163,15 @@ class ManipulationBridge:
                 and not hasattr(self.controller, 'cart_location') else self.controller)
         core.base_repositioned = True
 
-    def repark_station(self, simulation_time):
-        """fm399 (1): after the reposition drive the parked ESDF from the pickup pose is wrong at
-        place_approach (the base moved -- a moving base invalidates the parked mapper by contract).
-        Discard it and re-open a FRESH parked epoch at the new pose, so the re-warm re-incorporates a
-        fresh ESDF whose stamp is strictly after the new parked epoch; the incorporation-ack
-        parked_since gate then makes collision_time (hence ready) only reachable with that fresh
-        integration. No-op for a runtime that does not own sensor I/O (byte-identical)."""
-        if self.owns_sensor_io and hasattr(self.controller, 'repark_station'):
-            self.controller.repark_station(simulation_time)
+    def pause_station(self, simulation_time):
+        """fm399 (1): cleanly STOP the parked station at the START of the reposition drive, while the
+        base is still parked (so the 'stop' is accepted -> idle, NOT faulted). A moving base
+        invalidates the parked mapper, and the host spams emergency-stop while a parked station is
+        faulted/un-heartbeat-ed (the run-309 failure); an idle station publishes no stop. The station
+        is re-begun fresh at place_approach in the re-warm. No-op for a runtime that does not own
+        sensor I/O (byte-identical)."""
+        if self.owns_sensor_io and hasattr(self.controller, 'pause_station'):
+            self.controller.pause_station(simulation_time)
 
 
 class RuntimeAdapter:
@@ -385,10 +385,9 @@ class RuntimeAdapter:
                 # fm390: arrived at place_approach with the carton carried. Resume the PAUSED arm (its
                 # TRANSIT -> preplace) after re-warming the collision map at the new base pose; do NOT
                 # re-begin the manipulation (the controller is mid-run, holding the carry pose).
-                # fm399 (1): RE-PARK the station first -- the pickup-pose ESDF is wrong here (run-309
-                # stopped on exactly this stale collision world at arrival). repark opens a fresh epoch
-                # so the re-warm below re-incorporates a fresh ESDF at the new pose before place.
-                self.manip.repark_station(self.time)
+                # fm399 (1): the station was cleanly STOPPED at drive-start; the re-warm below begins a
+                # FRESH epoch at this new pose and re-incorporates a fresh ESDF before place (the
+                # pickup-pose ESDF would be wrong here -- the run-309 stale-collision-world failure).
                 self.manip.set_base_repositioned()
                 self._collect_reposition_pending = False
                 self._collect_repositioned = True
@@ -518,6 +517,12 @@ class RuntimeAdapter:
                 self._reposition_seq = ([stage, self.poses['place_approach']] if stage is not None
                                         else [self.poses['place_approach']])
                 self._reposition_seq_i = 0
+                # fm399 (1): a moving base invalidates the parked mapper, and the host faults + spams
+                # emergency-stop the instant a parked station stops being heartbeat-ed (run-309 died
+                # here). CLEANLY stop the station NOW -- while still parked, so the 'stop' is accepted
+                # (-> idle, NOT faulted, no emergency stop) -- before the drive. It is re-begun fresh at
+                # place_approach in the re-warm, so place sees a correct new-pose ESDF by construction.
+                self.manip.pause_station(self.time)
                 # fm396 (B): trusted STATIC drive for the reposition -- the short move in front of the
                 # parked cart is proven clear against the static map + footprint (check_place_approach_nav.py),
                 # but the carry-fold self-geometry pollutes the live scan (run-304/307 ring the per-tick mask
