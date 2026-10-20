@@ -1,0 +1,46 @@
+{
+  "_comment": "Opt-in authored tow lanes + cart parking spot for the COUPLED restock drives. Merge the 'navigation.tow_lanes'/'navigation.directional_zone' keys into the mission runtime-config's navigation block, and the 'mission_poses.cart_parking' pose into mission_poses (the integration/bt-driver lane wires the return nav goal + uncouple step on that key). Absent => coupled drives free-plan exactly as before (byte-identical) and the braking gate uses the direction-aware zone by default. Poses are map-frame [x, y, yaw] in metres/radians; yaw PI = facing -x (west), 0 = facing +x (east). Waypoints are the authored centreline the expanded trajectory must pass through (asserted at build time). goal_articulation is the lane's achievable terminal cart articulation and governs arrival when the lane is active.",
+  "mission_poses": {
+    "cart_parking": [-9.0, 16.0, 3.141592653589793]
+  },
+  "navigation": {
+    "directional_zone": true,
+    "tow_lanes": [
+      {
+        "name": "outbound_dock_to_shelf",
+        "start": [-4.46, 15.25, 0.0],
+        "start_cart_yaw": 0.0,
+        "goal": [-3.05, 6.0, 3.141592653589793],
+        "goal_articulation": 0.9,
+        "start_tol_cart_yaw": 0.35,
+        "waypoints": [
+          [-2.97, 13.58, -1.687],
+          [-4.71, 12.2, -3.006],
+          [-6.77, 13.08, 1.945],
+          [-5.81, 15.06, 0.294],
+          [-3.91, 13.94, -1.358],
+          [-3.87, 11.73, -1.571],
+          [-3.43, 9.56, -0.777],
+          [-1.68, 8.12, -1.144],
+          [-2.58, 6.07, -2.826]
+        ]
+      },
+      {
+        "name": "return_shelf_to_cart_parking",
+        "start": [-3.05, 6.0, 3.141592653589793],
+        "start_cart_yaw": 3.141592653589793,
+        "goal": [-9.0, 16.0, 3.141592653589793],
+        "goal_articulation": 0.2,
+        "start_tol_cart_yaw": 0.35,
+        "waypoints": [
+          [-4.54, 7.67, 1.456],
+          [-3.88, 9.78, 1.571],
+          [-3.88, 11.99, 1.571],
+          [-3.88, 14.2, 1.623],
+          [-5.54, 15.65, 3.039],
+          [-7.74, 15.88, 3.039]
+        ]
+      }
+    ]
+  }
+}

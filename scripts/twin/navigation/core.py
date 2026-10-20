@@ -328,7 +328,8 @@ class Controller:
     """
     def __init__(self, grid, footprint, *, max_speed=0.25, max_angular=0.35,
                  brake_acceleration=0.4, stale_after=0.3, blocked_timeout=8.0,
-                 goal_timeout=180.0, allow_test_fixtures=False, docking=None):
+                 goal_timeout=180.0, allow_test_fixtures=False, docking=None,
+                 directional_zone=True):
         self.grid, self.footprint = grid, footprint
         self.max_speed, self.max_angular = max_speed, max_angular
         self.brake_acceleration, self.stale_after = brake_acceleration, stale_after
@@ -338,6 +339,14 @@ class Controller:
             raise ValueError('invalid controller limits')
         if docking is not None and not isinstance(docking, DockingApproach):
             raise ValueError('docking must be a DockingApproach or None')
+        # Direction-aware braking zone (default on): the circular footprint is checked all
+        # around (never shrunk) and the braking-distance extension is applied ONLY along the
+        # commanded forward motion (a capsule down the heading), so a no-reverse base never
+        # trips obstacle_stop on static geometry in its rear hemisphere it can never drive
+        # into. Set False to restore the legacy omnidirectional stop disk (radius+stop in all
+        # directions). The footprint radius and every margin are identical either way; the
+        # toggle only governs whether the braking inflation is omnidirectional or forward-only.
+        self.directional_zone = bool(directional_zone)
         self.allow_test_fixtures = allow_test_fixtures
         # Optional config-driven dock-approach speed cap; None -> disabled (unchanged run).
         self.docking = docking
@@ -437,16 +446,44 @@ class Controller:
         dyn = () if self.static_drive else obs.obstacles
         if not self.static_drive and not self._coverage_ok(odom, obs, radius, stop_distance, v, w):
             return Result(reason='insufficient_sensor_coverage')
-        # A disk expanded by stopping travel contains every possible braking arc. fm396 (B)/run-308: on the
-        # trusted static reposition the braking inflation (stop_distance = stale_after*speed, with the 3 s
-        # render-paced stale_after) made this disk overlap the SOURCE SUPPORT 0.86 m away and trip
-        # obstacle_stop, though the footprint radius clears it and the plan routes clear against the static
-        # map. Use the footprint RADIUS only there (no braking lookahead) so a genuine static overlap still
-        # stops but the proven-clear short reposition is not blocked by the render-pacing margin.
-        stop_radius = radius if self.static_drive else radius + stop_distance
-        if not self.grid.free(odom.pose,stop_radius,dyn):
+        # fm396 (B)/run-308: on the trusted static reposition the braking inflation (stop_distance =
+        # stale_after*speed, with the 3 s render-paced stale_after) overlapped the SOURCE SUPPORT 0.86 m
+        # away and tripped obstacle_stop though the footprint radius clears it and the plan routes clear
+        # against the static map. There the braking lookahead is dropped entirely (footprint RADIUS only).
+        # Otherwise the braking zone bounds every possible braking arc: direction-aware (a forward capsule
+        # down the heading) when self.directional_zone, else the legacy omnidirectional disk.
+        brake = 0.0 if self.static_drive else stop_distance
+        if not self._braking_zone_free(odom.pose, radius, brake, dyn):
             return Result(reason='obstacle_stop')
         return Result(v,w,reason='tracking')
+
+    def _braking_zone_free(self, pose, radius, brake, dyn):
+        """Is the braking zone clear of `dyn` obstacles and the static map?
+
+        The circular footprint (`radius`, which circumscribes the whole train) is ALWAYS
+        checked all around and is never shrunk -- any obstacle inside the body stops the
+        robot regardless of heading. The braking-distance extension `brake` is then added:
+
+        - directional (`self.directional_zone`, default): only along the forward motion -- the
+          footprint disk swept `brake` metres down the heading (a capsule). `brake` is derived
+          from the forward speed `max(commanded, measured)`, so a stop / rotate-in-place command
+          with no residual forward motion has `brake == 0` and only the all-around footprint is
+          checked (the circular footprint sweeps onto itself under rotation). A no-reverse base
+          can never drive into geometry behind it, so a rear obstacle outside the footprint does
+          NOT trip; an obstacle the same distance AHEAD (within the capsule) still does. A base
+          still physically coasting forward (measured speed > 0) while commanded to stop keeps
+          the forward capsule, because that travel is real.
+        - legacy omnidirectional: `brake` is added in every direction (radius+brake disk),
+          catching the rear hemisphere a forward-only base can never reach.
+        """
+        if not self.grid.free(pose, radius, dyn):
+            return False  # footprint (all around, never shrunk)
+        if brake <= 1e-9:
+            return True
+        if not self.directional_zone:
+            return self.grid.free(pose, radius + brake, dyn)
+        nose = (pose[0] + brake * math.cos(pose[2]), pose[1] + brake * math.sin(pose[2]))
+        return self.grid.segment_free(pose, nose, radius, dyn)
 
     def _coverage_ok(self, odom, obs, radius, stop_distance, v, w):
         """Circular-footprint coverage for a plain differential base (overridden by the
