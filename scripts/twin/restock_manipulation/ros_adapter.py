@@ -797,9 +797,30 @@ class RosMotionPort:
             self._plan_started_wall = time.monotonic()
             print('MOVE_GROUP_CRASH_RETRY resending plan goal after respawn (retry %d/%d)'
                   % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
+            self._reanchor_plan_goal_to_live()
             self._send(self.plan, self._plan_goal, 'plan_accept')
             return 'running'
         return None
+
+    def _reanchor_plan_goal_to_live(self):
+        """fm405: before re-sending a plan goal to a RESPAWNED move_group, re-anchor its request
+        start_state to the LIVE measured joints so cuMotion plans from where the arm ACTUALLY is. A crash
+        MID-MOVE (e.g. the grasp approach descent, run-312) then resumes from the current pose instead of
+        a stale pre-crash start, so the descent completes and the weld latches fully rather than
+        half-latched. No-op on the real rig (no live state), or when the goal / its start_state is absent
+        -- the result is still re-anchored on validate (fm368), so this only tightens the REQUEST."""
+        goal = getattr(self, '_plan_goal', None)
+        if goal is None or getattr(self, '_live_arm_state', None) is None:
+            return                                   # no goal, or real rig / fixture without live state
+        live = self._live_measured_start()
+        if live is None:
+            return
+        try:
+            js = goal.request.start_state.joint_state
+            pos_by_name = dict(zip(JOINTS, live))
+            js.position = [pos_by_name[n] for n in js.name]
+        except (AttributeError, KeyError, TypeError, ValueError):
+            pass   # fixture/goal without a start_state -> leave the request as-is (validate re-anchors)
 
     def _live_measured_start(self):
         """fm368: the live measured arm pose as an ordered six-tuple in JOINTS order, or None when no
@@ -878,6 +899,7 @@ class RosMotionPort:
                 print('MOVE_GROUP_CRASH_RETRY plan-result wall-deadline (likely move_group crash+respawn '
                       'between polls); resending plan goal (retry %d/%d)'
                       % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
+                self._reanchor_plan_goal_to_live()   # fm405: re-plan from live state (resume mid-descent)
                 self._send(self.plan, self._plan_goal, 'plan_accept')
                 return 'running'
             # fm367: a SIM-clock miss is a render-pacing transient (not a collision), so flag it so the

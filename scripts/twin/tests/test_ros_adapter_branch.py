@@ -9,6 +9,7 @@ node: the port is built via __new__ and only the pure branch helpers are exercis
 import math
 from pathlib import Path
 import sys
+from types import SimpleNamespace as S
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -244,6 +245,28 @@ class MoveGroupCrashRetry(unittest.TestCase):
         self.assertFalse(R('wall', 'await_settle', True, 0))
         self.assertFalse(R('wall', 'plan_result', False, 0))
         self.assertFalse(R('wall', 'plan_result', True, MOVE_GROUP_CRASH_RETRY_MAX))
+
+    def test_crash_resend_reanchors_plan_start_to_live_state_fm405(self):
+        # fm405: a crash MID-MOVE must resume from the LIVE pose -- re-anchor the plan goal's start_state
+        # to the live measured joints before re-sending, so cuMotion plans from where the arm actually is
+        # (the grasp descent resumes and the weld latches fully, not half-latched).
+        from twin.restock_manipulation.ros_adapter import JOINTS
+        p = self._port()
+        live = {j: float(i) for i, j in enumerate(JOINTS)}          # distinctive live joints
+        p._live_arm_state = lambda: (live, {j: 0.0 for j in JOINTS}, True)
+        js = S(name=list(JOINTS), position=[9.0] * 6)               # stale pre-crash start
+        p._plan_goal = S(request=S(start_state=S(joint_state=js)))
+        p._reanchor_plan_goal_to_live()
+        self.assertEqual(list(js.position), [float(i) for i in range(len(JOINTS))])  # re-anchored, in name order
+
+    def test_crash_resend_reanchor_is_noop_without_live_state_fm405(self):
+        # real rig / no fresh live state -> request unchanged (validate still re-anchors the RESULT).
+        p = self._port()
+        p._live_arm_state = None
+        js = S(name=['a'], position=[1.0])
+        p._plan_goal = S(request=S(start_state=S(joint_state=js)))
+        p._reanchor_plan_goal_to_live()
+        self.assertEqual(list(js.position), [1.0])
 
     @staticmethod
     def _port(state='plan_result', ready=True, plan_goal='GOAL', crash_retries=0, awaiting=False):
