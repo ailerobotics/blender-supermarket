@@ -163,6 +163,10 @@ def main():
         # (lift->tuck->TRANSIT->[base nav]->preplace), instead of the arm-only cage insert. Absent =>
         # byte-identical. Mutually exclusive in practice with cart_cage_place (base nav replaces it).
         reposition_before_place=bool(config.get('reposition_before_place', False)),
+        # fm410 (run-316): physics grasp confirm -- the lift-probe carton-tracking threshold (m). The grasp
+        # advances to carry only if the measured carton rose by >= this from the grasp-confirm baseline, so
+        # the confirm reads physics, never the (arm-occluded) source camera. Absent => inert (byte-identical).
+        grasp_track_m=config.get('grasp_track_m'),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # The first decode-grade frame + support registration under render pacing needs several
@@ -216,6 +220,7 @@ def main():
         'carry_wrist1_cap': controller.carry_wrist1_cap,
         'carry_lift_shape': controller.carry_lift_shape,
         'carry_wrist2_min': controller.carry_wrist2_min,
+        'grasp_track_m': controller.grasp_track_m,   # fm410: lift-probe carton-tracking confirm threshold (m)
         'reposition_before_place': controller.reposition_before_place,
         'sim_cart_place_policy': _policy is not None and bool(config.get('sim_cart_place_policy')),
         'base_collision_object': bool(config.get('base_collision_object', False)),

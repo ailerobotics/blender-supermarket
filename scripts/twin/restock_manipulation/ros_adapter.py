@@ -600,8 +600,7 @@ class RosMotionPort:
         # without a fresh _plan_started_wall the total-planning-wall cap carried the stale anchor from
         # the previous pose-goal move (lift), so the tuck/pan/stow joint goal tripped
         # 'planning failed (exhausted within wall cap)' the instant it entered planning
-        # (PLAN_WALL_DIAG elapsed=49.6 s on a plan that had just started). A joint goal does not re-plan
-        # a stored pose, so _plan_goal stays None (poll's REPLAN path is a no-op for it).
+        # (PLAN_WALL_DIAG elapsed=49.6 s on a plan that had just started).
         self._last_fault_sim_deadline=False   # fm367: fresh deadline-fault signal per move
         self._replan_attempts=0
         self._server_crash_retries=0
@@ -630,6 +629,17 @@ class RosMotionPort:
                 position=float(position),tolerance_above=.001,tolerance_below=.001,weight=1.))
         req.goal_constraints=[constraints]
         goal.planning_options.plan_only=True
+        # fm410 (run-316): STORE this joint goal so a WALL plan_result deadline (a move_group
+        # SIGABRT+respawn between polls, or a bare render-paced plan-result overrun -- run-316 died on a
+        # 30 ms plan_result wall overrun) can be re-sent by the bounded crash-retry instead of ending the
+        # mission. Previously begin_joint_goal left _plan_goal None, so has_plan_goal was False and
+        # _should_deadline_crash_retry / _should_crash_retry could never fire for the fm403 carry_lift_shape
+        # LIFT (and the cart tuck/pan/place) -- a joint-space (straight=False) plan_result wall fault then
+        # hard-failed the move -> host e-stop. The re-send is re-anchored to the live measured start
+        # (_reanchor_plan_goal_to_live) and bounded by MOVE_GROUP_CRASH_RETRY_MAX + plan_wall_cap_s. It also
+        # enables the stochastic fresh-re-plan on a cuMotion plan REJECTION (bounded by REPLAN_MAX), which
+        # is strictly beneficial for the fixed joint goal (cuMotion is stochastic; see the plan_result path).
+        self._plan_goal=goal
         self.generation+=1
         self.handle=None
         self.deadline_clock=time.monotonic

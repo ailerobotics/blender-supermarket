@@ -77,7 +77,8 @@ class TransferController:
                  carry_lift_shape=None, carry_wrist2_min=None,
                  cart_cage_place: bool = False, cage_axis=(1.0, 0.0, 0.0),
                  cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03,
-                 cage_preplace_shape=None, reposition_before_place: bool = False):
+                 cage_preplace_shape=None, reposition_before_place: bool = False,
+                 grasp_track_m=None):
         self.steady_clock=steady_clock
         # fm390: drive the BASE in front of the rollwagen mouth between the carry fold and the place,
         # instead of reaching the place around from the collect station pose. When set (with the staged
@@ -117,6 +118,19 @@ class TransferController:
         # fallback when carry_lift_shape is unset) so cuMotion cannot pick the w2-negative self-colliding
         # branch. None = off => byte-identical.
         self.carry_wrist2_min = None if carry_wrist2_min is None else float(carry_wrist2_min)
+        # fm410 (run-316): PHYSICS grasp confirm. The grasp phase confirms an ATTACHMENT (s.contact =
+        # weld/native grip, fm395 semantics, unchanged) WITHOUT consulting the source camera -- the arm
+        # occluding the fixed source cam during the grasp/hold is the normal case, never a fault. The LIFT
+        # then serves as the short physics PROBE: before advancing to carry (tuck/preplace) we require the
+        # measured carton centre (s.placed_pose, the fm389 ground-truth read) to have RISEN by >= grasp_track_m
+        # from its grasp-confirm baseline -- i.e. the carton physically tracked the tool up. A carton that
+        # did NOT track (placed_pose flat) means the attach signal was spurious / the body slipped, so FAIL
+        # honestly rather than carry a phantom load. None/<=0 (or no placed_pose from the driver -- real rig)
+        # => the gate is inert and the advance is the legacy fm395 one (byte-identical).
+        self.grasp_track_m = None if grasp_track_m is None else float(grasp_track_m)
+        if self.grasp_track_m is not None and (not math.isfinite(self.grasp_track_m) or self.grasp_track_m < 0):
+            raise ValueError('grasp_track_m must be a finite, non-negative metre threshold')
+        self._carton_z_at_grasp = None   # fm410: measured carton z latched at grasp-confirm, for the lift probe
         # Execute the contact descent as a seeded straight-line move through the trajectory host instead
         # of a cuMotion plan (the motion port's begin(straight_line=True) path). Default False keeps the
         # real-rig collision-planned descent; the sim mission opts in via config -- a one-flag revert.
@@ -329,6 +343,7 @@ class TransferController:
         self._grasp_confirm = 0         # fm395: consecutive confirmed-attachment ticks in grasp
         self._grasp_waits = 0           # fm395: ticks awaiting a confirmed attachment before a grasp retry
         self._grasp_retries = 0         # fm395: bounded grasp re-seat retries used this operation
+        self._carton_z_at_grasp = None  # fm410: latched at grasp-confirm; the lift-probe tracking baseline
         self.verify_ids = set()
         self.release_time = None
 
@@ -705,6 +720,20 @@ class TransferController:
                     # empty-handed return retreat -> retreat_tuck -> stow (see __init__).
                     next_phase['lift'] = 'tuck'
                     next_phase['retreat'] = 'retreat_tuck'
+                # fm410: the LIFT just completed -- it is the short physics probe. Before advancing to carry,
+                # require the measured carton to have TRACKED the tool up by >= grasp_track_m from the
+                # grasp-confirm baseline. A carton that stayed put (placed_pose flat) was never truly held, so
+                # FAIL rather than fold a phantom load through the cart. Inert when grasp_track_m is unset or
+                # no baseline/placed_pose was captured (real rig) -> legacy fm395 advance (byte-identical).
+                if (self.phase == 'lift' and self.grasp_track_m and self._carton_z_at_grasp is not None):
+                    if s.placed_pose is None:
+                        return self._fail('grasp probe: carton pose unavailable to confirm the lift tracked')
+                    risen = float(s.placed_pose[2]) - self._carton_z_at_grasp
+                    print('GRASP_PROBE risen=%.3f need=%.3f carton_z0=%.3f carton_z=%.3f'
+                          % (risen, self.grasp_track_m, self._carton_z_at_grasp, float(s.placed_pose[2])),
+                          flush=True)
+                    if risen < self.grasp_track_m:
+                        return self._fail('grasp not confirmed: carton did not track the tool through the lift')
                 self._transition(next_phase[self.phase])
                 return self._result()
             # Contact-terminated grasp descent (firstmate key contact-move-termination): while the
@@ -800,6 +829,12 @@ class TransferController:
                     self.held = True
                     if not self.motion.update_payload(True, self.profile):
                         return self._fail('payload collision attachment not acknowledged')
+                    # fm410: latch the measured carton z NOW (attachment confirmed, arm not yet lifted) as
+                    # the lift-probe baseline; the lift->carry gate requires the carton to rise from here.
+                    # None when the driver provides no placed_pose (real rig) -> the probe gate is inert.
+                    self._carton_z_at_grasp = (float(s.placed_pose[2])
+                                               if self.grasp_track_m and s.placed_pose is not None
+                                               else None)
                     self._transition('lift')
                     return self._result()
             else:

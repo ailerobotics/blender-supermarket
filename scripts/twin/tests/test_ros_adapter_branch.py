@@ -337,6 +337,60 @@ class MoveGroupCrashRetry(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             p._handle_server_crash()                           # poll() wraps this into a clean 'failed'
 
+    def test_begin_joint_goal_stores_a_resendable_plan_goal_fm410(self):
+        # fm410 (run-316): a begin_joint_goal move (the fm403 carry_lift_shape LIFT, cart tuck/pan/place)
+        # MUST store _plan_goal so a WALL plan_result deadline re-sends it (bounded crash-retry) instead of
+        # hard-failing the move -> host e-stop. run-316 died on exactly this: a joint-space (straight=False)
+        # plan_result wall overrun of 30 ms with _plan_goal=None -> has_plan_goal False -> no retry.
+        import math, time as _t, types
+        from twin.restock_manipulation import ros_adapter as A
+        from twin.restock_manipulation.ros_adapter import (
+            RosMotionPort, JOINTS, _should_deadline_crash_retry as R, MOVE_GROUP_CRASH_RETRY_MAX)
+
+        class _Goal:                                   # nested-attr MoveGroup.Goal stand-in
+            def __init__(self):
+                js = S(name=[], position=[])
+                self.request = S(group_name=None, pipeline_id=None, allowed_planning_time=0.0,
+                                 num_planning_attempts=0, max_velocity_scaling_factor=0.0,
+                                 max_acceleration_scaling_factor=0.0,
+                                 start_state=S(joint_state=js), goal_constraints=[])
+                self.planning_options = S(plan_only=False)
+        fake_action = types.ModuleType('moveit_msgs.action')
+        fake_action.MoveGroup = S(Goal=_Goal)
+        fake_action.ExecuteTrajectory = S(Goal=_Goal)
+        fake_msg = types.ModuleType('moveit_msgs.msg')
+        fake_msg.Constraints = lambda: S(joint_constraints=[])
+        fake_msg.JointConstraint = lambda **kw: S(**kw)
+        saved = {k: sys.modules.get(k) for k in ('moveit_msgs', 'moveit_msgs.action', 'moveit_msgs.msg')}
+        sys.modules['moveit_msgs'] = types.ModuleType('moveit_msgs')
+        sys.modules['moveit_msgs.action'] = fake_action
+        sys.modules['moveit_msgs.msg'] = fake_msg
+        try:
+            p = RosMotionPort.__new__(RosMotionPort)
+            p.state = 'idle'
+            p.plan, p.execute = _FakePlan(True), _FakePlan(True)
+            p.limits = LIMITS
+            p.group, p.pipeline = 'arm', 'cuMotion'
+            p.velocity_scale = 0.05
+            p.generation, p.timeout = 3, 25.0
+            p._publish_goal_tol = lambda tol: None
+            shape = (0.0, -1.5, 1.5, 0.65, 0.8, -1.25)   # a carry_lift_shape-like 6-joint goal
+            measured = (0.0, -1.57, 1.57, -1.57, -1.57, 0.0)
+            p.begin_joint_goal(shape, measured)
+            self.assertIsNotNone(p._plan_goal)                       # stored...
+            self.assertIs(p._plan_goal, p.plan.sent[-1])             # ...and it is the goal actually sent
+            self.assertEqual(p.state, 'plan_accept')
+            # The decisive consequence: a wall plan_result deadline now re-sends instead of failing.
+            self.assertTrue(R('wall', 'plan_result', p._plan_goal is not None,
+                              getattr(p, '_server_crash_retries', 0)))
+            self.assertTrue(_t and MOVE_GROUP_CRASH_RETRY_MAX and math)  # keep imports referenced
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+
 
 class Drain(unittest.TestCase):
     """drain() advances the PLANNING state machine off the independent watchdog tick (firstmate 290

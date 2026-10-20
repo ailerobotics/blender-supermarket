@@ -6,7 +6,8 @@ The Isaac-only live arm pose read (`_arm_base_from_camera`) is stubbed; everythi
 import numpy as np
 import pytest
 
-from scripts.twin.restock_manipulation.isaac_factory import CollectTargetBridge
+from scripts.twin.restock_manipulation.isaac_factory import (
+    CollectTargetBridge, survive_collect_occlusion)
 from scripts.twin.restock_manipulation.types import ProductProfile
 from scripts.twin.restock_camera.source_target import SourceTarget
 
@@ -81,3 +82,52 @@ def test_not_parked_is_rejected():
 def test_no_provider_is_none():
     b = _bridge(None)
     assert b.capture(1.0, 'backstock_00', 'rollwagen') is None
+
+
+# ---- fm410 (run-316): source-occlusion survival once the carton is attached ----
+
+def test_survive_collect_occlusion_truth_table_fm410():
+    assert survive_collect_occlusion(True, True, True) is True
+    assert survive_collect_occlusion(False, True, True) is False   # disabled => never survives (byte-identical)
+    assert survive_collect_occlusion(True, False, True) is False   # not attached => pre-grasp, source still required
+    assert survive_collect_occlusion(True, True, False) is False   # base moving => a real fault, never survived
+
+
+def test_occluded_capture_survives_when_attached_and_parked_fm410(monkeypatch):
+    # The source provider is occluded (returns None) but the carton is attached (native grip) and the base
+    # parked -> emit an honest arm-feedback packet (empty source observations, LIVE contact, no fabricated
+    # acquisition deadline) instead of nulling /sensors and freezing the controller mid-grasp/lift (run-316).
+    monkeypatch.setenv('RESTOCK_COLLECT_SURVIVE_OCCLUSION', '1')
+    b = _bridge(lambda now: None)
+    b.contact = NS(read=lambda: True)                    # attached (native grippedObjects)
+    packet = b.capture(2.0, 'backstock_00', 'rollwagen')
+    assert packet is not None
+    assert packet.observations == ()                     # no fresh source localisation is claimed
+    assert packet.target is None
+    assert packet.parked is True and packet.contact is True
+    assert packet.valid_until_steady is None             # no source acquisition this frame -> no deadline
+    assert packet.simulation_time == 2.0
+
+
+def test_occluded_capture_stays_none_when_not_attached_fm410(monkeypatch):
+    # Pre-grasp occlusion (carton NOT attached): the source is still required for localisation -> None.
+    monkeypatch.setenv('RESTOCK_COLLECT_SURVIVE_OCCLUSION', '1')
+    b = _bridge(lambda now: None)
+    b.contact = NS(read=lambda: False)                   # not attached; stage=None => no weld prim either
+    assert b.capture(2.0, 'backstock_00', 'rollwagen') is None
+
+
+def test_occluded_capture_not_survived_when_base_moving_fm410(monkeypatch):
+    monkeypatch.setenv('RESTOCK_COLLECT_SURVIVE_OCCLUSION', '1')
+    b = _bridge(lambda now: None)
+    b.contact = NS(read=lambda: True)
+    b.motion = NS(parked=lambda: False, collision_time=9.0)
+    assert b.capture(2.0, 'backstock_00', 'rollwagen') is None   # moving base is a fault, never survived
+
+
+def test_occlusion_survival_off_by_default_is_byte_identical_fm410(monkeypatch):
+    # Flag unset => the occluded capture returns None exactly as before even with the carton attached.
+    monkeypatch.delenv('RESTOCK_COLLECT_SURVIVE_OCCLUSION', raising=False)
+    b = _bridge(lambda now: None)
+    b.contact = NS(read=lambda: True)
+    assert b.capture(2.0, 'backstock_00', 'rollwagen') is None

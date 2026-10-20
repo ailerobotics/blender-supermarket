@@ -569,13 +569,19 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     # (the preflight baseline enforces them). carry_wrist1_cap + the
                                     # clear-region joint goal carry_lift_shape + the wrist_2 lower bound
                                     # keep the lift off the wrist_2-vs-forearm stop (runs 300d/305/311).
-                                    'carry_wrist1_cap', 'carry_lift_shape', 'carry_wrist2_min'})
+                                    'carry_wrist1_cap', 'carry_lift_shape', 'carry_wrist2_min',
+                                    # fm410: physics grasp-confirm (lift-probe carton-tracking) threshold --
+                                    # also preflight-baseline-enforced so it can never silently de-activate
+                                    # back to the camera-dependent confirm that stalled run-316.
+                                    'grasp_track_m'})
         self.assertIsInstance(cfg['carry_wrist1_cap'], (int, float))
         self.assertLessEqual(cfg['carry_wrist1_cap'], 0.65)   # at/below the wrist_2-vs-forearm stop
         self.assertEqual(len(cfg['carry_lift_shape']), 6)     # full 6-joint clear-region lift goal
         self.assertLessEqual(cfg['carry_lift_shape'][3], 0.65)  # wrist_1 at/below the stop
         self.assertGreaterEqual(cfg['carry_lift_shape'][4], 0.0)  # wrist_2 on the clear (positive) side
         self.assertIsInstance(cfg['carry_wrist2_min'], (int, float))
+        self.assertIsInstance(cfg['grasp_track_m'], (int, float))
+        self.assertGreater(cfg['grasp_track_m'], 0.0)         # a positive rise threshold (metres)
         self.assertGreaterEqual(cfg['carry_wrist2_min'], 0.0)  # wrist_2 lower bound on the clear side
         for k in ('sim_cart_place_policy', 'staged_cart_swing', 'base_collision_object', 'cart_cage_place',
                   'reposition_before_place'):

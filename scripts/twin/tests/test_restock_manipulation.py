@@ -218,6 +218,52 @@ def test_task_space_lift_fallback_carries_both_wrist_guards_fm403():
     assert 0.0 in [x for x in m.wrist2_mins if x is not None], m.wrist2_mins
 
 
+def _confirm_grasp_with_carton(c, z0, t0=1.0):
+    """Drive to grasp and confirm the attachment with a MEASURED carton pose (physics confirm), latching
+    z0 as the lift-probe baseline. Returns the next packet time. Uses no source observation at confirm."""
+    t = run_to(c, 'grasp', t0)
+    c.step(.1, packet(c, t, contact=False, placed_pose=(.4, 0., z0, 0., 0., 0., 1.)))       # issue gripper
+    r = c.step(.1, packet(c, t + .1, contact=True, placed_pose=(.4, 0., z0, 0., 0., 0., 1.)))  # confirm -> lift
+    assert c.phase == 'lift', (c.phase, r.reason)
+    return t + .2
+
+
+def test_grasp_confirm_is_physics_and_advances_when_carton_tracks_lift_fm410():
+    # fm410 (run-316): the grasp confirms on the ATTACHMENT, then the LIFT is the physics probe -- with the
+    # measured carton risen >= grasp_track_m it advances to carry. Crucially the lift packets carry NO source
+    # observation (observations=()), modelling the arm occluding the fixed source cam during grasp/hold: that
+    # must never block or fail the confirm/advance (run-316's stall was the source going occluded there).
+    c, m = make_controller('collect', grasp_track_m=0.03)
+    z0 = 0.2
+    t = _confirm_grasp_with_carton(c, z0)
+    c.step(.1, packet(c, t, contact=True, observations=(), placed_pose=(.4, 0., z0 + .05, 0., 0., 0., 1.)))   # issue lift
+    r = c.step(.1, packet(c, t + .1, contact=True, observations=(), placed_pose=(.4, 0., z0 + .05, 0., 0., 0., 1.)))  # complete
+    assert c.phase == 'preplace', (c.phase, r.reason)   # carton tracked the tool up -> advanced to carry
+    assert r.status == 'running'
+
+
+def test_grasp_confirm_fails_when_carton_does_not_track_the_lift_fm410():
+    # A carton that stayed put through the lift (placed_pose flat) was never truly held: FAIL honestly rather
+    # than fold a phantom load through the cart. This is the physics gate the source-camera confirm lacked.
+    c, m = make_controller('collect', grasp_track_m=0.03)
+    z0 = 0.2
+    t = _confirm_grasp_with_carton(c, z0)
+    c.step(.1, packet(c, t, contact=True, placed_pose=(.4, 0., z0, 0., 0., 0., 1.)))              # issue lift
+    r = c.step(.1, packet(c, t + .1, contact=True, placed_pose=(.4, 0., z0 + .005, 0., 0., 0., 1.)))  # barely moved
+    assert r.status == 'failed'
+    assert 'did not track' in r.reason, r.reason
+
+
+def test_grasp_track_inert_without_threshold_or_placed_pose_byte_identical_fm410():
+    # Off (grasp_track_m unset) => no physics gate, advance exactly as before (byte-identical legacy fm395).
+    c, _ = make_controller('collect')
+    assert run_to(c, 'preplace') and c.phase == 'preplace'
+    # ON but the driver provides NO placed_pose (the real rig / fixture) => baseline None => gate inert, so a
+    # real-rig run that cannot measure the carton is never blocked by this sim-only confirm.
+    c2, _ = make_controller('collect', grasp_track_m=0.03)
+    assert run_to(c2, 'preplace') and c2.phase == 'preplace'
+
+
 def test_grasp_stable_hold_still_confirms_under_monotonic_budget():
     # fm399: the monotonic wait must NOT pre-empt a genuine stable hold: with wait_ticks >> confirm_ticks
     # a steady contact confirms and lifts well inside the budget (no spurious retry).

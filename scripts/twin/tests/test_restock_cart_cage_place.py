@@ -35,7 +35,8 @@ class FixtureMotion:
         self.outcome, self.attach_ok = 'succeeded', True
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
-              slow=False, goal_tol=None, near_start=False):
+              wrist2_min=None, slow=False, goal_tol=None, near_start=False):
+        # wrist2_min accepted to match the real MotionPort.begin (fm403 wrist_2 lower-bound guard).
         self.moves.append(pose)
         self.straights.append(straight_line)
         self.joint_spaces.append(joint_space)

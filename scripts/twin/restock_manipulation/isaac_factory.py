@@ -36,6 +36,19 @@ def _finite_matrix4(m):
                     and all(isinstance(v, (int, float)) and math.isfinite(v) for v in r) for r in m))
 
 
+def survive_collect_occlusion(enabled, attached, parked):
+    """fm410 (run-316): decide whether a SOURCE-OCCLUDED collect capture should still emit a packet.
+
+    Once the carton is ATTACHED (weld/native grip), source localisation is done -- the arm occluding the
+    fixed source camera during grasp/hold is the normal case, not a fault. Returning None then nulls
+    /sensors and freezes the host controller mid-grasp/lift (run-316 looped COLLECT_CAPTURE 2663x). When
+    enabled + attached + the base is PARKED, emit an honest arm-feedback packet instead (empty source
+    observations -- no fresh localisation is claimed -- with LIVE contact/placed_pose/joints and no
+    fabricated acquisition deadline). A moving base (not parked) is a real fault and is never survived.
+    Off (enabled False) => never survives => byte-identical. Pure for CPU testing."""
+    return bool(enabled) and bool(attached) and bool(parked)
+
+
 def _profile(entry):
     if not isinstance(entry, dict):
         raise ValueError('each grasp profile must be an object')
@@ -596,6 +609,51 @@ class CollectTargetBridge:
         return Sensors(now, (obs,), tgt, parked, bool(self.contact.read()), now,
                        float(self.motion.collision_time), joints, (), float(now))
 
+    def _carton_attached(self):
+        """True once the carton is physically held -- native grippedObjects OR the SIM_ATTACH_FALLBACK weld
+        prim on the SHARED stage (reliable regardless of which NativePanelContact instance holds the fb
+        flag, so it never mis-reads a sibling capture's instance)."""
+        try:
+            if bool(self.contact.read()):
+                return True
+        except Exception:
+            pass
+        stage = getattr(self, 'stage', None)
+        path = getattr(self.contact, 'path', None)
+        if stage is None or not path:
+            return False
+        try:
+            return bool(stage.GetPrimAtPath(path + '/sim_attach_fallback'))
+        except Exception:
+            return False
+
+    def _survival_packet(self, now):
+        """fm410 (run-316): an honest arm-feedback /sensors packet when the SOURCE camera is occluded but the
+        carton is attached and the base parked (see survive_collect_occlusion). Empty source observations
+        (no fresh localisation claimed) + LIVE contact/placed_pose/joints/collision_time; valid_until_steady
+        None (no source acquisition this frame -> the controller skips its acquisition freshness, driving on
+        arm feedback). Returns None when survival is disabled or the carton is not attached/base not parked."""
+        from twin.restock_manipulation.types import Sensors
+        if getattr(self, '_survive_occlusion', None) is None:
+            import os
+            self._survive_occlusion = bool(os.environ.get('RESTOCK_COLLECT_SURVIVE_OCCLUSION'))
+        parked = bool(self.motion.parked())
+        if not survive_collect_occlusion(self._survive_occlusion, self._carton_attached(), parked):
+            return None
+        try:
+            joints = tuple(float(j) for j in self.joints())
+        except Exception:
+            joints = (0.,) * 6
+        try:
+            placed_pose = self._carton_center_station()
+        except Exception:
+            placed_pose = None
+        if self._calls % 10 == 1:
+            print(f'COLLECT_SURVIVE calls={self._calls} source-occluded, carton attached + parked -> '
+                  f'arm-feedback packet (contact={bool(self.contact.read())})', flush=True)
+        return Sensors(now, (), None, parked, bool(self.contact.read()), now,
+                       float(self.motion.collision_time), joints, (), float(now), None, placed_pose)
+
     def capture(self, now, source, destination):
         from twin.restock_manipulation.types import Sensors, Observation
         self.sensed_target_bboxes = ()
@@ -614,11 +672,11 @@ class CollectTargetBridge:
         except Exception as exc:                     # a swallowed source-capture failure (decode/freshness/...)
             if self._calls % 10 == 1:
                 print(f'COLLECT_CAPTURE calls={self._calls} provider_error={type(exc).__name__}:{exc}', flush=True)
-            return None
+            return self._survival_packet(now)        # fm410: source occluded -> arm-feedback packet if attached
         if target is None:
             if self._calls % 10 == 1:
                 print(f'COLLECT_CAPTURE calls={self._calls} target=None parked={self.motion.parked()}', flush=True)
-            return None
+            return self._survival_packet(now)        # fm410: source occluded -> arm-feedback packet if attached
         parked = bool(self.motion.parked())
         fresh = -0.02 <= now - target.stamp <= .5
         if not parked or not fresh:

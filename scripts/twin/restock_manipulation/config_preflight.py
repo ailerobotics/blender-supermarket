@@ -58,6 +58,7 @@ KEY_CONSUMER = {
     'contact_overpress_step_m': HOST,
     'arm_max_speed': HOST,
     'plan_wall_cap_s': HOST,
+    'grasp_track_m': HOST,        # fm410: lift-probe carton-tracking physics confirm threshold (m)
     # --- RUNTIME config (isaac_bundle / isaac_port / physics_setup) ---
     'phase_drive': RUNTIME,
     'arm_stiffness_abs': RUNTIME,
@@ -86,6 +87,8 @@ BASELINE_REQUIRED = (
     'contact_overpress_step_m',
     'arm_max_speed',
     'plan_wall_cap_s',
+    'grasp_track_m',          # fm410: physics grasp-confirm threshold; absent => the camera-independent
+                              # lift-probe confirm silently de-activates (run-316 phantom-load risk).
 )
 
 
