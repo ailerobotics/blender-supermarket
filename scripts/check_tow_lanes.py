@@ -309,6 +309,55 @@ def check_cart_yaw_rebase_envelope(grid, lanes_cfg, report):
             entry_divergence_rad=round(entry_div, 3), cart_yaw_tol=tol)
 
 
+def check_cart_yaw_rebase_acquire(grid, lanes_cfg, report):
+    """fm452(A) (run-334): the re-base fixed the FOLLOW (stop_replan reads the re-based route, 580->2 trips)
+    but TowLane.acquirable was checked BEFORE the re-base against the authored (swung-from-lane-start)
+    cart_yaw, so after the follower dropped the route mid-turn the aligned-but-lagging cart diverged past
+    start_tol_cart_yaw and re-acquire refused forever -> 859 lane_not_acquired churn. The fix makes
+    `_plan_lane`'s acquire use the SAME re-based expectation: acquire iff xy-near the route AND the live cart
+    re-bases cleanly (`_rebase_cart_yaw` returns a CHANGED route). Prove from the run-334 DROP STATE
+    (base ~(-3.53,15.02), cart lagging ~0.30) that (1) an aligned-but-lagging cart RE-ACQUIRES where the
+    authored-cart_yaw gate refused it, and (2) a cart genuinely off the lane (re-base breaches the envelope)
+    is STILL refused -- the gate is not merely dropped."""
+    spec = MobileSpec()
+    nav = lanes_cfg['navigation']
+    graph = TowLaneGraph.from_config(nav['tow_lanes'])
+    graph.expand_all(ArticulatedMap(grid, spec))
+    world = ArticulatedMap(grid, spec)
+    reacq = bool(nav.get('tow_lane_reacquire_along_route', False))
+    c = ArticulatedController(grid, spec, allow_test_fixtures=True, lane_graph=graph,
+                              lane_trust_static=True, lane_cart_yaw_rebase=True,
+                              lane_reacquire_along_route=reacq)
+    lane = next((ln for ln in graph.lanes if 'outbound' in ln.name), graph.lanes[0])
+    # run-334 dropped mid-FIRST-turn at a measured base x ~= -3.53 (the deepest the warm tow reached);
+    # take the authored route point ON that first turn (pre-loop) nearest that x as the drop point, so the
+    # base is ON the centreline (xy in tolerance) with its cart lagging -- exactly the drop condition.
+    st = lane.route.states
+    pre = st[:len(st) // 6]                                     # first turn, before the reorientation loop
+    kk = min(range(len(pre)), key=lambda i: abs(pre[i].x - (-3.53)))
+    drop = st[kk]
+    base_yaw = drop.yaw
+    authored_cart = drop.cart_yaw
+    tol = lane.start_tol_cart_yaw
+    # (1) aligned-but-lagging cart: the coupled train enters ALIGNED (cart ~ base heading) and the cart lags
+    #     the base by the observed ~0.30 rad through the turn -- the live state the authored (swung-from-
+    #     lane-start) cart_yaw gate refused (its authored cart_yaw has already swung ~1 rad away by here).
+    aligned = TrainState(drop.x, drop.y, base_yaw, wrap(base_yaw - 0.30))
+    authored_gate_refused = abs(wrap(aligned.cart_yaw - authored_cart)) > tol      # old gate said no
+    xy_ok = lane.acquirable(aligned.pose, None, along_route=reacq)                 # _plan_lane's xy gate
+    cart_ok = c._rebase_cart_yaw(lane.route, aligned, world) is not lane.route     # _plan_lane's cart gate
+    acquires = xy_ok and cart_ok
+    _record(report, f'cart_yaw_rebase_acquire_aligned_reacquires[{lane.name}]', acquires,
+            xy_near=xy_ok, rebase_clean=cart_ok, authored_cart_yaw_gate_would_refuse=authored_gate_refused,
+            start_tol_cart_yaw=round(tol, 3))
+    # (2) cart genuinely off the lane: a wildly misaligned cart re-bases to a swept-envelope breach, so
+    #     `_rebase_cart_yaw` returns the authored route unchanged -> the acquire gate still REFUSES it.
+    offlane = TrainState(drop.x, drop.y, base_yaw, wrap(base_yaw + 1.4))
+    off_cart_ok = c._rebase_cart_yaw(lane.route, offlane, world) is not lane.route
+    _record(report, f'cart_yaw_rebase_acquire_offlane_refused[{lane.name}]', not off_cart_ok,
+            rebase_breaches_envelope=not off_cart_ok, offlane_cart_yaw_rad=round(offlane.cart_yaw, 3))
+
+
 def check_track_tol_envelope(grid, lanes_cfg, report):
     """fm449 (run-332): after the reacquire + W2 fixes the coupled tow churns on
     stop_replan_tracking_error -- the base re-acquires then deviates > the 0.25 m xy tolerance from the
@@ -501,6 +550,7 @@ def main():
     check_cart_yaw_tol_envelope(grid, lanes_cfg, report)
     check_track_tol_envelope(grid, lanes_cfg, report)
     check_cart_yaw_rebase_envelope(grid, lanes_cfg, report)
+    check_cart_yaw_rebase_acquire(grid, lanes_cfg, report)
     check_measured_turn_radius(grid, lanes_cfg, report)
     print('TOW_LANES_PROOF ' + ('PASS' if report['ok'] else 'FAIL'), flush=True)
     return 0 if report['ok'] else 1

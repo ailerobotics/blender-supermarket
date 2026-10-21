@@ -649,8 +649,6 @@ class ArticulatedController(Controller):
         drive is bounded in CPU and cannot be starved into a planning_timeout under host load.
         """
         lane=self._active_lane
-        if not lane.acquirable(state.pose,state.cart_yaw,along_route=self.lane_reacquire_along_route):
-            return Route([],[],'lane_not_acquired')
         if obs.temporal_map is not None:
             world=ArticulatedMap(obs.temporal_map.planning_grid(self.grid),self.spec)
             uncertainty=max(.10,uncertainty)
@@ -658,6 +656,22 @@ class ArticulatedController(Controller):
         else:
             world=self.world
             planner=self.planner
+        if self.lane_cart_yaw_rebase:
+            # fm452(A): the FOLLOW tracks the re-based cart_yaw (zeroed at the base's aligned entry, then
+            # growing as the cart lags the sharpening turn -- see `_rebase_cart_yaw`), so the ACQUIRE must
+            # use the SAME expectation, not the authored (swung-from-lane-start) cart_yaw. Checked against
+            # the authored cart_yaw, an aligned-but-lagging cart after a drop diverges past start_tol_cart_yaw
+            # and re-acquire refuses forever -> lane_not_acquired churn (run-334: 859 trips while the base was
+            # otherwise driving the turn). Re-use the re-base code as the gate: acquire on xy-proximity to the
+            # route (cart_yaw handled by the re-base, same as the stop_replan drop) AND the live cart re-basing
+            # cleanly -- a cart genuinely off the lane re-bases to a swept-envelope breach, so `_rebase_cart_yaw`
+            # returns the authored route UNCHANGED (its `is` identity), and acquire still refuses it.
+            xy_ok=lane.acquirable(state.pose,None,along_route=self.lane_reacquire_along_route)
+            cart_ok=self._rebase_cart_yaw(lane.route,state,world) is not lane.route
+            if not (xy_ok and cart_ok):
+                return Route([],[],'lane_not_acquired')
+        elif not lane.acquirable(state.pose,state.cart_yaw,along_route=self.lane_reacquire_along_route):
+            return Route([],[],'lane_not_acquired')
         # Re-validate the authored lane against the LIVE obstacle cloud. When the opt-in proud
         # tolerance is set, discount live returns within that distance of KNOWN static geometry
         # (proud returns of the shelf/support the lane hugs) so they cannot false-block the lane;

@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
-from twin.restock.isaac_port import body_measurement, MissionCamera, IsaacPort, SENSING_ACTIONS
+from twin.restock.isaac_port import (body_measurement, MissionCamera, IsaacPort, SENSING_ACTIONS,
+                                      _sensing_frame_due, _collect_observe_force_due)
 from twin.restock.native_transport import ArmCommandGate
 from twin.restock_manipulation.cad_tool import ARM_JOINTS
 
@@ -133,7 +134,8 @@ def test_mission_camera_preserves_pixels_id_and_original_frame_clock():
     assert measured['rgb'] is frame['rgb'] and frame['rendering_time']==8.5
 
 
-def _plan_port(*, action, stride=2, sensing_stride=1, recorder=True, camera=True):
+def _plan_port(*, action, stride=2, sensing_stride=1, recorder=True, camera=True,
+               phase=None, force_render_ticks=0):
     port = IsaacPort.__new__(IsaacPort)   # skip Isaac wiring; only the render-gating state
     port.current_action = action
     port.record_stride = stride
@@ -141,6 +143,9 @@ def _plan_port(*, action, stride=2, sensing_stride=1, recorder=True, camera=True
     port.recorder = object() if recorder else None
     port.recording_camera = object() if camera else None
     port._sensing_suspended = False       # execution gate off (default); render-gating byte-identical
+    port._phase = phase                   # last controller phase (fm452 collect-observe force window)
+    port._collect_observe_force_render_ticks = force_render_ticks
+    port._collect_observe_forced = 0
     return port
 
 
@@ -166,6 +171,66 @@ def test_sensing_stage_renders_on_sensing_stride():
         port = _plan_port(action=action, stride=100, sensing_stride=4)
         sensing = [port._frame_plan(t)[0] for t in range(1, 9)]
         assert sensing == [False, False, False, True, False, False, False, True]
+
+
+def test_collect_observe_force_render_off_is_byte_identical_stride():
+    # fm452 (COLD): force_render_ticks=0 (default) => the collect 'observe' stage keeps the plain
+    # stride-6 cadence, even in the observe phase. Byte-identical to the pre-fm452 behaviour.
+    port = _plan_port(action='collect', stride=100, sensing_stride=6, phase='observe',
+                      force_render_ticks=0)
+    sensing = [port._frame_plan(t)[0] for t in range(1, 13)]
+    assert sensing == [t % 6 == 0 for t in range(1, 13)]   # stride-6: True only on 6, 12
+    assert port._collect_observe_forced == 0               # never forced
+
+
+def test_collect_observe_force_render_forces_stride1_for_first_n_observe_ticks():
+    # fm452 (COLD): with N>0 the source renders EVERY tick for the first N ticks of collect observe,
+    # then falls back to stride-6. Simulate consecutive observe ticks so the force budget decrements.
+    N = 4
+    port = _plan_port(action='collect', stride=100, sensing_stride=6, phase='observe',
+                      force_render_ticks=N)
+    sensing = [port._frame_plan(t)[0] for t in range(1, 13)]
+    # First N ticks forced (stride-1 => every tick True); then back to stride-6 (True at 6, 12).
+    assert sensing[:N] == [True] * N
+    assert sensing[N:] == [t % 6 == 0 for t in range(N + 1, 13)]
+    assert port._collect_observe_forced == N               # exactly N ticks consumed the budget
+
+
+def test_collect_observe_force_render_not_in_reach_or_other_stages():
+    # fm452 (COLD): the force window is scoped to current_action=='collect' AND the observe phase.
+    # Pure predicate: a reach phase, transfer/verify, or an off-knob all decline to force.
+    assert _collect_observe_force_due('collect', 'observe', 0, 4) is True
+    assert _collect_observe_force_due('collect', 'grasp', 0, 4) is False     # reach phase
+    assert _collect_observe_force_due('collect', 'approach', 0, 4) is False  # reach phase
+    assert _collect_observe_force_due('transfer', 'observe', 0, 4) is False  # other sensing stage
+    assert _collect_observe_force_due('verify', 'observe', 0, 4) is False
+    assert _collect_observe_force_due('collect', 'observe', 4, 4) is False   # budget exhausted
+    assert _collect_observe_force_due('collect', 'observe', 0, 0) is False   # knob off
+    # And through _frame_plan: a reach phase in collect keeps the plain stride-6 cadence (reach
+    # suspends in the real gate anyway, but even unsuspended it is never force-rendered here).
+    reach = _plan_port(action='collect', stride=100, sensing_stride=6, phase='grasp',
+                       force_render_ticks=4)
+    assert [reach._frame_plan(t)[0] for t in range(1, 13)] == [t % 6 == 0 for t in range(1, 13)]
+    assert reach._collect_observe_forced == 0
+    # A transfer observe never forces either.
+    xfer = _plan_port(action='transfer', stride=100, sensing_stride=6, phase='observe',
+                      force_render_ticks=4)
+    assert [xfer._frame_plan(t)[0] for t in range(1, 13)] == [t % 6 == 0 for t in range(1, 13)]
+    assert xfer._collect_observe_forced == 0
+
+
+def test_sensing_frame_due_force_stride1_is_byte_identical_when_off():
+    # The extra force_stride1 arg defaults False and is byte-identical to the 4-arg call.
+    for action in ('collect', 'transfer', 'couple'):
+        for tick in range(1, 13):
+            for stride in (1, 6):
+                for susp in (False, True):
+                    assert (_sensing_frame_due(action, tick, stride, susp)
+                            == _sensing_frame_due(action, tick, stride, susp, False))
+    # force_stride1=True renders every tick for a non-suspended sensing stage, nothing otherwise.
+    assert _sensing_frame_due('collect', 3, 6, False, True) is True
+    assert _sensing_frame_due('collect', 3, 6, True, True) is False   # suspended wins
+    assert _sensing_frame_due('couple', 3, 6, False, True) is False   # non-sensing stage
 
 
 def test_invalid_sensing_stride_rejected():
@@ -221,6 +286,30 @@ def test_begin_action_tracks_current_action_for_gating():
     port.current_action = None
     port.begin_action('collect', job={})
     assert port.current_action == 'collect'
+
+
+def test_begin_action_resets_collect_observe_force_budget():
+    # fm452 (COLD): entering the collect stage reopens the force-render budget so the stride-1 window
+    # fires afresh at this collect's observe entry. Non-collect actions leave it untouched.
+    port = IsaacPort.__new__(IsaacPort)
+    port.on_action = None
+    port.current_action = None
+    port._stage_scoped_teardown = None                    # non-collect path fires the teardown fallback
+    port._stage_scoped_done = False
+    port._collect_observe_forced = 7                      # spent by a previous collect
+    port.begin_action('couple', job={})                   # non-collect: budget untouched
+    assert port._collect_observe_forced == 7
+    port.begin_action('collect', job={})                  # collect: budget reset
+    assert port._collect_observe_forced == 0
+
+
+def test_invalid_collect_observe_force_render_ticks_rejected():
+    import pytest as _pt
+    with _pt.raises(ValueError, match='collect_observe_force_render_ticks'):
+        IsaacPort(world=None, robot=NS(dof_names=('left_wheel_joint', 'right_wheel_joint')),
+                  robot_body=None, cart_body=None, mobile=None, range_sensor=None,
+                  transport=None, contact=None, hold_arm=None, verification=None,
+                  collect_observe_force_render_ticks=-1)
 
 
 def test_invalid_record_stride_rejected():

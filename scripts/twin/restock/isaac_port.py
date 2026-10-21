@@ -29,15 +29,38 @@ SENSING_ACTIONS = frozenset({'collect', 'transfer', 'verify'})
 ATTACH_SETTLE_STEPS = 15
 
 
-def _sensing_frame_due(current_action, upcoming_tick, sensing_stride, suspended):
+def _sensing_frame_due(current_action, upcoming_tick, sensing_stride, suspended, force_stride1=False):
     """Whether this tick must render a fresh SENSING frame: a decode-grade stage on its stride
     cadence, UNLESS the opt-in execution gate has suspended the decode render for the current
     controller phase. While suspended the capture republishes the held registration instead of a
     fresh frame (isaac_sensors.sensing_render_required / PR 80 hold), so no render is forced. Pure
     for CPU testing of the phase->suspend->render-skip wiring; suspended is always False when the
-    gate is off, so this is byte-identical to the pre-gate behaviour then."""
-    return (not suspended and current_action in SENSING_ACTIONS
-            and upcoming_tick % sensing_stride == 0)
+    gate is off, so this is byte-identical to the pre-gate behaviour then.
+
+    fm452 (COLD): ``force_stride1`` (default False => byte-identical) overrides ``sensing_stride`` with
+    an effective stride of 1 for this tick, so the source renders EVERY tick during the short
+    collect-observe force-render window (see ``_collect_observe_force_due``)."""
+    if suspended or current_action not in SENSING_ACTIONS:
+        return False
+    stride = 1 if force_stride1 else sensing_stride
+    return upcoming_tick % stride == 0
+
+
+def _collect_observe_force_due(current_action, phase, forced_count, force_ticks):
+    """Whether the collect-observe FORCE-RENDER window applies this tick (fm452 COLD): for the first
+    ``force_ticks`` ticks of the collect 'observe' stage, render the source EVERY tick (stride 1)
+    instead of every ``sensing_stride``, so the source camera's first fresh synchronized frame lands
+    INSIDE require_collect_source_evidence's bounded wait rather than racing the GPU-load-dependent
+    async first RTX render -- which at collect-observe ENTRY is stale (now-stamp >> the 0.5 s freshness
+    budget) and completes asynchronously over several ticks -> 'no new synchronized rendered camera
+    frame' (isaac_sensors.py:315), flaky run-to-run (diagnosed commit d25f0c2). Scoped to
+    current_action=='collect' AND the observe phase ONLY -- the reach phases suspend the render and
+    transfer/verify never force. ``force_ticks==0`` (default) => always False => byte-identical stride
+    cadence. Does NOT widen the freshness window (that would certify stale geometry -- forbidden); it
+    only renders MORE OFTEN at the collect entry so a fresh frame is guaranteed quickly. Pure for CPU
+    testing."""
+    return (force_ticks > 0 and current_action == 'collect' and phase == 'observe'
+            and forced_count < force_ticks)
 
 
 def _render_suspended(phase, current_action, collect_keep_source_render):
@@ -146,7 +169,7 @@ class IsaacPort:
                  stationary_dxy=0.005, stationary_dyaw=0.01, command_gate=None,
                  position_uncertainty=0.05, phase_drive=None, arm_joints=None,
                  stage_scoped_teardown=None, release_source_capture=None,
-                 collect_keep_source_render=False):
+                 collect_keep_source_render=False, collect_observe_force_render_ticks=0):
         self.world,self.robot=world,robot
         # fm380: optional callable to DESTROY the collect-only sensing cameras' render products at the
         # collect->couple boundary (stage-scoped sensing). None (default) => never called => byte-
@@ -170,6 +193,18 @@ class IsaacPort:
         # (the sensor gate needs a new monotonic frame each capture; a paused render fails it). Scoped to
         # current_action=='collect' so transfer/couple still suspend. False (default) => byte-identical.
         self._collect_keep_source_render=bool(collect_keep_source_render)
+        # fm452 (COLD): force a stride-1 SOURCE render for the first N ticks of the collect 'observe'
+        # stage, so the source camera's first fresh synchronized frame lands inside
+        # require_collect_source_evidence's bounded wait instead of racing the GPU-load-dependent async
+        # first RTX render (stale at collect-observe entry -> 'no new synchronized rendered camera frame',
+        # flaky run-to-run; commit d25f0c2). 0 (default) => OFF => byte-identical stride cadence. Does NOT
+        # widen the freshness window (forbidden -- would certify stale geometry); it only renders more
+        # often at the collect entry. Counter reset at the collect stage boundary (begin_action).
+        force_ticks=int(collect_observe_force_render_ticks)
+        if force_ticks < 0:
+            raise ValueError('collect_observe_force_render_ticks must be a nonnegative int')
+        self._collect_observe_force_render_ticks=force_ticks
+        self._collect_observe_forced=0
         self._arm_joints=tuple(arm_joints) if arm_joints else None
         self._last_drive_gains=None
         # Localization uncertainty pad added to the nav footprint radius. The real rig keeps the
@@ -311,9 +346,17 @@ class IsaacPort:
         Sensing renders on the ``sensing_stride`` cadence (freshness is sim-time bounded, not
         per-tick), so a render-paced sensing stage advances sim far faster than at every tick.
         While the execution gate has suspended the decode render (``_sensing_suspended``) no sensing
-        render is forced -- the capture republishes the held registration instead."""
+        render is forced -- the capture republishes the held registration instead.
+        fm452 (COLD): for the first N ticks of the collect 'observe' stage the source is rendered EVERY
+        tick (stride 1) so a fresh synchronized frame is guaranteed quickly at the collect entry (see
+        ``_collect_observe_force_due``); N=0 (default) => byte-identical stride cadence."""
+        force=_collect_observe_force_due(self.current_action, self._phase,
+                                         self._collect_observe_forced,
+                                         self._collect_observe_force_render_ticks)
+        if force:
+            self._collect_observe_forced+=1
         sensing=_sensing_frame_due(self.current_action, upcoming_tick, self.sensing_stride,
-                                   self._sensing_suspended)
+                                   self._sensing_suspended, force)
         record=(self.recorder is not None and self.recording_camera is not None
                 and upcoming_tick%self.record_stride==0)
         return sensing,record
@@ -603,6 +646,11 @@ class IsaacPort:
         # action (collect is a SENSING_ACTION; couple/outbound/park are not) still frees the cameras.
         if action not in SENSING_ACTIONS:
             self._fire_stage_scoped_teardown()
+        # fm452 (COLD): reset the collect-observe force-render budget when the collect stage begins, so
+        # the force-stride-1 window opens afresh at this collect's observe entry. No-op when the knob is
+        # off (budget stays 0) => byte-identical.
+        if action == 'collect':
+            self._collect_observe_forced=0
         self.current_action=action
         if self.on_action is not None:
             self.on_action(action,job)

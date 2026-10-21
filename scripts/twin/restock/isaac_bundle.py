@@ -581,6 +581,11 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # the Option-B-seeded hold() gets a fresh synchronized frame. Only effective with the sensing
         # execution gate on; scoped to the collect stage. Absent/false => byte-identical.
         collect_keep_source_render=bool(config.get('collect_keep_source_render')),
+        # fm452 (COLD): force a stride-1 source render for the first N ticks of the collect 'observe'
+        # stage so the first fresh synchronized source frame lands inside require_collect_source_evidence's
+        # bounded wait (instead of racing the GPU-load-dependent async first RTX render). 0/absent => OFF
+        # => byte-identical stride cadence. Does NOT widen the freshness window.
+        collect_observe_force_render_ticks=int(config.get('collect_observe_force_render_ticks', 0)),
         # fm380: stage-scoped sensing -- destroy the collect-only station cameras' render products at
         # the collect->couple boundary to return their VRAM. SIM-ONLY, opt-in; unset => None => never
         # torn down => byte-identical. The cart camera + nav/nvblox + walkthrough recorder are untouched.

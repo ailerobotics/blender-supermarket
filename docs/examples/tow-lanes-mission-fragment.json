@@ -124,7 +124,14 @@
     ],
     "tow_lane_trust_static": true,
     "tow_lane_coast_refusals": true,
-    "tow_lane_trust_unknown": true
+    "tow_lane_trust_unknown": true,
+    "tow_lane_reacquire_along_route": true,
+    "tow_lane_track_tol_m": 0.35,
+    "tow_lane_track_envelope": true,
+    "tow_lane_cart_yaw_rebase": true,
+    "tow_lane_cart_yaw_tol": 0.3,
+    "tow_lane_curve_speed_floor": 0.55,
+    "measured_turn_fault_s": 20.0
   },
   "_fm437_note": "tow_lane_trust_unknown (default off): on a static-validated authored lane, trust UNOBSERVED temporal-map cells in the swept envelope as free (the static map proved that corridor clear); a POSITIVE/occupied return still stops the tow. Unblocks the run-327b outbound stall at the first southward turn ('unknown_navigation_cell' over the unmapped sector south of the dock corridor)."
 }

@@ -2803,3 +2803,67 @@ entry + a GPU-load-dependent async first-render race; the fix is to force a sour
 observe window (not shipped yet — proposed).
 
 mp4: run-334 258 KB (cold), run-334b 9.4 MB, run-334c 9.0 MB.
+
+### 2026-10-21 — fm452 prep (run-335): acquire-path cart_yaw re-base + COLD force-render (both offline, default-off)
+
+Two fixes staged for run-335 so one GPU session tests both the WARM turn and the COLD collect path.
+
+**(A) WARM — acquire uses the re-based cart_yaw expectation (the direct cause of run-334's 859
+lane_not_acquired).** The re-base fixed the FOLLOW but `TowLane.acquirable` was checked in `_plan_lane`
+BEFORE the re-base against the authored (swung-from-lane-start) cart_yaw, so after a mid-turn drop the live
+aligned-but-lagging cart diverged > `start_tol_cart_yaw` from the authored value and re-acquire refused
+forever. Fix (`articulated.py` `_plan_lane`): when `lane_cart_yaw_rebase` is on, the acquire now gates on
+**xy-proximity to the route AND the live cart re-basing cleanly** — it re-uses `_rebase_cart_yaw` as the
+gate, not a dropped check: a cart genuinely off the lane re-bases to a swept-envelope breach, so
+`_rebase_cart_yaw` returns the authored route unchanged (its `is` identity) and the acquire still REFUSES
+it. Default-off path (`lane_cart_yaw_rebase` false) is the unchanged `acquirable(pose, cart_yaw, …)` call,
+byte-identical. Rides the already-staged `tow_lane_cart_yaw_rebase=true`; no new config flag. Proof added to
+`check_tow_lanes.py` from the run-334 drop state (first turn, route point nearest the measured x=−3.53): an
+aligned cart lagging the observed 0.30 rad **re-acquires** (xy in tol, re-base clean, |div| 0.95 > the 0.35
+authored tol that refused it), while an off-lane cart (+1.4 rad) **re-bases to a breach and is refused**.
+The full `TOW_LANES_PROOF` suite (31 checks) + `test_articulated_navigation.py` (31) pass.
+
+**COLD — force-render at the collect-observe boundary (the real fix the dig proposed, now shipped).** New
+config `collect_observe_force_render_ticks` (int, default 0 = OFF = byte-identical): for the first N ticks
+of the collect `observe` stage the source renders EVERY tick (stride 1) instead of every `sensing_stride`
+(6), so the first fresh synchronized source frame lands inside `require_collect_source_evidence`'s bounded
+wait (default 40 ticks) instead of racing the GPU-load-dependent async first RTX render. It does **not**
+widen the 0.5 s freshness window (a window-widen would certify stale pre-park geometry — forbidden); it only
+renders more often at the entry. Scoped to `current_action=='collect' AND phase=='observe'` (the reach
+phases suspend; transfer/verify never force); budget reset at the collect stage boundary. Staged at **N=30**
+in `mission-runtime-cc-collect.json` (comfortably inside the 40-tick evidence wait, well past the few-tick
+async render latency); the warm `couple.json` never runs collect so it is unchanged. Wiring: `isaac_port.py`
+(`_collect_observe_force_due` + `_sensing_frame_due(force_stride1=…)`), threaded through `isaac_bundle.py`.
+CPU tests: 6 added to `test_restock_physics_port.py` (off byte-identical, on forces stride-1 for exactly N
+observe ticks then reverts, never fires in reach/transfer/verify, reset on collect entry, negative rejected);
+39 passed / 4 skipped across the port + sensing suites. VRAM: one 1.0-scale source camera for N ticks at the
+collect entry, well before the ~11.9 GB late-mission peak — bounded, measurable only at a boot.
+
+**measured_turn_radius at the turn — not the current blocker.** run-334 logged 584 measured_turn_radius
+coasts (median rw/rv 0.59, under the 0.697 = 1/1.5+0.03 trip; tail spikes over it). With
+`measured_turn_fault_s=20.0` these are NET-accumulating transient coasts that decay on tracking — the run
+did NOT fault on them (it kept driving +0.37 m), so the window is doing its job. The acquire-path churn
+(859) is what froze the tow, not the turn-radius tail. If run-335 shows the fault window saturating, that
+is the next layer; no change for now.
+
+**(B) Would a live-train-matched outbound lane collapse the remaining layers? (one-page analysis).** The
+outbound lane's `cart_yaw` is authored by integrating the off-axle trailer kinematics from the lane START
+(cart aligned at the dock, articulation 0), but the coupled train enters the follow PARTWAY and already
+ALIGNED from the couple — so the authored swing is phase-shifted from what the live train carries, and every
+turn layer peeled so far (xy tol → cart_yaw entry → cart_yaw acquire) is a consequence of that single
+mismatch, each patched reactively in the controller (position-aware tol, follow re-base, acquire re-base). A
+*live-train-matched* re-author would instead generate the lane's `cart_yaw` profile from the measured entry
+state (pose + aligned cart) forward, so the authored expectation equals what the train actually carries at
+every point — collapsing the entry-divergence, follow, and acquire layers into the lane itself and removing
+the three controller patches from the hot path. Trade-offs: (1) it bakes in ONE entry state, so it is only
+valid if the couple delivers the train to a repeatable pose (run-321b+ couple is clean and repeatable, so
+this holds); a drifted entry would need the re-base to remain as a safety fallback (keep it, default-off).
+(2) The `(x,y,base_yaw)` centreline and its static-map envelope validation are UNCHANGED — only `cart_yaw`
+per state changes — so `check_tow_lanes`' envelope proofs transfer directly. (3) It does NOT touch the
+measured_turn_radius tail (a DRIVE mis-track, not an authoring error) nor the ~90° portal geometry
+feasibility (already proven to need the 1.5 m min radius; 1.7–1.8 m times out). **Recommendation:** do NOT
+re-author pre-emptively — run-335 tests whether the acquire re-base clears the warm turn with the current
+authored lane + the three patches; the re-base already makes the FOLLOW track the live train, so a static
+re-author is largely equivalent to "bake the run-time re-base into the lane." Re-author only if run-335
+reveals a NEW turn layer that the re-base cannot reach from the entry state (i.e. a divergence that is not a
+pure cart_yaw phase-shift) — then the measured entry + cart profile from run-335's nav-trace is the input.
