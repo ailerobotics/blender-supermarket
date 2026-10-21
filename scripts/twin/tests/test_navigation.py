@@ -316,6 +316,35 @@ class NavigationTests(unittest.TestCase):
         c2.start((2, 0, 0), False)
         self.assertEqual(c2.step(0.1, odom, obs, now=0.1).reason, 'arm_not_in_transport')
 
+    def test_carry_drive_still_stops_for_obstacle_in_carry_envelope_fm432(self):
+        # fm432 precondition: carry_drive relaxes ONLY the arm-transport gate, NOT the collision footprint.
+        # The carry fold envelope (CPU-verified 0.62 m, isaac_port transport.contains) is WITHIN the base
+        # footprint radius (transport_radius 0.65 + margin 0.05 = 0.70), so the nav already covers the
+        # carried carton. The reposition drives static_drive => the obstacle check runs against the STATIC
+        # MAP footprint (not the lidar), so the carton lidar self-mask cannot remove an obstacle from the
+        # collision footprint: an obstacle the carried carton would hit still stops the drive.
+        fp = Footprint(0.65, 0.62, 1.0, margin=0.05)        # the mission base footprint
+        self.assertAlmostEqual(fp.radius(False), 0.70)
+        self.assertLess(0.62, fp.radius(False))             # footprint already includes the carry envelope
+        odom = Odometry((0, 0, 0), 0.1, 0.0, 0.0, 'test_fixture', 0.05)
+        obs = Observation(0.1, (), False, False, source='test_fixture', coverage_radius=10)  # arm_transport False, EMPTY lidar
+        # a static box ~0.55 m ahead -- inside the 0.62 carry envelope, hence inside the 0.70 footprint.
+        # carry_drive relaxed arm_transport; static_drive => the STATIC-MAP footprint still sees the box,
+        # so the drive STOPS (does not advance) -- the collision footprint covers the carried carton.
+        grid = GridMap((-6, -6, 6, 6), [(0.50, -0.06, 0.60, 0.06)], 0.1)
+        c = Controller(grid, fp, allow_test_fixtures=True)
+        c.start((2, 0, 0), False, carry_drive=True, static_drive=True)
+        stopped = c.step(0.1, odom, obs, now=0.1)
+        self.assertEqual(stopped.velocity, (0, 0))
+        self.assertIn(stopped.reason, ('obstacle_stop', 'blocked_no_route'))
+        # baseline: with a CLEAR static map the same carry_drive leg advances (so the stop above is the box,
+        # not carry_drive itself refusing).
+        c2 = Controller(GridMap((-6, -6, 6, 6), (), 0.1), fp, allow_test_fixtures=True)
+        c2.start((2, 0, 0), False, carry_drive=True, static_drive=True)
+        moving = c2.step(0.1, odom, obs, now=0.1)
+        self.assertEqual(moving.reason, 'tracking')
+        self.assertGreater(moving.velocity[0], 0.0)
+
     def test_ros_domain_guard(self):
         with patch.dict('os.environ',{'ROS_DOMAIN_ID':'42','ROS_LOCALHOST_ONLY':'1'}):
             with self.assertRaises(RuntimeError): require_isolation()
