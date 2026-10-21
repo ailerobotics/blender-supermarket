@@ -66,6 +66,17 @@ def body_measurement(body):
     return Pose2(float(position[0]),float(position[1]),yaw),float(position[2]),linear,angular
 
 
+def body_roll_pitch_deg(body):
+    """Roll, pitch (degrees) of a body from its world quaternion -- the chassis attitude that
+    body_measurement() discards (it keeps only yaw). Used to log the caster-lift static tilt
+    (fm437: confirm the lifted-caster nose pitch live; a level chassis reads ~0)."""
+    _, quaternion = body.get_world_pose()
+    w, x, y, z = np.asarray(quaternion, float)
+    roll = math.atan2(2*(w*x+y*z), 1-2*(x*x+y*y))
+    pitch = math.asin(max(-1.0, min(1.0, 2*(w*y-z*x))))
+    return math.degrees(roll), math.degrees(pitch)
+
+
 class TransportEnvelope:
     """Current encoder FK against the same collision geometry used offline."""
     def __init__(self, urdf, package_roots, radius):
@@ -424,6 +435,13 @@ class IsaacPort:
             self._last_byaw_log=now
             print(f'BASE_YAW_TICK base_dyaw={bdyaw*1e3:.2f}mrad base_dxy={bdxy*1e3:.1f}mm '
                   f'braked={getattr(self.mobile,"_braked",None)} now={now:.2f}',flush=True)
+        # fm437: log the base chassis attitude (roll/pitch) ~1 Hz in every action, so the caster-lift
+        # static tilt is measured live (a level chassis reads ~0; the 5 mm lift predicts ~0.75 deg pitch).
+        if now-getattr(self,'_last_batt_log',-1.)>=1.0:
+            self._last_batt_log=now
+            broll,bpitch=body_roll_pitch_deg(self.robot_body)
+            print(f'BASE_ATT roll_deg={broll:.3f} pitch_deg={bpitch:.3f} z_m={rz:.4f} '
+                  f'action={self.current_action} now={now:.2f}',flush=True)
         if self.after_step is not None:
             self.after_step(now,parked)
         # fm390: during the mid-collect reposition carry (the controller holds the carry fold in TRANSIT

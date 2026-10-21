@@ -181,6 +181,10 @@ class FactoryDispatchTests(unittest.TestCase):
         self.assertFalse(_build('reference').lane_coast_refusals)             # default off
         self.assertTrue(_build('reference', tow_lane_coast_refusals=True).lane_coast_refusals)
 
+    def test_tow_lane_trust_unknown_flows_through(self):
+        self.assertFalse(_build('reference').lane_trust_unknown)              # default off
+        self.assertTrue(_build('reference', tow_lane_trust_unknown=True).lane_trust_unknown)
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

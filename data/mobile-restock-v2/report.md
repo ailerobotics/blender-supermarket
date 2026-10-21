@@ -2387,3 +2387,41 @@ re-framing check at 0.75° pitch) before concluding.
 **Net:** run-327 proves the drive fix on the live mission — the core warm-outbound crawl is gone and the
 base now tows the cart 4.87 m cleanly. The warm frontier is now a single nav `planning_stop` partway along
 the outbound lane; the cold frontier is the collect-capture camera-sync/occlusion (earlier than B').
+
+### 2026-10-21 — fm437 (A+B): run-327 frontier diagnosed; warm planning_stop = unmapped-cell turn gate (fixed, trust_unknown); cold-collect tilt EXONERATED
+
+**(A) Warm `planning_stop` at x≈−4.02 — classified with evidence, fixed.** `check_tow_lanes` follows the
+authored outbound lane closed-loop to the goal (`arrived_stopped`, route 22.18 m) against the static map +
+dense live cloud → **lane geometry + static swept-envelope are sound**; it is NOT a lane-end, goal-approach,
+or static-swept reject. The measured run-327b end pose (−4.02, 15.22, −8.6°, coupled) is the lane's FIRST
+southward turn toward waypoint 1 [−2.97, 13.58, −1.687]; the nav-trace probe shows the turn sweep
+uncertified with 5 blind rays at −85…−89° (due south) and `unknown: 173` cells. The base faces east and the
+cart trails west, so the blind south sector is NOT cart self-occlusion — it is genuinely **unmapped** space
+the robot never sensed while driving east along y≈15.2. The live refusal is `temporal.check_polygon`
+returning **`unknown_navigation_cell`** (temporal.py:413-415) when the swept train polygon covers unknown
+cells; `check_tow_lanes` cannot reproduce it because it exercises the CoverageField path with a fully-known
+cloud, not the live nvblox temporal map — a fidelity gap, now covered by a direct `TemporalMap.check_train`
+unit test.
+
+FIX: `navigation.tow_lane_trust_unknown` (default off, byte-identical). On a static-validated authored lane
+(`_active_lane` set) the swept check trusts UNOBSERVED cells as free — the static map proved that corridor
+clear at lane build and `trust_static` re-validates it live — while a POSITIVE (occupied) ESDF return STILL
+returns `occupied_navigation_cell`, so a genuinely new obstacle keeps stopping the tow (fm437's requirement).
+`check_train`/`check_polygon` take `trust_unknown`; `gate_velocity` passes
+`self.lane_trust_unknown and self._active_lane is not None`; factory threads `tow_lane_trust_unknown`. CPU
+tests: `test_navigation_temporal.py::test_trust_unknown_passes_unknown_but_still_stops_on_occupied`
+(reproduces the live `unknown_navigation_cell`, proves the pass, proves occupied STILL stops) +
+`test_navigation_factory.py` threading. Staged into run-328 (cc-collect + couple).
+
+**(B) Cold collect-capture — tilt EXONERATED (NOT a caster-lift regression).** Offline code analysis: the
+COLLECT "source" camera is `/World`-mounted (station-fixed, parent `map`→`/World`; `restock_camera/config.py:79`,
+`sensing_sources.py:229`, `native_cameras.py:257`), NOT on the robot — chassis attitude cannot move it or
+its pixels. The three failing gates read only frame freshness/identity/sync (`isaac_sensors.py:258/299/315`)
+and whether a registration was ever established (`restock_camera/sensed.py:50/509`) — none read chassis
+roll/pitch; the horizontality gates threshold at acos(.999)≈2.56° and the lift's 0.75° pitch passes with
+margin (cos 0.75°=0.99991); the `parked` gate is planar only. So the 0.75° tilt does not change frame-sync
+or registration — the cold collect-capture failure is the known render-sync/occlusion class (reached the
+grasp press first), overlapping the B' camera-placement question. **No sprung caster needed** (fm437's
+correction: pursue it only if the tilt mattered — it does not); caster_lift_m stays 5 mm. Still added the
+requested base attitude log: `BASE_ATT roll_deg/pitch_deg` ~1 Hz in every action (`isaac_port.py`
+`body_roll_pitch_deg` + the advance() log) so the live tilt is measured next run.

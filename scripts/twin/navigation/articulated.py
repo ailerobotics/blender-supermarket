@@ -449,8 +449,13 @@ class ArticulatedController(Controller):
                  lane_graph=None, lane_static_tol=0.0, lane_trust_static=False,
                  lane_reacquire_along_route=False, lane_cart_yaw_tol=0.20,
                  lane_curve_speed_floor=0.25, lane_max_curvature=None,
-                 lane_coast_refusals=False, **kwargs):
+                 lane_coast_refusals=False, lane_trust_unknown=False, **kwargs):
         self.require_temporal_map=require_temporal_map
+        # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
+        # swept train envelope as free (the static map proved that corridor clear), so the base is not
+        # frozen at an unmapped turn (run-327b: outbound drove 4.87 m then 'unknown_navigation_cell' at the
+        # first southward turn south of the dock corridor). A positive (occupied) return still stops the tow.
+        self.lane_trust_unknown=bool(lane_trust_unknown)
         self.spec=spec or MobileSpec()
         self.world=ArticulatedMap(grid,self.spec)
         # Opt-in lidar-proud tolerance for the AUTHORED tow lanes only (navigation.tow_lane_static_tol_m).
@@ -744,7 +749,8 @@ class ArticulatedController(Controller):
                 return Result(reason='obstacle_stop')
             predicted+=braking
         if temporal is not None:
-            reason=temporal.check_train(predicted,self.spec,uncertainty,now)
+            trust_unknown=self.lane_trust_unknown and self._active_lane is not None
+            reason=temporal.check_train(predicted,self.spec,uncertainty,now,trust_unknown=trust_unknown)
             if reason:return Result(reason=reason)
         return Result(v,w,reason='tracking')
 
