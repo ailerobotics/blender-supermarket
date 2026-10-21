@@ -458,7 +458,7 @@ class ArticulatedController(Controller):
                  lane_curve_speed_floor=0.25, lane_max_curvature=None,
                  lane_coast_refusals=False, lane_trust_unknown=False,
                  measured_turn_fault_s=None, lane_track_tol=0.25,
-                 lane_track_envelope=False, **kwargs):
+                 lane_track_envelope=False, lane_cart_yaw_rebase=False, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
         # swept train envelope as free (the static map proved that corridor clear), so the base is not
@@ -568,6 +568,17 @@ class ArticulatedController(Controller):
         # lane_track_tol everywhere (byte-identical). The per-state slack is memoised (computed once).
         self.lane_track_envelope=bool(lane_track_envelope)
         self._slack_cache={}
+        # fm451 (run-333): the authored route's cart_yaw is the off-axle trailer integration from the
+        # authored lane START (aligned there) -- so by the turn it carries a +0.11 rad off-axle swing. But
+        # the train ENTERS the follow partway and ALIGNED (from the couple), having done no such swing, so
+        # at the nearest route point the authored cart_yaw diverges ~0.30 rad from the live cart and
+        # stop_replan drops the route BEFORE the base can drive the turn (chicken-and-egg). This re-bases the
+        # expected cart_yaw: from the base's nearest route point, re-integrate the SAME off-axle kinematics
+        # forward with cart_yaw there = the live cart_yaw -- so the expectation is what a correctly-tracking
+        # ALIGNED-entry train actually does. The (x,y,base_yaw) centreline is unchanged; the re-based profile
+        # is re-checked against the swept envelope and only used if clear (a genuinely departed cart still
+        # trips). Off (default) => the authored profile (byte-identical). Proven: check_cart_yaw_rebase_envelope.
+        self.lane_cart_yaw_rebase=bool(lane_cart_yaw_rebase)
         # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
         # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
         # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
@@ -684,7 +695,31 @@ class ArticulatedController(Controller):
                      tuple(round(c,2) for c in self.goal),kept_diag),flush=True)
             return Route([],[],'lane_blocked')
         checked.reason='validated_lane'
+        if self.lane_cart_yaw_rebase:
+            checked=self._rebase_cart_yaw(checked,state,world)
         return checked
+
+    def _rebase_cart_yaw(self,route,state,world):
+        """fm451: re-base the expected cart_yaw to the base's ACTUAL (aligned) entry. From the nearest route
+        point to `state`, set cart_yaw = the live cart_yaw and re-integrate the off-axle trailer kinematics
+        (advance()'s cart_rate, same hitch_x/cart_hitch_x) forward to the goal. The (x,y,base_yaw) centreline
+        is untouched. Only used if every re-based state stays inside the swept envelope -- else the authored
+        route is returned unchanged (so a cart that has genuinely departed the lane still trips stop_replan)."""
+        st=route.states
+        if not st:
+            return route
+        k=min(range(len(st)),key=lambda i:math.hypot(st[i].x-state.x,st[i].y-state.y))
+        spec=self.spec; cy=state.cart_yaw
+        rebased=[st[i] for i in range(k)]+[TrainState(st[k].x,st[k].y,st[k].yaw,cy)]
+        for i in range(k,len(st)-1):
+            ds=math.hypot(st[i+1].x-st[i].x,st[i+1].y-st[i].y)
+            curv=wrap(st[i+1].yaw-st[i].yaw)/ds if ds>1e-9 else 0.0
+            beta=st[i].yaw-cy
+            cy=wrap(cy+(math.sin(beta)+spec.hitch_x*curv*math.cos(beta))/spec.cart_hitch_x*ds)
+            rebased.append(TrainState(st[i+1].x,st[i+1].y,st[i+1].yaw,cy))
+        if any(not world.valid(s,(),0.0) for s in rebased[k:]):     # a departed cart would breach -> keep authored
+            return route
+        return Route(rebased,route.curvatures,route.reason)
 
     def _coverage_ok(self,odom,obs,radius,stop_distance,v,w):
         """Uncoupled braking-sweep coverage (the reference base path via super()).

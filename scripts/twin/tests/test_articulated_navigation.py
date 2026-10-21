@@ -142,6 +142,33 @@ class ArticulatedTests(unittest.TestCase):
         self.assertTrue(c.route and c.route.states,'controller never reached tracking')
         return state, now
 
+    def test_cart_yaw_rebase_matches_live_aligned_entry(self):
+        # fm451: re-base the expected cart_yaw from the base's ACTUAL aligned entry. The nearest route
+        # point's cart_yaw becomes the live cart_yaw (entry divergence ~0), differing from the authored
+        # (swung) value; the re-based tail stays in the empty-map envelope so it is used.
+        from twin.navigation.articulated import Route
+        c = ArticulatedController(GridMap((-15, -15, 15, 15)), allow_test_fixtures=True,
+                                  lane_cart_yaw_rebase=True)
+        authored = [TrainState(i * 0.4, 0.0, -0.30, 0.20) for i in range(8)]   # authored cart_yaw swung +0.20
+        route = Route(authored, [0.0] * 7, 'validated_lane')
+        base = TrainState(1.2, 0.0, -0.30, -0.30)                              # at index 3, cart ALIGNED
+        rebased = c._rebase_cart_yaw(route, base, c.world)
+        self.assertAlmostEqual(rebased.states[3].cart_yaw, base.cart_yaw, places=9)  # entry divergence ~0
+        self.assertNotAlmostEqual(rebased.states[3].cart_yaw, authored[3].cart_yaw)  # changed from authored
+        self.assertEqual(len(rebased.states), len(authored))                   # same length/centreline
+
+    def test_cart_yaw_rebase_keeps_authored_when_it_would_breach(self):
+        # fm451 safety: if re-basing from a departed cart would put the swept envelope into an obstacle,
+        # the authored route is kept (so a genuinely off-lane cart still trips stop_replan, never masked).
+        from twin.navigation.articulated import Route
+        grid = GridMap((-15, -15, 15, 15), ((0.0, -1.2, 4.0, -0.2),))          # wall just below the route
+        c = ArticulatedController(grid, allow_test_fixtures=True, lane_cart_yaw_rebase=True)
+        authored = [TrainState(i * 0.4, 0.0, 0.0, 0.0) for i in range(8)]
+        route = Route(authored, [0.0] * 7, 'validated_lane')
+        base = TrainState(1.2, 0.0, 0.0, -1.4)                                 # cart yawed hard toward the wall
+        rebased = c._rebase_cart_yaw(route, base, c.world)
+        self.assertIs(rebased, route)                                          # breach -> authored kept
+
     def test_track_envelope_caps_tol_by_local_lateral_slack(self):
         # fm449: with lane_track_envelope the stop_replan tol = min(lane_track_tol, local_slack - 0.05),
         # floored 0.10. Open space -> wide slack (tol loosens toward lane_track_tol); a wall beside a route

@@ -33,7 +33,7 @@ from twin.navigation.core import Controller, Footprint, GridMap
 from twin.navigation.lanes import TowLaneGraph
 from twin.navigation.articulated import ArticulatedController, ArticulatedMap, TrainState, advance
 from twin.navigation import Odometry, Observation
-from twin.mobile import MobileSpec
+from twin.mobile import MobileSpec, wrap
 
 
 def _record(report, name, passed, **kw):
@@ -274,6 +274,41 @@ def check_cart_yaw_tol_envelope(grid, lanes_cfg, report):
                 not clear_at(lane, margin + 0.05), probe_rad=round(margin + 0.05, 3))
 
 
+def check_cart_yaw_rebase_envelope(grid, lanes_cfg, report):
+    """fm451 (run-333): the stop_replan CART_YAW trip -- the authored cart_yaw carries the off-axle swing
+    integrated from the lane START, but the train enters the follow partway + ALIGNED (from the couple), so
+    at the nearest point the authored cart_yaw diverges ~0.30 rad from the live cart and drops the route
+    before the turn. tow_lane_cart_yaw_rebase re-bases the expected cart_yaw forward from the live aligned
+    entry. Prove: (1) the re-based profile keeps the cart inside the swept envelope everywhere, and (2) the
+    run-333 entry state (turn entry, cart aligned) no longer trips -- its nearest re-based cart_yaw matches
+    the aligned cart within the 0.30 tol."""
+    spec = MobileSpec()
+    nav = lanes_cfg['navigation']
+    graph = TowLaneGraph.from_config(nav['tow_lanes'])
+    graph.expand_all(ArticulatedMap(grid, spec))
+    world = ArticulatedMap(grid, spec)
+    tol = float(nav.get('tow_lane_cart_yaw_tol', 0.20))
+    c = ArticulatedController(grid, spec, allow_test_fixtures=True, lane_graph=graph,
+                              lane_trust_static=True, lane_cart_yaw_rebase=True)
+    lane = next((ln for ln in graph.lanes if 'outbound' in ln.name), graph.lanes[0])
+    # the run-333 entry: at the turn entry, base part-way down the dock, cart ALIGNED (articulation 0)
+    entry_xy = (-3.92, 15.15)
+    kk = min(range(len(lane.route.states)),
+             key=lambda i: math.hypot(lane.route.states[i].x - entry_xy[0], lane.route.states[i].y - entry_xy[1]))
+    base_yaw = lane.route.states[kk].yaw
+    entry = TrainState(entry_xy[0], entry_xy[1], base_yaw, base_yaw)        # cart aligned (cart_yaw=base_yaw)
+    rebased = c._rebase_cart_yaw(lane.route, entry, world)
+    used = rebased is not lane.route                                        # re-base passed the envelope gate
+    clear = all(world.valid(s, (), 0.0) for s in rebased.states[kk:])
+    # entry trip check: nearest re-based cart_yaw vs the aligned live cart
+    near = min(rebased.states, key=lambda s: math.hypot(s.x - entry_xy[0], s.y - entry_xy[1]))
+    entry_div = abs(wrap(near.cart_yaw - entry.cart_yaw))
+    _record(report, f'cart_yaw_rebase_envelope_clear[{lane.name}]', used and clear,
+            rebased_used=used, envelope_clear=clear)
+    _record(report, f'cart_yaw_rebase_entry_no_longer_trips[{lane.name}]', entry_div <= tol,
+            entry_divergence_rad=round(entry_div, 3), cart_yaw_tol=tol)
+
+
 def check_track_tol_envelope(grid, lanes_cfg, report):
     """fm449 (run-332): after the reacquire + W2 fixes the coupled tow churns on
     stop_replan_tracking_error -- the base re-acquires then deviates > the 0.25 m xy tolerance from the
@@ -465,6 +500,7 @@ def main():
     check_reacquire_along_route(grid, lanes_cfg, report)
     check_cart_yaw_tol_envelope(grid, lanes_cfg, report)
     check_track_tol_envelope(grid, lanes_cfg, report)
+    check_cart_yaw_rebase_envelope(grid, lanes_cfg, report)
     check_measured_turn_radius(grid, lanes_cfg, report)
     print('TOW_LANES_PROOF ' + ('PASS' if report['ok'] else 'FAIL'), flush=True)
     return 0 if report['ok'] else 1
