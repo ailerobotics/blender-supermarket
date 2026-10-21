@@ -412,13 +412,28 @@ class RegisteredSupport:
                       e.camera_revision, g.camera_revision, k == g.intrinsics), flush=True)
             raise ValueError('expired, invalidated or changed rigid-support geometry')
 
-    def _monotonic_ok(self, e):
+    def _monotonic_ok(self, e, *, allow_repeat=False):
+        # ``allow_repeat`` relaxes the strictly-new requirement to monotonic NON-REGRESSING for the
+        # HELD path only: hold() re-expresses the last clean registration through the live
+        # base_from_camera/TF and does NOT consume fresh pixels, so under a sensing stride the source
+        # camera re-polls it with the SAME last frame between renders (frame_id/stamp/acquisition
+        # clock equal). Accept an equal (non-regressing) frame then; still refuse a frame that goes
+        # BACKWARDS (frame_id/stamp/acquired_steady strictly decreasing) or a regressed (already-seen)
+        # session. prepare()/observe keep the strict strictly-new gate (allow_repeat left False).
         if self.last_frame is not None:
             prior = self.last_frame
             same_session = e.session_id == prior.session_id
-            if ((same_session and (e.frame_id <= prior.frame_id or e.stamp <= prior.stamp))
+            if allow_repeat:
+                regressed = e.frame_id < prior.frame_id or e.stamp < prior.stamp
+                steady_regressed = (e.acquired_steady is not None
+                                    and e.acquired_steady < prior.acquired_steady)
+            else:
+                regressed = e.frame_id <= prior.frame_id or e.stamp <= prior.stamp
+                steady_regressed = (e.acquired_steady is not None
+                                    and e.acquired_steady <= prior.acquired_steady)
+            if ((same_session and regressed)
                     or (not same_session and e.session_id in self.seen_sessions)
-                    or (e.acquired_steady is not None and e.acquired_steady <= prior.acquired_steady)):
+                    or steady_regressed):
                 raise ValueError('rigid-support registration needs a new monotonic frame')
 
     def prepare(self, depth, k, base_from_camera, registration, clearance, *, now, parked,
@@ -495,7 +510,10 @@ class RegisteredSupport:
         Used when the support markers/footprint are occluded by the reaching arm so no fresh
         full-footprint registration is available this frame. Every non-visibility gate still holds:
         the from-the-future bound + stamp sync, baseline lifetime (``age_at``), identity validity and
-        a monotonic frame. The camera is allowed to MOVE through the reach: the support is rigid
+        a monotonic NON-REGRESSING frame (the held path re-expresses via live TF and consumes no fresh
+        pixels, so a sensing stride re-polls the SAME last frame between renders -- an equal frame_id
+        holds, only a backwards frame_id/stamp/acquisition clock or a regressed session refuses). The
+        camera is allowed to MOVE through the reach: the support is rigid
         (world-fixed for the collect source, cart-fixed for the transfer deck) so camera_from_support
         is invariant, and base_from_support is RE-EXPRESSED from the live ``base_from_camera`` each
         tick rather than frozen — a frozen pose silently drifts, and the old exact-match guard bailed
@@ -516,7 +534,7 @@ class RegisteredSupport:
             raise ValueError('occlusion tolerance is not configured for this support')
         if self.good is None:
             raise ValueError('no established support registration to hold under occlusion')
-        self._monotonic_ok(e)
+        self._monotonic_ok(e, allow_repeat=True)
         good_view,good_now = self.good
         if now-good_now > occlusion_window_s:
             raise ValueError('support view lost beyond the occlusion window')

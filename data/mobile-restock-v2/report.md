@@ -2599,3 +2599,42 @@ frame each poll but the source renders only every 6 ticks) + a decode miss, not 
 the suspend.
 
 mp4: run-331 263 KB (cold), run-331b 8.94 MB, run-331c 8.94 MB. BASE_ATT tilt unchanged ~-0.71 deg.
+
+### 2026-10-21 — fm448: WARM (W2 floor + reacquire correctness fix) + COLD (C1 hold-held-frame); decode miss is sequencing
+
+**(a) feasibility reconfirmed:** planner min_turn_radius is configurable; outbound routes at 1.5 m, NO route
+at 1.7/1.8 m (planning_timeout) — the 2.5 m portal can't fit a wider coupled turn. So (b), not (a).
+
+**WARM (W2):** staged `tow_lane_curve_speed_floor=0.714→0.55` (turn v 0.193 m/s; predicted rw/rv ~0.55, 22%
+margin under the 0.697 trip, anchored on run-331's 0.39@0.714) — moderate so it drifts less than 0.714.
+
+**WARM (reacquire — correctness bug fixed).** `TowLane.acquirable(along_route=True)` kept THREE gates
+(xy + base-heading + cart_yaw) against the nearest route point, but the controller's route-drop
+(`stop_replan_tracking_error`) checks only xy + cart_yaw. Mid-turn the authored base yaw sweeps through the
+turn, so after a drift the nearest-by-xy point's heading differs > start_tol_yaw while xy and cart_yaw stay
+in tolerance — making ACQUIRE stricter than the DROP, so re-acquire could never pass → `lane_not_acquired`
+churned forever (846×, run-331). Fix: the along_route branch re-acquires on the SAME criteria the drop uses
+(xy ≤ start_tol_xy of the nearest route point + cart_yaw ≤ start_tol_cart_yaw), dropping the surplus
+base-heading gate (the closed-loop follower corrects residual heading). `along_route=False` byte-identical;
+a pose far from every route point still refuses. Did NOT loosen the 0.25 m stop_replan tolerance (fm448).
+6 CPU tests; 107 nav tests pass.
+
+**COLD (C1 — hold accepts the held frame between renders).** `hold()` required a strictly-NEW monotonic
+frame, but the source renders only every sensing_stride=6 ticks, so between renders the held path was
+re-polled with the SAME frame and wrongly raised `needs a new monotonic frame`. `_monotonic_ok(allow_repeat)`
+now accepts an EQUAL (non-regressing) frame for the held path (it re-expresses via live TF, consumes no
+fresh pixels) while still refusing a backwards frame_id/stamp/acquisition-clock or a regressed session;
+prepare()/observe stay strict. Preserves the lifetime + occlusion-window bound. 3 CPU tests. Also updated the
+obsolete `test_decode_failure_before_any_clean_observe_is_strict` → two tests: a SEEDED baseline (Option B)
+now holds a first-frame decode failure on the commissioned prior, an UNSEEDED (legacy, no camera_from_support)
+still strict-refuses — the safety invariant preserved for the genuinely-no-prior case. (This test had
+regressed silently at the Option-B commit; now correct.)
+
+**COLD (decode miss — root-caused, no code change).** `unknown or undecoded label in calibrated slot`
+(isaac_sensors.py) is the carton-TOP SKU-label QR, not the support markers. The source IS at 1.0
+(render_scale ruled out: collect_source_location → full_res_locations pins it to 1.0). The miss is the same
+SEQUENCING family: `_label_clean[source]` is seeded only by a live clean frame, and the descending gripper
+occludes the carton top before any clean source frame — so the undecoded-label hold has no prior. Seeding a
+"clean label read" from the baseline would assert a SKU that was never decoded (evidence-integrity
+violation), so NO camera-lane code change; the fix is orchestration (clean source frame before the grasp
+occludes), integration-owned, same as the support-registration cold-collect conclusion.

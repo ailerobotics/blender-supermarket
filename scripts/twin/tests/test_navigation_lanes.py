@@ -327,6 +327,68 @@ class LaneReacquireAlongRouteTests(unittest.TestCase):
         self.assertEqual(c.plan_observed_route(state, self._obs(), 0.05).reason, 'validated_lane')
 
 
+class LaneReacquireMidTurnDriftTests(unittest.TestCase):
+    """fm448/run-331: on the coupled outbound tow the base drifted off the authored route MID-TURN, the
+    controller dropped the route (stop_replan_tracking_error, which gates on xy + cart_yaw, NOT base
+    heading), then churned lane_not_acquired forever (846x) because `acquirable(along_route=True)` ALSO
+    required the base HEADING to be within start_tol_yaw of the nearest route point. Mid-route the authored
+    yaw sweeps through the turn, so the nearest-by-xy point's heading differs from a slightly-drifted base
+    even when xy + cart_yaw are both in tolerance -> acquire was STRICTER than the drop, so re-acquire was
+    impossible. The fix drops the base-yaw gate for along_route (same xy + cart_yaw criteria as the drop);
+    the start-only gate (along_route=False) keeps the base-yaw check byte-identically."""
+
+    def setUp(self):
+        self.spec = MobileSpec()
+        self.grid = GridMap((-8, -8, 8, 8), (), 0.20)
+        self.lane = _straight_lane()
+        self.graph = TowLaneGraph([self.lane]).expand_all(ArticulatedMap(self.grid, self.spec))
+        # A pose at a MID-ROUTE point (x=+1, 5 m past the x=-4 start -- >> start_tol_xy 0.25 from it) on the
+        # centreline, but whose base HEADING has drifted 0.2 rad (> start_tol_yaw 0.15). xy and cart_yaw are
+        # both in tolerance of the nearest route point (yaw there is 0). Old along_route gate refused it on
+        # the base-yaw check; the fix re-acquires.
+        self.drifted = (1.0, 0.0, 0.2)
+
+    def _obs(self):
+        return Observation(0.1, (), True, True, 0.0, 'test_fixture', 10.0)
+
+    # (a) a mid-route drifted pose (near route state k, not the start) re-acquires when along_route=True.
+    def test_along_route_reacquires_after_midroute_heading_drift(self):
+        self.assertTrue(self.lane.acquirable(self.drifted, 0.0, along_route=True))
+
+    def test_controller_reacquires_after_midroute_heading_drift(self):
+        c = ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, lane_graph=self.graph,
+                                  lane_reacquire_along_route=True)
+        c.start((4, 0, 0), True)
+        state = TrainState(*self.drifted, 0.0)
+        self.assertEqual(c.plan_observed_route(state, self._obs(), 0.05).reason, 'validated_lane')
+
+    # (b) a genuinely off-lane pose (far from EVERY route point) still returns lane_not_acquired.
+    def test_along_route_still_rejects_far_off_lane_pose(self):
+        self.assertFalse(self.lane.acquirable((1.0, 3.0, 0.2), 0.0, along_route=True))  # 3 m off laterally
+
+    def test_controller_rejects_far_off_lane_pose(self):
+        c = ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, lane_graph=self.graph,
+                                  lane_reacquire_along_route=True)
+        c.start((4, 0, 0), True)
+        state = TrainState(1.0, 3.0, 0.2, 0.0)
+        self.assertEqual(c.plan_observed_route(state, self._obs(), 0.05).reason, 'lane_not_acquired')
+
+    def test_along_route_still_gates_cart_yaw_drift(self):
+        # SAFETY: the cart_yaw gate is RETAINED along_route -- a cart yawed > start_tol_cart_yaw (0.20) from
+        # the nearest route point is still refused, even at a mid-route point with a good base heading.
+        self.assertFalse(self.lane.acquirable((1.0, 0.0, 0.0), 0.5, along_route=True))
+
+    # (c) along_route=False is byte-identical (start-only, base-yaw gate intact).
+    def test_along_route_false_is_byte_identical_start_only(self):
+        # A pose AT the start xy with a 0.2 rad heading drift (> start_tol_yaw 0.15) is rejected exactly as
+        # before -- the start-only branch keeps the base-yaw gate.
+        self.assertFalse(self.lane.acquirable((-4.0, 0.0, 0.2), 0.0, along_route=False))
+        self.assertTrue(self.lane.acquirable((-4.05, 0.03, 0.02), 0.03, along_route=False))
+        # And the same drifted mid-route pose that re-acquires along_route is still refused start-only
+        # (5 m from the start > start_tol_xy), proving the branches are independent.
+        self.assertFalse(self.lane.acquirable(self.drifted, 0.0, along_route=False))
+
+
 class LaneCoupledTrackingKnobsTests(unittest.TestCase):
     """fm429 (run-324b/c): config-driven coupled-tow tracking knobs, all defaulting to the prior
     hardcoded values => byte-identical. The cart_yaw replan tolerance is the one staged (relaxed to the

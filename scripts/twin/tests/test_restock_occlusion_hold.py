@@ -100,6 +100,48 @@ def test_hold_tolerates_a_moved_support_camera_by_re_expressing_the_pose():
                            np.asarray(clean.registration.base_from_support))
 
 
+def test_hold_accepts_the_repeated_held_frame_between_renders():
+    # C1 (fm448 / run-331 cold collect): the source renders only every sensing_stride ticks, so
+    # between renders hold() is re-polled with the SAME last frame. The held path re-expresses the
+    # registration via live TF (consumes no fresh pixels), so an equal (non-regressing) frame_id must
+    # HOLD, not raise 'rigid-support registration needs a new monotonic frame'.
+    tracker,(k,camera,depth,support,_,a,b) = commissioned()
+    _clean(tracker, k, camera, depth, a, b, now=2., frame_id=2)   # clean view seeds the hold
+    e = registration(k, camera, depth, a, b, stamp=3., frame_id=3).evidence
+    first = tracker.hold(depth, k, camera, e, now=3., parked=True, occlusion_window_s=20.,
+                         current_registration=None)
+    assert first.occluded
+    # Re-poll with the IDENTICAL frame (same id/stamp) between renders: non-regressing -> holds.
+    repeat = tracker.hold(depth, k, camera, e, now=3., parked=True, occlusion_window_s=20.,
+                          current_registration=None)
+    assert repeat.occluded
+    np.testing.assert_allclose(repeat.center_base, first.center_base, atol=1e-12)
+
+
+def test_hold_rejects_a_regressing_frame_id():
+    # A frame_id that goes BACKWARDS (even with an advancing stamp) is still a regression and refuses.
+    tracker,(k,camera,depth,support,_,a,b) = commissioned()
+    _clean(tracker, k, camera, depth, a, b, now=5., frame_id=5)   # last_frame = frame 5
+    regress = registration(k, camera, depth, a, b, stamp=6., frame_id=4).evidence
+    with pytest.raises(ValueError, match='monotonic'):
+        tracker.hold(depth, k, camera, regress, now=6., parked=True, occlusion_window_s=20.,
+                     current_registration=None)
+
+
+def test_hold_repeat_refused_once_the_frame_ages_past_the_window():
+    # Relaxing the monotonic gate to non-regressing does NOT widen the occlusion window: a held frame
+    # aged past the window since the last clean view still refuses.
+    tracker,(k,camera,depth,support,_,a,b) = commissioned()
+    _clean(tracker, k, camera, depth, a, b, now=2., frame_id=2)   # clean view at now=2
+    e = registration(k, camera, depth, a, b, stamp=3., frame_id=3).evidence
+    assert tracker.hold(depth, k, camera, e, now=3., parked=True, occlusion_window_s=2.0,
+                        current_registration=None).occluded
+    late = registration(k, camera, depth, a, b, stamp=4.5, frame_id=4).evidence   # 2.5 s after clean
+    with pytest.raises(ValueError, match='occlusion window'):
+        tracker.hold(depth, k, camera, late, now=4.5, parked=True, occlusion_window_s=2.0,
+                     current_registration=None)
+
+
 def test_a_disturbed_support_can_no_longer_be_held():
     tracker,(k,camera,depth,support,_,a,b) = commissioned()
     _clean(tracker, k, camera, depth, a, b, now=2., frame_id=2)
@@ -347,12 +389,46 @@ def test_held_frame_refused_once_stale_past_the_window(tmp_path, monkeypatch):
         adapter.capture(1.70, 'backstock_00', 'backstock_00', motion, contact)
 
 
-def test_decode_failure_before_any_clean_observe_is_strict(tmp_path, monkeypatch):
+def test_decode_failure_with_seeded_baseline_holds_on_the_commissioned_prior(tmp_path, monkeypatch):
+    # Option B (fm443/fm444): the commissioned baseline carries the world-constant camera_from_support,
+    # so apply_baselines SEEDS tracker.good. A first-frame decode failure under occlusion then re-expresses
+    # that commissioned prior through live TF (hold) instead of strict-refusing -- the whole point of
+    # seeding the hold from the baseline (pre-Option-B this was strict: there was no prior to fall back on).
     from .test_restock_manipulation import FixturePoseBridge
     monkeypatch.setattr('scripts.twin.restock_manipulation.isaac_sensors.load_pose_bridge',
                         lambda root: FixturePoseBridge())
     _, adapter, camera, motion, contact, (k, witness, frame, camera_pose) = _source_rig(tmp_path)
-    # First ever frame fails decode: nothing clean to hold -> strict refusal (observe stays strict).
+    assert adapter.context_provider.slots[0].tracker.good is not None   # Option B seeded the prior at boot
+    _fail_decode_next(adapter)
+    adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)   # holds on the seed, no raise
+
+
+def test_decode_failure_without_a_seeded_prior_is_strict(tmp_path, monkeypatch):
+    # Safety invariant preserved for the genuinely-no-prior case: a LEGACY baseline lacking
+    # camera_from_support leaves tracker.good None (no seed), so a first-frame decode failure with nothing
+    # clean to hold strict-refuses, exactly as before Option B.
+    from dataclasses import replace
+    from scripts.twin.restock_camera import commissioning as C
+    from .test_restock_commissioning import empty_frame, context
+    from .test_restock_manipulation import FixturePoseBridge
+    from scripts.twin.restock_manipulation import isaac_sensors
+    monkeypatch.setattr('scripts.twin.restock_manipulation.isaac_sensors.load_pose_bridge',
+                        lambda root: FixturePoseBridge())
+    k, camera_pose, depth, support, witness, frame = empty_frame()
+    ctx = context(k, camera_pose, location='backstock_00', camera_id='source')
+    C.commission_and_persist(ctx, frame, 1., {'backstock_00': (support, witness)}, dataset_dir=tmp_path)
+    loaded = C.load_baselines(tmp_path)
+    legacy = {loc: replace(rec, geometry=replace(rec.geometry, camera_from_support=None))
+              for loc, rec in loaded.items()}            # strip the pose -> no Option-B seed
+    boot = context(k, camera_pose, location='backstock_00', camera_id='source')
+    C.apply_baselines(boot, legacy, required_locations=['backstock_00'])
+    boot.occlusion_window_s = 20.
+    assert boot.slots[0].tracker.good is None             # unseeded: nothing to hold
+    adapter = isaac_sensors.IsaacCartonSensors(_Camera(frame, k), pose_bridge_root='fixture', profiles={},
+                                               context_provider=boot, camera_id='source',
+                                               steady_clock=lambda: 0.)
+    motion = NS(parked=lambda: True, collision_time=1., joint_positions=lambda: (0.,)*6,
+                observe_source=lambda o: None)
     _fail_decode_next(adapter)
     with pytest.raises(ValueError):
-        adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)
+        adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, NS(read=lambda: False))

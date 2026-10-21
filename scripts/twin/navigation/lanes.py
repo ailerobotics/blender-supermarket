@@ -77,22 +77,34 @@ class TowLane:
         robot is not on this lane).
 
         Default: proximity to the lane START only. With `along_route` (fm427/run-323b), proximity to the
-        NEAREST authored route point instead -- the SAME tolerances, only the reference generalises from
-        the fixed start to the whole centreline. run-323b froze 0.06 m from the route but 0.36 m from the
-        start after the follower advanced a few waypoints and dropped the route; the start-only check then
-        refused to re-acquire (> start_tol_xy) -> lane_not_acquired forever. A follower that has drifted a
-        little ALONG its own lane must re-acquire at its progress, not be forced back to the start."""
+        NEAREST authored route point instead -- the reference generalises from the fixed start to the whole
+        centreline. run-323b froze 0.06 m from the route but 0.36 m from the start after the follower
+        advanced a few waypoints and dropped the route; the start-only check then refused to re-acquire
+        (> start_tol_xy) -> lane_not_acquired forever. A follower that has drifted a little ALONG its own
+        lane must re-acquire at its progress, not be forced back to the start.
+
+        fm448/run-331: the along-route gate is the SAME criteria the controller's stop_replan_tracking_error
+        drop uses -- xy (start_tol_xy) + cart_yaw (start_tol_cart_yaw) -- and deliberately NOT the base
+        heading. The start-only branch keeps the base-yaw gate because at the fixed start there is a single
+        authored heading to line up with; mid-route the authored base yaw sweeps THROUGH a turn, so the
+        nearest-by-xy route point's heading can differ from a base that drifted a little (> start_tol_yaw)
+        even though xy AND cart_yaw are both in tolerance. Applying the start's heading gate there made
+        acquire STRICTER than the drop that dropped the route, so after a mid-turn drift the follower could
+        never re-acquire -> lane_not_acquired churned forever (846 occurrences). The closed-loop follower
+        corrects residual heading via its tracking law, so re-acquiring on xy + cart_yaw is sufficient; a
+        pose far from EVERY route point (> start_tol_xy from the nearest) still refuses."""
         if len(pose) != 3 or not all(math.isfinite(v) for v in pose):
             return False
         if along_route and self.route is not None and self.route.states:
             best = min(self.route.states, key=lambda s: math.hypot(pose[0] - s.x, pose[1] - s.y))
-            ref_xy, ref_yaw, ref_cart = (best.x, best.y), best.yaw, best.cart_yaw
-        else:
-            ref_xy, ref_yaw, ref_cart = self.start[:2], self.start[2], self.start_cart_yaw
-        ok = (math.dist(pose[:2], ref_xy) <= self.start_tol_xy
-              and abs(wrap(pose[2] - ref_yaw)) <= self.start_tol_yaw)
+            ok = math.dist(pose[:2], (best.x, best.y)) <= self.start_tol_xy
+            if cart_yaw is not None:
+                ok = ok and abs(wrap(cart_yaw - best.cart_yaw)) <= self.start_tol_cart_yaw
+            return ok
+        ok = (math.dist(pose[:2], self.start[:2]) <= self.start_tol_xy
+              and abs(wrap(pose[2] - self.start[2])) <= self.start_tol_yaw)
         if cart_yaw is not None:
-            ok = ok and abs(wrap(cart_yaw - ref_cart)) <= self.start_tol_cart_yaw
+            ok = ok and abs(wrap(cart_yaw - self.start_cart_yaw)) <= self.start_tol_cart_yaw
         return ok
 
     def start_state(self):
