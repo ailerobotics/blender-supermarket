@@ -716,6 +716,13 @@ class ArticulatedController(Controller):
             if reason:return Result(reason=reason)
         if not all(math.isfinite(v) for v in (linear,angular)) or linear<0:
             return Result(reason='reverse_or_invalid_command')
+        # fm437/fm439: on a static-validated authored lane, trust UNOBSERVED space in the swept envelope.
+        # Applies to BOTH gate paths: the CoverageField certification below (reference nav_mode -- the
+        # live run-328 path: the ~90 deg southward turn can't be pre-observed because the base faces east,
+        # a sensing-geometry deadlock) AND the temporal check_train. A positive/observed obstacle still
+        # stops the tow (world.valid/rollout on obs.obstacles below), so only the unobserved-space refusal
+        # is waived -- the static map (validated at lane build + trust_static live) is the authority there.
+        trust_unknown=self.lane_trust_unknown and self._active_lane is not None
         v=min(linear,self.max_speed)
         w=max(-self.max_angular,min(angular,self.max_angular))
         if abs(w)*1.5>v+1e-9:
@@ -731,7 +738,7 @@ class ArticulatedController(Controller):
                 ok=obs.coverage_radius>=self.footprint.radius(True)+uncertainty+stop
             else:
                 ok=self._envelope_coverage_ok(odom,obs,stop,k,uncertainty,coupled=True)
-            if not ok:
+            if not ok and not trust_unknown:
                 return Result(reason='insufficient_sensor_coverage')
         if not self.world.valid(state,obs.obstacles,uncertainty):
             return Result(reason='obstacle_stop')
@@ -749,7 +756,6 @@ class ArticulatedController(Controller):
                 return Result(reason='obstacle_stop')
             predicted+=braking
         if temporal is not None:
-            trust_unknown=self.lane_trust_unknown and self._active_lane is not None
             reason=temporal.check_train(predicted,self.spec,uncertainty,now,trust_unknown=trust_unknown)
             if reason:return Result(reason=reason)
         return Result(v,w,reason='tracking')

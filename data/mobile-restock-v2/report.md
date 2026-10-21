@@ -2425,3 +2425,41 @@ grasp press first), overlapping the B' camera-placement question. **No sprung ca
 correction: pursue it only if the tilt mattered — it does not); caster_lift_m stays 5 mm. Still added the
 requested base attitude log: `BASE_ATT roll_deg/pitch_deg` ~1 Hz in every action (`isaac_port.py`
 `body_roll_pitch_deg` + the advance() log) so the live tilt is measured next run.
+
+### 2026-10-21 — run-328 (fm438 GO): trust_unknown was on the WRONG gate path (reference nav_mode uses CoverageField, not temporal); fixed + re-staged
+
+Full guarded mission with `tow_lane_trust_unknown=true` staged. Result: both warm runs stalled at the
+**identical** x=−4.02 as run-327b → the fm437 fix was **inert**. Diagnosis: `nav_mode: reference` with
+`require_temporal_map` unset means the live gate uses the **CoverageField `certifies_sweep`** path
+(`_envelope_coverage_ok` → `insufficient_sensor_coverage`), NOT the temporal `check_train` I patched. The
+nav-trace probe is explicit: at the stall `gate_drive` certifies (cert=True) but `gate_turn` is cert=False
+with 5 blind beams at −89.4…−85.4° (due south). The base reaches the lane's first ~90° southward turn
+facing east and **cannot pre-observe south without turning** (a sensing-geometry deadlock) — the turn
+sweep's forward crescent is unobserved → coverage refuses → the authored route drops+replans → `planning_stop`
+→ nav-stuck at 120 s.
+
+FIX (same `navigation.tow_lane_trust_unknown` flag, now on the CORRECT path): `gate_velocity` computes
+`trust_unknown = lane_trust_unknown and _active_lane is not None` and, on a static-validated authored lane,
+**waives the `insufficient_sensor_coverage` refusal** (the static map proved the swept corridor clear at
+lane build + `trust_static` live), while `world.valid`/`rollout` on `obs.obstacles` still return
+`obstacle_stop` — so an OBSERVED obstacle still stops the tow. The temporal `check_train` trust (fm437)
+stays for temporal-map mode. CPU test
+`test_navigation_coverage.py::test_lane_trust_unknown_waives_coverage_but_observed_obstacle_still_stops`
+reproduces the live `insufficient_sensor_coverage` refusal, proves the waiver, and proves an observed
+obstacle STILL `obstacle_stop`s. No config change (the staged flag now covers both paths).
+
+**Per-stage reach:** COLD run-328 reserved→collect→failed (`arm command heartbeat lost`, native_transport
+watchdog — a different cold flake than run-327's collect-capture; both are cold-collect issues upstream of
+B'). WARM run-328b/328c (byte-reproducible): reserved→collect_shortcut→couple→**couple_succeeded**→outbound
+→failed at x=−4.02 (`planning_stop`, 120/121 s). Couple CLEAN: hitch latched to **19.5 / 19.4 mm**. Outbound
+path 5.02 m (tracking: 520 vs 5 measured_turn_radius). park/transfer/verify/return NOT reached.
+
+**BASE_ATT tilt (fm438 ask — the new log works):** the caster-lift static tilt is **pitch ≈ −0.71°**
+(cold base settled −0.454°→−0.707°; matches the predicted ~0.75°), roll ≈ 0, and **near-level
+(−0.03°) while driving coupled**. Small, as expected; consistent with the (B) tilt exoneration.
+
+**mp4s:** run-328 264 KB (short cold), run-328b 9.98 MB, run-328c 9.54 MB.
+
+**Disk-cleanup note (fm440/fm441):** the ~70 GB root cleanup reported in fm439 was NOT this task's action
+(fm441 withdrew the misattribution). This task's only deletions are task-scoped: dead-PID
+`/dev/shm/fastrtps_*`, and `rm -rf` of own run/commissioning/scratch dirs under the task dataset.
