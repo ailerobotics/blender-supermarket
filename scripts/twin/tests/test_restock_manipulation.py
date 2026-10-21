@@ -370,6 +370,65 @@ def test_collision_stale_pause_keeps_stream_alive_and_wall_fail_fast_fm427():
     assert r.status == 'failed' and 'collision-stale pause' in r.reason and 'heartbeat' in r.reason, r.reason
 
 
+def test_held_lift_collision_grace_rides_then_fails_fast_fm430():
+    # fm430 (2a) fallback: the post-attach LIFT to the fixed clear-region carry_lift_shape may RIDE a
+    # stale collision world (proceed, not pause) for a bounded WALL grace, then fail fast named. Scoped to
+    # phase 'lift' + carry_lift_shape set + collision-sole staleness + held.
+    clock = [0.0]
+    c, m = make_controller('collect', steady_clock=lambda: clock[0],
+                           carry_lift_shape=(1.2675, -2.27, 1.0, 0.65, 0.8, -1.2545))
+    c.collision_stale_tol_s = 0.8
+    c.lift_collision_grace_wall_s = 5.0
+    t = run_to(c, 'lift'); assert c.held
+    m.outcome = 'running'
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        # stale collision stamp (0.6 s old): past the 0.5 max_age -> would pause; the grace RIDES it
+        r = c.step(.1, packet(c, t, contact=True, collision_time=t - 0.6))
+    assert r.status == 'running', r.reason
+    assert 'LIFT_COLLISION_GRACE' in buf.getvalue()
+    assert 'COLLISION_STALE_PAUSE' not in buf.getvalue()   # grace proceeds, never the hold path
+    assert c.phase == 'lift'
+    # past the wall grace with the stamp still stale -> fail fast named
+    clock[0] = 6.0
+    r = c.step(.1, packet(c, t + .1, contact=True, collision_time=(t + .1) - 0.6))
+    assert r.status == 'failed' and 'held-lift collision grace exceeded' in r.reason, r.reason
+
+
+def test_held_lift_collision_grace_default_off_pauses_fm430():
+    # Default (lift_collision_grace_wall_s == 0) => the fm419(a) pause path, byte-identical (no grace).
+    c, m = make_controller('collect', carry_lift_shape=(1.2675, -2.27, 1.0, 0.65, 0.8, -1.2545))
+    c.collision_stale_tol_s = 0.8
+    assert c.lift_collision_grace_wall_s == 0.0
+    t = run_to(c, 'lift'); assert c.held
+    m.outcome = 'running'
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        r = c.step(.1, packet(c, t, contact=True, collision_time=t - 0.6))
+    assert r.status == 'running', r.reason
+    assert 'COLLISION_STALE_PAUSE' in buf.getvalue()       # the legacy pause, not the grace
+    assert 'LIFT_COLLISION_GRACE' not in buf.getvalue()
+
+
+def test_held_lift_collision_grace_scoped_to_lift_only_fm430():
+    # The grace must NOT apply outside the lift (e.g. at contact/grasp) -- a collision-stale there still
+    # pauses (fm419) or trips, never rides. Here with grace on but phase != lift.
+    c, m = make_controller('collect', carry_lift_shape=(1.2675, -2.27, 1.0, 0.65, 0.8, -1.2545))
+    c.collision_stale_tol_s = 0.8
+    c.lift_collision_grace_wall_s = 5.0
+    t = run_to(c, 'grasp')   # held becomes True only after grasp->lift; at grasp pre-weld it is not held
+    # drive a held state at a non-lift phase by forcing phase after a hold; simplest: assert grace inert
+    # when not in lift via a direct check that a stale collision at 'grasp' does not print the grace.
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        c.step(.1, packet(c, t, contact=False))            # issue gripper
+        c.step(.1, packet(c, t + .1, contact=False, collision_time=(t + .1) - 0.6))
+    assert 'LIFT_COLLISION_GRACE' not in buf.getvalue()     # never grace outside the lift
+
+
 def test_collision_stale_pause_hold_swallows_motion_active_raise_fm427():
     # fm427 (A1) / run-324 cold REGRESSION: the keep-alive calls begin_joint_goal, which the REAL host
     # (RosMotionPort) raises 'motion already active' when the lift trajectory is still active -- and that

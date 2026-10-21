@@ -344,6 +344,33 @@ class IncorporationAckTest(unittest.TestCase):
         # mission's 0 <= now - collision_time <= 0.5 freshness gate.
         self.assertEqual(st.snapshot(10.9, endpoints_ready=True, process_alive=True)['collision_time'], -1.)
 
+    def test_postattach_esdf_kick_arms_on_phase_into_lift_fm430(self):
+        # fm430 (2a): the post-attach ESDF re-integration kick arms once on the mission phase rising INTO
+        # 'lift' (the move right after the grasp->weld), so the tick drops any in-flight pre-attach request
+        # and integrates the post-attach ESDF a cycle sooner. Pure sequencing (ROS glue is separate).
+        st, _ = self.prepared()
+        st.kick_enabled = True
+        self.assertFalse(st.note_manip_phase('grasp'))        # not lift -> no arm
+        self.assertFalse(st.consume_kick())
+        self.assertTrue(st.note_manip_phase('lift'))          # rising into lift -> arm
+        self.assertTrue(st.consume_kick())                    # consumed once
+        self.assertFalse(st.consume_kick())                   # one-shot
+        self.assertFalse(st.note_manip_phase('lift'))         # steady lift -> no re-arm
+        self.assertFalse(st.note_manip_phase('preplace'))     # off lift -> no arm
+        self.assertTrue(st.note_manip_phase('lift'))          # rising into lift again -> re-arms
+
+    def test_postattach_esdf_kick_default_off_never_arms_fm430(self):
+        st, _ = self.prepared()
+        self.assertFalse(st.kick_enabled)                     # default off (env unset)
+        self.assertFalse(st.note_manip_phase('lift'))
+        self.assertFalse(st.consume_kick())
+
+    def test_postattach_esdf_kick_inactive_epoch_never_arms_fm430(self):
+        st, _ = self.state()                                  # NOT prepared -> inactive
+        st.kick_enabled = True
+        self.assertFalse(st.note_manip_phase('lift'))         # no active parked epoch -> no arm
+        self.assertFalse(st.consume_kick())
+
     def test_acknowledgement_monotonic_and_epoch_scoped(self):
         st, _ = self.prepared()
         st.acknowledge(10.2, 1)

@@ -249,6 +249,22 @@ move into the stale collision world) so the arm-command stream stays alive and t
 (2) fails fast with a named reason once the pause persists beyond this WALL budget (below the 90 s
 backstop). CPU tests: `tests/test_restock_manipulation.py`.
 
+**Post-attach collision-stamp lag — two opt-in mitigations (fm430 (2a), both default-off ⇒ byte-identical):**
+diagnosis — right after the `SIM_ATTACH` weld the host `object_attachment` clears the carton voxels and
+the parked mapper must re-incorporate at the new state, but under render pacing the next nvblox ESDF
+integration stamp lags `now` by ~0.5–0.8 s (run-323 `collision_dt` 0.52→0.65, progressive), so the
+controller's 0.5 s collision freshness trips through the lift and the fm419(a) pause holds.
+(1) **Host ESDF re-integration kick** — `RESTOCK_ESDF_POSTATTACH_KICK` makes `restock_host/incorporation_ack.py`
+(the nvblox `get_esdf_and_gradient` poll node) subscribe to `/manipulation/status` and, on the phase
+rising into `lift` (post-weld), DROP any in-flight pre-attach ESDF request and issue a fresh one so the
+post-attach integration lands ~a cycle sooner instead of waiting out the old request (≤ 2 s). Pure
+`IncorporationAckState.note_manip_phase`/`consume_kick` sequencing, unit-tested in `tests/test_restock_host.py`.
+(2) **Controller held-lift collision grace** — `RESTOCK_LIFT_COLLISION_GRACE_WALL_S` lets ONLY the
+post-attach lift to the fixed, bench-proven clear-region `carry_lift_shape` (which does NOT depend on the
+live collision world) RIDE THROUGH a stale collision stamp (proceed, not pause) for a bounded WALL grace,
+then FAIL FAST with a named reason. Scoped to held + phase `lift` + `carry_lift_shape` set +
+collision-SOLE staleness (every other invariant field must be good). CPU tests: `tests/test_restock_manipulation.py`.
+
 Integration's existing Isaac ROS graphs supply `/clock`, registered RGB-D, current
 TF and joint-state/controller transport. Host-side MoveIt/cuMotion provides the
 three planning/execution endpoints below, `/restock_sim/apply_planning_scene`

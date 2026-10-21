@@ -175,6 +175,17 @@ class TransferController:
         # 0 s (default) => the legacy empty-control pause with no wall bound (byte-identical).
         self.collision_pause_wall_s = _float_env_bounded('RESTOCK_COLLISION_PAUSE_WALL_S', 0.0, 0.0, 85.0)
         self._pause_wall_start = None        # wall time the current collision-stale pause began
+        # fm430 (2a) fallback (run-323/324 cold lift): the post-attach LIFT drives to carry_lift_shape, a
+        # FIXED, bench-proven clear-region joint goal that does NOT depend on the live collision world. If
+        # the ESDF re-incorporation lags after the SIM_ATTACH weld (collision stamp briefly stale), the
+        # fm419(a) pause HOLDS the lift until the stamp freshens -- but if it never freshens (run-323:
+        # collision_dt grew 0.52->0.65) the lift stalls. This OPT-IN grace lets ONLY that specific
+        # pre-validated lift RIDE THROUGH a stale collision world (proceed, not pause) for a bounded WALL
+        # window, then FAIL FAST with a named reason. Scoped tightly: held + phase 'lift' + carry_lift_shape
+        # set + collision-sole staleness. 0 s (default) => off => the fm419(a) pause (byte-identical). This
+        # is the controller-side fallback to the host ESDF re-integration kick (restock_host).
+        self.lift_collision_grace_wall_s = _float_env_bounded('RESTOCK_LIFT_COLLISION_GRACE_WALL_S', 0.0, 0.0, 85.0)
+        self._lift_grace_wall_start = None   # wall time the current held-lift collision grace began
         # Execute the contact descent as a seeded straight-line move through the trajectory host instead
         # of a cuMotion plan (the motion port's begin(straight_line=True) path). Default False keeps the
         # real-rig collision-planned descent; the sim mission opts in via config -- a one-flag revert.
@@ -502,6 +513,31 @@ class TransferController:
         if self.elapsed > self.phase_timeout:
             return self._fail('phase timeout: ' + self.phase)
         collision_fresh = self._fresh(sensors.collision_time, now)
+        # fm430 (2a) fallback: ride the post-attach LIFT (to the fixed clear-region carry_lift_shape, which
+        # does NOT depend on the live collision world) THROUGH a brief ESDF-re-incorporation staleness for
+        # a bounded WALL grace -- proceed (treat collision as fresh for this pre-validated move), then FAIL
+        # FAST with a named reason if the collision world stays stale past the grace. Scoped to held +
+        # phase 'lift' + carry_lift_shape set + collision-SOLE staleness (every other invariant field must
+        # be good, so it can never mask a base-moving / feedback / pre-grasp fault). 0 s => off => the
+        # fm419(a) pause path (byte-identical). Resets when collision is fresh again (below).
+        if (not collision_fresh and self.lift_collision_grace_wall_s > 0 and self.held
+                and self.phase == 'lift' and self.carry_lift_shape is not None
+                and sensors.parked is True and type(sensors.contact) is bool
+                and self._fresh(sensors.feedback_time, now) and len(sensors.joint_positions) == 6
+                and all(math.isfinite(x) for x in sensors.joint_positions)
+                and math.isfinite(sensors.collision_time) and now - sensors.collision_time > self.max_age):
+            wall = self.steady_clock()
+            if self._lift_grace_wall_start is None:
+                self._lift_grace_wall_start = wall
+            if wall - self._lift_grace_wall_start > self.lift_collision_grace_wall_s:
+                return self._fail('held-lift collision grace exceeded %.1fs wall: the collision world '
+                                  'stayed stale (collision_dt=%.4f) through the post-attach lift to the '
+                                  'fixed clear-region goal -- failing fast'
+                                  % (wall - self._lift_grace_wall_start, now - sensors.collision_time))
+            print('LIFT_COLLISION_GRACE phase=lift now=%.3f collision_dt=%.4f (grace %.1fs) -- riding the '
+                  'pre-validated clear-region lift through the post-attach ESDF lag'
+                  % (now, now - sensors.collision_time, self.lift_collision_grace_wall_s), flush=True)
+            collision_fresh = True   # proceed with THIS pre-validated lift despite the stale collision world
         if (sensors.parked is not True or type(sensors.contact) is not bool
                 or not self._fresh(sensors.feedback_time, now)
                 or not collision_fresh
@@ -579,6 +615,9 @@ class TransferController:
                   flush=True)
             return self._fail('base moving or stale/missing feedback/collision world [' + ','.join(why) + ']')
         self._pause_wall_start = None   # fm427 (A1): invariant passed (collision fresh) -> pause ended
+        if collision_fresh and (not math.isfinite(sensors.collision_time)
+                                or now - sensors.collision_time <= self.max_age):
+            self._lift_grace_wall_start = None   # fm430 (2a): collision genuinely fresh -> grace resets
         if self.held and self.phase != 'release' and not sensors.contact:
             return self._fail('lost grasp')
         # fm425 (run-322 cold): WALL-clock contact fail-fast. While pressing for contact (phase 'contact',

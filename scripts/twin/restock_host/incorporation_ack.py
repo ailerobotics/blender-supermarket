@@ -67,6 +67,19 @@ class IncorporationAckState:
                           if 'RESTOCK_STATION_SIM_GAP_S' in os.environ else .5)
         self.wall_gap_s = (max(3., min(600., float(os.environ['RESTOCK_STATION_WALL_GAP_S'])))
                            if 'RESTOCK_STATION_WALL_GAP_S' in os.environ else 3.)
+        # fm430 (2a): post-attach ESDF re-integration KICK (opt-in, default off => byte-identical). After
+        # the SIM_ATTACH weld the host object_attachment clears the carton voxels and the parked mapper
+        # must re-incorporate at the new state, but under render pacing the next ESDF integration stamp
+        # lags `now` by ~0.5-0.8 s (run-323 collision_dt 0.52->0.65), so the mission's 0.5 s collision
+        # freshness trips through the lift. This node already polls get_esdf_and_gradient continuously,
+        # but a request can be MID-FLIGHT (up to the 2 s cancel) when the attach lands, so the first
+        # post-attach integration waits for that pre-attach request. The kick: on the attach edge (the
+        # mission's /manipulation/status contact rising False->True), DROP the in-flight pre-attach request
+        # and issue a fresh one immediately, so the post-attach ESDF integrates ~a cycle sooner. Pure
+        # sequencing lives on this state object (unit-tested); the ROS subscription is glue.
+        self.kick_enabled = (os.environ.get('RESTOCK_ESDF_POSTATTACH_KICK', '0') not in ('0', '', 'false', 'False'))
+        self._kick_pending = False
+        self._last_phase = None
         self.epoch = 0
         self.sequence = -1
         self.parked_since = -1.
@@ -124,6 +137,26 @@ class IncorporationAckState:
         self.last_heartbeat = stamp
         self.wall_heartbeat = self.wall_clock()
         return action
+
+    def note_manip_phase(self, phase):
+        """fm430 (2a): arm the post-attach ESDF kick on the attach-adjacent EDGE -- the mission phase
+        rising INTO 'lift' (the move that starts right after the grasp->weld, when the carton has just
+        attached and the ESDF must re-incorporate). /manipulation/status carries `phase`, not contact.
+        Only while a parked epoch is active and the kick is enabled; steady/other phases do not re-arm.
+        Returns True iff it armed the kick this call."""
+        rising_into_lift = (phase == 'lift' and self._last_phase != 'lift')
+        self._last_phase = phase
+        if rising_into_lift and self.kick_enabled and self.active and not self.fault:
+            self._kick_pending = True
+            return True
+        return False
+
+    def consume_kick(self):
+        """Pop the one-shot kick arm (True at most once per attach edge); the tick drops any in-flight
+        pre-attach ESDF request and issues a fresh one so the post-attach integration is not delayed."""
+        k = self._kick_pending
+        self._kick_pending = False
+        return k
 
     def acknowledge(self, stamp, epoch):
         if (not self.active or epoch != self.epoch or not math.isfinite(stamp)
@@ -261,6 +294,13 @@ def main():
                 if pending is not None and time.monotonic() - pending_wall > 2.:
                     pending.cancel()
                     pending = None
+                # fm430 (2a): on the attach edge, drop the in-flight pre-attach request so a fresh
+                # post-attach integration issues this tick instead of waiting out the old one.
+                if state.consume_kick() and pending is not None:
+                    pending.cancel()
+                    pending = None
+                    node.get_logger().info('post-attach ESDF kick: dropped in-flight request for a fresh '
+                                           'post-attach integration')
                 if pending is None and endpoints_ready and service.service_is_ready():
                     request = EsdfAndGradients.Request()
                     request.update_esdf = True
@@ -283,7 +323,19 @@ def main():
             state.fault = str(exc)
             stop.publish(Bool(data=True))
 
+    def manip_status(message):
+        # fm430 (2a): arm the post-attach ESDF kick on the mission phase rising into 'lift' (post-weld).
+        # Best-effort: a malformed/absent status never disturbs the ack node.
+        try:
+            data = json.loads(message.data)
+            if state.note_manip_phase(data.get('phase')):
+                node.get_logger().info('post-attach ESDF kick armed (manipulation phase -> lift)')
+        except (ValueError, TypeError, AttributeError):
+            pass
+
     node.create_subscription(String, NS + '/station/command', command, 10)
+    if state.kick_enabled:
+        node.create_subscription(String, NS + '/manipulation/status', manip_status, 10)
     node.create_timer(.05, tick)
     try:
         rclpy.spin(node)
