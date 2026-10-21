@@ -2347,3 +2347,43 @@ on yaw — all inside tolerance, at **physical** μ=1.0 (no unphysical friction,
 confirms both the root cause (drive-wheel normal force) and the faithful fix. Staged into run-327 by
 pointing the cc-collect + couple configs' `mobile_manifest` at the lifted asset (A'-2 coast already
 staged); enablement fragment `docs/examples/caster-lift-mission-fragment.json`.
+
+### 2026-10-21 — run-327 (fm436 GO): the caster-lift drive fix works LIVE; outbound now drives 4.87 m and the blocker moves to a nav planning_stop
+
+Full guarded mission with the caster-lift asset (mobile_manifest → /mobile-casterlift/) + A'-2 coast + trust_static
++ cart_yaw_tol 0.30 + carry_reposition_drive + ESDF kick + lift grace + all prior. Offline preflights green;
+lock held across commission+mission; whispr via --heavy-threshold-mb 2500. cold → warm → extra-warm.
+
+**COLD run-327** (real collect): reserved → collect → **failed**. The base drove the collect approach and
+engaged BASE_FULL_BRAKE for the grasp press, then `COLLECT_CAPTURE` failed repeatedly on camera evidence —
+`no new synchronized rendered camera frame` / `no established support registration to hold under occlusion`
+/ `missing, moving, stale or unsynchronized camera evidence` (the known collect-confirm source-occlusion /
+render-sync class). It did NOT reach place_approach (run-326 cold did), so this is earlier than the expected
+B' re-park occlusion. mp4 258 KB. Candidate contributor: the caster-lift static tilt may reframe the fixed
+source camera — unconfirmed (see tilt note). 
+
+**WARM run-327b & run-327c** (start_at=couple; byte-reproducible): reserved → collect_shortcut → couple →
+**couple_succeeded** → outbound → **failed**. Couple CLEAN (388 tracking ticks; hitch dock closed
+72→56→40→23 mm to the latch). **Outbound is the headline:** the base drove **4.865 / 4.867 m** of the tow
+lane (x −5.73→−4.02, y 15.22–16.00) with **114 `tracking` ticks vs 2 `measured_turn_radius` and ZERO
+lane_blocked / stop_replan / lane_not_acquired** — compare run-326b (no lift): **1.09 m**, 58 replan + 23
+measured_turn_radius churn. **The caster-lift drive-fidelity fix carried straight into the live coupled tow:
+~4.5× the distance, churn eliminated, over-rotation all but gone.** Both runs then hit a **`planning_stop`**
+at x≈−4.02 (≈4.87 m in): the base stopped making progress and the RESTOCK_NAV_STUCK_WALL_S=120 guard
+fail-fast'd at 120/121 s (`outbound stuck with no base progress for 120s … last reason 'planning_stop'`).
+This is a **nav planning / lane-continuation** blocker at a specific point on the outbound lane — NOT drive
+fidelity (the drive is healthy right up to the stop). park / transfer / verify / return NOT reached.
+mp4s 9.66 / 9.67 MB.
+
+**Tilt note (fm436's ask — did the 0.75° nose-up caster-lift tilt affect perception or grasp?):** No
+evidence it hurt the couple or the outbound drive (both healthy and reproducible). The run has no explicit
+base roll/pitch log; SEAL_DIAG `tilt_deg` averaged ~3.2° but that is the GRIPPER-frame forward in the carry
+pose (gripper pointing ~down), not the chassis, and there is no run-326 baseline to difference it against —
+so it cannot be cleanly attributed to the lift. The cold collect-capture failure is the known camera
+sync/occlusion class and reached the grasp press first; whether the chassis tilt reframed the fixed source
+camera is plausible but UNCONFIRMED. Recommend a base roll/pitch log (and an offline source-camera
+re-framing check at 0.75° pitch) before concluding.
+
+**Net:** run-327 proves the drive fix on the live mission — the core warm-outbound crawl is gone and the
+base now tows the cart 4.87 m cleanly. The warm frontier is now a single nav `planning_stop` partway along
+the outbound lane; the cold frontier is the collect-capture camera-sync/occlusion (earlier than B').
