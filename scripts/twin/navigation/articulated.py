@@ -887,12 +887,16 @@ class ArticulatedController(Controller):
             track_tol=min(self.lane_track_tol, max(0.10, slack-0.05))
         # fm450: per-point tracking margin, so run-333 shows how close the base runs to its eff tol at the
         # narrow shelf-end pinch (eff tol -> 0.10 m there) vs the wide turn. Throttled.
+        cart_err=abs(wrap(nearest.cart_yaw-state.cart_yaw))
         self._trackn=getattr(self,'_trackn',0)+1
         if self._trackn % 30 == 1:
-            print('TRACK_DIAG err=%.3f tol=%.3f slack=%s at=(%.2f,%.2f)' %
+            # fm449/450 + run-333: log BOTH stop_replan conditions -- xy (err vs tol+slack) AND the cart_yaw
+            # divergence (cart_err vs lane_cart_yaw_tol). run-333 showed xy err ~0.066 << 0.35 so the trip is
+            # the CART_YAW, not xy; this exposes which condition actually fires and by how much.
+            print('TRACK_DIAG err=%.3f tol=%.3f slack=%s cart_err=%.3f cart_tol=%.3f at=(%.2f,%.2f)' %
                   (track_err, track_tol, ('%.3f'%slack) if slack is not None else 'n/a',
-                   nearest.x, nearest.y), flush=True)
-        if track_err>track_tol or abs(wrap(nearest.cart_yaw-state.cart_yaw))>self.lane_cart_yaw_tol:
+                   cart_err, self.lane_cart_yaw_tol, nearest.x, nearest.y), flush=True)
+        if track_err>track_tol or cart_err>self.lane_cart_yaw_tol:
             self.route=None
             return Result(reason='stop_replan_tracking_error')
         # Follow the checked curvature, rather than cutting tight portal corners
