@@ -2780,3 +2780,26 @@ with the flag set will confirm the gate (expected `stale`, large `delta` at obse
 latency. CPU tests: 3 added to `test_restock_sensing_stride.py` (stale named + measured, future named,
 silent/byte-identical when unset); the file's 9 tests + `test_restock_sensing_gate` + `test_restock_source_target`
 (30) all pass.
+
+### 2026-10-21 — run-334 (fm451 GO): cart_yaw re-base WORKS (stop_replan 580→2, base +0.37 m into the turn); churn moves to the ACQUIRE path
+
+**WARM run-334b/c — the fm451 re-base worked, next layer is the acquire path.** `stop_replan_tracking_error`
+dropped **580→2** and the base drove **+0.37 m deeper** (path 5.84 m, end x=−3.53, into the turn). TRACK_DIAG:
+xy err stays 0.05–0.10, and **cart_err climbs 0→0.30** as the base actually drives the turn (the re-base sets
+the entry divergence to 0, then it grows as the cart lags the sharpening turn, re-hitting 0.30 twice). So the
+entry trip is solved and the base turns. But the churn moved to **859 lane_not_acquired + 858
+replan_changed_observations** (+ 584 measured_turn_radius, median rw/rv 0.59 under the 0.697 trip). Root: the
+re-base fixes the FOLLOW (stop_replan reads the re-based route) but `TowLane.acquirable` is checked in
+`_plan_lane` BEFORE the re-base, against the AUTHORED (swung) cart_yaw — so after a drop the live aligned
+cart diverges from the authored cart_yaw by > start_tol_cart_yaw and re-acquire fails → lane_not_acquired ↔
+replan churn → nav-stuck at x=−3.53. Next layer: apply the same aligned re-base to the acquire check (or
+drop its cart_yaw gate the way the reacquire fix dropped base-heading). park/transfer/verify/return not
+reached, but this is the deepest the warm tow has driven into the turn (8 warm runs 327-334, each peels one
+turn layer: over-rotation → xy tol → cart_yaw-entry → now cart_yaw-acquire).
+
+**COLD run-334 — still fails at collect** (`arm command heartbeat lost`); the render-sync dig (now on the
+branch, commit d25f0c2, default-off RENDER_SYNC_DIAG) root-caused it: the source render is stale at collect
+entry + a GPU-load-dependent async first-render race; the fix is to force a source render for the brief
+observe window (not shipped yet — proposed).
+
+mp4: run-334 258 KB (cold), run-334b 9.4 MB, run-334c 9.0 MB.
