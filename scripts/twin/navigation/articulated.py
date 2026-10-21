@@ -447,7 +447,8 @@ class ArticulatedController(Controller):
     """Measured-state route following and braking sweep for the physical tow rig."""
     def __init__(self, grid, spec=None, *, require_temporal_map=False, planner_timeout=None,
                  lane_graph=None, lane_static_tol=0.0, lane_trust_static=False,
-                 lane_reacquire_along_route=False, **kwargs):
+                 lane_reacquire_along_route=False, lane_cart_yaw_tol=0.20,
+                 lane_curve_speed_floor=0.25, lane_max_curvature=None, **kwargs):
         self.require_temporal_map=require_temporal_map
         self.spec=spec or MobileSpec()
         self.world=ArticulatedMap(grid,self.spec)
@@ -488,6 +489,30 @@ class ArticulatedController(Controller):
         # checks acquirability against the NEAREST route point (same tolerances), so a follower that has
         # drifted a little along its own lane re-acquires at its progress instead of being trapped.
         self.lane_reacquire_along_route=bool(lane_reacquire_along_route)
+        # fm429 (run-324b/c): curvature-aware coupled-tow tracking knobs for the authored lane follower,
+        # all defaulting to the prior hardcoded values => byte-identical. run-324b/c measured: the cart
+        # yaw-RATE tracks the base well (|rw-cw| max 0.097, mean 0.015 rad/s), but at the curve-slowed
+        # crawl (rv mean 0.033 m/s) the MEASURED arc runs far tighter than the 1/1.5 build cap and the
+        # tow makes ~0 net progress, tripping stop_replan_tracking_error on the cart_yaw offset. These
+        # let the owner (a) relax the cart_yaw replan tolerance to the measured lag WITHOUT masking real
+        # divergence (the swept envelope is re-proven on the lagged cart pose offline), (b) tune the
+        # curve speed floor (slower on curves so the cart stays inside the planned articulation), and (c)
+        # cap the follower's COMMANDED curvature below the physical min-turn-radius so corrections are
+        # gentler (the authored route itself stays build-validated at the physical cap). lane_max_curvature
+        # None => the physical cap 1/min_turn_radius (unchanged).
+        phys_kappa = 1.0 / 1.5   # 1.5 m = the coupled min turn radius (the Footprint value below)
+        if not (isinstance(lane_cart_yaw_tol,(int,float)) and math.isfinite(lane_cart_yaw_tol)
+                and 0.0 < lane_cart_yaw_tol <= self.spec.max_articulation):
+            raise ValueError('lane_cart_yaw_tol must be in (0, max_articulation] radians')
+        if not (isinstance(lane_curve_speed_floor,(int,float)) and math.isfinite(lane_curve_speed_floor)
+                and 0.0 < lane_curve_speed_floor <= 1.0):
+            raise ValueError('lane_curve_speed_floor must be a fraction in (0, 1]')
+        if lane_max_curvature is not None and not (isinstance(lane_max_curvature,(int,float))
+                and math.isfinite(lane_max_curvature) and 0.0 < lane_max_curvature <= phys_kappa+1e-9):
+            raise ValueError('lane_max_curvature must be a positive curvature <= 1/min_turn_radius')
+        self.lane_cart_yaw_tol=float(lane_cart_yaw_tol)
+        self.lane_curve_speed_floor=float(lane_curve_speed_floor)
+        self.lane_max_curvature=phys_kappa if lane_max_curvature is None else float(lane_max_curvature)
         # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
         # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
         # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
@@ -772,7 +797,7 @@ class ArticulatedController(Controller):
         self.index=min(candidates,key=lambda i:math.hypot(self.route.states[i].x-state.x,
                                                         self.route.states[i].y-state.y))
         nearest=self.route.states[self.index]
-        if math.hypot(nearest.x-state.x,nearest.y-state.y)>0.25 or abs(wrap(nearest.cart_yaw-state.cart_yaw))>0.20:
+        if math.hypot(nearest.x-state.x,nearest.y-state.y)>0.25 or abs(wrap(nearest.cart_yaw-state.cart_yaw))>self.lane_cart_yaw_tol:
             self.route=None
             return Result(reason='stop_replan_tracking_error')
         # Follow the checked curvature, rather than cutting tight portal corners
@@ -790,13 +815,16 @@ class ArticulatedController(Controller):
         ref_yaw=wrap(a.yaw+t*wrap(b.yaw-a.yaw))
         lateral=-math.sin(ref_yaw)*(x-state.x)+math.cos(ref_yaw)*(y-state.y)
         curvature=self.route.curvatures[j]+1.5*wrap(ref_yaw-state.yaw)+2*lateral
-        curvature=max(-1/1.5,min(1/1.5,curvature))
+        curvature=max(-self.lane_max_curvature,min(self.lane_max_curvature,curvature))
         v=min(self.max_speed,max(0.03,distance*0.5))
         # Slow for tight turns so the under-powered coupled base does not over-rotate the
-        # MEASURED arc past the min radius: at the 1/1.5 curvature cap command 0.25*max_speed,
+        # MEASURED arc past the min radius: at the curvature cap command lane_curve_speed_floor*max_speed,
         # scaling up to full speed when straight. Keeps the commanded speed near what the base
-        # actually achieves while towing, so the braking-curvature gate refuses far less.
-        v=min(v,self.max_speed*max(0.25,1.0-0.75*min(1.0,abs(curvature)*1.5)))
+        # actually achieves while towing, so the braking-curvature gate refuses far less. (fm429: the
+        # floor is config-tunable; the normaliser uses the physical cap so a lower lane_max_curvature
+        # does not itself change the straight-vs-curve speed schedule.)
+        floor=self.lane_curve_speed_floor
+        v=min(v,self.max_speed*max(floor,1.0-(1.0-floor)*min(1.0,abs(curvature)*self.footprint.min_turn_radius)))
         result=self.gate_velocity(now,odom,obs,v,v*curvature)
         if result.reason!='tracking':
             # A transient measured-curvature trip (the base is momentarily under commanded

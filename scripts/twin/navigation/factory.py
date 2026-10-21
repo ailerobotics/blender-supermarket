@@ -308,6 +308,10 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
                                        lane_static_tol=float(nav.get('tow_lane_static_tol_m', 0.0)),
                                        lane_trust_static=bool(nav.get('tow_lane_trust_static', False)),
                                        lane_reacquire_along_route=bool(nav.get('tow_lane_reacquire_along_route', False)),
+                                       lane_cart_yaw_tol=float(nav.get('tow_lane_cart_yaw_tol', 0.20)),
+                                       lane_curve_speed_floor=float(nav.get('tow_lane_curve_speed_floor', 0.25)),
+                                       lane_max_curvature=(float(nav['tow_lane_max_curvature'])
+                                                           if 'tow_lane_max_curvature' in nav else None),
                                        **_controller_kwargs(nav))
 
     if 'dynamic_obstacles' in nav and mode != 'sensor':

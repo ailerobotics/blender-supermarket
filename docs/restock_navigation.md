@@ -396,6 +396,25 @@ point) is still rejected. Staged `true`. (The measured run-323b post-couple base
 start-only acquire check, not a bad start pose, so no pre-lane alignment leg or tolerance widening was
 needed.) CPU tests: `tests/test_navigation_lanes.py`; offline proof `check_tow_lanes.check_reacquire_along_route`.
 
+**Coupled-tow tracking knobs** (fm429, all default to the prior hardcoded values ⇒ byte-identical):
+`navigation.tow_lane_cart_yaw_tol` (default 0.20 rad) — the `stop_replan_tracking_error` cart-yaw
+replan tolerance; `navigation.tow_lane_curve_speed_floor` (default 0.25) — the curve-slowdown speed
+floor; `navigation.tow_lane_max_curvature` (default = the physical 1/1.5 cap) — caps the follower's
+COMMANDED curvature below the physical min-turn-radius for gentler corrections. run-324b/c measured: the
+cart yaw-**rate** tracks the base well (|rw−cw| max 0.097, mean 0.015 rad/s) — the stall is a sim
+base/cart-dynamics transient (the under-powered base over-rotating at the curve-slowed crawl, measured
+arc κ up to 7.2 vs the 0.667 cap), **not** cart articulation lag and **not** reproducible in the
+kinematic model (offline the follower tracks the lane with zero cart lag). The one lever the evidence +
+an offline swept-envelope proof support is relaxing the cart-yaw tolerance: `check_tow_lanes.check_cart_yaw_tol_envelope`
+sweeps a ± cart-yaw offset on every authored route state and finds the largest offset whose
+occupied-envelope stays clear of the static map — **0.33 rad (outbound) / 0.338 rad (return)**; the
+staged `tow_lane_cart_yaw_tol=0.30` sits under that bound (absorbs the measured transient, cuts the
+route-drop churn) and an offset past the bound provably breaches the envelope (so the tolerance can never
+be widened to mask a cart that has actually left the swept envelope). The speed-floor and curvature-cap
+knobs ship tunable but are NOT staged lower (slowing further raises the measured κ at crawl; the
+commanded curvature is already clamped). CPU tests: `tests/test_navigation_lanes.py`,
+`tests/test_navigation_factory.py`.
+
 Offline proof (CPU, the mission's real inputs): `scripts/check_tow_lanes.py`
 (`--environment … --scenario … --camera-config … --lanes docs/examples/tow-lanes-mission-fragment.json`)
 drives the real controller/planner and asserts the direction-aware zone + both lanes end to end, plus

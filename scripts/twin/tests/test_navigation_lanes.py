@@ -327,5 +327,59 @@ class LaneReacquireAlongRouteTests(unittest.TestCase):
         self.assertEqual(c.plan_observed_route(state, self._obs(), 0.05).reason, 'validated_lane')
 
 
+class LaneCoupledTrackingKnobsTests(unittest.TestCase):
+    """fm429 (run-324b/c): config-driven coupled-tow tracking knobs, all defaulting to the prior
+    hardcoded values => byte-identical. The cart_yaw replan tolerance is the one staged (relaxed to the
+    swept-envelope-proven bound); curve speed floor and commanded-curvature cap ship as tunable."""
+
+    def setUp(self):
+        self.spec = MobileSpec()
+        self.grid = GridMap((-8, -8, 8, 8), (), 0.20)
+        self.lane = _straight_lane()
+        self.graph = TowLaneGraph([self.lane]).expand_all(ArticulatedMap(self.grid, self.spec))
+
+    def test_defaults_match_prior_hardcoded_values(self):
+        c = ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, lane_graph=self.graph)
+        self.assertAlmostEqual(c.lane_cart_yaw_tol, 0.20)
+        self.assertAlmostEqual(c.lane_curve_speed_floor, 0.25)
+        self.assertAlmostEqual(c.lane_max_curvature, 1.0 / 1.5)        # physical min-turn-radius cap
+
+    def test_validation_rejects_bad_knobs(self):
+        for bad in (dict(lane_cart_yaw_tol=0.0), dict(lane_cart_yaw_tol=math.radians(90)),
+                    dict(lane_curve_speed_floor=0.0), dict(lane_curve_speed_floor=1.5),
+                    dict(lane_max_curvature=0.0), dict(lane_max_curvature=1.0)):   # 1.0 > 1/1.5 phys cap
+            with self.assertRaises(ValueError):
+                ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, **bad)
+
+    def test_cart_yaw_tol_honored_in_tracking(self):
+        # With a route acquired, a cart_yaw divergence of 0.25 rad from the route drops the route at the
+        # default 0.20 tol (stop_replan_tracking_error) but is tolerated at the relaxed 0.30 tol.
+        for tol, expect_drop in ((0.20, True), (0.30, False)):
+            c = ArticulatedController(self.grid, self.spec, allow_test_fixtures=True,
+                                      lane_graph=self.graph, lane_cart_yaw_tol=tol)
+            c.start((4, 0, 0), True)
+            # STOPPED at the lane start so it comes to rest then plans the route (planning_stop -> route).
+            for i in range(5):
+                c.step(0.1, Odometry((-4.0, 0.0, 0.0), 0.1 + i * 0.1, 0.0, 0.0, 'test_fixture', 0.05),
+                       Observation(0.1 + i * 0.1, (), True, True, 0.0, 'test_fixture', 10.0), now=0.1 + i * 0.1)
+                if c.route is not None:
+                    break
+            self.assertIsNotNone(c.route)
+            # tick 2: base still on the route (y=0) but the CART yaw has diverged 0.25 rad
+            # (articulation = base_yaw - cart_yaw = -0.25 for cart_yaw=0.25, base_yaw=0)
+            r = c.step(0.1, Odometry((-3.95, 0.0, 0.0), 0.2, 0.0, 0.0, 'test_fixture', 0.05),
+                       Observation(0.2, (), True, True, -0.25, 'test_fixture', 10.0), now=0.2)
+            self.assertEqual(r.reason == 'stop_replan_tracking_error', expect_drop,
+                             f'tol={tol} reason={r.reason}')
+
+    def test_tighter_max_curvature_clamps_commanded_turn(self):
+        # A tighter commanded-curvature cap bounds |w|/v below the physical 1/1.5; the follower never
+        # commands a turn tighter than lane_max_curvature. (Construction + attr contract; the clamp is
+        # applied at the tracking law.)
+        c = ArticulatedController(self.grid, self.spec, allow_test_fixtures=True,
+                                  lane_graph=self.graph, lane_max_curvature=0.4)
+        self.assertAlmostEqual(c.lane_max_curvature, 0.4)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -234,6 +234,46 @@ def check_reacquire_along_route(grid, lanes_cfg, report):
             reacq(True) == 'validated_lane', reason=reacq(True))
 
 
+def check_cart_yaw_tol_envelope(grid, lanes_cfg, report):
+    """fm429 (run-324b/c): the coupled tow churns on stop_replan_tracking_error when the MEASURED cart
+    yaw diverges past the 0.20 rad replan tolerance from the planned articulation on the lane's curves.
+    MEASURED from run-324b/c: the cart yaw-RATE tracks the base well (|rw-cw| max 0.097, mean 0.015 rad/s)
+    -- the divergence is a sim base/cart-dynamics transient (the under-powered base over-rotating at the
+    curve-slowed crawl), NOT reproducible in this kinematic model (offline the follower tracks the lane
+    with zero cart lag). fm429 sanctions relaxing the tolerance ONLY as far as keeps the cart inside the
+    validated swept envelope. Prove that bound HERE: sweep a +/- cart_yaw offset applied to EVERY authored
+    route state and find the largest offset whose occupied_envelope is still clear of the STATIC map; the
+    relaxed tolerance must sit under it (never widen past it to mask divergence)."""
+    spec = MobileSpec()
+    nav = lanes_cfg['navigation']
+    graph = TowLaneGraph.from_config(nav['tow_lanes'])
+    graph.expand_all(ArticulatedMap(grid, spec))
+    world = ArticulatedMap(grid, spec)
+    RELAXED = float(nav.get('tow_lane_cart_yaw_tol', 0.20))
+
+    def clear_at(lane, off):
+        for s in lane.route.states:
+            for sign in (+1, -1):
+                tr = TrainState(s.x, s.y, s.yaw, s.cart_yaw + sign * off)
+                if abs(tr.articulation) >= spec.max_articulation or not world.valid(tr, (), 0.0):
+                    return False
+        return True
+
+    for lane in graph.lanes:
+        lo, hi = 0.0, 0.6
+        for _ in range(24):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if clear_at(lane, mid) else (lo, mid)
+        margin = lo
+        _record(report, f'cart_yaw_envelope_margin[{lane.name}]', margin >= RELAXED and clear_at(lane, RELAXED),
+                envelope_safe_offset_rad=round(margin, 3), relaxed_tol_rad=RELAXED,
+                relaxed_within_envelope=clear_at(lane, RELAXED))
+        # don't-mask-divergence: an offset beyond the envelope margin MUST breach (so the tol can never be
+        # widened to swallow a cart that has actually left the swept envelope).
+        _record(report, f'cart_yaw_excessive_offset_breaches_envelope[{lane.name}]',
+                not clear_at(lane, margin + 0.05), probe_rad=round(margin + 0.05, 3))
+
+
 def _drive_lane(controller, spec, lane, goal, *, jitter, report, label, direct_xy):
     """Drive the REAL ArticulatedController following the lane closed-loop from a jittered start."""
     import time as _time
@@ -345,6 +385,7 @@ def main():
     check_proud_tolerance(grid, lanes_cfg, report)
     check_trust_static(grid, lanes_cfg, report)
     check_reacquire_along_route(grid, lanes_cfg, report)
+    check_cart_yaw_tol_envelope(grid, lanes_cfg, report)
     print('TOW_LANES_PROOF ' + ('PASS' if report['ok'] else 'FAIL'), flush=True)
     return 0 if report['ok'] else 1
 

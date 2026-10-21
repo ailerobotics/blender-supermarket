@@ -166,6 +166,17 @@ class FactoryDispatchTests(unittest.TestCase):
         self.assertFalse(_build('reference').lane_reacquire_along_route)      # default off
         self.assertTrue(_build('reference', tow_lane_reacquire_along_route=True).lane_reacquire_along_route)
 
+    def test_coupled_tracking_knobs_flow_through(self):
+        c = _build('reference')
+        self.assertAlmostEqual(c.lane_cart_yaw_tol, 0.20)                     # defaults
+        self.assertAlmostEqual(c.lane_curve_speed_floor, 0.25)
+        self.assertAlmostEqual(c.lane_max_curvature, 1.0 / 1.5)
+        c2 = _build('reference', tow_lane_cart_yaw_tol=0.30,
+                    tow_lane_curve_speed_floor=0.15, tow_lane_max_curvature=0.4)
+        self.assertAlmostEqual(c2.lane_cart_yaw_tol, 0.30)
+        self.assertAlmostEqual(c2.lane_curve_speed_floor, 0.15)
+        self.assertAlmostEqual(c2.lane_max_curvature, 0.4)
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):
