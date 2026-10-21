@@ -486,6 +486,7 @@ Focused tests live in `scripts/twin/tests/test_restock_camera.py`; they use anal
 depth fixtures labelled as CPU tests. No fixtures establish sensor or physics
 success. The task's exact-input visibility JSON and report are handed to
 integration separately; final recorded demonstration remains integration-owned.
+
 # Acquisition-to-use integration gate
 
 `restock_camera/freshness.py` keeps the 500 ms acquisition deadline across
@@ -501,3 +502,56 @@ gripper dispatch also refuses an expired queued command. The host and native
 process must share the workstation monotonic clock. This is not a cross-machine
 clock synchronization protocol. Runtime remains UNCOMMISSIONED until held-out
 native acquisition, all processing, mapping and actuator handoff pass the limit.
+
+## Mast depth camera — nvblox obstacle map while a carton is carried
+
+`scripts/twin/restock_camera/mast_depth.py` designs a second depth feed for the nvblox
+obstacle map. The eye-in-hand **wrist** camera is nvblox's only collision/depth feed
+(`restock_host/launch.py`, `num_cameras: 1`, `camera_0` ← masked `world_depth`); from grasp
+on, the carried carton fills the wrist frame, the masked depth stream stops and the ESDF
+freezes at the place re-park (integration finding B'). The `mast` camera is a RealSense
+D435-class depth camera (848×480, 87° HFOV, 0.3–6.0 m) fixed to `base_link` high on the mast
+(`MAST_MOUNT_XYZ`), pitched down over the arm's working side, so a carton held at the gripper
+cannot fill its frame. It feeds nvblox as **`camera_1`** alongside the wrist, with the SAME
+masking applied: the per-pixel instance-ID rig self mask (the attached carton is a rig-instance
+subtree, removed like any rig pixel) plus the `object_segmenter` grasp-target mask.
+
+- **Switch (default off).** Host config `mast_depth: {enabled: true}` (`restock_host/config.py`,
+  `restock_host/launch.py`) turns on the second feed: `num_cameras: 2`, a second
+  `object_segmenter` republishing the mast rig+carton-masked depth on `world_depth_mast`, and
+  `camera_1` remapped to it. Off (absent / `false`) the launch is byte-for-byte the single-feed
+  default; `camera_config(scenario, manifest, mast_depth=True)` adds the `mast` camera
+  (parent `robot_base`, `role: nvblox_depth`, no QR support) and its collision housing/bracket,
+  and `camera_config(...)` without the flag is unchanged. The integration lane flips the switch
+  and authors the prim + the Isaac-side masked-depth publisher for `restock_camera_mast`
+  (`mast_depth.nvblox_feed()` names the topics/frame; the host `required_external` states the
+  contract).
+- **Offline proof (`scripts/plan_restock_more_cameras.py`, `test_restock_mast_depth.py`).** At
+  the carry / place-re-park / transfer geometry the mast sees the place region and the arm-sweep
+  approach while the carton is held, whereas the wrist is fully blocked; a finite-resolution
+  voxel replay (`observed_space.ObservedSpace`) stays fresh and keeps integrating across the
+  held-carton window (ESDF updates every tick) while the carton-filled wrist contributes
+  nothing. Masked carton pixels neither clear free space nor assert an obstacle. These are
+  geometric design predictions, not rendered RGB-D.
+
+## Cold-collect grasp confirmation (run-327/328) — named cause
+
+Cold runs fail at **collect**: the fixed `source` camera capture cycles `missing, moving,
+stale or unsynchronized camera evidence` → `no new synchronized rendered camera frame` → `no
+established support registration to hold under occlusion`, never succeeding, and the manip
+reports `no initial sensor frame` → `arm command heartbeat lost`. This is **not** a
+camera-placement problem (so no confirmation camera is added — "as few cameras as the evidence
+needs"):
+
+`scripts/plan_restock_more_cameras.py` / `test_restock_mast_depth.py` prove geometrically that
+the overhead `source` lens keeps a clear, in-FOV sightline to **both support markers and the
+witness** (at y≈17.4, directly under the lens) both at the parked collect pose and through a
+conservative south-approaching grasp arm and pre-weld press; only the carton *top* is
+transiently blocked by the press. So a clean cold registration frame is available at park. The
+failure is the absence of an **established** registration to hold through the occlusion the
+scenario itself declares (`occlusion_window_s`): the collect provider never seeds the hold
+before the arm enters that window. The fix is collect-provider/orchestrator **sequencing**
+(establish at park before reach, or seed the hold from the commissioned baseline) — owned by
+the integration/manipulation lane. (`render_scale 0.375` on a decode-grade source camera is a
+secondary suspect to rule out — small markers decode worse at reduced resolution; this is a
+render-config choice, also integration-owned, not a new camera.)

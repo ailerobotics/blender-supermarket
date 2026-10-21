@@ -42,9 +42,18 @@ def validate_config(config):
     """Require expanded CAD URDF, matching SRDF and nonempty collision XRDF."""
     import yaml
     allowed = {'urdf', 'srdf', 'xrdf', 'workspace_min', 'workspace_max',
-               'domain', 'namespace', 'frame', 'tcp', 'shelfbot_root', 'mobile_manifest', 'asset_report'}
+               'domain', 'namespace', 'frame', 'tcp', 'shelfbot_root', 'mobile_manifest', 'asset_report',
+               'mast_depth'}
     if set(config) - allowed:
         raise ValueError(f'unknown configuration keys: {sorted(set(config)-allowed)}')
+    # Optional second nvblox depth feed (the body-mounted mast camera). Default off: when
+    # absent or {'enabled': False} the host launch is byte-for-byte the single-feed default.
+    # The integration lane turns it on for a run; the Isaac side must then publish the mast
+    # masked depth (see restock_camera.mast_depth.nvblox_feed and docs/restock_camera.md).
+    mast = config.get('mast_depth')
+    if mast is not None and (not isinstance(mast, dict) or set(mast) - {'enabled'}
+                             or not isinstance(mast.get('enabled', False), bool)):
+        raise ValueError("mast_depth must be {'enabled': bool}")
     for key, expected in [('domain', 88), ('namespace', NS), ('frame', FRAME), ('tcp', TCP)]:
         if config.get(key, expected) != expected:
             raise ValueError(f'{key} must be {expected}')
@@ -190,8 +199,30 @@ def launch_plan(config):
                                  'refine conservative coverage or prove narrow exclusions; see ' + c['asset_report'])
     else:
         static_errors.append('asset_report: current recomputable coverage evidence required; rerun generate_assets')
+    mast_enabled = bool(c.get('mast_depth', {}).get('enabled'))
+    required_external = ['measured joint_states and TF including all movable CAD joints',
+                         'rig-masked registered depth (Image 32FC1, metres, self pixels 0) on '
+                         'camera/masked_depth from the Isaac per-pixel instance-ID self mask, with '
+                         'camera/masked_depth/camera_info (frame restock_camera_<id>) and /clock',
+                         'sensor-derived target_bbox Float32MultiArray [u1,v1,u2,v2], fresh for every masked frame',
+                         'articulation feedback (joint_states) and an arm_joint_command sink for the '
+                         'host-launched arm_controller/follow_joint_trajectory executor '
+                         '(twin.restock.trajectory_host; integration must not launch its own)',
+                         'parked station lifecycle: stop host, restart empty map; the host '
+                         'publishes the fresh ESDF incorporation ack (collision_time) on '
+                         'station/status, driven by station/command prepare/heartbeat/stop']
+    if mast_enabled:
+        from twin.restock_camera.mast_depth import nvblox_feed
+        feed = nvblox_feed()
+        required_external.append(
+            'mast_depth on: rig+carton-masked registered depth (Image 32FC1, metres, self '
+            f"pixels 0) on {feed['masked_depth']} from the Isaac per-pixel instance-ID self mask "
+            f"(the attached carton is a rig-instance subtree, so it is masked), with "
+            f"{feed['masked_depth_info']} (frame {feed['frame_id']}) and /clock -- the second "
+            'nvblox feed (camera_1) while the wrist (camera_0) is carton-blocked')
     return {
         'environment': ENV, 'namespace': NS, 'frame': FRAME, 'tcp': TCP,
+        'mast_depth': {'enabled': mast_enabled},
         'robot': {k: c[k] for k in ('urdf', 'srdf', 'xrdf')},
         'workspace_min': c['workspace_min'], 'workspace_max': c['workspace_max'],
         'shelfbot_root': str(Path(c['shelfbot_root']).resolve()),
@@ -206,17 +237,7 @@ def launch_plan(config):
                   'nvblox_ros/NvbloxNode',
                   'twin.restock.trajectory_host',
                   'twin.restock_host.incorporation_ack'],
-        'required_external': ['measured joint_states and TF including all movable CAD joints',
-                              'rig-masked registered depth (Image 32FC1, metres, self pixels 0) on '
-                              'camera/masked_depth from the Isaac per-pixel instance-ID self mask, with '
-                              'camera/masked_depth/camera_info (frame restock_camera_<id>) and /clock',
-                              'sensor-derived target_bbox Float32MultiArray [u1,v1,u2,v2], fresh for every masked frame',
-                              'articulation feedback (joint_states) and an arm_joint_command sink for the '
-                              'host-launched arm_controller/follow_joint_trajectory executor '
-                              '(twin.restock.trajectory_host; integration must not launch its own)',
-                              'parked station lifecycle: stop host, restart empty map; the host '
-                              'publishes the fresh ESDF incorporation ack (collision_time) on '
-                              'station/status, driven by station/command prepare/heartbeat/stop'],
+        'required_external': required_external,
         'readiness': 'configuration only; graph, sensing and GPU execution unverified',
         'static_errors': static_errors,
     }

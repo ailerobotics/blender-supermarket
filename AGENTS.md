@@ -121,6 +121,14 @@ repo's `scenes/`, `export/` or `renders/`.
   and the post-placement verification (`shelf_verification_provider`) when
   `config['transfer_shelf_location']` is set — contract `data/sim-restock-camera-v2/shelf-contract.md`,
   RUNBOOK §13c.
+- **nvblox obstacle map while carrying**: the eye-in-hand `wrist` camera is nvblox's only depth
+  feed, so a held carton freezes the ESDF at the place re-park (finding B'). The body-mounted
+  `mast` depth camera (`restock_camera/mast_depth.py`, RealSense-class, fixed to `base_link`) is
+  the second feed (`camera_1`), carton-masked like the wrist. Off by default; host switch
+  `mast_depth: {enabled: true}` (`restock_host/config.py`/`launch.py` set `num_cameras: 2` + a
+  second segmenter), and `camera_config(..., mast_depth=True)` adds the prim. Design + the
+  named cold-collect cause (sequencing, not a camera): docs/restock_camera.md, proof
+  `scripts/plan_restock_more_cameras.py`.
 - **Mobile navigation**: `scripts/twin/navigation/` and
   [docs/restock_navigation.md](docs/restock_navigation.md) define sensor, footprint
   and goal contracts; RUNBOOK §12 has CPU checks and isolated Nav2 launch. Coupled
