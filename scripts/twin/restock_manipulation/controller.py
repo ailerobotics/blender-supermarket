@@ -164,6 +164,17 @@ class TransferController:
         # advance (progress). 0 s (default) => off => byte-identical; bounded below the 90 s backstop.
         self.contact_stuck_wall_s = _float_env_bounded('RESTOCK_CONTACT_STUCK_WALL_S', 0.0, 0.0, 85.0)
         self._contact_progress_wall = None   # wall time of the last contact-phase progress (see step)
+        # fm427 (A1) (run-323 cold lift): the fm419(a) COLLISION_STALE_PAUSE holds the post-attach lift on
+        # a genuinely-stale collision stamp (run-323: collision_dt 0.52->0.65 s, the benign weld/ESDF
+        # re-incorporation lag) by returning EMPTY controls -- a SILENT hold. Under render pacing that
+        # silent hold starved the 90 s host arm-command heartbeat watchdog. Two fixes: (1) during the
+        # pause re-command a HOLD at the CURRENT measured joints each tick (stationary -- never advances
+        # the held move into the stale collision world) so the arm-command stream stays alive and the
+        # heartbeat is fed; (2) bound the pause in WALL time -- a pause that persists beyond
+        # collision_pause_wall_s fails fast with a named reason instead of silently starving the watchdog.
+        # 0 s (default) => the legacy empty-control pause with no wall bound (byte-identical).
+        self.collision_pause_wall_s = _float_env_bounded('RESTOCK_COLLISION_PAUSE_WALL_S', 0.0, 0.0, 85.0)
+        self._pause_wall_start = None        # wall time the current collision-stale pause began
         # Execute the contact descent as a seeded straight-line move through the trajectory host instead
         # of a cuMotion plan (the motion port's begin(straight_line=True) path). Default False keeps the
         # real-rig collision-planned descent; the sim mission opts in via config -- a one-flag revert.
@@ -529,12 +540,35 @@ class TransferController:
                     and self.collision_stale_tol_s > 0 and math.isfinite(sensors.collision_time)
                     and self.max_age < now - sensors.collision_time <= self.collision_stale_tol_s):
                 self.issued = False   # resume = re-plan the held move from the current (held) pose
+                # fm427 (A1): config-driven (collision_pause_wall_s > 0; default 0 => the legacy
+                # empty-control pause, byte-identical). When enabled: (1) WALL-bound the pause so it
+                # fails fast with a named reason instead of silently starving the 90 s arm-command
+                # heartbeat (run-323 cold lift), and (2) keep the stream ALIVE -- re-command a HOLD at
+                # the CURRENT measured joints each tick (stationary: the goal IS the measured pose, so
+                # the arm never advances the held move into the stale collision world) so the host keeps
+                # publishing an arm command and the heartbeat is fed. The keep-alive needs the motion
+                # port's begin_joint_goal (the mission path has it); without it the wall bound is the
+                # sole backstop.
+                if self.collision_pause_wall_s > 0:
+                    wall = self.steady_clock()
+                    if self._pause_wall_start is None:
+                        self._pause_wall_start = wall
+                    if wall - self._pause_wall_start > self.collision_pause_wall_s:
+                        return self._fail('collision-stale pause exceeded %.1fs wall at phase=%s (%s); '
+                                          'the collision world stayed stale -- failing fast before the '
+                                          'arm-command heartbeat watchdog'
+                                          % (wall - self._pause_wall_start, self.phase, why[0]))
+                    if (len(sensors.joint_positions) == 6
+                            and callable(getattr(self.motion, 'begin_joint_goal', None))):
+                        self.motion.begin_joint_goal(tuple(sensors.joint_positions),
+                                                     tuple(sensors.joint_positions))
                 print('COLLISION_STALE_PAUSE phase=%s now=%.3f %s (max_age %.3f)' % (
                     self.phase, now, why[0], self.collision_stale_tol_s), flush=True)
-                return self._result()   # running, no new command -> arm holds pose (zero velocity)
+                return self._result()   # running; the hold above keeps the arm stationary + stream alive
             print('CONTROLLER_INVARIANT_TRIP phase=%s now=%.3f %s' % (self.phase, now, ' '.join(why)),
                   flush=True)
             return self._fail('base moving or stale/missing feedback/collision world [' + ','.join(why) + ']')
+        self._pause_wall_start = None   # fm427 (A1): invariant passed (collision fresh) -> pause ended
         if self.held and self.phase != 'release' and not sensors.contact:
             return self._fail('lost grasp')
         # fm425 (run-322 cold): WALL-clock contact fail-fast. While pressing for contact (phase 'contact',

@@ -203,6 +203,37 @@ def check_trust_static(grid, lanes_cfg, report):
             obstacle=(round(ahead[0], 2), round(ahead[1], 2)))
 
 
+def check_reacquire_along_route(grid, lanes_cfg, report):
+    """fm427 (B1) / run-323b: with trust_static the outbound lane VALIDATES, the follower drove ~0.36 m
+    along it, dropped the route on a tracking transient, then could NOT re-acquire -- `acquirable` checked
+    only the fixed START (0.36 m away > start_tol_xy 0.25) though the train was 0.06 m from the route
+    centreline -> lane_not_acquired forever, train frozen. Reproduce that trap from a pose advanced a few
+    route points along the lane (on the route, far from the start) and prove navigation.tow_lane_reacquire_
+    along_route re-acquires at the train's progress (same tolerances, nearest route point as the reference)."""
+    spec = MobileSpec()
+    nav = lanes_cfg['navigation']
+    graph = TowLaneGraph.from_config(nav['tow_lanes'])
+    graph.expand_all(ArticulatedMap(grid, spec))
+    lane = next((ln for ln in graph.lanes if 'outbound' in ln.name), graph.lanes[0])
+    adv = lane.route.states[len(lane.route.states) // 20]   # advanced a little way along the lane
+    pose = (adv.x, adv.y, adv.yaw)
+    from_start = math.dist(pose[:2], lane.start[:2])
+
+    def reacq(flag):
+        c = ArticulatedController(grid, spec, allow_test_fixtures=True, lane_graph=graph,
+                                  lane_trust_static=True, lane_reacquire_along_route=flag)
+        c.start(lane.goal, True)
+        st = TrainState(pose[0], pose[1], pose[2], adv.cart_yaw)
+        obs = Observation(0.1, (), True, True, st.articulation, 'test_fixture', 10.0)
+        return c.plan_observed_route(st, obs, 0.05).reason
+
+    _record(report, 'start_only_acquire_traps_drifted_follower',
+            from_start > lane.start_tol_xy and reacq(False) == 'lane_not_acquired',
+            dist_from_start_m=round(from_start, 3), start_tol_xy=lane.start_tol_xy, reason=reacq(False))
+    _record(report, 'reacquire_along_route_recovers_the_lane',
+            reacq(True) == 'validated_lane', reason=reacq(True))
+
+
 def _drive_lane(controller, spec, lane, goal, *, jitter, report, label, direct_xy):
     """Drive the REAL ArticulatedController following the lane closed-loop from a jittered start."""
     import time as _time
@@ -313,6 +344,7 @@ def main():
     check_tow_lanes(grid, lanes_cfg, report)
     check_proud_tolerance(grid, lanes_cfg, report)
     check_trust_static(grid, lanes_cfg, report)
+    check_reacquire_along_route(grid, lanes_cfg, report)
     print('TOW_LANES_PROOF ' + ('PASS' if report['ok'] else 'FAIL'), flush=True)
     return 0 if report['ok'] else 1
 

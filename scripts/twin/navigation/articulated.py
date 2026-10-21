@@ -446,7 +446,8 @@ class ArticulatedPlanner:
 class ArticulatedController(Controller):
     """Measured-state route following and braking sweep for the physical tow rig."""
     def __init__(self, grid, spec=None, *, require_temporal_map=False, planner_timeout=None,
-                 lane_graph=None, lane_static_tol=0.0, lane_trust_static=False, **kwargs):
+                 lane_graph=None, lane_static_tol=0.0, lane_trust_static=False,
+                 lane_reacquire_along_route=False, **kwargs):
         self.require_temporal_map=require_temporal_map
         self.spec=spec or MobileSpec()
         self.world=ArticulatedMap(grid,self.spec)
@@ -479,6 +480,14 @@ class ArticulatedController(Controller):
         # direction-aware gate owns new-obstacle avoidance. `lane_static_tol` still applies underneath for
         # the narrower proud-of-mapped case; trust_static is the superset.
         self.lane_trust_static=bool(lane_trust_static)
+        # Opt-in re-acquire-along-the-route (navigation.tow_lane_reacquire_along_route), default off =>
+        # byte-identical (start-only acquire). run-323b: trust_static let the lane validate, the follower
+        # drove ~0.36 m along it, dropped the route on a tracking transient, then could NOT re-acquire
+        # because `acquirable` only checked the fixed START (0.36 m away > start_tol_xy) though the train
+        # was 0.06 m from the route -> lane_not_acquired forever, train frozen. When set, `_plan_lane`
+        # checks acquirability against the NEAREST route point (same tolerances), so a follower that has
+        # drifted a little along its own lane re-acquires at its progress instead of being trapped.
+        self.lane_reacquire_along_route=bool(lane_reacquire_along_route)
         # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
         # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
         # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
@@ -548,7 +557,7 @@ class ArticulatedController(Controller):
         drive is bounded in CPU and cannot be starved into a planning_timeout under host load.
         """
         lane=self._active_lane
-        if not lane.acquirable(state.pose,state.cart_yaw):
+        if not lane.acquirable(state.pose,state.cart_yaw,along_route=self.lane_reacquire_along_route):
             return Route([],[],'lane_not_acquired')
         if obs.temporal_map is not None:
             world=ArticulatedMap(obs.temporal_map.planning_grid(self.grid),self.spec)

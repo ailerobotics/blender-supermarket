@@ -162,6 +162,10 @@ class FactoryDispatchTests(unittest.TestCase):
         self.assertFalse(_build('reference').lane_trust_static)               # default off
         self.assertTrue(_build('reference', tow_lane_trust_static=True).lane_trust_static)
 
+    def test_tow_lane_reacquire_along_route_flows_through(self):
+        self.assertFalse(_build('reference').lane_reacquire_along_route)      # default off
+        self.assertTrue(_build('reference', tow_lane_reacquire_along_route=True).lane_reacquire_along_route)
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

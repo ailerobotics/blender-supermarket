@@ -53,20 +53,24 @@ class RuntimeTests(unittest.TestCase):
         self.adapter = RuntimeAdapter(self.nav,self.mobile,self.manip,self.port,poses,fixture_mode=True)
         self.job = Job('j','milk',1,'back','shelf')
 
-    def _stuck_adapter(self, *, nav_stuck_wall_s, clock, moving=False):
-        """An outbound navigate adapter whose nav never completes (reason='lane_blocked')."""
+    def _stuck_adapter(self, *, nav_stuck_wall_s, clock, moving=False, cycling=False):
+        """An outbound navigate adapter whose nav never completes. reason='lane_blocked' by default;
+        with cycling=True it ALTERNATES lane_not_acquired<->replan_changed_observations (the run-323b
+        frozen cycle) to prove the no-progress fail-fast is reason-agnostic."""
         pose = {'p': (1.0, 2.0, 0.5)}
         ticks = [0]
+        reasons = ['lane_not_acquired', 'replan_changed_observations']
         def advance(dt):
             ticks[0] += 1
             if moving:                                   # base makes real progress each tick
                 pose['p'] = (pose['p'][0] + 0.5, pose['p'][1], pose['p'][2])
             return replace(self.p, observation_id=f'f-{ticks[0]}', simulation_time=ticks[0]*.1,
                            odometry=NS(pose=pose['p']))
+        def nav_step(dt, p):
+            reason = reasons[ticks[0] % 2] if cycling else 'lane_blocked'
+            return NS(status='running', linear=0., angular=0., reason=reason)
         port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
-        nav = NS(start=lambda g, c, **k: None,
-                 step=lambda dt, p: NS(status='running', linear=0., angular=0., reason='lane_blocked'),
-                 cancel=lambda: None)
+        nav = NS(start=lambda g, c, **k: None, step=nav_step, cancel=lambda: None)
         poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
         adapter = RuntimeAdapter(nav, self.mobile, self.manip, port, poses, fixture_mode=True,
                                  wall_clock=lambda: clock[0], nav_stuck_wall_s=nav_stuck_wall_s)
@@ -86,8 +90,8 @@ class RuntimeTests(unittest.TestCase):
         clock[0] = 6.0                                   # past the 5 s budget, no base progress
         r = adapter._step(.1)
         self.assertEqual(r.status, 'failed')
-        self.assertIn('stuck on', r.reason)
-        self.assertIn('lane_blocked', r.reason)
+        self.assertIn('no base progress', r.reason)
+        self.assertIn('lane_blocked', r.reason)          # names the current reason
 
     def test_nav_stuck_resets_on_base_progress_fm425(self):
         # A tow that is actually MOVING (base pose advancing) never trips the stuck budget, even past it.
@@ -97,6 +101,22 @@ class RuntimeTests(unittest.TestCase):
         clock[0] = 100.0
         for _ in range(5):
             self.assertEqual(adapter._step(.1).status, 'running')
+
+    def test_nav_stuck_catches_cycling_reasons_no_progress_fm427(self):
+        # fm427 (C) / run-323b: the outbound froze while ALTERNATING lane_not_acquired<->replan_changed_
+        # observations; the earlier reason-keyed check reset on every reason change and never fired. The
+        # no-base-progress check is reason-agnostic -> it still fails fast, naming the current reason.
+        clock = [0.0]
+        adapter = self._stuck_adapter(nav_stuck_wall_s=5.0, clock=clock, cycling=True)
+        r = adapter._step(.1); self.assertEqual(r.status, 'running')   # start the no-progress timer
+        for _ in range(3):
+            clock[0] += 2.0
+            r = adapter._step(.1)
+            if r.status == 'failed':
+                break
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('no base progress', r.reason)
+        self.assertIn('last reason', r.reason)   # names whichever reason was current when it tripped
 
     def test_nav_stuck_default_off_is_byte_identical_fm425(self):
         # nav_stuck_wall_s == 0 => the WALL fail-fast is inert (byte-identical); the stage stays running.

@@ -382,6 +382,20 @@ obstacle cloud and **still stops the tow for a genuinely new obstacle ahead** �
 net moves to the live gate (direction/time-aware), exactly as `couple_static_drive` does for the couple
 legs. Staged `true` for the mission tow lanes.
 
+**Re-acquire along the route** (`navigation.tow_lane_reacquire_along_route`, opt-in, default `false` =
+off ⇒ byte-identical, start-only acquire): run-323b exposed a follower trap once `tow_lane_trust_static`
+let the lane validate — the follower drove ~0.36 m along the lane, dropped the route on a tracking
+transient, then could **not** re-acquire because `TowLane.acquirable` checked proximity to the fixed lane
+**start** only (0.36 m away, > `start_tol_xy` 0.25) even though the train was **0.06 m from the route
+centreline** → `lane_not_acquired` forever, train frozen. When set, `_plan_lane` checks acquirability
+against the **nearest authored route point** (the SAME tolerances — only the reference generalises from
+the fixed start to the whole centreline), so a closed-loop follower that has drifted a little along its
+own lane re-acquires at its progress instead of being trapped. An off-route pose (far from every route
+point) is still rejected. Staged `true`. (The measured run-323b post-couple base delta to the start was
+0.023 m / 0.007 rad with articulation ≈0 — i.e. the pose was ON the lane start; the trap was the
+start-only acquire check, not a bad start pose, so no pre-lane alignment leg or tolerance widening was
+needed.) CPU tests: `tests/test_navigation_lanes.py`; offline proof `check_tow_lanes.check_reacquire_along_route`.
+
 Offline proof (CPU, the mission's real inputs): `scripts/check_tow_lanes.py`
 (`--environment … --scenario … --camera-config … --lanes docs/examples/tow-lanes-mission-fragment.json`)
 drives the real controller/planner and asserts the direction-aware zone + both lanes end to end, plus

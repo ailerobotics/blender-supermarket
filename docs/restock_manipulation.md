@@ -238,6 +238,17 @@ progress (entering contact / a `CONTACT_STEP` advance) occurs for this many WALL
 heartbeat backstop — so a stuck contact ends the attempt legibly instead of burning the GPU wall cap.
 CPU tests: `tests/test_restock_manipulation.py`.
 
+**Collision-stale pause keep-alive + wall budget** (`RESTOCK_COLLISION_PAUSE_WALL_S`, opt-in, default
+`0` = off ⇒ the legacy empty-control pause, byte-identical): the fm419(a) `COLLISION_STALE_PAUSE` holds
+the post-attach lift while the (held) carton's collision stamp is briefly stale — the benign weld/ESDF
+re-incorporation lag (run-323: `collision_dt` 0.52→0.65 s). The legacy pause returned EMPTY controls — a
+SILENT hold that, under render pacing, starved the 90 s host arm-command heartbeat watchdog before the
+sim-clock `collision_stale_tol_s` could trip. When set, the pause (1) re-commands a HOLD at the CURRENT
+measured joints each tick (stationary — the goal IS the measured pose, so the arm never advances the held
+move into the stale collision world) so the arm-command stream stays alive and the heartbeat is fed, and
+(2) fails fast with a named reason once the pause persists beyond this WALL budget (below the 90 s
+backstop). CPU tests: `tests/test_restock_manipulation.py`.
+
 Integration's existing Isaac ROS graphs supply `/clock`, registered RGB-D, current
 TF and joint-state/controller transport. Host-side MoveIt/cuMotion provides the
 three planning/execution endpoints below, `/restock_sim/apply_planning_scene`

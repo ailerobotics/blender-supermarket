@@ -71,16 +71,28 @@ class TowLane:
         return (math.dist(goal[:2], self.goal[:2]) <= self.goal_tol_xy
                 and abs(wrap(goal[2] - self.goal[2])) <= self.goal_tol_yaw)
 
-    def acquirable(self, pose, cart_yaw=None):
-        """True iff the measured base pose is close enough to the lane start for the
-        closed-loop follower to acquire the centreline (the controller tracks small offsets;
-        a larger displacement means the robot is not on this lane)."""
+    def acquirable(self, pose, cart_yaw=None, along_route=False):
+        """True iff the measured base pose is close enough to the lane for the closed-loop follower to
+        acquire the centreline (the controller tracks small offsets; a larger displacement means the
+        robot is not on this lane).
+
+        Default: proximity to the lane START only. With `along_route` (fm427/run-323b), proximity to the
+        NEAREST authored route point instead -- the SAME tolerances, only the reference generalises from
+        the fixed start to the whole centreline. run-323b froze 0.06 m from the route but 0.36 m from the
+        start after the follower advanced a few waypoints and dropped the route; the start-only check then
+        refused to re-acquire (> start_tol_xy) -> lane_not_acquired forever. A follower that has drifted a
+        little ALONG its own lane must re-acquire at its progress, not be forced back to the start."""
         if len(pose) != 3 or not all(math.isfinite(v) for v in pose):
             return False
-        ok = (math.dist(pose[:2], self.start[:2]) <= self.start_tol_xy
-              and abs(wrap(pose[2] - self.start[2])) <= self.start_tol_yaw)
+        if along_route and self.route is not None and self.route.states:
+            best = min(self.route.states, key=lambda s: math.hypot(pose[0] - s.x, pose[1] - s.y))
+            ref_xy, ref_yaw, ref_cart = (best.x, best.y), best.yaw, best.cart_yaw
+        else:
+            ref_xy, ref_yaw, ref_cart = self.start[:2], self.start[2], self.start_cart_yaw
+        ok = (math.dist(pose[:2], ref_xy) <= self.start_tol_xy
+              and abs(wrap(pose[2] - ref_yaw)) <= self.start_tol_yaw)
         if cart_yaw is not None:
-            ok = ok and abs(wrap(cart_yaw - self.start_cart_yaw)) <= self.start_tol_cart_yaw
+            ok = ok and abs(wrap(cart_yaw - ref_cart)) <= self.start_tol_cart_yaw
         return ok
 
     def start_state(self):

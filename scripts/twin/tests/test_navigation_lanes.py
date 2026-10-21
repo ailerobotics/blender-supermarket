@@ -284,5 +284,48 @@ class LaneTrustStaticTests(unittest.TestCase):
                          'lane_blocked')
 
 
+class LaneReacquireAlongRouteTests(unittest.TestCase):
+    """fm427 (B1) / run-323b: the follower drove ~0.36 m along the validated lane, dropped the route on a
+    tracking transient, then could NOT re-acquire -- `acquirable` checked only the fixed START (0.36 m >
+    start_tol_xy) though the train was 0.06 m from the route. tow_lane_reacquire_along_route re-acquires at
+    the train's progress (nearest route point, SAME tolerances)."""
+
+    def setUp(self):
+        self.spec = MobileSpec()
+        self.grid = GridMap((-8, -8, 8, 8), (), 0.20)
+        self.lane = _straight_lane()
+        self.graph = TowLaneGraph([self.lane]).expand_all(ArticulatedMap(self.grid, self.spec))
+        # A pose well ALONG the straight lane (start is x=-4; drive to x=+1), on the centreline (y=0),
+        # 5 m from the start (>> start_tol_xy 0.25) but ~0 m from the route.
+        self.advanced = (1.0, 0.0, 0.0)
+
+    def _obs(self):
+        return Observation(0.1, (), True, True, 0.0, 'test_fixture', 10.0)
+
+    def test_acquirable_start_only_rejects_advanced_pose(self):
+        self.assertFalse(self.lane.acquirable(self.advanced, 0.0, along_route=False))
+
+    def test_acquirable_along_route_accepts_advanced_pose(self):
+        self.assertTrue(self.lane.acquirable(self.advanced, 0.0, along_route=True))
+
+    def test_along_route_still_rejects_off_route_pose(self):
+        # a pose far from EVERY route point (off the lane laterally) is never acquirable, even along_route.
+        self.assertFalse(self.lane.acquirable((1.0, 3.0, 0.0), 0.0, along_route=True))
+
+    def test_controller_default_traps_drifted_follower(self):
+        c = ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, lane_graph=self.graph)
+        self.assertFalse(c.lane_reacquire_along_route)
+        c.start((4, 0, 0), True)
+        state = TrainState(*self.advanced, 0.0)
+        self.assertEqual(c.plan_observed_route(state, self._obs(), 0.05).reason, 'lane_not_acquired')
+
+    def test_controller_reacquire_recovers_drifted_follower(self):
+        c = ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, lane_graph=self.graph,
+                                  lane_reacquire_along_route=True)
+        c.start((4, 0, 0), True)
+        state = TrainState(*self.advanced, 0.0)
+        self.assertEqual(c.plan_observed_route(state, self._obs(), 0.05).reason, 'validated_lane')
+
+
 if __name__ == '__main__':
     unittest.main()

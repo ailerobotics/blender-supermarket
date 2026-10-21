@@ -408,14 +408,15 @@ class RuntimeAdapter:
         return None
 
     def _nav_stuck_check(self, reason, odometry):
-        """fm425 (c): WALL-clock no-progress fail-fast for a running navigate stage.
+        """fm427 (C): WALL-clock NO-BASE-PROGRESS fail-fast for a running navigate stage.
 
-        Returns a named fail reason when the SAME running `reason` has persisted with NO measured
-        base-pose progress for longer than nav_stuck_wall_s WALL seconds, else None. The reason/pose
-        marker resets whenever the reason changes OR the base moves (> ~2 cm / ~1 deg), so only a
-        genuinely wedged stage (run-322b: outbound 'lane_blocked' forever under render pacing, which no
-        SIM-clock cap could catch) is failed. Off (nav_stuck_wall_s == 0) => always None (byte-identical);
-        a missing odometry pose is treated as no-progress so a truly frozen stage still trips."""
+        Returns a named fail reason when the measured base pose has NOT progressed (> ~2 cm / ~1 deg)
+        for longer than nav_stuck_wall_s WALL seconds, else None. The timer resets ONLY on base progress
+        -- NOT on a reason change -- so a stage that cycles reasons while frozen (run-323b: outbound
+        alternating lane_not_acquired<->replan_changed_observations with ~0.37 m total drift then frozen,
+        which the earlier reason-keyed check and every SIM-clock cap missed) is still caught. Off
+        (nav_stuck_wall_s == 0) => always None (byte-identical); a missing odometry pose is treated as
+        no-progress so a truly frozen stage still trips. The message names the CURRENT (last) reason."""
         if self.nav_stuck_wall_s <= 0:
             return None
         pose = getattr(odometry, 'pose', None)
@@ -427,16 +428,17 @@ class RuntimeAdapter:
             progressed = (math.hypot(pose[0] - self._nav_stuck_pose[0],
                                      pose[1] - self._nav_stuck_pose[1]) > 0.02
                           or abs(dyaw) > math.radians(1.0))
-        if reason != self._nav_stuck_reason or progressed or self._nav_stuck_wall is None:
-            self._nav_stuck_reason = reason
+        if self._nav_stuck_wall is None or progressed:
             self._nav_stuck_wall = now_wall
             self._nav_stuck_pose = pose
+            self._nav_stuck_reason = reason
             return None
+        self._nav_stuck_reason = reason   # keep the latest reason for the failure message
         waited = now_wall - self._nav_stuck_wall
         if waited > self.nav_stuck_wall_s:
-            return ('%s stuck on %r for %.0fs wall with no base progress (> %.0fs budget); '
+            return ('%s stuck with no base progress for %.0fs wall (> %.0fs budget; last reason %r); '
                     'failing the attempt fast instead of burning the GPU wall cap'
-                    % (self.action, reason, waited, self.nav_stuck_wall_s))
+                    % (self.action, waited, self.nav_stuck_wall_s, reason))
         return None
 
     def _step(self, dt):

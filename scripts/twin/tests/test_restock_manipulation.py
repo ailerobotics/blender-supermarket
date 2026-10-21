@@ -339,6 +339,52 @@ def test_contact_stall_wall_budget_default_off_is_byte_identical_fm425():
     assert r.status != 'failed' or 'contact stalled' not in r.reason, r.reason
 
 
+def test_collision_stale_pause_keeps_stream_alive_and_wall_fail_fast_fm427():
+    # fm427 (A1) / run-323 cold lift: the COLLISION_STALE_PAUSE held the post-attach lift on a genuinely-
+    # stale collision stamp (the benign weld/ESDF re-incorporation lag) by returning EMPTY controls -- a
+    # SILENT hold that starved the 90 s heartbeat. With collision_pause_wall_s>0 the pause now (1) re-
+    # commands a HOLD at the CURRENT measured joints each tick (stream alive, stationary) and (2) fails
+    # fast with a named reason past the WALL budget.
+    clock = [0.0]
+    c, m = make_controller('collect', steady_clock=lambda: clock[0])
+    c.collision_stale_tol_s = 0.8
+    c.collision_pause_wall_s = 5.0
+    t = run_to(c, 'lift'); assert c.held
+    m.outcome = 'running'
+    c.step(.1, packet(c, t, contact=True))                     # issue the lift
+    stows_before = len(m.stows)
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        # a genuinely-STALE collision stamp (0.6 s old): max_age(0.5) < 0.6 <= tol(0.8) -> PAUSE
+        r = c.step(.1, packet(c, t + .1, contact=True, collision_time=(t + .1) - 0.6))
+    assert r.status == 'running', r.reason
+    assert 'COLLISION_STALE_PAUSE' in buf.getvalue()
+    assert len(m.stows) > stows_before                         # a HOLD command was issued (stream fed)
+    goal, measured, _slow = m.stows[-1]
+    assert goal == (0.,) * 6 and measured == (0.,) * 6          # hold at the CURRENT joints (stationary)
+    assert c.phase == 'lift'                                    # did NOT advance the held move
+    # past the wall budget with the stamp still stale -> fail fast with a named reason (not the watchdog)
+    clock[0] = 6.0
+    r = c.step(.1, packet(c, t + .2, contact=True, collision_time=(t + .2) - 0.6))
+    assert r.status == 'failed' and 'collision-stale pause' in r.reason and 'heartbeat' in r.reason, r.reason
+
+
+def test_collision_stale_pause_default_off_is_byte_identical_fm427():
+    # collision_pause_wall_s == 0 (default) => the legacy empty-control pause: NO hold command issued,
+    # NO wall fail-fast (the pause still holds pose and resumes on a fresh stamp, exactly as before).
+    c, m = make_controller('collect')
+    c.collision_stale_tol_s = 0.8
+    assert c.collision_pause_wall_s == 0.0
+    t = run_to(c, 'lift'); assert c.held
+    m.outcome = 'running'
+    c.step(.1, packet(c, t, contact=True))
+    stows_before = len(m.stows)
+    r = c.step(.1, packet(c, t + .1, contact=True, collision_time=(t + .1) - 0.6))
+    assert r.status == 'running' and r.controls == ()          # empty-control pause (legacy)
+    assert len(m.stows) == stows_before                        # NO hold command (byte-identical)
+
+
 def test_invariant_trip_names_the_failed_condition_fm412():
     # fm412 (run-317/318): the top-of-step invariant is a 5-condition OR; its reason must name the ACTUAL
     # failed field + value so a run that dies here is self-diagnosing (both runs died here ambiguously).
