@@ -73,6 +73,7 @@ KEY_CONSUMER = {
     'nav_factory': RUNTIME,
     'nav_mode': RUNTIME,
     'navigation': RUNTIME,
+    'collect_observe_force_render_ticks': RUNTIME,   # fm452: COLD force-render window; isaac_bundle reads it
 }
 
 # fm402: cap/limit keys the controller reads OPTIONALLY (config.get with a silent default). These are
