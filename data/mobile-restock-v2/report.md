@@ -2310,3 +2310,40 @@ MobileSpec knob, default 0 = byte-identical) that needs its own validating uncou
 GPU run, past this batch's cap) — PREPARED but NOT launched; awaiting a firstmate GO. Cranking
 `wheel_friction` to an unphysical value is explicitly NOT the fix (it bends the sim away from the real
 spec and still caps at ~18 %).
+
+### 2026-10-21 — fm435 caster_lift_m: the fix VALIDATED on the uncoupled bench (fix the sim, no gate bent)
+
+Implemented `MobileSpec.caster_lift_m` (default 0.0 = legacy co-planar, byte-identical; bounded [0, 0.03]):
+`build_mobile_urdf` raises the two caster_roll joint z by the lift so the passive casters sit that far
+ABOVE the drive-wheel ground plane, making the two drive wheels the deterministic primary weight-bearing
+contacts. `assemble` builds the spec tolerant of the field being absent from an older config. CPU
+geometry tests assert co-planar at 0 and an exact `lift` gap otherwise, plus bounds rejection
+(`scripts/twin/tests/test_mobile_assets.py`). Full twin CPU suite: 1031 passed (the 35 collection errors
++ 1 failure are the pre-existing `scripts.`-prefix import-path convention, unrelated).
+
+**Offline tip-over check (fm435's ask):** transport/drive CoM x=−0.018 (just behind the drive axle).
+With casters lifted the base rests on a triangle of the two drive wheels + the rear caster; the CoM
+projects INSIDE it (edge margins 0.258 / 0.018 / 0.233 m, nearest = the 17.6 mm to the drive-axle edge).
+Static vertical split: the engaged caster carries ~|CoM_x|/0.38 ≈ **4.6 %**, so the **drive wheels carry
+~95 %**. The carton is 0.45 kg (negligible CoM shift), and the coupled hitch force is near-ground
+(z≈0.04) and near-horizontal (the cart carries its own weight on its own casters), so neither carry nor
+coupling tips the base — if carry ever shifts the CoM forward of the axle it simply rests on the FRONT
+caster (symmetric). Side effect to watch at integration: a 5 mm lift gives a 0.75° static nose-up tilt;
+the mission re-senses collect/transfer targets via camera so it self-corrects, but the owning lane
+should confirm at run-327.
+
+**Validating uncoupled bench (lift 5 mm, REAL μ=1.0, fm435 GO, one run):**
+
+| metric | lift 0 (co-planar) | **lift 5 mm** | within 15 %? |
+|--------|--------------------|---------------|--------------|
+| straight v-ratio | 0.097 | **0.988** | yes |
+| arc v-ratio | 0.17 | **0.985** | yes |
+| arc ω-ratio | 0.23 | **0.851** | yes |
+| `within_tol` | false | **true** | yes |
+
+`WHEEL_TRACTION static=1.0 bound=2 colliders` (the two drive wheels), default drive (80 N / 100 damping).
+The base now tracks commanded (v, ω) within ~1.5 % straight, ~1.5 % on the arc's forward speed, and 15 %
+on yaw — all inside tolerance, at **physical** μ=1.0 (no unphysical friction, no gate relaxed). This
+confirms both the root cause (drive-wheel normal force) and the faithful fix. Staged into run-327 by
+pointing the cc-collect + couple configs' `mobile_manifest` at the lifted asset (A'-2 coast already
+staged); enablement fragment `docs/examples/caster-lift-mission-fragment.json`.
