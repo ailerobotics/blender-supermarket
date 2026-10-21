@@ -457,7 +457,8 @@ class ArticulatedController(Controller):
                  lane_reacquire_along_route=False, lane_cart_yaw_tol=0.20,
                  lane_curve_speed_floor=0.25, lane_max_curvature=None,
                  lane_coast_refusals=False, lane_trust_unknown=False,
-                 measured_turn_fault_s=None, **kwargs):
+                 measured_turn_fault_s=None, lane_track_tol=0.25,
+                 lane_track_envelope=False, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
         # swept train envelope as free (the static map proved that corridor clear), so the base is not
@@ -549,6 +550,24 @@ class ArticulatedController(Controller):
         self.measured_turn_fault_s=(float(measured_turn_fault_s)
                                     if measured_turn_fault_s not in (None, 0, 0.0) else None)
         self._mtr_window=0.0
+        # fm449: the stop_replan_tracking_error xy tolerance -- how far the base may be from the nearest
+        # authored route point before the route is DROPPED and re-planned. 0.25 m (default) = legacy
+        # (byte-identical). run-332: reacquire + W2 solved the over-rotation + lane_not_acquired, but the
+        # coupled turn's tracking error exceeds 0.25 m so the base re-acquires then re-drops (583x churn).
+        # A larger value lets the base RIDE the turn's tracking error instead of churning -- bounded by the
+        # swept-envelope proof (check_tow_lanes check_track_tol_envelope): the relaxed tol must stay inside
+        # the lateral offset whose robot+cart envelope is still clear of the static map (never mask a real
+        # departure). Matches the cart_yaw_tol prove-then-relax pattern (fm429).
+        self.lane_track_tol=float(lane_track_tol)
+        # fm449: a SINGLE scalar track tol is wrong for this lane -- the swept-envelope lateral slack is
+        # position-dependent (check_tow_lanes: ~0.80 m at the dock turn where run-332 churned, but only
+        # 0.14 m at the shelf-end pinch far downstream). With this on, the effective stop_replan xy tol at
+        # each route point is min(lane_track_tol, local_lateral_slack - 0.05), floored at 0.10 -- so the
+        # base may ride the turn's tracking error (loosened toward lane_track_tol where the envelope is
+        # wide) while staying TIGHT at a narrow pinch (never beyond the envelope). Off (default) => the flat
+        # lane_track_tol everywhere (byte-identical). The per-state slack is memoised (computed once).
+        self.lane_track_envelope=bool(lane_track_envelope)
+        self._slack_cache={}
         # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
         # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
         # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
@@ -716,6 +735,25 @@ class ArticulatedController(Controller):
         travel=(math.cos(yaw),math.sin(yaw))
         return field.certifies_sweep(occupied,swept,travel,geometry_margin=self.world.margin)
 
+    def _lateral_slack(self,s):
+        """fm449: the max clear LATERAL (perpendicular-to-heading) offset of the base+cart swept envelope
+        at route state `s` against the STATIC map -- the headroom that bounds how far the base may safely
+        ride off the authored centreline here. Memoised per rounded state (computed once per route point),
+        so the position-aware stop_replan tol costs ~one binary search per distinct point, not per tick."""
+        key=(round(s.x,2),round(s.y,2),round(wrap(s.yaw),2),round(wrap(s.cart_yaw),2))
+        cached=self._slack_cache.get(key)
+        if cached is not None:
+            return cached
+        nx,ny=-math.sin(s.yaw),math.cos(s.yaw)
+        lo,hi=0.0,0.8
+        for _ in range(14):
+            mid=(lo+hi)/2
+            ok=all(self.world.valid(TrainState(s.x+sg*mid*nx,s.y+sg*mid*ny,s.yaw,s.cart_yaw),(),0.0)
+                   for sg in (+1,-1))
+            lo,hi=(mid,hi) if ok else (lo,mid)
+        self._slack_cache[key]=lo
+        return lo
+
     def gate_velocity(self,now,odom,obs,linear,angular):
         if self.require_temporal_map and (obs is None or obs.temporal_map is None):
             return Result(reason='missing_navigation_map')
@@ -841,7 +879,10 @@ class ArticulatedController(Controller):
         self.index=min(candidates,key=lambda i:math.hypot(self.route.states[i].x-state.x,
                                                         self.route.states[i].y-state.y))
         nearest=self.route.states[self.index]
-        if math.hypot(nearest.x-state.x,nearest.y-state.y)>0.25 or abs(wrap(nearest.cart_yaw-state.cart_yaw))>self.lane_cart_yaw_tol:
+        track_tol=self.lane_track_tol
+        if self.lane_track_envelope:                     # fm449: cap by the local swept-envelope slack
+            track_tol=min(self.lane_track_tol, max(0.10, self._lateral_slack(nearest)-0.05))
+        if math.hypot(nearest.x-state.x,nearest.y-state.y)>track_tol or abs(wrap(nearest.cart_yaw-state.cart_yaw))>self.lane_cart_yaw_tol:
             self.route=None
             return Result(reason='stop_replan_tracking_error')
         # Follow the checked curvature, rather than cutting tight portal corners

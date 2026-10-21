@@ -142,6 +142,22 @@ class ArticulatedTests(unittest.TestCase):
         self.assertTrue(c.route and c.route.states,'controller never reached tracking')
         return state, now
 
+    def test_track_envelope_caps_tol_by_local_lateral_slack(self):
+        # fm449: with lane_track_envelope the stop_replan tol = min(lane_track_tol, local_slack - 0.05),
+        # floored 0.10. Open space -> wide slack (tol loosens toward lane_track_tol); a wall beside a route
+        # point -> narrower slack (tol tightens). Off (default) is the flat tol everywhere.
+        openc = ArticulatedController(GridMap((-15, -15, 15, 15)), allow_test_fixtures=True,
+                                      lane_track_tol=0.35, lane_track_envelope=True)
+        open_slack = openc._lateral_slack(TrainState(0, 0, 0, 0))
+        self.assertGreater(open_slack, 0.4)                      # empty map: wide lateral headroom
+        walled = ArticulatedController(GridMap((-15, -15, 15, 15), ((-2, 0.55, 2, 2.0),)),
+                                       allow_test_fixtures=True, lane_track_tol=0.35, lane_track_envelope=True)
+        wall_slack = walled._lateral_slack(TrainState(0, 0, 0, 0))   # wall 0.55 m to the +y (lateral) side
+        self.assertLess(wall_slack, open_slack)                  # the wall tightens the clear lateral offset
+        self.assertLess(wall_slack, 0.35)                        # -> effective tol would tighten below 0.35
+        # memoised: a second call returns the same value
+        self.assertEqual(walled._lateral_slack(TrainState(0, 0, 0, 0)), wall_slack)
+
     def test_persistent_measured_turn_radius_faults_fast(self):
         # fm446 (C): a measured_turn_radius that trips EVERY tick (a sub-min-radius turn the coupled base
         # cannot make) must FAIL FAST with a named fault, not livelock. measured_turn_fault_s=1.0 => after

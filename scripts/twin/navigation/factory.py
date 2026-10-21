@@ -315,6 +315,8 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
                                        lane_coast_refusals=bool(nav.get('tow_lane_coast_refusals', False)),
                                        lane_trust_unknown=bool(nav.get('tow_lane_trust_unknown', False)),
                                        measured_turn_fault_s=nav.get('measured_turn_fault_s'),
+                                       lane_track_tol=float(nav.get('tow_lane_track_tol_m', 0.25)),
+                                       lane_track_envelope=bool(nav.get('tow_lane_track_envelope', False)),
                                        **_controller_kwargs(nav))
 
     if 'dynamic_obstacles' in nav and mode != 'sensor':

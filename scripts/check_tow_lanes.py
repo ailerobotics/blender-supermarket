@@ -274,6 +274,54 @@ def check_cart_yaw_tol_envelope(grid, lanes_cfg, report):
                 not clear_at(lane, margin + 0.05), probe_rad=round(margin + 0.05, 3))
 
 
+def check_track_tol_envelope(grid, lanes_cfg, report):
+    """fm449 (run-332): after the reacquire + W2 fixes the coupled tow churns on
+    stop_replan_tracking_error -- the base re-acquires then deviates > the 0.25 m xy tolerance from the
+    nearest authored route point ON THE TURN and re-drops (583x). fm449 sanctions relaxing
+    `navigation.tow_lane_track_tol_m` ONLY as far as keeps the base+cart swept envelope inside the static
+    map. Prove that bound HERE (the cart_yaw pattern, for XY): offset EVERY authored route state LATERALLY
+    (perpendicular to its heading) by +/- off and find the largest offset whose occupied envelope is still
+    clear of the STATIC map; the relaxed tol must sit under it (never widen past it to mask a real
+    departure)."""
+    spec = MobileSpec()
+    nav = lanes_cfg['navigation']
+    graph = TowLaneGraph.from_config(nav['tow_lanes'])
+    graph.expand_all(ArticulatedMap(grid, spec))
+    world = ArticulatedMap(grid, spec)
+    RELAXED = float(nav.get('tow_lane_track_tol_m', 0.25))
+    ENVELOPE = bool(nav.get('tow_lane_track_envelope', False))
+
+    def slack_at(s):                                            # max clear lateral offset at state s
+        nx, ny = -math.sin(s.yaw), math.cos(s.yaw)
+        lo, hi = 0.0, 0.8
+        for _ in range(20):
+            mid = (lo + hi) / 2
+            ok = all(world.valid(TrainState(s.x + sg*mid*nx, s.y + sg*mid*ny, s.yaw, s.cart_yaw), (), 0.0)
+                     for sg in (+1, -1))
+            lo, hi = (mid, hi) if ok else (lo, mid)
+        return lo
+
+    for lane in graph.lanes:
+        slacks = [slack_at(s) for s in lane.route.states]
+        gmin = min(slacks)
+        if ENVELOPE:
+            # The controller caps the stop_replan tol per route point: eff = min(RELAXED, slack-0.05)
+            # floored 0.10. By construction eff <= slack everywhere -> the base never rides beyond the
+            # envelope at ANY point; the tol loosens only where the envelope is wide (the dock turn) and
+            # stays tight at a narrow pinch (the shelf end). PASS iff every eff <= its local slack.
+            effs = [min(RELAXED, max(0.10, sl - 0.05)) for sl in slacks]
+            safe = all(e <= sl + 1e-9 for e, sl in zip(effs, slacks))
+            _record(report, f'track_tol_envelope_margin[{lane.name}]', safe,
+                    mode='position_aware', relaxed_tol_m=RELAXED, global_min_slack_m=round(gmin, 3),
+                    eff_tol_min_m=round(min(effs), 3), eff_tol_max_m=round(max(effs), 3),
+                    all_eff_within_envelope=safe)
+        else:
+            # Flat scalar tol: it must sit under the GLOBAL min slack (never ride beyond the tightest point).
+            _record(report, f'track_tol_envelope_margin[{lane.name}]', RELAXED <= gmin,
+                    mode='flat_scalar', envelope_safe_offset_m=round(gmin, 3), relaxed_tol_m=RELAXED,
+                    relaxed_within_envelope=RELAXED <= gmin)
+
+
 def check_measured_turn_radius(grid, lanes_cfg, report):
     """fm431 (A): run-325b -- the coupled base UNDER-tracked the commanded (v, omega) on the lane's
     curves: it under-translated (measured ~0.033 m/s vs commanded ~0.0625) AND over-rotated (measured
@@ -416,6 +464,7 @@ def main():
     check_trust_static(grid, lanes_cfg, report)
     check_reacquire_along_route(grid, lanes_cfg, report)
     check_cart_yaw_tol_envelope(grid, lanes_cfg, report)
+    check_track_tol_envelope(grid, lanes_cfg, report)
     check_measured_turn_radius(grid, lanes_cfg, report)
     print('TOW_LANES_PROOF ' + ('PASS' if report['ok'] else 'FAIL'), flush=True)
     return 0 if report['ok'] else 1
