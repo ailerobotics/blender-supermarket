@@ -2690,3 +2690,34 @@ CPU tests: 13 (subagent) + 2 host-path + the Sensors round-trip + the host-confi
 tests pass, config_preflight PASS. Isaac-boot-verified only: that a clean source capture actually arrives at
 park within the wait (if it never does, the gate fails fast with the named reason instead of the old opaque
 `arm command heartbeat lost`).
+
+### 2026-10-21 — run-333 (fm449/450 GO): WARM xy SOLVED but the stop_replan trip is the CART_YAW; COLD gate inert (capture fails upstream)
+
+**WARM run-333b/c — the fm449/450 xy fixes WORK, but the real stop_replan trip is the other half: cart_yaw.**
+TRACK_DIAG at the stall: `err=0.066 tol=0.350 slack=0.800 at=(-3.92,15.15)` — the xy tracking error is only
+**0.066 m**, far inside the position-aware 0.35 m tol, so the base now tracks the turn's POSITION cleanly
+(the fm449 tol + fm450 speed cap did their job). stop_replan still churns (580× ↔ route_ready) because its
+OTHER condition — `cart_yaw divergence > lane_cart_yaw_tol (0.30)` — trips. Offline pinpoint: at the turn
+entry (route index 7, (-3.92,15.15)) the authored route expects cart_yaw **0.11** (the trailer kinematically
+pre-swings as the base turns), but the base arrives from the couple with the cart aligned behind
+(cart_yaw ≈ base_yaw ≈ **−0.19**) → divergence **~0.30 = exactly the tol** → the route is dropped BEFORE the
+base drives the turn (it cannot swing the cart into agreement without driving, which the check prevents — a
+chicken-and-egg, the same authored-sweep class the reacquire base-heading fix resolved for acquire). The
+base|cart angular RATES track well (|rw−cw| median 0.003), confirming it is an entry-pose mismatch, not an
+accumulated dynamics divergence. Added cart_yaw to TRACK_DIAG. FIX DIRECTION: `tow_lane_cart_yaw_tol`
+0.30→**0.33** — the envelope-proven maximum (check_cart_yaw_tol_envelope: outbound safe offset 0.33), fm429's
+guardrail — giving the 0.03 rad headroom to clear the ~0.30 entry mismatch so the base starts the turn and
+the cart swings into agreement; if the divergence creeps past 0.33 the next cart_yaw TRACK_DIAG shows it
+(and that would mean the cart leaves the envelope — the turn too tight for the coupled trailer). park/
+transfer/verify/return not reached.
+
+**COLD run-333 — the require_collect_source_evidence gate is built+wired but INERT this run.** It logged 0
+times: the gate sits AFTER the observe `matches==1` + target check, but the collect capture failed upstream
+(`no new synchronized rendered camera frame` ×3) so observe never got an observation to reach the gate —
+ending again on `arm command heartbeat lost`. (D) collect_keep_source_render cleared this error in run-332
+but it returned in run-333, so the source render-sync is flaky run-to-run at the frame level — a deeper
+Isaac render/stamp-sync issue upstream of the gate, not the gate itself. The gate remains correct for when a
+clean capture DOES arrive (it then holds the reach until the decoded-label evidence commits); the cold root
+is the render-sync delivering a synchronized frame at all.
+
+mp4: run-333 258 KB (cold), run-333b 8.82 MB, run-333c 8.82 MB. TRACK_DIAG now logs cart_err for run-334.
