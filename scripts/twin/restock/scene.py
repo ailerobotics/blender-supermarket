@@ -173,6 +173,25 @@ def author_initial_scenario(stage, scenario):
     support.AddScaleOp().Set(Gf.Vec3f(*size))
     UsdPhysics.CollisionAPI.Apply(support.GetPrim())
     support.CreateDisplayColorAttr([Gf.Vec3f(.3,.32,.34)])
+    # fm459: optional backroom TRANSFER BAY -- a static support surface (collider) the carton is placed
+    # onto when the mission transfers to a backroom bay instead of the store shelf (the store shelf is
+    # baked south of the portal). Absent => unchanged (store-shelf transfer). Its top surface must sit at
+    # the shelf camera's commissioned support z, and the shelf station camera is repositioned over it (see
+    # camera-config-bay.json) so commissioning + camera-measured verify register the SAME surface. A box
+    # from the floor to `top_z`, footprint `dimensions_m[:2]`.
+    bay = scenario.get('transfer_bay')
+    if bay:
+        bx, by = bay['center_xy']
+        bw, bd = bay['dimensions_m'][0], bay['dimensions_m'][1]
+        top_z = float(bay['top_z'])
+        if not (math.isfinite(bx) and math.isfinite(by) and bw > 0 and bd > 0 and top_z > 0):
+            raise ValueError('transfer_bay needs finite center_xy, positive dimensions_m and top_z')
+        bayprim = UsdGeom.Cube.Define(stage, '/RestockScenario/TransferBay')
+        bayprim.CreateSizeAttr(1.)
+        bayprim.AddTranslateOp().Set(Gf.Vec3d(bx, by, top_z / 2))
+        bayprim.AddScaleOp().Set(Gf.Vec3f(bw, bd, top_z))
+        UsdPhysics.CollisionAPI.Apply(bayprim.GetPrim())
+        bayprim.CreateDisplayColorAttr([Gf.Vec3f(.28, .3, .34)])
     # Mesh is needed by the same collider and physical QR authoring used above.
     mesh = UsdGeom.Mesh.Define(stage, '/RestockScenario/HandlingUnit')
     x,y,z = [v/2 for v in dimensions]
@@ -188,4 +207,5 @@ def author_initial_scenario(stage, scenario):
     stock = promote_stock(stage,str(mesh.GetPath()),unit['sku'],unit['mass_kg'])
     return dict(stock=stock, depleted_product_prims=list(map(str,matches)),
                 support=str(support.GetPath()), evidence='initial_conditions_only',
-                counted_unit='sealed_handling_unit', hidden_contents_counted=False)
+                counted_unit='sealed_handling_unit', hidden_contents_counted=False,
+                transfer_bay=('/RestockScenario/TransferBay' if scenario.get('transfer_bay') else None))
