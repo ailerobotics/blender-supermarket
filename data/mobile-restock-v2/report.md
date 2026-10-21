@@ -2571,3 +2571,31 @@ Scoped to collect; transfer/couple still suspend. VRAM: collect is the FIRST sta
 late-mission peak, so keeping the 1.0-scale source decode render alive through the brief collect reach has
 headroom (confirmed at the run). Pure-logic extracted to `_render_suspended`; CPU-tested; staged on for
 run-331.
+
+### 2026-10-21 — run-331 (fm447 GO): (b) FIXES the over-rotation (rw/rv 0.83→0.39); (D) fixes the source render; next blockers surface on both paths
+
+(a) feasibility (offline): the outbound plans at 1.5 m (min local radius 1.50 m) but NO ROUTE at 1.7/1.8 m
+(planning_timeout) — the 2.5 m portal can't fit a wider coupled turn. So staged (b)
+`tow_lane_curve_speed_floor=0.714` (turn at the bench-tracked 0.25 m/s).
+
+**WARM run-331b/c — (b) worked, new blocker is lane re-acquisition.** `measured_turn_radius` is GONE (0,
+was 186); the measured turn arc **rw/rv median 0.39** (run-330 was 0.83, trip >0.697) — driving the turn at
+0.25 m/s instead of 0.0875 m/s eliminated the coupled over-rotation, confirming the bench. But the faster
+turn now drifts the base off the authored route early (`stop_replan_tracking_error`) and then it cannot
+re-acquire: **846 `lane_not_acquired` + 845 `replan_changed_observations`** churn (6 tracking ticks only;
+10780/14122 ticks near-stopped) → nav-stuck at 120 s at x=−3.89. (C) correctly did not fire (no
+over-rotation to fault). So the warm path advanced from "over-rotation livelock" to a lane
+tracking/re-acquisition churn after the faster turn — the follower's 0.25 m stop_replan tolerance and the
+reacquire-along-route both need to tolerate the faster turn's deviation. park/transfer/verify/return not
+reached.
+
+**COLD run-331 — (D) + Option B both working, remaining is sensing cadence/decode.** `no established
+support registration` stays 0 (Option B) and `no new synchronized rendered camera frame` is now 0 (D keeps
+the source rendering through the collect reach). The collect now fails on `needs a new monotonic frame`
+(2 — hold() polled between the sensing_stride=6 renders, so the frame_id has not advanced), `missing,
+moving, stale or unsynchronized camera evidence`, and `unknown or undecoded label in calibrated slot` — then
+`arm command heartbeat lost`. So the next cold blocker is the sensing cadence (hold() wants a new monotonic
+frame each poll but the source renders only every 6 ticks) + a decode miss, not the registration prior or
+the suspend.
+
+mp4: run-331 263 KB (cold), run-331b 8.94 MB, run-331c 8.94 MB. BASE_ATT tilt unchanged ~-0.71 deg.
