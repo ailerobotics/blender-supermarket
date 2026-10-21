@@ -880,9 +880,19 @@ class ArticulatedController(Controller):
                                                         self.route.states[i].y-state.y))
         nearest=self.route.states[self.index]
         track_tol=self.lane_track_tol
+        slack=None
+        track_err=math.hypot(nearest.x-state.x,nearest.y-state.y)
         if self.lane_track_envelope:                     # fm449: cap by the local swept-envelope slack
-            track_tol=min(self.lane_track_tol, max(0.10, self._lateral_slack(nearest)-0.05))
-        if math.hypot(nearest.x-state.x,nearest.y-state.y)>track_tol or abs(wrap(nearest.cart_yaw-state.cart_yaw))>self.lane_cart_yaw_tol:
+            slack=self._lateral_slack(nearest)
+            track_tol=min(self.lane_track_tol, max(0.10, slack-0.05))
+        # fm450: per-point tracking margin, so run-333 shows how close the base runs to its eff tol at the
+        # narrow shelf-end pinch (eff tol -> 0.10 m there) vs the wide turn. Throttled.
+        self._trackn=getattr(self,'_trackn',0)+1
+        if self._trackn % 30 == 1:
+            print('TRACK_DIAG err=%.3f tol=%.3f slack=%s at=(%.2f,%.2f)' %
+                  (track_err, track_tol, ('%.3f'%slack) if slack is not None else 'n/a',
+                   nearest.x, nearest.y), flush=True)
+        if track_err>track_tol or abs(wrap(nearest.cart_yaw-state.cart_yaw))>self.lane_cart_yaw_tol:
             self.route=None
             return Result(reason='stop_replan_tracking_error')
         # Follow the checked curvature, rather than cutting tight portal corners
@@ -910,6 +920,14 @@ class ArticulatedController(Controller):
         # does not itself change the straight-vs-curve speed schedule.)
         floor=self.lane_curve_speed_floor
         v=min(v,self.max_speed*max(floor,1.0-(1.0-floor)*min(1.0,abs(curvature)*self.footprint.min_turn_radius)))
+        # fm450: slack-proportional speed cap -- SLOW THROUGH a narrow pinch (not loosen the tol there), so
+        # the tracking error stays within the tight eff tol. Tracking error scales ~linearly with speed
+        # (run-332: ~0.3 m error at 0.25 m/s on the turn), so cap v <= (slack-0.05)/1.5 to keep the error
+        # under the envelope headroom; a wide-slack turn is unaffected (the cap exceeds max_speed there),
+        # only the shelf-end pinch (slack 0.14 -> ~0.06 m/s) slows. Kept moving by a 0.05 m/s floor. Gated on
+        # lane_track_envelope (the same opt-in as the position-aware tol); off => unchanged.
+        if self.lane_track_envelope and slack is not None:
+            v=min(v,max(0.05,(slack-0.05)/1.5))
         result=self.gate_velocity(now,odom,obs,v,v*curvature)
         if result.reason!='tracking':
             # A transient measured-curvature trip (the base is momentarily under commanded
