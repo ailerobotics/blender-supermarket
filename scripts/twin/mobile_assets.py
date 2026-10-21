@@ -101,8 +101,10 @@ def build_mobile_urdf(source, output, spec=MobileSpec()):
         _joint(root, f'{label}_caster_swivel', 'base_link', f'{label}_caster_fork',
                (x, 0, 0.145-spec.base_z), 'continuous')
         _link(root, f'{label}_caster_wheel', 0.5, radius=0.065, length=0.035)
+        # Raise the caster wheel by spec.caster_lift_m so its ground contact sits that far ABOVE the
+        # drive-wheel plane (0.0 => co-planar, legacy). The fork never touches ground either way.
         _joint(root, f'{label}_caster_roll', f'{label}_caster_fork', f'{label}_caster_wheel',
-               (-0.025, 0, -0.08), 'continuous', '0 1 0')
+               (-0.025, 0, -0.08 + spec.caster_lift_m), 'continuous', '0 1 0')
     # Drawbar: back edge -.50 to hitch -.62, below the deck.
     _link(root, 'hitch', 1, (abs(spec.hitch_x)-spec.length/2, 0.06, 0.04))
     hitch = root.find("link[@name='hitch']")

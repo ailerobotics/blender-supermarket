@@ -65,7 +65,9 @@ def inputs(config, scenario):
     store=Path(config['store_usd']).resolve()
     if not urdf.is_file() or not store.is_file():
         raise ValueError('generated mobile URDF and exported store required')
-    spec=MobileSpec(**{f.name:mobile['spec'][f.name] for f in fields(MobileSpec)})
+    # Tolerant of fields absent from an older config (e.g. caster_lift_m): they fall back to the
+    # MobileSpec default, so a config that predates a new field builds the identical spec.
+    spec=MobileSpec(**{f.name:mobile['spec'][f.name] for f in fields(MobileSpec) if f.name in mobile['spec']})
     tool=inspect_tool(urdf)
     positions=mobile['transport_positions']
     if any(name not in positions or not lo<=positions[name]<=hi

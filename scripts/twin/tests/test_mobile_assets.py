@@ -56,6 +56,47 @@ def test_mobile_urdf_free_root_preserves_arm_and_wheel_geometry(source, tmp_path
     assert 'restock_camera_wrist' in robot.links and robot.joints_by_name['restock_camera_wrist_joint']
 
 
+def _caster_contact_bottom(robot, target):
+    """World-frame z of the lowest point of a caster wheel (center z minus wheel radius 0.065)."""
+    t = link_world_transforms(robot, target)
+    return t['front_caster_wheel'][2, 3] - 0.065, t['rear_caster_wheel'][2, 3] - 0.065
+
+
+def test_caster_lift_default_is_coplanar_with_drive_wheels(source, tmp_path):
+    # Default spec (caster_lift_m=0): all four ground contacts co-planar (legacy, byte-identical).
+    out = tmp_path/'mobile.urdf'
+    target = build_mobile_urdf(source, out)
+    robot = parse_urdf(str(out))
+    t = link_world_transforms(robot, target)
+    drive_bottom = t['left_wheel'][2, 3] - 0.16          # drive wheel radius 0.16
+    front_c, rear_c = _caster_contact_bottom(robot, target)
+    assert front_c == pytest.approx(drive_bottom)        # co-planar
+    assert rear_c == pytest.approx(drive_bottom)
+    # the unchanged legacy caster_roll z offset
+    assert robot.joints_by_name['front_caster_roll'].origin_xyz[2] == pytest.approx(-0.08)
+
+
+def test_caster_lift_recesses_casters_above_drive_plane(source, tmp_path):
+    lift = 0.005
+    out = tmp_path/'mobile.urdf'
+    target = build_mobile_urdf(source, out, MobileSpec(caster_lift_m=lift))
+    robot = parse_urdf(str(out))
+    t = link_world_transforms(robot, target)
+    drive_bottom = t['left_wheel'][2, 3] - 0.16
+    front_c, rear_c = _caster_contact_bottom(robot, target)
+    # both casters sit exactly `lift` ABOVE the drive-wheel ground plane -> drive wheels are the sole
+    # flat-ground contact and bear the weight; casters only catch pitch.
+    assert front_c - drive_bottom == pytest.approx(lift)
+    assert rear_c - drive_bottom == pytest.approx(lift)
+    assert robot.joints_by_name['front_caster_roll'].origin_xyz[2] == pytest.approx(-0.08 + lift)
+
+
+def test_caster_lift_bounds_rejected():
+    for bad in (-0.001, 0.05):
+        with pytest.raises(ValueError):
+            MobileSpec(caster_lift_m=bad)
+
+
 @pytest.fixture
 def stage():
     pytest.importorskip('pxr')
