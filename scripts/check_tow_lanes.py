@@ -385,23 +385,61 @@ def check_cart_yaw_rebase_acquire(grid, lanes_cfg, report):
     base_yaw = drop.yaw
     authored_cart = drop.cart_yaw
     tol = lane.start_tol_cart_yaw
+    cart_tol = c.lane_cart_yaw_tol                                 # fm455 b-fix: the FOLLOW's stop_replan tol
+
+    def acquire_cart_ok(state):
+        # mirrors _plan_lane's fm455 b-fixed cart gate exactly: cart_err at the re-based nearest <= cart_tol
+        rebased = c._rebase_cart_yaw(lane.route, state, world)
+        if not rebased.states:
+            return False, None
+        near = min(rebased.states, key=lambda s: math.hypot(s.x - state.x, s.y - state.y))
+        err = abs(wrap(near.cart_yaw - state.cart_yaw))
+        return err <= cart_tol, err
+
     # (1) aligned-but-lagging cart: the coupled train enters ALIGNED (cart ~ base heading) and the cart lags
-    #     the base by the observed ~0.30 rad through the turn -- the live state the authored (swung-from-
-    #     lane-start) cart_yaw gate refused (its authored cart_yaw has already swung ~1 rad away by here).
-    aligned = TrainState(drop.x, drop.y, base_yaw, wrap(base_yaw - 0.30))
-    authored_gate_refused = abs(wrap(aligned.cart_yaw - authored_cart)) > tol      # old gate said no
+    #     the base by the observed ~0.287 rad -- the run-335 live state. The old fm452(A) rebase-ENVELOPE gate
+    #     refused it (breach at ~0.29) though the follow tolerates 0.30 -> dead-zone churn. The b-fixed gate
+    #     uses the follow's cart_tol predicate, so it RE-ACQUIRES.
+    aligned = TrainState(drop.x, drop.y, base_yaw, wrap(base_yaw - 0.287))
+    authored_gate_refused = abs(wrap(aligned.cart_yaw - authored_cart)) > tol      # old authored gate said no
     xy_ok = lane.acquirable(aligned.pose, None, along_route=reacq)                 # _plan_lane's xy gate
-    cart_ok = c._rebase_cart_yaw(lane.route, aligned, world) is not lane.route     # _plan_lane's cart gate
-    acquires = xy_ok and cart_ok
-    _record(report, f'cart_yaw_rebase_acquire_aligned_reacquires[{lane.name}]', acquires,
-            xy_near=xy_ok, rebase_clean=cart_ok, authored_cart_yaw_gate_would_refuse=authored_gate_refused,
-            start_tol_cart_yaw=round(tol, 3))
-    # (2) cart genuinely off the lane: a wildly misaligned cart re-bases to a swept-envelope breach, so
-    #     `_rebase_cart_yaw` returns the authored route unchanged -> the acquire gate still REFUSES it.
+    cart_ok, cart_err = acquire_cart_ok(aligned)                                   # b-fixed cart gate
+    _record(report, f'cart_yaw_rebase_acquire_aligned_reacquires[{lane.name}]', xy_ok and cart_ok,
+            xy_near=xy_ok, cart_err_rad=round(cart_err or 0, 3), cart_tol=round(cart_tol, 3),
+            authored_cart_yaw_gate_would_refuse=authored_gate_refused)
+    # (2) cart genuinely past the follow tolerance: the acquire still REFUSES it (the follow would stop_replan
+    #     it anyway) -- the gate is aligned with the follow, not merely dropped, so there is no false accept.
     offlane = TrainState(drop.x, drop.y, base_yaw, wrap(base_yaw + 1.4))
-    off_cart_ok = c._rebase_cart_yaw(lane.route, offlane, world) is not lane.route
-    _record(report, f'cart_yaw_rebase_acquire_offlane_refused[{lane.name}]', not off_cart_ok,
-            rebase_breaches_envelope=not off_cart_ok, offlane_cart_yaw_rad=round(offlane.cart_yaw, 3))
+    off_ok, off_err = acquire_cart_ok(offlane)
+    _record(report, f'cart_yaw_rebase_acquire_offlane_refused[{lane.name}]', not off_ok,
+            cart_err_rad=round(off_err or 9, 3), cart_tol=round(cart_tol, 3))
+
+
+def check_rigid_pivot_clearance(grid, lanes_cfg, report):
+    """fm455 (option c): the rigid-hitch-locked train reorients at the portal as ONE rigid body. The tightest
+    (and only open-floor-feasible) rigid reorientation is a PIVOT -- rotate in place -- since any min-radius
+    arc swings the rigidly-trailing cart too wide to clear. Prove the swept RADIUS of the rigid train vs the
+    open-floor CLEARANCE (fm455's explicit ask): compute the rigid pivot swept radius (base + collinear cart),
+    then rotate the rigid train in place E->S at the doorway staging point and require every intermediate
+    heading clears the static map, and that the swept disc fits the measured clearance to the nearest
+    obstacle. This is the geometric feasibility of c; the pivot EXECUTION (controller rotate-in-place + PhysX
+    hitch-lock) is the sim-side integration."""
+    spec = MobileSpec()
+    world = ArticulatedMap(grid, spec)
+    front = spec.length / 2
+    rear_of_cart = abs(spec.hitch_x) + spec.cart_hitch_x + spec.cart_length / 2
+    swept_radius = max(front, math.hypot(rear_of_cart, spec.cart_width / 2))
+    # staging point on the doorway centreline, north of the throat (where the pivot reorients E->S)
+    px, py = -3.87, 14.0
+    yaw0, yaw1 = 0.0, -math.pi / 2
+    n = 36
+    clears = all(world.valid(TrainState(px, py, yaw0 + (yaw1 - yaw0) * t / n,
+                                        yaw0 + (yaw1 - yaw0) * t / n), (), 0.0) for t in range(n + 1))
+    clearance = world.nearest_static(px, py, max_cells=5)         # m to nearest static obstacle AABB
+    _record(report, 'rigid_pivot_swept_radius_within_clearance',
+            clears and swept_radius <= clearance + 1e-6,
+            swept_radius_m=round(swept_radius, 2), clearance_to_static_m=round(clearance, 2),
+            pivot_rotation_clears_static=clears, pivot_at=(px, py))
 
 
 def check_track_tol_envelope(grid, lanes_cfg, report):
@@ -598,6 +636,7 @@ def main():
     check_track_tol_envelope(grid, lanes_cfg, report)
     check_cart_yaw_rebase_envelope(grid, lanes_cfg, report)
     check_cart_yaw_rebase_acquire(grid, lanes_cfg, report)
+    check_rigid_pivot_clearance(grid, lanes_cfg, report)
     check_measured_turn_radius(grid, lanes_cfg, report)
     print('TOW_LANES_PROOF ' + ('PASS' if report['ok'] else 'FAIL'), flush=True)
     return 0 if report['ok'] else 1

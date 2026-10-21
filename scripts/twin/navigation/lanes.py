@@ -39,7 +39,8 @@ class TowLane:
     def __init__(self, name, start, goal, *, waypoints=(), start_cart_yaw=None,
                  goal_articulation=None, goal_tol_xy=0.30, goal_tol_yaw=0.26,
                  start_tol_xy=0.25, start_tol_yaw=0.15, start_tol_cart_yaw=0.20,
-                 waypoint_tol=1.25, route_through_waypoints=False):
+                 waypoint_tol=1.25, route_through_waypoints=False,
+                 rigid_hitch_lock=False, lock_curvature_threshold=0.30, lock_engage_tol=0.12):
         if not isinstance(name, str) or not name:
             raise ValueError('tow lane needs a non-empty name')
         self.name = name
@@ -69,6 +70,15 @@ class TowLane:
         # behind the base BEFORE the doorway, replacing the single sharp ~90 deg reorientation loop.
         # Default False => free-plan-and-validate, byte-identical to the historical lane.
         self.route_through_waypoints = bool(route_through_waypoints)
+        # fm455 (option c): rigidly pin the drawbar hitch (cart_yaw = base_yaw, articulation 0) through the
+        # authored turn(s) and release on the straight, so the min-radius portal reorientation tows the cart
+        # as one rigid body instead of letting it lag off-axle into a stall. `lock_curvature_threshold` is
+        # the |curvature| (1/radius) above which a step is a "turn" (locked); `lock_engage_tol` is the max
+        # |articulation| at which a real lockable hitch may engage (a lagging cart cannot be snapped rigid).
+        # Default off => no step locked => off-axle trailing everywhere, byte-identical.
+        self.rigid_hitch_lock = bool(rigid_hitch_lock)
+        self.lock_curvature_threshold = float(lock_curvature_threshold)
+        self.lock_engage_tol = float(lock_engage_tol)
         # Set by expand(): the validated train trajectory (an articulated.Route).
         self.route = None
 
@@ -146,9 +156,63 @@ class TowLane:
                         f'tow lane {self.name!r} waypoint {tuple(round(c, 2) for c in wp)} is '
                         f'{near:.2f} m off the expanded centreline (> {self.waypoint_tol} m); '
                         f'the authored lane and the realised trajectory disagree')
+        if self.rigid_hitch_lock:
+            route = self._apply_rigid_lock(planner, world, start, route, build_margin)
         self.route = route
         self.goal_articulation = ga
         return route
+
+    def _apply_rigid_lock(self, planner, world, start, route, build_margin):
+        """fm455 (option c): pin the drawbar hitch RIGID through the authored turn(s) and release on the
+        straight, so the towed cart never develops the off-axle lag that stalls the min-radius portal
+        reorientation. Re-integrate cart_yaw forward from the lane start with a per-step lock flag
+        (|curvature| > `lock_curvature_threshold` ⇒ locked ⇒ cart rigid with the base, articulation 0;
+        straight ⇒ released ⇒ off-axle trailing). The base centreline (x, y, yaw) is UNCHANGED -- only
+        cart_yaw per step. The lock may only ENGAGE where the cart is already aligned (|articulation| ≤
+        lock_engage_tol); a real pin cannot snap a lagging cart into place (that would be a teleport), so
+        an engagement on a lagging cart raises. The rigid train's swept footprint is then RE-VALIDATED
+        against the static map (`validate_seed` rolls out the single-rigid-body hull on the locked steps);
+        a rigid turn that does not clear raises. Lock/release transitions are logged as explicit events."""
+        from .articulated import Route, advance
+        spec = world.spec
+        st, cv = route.states, route.curvatures
+        if not cv:
+            return route
+        thr, engage_tol = self.lock_curvature_threshold, self.lock_engage_tol
+        new_states = [st[0]]
+        flags = []
+        prev_locked = False
+        transitions = []
+        for i, k in enumerate(cv):
+            lk = abs(k) > thr
+            a = new_states[-1]
+            if lk and not prev_locked:                      # lock ENGAGES here
+                if abs(a.articulation) > engage_tol:
+                    raise ValueError(
+                        f'tow lane {self.name!r} rigid_hitch_lock cannot engage at step {i} '
+                        f'(pose {tuple(round(c,2) for c in a.pose)}): cart articulation '
+                        f'{a.articulation:+.3f} rad > lock_engage_tol {engage_tol} -- a real lockable '
+                        f'hitch cannot snap a lagging cart to rigid (that would be a teleport)')
+                transitions.append(('LOCK', i, tuple(round(c, 2) for c in a.pose)))
+            elif prev_locked and not lk:                    # lock RELEASES here
+                transitions.append(('RELEASE', i, tuple(round(c, 2) for c in a.pose)))
+            ds = math.dist(a.pose[:2], st[i + 1].pose[:2])
+            new_states.append(advance(a, ds, k, spec, lk))
+            flags.append(lk)
+            prev_locked = lk
+        locked_route = Route(new_states, list(cv), route.reason, locked=tuple(flags))
+        # re-validate the RIGID-on-locked-steps swept footprint against the static map
+        checked = planner.validate_seed(locked_route, start, self.goal, (), max(0.02, build_margin),
+                                        self.goal_articulation if self.goal_articulation is not None
+                                        else world.spec.max_articulation)
+        if not checked.states:
+            raise ValueError(
+                f'tow lane {self.name!r} rigid_hitch_lock route does not clear the static map '
+                f'(rigid-train swept footprint): {checked.reason}')
+        n_lock = sum(flags)
+        print('TOW_LANE_RIGID_LOCK lane=%r locked_steps=%d/%d transitions=%s'
+              % (self.name, n_lock, len(flags), transitions), flush=True)
+        return checked
 
     def _expand_through_waypoints(self, planner, world, start, ga, build_margin):
         """fm454 (option b): plan the coupled train THROUGH the authored waypoints as ordered sub-goals.
@@ -187,7 +251,8 @@ class TowLane:
             raise ValueError('each tow lane must be an object')
         known = {'name', 'start', 'goal', 'waypoints', 'start_cart_yaw', 'goal_articulation',
                  'goal_tol_xy', 'goal_tol_yaw', 'start_tol_xy', 'start_tol_yaw',
-                 'start_tol_cart_yaw', 'waypoint_tol', 'route_through_waypoints'}
+                 'start_tol_cart_yaw', 'waypoint_tol', 'route_through_waypoints',
+                 'rigid_hitch_lock', 'lock_curvature_threshold', 'lock_engage_tol'}
         unknown = set(cfg) - known
         if unknown:
             raise ValueError(f'unknown tow lane keys: {sorted(unknown)}')
@@ -200,6 +265,9 @@ class TowLane:
                    start_cart_yaw=cfg.get('start_cart_yaw'),
                    goal_articulation=cfg.get('goal_articulation'),
                    route_through_waypoints=bool(cfg.get('route_through_waypoints', False)),
+                   rigid_hitch_lock=bool(cfg.get('rigid_hitch_lock', False)),
+                   **{k: float(cfg[k]) for k in ('lock_curvature_threshold', 'lock_engage_tol')
+                      if k in cfg},
                    **{k: float(cfg[k]) for k in tol_keys if k in cfg})
 
 

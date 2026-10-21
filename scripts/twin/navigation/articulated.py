@@ -36,16 +36,26 @@ class TrainState:
         return robot, cart
 
 
-def advance(state, distance, curvature, spec):
-    """Midpoint integration of an off-axle rear hitch trailer, in path length."""
+def advance(state, distance, curvature, spec, locked=False):
+    """Midpoint integration of an off-axle rear hitch trailer, in path length.
+
+    fm455 (option c): with ``locked`` the drawbar hitch is rigidly PINNED (a real lockable hitch, see
+    `MobileController`/`physics_setup`), so the cart yaws rigidly WITH the base -- cart_yaw tracks the new
+    base_yaw exactly (articulation stays 0). The off-axle trailer integration is bypassed for that step;
+    the rigid train is one body. ``locked=False`` (default) is the unchanged off-axle model, byte-identical."""
+    half_yaw = state.yaw+curvature*distance/2
+    new_yaw = wrap(state.yaw+curvature*distance)
+    if locked:
+        return TrainState(state.x+distance*math.cos(half_yaw),
+                          state.y+distance*math.sin(half_yaw),
+                          new_yaw, new_yaw)
     def cart_rate(yaw, phi):
         beta = yaw-phi
         return (math.sin(beta)+spec.hitch_x*curvature*math.cos(beta))/spec.cart_hitch_x
-    half_yaw = state.yaw+curvature*distance/2
     half_phi = state.cart_yaw+cart_rate(state.yaw,state.cart_yaw)*distance/2
     return TrainState(state.x+distance*math.cos(half_yaw),
                       state.y+distance*math.sin(half_yaw),
-                      wrap(state.yaw+curvature*distance),
+                      new_yaw,
                       wrap(state.cart_yaw+cart_rate(half_yaw,half_phi)*distance))
 
 
@@ -143,15 +153,19 @@ class ArticulatedMap:
         return self.clear_polygon(occupied_envelope(*state.bodies(self.spec),self.spec,
                                   margin=self.margin+extra_margin),dynamic)
 
-    def rollout(self,state,distance,curvature,dynamic=(),extra_margin=0.0,step=0.08):
-        """Check each local swept hull, never one convex hull of the whole turn."""
+    def rollout(self,state,distance,curvature,dynamic=(),extra_margin=0.0,step=0.08,locked=False):
+        """Check each local swept hull, never one convex hull of the whole turn.
+
+        fm455 (option c): ``locked`` rolls out the RIGID train (cart pinned to the base, articulation 0)
+        so the swept hull is the single-rigid-body footprint rotating through the arc, not the trailing
+        off-axle cart. ``locked=False`` (default) is the unchanged off-axle rollout."""
         if distance<0 or abs(curvature)>1/1.5+1e-9:
             return []
         count=max(1,math.ceil(distance/step))
         ds=distance/count
         samples=[state]
         for _ in range(count):
-            nxt=advance(samples[-1],ds,curvature,self.spec)
+            nxt=advance(samples[-1],ds,curvature,self.spec,locked)
             if abs(nxt.articulation)>=self.spec.max_articulation:
                 return []
             # Centre-trajectory chord error plus RK2 integration allowance.
@@ -215,6 +229,10 @@ class Route:
     curvatures: list
     reason: str
     expanded: int = 0
+    # fm455 (option c): per-step rigid-hitch-lock flags (parallel to `curvatures`; locked[i] drives
+    # states[i]->states[i+1]). Empty () => no step is locked => off-axle trailer everywhere, byte-identical.
+    # Keyword-only in practice (every positional Route(...) passes at most `expanded`).
+    locked: tuple = ()
 
 
 class ArticulatedPlanner:
@@ -256,25 +274,27 @@ class ArticulatedPlanner:
             return Route([],[],'seed_start_mismatch')
         if not self.world.valid(start,dynamic,extra_margin):
             return Route([],[],'invalid_start')
-        states=[start]; curvatures=[]
-        for a,b,k in zip(seed.states,seed.states[1:],seed.curvatures):
+        states=[start]; curvatures=[]; out_locked=[]
+        for i,(a,b,k) in enumerate(zip(seed.states,seed.states[1:],seed.curvatures)):
+            lk=bool(seed.locked[i]) if seed.locked else False
             ds=math.dist(a.pose[:2],b.pose[:2])
             if not math.isfinite(k) or not 0<ds<=0.10:
                 return Route([],[],'invalid_seed_primitive')
-            expected=advance(a,ds,k,self.world.spec)
+            expected=advance(a,ds,k,self.world.spec,lk)
             if (math.dist(expected.pose[:2],b.pose[:2])>1e-5
                     or abs(wrap(expected.yaw-b.yaw))>1e-5
                     or abs(wrap(expected.cart_yaw-b.cart_yaw))>1e-5):
                 return Route([],[],'seed_kinematics_mismatch')
-            samples=self.world.rollout(states[-1],ds,k,dynamic,extra_margin,step=0.10)
+            samples=self.world.rollout(states[-1],ds,k,dynamic,extra_margin,step=0.10,locked=lk)
             if not samples:
                 return Route([],[],'seed_collision')
             states.extend(samples[1:]); curvatures.extend([k]*(len(samples)-1))
+            out_locked.extend([lk]*(len(samples)-1))
         end=states[-1]
         if (math.dist(end.pose[:2],goal[:2])>=0.07 or abs(wrap(end.yaw-goal[2]))>=0.07
                 or abs(end.articulation)>=limit):
             return Route([],[],'seed_goal_mismatch')
-        return Route(states,curvatures,'validated_seed')
+        return Route(states,curvatures,'validated_seed',locked=tuple(out_locked) if seed.locked else ())
 
     def plan(self,start,goal,dynamic=(),extra_margin=0.02,goal_articulation=None):
         """Try verified cache, an independently checked proposal, then full search.
@@ -665,9 +685,19 @@ class ArticulatedController(Controller):
             # otherwise driving the turn). Re-use the re-base code as the gate: acquire on xy-proximity to the
             # route (cart_yaw handled by the re-base, same as the stop_replan drop) AND the live cart re-basing
             # cleanly -- a cart genuinely off the lane re-bases to a swept-envelope breach, so `_rebase_cart_yaw`
-            # returns the authored route UNCHANGED (its `is` identity), and acquire still refuses it.
+            # returns the authored route UNCHANGED (its `is` identity).
+            # fm455 b-fix: the acquire cart gate must use the SAME predicate+threshold as the FOLLOW's
+            # stop_replan (cart_err <= lane_cart_yaw_tol against the re-based nearest), NOT the stricter
+            # rebase-envelope-clear test. The envelope test refused at ~0.29 while the follow tolerates
+            # 0.30 -> a dead zone that converted a tolerable lag into lane_not_acquired churn (run-335:
+            # cart lag ~0.287 stalled the tow at 852 lane_not_acquired though the follow would have
+            # continued). Re-base the route; measure cart_err at the nearest route point exactly as the
+            # follow does; acquire iff within lane_cart_yaw_tol. A cart genuinely past the follow tol is
+            # still refused (the follow would stop_replan it anyway) -- no dead zone, no false refusal.
             xy_ok=lane.acquirable(state.pose,None,along_route=self.lane_reacquire_along_route)
-            cart_ok=self._rebase_cart_yaw(lane.route,state,world) is not lane.route
+            rebased=self._rebase_cart_yaw(lane.route,state,world)
+            near=min(rebased.states,key=lambda s:math.hypot(s.x-state.x,s.y-state.y)) if rebased.states else None
+            cart_ok=near is not None and abs(wrap(near.cart_yaw-state.cart_yaw))<=self.lane_cart_yaw_tol
             if not (xy_ok and cart_ok):
                 return Route([],[],'lane_not_acquired')
         elif not lane.acquirable(state.pose,state.cart_yaw,along_route=self.lane_reacquire_along_route):
@@ -722,6 +752,9 @@ class ArticulatedController(Controller):
         st=route.states
         if not st:
             return route
+        if route.locked and any(route.locked):
+            return route    # fm455: a rigid-hitch-locked route carries cart_yaw=base_yaw by the pin; the
+                            # off-axle re-base does not apply (and must not corrupt the locked steps)
         k=min(range(len(st)),key=lambda i:math.hypot(st[i].x-state.x,st[i].y-state.y))
         spec=self.spec; cy=state.cart_yaw
         rebased=[st[i] for i in range(k)]+[TrainState(st[k].x,st[k].y,st[k].yaw,cy)]
