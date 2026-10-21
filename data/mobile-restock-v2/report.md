@@ -2660,3 +2660,33 @@ the integration-owned sequencing/decode class (clean source frame + label read b
 the same conclusion as the camera report's Deliverable 2; no further camera-lane code change is safe/offline.
 
 mp4: run-332 262 KB (cold), run-332b 9.09 MB, run-332c 8.86 MB. BASE_ATT ~-0.71 deg.
+
+### 2026-10-21 — fm449/fm450: WARM position-aware track tol + slack speed cap; COLD collect-source evidence gate (wired host-path)
+
+**WARM (fm449 + fm450).** stop_replan churn is the base deviating >0.25 m from the route ON THE TURN. The
+envelope proof (check_track_tol_envelope) showed the lateral slack is position-dependent: 0.800 m at the
+dock turn, 0.14 m at the shelf-end pinch. So (fm449) `navigation.tow_lane_track_envelope` (default off)
+makes the stop_replan xy tol per-point = min(tow_lane_track_tol_m, local_slack−0.05) floored 0.10 — eff
+0.35 m at the turn (rides the tracking error), 0.10 m at the pinch (tighter + safer than the old flat 0.25),
+all within the envelope by construction. (fm450) a slack-proportional SPEED CAP v ≤ max(0.05,(slack−0.05)/
+1.5) SLOWS through a narrow pinch (0.14 m → ~0.06 m/s) so the error stays within the tight tol, not loosen;
+the wide turn is unaffected. + a throttled TRACK_DIAG (err/tol/slack) so run-333 shows the margin. Staged
+tow_lane_track_tol_m=0.35 + tow_lane_track_envelope=true. Envelope proof PASSES (eff_tol 0.10–0.35,
+all within envelope); 134 nav tests.
+
+**COLD (fm449 — I now own the collect sequencing).** Gate the collect observe→reach on a CLEAN
+synchronized source frame + a DECODED label AT PARK, before the gripper occludes the carton top. New
+`require_collect_source_evidence` (TransferController, default off): observe does not advance to `approach`
+until the collect source reports clean-this-tick; a bounded wait
+(RESTOCK_COLLECT_SOURCE_EVIDENCE_WAIT_TICKS, default 40) then fails fast with the named
+`collect_source_evidence_unavailable` rather than reaching blind. The clean verdict is
+`restock_camera.source_target.SourceTarget.clean` = (not render-suspended) AND not registration-occluded —
+the same signal the lane already computes; a held/seeded prior does NOT count. WIRED for the ROS-split host
+path: the Isaac-side verdict rides a new `Sensors.collect_source_clean` field (set in isaac_factory capture
+from the SourceTarget.clean), crossing asdict→JSON→Sensors(**data) exactly like `base_repositioned`; the
+host controller gate reads `s.collect_source_clean` when no in-process provider is injected; ros_host threads
+`require_collect_source_evidence` from the repo host config (staged true). Default off ⇒ byte-identical.
+CPU tests: 13 (subagent) + 2 host-path + the Sensors round-trip + the host-config key-set; 206 manip/camera
+tests pass, config_preflight PASS. Isaac-boot-verified only: that a clean source capture actually arrives at
+park within the wait (if it never does, the gate fails fast with the named reason instead of the old opaque
+`arm command heartbeat lost`).

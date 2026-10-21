@@ -176,6 +176,98 @@ def test_grasp_flicker_does_not_livelock_retries_or_fails_within_budget():
     assert m.payloads == []
 
 
+def test_collect_source_evidence_gate_off_is_byte_identical_reach_proceeds():
+    # fm449 (a): flag OFF (default) => observe advances into the reach exactly as today, even with no
+    # collect-source evidence provider wired.
+    c, m = make_controller('collect')
+    assert c.require_collect_source_evidence is False
+    r = c.step(.1, packet(c, 1.0))
+    assert c.phase == 'approach' and r.status != 'failed'   # left observe into the reach
+
+
+def test_collect_source_evidence_gate_permits_reach_on_a_clean_capture():
+    # fm449 (b): flag ON + a clean source capture present this tick => observe advances into the reach.
+    c, m = make_controller('collect', require_collect_source_evidence=True)
+    c.set_collect_source_evidence(lambda now: True)
+    r = c.step(.1, packet(c, 1.0))
+    assert c.phase == 'approach' and r.status != 'failed'
+
+
+def test_collect_source_evidence_gate_fails_fast_when_no_clean_capture_arrives():
+    # fm449 (c): flag ON + no clean capture within the bounded wait => fail fast with the named reason,
+    # never entering the reach.
+    c, m = make_controller('collect', require_collect_source_evidence=True)
+    c.collect_source_evidence_wait_ticks = 3
+    c.set_collect_source_evidence(lambda now: False)
+    result = None
+    for i in range(10):
+        result = c.step(.1, packet(c, 1.0 + i * .1))
+        assert c.phase != 'approach', 'must never begin the reach without a clean source capture'
+        if result.status == 'failed':
+            break
+    assert c.phase == 'failed' and result.reason == 'collect_source_evidence_unavailable'
+    assert m.moves == []                                   # no reach move was ever issued
+
+
+def test_collect_source_evidence_gate_host_path_reads_sensors_field():
+    # fm449 host path: no injected provider (the controller runs in the host process); the clean verdict
+    # rides Sensors.collect_source_clean, set Isaac-side. clean=True permits the reach; clean=False holds.
+    c, m = make_controller('collect', require_collect_source_evidence=True)
+    assert c._collect_source_evidence is None                 # host path: no in-process provider
+    r = c.step(.1, packet(c, 1.0, collect_source_clean=True))
+    assert c.phase == 'approach' and r.status != 'failed'     # Isaac-set clean field permits the reach
+
+
+def test_collect_source_evidence_gate_host_path_not_clean_holds_then_fails():
+    # fm449 host path: Sensors.collect_source_clean False => holds in observe, then fails fast at the bound.
+    c, m = make_controller('collect', require_collect_source_evidence=True)
+    c.collect_source_evidence_wait_ticks = 3
+    result = None
+    for i in range(10):
+        result = c.step(.1, packet(c, 1.0 + i * .1, collect_source_clean=False))
+        assert c.phase != 'approach'
+        if result.status == 'failed':
+            break
+    assert c.phase == 'failed' and result.reason == 'collect_source_evidence_unavailable'
+
+
+def test_collect_source_evidence_gate_holds_in_observe_during_the_bounded_wait():
+    # fm449: while awaiting the clean capture the controller stays in observe (running), not failed,
+    # until the bounded budget is exhausted.
+    c, m = make_controller('collect', require_collect_source_evidence=True)
+    c.collect_source_evidence_wait_ticks = 5
+    c.set_collect_source_evidence(lambda now: False)
+    for i in range(5):
+        r = c.step(.1, packet(c, 1.0 + i * .1))
+        assert c.phase == 'observe' and r.status == 'running'
+
+
+def test_collect_source_evidence_gate_held_or_seeded_prior_does_not_count():
+    # fm449 (d): a HELD/seeded prior (the provider reports not-clean) does NOT satisfy the gate -- the
+    # reach stays blocked until a genuine clean-this-tick True arrives. Models the camera-lane verdict
+    # where an occluded/held SourceTarget yields clean=False (see test_restock_source_target).
+    c, m = make_controller('collect', require_collect_source_evidence=True)
+    c.collect_source_evidence_wait_ticks = 20
+    state = {'clean': False}
+    c.set_collect_source_evidence(lambda now: state['clean'])
+    for i in range(4):                                     # held/seeded prior: not clean -> stay in observe
+        c.step(.1, packet(c, 1.0 + i * .1))
+        assert c.phase == 'observe'
+    assert m.moves == []                                   # no reach begun on the held prior
+    state['clean'] = True                                  # a genuine clean capture arrives
+    c.step(.1, packet(c, 1.5))
+    assert c.phase == 'approach'
+
+
+def test_collect_source_evidence_gate_does_not_arm_for_transfer():
+    # fm449: the gate is scoped to collect (the source is the fixed camera station). A transfer run
+    # (source = cart, controlled asset) is byte-identical even with the flag on.
+    c, m = make_controller('transfer', require_collect_source_evidence=True)
+    c.set_collect_source_evidence(lambda now: False)       # would block collect; must not touch transfer
+    r = c.step(.1, packet(c, 1.0))
+    assert c.phase == 'approach' and r.status != 'failed'
+
+
 def test_lift_passes_carry_wrist1_cap_to_motion_fm402():
     # fm402 regression guard for the runs 300d/305/311 jam: with carry_wrist1_cap set, the 'lift' move
     # MUST carry that wrist_1 cap to the planner so the loaded-lift IK stays below the wrist_2-vs-forearm

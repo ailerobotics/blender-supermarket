@@ -71,6 +71,13 @@ class Sensors:
     # JSON -> Sensors(**data)). The host controller's TRANSIT phase resumes to preplace on this OR its
     # own self.base_repositioned (the in-process fixture path). Default False => byte-identical.
     base_repositioned: bool = False
+    # fm449 (collect-source evidence gate): True when the FIXED source camera delivered, THIS tick at park,
+    # a CLEAN synchronized frame WITH a decoded label for the calibrated source slot (NOT a held/seeded
+    # republish) -- the Isaac-side clean verdict (restock_camera.source_target SourceTarget.clean) carried to
+    # the host controller across the same asdict -> JSON -> Sensors(**data) boundary as base_repositioned. The
+    # collect observe gate (require_collect_source_evidence) permits the reach only on this. Default False =>
+    # byte-identical (the gate waits / fails fast, exactly as when the driver never sets it).
+    collect_source_clean: bool = False
     # Driver must reject stale/absent joint/contact/odom data before making a packet.
 
 

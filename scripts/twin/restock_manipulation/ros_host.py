@@ -167,6 +167,10 @@ def main():
         # advances to carry only if the measured carton rose by >= this from the grasp-confirm baseline, so
         # the confirm reads physics, never the (arm-occluded) source camera. Absent => inert (byte-identical).
         grasp_track_m=config.get('grasp_track_m'),
+        # fm449 (run-332 cold collect): gate the observe->reach on a clean synchronized source frame + decoded
+        # label at park (the Isaac-side verdict rides Sensors.collect_source_clean). Absent/False => the gate
+        # never arms => byte-identical. No injected provider on the host path; the gate reads the packet field.
+        require_collect_source_evidence=bool(config.get('require_collect_source_evidence', False)),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # The first decode-grade frame + support registration under render pacing needs several

@@ -33,6 +33,11 @@ class SourceTarget:
                                   # suspension; the consumer puts it on the host Sensors so the
                                   # contact/grasp suction guard (require_fresh) can fire. None when
                                   # not suspended (the rendered packet carries its own deadline).
+    clean: bool = False           # fm449: True iff this is a CLEAN, committed source capture -- a fresh
+                                  # synchronized rendered frame (NOT a suspended republish) whose source
+                                  # support registration is NOT occluded/held, so the decoded label stands
+                                  # on a freshly registered slot. The collect-source evidence gate
+                                  # (build_collect_source_evidence) keys the observe->reach commit on this.
 
 
 def _source_evidence(adapter, location):
@@ -112,8 +117,34 @@ def build_source_target_provider(adapter, motion, contact, *, source_location='b
             print('SOURCE_YAW_DIAG loc=%s sku=%s obs_yaw_base_deg=%+.3f occluded=%s stamp=%.3f '
                   'frame_id=%s' % (source_location, obs.sku, obs_yaw, suspended, stamp,
                                    evidence['current_frame_id']), flush=True)
+        # fm449: a CLEAN, committed source capture this tick = a fresh synchronized rendered frame (NOT a
+        # suspended republish) whose source support registration is NOT occluded/held. Keyed on the SAME
+        # occluded signal the camera lane already computes (`registration_occluded` = source support held
+        # OR its label occluded; isaac_sensors), so a held/seeded prior never reads as clean. The collect
+        # observe->reach gate (build_collect_source_evidence) consumes this.
+        clean = (not suspended) and not provenance['registration_occluded']
         return SourceTarget(sku=obs.sku, pose_station=tuple(obs.pose),
                             stamp=stamp, provenance=provenance,
                             location=source_location, station_frame=station_frame,
-                            occluded=suspended, valid_until_steady=valid_until_steady)
+                            occluded=suspended, valid_until_steady=valid_until_steady, clean=clean)
     return source_target_provider
+
+
+def build_collect_source_evidence(source_target_provider):
+    """fm449: wrap a ``source_target_provider`` into the controller's collect-source evidence gate.
+
+    Returns ``clean(now) -> bool``: True only when the fixed source camera delivered -- this tick, at
+    park -- a CLEAN synchronized frame WITH a decoded label for the calibrated source slot, i.e. a
+    non-None :class:`SourceTarget` whose ``clean`` flag is set (not a suspended republish, not a
+    held/occluded/seeded registration). A swallowed source-capture failure (decode / freshness /
+    occlusion-window raise) is a plain False -- no clean evidence this tick -- never an exception, so the
+    controller's bounded wait governs. Pass the result to
+    :meth:`TransferController.set_collect_source_evidence`; the controller holds in observe until it
+    returns True, then permits the reach (or fails fast on its bounded-wait timeout)."""
+    def clean(now):
+        try:
+            target = source_target_provider(now)
+        except Exception:
+            return False
+        return bool(target is not None and target.clean)
+    return clean

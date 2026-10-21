@@ -638,7 +638,11 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     # fm410: physics grasp-confirm (lift-probe carton-tracking) threshold --
                                     # also preflight-baseline-enforced so it can never silently de-activate
                                     # back to the camera-dependent confirm that stalled run-316.
-                                    'grasp_track_m'})
+                                    'grasp_track_m',
+                                    # fm449: gate the collect observe->reach on a clean source frame + decoded
+                                    # label at park (Sensors.collect_source_clean, set Isaac-side). Optional,
+                                    # host reads via config.get; default False => byte-identical.
+                                    'require_collect_source_evidence'})
         self.assertIsInstance(cfg['carry_wrist1_cap'], (int, float))
         self.assertLessEqual(cfg['carry_wrist1_cap'], 0.65)   # at/below the wrist_2-vs-forearm stop
         self.assertEqual(len(cfg['carry_lift_shape']), 6)     # full 6-joint clear-region lift goal

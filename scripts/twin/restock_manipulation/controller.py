@@ -87,7 +87,7 @@ class TransferController:
                  cart_cage_place: bool = False, cage_axis=(1.0, 0.0, 0.0),
                  cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03,
                  cage_preplace_shape=None, reposition_before_place: bool = False,
-                 grasp_track_m=None):
+                 grasp_track_m=None, require_collect_source_evidence: bool = False):
         self.steady_clock=steady_clock
         # fm390: drive the BASE in front of the rollwagen mouth between the carry fold and the place,
         # instead of reaching the place around from the collect station pose. When set (with the staged
@@ -152,6 +152,25 @@ class TransferController:
         if self.grasp_track_m is not None and (not math.isfinite(self.grasp_track_m) or self.grasp_track_m < 0):
             raise ValueError('grasp_track_m must be a finite, non-negative metre threshold')
         self._carton_z_at_grasp = None   # fm410: measured carton z latched at grasp-confirm, for the lift probe
+        # fm449 (run-332 cold collect): GATE the observe->approach reach on a CLEAN, committed collect-source
+        # capture AT PARK. Cold collect failed at the collect capture because the grasp/reach began before the
+        # fixed source camera had a clean, synchronized evidence frame for the calibrated source slot -- the
+        # descending gripper then occluded the carton top, so the undecoded-label hold ('unknown or undecoded
+        # label in calibrated slot') and the sync gates had no prior. matches==1 in observe proves a DECODED
+        # label but can be served from a HELD/seeded registration (fm443 seed, or an occluded footprint), so
+        # the reach must NOT begin on that prior. When this flag is on, observe will not advance to 'approach'
+        # until an injected collect-source evidence provider reports -- this tick, at park -- BOTH a clean
+        # SYNCHRONIZED source frame AND a decoded label for the calibrated slot, keyed on the SAME clean/
+        # occluded signal the camera lane computes (a non-suspended, non-occluded SourceTarget; see
+        # restock_camera.source_target.build_collect_source_evidence). No clean capture within
+        # collect_source_evidence_wait_ticks fails fast with the named reason 'collect_source_evidence_unavailable'
+        # rather than reaching blind. Default OFF (flag False, provider never set) => the gate never arms =>
+        # byte-identical. Scoped to collect (the source is a fixed-camera station; transfer's source is the
+        # controlled-asset cart, not camera-sensed).
+        self.require_collect_source_evidence = bool(require_collect_source_evidence)
+        self.collect_source_evidence_wait_ticks = _int_env('RESTOCK_COLLECT_SOURCE_EVIDENCE_WAIT_TICKS', 40, 1, 600)
+        self._collect_source_evidence = None   # injected callable(now) -> bool: clean source capture this tick
+        self._collect_source_evidence_waits = 0
         # fm425 (run-322 cold): WALL-clock contact fail-fast. Cold run-322 reached the contact descent and
         # crept CONTACT_STEP to 12 mm with contact=False (the native suction never latched and the
         # SIM_ATTACH weld never formed), then the arm-command stream lapsed into the 90 s host transport
@@ -372,6 +391,17 @@ class TransferController:
                  tuple(round(c, 3) for c in place_side['preplace'][:3])), flush=True)
         return None
 
+    def set_collect_source_evidence(self, provider):
+        """fm449: inject the collect-source clean-capture signal the observe gate polls before the reach.
+
+        ``provider(now) -> bool`` returns True only when the fixed source camera delivered, AT PARK, a
+        CLEAN synchronized frame WITH a decoded label for the calibrated source slot this tick -- NOT a
+        held/seeded republish. The camera lane builds it from the same clean-frame/occluded signal the
+        source provider already computes (``restock_camera.source_target.build_collect_source_evidence``:
+        a non-None SourceTarget whose ``clean`` flag is set). Inert unless ``require_collect_source_evidence``
+        is set; left unset (default) the gate never arms => byte-identical."""
+        self._collect_source_evidence = provider
+
     def start(self, operation: str, job: dict) -> None:
         if self.phase not in ('idle', 'succeeded', 'failed') or self.held:
             raise ValueError('transfer active or payload requires recovery')
@@ -397,6 +427,7 @@ class TransferController:
                 or not math.isfinite(p.max_reach) or p.max_reach <= 0):
             raise ValueError('invalid product geometry/calibration')
         self.job = dict(job)
+        self.operation = operation   # fm449: scope the collect-source evidence gate to collect
         self.source = job['source_bin'] if operation == 'collect' else self.cart_location
         self.destination = self.cart_location if operation == 'collect' else job['shelf_id']
         if self.source == self.destination:
@@ -413,6 +444,7 @@ class TransferController:
         self._grasp_waits = 0           # fm395: ticks awaiting a confirmed attachment before a grasp retry
         self._grasp_retries = 0         # fm395: bounded grasp re-seat retries used this operation
         self._carton_z_at_grasp = None  # fm410: latched at grasp-confirm; the lift-probe tracking baseline
+        self._collect_source_evidence_waits = 0  # fm449: ticks awaiting a clean source capture before the reach
         self.verify_ids = set()
         self.release_time = None
 
@@ -722,6 +754,41 @@ class TransferController:
                       % (self.profile.max_reach, bad, tuple(round(c, 3) for c in source.pose[:3]),
                          tuple(round(c, 3) for c in target.pose[:3])), flush=True)
                 return self._fail('approach outside reach envelope')
+            # fm449 (run-332 cold collect): do not leave observe for the reach until the fixed source
+            # camera has delivered -- this tick, at park -- a CLEAN synchronized frame + a DECODED label
+            # for the calibrated source slot. matches==1 above already proves a decoded label, but it can
+            # be served from a HELD/seeded registration (the carton top read while the support is occluded
+            # or off a fm443 seed); beginning the reach on that prior is exactly the cold-collect failure.
+            # The injected provider reports the clean-this-tick verdict keyed on the camera lane's
+            # occluded/clean signal (a non-None, non-suspended, non-occluded SourceTarget). Bounded: no
+            # clean capture within collect_source_evidence_wait_ticks fails fast with the named reason.
+            # Default off (flag False) => the branch never arms => byte-identical. Placed before any commit
+            # side-effect (evidence append / transition) so a wait neither advances nor double-records.
+            if self.require_collect_source_evidence and getattr(self, 'operation', None) == 'collect':
+                clean = False
+                provider = self._collect_source_evidence
+                if provider is not None:
+                    try:
+                        clean = bool(provider(now))
+                    except Exception as exc:   # a swallowed source-capture failure counts as not-clean
+                        print('COLLECT_SOURCE_EVIDENCE provider error (%s: %s)'
+                              % (type(exc).__name__, exc), flush=True)
+                        clean = False
+                else:
+                    # fm449 host path: the collect controller runs in the host process fed Sensors over ROS,
+                    # so the Isaac-side clean verdict rides the packet (Sensors.collect_source_clean, set from
+                    # the source provider's SourceTarget.clean) -- the same asdict->JSON->Sensors crossing as
+                    # base_repositioned. Absent/False => not clean (byte-identical when the driver never sets it).
+                    clean = bool(getattr(s, 'collect_source_clean', False))
+                if not clean:
+                    self._collect_source_evidence_waits += 1
+                    if self._collect_source_evidence_waits > self.collect_source_evidence_wait_ticks:
+                        return self._fail('collect_source_evidence_unavailable')
+                    if self._collect_source_evidence_waits % 20 == 1:
+                        print('COLLECT_SOURCE_EVIDENCE waiting for a clean source frame+label (%d/%d) '
+                              'provider=%s' % (self._collect_source_evidence_waits,
+                              self.collect_source_evidence_wait_ticks, provider is not None), flush=True)
+                    return self._result()   # hold in observe; the reach has not begun
             self.target_pose = (*target.pose[:2], target.pose[2] + p.dimensions[2], *target.pose[3:])
             self.target_surface = target.pose
             self.source_pose = source.pose

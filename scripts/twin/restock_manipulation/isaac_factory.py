@@ -787,7 +787,9 @@ class CollectTargetBridge:
                       flush=True)
         return Sensors(now, (obs,), cart_target, parked, bool(self.contact.read()), now,
                        self._collision_time(), joints, (), float(target.stamp),
-                       target.valid_until_steady, placed_pose)
+                       target.valid_until_steady, placed_pose,
+                       # fm449: carry the source's clean-this-tick verdict to the host collect gate.
+                       collect_source_clean=bool(getattr(target, 'clean', False)))
 
 
 def _build_runtime(*, app, assembly, params, output):

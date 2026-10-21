@@ -4,7 +4,8 @@ from types import SimpleNamespace as NS
 import numpy as np
 import pytest
 
-from scripts.twin.restock_camera.source_target import build_source_target_provider, SourceTarget
+from scripts.twin.restock_camera.source_target import (
+    build_source_target_provider, build_collect_source_evidence, SourceTarget)
 from scripts.twin.restock_manipulation.types import Sensors, Observation
 
 
@@ -136,6 +137,54 @@ def test_provider_is_byte_identical_when_not_suspended_even_if_occluded():
     # an adapter with no render_suspended attribute at all behaves the same (duck-typed default).
     plain, _ = _adapter([_carton()])
     assert build_source_target_provider(plain, motion=NS(), contact=NS())(2.).occluded is False
+
+
+# --- fm449 clean-source evidence (collect observe->reach gate) -----------------
+
+def test_clean_flag_true_on_a_fresh_non_occluded_source_capture():
+    # A plain rendered sensed carton: a synchronized frame WITH a decoded label, support not held.
+    adapter, _ = _adapter([_carton()])
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(2.)
+    assert target.clean is True
+
+
+def test_clean_flag_false_under_render_suspension_held_republish():
+    # A suspended republish (render suspended, held registration) is never a clean committed capture.
+    adapter = _gated_adapter([_carton()], render_suspended=True, occluded=True)
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(12.0)
+    assert target.occluded is True and target.clean is False
+
+
+def test_clean_flag_false_on_a_held_or_seeded_occluded_registration():
+    # Not suspended, but the source support registration is occluded/held (registration_occluded True):
+    # the decoded label stands on a held/seeded prior, so it must NOT read as a clean capture. (fm449 d)
+    adapter = _gated_adapter([_carton()], render_suspended=False, occluded=True)
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(2.0)
+    assert target.occluded is False and target.clean is False
+
+
+def test_build_collect_source_evidence_true_only_on_a_clean_capture():
+    clean_adapter, _ = _adapter([_carton()])
+    gate = build_collect_source_evidence(build_source_target_provider(clean_adapter, motion=NS(), contact=NS()))
+    assert gate(2.) is True
+
+
+def test_build_collect_source_evidence_false_on_held_seeded_prior():
+    held = _gated_adapter([_carton()], render_suspended=False, occluded=True)
+    gate = build_collect_source_evidence(build_source_target_provider(held, motion=NS(), contact=NS()))
+    assert gate(2.0) is False                                 # fm449 (d): a held/seeded prior does not count
+
+
+def test_build_collect_source_evidence_false_when_no_unit_is_sensed():
+    empty, _ = _adapter([])
+    gate = build_collect_source_evidence(build_source_target_provider(empty, motion=NS(), contact=NS()))
+    assert gate(2.) is False                                  # no decoded label => no clean evidence
+
+
+def test_build_collect_source_evidence_swallows_capture_failures_as_not_clean():
+    def boom(now):
+        raise ValueError('decode/freshness refusal')
+    assert build_collect_source_evidence(boom)(2.) is False   # a swallowed failure is not-clean, never raises
 
 
 # --- build_sensing wiring -----------------------------------------------------
