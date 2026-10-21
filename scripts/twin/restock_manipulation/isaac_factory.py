@@ -653,17 +653,29 @@ class CollectTargetBridge:
         obs = Observation(observation_id=f'cart:{now:.3f}', source='sensor', simulation_time=float(now),
                           sku=sku, location=self.cart_placement['location'], pose=(cx, cy, cz, *cq),
                           confidence=1.0, frame='ur_base_link')
-        tgt = Target(observation_id=f'shelf:{slot.stamp}', source='sensor', simulation_time=float(now),
+        # fm461: honestly carry the provider's source. A ground-truth bay target (the demo fallback, when
+        # the shelf is not camera-commissioned) is labelled source='ground_truth', NOT 'sensor', so the
+        # controller gate (transfer_ground_truth) and the evidence never misrepresent it as a measurement.
+        prov = getattr(slot, 'provenance', None)
+        tgt_source = 'ground_truth' if isinstance(prov, dict) and prov.get('source') == 'ground_truth' else 'sensor'
+        tgt = Target(observation_id=f'shelf:{slot.stamp}', source=tgt_source, simulation_time=float(now),
                      location=slot.location, pose=tuple(slot.pose_station), clear=bool(slot.clear),
                      free_dimensions=tuple(slot.free_dimensions), frame='ur_base_link')
         try:
             joints = tuple(float(j) for j in self.joints())
         except Exception:
             joints = (0.,) * 6
+        # fm461: thread the sim-measured carton pose so the transfer verify can check placement from the
+        # ground truth (carton vs bay target) -- the transfer destination has no fixed camera framing the
+        # post-release slot in the ground-truth fallback. None (stage read failed) => camera verify path.
+        try:
+            placed_pose = self._carton_center_station()
+        except Exception:
+            placed_pose = None
         print(f'TRANSFER_CAPTURE calls={self._calls} sku={sku} cart=({cx:.2f},{cy:.2f},{cz:.2f}) '
-              f'shelf={slot.location} clear={slot.clear}', flush=True)
+              f'shelf={slot.location} clear={slot.clear} src={tgt_source}', flush=True)
         return Sensors(now, (obs,), tgt, parked, bool(self.contact.read()), now,
-                       self._collision_time(), joints, (), float(now))
+                       self._collision_time(), joints, (), float(now), None, placed_pose)
 
     def _collision_time(self):
         # fm415: hold last-good collision_time so a -1 mirror-gap tick at the weld never reaches the

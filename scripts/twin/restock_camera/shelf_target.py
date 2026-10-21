@@ -80,6 +80,27 @@ def _wrap(angle):
     return (angle + math.pi) % (2. * math.pi) - math.pi
 
 
+def build_ground_truth_shelf_target_provider(location, target_xyz, *,
+                                             free_dimensions=(0.6, 0.6, 0.5), station_frame='map'):
+    """fm461 demo fallback: a GROUND-TRUTH transfer-destination provider that returns the AUTHORED bay
+    support pose every tick, with no fixed shelf camera / commissioned baseline (marker decode is blocked
+    at the bay; follow-up). The target is honestly tagged ``provenance['source'] == 'ground_truth'`` so the
+    isaac bridge labels the Target source 'ground_truth' (not 'sensor') and the controller's
+    transfer_ground_truth gate -- and only that gate -- accepts it; the placement is then verified from the
+    sim-measured carton pose vs this bay target (controller ground_truth_place_check). NEVER use this to
+    certify real inventory -- it is a sim-only demo verify, labelled as such end-to-end."""
+    pose = (float(target_xyz[0]), float(target_xyz[1]), float(target_xyz[2]), 0.0, 0.0, 0.0, 1.0)
+    fd = tuple(float(v) for v in free_dimensions)
+
+    def ground_truth_shelf_target_provider(now):
+        return ShelfSlotTarget(location=location, pose_station=pose, free_dimensions=fd, clear=True,
+                               stamp=float(now),
+                               provenance={'source': 'ground_truth', 'location': location,
+                                           'note': 'fm461 authored bay pose; sim ground-truth demo verify'},
+                               station_frame=station_frame)
+    return ground_truth_shelf_target_provider
+
+
 def build_shelf_target_provider(adapter, motion, contact, *, shelf_location='G3_back_s2',
                                 station_frame='map'):
     """Return ``shelf_target_provider(now) -> ShelfSlotTarget | None`` over a fixed-shelf adapter.

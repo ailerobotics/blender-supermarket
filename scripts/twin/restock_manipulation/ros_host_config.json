@@ -1,76 +1,77 @@
 {
- "profiles": [
-  {
-   "sku": "juice_orange",
-   "dimensions": [
-    0.6,
-    0.4,
-    0.16
-   ],
-   "tcp_quaternion": [
-    0.5,
-    0.5,
-    0.5,
-    0.5
-   ],
-   "tcp_surface_offset": 0.00275,
-   "approach": 0.18,
-   "max_reach": 1.3,
-   "mass_kg": 0.45,
-   "grasp_mode": "side"
-  }
- ],
- "walls": {
-  "backstock_00": 3,
-  "rollwagen": 3,
-  "G3_back_s2": 3
- },
- "pose_goal": true,
- "contact_straight_line": true,
- "contact_overpress_step_m": 0.003,
- "contact_overpress_cap_m": 0.02,
- "arm_max_speed": 0.3,
- "startup_grace_seconds": 60.0,
- "sim_cart_place_policy": false,
- "reposition_before_place": true,
- "payload_ack_wall_s": 15.0,
- "staged_cart_swing": true,
- "cart_pan_joint0": -1.822,
- "cart_tuck_shape": [
-  -2.27,
-  1.0,
-  0.65,
-  0.8,
-  -1.2545
- ],
- "plan_wall_cap_s": 60.0,
- "base_collision_object": false,
- "cart_cage_place": false,
- "cage_axis": [
-  1.0,
-  0.0,
-  0.0
- ],
- "cage_mouth_standoff": 0.55,
- "cage_insert_gap": 0.03,
- "cage_preplace_shape": [
-  -3.702,
-  -3.486,
-  1.425,
-  -1.081,
-  0.561,
-  0.0
- ],
- "carry_wrist1_cap": 0.65,
- "carry_lift_shape": [
-  1.2675,
-  -2.27,
-  1.0,
-  0.65,
-  0.8,
-  -1.2545
- ],
- "carry_wrist2_min": 0.0,
- "grasp_track_m": 0.03,
- "require_collect_source_evidence": true
+  "profiles": [
+    {
+      "sku": "juice_orange",
+      "dimensions": [
+        0.6,
+        0.4,
+        0.16
+      ],
+      "tcp_quaternion": [
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "tcp_surface_offset": 0.00275,
+      "approach": 0.18,
+      "max_reach": 1.3,
+      "mass_kg": 0.45,
+      "grasp_mode": "side"
+    }
+  ],
+  "walls": {
+    "backstock_00": 3,
+    "rollwagen": 3,
+    "G3_back_s2": 3
+  },
+  "pose_goal": true,
+  "contact_straight_line": true,
+  "contact_overpress_step_m": 0.003,
+  "contact_overpress_cap_m": 0.02,
+  "arm_max_speed": 0.3,
+  "startup_grace_seconds": 60.0,
+  "sim_cart_place_policy": false,
+  "reposition_before_place": true,
+  "payload_ack_wall_s": 15.0,
+  "staged_cart_swing": true,
+  "cart_pan_joint0": -1.822,
+  "cart_tuck_shape": [
+    -2.27,
+    1.0,
+    0.65,
+    0.8,
+    -1.2545
+  ],
+  "plan_wall_cap_s": 60.0,
+  "base_collision_object": false,
+  "cart_cage_place": false,
+  "cage_axis": [
+    1.0,
+    0.0,
+    0.0
+  ],
+  "cage_mouth_standoff": 0.55,
+  "cage_insert_gap": 0.03,
+  "cage_preplace_shape": [
+    -3.702,
+    -3.486,
+    1.425,
+    -1.081,
+    0.561,
+    0.0
+  ],
+  "carry_wrist1_cap": 0.65,
+  "carry_lift_shape": [
+    1.2675,
+    -2.27,
+    1.0,
+    0.65,
+    0.8,
+    -1.2545
+  ],
+  "carry_wrist2_min": 0.0,
+  "grasp_track_m": 0.03,
+  "require_collect_source_evidence": true,
+  "transfer_ground_truth": true
 }

@@ -171,6 +171,9 @@ def main():
         # label at park (the Isaac-side verdict rides Sensors.collect_source_clean). Absent/False => the gate
         # never arms => byte-identical. No injected provider on the host path; the gate reads the packet field.
         require_collect_source_evidence=bool(config.get('require_collect_source_evidence', False)),
+        # fm461 (demo fallback): accept the authored GROUND-TRUTH bay transfer target + ground-truth verify
+        # when the shelf station is not camera-commissioned. Absent/False => byte-identical.
+        transfer_ground_truth=bool(config.get('transfer_ground_truth', False)),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # The first decode-grade frame + support registration under render pacing needs several

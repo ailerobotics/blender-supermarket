@@ -87,7 +87,8 @@ class TransferController:
                  cart_cage_place: bool = False, cage_axis=(1.0, 0.0, 0.0),
                  cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03,
                  cage_preplace_shape=None, reposition_before_place: bool = False,
-                 grasp_track_m=None, require_collect_source_evidence: bool = False):
+                 grasp_track_m=None, require_collect_source_evidence: bool = False,
+                 transfer_ground_truth: bool = False):
         self.steady_clock=steady_clock
         # fm390: drive the BASE in front of the rollwagen mouth between the carry fold and the place,
         # instead of reaching the place around from the collect station pose. When set (with the staged
@@ -168,6 +169,12 @@ class TransferController:
         # byte-identical. Scoped to collect (the source is a fixed-camera station; transfer's source is the
         # controlled-asset cart, not camera-sensed).
         self.require_collect_source_evidence = bool(require_collect_source_evidence)
+        # fm461 (demo, opt-in): accept a GROUND-TRUTH transfer destination target (the authored bay pose,
+        # source 'ground_truth') when the shelf station is NOT camera-commissioned, and verify the placement
+        # from the sim-measured carton pose vs that bay target (the existing ground_truth_place_check path),
+        # labelled ground_truth in the evidence + run log. Off (default) => only sensor-sourced transfer
+        # targets + the camera 2-frame verify, byte-identical.
+        self.transfer_ground_truth = bool(transfer_ground_truth)
         self.collect_source_evidence_wait_ticks = _int_env('RESTOCK_COLLECT_SOURCE_EVIDENCE_WAIT_TICKS', 40, 1, 600)
         self._collect_source_evidence = None   # injected callable(now) -> bool: clean source capture this tick
         self._collect_source_evidence_waits = 0
@@ -453,6 +460,8 @@ class TransferController:
 
     def _provenance(self, item, now):
         allowed = ('sensor', 'test_fixture') if self.fixture_mode else ('sensor',)
+        if self.transfer_ground_truth:
+            allowed = allowed + ('ground_truth',)   # fm461: the authored bay transfer target (demo fallback)
         return (item.source in allowed and bool(item.observation_id)
                 and self._fresh(item.simulation_time, now) and item.frame == self.frame)
 
@@ -1199,10 +1208,20 @@ class TransferController:
                 if on_deck:
                     self.verify_ids.add(('place_gt', round(now, 3)))
                     if len({t for _, t in self.verify_ids}) >= 2:
+                        # fm461: for the bay transfer with a ground-truth target, mark the verify mode
+                        # explicitly as ground_truth (NOT camera-measured) in the evidence + run log so the
+                        # report/mission.json never misrepresents this as a sensor verification.
+                        gt_transfer = self.transfer_ground_truth and self.operation == 'transfer'
                         self.evidence.append({'source': 'ground_truth_place_check', 'location': self.destination,
+                                              'verify_mode': 'ground_truth' if gt_transfer else 'ground_truth_place',
                                               'simulation_time': float(now), 'carton_pose_station': tuple(c),
                                               'support_pose_station': tuple(self.target_surface),
                                               'xy_offset': float(xy), 'bottom_gap': float(bottom_gap)})
+                        if gt_transfer:
+                            print('GROUND_TRUTH_VERIFY transfer destination=%s carton=%s bay_target=%s '
+                                  'xy_offset=%.3f bottom_gap=%.3f (ground-truth, not camera)'
+                                  % (self.destination, tuple(round(v, 3) for v in c),
+                                     tuple(round(v, 3) for v in self.target_surface), xy, bottom_gap), flush=True)
                         self._transition('succeeded')
                 else:
                     self.verify_ids = {x for x in self.verify_ids if x[0] != 'place_gt'}

@@ -317,7 +317,23 @@ def build_sensing(*, app, assembly, plan, config, output):
     # G3_back_s2 baseline: the empty-slot placement target and the post-placement verification,
     # both against the same baseline (see twin.restock_camera.shelf_target / the shelf contract).
     shelf_location = config.get('transfer_shelf_location') if isinstance(config, dict) else None
-    if shelf_location:
+    # fm461 (demo fallback): when the shelf station is NOT camera-commissioned (marker-decode blocked at
+    # the bay), serve the transfer destination from the AUTHORED bay pose as a GROUND-TRUTH target, and let
+    # the controller verify from the sim-measured carton pose. No shelf adapter / baseline is required.
+    # The target is honestly source-tagged 'ground_truth' (not 'sensor'); absent => camera path, unchanged.
+    gt = config.get('transfer_ground_truth') if isinstance(config, dict) else None
+    if gt and (gt.get('enabled') if isinstance(gt, dict) else gt):
+        target = gt.get('target') if isinstance(gt, dict) else None
+        loc = (gt.get('location') if isinstance(gt, dict) else None) or shelf_location
+        if not target or len(target) < 3 or not loc:
+            raise ValueError("transfer_ground_truth needs {'enabled':true,'location':<id>,'target':[x,y,z]}")
+        from .shelf_target import build_ground_truth_shelf_target_provider
+        result['shelf_target_provider'] = build_ground_truth_shelf_target_provider(
+            loc, tuple(float(v) for v in target[:3]),
+            free_dimensions=tuple(gt.get('free_dimensions', (0.6, 0.6, 0.5))),
+            station_frame=config.get('station_frame', 'map'))
+        result['shelf_verification_provider'] = None   # verify is the controller's ground_truth_place_check
+    elif shelf_location:
         from .shelf_target import build_shelf_target_provider, build_shelf_verification_provider
         location_cameras = _get(sources, 'location_cameras')
         if shelf_location not in location_cameras:
