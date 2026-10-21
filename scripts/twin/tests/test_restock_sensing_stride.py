@@ -118,6 +118,48 @@ def test_repeat_refused_once_the_frame_ages_out_of_the_freshness_window(tmp_path
         adapter.capture(1.60, 'backstock_00', 'backstock_00', motion, contact)
 
 
+def test_stale_refusal_is_named_and_measured_under_the_diag_flag(tmp_path, monkeypatch, capsys):
+    """RESTOCK_RENDER_SYNC_DIAG distinguishes the three 'no new synchronized' gates + prints the
+    magnitude, so the flaky COLD-collect render-sync trip can be pinned to a gate from the run log.
+
+    The stale gate is the confirmed cold-collect case: the source render did not deliver a fresh
+    frame within 0.5 s of sim time (it only starts rendering at the collect boundary, renders every
+    sensing_stride ticks, and RTX completes asynchronously), so now-stamp (0.6 s) exceeds the budget.
+    """
+    monkeypatch.setenv('RESTOCK_RENDER_SYNC_DIAG', '1')
+    monkeypatch.setattr(isaac_sensors, 'load_pose_bridge', lambda root: FixturePoseBridge())
+    adapter, camera, motion, contact, decode_calls, frame = _rig(tmp_path)
+    adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)
+    with pytest.raises(ValueError, match='no new synchronized'):
+        adapter.capture(1.60, 'backstock_00', 'backstock_00', motion, contact)  # now-stamp 0.6 > 0.5
+    line = capsys.readouterr().out
+    assert 'RENDER_SYNC_DIAG reject gate=stale' in line
+    assert 'budget=0.5' in line and 'delta=0.6' in line  # the measured staleness, for the run log
+
+
+def test_future_frame_refusal_is_named_under_the_diag_flag(tmp_path, monkeypatch, capsys):
+    """The future/non-finite gate (render clock leads now by > _RENDER_LEAD) names itself distinctly."""
+    monkeypatch.setenv('RESTOCK_RENDER_SYNC_DIAG', '1')
+    monkeypatch.setattr(isaac_sensors, 'load_pose_bridge', lambda root: FixturePoseBridge())
+    adapter, camera, motion, contact, decode_calls, frame = _rig(tmp_path)
+    adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)
+    camera.frame = dict(frame, rendering_frame=2, rendering_time=5.0)   # render clock far ahead of now
+    with pytest.raises(ValueError, match='no new synchronized'):
+        adapter.capture(1.10, 'backstock_00', 'backstock_00', motion, contact)  # now-stamp = -3.9
+    assert 'RENDER_SYNC_DIAG reject gate=future' in capsys.readouterr().out
+
+
+def test_diag_is_silent_and_byte_identical_when_unset(tmp_path, monkeypatch, capsys):
+    """Default (flag unset): the same ValueError raises with NO diagnostic line -- byte-identical."""
+    monkeypatch.delenv('RESTOCK_RENDER_SYNC_DIAG', raising=False)
+    monkeypatch.setattr(isaac_sensors, 'load_pose_bridge', lambda root: FixturePoseBridge())
+    adapter, camera, motion, contact, decode_calls, frame = _rig(tmp_path)
+    adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)
+    with pytest.raises(ValueError, match='no new synchronized'):
+        adapter.capture(1.60, 'backstock_00', 'backstock_00', motion, contact)
+    assert 'RENDER_SYNC_DIAG' not in capsys.readouterr().out
+
+
 def test_repeat_with_tampered_pixels_falls_through_to_replay_refusal(tmp_path, monkeypatch):
     monkeypatch.setattr(isaac_sensors, 'load_pose_bridge', lambda root: FixturePoseBridge())
     adapter, camera, motion, contact, decode_calls, frame = _rig(tmp_path)

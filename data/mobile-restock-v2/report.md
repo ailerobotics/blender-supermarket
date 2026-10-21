@@ -2721,3 +2721,62 @@ clean capture DOES arrive (it then holds the reach until the decoded-label evide
 is the render-sync delivering a synchronized frame at all.
 
 mp4: run-333 258 KB (cold), run-333b 8.82 MB, run-333c 8.82 MB. TRACK_DIAG now logs cart_err for run-334.
+
+### 2026-10-21 — fm451: COLD render-sync dig (why `no new synchronized rendered camera frame` is flaky run-to-run)
+
+**Question.** The COLD collect fails `no new synchronized rendered camera frame` in SOME runs (run-333 ×3)
+and not others (run-331 ×0). Why is it flaky at the frame level, with (D) `collect_keep_source_render` set?
+
+**Stamp sources (point 1).** The two stamps the sync compares come from DIFFERENT clocks:
+- `stamp` = `frame['rendering_time']` — the render product's own reference time (RTX annotator; its
+  integer partner `frame['rendering_frame']` is `referenceTimeNumerator`, `native_cameras.py:47-56`).
+  Both are derived from the SAME render reference time, so frame_id and stamp advance TOGETHER
+  (a frame_id/stamp cross-desync is not the mechanism).
+- `transform_stamp` = `float(now)` — the TF/pose stamp is just the capture's `now`
+  (`sensing_sources.py:99-102`, `measure_context`). It is NOT a separate TF clock, so on a genuinely
+  fresh frame `now ≈ stamp` and the `abs(stamp-transform_stamp) ≤ .05` sync (`sensed.py:49`) passes.
+  `now` itself = `tick*dt` (`isaac_port.py:389`), threaded to capture as `simulation_time`.
+
+**The real trip is STALENESS, not the 0.05 cross-sync (point 2).** sensing_stride=6 ⇒ a fresh clean
+frame is at most 6·dt ≈ 0.1 s old — under both the 0.05 sync (only evaluated on a fresh, non-reuse frame
+where now≈stamp) and the 0.5 s freshness budget. So a NORMAL stride cycle does not trip. The error fires
+at `isaac_sensors.py:315` (`now-stamp > budget`, clean budget 0.5 s) when the source render does NOT
+deliver a fresh frame within 0.5 s of SIM time. Confirmed by the existing CPU test
+`test_repeat_refused_once_the_frame_ages_out_of_the_freshness_window` (now-stamp 0.6 > 0.5 ⇒ this exact
+message). The frame_id-advance gate (point 3) at `:299` (and the future gate at `:258`) are the boundary
+cases; frame_id and stamp advance together, so `:299` fires only when the render product has not advanced
+at all AND it is not an exact reuse.
+
+**Why the source goes stale at collect ENTRY, and why it is flaky (point 4).** The source camera renders
+ONLY while the current stage is a sensing stage (`collect/transfer/verify`) on the stride cadence
+(`isaac_port.py:32-40` `_sensing_frame_due`, `:308` `_frame_plan`, `:334-339` `advance`). The
+navigation stages that PRECEDE collect never render it, so at the collect-observe entry the source render
+product is frozen at a stale reference time and `now-stamp` is already far over 0.5 s. A fresh render is
+then requested only every 6 ticks and the RTX frame completes ASYNCHRONOUSLY over additional ticks; until
+the first fresh source frame actually lands, every per-tick capture trips `:315`. How many observe ticks
+trip — and whether a clean frame lands before the observe window closes — depends on the wall latency of
+that first RTX source render relative to the sim-time budget, which varies with GPU load ⇒ run-to-run
+flaky (run-331 phased so a fresh frame landed in time; run-333 it did not, so observe never produced an
+observation and the mission ended on `arm command heartbeat lost`). (D) only stops the SUSPENSION of the
+render during the later approach/grasp occlusion phases; it neither forces a render at observe ENTRY nor
+shortens the stride, so the entry/async-latency race is untouched.
+
+**Recommendation (smallest safe fix).** A window-widen is UNSAFE: accepting a frame whose `now-stamp`
+> budget would certify geometry sensed before the base even parked at the backstock — exactly what the
+0.5 s gate exists to refuse. The real fix is orchestration and is already built but was INERT this run:
+hold collect-observe on a CLEAN synchronized source frame (fm449 `require_collect_source_evidence`,
+wired on the external host config) AND, integration/`isaac_port`-owned, force a source render for a few
+ticks at the collect boundary BEFORE observe commits (or drop the stride to 1 for the brief observe
+window) so the first fresh frame is guaranteed within the bounded wait instead of racing it. No camera-lane
+code change can make a genuinely stale frame acceptable.
+
+**Shipped (camera lane, safe + offline-tested).** The three `:258/:299/:315` raises shared ONE opaque
+message, which is why this trip could not be pinned to a gate (nor its magnitude read) from the run log.
+Added `_reject_unsynced(gate, **values)` (`isaac_sensors.py`): behind `RESTOCK_RENDER_SYNC_DIAG=1`
+(default off) it prints `RENDER_SYNC_DIAG reject gate={future|nonmonotonic|stale} now=… stamp=… delta=…
+budget=… …` then raises the UNCHANGED message. Error-path only (a successful capture never calls it) ⇒
+default run byte-identical; existing `match='no new synchronized'` matchers unaffected. The next cold run
+with the flag set will confirm the gate (expected `stale`, large `delta` at observe entry) and the exact
+latency. CPU tests: 3 added to `test_restock_sensing_stride.py` (stale named + measured, future named,
+silent/byte-identical when unset); the file's 9 tests + `test_restock_sensing_gate` + `test_restock_source_target`
+(30) all pass.

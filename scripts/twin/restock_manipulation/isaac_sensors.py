@@ -50,6 +50,26 @@ def sensing_render_required(phase):
     return str(phase) not in _SENSING_SUSPEND_PHASES
 
 
+def _reject_unsynced(gate, **values):
+    """Raise the standing ``no new synchronized rendered camera frame`` capture refusal.
+
+    ``capture`` refuses a frame at THREE distinct gates that historically shared this one opaque
+    message, so a cold-collect render-sync failure could not be pinned to a gate (nor its magnitude
+    read) from the run log -- which is why the flaky COLD collect ``no new synchronized`` needed a
+    live dig (``gate='future'`` = render clock leads ``now`` / non-finite; ``gate='nonmonotonic'`` =
+    the render product's frame_id/stamp did not advance and it is not an exact reuse; ``gate='stale'``
+    = ``now-stamp`` exceeded the acquisition-to-use budget, i.e. the source render did not deliver a
+    fresh frame within the window -- the stride/async-RTX-latency case). ``RESTOCK_RENDER_SYNC_DIAG=1``
+    prints a ``RENDER_SYNC_DIAG`` line naming the gate + the discriminating values; default off =>
+    silent. This runs ONLY on the refusal path (a successful capture never calls it), and the raised
+    message is UNCHANGED, so a default run -- and every existing matcher/tolerant retry -- is
+    byte-identical."""
+    if os.environ.get('RESTOCK_RENDER_SYNC_DIAG', '0') != '0':
+        detail = ' '.join(f'{k}={v!r}' for k, v in values.items())
+        print(f'RENDER_SYNC_DIAG reject gate={gate} {detail}', flush=True)
+    raise ValueError('no new synchronized rendered camera frame')
+
+
 @dataclass(frozen=True)
 class SlotView:
     location: str
@@ -255,7 +275,7 @@ class IsaacCartonSensors:
         # (then the bound is the hold window, not 0.5 s — a deliberately held frame is stale by
         # design); see the budget block after the context is resolved.
         if not np.isfinite([now,stamp]).all() or now-stamp < -0.02:
-            raise ValueError('no new synchronized rendered camera frame')
+            _reject_unsynced('future', now=now, stamp=stamp, delta=now-stamp, frame_id=frame_id)
         # Anchor the acquisition-to-use deadline on the steady clock BEFORE processing; the budget
         # (0.5 s live, or the hold window for held output) is applied once known, below.
         started = self.steady_clock()
@@ -296,7 +316,9 @@ class IsaacCartonSensors:
         if not reuse and (self.last_session == context.session_id
                           and (frame_id <= self.last_frame or stamp <= self.last_stamp)
                           or self.last_session != context.session_id and context.session_id in self.seen_sessions):
-            raise ValueError('no new synchronized rendered camera frame')
+            _reject_unsynced('nonmonotonic', now=now, stamp=stamp, frame_id=frame_id,
+                             last_frame=self.last_frame, last_stamp=self.last_stamp,
+                             session=context.session_id, last_session=self.last_session)
         self.last_frame,self.last_stamp,self.last_session = frame_id,stamp,context.session_id
         self.seen_sessions.add(context.session_id)
         if not self.slots or len({s.location for s in self.slots}) != len(self.slots):
@@ -312,7 +334,8 @@ class IsaacCartonSensors:
         window = getattr(context, 'occlusion_window_s', None)
         budget = float(window) if (held and window and np.isfinite(window)) else .5
         if now-stamp > budget:
-            raise ValueError('no new synchronized rendered camera frame')
+            _reject_unsynced('stale', now=now, stamp=stamp, delta=now-stamp, budget=budget,
+                             held=held, frame_id=frame_id)
         deadline = frame_deadline(frame, now, started, budget_s=budget, use_acquired=False)
         camera_evidence = None
         for slot in self.slots:
