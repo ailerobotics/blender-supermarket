@@ -274,6 +274,36 @@ def check_cart_yaw_tol_envelope(grid, lanes_cfg, report):
                 not clear_at(lane, margin + 0.05), probe_rad=round(margin + 0.05, 3))
 
 
+def check_measured_turn_radius(grid, lanes_cfg, report):
+    """fm431 (A): run-325b -- the coupled base UNDER-tracked the commanded (v, omega) on the lane's
+    curves: it under-translated (measured ~0.033 m/s vs commanded ~0.0625) AND over-rotated (measured
+    yaw-rate up to ~0.19 vs commanded ~0.042), so its MEASURED arc (odom.angular/odom.linear) ran far
+    tighter than the 1.5 m min turn radius and the coupled gate refused with 'measured_turn_radius'.
+    Reproduce the gate TRIP here: a FEASIBLE commanded (v, omega) but a MEASURED odom whose arc exceeds
+    1/1.5+0.03 is refused, while a well-tracked measured arc is not. The mis-track itself is sim DRIVE
+    dynamics (not in this kinematic model) -- the fix is the config wheel-drive tune (A2), GPU-swept in
+    run-326; the follower already COASTS on the trip (keeps the route) rather than dropping it."""
+    spec = MobileSpec()
+    nav = lanes_cfg['navigation']
+    graph = TowLaneGraph.from_config(nav['tow_lanes'])
+    graph.expand_all(ArticulatedMap(grid, spec))
+    lane = next((ln for ln in graph.lanes if 'outbound' in ln.name), graph.lanes[0])
+    c = ArticulatedController(grid, spec, allow_test_fixtures=True, lane_graph=graph, lane_trust_static=True)
+    c.start(lane.goal, True)
+    s0 = lane.start_state()
+    pose = (s0.x, s0.y, s0.yaw)
+    obs = Observation(0.1, (), True, True, s0.articulation, 'test_fixture', 10.0)
+    cmd = (0.0625, 0.04)     # strictly feasible command: |w|*1.5 = 0.06 < v=0.0625 (no commanded turn_radius)
+    over = Odometry(pose, 0.1, 0.03, 0.30, 'test_fixture', 0.05)    # measured k = 10.0 >> 0.697
+    well = Odometry(pose, 0.1, 0.0625, 0.04, 'test_fixture', 0.05)  # measured k = 0.64 (tracks command, < 0.697)
+    r_over = c.gate_velocity(0.1, over, obs, *cmd)
+    r_well = c.gate_velocity(0.1, well, obs, *cmd)
+    _record(report, 'measured_turn_radius_trips_on_overrotating_arc',
+            r_over.reason == 'measured_turn_radius', measured_k=round(0.30 / 0.03, 2), reason=r_over.reason)
+    _record(report, 'well_tracked_arc_does_not_trip_measured_turn_radius',
+            r_well.reason != 'measured_turn_radius', measured_k=round(0.04 / 0.0625, 3), reason=r_well.reason)
+
+
 def _drive_lane(controller, spec, lane, goal, *, jitter, report, label, direct_xy):
     """Drive the REAL ArticulatedController following the lane closed-loop from a jittered start."""
     import time as _time
@@ -386,6 +416,7 @@ def main():
     check_trust_static(grid, lanes_cfg, report)
     check_reacquire_along_route(grid, lanes_cfg, report)
     check_cart_yaw_tol_envelope(grid, lanes_cfg, report)
+    check_measured_turn_radius(grid, lanes_cfg, report)
     print('TOW_LANES_PROOF ' + ('PASS' if report['ok'] else 'FAIL'), flush=True)
     return 0 if report['ok'] else 1
 

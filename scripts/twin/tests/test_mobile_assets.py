@@ -116,6 +116,47 @@ def test_hitch_and_runtime_do_not_change_cart_transforms(stage):
         author_hitch(stage, '/missing', '/Rollwagen/chassis')
 
 
+def test_wheel_drive_params_configurable_fm431(stage):
+    # fm431 (A2): the SIM wheel force-velocity drive (maxForce/damping) is config-tunable so the coupled
+    # base can be driven toward its documented tracking fidelity (run-325 under-tracked (v,omega)); None
+    # => the prior class constants (byte-identical). The parking HOLD keeps its own stiff constants.
+    from pxr import UsdGeom, UsdPhysics
+    from twin.mobile_runtime import MobileController
+    author_cart(stage)
+    robot = UsdGeom.Xform.Define(stage, '/Robot/base_link').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(robot)
+    wheels = ['/Robot/left', '/Robot/right']
+    for p in wheels:
+        UsdPhysics.RevoluteJoint.Define(stage, p)
+    # default => the class constants, authored onto the drive
+    d = MobileController(stage, str(robot.GetPath()), '/Rollwagen/chassis', wheels)
+    assert d.drive_max_force == MobileController.DRIVE_MAX_FORCE
+    assert d.drive_damping == MobileController.DRIVE_DAMPING
+    assert d.drives[0].GetMaxForceAttr().Get() == pytest.approx(MobileController.DRIVE_MAX_FORCE)
+    assert d.drives[0].GetDampingAttr().Get() == pytest.approx(MobileController.DRIVE_DAMPING)
+    # override => the configured values authored onto the drive
+    import pxr.Usd as Usd
+    s2 = Usd.Stage.CreateInMemory()
+    author_cart(s2)
+    r2 = UsdGeom.Xform.Define(s2, '/Robot/base_link').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(r2)
+    for p in wheels:
+        UsdPhysics.RevoluteJoint.Define(s2, p)
+    c = MobileController(s2, str(r2.GetPath()), '/Rollwagen/chassis', wheels,
+                         drive_max_force=240.0, drive_damping=400.0)
+    assert c.drive_max_force == 240.0 and c.drive_damping == 400.0
+    assert c.drives[0].GetMaxForceAttr().Get() == pytest.approx(240.0)
+    assert c.drives[0].GetDampingAttr().Get() == pytest.approx(400.0)
+    s3 = Usd.Stage.CreateInMemory()
+    author_cart(s3)
+    r3 = UsdGeom.Xform.Define(s3, '/Robot/base_link').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(r3)
+    for p in wheels:
+        UsdPhysics.RevoluteJoint.Define(s3, p)
+    with pytest.raises(ValueError):
+        MobileController(s3, str(r3.GetPath()), '/Rollwagen/chassis', wheels, drive_max_force=0.0)
+
+
 def test_base_hold_locks_wheels_and_releases(stage):
     # The sim stationary base hold (task base-hold-under-stiff-arm): hold() locks each wheel at its
     # current angle with a stiff POSITION drive (the parking brake) so the stiff arm's reaction

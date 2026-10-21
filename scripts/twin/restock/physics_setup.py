@@ -381,8 +381,14 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
             print(f'WHEEL_TRACTION skipped: {type(exc).__name__}: {exc}',flush=True)
     if diagnostic_prepare is not None:
         diagnostic_prepare(stage)
+    # fm431 (A2): optional SIM wheel-drive tune so the coupled base tracks the commanded (v, omega)
+    # toward the real base's documented limits (run-325: the base under-tracked on curves). config
+    # ['wheel_drive'] = {'max_force': N, 'damping': D}; absent => the class defaults (80 N, 100),
+    # byte-identical. Efficacy is a GPU sweep (run-326).
+    _wd = config.get('wheel_drive') or {}
     controller=MobileController(stage,paths['base_link'],cart_path,
-        [paths['left_wheel_joint'],paths['right_wheel_joint']],spec=spec)
+        [paths['left_wheel_joint'],paths['right_wheel_joint']],spec=spec,
+        drive_max_force=_wd.get('max_force'), drive_damping=_wd.get('damping'))
     scenes=[str(p.GetPath()) for p in stage.Traverse() if p.IsA(UsdPhysics.Scene)]
     if len(scenes)!=1:
         raise ValueError('one composed physics scene required')

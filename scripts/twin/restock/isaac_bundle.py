@@ -380,7 +380,8 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              route_alerts=route_alerts, fine_dock=fine_dock,
                              hold_cart_through_couple=bool(config.get('hold_cart_through_couple')),
                              couple_static_drive=bool(config.get('couple_static_drive')),
-                             uncouple_on_return=bool(config.get('uncouple_on_return')))
+                             uncouple_on_return=bool(config.get('uncouple_on_return')),
+                             carry_reposition_drive=bool(config.get('carry_reposition_drive')))
 
     # Opt-in warm-session reset provider (dev iteration): config['warm_reset'] names a
     # lane-owned builder `module:function` called once here with the live scene; it returns the

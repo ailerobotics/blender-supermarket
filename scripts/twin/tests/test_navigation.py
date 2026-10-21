@@ -299,6 +299,23 @@ class NavigationTests(unittest.TestCase):
             self.assertEqual(result.velocity,(0,0))
         self.assertEqual(result.status,'failed')
 
+    def test_carry_drive_relaxes_arm_transport_gate_fm431(self):
+        # fm431 (B1) / run-325 cold TRANSIT: the mid-collect reposition drives the base while the arm
+        # CARRIES the carton (arm_transport=False), so by default the nav refuses every drive with
+        # 'arm_not_in_transport'. carry_drive (set only on the reposition leg) relaxes THAT gate; every
+        # other input check is untouched. Default off => the empty-gripper gate holds (byte-identical).
+        odom = Odometry((0, 0, 0), 0.1, 0.0, 0.0, 'test_fixture', 0.05)
+        obs = Observation(0.1, (), False, False, source='test_fixture', coverage_radius=10)  # arm_transport=False
+        c = self.controller()
+        c.start((2, 0, 0), False)
+        self.assertEqual(c.step(0.1, odom, obs, now=0.1).reason, 'arm_not_in_transport')
+        c2 = self.controller()
+        c2.start((2, 0, 0), False, carry_drive=True)
+        self.assertNotEqual(c2.step(0.1, odom, obs, now=0.1).reason, 'arm_not_in_transport')
+        # a fresh start WITHOUT carry_drive resets the relaxation (not latched)
+        c2.start((2, 0, 0), False)
+        self.assertEqual(c2.step(0.1, odom, obs, now=0.1).reason, 'arm_not_in_transport')
+
     def test_ros_domain_guard(self):
         with patch.dict('os.environ',{'ROS_DOMAIN_ID':'42','ROS_LOCALHOST_ONLY':'1'}):
             with self.assertRaises(RuntimeError): require_isolation()

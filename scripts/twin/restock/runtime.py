@@ -86,7 +86,7 @@ class NavigationBridge:
         self.detection_source = detection_source
 
     def start(self, goal, coupled, *, goal_articulation=None, arrival_xy_tol=None,
-              arrival_yaw_tol=None, static_drive=False):
+              arrival_yaw_tol=None, static_drive=False, carry_drive=False):
         kw = {}
         if goal_articulation is not None:
             kw['goal_articulation'] = goal_articulation
@@ -96,6 +96,8 @@ class NavigationBridge:
             kw['arrival_yaw_tol'] = arrival_yaw_tol
         if static_drive:
             kw['static_drive'] = True
+        if carry_drive:
+            kw['carry_drive'] = True
         self.controller.start(goal, coupled, **kw)
 
     def step(self, dt, packet):
@@ -188,8 +190,15 @@ class RuntimeAdapter:
                  *, fixture_mode=False, goal_articulation=None,
                  stall_window_s=_SENSOR_STALL_WINDOW_S, route_alerts=None, fine_dock=None,
                  hold_cart_through_couple=False, couple_static_drive=False,
-                 uncouple_on_return=False, wall_clock=time.monotonic, nav_stuck_wall_s=None):
+                 uncouple_on_return=False, wall_clock=time.monotonic, nav_stuck_wall_s=None,
+                 carry_reposition_drive=False):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
+        # fm431 (B1) / run-325 cold TRANSIT: relax the nav arm-transport gate on the mid-collect
+        # reposition legs so the base can drive to place_approach while the arm CARRIES the carton (the
+        # stable braked carry, already lidar self-masked). False (default) => the empty-gripper gate
+        # holds => byte-identical. SIM-only safety: valid only with the arm in the verified carry; the
+        # in-sim drive + no-drop validation is a GPU check (run-326). See navigation.core carry_drive.
+        self.carry_reposition_drive = bool(carry_reposition_drive)
         # Opt-in uncouple-at-parking-spot on return (captain 2026-10-20: "robot should uncouple at the
         # parking spot"): instead of towing the cart home coupled, the return stage tows it to a cart
         # parking spot (`cart_parking` pose, from the nav-lanes lane), brakes the cart, releases the tow
@@ -524,6 +533,7 @@ class RuntimeAdapter:
                     # Reached the staging waypoint (east of the cart); advance to place_approach.
                     self._reposition_seq_i += 1
                     self.nav.start(self._reposition_seq[self._reposition_seq_i], False, static_drive=True,
+                                   carry_drive=self.carry_reposition_drive,  # fm431 (B1): drive while carrying
                                    arrival_xy_tol=0.15, arrival_yaw_tol=0.20)  # fm408: cover the base static-drive residual (run-315 diag: xy~0.11, yaw~0.16)
                     self.phase = 'navigate'
                     return Result('running',
@@ -712,6 +722,7 @@ class RuntimeAdapter:
                 # did not clear). Static-only route + gates for these legs only; every other leg keeps full
                 # live obstacle avoidance.
                 self.nav.start(self._reposition_seq[0], False, static_drive=True,
+                               carry_drive=self.carry_reposition_drive,  # fm431 (B1): drive while carrying
                                arrival_xy_tol=0.15, arrival_yaw_tol=0.20)  # fm408: cover the static-drive yaw residual (run-315 diag)
                 self.phase = 'navigate'
                 self._collect_reposition_pending = True

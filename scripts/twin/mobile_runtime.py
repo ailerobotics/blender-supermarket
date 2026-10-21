@@ -12,7 +12,8 @@ from .mobile_assets import author_hitch
 
 class MobileController:
     def __init__(self, stage, robot_body, cart_body, wheel_joint_paths,
-                 spec=MobileSpec(), hitch_path='/MobileHitch', wheel_angle_reader=None):
+                 spec=MobileSpec(), hitch_path='/MobileHitch', wheel_angle_reader=None,
+                 drive_max_force=None, drive_damping=None):
         from pxr import UsdPhysics
         if len(wheel_joint_paths) != 2 or len(set(wheel_joint_paths)) != 2:
             raise ValueError('left and right wheel joint paths required, in that order')
@@ -27,13 +28,26 @@ class MobileController:
         self.stage, self.robot_body, self.cart_body = stage, robot_body, cart_body
         self.spec, self.hitch_path = spec, hitch_path
         self.coupler = Coupler(spec)
+        # fm431 (A2): the SIM wheel force-velocity drive (torque = damping * (target - measured), capped at
+        # maxForce) is the base's drive fidelity. run-325 measured the coupled base UNDER-tracking the
+        # commanded (v, omega) on curves -- under-translating (measured ~0.033 m/s vs commanded ~0.0625)
+        # and over-rotating (measured yaw-rate up to ~0.19 vs commanded ~0.042) -- so the authored tow
+        # lane's feasible turns trip the gate's measured-arc check. These let the mission tune the SIM
+        # drive toward the real base's documented limits (0.35 m/s, 0.35 rad/s towing ~215 kg; see
+        # docs/mobile_robot_rollwagen.md) WITHOUT bending the lanes around a sim artefact. None => the
+        # prior class-constant values (80 N and 100), byte-identical. The parking HOLD (hold()) keeps its
+        # own stiff HOLD_* constants. Efficacy is a GPU-measured sweep (run-326), not offline-provable.
+        self.drive_max_force = float(self.DRIVE_MAX_FORCE if drive_max_force is None else drive_max_force)
+        self.drive_damping = float(self.DRIVE_DAMPING if drive_damping is None else drive_damping)
+        if not (self.drive_max_force > 0 and self.drive_damping > 0):
+            raise ValueError('wheel drive max_force and damping must be positive')
         self.drives = []
         for path in wheel_joint_paths:
             drive = UsdPhysics.DriveAPI.Apply(stage.GetPrimAtPath(path), 'angular')
             drive.CreateTypeAttr('force')
             drive.CreateStiffnessAttr(0.0)
-            drive.CreateDampingAttr(self.DRIVE_DAMPING)
-            drive.CreateMaxForceAttr(self.DRIVE_MAX_FORCE)
+            drive.CreateDampingAttr(self.drive_damping)
+            drive.CreateMaxForceAttr(self.drive_max_force)
             drive.CreateTargetVelocityAttr(0.0)
             self.drives.append(drive)
         # SIM-only stationary base hold (twin.restock task base-hold-under-stiff-arm): a real parked
@@ -97,8 +111,8 @@ class MobileController:
         if self._held:
             for drive in self.drives:
                 drive.GetStiffnessAttr().Set(0.0)
-                drive.GetDampingAttr().Set(self.DRIVE_DAMPING)
-                drive.GetMaxForceAttr().Set(self.DRIVE_MAX_FORCE)
+                drive.GetDampingAttr().Set(self.drive_damping)      # fm431 (A2): restore the configured drive
+                drive.GetMaxForceAttr().Set(self.drive_max_force)
                 drive.GetTargetVelocityAttr().Set(0.0)
             self._held = False
 

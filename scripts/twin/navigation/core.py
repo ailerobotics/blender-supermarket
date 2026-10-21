@@ -366,9 +366,21 @@ class Controller:
         # run-304/307) that the per-tick carry mask did not clear live. Default False => every other leg
         # keeps full live-scan obstacle avoidance (byte-identical). Set only on the uncoupled reposition legs.
         self.static_drive = False
+        # fm431 (B1) / run-325 cold TRANSIT: the mid-collect reposition drives the base to place_approach
+        # while the arm CARRIES the carton (a stable braked carry fold, NOT the empty stow posture), so
+        # obs.arm_transport is False and the nav refuses every drive with 'arm_not_in_transport' -> the
+        # reposition never moves and the held arm starves the heartbeat. carry_drive relaxes ONLY that
+        # arm-transport gate for the reposition leg (the carried load is in the verified braked carry and
+        # already lidar self-masked via carry_self_radius); every other gate (coverage, obstacle, swept
+        # envelope, coupling, articulation) is untouched. Default False => the empty-gripper gate holds
+        # (byte-identical). Set only on the uncoupled reposition legs, and SAFE only when the arm is in
+        # the stable carry -- the in-sim drive + no-drop validation is a GPU check (run-326).
+        self.carry_drive = False
 
-    def start(self, goal, coupled, *, arrival_xy_tol=None, arrival_yaw_tol=None, static_drive=False):
+    def start(self, goal, coupled, *, arrival_xy_tol=None, arrival_yaw_tol=None, static_drive=False,
+              carry_drive=False):
         self.static_drive = bool(static_drive)
+        self.carry_drive = bool(carry_drive)
         if len(goal) != 3 or not all(math.isfinite(v) for v in goal):
             raise ValueError('goal must be finite map [x,y,yaw]')
         if arrival_xy_tol is not None and (not math.isfinite(arrival_xy_tol) or arrival_xy_tol <= 0):
@@ -412,7 +424,7 @@ class Controller:
                 return 'unsupported_observation_source'
         if obs.coupled != self.coupled:
             return 'coupling_changed'
-        if not obs.arm_transport:
+        if not obs.arm_transport and not self.carry_drive:
             return 'arm_not_in_transport'
         if self.coupled and abs(obs.articulation) >= self.footprint.max_articulation:
             return 'articulation_limit'
