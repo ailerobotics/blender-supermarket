@@ -220,12 +220,18 @@ class Route:
 class ArticulatedPlanner:
     """Bounded hybrid A*: (x,y,base yaw,cart articulation), forward arcs only."""
     def __init__(self, world, *, xy_resolution=0.20, yaw_bins=72,
-                 primitive_length=0.4, max_expansions=60000, timeout=30.0):
+                 primitive_length=0.4, max_expansions=60000, timeout=30.0,
+                 min_turn_radius=1.5):
         self.world=world
         self.xy_resolution=xy_resolution
         self.yaw_step=2*math.pi/yaw_bins
         self.length=primitive_length
         self.max_expansions,self.timeout=max_expansions,timeout
+        # fm447 (a): the planned min turn radius for the hybrid-A* arc successors + the Dubins shots.
+        # 1.5 m (default) = the coupled physical minimum (byte-identical). A LARGER value plans GENTLER
+        # turns so a coupled base that over-rotates the physical-min turn by ~24% (run-330b) still executes
+        # an arc >= the physical min -- IF the aisle/portal can fit the wider turn (proven in check_tow_lanes).
+        self.min_turn_radius=float(min_turn_radius)
         self.seeds=[]
 
     def key(self,s):
@@ -332,7 +338,7 @@ class ArticulatedPlanner:
             dx,dy=math.cos(heading),math.sin(heading)
             for approach in (1.5,2.0,2.5,3.0):
                 entry=(x-approach*dx,y-approach*dy,heading)
-                for shot in dubins_connections(start,entry):
+                for shot in dubins_connections(start,entry,self.min_turn_radius):
                     if time.monotonic()>deadline:
                         return Route([],[],'corridor_budget')
                     first=extend(start,shot)
@@ -342,7 +348,7 @@ class ArticulatedPlanner:
                         middle=extend(first[0][-1],[(approach+departure,0.0)])
                         if middle is None:
                             continue
-                        for final in dubins_connections(middle[0][-1],goal):
+                        for final in dubins_connections(middle[0][-1],goal,self.min_turn_radius):
                             if time.monotonic()>deadline:
                                 return Route([],[],'corridor_budget')
                             last=extend(middle[0][-1],final)
@@ -391,7 +397,7 @@ class ArticulatedPlanner:
                     approach=(goal[0]-lead*math.cos(goal[2]),
                               goal[1]-lead*math.sin(goal[2]),goal[2])
                     shots.extend(s+([(lead,0.0)] if lead else [])
-                                 for s in dubins_connections(state,approach))
+                                 for s in dubins_connections(state,approach,self.min_turn_radius))
                 for shot in sorted(shots,key=lambda s:sum(p[0] for p in s)):
                     shot_state=state
                     shot_edge=[]
@@ -425,7 +431,8 @@ class ArticulatedPlanner:
             # Direct final straight primitive preserves precise portal/aisle alignment.
             distance=math.hypot(goal[0]-state.x,goal[1]-state.y)
             heading=math.atan2(goal[1]-state.y,goal[0]-state.x)
-            options=[(self.length,k) for k in (0.0,-1/1.5,1/1.5,-1/3,1/3)]
+            _R=self.min_turn_radius
+            options=[(self.length,k) for k in (0.0,-1/_R,1/_R,-1/(2*_R),1/(2*_R))]
             if distance<4 and abs(wrap(heading-state.yaw))<0.03:
                 options.insert(0,(distance,0.0))
             for length,k in options:
