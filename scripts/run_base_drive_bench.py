@@ -34,7 +34,8 @@ def worker(config_path, output, *, wheel_friction, solver_iters, physics_dt,
     from isaacsim import SimulationApp
     app = SimulationApp({'headless': True, 'width': 320, 'height': 240})
     try:
-        from twin.restock.physics_setup import assemble, body_measurement
+        from twin.restock.physics_setup import assemble
+        from twin.restock.isaac_port import body_measurement
         from twin.mobile import DockObservation, Pose2
         output = Path(output); output.mkdir(parents=True, exist_ok=True)
         config = json.loads(Path(config_path).read_text())
@@ -57,8 +58,8 @@ def worker(config_path, output, *, wheel_friction, solver_iters, physics_dt,
         achieved = []
         t0 = time.monotonic()
         for c in cmds:
-            r, _rz, _rv, _rw = body_measurement(rb)
-            obs = DockObservation(Pose2(float(r[0]), float(r[1]), 0.0), Pose2(-1.27, 0.0, 0.0),
+            r, _rz, _rv, _rw = body_measurement(rb)        # r is a Pose2 (x, y, yaw)
+            obs = DockObservation(Pose2(r.x, r.y, r.yaw), Pose2(-1.27, 0.0, 0.0),
                                   0.28, 0.28, 0.0, 0.0, 0.0, 0.0)
             mobile.command(c.v, c.omega, obs, transport_ready=True)
             assembly.world.step(render=False)
@@ -124,6 +125,12 @@ def main():
         finally:
             child.close()
         rec['returncode'] = child.process.returncode
+        # Isaac's SimulationApp.close() can hard-exit 0 even on a worker error, so trust the RESULT file,
+        # not the exit code: success iff the worker wrote base-drive-bench.json.
+        if not (args.output / 'base-drive-bench.json').exists():
+            rec['status'] = 'failed'
+            errf = args.output / 'base-drive-bench.err'
+            rec['error'] = errf.read_text()[-800:] if errf.exists() else 'no result, no err file'
         write(args.output / 'run.json', rec)
     print('BASE_DRIVE_BENCH_PARENT ' + json.dumps({k: rec[k] for k in ('status', 'returncode') if k in rec}), flush=True)
 

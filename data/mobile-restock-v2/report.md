@@ -2257,3 +2257,56 @@ are now config-driven with **real-rig defaults 5mm / 10mrad** and a **sim profil
 `base_stationary_dxy_m`=0.010 / `base_stationary_dyaw_rad`=0.025** (same pattern as the sim arm-speed
 and occlusion-window relaxations). A base that genuinely rolls away is still caught at these values;
 `BASE_DISP` logs every trip with its measured number. Real-rig path untouched.
+
+### 2026-10-21 — fm434 base-drive-fidelity bench (GPU, UNCOUPLED): no single physics lever closes the crawl; root cause is drive-wheel normal force
+
+The mission base under-tracks commanded (v, ω) even UNCOUPLED (fm433 refuted cart drag).
+fm434 ran a bounded diagnostic: a short uncoupled GPU bench (`scripts/run_base_drive_bench.py`,
+pure core `scripts/twin/tools/base_drive_bench.py`) boots Isaac once, assembles the base with NO
+cart, commands an open-loop step profile (straight 0.25 m/s for 4 s, then a 1.5 m-radius arc for
+6 s) directly via the production `MobileController.command` wheel-target conversion, and records
+commanded-vs-achieved (‖v‖, ω) per tick. One physics lever per run, cap 4 runs, stop at the first
+lever that tracks within ~15%. **Lever 2 (wheel radius / diff-drive units) was ruled out STATICALLY**
+(conversion radius 0.16 / track 0.70 matches the URDF, DriveAPI uses the degrees convention; a units
+error lurches fast, not crawls) — no GPU run spent on it.
+
+| run | lever | straight v-ratio | arc v-ratio | arc ω-ratio | within 15 %? |
+|-----|-------|------------------|-------------|-------------|--------------|
+| 1 | baseline (μ=1.0, dt 1/60, default solver) | **0.097** | 0.17 | 0.23 | no |
+| 2 | traction μ=2.0 | **0.176** | 0.17 | 0.24 | no |
+| 3 | solver position iters = 64 | **0.097** | 0.17 | 0.23 | no |
+| 4 | physics_dt = 1/120 | **0.120** | 0.15 | 0.22 | no |
+
+**No single lever reaches 15 %** (the base needs a ≈0.85 ratio; it achieves 10–18 %). Traction is the
+ONLY effective knob — doubling μ (1.0→2.0) ~doubled straight tracking (0.097→0.176), so **slip is real** —
+but even at μ=2.0 (already beyond physical rubber-on-concrete) it is ~18 %. Solver iterations are inert
+(0.097, identical to baseline); physics_dt helps marginally (0.120); wheel-drive maxForce/damping was
+already proven inert (fm433, reverted). In every run the arc ω-ratio (≈0.22) exceeds the straight
+v-ratio (≈0.10–0.18): the base achieves more of its commanded YAW than its commanded TRANSLATION — this
+is the mission's `measured_turn_radius` over-rotation, and it shares ONE root cause with the
+under-translation.
+
+**Root cause (offline-proven geometry): the drive wheels carry under-determined, low normal force.**
+The base is a 4-contact rigid body — 2 drive wheels at x=0, y=±0.35 and 2 passive casters at x=±0.38 —
+and **all four ground contacts are exactly co-planar** (base-frame bottom z = −0.240 for both the drive
+wheels, radius 0.16 at joint z=−0.08, AND the casters, radius 0.065 at wheel z=−0.175; arithmetic in
+`mobile_assets.py` lines 95–105 with `MobileSpec` base_z=0.24). The CoM sits at x≈0, directly over the
+drive-wheel axle. A rigid body resting on four co-planar contacts with the CoM over the centre axle is
+**statically indeterminate** in its vertical load split — PhysX resolves it by contact penetration/
+stiffness, and there is nothing in the model that forces the two DRIVE wheels to be the primary
+weight-bearing contacts. The friction-responsive-but-torque/solver/dt-inert signature is the classic
+fingerprint of low drive-wheel normal force: the wheels spin near their commanded rate but slip because
+μ·N is small (weight shared with / taken by the fore-and-aft casters). At μ=1 with ~half the 180 kg on
+the drive wheels, traction would be ~880 N — far more than the <200 N needed to move the train, i.e. NO
+slip; the observed heavy slip means the drive wheels carry FAR less than that.
+
+**Faithful fix (matches the real spec; does NOT bend a gate):** make the two drive wheels the
+deterministic primary support, with the casters as light pitch stabilisers — exactly how a real
+caster-stabilised differential-drive robot carries its weight. The cleanest model change is a small
+`caster_lift_m` (recess the caster contact a few mm ABOVE the drive-wheel plane) so the base settles its
+weight onto the drive wheels; real μ≈0.9 rubber then gives ample grip, and the `measured_turn_radius`
+over-rotation resolves with the same change. This is a base-model change (mobile_assets caster z +
+MobileSpec knob, default 0 = byte-identical) that needs its own validating uncoupled bench run (a 5th
+GPU run, past this batch's cap) — PREPARED but NOT launched; awaiting a firstmate GO. Cranking
+`wheel_friction` to an unphysical value is explicitly NOT the fix (it bends the sim away from the real
+spec and still caps at ~18 %).
