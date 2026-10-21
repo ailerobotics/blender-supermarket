@@ -128,6 +128,52 @@ class ArticulatedTests(unittest.TestCase):
         c.step(.05,od,obs,now=now)
         self.assertIsNone(c.route)            # dropped -> will replan
 
+    def _reach_tracking(self, c):
+        state=TrainState(0,0,0,0); v=w=0.0; now=0.0
+        for i in range(400):
+            now=(i+1)*.05
+            od=Odometry(state.pose,now,v,w,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            v,w=r.velocity
+            if c.route is not None and c.route.states and r.reason=='tracking':
+                break
+            state=advance(state,v*.05,w/v if v else 0,self.spec)
+        self.assertTrue(c.route and c.route.states,'controller never reached tracking')
+        return state, now
+
+    def test_persistent_measured_turn_radius_faults_fast(self):
+        # fm446 (C): a measured_turn_radius that trips EVERY tick (a sub-min-radius turn the coupled base
+        # cannot make) must FAIL FAST with a named fault, not livelock. measured_turn_fault_s=1.0 => after
+        # ~1 s (20 ticks at dt .05) of net over-rotation coast it terminates 'measured_turn_radius_persistent'.
+        c=ArticulatedController(self.world.grid,allow_test_fixtures=True,measured_turn_fault_s=1.0)
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        reasons=[]
+        for _ in range(40):
+            now+=.05
+            tight=Odometry(state.pose,now,0.05,0.05*(1/1.5+0.3),'test_fixture',.02)   # over-rotating arc
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,tight,obs,now=now)
+            reasons.append((r.status,r.reason))
+            if r.status=='failed':
+                break
+        self.assertEqual(reasons[-1],('failed','measured_turn_radius_persistent'))
+        self.assertLessEqual(len(reasons),25)                 # ~20 ticks (1.0 s / 0.05), bounded fast
+
+    def test_measured_turn_fault_off_by_default_coasts(self):
+        # Default (no measured_turn_fault_s) is byte-identical: persistent measured_turn_radius keeps
+        # coasting (never the new fault) -- the legacy behaviour.
+        c=ArticulatedController(self.world.grid,allow_test_fixtures=True)
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        for _ in range(40):
+            now+=.05
+            tight=Odometry(state.pose,now,0.05,0.05*(1/1.5+0.3),'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,tight,obs,now=now)
+            self.assertNotEqual(r.reason,'measured_turn_radius_persistent')
+
     def test_tight_turn_commands_reduced_speed(self):
         # The tracking command slows for tight turns so the coupled base can keep up: the
         # feedback curved-goal run must never command max_speed while turning hard.

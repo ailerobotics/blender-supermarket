@@ -577,6 +577,10 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # fm347/348 (1): opt-in phase-dependent arm drive (soft tuck-settle / stiff loaded-place).
         # Absent config['phase_drive'] => None => the assemble() drive stays (byte-identical).
         phase_drive=config.get('phase_drive'),
+        # fm446 (D): keep the collect source decode render alive through the collect occlusion window so
+        # the Option-B-seeded hold() gets a fresh synchronized frame. Only effective with the sensing
+        # execution gate on; scoped to the collect stage. Absent/false => byte-identical.
+        collect_keep_source_render=bool(config.get('collect_keep_source_render')),
         # fm380: stage-scoped sensing -- destroy the collect-only station cameras' render products at
         # the collect->couple boundary to return their VRAM. SIM-ONLY, opt-in; unset => None => never
         # torn down => byte-identical. The cart camera + nav/nvblox + walkthrough recorder are untouched.

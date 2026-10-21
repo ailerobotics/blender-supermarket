@@ -3,7 +3,7 @@ driver + tests; this is the IsaacPort/runtime per-tick driver that makes the gat
 mission). Pure CPU: the phase->suspend mapping and the decode-grade render-skip it drives."""
 import unittest
 
-from twin.restock.isaac_port import _sensing_frame_due, SENSING_ACTIONS
+from twin.restock.isaac_port import _sensing_frame_due, SENSING_ACTIONS, _render_suspended
 from twin.restock_manipulation.isaac_sensors import sensing_render_required, _SENSING_SUSPEND_PHASES
 
 
@@ -40,6 +40,21 @@ class SensingGateDriverTests(unittest.TestCase):
         self.assertFalse(would_render('lift', 6, 6))
         self.assertFalse(would_render('preplace', 6, 6))    # holding chain: arm occludes -> suspend (fm 286)
         self.assertTrue(would_render(None, 6, 6))           # pre-grasp: fail safe render
+
+    def test_collect_keep_source_render_holds_source_through_occlusion(self):
+        # fm446 (D): with collect_keep_source_render the gate does NOT suspend the decode render on the
+        # collect reach phases, so the Option-B-seeded hold() keeps getting fresh source frames. Scoped
+        # to the collect stage; transfer still suspends; default (off) is byte-identical to the mapping.
+        for phase in ('approach', 'contact', 'grasp', 'lift'):
+            # default off: suspends on the reach phase (legacy)
+            self.assertTrue(_render_suspended(phase, 'collect', False), phase)
+            # keep_source on + collect: NOT suspended (source stays live)
+            self.assertFalse(_render_suspended(phase, 'collect', True), phase)
+            # keep_source on but NOT collect (e.g. transfer): still suspends
+            self.assertTrue(_render_suspended(phase, 'transfer', True), phase)
+        # observe always renders regardless of the flag/stage
+        for keep in (False, True):
+            self.assertFalse(_render_suspended('observe', 'collect', keep))
 
 
 if __name__ == '__main__':

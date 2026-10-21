@@ -2534,3 +2534,40 @@ the seeded hold() gets live frames), not the registration prior.
 
 **BASE_ATT:** caster-lift pitch ~-0.71 deg (steady), near-level driving coupled — unchanged, small.
 mp4: run-330 254 KB (cold), run-330b 9.67 MB, run-330c 9.91 MB.
+
+### 2026-10-21 — fm446 (A)+(C)+(D): the outbound lane is VALID (base over-rotates it); + a persistent-turn fault + source-render-through-occlusion
+
+**(A) — the lane is NOT sub-min-radius; re-authoring it is moot.** The run-330 "1.33 m first turn" was a
+sparse-WAYPOINT artifact: `TowLane.expand` RE-PLANS start→goal with the hybrid-A* planner and only asserts
+the authored waypoints lie on that route (a consistency check) — the waypoints do not define the path. The
+planned DENSE route's minimum local turn radius is **exactly 1.50 m** (the designed coupled minimum) end to
+end. The real cause of the `measured_turn_radius` livelock is the **coupled base OVER-ROTATING the valid
+1.5 m turn**: the follower commands curvature ≤1/1.5 (0.667) but the base's MEASURED arc is rw/rv ≈0.83
+(~24% over), past the 0.697 gate (0.667 + 0.03 margin). The caster-lift fixed UNCOUPLED straight+arc
+tracking (0.988) but the COUPLED turn still over-steers. So this is a drive/follower issue, not lane
+geometry — re-authoring the first turn cannot fix it. To keep the over-rotated execution under 0.697 the
+planner would have to plan at ≥~1.78 m radius; the planner's min radius is hardcoded 1.5 m (dubins +
+curvature cap), and the portal is a **2.5 m gap** (wall at y≈11, x∈[−5.12,−2.62]) with the dock 0.59 m east
+of its centre facing east — a 1.8 m coupled reorientation into it is not obviously feasible and needs its
+own validation. Options for the real fix (raised as a decision): (a) a configurable planner min-turn-radius
+margin for authored lanes (plan gentler, validate it still fits the portal); (b) raise
+`lane_curve_speed_floor` so the base drives the turn faster (the bench tracked well at full speed, so more
+translation-per-rotation may drop the measured rw/rv); (c) a dedicated coupled-turn drive-fidelity fix.
+
+**(C) persistent measured_turn_radius → fast fault (DONE).** `measured_turn_fault_s` (default off): a
+net-accumulating window (increment dt on a measured_turn_radius coast, DECAY on a clean tracking tick)
+faults `measured_turn_radius_persistent` once the net stuck time exceeds the budget — so a sub-radius turn
+the base cannot make fails FAST instead of livelocking to the 120 s mission nav-stuck (run-330b: 186 coasts,
+the sparse tracking tick kept resetting the 8 s blocked_timeout). Threaded controller+factory; CPU tests:
+persistent → faults in ~1 s window, off-by-default coasts (byte-identical), 48 nav tests pass. Staged
+`measured_turn_fault_s=20.0` for run-331.
+
+**(D) source render through the collect occlusion window (DONE).** `collect_keep_source_render` (default
+off): `IsaacPort.gate()` does NOT suspend the decode render during the collect reach phases when set + the
+stage is 'collect', so the Option-B-seeded hold() gets a fresh synchronized frame each tick (run-330 cold
+cleared `no established registration` via Option B but then failed `needs a new monotonic frame` /
+`no new synchronized rendered camera frame` because the gate paused the source during approach/grasp).
+Scoped to collect; transfer/couple still suspend. VRAM: collect is the FIRST stage, well below the ~11.9 GB
+late-mission peak, so keeping the 1.0-scale source decode render alive through the brief collect reach has
+headroom (confirmed at the run). Pure-logic extracted to `_render_suspended`; CPU-tested; staged on for
+run-331.

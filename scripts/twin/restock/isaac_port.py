@@ -40,6 +40,19 @@ def _sensing_frame_due(current_action, upcoming_tick, sensing_stride, suspended)
             and upcoming_tick % sensing_stride == 0)
 
 
+def _render_suspended(phase, current_action, collect_keep_source_render):
+    """Whether gate() suspends the decode render this phase. Normally the inverse of
+    ``sensing_render_required(phase)`` (suspend on the validated-reach execution phases). fm446 (D):
+    when ``collect_keep_source_render`` is set AND the current stage is 'collect', NEVER suspend — the
+    source decode render stays alive through the collect occlusion window so the Option-B-seeded hold()
+    gets a fresh synchronized frame (the sensor gate needs a new monotonic frame each capture). Scoped to
+    collect: transfer/couple still suspend as before. False (default) => byte-identical. Pure for CPU test."""
+    suspended = not sensing_render_required(phase)
+    if suspended and collect_keep_source_render and current_action == 'collect':
+        return False
+    return suspended
+
+
 def _masked_depth_due(current_action, upcoming_tick, sensing_stride, has_masked_depth):
     """Whether to render + publish masked depth (arm camera -> host nvblox ESDF) this tick. Fires on
     the sensing cadence REGARDLESS of the execution gate's decode suspension: the parked-station
@@ -132,7 +145,8 @@ class IsaacPort:
                  masked_depth=None, set_render_suspended=None,
                  stationary_dxy=0.005, stationary_dyaw=0.01, command_gate=None,
                  position_uncertainty=0.05, phase_drive=None, arm_joints=None,
-                 stage_scoped_teardown=None, release_source_capture=None):
+                 stage_scoped_teardown=None, release_source_capture=None,
+                 collect_keep_source_render=False):
         self.world,self.robot=world,robot
         # fm380: optional callable to DESTROY the collect-only sensing cameras' render products at the
         # collect->couple boundary (stage-scoped sensing). None (default) => never called => byte-
@@ -151,6 +165,11 @@ class IsaacPort:
         # already holds -- no cross-process channel needed. config['phase_drive']={'soft':{kp,kd,eff},
         # 'stiff':{...}}; absent => None => the assemble() drive stays throughout (byte-identical).
         self._phase_drive=phase_drive
+        # fm446 (D): keep the collect SOURCE decode render ALIVE through the collect occlusion window
+        # (the approach/grasp reach phases) so the Option-B-seeded hold() gets a fresh synchronized frame
+        # (the sensor gate needs a new monotonic frame each capture; a paused render fails it). Scoped to
+        # current_action=='collect' so transfer/couple still suspend. False (default) => byte-identical.
+        self._collect_keep_source_render=bool(collect_keep_source_render)
         self._arm_joints=tuple(arm_joints) if arm_joints else None
         self._last_drive_gains=None
         # Localization uncertainty pad added to the nav footprint radius. The real rig keeps the
@@ -282,7 +301,7 @@ class IsaacPort:
                 print(f'PHASE_DRIVE phase={phase} -> kp={g["kp"]:g} kd={g["kd"]:g} eff={g["eff"]:g}',flush=True)
         if self._set_render_suspended is None:
             return
-        suspended=not sensing_render_required(phase)
+        suspended=_render_suspended(phase, self.current_action, self._collect_keep_source_render)
         self._sensing_suspended=suspended
         self._set_render_suspended(suspended)
 

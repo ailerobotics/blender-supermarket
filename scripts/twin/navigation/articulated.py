@@ -449,7 +449,8 @@ class ArticulatedController(Controller):
                  lane_graph=None, lane_static_tol=0.0, lane_trust_static=False,
                  lane_reacquire_along_route=False, lane_cart_yaw_tol=0.20,
                  lane_curve_speed_floor=0.25, lane_max_curvature=None,
-                 lane_coast_refusals=False, lane_trust_unknown=False, **kwargs):
+                 lane_coast_refusals=False, lane_trust_unknown=False,
+                 measured_turn_fault_s=None, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
         # swept train envelope as free (the static map proved that corridor clear), so the base is not
@@ -530,6 +531,17 @@ class ArticulatedController(Controller):
         # lane. Scoped to an active authored lane (its geometry is fixed + build-validated). Default False
         # => the legacy drop-and-replan (byte-identical).
         self.lane_coast_refusals=bool(lane_coast_refusals)
+        # fm446 (C): a PERSISTENT measured_turn_radius is a drive/route FAULT, not an endless coast.
+        # measured_turn_radius coasts (keeps the route) for transient over-rotation, but a sub-min-radius
+        # authored turn the coupled base physically cannot make over-rotates EVERY tick (run-330b: 186
+        # coasts, ~0 net progress) -- and the sparse tracking tick between coasts keeps resetting the 8 s
+        # blocked_timeout, so the controller livelocks until the 120 s mission nav-stuck. This net-
+        # accumulating window (increment dt on a measured_turn_radius coast, DECAY on a clean tracking tick)
+        # faults 'measured_turn_radius_persistent' once the net stuck time exceeds measured_turn_fault_s, so
+        # it fails fast instead of coasting. None/<=0 => off (byte-identical: the legacy coast + 8 s timeout).
+        self.measured_turn_fault_s=(float(measured_turn_fault_s)
+                                    if measured_turn_fault_s not in (None, 0, 0.0) else None)
+        self._mtr_window=0.0
         # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
         # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
         # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
@@ -565,6 +577,7 @@ class ArticulatedController(Controller):
         self.route=None
         self.index=0
         self.planning_stop=False
+        self._mtr_window=0.0                               # fm446 (C): fresh goal -> fresh over-rotation window
         self.goal_articulation=self.spec.max_articulation if goal_articulation is None else goal_articulation
         # Resolve the authored tow lane for this COUPLED goal (if any). Uncoupled drives never use a
         # lane. Pose acquirability + live-obstacle swept validation are checked when the route is built.
@@ -867,6 +880,14 @@ class ArticulatedController(Controller):
                      or (self.lane_coast_refusals and self._active_lane is not None))
             if not coast:
                 self.route=None
+            elif result.reason=='measured_turn_radius' and self.measured_turn_fault_s is not None:
+                # fm446 (C): net-accumulate the over-rotation coast; a sub-min-radius turn the coupled base
+                # cannot make trips every tick -> fail fast instead of livelocking to the mission nav-stuck.
+                self._mtr_window += dt
+                if self._mtr_window >= self.measured_turn_fault_s:
+                    self.terminal=Result(status='failed',reason='measured_turn_radius_persistent')
+                    return self.terminal
             return self._wait(dt,result.reason)
         self.blocked=0.0
+        self._mtr_window=max(0.0, self._mtr_window-dt)   # decay on a clean tracking tick (fm446 C)
         return result
