@@ -2897,6 +2897,45 @@ straight, a coupled-as-single-rigid-body swept footprint for the validator (the 
 the envelope is a fixed rigid shape), and a PhysX hitch-lock on the sim side; the nav model + `check_tow_lanes` would
 validate the single-body footprint along the same lanes.
 
+### 2026-10-21 — run-335 RESULT (fm452 A + COLD, fm453 mast, fm454 portal corner)
+
+Three attempts ran (cold run-335 + warm 335b/335c, start_at=couple). Ended 22:30, lock released clean, GPU back to
+whispr-only. mp4: run-335 228 KB (cold, failed early), 335b 9.0 MB, 335c 10.0 MB.
+
+**Mast camera (fm453): ON, confirmed.** host-stack.log shows `num_cameras: 2` and the mast masked-depth feed active
+(`camera_mast/masked_depth`, frame `restock_camera_mast`, nvblox `camera_1`, carton-masked). CAVEAT on "did the
+obstacle map keep updating while the carton was held": NO run reached the transfer place-re-park where the ARM holds
+the carton and freezes the wrist ESDF — that is the scenario the mast exists to fix, and it was not exercised this
+run (the warm runs tow the carton in the CART during outbound, not arm-held, and stalled in outbound; the cold run
+died at collect). The second feed is wired and live, but the carry-ESDF benefit remains unverified in-mission.
+
+**COLD run-335: still dies at collect** — but on `STATION_ACK_STALE` (station sensor ACK stamp frozen at 0.9 s while
+sim advanced to 9.08 s → `arm command heartbeat lost`), a station sensor-STREAM freeze, NOT the source-render-sync
+staleness the fm452 force-render targets. `collect_observe_force_render_ticks=30` was staged but the station froze
+upstream at stamp 0.9 s (very early), so the force-render window never mattered here. The cold collect blocker is now
+a station-ack stream halt (cf. the collect-confirm sensor-stall family), independent of the render-sync fix.
+
+**WARM outbound (fm454 portal corner): the cart_yaw fixes held, but the corner was NOT cleared.** TRACK_DIAG shows
+the track+rebase fixes WORKED — xy err tiny (0.02–0.06, tol 0.35) and **stop_replan dropped 580→2**. But the base
+churns in the FIRST part of the geometry-forced reorientation (oscillating x≈−4.46↔−3.70 at y≈15.1–15.2, i.e. ~0.4–
+0.76 m into the turn, never reaching the straight lead-in further south), the towed cart lags to **cart_err ≈ 0.287**
+(just under the 0.30 tol, so few stop_replan), and `lane_not_acquired` churns **852×** → `planning_stop`, no net base
+progress for 120 s → fast-fail. The 852 `lane_not_acquired` is the fm452(A) acquire gate correctly REFUSING to
+re-acquire because the lagging cart (0.29) re-bases to a swept-envelope breach — a SAFE refusal, but it halts the
+train. **The train stalls IN the reorientation, before the straight lead-in — exactly the geometry-forced case flagged
+in the fm454 caveat.** So option b (re-author + lead-in) reduced the cart_yaw stop_replan trips to ~zero but could
+NOT overcome the cart lag the min-radius reorientation induces; it did not clear the corner.
+
+**Verdict: option b did not clear the portal corner. Option c (rigid hitch lock) is now indicated.** Per the captain's
+"try b first, then c", b is now proven insufficient for the reorientation cart-lag. Option c removes the off-axle lag
+entirely during the turn (robot+cart rotate as one rigid body), which is the direct fix for the 0.29 cart_err stall.
+What c takes (NOT built, per "do not build c now"): a `MobileController` tow-lock mode pinning cart_yaw = base_yaw
+(zero articulation) through the authored turn and releasing on the straight; a coupled-as-single-rigid-body swept
+footprint for the validator + `check_tow_lanes` (fixed rigid shape, no trailing cart); and a PhysX hitch-lock on the
+sim side. A secondary finding: the fm452(A) acquire gate's rebase-envelope strictness (refuses at ~0.29) is tighter
+than the follow's 0.30 cart_tol, creating a dead-zone that converts a tolerable lag into `lane_not_acquired` churn —
+if b is revisited, align the two thresholds. See [[portal-corner-geometry-forced]].
+
 **(B) Would a live-train-matched outbound lane collapse the remaining layers? (one-page analysis).** The
 outbound lane's `cart_yaw` is authored by integrating the off-axle trailer kinematics from the lane START
 (cart aligned at the dock, articulation 0), but the coupled train enters the follow PARTWAY and already
