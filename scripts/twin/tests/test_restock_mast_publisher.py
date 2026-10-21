@@ -17,7 +17,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from twin.restock.masked_depth import (
-    build_mast_depth_bridge, mast_sim_topics, _serve_topic_args, masked_depth_from_frame)
+    build_mast_depth_bridge, mast_sim_topics, _serve_topic_args, masked_depth_from_frame,
+    _default_socket_path)
 from twin.restock.sensing_sources import build_sensing_sources
 from twin.restock_camera import mast_depth as M
 import twin.restock_camera.config as cc
@@ -184,6 +185,24 @@ class MastBridgeConstruction(unittest.TestCase):
             _initialize=self._fake_initialize,
             _bridge_cls=lambda **kw: captured.update(kw))
         self.assertEqual(list(captured['rig_prefixes']), ['/A', '/B'])
+
+
+class SocketPathPerFeedUniqueness(unittest.TestCase):
+    """The wrist (camera_0) and mast (camera_1) publisher subprocesses run in ONE Isaac process,
+    so their default Unix-socket paths MUST differ (serve() unlinks its path on bind + exit, so a
+    shared name lets one feed clobber the sibling). Regression for the fm458 collision."""
+
+    def test_wrist_and_mast_default_socket_paths_differ_in_one_process(self):
+        pid = 4242
+        wrist = _default_socket_path('restock_camera_arm', pid=pid)
+        mast = _default_socket_path(M.MAST_FRAME_ID, pid=pid)        # same process (same pid)
+        self.assertNotEqual(wrist, mast)
+        self.assertIn(str(pid), wrist)
+        self.assertIn('restock_camera_arm', wrist)
+        self.assertIn('restock_camera_mast', mast)
+        # No path separators leak into the socket filename.
+        self.assertNotIn('/', wrist.rsplit('/', 1)[1])
+        self.assertNotIn('/', mast.rsplit('/', 1)[1])
 
 
 class MastRigCartonSelfMask(unittest.TestCase):

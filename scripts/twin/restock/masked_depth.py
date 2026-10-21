@@ -220,6 +220,20 @@ def _serve_topic_args(topics):
                                            bbox=topics.get('bbox') or 'none')
 
 
+def _default_socket_path(frame_id, pid=None):
+    """Per-FEED Unix-socket path for the masked-depth publisher subprocess.
+
+    Keyed on BOTH the Isaac pid AND the camera ``frame_id``: the wrist (camera_0,
+    ``restock_camera_arm``) and the opt-in mast (camera_1, ``restock_camera_mast``) run as TWO
+    publisher subprocesses in the SAME Isaac process, so a pid-only name collided (both defaulted
+    to ``/tmp/restock_maskdepth_<pid>.sock``). ``serve`` unlinks its socket path on bind and again
+    on exit, so a shared name let one feed clobber its sibling's socket. frame_ids are
+    filesystem-safe tokens (no path separators), so this is a stable per-feed name.
+    """
+    import os
+    return f'/tmp/restock_maskdepth_{os.getpid() if pid is None else pid}_{frame_id}.sock'
+
+
 class ArmDepthSubprocessBridge:
     """Ship arm masked-depth frames to the out-of-Isaac rclpy publisher subprocess.
 
@@ -259,7 +273,7 @@ class ArmDepthSubprocessBridge:
         import os
         import subprocess
         from .masked_depth_ipc import FrameWriter
-        self._socket_path = socket_path or f'/tmp/restock_maskdepth_{os.getpid()}.sock'
+        self._socket_path = socket_path or _default_socket_path(frame_id)
         ipc_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'masked_depth_ipc.py')
         # Match the host nodes' DDS config EXACTLY (twin.restock_host.config.isolated_environment):
         # rmw_fastrtps_cpp + UDPv4-only builtin transport + SKIP_DEFAULT_XML + localhost-only, and
