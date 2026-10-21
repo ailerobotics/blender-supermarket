@@ -2846,6 +2846,57 @@ did NOT fault on them (it kept driving +0.37 m), so the window is doing its job.
 (859) is what froze the tow, not the turn-radius tail. If run-335 shows the fault window saturating, that
 is the next layer; no change for now.
 
+### 2026-10-21 — fm454 (CAPTAIN, option b): re-author the portal corner + mast depth camera (fm453), staged for run-335
+
+**fm453 — mast depth camera on (PR #156, nvblox camera_1).** `host-cad/host.json` gains `mast_depth:{enabled:true}`
+⇒ the host launch authors `num_cameras: 2` (source line `'num_cameras': 2 if mast_enabled else 1`, confirmed via
+`launch_plan` offline; `description()` needs ROS so the literal `num_cameras:2` lands in host-stack.log at boot). The
+mission `camera_config` is repointed to a task-local `camera-config-mast.json` built by SURGICALLY injecting the
+`mast_camera_entry()` prim + housing/bracket onto the sim-restock-camera-v2 base design — station cameras
+(source/cart/shelf) + pre-existing solids byte-identical (regenerating from the mission scenario/manifest would have
+drifted the station geometry and broken the cc-334 commissioning baselines, so a surgical inject was required). Mast
+= RealSense D435-class on `robot_base`, role `nvblox_depth`, so a carried carton no longer freezes the ESDF (the
+wrist eye-in-hand is carton-blocked from grasp on). Preflight evidence to confirm at the run: `num_cameras: 2` in
+host-stack.log + the `mast` prim authored.
+
+**fm454 — portal corner re-authored (option b), geometry findings.** The partition wall sits at y≈11 with the doorway
+gap at x∈[−5.12,−2.62]; the coupled-train passable throat is a narrow x≈−3.87 band. The dock faces EAST at
+(−4.46,15.25) only ~0.6 m west of the throat centreline, so a min-radius (1.5 m) right turn from the dock overshoots
+EAST of the throat and the free planner loops a full ~360° back to enter the corridor from the north — holding the
+towed cart at steady-state articulation **0.80 rad** (below the 1.13 max, but sustained) through the whole loop. That
+sustained max-articulation loop is what the real coupled tow trips on. Two facts constrain the fix: (1) the turn
+radius is planner-primitive-fixed (sweeping `min_turn_radius` 1.5→2.6 produced the IDENTICAL path, so a "wider turn"
+is not reachable by the radius knob, and fm449 already showed 1.7–1.8 m times out for the whole plan); (2) forcing a
+fully-aligned pose south of the throat makes the west-facing-goal approach (articulation 0.9) TIME OUT in the coupled
+search — so hard sub-goal routing straight through the throat is infeasible.
+
+**What was done.** Added an opt-in `route_through_waypoints` to `TowLane` (`navigation/lanes.py`,
+`_expand_through_waypoints`): when set, `expand()` routes the train THROUGH the authored waypoints as ordered
+sub-goals (per-leg articulated plans concatenated with cart_yaw continuity) instead of free-planning start→goal and
+only validating the waypoints lie near the result — giving the author direct control of the corner. Default off ⇒
+byte-identical free-plan-and-validate. Both lanes carry ONE sparse via at the doorway (outbound [−3.87,13.4,−π/2]
+south-aligned north of the throat; return [−3.87,9.5,+π/2] north-aligned south of it): the reorientation happens in
+the OPEN floor to an aligned pose feeding the doorway corridor, and the corridor route then supplies the STRAIGHT
+lead-in through the throat so the cart lines up behind the base BEFORE the goal turn. Result: outbound 22.18→**21.3 m**
+(loop_ratio 2.37→2.28), return 15.11→**14.48 m** (1.3→1.24) — both shorter + the lead-in is now explicitly authored.
+
+**Proof (`check_tow_lanes`, against the REAL run config `mission-runtime-cc-collect.json`, 34/34 PASS).** Both lanes
+expand + `lane_follows_to_goal` = **arrived_stopped** closed-loop with jitter (no lane_not_acquired / stop_replan
+churn); the swept envelope is clear against the live cloud; `new_obstacle_on_lane_still_blocks_tow` (a real obstacle
+still stops the tow); and the new `portal_leadin_aligns_cart` asserts a contiguous straight run through the throat
+where the cart articulation DECAYS to near-zero at the lead-in exit — outbound 0.093→**0.005**, return 0.61→**0.031**.
+So the cart provably lines up through the doorway before the turn, in the articulated model with realistic lag.
+
+**Honest caveat + option c.** The ~360° reorientation at the dock is geometry-FORCED (dock ~0.6 m from the throat,
+min radius 1.5, planner-fixed primitives) — the cart still reaches 0.80 rad during it, so if run-335 still stalls in
+the reorientation (not the throat), the corner cannot be made gentler by re-authoring alone. The fallback is
+**option c** (rigid hitch lock while towing: robot + cart turn as one body, removing the off-axle cart lag entirely
+during the reorientation) — NOT built per the captain's "try b first". What c would take: a `MobileController`
+tow-lock mode that pins cart_yaw = base_yaw (zero articulation) through the authored turn and releases it on the
+straight, a coupled-as-single-rigid-body swept footprint for the validator (the cart no longer trails off-axle, so
+the envelope is a fixed rigid shape), and a PhysX hitch-lock on the sim side; the nav model + `check_tow_lanes` would
+validate the single-body footprint along the same lanes.
+
 **(B) Would a live-train-matched outbound lane collapse the remaining layers? (one-page analysis).** The
 outbound lane's `cart_yaw` is authored by integrating the off-axle trailer kinematics from the lane START
 (cart aligned at the dock, articulation 0), but the coupled train enters the follow PARTWAY and already

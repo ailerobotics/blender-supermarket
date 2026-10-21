@@ -39,7 +39,7 @@ class TowLane:
     def __init__(self, name, start, goal, *, waypoints=(), start_cart_yaw=None,
                  goal_articulation=None, goal_tol_xy=0.30, goal_tol_yaw=0.26,
                  start_tol_xy=0.25, start_tol_yaw=0.15, start_tol_cart_yaw=0.20,
-                 waypoint_tol=1.25):
+                 waypoint_tol=1.25, route_through_waypoints=False):
         if not isinstance(name, str) or not name:
             raise ValueError('tow lane needs a non-empty name')
         self.name = name
@@ -61,6 +61,14 @@ class TowLane:
         self.goal_tol_xy, self.goal_tol_yaw = goal_tol_xy, goal_tol_yaw
         self.start_tol_xy, self.start_tol_yaw = start_tol_xy, start_tol_yaw
         self.start_tol_cart_yaw, self.waypoint_tol = start_tol_cart_yaw, waypoint_tol
+        # fm454 (option b): when set, expand() routes the train THROUGH the authored waypoints as
+        # ordered sub-goals (concatenating per-segment articulated plans with cart_yaw continuity)
+        # instead of free-planning start->goal and only validating the waypoints lie near the result.
+        # This gives the author DIRECT control over the corner shape -- a gentle, large-radius portal
+        # approach + a straight south lead-in (two collinear waypoints) so the towed cart lines up
+        # behind the base BEFORE the doorway, replacing the single sharp ~90 deg reorientation loop.
+        # Default False => free-plan-and-validate, byte-identical to the historical lane.
+        self.route_through_waypoints = bool(route_through_waypoints)
         # Set by expand(): the validated train trajectory (an articulated.Route).
         self.route = None
 
@@ -119,25 +127,59 @@ class TowLane:
         readable lane and the executed trajectory cannot silently diverge. Raises if the lane
         cannot be realised -- a broken lane fails the build rather than the mission.
         """
-        from .articulated import ArticulatedPlanner, TrainState
+        from .articulated import ArticulatedPlanner, Route, TrainState
         planner = ArticulatedPlanner(world, timeout=build_timeout)
         planner.seeds = []
         ga = self.goal_articulation if self.goal_articulation is not None else world.spec.max_articulation
         start = TrainState(self.start[0], self.start[1], self.start[2], self.start_cart_yaw)
-        route = planner.plan(start, self.goal, (), build_margin, ga)
-        if not route.states:
-            raise ValueError(f'tow lane {self.name!r} does not expand to a valid route against '
-                             f'the static map: {route.reason}')
-        for wp in self.waypoints:
-            near = min(math.dist((s.x, s.y), wp[:2]) for s in route.states)
-            if near > self.waypoint_tol:
-                raise ValueError(
-                    f'tow lane {self.name!r} waypoint {tuple(round(c, 2) for c in wp)} is '
-                    f'{near:.2f} m off the expanded centreline (> {self.waypoint_tol} m); '
-                    f'the authored lane and the realised trajectory disagree')
+        if self.route_through_waypoints and self.waypoints:
+            route = self._expand_through_waypoints(planner, world, start, ga, build_margin)
+        else:
+            route = planner.plan(start, self.goal, (), build_margin, ga)
+            if not route.states:
+                raise ValueError(f'tow lane {self.name!r} does not expand to a valid route against '
+                                 f'the static map: {route.reason}')
+            for wp in self.waypoints:
+                near = min(math.dist((s.x, s.y), wp[:2]) for s in route.states)
+                if near > self.waypoint_tol:
+                    raise ValueError(
+                        f'tow lane {self.name!r} waypoint {tuple(round(c, 2) for c in wp)} is '
+                        f'{near:.2f} m off the expanded centreline (> {self.waypoint_tol} m); '
+                        f'the authored lane and the realised trajectory disagree')
         self.route = route
         self.goal_articulation = ga
         return route
+
+    def _expand_through_waypoints(self, planner, world, start, ga, build_margin):
+        """fm454 (option b): plan the coupled train THROUGH the authored waypoints as ordered sub-goals.
+
+        Each leg is a full articulated plan from the running train state (x, y, yaw, cart_yaw) to the
+        next via-pose, concatenated with cart_yaw carried continuously from one leg's terminal state
+        into the next leg's start -- so the author shapes the corner directly (a gentle large-radius
+        approach + a straight south lead-in before the doorway) and the realised trajectory IS the
+        authored corner, not a free-plan that merely passes near it. Intermediate legs allow the full
+        articulation range (the cart settles by the kinematics); only the final leg is held to the
+        lane's goal_articulation. Raises if any leg cannot be realised against the static map."""
+        from .articulated import Route
+        legs = list(self.waypoints) + [self.goal]
+        states, curvatures = [], []
+        cur = start
+        for i, tgt in enumerate(legs):
+            leg_ga = ga if i == len(legs) - 1 else world.spec.max_articulation
+            seg = planner.plan(cur, tgt, (), build_margin, leg_ga)
+            if not seg.states:
+                raise ValueError(
+                    f'tow lane {self.name!r} leg {i} to {tuple(round(c, 2) for c in tgt)} does not '
+                    f'expand against the static map: {seg.reason}')
+            seg_states = seg.states
+            if states:
+                # the leg starts at `cur` (== the previous leg's terminal state); drop the duplicate
+                # junction state but keep every curvature (curvatures[k] drives states[k]->states[k+1]).
+                seg_states = seg_states[1:]
+            states.extend(seg_states)
+            curvatures.extend(seg.curvatures)
+            cur = seg.states[-1]
+        return Route(states, curvatures, 'validated_lane_via')
 
     @classmethod
     def from_config(cls, cfg):
@@ -145,7 +187,7 @@ class TowLane:
             raise ValueError('each tow lane must be an object')
         known = {'name', 'start', 'goal', 'waypoints', 'start_cart_yaw', 'goal_articulation',
                  'goal_tol_xy', 'goal_tol_yaw', 'start_tol_xy', 'start_tol_yaw',
-                 'start_tol_cart_yaw', 'waypoint_tol'}
+                 'start_tol_cart_yaw', 'waypoint_tol', 'route_through_waypoints'}
         unknown = set(cfg) - known
         if unknown:
             raise ValueError(f'unknown tow lane keys: {sorted(unknown)}')
@@ -157,6 +199,7 @@ class TowLane:
                    waypoints=cfg.get('waypoints', ()),
                    start_cart_yaw=cfg.get('start_cart_yaw'),
                    goal_articulation=cfg.get('goal_articulation'),
+                   route_through_waypoints=bool(cfg.get('route_through_waypoints', False)),
                    **{k: float(cfg[k]) for k in tol_keys if k in cfg})
 
 

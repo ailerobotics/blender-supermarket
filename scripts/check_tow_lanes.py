@@ -234,6 +234,52 @@ def check_reacquire_along_route(grid, lanes_cfg, report):
             reacq(True) == 'validated_lane', reason=reacq(True))
 
 
+def check_portal_leadin(grid, lanes_cfg, report):
+    """fm454 (option b, CAPTAIN): the re-authored portal corner must give the towed cart a STRAIGHT lead-in
+    through the doorway so it lines up behind the base BEFORE the goal turn (replacing the free-plan
+    reorientation that held the cart at steady-state articulation ~0.80 through a full loop). Prove, for every
+    lane that crosses the doorway throat (x ~= -3.87, the passable band in the y ~= 11 partition), that the
+    route contains a contiguous near-straight segment through the throat where (a) the base heading is aligned
+    with the doorway axis (|base_yaw| ~= pi/2) and (b) the cart articulation DECAYS to near-zero by the far
+    (exit) end of that segment -- i.e. the lead-in actually aligns the cart. A lane that does not cross the
+    throat is skipped (not every lane shares the corner)."""
+    spec = MobileSpec()
+    nav = lanes_cfg['navigation']
+    graph = TowLaneGraph.from_config(nav['tow_lanes'])
+    graph.expand_all(ArticulatedMap(grid, spec))
+    THROAT_X = (-4.35, -3.55)                       # the coupled-train passable band in the doorway gap
+    THROAT_Y = (9.7, 13.6)                          # from just south of the partition up into the approach
+    for lane in graph.lanes:
+        st, cv = lane.route.states, lane.route.curvatures
+        # the lead-in is a contiguous near-STRAIGHT run (|curvature| ~ 0, so constant base heading --
+        # the exact heading need not be pure N-S; the return threads the throat on a slight diagonal)
+        # that lies inside the doorway throat. Collect the LONGEST such run (the lead-in), not the first.
+        runs, cur = [], []
+        for i, s in enumerate(st):
+            straight = i >= len(cv) or abs(cv[i]) < 0.05
+            inside = THROAT_X[0] <= s.x <= THROAT_X[1] and THROAT_Y[0] <= s.y <= THROAT_Y[1]
+            if straight and inside:
+                cur.append(s)
+            else:
+                if cur:
+                    runs.append(cur)
+                cur = []
+        if cur:
+            runs.append(cur)
+        run = max(runs, key=len) if runs else []
+        if len(run) < 5:
+            continue                                # this lane does not thread the throat straight -- skip
+        span = math.dist((run[0].x, run[0].y), (run[-1].x, run[-1].y))
+        # the cart aligns THROUGH the lead-in: its articulation at the far (exit) end of the straight run --
+        # whichever end carries the smaller articulation -- must be near zero (the cart lined up behind base).
+        exit_art = min(abs(run[0].articulation), abs(run[-1].articulation))
+        entry_art = max(abs(run[0].articulation), abs(run[-1].articulation))
+        _record(report, f'portal_leadin_aligns_cart[{lane.name}]',
+                span >= 1.0 and exit_art <= 0.15,
+                straight_span_m=round(span, 2), cart_art_entry_rad=round(entry_art, 3),
+                cart_art_at_leadin_exit_rad=round(exit_art, 3), throat_states=len(run))
+
+
 def check_cart_yaw_tol_envelope(grid, lanes_cfg, report):
     """fm429 (run-324b/c): the coupled tow churns on stop_replan_tracking_error when the MEASURED cart
     yaw diverges past the 0.20 rad replan tolerance from the planned articulation on the lane's curves.
@@ -547,6 +593,7 @@ def main():
     check_proud_tolerance(grid, lanes_cfg, report)
     check_trust_static(grid, lanes_cfg, report)
     check_reacquire_along_route(grid, lanes_cfg, report)
+    check_portal_leadin(grid, lanes_cfg, report)
     check_cart_yaw_tol_envelope(grid, lanes_cfg, report)
     check_track_tol_envelope(grid, lanes_cfg, report)
     check_cart_yaw_rebase_envelope(grid, lanes_cfg, report)
