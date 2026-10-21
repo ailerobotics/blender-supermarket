@@ -8,6 +8,7 @@ import math
 from dataclasses import replace
 
 from twin.restock_manipulation.types import Result
+from .native_channel import StationAckStreamStalled
 
 
 class RosManipulationRuntime:
@@ -140,6 +141,13 @@ class RosManipulationRuntime:
         Returns True once the station reports a fresh collision_time (ready)."""
         try:
             self._pump(simulation_time, parked)
+        except StationAckStreamStalled:
+            # A frozen station-ack publisher is NOT a recoverable warm transient -- re-warming can
+            # never revive a dead publisher. Propagate the NAMED cause so the stage fails fast (run-335)
+            # instead of capping warm ticks, force-dispatching the grasp into a dead station, and dying
+            # on the opaque 30 s arm-command heartbeat backstop. Every other warm transient stays
+            # swallowed (byte-identical): the station re-prepares/recovers on the next tick as before.
+            raise
         except Exception as exc:
             self.latest = Result('running', 'warm', str(exc))
             return False

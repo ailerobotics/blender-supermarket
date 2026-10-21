@@ -33,6 +33,24 @@ _HEARTBEAT_UNAVAILABLE_S = max(2.0, min(120.0, float(os.environ.get('RESTOCK_HEA
 # when a stage_clock is wired (the sim profile); real-rig (stage_clock=None) keeps the wall bound alone.
 # See freshness-sim-clock-not-wall.
 _STAGE_UNAVAILABLE_S = max(1.0, min(120.0, float(os.environ.get('RESTOCK_STAGE_UNAVAILABLE_S', 3.0))))  # fm362
+# SIM-clock (stage) FROZEN-STAMP watchdog bound: fault if the station ack's stamp stops ADVANCING
+# (the publisher stopped ticking) for this many stage seconds while the consumer keeps reading the
+# same cached ack. The existing stage-gap guard above only catches the accepted-then-froze case (its
+# ref is the last ACCEPTED fresh ack); when the first sighting of the frozen ack is ALREADY stale (a
+# stage re-begin or a nulled self.latest after a stage stop, or a host-DDS relay delivery lag) the
+# out-of-window ack preempts that guard with the generic 'stale parked-station acknowledgement', which
+# a warm() retry swallows every tick -- the staleness delta then grows unbounded until the opaque 30 s
+# arm-command heartbeat backstop fires (run-335: station supervisor froze at stamp 0.9 s, correlated
+# with a sibling host IPC teardown, and the consumer spun on STATION_ACK_STALE to 'arm command
+# heartbeat lost'). This watchdog names that frozen-publisher cause and fails fast. Sim profile only
+# (engaged when stage_clock is wired); real-rig keeps the wall path. See freshness-sim-clock-not-wall.
+_STATION_ACK_FROZEN_S = max(0.5, min(120.0, float(os.environ.get('RESTOCK_STATION_ACK_FROZEN_S', 2.0))))
+
+
+class StationAckStreamStalled(RuntimeError):
+    """The station-ack publisher stopped advancing its stamp (a dead/frozen supervisor, not a
+    transient skew). Raised with a named cause so a frozen stream fails the stage fast instead of
+    being swallowed by a warm() retry until the opaque arm-command heartbeat backstop."""
 
 
 class JsonChannel:
@@ -94,7 +112,8 @@ class StationClient:
     # stage_clock seam reads the same stage-time source native_transport publishes on /clock, at the
     # moment of publish, so both sides share one clock domain and the ack's bound stays untouched.
     def __init__(self, channel, *, wall_clock=time.monotonic, stage_clock=None, publish_lag=0.,
-                 heartbeat_s=_HEARTBEAT_UNAVAILABLE_S, stage_unavailable_s=_STAGE_UNAVAILABLE_S):
+                 heartbeat_s=_HEARTBEAT_UNAVAILABLE_S, stage_unavailable_s=_STAGE_UNAVAILABLE_S,
+                 ack_frozen_s=_STATION_ACK_FROZEN_S):
         self.channel,self.wall_clock=channel,wall_clock
         self.stage_clock=stage_clock
         # Wall heartbeat-unavailable bound (real-rig 10 s; sim profile raises it for the slow place).
@@ -107,6 +126,16 @@ class StationClient:
         # Sim-clock (stage) supervisor-liveness bound (primary when stage_clock is wired).
         self.stage_unavailable_s=(max(1.0,min(120.0,float(os.environ['RESTOCK_STAGE_UNAVAILABLE_S'])))
                                   if 'RESTOCK_STAGE_UNAVAILABLE_S' in os.environ else float(stage_unavailable_s))
+        # Sim-clock FROZEN-STAMP watchdog bound (env wins over the passed value, matching the two bounds
+        # above). Re-read + clamp at ctor time so the sim-only env widen applies whether set before or
+        # after import.
+        self.ack_frozen_s=(max(0.5,min(120.0,float(os.environ['RESTOCK_STATION_ACK_FROZEN_S'])))
+                           if 'RESTOCK_STATION_ACK_FROZEN_S' in os.environ else float(ack_frozen_s))
+        # Last ack stamp VALUE observed for the current epoch, and the stage time it was FIRST seen.
+        # Tracked independent of whether the ack was ever ACCEPTED, so a frozen stamp is caught even
+        # when the stale-window check would preempt the accepted-ack stage-gap guard. Reset per epoch.
+        self._ack_stamp_seen=None
+        self._ack_stamp_stage=None
         # Stage time of the last accepted fresh ack, and of the epoch's first tick; the sim-clock
         # liveness gap is measured against whichever is later. None until the stage clock is first read.
         self._last_ack_stage=None
@@ -159,6 +188,8 @@ class StationClient:
         self.last_reply=None
         self._last_ack_stage=None
         self._begin_stage=None
+        self._ack_stamp_seen=None
+        self._ack_stamp_stage=None
         self.tick(now,parked=True)
         return self
 
@@ -171,6 +202,15 @@ class StationClient:
         if self._begin_stage is None:
             self._begin_stage=now
         reply=self.channel.read()
+        if reply and reply.get('epoch')==self.epoch:
+            # Frozen-stamp watchdog bookkeeping: remember the ack stamp value and the stage time it was
+            # FIRST seen, independent of whether the ack is ever accepted below. A publisher that stopped
+            # ticking keeps the SAME stamp while the mission stage clock advances -- detectable even when
+            # the stale-window check (below) would otherwise preempt the accepted-ack stage-gap guard.
+            stamp=reply.get('stamp')
+            if stamp!=self._ack_stamp_seen:
+                self._ack_stamp_seen=stamp
+                self._ack_stamp_stage=now
         if reply and reply.get('epoch')==self.epoch and reply!=self.latest:
             # Freshness window on the ack stamp vs the mission stage clock. The original tight
             # [0, 0.5] s rejected the ack the instant the host /clock drifted AHEAD of the mission
@@ -181,6 +221,19 @@ class StationClient:
             # genuinely dead host). Log the delta so a real stall is still attributable.
             delta=now-reply.get('stamp',-1)
             if not _ACK_LEAD<=delta<=_ACK_LAG:
+                # Distinguish a FROZEN publisher (the SAME stamp for > ack_frozen_s of advancing stage
+                # time: the host stopped ticking) from a one-off skew. A frozen stream is the run-335
+                # wedge -- name it (station_ack_stream_stalled) and fail fast, instead of spamming
+                # STATION_ACK_STALE every swallowed warm tick until the opaque 30 s arm-command
+                # heartbeat backstop. Sim clock only (real-rig keeps the generic wall path).
+                if (self.stage_clock is not None and self._ack_stamp_stage is not None
+                        and now-self._ack_stamp_stage>self.ack_frozen_s):
+                    frozen_for=now-self._ack_stamp_stage
+                    print(f'STATION_ACK_FROZEN stamp={reply.get("stamp")} now={now:.3f} '
+                          f'frozen_for={frozen_for:.3f} budget={self.ack_frozen_s}',flush=True)
+                    raise StationAckStreamStalled(
+                        f'station_ack_stream_stalled: stamp frozen at {reply.get("stamp")}s for '
+                        f'{frozen_for:.1f}s (publisher stopped)')
                 print(f'STATION_ACK_STALE delta={delta:.3f} now={now:.3f} '
                       f'stamp={reply.get("stamp")} window=[{_ACK_LEAD},{_ACK_LAG}]',flush=True)
                 raise ValueError('stale parked-station acknowledgement')
@@ -212,6 +265,10 @@ class StationClient:
             self.sequence=0
             self._prepared=False
             self.latest=None
+            # Fresh epoch: forget the prior epoch's observed stamp so the frozen-stamp watchdog does
+            # not carry a stale stage reference (or a coincidental stamp match) across the re-prepare.
+            self._ack_stamp_seen=None
+            self._ack_stamp_stage=None
         # Supervisor liveness. PRIMARY is the sim/stage clock (immune to render pacing): fault if stage
         # time has advanced past the last fresh ack (or the epoch's first tick) by more than the stage
         # bound. The WALL bound stays only as a generous frozen-sim backstop. Engaged on the stage clock

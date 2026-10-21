@@ -1,7 +1,7 @@
 import pytest
 
 from twin.restock.station import StationState, _MAX_RECOVERIES
-from twin.restock.native_channel import StationClient
+from twin.restock.native_channel import StationClient, StationAckStreamStalled
 
 
 def message(action='prepare',epoch=1,sequence=0,stamp=1.,parked=True):
@@ -249,3 +249,126 @@ def test_client_rejects_stale_or_different_epoch_readiness():
     channel.reply=dict(epoch=1,stamp=0.,state='ready',collision_time=0.)
     with pytest.raises(ValueError,match='stale'):
         client.tick(1.1,parked=True)
+
+
+# --- Frozen station-ack publisher watchdog (run-335) -------------------------------------------
+# run-335 (COLD collect): the station supervisor stopped publishing at stage ~0.9 s (stamp frozen at
+# 0.900000046, correlated with a sibling host IPC teardown). The host-DDS relay kept serving the last
+# cached ack, so the consumer saw a FROZEN stamp. After the first collect attempt's stop() nulled
+# self.latest, the frozen ack (first seen already stale) hit the generic 'stale parked-station
+# acknowledgement' path, which the warm() retry swallowed every tick -- the staleness delta grew
+# unbounded (delta 5.0 -> 8.2) until the opaque 30 s arm-command heartbeat backstop fired. The
+# watchdog names the frozen-publisher cause and fails fast on a bounded SIM-time budget.
+
+def test_frozen_ack_stamp_fails_fast_with_named_cause():
+    # The run-335 path: a frozen ack first SEEN while already stale (self.latest reset / relay delivery
+    # lag), so the stale-window check -- not the accepted-ack stage-gap guard -- is what fires. On the
+    # first sighting it is only 'stale' (we cannot yet know it is frozen); once the SAME stamp persists
+    # past ack_frozen_s of advancing stage time, it is named station_ack_stream_stalled and fails fast.
+    stage=[1.0]
+    channel=Channel()
+    client=StationClient(channel,wall_clock=lambda:0.,stage_clock=lambda:stage[0],
+                         heartbeat_s=1000.,stage_unavailable_s=1000.,ack_frozen_s=2.0)
+    client.begin('restock_camera_source',1.0)
+    # Frozen ack delivered late: first sighting at stage 5.0 is out-of-window -> generic stale.
+    stage[0]=5.0
+    channel.reply=dict(epoch=1,stamp=0.9,state='ready',collision_time=0.85)
+    with pytest.raises(ValueError,match='stale'):
+        client.tick(0.,parked=True)
+    # Same cached stamp, stage advanced < budget: still only 'stale' (not yet proven frozen).
+    stage[0]=5.0+1.5
+    with pytest.raises(ValueError,match='stale'):
+        client.tick(0.,parked=True)
+    # Same cached stamp beyond the budget of advancing stage time -> named fast fail.
+    stage[0]=5.0+2.1
+    with pytest.raises(StationAckStreamStalled) as exc:
+        client.tick(0.,parked=True)
+    assert 'station_ack_stream_stalled' in str(exc.value)
+    assert 'publisher stopped' in str(exc.value)
+    assert '0.9' in str(exc.value)
+
+
+def test_frozen_ack_watchdog_tolerates_a_long_healthy_advancing_stream():
+    # An ADVANCING stamp is never frozen, even across a warm far longer than the budget: no false trip.
+    stage=[1.0]
+    channel=Channel()
+    client=StationClient(channel,wall_clock=lambda:0.,stage_clock=lambda:stage[0],
+                         heartbeat_s=1000.,stage_unavailable_s=1000.,ack_frozen_s=2.0)
+    client.begin('restock_camera_source',1.0)
+    for s in (1.1,2.0,3.0,4.0,5.0,6.0,7.0):      # 6 s of stage time, >> the 2 s budget
+        stage[0]=s
+        channel.reply=dict(epoch=1,stamp=s,state='ready',collision_time=s-0.05)
+        client.tick(0.,parked=True)              # fresh (delta~0), accepted, stamp advances
+    assert client.ready(7.0)
+
+
+def test_frozen_ack_watchdog_disengaged_on_real_rig_without_stage_clock():
+    # Real-rig (stage_clock=None) keeps the generic wall path: a stale ack stays a ValueError 'stale',
+    # never the sim-clock StationAckStreamStalled, so behaviour is byte-identical off the sim profile.
+    channel=Channel()
+    client=StationClient(channel,wall_clock=lambda:0.)      # no stage_clock
+    client.begin('restock_camera_source',1.)
+    channel.reply=dict(epoch=1,stamp=0.,state='ready',collision_time=0.)
+    with pytest.raises(ValueError,match='stale'):
+        client.tick(10.,parked=True)
+    with pytest.raises(ValueError,match='stale'):           # persists -> still generic, never the stall
+        client.tick(20.,parked=True)
+
+
+def test_frozen_budget_env_overrides_passed_value(monkeypatch):
+    # The sim-only env widen WINS over any caller-passed value (isaac_factory passes config), matching
+    # the heartbeat_s / stage_unavailable_s bounds.
+    monkeypatch.setenv('RESTOCK_STATION_ACK_FROZEN_S','7.5')
+    client=StationClient(Channel(),wall_clock=lambda:0.,ack_frozen_s=2.0)
+    assert client.ack_frozen_s==7.5
+
+
+def test_accepted_then_frozen_still_uses_the_rich_host_stack_teardown_reason():
+    # When the ack was ACCEPTED first and then froze (reply == self.latest), the stale-window branch is
+    # skipped, so the existing stage-gap guard -- with its richer 'host stack went silent' reason --
+    # still fires; the frozen-stamp watchdog does not steal that case.
+    wall=[0.]; stage=[1.]
+    channel=Channel()
+    client=StationClient(channel,wall_clock=lambda:wall[0],stage_clock=lambda:stage[0],
+                         heartbeat_s=1000.,stage_unavailable_s=3.0)   # ack_frozen_s default 2.0
+    client.begin('restock_camera_source',1.)
+    stage[0]=1.1; wall[0]+=0.5
+    channel.reply=dict(epoch=1,stamp=1.1,state='ready',collision_time=1.05)
+    client.tick(0.,parked=True)
+    assert client.ready(0.)
+    stage[0]=1.1+3.1
+    with pytest.raises(RuntimeError) as exc:
+        client.tick(0.,parked=True)
+    assert 'heartbeat unavailable' in str(exc.value)
+    assert not isinstance(exc.value, StationAckStreamStalled)
+
+
+def test_warm_propagates_stall_but_swallows_other_transients():
+    # ros_manipulation.warm() must re-raise the named stall (a dead publisher is not a recoverable warm
+    # transient) so the stage fails fast, while every other warm transient stays swallowed (-> False).
+    from twin.restock.ros_manipulation import RosManipulationRuntime
+
+    class FakeFeedback:
+        def __init__(self): self.collision_time=-1.; self._p=True
+        def set_parked(self,v): self._p=v
+        def parked(self): return self._p
+
+    class FakeStation:
+        latest=None; stage_clock=None; collision_time=-1.
+        def __init__(self,exc): self.exc=exc
+        def tick(self,now,*,parked): raise self.exc
+        def ready(self,now): return False
+
+    stalled=RosManipulationRuntime(None,None,prepare_station=lambda o,j:None,
+        feedback=FakeFeedback(),
+        station=FakeStation(StationAckStreamStalled('station_ack_stream_stalled: stamp frozen')))
+    stalled._station_started=True
+    with pytest.raises(StationAckStreamStalled):
+        stalled.warm(1.0, parked=True)
+
+    transient=RosManipulationRuntime(None,None,prepare_station=lambda o,j:None,
+        feedback=FakeFeedback(),
+        station=FakeStation(ValueError('stale parked-station acknowledgement')))
+    transient._station_started=True
+    assert transient.warm(1.0, parked=True) is False          # swallowed as before
+    assert 'stale' in (transient.latest.reason or '')

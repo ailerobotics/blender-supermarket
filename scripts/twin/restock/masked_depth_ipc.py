@@ -182,7 +182,11 @@ def serve(socket_path, *, idle_timeout_s=600.0, depth_topic=WRIST_DEPTH_TOPIC,
     finally:
         node.get_logger().info(f'masked-depth publisher exiting; published={published}')
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.shutdown()                 # guard the double-shutdown RCLError when a second masked-depth
+        except Exception:                    # IPC (e.g. the mast camera_1 feed) already shut the context down
+            pass                             # -- the error is cosmetic at exit, but its traceback masked the
+                                             # real early-exit reason in run-335's cold station-freeze log
         conn.close()
         srv.close()
         try:
