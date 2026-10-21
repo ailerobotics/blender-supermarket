@@ -448,7 +448,8 @@ class ArticulatedController(Controller):
     def __init__(self, grid, spec=None, *, require_temporal_map=False, planner_timeout=None,
                  lane_graph=None, lane_static_tol=0.0, lane_trust_static=False,
                  lane_reacquire_along_route=False, lane_cart_yaw_tol=0.20,
-                 lane_curve_speed_floor=0.25, lane_max_curvature=None, **kwargs):
+                 lane_curve_speed_floor=0.25, lane_max_curvature=None,
+                 lane_coast_refusals=False, **kwargs):
         self.require_temporal_map=require_temporal_map
         self.spec=spec or MobileSpec()
         self.world=ArticulatedMap(grid,self.spec)
@@ -513,6 +514,17 @@ class ArticulatedController(Controller):
         self.lane_cart_yaw_tol=float(lane_cart_yaw_tol)
         self.lane_curve_speed_floor=float(lane_curve_speed_floor)
         self.lane_max_curvature=phys_kappa if lane_max_curvature is None else float(lane_max_curvature)
+        # fm433 (A'-2) / run-326b: following an AUTHORED lane, a jittering live cloud flickers transient
+        # gate refusals (insufficient_sensor_coverage, proud-return obstacle_stop) that DROP the validated
+        # route; the next tick re-plans on the changed cloud (replan_changed_observations), and the
+        # drop<->replan churn stalls the tow (run-326b: 58 replan + 23 measured_turn_radius while the base
+        # only crept 1.09 m). measured_turn_radius already COASTS (keeps the route); when this is set, EVERY
+        # non-tracking refusal on an active lane coasts too -- the route is KEPT and the base simply STOPS
+        # this tick (velocity 0 via _wait), so a genuinely new obstacle still halts the tow and a PERSISTENT
+        # refusal still fails via the blocked_timeout, but a transient cloud flicker no longer discards the
+        # lane. Scoped to an active authored lane (its geometry is fixed + build-validated). Default False
+        # => the legacy drop-and-replan (byte-identical).
+        self.lane_coast_refusals=bool(lane_coast_refusals)
         # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
         # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
         # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
@@ -834,7 +846,14 @@ class ArticulatedController(Controller):
             # which cycles and stalls the tow. Other refusals (obstacle, coverage, map, tracking
             # error) still drop the route and replan. A persistent trip still fails via _wait's
             # blocked timeout; self.blocked resets on the next clean tracking tick.
-            if result.reason!='measured_turn_radius':
+            # fm433 (A'-2): measured_turn_radius always coasts (keeps the route). When lane_coast_refusals
+            # is set and an authored lane is active, EVERY non-tracking refusal coasts too -- the route is
+            # kept and the base stops this tick (velocity 0), so a new obstacle still halts the tow and a
+            # persistent refusal still fails via _wait's blocked_timeout, but a transient live-cloud flicker
+            # no longer drops+replans the validated lane. Otherwise the legacy drop (byte-identical).
+            coast = (result.reason=='measured_turn_radius'
+                     or (self.lane_coast_refusals and self._active_lane is not None))
+            if not coast:
                 self.route=None
             return self._wait(dt,result.reason)
         self.blocked=0.0

@@ -380,6 +380,36 @@ class LaneCoupledTrackingKnobsTests(unittest.TestCase):
                                   lane_graph=self.graph, lane_max_curvature=0.4)
         self.assertAlmostEqual(c.lane_max_curvature, 0.4)
 
+    def _to_tracking(self, c):
+        c.start((4, 0, 0), True)
+        pose = (-4.0, 0.0, 0.0); v = w = 0.0
+        for t in range(80):
+            od = Odometry(pose, (t + 1) * 0.1, abs(v), w, 'test_fixture', 0.05)
+            r = c.step(0.1, od, Observation((t + 1) * 0.1, (), True, True, 0.0, 'test_fixture', 10.0),
+                       now=(t + 1) * 0.1)
+            if c.route is not None and c.route.states and r.reason == 'tracking':
+                return pose, v, w
+            v, w = r.linear, r.angular
+            th = pose[2] + w * 0.1
+            ns = advance(TrainState(pose[0], pose[1], pose[2], 0.0), v * 0.1, (w / v if abs(v) > 1e-6 else 0), self.spec)
+            pose = (pose[0] + v * 0.1 * math.cos(th), pose[1] + v * 0.1 * math.sin(th), th)
+        self.fail('did not reach lane tracking')
+
+    def test_coast_refusals_keeps_lane_through_refusal_fm433(self):
+        # fm433 (A'-2): with lane_coast_refusals, a gate refusal (here an obstacle ahead) on an ACTIVE lane
+        # KEEPS the route (coast) instead of dropping+replanning; the base still STOPS this tick (not
+        # 'tracking'), so a genuinely new obstacle still halts the tow. Default off => the legacy drop.
+        for coast, expect_route_kept in ((False, False), (True, True)):
+            c = ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, lane_graph=self.graph,
+                                      lane_coast_refusals=coast, blocked_timeout=40.0)
+            pose, v, w = self._to_tracking(c)
+            self.assertIsNotNone(c.route)
+            ahead = (pose[0] + 0.3, pose[1])       # obstacle right in front -> gate refusal
+            od = Odometry(pose, 10.0, abs(v), w, 'test_fixture', 0.05)
+            r = c.step(0.1, od, Observation(10.0, (ahead,), True, True, 0.0, 'test_fixture', 10.0), now=10.0)
+            self.assertNotEqual(r.reason, 'tracking')          # the tow STOPS for the obstacle
+            self.assertEqual(c.route is not None, expect_route_kept)   # coast keeps the lane; legacy drops it
+
 
 if __name__ == '__main__':
     unittest.main()

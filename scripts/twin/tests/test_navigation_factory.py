@@ -177,6 +177,10 @@ class FactoryDispatchTests(unittest.TestCase):
         self.assertAlmostEqual(c2.lane_curve_speed_floor, 0.15)
         self.assertAlmostEqual(c2.lane_max_curvature, 0.4)
 
+    def test_tow_lane_coast_refusals_flows_through(self):
+        self.assertFalse(_build('reference').lane_coast_refusals)             # default off
+        self.assertTrue(_build('reference', tow_lane_coast_refusals=True).lane_coast_refusals)
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

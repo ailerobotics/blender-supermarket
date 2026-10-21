@@ -389,6 +389,13 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     controller=MobileController(stage,paths['base_link'],cart_path,
         [paths['left_wheel_joint'],paths['right_wheel_joint']],spec=spec,
         drive_max_force=_wd.get('max_force'), drive_damping=_wd.get('damping'))
+    # fm433: confirm the wheel-drive tune actually reached the joints at runtime (run-326 applied it -- the
+    # mission.usda carried maxForce/damping -- but it left no log, so 'applied vs not' could not be read
+    # from the console; the tune turned out ineffective for the base's intrinsic under-tracking, which is a
+    # DRIVE/TRACTION fidelity issue present even UNCOUPLED, not cart drag).
+    print('WHEEL_DRIVE max_force=%.1f damping=%.1f wheel_friction=%s (defaults 80/100; the base under-tracks '
+          'commanded (v,omega) even uncoupled -- a traction/drive-fidelity GPU sweep lever)'
+          % (controller.drive_max_force, controller.drive_damping, config.get('wheel_friction')), flush=True)
     scenes=[str(p.GetPath()) for p in stage.Traverse() if p.IsA(UsdPhysics.Scene)]
     if len(scenes)!=1:
         raise ValueError('one composed physics scene required')
