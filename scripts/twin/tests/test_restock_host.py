@@ -286,6 +286,44 @@ class HostTests(unittest.TestCase):
         # processes = [moveit, container, masker, manipulation, trajectory] = 5.
         self.assertEqual(len(launch.entities), 2 * 5 + 1)
 
+    def test_mast_depth_off_by_default_single_feed(self):
+        # Absent or disabled mast_depth: the plan reports a single nvblox feed and carries no
+        # mast contract -- the single-feed default is unchanged.
+        for cfg in (self.config, self.config | {'mast_depth': {'enabled': False}}):
+            plan = launch_plan(cfg)
+            self.assertFalse(plan['mast_depth']['enabled'])
+            self.assertFalse(any('mast' in req for req in plan['required_external']))
+
+    def test_mast_depth_switch_adds_second_feed_contract(self):
+        from twin.restock_camera.mast_depth import nvblox_feed
+        feed = nvblox_feed()
+        plan = launch_plan(self.config | {'mast_depth': {'enabled': True}})
+        self.assertTrue(plan['mast_depth']['enabled'])
+        mast_reqs = [req for req in plan['required_external'] if 'mast_depth on' in req]
+        self.assertEqual(len(mast_reqs), 1)
+        # The Isaac-side contract names the mast masked-depth topic and frame the host wires
+        # to nvblox camera_1, and states the carton is masked as a rig-instance subtree.
+        self.assertIn(feed['masked_depth'], mast_reqs[0])
+        self.assertIn(feed['frame_id'], mast_reqs[0])
+        self.assertIn('camera_1', mast_reqs[0])
+        self.assertIn('carton', mast_reqs[0])
+
+    def test_reject_malformed_mast_depth(self):
+        for bad in ({'enabled': 'yes'}, {'on': True}, [], {'enabled': True, 'extra': 1}):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'mast_depth'):
+                launch_plan(self.config | {'mast_depth': bad})
+
+    @unittest.skipUnless(os.environ.get('RESTOCK_HOST_VALIDATE_INSTALLED') == '1',
+                         'explicit CPU-only installed-image validation')
+    def test_installed_mast_depth_adds_second_segmenter(self):
+        # With the switch on, the launch gains exactly one extra process (the mast segmenter)
+        # and its shutdown guard; off, it is the single-feed default (same baseline count).
+        from twin.restock_host.launch import description
+        self.assertEqual(dependencies()['errors'], [])
+        baseline = description(self.config)
+        enabled = description(self.config | {'mast_depth': {'enabled': True}})
+        self.assertEqual(len(enabled.entities), len(baseline.entities) + 2)
+
     def test_graph_requires_exact_types_and_all_servers(self):
         services = [(NS + '/' + k, [v]) for k, v in ENDPOINTS.items() if '/srv/' in v]
         actions = [(NS + '/' + k, [v]) for k, v in ENDPOINTS.items() if '/action/' in v]

@@ -14,7 +14,16 @@ from .lights import camera_lamp
 from .wrist_camera import wrist_camera_design
 
 
-def camera_config(scenario, manifest):
+def camera_config(scenario, manifest, *, mast_depth=False):
+    """Fixed station camera + QR support design (``source``/``cart``/``shelf``).
+
+    ``mast_depth`` (default False) adds the body-mounted mast depth camera that feeds the
+    nvblox obstacle map as a second feed while a carton is carried (see
+    :mod:`twin.restock_camera.mast_depth`); it has no QR support (``role`` ``nvblox_depth``),
+    is parented to ``robot_base`` and carries its own collision housing/bracket. When False the
+    output is byte-for-byte the historical design: existing cameras and the single-feed default
+    are unchanged unless the integration lane regenerates with the switch on.
+    """
     staging,unit = scenario['initial_staging'],scenario['handling_unit']
     if (unit['local_wall'] != 3 or unit['grasp_mode'] != 'side'
             or not np.allclose(unit['dimensions_m'],[.6,.4,.16])
@@ -205,6 +214,15 @@ def camera_config(scenario, manifest):
     if occlusion_window_s is not None and (not np.isfinite(occlusion_window_s)
                                            or occlusion_window_s < 0 or occlusion_window_s > 900):
         raise ValueError('scenario occlusion_window_s must be None or a finite 0..900 s sim duration')
+    if mast_depth:
+        # Body-mounted RealSense-class depth camera on the robot mast: nvblox's second feed
+        # (camera_1) so a carried carton occluding the wrist (camera_0) no longer freezes the
+        # ESDF. No QR support; parented to robot_base; its housing/bracket are collision
+        # geometry the arm/cart planning must see. Single-sourced from twin.restock_camera.mast_depth.
+        from .mast_depth import mast_camera_entry
+        mast_camera,mast_solids = mast_camera_entry()
+        cameras[mast_camera['id']] = mast_camera
+        solids.extend(mast_solids)
     return dict(schema='restock-camera-design.v2',evidence='geometric_design_not_sensor_capture',
                 runtime_ready=False,cameras=cameras,solids=solids,supports=supports,lamps=lamps,
                 cart_chassis_height_m=.20,required_depth_error_bound_m=.0002,

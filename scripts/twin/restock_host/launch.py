@@ -20,6 +20,15 @@ def description(config):
     if plan['static_errors']:
         raise ValueError('; '.join(plan['static_errors']))
     robot = plan['robot']
+    # Optional second nvblox depth feed: the body-mounted mast camera (camera_1), so a carried
+    # carton occluding the wrist (camera_0) no longer freezes the ESDF. Off by default: the
+    # whole feed below is skipped and the mapper stays single-camera. See
+    # twin.restock_camera.mast_depth and docs/restock_camera.md.
+    mast_enabled = bool(plan.get('mast_depth', {}).get('enabled'))
+    mast = None
+    if mast_enabled:
+        from twin.restock_camera.mast_depth import nvblox_feed
+        mast = nvblox_feed()
 
     def params(package, relative):
         return yaml.safe_load((Path(share(package)) / relative).read_text())['/**']['ros__parameters']
@@ -127,7 +136,8 @@ def description(config):
     world = {**common, 'global_frame': FRAME, 'map_clearing_frame_id': FRAME,
              'esdf_slice_bounds_visualization_attachment_frame_id': FRAME,
              'workspace_height_bounds_visualization_attachment_frame_id': FRAME,
-             'use_depth': True, 'use_color': False, 'use_lidar': False, 'num_cameras': 1,
+             'use_depth': True, 'use_color': False, 'use_lidar': False,
+             'num_cameras': 2 if mast_enabled else 1,
              'input_qos': 'SENSOR_DATA',
              'update_esdf_rate_hz': 0.0, 'static_mapper.workspace_bounds_type': 'bounding_box'}
     # nvblox's own input-queue-drop / per-message-delay counters to the stack log (see
@@ -140,11 +150,18 @@ def description(config):
     for key, val in zip(('min_corner_x_m', 'min_corner_y_m', 'min_height_m',
                          'max_corner_x_m', 'max_corner_y_m', 'max_height_m'), lo + hi):
         world['static_mapper.workspace_bounds_' + key] = float(val)
+    nvblox_remaps = [('camera_0/depth/image', NS + '/world_depth'),
+                     ('camera_0/depth/camera_info', NS + '/camera/masked_depth/camera_info')]
+    if mast_enabled:
+        # camera_1 is the mast feed: the second object_segmenter (below) republishes the
+        # mast rig+carton-masked depth on world_depth_mast with camera_info taken straight
+        # from the mast masked-depth stream (same pattern as camera_0).
+        nvblox_remaps += [('camera_1/depth/image', NS + '/' + mast['world_depth']),
+                          ('camera_1/depth/camera_info', NS + '/' + mast['masked_depth_info'])]
     nvblox_node = component('nvblox_ros', 'nvblox::NvbloxNode', 'nvblox_node', [
         str(Path(share('nvblox_examples_bringup')) / 'config/nvblox/nvblox_base.yaml'),
         str(Path(share('isaac_ros_manipulation_bringup')) / 'config/nvblox/nvblox_manipulator_base.yaml'),
-        world], [('camera_0/depth/image', NS + '/world_depth'),
-                 ('camera_0/depth/camera_info', NS + '/camera/masked_depth/camera_info')])
+        world], nvblox_remaps)
     # Load order matters: composable nodes load sequentially in one container, and the
     # CumotionPlanner constructor blocks waiting for the nvblox get_esdf_and_gradient
     # service, so the mapper must load BEFORE the planner or the whole container
@@ -221,6 +238,23 @@ def description(config):
     # propagate SIGINT to the rest of the stack; propagating it is exactly the run-266/268 whole-run
     # loss this lane fixes. The other components stay genuinely fatal (host-lifecycle lane territory).
     guarded = [container, masker, manipulation, trajectory]
+    if mast_enabled:
+        # Second segmenter for the mast feed: subscribes the mast rig-masked depth, masks the
+        # same grasp target out of it, and republishes world_depth_mast for nvblox camera_1.
+        # Identical node/parameters to the wrist masker above, only the topics differ. Guarded
+        # like the wrist masker: losing a masking feed must tear the stack down, not leave a
+        # planner reading a half-stale ESDF.
+        mast_masker = ExecuteProcess(cmd=[sys.executable, '-m', 'shelfbot.perception.object_segmenter',
+            '--ros-args', '-r', '__ns:=' + NS,
+            '-p', 'use_sim_time:=true', '-p', 'depth_in_topic:=' + NS + '/' + mast['masked_depth'],
+            '-p', 'depth_out_topic:=' + NS + '/' + mast['world_depth'],
+            '-p', 'bbox_topic:=' + NS + '/target_bbox', '-p', 'bbox_timeout_s:=0.5',
+            '-p', 'bbox_padding_px:=0']
+            + (['--log-level', 'debug'] if nvblox_diag else []),
+            additional_env={'PYTHONPATH': plan['shelfbot_root'] + os.pathsep + os.environ.get('PYTHONPATH', '')},
+            output='screen')
+        processes.append(mast_masker)
+        guarded.append(mast_masker)
     guards = [RegisterEventHandler(OnProcessExit(target_action=process,
               on_exit=[EmitEvent(event=Shutdown(reason='restock host component exited'))]))
               for process in guarded]
