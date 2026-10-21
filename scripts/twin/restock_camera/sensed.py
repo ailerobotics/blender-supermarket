@@ -241,6 +241,11 @@ class SupportGeometry:
     steady_domain: str = ''
     baseline_acquired_steady: float | None = None
     lifetime_s: float = 600.
+    # Commissioned camera<-support pose (world-constant: fixed source camera + fixed support, base
+    # parked). Persisted so apply_baselines can SEED RegisteredSupport.good, letting hold() re-express
+    # the commissioned registration through the LIVE base_from_camera before any clean observe prepare()
+    # runs (Option B / fm443). None on legacy baselines -> no seed (byte-identical clean-establish).
+    camera_from_support: tuple | None = None
 
     def age_at(self, evidence, now, *, wall_lifetime_s=None):
         """Baseline age bounded by ``lifetime_s`` on the SIM/node clock (``now``).
@@ -301,12 +306,16 @@ def calibrate_rigid_support(depth, support_polygon_uv, witness_polygon_uv, k,
     footprint = _rectangle(center[:2],required_xy)
     if not contains(corners[:,:2],footprint,registration.position_error_m):
         raise ValueError('measured quadrilateral does not cover full required footprint')
+    # World-constant camera<-support (base parked, camera + support world-fixed) so hold() can
+    # re-express the commissioned registration through the LIVE base_from_camera (Option B / fm443).
+    camera_from_support = _matrix_tuple(np.linalg.inv(np.asarray(base_from_camera, float)) @ pose)
     return SupportGeometry(registration.support_id,registration.marker_id,registration.revision,
         registration.evidence.camera_id,registration.evidence.camera_revision,k,calibration_id,
         registration.evidence.frame_id,registration.evidence.stamp,
         _matrix_tuple(corners),_matrix_tuple(witness),tuple(center),tuple(required_xy),
         registration.position_error_m,registration.layout_id,registration.evidence.session_id,
-        registration.evidence.steady_domain,registration.evidence.acquired_steady,lifetime_s)
+        registration.evidence.steady_domain,registration.evidence.acquired_steady,lifetime_s,
+        camera_from_support=camera_from_support)
 
 
 @dataclass(frozen=True)

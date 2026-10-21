@@ -28,8 +28,13 @@ def main():
     p.add_argument('--scenario', required=True, type=Path, help='mission scenario JSON')
     p.add_argument('--manifest', required=True, type=Path, help='mobile manifest JSON')
     p.add_argument('--output', required=True, type=Path, help='camera_config.json path to write')
+    p.add_argument('--mast-depth', action='store_true',
+                   help='add the body-mounted mast depth camera (nvblox camera_1) that the carried '
+                        'carton cannot block -- fixes the place re-park ESDF freeze (B\'). Requires '
+                        'host.json mast_depth.enabled=true to be consumed.')
     a = p.parse_args()
-    cfg = camera_config(json.loads(a.scenario.read_text()), json.loads(a.manifest.read_text()))
+    cfg = camera_config(json.loads(a.scenario.read_text()), json.loads(a.manifest.read_text()),
+                        mast_depth=a.mast_depth)
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps(cfg, indent=1) + '\n')
     summary = {'wrote': str(a.output),

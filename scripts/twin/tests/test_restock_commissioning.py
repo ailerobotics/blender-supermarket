@@ -146,6 +146,39 @@ def test_apply_baselines_attaches_tracker_so_mission_capture_validates(tmp_path)
     assert result.slots[0].free_dimensions[2] == 0                # foreground seen, not empty
 
 
+def test_commissioned_geometry_carries_camera_from_support(tmp_path):
+    # Option B (fm443): calibrate persists the world-constant camera<-support pose so the hold()
+    # prior can be seeded at boot (the collect-under-occlusion fix).
+    _, records, _ = commissioned_dir(tmp_path)
+    g = records[0].geometry
+    assert g.camera_from_support is not None
+    assert np.asarray(g.camera_from_support).shape == (4, 4)
+
+
+def test_apply_baselines_seeds_a_holdable_prior_from_the_commissioned_pose(tmp_path):
+    # Option B: after attach the tracker has a hold()-able prior (self.good) BEFORE any clean observe
+    # prepare(), so collect under the 300 s occlusion window no longer raises 'no established support
+    # registration'. Seeded base_from_camera=I and registration.base_from_support=camera_from_support
+    # make hold()'s re-expression base_from_support = live_bfc @ camera_from_support exact.
+    from dataclasses import replace
+    from scripts.twin.restock_camera.sensed import RegisteredSupport
+    directory, _, (k, camera, *_rest) = commissioned_dir(tmp_path)
+    loaded = C.load_baselines(directory)
+    boot = context(k, camera)
+    C.apply_baselines(boot, loaded, required_locations=['backstock_00'])
+    tracker = boot.slots[0].tracker
+    assert tracker.good is not None
+    view, now0 = tracker.good
+    assert now0 == float('inf')
+    assert np.allclose(np.asarray(view.base_from_camera), np.eye(4))
+    assert np.allclose(np.asarray(view.registration.base_from_support),
+                       np.asarray(tracker.geometry.camera_from_support))
+    # A legacy baseline without the pose leaves the prior unseeded (byte-identical clean-establish).
+    legacy = RegisteredSupport(replace(loaded['backstock_00'].geometry, camera_from_support=None))
+    C._seed_tracker_good(legacy)
+    assert legacy.good is None
+
+
 # --- commissioning freshness bound (deterministic, no real decode wall time) --
 
 def test_commission_uses_its_own_freshness_bound_not_the_live_half_second(tmp_path):
