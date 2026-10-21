@@ -558,13 +558,23 @@ class TransferController:
                                           'the collision world stayed stale -- failing fast before the '
                                           'arm-command heartbeat watchdog'
                                           % (wall - self._pause_wall_start, self.phase, why[0]))
+                    # BEST-EFFORT keep-alive: only meaningful when the motion port is IDLE (no active
+                    # trajectory). If a move is still active the port raises ('motion already active',
+                    # ros_adapter.py) -- and that active trajectory is ALREADY feeding the arm-command
+                    # stream, so the hold is unnecessary; swallow the raise (never crash the pause --
+                    # run-324 cold: an uncaught RuntimeError here killed the step -> heartbeat lost). The
+                    # WALL budget above is the guaranteed backstop either way.
                     if (len(sensors.joint_positions) == 6
                             and callable(getattr(self.motion, 'begin_joint_goal', None))):
-                        self.motion.begin_joint_goal(tuple(sensors.joint_positions),
-                                                     tuple(sensors.joint_positions))
+                        try:
+                            self.motion.begin_joint_goal(tuple(sensors.joint_positions),
+                                                         tuple(sensors.joint_positions))
+                        except Exception as exc:   # noqa: BLE001 -- active move already feeds the stream
+                            print('COLLISION_STALE_PAUSE hold skipped (%s: %s)'
+                                  % (type(exc).__name__, exc), flush=True)
                 print('COLLISION_STALE_PAUSE phase=%s now=%.3f %s (max_age %.3f)' % (
                     self.phase, now, why[0], self.collision_stale_tol_s), flush=True)
-                return self._result()   # running; the hold above keeps the arm stationary + stream alive
+                return self._result()   # running; a hold (if idle) + the wall budget feed/bound the pause
             print('CONTROLLER_INVARIANT_TRIP phase=%s now=%.3f %s' % (self.phase, now, ' '.join(why)),
                   flush=True)
             return self._fail('base moving or stale/missing feedback/collision world [' + ','.join(why) + ']')

@@ -370,6 +370,33 @@ def test_collision_stale_pause_keeps_stream_alive_and_wall_fail_fast_fm427():
     assert r.status == 'failed' and 'collision-stale pause' in r.reason and 'heartbeat' in r.reason, r.reason
 
 
+def test_collision_stale_pause_hold_swallows_motion_active_raise_fm427():
+    # fm427 (A1) / run-324 cold REGRESSION: the keep-alive calls begin_joint_goal, which the REAL host
+    # (RosMotionPort) raises 'motion already active' when the lift trajectory is still active -- and that
+    # active move is ALREADY feeding the arm-command stream, so the hold is unnecessary. The raise MUST be
+    # swallowed (an uncaught RuntimeError here killed the cold step -> heartbeat lost); the WALL budget
+    # stays the backstop. (FixtureMotion does not model the guard, which is why the CPU suite missed it.)
+    clock = [0.0]
+    c, m = make_controller('collect', steady_clock=lambda: clock[0])
+    c.collision_stale_tol_s = 0.8
+    c.collision_pause_wall_s = 5.0
+    t = run_to(c, 'lift'); assert c.held
+    m.outcome = 'running'
+    c.step(.1, packet(c, t, contact=True))
+    def boom(*a, **k):
+        raise RuntimeError('motion already active')
+    m.begin_joint_goal = boom
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        r = c.step(.1, packet(c, t + .1, contact=True, collision_time=(t + .1) - 0.6))
+    assert r.status == 'running', r.reason                     # swallowed, NOT crashed
+    assert 'hold skipped' in buf.getvalue()
+    clock[0] = 6.0                                             # wall budget still fails fast past the bound
+    r = c.step(.1, packet(c, t + .2, contact=True, collision_time=(t + .2) - 0.6))
+    assert r.status == 'failed' and 'collision-stale pause' in r.reason, r.reason
+
+
 def test_collision_stale_pause_default_off_is_byte_identical_fm427():
     # collision_pause_wall_s == 0 (default) => the legacy empty-control pause: NO hold command issued,
     # NO wall fail-fast (the pause still holds pose and resumes on a fresh stamp, exactly as before).
