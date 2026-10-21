@@ -2638,3 +2638,25 @@ occludes the carton top before any clean source frame — so the undecoded-label
 "clean label read" from the baseline would assert a SKU that was never decoded (evidence-integrity
 violation), so NO camera-lane code change; the fix is orchestration (clean source frame before the grasp
 occludes), integration-owned, same as the support-registration cold-collect conclusion.
+
+### 2026-10-21 — run-332 (fm448 GO): both warm fixes landed (reacquire + W2); cold C1 landed; warm blocker moves to stop_replan_tracking_error
+
+**WARM run-332b/c — reacquire + W2 both worked; next blocker is the 0.25 m stop_replan tolerance.**
+`lane_not_acquired` is now **0** (was 846 — the reacquire correctness fix works), and W2
+(tow_lane_curve_speed_floor=0.55) held the turn: measured rw/rv **0.41** (no measured_turn_radius). But the
+churn moved to **`stop_replan_tracking_error` × 583 ↔ `route_ready` × 584**: the base re-acquires the lane,
+follows a tick or two, then deviates **>0.25 m** from the nearest authored route point on the turn and drops
+the route again → re-plan → re-acquire → drop, ~0 net progress → nav-stuck 120 s at x=−3.90. So after the
+over-rotation and re-acquire fixes, the coupled turn's tracking error exceeds the hardcoded 0.25 m
+`stop_replan_tracking_error` xy tolerance. Per fm448 this tolerance may be loosened WITH a swept-envelope
+proof (as done for cart_yaw) — the next step: make it configurable, loosen to the value the envelope admits,
+and prove it in check_tow_lanes. (C) measured_turn_fault_s did not fire (no over-rotation). park/transfer/
+verify/return not reached.
+
+**COLD run-332 — C1 landed.** `needs a new monotonic frame` is now **0** (was 2 — C1's held-frame
+acceptance works), `no established support registration` stays 0 (Option B). Remaining collect errors
+(`no new synchronized rendered camera frame` ×2, `unknown or undecoded label` ×2, one stale-evidence) are
+the integration-owned sequencing/decode class (clean source frame + label read before the grasp occludes) —
+the same conclusion as the camera report's Deliverable 2; no further camera-lane code change is safe/offline.
+
+mp4: run-332 262 KB (cold), run-332b 9.09 MB, run-332c 8.86 MB. BASE_ATT ~-0.71 deg.
