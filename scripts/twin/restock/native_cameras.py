@@ -233,6 +233,40 @@ def initialize_collision_camera(stage, design, frame_prim_path, *, session_id=No
     return camera, spec['frame']
 
 
+def initialize_mast_camera(stage, design, base_path, *, session_id=None,
+                           steady_domain=None, resolution=None):
+    """Author + wrap the body-mounted mast depth camera (nvblox camera_1) for its masked-depth bridge.
+
+    Mirrors :func:`initialize_collision_camera` for the wrist, but the mast camera has no separately
+    authored prim: it is authored HERE from the camera design's ``mast`` entry (``role ==
+    'nvblox_depth'``, ``parent == 'robot_base'``; :func:`twin.restock_camera.mast_depth.mast_camera_entry`).
+    ``base_path`` is the robot base prim (``assembly.paths['ur_base_link']``). The design
+    ``parent_from_optical`` is the ROS optical frame in base; a USD ``Camera`` child is authored with
+    the optical->USD flip (``+Y`` up, looks ``-Z``) exactly as :class:`CameraRig` does for the station
+    cameras, then initialized with distance-to-image-plane + instance-id segmentation so the bridge can
+    rig+carton-mask it. Returns ``(RenderedCamera, camera_path, frame_id)``, or ``None`` when the design
+    carries no mast camera (mast depth not enabled) -- so a disabled mast authors nothing.
+    """
+    from twin.restock_camera.mast_depth import MAST_FRAME_ID
+    spec = design.get('cameras', {}).get('mast')
+    if spec is None:
+        return None
+    from pxr import Gf, UsdGeom
+    k = Intrinsics(**spec['intrinsics'])
+    matrix = rigid(spec['parent_from_optical'])
+    root = base_path.rstrip('/') + '/restock_camera_mast'
+    if stage.GetPrimAtPath(root):
+        raise ValueError('refusing to overwrite mast camera mount: ' + root)
+    UsdGeom.Xform.Define(stage, root).AddTransformOp().Set(Gf.Matrix4d(*matrix.T.ravel().tolist()))
+    camera_path = root + '/Camera'
+    # USD camera looks -Z, +Y up; the ROS optical parent is +Z, +Y down (CameraRig convention).
+    UsdGeom.Camera.Define(stage, camera_path).AddTransformOp().Set(
+        Gf.Matrix4d(1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1))
+    camera = initialize_camera(camera_path, k, name='restock_mast', session_id=session_id,
+                               steady_domain=steady_domain, resolution=resolution)
+    return camera, camera_path, MAST_FRAME_ID
+
+
 class CameraRig:
     def __init__(self, *, stage, specs, parent_paths, frequency=-1, render_scale=1.0,
                  camera_render_scales=None):

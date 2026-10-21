@@ -206,6 +206,20 @@ def masked_depth_from_frame(frame, rig_prefixes, id_cache, *, invalid=INVALID_DE
     masked = mask_rig_depth(depth, ids, id_cache[1], invalid=invalid)
     return masked, id_cache
 
+
+def _serve_topic_args(topics):
+    """CLI suffix for ``masked_depth_ipc.serve``'s optional per-feed topic overrides.
+
+    ``None`` (the wrist) => ``''`` so the spawned command is byte-identical to the legacy wrist
+    invocation. A dict ``{'depth','info','bbox'}`` appends ``' <depth> <info> <bbox>'`` (a falsy
+    ``bbox`` becomes the literal ``none``, which disables the bbox publisher in ``serve``).
+    """
+    if not topics:
+        return ''
+    return " {depth} {info} {bbox}".format(depth=topics['depth'], info=topics['info'],
+                                           bbox=topics.get('bbox') or 'none')
+
+
 class ArmDepthSubprocessBridge:
     """Ship arm masked-depth frames to the out-of-Isaac rclpy publisher subprocess.
 
@@ -222,7 +236,7 @@ class ArmDepthSubprocessBridge:
 
     def __init__(self, *, camera, camera_path, stage, transport, sensors, rig_prefixes,
                  runtime_env, python='python3', frame_id='restock_camera_arm', domain=88,
-                 invalid=INVALID_DEPTH, socket_path=None, idle_timeout_s=1800.0):
+                 invalid=INVALID_DEPTH, socket_path=None, idle_timeout_s=1800.0, topics=None):
         from pxr import UsdGeom, Gf
         self.camera, self.sensors = camera, sensors
         self.rig_prefixes = tuple(rig_prefixes)
@@ -258,7 +272,8 @@ class ArmDepthSubprocessBridge:
                    f'FASTDDS_BUILTIN_TRANSPORTS=UDPv4 SKIP_DEFAULT_XML=1; '
                    f'unset FASTRTPS_DEFAULT_PROFILES_FILE FASTDDS_DEFAULT_PROFILES_FILE '
                    f'ROS_DISCOVERY_SERVER CYCLONEDDS_URI RMW_FASTRTPS_USE_QOS_FROM_XML; '
-                   f'exec {python} {ipc_script} serve {self._socket_path} {float(idle_timeout_s)}')
+                   f'exec {python} {ipc_script} serve {self._socket_path} {float(idle_timeout_s)}'
+                   f'{_serve_topic_args(topics)}')
         # Spawn under a CLEAN base env, NOT the Isaac process env: Isaac loads its own bundled
         # ("internal") jazzy rclpy/rmw and sets AMENT/PYTHONPATH/LD_LIBRARY_PATH to it; inheriting
         # that and sourcing the host /opt/ros jazzy overlay on top mixes two ROS middlewares, so
@@ -320,3 +335,61 @@ class ArmDepthSubprocessBridge:
                     self._proc.wait(timeout=5)
                 except Exception:
                     self._proc.kill()
+
+
+def _rig_root(path):
+    """Top-level USD prim of a path, e.g. '/mobile_ur10_rollwagen/ur_base_link' -> '/mobile_ur10_rollwagen'."""
+    parts = str(path).strip('/').split('/')
+    return '/' + parts[0] if parts and parts[0] else str(path)
+
+
+def mast_sim_topics(namespace='/restock_sim'):
+    """Full ROS topic names the mast (camera_1) masked-depth publisher uses (pure; no Isaac).
+
+    The design/host single-sources the NS-relative names from
+    :func:`twin.restock_camera.mast_depth.nvblox_feed`; this joins them to the mission namespace
+    (``/restock_sim``) the host launch (``restock_host.launch``) subscribes on. ``bbox`` is ``None``:
+    the mast segmenter reuses the shared ``/restock_sim/target_bbox`` the wrist already publishes.
+    """
+    from twin.restock_camera.mast_depth import nvblox_feed
+    feed = nvblox_feed()
+    ns = namespace.rstrip('/')
+    return {'depth': ns + '/' + feed['masked_depth'],
+            'info': ns + '/' + feed['masked_depth_info'], 'bbox': None}
+
+
+def build_mast_depth_bridge(*, stage, assembly, design, settings,
+                            gripper_path='/RestockPanelGripper', _initialize=None, _bridge_cls=None):
+    """Author the mast depth camera prim + wire its masked-depth/info publisher (nvblox camera_1).
+
+    Mirrors ``restock_manipulation.isaac_factory._build_masked_depth_bridge`` for the wrist
+    (camera_0), but the mast camera (camera_1) is body-mounted on ``robot_base`` and authored here
+    from the design's ``mast`` entry (:func:`native_cameras.initialize_mast_camera`). Rig prefixes
+    (robot + cart + gripper subtrees whose self-pixels are invalidated -- INCLUDING the carried
+    carton, which rides the rig as an instance subtree) match the wrist. The feed publishes only
+    masked_depth + camera_info on frame ``restock_camera_mast``; the grasp-target bbox stays the
+    single shared ``/restock_sim/target_bbox`` the wrist publishes, so ``sensors=None`` (no bbox).
+    Returns the bridge, or ``None`` when the design carries no mast camera (mast depth disabled) --
+    so a disabled mast authors no prim, allocates no render product and spawns no publisher.
+
+    ``_initialize``/``_bridge_cls`` are the camera-authoring + publisher-construction seams (default
+    to the real Isaac authoring + :class:`ArmDepthSubprocessBridge`); CPU tests inject fakes so the
+    wiring (prefixes, topics, frame, sensors) is exercised without authoring a prim or spawning the
+    out-of-Isaac publisher subprocess.
+    """
+    initialize = _initialize
+    if initialize is None:
+        from .native_cameras import initialize_mast_camera as initialize
+    built = initialize(stage, design, assembly.paths['ur_base_link'])
+    if built is None:
+        return None
+    camera, camera_path, frame_id = built
+    cart_root = assembly.evidence['composition']['assets']['cart']['root']
+    prefixes = settings.get('rig_prefixes') or tuple(dict.fromkeys(
+        [_rig_root(assembly.paths['articulation']), _rig_root(cart_root), gripper_path]))
+    bridge_cls = _bridge_cls or ArmDepthSubprocessBridge
+    return bridge_cls(
+        camera=camera, camera_path=camera_path, stage=stage, transport=assembly.transport,
+        sensors=None, rig_prefixes=prefixes, frame_id=frame_id,
+        domain=int(settings.get('domain', 88)), runtime_env=settings['runtime_env'],
+        python=settings.get('python', 'python3'), topics=mast_sim_topics())

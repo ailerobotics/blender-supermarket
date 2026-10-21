@@ -459,11 +459,19 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         loc for loc in (config.get('collect_source_location') or _job.get('source_bin'),
                         config.get('transfer_shelf_location') or _job.get('shelf_id'),
                         'rollwagen') if loc))
+    # Opt-in body-mounted mast depth camera (nvblox camera_1), so a carton occluding the wrist
+    # (camera_0) no longer freezes the ESDF. Absent/false => byte-identical (no mast camera in the
+    # design, no mast prim/render product, no second publisher). It reuses the wrist feed's host
+    # overlay ROS env / python / domain from the `masked_depth` block, so the mast publisher spawns
+    # the same way; `mast_depth` may override any of them (e.g. its own rig_prefixes).
+    _mast_enabled = bool(config.get('mast_depth', {}).get('enabled'))
+    _mast_settings = {**config.get('masked_depth', {}), **config.get('mast_depth', {})}
     assembly.sensing_sources = build_sensing_sources(
         assembly=assembly, scenario=scenario, manifest=mobile_manifest,
         manip_runtime=manipulation.controller, pose_bridge_root=config['pose_bridge_root'],
         render_scale=float(config.get('render_scale', 1.0)),
-        full_res_locations=_decode_locations)
+        full_res_locations=_decode_locations,
+        mast_depth=_mast_enabled, mast_depth_settings=_mast_settings)
     sensing = sensing_factory(app=app, assembly=assembly, plan=plan, config=config, output=output)
     capture = sensing['capture']
     recording_camera = sensing['recording_camera']
@@ -554,6 +562,9 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         native_transport=assembly.transport, command_gate=assembly.command_gate,
         on_action=on_action, record_stride=record_stride,
         sensing_stride=sensing_stride, set_render_suspended=gate_seam,
+        # Mast masked-depth publisher (nvblox camera_1), or None when mast depth is off. The port
+        # publishes it on the sensing cadence (_masked_depth_due); None => byte-identical.
+        masked_depth=assembly.sensing_sources.get('mast_depth'),
         # Stationary-operation gate: real-rig defaults 5 mm / 10 mrad; the sim profile relaxes them
         # (firstmate msg 252 sim-only fidelity relaxation) to tolerate the harmless ~11 mrad contact
         # chassis-pivot impulse. Absent from config => real-rig defaults (real path untouched).
@@ -579,6 +590,11 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
 
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)
+    # Terminate the mast masked-depth publisher subprocess on shutdown (the wrist bridge is closed by
+    # RosManipulationRuntime; the mast rides the port's masked_depth hook, so close it here). No-op None.
+    _mast_bridge = assembly.sensing_sources.get('mast_depth')
+    if _mast_bridge is not None and hasattr(_mast_bridge, 'close'):
+        closers = closers + (_mast_bridge.close,)
     return {'navigation': navigation, 'mobile': assembly.mobile, 'manipulation': manipulation,
             'port': port, 'closers': closers, 'recording': recording}
 

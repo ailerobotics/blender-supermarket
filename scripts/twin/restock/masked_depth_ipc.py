@@ -24,6 +24,12 @@ import struct
 MAGIC = b'MDF1'
 _LEN = struct.Struct('>I')
 
+# Default (eye-in-hand wrist, camera_0) ROS topics. The mast feed (camera_1) passes its own via
+# the serve() kwargs / CLI, so the wrist path stays byte-identical (it passes no topic args).
+WRIST_DEPTH_TOPIC = '/restock_sim/camera/masked_depth'
+WRIST_INFO_TOPIC = '/restock_sim/camera/masked_depth/camera_info'
+WRIST_BBOX_TOPIC = '/restock_sim/target_bbox'
+
 
 def pack_frame(header, depth_bytes):
     """Serialize one frame (header dict + raw depth bytes) to a length-prefixed message."""
@@ -92,13 +98,18 @@ class FrameWriter:
             pass
 
 
-def serve(socket_path, *, idle_timeout_s=600.0):
+def serve(socket_path, *, idle_timeout_s=600.0, depth_topic=WRIST_DEPTH_TOPIC,
+          info_topic=WRIST_INFO_TOPIC, bbox_topic=WRIST_BBOX_TOPIC):
     """Subprocess entry: bind the socket, accept the Isaac writer, publish each frame.
 
     Runs under the host overlay ROS env (domain 88). Publishes masked_depth (Image 32FC1),
     camera_info (CameraInfo) and target_bbox (Float32MultiArray) with SENSOR_DATA QoS -- the
     exact QoS the shelfbot object_segmenter subscribes with. Exits when the writer closes or
     after `idle_timeout_s` with no frame.
+
+    The topic names default to the wrist (camera_0) feed; the mast (camera_1) feed passes its own
+    ``depth_topic``/``info_topic`` and ``bbox_topic=None`` (the shared ``/restock_sim/target_bbox``
+    is published once by the wrist, so the mast segmenter reuses it -- no second bbox publisher).
     """
     import os
     import numpy as np
@@ -127,9 +138,11 @@ def serve(socket_path, *, idle_timeout_s=600.0):
 
     rclpy.init(args=None)
     node = Node('restock_masked_depth_pub')
-    depth_pub = node.create_publisher(Image, '/restock_sim/camera/masked_depth', qos_profile_sensor_data)
-    info_pub = node.create_publisher(CameraInfo, '/restock_sim/camera/masked_depth/camera_info', qos_profile_sensor_data)
-    bbox_pub = node.create_publisher(Float32MultiArray, '/restock_sim/target_bbox', qos_profile_sensor_data)
+    depth_pub = node.create_publisher(Image, depth_topic, qos_profile_sensor_data)
+    info_pub = node.create_publisher(CameraInfo, info_topic, qos_profile_sensor_data)
+    # Only the wrist publishes the shared grasp-target bbox; the mast reuses it (bbox_topic=None).
+    bbox_pub = (node.create_publisher(Float32MultiArray, bbox_topic, qos_profile_sensor_data)
+                if bbox_topic else None)
 
     conn, _ = srv.accept()
     conn.settimeout(idle_timeout_s)
@@ -158,7 +171,7 @@ def serve(socket_path, *, idle_timeout_s=600.0):
             info.p = [k[0], 0.0, k[2], 0.0, 0.0, k[4], k[5], 0.0, 0.0, 0.0, 1.0, 0.0]
             depth_pub.publish(img)
             info_pub.publish(info)
-            if header.get('bbox') is not None:
+            if bbox_pub is not None and header.get('bbox') is not None:
                 msg = Float32MultiArray()
                 msg.data = [float(v) for v in header['bbox']]
                 bbox_pub.publish(msg)
@@ -182,7 +195,15 @@ if __name__ == '__main__':
     import sys
     if len(sys.argv) >= 3 and sys.argv[1] == 'serve':
         timeout = float(sys.argv[3]) if len(sys.argv) > 3 else 600.0
-        serve(sys.argv[2], idle_timeout_s=timeout)
+        # Optional per-feed topic overrides (the mast feed): [depth_topic info_topic [bbox_topic]].
+        # A bbox topic of '' or 'none' disables the bbox publisher (mast reuses the shared wrist one).
+        kw = {}
+        if len(sys.argv) > 5:
+            kw['depth_topic'], kw['info_topic'] = sys.argv[4], sys.argv[5]
+        if len(sys.argv) > 6:
+            kw['bbox_topic'] = None if sys.argv[6] in ('', 'none') else sys.argv[6]
+        serve(sys.argv[2], idle_timeout_s=timeout, **kw)
     else:
-        print('usage: masked_depth_ipc.py serve <socket_path> [idle_timeout_s]', file=sys.stderr)
+        print('usage: masked_depth_ipc.py serve <socket_path> [idle_timeout_s] '
+              '[depth_topic info_topic [bbox_topic]]', file=sys.stderr)
         sys.exit(2)

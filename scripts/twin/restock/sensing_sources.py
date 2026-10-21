@@ -49,7 +49,8 @@ def _all_true_mask(design, camera_id):
 
 def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_bridge_root,
                           render_scale=1.0, full_res_locations=(), clearance_for_slot=None,
-                          _rig_builder=None):
+                          mast_depth=False, mast_depth_settings=None,
+                          _rig_builder=None, _mast_bridge_builder=None):
     """Assemble the sensing_sources mapping. Pure wiring; the rig is built behind the seam.
 
     pose_bridge_root is the FILESYSTEM root of the tray-perception pose bridge
@@ -62,7 +63,10 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
     only ~6 px/module). Each camera's context intrinsics are scaled by the SAME per-camera
     factor so the context, its commissioned baseline and the live capture share one calibration.
     """
-    design = build_camera_design(scenario, manifest)
+    # ``mast_depth`` (default off) adds the body-mounted mast depth camera (nvblox camera_1) to the
+    # design and, below, authors its prim + masked-depth publisher. False/absent => byte-identical:
+    # no mast camera in the design, no mast prim/render product, no second publisher.
+    design = build_camera_design(scenario, manifest, mast_depth=mast_depth)
     shelf_id = scenario['job']['shelf_id']
     # Map the design 'source' support to the job's source_bin (the mission's address for the
     # pick location, e.g. 'backstock_00') exactly as run_restock_commissioning does, so the
@@ -113,6 +117,17 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
 
     profiles = dict(getattr(manip_runtime.controller, 'profiles', {}))
 
+    # Body-mounted mast depth camera (nvblox camera_1): author its prim on robot_base + wire a second
+    # masked_depth_ipc publisher on the MAST_* topics/frame (rig+carton self-masked), fed to the port's
+    # per-tick masked_depth hook. None unless opted in; the camera design already excludes 'mast' when
+    # off, so this is byte-identical when disabled.
+    mast_depth_bridge = None
+    if mast_depth:
+        from .masked_depth import build_mast_depth_bridge
+        build_mast = _mast_bridge_builder or build_mast_depth_bridge
+        mast_depth_bridge = build_mast(stage=assembly.stage, assembly=assembly, design=design,
+                                       settings=mast_depth_settings or {})
+
     def stage_scoped_teardown():
         """fm381: DESTROY (free VRAM, not just pause) the station cameras this mission NEVER reads --
         i.e. the SHELF camera (transfer-only; no transfer stage here), via _unused_sensing_camera_ids.
@@ -134,6 +149,9 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
     return {
         'cameras': cameras,
         'stage_scoped_teardown': stage_scoped_teardown,
+        # Mast masked-depth publisher (nvblox camera_1), or None when mast depth is off. The port
+        # publishes it on the sensing cadence via its masked_depth hook (isaac_bundle wires it).
+        'mast_depth': mast_depth_bridge,
         'context_providers': context_providers,
         'location_cameras': location_cameras,
         'profiles': profiles,
