@@ -2503,3 +2503,34 @@ a third blind guess.
   focused Isaac-bundle follow-up needing an Isaac boot to verify (camera lane or a dedicated task).
 
 **Disk (fm440/fm441):** the ~70 GB cleanup was not this task's action (withdrawn); task-scoped deletions only.
+
+### 2026-10-21 — run-330 (fm444 GO): the uncapped log UNMASKS the warm reason = measured_turn_radius; Option B clears the cold 'no established registration'
+
+The uncapped non-tracking nav-reason log (fm443) finally shows the truth, and it is NOT the coverage/unknown
+gate I patched in fm437/fm438 (both correct but irrelevant here).
+
+**WARM run-330b/330c (reproducible): the stall is `measured_turn_radius` x186** (vs 114 tracking, 2
+planning_stop) — the 1/30 NAV_STEP throttle had hidden it (prior runs logged only "2"). At the stall the
+measured arc is median `rw/rv`=0.83 (max 2.34), well over the 0.697 (1.5 m) trip. ROOT: the authored
+outbound lane's FIRST turn, start [-4.46,15.25,0] -> wp1 [-2.97,13.58,-1.687], is **2.24 m over a 97 deg
+yaw = a ~1.33 m required radius, TIGHTER than the 1.5 m coupled minimum**. The coupled base physically
+over-rotates that arc, measured_turn_radius trips and coasts (keeps the route, v~0), and it livelocks —
+186 coasts, ~0 net progress -> nav-stuck at 120 s. (`check_tow_lanes` lane-follow passes offline because
+it grades the capped COMMANDED curvature + a winding re-plan; the LIVE physics over-rotates the measured
+arc.) The caster-lift fixed the UNCOUPLED straight+arc (0.988) but the sharp sub-min-radius COUPLED turn
+still over-rotates. FIX DIRECTION (offline-provable): re-author the outbound lane's first turn to respect
+the 1.5 m min radius (move/again-intermediate wp1), and/or treat a persistent measured_turn_radius as a
+drive/route fault rather than an endless coast. Couple clean (hitch hitch_mm=19.3); park/transfer/verify/return
+not reached.
+
+**COLD run-330: Option B (fm443/fm444) WORKS — 'no established support registration to hold under
+occlusion' is GONE (0 occurrences, down from the recurring raise in 327/328/329).** The seeded commissioned
+prior is being used. The cold collect now fails on the DOWNSTREAM frame issues the caveat named: the source
+camera render is SUSPENDED during the reach, so hold() has no live frame — `rigid-support registration
+needs a new monotonic frame` / `no new synchronized rendered camera frame` / `missing, moving, stale or
+unsynchronized camera evidence` — ending on `arm command heartbeat lost`. So the next cold blocker is the
+sensing-render SUSPEND policy (the source camera must keep rendering through the collect occlusion window so
+the seeded hold() gets live frames), not the registration prior.
+
+**BASE_ATT:** caster-lift pitch ~-0.71 deg (steady), near-level driving coupled — unchanged, small.
+mp4: run-330 254 KB (cold), run-330b 9.67 MB, run-330c 9.91 MB.
