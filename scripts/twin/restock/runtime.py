@@ -472,7 +472,14 @@ class RuntimeAdapter:
                 self.route_alerts.on_navigate(self.port, p, self.time)
             r = self.nav.step(dt, p)
             self._navn = getattr(self, '_navn', 0) + 1
-            if self._navn % 30 == 1:                     # diagnostic: why navigate does not complete
+            # Throttled heartbeat every 30 ticks PLUS every tick whose reason is not plain 'tracking'
+            # (de-duplicated on reason), so a stall's true per-tick refusal/replan reason is never hidden
+            # by the 1/30 sampling (runs 327-329 stalled on an outbound 'planning_stop' the sampled log
+            # never showed). RESTOCK_NAV_REASON_DIAG=0 silences the extra per-reason lines.
+            _extra = (r.reason != 'tracking' and getattr(self, '_last_nav_reason', None) != r.reason
+                      and os.environ.get('RESTOCK_NAV_REASON_DIAG', '1') != '0')
+            self._last_nav_reason = r.reason
+            if self._navn % 30 == 1 or _extra:           # diagnostic: why navigate does not complete
                 print(f'NAV_STEP action={self.action} status={r.status} reason={r.reason!r} '
                       f'transport_ready={p.transport_ready} coupled={p.coupled} parked={p.parked}',
                       flush=True)
