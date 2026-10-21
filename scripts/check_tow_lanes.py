@@ -152,6 +152,57 @@ def check_proud_tolerance(grid, lanes_cfg, report):
             new_obstacle=(round(mid.x, 2), round(mid.y, 2)), reason=plan_reason(TOL, extra=[(mid.x, mid.y)]))
 
 
+def check_trust_static(grid, lanes_cfg, report):
+    """fm425(a): run-322b showed the coupled OUTBOUND tow STILL `lane_blocked` with
+    tow_lane_static_tol_m=0.12 ACTIVE -- the LANE_BLOCKED_DIAG named vseed_reason=seed_collision with 128
+    live returns KEPT (> 0.12 m from any mapped AABB). The run had NO dynamic-obstacle source, so every one
+    of those returns is STATIC: proud-beyond-tol OR off finer sim geometry than the AABB static map carries
+    (an 'unmapped' static return). near_static can never discount an unmapped-static return, and the
+    806-AABB map makes raising the tol unsafe (it would swallow a genuinely new obstacle sitting near any
+    of ~800 shelves). tow_lane_trust_static re-validates the authored lane against the static map ALONE --
+    the geometry the lane was expanded + validated clear of at build -- reopening it; and because it NEVER
+    sets self.static_drive, the live direction-aware braking gate (gate_velocity) keeps the full live cloud
+    and STILL stops the tow for a genuinely new obstacle ahead."""
+    spec = MobileSpec()
+    nav = lanes_cfg['navigation']
+    graph = TowLaneGraph.from_config(nav['tow_lanes'])
+    graph.expand_all(ArticulatedMap(grid, spec))
+    lane = next((ln for ln in graph.lanes if 'outbound' in ln.name), graph.lanes[0])
+    world = ArticulatedMap(grid, spec)
+    TOL = 0.12
+    # Model the run-322b live cloud: proud-of-mapped returns UNION one UNMAPPED static return that lies on
+    # the lane centreline yet far (> TOL) from every mapped AABB -- exactly the class the tol cannot reach.
+    mid = lane.route.states[len(lane.route.states) // 2]
+    far = world.nearest_static(mid.x, mid.y)
+    cloud = tuple(_proud_points(grid, 0.10)) + ((mid.x, mid.y),)
+
+    def plan_reason(**kw):
+        c = ArticulatedController(grid, spec, allow_test_fixtures=True, lane_graph=graph, **kw)
+        c.start(lane.goal, True)
+        state = lane.start_state()
+        obs = Observation(0.1, cloud, True, True, state.articulation, 'test_fixture', 10.0)
+        return c.plan_observed_route(state, obs, 0.05).reason
+
+    _record(report, 'unmapped_static_return_defeats_tol', far > TOL and plan_reason(lane_static_tol=TOL) == 'lane_blocked',
+            centreline_nearest_static_m=round(far, 3), tol_m=TOL, reason=plan_reason(lane_static_tol=TOL))
+    _record(report, 'trust_static_reopens_lane',
+            plan_reason(lane_trust_static=True) == 'validated_lane', reason=plan_reason(lane_trust_static=True))
+    # SAFETY: with trust_static ON, the live braking gate must STILL stop the tow for a genuinely new
+    # obstacle directly ahead. gate_velocity uses the live cloud (trust_static never touches it).
+    c = ArticulatedController(grid, spec, allow_test_fixtures=True, lane_graph=graph, lane_trust_static=True)
+    c.start(lane.goal, True)
+    s0 = lane.start_state()
+    pose = (s0.x, s0.y, s0.yaw)
+    ahead = (pose[0] + 0.5 * math.cos(pose[2]), pose[1] + 0.5 * math.sin(pose[2]))
+    od = Odometry(pose, 0.1, 0.2, 0.0, 'test_fixture', 0.05)
+    clear = c.gate_velocity(0.1, od, Observation(0.1, (), True, True, s0.articulation, 'test_fixture', 10.0), 0.2, 0.0)
+    blocked = c.gate_velocity(0.1, od, Observation(0.1, (ahead,), True, True, s0.articulation, 'test_fixture', 10.0), 0.2, 0.0)
+    _record(report, 'trust_static_new_obstacle_still_stops_tow_via_brake_gate',
+            clear.reason == 'tracking' and blocked.reason == 'obstacle_stop',
+            clear_reason=clear.reason, blocked_reason=blocked.reason,
+            obstacle=(round(ahead[0], 2), round(ahead[1], 2)))
+
+
 def _drive_lane(controller, spec, lane, goal, *, jitter, report, label, direct_xy):
     """Drive the REAL ArticulatedController following the lane closed-loop from a jittered start."""
     import time as _time
@@ -261,6 +312,7 @@ def main():
     check_directional_zone(grid, report)
     check_tow_lanes(grid, lanes_cfg, report)
     check_proud_tolerance(grid, lanes_cfg, report)
+    check_trust_static(grid, lanes_cfg, report)
     print('TOW_LANES_PROOF ' + ('PASS' if report['ok'] else 'FAIL'), flush=True)
     return 0 if report['ok'] else 1
 

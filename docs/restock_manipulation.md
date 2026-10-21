@@ -226,6 +226,18 @@ the native seal. `/restock_sim/manipulation/stop` is Bool and must latch arm hol
 and inhibit further trajectory commands until explicit recovery. Lost host
 heartbeat also latches hold. Never release a held unit as a watchdog fallback.
 
+**Contact wall-budget fail-fast** (`RESTOCK_CONTACT_STUCK_WALL_S`, opt-in, default `0` = off): the
+contact descent terminates on measured contact (`Sensors.contact` = native grippedObjects OR the
+`SIM_ATTACH_FALLBACK` weld, which welds at the measured ≤0.5 mm pad-to-carton gap), creeping
+`CONTACT_STEP` toward the carton between freeze-settles. In run-322 cold the native suction never
+latched and the weld never formed, so the creep held with `contact=False` and the arm-command stream
+lapsed into the opaque 90 s host transport heartbeat watchdog (`arm command heartbeat lost`, no named
+cause). The phase's own `phase_timeout` is **sim-clock**, so under render pacing the WALL heartbeat trips
+first. When set, the controller fails the contact phase fast with a named reason once no contact
+progress (entering contact / a `CONTACT_STEP` advance) occurs for this many WALL seconds — below the
+heartbeat backstop — so a stuck contact ends the attempt legibly instead of burning the GPU wall cap.
+CPU tests: `tests/test_restock_manipulation.py`.
+
 Integration's existing Isaac ROS graphs supply `/clock`, registered RGB-D, current
 TF and joint-state/controller transport. Host-side MoveIt/cuMotion provides the
 three planning/execution endpoints below, `/restock_sim/apply_planning_scene`

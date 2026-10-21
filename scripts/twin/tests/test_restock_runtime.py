@@ -53,6 +53,65 @@ class RuntimeTests(unittest.TestCase):
         self.adapter = RuntimeAdapter(self.nav,self.mobile,self.manip,self.port,poses,fixture_mode=True)
         self.job = Job('j','milk',1,'back','shelf')
 
+    def _stuck_adapter(self, *, nav_stuck_wall_s, clock, moving=False):
+        """An outbound navigate adapter whose nav never completes (reason='lane_blocked')."""
+        pose = {'p': (1.0, 2.0, 0.5)}
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            if moving:                                   # base makes real progress each tick
+                pose['p'] = (pose['p'][0] + 0.5, pose['p'][1], pose['p'][2])
+            return replace(self.p, observation_id=f'f-{ticks[0]}', simulation_time=ticks[0]*.1,
+                           odometry=NS(pose=pose['p']))
+        port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        nav = NS(start=lambda g, c, **k: None,
+                 step=lambda dt, p: NS(status='running', linear=0., angular=0., reason='lane_blocked'),
+                 cancel=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        adapter = RuntimeAdapter(nav, self.mobile, self.manip, port, poses, fixture_mode=True,
+                                 wall_clock=lambda: clock[0], nav_stuck_wall_s=nav_stuck_wall_s)
+        adapter.start('outbound', self.job)
+        return adapter
+
+    def test_nav_stuck_wall_fail_fast_fm425(self):
+        # fm425 (c) / run-322b: the coupled OUTBOUND tow sat on reason='lane_blocked' for ~50 min WALL and
+        # the SIM-clock caps never fired under render pacing. A WALL budget now fails the stage fast with
+        # the named reason, instead of burning the whole GPU wall cap.
+        clock = [0.0]
+        adapter = self._stuck_adapter(nav_stuck_wall_s=5.0, clock=clock)
+        r = adapter._step(.1)                            # wall 0: start the no-progress timer
+        self.assertEqual((r.status, r.reason), ('running', 'lane_blocked'))
+        clock[0] = 4.0
+        self.assertEqual(adapter._step(.1).status, 'running')
+        clock[0] = 6.0                                   # past the 5 s budget, no base progress
+        r = adapter._step(.1)
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('stuck on', r.reason)
+        self.assertIn('lane_blocked', r.reason)
+
+    def test_nav_stuck_resets_on_base_progress_fm425(self):
+        # A tow that is actually MOVING (base pose advancing) never trips the stuck budget, even past it.
+        clock = [0.0]
+        adapter = self._stuck_adapter(nav_stuck_wall_s=5.0, clock=clock, moving=True)
+        adapter._step(.1)
+        clock[0] = 100.0
+        for _ in range(5):
+            self.assertEqual(adapter._step(.1).status, 'running')
+
+    def test_nav_stuck_default_off_is_byte_identical_fm425(self):
+        # nav_stuck_wall_s == 0 => the WALL fail-fast is inert (byte-identical); the stage stays running.
+        clock = [0.0]
+        adapter = self._stuck_adapter(nav_stuck_wall_s=0.0, clock=clock)
+        adapter._step(.1)
+        clock[0] = 10_000.0
+        self.assertEqual(adapter._step(.1).status, 'running')
+
+    def test_nav_stuck_wall_rejects_invalid(self):
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        with self.assertRaises(ValueError):
+            RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True,
+                           nav_stuck_wall_s=-1.0)
+
     def test_collect_drives_to_place_approach_between_pick_and_place(self):
         # fm390: when the arm reaches TRANSIT (carry fold done) and a place_approach pose is configured,
         # the adapter drives the base there (carton carried), re-warms WITHOUT re-dispatching the grasp,

@@ -305,6 +305,40 @@ def test_wildly_future_collision_stamp_still_trips_fm423():
     assert r.status == 'failed' and 'collision_dt=' in r.reason, r.reason
 
 
+def test_contact_stall_wall_fail_fast_fm425():
+    # fm425 (b) / run-322 cold: the contact descent crept CONTACT_STEP with contact=False and the
+    # arm-command stream lapsed into the 90 s host heartbeat watchdog ('arm command heartbeat lost', no
+    # named cause). A WALL budget now fails the contact phase fast with a named reason BEFORE the watchdog.
+    clock = [0.0]
+    c, m = make_controller('collect', steady_clock=lambda: clock[0],
+                           contact_straight_line=True, contact_overpress_step_m=0.003,
+                           contact_overpress_cap_m=0.02)
+    c.contact_stuck_wall_s = 5.0
+    t = run_to(c, 'contact')                       # reach the contact phase (progress mark set at wall 0)
+    # Press with contact never latching; hold the wall clock just under budget -> still running.
+    clock[0] = 4.9
+    r = c.step(.1, packet(c, t, contact=False))
+    assert r.status == 'running', r.reason
+    # Past the budget with no contact progress -> fail fast with a named reason (not the heartbeat).
+    clock[0] = 6.0
+    r = c.step(.1, packet(c, t + .1, contact=False))
+    assert r.status == 'failed' and 'contact stalled' in r.reason and 'heartbeat' in r.reason, r.reason
+
+
+def test_contact_stall_wall_budget_default_off_is_byte_identical_fm425():
+    # Default (contact_stuck_wall_s == 0) => the WALL budget is inert: a long stall does not fail here
+    # (the existing cap / host watchdog still backstop), so absent config is byte-identical.
+    clock = [0.0]
+    c, m = make_controller('collect', steady_clock=lambda: clock[0],
+                           contact_straight_line=True, contact_overpress_step_m=0.003,
+                           contact_overpress_cap_m=0.02)
+    assert c.contact_stuck_wall_s == 0.0
+    t = run_to(c, 'contact')
+    clock[0] = 10_000.0                            # absurd wall elapsed
+    r = c.step(.1, packet(c, t, contact=False))
+    assert r.status != 'failed' or 'contact stalled' not in r.reason, r.reason
+
+
 def test_invariant_trip_names_the_failed_condition_fm412():
     # fm412 (run-317/318): the top-of-step invariant is a 5-condition OR; its reason must name the ACTUAL
     # failed field + value so a run that dies here is self-diagnosing (both runs died here ambiguously).

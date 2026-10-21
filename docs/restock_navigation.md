@@ -362,14 +362,43 @@ This touches the lane plan-validation alone, never the braking gate, mirroring `
 config-driven trusted-static style but narrower. Staged value `0.12 m` (covers the measured ~0.089 m
 clearance + the ~0.10 m proud offset that reproduces the live block). The opaque bare `lane_blocked`
 now also logs `LANE_BLOCKED_DIAG` with the specific `validate_seed` rejection + discounted/kept cloud
-sizes, so a future stall names its cause.
+sizes AND a capped sample of the surviving (kept) returns with each one's distance to the nearest
+mapped static geometry (`ArticulatedMap.nearest_static`), so a future stall is classifiable from the
+console: a small distance is a proud-of-mapped return, a distance at/over the search cap is a return
+off finer sim geometry than the AABB static map carries (unmapped static) or open space.
+
+**Trusted-static lane re-validation** (`navigation.tow_lane_trust_static`, opt-in, default `false` =
+off ⇒ byte-identical): the superset of the proud tolerance, for when the tol cannot reach the kept
+returns. run-322b showed the outbound tow STILL `lane_blocked` with `tow_lane_static_tol_m=0.12`
+active — the `LANE_BLOCKED_DIAG` named 128 kept returns sitting **> 0.12 m** from any mapped AABB. With
+no dynamic-obstacle source every live return is static, so those are proud-beyond-tol OR off finer sim
+geometry than the ~800-AABB static map carries; `near_static` can never discount an unmapped-static
+return, and the dense map makes raising the tol unsafe (it would swallow a genuinely new obstacle near
+any of hundreds of shelves). When set, the authored lane is re-validated against the **static map
+alone** (`dyn=()`) — the geometry it was expanded and swept-validated clear of at build — so proud or
+unmapped static cannot false-block it. It is scoped to lane plan-validation ONLY and NEVER sets the
+base `static_drive`, so the live direction-aware braking gate (`gate_velocity`) keeps the full live
+obstacle cloud and **still stops the tow for a genuinely new obstacle ahead** — the new-obstacle safety
+net moves to the live gate (direction/time-aware), exactly as `couple_static_drive` does for the couple
+legs. Staged `true` for the mission tow lanes.
 
 Offline proof (CPU, the mission's real inputs): `scripts/check_tow_lanes.py`
 (`--environment … --scenario … --camera-config … --lanes docs/examples/tow-lanes-mission-fragment.json`)
 drives the real controller/planner and asserts the direction-aware zone + both lanes end to end, plus
 (fm423) reproduces the proud-cloud `lane_blocked` and proves the tolerance reopens the lane while a new
-on-lane obstacle still blocks the tow; design and numbers in `data/sim-restock-nav-lanes-v1/report.md`.
-CPU unit tests: `tests/test_navigation_lanes.py`, `tests/test_navigation_factory.py`.
+on-lane obstacle still blocks the tow; and (fm425) reproduces the run-322b block with an unmapped-static
+return the tol cannot reach, proves `tow_lane_trust_static` reopens the lane, and proves the live braking
+gate still stops the tow for a new obstacle with trust-static ON (`check_trust_static`). Design and
+numbers in `data/sim-restock-nav-lanes-v1/report.md`. CPU unit tests: `tests/test_navigation_lanes.py`,
+`tests/test_navigation_factory.py`.
+
+**Wall-clock stuck-stage fail-fast** (`RESTOCK_NAV_STUCK_WALL_S`, opt-in, default `0` = off): the nav
+`blocked_timeout`/`goal_timeout` are **sim-clock** caps, which under render pacing (sim advances far
+slower than wall) cannot fire — run-322b's outbound sat on `lane_blocked` for ~50 min WALL and only the
+3600 s orchestrator cap ended it, burning the whole GPU budget with no named stage failure. When set,
+the runtime fails a navigate stage fast with its named reason once the SAME running reason persists with
+NO measured base-pose progress for longer than this many WALL seconds (reset on a reason change or base
+progress). Staged `120`. CPU tests: `tests/test_restock_runtime.py`.
 
 ## In-process route
 

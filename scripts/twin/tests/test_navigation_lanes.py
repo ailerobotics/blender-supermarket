@@ -215,5 +215,74 @@ class LaneStaticProudToleranceTests(unittest.TestCase):
             ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, lane_static_tol=-0.1)
 
 
+class LaneTrustStaticTests(unittest.TestCase):
+    """fm425(a) / run-322b: the coupled OUTBOUND tow stayed lane_blocked with tow_lane_static_tol_m=0.12
+    ACTIVE because 128 live returns sat > 0.12 m from any mapped AABB -- with no dynamic-obstacle source
+    every return is static, so they are proud-beyond-tol OR off finer geometry than the AABB map carries
+    (unmapped static), which near_static can never discount. tow_lane_trust_static re-validates the authored
+    lane against the static map ALONE (what it was build-validated against) and reopens it, WITHOUT setting
+    self.static_drive -- so the live braking gate still stops the tow for a genuinely new obstacle."""
+
+    def setUp(self):
+        self.spec = MobileSpec()
+        self.box = (-0.5, 0.80, 0.5, 2.0)
+        self.grid = GridMap((-8, -8, 8, 8), (self.box,), 0.20)
+        self.lane = _straight_lane()
+        self.graph = TowLaneGraph([self.lane]).expand_all(ArticulatedMap(self.grid, self.spec))
+        self.state = TrainState(-4.0, 0.0, 0.0, 0.0)
+        # An UNMAPPED static return on the lane centre, 0.80 m from the only box (NOT near static at ANY
+        # tol < 1 m) -- the class the proud tolerance cannot reach.
+        self.unmapped = (0.0, 0.0)
+
+    def _controller(self, **kw):
+        c = ArticulatedController(self.grid, self.spec, allow_test_fixtures=True,
+                                  lane_graph=self.graph, **kw)
+        c.start((4, 0, 0), True)
+        return c
+
+    def _obs(self, points):
+        return Observation(0.1, tuple(points), True, True, 0.0, 'test_fixture', 10.0)
+
+    def test_nearest_static_measures_distance(self):
+        world = ArticulatedMap(self.grid, self.spec)
+        self.assertAlmostEqual(world.nearest_static(0.0, 0.74), 0.06, places=2)   # 6 cm proud of the box
+        self.assertGreater(world.nearest_static(*self.unmapped), 0.12)            # genuinely far from static
+
+    def test_tol_cannot_discount_unmapped_static_return(self):
+        # Even a generous tol keeps an unmapped-static return -> lane_blocked (reproduces run-322b).
+        c = self._controller(lane_static_tol=0.12)
+        self.assertEqual(c.plan_observed_route(self.state, self._obs([self.unmapped]), 0.05).reason,
+                         'lane_blocked')
+
+    def test_trust_static_reopens_lane_against_static_map(self):
+        c = self._controller(lane_trust_static=True)
+        self.assertEqual(c.plan_observed_route(self.state, self._obs([self.unmapped]), 0.05).reason,
+                         'validated_lane')
+
+    def test_trust_static_new_obstacle_still_stops_via_brake_gate(self):
+        # SAFETY: trust_static trusts the static map for the PLAN only; the live braking gate keeps the
+        # full live cloud, so a new obstacle directly ahead still stops the tow (obstacle_stop).
+        c = self._controller(lane_trust_static=True)
+        pose = (self.state.x, self.state.y, self.state.yaw)
+        ahead = (pose[0] + 0.5, pose[1])     # 0.5 m ahead along +x heading
+        od = Odometry(pose, 0.1, 0.2, 0.0, 'test_fixture', 0.05)
+        clear = c.gate_velocity(0.1, od, self._obs([]), 0.2, 0.0)
+        blocked = c.gate_velocity(0.1, od, self._obs([ahead]), 0.2, 0.0)
+        self.assertEqual(clear.reason, 'tracking')
+        self.assertEqual(blocked.reason, 'obstacle_stop')
+
+    def test_trust_static_does_not_enable_static_drive(self):
+        # trust_static is scoped to lane plan-validation; it must NEVER flip the base static_drive (which
+        # would zero the braking gate's live cloud). Byte-identical braking behaviour.
+        c = self._controller(lane_trust_static=True)
+        self.assertFalse(c.static_drive)
+
+    def test_default_off_is_byte_identical(self):
+        c = self._controller()   # no trust_static, no tol
+        self.assertFalse(c.lane_trust_static)
+        self.assertEqual(c.plan_observed_route(self.state, self._obs([self.unmapped]), 0.05).reason,
+                         'lane_blocked')
+
+
 if __name__ == '__main__':
     unittest.main()

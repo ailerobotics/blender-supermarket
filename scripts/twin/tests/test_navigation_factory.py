@@ -154,6 +154,14 @@ class FactoryDispatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _build('reference', tow_lanes=[lane])
 
+    def test_tow_lane_static_tol_flows_through(self):
+        self.assertEqual(_build('reference').lane_static_tol, 0.0)             # default off
+        self.assertAlmostEqual(_build('reference', tow_lane_static_tol_m=0.12).lane_static_tol, 0.12)
+
+    def test_tow_lane_trust_static_flows_through(self):
+        self.assertFalse(_build('reference').lane_trust_static)               # default off
+        self.assertTrue(_build('reference', tow_lane_trust_static=True).lane_trust_static)
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

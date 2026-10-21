@@ -6,6 +6,7 @@ the sibling modules are injected after a guarded simulator boot.
 """
 from dataclasses import asdict, dataclass, replace
 import math
+import os
 import time
 from ..restock_camera.freshness import require_fresh
 from typing import Protocol
@@ -187,7 +188,7 @@ class RuntimeAdapter:
                  *, fixture_mode=False, goal_articulation=None,
                  stall_window_s=_SENSOR_STALL_WINDOW_S, route_alerts=None, fine_dock=None,
                  hold_cart_through_couple=False, couple_static_drive=False,
-                 uncouple_on_return=False):
+                 uncouple_on_return=False, wall_clock=time.monotonic, nav_stuck_wall_s=None):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         # Opt-in uncouple-at-parking-spot on return (captain 2026-10-20: "robot should uncouple at the
         # parking spot"): instead of towing the cart home coupled, the return stage tows it to a cart
@@ -260,6 +261,28 @@ class RuntimeAdapter:
                 if len(wp) != 3 or not all(math.isfinite(v) for v in wp):
                     raise ValueError(f'invalid pose: {name}')
         self.time = 0.
+        # fm425 (c) (run-322b): WALL-clock stuck-stage fail-fast for navigate. The nav controller's own
+        # blocked_timeout/goal_timeout are SIM-clock caps (factory.py) -- under render pacing the sim
+        # advances far slower than wall, so run-322b's coupled OUTBOUND tow sat on reason='lane_blocked'
+        # for ~50 min WALL (925 NAV_STEP) and NEITHER sim cap fired; only the 3600 s orchestrator wall cap
+        # (SIGKILL) ended it, burning the whole GPU budget with no named stage failure. This is a WALL
+        # budget: if navigate reports the SAME running reason with NO measured base-pose progress for
+        # longer than nav_stuck_wall_s WALL, the stage FAILS FAST with that named reason. Reset whenever
+        # the reason changes OR the base makes progress. 0 s (default) => off => byte-identical; a sane
+        # value sits well under the orchestrator wall cap (GPU hours are the scarce resource). wall_clock
+        # is injectable for tests (default monotonic).
+        self.wall_clock = wall_clock
+        if nav_stuck_wall_s is None:
+            try:
+                nav_stuck_wall_s = float(os.environ.get('RESTOCK_NAV_STUCK_WALL_S', 0.0))
+            except (TypeError, ValueError):
+                nav_stuck_wall_s = 0.0
+        if not (math.isfinite(nav_stuck_wall_s) and 0.0 <= nav_stuck_wall_s <= 3000.0):
+            raise ValueError('nav_stuck_wall_s must be a finite number of seconds in [0, 3000]')
+        self.nav_stuck_wall_s = float(nav_stuck_wall_s)
+        self._nav_stuck_reason = None     # the running reason currently being timed
+        self._nav_stuck_wall = None       # wall time that reason/pose last changed (progress)
+        self._nav_stuck_pose = None       # base pose at that progress mark
         self.action = None
         self.last_packet_id = None
 
@@ -384,6 +407,38 @@ class RuntimeAdapter:
                     f'host sensor-stream watchdog is the backstop')
         return None
 
+    def _nav_stuck_check(self, reason, odometry):
+        """fm425 (c): WALL-clock no-progress fail-fast for a running navigate stage.
+
+        Returns a named fail reason when the SAME running `reason` has persisted with NO measured
+        base-pose progress for longer than nav_stuck_wall_s WALL seconds, else None. The reason/pose
+        marker resets whenever the reason changes OR the base moves (> ~2 cm / ~1 deg), so only a
+        genuinely wedged stage (run-322b: outbound 'lane_blocked' forever under render pacing, which no
+        SIM-clock cap could catch) is failed. Off (nav_stuck_wall_s == 0) => always None (byte-identical);
+        a missing odometry pose is treated as no-progress so a truly frozen stage still trips."""
+        if self.nav_stuck_wall_s <= 0:
+            return None
+        pose = getattr(odometry, 'pose', None)
+        now_wall = self.wall_clock()
+        progressed = False
+        if pose is not None and self._nav_stuck_pose is not None:
+            dyaw = pose[2] - self._nav_stuck_pose[2]
+            dyaw = math.atan2(math.sin(dyaw), math.cos(dyaw))   # normalize to [-pi, pi]
+            progressed = (math.hypot(pose[0] - self._nav_stuck_pose[0],
+                                     pose[1] - self._nav_stuck_pose[1]) > 0.02
+                          or abs(dyaw) > math.radians(1.0))
+        if reason != self._nav_stuck_reason or progressed or self._nav_stuck_wall is None:
+            self._nav_stuck_reason = reason
+            self._nav_stuck_wall = now_wall
+            self._nav_stuck_pose = pose
+            return None
+        waited = now_wall - self._nav_stuck_wall
+        if waited > self.nav_stuck_wall_s:
+            return ('%s stuck on %r for %.0fs wall with no base progress (> %.0fs budget); '
+                    'failing the attempt fast instead of burning the GPU wall cap'
+                    % (self.action, reason, waited, self.nav_stuck_wall_s))
+        return None
+
     def _step(self, dt):
         self.time += dt
         gate = getattr(self.port, 'gate', None)  # drive the opt-in sensing gate from last phase
@@ -415,6 +470,9 @@ class RuntimeAdapter:
             if r.status not in ('running', 'succeeded'):
                 raise ValueError('invalid navigation status')
             if r.status == 'running':
+                stuck = self._nav_stuck_check(r.reason, getattr(p, 'odometry', None))
+                if stuck is not None:
+                    return Result('failed', reason=stuck)
                 self.mobile.command(r.linear, r.angular, p.docking,
                                     transport_ready=p.transport_ready)
                 return Result('running', reason=r.reason)

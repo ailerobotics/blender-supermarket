@@ -152,6 +152,18 @@ class TransferController:
         if self.grasp_track_m is not None and (not math.isfinite(self.grasp_track_m) or self.grasp_track_m < 0):
             raise ValueError('grasp_track_m must be a finite, non-negative metre threshold')
         self._carton_z_at_grasp = None   # fm410: measured carton z latched at grasp-confirm, for the lift probe
+        # fm425 (run-322 cold): WALL-clock contact fail-fast. Cold run-322 reached the contact descent and
+        # crept CONTACT_STEP to 12 mm with contact=False (the native suction never latched and the
+        # SIM_ATTACH weld never formed), then the arm-command stream lapsed into the 90 s host transport
+        # heartbeat watchdog -- an opaque 'arm command heartbeat lost' with no named cause. The contact
+        # phase's own phase_timeout is SIM-clock (self.elapsed += dt), so under render pacing (1.7-3.5 s
+        # WALL per capture) the WALL heartbeat trips long before the sim phase_timeout. This is a WALL
+        # budget on time-without-contact-progress in the contact phase: if it elapses the step FAILS FAST
+        # with a named reason BEFORE the 90 s watchdog, so a stuck contact ends the attempt legibly instead
+        # of burning the rest of the GPU wall cap. Reset on entering contact and on each CONTACT_STEP
+        # advance (progress). 0 s (default) => off => byte-identical; bounded below the 90 s backstop.
+        self.contact_stuck_wall_s = _float_env_bounded('RESTOCK_CONTACT_STUCK_WALL_S', 0.0, 0.0, 85.0)
+        self._contact_progress_wall = None   # wall time of the last contact-phase progress (see step)
         # Execute the contact descent as a seeded straight-line move through the trajectory host instead
         # of a cuMotion plan (the motion port's begin(straight_line=True) path). Default False keeps the
         # real-rig collision-planned descent; the sim mission opts in via config -- a one-flag revert.
@@ -399,6 +411,8 @@ class TransferController:
         self.phase, self.elapsed, self.issued = phase, 0.0, False
         self._staged_retries = 0   # fm358: fresh retry budget per phase
         self._move_deadline_retries = 0   # fm367: fresh deadline-retry budget per phase
+        if phase == 'contact':
+            self._contact_progress_wall = self.steady_clock()   # fm425: start the WALL no-progress budget
 
     def _result(self, controls=()):
         status = self.phase if self.phase in ('failed', 'succeeded') else 'running'
@@ -523,6 +537,18 @@ class TransferController:
             return self._fail('base moving or stale/missing feedback/collision world [' + ','.join(why) + ']')
         if self.held and self.phase != 'release' and not sensors.contact:
             return self._fail('lost grasp')
+        # fm425 (run-322 cold): WALL-clock contact fail-fast. While pressing for contact (phase 'contact',
+        # not yet latched), if no progress (enter-contact / CONTACT_STEP advance) for longer than
+        # contact_stuck_wall_s WALL, FAIL FAST with a named reason -- before the 90 s host arm-command
+        # heartbeat watchdog can trip opaquely. Off (0) or outside the contact phase => inert.
+        if (self.contact_stuck_wall_s > 0 and self.phase == 'contact' and not sensors.contact
+                and self._contact_progress_wall is not None):
+            stalled = self.steady_clock() - self._contact_progress_wall
+            if stalled > self.contact_stuck_wall_s:
+                return self._fail('contact stalled: no contact progress for %.1fs wall '
+                                  '(> %.0fs budget; native suction did not latch and no SIM_ATTACH weld '
+                                  'formed) -- failing fast before the arm-command heartbeat watchdog'
+                                  % (stalled, self.contact_stuck_wall_s))
         try:
             if sensors.valid_until_steady is not None:
                 require_fresh(sensors.valid_until_steady,self.steady_clock)
@@ -782,6 +808,7 @@ class TransferController:
                     if self._contact_step + self.contact_overpress_step_m <= self.contact_overpress_cap_m + 1e-9:
                         self._contact_step += self.contact_overpress_step_m
                         self.issued = False
+                        self._contact_progress_wall = self.steady_clock()   # fm425: a step advance IS progress
                         print(f'CONTACT_STEP advance step={self._contact_step*1000:.1f}mm '
                               f'cap={self.contact_overpress_cap_m*1000:.0f}mm contact={s.contact}', flush=True)
                         return self._result()

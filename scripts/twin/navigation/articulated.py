@@ -186,6 +186,28 @@ class ArticulatedMap:
                         return True
         return False
 
+    def nearest_static(self,x,y,max_cells=4):
+        """Distance (m) from (x,y) to the nearest static-map obstacle AABB, searching cells within
+        +-max_cells. DIAGNOSTIC ONLY (LANE_BLOCKED_DIAG classification): a small distance means the
+        return is proud-of-mapped static, a distance at/over the search cap means it sits off finer
+        sim geometry than the AABB map carries (or genuinely open space). Capped so the per-tick diag
+        stays cheap; returns the cap when nothing is indexed within it."""
+        cx,cy=math.floor(x),math.floor(y)
+        best=float(max_cells)
+        seen=set()
+        for i in range(cx-max_cells,cx+max_cells+1):
+            for j in range(cy-max_cells,cy+max_cells+1):
+                for oi in self.index.get((i,j),()):
+                    if oi in seen:
+                        continue
+                    seen.add(oi)
+                    xmin,ymin,xmax,ymax=self.grid.obstacles[oi]
+                    dx=max(xmin-x,0.0,x-xmax); dy=max(ymin-y,0.0,y-ymax)
+                    d=math.hypot(dx,dy)
+                    if d<best:
+                        best=d
+        return best
+
 
 @dataclass
 class Route:
@@ -424,7 +446,7 @@ class ArticulatedPlanner:
 class ArticulatedController(Controller):
     """Measured-state route following and braking sweep for the physical tow rig."""
     def __init__(self, grid, spec=None, *, require_temporal_map=False, planner_timeout=None,
-                 lane_graph=None, lane_static_tol=0.0, **kwargs):
+                 lane_graph=None, lane_static_tol=0.0, lane_trust_static=False, **kwargs):
         self.require_temporal_map=require_temporal_map
         self.spec=spec or MobileSpec()
         self.world=ArticulatedMap(grid,self.spec)
@@ -443,6 +465,20 @@ class ArticulatedController(Controller):
                 and 0.0<=lane_static_tol<1.0):
             raise ValueError('lane_static_tol must be a finite distance in [0, 1) metres')
         self.lane_static_tol=float(lane_static_tol)
+        # Opt-in trusted-static lane plan-validation (navigation.tow_lane_trust_static), default off =>
+        # byte-identical. The authored tow lane is expanded AND swept-validated clear of the static map at
+        # build; when ON, `_plan_lane` re-validates it against the static map ALONE (dyn=()), so proud OR
+        # unmapped-in-the-planning-grid static returns in the LIVE cloud cannot false-block a route that is
+        # already proven clear of the static map (run-322b: with no dynamic-obstacle source every live
+        # return is static, yet 128 returns sat >0.12 m from any mapped AABB -- proud-beyond-tol or off
+        # finer sim geometry than the AABB map -- so the narrower `lane_static_tol` could not reach them,
+        # and the 797-AABB map makes raising that tol unsafe). This is the couple_static_drive trusted-
+        # static pattern scoped to lane plan-validation ONLY: it NEVER sets self.static_drive, so the live
+        # braking gate (gate_velocity) keeps the full live obstacle cloud and a genuinely new obstacle on
+        # the lane STILL stops the tow -- the plan trusts the fixed, pre-validated geometry while the live
+        # direction-aware gate owns new-obstacle avoidance. `lane_static_tol` still applies underneath for
+        # the narrower proud-of-mapped case; trust_static is the superset.
+        self.lane_trust_static=bool(lane_trust_static)
         # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
         # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
         # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
@@ -528,7 +564,13 @@ class ArticulatedController(Controller):
         # cloud, byte-identical.
         dyn=obs.obstacles
         discounted=0
-        if self.lane_static_tol>0 and dyn:
+        if self.lane_trust_static:
+            # Trust the static map the lane was build-validated against: validate the authored route
+            # against static geometry ALONE. The live braking gate (gate_velocity) is untouched and
+            # still stops the tow for a genuinely new obstacle ahead.
+            dyn=()
+            discounted=len(obs.obstacles)
+        elif self.lane_static_tol>0 and dyn:
             kept=tuple((x,y) for (x,y) in dyn if not world.near_static(x,y,self.lane_static_tol))
             discounted=len(dyn)-len(kept)
             dyn=kept
@@ -538,11 +580,18 @@ class ArticulatedController(Controller):
             # Keep the contract reason 'lane_blocked', but never leave WHY opaque again (run-321b
             # burned an hour on a bare 'lane_blocked'): name the specific validate_seed rejection and
             # the live/discounted cloud sizes so the next run's cause is readable from the console.
+            # Also DUMP a capped sample of the KEPT returns with each one's distance to the nearest
+            # static-map geometry (fm425: the raw cloud was never persisted, so the run-322b 128-kept
+            # points could not be classified post-hoc -- now every lane_blocked records, for free, how
+            # far the surviving returns sit from mapped static, which tells proud-of-mapped (small
+            # distance) from off-finer-geometry/unmapped (large distance) at a glance).
+            kept_diag=tuple((round(x,2),round(y,2),round(world.nearest_static(x,y),3))
+                            for (x,y) in dyn[:20]) if dyn else ()
             print('LANE_BLOCKED_DIAG lane=%r vseed_reason=%s live_pts=%d discounted_near_static=%d '
-                  'kept=%d proud_tol_m=%.3f start=%s goal=%s'
+                  'kept=%d proud_tol_m=%.3f trust_static=%s start=%s goal=%s kept_near_static=%s'
                   % (lane.name,checked.reason,len(obs.obstacles),discounted,len(dyn),
-                     self.lane_static_tol,tuple(round(c,2) for c in lane.start),
-                     tuple(round(c,2) for c in self.goal)),flush=True)
+                     self.lane_static_tol,self.lane_trust_static,tuple(round(c,2) for c in lane.start),
+                     tuple(round(c,2) for c in self.goal),kept_diag),flush=True)
             return Route([],[],'lane_blocked')
         checked.reason='validated_lane'
         return checked
