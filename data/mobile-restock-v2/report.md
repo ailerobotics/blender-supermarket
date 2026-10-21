@@ -2463,3 +2463,43 @@ path 5.02 m (tracking: 520 vs 5 measured_turn_radius). park/transfer/verify/retu
 **Disk-cleanup note (fm440/fm441):** the ~70 GB root cleanup reported in fm439 was NOT this task's action
 (fm441 withdrew the misattribution). This task's only deletions are task-scoped: dead-PID
 `/dev/shm/fastrtps_*`, and `rm -rf` of own run/commissioning/scratch dirs under the task dataset.
+
+### 2026-10-21 — run-329 (fm442 GO) + fm443 batch: coverage-waiver still stalled warm; cold-collect Option B landed; mast publisher gap named
+
+**run-329 warm: SAME stall at x=−4.02** as 327b/328b (path 5.02 m, couple clean hitch 19.4 mm). The
+coverage-path waiver did NOT change it, so neither gate fix I shipped is the mechanism. `_nav_stuck_check`
+captured the real reason — **`planning_stop`** (the authored route is dropped → the replan cycle makes no
+progress). NAV_STEP was throttled 1/30, hiding the per-tick reason. Added an **uncapped non-tracking nav
+reason log** (commit 3b7c40f, `RESTOCK_NAV_REASON_DIAG`) so the NEXT run reveals the exact route-drop reason
+(stop_replan_tracking_error vs replan_changed_observations vs lane_not_acquired vs obstacle_stop) instead of
+a third blind guess.
+
+**BASE_ATT tilt (fm438/fm442):** cold base settled to **pitch ≈ −0.71°** (matches predicted 0.75°), roll
+≈ 0, **near-level (−0.03°) while driving coupled** — small, as the (B) exoneration predicted.
+
+**fm443 batch (offline):**
+- **(3) render_scale RULED OUT:** the decode-grade source camera already renders at **1.0** (via
+  `collect_source_location=backstock_00` → `_decode_locations` → `full_res_locations`); only the
+  mapper/nav/arm cameras use 0.375. Not the cold-collect cause.
+- **(2) cold-collect = SEQUENCING, fixed (Option B):** the raise `no established support registration to
+  hold under occlusion` is because `self.good` (the hold() prior) was only ever set by a clean observe
+  `prepare()`, which never ran before the arm entered the 300 s occlusion window. Option B persists the
+  world-constant `camera_from_support` in the commissioned baseline and **seeds `tracker.good`** at
+  `apply_baselines`/`apply_to_contexts`, so `hold()` re-expresses the commissioned registration through the
+  LIVE `base_from_camera` (base parked, camera + support world-fixed) with no clean-prepare prerequisite.
+  Legacy baselines no-op (byte-identical). The orchestrator re-commissions fresh each run, so regenerated
+  baselines carry the field. CPU tests: round-trip + seed + legacy-no-op (+28 commissioning tests).
+  **Caveat:** `hold()` still needs a live `FrameEvidence` within the occlusion window — Option B removes the
+  clean-prepare + `good` prerequisite, not the synchronized-frame requirement; the next run shows which cold
+  errors remain.
+- **(1) mast depth camera — capability added, NOT enabled (publisher gap):** PR #156 (merged) wired the mast
+  *design* (`camera_config(mast_depth=True)` → `mast` prim on `robot_base`, role `nvblox_depth`) and the
+  *host consumption* (nvblox camera_1 + a second object_segmenter, gated on `mast_depth.enabled`). But the
+  **Isaac-side publisher of `camera_mast/masked_depth`** (the per-pixel instance-ID self-masked depth, the
+  analogue of the wrist `collision`-role bridge in `native_cameras`) is **NOT wired**. Enabling the host flag
+  now would be half-wired (the host expects a topic Isaac never publishes). The mast is also not reached in
+  run-330 (it fixes the place re-park B', downstream of both cold-collect and the warm turn). So the mast
+  stays OFF; added `--mast-depth` to `write_restock_camera_config.py` (capability). The publisher is a
+  focused Isaac-bundle follow-up needing an Isaac boot to verify (camera lane or a dedicated task).
+
+**Disk (fm440/fm441):** the ~70 GB cleanup was not this task's action (withdrawn); task-scoped deletions only.
