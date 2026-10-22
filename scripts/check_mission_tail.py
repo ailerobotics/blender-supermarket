@@ -20,11 +20,15 @@ Checks (PASS/FAIL/WARN lines, exit 0 iff no FAIL):
   tail_*              BT dry-runs: nominal completion, an unsettled uncouple, a failed home leg retried, a
                       tray off the bay, and the default-off (no vr1 switches) behaviour
   home_leg_*          (with --environment) the real uncoupled controller drives cart_parking -> home
+  return_tracking_*   (with --environment --return-tracking) the REAL COUPLED follower drives the return
+                      from the recorded end-of-verify train pose (cart lagging at articulation ~0.2) to
+                      cart_parking -- exercising the cart-yaw tracking law that the coupled return is
+                      otherwise STUBBED for here (the warm3 stall; guards tow_lane_cart_yaw_rebase)
 
 Usage (the integration lane's pre-boot gate; py_trees on the path for the BT checks):
   PYTHONPATH=scripts:$BTDIR python3 scripts/check_mission_tail.py \\
       --runtime-config <mission-runtime.json> --scenario <mission-scenario.json> \\
-      [--environment <environment.json>] [--camera-config <camera-config-bay.json>]
+      [--environment <environment.json>] [--camera-config <camera-config-bay.json>] [--return-tracking]
 """
 from __future__ import annotations
 
@@ -554,7 +558,8 @@ def check_default_off(config, scenario, rep, workdir):
               state=mission.state, reason=mission.reason[:120])
 
 
-def run_checks(config, scenario, *, environment=None, camera_config=None, workdir=None, stream=sys.stdout):
+def run_checks(config, scenario, *, environment=None, camera_config=None, workdir=None,
+               return_tracking=False, stream=sys.stdout):
     rep = Report(stream)
     check_config(config, scenario, rep)
     check_tray_on_bay(config, scenario, rep)
@@ -565,6 +570,11 @@ def run_checks(config, scenario, *, environment=None, camera_config=None, workdi
     if environment is not None:
         from twin.restock.tail_nav import check_home_leg
         check_home_leg(config, scenario, environment, rep, camera_config=camera_config)
+        if return_tracking:
+            # Drive the REAL coupled follower for the return instead of the kinematic stub check_tail
+            # uses, so the cart-yaw tracking law (the warm3 stall) is actually exercised on the grid.
+            from twin.restock.tail_nav import check_return_tracking
+            check_return_tracking(config, scenario, environment, rep, camera_config=camera_config)
     return rep
 
 
@@ -575,12 +585,18 @@ def main(argv=None):
     ap.add_argument('--environment', type=Path, help='static environment manifest: adds the home-leg nav check')
     ap.add_argument('--camera-config', type=Path, help='camera config whose map solids join the home-leg map')
     ap.add_argument('--workdir', type=Path, help='keep the dry-run mission.json / bt_events.jsonl here')
+    ap.add_argument('--return-tracking', action='store_true',
+                    help='also drive the REAL coupled return follower (cart-yaw tracking from the recorded '
+                         'end-of-verify pose) instead of the kinematic stub; needs --environment')
     args = ap.parse_args(argv)
     config = json.loads(args.runtime_config.read_text())
     scenario = json.loads(args.scenario.read_text())
     env = json.loads(args.environment.read_text()) if args.environment else None
     cam = json.loads(args.camera_config.read_text()) if args.camera_config else None
-    rep = run_checks(copy.deepcopy(config), scenario, environment=env, camera_config=cam, workdir=args.workdir)
+    if args.return_tracking and env is None:
+        ap.error('--return-tracking requires --environment (the real nav grid)')
+    rep = run_checks(copy.deepcopy(config), scenario, environment=env, camera_config=cam,
+                     workdir=args.workdir, return_tracking=args.return_tracking)
     print('MISSION_TAIL_DRYRUN ' + ('PASS' if not rep.failed else f'FAIL ({len(rep.failed)} failed)'), flush=True)
     return 0 if not rep.failed else 1
 

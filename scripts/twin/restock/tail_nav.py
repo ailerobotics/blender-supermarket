@@ -210,6 +210,93 @@ def simulate_home_leg(config, scenario, environment, *, start=None, home=None, b
                 pose=[round(c, 3) for c in state['pose']], reasons=reasons, near_goal=near_goal or [])
 
 
+# warm3 (sim-video, branch fm/twin-robot-in-store-boot-v1) recorded END-OF-VERIFY train pose, read from
+# the run's nav-trace.jsonl first RETURN tick (tick 4846): base (x, y, yaw) and the towed cart's
+# articulation (base_yaw - cart_yaw). This is the measured pose from which the live coupled RETURN stalled
+# -- the cart lags at ~0.2 rad after the transfer, so the authored return lane (start_cart_yaw 0) is
+# tracked with cart_err ~0.23 and the follower drops its own validated route every tick unless
+# navigation.tow_lane_cart_yaw_rebase is set. Any regression that drops that key reproduces the stall here.
+RECORDED_END_OF_VERIFY_BASE = (-2.078, 15.239, math.radians(-1.7))
+RECORDED_END_OF_VERIFY_ARTICULATION = 0.2001
+
+
+def simulate_coupled_return(config, scenario, environment, *, start_pose=RECORDED_END_OF_VERIFY_BASE,
+                            start_articulation=RECORDED_END_OF_VERIFY_ARTICULATION, goal=None,
+                            camera_config=None, max_s=30.0, dt=1 / 60):
+    """Drive the REAL COUPLED (robot+cart) ``ArticulatedController`` along the mission's return goal from a
+    measured end-of-verify train pose, built through ``nav_factory`` so the controller reads the mission's
+    actual ``navigation.*`` keys verbatim -- including ``tow_lane_cart_yaw_rebase``. If that key is dropped
+    (or set false) the follower hits the cart-yaw ``stop_replan_tracking_error`` trap (cart_err ~0.23 >
+    ``tow_lane_cart_yaw_tol`` because the cart lags at articulation ~0.2 while the authored lane starts at
+    cart_yaw 0) and the drive never arrives -- so any caller asserting arrival fails, closing the gap that
+    ``check_mission_tail`` left by stubbing the coupled return. Unlike ``simulate_home_leg`` this is coupled
+    and follows the resolved return lane; the goal defaults to ``mission_poses.cart_parking``.
+
+    Returns ``{status, reason, arrived, reasons, pose, moved, lane, goal, articulation}``. ``arrived`` is
+    True iff the controller latched ``arrived_stopped`` at the goal.
+    """
+    from twin.navigation.core import Odometry, Observation, wrap
+    from twin.navigation.factory import nav_factory
+    from twin.navigation.articulated import TrainState, advance
+    from twin.mobile import MobileSpec
+    poses = config['mission_poses']
+    goal = tuple(goal if goal is not None else poses['cart_parking'])
+    ga = (config.get('goal_articulation') or {}).get('return')
+    nav_cfg = dict(config['navigation'], environment=environment)
+    nav_cfg.pop('environment_path', None)
+    nav_cfg.pop('scenario_path', None)
+    if scenario is not None:
+        nav_cfg['scenario'] = scenario
+    else:
+        nav_cfg.pop('scenario', None)   # optional; a present-but-None key fails _load
+    if camera_config is not None:
+        nav_cfg['camera_config'] = camera_config
+    nav_cfg.pop('camera_config_path', None)
+    saved = {k: os.environ.get(k) for k in NAV_ENV}
+    os.environ.update(NAV_ENV)
+    try:
+        nav = nav_factory(app=None, assembly=object(), plan=NS(nav_mode='reference'),
+                          config=dict(config, navigation=nav_cfg), output='.')
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    spec = MobileSpec()
+    nav.start(goal, True, goal_articulation=ga)
+    lane = getattr(nav, '_active_lane', None)
+    pose = list(start_pose)
+    art = float(start_articulation)
+    cyaw = wrap(pose[2] - art)
+    v = w = 0.0
+    reasons = {}
+    result = None
+    for _ in range(int(max_s / dt)):
+        od = Odometry(tuple(pose), (_ + 1) * dt, v, w)          # production source defaults -> accepted
+        ob = Observation((_ + 1) * dt, (), True, True, art, coverage_radius=10.0)
+        r = nav.step(dt, od, ob, now=(_ + 1) * dt)
+        reasons[r.reason] = reasons.get(r.reason, 0) + 1
+        if r.status in ('succeeded', 'failed'):
+            result = r
+            break
+        v, w = r.linear, r.angular
+        x, y, yaw = pose
+        ts = TrainState(x, y, yaw, cyaw)
+        k = w / v if abs(v) > 1e-6 else 0.0
+        ns = advance(ts, v * dt, k, spec)
+        pose = [x + v * math.cos(yaw) * dt, y + v * math.sin(yaw) * dt, wrap(yaw + w * dt)]
+        cyaw = ns.cart_yaw
+        art = abs(wrap(pose[2] - cyaw))
+    arrived = bool(result and result.status == 'succeeded' and result.reason == 'arrived_stopped')
+    return {'status': result.status if result else 'timeout',
+            'reason': result.reason if result else 'sim budget',
+            'arrived': arrived, 'reasons': reasons,
+            'pose': [round(c, 3) for c in pose], 'moved': round(math.dist(pose[:2], start_pose[:2]), 3),
+            'lane': lane.name if lane is not None else None,
+            'goal': list(goal), 'articulation': round(start_articulation, 4)}
+
+
 def lidar_wall_probe(sensor_to_base, *, wall_x=3.0):
     """The lidar wiring proof: a wall at x=wall_x seen from a base at the origin. Returns the obstacle x
     span; the correct wiring reproduces the wall exactly (span 0)."""
@@ -238,3 +325,20 @@ def check_home_leg(config, scenario, environment, rep, *, camera_config=None):
                               lidar_yaw_fix=not configured['lidar_yaw_fix'])
     rep.add('INFO', 'home_leg_other_lidar_wiring', **other)
     return configured
+
+
+def check_return_tracking(config, scenario, environment, rep, *, camera_config=None):
+    """Exercise the COUPLED return's cart-yaw tracking with the REAL controller instead of the kinematic
+    stub ``check_tail`` uses. Drives ``simulate_coupled_return`` from the recorded end-of-verify train pose
+    (cart lagging at articulation ~0.2) to ``mission_poses.cart_parking`` using the config's actual
+    ``navigation.*`` keys. With ``tow_lane_cart_yaw_rebase`` set (and/or a wide enough ``tow_lane_cart_yaw_tol``)
+    it reaches ``arrived_stopped``; if the runtime config regresses that key back to the warm3 state the
+    follower drops its own validated route on cart_err and this check FAILS -- which the stub could never
+    catch. No-op (INFO skip) when the coupled return resolves to no authored lane (e.g. a no-tow config)."""
+    result = simulate_coupled_return(config, scenario, environment, camera_config=camera_config, max_s=30.0)
+    if result['lane'] is None:
+        rep.add('INFO', 'return_tracking_no_authored_lane', **result,
+                note='coupled return resolves to no authored tow lane (free-plan); cart-yaw lane tracking N/A')
+        return result
+    rep.check(result['arrived'], 'return_tracking_reaches_cart_parking', **result)
+    return result
