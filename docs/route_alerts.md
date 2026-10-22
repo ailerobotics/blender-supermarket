@@ -2,7 +2,7 @@
 
 While the restocking robot tows the cart down the aisle its cameras see the floor and
 shelves. **Route alerts** bridges that camera stream to the read-only
-[`store-vision`](https://github.com/ailerobotics/store-vision) detectors so the drive
+the `store-vision` suite (a separate package) detectors so the drive
 produces the same findings a fixed store camera would — floor **spills**, aisle
 **obstructions**, misplaced / out-of-cold-chain **strays** — publishes them as
 `robot.route_alert.*` events plus optional staff tasks, and feeds the obstruction

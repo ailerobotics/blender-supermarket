@@ -38,8 +38,8 @@ python3 scripts/gen_labels.py        # PIL labels, price tags, signs     -> asse
 # headless full build (≈4 s) from the base file that holds the Poly Haven materials + HDRI:
 blender -b scenes/supermarket_base.blend --python scripts/build_supermarket.py -- --all --save scenes/supermarket.blend
 # or rebuild inside the running GUI through MCP, stage by stage:
-uv run --with mcp scripts/mcpcall.py execute_blender_code '{"code":"import sys,importlib; sys.path.insert(0,\"/home/manishsaini/workspaces/blender-supermarket/scripts\"); import build_supermarket as B; importlib.reload(B); B.build([\"clear\",\"structure\",\"library\",\"gondolas\"])"}'
-uv run --with mcp scripts/mcpcall.py execute_blender_code '{"code":"import sys; sys.path.insert(0,\"/home/manishsaini/workspaces/blender-supermarket/scripts\"); import build_supermarket as B; B.build([\"walls\",\"chillers\",\"front\",\"produce\",\"signage\",\"lighting\",\"cameras\",\"render\"], save=\"/home/manishsaini/workspaces/blender-supermarket/scenes/supermarket.blend\")"}'
+uv run --with mcp scripts/mcpcall.py execute_blender_code '{"code":"import sys,importlib; sys.path.insert(0,\"~/workspaces/blender-supermarket/scripts\"); import build_supermarket as B; importlib.reload(B); B.build([\"clear\",\"structure\",\"library\",\"gondolas\"])"}'
+uv run --with mcp scripts/mcpcall.py execute_blender_code '{"code":"import sys; sys.path.insert(0,\"~/workspaces/blender-supermarket/scripts\"); import build_supermarket as B; B.build([\"walls\",\"chillers\",\"front\",\"produce\",\"signage\",\"lighting\",\"cameras\",\"render\"], save=\"~/workspaces/blender-supermarket/scenes/supermarket.blend\")"}'
 ```
 Stages: `clear structure library gondolas walls chillers front produce signage lighting cameras render`. Products = `scripts/catalog.py` (93 SKUs, fictional brands, real dimensions).
 
@@ -1191,10 +1191,10 @@ PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/tw
 Guarded GPU (short session; integration lane holds `/tmp/aile-gpu.lock` priority). Trial-1
 contact diagnosis (name the obstacle the fold hits) then the carry-pose clearance sweep:
 ```
-RESTOCK_PYTHON=/home/manishsaini/miniforge3/envs/env_isaaclab/bin/python \
-RESTOCK_NVIDIA_RUNTIME=/home/manishsaini/datasets/twin-robot-in-store-boot-v1/gpu-runtime-578/root \
+RESTOCK_PYTHON=~/miniforge3/envs/env_isaaclab/bin/python \
+RESTOCK_NVIDIA_RUNTIME=~/datasets/twin-robot-in-store-boot-v1/gpu-runtime-578/root \
   scripts/run_arm_carry_bench.sh \
-    --runtime-config /home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/mission-runtime-cc-collect.json \
+    --runtime-config ~/datasets/twin-robot-in-store-boot-v1/mission/mission-runtime-cc-collect.json \
     --output <scratch>/armbench --diagnose --expect reproduce --heavy-threshold-mb 2500 \
     --lift-joints <6 measured lift joints>     # then --pose-sweep for the clearing shape
 ```
@@ -1213,10 +1213,10 @@ Print the aggregated status once and exit (the dry-run transcript):
 PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py --dry-run
 ```
 
-Serve read-only on the tailnet (binds `100.100.47.65:8794`; `8787/8790/8791/8793` taken):
+Serve read-only on the tailnet (binds `<DASHBOARD_HOST>:8794`; `8787/8790/8791/8793` taken):
 ```
 PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py
-# -> http://100.100.47.65:8794/
+# -> http://<DASHBOARD_HOST>:8794/
 ```
 
 With the store overlay + the opt-in phone trigger queue (default off):
@@ -1228,9 +1228,9 @@ PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py \
 The behaviour-tree panel needs no flag: it auto-discovers the per-run `bt_snapshot.json`
 that `sim-restock-bt-v1` writes into the run directory, so it lights up on the first
 bt-enabled run (`--bt <path>` overrides with an explicit snapshot file).
-It reads the upstream watch page (`--upstream`, default `http://100.100.47.65:8787`) and
+It reads the upstream watch page (`--upstream`, default `http://<DASHBOARD_HOST>:8787`) and
 the mission run directories (`--run-root`, default
-`/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission`); it never writes a run,
+`~/datasets/twin-robot-in-store-boot-v1/mission`); it never writes a run,
 never boots Isaac, and degrades gracefully when the upstream is down. `--enable-trigger`
 requires `--requests-dir`; without it `POST /trigger` returns `403`.
 
@@ -1291,7 +1291,7 @@ PYTHONPATH=scripts python3 -m pytest scripts/twin/route_alerts/tests/test_config
     scripts/twin/route_alerts/tests/test_costmap.py \
     scripts/twin/route_alerts/tests/test_mission.py -q
 # all tests incl. store-vision integration (unittest; the venv has no pytest):
-PYTHONPATH=scripts /home/manishsaini/firstmate/projects/store-vision/.venv/bin/python \
+PYTHONPATH=scripts ~/firstmate/projects/store-vision/.venv/bin/python \
     -m unittest discover -s scripts/twin/route_alerts/tests -p 'test_*.py'
 ```
 
@@ -1301,7 +1301,7 @@ obstruction + aisle-blocked + robot events + staff tasks + people-masked), then 
 REAL coupled controller through the REAL dynobs layer so it stops for and re-routes around
 the detected obstruction. Self-asserting (exit 1 on any failure); artifacts outside git:
 ```
-PYTHONPATH=scripts /home/manishsaini/firstmate/projects/store-vision/.venv/bin/python \
+PYTHONPATH=scripts ~/firstmate/projects/store-vision/.venv/bin/python \
     scripts/run_route_alerts_evidence.py --out ~/datasets/sim-route-alerts-v1
 ```
 
