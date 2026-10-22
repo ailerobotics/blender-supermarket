@@ -7,10 +7,31 @@ by integration. No hardware launch or simulator boot occurs here.
 import argparse
 from dataclasses import asdict
 import json
+import os
 import sys
 
 from .ros_adapter import (RosMotionPort, RosTransferBridge, require_sim_domain,
                           sensors_from_json,planner_velocity_scale)
+
+# Sim-clock pre-weld grasp-press budget (SIM seconds), now EFFECTIVE BY DEFAULT (firstmate
+# sim-robust-weld-attach-v1). A press that never seals a weld keeps the host alive (trajectory_host
+# still publishes /joint_states, so the pace-aware arm-command heartbeat does NOT trip -- it fires only
+# on host SILENCE), so without this bound a non-forming grasp loops until the COARSE 120 s phase_timeout,
+# burning the GPU wall cap with no named cause. This bounds the WHOLE unconfirmed press on the SIM clock
+# (render-pacing-safe) and fails fast with a NAMED reason. The default is generous: the slowest observed
+# LEGITIMATE grasp press (ground-truth collect, run collect1) was ~13.4 sim s, so 45 s is >3x that yet a
+# third of the 120 s phase_timeout. Env RESTOCK_GRASP_PRESS_TIMEOUT_S overrides the default; the config
+# key 'grasp_press_timeout_s' overrides both (set it to 0 to disable and reproduce a pre-fix run). The
+# controller re-clamps to <= phase_timeout.
+_DEFAULT_GRASP_PRESS_TIMEOUT_S = 45.0
+
+
+def _default_grasp_press_timeout_s():
+    try:
+        v = float(os.environ.get('RESTOCK_GRASP_PRESS_TIMEOUT_S', _DEFAULT_GRASP_PRESS_TIMEOUT_S))
+    except (TypeError, ValueError):
+        return _DEFAULT_GRASP_PRESS_TIMEOUT_S
+    return v if (v == v and v >= 0) else _DEFAULT_GRASP_PRESS_TIMEOUT_S
 
 
 def contract_smoke():
@@ -167,10 +188,13 @@ def main():
         # advances to carry only if the measured carton rose by >= this from the grasp-confirm baseline, so
         # the confirm reads physics, never the (arm-occluded) source camera. Absent => inert (byte-identical).
         grasp_track_m=config.get('grasp_track_m'),
-        # Sim-clock pre-weld press budget (SIM seconds): fail the honest collect fast with a NAMED reason
-        # if the grasp press never seals, before the opaque 90 s WALL arm-command heartbeat watchdog
-        # (runs 321/327). Absent/0 => off => byte-identical. Clamped to <= phase_timeout in the controller.
-        grasp_press_timeout_s=float(config.get('grasp_press_timeout_s', 0.0)),
+        # Sim-clock pre-weld press budget (SIM seconds): fail the collect fast with a NAMED reason if the
+        # grasp press never seals, before the opaque 90 s WALL arm-command heartbeat watchdog (runs
+        # 321/327). Now EFFECTIVE BY DEFAULT (sim-robust-weld-attach-v1): absent config => the
+        # _default_grasp_press_timeout_s backstop (45 s, env RESTOCK_GRASP_PRESS_TIMEOUT_S); the config
+        # key still overrides, and setting it to 0 disables (byte-identical pre-fix). Clamped to <=
+        # phase_timeout in the controller.
+        grasp_press_timeout_s=float(config.get('grasp_press_timeout_s', _default_grasp_press_timeout_s())),
         # fm449 (run-332 cold collect): gate the observe->reach on a clean synchronized source frame + decoded
         # label at park (the Isaac-side verdict rides Sensors.collect_source_clean). Absent/False => the gate
         # never arms => byte-identical. No injected provider on the host path; the gate reads the packet field.

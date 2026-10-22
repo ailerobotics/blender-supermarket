@@ -481,6 +481,28 @@ def test_grasp_press_sim_budget_is_not_rearmed_by_retries():
     assert c._grasp_retries >= 1                      # a re-seat DID happen, yet the clock was not re-armed
 
 
+def test_grasp_press_budget_effective_by_default_in_host_wiring(monkeypatch):
+    # firstmate sim-robust-weld-attach-v1: the production host wiring (ros_host) now defaults the
+    # grasp-press budget ON so a non-forming grasp that keeps the host ALIVE (no heartbeat trip) fails
+    # fast with a named reason instead of looping to the coarse 120 s phase_timeout. Switch keys stay
+    # backward compatible: env overrides the default, and an explicit config 0 disables it.
+    from scripts.twin.restock_manipulation import ros_host
+    monkeypatch.delenv('RESTOCK_GRASP_PRESS_TIMEOUT_S', raising=False)
+    assert ros_host._default_grasp_press_timeout_s() > 0           # effective by default
+    # ros_host resolves float(config.get('grasp_press_timeout_s', _default_grasp_press_timeout_s())):
+    resolve = lambda cfg: float(cfg.get('grasp_press_timeout_s', ros_host._default_grasp_press_timeout_s()))
+    assert resolve({}) == ros_host._DEFAULT_GRASP_PRESS_TIMEOUT_S  # absent key => default-on
+    assert resolve({'grasp_press_timeout_s': 0.0}) == 0.0          # explicit 0 => disabled (pre-fix)
+    assert resolve({'grasp_press_timeout_s': 7.5}) == 7.5          # config overrides
+    monkeypatch.setenv('RESTOCK_GRASP_PRESS_TIMEOUT_S', '20')
+    assert ros_host._default_grasp_press_timeout_s() == 20.0       # env overrides the default
+    assert resolve({}) == 20.0
+    monkeypatch.setenv('RESTOCK_GRASP_PRESS_TIMEOUT_S', 'nonsense')
+    assert ros_host._default_grasp_press_timeout_s() == ros_host._DEFAULT_GRASP_PRESS_TIMEOUT_S  # bad => default
+    monkeypatch.setenv('RESTOCK_GRASP_PRESS_TIMEOUT_S', '-5')
+    assert ros_host._default_grasp_press_timeout_s() == ros_host._DEFAULT_GRASP_PRESS_TIMEOUT_S  # neg => default
+
+
 def test_collision_stale_pause_keeps_stream_alive_and_wall_fail_fast_fm427():
     # fm427 (A1) / run-323 cold lift: the COLLISION_STALE_PAUSE held the post-attach lift on a genuinely-
     # stale collision stamp (the benign weld/ESDF re-incorporation lag) by returning EMPTY controls -- a
