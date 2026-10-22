@@ -49,7 +49,7 @@ def _all_true_mask(design, camera_id):
 
 def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_bridge_root,
                           render_scale=1.0, full_res_locations=(), clearance_for_slot=None,
-                          mast_depth=False, mast_depth_settings=None,
+                          mast_depth=False, mast_depth_settings=None, light_rig_scale=None,
                           _rig_builder=None, _mast_bridge_builder=None):
     """Assemble the sensing_sources mapping. Pure wiring; the rig is built behind the seam.
 
@@ -84,7 +84,7 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
                      for cid in {s['camera_id'] for s in design['supports'].values()}}
 
     rig = (_rig_builder or _real_rig)(assembly=assembly, design=design, render_scale=render_scale,
-                                      camera_render_scales=camera_scales)
+                                      camera_render_scales=camera_scales, light_rig_scale=light_rig_scale)
     cameras = rig['cameras']
     base_from_camera = rig['base_from_camera']       # callable(camera_id) -> 4x4
     recording_camera = rig['recording_camera']
@@ -234,7 +234,7 @@ def station_camera_specs(design, parent_paths, *, drop_camera_ids=()):
     return specs
 
 
-def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
+def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None, light_rig_scale=None):
     """Build the Isaac CameraRig on the composed stage and expose the sensing cameras."""
     from pxr import UsdGeom
     from .native_cameras import CameraRig
@@ -312,6 +312,28 @@ def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None):
         fill.CreateColorAttr(Gf.Vec3f(1., .97, .92))
         UsdGeom.Xformable(fill.GetPrim()).AddTranslateOp().Set(Gf.Vec3d(0., 0., 2.4))
         recording_camera = chase
+    # fm465: light the STATION camera views for QR decode. The mission previously relied on the dim
+    # exported store lights + the base-following walkthrough fill, so the source/cart/shelf cameras saw
+    # the carton/support QR too dark to decode ('unknown or undecoded label in calibrated slot' at cold
+    # collect + transfer) -- while commissioning AND the view-source optical bench, which DO author the
+    # camera-lane light rig, decode the carton SKU + both support markers cleanly (6/6 at intensity_scale
+    # 1.0; verified). This authors the SAME rig the bench/commissioning use (disable the dim exported
+    # store lights, then the correct-nits store fixtures + dome fill + the shelf ring lamp). The baseline
+    # match (_check_match) is purely geometric (support/camera id + intrinsics), NOT brightness, so a
+    # mission lit brighter than the 0.5-commissioned baseline still matches it -- and 1.0 decodes robustly
+    # where 0.5 is marginal. None => skip (byte-identical: the pre-fm465 dim-store-light behaviour); the
+    # DiskLight walkthrough fill above is untouched (it is not a Rect/Dome/Sphere light, so the disable
+    # loop leaves it, and it keeps lighting the overhead chase view).
+    if light_rig_scale is not None:
+        from pxr import UsdLux
+        from twin.restock_camera.lights import light_rig, author_light_rig, author_camera_lamps, LightRigTuning
+        tuning = LightRigTuning(intensity_scale=float(light_rig_scale))
+        for prim in assembly.stage.Traverse():
+            if (prim.IsA(UsdLux.RectLight) or prim.IsA(UsdLux.DomeLight) or prim.IsA(UsdLux.SphereLight)) \
+                    and not str(prim.GetPath()).startswith('/World/RestockLight_'):
+                prim.SetActive(False)
+        author_light_rig(assembly.stage, light_rig(tuning), parent_path='/World', tuning=tuning)
+        author_camera_lamps(assembly.stage, design, parent_paths=parent_paths, tuning=tuning)
     return {'cameras': rig.cameras,
             'base_from_camera': lambda camera_id: rig.base_from_camera(camera_id, base_root),
             'recording_camera': recording_camera}

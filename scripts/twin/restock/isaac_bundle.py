@@ -466,11 +466,18 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # the same way; `mast_depth` may override any of them (e.g. its own rig_prefixes).
     _mast_enabled = bool(config.get('mast_depth', {}).get('enabled'))
     _mast_settings = {**config.get('masked_depth', {}), **config.get('mast_depth', {})}
+    # fm465: author the camera-lane light rig on the station camera views so the carton/support QR
+    # decodes (the mission previously ran on the dim exported store lights only -> cold-collect/transfer
+    # 'undecoded label in calibrated slot'; commissioning + the view bench, which DO apply the rig, decode
+    # cleanly). Opt-in: present `light_intensity_scale` => apply the rig at that scale (match the scale the
+    # station baselines were commissioned under; _check_match is geometric so a brighter mission still
+    # matches); absent => None => byte-identical (no rig authored, pre-fm465 behaviour).
+    _light_rig_scale = config.get('light_intensity_scale')
     assembly.sensing_sources = build_sensing_sources(
         assembly=assembly, scenario=scenario, manifest=mobile_manifest,
         manip_runtime=manipulation.controller, pose_bridge_root=config['pose_bridge_root'],
         render_scale=float(config.get('render_scale', 1.0)),
-        full_res_locations=_decode_locations,
+        full_res_locations=_decode_locations, light_rig_scale=_light_rig_scale,
         mast_depth=_mast_enabled, mast_depth_settings=_mast_settings)
     sensing = sensing_factory(app=app, assembly=assembly, plan=plan, config=config, output=output)
     capture = sensing['capture']

@@ -54,7 +54,7 @@ class FakeRig:
     def __init__(self):
         self.design = None
 
-    def builder(self, *, assembly, design, render_scale=1.0, camera_render_scales=None):
+    def builder(self, *, assembly, design, render_scale=1.0, camera_render_scales=None, light_rig_scale=None):
         self.design = design
         return {'cameras': {cid: NS(id=cid) for cid in design['cameras']},
                 'base_from_camera': lambda cid: np.eye(4).tolist(),
