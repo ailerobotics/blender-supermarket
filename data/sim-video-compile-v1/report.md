@@ -34,23 +34,30 @@ band). Ranges come from `data/sim-video-stage-audit-v1/stage_sources.json`.
 
 ## v1 result (2026-10-22)
 
-`mission/demo-006/walkthrough.mp4` — 45.9 s, 689 frames, 1920×1080, 15 fps; clock continuous
-1.4→45.9 s, stage numbers 1→7, 0 dim/black frames. Spine:
+`mission/demo-006/walkthrough.mp4` — 32.3 s, 485 frames, 1920×1080, 15 fps; clock continuous
+2.1→32.3 s, stage numbers 1→7, 0 dim/black frames. Story (per the captain's 2026-10-22 review):
+warehouse pick onto the rollwagen → tow out → place → tow the rollwagen **back to the warehouse and
+park**. **Cut rule:** every stage ends before any wrongly tilted carton / clip / jump / mid-way
+uncouple.
 
 | stage | source | note |
 |-------|--------|------|
-| collect | collect-src-001 f0–298 | real shelf pick + lift + carry to the rollwagen (cold GT run); **no place yet** — full pick→place re-run pending (part B of the collect lane) |
+| collect | collect-src-001 f0–112 | real shelf pick; **cut at the clean grasp**, before the lift pitches the carton off level (tilt starts ~f120) |
 | couple | warm8 f0–126 | real couple |
-| outbound | warm8 f126–164 | **INTERIM** clean backroom-bay drive (no wall clip, but not the door) → `mission/door-src-001` |
+| outbound | warm8 f126–164 | **INTERIM** clean backroom drive (no wall clip) → door/front pass pending `door-src-001` |
 | park | warm8 f164 | 1-frame transition, held 1.2 s |
-| transfer | warm8 f164–223 | scripted still-arm (sim weld) |
+| transfer | warm8 f164–223 | **INTERIM** scripted still-arm place at the backroom bay; front-shelf place pending (story-sources) |
 | verify | warm8 f223 | ground-truth, held 1.2 s |
-| return | warm8 f223–358 | real return home |
+| return | demo-005 f1425–1800 (stride 3) | coupled tow from the front **back to the warehouse + park**; **cut before the uncouple** at f1830 |
 
-One slot (`outbound`) is still interim; swapping it is a one-line edit of the spec once the door
-helper run lands. Collect is a real pick/lift/carry but stops before the place (the cold run died on
-a watchdog e-stop at arrival); the on-screen label says so. No run drives the door yet (see the
-audit); those are honest, labelled gaps, not hidden.
+Interim slots swap via a one-line spec edit as helpers land: `outbound ← door-src-001`,
+`transfer` (front-shelf) + a native coupled return `← sim-video-story-sources-v1`, clean per-segment
+cut ranges `← sim-video-cut-qa-v1`. Known interim discontinuity: transfer is still the backroom bay
+while the return starts at the supermarket front (front-shelf transfer pending).
+
+Per-segment knobs the compiler honours (all in the spec): `stride` (time-lapse a slow stretch),
+`min_seconds` (hold a sub-second stage), `caption`/`title` (override the band wording, e.g. drop
+"uncouple" on the return), `band` (draw a caption band; default real=yes, choreo=no).
 
 `collect-src-001` is a carved single-stage clip (no `mission.json`); `stitch.load_run_lenient`
 assembles it into an equivalent run (empty event log, panel from its own `bt_events`).
