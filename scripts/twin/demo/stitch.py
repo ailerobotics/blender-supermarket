@@ -66,8 +66,11 @@ class Segment:
     frame_start: int
     frame_end: int
     kind: str | None = None
+    stride: int = 1                   # take every Nth source frame (time-lapse a slow stretch)
     min_seconds: float = 0.0
-    caption: str | None = None
+    caption: str | None = None        # override the stage's default band caption
+    title: str | None = None          # override the band's stage title (e.g. drop "& uncouple")
+    band: bool | None = None          # draw a caption band? default: real=yes, choreo=no (already baked)
     labels: list = field(default_factory=list)
 
 
@@ -192,9 +195,10 @@ def composite_frame(scene_img, panel_img):
     return canvas
 
 
-def draw_band(scene_img, stage, *, clock, coupled, labels):
+def draw_band(scene_img, stage, *, clock, coupled, labels, title=None, caption=None):
     """Draw the caption band (stage idx/7 + title + caption + any provenance labels) and a sim clock
-    onto a 960x720 recorded scene, matching the demo cut's band so real and choreo scenes read alike."""
+    onto a recorded scene, matching the demo cut's band so real and choreo scenes read alike. ``title``
+    and ``caption`` override the stage defaults (e.g. a return segment that must not say 'uncouple')."""
     from PIL import Image, ImageDraw
     w, h = scene_img.size
     canvas = scene_img.convert('RGB').copy()
@@ -203,9 +207,8 @@ def draw_band(scene_img, stage, *, clock, coupled, labels):
     d = ImageDraw.Draw(band)
     idx = E.STAGES.index(stage) + 1
     d.text((18, 10), f'{idx}/7', font=W.font(26, True), fill=ACCENT + (255,))
-    d.text((80, 10), E.TITLES[stage].upper(), font=W.font(26, True), fill=FG + (255,))
-    caption = E.CAPTIONS[stage]
-    y = W._text_block(d, (20, 48), caption, W.font(17), FG + (255,), w - 40, 3)
+    d.text((80, 10), (title or E.TITLES[stage]).upper(), font=W.font(26, True), fill=FG + (255,))
+    y = W._text_block(d, (20, 48), caption or E.CAPTIONS[stage], W.font(17), FG + (255,), w - 40, 3)
     if labels:
         text = '; '.join(str(x) for x in labels)
         W._text_block(d, (20, y + 2), text, W.font(14, True), AMBER + (255,), w - 40, 2)
@@ -251,7 +254,7 @@ class Compiler:
         model = E.cart_model(run)
         step_reasons = {}
         BT.seed_reasons(timeline, run, model, step_reasons)
-        frames = run.frames[seg.frame_start:seg.frame_end + 1]
+        frames = run.frames[seg.frame_start:seg.frame_end + 1:max(1, seg.stride)]
         if not frames:
             raise ValueError(f'{run_dir.name}: no frames in [{seg.frame_start},{seg.frame_end}]')
         hold = max(0, round(seg.min_seconds * self.spec.fps) - len(frames))
@@ -276,8 +279,9 @@ class Compiler:
         if len(pngs) != len(entries):
             raise ValueError(f'{run_dir.name}: {len(pngs)} decoded frames vs {len(entries)} log entries '
                              f'for [{seg.frame_start},{seg.frame_end}]')
-        hold = max(0, round(seg.min_seconds * self.spec.fps) - len(entries))
-        pairs = list(zip(pngs, entries)) + [None] * hold
+        pairs = list(zip(pngs, entries))[::max(1, seg.stride)]
+        hold = max(0, round(seg.min_seconds * self.spec.fps) - len(pairs))
+        pairs = pairs + [None] * hold
 
         def render_one(i):
             png, logentry = pairs[i] if pairs[i] is not None else pairs[len(pairs) - hold - 1]
@@ -300,8 +304,10 @@ class Compiler:
             clock = self.global_frame / self.spec.fps
             final = is_last_segment and i == count - 1
             rewrite_entry(entry, seg.stage, global_frame=self.global_frame, clock=clock, final=final)
-            if kind == 'real':
-                scene = draw_band(scene, seg.stage, clock=clock, coupled=coupled, labels=seg.labels)
+            want_band = seg.band if seg.band is not None else (kind == 'real')
+            if want_band:
+                scene = draw_band(scene, seg.stage, clock=clock, coupled=coupled, labels=seg.labels,
+                                  title=seg.title, caption=seg.caption)
             panel_img = PANEL.render_panel(entry, size=(PANEL_W, OUT_H))
             yield np.asarray(composite_frame(scene, panel_img), dtype=np.uint8)
         self.table.append({'stage': seg.stage, 'source': run_dir.name, 'kind': kind,

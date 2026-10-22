@@ -1,5 +1,5 @@
 {
-  "_comment": "demo-006 compile spec. Ordered per-stage segments; each names the source run and the inclusive frame range to take. Ranges from data/sim-video-stage-audit-v1/stage_sources.json. collect now uses mission/collect-src-001 (cold GT-collect: real shelf pick + lift + carry to the rollwagen, NO place; frames 0-298 per its README, grasp #89 / lifted-clear #202 / arrived #298). One interim slot remains: outbound <- mission/door-src-001 (door pass; interim = warm8 clean backroom-bay drive, which does NOT clip the wall but is the backroom route not the door).",
+  "_comment": "demo-006 compile spec after the captain's 2026-10-22 review. Story: warehouse pick onto the rollwagen -> rollwagen towed out -> placed -> robot+rollwagen towed back to the warehouse and parked. CUT RULE: every stage ends BEFORE any wrongly tilted carton / clip / jump / mid-way uncouple. collect = collect-src-001 cut at the clean grasp (f0-112) BEFORE the carton pitches off level (tilt starts ~f120). return = demo-005's COUPLED tow back to the warehouse + park (f1425-1800), cut BEFORE the uncouple at f1830 (ends on the parked, still-coupled robot+rollwagen). Interim slots pending helper lanes: outbound <- door-src-001 (door/front pass; interim = warm8 clean backroom-bay drive); transfer at the supermarket FRONT + a native coupled return <- sim-video-story-sources-v1 (interim = warm8 backroom transfer, demo-005 return). Clean per-segment cut ranges also coming from sim-video-cut-qa-v1.",
   "mission_root": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission",
   "title": "demo-006",
   "fps": 15,
@@ -10,8 +10,9 @@
       "source": "collect-src-001",
       "kind": "real",
       "frame_start": 0,
-      "frame_end": 298,
-      "labels": ["real shelf pick + lift + carry to rollwagen; place pending full pick->place re-run"]
+      "frame_end": 112,
+      "caption": "Pick the carton off the warehouse shelf",
+      "labels": ["real pick (collect-src-001); cut at the clean grasp, before the lift tilts the carton"]
     },
     {
       "stage": "couple",
@@ -26,7 +27,7 @@
       "kind": "real",
       "frame_start": 126,
       "frame_end": 164,
-      "labels": ["INTERIM: backroom-bay route (clean, no wall clip); door pass pending (door-src-001)"]
+      "labels": ["INTERIM: clean backroom drive (no wall clip); door/front pass pending (door-src-001)"]
     },
     {
       "stage": "park",
@@ -42,7 +43,7 @@
       "kind": "real",
       "frame_start": 164,
       "frame_end": 223,
-      "labels": ["scripted still-arm transfer (sim weld attach), not a physics grasp"]
+      "labels": ["INTERIM: scripted still-arm place at the backroom bay; front-shelf place pending (story-sources)"]
     },
     {
       "stage": "verify",
@@ -55,10 +56,15 @@
     },
     {
       "stage": "return",
-      "source": "warm8",
-      "kind": "real",
-      "frame_start": 223,
-      "frame_end": 358
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1425,
+      "frame_end": 1800,
+      "stride": 3,
+      "band": true,
+      "title": "Return to the warehouse",
+      "caption": "Tow the rollwagen back to the warehouse and park (still coupled)",
+      "labels": ["coupled tow back + park (demo-005); cut before the uncouple"]
     }
   ]
 }
