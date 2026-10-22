@@ -66,8 +66,14 @@ class FixtureMotion:
     def last_fault_was_sim_deadline(self):
         return self.sim_deadline_fault
 
-    def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None):
+    def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None, straight_line=False):
         self.stows.append((goal,measured,slow))
+        # sim-robust-collect-stow-branch-v1: record every begin_joint_goal with its collision-off
+        # straight-line flag + goal (the collect deck RETREAT backs the empty gripper off the
+        # self-colliding place fold to the fixed clear shape via a straight-line JOINT smoothstep).
+        self.joint_goals = getattr(self, 'joint_goals', [])
+        self.joint_goals.append(dict(goal=tuple(goal), measured=tuple(measured), slow=slow,
+                                     goal_tol=goal_tol, straight_line=bool(straight_line)))
 
     def stop(self):
         self.stops += 1
@@ -906,8 +912,10 @@ def _collect_place_controller(straight_line):
 
 def _drive_collect_place(c, m):
     """Drive the collect reposition place to verify (as test_reposition_full_place_path_reaches_verify),
-    returning {phase_that_issued_a_begin_move: straight_line_flag} and the ordered phase sequence."""
-    by_phase, seq, n, t0 = {}, [], 0, 1.0
+    returning {phase_that_issued_a_begin()_pose-move: straight_line_flag}, the ordered phase sequence, and
+    {phase_that_issued_a_begin_joint_goal: {goal, straight_line}} (the fixed-shape preplace, the staged
+    tuck/pan/retreat_tuck/stow folds, and the collect deck straight-line RETREAT escape)."""
+    by_phase, jg_by_phase, seq, n, k, t0 = {}, {}, [], 0, 0, 1.0
     for i in range(140):
         if c.phase == 'verify':
             break
@@ -925,8 +933,12 @@ def _drive_collect_place(c, m):
         if len(m.moves) > n:                                 # a begin() pose-move was issued this step
             by_phase[phase_before] = m.straight_lines[-1]
             n = len(m.moves)
+        jg = getattr(m, 'joint_goals', [])
+        if len(jg) > k:                                      # a begin_joint_goal was issued this step
+            jg_by_phase[phase_before] = jg[-1]
+            k = len(jg)
     assert c.phase == 'verify', c.phase
-    return by_phase, seq
+    return by_phase, seq, jg_by_phase
 
 
 def test_collect_deck_place_predicate_is_scoped():
@@ -948,15 +960,26 @@ def test_collect_deck_place_routes_place_and_retreat_straight_line():
     # straight-line; the PREPLACE stays collision-aware (a fixed joint goal here) and the free-space pick
     # approach stays collision-aware; release -> retreat -> stow -> verify still follow.
     c, m = _collect_place_controller(straight_line=True)
-    by_phase, seq = _drive_collect_place(c, m)
+    by_phase, seq, jg_by_phase = _drive_collect_place(c, m)
     assert by_phase.get('place') is True                      # place descent onto the deck: collision-off
-    assert by_phase.get('retreat') is True                    # empty-handed lift back: collision-off
-    # ONLY place + retreat route straight-line; every other begin() pose-move (the free-space pick
-    # approach/contact/lift) stays collision-aware.
-    assert {p for p, straight in by_phase.items() if straight} == {'place', 'retreat'}, by_phase
+    # ONLY the place descent routes as a begin() pose straight-line now; the empty-handed RETREAT routes
+    # as a collision-off straight-line JOINT escape (begin_joint_goal(straight_line=True)) to the fixed
+    # clear upright shape -- sim-robust-collect-stow-branch-v1, so the self-colliding place fold can't
+    # block the next collision-aware staged retreat_tuck. Every other begin() pose-move (the free-space
+    # pick approach/contact/lift) stays collision-aware.
+    assert {p for p, straight in by_phase.items() if straight} == {'place'}, by_phase
+    assert 'retreat' not in by_phase                          # retreat is no longer a begin() pose-move
     # the preplace is a fixed collision-aware joint goal (begin_joint_goal), never a begin() pose-move
     assert 'preplace' not in by_phase
     assert _SL_PREPLACE_SHAPE in [g for g, _m, _s in m.stows]
+    # the RETREAT is a collision-OFF straight-line JOINT smoothstep to the fixed clear upright shape
+    retreat_jg = jg_by_phase.get('retreat')
+    assert retreat_jg is not None and retreat_jg['straight_line'] is True, jg_by_phase
+    assert retreat_jg['goal'] == _SL_PREPLACE_SHAPE
+    # the preplace / staged folds are collision-AWARE joint goals (never straight-line)
+    assert jg_by_phase['preplace']['straight_line'] is False
+    assert all(jg['straight_line'] is False
+               for p, jg in jg_by_phase.items() if p != 'retreat')
     # the full place-side sequence completed through release/retreat/stow to verify
     for p in ('preplace', 'place', 'release', 'retreat', 'stow'):
         assert p in seq, (p, seq)
@@ -968,15 +991,42 @@ def test_collect_deck_place_straight_line_default_off_is_byte_identical():
     # and the collect_place_wrist_guard is carried on the place/retreat begin() exactly as before.
     c, m = _collect_place_controller(straight_line=False)
     assert c.collect_place_straight_line is False
-    by_phase, seq = _drive_collect_place(c, m)
+    by_phase, seq, jg_by_phase = _drive_collect_place(c, m)
     assert by_phase.get('place') is False                     # collision-aware place (baseline)
     assert by_phase.get('retreat') is False                   # collision-aware retreat (baseline)
-    assert not any(m.straight_lines)                          # nothing routed straight-line
+    assert not any(m.straight_lines)                          # nothing routed straight-line (begin())
+    assert not any(jg['straight_line'] for jg in getattr(m, 'joint_goals', []))  # nor a joint-goal escape
     # the wrist-guard is still applied to the collision-aware place pose-IK (PR #209 behaviour unchanged)
     place_extra = [e for pose, e in zip(m.moves, m.begin_extra)
                    if pose == c.poses['place']]
     assert place_extra and all('wrist_guard' in e for e in place_extra)
     assert c.phase == 'verify'
+
+
+def test_collect_deck_retreat_fails_by_name_without_a_clear_escape_shape():
+    # sim-robust-collect-stow-branch-v1: a collect deck straight-line place with NO clear escape shape
+    # configured (collect_place_preplace_shape=None) must FAIL BY NAME at the retreat rather than drive the
+    # collision-aware tuck into the self-colliding place fold (the collect5 INVALID_INITIAL_CSPACE_POSITION).
+    c, m = make_controller('collect', transport_joints=_SL_STOW, staged_cart_swing=True,
+                           cart_pan_joint0=-0.8605, cart_tuck_shape=_SL_TUCK,
+                           reposition_before_place=True,
+                           collect_place_preplace_shape=None,       # no configured clear escape
+                           collect_place_straight_line=True)
+    t0, r = 1.0, None
+    for i in range(140):
+        if c.phase in ('failed', 'verify'):
+            break
+        if c.phase == 'transit':
+            c.base_repositioned = True
+        contact = c.held or (c.phase == 'grasp' and c.issued)
+        if c.phase == 'release' and c.issued:
+            contact = False
+        extra = {'joint_positions': _SL_STOW} if c.phase == 'stow' else {}
+        r = c.step(.1, packet(c, t0 + i * .1, contact=contact, **extra))
+        if r.status == 'failed':
+            break
+    assert c.phase == 'failed' and r is not None and r.status == 'failed'
+    assert 'clear-branch escape shape' in r.reason and 'collect_place_preplace_shape' in r.reason, r.reason
 
 
 def test_reposition_fails_if_deck_target_not_reacquired():
@@ -1544,6 +1594,29 @@ def test_move_group_respawn_drift_hard_fails_without_live_state(monkeypatch):
     port.begin_joint_goal([0.3] * 6, [0.0] * 6)
     assert _drive_to_terminal(port) == 'failed'
     assert stopped
+
+
+def test_begin_joint_goal_straight_line_dispatches_executor_no_plan(monkeypatch):
+    # sim-robust-collect-stow-branch-v1: begin_joint_goal(straight_line=True) dispatches the collision-OFF
+    # 2-point smoothstep to the explicit joint target straight through the host EXECUTOR (the same path as
+    # the straight-line pose descent) -- it NEVER enters a cuMotion plan, so the collect retreat escape is
+    # never rejected for a self-colliding start. A settling arm dispatches and the move succeeds.
+    port, clk, trajectory = _settle_adapter(monkeypatch, vel=0.0, live_pos=0.3)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6, straight_line=True)
+    assert port._straight_line is True
+    assert port.state in ('await_settle', 'execute_accept')   # straight to the executor, no plan_accept
+    assert _drive_to_terminal(port) == 'succeeded'
+    # the dispatched trajectory ends at the explicit joint target (a 2-point rest-to-rest smoothstep)
+    assert list(trajectory.joint_trajectory.points[-1].positions) == pytest.approx([0.3] * 6)
+
+
+def test_begin_joint_goal_default_is_collision_planned(monkeypatch):
+    # Default (straight_line unset): begin_joint_goal still plans through cuMotion (plan_accept) -- byte-
+    # identical to the stow/tuck behaviour; nothing routes to the executor directly.
+    port, clk, trajectory = _settle_adapter(monkeypatch, vel=0.0, live_pos=0.3)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert port._straight_line is False
+    assert port.state == 'plan_accept'
 
 
 def test_move_group_respawn_recovery_still_hard_fails_bad_plan(monkeypatch):

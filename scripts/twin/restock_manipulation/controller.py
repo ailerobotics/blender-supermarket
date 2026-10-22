@@ -1109,6 +1109,32 @@ class TransferController:
                                                  slow=True, goal_tol=0.2)
                     self.issued = True
                     return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+                # sim-robust-collect-stow-branch-v1 (collect5, 2026-10-23): clear-branch RETREAT for the
+                # NON-cage COLLECT deck place. The place + retreat run collision-OFF straight-line
+                # (_collect_deck_place) because the set-down fold is a conservative attached-carton
+                # self-collision; but with collision-avoidance OFF the empty-retreat pose IK branches into a
+                # DROOPED config where the forearm sits ~18 mm inside the gripper-cube (cube_without_surface_
+                # plates) sphere margin (collect5 retreat endpoint [0.214,-1.755,2.075,-0.320,1.975,0], FK TCP
+                # ~10 cm below the standoff). The NEXT move is the collision-AWARE staged retreat_tuck, and
+                # cuMotion rejects that self-colliding START ('Invalid c-space position: self collision
+                # detected' -> INVALID_INITIAL_CSPACE_POSITION -> MANIP_HOST_FAILED op=collect -> arm
+                # heartbeat lost). Fix: return the empty gripper to the FIXED clear UPRIGHT standoff
+                # (collect_place_preplace_shape -- the same CPU-validated clear-region shape the preplace
+                # uses, FK TCP = the retreat standoff pose) via a collision-OFF straight-line JOINT smoothstep
+                # (begin_joint_goal(straight_line=True)): the smoothstep monotonically un-folds the forearm
+                # out of the cube margin to a self-clear config, so retreat_tuck/stow then plan from a clean
+                # start. No clear escape shape configured => fail by name (never drive the collision-aware
+                # tuck into a self-colliding start). Scoped to _collect_deck_place retreat, so cart-cage /
+                # live_pose / scripted-still stay byte-identical.
+                if self.phase == 'retreat' and self._collect_deck_place():
+                    if self.collect_place_preplace_shape is None:
+                        return self._fail('collect deck retreat has no clear-branch escape shape: '
+                                          'collect_place_straight_line needs collect_place_preplace_shape '
+                                          'to back the empty gripper off the self-colliding place fold')
+                    self.motion.begin_joint_goal(self.collect_place_preplace_shape, s.joint_positions,
+                                                 straight_line=True)
+                    self.issued = True
+                    return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
                 straight_contact = self.phase == 'contact' and self.contact_straight_line
                 # Cart-cage open-face place: the INSERT (place) and empty-handed RETREAT are straight-line
                 # moves THROUGH the single open +x face (begin(straight_line=True): collision-off seeded
