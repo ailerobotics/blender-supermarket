@@ -1016,7 +1016,21 @@ class TransferController:
                 # 2-point). The cage walls are published only so cuMotion routes the collision-aware
                 # PREPLACE around them to the mouth standoff; the insert then deliberately drives into the
                 # open mouth and back out, never crossing a wall (CPU-proven by the fold->insert sweep).
-                straight = straight_contact or (self.cart_cage_place and self.phase in ('place', 'retreat'))
+                #
+                # live_pose transfer (armcam2, 2026-10-22): the place lowers the carton ONTO the bay
+                # surface, so the place config necessarily brings the gripper tines to within ~13 mm of
+                # the TransferBay top (CPU-measured: surface_plate_6 at +0.0126 m, vs the preplace standoff
+                # at +0.143 m -- data/.../livepose-pick-collision), inside cuMotion's ESDF collision margin.
+                # A collision-AWARE joint-space plan to that config is therefore rejected
+                # ('Invalid c-space position: world collision detected' -> trajopt UNKNOWN_STATUS ->
+                # MANIP_HOST_FAILED op=transfer), exactly as the preplace plans cleanly. Route the final
+                # place descent and the empty-handed retreat as the SAME straight-line collision-off seeded
+                # insert the cart-cage place uses (the preplace standoff stays collision-aware): touching the
+                # surface is the intent, like the contact descent at the pick. Scoped to live_pose so the
+                # scripted/still path and every non-live_pose run are byte-identical.
+                straight = (straight_contact
+                            or (self.cart_cage_place and self.phase in ('place', 'retreat'))
+                            or (self._live_pose_transfer() and self.phase in ('place', 'retreat')))
                 target = self._overpressed_contact(self._contact_step) if straight_contact else self.poses[self.phase]
                 # Per-move goal type (firstmate msg 284/285): the cart PLACE poses have no cuMotion
                 # task-space IK solution (the solver is systemically broken here); route them through

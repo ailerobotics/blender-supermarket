@@ -256,7 +256,12 @@ repo's `scenes/`, `export/` or `renders/`.
   reposition (`restock_manipulation/transfer_mode.py`). **`live_pose` REQUIRES
   `RESTOCK_TRANSFER_CARRY=wrist_guard`** — it fixes only the PICK reach; its preplace/place/retreat stay
   seeded-KDL, so without the guard the controller FAILS FAST at observe with a named reason rather than
-  silently running the `ur_wrist_2`-vs-forearm jam (audit `transfer-preplace-wrist-branch-jam`). `scripted`
+  silently running the `ur_wrist_2`-vs-forearm jam (audit `transfer-preplace-wrist-branch-jam`). The
+  live_pose PLACE lowers the carton ONTO the bay, so its place config sits ~13 mm above the bay top (inside
+  cuMotion's ESDF voxel margin) and a collision-aware plan is rejected (`world collision detected`); the
+  place descent + empty retreat therefore route as the collision-OFF straight-line insert (like the
+  cart-cage place), PREPLACE stays collision-aware — automatic within live_pose, no new key
+  (`data/twin-robot-in-store-boot-v1/livepose-pick-collision/report.md`). `scripted`
   = the labelled safety net
   (`restock/scripted_transfer.py`): no warm-up/host job, kinematic carton onto `transfer_ground_truth.target`
   (needs `enabled`; evidence `source='ground_truth'`), arm `RESTOCK_SCRIPTED_TRANSFER_ARM=still` (default) |
