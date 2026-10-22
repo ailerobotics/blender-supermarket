@@ -213,6 +213,34 @@ def test_render_choreo_source(tmp_path):
     assert summary['segments'][0]['kind'] == 'choreo'
 
 
+def test_render_choreo_from_scene_frames_dir(tmp_path):
+    """A choreo source delivered as raw scene-frames/ + decision_log.json (no mp4, e.g. door-src-001)
+    re-composites directly from the PNGs — no ffmpeg decode of a baked clip."""
+    ffmpeg = W.find_ffmpeg()
+    if ffmpeg is None:
+        pytest.skip('no ffmpeg on this host')
+    d = tmp_path / 'door-choreo'
+    (d / 'scene-frames').mkdir(parents=True)
+    frames = []
+    for i in range(6):
+        Image.new('RGB', (960, 720), (40 + i * 10, 80, 120)).save(d / 'scene-frames' / f'{i:06d}.png')
+        tree = _tree()
+        node = next(x for x in tree['children'] if x['name'] == 'stage:outbound')
+        node['status'] = 'running'
+        frames.append({'scene_file': f'{i:06d}.png',
+                       'panel': {'tree': tree, 'header': {'stage_title': 'outbound', 'clock': i, 'frame': i},
+                                 'chips': [('coupled', 'yes')]}})
+    (d / 'decision_log.json').write_text(json.dumps({'frames': frames}))
+    assert S.detect_kind(d) == 'choreo'                 # decision_log, no mission-frames
+    spec = S.CompileSpec(mission_root=tmp_path, fps=15, xfade_frames=0, segments=[
+        S.Segment('outbound', d.name, 0, 5, kind='choreo', band=True),
+    ])
+    out = tmp_path / 'out.mp4'
+    summary = S.render(spec, out, ffmpeg=ffmpeg, tmp_dir=tmp_path / 'tmp')
+    assert out.is_file() and summary['output_frames'] == 6
+    assert summary['segments'][0]['kind'] == 'choreo'
+
+
 def test_panel_renders_from_a_rewritten_entry():
     entry = {'tree': _tree(), 'header': {'stage_title': 'x', 'clock': 1.0, 'frame': 1},
              'chips': [('base x,y', '1.0, 2.0 m')]}
