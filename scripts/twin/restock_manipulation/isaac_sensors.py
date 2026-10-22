@@ -387,7 +387,26 @@ class IsaacCartonSensors:
         window = context.occlusion_window_s
         mask_shape = depth.shape
         candidates = [(d.text,np.asarray(d.corners)) for d in qr.detections]
-        candidates.extend(('',np.asarray(p)) for p in qr.unreadable_corners)
+        # fm467: the tiled decoder (FixedTileQR, 640 px tiles / 480 stride) can see one physical QR in
+        # TWO tiles -- cleanly decoded in the tile that contains it whole, and as an UNREADABLE partial
+        # quad at the adjacent tile seam. Under the all-support label mask that unreadable partial lands
+        # in a calibrated slot and, having no SKU profile and no prior clean read, tripped 'unknown or
+        # undecoded label' (run-344: the bottom-right support marker's seam partial). An unreadable quad
+        # that spatially overlaps a cleanly DECODED quad is that same QR seen twice, never a distinct
+        # label, so drop it. A GENUINE occlusion (gripper over the carton -> no decode for it) produces an
+        # unreadable quad that overlaps NO decode, so it is kept and still handled by the occlusion window.
+        def _decoded_box(poly):
+            poly = np.asarray(poly, float)
+            return (poly[:,0].min(), poly[:,1].min(), poly[:,0].max(), poly[:,1].max())
+        _decoded_boxes = [_decoded_box(d.corners) for d in qr.detections]
+        def _overlaps_decoded(poly):
+            x0, y0, x1, y1 = _decoded_box(poly)
+            for bx0, by0, bx1, by1 in _decoded_boxes:
+                if x0 <= bx1 and bx0 <= x1 and y0 <= by1 and by0 <= y1:   # bbox intersection (same QR)
+                    return True
+            return False
+        candidates.extend(('',np.asarray(p)) for p in qr.unreadable_corners
+                          if not _overlaps_decoded(p))
         for index, (code, polygon) in enumerate(candidates):
             if code in marker_ids or (isinstance(code, str) and code.startswith('support:')):
                 continue  # support identity never becomes inventory/SKU

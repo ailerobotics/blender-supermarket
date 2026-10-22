@@ -309,6 +309,33 @@ def test_unregistered_support_marker_in_slot_is_skipped_not_refused(tmp_path, mo
     adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)   # no 'unknown or undecoded'
 
 
+def test_tile_seam_unreadable_partial_of_a_decoded_qr_is_dropped(tmp_path, monkeypatch):
+    """fm467: the tiled decoder can see one physical QR in two tiles -- decoded whole in one, and an
+    UNREADABLE partial quad at the adjacent tile seam. The partial overlaps the decoded quad, so it is
+    the same QR seen twice and must be dropped, NOT raised as an unknown label (run-344 cold-collect
+    trip on the bottom-right support marker's seam partial). A genuine occlusion unreadable quad (which
+    overlaps NO decode) is still kept + handled by the window, as the mystery-sku test above asserts."""
+    from dataclasses import replace
+    from .test_restock_manipulation import FixturePoseBridge
+    from scripts.twin.restock_camera.qr import FixedTileQR, QRDetection
+    from .test_restock_commissioning import quad, pix
+    monkeypatch.setattr('scripts.twin.restock_manipulation.isaac_sensors.load_pose_bridge',
+                        lambda root: FixturePoseBridge())
+    _, adapter, camera, motion, contact, (k, witness, frame, camera_pose) = _source_rig(tmp_path)
+    corners = tuple(map(tuple, pix(quad([0, 0, .2], [.06, .06]), k, camera_pose)))
+
+    class _Injecting:   # a decoded SKU-ish marker + an UNREADABLE partial of that SAME quad (tile seam)
+        def __init__(self): self.real = FixedTileQR('source')
+        def decode(self, rgb, evidence, *, now, parked, roi=None):
+            q = self.real.decode(rgb, evidence, now=now, parked=parked, roi=roi)
+            return replace(q, detections=q.detections + (QRDetection('support:c', corners),),
+                           unreadable_corners=q.unreadable_corners + (np.asarray(corners),))
+    adapter.decoder = _Injecting()
+    # The unreadable partial overlaps the decoded quad -> dropped; no 'unknown or undecoded' raise even
+    # on the first (never-clean) frame. Without the fm467 drop the kept partial (code='') would refuse.
+    adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)
+
+
 def test_undecoded_label_refused_once_the_window_expires(tmp_path, monkeypatch):
     from .test_restock_manipulation import FixturePoseBridge
     monkeypatch.setattr('scripts.twin.restock_manipulation.isaac_sensors.load_pose_bridge',
