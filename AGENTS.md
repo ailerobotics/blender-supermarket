@@ -127,6 +127,21 @@ repo's `scenes/`, `export/` or `renders/`.
   `tests/test_restock_runtime.py` (`test_loaded_place_*`) + `tests/test_restock_manipulation.py`
   (`test_release_*`, `test_collect_place_runs_descent_release_stow_*`); GPU fragment
   `docs/examples/cart-place-descent-mission-fragment.json`; write-up `data/sim-robust-cart-place-descent-v1/`.
+  **Place-on-cart endpoint self-collision** (opt-in, default-off ⇒ byte-identical): with the goal + descent
+  fixes above, collect4 reached the upright preplace and the host planned the place, but the deck PLACE
+  config is rejected by cuMotion as an attached-object SELF-collision (`'Invalid c-space position: self
+  collision detected'`, **0 world collisions**) — the held carton is a 34-sphere cuMotion `attached_object`
+  (`isaac_motion.attach_object_world` at `gripper_tcp`) NOT self-collision-ignored vs forearm/wrist/upper-arm,
+  so the set-down fold brings it inside the self-collision margin EVEN THOUGH the bare arm is self-clear
+  (+0.0339 m at BOTH preplace and place) and PR #209's wrist-guard accepted the config. The cart deck is not
+  a cuMotion WORLD object here (`world_obstacles:[]`, `base_collision_object:false`). Fix = port the cart-cage
+  / live_pose (PR #215) mechanism: HOST key `collect_place_straight_line` routes the deck place descent + empty
+  retreat as the collision-OFF straight-line seeded insert (`begin(straight_line=True)`, same `straight`
+  predicate, no second mechanism); the preplace standoff stays collision-aware. Scoped to the non-cage collect
+  place (`_collect_deck_place`), so transfer/live_pose/scripted-still are byte-identical. CPU proof
+  `tests/test_restock_manipulation.py` (`test_collect_deck_place_*`); GPU fragment
+  `docs/examples/collect-place-straightline-mission-fragment.json`; write-up
+  `data/sim-robust-collect-place-straightline-v1/`.
   **Honest-collect robustness** (opt-in, default-off ⇒ byte-identical): the grasp-critical collect
   source park uses a tolerance-aware arrival (`navigation` `strict_xy_arrival`, set automatically on the
   collect leg — never declares `arrived` outside the true xy tol even under the fm482 hysteresis latch),

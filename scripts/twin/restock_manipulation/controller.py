@@ -92,6 +92,7 @@ class TransferController:
                  cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03,
                  cage_preplace_shape=None, reposition_before_place: bool = False,
                  collect_place_preplace_shape=None, collect_place_wrist_guard: bool = False,
+                 collect_place_straight_line: bool = False,
                  grasp_track_m=None, require_collect_source_evidence: bool = False,
                  transfer_ground_truth: bool = False, ground_truth_pick: bool = False,
                  collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0,
@@ -378,6 +379,25 @@ class TransferController:
         # (place/retreat pose-IK; the preplace is the fixed shape above). Off (default) => the collect
         # place pose-IK is unguarded => byte-identical. See _place_wrist_guard.
         self.collect_place_wrist_guard = bool(collect_place_wrist_guard)
+        # sim-robust-collect-place-straightline-v1 (collect4, 2026-10-23): route the NON-cage COLLECT
+        # deck PLACE descent + empty RETREAT as the collision-OFF straight-line seeded insert
+        # (begin(straight_line=True)) -- the SAME mechanism the cart-cage place and the live_pose transfer
+        # place (PR #215) already use. The collect place lowers the HELD carton ONTO the cart deck; the
+        # carton is a cuMotion attached_object (ros_host attaches a 34-sphere cuboid at gripper_tcp), and
+        # the attached_object is NOT self-collision-ignored against the forearm / wrist / upper-arm, so the
+        # set-down fold brings the carton spheres within the attached-object self-collision margin and
+        # cuMotion rejects a collision-AWARE plan to the place config ('Invalid c-space position: self
+        # collision detected' -> trajopt UNKNOWN_STATUS -> MANIP_HOST_FAILED op=collect), EVEN THOUGH the
+        # bare arm is self-clear there and PR #209's wrist-guard accepted the config (collect4 host-stack.log:
+        # 6 self-collisions, 0 world collisions; bare-arm worst self-pair +0.0339 m at BOTH the upright
+        # preplace and the place). The cart deck is not a cuMotion WORLD obstacle for this run
+        # (world_obstacles=[], base_collision_object=False), so this is purely the attached-carton self-check
+        # -- a conservative sphere rejection of the intended set-down, exactly like the cart-cage insert and
+        # the live_pose place. The PREPLACE standoff stays collision-aware (the fixed upright
+        # collect_place_preplace_shape joint goal). OFF (default) => byte-identical; collect4 staging + this
+        # key = the fix. Scoped to the non-cage collect place, so transfer / live_pose / scripted-still are
+        # untouched. See _collect_deck_place and data/sim-robust-collect-place-straightline-v1/report.md.
+        self.collect_place_straight_line = bool(collect_place_straight_line)
         # fm476: SIM-ONLY env override for the sensor-packet freshness bound. The fm465 light rig makes
         # the TRANSFER capture's full-res render slow, so by the time the packet reaches the host the
         # sim /clock has advanced ~0.55 s past the packet stamp -- STALE beyond the 0.5 s default, so the
@@ -568,6 +588,18 @@ class TransferController:
     def _live_pose_transfer(self):
         """RESTOCK_TRANSFER_MODE=live_pose AND this run is the transfer (collect is never affected)."""
         return self.transfer_mode == LIVE_POSE and getattr(self, 'operation', None) == 'transfer'
+
+    def _collect_deck_place(self):
+        """collect_place_straight_line AND this run is the NON-cage COLLECT deck place. Its place descent
+        lowers the HELD carton onto the cart deck, and the carton is a cuMotion attached_object not
+        self-collision-ignored against the forearm/wrist/upper-arm, so the set-down fold is rejected as a
+        (conservative) attached-object SELF-collision even though the bare arm + wrist-guard are clear
+        there (collect4). The place + empty retreat therefore route collision-OFF straight-line like the
+        cart-cage place and the live_pose transfer place; the PREPLACE standoff stays collision-aware.
+        Off (default) or a cage/transfer run => False => byte-identical."""
+        return (self.collect_place_straight_line
+                and getattr(self, 'operation', None) == 'collect'
+                and not self.cart_cage_place)
 
     def _place_wrist_guard(self):
         """The (wrist1_cap, wrist2_min) clear carry region a place-side KDL goal must satisfy, else the
@@ -1095,9 +1127,21 @@ class TransferController:
                 # insert the cart-cage place uses (the preplace standoff stays collision-aware): touching the
                 # surface is the intent, like the contact descent at the pick. Scoped to live_pose so the
                 # scripted/still path and every non-live_pose run are byte-identical.
+                #
+                # collect deck place (collect4, 2026-10-23): the NON-cage COLLECT place lowers the HELD
+                # carton onto the cart deck. The carton is a cuMotion attached_object (ros_host attaches a
+                # 34-sphere cuboid at gripper_tcp) NOT self-collision-ignored against the forearm/wrist/
+                # upper-arm, so the set-down fold is rejected as an attached-object SELF-collision ('Invalid
+                # c-space position: self collision detected' -> MANIP_HOST_FAILED op=collect) EVEN THOUGH the
+                # bare arm is self-clear and PR #209's wrist-guard accepted the config. Route it the same
+                # way (place + empty retreat straight-line; preplace collision-aware) -- the deck is not a
+                # cuMotion world object here, so this is purely the conservative attached-carton self-check
+                # of the intended set-down. Gated on _collect_deck_place() (collect_place_straight_line,
+                # non-cage collect), so transfer / live_pose / scripted-still stay byte-identical.
                 straight = (straight_contact
                             or (self.cart_cage_place and self.phase in ('place', 'retreat'))
-                            or (self._live_pose_transfer() and self.phase in ('place', 'retreat')))
+                            or (self._live_pose_transfer() and self.phase in ('place', 'retreat'))
+                            or (self._collect_deck_place() and self.phase in ('place', 'retreat')))
                 target = self._overpressed_contact(self._contact_step) if straight_contact else self.poses[self.phase]
                 # Per-move goal type (firstmate msg 284/285): the cart PLACE poses have no cuMotion
                 # task-space IK solution (the solver is systemically broken here); route them through
