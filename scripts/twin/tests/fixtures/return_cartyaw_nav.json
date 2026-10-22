@@ -1,0 +1,67 @@
+{
+  "_comment": "Regression fixture mirroring the mission runtime-config navigation block for the coupled RETURN cart-yaw fix (sim-video-return-workaround-v1). tow_lane_cart_yaw_rebase + tow_lane_cart_yaw_tol are the fm fix for the warm3 RETURN stall; keep in sync with mission-runtime-couple.json. The embedded 'environment' is a minimal open grid so the test needs no ~/datasets inputs. See scripts/twin/tests/test_return_cartyaw_regression.py.",
+  "mission_poses": {
+    "cart_parking": [
+      -1.2,
+      15.25,
+      0.0
+    ]
+  },
+  "goal_articulation": {
+    "return": 0.2
+  },
+  "navigation": {
+    "tow_lanes": [
+      {
+        "name": "outbound_dock_to_bay",
+        "start": [
+          -4.46,
+          15.25,
+          0.0
+        ],
+        "start_cart_yaw": 0.0,
+        "goal": [
+          -2.0,
+          15.25,
+          0.0
+        ],
+        "goal_articulation": 0.3,
+        "start_tol_cart_yaw": 0.35
+      },
+      {
+        "name": "return_bay_to_parking",
+        "start": [
+          -2.0,
+          15.25,
+          0.0
+        ],
+        "start_cart_yaw": 0.0,
+        "goal": [
+          -1.2,
+          15.25,
+          0.0
+        ],
+        "goal_articulation": 0.2,
+        "start_tol_cart_yaw": 0.35
+      }
+    ],
+    "tow_lane_cart_yaw_rebase": true,
+    "tow_lane_cart_yaw_tol": 0.3,
+    "tow_lane_track_tol_m": 0.15,
+    "tow_lane_trust_static": true,
+    "tow_lane_trust_unknown": true,
+    "tow_lane_reacquire_along_route": true,
+    "tow_lane_coast_refusals": true,
+    "tow_lane_static_tol_m": 0.12,
+    "directional_zone": true,
+    "environment": {
+      "map_bounds": [
+        -8.0,
+        3.0,
+        10.0,
+        20.0
+      ],
+      "static_obstacles": []
+    }
+  }
+}

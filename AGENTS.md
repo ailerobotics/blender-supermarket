@@ -176,7 +176,15 @@ repo's `scenes/`, `export/` or `renders/`.
   `cart_parking`, AFTER transfer + verify (tow → brake/pin → uncouple → back away → home uncoupled).
   CPU dry-run through the real BT/`Mission`/`RuntimeAdapter`: `scripts/check_mission_tail.py`
   (RUNBOOK §21, guarded by `test_restock_mission_tail.py`); the labelled ground-truth verify switch
-  and the reachable return poses are in `docs/examples/mission-tail-fragment.json`.
+  and the reachable return poses are in `docs/examples/mission-tail-fragment.json`. **The coupled RETURN
+  tow is STUBBED kinematically by that dry-run** — it does not exercise the follower's cart-yaw tracking,
+  which is where a real stall lives: the authored return lane has `start_cart_yaw` 0 but the towed cart
+  lags at articulation ~0.2 after transfer, so without `navigation.tow_lane_cart_yaw_rebase` the follower
+  drops its validated route every tick (`stop_replan_tracking_error`, `cart_err` > `tow_lane_cart_yaw_tol`)
+  and never moves. Guards: `scripts/twin/tests/test_return_cartyaw_regression.py` (drives the REAL coupled
+  follower via `nav_factory` from the recorded end-of-verify pose, fixture `tests/fixtures/return_cartyaw_nav.json`;
+  a dropped rebase key at the default tol re-stalls and fails) and `check_mission_tail --return-tracking`
+  (same drive on the real grid instead of the stub) — both via `tail_nav.py` `simulate_coupled_return`.
 - **Transfer workaround modes** (env `RESTOCK_TRANSFER_MODE`, read by Isaac AND the host, never a config
   key; default off): `live_pose` = real-arm pick from the live carton pose + near-face yaw, no transfer
   reposition (`restock_manipulation/transfer_mode.py`); `scripted` = the labelled safety net
