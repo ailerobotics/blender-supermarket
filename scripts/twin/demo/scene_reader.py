@@ -315,8 +315,11 @@ class DemoScene:
             'carton_face_xyz': (carton_pos[0], carton_pos[1] - 0.2, carton_z),
             'pad_xyz': pad, 'carton_top_z': carton_z + C.CARTON_HALF_H,
             'cage_top_z': self._cage_top_z,
-            'cage_target_xyz': (cart_xy[0] + math.cos(cart_yaw) * 0.08,
-                                cart_xy[1] + math.sin(cart_yaw) * 0.08, C.CAGE_SHELF_Z + C.CARTON_HALF_H),
+            'cage_target_xyz': (cart_xy[0] + math.cos(cart_yaw) * C.CAGE_LOAD_BODY_XY[0]
+                                - math.sin(cart_yaw) * C.CAGE_LOAD_BODY_XY[1],
+                                cart_xy[1] + math.sin(cart_yaw) * C.CAGE_LOAD_BODY_XY[0]
+                                + math.cos(cart_yaw) * C.CAGE_LOAD_BODY_XY[1],
+                                C.CAGE_SHELF_Z + C.CARTON_HALF_H),
             'shelf_target_xyz': (C.P_SHELF[0], C.P_SHELF[1], C.P_SHELF[2]),
             'obstacles': obstacles, 'brake_m': brake, 'articulation_rad': art,
         }

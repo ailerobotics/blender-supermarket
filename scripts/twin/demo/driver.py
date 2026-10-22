@@ -46,7 +46,8 @@ def synthetic_reads(frame, prev=None):
         # With IK the gripper tracks the carton, so the pad sits ~on it (few-mm contact gap).
         'pad_xyz': (kx + 0.003, ky, kz), 'carton_top_z': kz + C.CARTON_HALF_H,
         'cage_top_z': 1.65,
-        'cage_target_xyz': (cxx + math.cos(cyaw) * 0.08, cyy + math.sin(cyaw) * 0.08, C.CAGE_SHELF_Z + C.CARTON_HALF_H),
+        'cage_target_xyz': (cxx + math.cos(cyaw) * C.CAGE_LOAD_BODY_XY[0],
+                            cyy + math.sin(cyaw) * C.CAGE_LOAD_BODY_XY[0], C.CAGE_SHELF_Z + C.CARTON_HALF_H),
         'shelf_target_xyz': (C.P_SHELF[0], C.P_SHELF[1], C.P_SHELF[2]),
         'obstacles': SYNTHETIC_OBSTACLES, 'brake_m': brake,
         'articulation_rad': (cyaw - byaw + math.pi) % (2 * math.pi) - math.pi,
@@ -126,11 +127,37 @@ def recompute(src_decision_log, out_dir, *, fps=15):
     grasp_mm = min(grasp_gaps) * 1000.0 if grasp_gaps else 0.0
     grasp_reason = ('contact gap <1 mm at grasp · sealed' if grasp_mm < 1.0
                     else f'contact gap {grasp_mm:.0f} mm at grasp')
+    # Pre-pass: the cage placement (collect:5) reports where the carton SETTLES in the cage
+    # once the gripper RELEASES it (the collect:6 verify-placed frames), not the transient
+    # offset while the kinematic IK pad is still pressed against the free carton body (which
+    # physics shoves aside during the hold). This is the honest placed-position read.
+    place_reason = None
+    for fr, r in zip(frames, reads):
+        if fr['stage'] == 'collect' and fr['step'] == 6:
+            err = M.placement_error(r['carton_xyz'], r['cage_target_xyz'])['error_mm']
+            place_reason = f'placed Δ {err:.0f} mm from target'
+            break
+    # Same for the shelf place (transfer:1): report the carton's SETTLED placement once the
+    # gripper releases it (the verify stage reads it stationary on the shelf), not the
+    # gripper-hold transient while the IK pad is still pressed against the free carton body.
+    shelf_place_reason = None
+    for fr, r in zip(frames, reads):
+        if fr['stage'] == 'verify':
+            err = M.placement_error(r['carton_xyz'], r['shelf_target_xyz'])['error_mm']
+            shelf_place_reason = f'placed Δ {err:.0f} mm from target'
+            break
     step_reasons = {}
     entries = []
     for i, (fr, r) in enumerate(zip(frames, reads)):
         key = f"{fr['stage']}:{fr['step']}"
-        step_reasons[key] = grasp_reason if key == 'collect:2' else DL.compute_reason(fr['stage'], fr['step'], r)
+        if key == 'collect:2':
+            step_reasons[key] = grasp_reason
+        elif key == 'collect:5' and place_reason is not None:
+            step_reasons[key] = place_reason
+        elif key == 'transfer:1' and shelf_place_reason is not None:
+            step_reasons[key] = shelf_place_reason
+        else:
+            step_reasons[key] = DL.compute_reason(fr['stage'], fr['step'], r)
         chips = DL.compute_chips(r, fr)
         state = 'complete' if i == len(frames) - 1 else 'running'
         entry = DL.build_entry(fr, step_reasons, chips, mission_state=state)
