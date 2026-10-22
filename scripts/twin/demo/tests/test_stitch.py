@@ -76,6 +76,32 @@ def test_rewrite_entry_sets_clock_frame_state():
 
 
 # ---------------- spec / detection ----------------
+def test_load_run_lenient_carved_segment_without_mission_json(tmp_path):
+    """A helper's carved single-stage clip has mission-frames + bt_events + nav-trace but no
+    mission.json; the compiler must still load it (empty event log, panel from its bt_events)."""
+    from twin.demo import bt_timeline as BT
+    run_dir = _real(tmp_path, 'seg')
+    (run_dir / 'mission.json').unlink()
+    run = S.load_run_lenient(run_dir)
+    assert run.frames and run.events == [] and run.mission['state'] == 'running'
+    assert isinstance(run.clock_offset, float)
+    BT.BtTimeline.from_run(run)                      # bt panel still reconstructs
+
+
+def test_render_carved_segment_source(tmp_path):
+    ffmpeg = W.find_ffmpeg()
+    if ffmpeg is None:
+        pytest.skip('no ffmpeg on this host')
+    run_dir = _real(tmp_path, 'seg')
+    (run_dir / 'mission.json').unlink()             # carved clip: no mission.json
+    spec = S.CompileSpec(mission_root=tmp_path, fps=15, xfade_frames=0, segments=[
+        S.Segment('collect', str(run_dir), 0, 4),
+    ])
+    out = tmp_path / 'out.mp4'
+    summary = S.render(spec, out, ffmpeg=ffmpeg, tmp_dir=tmp_path / 'tmp')
+    assert out.is_file() and summary['output_frames'] == 5
+
+
 def test_detect_kind_and_spec_from_json(tmp_path):
     real = TW.make_run(tmp_path)
     assert S.detect_kind(real) == 'real'

@@ -101,6 +101,33 @@ def detect_kind(run_dir):
     return 'real'
 
 
+def load_run_lenient(run_dir):
+    """Load a real run dir, or a CARVED single-stage segment that has mission-frames + bt_events +
+    nav-trace but NO mission.json (a helper's extracted clip). A full run dir goes through
+    ``E.load_run``; a carved segment is assembled into an equivalent ``E.Run`` with an empty mission
+    event log (its panel comes from the bt_events it does carry)."""
+    run_dir = Path(run_dir).resolve()
+    if (run_dir / 'mission.json').is_file():
+        return E.load_run(run_dir)
+    trace = E.read_trace(run_dir / 'nav-trace.jsonl')
+    offset, source = 0.0, 'none (assumed 0)'
+    worlds = [r['world_t'] - r['t'] for r in trace if isinstance(r.get('world_t'), (int, float))]
+    if worlds:
+        worlds.sort()
+        offset, source = worlds[len(worlds) // 2], 'nav-trace world_t'
+    frames = []
+    manifest = run_dir / 'mission-frames' / 'frames.json'
+    if manifest.is_file():
+        data = json.loads(manifest.read_text())
+        for i, f in enumerate(data.get('frames', [])):
+            st = float(f['simulation_time'])
+            frames.append(E.Frame(i, manifest.parent / f['file'], st, st - offset))
+    return E.Run(run_dir=run_dir, name=run_dir.name, mission={'state': 'running', 'reason': '', 'events': []},
+                 events=[], trace=trace, frames=frames,
+                 bt_events=E._read_jsonl(run_dir / 'bt_events.jsonl'),
+                 clock_offset=float(offset), clock_source=source, scenario=E._find_scenario(run_dir), spec={})
+
+
 # ---------------- continuity: rewrite one panel tree for global progress ----------------
 def rewrite_tree(tree, stage, *, final=False):
     """Make the seven-stage ladder read GLOBALLY: every stage before ``stage`` is done, every stage
@@ -219,7 +246,7 @@ class Compiler:
     def _plan_real(self, seg, run_dir):
         """Resolve a real segment to (render_one, count). render_one(i) -> (scene_960, entry, coupled)."""
         from PIL import Image
-        run = E.load_run(run_dir)
+        run = load_run_lenient(run_dir)
         timeline = BT.BtTimeline.from_run(run)
         model = E.cart_model(run)
         step_reasons = {}
