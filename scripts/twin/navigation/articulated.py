@@ -484,7 +484,9 @@ class ArticulatedController(Controller):
                  lane_coast_refusals=False, lane_trust_unknown=False,
                  measured_turn_fault_s=None, lane_track_tol=0.25,
                  lane_track_envelope=False, lane_cart_yaw_rebase=False,
-                 coupled_creep_escape=False, coupled_creep_floor=0.03, **kwargs):
+                 coupled_creep_escape=False, coupled_creep_floor=0.03,
+                 coupled_progress_escape=False, coupled_progress_min_m=0.05,
+                 coupled_progress_escape_s=3.0, coupled_progress_fault_s=8.0, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm481/fm482 (navigation.coupled_creep_escape, default off => byte-identical): the coupled
         # measured-curvature brake divides odom.angular by odom.linear, and at a near-stationary crawl that
@@ -502,6 +504,38 @@ class ArticulatedController(Controller):
             raise ValueError('coupled_creep_floor must be in (0, 0.1] m/s')
         self.coupled_creep_floor=float(coupled_creep_floor)
         self.creep_escapes=0                                # ticks the escape replaced a noise refusal
+        # fm-sim-robust-outbound (navigation.coupled_progress_escape, default off => byte-identical): a
+        # SIM-CLOCK commanded-vs-measured NET-progress monitor for the coupled tow. warm9/warm10 outbound
+        # pinned at x~=-3.9 (y=15.25) with the follower still COMMANDING forward (reason='tracking' on most
+        # ticks, only a few 'measured_turn_radius'), the base jittering in place (measured |rv| noise to
+        # ~0.23 m/s but ~0 NET displacement), under ~20x render pacing -- so the base made no net progress
+        # for ~14 s SIM but ~285 s WALL, and the 120 s WALL nav-stuck budget (restock.runtime) failed the
+        # stage (3x) only after burning GPU wall. coupled_creep_escape (fm482) missed it: its trigger needs
+        # |odom.linear| INSIDE a narrow noise band, which the jitter spikes leave, and measured_turn_fault_s
+        # (fm446) only accumulates on measured_turn_radius COASTS, not on the dominant 'tracking' ticks.
+        # This monitor keys on NET base displacement over SIM time instead of instantaneous velocity: while
+        # the coupled base commands forward but has not moved >= coupled_progress_min_m from its anchor for
+        # coupled_progress_escape_s SIM seconds, FORCE the committed creep (the fm482 forced-floor path --
+        # keep a clean forward command, never thrash to a measured-curvature STOP); if still no net progress
+        # after coupled_progress_fault_s SIM seconds, FAULT 'coupled_no_progress' terminal so the stage
+        # StageRetry-replans in a few SIM seconds -- before (and on the correct clock for) the WALL budget.
+        self.coupled_progress_escape=bool(coupled_progress_escape)
+        for _nm,_v,_hi in (('coupled_progress_min_m',coupled_progress_min_m,1.0),
+                           ('coupled_progress_escape_s',coupled_progress_escape_s,120.0),
+                           ('coupled_progress_fault_s',coupled_progress_fault_s,120.0)):
+            if not (isinstance(_v,(int,float)) and not isinstance(_v,bool)
+                    and math.isfinite(_v) and 0.0<float(_v)<=_hi):
+                raise ValueError(f'{_nm} must be a finite number in (0, {_hi:g}]')
+        if float(coupled_progress_escape_s)>float(coupled_progress_fault_s):
+            raise ValueError('coupled_progress_escape_s must be <= coupled_progress_fault_s')
+        self.coupled_progress_min_m=float(coupled_progress_min_m)
+        self.coupled_progress_escape_s=float(coupled_progress_escape_s)
+        self.coupled_progress_fault_s=float(coupled_progress_fault_s)
+        self._prog_anchor=None        # (sim_now, x, y) of the last confirmed base progress (window start)
+        self._prog_last_now=None      # sim time of the last monitor tick (contiguity/gap check)
+        self._prog_stuck_s=0.0        # SIM seconds the base has sat below coupled_progress_min_m
+        self._force_progress_creep=False   # set per-tick: force the committed creep this gate call
+        self.progress_escapes=0       # ticks the no-progress monitor forced a creep
         # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
         # swept train envelope as free (the static map proved that corridor clear), so the base is not
         # frozen at an unmapped turn (run-327b: outbound drove 4.87 m then 'unknown_navigation_cell' at the
@@ -657,6 +691,10 @@ class ArticulatedController(Controller):
         self.index=0
         self.planning_stop=False
         self._mtr_window=0.0                               # fm446 (C): fresh goal -> fresh over-rotation window
+        self._prog_anchor=None                             # fresh goal -> fresh net-progress anchor/window
+        self._prog_last_now=None
+        self._prog_stuck_s=0.0
+        self._force_progress_creep=False
         self.goal_articulation=self.spec.max_articulation if goal_articulation is None else goal_articulation
         # Resolve the authored tow lane for this COUPLED goal (if any). Uncoupled drives never use a
         # lane. Pose acquirability + live-obstacle swept validation are checked when the route is built.
@@ -914,6 +952,11 @@ class ArticulatedController(Controller):
         escape=(self.coupled_creep_escape and v>1e-6
                 and 0.02<abs(odom.linear)<max(0.06,2*self.coupled_creep_floor)
                 and abs(odom.angular/odom.linear)>1/1.5+0.03)
+        # fm-sim-robust-outbound: the net-no-progress monitor (step) forces the SAME committed creep,
+        # keyed on NET displacement rather than the instantaneous noise band -- so a forward-commanding
+        # tow that is pinned with velocity SPIKES outside the band still keeps a clean forward command
+        # instead of thrashing to a measured-curvature STOP. Only forces where there IS a forward command.
+        escape=escape or (self._force_progress_creep and v>1e-6)
         if escape:
             v=max(v,min(self.coupled_creep_floor,self.max_speed))
             wmax=v/self.footprint.min_turn_radius
@@ -941,6 +984,8 @@ class ArticulatedController(Controller):
             if escape:
                 measured_k=k        # noise-band ratio is not an arc: brake along the clamped command
                 self.creep_escapes+=1
+                if self._force_progress_creep:
+                    self.progress_escapes+=1
             else:
                 measured_k=odom.angular/odom.linear
                 if abs(measured_k)>1/1.5+0.03:
@@ -968,6 +1013,7 @@ class ArticulatedController(Controller):
             return Result(reason='invalid_control_period')
         self.elapsed+=dt
         now=self.elapsed if now is None else now
+        self._force_progress_creep=False   # fm-sim-robust-outbound: set only by the net-progress monitor
         reason=self._inputs(now,odometry,observations)
         if reason:
             return self._wait(dt,reason)
@@ -1086,6 +1132,30 @@ class ArticulatedController(Controller):
         # lane_track_envelope (the same opt-in as the position-aware tol); off => unchanged.
         if self.lane_track_envelope and slack is not None:
             v=min(v,max(0.05,(slack-0.05)/1.5))
+        # fm-sim-robust-outbound: SIM-clock net-progress monitor (default off => byte-identical). We are
+        # about to command a forward v (>=0.03) along the route; measure whether the base has actually
+        # MOVED >= coupled_progress_min_m from its anchor. Keyed on NET displacement + the SIM clock, so
+        # render pacing cannot distort it and the 'tracking'-dominated warm10 pin (which measured_turn_
+        # fault_s / the noise-band creep both miss) is caught: ESCALATE (force the committed creep) while
+        # trying to drive through, then FAULT fast -> StageRetry replan well before the WALL nav-stuck.
+        if self.coupled_progress_escape:
+            # Only CONTIGUOUS tracking-with-no-progress accrues. A GAP since the last monitor tick (the
+            # base legitimately sat in a preceding planning_stop/blocked-aisle wait, which return before
+            # this monitor) re-anchors a fresh window, so a long legitimate wait is never charged against
+            # the resumed drive; a route drop->replan mid-stall is a 1-2 tick gap and stays contiguous.
+            gap=(self._prog_anchor is None or self._prog_last_now is None
+                 or (now-self._prog_last_now)>max(5*dt,0.5))
+            if gap or math.hypot(state.x-self._prog_anchor[1],
+                                 state.y-self._prog_anchor[2])>=self.coupled_progress_min_m:
+                self._prog_anchor=(now,state.x,state.y)           # fresh window / real net progress
+                self._prog_stuck_s=0.0
+            else:
+                self._prog_stuck_s=max(0.0,now-self._prog_anchor[0])   # SIM seconds pinned below min_m
+            self._prog_last_now=now
+            if self._prog_stuck_s>=self.coupled_progress_fault_s:
+                self.terminal=Result(status='failed',reason='coupled_no_progress')
+                return self.terminal
+            self._force_progress_creep=self._prog_stuck_s>=self.coupled_progress_escape_s
         result=self.gate_velocity(now,odom,obs,v,v*curvature)
         if result.reason!='tracking':
             # A transient measured-curvature trip (the base is momentarily under commanded

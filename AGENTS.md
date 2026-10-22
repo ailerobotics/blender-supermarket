@@ -167,7 +167,14 @@ repo's `scenes/`, `export/` or `renders/`.
   design in `data/sim-restock-nav-lanes-v1/report.md`. **Couple speed / outbound stall** (fm482, both
   opt-in): `navigation.arrival_xy_hysteresis_m` stops the couple-standoff arrival dither (~700 s wall per
   warm run) and `navigation.coupled_creep_escape` stops the outbound `measured_turn_radius` noise
-  livelock; offline proof on the recorded runs `scripts/check_couple_speed.py`. **Sharp edge:
+  livelock; offline proof on the recorded runs `scripts/check_couple_speed.py`. A LATER residual outbound
+  stall (warm9/warm10: base pinned x≈−3.9 still COMMANDING forward, jittering in place; frozen ~14 s SIM =
+  ~285 s WALL under render pacing, so the 120 s WALL no-base-progress budget false-failed the stage on the
+  wrong clock — creep-escape/`measured_turn_fault` both miss it) is caught by the opt-in SIM-clock
+  net-progress monitor `navigation.coupled_progress_escape` (escalate→fault `coupled_no_progress`→replan in
+  sim-seconds); see docs/restock_navigation.md, `scripts/check_outbound_progress.py`,
+  `docs/examples/outbound-progress-mission-fragment.json`. Uncoupled drive-fidelity lever = `caster_lift_m`
+  (fm434 bench `base-drive-bench-*`: 0.097→0.988). **Sharp edge:
   `Scan.sensor_to_base` is (x, y, YAW)** but `isaac_bundle` passes the lidar URDF origin (x, y, z),
   rotating every live return 0.15 rad about the sensor (a likely root of "lidar-proud" phantoms);
   `lidar_sensor_yaw_fix: true` uses yaw 0 — default off, re-check couple/outbound before enabling

@@ -185,6 +185,23 @@ class FactoryDispatchTests(unittest.TestCase):
         self.assertFalse(_build('reference').lane_trust_unknown)              # default off
         self.assertTrue(_build('reference', tow_lane_trust_unknown=True).lane_trust_unknown)
 
+    def test_coupled_progress_escape_flows_through(self):
+        c = _build('reference')
+        self.assertFalse(c.coupled_progress_escape)                          # default off
+        self.assertAlmostEqual(c.coupled_progress_min_m, 0.05)               # defaults
+        self.assertAlmostEqual(c.coupled_progress_escape_s, 3.0)
+        self.assertAlmostEqual(c.coupled_progress_fault_s, 8.0)
+        c2 = _build('reference', coupled_progress_escape=True, coupled_progress_min_m=0.08,
+                    coupled_progress_escape_s=2.0, coupled_progress_fault_s=6.0)
+        self.assertTrue(c2.coupled_progress_escape)
+        self.assertAlmostEqual(c2.coupled_progress_min_m, 0.08)
+        self.assertAlmostEqual(c2.coupled_progress_escape_s, 2.0)
+        self.assertAlmostEqual(c2.coupled_progress_fault_s, 6.0)
+
+    def test_coupled_progress_escape_rejects_non_bool(self):
+        with self.assertRaises(ValueError):
+            _build('reference', coupled_progress_escape='true')              # _strict_bool
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

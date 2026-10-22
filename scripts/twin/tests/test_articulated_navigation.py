@@ -271,6 +271,101 @@ class ArticulatedTests(unittest.TestCase):
         self.assertEqual(c.gate_velocity(0.1, od, rear, 0.25, 0.0).reason, 'tracking')
         self.assertEqual(c.gate_velocity(0.1, od, ahead, 0.25, 0.0).reason, 'obstacle_stop')
 
+    # --- fm-sim-robust-outbound: coupled net-progress monitor (warm10 outbound stall) -----------------
+    # warm10/warm9 outbound pinned at a fixed pose while the follower kept COMMANDING forward
+    # (reason='tracking' on most ticks) and the base jittered in place (measured |rv| noise, ~0 NET
+    # displacement). The _frozen_jitter helper replays that signature: the base pose does NOT advance,
+    # but odometry reports a non-zero, jittering measured (rv, rw) exactly as the trace recorded.
+    _JITTER_RV = (0.03, 0.20, 0.012, 0.05, 0.04)   # warm10 nav-trace rv: mean ~0.026, spikes to ~0.23
+    _JITTER_RW = (0.05, 0.17, 0.03, 0.11, 0.08)
+
+    def _drive_frozen_jitter(self, c, state, now, ticks):
+        """Feed `ticks` steps with the base pose FROZEN at `state` but a jittering measured velocity.
+        Returns (list of (status, reason), last now, forward_commands)."""
+        out=[]; forward=[]
+        for i in range(ticks):
+            now+=.05
+            rv=self._JITTER_RV[i%len(self._JITTER_RV)]
+            rw=self._JITTER_RW[i%len(self._JITTER_RW)]
+            od=Odometry(state.pose,now,rv,rw,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            out.append((r.status,r.reason))
+            forward.append(r.velocity[0])
+            if r.status=='failed':
+                break
+        return out, now, forward
+
+    def test_coupled_no_progress_faults_fast_on_frozen_base(self):
+        # With the monitor ON, a forward-commanding tow pinned with jittering velocity (warm10) is
+        # caught on the SIM clock: it ESCALATES (forces the committed creep) then FAULTS fast so the
+        # stage StageRetry-replans -- in ~fault_s SIM seconds, not the 120 s WALL nav-stuck budget.
+        c=ArticulatedController(self.world.grid,allow_test_fixtures=True,
+                                coupled_progress_escape=True,coupled_progress_min_m=0.05,
+                                coupled_progress_escape_s=0.5,coupled_progress_fault_s=1.0)
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        out,now,_=self._drive_frozen_jitter(c,state,now,ticks=60)
+        self.assertEqual(out[-1],('failed','coupled_no_progress'))
+        self.assertLessEqual(len(out),25)            # ~20 ticks (1.0 s / 0.05 dt): bounded, fast
+        self.assertGreater(c.progress_escapes,0)     # the creep was forced BEFORE the fault (escalate)
+
+    def test_coupled_progress_escape_off_by_default_livelocks(self):
+        # Default (monitor OFF) is byte-identical: the SAME frozen-jitter signature never produces the
+        # new fault -- it livelocks exactly as warm10 did (only the WALL nav-stuck would eventually fail
+        # it). Proves we reproduce the stall and that the fix is opt-in.
+        c=ArticulatedController(self.world.grid,allow_test_fixtures=True)
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        out,_,_=self._drive_frozen_jitter(c,state,now,ticks=200)
+        self.assertEqual(len(out),200)               # ran to the end, never terminated
+        self.assertFalse(any(reason=='coupled_no_progress' for _,reason in out))
+        self.assertEqual(c.progress_escapes,0)
+
+    def test_coupled_progress_monitor_does_not_false_trip_on_a_healthy_tow(self):
+        # A coupled tow that actually MOVES re-anchors well within the SIM budgets, so with the
+        # PRODUCTION defaults (escape 3 s / fault 8 s / 5 cm) the monitor never escalates nor faults a
+        # healthy drive to the curved goal -- slow (curve-floor) sections still clear >=min_m in time.
+        c=ArticulatedController(self.world.grid,allow_test_fixtures=True,coupled_progress_escape=True)
+        c.start((5,3,0),True)
+        state=TrainState(0,0,0,0); v=w=0.0; r=None
+        for i in range(2000):
+            now=(i+1)*.05
+            od=Odometry(state.pose,now,v,w,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            v,w=r.velocity
+            state=advance(state,v*.05,w/v if v else 0,self.spec)
+            if r.status!='running': break
+        self.assertEqual(r.status,'succeeded',r.reason)
+        self.assertEqual(c.progress_escapes,0)       # never needed the escape on a healthy tow
+
+    def test_coupled_progress_monitor_resets_after_a_non_tracking_gap(self):
+        # Only CONTIGUOUS tracking-with-no-progress accrues: if the base's tracking ticks are separated by
+        # a long (> gap) SIM wait (the controller sat in planning_stop/blocked, which return before the
+        # monitor), each resumed tick re-anchors a fresh window -> a legitimate wait is never charged
+        # against the resumed drive, so a frozen-but-intermittently-tracking base does NOT false-fault.
+        c=ArticulatedController(self.world.grid,allow_test_fixtures=True,
+                                coupled_progress_escape=True,coupled_progress_min_m=0.05,
+                                coupled_progress_escape_s=0.5,coupled_progress_fault_s=1.0)
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        for _ in range(40):
+            now+=2.0        # a >0.5 s SIM gap between tracking ticks: the monitor sees a fresh window each time
+            od=Odometry(state.pose,now,0.0,0.0,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            self.assertNotEqual(r.status,'failed')      # never faults despite being frozen
+        self.assertEqual(c._prog_stuck_s,0.0)           # the window reset on every gap
+
+    def test_coupled_progress_escape_rejects_invalid_params(self):
+        for kw in (dict(coupled_progress_min_m=0.0), dict(coupled_progress_min_m=-1.0),
+                   dict(coupled_progress_escape_s=0.0), dict(coupled_progress_fault_s=0.0),
+                   dict(coupled_progress_min_m=float('nan')),
+                   dict(coupled_progress_escape_s=5.0,coupled_progress_fault_s=1.0)):  # escape > fault
+            with self.assertRaises(ValueError):
+                ArticulatedController(self.world.grid,allow_test_fixtures=True,**kw)
+
     def test_seed_rejects_teleport(self):
         from twin.navigation.articulated import Route
         a=TrainState(0,0,0,0)

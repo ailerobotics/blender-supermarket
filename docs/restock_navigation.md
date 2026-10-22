@@ -446,6 +446,27 @@ brake is unchanged. Both switches are named in the stage evidence (`couple_arriv
 `outbound_brake_mode`). Example: `docs/examples/couple-speed-mission-fragment.json`; offline proof
 `scripts/check_couple_speed.py` (RUNBOOK §12); CPU tests `tests/test_couple_speed.py`.
 
+**Coupled net-progress escape + fault** (`navigation.coupled_progress_escape`, opt-in, default `false` ⇒
+byte-identical; sim-robust-outbound-drive-v1; `coupled_progress_min_m` 0.05, `coupled_progress_escape_s`
+3.0, `coupled_progress_fault_s` 8.0). A **SIM-clock** commanded-vs-measured NET-progress monitor for the
+coupled follower, keyed on net base displacement rather than instantaneous velocity. warm9/warm10 outbound
+pinned at x≈−3.9 while the follower kept **commanding forward** (`reason='tracking'` on most ticks) and the
+base jittered in place (measured `|rv|` noise to ~0.23 m/s, ~0 net displacement); under ~20× render pacing
+the frozen window was ~14 s SIM but ~285 s WALL, so the WALL budget below failed the stage on the wrong
+clock. `coupled_creep_escape` misses it (its trigger needs `|odom.linear|` inside the noise band the jitter
+spikes leave) and `measured_turn_fault_s` misses it (it accrues only on `measured_turn_radius` coasts, not
+the dominant `tracking` ticks). With this on: while the base has not moved ≥ `coupled_progress_min_m` from
+its anchor for `coupled_progress_escape_s` SIM seconds it **forces the committed creep** (the same
+arc-clamped forward command, so it never thrashes to a measured-curvature stop); after
+`coupled_progress_fault_s` SIM seconds of no net progress it **faults `coupled_no_progress`** so the stage
+StageRetry-replans — in a few SIM seconds, before the WALL budget. A healthy (even slow curve-floor) tow
+re-anchors well within the window, so no false trip. Example:
+`docs/examples/outbound-progress-mission-fragment.json`; offline proof on the recorded runs
+`scripts/check_outbound_progress.py`; CPU tests (REAL controller: reproduce the stall + prove the
+escalate/fault recovery) `tests/test_articulated_navigation.py`. The UNCOUPLED drive-fidelity lever behind
+the crawl is `mobile_spec.caster_lift_m` (fm434 bench `base-drive-bench-*`: 0.097→0.988 at 0.005 m); the
+warm runs already set it, so this monitor covers the residual **coupled** limit cycle.
+
 **Wall-clock stuck-stage fail-fast** (`RESTOCK_NAV_STUCK_WALL_S`, opt-in, default `0` = off): the nav
 `blocked_timeout`/`goal_timeout` are **sim-clock** caps, which under render pacing (sim advances far
 slower than wall) cannot fire — run-322b's outbound sat on `lane_blocked` for ~50 min WALL and only the

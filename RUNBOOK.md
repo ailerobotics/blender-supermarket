@@ -322,6 +322,14 @@ PYTHONPATH=scripts python3 scripts/check_couple_speed.py --environment "$ENVIRON
   --runs-dir "$MISSION_RUNS_DIR" --runs 347 348b 349 350 351 352 353 354 355 356
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest scripts/twin/tests/test_couple_speed.py -q
 
+# Coupled outbound no-progress stall (sim-robust-outbound-drive-v1): measures the longest no-net-progress
+# window per recorded warm run in BOTH clocks and reports when the SIM-clock monitor
+# (navigation.coupled_progress_escape, docs/examples/outbound-progress-mission-fragment.json) fires. The
+# stalled runs must fire, the clean runs must stay silent. Exit 0 = PASS.
+PYTHONPATH=scripts python3 scripts/check_outbound_progress.py --runs-dir "$MISSION_RUNS_DIR" \
+  --stalled warm9 warm10 --clean warm8 warm11
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest scripts/twin/tests/test_articulated_navigation.py -q
+
 # Optional host-Python Jazzy overlay, extracted only into task-owned storage.
 # Uses existing trusted apt indexes; no sudo, package install, or service restart.
 python3 scripts/setup_restock_nav2.py --output "$TASK_OUTPUT/nav2"
