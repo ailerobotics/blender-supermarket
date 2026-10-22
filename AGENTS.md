@@ -461,6 +461,15 @@ repo's `scenes/`, `export/` or `renders/`.
   The built-in `SEAL_DIAG`/`probe()` logs status, gripped count, per-seal pose + raycast gap every
   grasp tick (`RESTOCK_SEAL_DIAG=0` to silence). Evidence + the contact-gap GPU probe:
   `data/sim-restock-stations-v1/report.md`.
+  **SIM_ATTACH_FALLBACK weld robustness** (sim-robust-weld-attach-v1): the weld gate is the pure
+  `_contact_weld_ready(gap, tilt, hits)`; `SIM_ATTACH_CONTACT_MM` now defaults to a TOLERANT **3 mm**
+  (was 0.5 mm, which sat right at the descent endpoint so welding depended on sub-mm jitter — runs
+  321/327 bottomed at 0.67 mm and never welded), env `RESTOCK_SIM_ATTACH_CONTACT_MM` (clamped to the
+  real cup's 5 mm seal reach), tilt gate unchanged. PR 203's `grasp_press_timeout_s` is now EFFECTIVE
+  BY DEFAULT in `ros_host.py` (45 s SIM, env `RESTOCK_GRASP_PRESS_TIMEOUT_S`, config `0` disables).
+  Sharp edge: `collect1`/`collectsrc` grasps actually SUCCEED — both runs fail later at the PLACE-on-cart
+  step (sibling `sim-robust-collect-place-v1`), not at the grasp. Write-up:
+  `data/sim-robust-weld-attach-v1/report.md`.
 - **Dev-loop tooling for the Isaac mobile-restock lane** lives in `scripts/twin/tools/`
   (CPU, no GPU): `profile_mission_run.py` breaks a recorded run's wall clock into
   boot/commissioning/collect-observe/approach-reach/per-frame-render/ROS-idle/shutdown from
