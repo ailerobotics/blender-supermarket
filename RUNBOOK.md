@@ -586,6 +586,22 @@ python3 scripts/check_transfer_bench_staging.py --runs 351 353 354 356
 python3 -m pytest -q scripts/twin/tests/test_restock_transfer_bench.py
 ```
 
+**Staged-start clock + settle** (`twin/restock/staged_start.py`; engaged only when `start_at` is set and
+is not `collect`, so a cold run is byte-identical): the shortcut's settle `world.step`s run before the
+first mission tick, so Isaac `/clock` leads the packet clock by a constant 0.55 s (`couple`) / 1.55 s
+(`transfer`), against 0.05 s cold. `"staged_start_clock_sync"` (default `true`) stamps that offset on
+every host sensor packet (`Sensors.clock_offset`, collision_time moved into the packet clock), so the
+host packet- and collision-freshness checks measure true age and the default
+`RESTOCK_SENSOR_MAX_AGE_S` bound holds. `"staged_start_settle_s"` (default `20`, `0` = off) holds the
+first manipulation dispatch until the mission has run that much sim time with the station ack +
+collision stamps steady for 2 s, bounded at +60 s. Console: `STAGED_CLOCK_SYNC`, `STAGED_SETTLE_HOLD
+released reason=...`; mission.json: `staged_start_mode`. CPU replay of bench1 (both failures
+reproduced on the legacy packet, both cleared when synced):
+
+```bash
+python3 -m pytest -q scripts/twin/tests/test_restock_staged_start.py
+```
+
 ### 11a. Demand-driven mission job (store-vision plan, CPU, opt-in)
 
 The mission job is normally the one hardcoded in `scripts/restock_scenario.json`.

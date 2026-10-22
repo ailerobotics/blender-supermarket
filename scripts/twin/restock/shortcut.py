@@ -203,6 +203,10 @@ def walkthrough_caption(config):
     if staging is not None:
         preset = staging if isinstance(staging, str) else staging.get('preset', 'recorded_bay_park')
         text += f' | staged: {preset}'
+    from .staged_start import summary_fields
+    mode = summary_fields(config).get('staged_start_mode')
+    if mode and mode != 'off':
+        text += f' | {mode}'
     return text
 
 
@@ -227,8 +231,9 @@ def shortcut_summary(shortcut, config, staging=None):
     """mission.json fields for a start-phase shortcut run: top-level ``start_at``, the shortcut record
     (with the applied ``staging`` when the recorded start staging ran), the ``start_staging_mode``
     workaround label and the walkthrough caption."""
+    from .staged_start import summary_fields
     out = {'start_at': shortcut['start_at'], 'shortcut': dict(shortcut),
-           'walkthrough_caption': walkthrough_caption(config)}
+           'walkthrough_caption': walkthrough_caption(config), **summary_fields(config)}
     if staging:
         out['shortcut']['staging'] = staging
         out['start_staging_mode'] = staging['mode']

@@ -56,7 +56,7 @@ class LabelTests(unittest.TestCase):
         cfg = apply_bench_keys({}, start_at='couple', stop_after='park')
         text = walkthrough_caption(cfg)
         self.assertEqual(text, 'BENCH RUN start_at=couple stop_after=park: collect SYNTHESIZED, not '
-                               'performed; transfer, verify, return NOT RUN')
+                               'performed; transfer, verify, return NOT RUN | settle hold 20s; host clock sync')
         out = bounded_summary(cfg)
         self.assertEqual(out['stop_after'], 'park')
         self.assertEqual(out['stages_driven'], ['couple', 'outbound', 'park'])
@@ -67,7 +67,12 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(bounded_summary({}), {})
 
     def test_start_only_caption_unchanged(self):
+        # A staged start names its staged-start switches (twin.restock.staged_start) on screen too.
         self.assertEqual(walkthrough_caption({'start_at': 'transfer', 'start_staging': 'recorded_bay_park'}),
+                         'BENCH RUN start_at=transfer: collect, couple, outbound, park SYNTHESIZED, not '
+                         'performed | staged: recorded_bay_park | settle hold 20s; host clock sync')
+        self.assertEqual(walkthrough_caption({'start_at': 'transfer', 'start_staging': 'recorded_bay_park',
+                                              'staged_start_settle_s': 0, 'staged_start_clock_sync': False}),
                          'BENCH RUN start_at=transfer: collect, couple, outbound, park SYNTHESIZED, not '
                          'performed | staged: recorded_bay_park')
 

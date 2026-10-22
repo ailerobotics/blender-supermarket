@@ -13,6 +13,7 @@ from ..restock_manipulation import ground_truth_collect as gtc
 from typing import Protocol
 
 from .mission import Result
+from .staged_start import SettleHold
 
 # Safety cap on the parked collision-map warm-up (RuntimeAdapter 'warm' phase): the warm-up
 # normally exits as soon as the station reports a fresh collision_time (a few ticks once nvblox
@@ -204,6 +205,15 @@ class ManipulationBridge:
         else:
             core.base_repositioned = True
 
+    def set_clock_sync(self, enabled=True):
+        """Staged-start clock sync (twin.restock.staged_start): enable the /clock-offset stamp on the
+        host sensor packets. Returns True when the sensor-owning runtime accepted it, False for a runtime
+        without the hook (the caller logs that the sync is unavailable rather than silently assuming it)."""
+        if self.owns_sensor_io and hasattr(self.controller, 'set_clock_sync'):
+            self.controller.set_clock_sync(enabled)
+            return True
+        return False
+
     def pause_station(self, simulation_time):
         """fm399 (1): cleanly STOP the parked station at the START of the reposition drive, while the
         base is still parked (so the 'stop' is accepted -> idle, NOT faulted). A moving base
@@ -222,8 +232,13 @@ class RuntimeAdapter:
                  hold_cart_through_couple=False, couple_static_drive=False,
                  uncouple_on_return=False, wall_clock=time.monotonic, nav_stuck_wall_s=None,
                  carry_reposition_drive=False, couple_standoff_tolerance=None,
-                 ground_truth_place_actions=()):
+                 ground_truth_place_actions=(), staged_settle_s=0.0):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
+        # Staged-start settle hold (twin.restock.staged_start; the bundle passes
+        # config['staged_start_settle_s'] only when start_at is set and not collect): the warm-up of the
+        # mission's FIRST manipulation stage holds the dispatch until the simulation has run that long
+        # and the station ack + collision-world stamps are steady. 0.0 (default) => no hold, byte-identical.
+        self.settle_hold = SettleHold(staged_settle_s) if staged_settle_s and staged_settle_s > 0 else None
         # fm482 (config['couple_standoff_tolerance'], default None => xy 0.05 m + the nav default yaw
         # 0.08 rad, byte-identical): the arrival tolerance of the on-axis couple STANDOFF leg. The
         # standoff is not the latch -- the fine-dock servo closes the residual onto the measured drawbar
@@ -751,6 +766,15 @@ class RuntimeAdapter:
                 if self._warmn <= _WARM_SETTLE_GRACE_TICKS:
                     return Result('running', reason='warm-up settling (stationarity window filling)')
                 return Result('failed', reason='base moved during collision-map warm-up')
+            hold = self.settle_hold
+            if hold is not None and not hold.released:
+                # Staged start: the FIRST manipulation dispatch waits for a settled simulation (see
+                # staged_start.SettleHold); the station keeps being pumped above every held tick.
+                if not hold.update(self.time, ready=ready, parked=p.parked):
+                    return Result('running', reason=hold.status)
+                print(hold.release_line + f' action={self.action}', flush=True)
+                if hold.reason == 'cap':
+                    self._warmn = max(self._warmn, _WARM_MAX_TICKS)   # bounded: dispatch like the warm cap
             if ready or self._warmn >= _WARM_MAX_TICKS:
                 self.phase = 'execute'
                 # Dispatch the current manipulation job (collect or transfer) now the collision map

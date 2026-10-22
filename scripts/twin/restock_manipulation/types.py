@@ -78,6 +78,11 @@ class Sensors:
     # collect observe gate (require_collect_source_evidence) permits the reach only on this. Default False =>
     # byte-identical (the gate waits / fails fast, exactly as when the driver never sets it).
     collect_source_clean: bool = False
+    # Staged-start clock sync (twin.restock.staged_start): the host /clock minus this packet's clock at
+    # capture. A start-phase shortcut steps physics before the first mission tick, so /clock leads the
+    # packet clock by a constant (1.55 s on start_at=transfer); the host packet-freshness check subtracts
+    # it and the Isaac side moves collision_time into the packet clock. Default 0.0 => byte-identical.
+    clock_offset: float = 0.0
     # Driver must reject stale/absent joint/contact/odom data before making a packet.
 
 
