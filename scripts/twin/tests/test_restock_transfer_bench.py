@@ -245,7 +245,7 @@ class EntersTransferDirectlyTests(unittest.TestCase):
 
 class CreateWiringTests(unittest.TestCase):
     def test_build_gets_the_staged_scenario_runtime_keeps_the_original(self):
-        from test_isaac_bundle import MANIFEST, CreateWiringTests as Base, base_config
+        from twin.tests.test_isaac_bundle import MANIFEST, CreateWiringTests as Base, base_config
         from twin.restock.isaac_bundle import create
         seen, flags = {}, {}
         sc = dict(mission_scenario(), navigation_model='articulated')
@@ -267,7 +267,7 @@ class CreateWiringTests(unittest.TestCase):
         self.assertEqual(bundle.start_staging['mode'], 'start_phase_shortcut:recorded_bay_park')
 
     def test_absent_staging_passes_the_scenario_through(self):
-        from test_isaac_bundle import MANIFEST, SCENARIO, CreateWiringTests as Base, base_config
+        from twin.tests.test_isaac_bundle import MANIFEST, SCENARIO, CreateWiringTests as Base, base_config
         from twin.restock.isaac_bundle import create
         seen = {}
         bundle = create(app=object(), manifest=MANIFEST, scenario=SCENARIO, config=base_config(),
