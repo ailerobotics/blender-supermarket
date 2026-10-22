@@ -59,6 +59,22 @@ def run_warm_session(run_once, *, warm_attempts, warm_reset, write_attempts=None
     return mission, summary
 
 
+def apply_bench_keys(config, *, start_at=None, start_staging=None, stop_after=None):
+    """Dev-bench launch keys: ``--start-at`` / ``--start-staging`` / ``--stop-after`` override the
+    runtime-config keys of the same name, then ``stop_after`` cuts ``config['stages']`` to the prefix
+    ending at that stage (``mission.bounded_stages``; fails closed before any boot). Every consumer
+    (Mission, the shortcut synthesis, the caption) reads the bounded ``stages``. No key set and no
+    flag => ``config`` untouched (byte-identical)."""
+    for key, value in (('start_at', start_at), ('start_staging', start_staging), ('stop_after', stop_after)):
+        if value is not None:
+            config[key] = value
+    if config.get('stop_after') is not None:
+        from twin.restock.mission import bounded_stages
+        config['stages'] = list(bounded_stages(config.get('stages'), config['stop_after'],
+                                               config.get('start_at')))
+    return config
+
+
 def _apply_render_preset(config, name):
     """Opt into a sensing render preset for this run -- the SAME ``--render-preset`` that
     commissioning takes. Sets the NON-decode render-product scale (mapper/nav/arm). The QR-decode
@@ -271,6 +287,9 @@ def run(args, manifest, scenario):
         raise ValueError('runtime requires --runtime-config with exact sensor/host/CAD inputs')
     from preflight_mobile_restock import check as check_runtime_inputs
     config=json.loads(args.runtime_config.read_text())
+    apply_bench_keys(config, start_at=getattr(args, 'start_at', None),
+                     start_staging=getattr(args, 'start_staging', None),
+                     stop_after=getattr(args, 'stop_after', None))
     if getattr(args, 'render_preset', None):
         _apply_render_preset(config, args.render_preset)
     # Opt-in mobile store-sensor (twin.route_alerts); default off => byte-identical run.
@@ -467,6 +486,12 @@ def run(args, manifest, scenario):
                         from twin.restock.shortcut import shortcut_summary
                         s.update(shortcut_summary(m.shortcut, config,
                                                   getattr(bundle, 'start_staging', None)))
+                    # A stop_after targeted test: record the stop stage + the stages NOT run.
+                    from twin.restock.shortcut import bounded_summary
+                    bounded = bounded_summary(config)
+                    if bounded:
+                        s.update(bounded)
+                        s['note'] += ' ' + bounded['bounded_note']
                     # Persist the per-stage summary now, before the finally runs app.close():
                     # Isaac's SimulationApp.close() can terminate the process hard and skip the
                     # outer finally (which re-writes mission.json with events as a fallback).
@@ -568,6 +593,16 @@ def main():
                              'collect source + sensing at 0.6 scale (~2.8x fewer pixels) to speed '
                              'iteration; use the SAME preset for commissioning so the baseline matches.')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--start-at', choices=('couple', 'transfer'),
+                        help='dev bench: begin the mission at this stage (runtime-config "start_at"); '
+                             'the skipped prefix is synthesized and recorded as *_shortcut')
+    parser.add_argument('--start-staging', choices=('recorded_bay_park',),
+                        help='dev bench (with --start-at transfer): spawn at the recorded '
+                             'park->transfer handover (runtime-config "start_staging")')
+    parser.add_argument('--stop-after', choices=('collect', 'couple', 'outbound', 'park', 'transfer',
+                                                 'verify', 'return'),
+                        help='dev targeted test: end the mission right after this stage '
+                             '(runtime-config "stop_after"); later stages are not run')
     parser.add_argument('--warm-attempts', type=int, default=1,
                         help='dev iteration: re-run the mission up to N times inside the SAME live '
                              'Isaac session (no re-boot / re-commission per attempt), re-seating the '

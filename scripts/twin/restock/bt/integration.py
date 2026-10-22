@@ -103,6 +103,11 @@ def run_once_bt(db, scenario, bundle, config, output_dir, *, mission_factory, is
                               'performed; see events *_shortcut.')
         from ..shortcut import shortcut_summary
         summary.update(shortcut_summary(mission.shortcut, config, getattr(bundle, 'start_staging', None)))
+    from ..shortcut import bounded_summary
+    bounded = bounded_summary(config)
+    if bounded:
+        summary.update(bounded)
+        summary['note'] += ' ' + bounded['bounded_note']
     summary['bt_view'] = str((output_dir / 'bt_view.html'))
     try:
         early = dict(summary, events=db.events(scenario['job']['job_id']))

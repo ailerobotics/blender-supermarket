@@ -561,7 +561,15 @@ the hitch, and the carton resting on the deck at `initial_staging.cart_load_cent
 `start_staging` may also be an object overriding `robot_base_pose`, `articulation`,
 `carton_load_center_body_xy`, `carton_support_z_world`. mission.json records `start_at`,
 `start_staging_mode` and the staged poses; the walkthrough carries a burned-in BENCH caption.
-Absent `start_staging` => byte-identical. CPU proof against the raw run files:
+Absent `start_staging` => byte-identical.
+
+Targeted test (`"stop_after": "<stage>"`, or `run_mobile_restock.py --stop-after <stage>`;
+`--start-at` / `--start-staging` likewise override the keys above): the mission ends right after
+that stage (`mission.bounded_stages` cuts `stages`), e.g. collect-only = `--stop-after collect`,
+couple->park = `--start-at couple --stop-after park`, transfer->verify =
+`--start-at transfer --start-staging recorded_bay_park --stop-after verify`. mission.json records
+`stop_after`, `stages_driven`, `not_run` (its `complete` covers only the stages driven) and the
+walkthrough caption names the stages NOT RUN. CPU proof against the raw run files:
 
 ```bash
 python3 scripts/check_transfer_bench_staging.py --runs 351 353 354 356

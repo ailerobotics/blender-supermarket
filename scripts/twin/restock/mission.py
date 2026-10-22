@@ -24,6 +24,21 @@ ACTIONS = ('collect', 'couple', 'outbound', 'park', 'transfer', 'verify', 'retur
 _RETRYABLE_STAGES = ('couple', 'outbound', 'park', 'return')
 
 
+def bounded_stages(stages=None, stop_after=None, start_at=None):
+    """The in-order stage prefix a run drives: ``stages`` (default ACTIONS) cut right after
+    ``stop_after`` (dev targeted test: e.g. collect-only, or start_at=couple stop_after=park).
+    ``stop_after=None`` returns ``stages`` unchanged. Refuses a stop stage that is not in the run or
+    that precedes ``start_at`` (the run would drive nothing)."""
+    stages = tuple(stages) if stages else ACTIONS
+    if stop_after is None:
+        return stages
+    if stop_after not in stages:
+        raise ValueError(f'stop_after {stop_after!r} not in mission stages {stages}')
+    if start_at is not None and start_at in stages and stages.index(stop_after) < stages.index(start_at):
+        raise ValueError(f'stop_after {stop_after!r} precedes start_at {start_at!r}')
+    return stages[:stages.index(stop_after) + 1]
+
+
 @dataclass(frozen=True)
 class Result:
     status: str
