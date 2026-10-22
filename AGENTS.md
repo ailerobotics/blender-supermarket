@@ -392,6 +392,14 @@ repo's `scenes/`, `export/` or `renders/`.
   depth/context, so the replay drives the real gates with the recorded timing+identity against
   an analytic bench frame (labelled, not sensor evidence). Write-up + per-phase numbers:
   `data/sim-restock-devloop-v1/report.md`.
+- **Sim speed profile** (opt-in, default off): runtime-config `"sim_speed": {"profile": "max"}`
+  (`restock/sim_speed.py`) pauses the 2560×1920 station decode cameras wherever nothing reads them
+  (nav stages; ground-truth transfer/verify), drops wall pacing outside collect/transfer/verify (a 1×
+  cap stays there because host sim-time windows would tighten), labels `sim_speed_mode`, and prints
+  per-stage `TICK_PROFILE` lines. **Sharp edge: never pause the arm/mast depth cameras.** The
+  masked-depth bridge stamps frames with the publishing tick's sim time, so a pre-pause buffer would
+  reach nvblox as current. The unrendered 40–72 ms tick caps the sim near 0.3×. Replay estimator
+  `scripts/twin/tools/estimate_sim_speed.py`; guard audit `~/firstmate/data/sim-video-speedup-v1/report.md`.
 - **Arm-carry bench** (`scripts/twin/tools/arm_carry_bench.py` + guarded GPU runner
   `scripts/run_arm_carry_bench.py`): boots Isaac ONCE, welds the carton at the tool via the
   mission's own `SIM_ATTACH_FALLBACK` weld, brakes the base in the airborne-carry yaw-lock
