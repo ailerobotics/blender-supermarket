@@ -1,5 +1,5 @@
 {
-  "_comment": "demo-006 compile spec after the captain's 2026-10-22 review. Story: warehouse pick onto the rollwagen -> rollwagen towed out -> placed -> robot+rollwagen towed back to the warehouse and parked. CUT RULE: every stage ends BEFORE any wrongly tilted carton / clip / jump / mid-way uncouple. collect = collect-src-001 cut at the clean grasp (f0-112) BEFORE the carton pitches off level (tilt starts ~f120). return = demo-005's COUPLED tow back to the warehouse + park (f1425-1800), cut BEFORE the uncouple at f1830 (ends on the parked, still-coupled robot+rollwagen). Interim slots pending helper lanes: outbound <- door-src-001 (door/front pass; interim = warm8 clean backroom-bay drive); transfer at the supermarket FRONT + a native coupled return <- sim-video-story-sources-v1 (interim = warm8 backroom transfer, demo-005 return). Clean per-segment cut ranges also coming from sim-video-cut-qa-v1.",
+  "_comment": "demo-006 compile spec after the captain's 2026-10-22 review. Story: warehouse pick onto the rollwagen -> rollwagen towed out -> placed -> robot+rollwagen towed back to the warehouse and parked. CUT RULE: every stage ends BEFORE any wrongly tilted carton / clip / jump / mid-way uncouple. collect = collect-src-002 f0-323 (real pick + lift + carry to the rollwagen + perceive deck + reach over the deck; carton stays level, the overhead skew is perspective; supersedes collect-src-001). stride 2 keeps the carry brisk. return = demo-005's COUPLED tow back to the warehouse + park (f1425-1800), cut BEFORE the uncouple at f1830 (ends on the parked, still-coupled robot+rollwagen). Interim slots pending helper lanes: outbound <- door-src-001 (door/front pass; interim = warm8 clean backroom-bay drive); transfer at the supermarket FRONT + a native coupled return <- sim-video-story-sources-v1 (interim = warm8 backroom transfer, demo-005 return). Clean per-segment cut ranges also coming from sim-video-cut-qa-v1.",
   "mission_root": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission",
   "title": "demo-006",
   "fps": 15,
@@ -7,12 +7,13 @@
   "segments": [
     {
       "stage": "collect",
-      "source": "collect-src-001",
+      "source": "collect-src-002",
       "kind": "real",
       "frame_start": 0,
-      "frame_end": 112,
-      "caption": "Pick the carton off the warehouse shelf",
-      "labels": ["real pick (collect-src-001); cut at the clean grasp, before the lift tilts the carton"]
+      "frame_end": 323,
+      "stride": 2,
+      "caption": "Pick the carton off the warehouse shelf and carry it to the rollwagen",
+      "labels": ["real pick + lift + carry + reach over the rollwagen deck (collect-src-002); carton level (overhead skew is perspective); set-down pending (place CUDA-OOM)"]
     },
     {
       "stage": "couple",
