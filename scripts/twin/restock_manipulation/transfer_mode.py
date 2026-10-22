@@ -28,10 +28,19 @@ from dataclasses import replace
 
 ENV = 'RESTOCK_TRANSFER_MODE'
 LIVE_POSE = 'live_pose'
-MODES = (LIVE_POSE,)
+SCRIPTED = 'scripted'
+MODES = (LIVE_POSE, SCRIPTED)
 DESCRIPTIONS = {
     LIVE_POSE: ('real-arm transfer picks the carton from its live (controlled-asset ground-truth) pose with '
                 'a near-face side grip, bay place yaw chosen for reach, and no base reposition'),
+    SCRIPTED: ('SCRIPTED transfer fallback: the carton is moved from the rollwagen to the ground-truth bay '
+               'target along a scripted kinematic path (arm still, or opted in: the scripted arm path through '
+               'the host trajectory executor; not cuMotion-planned, not physics-grasped); placement checked '
+               'against the ground-truth target'),
+}
+CAPTIONS = {
+    LIVE_POSE: 'TRANSFER: live-pose pick (ground-truth carton pose)',
+    SCRIPTED: 'SCRIPTED TRANSFER (workaround): scripted carton path, not planned or grasped',
 }
 _OFF = ('', '0', 'off', 'none', 'false')
 
@@ -68,7 +77,23 @@ def stamp_summary(summary, environ=None):
     tag = f' TRANSFER_MODE={mode}: {DESCRIPTIONS[mode]}.'
     if tag not in note:
         summary['note'] = note + tag
+    summary['walkthrough_caption'] = transfer_caption(summary.get('walkthrough_caption'), environ)
     return summary
+
+
+def transfer_caption(base=None, environ=None):
+    """The walkthrough caption with the active transfer mode appended (burned into the video by the
+    Recorder; mirrored into mission.json). Off/invalid => ``base`` unchanged (byte-identical)."""
+    try:
+        mode = transfer_mode(environ)
+    except ValueError:
+        return base
+    if mode is None:
+        return base
+    label = CAPTIONS[mode]
+    if base and label in base:
+        return base
+    return f'{base} | {label}' if base else label
 
 
 def flip_yaw(quaternion):

@@ -404,6 +404,13 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
 
     from .ground_truth_verify import stage_modes as _stage_modes
     adapter.stage_modes = _stage_modes(config)   # vr1: '[ground truth]' step labels; {} => none
+    # SIM-ONLY scripted transfer fallback: RESTOCK_TRANSFER_MODE=scripted attaches the scripted runner
+    # (twin.restock.scripted_transfer); unset => None => the transfer stage is byte-identical.
+    from .scripted_transfer import build_scripted_transfer
+    adapter.scripted_transfer = build_scripted_transfer(assembly=assembly, config=config,
+                                                        scenario=scenario, output=output)
+    if adapter.scripted_transfer is not None:      # the BT view tags the transfer steps with the workaround
+        adapter.stage_modes = dict(adapter.stage_modes, transfer='scripted, ground_truth')
 
     # Opt-in warm-session reset provider (dev iteration): config['warm_reset'] names a
     # lane-owned builder `module:function` called once here with the live scene; it returns the
@@ -581,9 +588,12 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # for the full run.
     from .shortcut import walkthrough_caption
     from ..restock_manipulation import ground_truth_collect
-    # collect-gt: a ground-truth collect run names the workaround in the same burned-in caption.
+    from ..restock_manipulation.transfer_mode import transfer_caption
+    # collect-gt: a ground-truth collect run names the workaround in the same burned-in caption; so does a
+    # transfer workaround mode (RESTOCK_TRANSFER_MODE).
     recorder = (Recorder(output / 'mission-frames', fps=plan.recording_fps,
-                         caption=ground_truth_collect.join_caption(walkthrough_caption(config), config))
+                         caption=transfer_caption(ground_truth_collect.join_caption(walkthrough_caption(config),
+                                                                                    config)))
                 if recording_camera is not None else None)
     # vr1 (labelled demo workaround, default OFF): config['verify_ground_truth'].enabled swaps the
     # camera InventoryVerifier for the SIM GROUND-TRUTH verifier (handling-unit pose vs the authored bay
