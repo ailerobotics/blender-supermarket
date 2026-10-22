@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .transfer_mode import LIVE_POSE, transfer_mode
 from .types import ProductProfile
 
 STATIONS = ('source', 'shelf')
@@ -429,6 +430,13 @@ class CollectTargetBridge:
         # asset). Collect leaves this None and is unaffected.
         self.shelf_provider = None
         self.sensed_target_bboxes = ()
+        # Opt-in SIM transfer workaround (env RESTOCK_TRANSFER_MODE, see transfer_mode.py). 'live_pose': the
+        # transfer SOURCE is the carton's LIVE top surface (handling-unit prim) instead of the deck-top AABB
+        # centre. Unset => None => byte-identical. Logged at boot so the activation is visible in the console.
+        self.transfer_mode = transfer_mode()
+        if self.transfer_mode:
+            print(f'TRANSFER_MODE {self.transfer_mode} isaac-capture: transfer source = live carton top pose '
+                  f'({self._handling_unit_path})', flush=True)
 
     def set_shelf_target_provider(self, provider):
         self.shelf_provider = provider
@@ -619,6 +627,33 @@ class CollectTargetBridge:
         p = np.linalg.inv(Tub) @ np.array([float(w[0]), float(w[1]), float(w[2]), 1.0])
         return (float(p[0]), float(p[1]), float(p[2]), 0.0, 0.0, 0.0, 1.0)
 
+    def _carton_top_station(self):
+        """live_pose transfer SOURCE: the carton's observed TOP contact surface (the types.Observation.pose
+        contract) from the LIVE handling-unit prim -- its centre + half the profile height, and its yaw relative
+        to ur_base_link. Controlled-asset ground truth like _cart_pose_station, but where the carton actually
+        rests (a warm-start carton sits on the UPPER shelf, cart body +0.18 m -- not at the deck-top AABB
+        centre). Returns ((x, y, z_top), yaw) in ur_base_link, or None when the prim is absent."""
+        import numpy as np
+        from pxr import Usd, UsdGeom
+        unit = self.stage.GetPrimAtPath(self._handling_unit_path)
+        if not unit:
+            return None
+        cache = UsdGeom.XformCache()
+        Tu = np.asarray(cache.GetLocalToWorldTransform(unit)).T
+        if self._unit_local_center is None:       # shared rigid-body cache with _carton_center_station
+            bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                     [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+            rng = bbox.ComputeWorldBound(unit).ComputeAlignedRange()
+            mn, mx = rng.GetMin(), rng.GetMax()
+            wc = np.array([(mn[0] + mx[0]) / 2.0, (mn[1] + mx[1]) / 2.0, (mn[2] + mx[2]) / 2.0, 1.0])
+            self._unit_local_center = np.linalg.inv(Tu) @ wc
+        w = Tu @ self._unit_local_center
+        Tub = np.asarray(cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.base_path))).T
+        p = np.linalg.inv(Tub) @ np.array([float(w[0]), float(w[1]), float(w[2]), 1.0])
+        height = float(next(iter(self.profiles.values())).dimensions[2])
+        yaw = math.atan2(float(Tu[1, 0]), float(Tu[0, 0])) - math.atan2(float(Tub[1, 0]), float(Tub[0, 0]))
+        return (float(p[0]), float(p[1]), float(p[2]) + height / 2.0), yaw
+
     def _capture_transfer(self, now):
         """Transfer sensing: the carton on the cart (derived cart pose, controlled asset) as the
         SOURCE observation + the camera-lane fixed-shelf slot as the DESTINATION target. Mirrors
@@ -648,6 +683,15 @@ class CollectTargetBridge:
                 print(f'TRANSFER_CAPTURE slot={slot is not None} fresh?', flush=True)
             return None
         (cx, cy, cz), yaw = cart
+        if self.transfer_mode == LIVE_POSE:
+            # live_pose (transfer_mode.py): pick the carton where it actually rests -- its live TOP surface --
+            # not the deck-top AABB centre (run-354/356 reach fail). No live carton => no packet (never fabricated).
+            live = self._carton_top_station()
+            if live is None:
+                if self._calls % 10 == 1:
+                    print('TRANSFER_CAPTURE live_pose: handling-unit prim absent', flush=True)
+                return None
+            (cx, cy, cz), yaw = live
         sku = next(iter(self.profiles)) if self.profiles else ''
         cq = (0., 0., math.sin(yaw / 2.), math.cos(yaw / 2.))
         obs = Observation(observation_id=f'cart:{now:.3f}', source='sensor', simulation_time=float(now),
@@ -701,7 +745,8 @@ class CollectTargetBridge:
         except Exception:
             placed_pose = None
         print(f'TRANSFER_CAPTURE calls={self._calls} sku={sku} cart=({cx:.2f},{cy:.2f},{cz:.2f}) '
-              f'shelf={slot.location} clear={slot.clear} src={tgt_source}', flush=True)
+              f'shelf={slot.location} clear={slot.clear} src={tgt_source}'
+              + (f' transfer_mode={self.transfer_mode}' if self.transfer_mode else ''), flush=True)
         return Sensors(now, (obs,), tgt, parked, bool(self.contact.read()), now,
                        self._collision_time(), joints, (), float(now), None, placed_pose)
 

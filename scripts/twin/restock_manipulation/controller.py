@@ -6,6 +6,7 @@ import time
 from ..restock_camera.freshness import require_fresh
 
 from .fit import axis_fits
+from .transfer_mode import LIVE_POSE, near_face_poses, transfer_mode
 from .types import MotionPort, ProductProfile, Result, Sensors
 
 # Controller ticks to HOLD a settled contact step before re-checking the latch, so the arm link
@@ -98,6 +99,11 @@ class TransferController:
         self.reposition_before_place = bool(reposition_before_place)
         self.base_repositioned = False
         self._source_obs = None   # fm390: the matched source observation, for re-running the place policy
+        # Opt-in SIM transfer workaround (env RESTOCK_TRANSFER_MODE, twin.restock_manipulation.transfer_mode,
+        # read in BOTH processes). 'live_pose': near-face pick/place yaw, every station reach-gated at observe,
+        # lift -> tuck -> preplace (no TRANSIT hold, no collect-cart pan). Unset => None => byte-identical.
+        self.transfer_mode = transfer_mode()
+        self.near_face = None     # live_pose: which yaw representatives the transfer observe chose
         # fm395 (A): require a STABLE confirmed attachment (s.contact = native grippedObjects OR the sim
         # fallback weld) for grasp_confirm_ticks consecutive ticks before lifting -- never advance to lift
         # on a single transient contact (run-306: a one-tick weld, released by a status flicker, let the
@@ -485,6 +491,15 @@ class TransferController:
                 and math.isclose(sum(x*x for x in pose[3:]), 1, abs_tol=1e-4)
                 and math.dist(pose[:3], (0, 0, 0)) <= self.profile.max_reach)
 
+    def _live_pose_transfer(self):
+        """RESTOCK_TRANSFER_MODE=live_pose AND this run is the transfer (collect is never affected)."""
+        return self.transfer_mode == LIVE_POSE and getattr(self, 'operation', None) == 'transfer'
+
+    def _repositions_before_place(self):
+        """fm390's TRANSIT base-reposition handshake applies. Never for a live_pose transfer: the runtime
+        drives that reposition for collect only, so a transfer would hold in TRANSIT to the phase timeout."""
+        return self.reposition_before_place and not self._live_pose_transfer()
+
     def _transition(self, phase):
         self.phase, self.elapsed, self.issued = phase, 0.0, False
         self._staged_retries = 0   # fm358: fresh retry budget per phase
@@ -747,7 +762,12 @@ class TransferController:
                               preplace=pose(target.pose, p.dimensions[2] + p.approach),
                               place=place, retreat=pose(target.pose, p.dimensions[2] + p.approach))
             if self.pose_policy is not None:
-                self.poses = self.pose_policy.build(source, target, p)
+                if self._live_pose_transfer():
+                    # live_pose: carton + bay are symmetric under a 180 deg yaw -- pick the representatives
+                    # that keep the side-grip wall facing the arm (min worst-station reach).
+                    self.poses, self.near_face = near_face_poses(self.pose_policy, source, target, p)
+                else:
+                    self.poses = self.pose_policy.build(source, target, p)
             if self.cart_cage_place:
                 # Re-chain the place for the open-face insert, keeping the policy's reachable PLACE
                 # orientation + sensed deck position. PREPLACE = the deck place pushed out the +x mouth
@@ -768,7 +788,7 @@ class TransferController:
             # pose -- the deck is only reachable once the base has driven to place_approach (reach proof
             # scripts/check_place_approach_reach.py). Gate only the PICK-side poses now; the place-side
             # poses are re-registered in the place_approach frame and reach-gated there (_reregister_place).
-            gate_poses = (self.poses if not self.reposition_before_place
+            gate_poses = (self.poses if not self._repositions_before_place()
                           else {k: v for k, v in self.poses.items() if k not in _PLACE_SIDE_PHASES})
             if not all(self._pose_ok(v) for v in gate_poses.values()):
                 import math as _m
@@ -825,6 +845,17 @@ class TransferController:
                 print('GROUND_TRUTH_PICK transfer source=%s pick=%s (ground-truth controlled-asset cart '
                       'deck, not camera)' % (self.source, tuple(round(v, 3) for v in source.pose[:3])),
                       flush=True)
+            if self._live_pose_transfer():
+                # Label the workaround honestly in the evidence + console (mission.json records the mode).
+                self.evidence.append({'source': 'transfer_mode', 'transfer_mode': LIVE_POSE,
+                                      'location': self.source,
+                                      'pick_top_pose': tuple(round(v, 4) for v in source.pose),
+                                      'place_surface_pose': tuple(round(v, 4) for v in target.pose),
+                                      **(self.near_face or {})})
+                print('TRANSFER_MODE live_pose observe: pick_top=%s place_surface=%s near_face=%s reach=%s'
+                      % (tuple(round(v, 3) for v in source.pose[:3]), tuple(round(v, 3) for v in target.pose[:3]),
+                         self.near_face, {k: round(math.dist(v[:3], (0, 0, 0)), 3)
+                                          for k, v in self.poses.items()}), flush=True)
             self._transition('approach')
         if self.phase in self.poses:
             # OBSERVE-THEN-EXECUTE lock (firstmate 2026-10-15, key approach-sensing-occlusion): once
@@ -1069,7 +1100,9 @@ class TransferController:
                 return self._fail('staged cart-swing %s move failed' % self.phase)
             if outcome == 'succeeded':
                 nxt = {'tuck': 'pan', 'pan': 'preplace', 'retreat_tuck': 'stow'}[self.phase]
-                if self.phase == 'tuck' and self.reposition_before_place:
+                if self.phase == 'tuck' and self._live_pose_transfer():
+                    nxt = 'preplace'  # live_pose: no TRANSIT hold (no transfer reposition), no collect-cart pan
+                elif self.phase == 'tuck' and self.reposition_before_place:
                     nxt = 'transit'   # fm390: hold the carry fold; the base drives to place_approach next
                 self._transition(nxt)
             elif outcome != 'running':
