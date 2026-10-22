@@ -492,6 +492,8 @@ def run(args, manifest, scenario):
                     if bounded:
                         s.update(bounded)
                         s['note'] += ' ' + bounded['bounded_note']
+                    from twin.restock_manipulation.transfer_mode import stamp_summary
+                    stamp_summary(s)   # opt-in RESTOCK_TRANSFER_MODE => transfer_mode + note; absent => no-op
                     # Persist the per-stage summary now, before the finally runs app.close():
                     # Isaac's SimulationApp.close() can terminate the process hard and skip the
                     # outer finally (which re-writes mission.json with events as a fallback).

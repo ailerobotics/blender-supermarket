@@ -109,6 +109,8 @@ def run_once_bt(db, scenario, bundle, config, output_dir, *, mission_factory, is
         summary.update(bounded)
         summary['note'] += ' ' + bounded['bounded_note']
     summary['bt_view'] = str((output_dir / 'bt_view.html'))
+    from ...restock_manipulation.transfer_mode import stamp_summary
+    stamp_summary(summary)   # opt-in RESTOCK_TRANSFER_MODE workaround => transfer_mode + note; absent => no-op
     try:
         early = dict(summary, events=db.events(scenario['job']['job_id']))
         (output_dir / 'mission.json').write_text(json.dumps(early, indent=2, allow_nan=False) + '\n')
