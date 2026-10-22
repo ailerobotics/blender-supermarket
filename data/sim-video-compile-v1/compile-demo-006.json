@@ -1,0 +1,64 @@
+{
+  "_comment": "demo-006 compile spec. Ordered per-stage segments; each names the source run and the inclusive frame range to take. Ranges from data/sim-video-stage-audit-v1/stage_sources.json. Two slots are interim and get swapped by firstmate when the helpers land: collect <- mission/collect-src-001 (clean ground-truth pick onto the rollwagen; interim = run-326 partial real pick) and outbound <- mission/door-src-001 (door pass; interim = warm8 clean backroom-bay drive, which does NOT clip the wall but is the backroom route not the door).",
+  "mission_root": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission",
+  "title": "demo-006",
+  "fps": 15,
+  "xfade_frames": 8,
+  "segments": [
+    {
+      "stage": "collect",
+      "source": "run-326",
+      "kind": "real",
+      "frame_start": 0,
+      "frame_end": 400,
+      "labels": ["INTERIM: partial real pick (run-326); carton deposit onto rollwagen from GPU re-run pending (collect-src-001)"]
+    },
+    {
+      "stage": "couple",
+      "source": "warm8",
+      "kind": "real",
+      "frame_start": 0,
+      "frame_end": 126
+    },
+    {
+      "stage": "outbound",
+      "source": "warm8",
+      "kind": "real",
+      "frame_start": 126,
+      "frame_end": 164,
+      "labels": ["INTERIM: backroom-bay route (clean, no wall clip); door pass pending (door-src-001)"]
+    },
+    {
+      "stage": "park",
+      "source": "warm8",
+      "kind": "real",
+      "frame_start": 164,
+      "frame_end": 164,
+      "min_seconds": 1.2
+    },
+    {
+      "stage": "transfer",
+      "source": "warm8",
+      "kind": "real",
+      "frame_start": 164,
+      "frame_end": 223,
+      "labels": ["scripted still-arm transfer (sim weld attach), not a physics grasp"]
+    },
+    {
+      "stage": "verify",
+      "source": "warm8",
+      "kind": "real",
+      "frame_start": 223,
+      "frame_end": 223,
+      "min_seconds": 1.2,
+      "labels": ["ground-truth verify"]
+    },
+    {
+      "stage": "return",
+      "source": "warm8",
+      "kind": "real",
+      "frame_start": 223,
+      "frame_end": 358
+    }
+  ]
+}

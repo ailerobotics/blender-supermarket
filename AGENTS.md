@@ -498,6 +498,16 @@ repo's `scenes/`, `export/` or `renders/`.
   `bt_events.jsonl`/`bt_snapshot.json` to per-frame node statuses + the authored step labels, and
   measures each reason (couple hitch gap, base→bay distance, lane progress, placed Δ, the failed step's
   recorded fault) from the traced poses via `twin/demo/measures.py`. Default (no flag) is byte-identical.
+- **Multi-run compile** (CPU, sources read-only): `scripts/compile_demo_video.py` +
+  `scripts/twin/demo/stitch.py` stitch ONE continuous seven-stage demo from per-stage segments of
+  DIFFERENT runs (each stage from a run where it worked), re-rendering the demo panel so the ladder,
+  clock and stage numbers run continuously across the source seams (earlier stages `done`, later
+  `idle`; active stage + chips + scene pass through). Two source kinds, both reduced to the panel
+  `entry`: `real` (bt_timeline over a run dir's mission-frames) and `choreo` (a demo dir's
+  `decision_log.json` + scene cropped from its composited mp4). Cross-fades only at source boundaries.
+  Spec + ranges: `data/sim-video-compile-v1/compile-demo-006.json` (ranges from
+  `data/sim-video-stage-audit-v1/stage_sources.json`); design + the demo-006 stage→source table:
+  `data/sim-video-compile-v1/report.md`. CPU tests: `scripts/twin/demo/tests/test_stitch.py`.
 
 ## Maintaining this file
 
