@@ -2936,6 +2936,31 @@ sim side. A secondary finding: the fm452(A) acquire gate's rebase-envelope stric
 than the follow's 0.30 cart_tol, creating a dead-zone that converts a tolerable lag into `lane_not_acquired` churn —
 if b is revisited, align the two thresholds. See [[portal-corner-geometry-forced]].
 
+### 2026-10-22 — run-341: BREAKTHROUGH — the gentle backroom-bay route DRIVES (portal problem solved in-sim)
+
+After fm458 pivoted away from the portal, the mission was re-homed to a backroom transfer BAY east of the dock,
+reached by a pure straight-east coupled tow (cart lag 0.00), with a GROUND-TRUTH verify (fm461) and the shelf
+camera dropped from commissioning (marker decode follow-up). run-341 is the first run where the whole
+commissioning + the coupled drive actually work:
+
+**WHAT SUCCEEDED (run-341b/c warm, start_at=couple), from mission.json events:** couple → **outbound_succeeded**
+(`arrived: True`, sim 227.6 s — the straight-east bay tow completed, the base reached the bay park) → **park_succeeded**
+(`stationary: True`). The ~90° min-radius portal reorientation that stalled 15+ warm runs (327–340) is GONE — the
+coupled train drives the gentle route and parks cleanly. Commissioning (backstock + rollwagen, the known-good rig)
+committed on the first try under the new config; the fm460 `COMMISSION_CFG_PREFLIGHT` gate passed at boot.
+
+**WHERE IT STOPS:** the **transfer** stage starts (sim 227.65 s) and 0.7 s later the mission fails on
+`StationAckStreamStalled: stamp frozen at 228.35 s (publisher stopped)` — the host masked-depth publisher dies the
+moment the transfer tries to sense the CART (pick the carton off the deck), freezing the station ACK stream (the
+fm455 consumer names it fast). Same signature in 341c (221 s). So transfer never completes and the ground-truth
+verify never fires. This is the SAME systemic root cause the cold collect hits (fm461's flagged follow-up): the
+station-camera marker decode / masked-depth publisher death. It is now the SINGLE blocker between here and the first
+complete 7-stage video — reached at the transfer's cart sensing instead of the cold collect's source sensing.
+
+mp4: run-341 158 KB (cold, source-decode), run-341b 9.3 MB, run-341c 9.2 MB (each ~20 min: the full couple + gentle
+bay tow + park, then the transfer-stage freeze). The nav/tow problem is SOLVED and demonstrated; the remaining work
+is the one systemic station-sensing/marker-decode/masked-depth investigation (fm461 follow-up), now the critical path.
+
 **(B) Would a live-train-matched outbound lane collapse the remaining layers? (one-page analysis).** The
 outbound lane's `cart_yaw` is authored by integrating the off-axle trailer kinematics from the lane START
 (cart aligned at the dock, articulation 0), but the coupled train enters the follow PARTWAY and already
