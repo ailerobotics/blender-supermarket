@@ -58,6 +58,39 @@ Videos served at `http://100.100.47.65:8787/v/mission/<run>/walkthrough.mp4`.
   and the top collect candidates — wall/shelf clipping, pose jumps/teleports,
   floating/missing carton, arm-through-shelf, panel mismatch.
 
-## Visual audit
+## Visual audit (OpenCV frame grids; ffmpeg absent)
 
-_v2 — in progress; faults recorded per stage in `stage_sources.json`._
+**warm8** (top-down walkthrough, 360 frames) — **visually CLEAN**. Across
+couple (0–126) → outbound (126–164) → transfer (164–223) → return (223–358):
+no wall or shelf clipping, no teleports/pose jumps, carton tracks the cart and
+is set at the bay target by ~#250. This is the safe spine for the compiled video.
+Collect was shortcut, so no pick is shown.
+
+**demo-005** (2040 frames, with decision-tree panel) — two confirmed faults, both
+matching the captain's notes:
+- **Starts at placement** (#0–~60): opens already lowering the carton into the
+  rollwagen; no warehouse-shelf pick is shown.
+- **Outbound clips THROUGH the backroom wall** (~#820–900): frames whiteout as the
+  camera/robot passes through solid wall geometry — backroom shelving before,
+  shop-floor aisle after. It does not pass the door.
+
+**demo-004** (2040 frames) — same choreography family, same two faults: starts at
+placement; outbound wall clip-through (~#680–850).
+
+**run-326** (real collect, 824 frames, later fails arm-heartbeat) — the arm reaches
+the warehouse shelf and **grasps the carton off it** (#160–240), swings it down
+(#320–400). This is the pick the captain wants — but after ~#420 the base
+destabilizes and the carton is **never cleanly deposited in the rollwagen**; usable
+as a **pick-only partial (≈#0–400)**.
+
+## What the compilation lead (sim-video-compile-v1) must know
+
+- **collect**: NO clean source. Best partial is `run-326` ≈#0–400 (pick off shelf
+  only); the deposit-onto-rollwagen clip **does not exist** — re-run or author it.
+- **outbound**: NO door passage anywhere. `warm8` 126–164 is a clean backroom-bay
+  drive (wrong route); the demos clip the wall — **do not use the demos for
+  outbound**. A pre-planned door pass must be authored/re-run as a separate clip.
+- **couple / transfer / verify / return**: use `warm8` (ranges above); clean.
+  park/verify are 1-frame transitions — fold them into the neighbouring beat.
+
+Reproduce grids: `/tmp/grid.py` (png dir / mp4) and `/tmp/grid2.py` (panel-cropped).
