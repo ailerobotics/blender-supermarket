@@ -250,7 +250,9 @@ class ArmDepthSubprocessBridge:
 
     def __init__(self, *, camera, camera_path, stage, transport, sensors, rig_prefixes,
                  runtime_env, python='python3', frame_id='restock_camera_arm', domain=88,
-                 invalid=INVALID_DEPTH, socket_path=None, idle_timeout_s=1800.0, topics=None):
+                 invalid=INVALID_DEPTH, socket_path=None, idle_timeout_s=1800.0, topics=None,
+                 max_restarts=20, restart_connect_timeout_s=20.0,
+                 send_buffer_bytes=8 << 20, send_timeout_s=10.0):
         from pxr import UsdGeom, Gf
         self.camera, self.sensors = camera, sensors
         self.rig_prefixes = tuple(rig_prefixes)
@@ -269,10 +271,14 @@ class ArmDepthSubprocessBridge:
             xf.AddTransformOp().Set(Gf.Matrix4d(1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1))
         transport.add_frames([optical_path])
 
-        # Spawn the out-of-Isaac rclpy publisher under the host overlay env + domain 88.
+        # Spawn the out-of-Isaac rclpy publisher under the host overlay env + domain 88, SUPERVISED:
+        # a writer exit that is NOT a close() (a crash / broken pipe) is detected on the next publish
+        # and the subprocess + writer are respawned (bounded) so the host nvblox/station-ack stream
+        # never starves into StationAckStreamStalled. The spawn is factored into _spawn_publisher so
+        # the supervisor can call it again verbatim; the socket path is unlinked+rebound by serve()
+        # on each (re)launch, so a respawn reconnects on the SAME per-feed path.
         import os
-        import subprocess
-        from .masked_depth_ipc import FrameWriter
+        from .masked_depth_ipc import SubprocessSupervisor
         self._socket_path = socket_path or _default_socket_path(frame_id)
         ipc_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'masked_depth_ipc.py')
         # Match the host nodes' DDS config EXACTLY (twin.restock_host.config.isolated_environment):
@@ -280,7 +286,7 @@ class ArmDepthSubprocessBridge:
         # strip any DDS profile/discovery-server overrides. The host forces UDPv4 (no shared memory);
         # a subprocess on the default SHM+UDP transport discovers the topics but never delivers data
         # to nvblox (run-37/38). Export AFTER sourcing the overlay so these win.
-        command = (f'set +u; source {runtime_env}; '
+        self._command = (f'set +u; source {runtime_env}; '
                    f'export ROS_DOMAIN_ID={int(domain)} ROS_LOCALHOST_ONLY=1 ROS_STATIC_PEERS= '
                    f'ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST RMW_IMPLEMENTATION=rmw_fastrtps_cpp '
                    f'FASTDDS_BUILTIN_TRANSPORTS=UDPv4 SKIP_DEFAULT_XML=1; '
@@ -293,11 +299,34 @@ class ArmDepthSubprocessBridge:
         # that and sourcing the host /opt/ros jazzy overlay on top mixes two ROS middlewares, so
         # the subprocess's DDS publishers never reach the host (the no-GPU smoke worked precisely
         # because it ran in a clean shell). Hand the overlay source a minimal env to build from.
-        clean_env = {k: os.environ[k] for k in ('HOME', 'USER', 'LOGNAME', 'TERM', 'DISPLAY')
-                     if k in os.environ}
-        clean_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-        self._proc = subprocess.Popen(['bash', '-c', command], env=clean_env)
-        self._writer = FrameWriter(self._socket_path)
+        self._clean_env = {k: os.environ[k] for k in ('HOME', 'USER', 'LOGNAME', 'TERM', 'DISPLAY')
+                           if k in os.environ}
+        self._clean_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        self._restart_connect_timeout_s = float(restart_connect_timeout_s)
+        self._send_buffer_bytes = send_buffer_bytes
+        self._send_timeout_s = send_timeout_s
+        feed = 'camera_1_mast' if 'mast' in str(frame_id) else 'camera_0_arm'
+        self._supervisor = SubprocessSupervisor(self._spawn_publisher, feed=feed,
+                                                max_restarts=int(max_restarts))
+
+    def _spawn_publisher(self):
+        """(re)launch the out-of-Isaac publisher subprocess + connect a bounded writer.
+
+        Called once at construction and again by :class:`SubprocessSupervisor` on a restart; the
+        serve() subprocess unlinks+rebinds the per-feed socket, so the fresh writer reconnects on
+        the same path. Returns ``(proc, writer)`` for the supervisor to own."""
+        import subprocess
+        from .masked_depth_ipc import FrameWriter
+        proc = subprocess.Popen(['bash', '-c', self._command], env=self._clean_env)
+        writer = FrameWriter(self._socket_path, connect_timeout_s=self._restart_connect_timeout_s,
+                             send_buffer_bytes=self._send_buffer_bytes,
+                             send_timeout_s=self._send_timeout_s)
+        return proc, writer
+
+    @property
+    def _proc(self):
+        """The live publisher subprocess (tracks the supervisor's current one across restarts)."""
+        return self._supervisor.proc
 
     def publish(self, now):
         import numpy as np
@@ -335,7 +364,10 @@ class ArmDepthSubprocessBridge:
         header = {'stamp_sec': sec, 'stamp_nsec': nsec,
                   'frame_id': self.frame_id, 'width': int(width), 'height': int(height),
                   'k': k, 'bbox': list(self._bbox) if self._bbox is not None else None}
-        self._writer.send(header, np.ascontiguousarray(masked, dtype='<f4').tobytes())
+        # Ship through the supervisor: a publisher that died since the last tick (a crash, not our
+        # close()) is respawned here before the send, so the feed self-heals instead of starving
+        # the station ack stream. On a clean close() the supervisor refuses (mission is tearing down).
+        self._supervisor.send(header, np.ascontiguousarray(masked, dtype='<f4').tobytes())
         self._published = getattr(self, '_published', 0) + 1
         return stamp_s
 
@@ -348,20 +380,15 @@ class ArmDepthSubprocessBridge:
         import traceback as _tb, time as _t
         feed = 'camera_1_mast' if 'mast' in str(self.frame_id) else 'camera_0_arm'
         caller = ''.join(_tb.format_stack()[-7:-1])
-        print('MASKED_DEPTH_BRIDGE_CLOSE feed=%s frame_id=%s wall=%.3f pid=%s alive=%s\n  caller:\n%s'
+        print('MASKED_DEPTH_BRIDGE_CLOSE feed=%s frame_id=%s wall=%.3f pid=%s alive=%s restarts=%s\n'
+              '  caller:\n%s'
               % (feed, self.frame_id, _t.time(), getattr(self._proc, 'pid', None),
-                 self._proc.poll() is None, caller), flush=True)
-        try:
-            self._writer.close()
-        finally:
-            if self._proc.poll() is None:
-                self._proc.terminate()
-                try:
-                    self._proc.wait(timeout=5)
-                except Exception:
-                    self._proc.kill()
-            print('MASKED_DEPTH_BRIDGE_CLOSED feed=%s returncode=%s (negative=killed by signal)'
-                  % (feed, self._proc.returncode), flush=True)
+                 self._supervisor.poll() is None, self._supervisor.restarts, caller), flush=True)
+        # Latch the supervisor closed (no restart after a deliberate teardown) and terminate the
+        # live subprocess + writer.
+        self._supervisor.close()
+        print('MASKED_DEPTH_BRIDGE_CLOSED feed=%s returncode=%s (negative=killed by signal)'
+              % (feed, self._supervisor.returncode), flush=True)
 
 
 def _rig_root(path):

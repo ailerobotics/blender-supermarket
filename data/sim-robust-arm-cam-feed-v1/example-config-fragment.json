@@ -1,0 +1,18 @@
+{
+  "_comment": "Bounded masked-depth config fragment for the live_pose transfer staging run, handed to the integration lane (twin-robot-in-store-boot-v1). Merge the keys below INTO the mission-runtime config's `masked_depth` block. All keys are backward compatible and default-safe; omitting them is byte-identical except that a per-op manip failure now keeps the station feed alive (the intended fix, no key required). Gate any change with `python3 scripts/twin/restock/gpu_budget.py <this-config>` BEFORE booting.",
+  "masked_depth": {
+    "enabled": true,
+    "runtime_env": "<host overlay env.sh — unchanged from the current config>",
+    "frame_id": "restock_camera_arm",
+    "domain": 88,
+    "_supervisor_defaults": "The bridge supervises + restarts the publisher automatically; these knobs only tune it and are OPTIONAL (shown with their defaults).",
+    "max_restarts": 20,
+    "restart_connect_timeout_s": 20.0,
+    "send_buffer_bytes": 8388608,
+    "send_timeout_s": 10.0
+  },
+  "mast_depth": {
+    "_comment": "KEEP OFF for live_pose transfer: gpu_budget confirms one arm feed fits the 12 GB card with whispr resident (11882/12288 MiB, 26 free) but a SECOND full-res feed does not. Enable only after a resolution cut that the budget gate passes AND an on-card peak sample confirms.",
+    "enabled": false
+  }
+}

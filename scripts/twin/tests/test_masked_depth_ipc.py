@@ -4,7 +4,8 @@ import struct
 import numpy as np
 import pytest
 
-from twin.restock.masked_depth_ipc import pack_frame, read_frame, MAGIC, FrameWriter
+from twin.restock.masked_depth_ipc import (
+    pack_frame, read_frame, MAGIC, FrameWriter, SubprocessSupervisor)
 
 
 def _recv_from(buf):
@@ -68,6 +69,110 @@ def test_frame_writer_sends_packed_bytes():
     writer.send(_hdr(), depth)
     header, got = read_frame(_recv_from(sent[0]))
     assert header == _hdr() and got == depth
+
+
+# --- SubprocessSupervisor: survive a publisher writer-EOF without starving the feed ----------
+
+class _FakeProc:
+    """A subprocess.Popen stand-in whose exit is driven by the test."""
+
+    def __init__(self):
+        self._rc = None
+
+    def poll(self):
+        return self._rc
+
+    @property
+    def returncode(self):
+        return self._rc
+
+    def die(self, rc=0):                 # the publisher exited (rc=0 == the writer_eof we observe)
+        self._rc = rc
+
+    def terminate(self):
+        if self._rc is None:
+            self._rc = -15
+
+    def kill(self):
+        self._rc = -9
+
+    def wait(self, timeout=None):
+        return self._rc
+
+
+class _FakeWriter:
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+        self.raise_once = None          # inject a one-shot send error (a broken pipe)
+
+    def send(self, header, depth):
+        if self.raise_once is not None:
+            exc, self.raise_once = self.raise_once, None
+            raise exc
+        self.sent.append((header, depth))
+
+    def close(self):
+        self.closed = True
+
+
+def _spawner():
+    """A spawn() returning a fresh (FakeProc, FakeWriter); `made` records each (re)launch."""
+    made = []
+
+    def spawn():
+        p, w = _FakeProc(), _FakeWriter()
+        made.append((p, w))
+        return p, w
+    return spawn, made
+
+
+def test_supervisor_restarts_on_writer_eof_before_the_feed_stalls():
+    # Replay of the transfer2 / bench1 EOF: the publisher exits rc=0 (writer_eof) mid-stream; the
+    # NEXT publish detects the dead proc and respawns + reconnects, so masked depth keeps flowing and
+    # the host incorporation-ack never freezes into StationAckStreamStalled.
+    spawn, made = _spawner()
+    logs = []
+    sup = SubprocessSupervisor(spawn, feed='camera_0_arm', log=logs.append)
+    sup.send({'frame': 1}, b'd1')
+    assert made[0][1].sent == [({'frame': 1}, b'd1')] and len(made) == 1
+    made[0][0].die(0)                                   # writer_eof, rc=0 (never a signal/OOM kill)
+    sup.send({'frame': 2}, b'd2')                        # restart happens HERE, before any stall
+    assert len(made) == 2 and sup.restarts == 1
+    assert made[1][1].sent == [({'frame': 2}, b'd2')]   # the fresh publisher carried the frame
+    assert made[0][1].closed                            # the dead writer was reaped
+    assert any('MASKED_DEPTH_BRIDGE_RESTART' in m and 'writer_exit rc=0' in m for m in logs)
+
+
+def test_supervisor_retries_on_broken_pipe_send():
+    spawn, made = _spawner()
+    sup = SubprocessSupervisor(spawn, log=lambda *_: None)
+    made[0][1].raise_once = BrokenPipeError()           # peer died between poll and send
+    sup.send({'f': 3}, b'd3')
+    assert sup.restarts == 1 and len(made) == 2
+    assert made[1][1].sent == [({'f': 3}, b'd3')]       # retried on the fresh writer
+
+
+def test_supervisor_does_not_restart_after_close():
+    spawn, made = _spawner()
+    sup = SubprocessSupervisor(spawn, log=lambda *_: None)
+    sup.close()
+    assert made[0][1].closed and sup.poll() == -15      # terminated, not restarted
+    with pytest.raises(RuntimeError):
+        sup.send({'f': 9}, b'd9')
+    assert len(made) == 1                               # a deliberate close never respawns
+
+
+def test_supervisor_restart_budget_is_bounded():
+    spawn, made = _spawner()
+    sup = SubprocessSupervisor(spawn, max_restarts=2, log=lambda *_: None)
+    for _ in range(2):
+        made[-1][0].die(0)
+        sup.send({'f': 0}, b'x')
+    assert sup.restarts == 2 and len(made) == 3
+    made[-1][0].die(0)
+    with pytest.raises(RuntimeError, match='restart budget'):
+        sup.send({'f': 0}, b'x')                        # a hard-crashing publisher can't spin forever
 
 
 def test_real_unix_socket_roundtrip(tmp_path):

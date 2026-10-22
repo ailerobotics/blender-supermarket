@@ -155,6 +155,17 @@ repo's `scenes/`, `export/` or `renders/`.
   second segmenter), and `camera_config(..., mast_depth=True)` adds the prim. Design + the
   named cold-collect cause (sequencing, not a camera): docs/restock_camera.md, proof
   `scripts/plan_restock_more_cameras.py`.
+- **Arm masked-depth feed lifecycle**: the out-of-Isaac publisher is a STATION-level resource the
+  host incorporation-ack consumes, NOT a per-op one. A per-op manip failure must hold the gripper but
+  NOT close it — `ros_manipulation.stop(close_sensing=False)` (the two `step()` failure sites); only
+  genuine mission teardown closes the feed. Closing it on a per-op `failed` froze the station ack
+  stamp → `StationAckStreamStalled` masking the TRUE reason (every recorded arm-feed death was this
+  `close()`, rc=0 writer_eof — never an OOM/signal kill). The bridge is supervised:
+  `masked_depth_ipc.SubprocessSupervisor` respawns the publisher on any non-`close()` exit within the
+  ack window (bounded `max_restarts`), and `FrameWriter` bounds its send buffer. Pre-boot VRAM gate
+  `scripts/twin/restock/gpu_budget.py` (12 GB card, whispr ~2.2 GB resident): one arm feed fits, a 2nd
+  full-res feed doesn't — keep `mast_depth` off for live_pose transfer. Report + bounded config
+  fragment: `data/sim-robust-arm-cam-feed-v1/`.
 - **Mobile navigation**: `scripts/twin/navigation/` and
   [docs/restock_navigation.md](docs/restock_navigation.md) define sensor, footprint
   and goal contracts; RUNBOOK §12 has CPU checks and isolated Nav2 launch. Coupled
