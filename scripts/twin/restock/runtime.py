@@ -363,6 +363,10 @@ class RuntimeAdapter:
         self._nav_stuck_pose = None       # base pose at that progress mark
         self.action = None
         self.last_packet_id = None
+        # SIM-ONLY scripted transfer fallback (RESTOCK_TRANSFER_MODE=scripted): a
+        # twin.restock.scripted_transfer.ScriptedTransfer attached by the Isaac bundle. None (default)
+        # => the transfer stage warms + dispatches the host manipulation job exactly as before.
+        self.scripted_transfer = None
 
     def start(self, action, job):
         if action != 'return':
@@ -430,6 +434,13 @@ class RuntimeAdapter:
                           if action in self.goal_articulation else {})
                 self.nav.start(self.poses[goal], action in ('outbound', 'return'), **kwargs)
                 self.phase = 'navigate'
+        elif action == 'transfer' and self.scripted_transfer is not None:
+            # SIM-ONLY scripted transfer (labelled workaround): no host manipulation job and no station
+            # warm-up -- the scripted runner moves the carton (and, opted in, the arm through the host
+            # trajectory executor) to the ground-truth bay target. Begun on the first parked tick.
+            self.phase = 'scripted'
+            self._warmn = 0
+            self._scripted_begun = False
         elif action == 'transfer':
             # Mirror the collect warm-up: make the shelf station's host ESDF + collision_time fresh
             # BEFORE dispatching the place grasp, so the first transfer observe sees a fresh
@@ -701,6 +712,29 @@ class RuntimeAdapter:
                 self.phase = 'fine_dock'
                 return Result('running', reason='nav at standoff; starting fine-dock insert')
             self.phase = 'execute'
+        if self.phase == 'scripted':
+            self.mobile.hold()   # stationary manipulation: brake the base
+            self._warmn += 1
+            if not p.parked:
+                # A start-phase shortcut begins AT this stage, so the stationarity window may not have
+                # filled yet (same grace as warm); a base moving once the script runs is a real fault.
+                if not self._scripted_begun and self._warmn <= _WARM_SETTLE_GRACE_TICKS:
+                    return Result('running', reason='scripted transfer settling (stationarity window filling)')
+                return Result('failed', reason='base moved during the scripted transfer')
+            if not self._scripted_begun:
+                self.scripted_transfer.begin(self.job, p.simulation_time)
+                self._scripted_begun = True
+            r = self.scripted_transfer.step(dt, p)
+            if r.status != 'succeeded':
+                return r
+            ev = r.evidence
+            # Checked against the SIM GROUND TRUTH, so labelled source='ground_truth' (vr1's convention;
+            # the Mission accepts it only with ground_truth_sources) -- never relabelled 'sensor'.
+            if (ev.get('source') != gtc.SOURCE or ev.get('ground_truth') is not True or
+                    ev.get('sku') != self.job.sku or ev.get('location') != self.job.shelf_id or
+                    ev.get('quantity') != self.job.quantity):
+                raise ValueError('scripted transfer evidence mismatch')
+            return Result('succeeded', dict(ev, released=True))
         if self.phase == 'warm':
             self.mobile.hold()   # stationary manipulation: brake the base against arm reaction
             self._warmn += 1
