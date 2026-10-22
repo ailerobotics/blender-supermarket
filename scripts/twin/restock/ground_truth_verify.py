@@ -199,6 +199,10 @@ def mission_modes(config):
         modes['transfer_verify_mode'] = VERIFY_MODE
     if isinstance(config, dict) and config.get('uncouple_on_return'):
         modes['return_mode'] = 'uncouple_at_cart_parking'
+    if isinstance(config, dict) and config.get('lidar_sensor_yaw_fix'):
+        # Provenance, not a workaround (a geometry-wiring fix; deliberately not a *_mode key so the
+        # walkthrough does not caption it): which lidar sensor->base offset this run's nav consumed.
+        modes['lidar_sensor_to_base'] = 'xy_yaw0 (vr1 lidar_sensor_yaw_fix)'
     return modes
 
 

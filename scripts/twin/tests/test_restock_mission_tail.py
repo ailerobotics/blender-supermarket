@@ -108,6 +108,11 @@ class GroundTruthSwitches(unittest.TestCase):
                                                  'return_mode': 'uncouple_at_cart_parking'})
         self.assertEqual(ground_truth_place_actions(config), ('transfer',))
         self.assertEqual(mission_ground_truth_sources(config), ('ground_truth',))
+        # the lidar wiring fix is recorded as provenance, not as a captioned *_mode workaround
+        lidar = mission_modes(dict(config, lidar_sensor_yaw_fix=True))['lidar_sensor_to_base']
+        self.assertIn('lidar_sensor_yaw_fix', lidar)
+        self.assertFalse(any(k.endswith('_mode') and 'lidar' in k for k in
+                             mission_modes(dict(config, lidar_sensor_yaw_fix=True))))
 
     def test_mission_refuses_ground_truth_evidence_unless_opted_in(self):
         class Adapter:
@@ -231,3 +236,19 @@ class HomeLegNavigation(unittest.TestCase):
         self.assertEqual(lidar_wall_probe((LIDAR_XYZ[0], LIDAR_XYZ[1], 0.0)), (3.0, 3.0))
         lo, hi = lidar_wall_probe(LIDAR_XYZ)          # the legacy (x, y, z) tuple read as (x, y, yaw)
         self.assertGreater(hi - lo, 1.0)
+
+    def test_recommended_return_poses_reach_home_uncoupled(self):
+        # The vr1 return poses (docs/examples/mission-tail-fragment.json): from the cart parking spot,
+        # back away south-east clear of the parked cart, then drive west to the spec home. Legacy lidar
+        # wiring (how the run is wired today); ~20 s CPU. Without the back-away waypoint the braking
+        # capsule clips the parked cart on the turn-in-place and the leg ends obstacle_stop_timeout.
+        from twin.restock.tail_nav import simulate_home_leg
+        fragment = json.loads((Path(__file__).resolve().parents[3] / 'docs' / 'examples'
+                               / 'mission-tail-fragment.json').read_text())
+        poses = fragment['mission_poses']
+        r = simulate_home_leg(FIXTURE['config'], FIXTURE['scenario'], FIXTURE['environment'],
+                              camera_config=FIXTURE['camera_config'], home=poses['home'],
+                              backaway=poses['cart_parking_backaway'], lidar_yaw_fix=False)
+        self.assertEqual((r['status'], r['reason'], r['leg']), ('succeeded', 'arrived_stopped', 1), r)
+        self.assertLess(math.dist(r['pose'][:2], poses['home'][:2]), 0.15)
+        self.assertLess(r['t'], 120.0)                # well inside the return stage budget

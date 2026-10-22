@@ -1284,3 +1284,22 @@ top from the recorded poses when the run set `RESTOCK_TRACE_POSES=1` (carton + c
 stage time per nav-trace row; off by default, observation only), else by frame analysis of the
 overhead chase frames (labelled as such). Tests: `PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 python3 -m pytest scripts/twin/demo/tests/test_walkthrough_cut.py -q` (set `FFMPEG` for the encode test).
+
+## 21. Mission tail dry-run — transfer succeeded → verify → uncouple return → mission end (CPU)
+
+Drive the mission TAIL through the real behaviour tree, `Mission`, `RuntimeAdapter`, fm461
+`TransferController` verify phase and the ground-truth verifier against a kinematic bay world
+(stubbed sim/nav/manipulation), then (with `--environment`) the uncoupled home leg with the real
+navigation controller + an emulated lidar on the static map. Run it on the runtime config before a
+GPU run that should reach the tail; exit 0 = no FAIL row.
+```
+M=~/datasets/twin-robot-in-store-boot-v1/mission
+PYTHONPATH=scripts:$M/bt-pythonpath python3 scripts/check_mission_tail.py \
+    --runtime-config $M/mission-runtime-couple.json --scenario $M/mission-scenario.json \
+    [--environment <navigation.environment_path> --camera-config $M/camera-config-bay.json]
+```
+Settings the tail needs (merge `docs/examples/mission-tail-fragment.json`): `verify_ground_truth`
+(labelled `verify_mode=ground_truth`, default off), the spec `mission_poses.home` and the
+`cart_parking_backaway` waypoint. The uncouple happens in RETURN at `cart_parking`, after transfer +
+verify at `shelf_approach`. Tests: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=scripts:<bt-pythonpath>
+python3 -m pytest scripts/twin/tests/test_restock_mission_tail.py -q`.

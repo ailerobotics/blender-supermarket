@@ -1,0 +1,12 @@
+{
+  "_comment": "vr1 (sim-video-verify-return-v1): MERGE into the mission runtime-config (mission-runtime-couple.json) for the backroom-bay demo tail (transfer succeeded -> verify -> uncouple-at-parking return -> mission end). verify_ground_truth is a labelled demo workaround, default OFF: the mission verify stage reads the handling-unit pose from the stage against the authored bay top instead of the (uncommissioned) bay shelf camera; mission.json records verify_mode=ground_truth and the verify step labels carry '[ground truth]'. The transfer's fm461 ground-truth place check is accepted as transfer evidence whenever the EXISTING transfer_ground_truth.enabled is true (transfer_verify_mode=ground_truth; no new key). The two mission_poses are plain config: home = the spec home (about (-3.9, 14.0) on tow-corner/alt-route.png; the old home = pickup (-5.73, 16) is not reachable uncoupled from the parking spot), and the back-away waypoint drives the base clear of the parked cart before the turn (without it the braking capsule clips the cart and the leg ends obstacle_stop_timeout). Proof: scripts/check_mission_tail.py (+ --environment for the real-controller home leg); RUNBOOK section 21.",
+  "verify_ground_truth": {"enabled": true},
+  "mission_poses": {
+    "home": [-3.9, 14.0, 3.14159],
+    "cart_parking_backaway": [-0.6, 13.8, 3.14159]
+  },
+  "_optional_lidar_sensor_yaw_fix": {
+    "_comment": "Default OFF and NOT needed for the tail (the home leg above succeeds under both wirings). isaac_bundle passes the lidar URDF origin (0.52, 0, 0.15) = (x, y, z) as Scan.sensor_to_base, which is (x, y, YAW): every live return is rotated 0.15 rad about the sensor. true => (0.52, 0, 0.0). It changes what couple/outbound see, so enable it only with the navigation lane's re-check of those stages.",
+    "lidar_sensor_yaw_fix": true
+  }
+}
