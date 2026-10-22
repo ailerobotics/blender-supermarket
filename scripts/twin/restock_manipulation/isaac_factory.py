@@ -788,8 +788,10 @@ class CollectTargetBridge:
             placed_pose = self._carton_center_station()
         except Exception:
             placed_pose = None
+        # fm488: GT collect has no camera framing the pick either; carry now+window so the collect grasp's
+        # gripper command is not refused 'missing acquisition deadline' (the cold collect-only failure).
         return Sensors(now, observations, cart_target, parked, bool(self.contact.read()), now,
-                       self._collision_time(), joints, (), float(now), None, placed_pose)
+                       self._collision_time(), joints, (), float(now), now + 300.0, placed_pose)
 
     def _capture_transfer(self, now):
         """Transfer sensing: the carton on the cart (derived cart pose, controlled asset) as the
@@ -884,8 +886,12 @@ class CollectTargetBridge:
         print(f'TRANSFER_CAPTURE calls={self._calls} sku={sku} cart=({cx:.2f},{cy:.2f},{cz:.2f}) '
               f'shelf={slot.location} clear={slot.clear} src={tgt_source}'
               + (f' transfer_mode={self.transfer_mode}' if self.transfer_mode else ''), flush=True)
+        # fm488: carry a sim-clock acquisition-to-use deadline (now + window) so the gripper command at
+        # CONTACT is not refused 'missing acquisition deadline' (isaac_ros_graph). The GT/live-pose transfer
+        # has no camera framing the pick to stamp this (the rendered camera path sets now+300), so stamp it
+        # here; the controller checks it on the sim clock and a 300 s budget never expires mid-grasp.
         return Sensors(now, (obs,), tgt, parked, bool(self.contact.read()), now,
-                       self._collision_time(), joints, (), float(now), None, placed_pose)
+                       self._collision_time(), joints, (), float(now), now + 300.0, placed_pose)
 
     def _collision_time(self):
         # fm415: hold last-good collision_time so a -1 mirror-gap tick at the weld never reaches the
