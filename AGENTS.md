@@ -251,7 +251,15 @@ repo's `scenes/`, `export/` or `renders/`.
   error (warm5). A mid-transfer executor refusal FAILS FAST with a named reason + a keep-alive hold (never
   the silent `still` degrade that starves the arm-command heartbeat). Offline proof (incl. the sphere model
   + warm5 host-validation replay): `data/sim-video-executor-arm-v1/report.md`,
-  `tests/test_restock_scripted_transfer.py`. Shelf-slot place (sales-floor endcap G3_back_s2, s3 board
+  `tests/test_restock_scripted_transfer.py`. **Sharp edge (execution-clock anchor):** `trajectory_host`
+  anchors a goal's trajectory time origin to the FIRST post-install `/joint_states` stamp
+  (`anchored_start`), NOT `now()` at the execute-callback — the mission can burst-advance the sim many
+  seconds between accept and first feedback (transfer1: ~11 s, with `fb_age=0` proving same-clock, not a
+  stale frame), and the old `start=now()` charged that as trajectory progress and e-stopped the still-parked
+  arm on the first sample (misdiagnosed as the warm5 wrist self-collision). Applies to EVERY mission arm
+  move. `begin()` reports+bounds the IK-plan latency (`RESTOCK_SCRIPTED_TRANSFER_IK_BUDGET_S`, default 120 s,
+  loud-not-fatal). Proof + GPU re-run config: `~/firstmate/data/sim-robust-executor-clock-v1/report.md`,
+  `tests/test_restock_trajectory_host.py`. Shelf-slot place (sales-floor endcap G3_back_s2, s3 board
   0.25 m above): `RESTOCK_SCRIPTED_TRANSFER_PLACE=front` (env, scripted only, default off) slides the carton
   in under the board instead of descending through it — task-space plan, still arm only; staging keys +
   CPU proof `scripts/check_front_transfer_staging.py`, `data/sim-video-story-sources-v1/report.md`.

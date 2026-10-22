@@ -139,6 +139,36 @@ def feedback_stale(sim_now, feedback_sim_stamp, wall_now, wall_received):
             or wall_now - wall_received > FEEDBACK_WALL_BACKSTOP_S)
 
 
+def anchored_start(plan_active, current_start, feedback_stamp):
+    """The trajectory time origin (sim seconds). Anchored to the MEASURED-FEEDBACK clock the first time a
+    feedback sample is available after a plan is installed (``current_start is None``): that feedback's own
+    sim stamp becomes t=0. Idempotent once set (returns ``current_start`` thereafter).
+
+    Why not ``now()`` at the execute-callback: the executor's node /clock latched at install can sit many
+    sim seconds BEFORE the first feedback the tracker actually evaluates, because the mission burst-advances
+    the sim between the goal accept and the first /clock+/joint_states the executor receives. The reference
+    is sampled at ``feedback_stamp - start``; anchoring ``start`` to ``now()`` then charges that advance as
+    trajectory progress the (physically correct, still-parked) arm has not made, and it faults on the first
+    sample. transfer1 (2026-10-22): ~11 s was charged this way -- ``plan.sample(11)`` (ur_wrist_1 ref 0.6066)
+    vs the arm exactly at its t=0 start pose (-0.7) = 1.31 rad > the 1.3 tol, with ``fb_age=0.000`` proving
+    ``now()`` and the feedback stamp are the SAME clock (so it is a start-anchor offset, not a stale frame).
+    Anchoring to the first post-install feedback makes the first evaluated reference ``plan.sample(0)`` by
+    construction, independent of any /clock-vs-feedback or staged-start two-sim-clock offset. Pure."""
+    if plan_active and current_start is None and feedback_stamp is not None:
+        return float(feedback_stamp)
+    return current_start
+
+
+def reference_time(feedback_stamp, start):
+    """Clamped (>=0) trajectory clock for the tracking reference: the measured-feedback stamp minus the
+    anchored ``start``. The clamp also covers the first feedback being stamped a sub-tick before ``start``
+    (a /joint_states-vs-/clock delivery race), whose correct reference is the start pose, ``sample(0)``.
+    ``start is None`` (origin not yet anchored) => 0.0, so the arm holds its start pose. Pure."""
+    if start is None:
+        return 0.0
+    return max(0.0, feedback_stamp - start)
+
+
 def tracking_fault(track_err, miss_count, *, tol=TRACKING_TOL, debounce=TRACKING_DEBOUNCE,
                    hard=TRACKING_HARD_TOL):
     """Decide whether a command-vs-measured tracking error should emergency-stop the mission.
@@ -242,6 +272,8 @@ def main():
         raise RuntimeError('trajectory executor requires simulation domain 88')
     lock=threading.RLock()
     state=dict(feedback=None,received=0.,fault=None,active=False,target=None,plan=None,start=None,
+               start_install=None,   # sim /clock at execute install; start is anchored to the first
+               # post-install feedback stamp (anchored_start), so this only records the anchor_lag.
                miss_count=0,miss_stamp=None,contact=False,
                # fm345 (c): terminal goal-gate position tolerance, default tight (GOAL_POSITION_TOL).
                # The controller latches a WIDER value on the carton-loaded PLACE extend via the
@@ -290,6 +322,19 @@ def main():
                 state['received']=time.monotonic()
                 if state['target'] is None:
                     state['target']=q.copy()
+                # Re-stamp the trajectory time origin to THIS feedback's own sim stamp the first time a
+                # feedback arrives after a plan is installed (start pending). The stamp-monotonic guard
+                # above guarantees this is a genuinely new (post-install) sample, so the first reference the
+                # tracker evaluates is plan.sample(0) regardless of how far the sim /clock burst-advanced
+                # between the goal accept and here (transfer1: ~11 s charged against the still-parked arm).
+                prev_start=state['start']
+                state['start']=anchored_start(state['plan'] is not None, state['start'], stamp)
+                if prev_start is None and state['start'] is not None:
+                    install=state['start_install']
+                    lag=state['start']-install if install is not None else float('nan')
+                    print(f'TRAJ_HOST_START anchored start={state["start"]:.3f} install={install} '
+                          f'anchor_lag={lag:.3f}s (reference origin = measured-feedback clock, not now())',
+                          flush=True)
             except Exception as exc:
                 fault(str(exc))
 
@@ -317,7 +362,14 @@ def main():
                       f'wall_gap={_wg:.3f}s>{FEEDBACK_WALL_BACKSTOP_S})')
                 return
             q,v=state['target'],np.zeros(6)
-            if state['plan'] is not None:
+            if state['plan'] is not None and state['start'] is None:
+                # Plan installed but the trajectory origin is not yet anchored (waiting for the first
+                # post-install feedback; feedback() latches it). Hold the plan's start pose and skip
+                # tracking this tick -- the arm is parked at the start, and evaluating a reference before
+                # the origin is anchored is exactly the transfer1 false-fault this fix removes.
+                q,v=state['plan'].sample(0.)
+                reference=state['plan'].sample(0.)[0]
+            elif state['plan'] is not None:
                 q,v=state['plan'].sample(max(0.,now()-state['start']))
                 # Tracking error must compare the command and the measured feedback at the SAME
                 # instant. The published command q is at now(), but the measured feedback is stamped
@@ -331,7 +383,7 @@ def main():
                 # the pre-trajectory (start) pose, so sample(0) is its correct reference. A raw negative
                 # elapsed crashed Plan.sample('invalid trajectory clock') in tick(), killing the whole
                 # executor at the first approach tick (run-130).
-                reference=state['plan'].sample(max(0.,state['feedback'][0]-state['start']))[0]
+                reference=state['plan'].sample(reference_time(state['feedback'][0],state['start']))[0]
             else:
                 reference=q                               # idle hold: measured vs the static target
             track_err=float(np.max(np.abs(reference-state['feedback'][1])))
@@ -413,10 +465,16 @@ def main():
         try:
             with lock:
                 plan=Plan(handle.request.trajectory,state['feedback'][1],limits,max_speed=max_speed,max_acceleration=max_acceleration)
-                state['plan'],state['start']=plan,now()
+                # Re-stamp the trajectory time origin to the MEASURED-FEEDBACK clock, NOT now(): start is
+                # left PENDING (None) and anchored by feedback() to the first post-install feedback stamp
+                # (see anchored_start). now() latches the node /clock here, but the sim /clock can
+                # burst-advance many seconds before the first feedback the tracker evaluates (transfer1:
+                # ~11 s against a still-parked, physically correct arm), and the reference is sampled at
+                # feedback_stamp - start -- so anchoring to now() charged that advance as trajectory
+                # progress and faulted on the first sample. start_install only records the anchor_lag.
+                state['plan'],state['start'],state['start_install']=plan,None,now()
                 state['miss_count'],state['miss_stamp']=0,None   # fresh debounce window per trajectory
                 state['contact']=False                           # arm the contact gate fresh per goal
-                started=state['start']
             wall_backstop=time.monotonic()+EXECUTE_WALL_BACKSTOP_S
             while rclpy.ok():
                 with lock:
@@ -426,6 +484,22 @@ def main():
                         result.error_code=result.PATH_TOLERANCE_VIOLATED
                         result.error_string=state['fault']
                         return result
+                    if state['fault']:
+                        raise RuntimeError(state['fault'])
+                    # Trajectory origin pending: left None at install, anchored by feedback() to the first
+                    # post-install feedback stamp (the measured-feedback clock), so the reference never
+                    # charges the sim's burst-advance between accept and first feedback as arm progress
+                    # (transfer1). Must NOT compute elapsed/terminal against a None origin; the sleep that
+                    # waits for the anchor is OUTSIDE the lock so feedback() can run and set it.
+                    pending=state['start'] is None
+                    if pending and time.monotonic()>wall_backstop:
+                        fault('trajectory clock/timeout failure')
+                        raise RuntimeError(state['fault'])
+                if pending:
+                    time.sleep(.01)
+                    continue
+                with lock:
+                    started=state['start']         # only ever transitions None -> set (monotonic)
                     elapsed=now()-started
                     # Sim-clock regression is a hard fault; the WALL bound is only a frozen/hung-sim
                     # backstop (see EXECUTE_WALL_BACKSTOP_S). Under render pacing a healthy grasp advances

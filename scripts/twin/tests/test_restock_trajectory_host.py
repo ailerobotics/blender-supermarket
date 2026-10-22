@@ -119,6 +119,78 @@ def test_tracking_fault_debounces_single_sample_transients():
     assert tracking_fault(TRACKING_HARD_TOL + 0.01, 1)
 
 
+def _transfer1_plan():
+    """A Plan shaped like transfer1's pick: ur_wrist_1 (joint 3) swings from the -0.7 start to a far
+    value, with plan.sample(11) ~ the logged reference at t=11 (ref_q[3]=0.6066). A symmetric zero-end-
+    velocity cubic over [0, 22] has its half-time sample at the (start+end)/2 midpoint, so end = 2*ref11
+    - start reproduces the logged reference at t=11. Feasible inside the executor's 0.3 rad/s ceiling."""
+    start = np.array([-0.0, -2.5001, 1.7002, -0.7, -1.5708, -0.0])
+    ref11 = np.array([0.14, -2.6979, 1.8492, 0.6037, -0.8621, 0.8493])   # transfer1 ref_q at t~=10.986
+    end = 2 * ref11 - start
+    def point(q, t):
+        return NS(positions=list(q), velocities=[0.0] * 6, effort=[],
+                  time_from_start=NS(sec=int(t), nanosec=round((t - int(t)) * 1e9)))
+    traj = NS(joint_names=list(ARM_JOINTS), points=[point(start, 0.0), point(end, 22.0)])
+    return Plan(traj, start, [(-2 * np.pi, 2 * np.pi)] * 6, max_speed=.3, max_acceleration=1.0), start, ref11
+
+
+def test_transfer1_first_reference_is_the_start_pose_not_the_clock_burst():
+    # transfer1 (2026-10-22, RESTOCK_SCRIPTED_TRANSFER_ARM=executor): the executor pick faulted at the
+    # FIRST evaluated tracking sample with meas_q EXACTLY the plan's t=0 start pose and ref_q at plan
+    # t~=11 (ur_wrist_1 0.6066 vs -0.7 => 1.31 > 1.3 rad). fb_age=0.000 proved now() and the feedback
+    # stamp are the SAME clock, so this was NOT a stale frame: start was anchored to now() at execute
+    # install, ~11 sim s BEFORE the first feedback the tracker evaluated (the mission burst-advanced the
+    # sim between accept and first feedback), and feedback_stamp-start charged that 11 s as arm progress.
+    from twin.restock.trajectory_host import (anchored_start, reference_time, tracking_fault,
+                                             TRACKING_TOL)
+    plan, start, ref11 = _transfer1_plan()
+    assert np.allclose(plan.sample(0.0)[0], start)              # t=0 reference is the arm's start pose
+    install_now = 100.0                                         # node /clock latched at execute install
+    burst = 11.0                                                # sim seconds the mission advanced before
+    first_fb_stamp = install_now + burst                       #   the first feedback the tracker sees
+    measured = start                                           # arm physically still parked at the start
+
+    # OLD behaviour (start = now() at install): reference is sampled 11 s into the plan while the arm is
+    # at t=0 => the logged false fault, reproduced here.
+    old_ref = plan.sample(reference_time(first_fb_stamp, install_now))[0]
+    assert np.isclose(reference_time(first_fb_stamp, install_now), 11.0)
+    assert np.allclose(old_ref, ref11, atol=5e-3)
+    old_err = float(np.max(np.abs(old_ref - measured)))
+    assert old_err > TRACKING_TOL                              # > 1.3 rad: the transfer1 TRAJ_HOST_FAULT
+    assert tracking_fault(old_err, 3)
+
+    # FIX (start anchored to the first post-install feedback stamp): the first evaluated reference is
+    # plan.sample(0) = the start pose, so the error against the (correct, parked) arm is ~0, no fault.
+    start_anchor = anchored_start(True, None, first_fb_stamp)
+    assert start_anchor == first_fb_stamp
+    new_ref = plan.sample(reference_time(first_fb_stamp, start_anchor))[0]
+    assert np.allclose(new_ref, start)
+    new_err = float(np.max(np.abs(new_ref - measured)))
+    assert new_err < 1e-9 and not tracking_fault(new_err, 3)
+
+
+def test_two_clock_offset_is_absorbed_by_feedback_anchor():
+    # The staged-start two-sim-clock offset (staged_start.py: /clock vs the mission packet clock, 1.55 s
+    # on start_at=transfer) and any render-pacing burst mean now() at execute install can lead/lag the
+    # measured-feedback clock by an ARBITRARY amount. Anchoring the trajectory origin to the first
+    # post-install feedback stamp makes the first evaluated reference plan.sample(0) = the start pose for
+    # EVERY offset, so the arm path no longer depends on the two clocks agreeing.
+    from twin.restock.trajectory_host import anchored_start, reference_time
+    plan, start, _ = _transfer1_plan()
+    for offset in (-5.0, -1.55, 0.0, 0.05, 1.55, 11.0, 200.0):
+        install_now = 50.0
+        first_fb_stamp = install_now + offset
+        anchor = anchored_start(True, None, first_fb_stamp)
+        assert anchor == first_fb_stamp                        # origin = the feedback clock, not now()
+        assert reference_time(first_fb_stamp, anchor) == 0.0   # first sample is exactly t=0
+        assert np.allclose(plan.sample(reference_time(first_fb_stamp, anchor))[0], start)
+    # idempotent + clamp contract: once anchored it never re-stamps; a sub-tick-early feedback clamps to 0
+    assert anchored_start(True, 50.0, 999.0) == 50.0           # already set -> unchanged
+    assert anchored_start(False, None, 10.0) is None           # no active plan -> stays pending
+    assert reference_time(49.999, 50.0) == 0.0                 # feedback a hair before start -> sample(0)
+    assert reference_time(60.0, 50.0) == 10.0
+
+
 def test_executor_exit_is_honest_and_bounded_tolerant():
     # run-266: executor.spin() returned mid-move under render pacing with no tracking fault, and the
     # generic fault('executor stopped') emergency-stopped a healthy grasp while hiding the cause.

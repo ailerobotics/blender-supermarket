@@ -415,6 +415,35 @@ def test_executor_mode_moves_the_arm_through_the_executor_and_the_carton_rides_t
     assert np.max(np.abs(driver.q - STOW)) < 0.011                       # back at the start pose
 
 
+def test_ik_plan_latency_report_and_budget_parse():
+    # The sender reports the begin()->send IK-plan latency and flags it OVER the budget (loud, not fatal:
+    # the executor re-anchors the trajectory origin to the first feedback stamp, so a slow IK no longer
+    # races the execution clock). Budget <=0 disables the verdict but still reports the number.
+    over, line = st.ik_latency_report(95.1, 120.0)
+    assert not over and 'ik_plan_latency=95.1s' in line and 'within budget' in line
+    over, line = st.ik_latency_report(130.0, 120.0)
+    assert over and 'OVER budget 120s' in line
+    over, line = st.ik_latency_report(9999.0, 0.0)
+    assert not over and 'budget disabled' in line and 'ik_plan_latency=9999.0s' in line
+    # env parse: default, explicit, disable, and a loud failure on garbage
+    assert st.ik_plan_budget_seconds({}) == st.IK_PLAN_BUDGET_DEFAULT_S
+    assert st.ik_plan_budget_seconds({'RESTOCK_SCRIPTED_TRANSFER_IK_BUDGET_S': '45'}) == 45.0
+    assert st.ik_plan_budget_seconds({'RESTOCK_SCRIPTED_TRANSFER_IK_BUDGET_S': '0'}) == 0.0
+    with pytest.raises(ValueError, match='not a number'):
+        st.ik_plan_budget_seconds({'RESTOCK_SCRIPTED_TRANSFER_IK_BUDGET_S': 'soon'})
+
+
+def test_begin_records_the_ik_plan_latency(ik):
+    # begin() measures and stores the IK-plan latency, and it rides the transfer evidence so a creeping
+    # latency is visible in mission.json without re-parsing host-stack.log.
+    driver = FakeDriver(ik)
+    runner = _runner(ik, driver, arm=FakeExecutor(driver, ik))
+    r = _run(runner)
+    assert r.status == 'succeeded', r.reason
+    assert runner.ik_plan_latency_s is not None and runner.ik_plan_latency_s >= 0.0
+    assert r.evidence['ik_plan_latency_s'] == round(runner.ik_plan_latency_s, 3)
+
+
 def test_executor_carton_is_rigid_on_the_measured_tool(ik):
     driver = FakeDriver(ik)
     arm = FakeExecutor(driver, ik)

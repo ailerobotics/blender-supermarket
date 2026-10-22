@@ -28,6 +28,16 @@ so a cold run is byte-identical whatever the runtime config carries:
   ``settle_s + _MAX_EXTRA_S`` of warm-up it releases anyway (logged) and the host guards decide, the
   same contract as the existing warm-up tick cap.
 
+The ARM path is handled explicitly OUT OF BAND of these two packet switches. The host trajectory
+executor (``trajectory_host``) does not ride the mission packet clock at all -- it subscribes to /clock
+(use_sim_time) and /joint_states directly on domain 88 -- so ``staged_start_clock_sync`` does not touch
+it. Instead it re-stamps its trajectory time origin to the first post-install /joint_states stamp
+(``trajectory_host.anchored_start``), which makes the tracking reference ride the MEASURED-FEEDBACK clock
+regardless of any /clock-vs-packet or /clock-vs-feedback offset (transfer1, 2026-10-22: anchoring to
+now() at execute charged an ~11 s accept->first-feedback sim burst as arm progress and faulted the
+still-parked arm on the first sample). CPU-proven in tests/test_restock_trajectory_host.py
+(two-clock-offset + transfer1 replay).
+
 Pure Python, CPU-tested (tests/test_restock_staged_start.py).
 """
 from __future__ import annotations
