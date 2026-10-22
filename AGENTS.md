@@ -476,12 +476,15 @@ repo's `scenes/`, `export/` or `renders/`.
   scene with a live decision/reason-tree panel. Never changes the autonomous mission. Reuses
   `restock.scene.build` (same store/robot/cart/carton) WITHOUT the autonomy stack
   `physics_setup.assemble` adds (so it's light on VRAM and spawns no host/ROS); the base/cart
-  are kinematic along the PR154 tow lanes, the arm IK-tracks the scripted carton
-  (`demo/arm_ik.py`), and every panel value is READ from the live stage each frame into
-  `decision_log.json`. Capture needs the mission chase-camera + fill-light recipe (plain
-  Camera/viewport render black). Encodes with `restock.recording.Recorder`. CPU tests:
-  `scripts/twin/demo/tests/`; design + choreographed-vs-measured split:
-  `~/firstmate/data/sim-demo-video-v1/report.md`.
+  are kinematic along the mission poses (demo-005: a stationary front-pick COLLECT, a
+  straight-reverse COUPLE, one loop-free OUTBOUND arc, the PR154 return lane), the arm
+  IK-tracks the scripted carton (`demo/arm_ik.py`), and every panel value is READ from the
+  live stage each frame into `decision_log.json` (`driver.recompute` re-derives panel reasons
+  on CPU from the logged reads — e.g. settled grasp/place readings — with no re-capture).
+  Capture needs the mission chase-camera + fill-light recipe (plain Camera/viewport render
+  black). Encodes with `restock.recording.Recorder` (or an in-memory rawvideo→ffmpeg stream
+  when disk is tight). CPU tests: `scripts/twin/demo/tests/`; design + choreographed-vs-measured
+  split: `~/firstmate/data/sim-demo-video-v1/report.md`.
 - **Real-mission demo cut + run checker** (CPU, only READS the run dir; RUNBOOK §20):
   `scripts/make_walkthrough_cut.py` turns a run's `mission-frames/` + `nav-trace.jsonl` +
   `mission.json` into the captioned, time-lapsed `walkthrough-demo.mp4`, labelling every

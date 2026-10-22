@@ -191,8 +191,8 @@ def test_compute_reason_every_node_nonempty():
 
 def test_reason_is_measured_not_constant():
     # Moving the base changes the drive→pick distance reason -> proves it reads the scene.
-    r_here = DL.compute_reason('collect', 0, _reads(base_xy=(-5.73, 16.0)))
-    r_far = DL.compute_reason('collect', 0, _reads(base_xy=(-5.73, 13.0)))
+    r_here = DL.compute_reason('collect', 0, _reads(base_xy=C.PICKUP[:2]))
+    r_far = DL.compute_reason('collect', 0, _reads(base_xy=(C.PICKUP[0], C.PICKUP[1] - 3.0)))
     assert r_here != r_far
     assert '0.00 m' in r_here or '0 m' in r_here
 

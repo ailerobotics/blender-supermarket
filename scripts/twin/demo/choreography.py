@@ -27,20 +27,34 @@ def _wrap(a):
 # ---- Geometry constants (map frame, metres/radians), from mission-scenario.json +
 # ---- docs/examples/tow-lanes-mission-fragment.json. These seed the SCRIPTED motion;
 # ---- the panel values are read from the live stage, not from these.
-PICKUP = (-5.73, 16.0, 0.0)
-START = (-5.73, 14.9, 0.0)
-CART_STAGED = (-5.73, 15.25, 0.0)
-PLACE_APPROACH = (-4.88, 15.25, math.pi)       # derive_place_approach(cart, standoff≈0.85)
-LANE_OUT_START = (-4.46, 15.25, 0.0)
-SHELF = (-3.05, 6.0, math.pi)
-CART_PARKING = (-9.0, 16.0, math.pi)
-HOME = (-5.73, 16.0, 0.0)
+# demo-005 start layout: COLLECT is a stationary front pick (no driving) and COUPLE is a
+# short straight reverse onto the cart's front drawbar. The rollwagen's open loading face AND
+# its drawbar are BOTH on the cart +X front (``mobile_assets.py``: "front (+X) open for
+# loading"; cart hitch at chassis-local (0.65, 0, ...)); the robot hitch is on the robot REAR
+# (base-link (-0.62, 0, ...)). So the only pose where BOTH a front-face pick and a
+# straight-reverse latch hold is: robot facing the tow direction (south) with the cart
+# directly BEHIND it (same yaw), the cart's open front toward the robot's rear. The arm
+# reaches into that open front to pick/seat the carton on the cart's upper shelf, and a short
+# straight reverse seats the rear hitch on the front drawbar. Facing the tow direction from
+# the start also removes demo-004's reorientation loop -- OUTBOUND is now one gentle arc.
+SOUTH = -math.pi / 2
+PICKUP = (-2.3, 12.75, SOUTH)             # spawn = pick pose; robot is stationary through COLLECT
+START = PICKUP
+PLACE_APPROACH = PICKUP                    # no drive to the cart; the arm loads it in place
+LANE_OUT_START = (-2.3, 13.0, SOUTH)       # dock pose, a 0.25 m straight reverse (north) from PICKUP
+CART_STAGED = (-2.3, 14.27, SOUTH)         # cart directly behind, same yaw (1.27 m dock separation)
+SHELF = (-3.05, 6.0, math.pi)              # unchanged: TRANSFER/VERIFY identical to demo-004
+CART_PARKING = (-9.0, 16.0, math.pi)       # unchanged: RETURN identical to demo-004
+HOME = (-5.73, 16.0, 0.0)                  # unchanged
 
-# PR154 outbound tow lane (base centreline): dock -> shelf.
+# demo-005 outbound: ONE gentle arc from the dock pose into the aisle to the shelf -- no
+# reorientation loop (the robot already faces the tow direction) and no in-place spin. Heading
+# rotates monotonically south->west over ~0.93 m min radius; y strictly decreases (no doubling
+# back); the arc bulges east only to x=-1.66 (within demo-004's proven-navigable aisle) and
+# ends with the towed cart straightened directly behind the base, so TRANSFER reads clean.
 OUTBOUND_WAYPOINTS = [LANE_OUT_START,
-    (-2.97, 13.58, -1.687), (-4.71, 12.2, -3.006), (-6.77, 13.08, 1.945),
-    (-5.81, 15.06, 0.294), (-3.91, 13.94, -1.358), (-3.87, 11.73, -1.571),
-    (-3.43, 9.56, -0.777), (-1.68, 8.12, -1.144), (-2.58, 6.07, -2.826), SHELF]
+    (-1.95, 10.3, -1.42), (-1.7, 8.2, -1.30), (-1.66, 7.2, -1.45),
+    (-1.73, 6.55, -1.80), (-2.05, 6.15, -2.3), (-2.55, 6.02, -2.85), SHELF]
 
 # PR154 return tow lane (base centreline): shelf -> cart parking spot.
 RETURN_WAYPOINTS = [SHELF,
@@ -48,9 +62,9 @@ RETURN_WAYPOINTS = [SHELF,
     (-3.88, 14.2, 1.623), (-5.54, 15.65, 3.039), (-7.74, 15.88, 3.039), CART_PARKING]
 
 # Carton world poses (x, y, z, yaw) for the fixed modes.
-P_SUPPORT = (-5.73, 17.1, 0.68, math.pi)       # on the backroom staging support
+P_SUPPORT = (-2.3, 13.95, 1.00, SOUTH)         # carton as-loaded on the cart's upper shelf (grasp seals; ~0.14 m proud of the front)
 CAGE_SHELF_Z = 0.9325                           # cart_support_z_world (scenario)
-CAGE_LOAD_BODY_XY = (0.08, 0.0)                 # cart_load_center_body_xy
+CAGE_LOAD_BODY_XY = (0.17, 0.0)                 # COLLECT seats the carton ~0.15 m deeper so it rests fully on the shelf
 CARTON_HALF_H = 0.08                            # carton height 0.16 / 2
 P_SHELF = (-3.05, 4.826, 0.73 + CARTON_HALF_H, 0.0)   # slot G3_back_s2 surface_z + half
 
@@ -160,8 +174,10 @@ def _plan():
 def _carton_pose(mode, u, base, cart):
     """World (x,y,z,yaw) of the carton for a given mode at fraction u in a segment."""
     def carried():
+        # Hover the grasped carton toward the cart (behind the south-facing base, i.e. -forward)
+        # so the grasp->lift->seat motion stays on the cart side and within the arm's reach.
         c, s = math.cos(base[2]), math.sin(base[2])
-        return (base[0] + c * 0.05, base[1] + s * 0.05, 1.15, base[2])
+        return (base[0] - c * 1.25, base[1] - s * 1.25, 1.08, base[2])
 
     def cage():
         c, s = math.cos(cart[2]), math.sin(cart[2])
