@@ -263,24 +263,28 @@ def test_client_rejects_stale_or_different_epoch_readiness():
 def test_frozen_ack_stamp_fails_fast_with_named_cause():
     # The run-335 path: a frozen ack first SEEN while already stale (self.latest reset / relay delivery
     # lag), so the stale-window check -- not the accepted-ack stage-gap guard -- is what fires. On the
-    # first sighting it is only 'stale' (we cannot yet know it is frozen); once the SAME stamp persists
-    # past ack_frozen_s of advancing stage time, it is named station_ack_stream_stalled and fails fast.
-    stage=[1.0]
+    # first sighting it is only 'stale' (we cannot yet know it is frozen); a genuinely dead publisher is
+    # named station_ack_stream_stalled once the SAME stamp persists past BOTH the stage budget AND the
+    # wall backstop (sim-robust-watchdogs: 'stamps frozen AND process gone' -- the wall leg keeps a
+    # render-lagged-but-alive publisher from false-tripping before it can recover). Here the stamp is
+    # frozen FOREVER with real wall time piling up -> a true dead publisher -> fast fail.
+    stage=[1.0]; wall=[0.]
     channel=Channel()
-    client=StationClient(channel,wall_clock=lambda:0.,stage_clock=lambda:stage[0],
-                         heartbeat_s=1000.,stage_unavailable_s=1000.,ack_frozen_s=2.0)
+    client=StationClient(channel,wall_clock=lambda:wall[0],stage_clock=lambda:stage[0],
+                         heartbeat_s=1000.,stage_unavailable_s=1000.,ack_frozen_s=2.0,ack_frozen_wall_s=10.0)
     client.begin('restock_camera_source',1.0)
     # Frozen ack delivered late: first sighting at stage 5.0 is out-of-window -> generic stale.
-    stage[0]=5.0
+    stage[0]=5.0; wall[0]=1.0
     channel.reply=dict(epoch=1,stamp=0.9,state='ready',collision_time=0.85)
     with pytest.raises(ValueError,match='stale'):
         client.tick(0.,parked=True)
-    # Same cached stamp, stage advanced < budget: still only 'stale' (not yet proven frozen).
-    stage[0]=5.0+1.5
+    # Same cached stamp, stage advanced past its budget but wall backstop NOT yet elapsed: still only
+    # 'stale' -- an alive-but-render-lagged publisher is given real wall time to recover before death.
+    stage[0]=5.0+2.1; wall[0]=1.0+3.0
     with pytest.raises(ValueError,match='stale'):
         client.tick(0.,parked=True)
-    # Same cached stamp beyond the budget of advancing stage time -> named fast fail.
-    stage[0]=5.0+2.1
+    # Same cached stamp beyond BOTH the stage budget AND the wall backstop -> named fast fail.
+    stage[0]=5.0+2.2; wall[0]=1.0+10.1
     with pytest.raises(StationAckStreamStalled) as exc:
         client.tick(0.,parked=True)
     assert 'station_ack_stream_stalled' in str(exc.value)
