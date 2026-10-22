@@ -329,9 +329,13 @@ class Controller:
     def __init__(self, grid, footprint, *, max_speed=0.25, max_angular=0.35,
                  brake_acceleration=0.4, stale_after=0.3, blocked_timeout=8.0,
                  goal_timeout=180.0, allow_test_fixtures=False, docking=None,
-                 directional_zone=True):
+                 directional_zone=True, coupled_creep_floor=0.03):
         self.grid, self.footprint = grid, footprint
         self.max_speed, self.max_angular = max_speed, max_angular
+        # fm481: forward creep floor (m/s) used by the COUPLED tow gate (ArticulatedController.gate_velocity)
+        # when a yaw correction is wanted but forward speed is near zero, so the straight-lane start-yaw
+        # error is absorbed over distance instead of tripping the turn-radius guard.
+        self.coupled_creep_floor = float(coupled_creep_floor)
         self.brake_acceleration, self.stale_after = brake_acceleration, stale_after
         self.blocked_timeout, self.goal_timeout = blocked_timeout, goal_timeout
         if not all(math.isfinite(v) and v > 0 for v in (max_speed,max_angular,
@@ -445,8 +449,6 @@ class Controller:
                 and math.dist(odom.pose[:2],self.goal[:2]) <= self.docking.approach_distance):
             v = min(v,self.docking.speed)
         w = max(-self.max_angular,min(angular,self.max_angular))
-        if self.coupled and abs(w)*self.footprint.min_turn_radius > v+1e-9:
-            return Result(reason='turn_radius')
         # Include measured velocity: braking cannot assume instantaneous stopping.
         speed = max(v,abs(odom.linear))
         stop_distance = speed*self.stale_after + speed*speed/(2*self.brake_acceleration)

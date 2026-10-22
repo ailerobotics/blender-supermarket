@@ -889,7 +889,27 @@ class ArticulatedController(Controller):
         if abs(odom.linear)>0.02:
             measured_k=odom.angular/odom.linear
             if abs(measured_k)>1/1.5+0.03:
-                return Result(reason='measured_turn_radius')
+                # fm481: at a near-stationary crawl this ratio is dominated by velocity NOISE, not a real
+                # sub-R_min turn. run-355 outbound: the coupled tow moved well for 0.5 m, then the base
+                # under-translated (rv~rw~0.02-0.05 m/s odom jitter) while the follower still commanded full
+                # forward; measured_k = odom.angular/odom.linear exceeded 1/R_min on 80% of ticks from that
+                # jitter alone, so the brake REFUSED ('measured_turn_radius' coasts -> base stops this tick),
+                # and every retry re-entered the same noisy near-zero band -> livelock (121 s parked, then
+                # blocked_timeout). When the base is essentially stopped (|v| within the coupled creep band)
+                # and a forward drive is commanded, treat it as noise: keep a forward CREEP with the arc
+                # clamped to within R_min and CONTINUE (the commanded creep is still footprint- and
+                # braking-rollout-checked below) so the base accelerates OUT of the noise band instead of
+                # coasting back into it. A genuine sub-R_min arc at real tow speed (|v| above the band) still
+                # refuses -- the safety brake is unchanged. Proven offline in check_tow_lanes with a
+                # velocity-lag plant from the run-355 stall state.
+                if abs(odom.linear)<max(0.06,2*self.coupled_creep_floor) and v>1e-6:
+                    v=max(v,min(self.coupled_creep_floor,self.max_speed))
+                    rmin=self.footprint.min_turn_radius if self.footprint.min_turn_radius>0 else 1.5
+                    wmax=v/rmin
+                    w=max(-wmax,min(w,wmax))
+                    measured_k=(w/v) if v>1e-6 else 0.0
+                else:
+                    return Result(reason='measured_turn_radius')
             braking=self.world.rollout(state,stop,max(-1/1.5,min(1/1.5,measured_k)),
                                       obs.obstacles,uncertainty)
             if not braking:
