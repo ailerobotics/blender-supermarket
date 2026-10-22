@@ -1,0 +1,40 @@
+{
+ "_comment": "By-eye faults no recorded pose can show (the traces carry carton yaw only, no roll/pitch). Each was found on frame crops and is frame-exact; cut_qa merges them with the pose/image detectors. kind 'carton_tilt' is TERMINAL (nothing after it in the stage is shown).",
+ "faults": {
+  "collect-src-001": [
+   {
+    "kind": "carton_tilt",
+    "frame": 134,
+    "end": 328,
+    "detail": "carton leaves level after the lift: a 2nd carton face shows from #134 (sim 45.9 s), ~45 deg by #146, held on edge (~90 deg) by #154 and stays tilted through the carry to the rollwagen; the captain's 'tilted the box in a very wrong way'",
+    "evidence": "crops #126-#148 every 2 frames: level top face through #132, pentagon outline (side face) from #134"
+   }
+  ],
+  "demo-004": [
+   {
+    "kind": "clip",
+    "frame": 680,
+    "end": 850,
+    "detail": "outbound wall clip-through per the stage audit (data/sim-video-stage-audit-v1/stage_sources.json demo_audit: whiteout ~#680-850); NOT reproduced by the whiteout/jump detectors here (frame mean <= 224) and inconclusive by eye (#850 cage against the portal wall) -- kept as a conservative cut",
+    "evidence": "stage-audit v2 OpenCV frame grid"
+   }
+  ],
+  "demo-005": [
+   {
+    "kind": "clip",
+    "frame": 820,
+    "end": 900,
+    "detail": "outbound wall clip-through per the stage audit (whiteout ~#840-880); the detectors here independently flag #796-829 (image jumps, base teleport 0.23 m/frame, whiteout #810)",
+    "evidence": "stage-audit v2 OpenCV frame grid + cut_qa image/pose channels"
+   }
+  ]
+ },
+ "notes": {
+  "collect-src-001": "cold GT-collect carve: approach, grasp (weld #89), lift off the warehouse shelf. NO place onto the rollwagen exists in this source.",
+  "warm11": "backroom-bay route. transfer is SCRIPTED (carton floats out of the cage to the bay while the arm stays still) and the return unlatches the rollwagen at the bay (#241) and drives home ALONE: only 225-232 of the return is coupled.",
+  "warm8": "same choreography as warm11 (backroom-bay route, scripted floating transfer, unlatch at the bay #241).",
+  "demo-005": "choreographed; tells the captain's story end to end on the store route (place on the store shelf, coupled return into the warehouse through the door). Faults: outbound clips through the backroom wall (#796-829); couple has an 8 cm carton snap at #645; collect STARTS with the carton being set into the rollwagen (no shelf pick) per the stage audit.",
+  "demo-004": "same family as demo-005 with more glitches (collect jumps #58/#80, transfer carton teleport #1281, cart yaw jump in the post-uncouple tail).",
+  "door-src-001": "outbound through the backroom door, being rendered by sim-video-door-path-v1; re-run scripts/cut_qa_ranges.py once it lands."
+ }
+}
