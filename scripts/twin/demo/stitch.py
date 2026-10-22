@@ -269,17 +269,28 @@ class Compiler:
         return render_one, len(seq), hold, 'real'
 
     def _plan_choreo(self, seg, run_dir):
-        """Resolve a choreo segment to (render_one, count). Scene cropped from the composited mp4."""
+        """Resolve a choreo segment to (render_one, count). The panel entry is the dir's own
+        ``decision_log.json`` payload. The scene is read from a raw ``scene-frames/`` dir when present
+        (each entry's ``scene_file`` -- preferred, lets us re-draw a continuous band), else cropped out
+        of the composited ``walkthrough.mp4`` (its band already baked in)."""
         from PIL import Image
         log = json.loads((run_dir / 'decision_log.json').read_text())['frames']
-        mp4 = run_dir / 'walkthrough.mp4'
-        seg_tmp = self.tmp / f'{run_dir.name}_{seg.stage}_{seg.frame_start}_{seg.frame_end}'
-        pngs = extract_mp4_frames(mp4, seg.frame_start, seg.frame_end, seg_tmp, ffmpeg=self.ffmpeg)
         entries = log[seg.frame_start:seg.frame_end + 1]
-        if len(pngs) != len(entries):
-            raise ValueError(f'{run_dir.name}: {len(pngs)} decoded frames vs {len(entries)} log entries '
-                             f'for [{seg.frame_start},{seg.frame_end}]')
-        pairs = list(zip(pngs, entries))[::max(1, seg.stride)]
+        if not entries:
+            raise ValueError(f'{run_dir.name}: no decision_log frames in [{seg.frame_start},{seg.frame_end}]')
+        scene_dir = run_dir / 'scene-frames'
+        if scene_dir.is_dir():
+            scenes = [scene_dir / e['scene_file'] for e in entries]
+            crop = False
+        else:
+            seg_tmp = self.tmp / f'{run_dir.name}_{seg.stage}_{seg.frame_start}_{seg.frame_end}'
+            scenes = extract_mp4_frames(run_dir / 'walkthrough.mp4', seg.frame_start, seg.frame_end,
+                                        seg_tmp, ffmpeg=self.ffmpeg)
+            crop = True
+            if len(scenes) != len(entries):
+                raise ValueError(f'{run_dir.name}: {len(scenes)} decoded frames vs {len(entries)} log '
+                                 f'entries for [{seg.frame_start},{seg.frame_end}]')
+        pairs = list(zip(scenes, entries))[::max(1, seg.stride)]
         hold = max(0, round(seg.min_seconds * self.spec.fps) - len(pairs))
         pairs = pairs + [None] * hold
 
@@ -287,7 +298,9 @@ class Compiler:
             png, logentry = pairs[i] if pairs[i] is not None else pairs[len(pairs) - hold - 1]
             entry = json.loads(json.dumps(logentry['panel']))     # deep copy (rewritten in place)
             with Image.open(png) as im:
-                scene = im.convert('RGB').crop((0, 0, REGION_W, OUT_H))
+                scene = im.convert('RGB')
+                if crop:
+                    scene = scene.crop((0, 0, REGION_W, OUT_H))
             coupled = any(v == 'yes' for (lbl, v) in entry.get('chips', []) if lbl == 'coupled')
             return scene, entry, coupled
         return render_one, len(pairs), hold, 'choreo'
