@@ -129,3 +129,32 @@ Delivered `collect-src-002` (345 frames; clean cut 0–323: shelf pick → lift 
 reach over the cart deck; the set-down+release is not completed). Carton tilt: none physically
 (GT pose ≈ 0°); the overhead-cam skew is perspective. To complete the place: free the VRAM
 margin (stop `whispr`) and re-run — an infra/integration action, no code change on this lane.
+
+## 7. FOLLOW-UP for the integration lane: place-stage cuMotion CUDA OOM
+
+Decision (2026-10-22): option A — `collect-src-002` frames 0–323 accepted as the compile
+collect source; no second GPU run; `whispr` stays untouched (captain's standing rule). The
+place-stage failure is filed here for the integration/host lane; this lane ships nothing more.
+
+Exact failure (`mission/collectsrc/host-stack.log`), during the PLACE-stage cuMotion planning:
+
+```
+[cumotion_planner] ERROR Trajectory optimization to joint config failed (trajopt: UNKNOWN_STATUS)
+[cumotion_planner] ERROR MoveGroup motion planning failed          (repeats ~6x as it retries)
+[component_container_mt-2] terminate called after throwing an instance of 'cumotion::FatalException'
+  what():  CUDA error: out of memory (/cumotion/src/cumotion/util/cuda_array.cu:66)
+[ERROR] process has died [pid 452630, exit code -6, cmd '... component_container_mt ...']
+```
+
+Cascade: the host component container dies (SIGABRT) → `move_group` / `trajectory_host` /
+`ros_host` siblings die → the mission's station-supervisor sees the host go silent (`host stack
+went silent after last state=ready, wall gap 30.1s`) → `collect` fails; the two retry attempts
+then die instantly on `arm command heartbeat lost` (the host is already gone).
+
+VRAM at the time (`VRAM_SAMPLE`, 20 s cadence — the OOM spike is between samples):
+peak sampled **used 10622 / free 1285 MiB of 12288**; `whispr` held ~2184 MiB throughout
+(`nvidia-smi` compute-apps). So cuMotion's place-stage trajopt allocation failed with ~1.3 GB
+free. Per [[mission-vram-ceiling-12gb]] render/GI is not the lever (fm373 ~160 MiB); the margin
+is `whispr` (~2.2 GB). To complete the place on this 12 GB card, free that margin before the
+place-stage trajopt (stop `whispr`, or run the place planning when whispr is idle) and re-run
+collect-only — an infra/host-lane action, no change to the PR #187 sensing-pause fix.
