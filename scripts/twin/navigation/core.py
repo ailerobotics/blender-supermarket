@@ -391,11 +391,23 @@ class Controller:
             raise ValueError('arrival_xy_hysteresis must be in [0, 0.5] m')
         self.arrival_xy_hysteresis = float(arrival_xy_hysteresis)
         self._xy_latched = False
+        self.strict_xy_arrival = False   # set per-leg by start(); grasp-critical tolerance-aware arrival
 
     def start(self, goal, coupled, *, arrival_xy_tol=None, arrival_yaw_tol=None, static_drive=False,
-              carry_drive=False):
+              carry_drive=False, strict_xy_arrival=False):
         self.static_drive = bool(static_drive)
         self.carry_drive = bool(carry_drive)
+        # Tolerance-aware final approach (default off => byte-identical). With the XY hysteresis latch
+        # on (arrival_xy_hysteresis > 0, added for the couple standoff dither, fm482) the base declares
+        # arrived_stopped as soon as the latch is set and the yaw aligns -- which, because the latch only
+        # RELEASES past arrival_xy_tol + hysteresis, lets 'arrived' fire while the TRUE xy sits up to one
+        # hysteresis band OUTSIDE arrival_xy_tol (cold collect: xy 0.169 declared arrived against a 0.150
+        # tol while the base crept out during the rotate-in-place). A grasp-critical leg (the collect
+        # source approach) must instead be within the real xy tolerance before the grasp begins, so when
+        # strict_xy_arrival is set the latch cannot by itself declare arrival outside arrival_xy_tol -- the
+        # base keeps closing the residual XY (bounded by goal_timeout) until the TRUE distance is in tol.
+        # No-op when the hysteresis latch is off (the bare xy <= arrival_xy_tol test is already strict).
+        self.strict_xy_arrival = bool(strict_xy_arrival)
         self._xy_latched = False
         if len(goal) != 3 or not all(math.isfinite(v) for v in goal):
             raise ValueError('goal must be finite map [x,y,yaw]')
@@ -570,6 +582,13 @@ class Controller:
             elif xy > self.arrival_xy_tol + self.arrival_xy_hysteresis:
                 self._xy_latched = False
             in_xy = self._xy_latched
+            if self.strict_xy_arrival:
+                # Tolerance-aware final approach: the latch keeps the base from re-driving while it
+                # finishes the yaw rotation, but a grasp-critical leg must not DECLARE arrival until the
+                # TRUE xy is within tol -- so drop the latch's in_xy here whenever the base has crept
+                # back outside arrival_xy_tol (it keeps closing the residual instead of latching 'arrived'
+                # up to one hysteresis band out).
+                in_xy = in_xy and xy <= self.arrival_xy_tol
         else:
             in_xy = xy <= self.arrival_xy_tol
         if in_xy:

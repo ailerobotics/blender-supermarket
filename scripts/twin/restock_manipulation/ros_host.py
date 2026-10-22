@@ -167,6 +167,10 @@ def main():
         # advances to carry only if the measured carton rose by >= this from the grasp-confirm baseline, so
         # the confirm reads physics, never the (arm-occluded) source camera. Absent => inert (byte-identical).
         grasp_track_m=config.get('grasp_track_m'),
+        # Sim-clock pre-weld press budget (SIM seconds): fail the honest collect fast with a NAMED reason
+        # if the grasp press never seals, before the opaque 90 s WALL arm-command heartbeat watchdog
+        # (runs 321/327). Absent/0 => off => byte-identical. Clamped to <= phase_timeout in the controller.
+        grasp_press_timeout_s=float(config.get('grasp_press_timeout_s', 0.0)),
         # fm449 (run-332 cold collect): gate the observe->reach on a clean synchronized source frame + decoded
         # label at park (the Isaac-side verdict rides Sensors.collect_source_clean). Absent/False => the gate
         # never arms => byte-identical. No injected provider on the host path; the gate reads the packet field.

@@ -21,9 +21,11 @@ class SensorNavigation:
         self.dynamic_layer=dynamic_layer
         self.last_localized=None
 
-    def start(self,goal,coupled,*,goal_articulation=None,static_drive=False,carry_drive=False):
-        # Forward the per-goal articulation tolerance + the reposition-leg drive flags to the inner
-        # controller so the NavigationBridge start(..., static_drive=, carry_drive=) contract holds.
+    def start(self,goal,coupled,*,goal_articulation=None,static_drive=False,carry_drive=False,
+              strict_xy_arrival=False):
+        # Forward the per-goal articulation tolerance + the reposition-leg drive flags + the grasp-critical
+        # strict XY arrival to the inner controller so the NavigationBridge start(..., static_drive=,
+        # carry_drive=, strict_xy_arrival=) contract holds.
         kw={}
         if goal_articulation is not None:
             kw['goal_articulation']=goal_articulation
@@ -31,6 +33,8 @@ class SensorNavigation:
             kw['static_drive']=True
         if carry_drive:
             kw['carry_drive']=True
+        if strict_xy_arrival:
+            kw['strict_xy_arrival']=True
         self.controller.start(goal,coupled,**kw)
 
     def cancel(self):

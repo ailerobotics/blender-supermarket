@@ -685,8 +685,8 @@ class ArticulatedController(Controller):
         self.index=0
         self.planning_stop=False
 
-    def start(self,goal,coupled,*,goal_articulation=None,arrival_xy_tol=None,arrival_yaw_tol=None,static_drive=False,carry_drive=False):
-        super().start(goal,coupled,arrival_xy_tol=arrival_xy_tol,arrival_yaw_tol=arrival_yaw_tol,static_drive=static_drive,carry_drive=carry_drive)
+    def start(self,goal,coupled,*,goal_articulation=None,arrival_xy_tol=None,arrival_yaw_tol=None,static_drive=False,carry_drive=False,strict_xy_arrival=False):
+        super().start(goal,coupled,arrival_xy_tol=arrival_xy_tol,arrival_yaw_tol=arrival_yaw_tol,static_drive=static_drive,carry_drive=carry_drive,strict_xy_arrival=strict_xy_arrival)
         self.route=None
         self.index=0
         self.planning_stop=False
