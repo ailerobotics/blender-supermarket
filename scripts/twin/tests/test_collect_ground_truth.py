@@ -348,7 +348,8 @@ def _drive(adapter):
     return r
 
 
-def test_runtime_converts_the_ground_truth_place_check_into_labelled_collect_evidence():
+def test_runtime_converts_the_ground_truth_place_check_into_labelled_collect_evidence(monkeypatch):
+    monkeypatch.setenv(ENV, '1')
     r = _drive(_collect_adapter(({'source': 'ground_truth', 'location': 'backstock_00'},
                                  _place_check(simulation_time=.1))))
     assert r.status == 'succeeded'
@@ -357,9 +358,19 @@ def test_runtime_converts_the_ground_truth_place_check_into_labelled_collect_evi
     assert ev['sku'] == 'milk' and ev['location'] == 'rollwagen' and ev['collect_mode'] == 'ground_truth'
 
 
-def test_runtime_refuses_a_ground_truth_place_check_at_the_wrong_location():
+def test_runtime_refuses_a_ground_truth_place_check_at_the_wrong_location(monkeypatch):
+    monkeypatch.setenv(ENV, '1')
     adapter = _collect_adapter((_place_check(location='G3_back_s2', simulation_time=.1),))
     with pytest.raises(ValueError):
+        _drive(adapter)
+
+
+def test_runtime_place_check_conversion_is_off_without_the_switch(monkeypatch):
+    """Unset => byte-identical: a collect ending on the fm389 place check keeps the pre-existing refusal."""
+    monkeypatch.delenv(ENV, raising=False)
+    adapter = _collect_adapter(({'source': 'ground_truth', 'location': 'backstock_00'},
+                                _place_check(simulation_time=.1)))
+    with pytest.raises(ValueError, match='transfer evidence mismatch'):
         _drive(adapter)
 
 
@@ -376,7 +387,8 @@ def _mission(state):
     return m
 
 
-def test_mission_accepts_labelled_ground_truth_evidence_for_collect_only():
+def test_mission_accepts_labelled_ground_truth_evidence_for_collect_only(monkeypatch):
+    monkeypatch.setenv(ENV, '1')
     ev = dict(gtc.stage_evidence_from_place_check(_place_check(), sku='juice_orange', quantity=1,
                                                   expected_location='rollwagen'), loaded=True)
     _mission('collect')._validate(ev)                               # accepted, labelled
@@ -386,6 +398,9 @@ def test_mission_accepts_labelled_ground_truth_evidence_for_collect_only():
         _mission('transfer')._validate(dict(ev, released=True))     # not this lane's stage
     with pytest.raises(ValueError):
         _mission('verify')._validate(ev)                            # the stock-commit gate stays sensor-only
+    monkeypatch.delenv(ENV)
+    with pytest.raises(ValueError, match='requires sensor evidence'):
+        _mission('collect')._validate(ev)                           # switch off -> sensor-only, as before
 
 
 # ---------------------------------------------------------------- Isaac bridge on a real USD stage
