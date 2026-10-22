@@ -38,11 +38,15 @@ SIM_NOW = 1000.0  # fixed fake node-clock reading (seconds)
 
 
 def _bridge(*, phase='observe', first_frame=False, job_age=None,
-            packet_wall_age=0.1, sim_gap=0.0, wall_backstop=30.0):
+            packet_wall_age=0.1, sim_gap=0.0, wall_backstop=30.0,
+            transit_pause_wall=1200.0, transit_start_age=None):
     b = RosTransferBridge.__new__(RosTransferBridge)
     b.watchdog_seconds = 1.0
     b.startup_grace_seconds = 5.0
     b.wall_backstop_seconds = wall_backstop
+    b.transit_pause_wall_s = transit_pause_wall
+    b._transit_pause_start_wall = (None if transit_start_age is None
+                                   else time.monotonic() - transit_start_age)
     b.first_frame = first_frame
     now = time.monotonic()
     b.job_start_wall = None if job_age is None else now - job_age
@@ -149,6 +153,61 @@ class PlanningHangSurfacesBeforeBackstop(unittest.TestCase):
         b.controller.motion = NS(planning_wall_exceeded=lambda: False,
                                  failed_result_pending=lambda: False)
         b._watchdog()
+        self.assertEqual(emitted, [])
+
+
+class TransitSensingPause(unittest.TestCase):
+    # fm490 (cold GT-collect): the fm390 reposition carry-drive holds the arm in TRANSIT and pauses the
+    # station while the base drives to place_approach, so /sensors legitimately stops for the whole
+    # render-paced drive (~31 s sim / ~740 s wall). Both the per-frame SIM bound AND the wall backstop
+    # must be suspended for the pause, under a generous wall budget that still catches a never-arriving
+    # drive.
+    def test_sim_stall_does_not_trip_during_transit(self):
+        # Exactly the cold-run trip: a huge SIM gap that WOULD fire 'sensor stream watchdog expired' in
+        # any other phase is suspended while phase=='transit'.
+        b, emitted = _bridge(phase='transit', first_frame=True, sim_gap=31.0, packet_wall_age=0.1)
+        b._watchdog()
+        self.assertEqual(emitted, [])
+
+    def test_wall_backstop_does_not_trip_during_transit(self):
+        # The render-paced drive runs ~740 s wall with no frame -- far past the 30 s wall backstop, which
+        # must not fire during the intentional pause.
+        b, emitted = _bridge(phase='transit', first_frame=True, sim_gap=0.0,
+                             packet_wall_age=740.0, wall_backstop=30.0, transit_start_age=740.0)
+        b._watchdog()
+        self.assertEqual(emitted, [])
+
+    def test_transit_resumes_cleanly_after_pause(self):
+        # When transit ends, the next phase sees fresh packet timers (set each transit tick), so a tiny
+        # residual gap does not spuriously trip.
+        b, emitted = _bridge(phase='transit', first_frame=True, sim_gap=50.0, packet_wall_age=600.0)
+        b._watchdog()
+        self.assertEqual(emitted, [])
+        self.assertIsNotNone(b.last_packet_sim)
+        # timers refreshed to 'now' so a following non-transit tick is clean
+        self.assertLessEqual(SIM_NOW - b.last_packet_sim, 1e-6)
+
+    def test_transit_budget_exceeded_hard_stops_with_named_reason(self):
+        # A reposition that never arrives still hard-stops once the generous transit budget is spent.
+        b, emitted = _bridge(phase='transit', first_frame=True, sim_gap=0.0, packet_wall_age=0.1,
+                             transit_pause_wall=1200.0, transit_start_age=1300.0)
+        b._watchdog()
+        self.assertEqual(len(emitted), 1)
+        self.assertTrue(emitted[0].reason.startswith(
+            'reposition carry-drive exceeded transit sensing-pause budget'), emitted[0].reason)
+
+    def test_transit_start_latches_on_first_transit_tick(self):
+        b, emitted = _bridge(phase='transit', first_frame=True, sim_gap=99.0, packet_wall_age=99.0)
+        self.assertIsNone(b._transit_pause_start_wall)
+        b._watchdog()
+        self.assertIsNotNone(b._transit_pause_start_wall)   # latched, no trip this tick
+        self.assertEqual(emitted, [])
+
+    def test_leaving_transit_clears_the_pause_latch(self):
+        b, emitted = _bridge(phase='preplace', first_frame=True, sim_gap=0.05, packet_wall_age=0.1,
+                             transit_start_age=10.0)
+        b._watchdog()
+        self.assertIsNone(b._transit_pause_start_wall)      # cleared so the next transit starts fresh
         self.assertEqual(emitted, [])
 
 

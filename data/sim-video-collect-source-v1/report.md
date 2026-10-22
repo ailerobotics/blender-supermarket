@@ -71,3 +71,39 @@ no place).
   watchdogs through the paused carry drive, and/or speed that render-paced leg) + re-run
   collect-only on the GPU for the full pick→place. Correct to spec; some knobs live in the
   integration lane's external mission config.
+
+Decision (2026-10-22): BOTH, in order. (A) delivered as the interim `collect-src-001`; (B)
+below.
+
+## 5. Part (B) fix shipped: suspend the sensor watchdog through the TRANSIT sensing-pause
+
+The per-frame `/sensors` watchdog is **already** sim-clock-gated (`ros_adapter.py` `_watchdog`,
+node-clock bound) — so "sim-gate it" is not the fix. It fired because during the fm390
+reposition carry-drive the station is **paused by design** (`pause_station`), so `/sensors`
+legitimately stops for the whole render-paced drive: the cold run went **~31 s sim / ~740 s
+wall** with no frame, which exceeds both the sim per-frame bound (15 s) and the wall backstop
+(180 s). The arm's joint feedback stayed fresh (zero `measured joint feedback lost` in the
+cold log) and the station was cleanly paused (no heartbeat fault), so the sensor-stream
+watchdog was the **sole** trip.
+
+Fix (`ros_adapter.py`): while the controller is in the `transit` phase, **suspend both**
+the per-frame sim bound and the wall backstop and keep the packet timers fresh (so resume is
+clean), under a generous env-overridable **transit-pause wall budget**
+(`RESTOCK_TRANSIT_SENSING_PAUSE_WALL_S`, default 1200 s = `RESTOCK_NAV_GOAL_TIMEOUT_S`) that
+still hard-stops a reposition that never arrives. Motion/planning faults above the branch
+still surface. `phase=='transit'` only occurs with `reposition_before_place` on, so a default
+run never enters the branch (byte-identical). The mission's own nav drive watchdogs
+(`RESTOCK_NAV_STUCK_WALL_S`, `RESTOCK_NAV_GOAL_TIMEOUT_S`) remain the authority over the drive.
+
+Tests: `scripts/twin/tests/test_ros_adapter_watchdog.py::TransitSensingPause` (6 new cases,
+incl. the exact cold-run 31 s-sim / 740 s-wall trips now suspended, and the budget-exceeded
+hard-stop). Full adapter/runtime/manipulation suites green (226 passed, 11 skipped).
+
+### Re-run readiness (knobs for the integration lane)
+
+No new external mission-config key is required: the fix is always-on for the `transit` pause,
+the default budget (1200 s) covers the ~740 s drive, and `reposition_before_place` is already
+active in the host config (the cold run reached `transit`). Optional: set
+`RESTOCK_TRANSIT_SENSING_PAUSE_WALL_S` if a different budget is wanted. Schedule the
+collect-only run (`stages=["collect","couple"]`, `RESTOCK_COLLECT_GROUND_TRUTH=1`, walkthrough
+camera, warm8 framing) once this fix is merged.
