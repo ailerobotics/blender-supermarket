@@ -76,6 +76,14 @@ def _train_stationary(docking):
             and max(abs(v) for v in vals) <= _UNCOUPLE_SPEED_TOL)
 
 
+def _profile_mark(port, name):
+    """Attribute the wall since the last profiler mark to ``name`` (sim_speed ``tick_profile_s``).
+    A no-op when the port has no TickProfiler (the default) => byte-identical."""
+    profiler = getattr(port, '_profiler', None)
+    if profiler is not None:
+        profiler.mark(name)
+
+
 @dataclass(frozen=True)
 class Packet:
     observation_id: str
@@ -619,6 +627,7 @@ class RuntimeAdapter:
             if self.route_alerts is not None:  # opt-in mobile store sensor; self-disabling
                 self.route_alerts.on_navigate(self.port, p, self.time)
             r = self.nav.step(dt, p)
+            _profile_mark(self.port, 'nav')     # sim_speed TICK_PROFILE split; no-op unless profiling
             self._navn = getattr(self, '_navn', 0) + 1
             # Throttled heartbeat every 30 ticks PLUS every tick whose reason is not plain 'tracking'
             # (de-duplicated on reason), so a stall's true per-tick refusal/replan reason is never hidden
@@ -859,6 +868,7 @@ class RuntimeAdapter:
             return Result('succeeded', self._evidence(p, stationary=True))
         if self.action in ('collect', 'transfer'):
             r = self.manip.step(dt, p)
+            _profile_mark(self.port, 'manip')   # sim_speed TICK_PROFILE split; no-op unless profiling
             self._last_manip_phase = getattr(r, 'phase', None)  # feeds next tick's port.gate()
             # fm390: the arm has folded to the carry pose and is HOLDING in TRANSIT -- drive the base to
             # place_approach (carton carried) before it places onto the deck. Pause stepping the arm (do

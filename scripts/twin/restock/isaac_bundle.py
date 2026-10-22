@@ -656,9 +656,16 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     if speed.active:
         record_stride = _sim_speed.widen_record_stride(
             record_stride, speed, float(assembly.world.get_physics_dt()))
-        idle_cameras = idle_camera_set(assembly.sensing_sources, manipulation)
-        print(speed.describe() + f' record_stride={record_stride} idle_cameras={sorted(idle_cameras)}',
-              flush=True)
+        cameras = idle_camera_set(assembly.sensing_sources)
+        station_ids = [key.split(':', 1)[1] for key in cameras if key.startswith('station:')]
+        locations = (assembly.sensing_sources or {}).get('location_cameras') or {}
+
+        def unread(action):     # pause_unread_decode: station cameras this stage's consumers never read
+            return {'station:' + cid for cid in
+                    _sim_speed.unread_station_cameras(config, action, station_ids, locations)}
+        idle_cameras = _sim_speed.IdleCameraPauser(cameras, unread=unread if speed.pause_unread_decode else None)
+        print(speed.describe() + f' record_stride={record_stride} idle_cameras={sorted(cameras)} '
+              f'unread transfer={sorted(unread("transfer"))} verify={sorted(unread("verify"))}', flush=True)
     # Opt-in sensing execution gate (default off): pass the camera-lane set_render_suspended seam to
     # the port ONLY when config['sensing_execution_gate'] is on, so the port's phase-driven gate()
     # suspends the decode render during the reach. Off => seam is None and the port is byte-identical.
@@ -725,24 +732,15 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
             'port': port, 'closers': closers, 'recording': recording}
 
 
-def idle_camera_set(sensing_sources, manipulation):
-    """sim_speed pause_idle_cameras: every render product the navigation-only stages never read --
-    the station decode cameras (``sensing_sources['cameras']``), the arm eye-in-hand masked-depth
-    camera and the mast depth camera -- keyed ``station:<id>`` / ``arm`` / ``mast``. The walkthrough
-    chase camera is never in it. Best-effort lookups (a missing handle is simply absent). Pure."""
-    cameras = {}
+def idle_camera_set(sensing_sources):
+    """sim_speed pause_idle_cameras: the station decode cameras (``sensing_sources['cameras']``, the
+    2560x1920 source/cart/shelf), keyed ``station:<id>`` -- the render products the navigation-only
+    stages never read. Never the walkthrough chase camera, and never the arm / mast depth cameras: the
+    masked-depth bridge stamps a frame with the publishing tick's sim time (to match /tf for nvblox),
+    so a buffer rendered before a pause would land in the ESDF at the wrong pose. Pure."""
     sources = sensing_sources if isinstance(sensing_sources, dict) else {}
-    for cid, cam in sorted((sources.get('cameras') or {}).items()):
-        cameras['station:' + cid] = cam
-    controller = getattr(manipulation, 'controller', None)
-    arm = (getattr(getattr(controller, '_collect_bridge', None), 'arm_camera', None)
-           or getattr(getattr(controller, '_sensors', None), 'camera', None))
-    if arm is not None:
-        cameras['arm'] = arm
-    mast = getattr(sources.get('mast_depth'), 'camera', None)
-    if mast is not None:
-        cameras['mast'] = mast
-    return cameras
+    return {'station:' + cid: cam for cid, cam in sorted((sources.get('cameras') or {}).items())
+            if cam is not None}
 
 
 def _stage_unit_pose_reader(stage, prim_path):

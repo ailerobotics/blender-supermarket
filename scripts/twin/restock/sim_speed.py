@@ -15,11 +15,20 @@ cameras (source/cart/shelf, full-res for QR decode) render -- and each one's acq
 copies rgb + depth + instance-id back to the CPU -- on every walkthrough frame, even in couple/outbound/
 park/return, which read no pixels at all. The levers, all pure decisions here so they are CPU-tested:
 
-* ``pause_idle_cameras`` -- stop the decode cameras' (and the arm/mast depth cameras') render products
-  for the stages that read no camera (couple/outbound/park/return) and restart them when a sensing stage
-  (collect/transfer/verify) begins. Inside a sensing stage nothing changes (the sensing execution gate
-  still owns the decode render there). A walkthrough frame in a navigation stage then renders only the
-  chase camera.
+* ``pause_idle_cameras`` -- stop the station decode cameras' render products for the stages that read
+  no camera (couple/outbound/park/return) and restart them when a sensing stage (collect/transfer/
+  verify) begins. Inside a sensing stage nothing changes (the sensing execution gate still owns the
+  decode render there). The arm (eye-in-hand) and mast depth cameras are NEVER paused: the masked-depth
+  bridge stamps a frame with the publishing tick's sim time (it must equal that tick's /tf for nvblox),
+  so a buffer rendered before a pause would be integrated into the ESDF at the wrong pose. They are
+  small (424x240, 848x480) and the measured decode-off render floor already includes them.
+* ``pause_unread_decode`` -- inside a sensing stage, keep the station decode cameras paused when this
+  run's configuration gives that stage no camera consumer: transfer with ``transfer_ground_truth`` (the
+  cart observation comes from the cart/carton prim, the bay target is ground truth) reads none of them,
+  and verify with ``verify_ground_truth`` reads none. The sensing gate's re-enable is held off for those
+  cameras for the stage, and any consumer read of a paused camera resumes it ON DEMAND (one refused
+  capture, never a dark camera), so a wrong guess costs a tick, not the run. The station consumers
+  check each frame's own ``rendering_time``, so a pre-pause buffer is refused as stale, never used.
 * ``pacing`` -- the port's legacy pacer holds the simulation to real time from the port's creation
   (``realtime=True``); today it never sleeps because the run is far slower than real time, but it would
   cap a faster run at 1x. ``host_coupled`` removes it for the stages the mission runs in-process
@@ -60,6 +69,7 @@ PROFILES = {
     'off': {},
     'max': {
         'pause_idle_cameras': True,
+        'pause_unread_decode': True,
         'pacing': 'host_coupled',
         'host_stage_max_ratio': 1.0,
         'walkthrough_hz': 3.0,
@@ -75,6 +85,7 @@ class SimSpeed:
     """Resolved speed levers. The defaults are the legacy behaviour (profile 'off')."""
     profile: str = 'off'
     pause_idle_cameras: bool = False
+    pause_unread_decode: bool = False
     pacing: str = 'legacy'
     host_stage_max_ratio: float = 1.0
     walkthrough_hz: float | None = None
@@ -89,10 +100,11 @@ class SimSpeed:
 
     def describe(self):
         """One boot-log line naming every lever (so a wrongly-set switch is visible at boot)."""
-        return ('SIM_SPEED profile=%s pause_idle_cameras=%s pacing=%s host_stage_max_ratio=%g '
-                'walkthrough_hz=%s trace_probe=%s bt_snapshot_hz=%s tick_profile_s=%s'
-                % (self.profile, self.pause_idle_cameras, self.pacing, self.host_stage_max_ratio,
-                   self.walkthrough_hz, self.trace_probe, self.bt_snapshot_hz, self.tick_profile_s))
+        return ('SIM_SPEED profile=%s pause_idle_cameras=%s pause_unread_decode=%s pacing=%s '
+                'host_stage_max_ratio=%g walkthrough_hz=%s trace_probe=%s bt_snapshot_hz=%s tick_profile_s=%s'
+                % (self.profile, self.pause_idle_cameras, self.pause_unread_decode, self.pacing,
+                   self.host_stage_max_ratio, self.walkthrough_hz, self.trace_probe, self.bt_snapshot_hz,
+                   self.tick_profile_s))
 
 
 def _positive_or_none(name, value):
@@ -125,7 +137,7 @@ def from_config(config):
     speed = replace(SimSpeed(), profile=profile, **values)
     if speed.pacing not in PACING_MODES:
         raise ValueError(f'sim_speed.pacing must be one of {PACING_MODES}, got {speed.pacing!r}')
-    for name in ('pause_idle_cameras', 'trace_probe'):
+    for name in ('pause_idle_cameras', 'pause_unread_decode', 'trace_probe'):
         if not isinstance(getattr(speed, name), bool):
             raise ValueError(f'sim_speed.{name} must be true or false')
     ratio = speed.host_stage_max_ratio
@@ -158,6 +170,33 @@ def widen_record_stride(stride, speed, dt):
 def pacing_legacy(speed):
     """Whether the port keeps its legacy absolute real-time pacer (the ``realtime`` flag)."""
     return speed.pacing == 'legacy'
+
+
+def _enabled(block):
+    return bool(block.get('enabled')) if isinstance(block, dict) else bool(block)
+
+
+def unread_station_cameras(config, action, station_ids, location_cameras=None):
+    """Station decode camera ids that no consumer reads in ``action`` under ``config`` (pure).
+
+    * transfer -- the cart observation is derived from the cart / live carton prim, never a camera; the
+      bay target comes from the shelf camera unless ``transfer_ground_truth`` is enabled. So: every
+      station camera with ground truth, else every camera except the one serving
+      ``transfer_shelf_location`` (an unknown shelf camera keeps all -- fail safe).
+    * verify -- ``verify_ground_truth`` reads the carton prim, no camera: every station camera; the
+      camera verifier keeps them all.
+    * collect (and anything else) -- none: the collect capture keeps its cameras.
+    """
+    ids = set(station_ids)
+    cfg = config if isinstance(config, dict) else {}
+    if action == 'transfer':
+        if _enabled(cfg.get('transfer_ground_truth')):
+            return ids
+        shelf_camera = (location_cameras or {}).get(cfg.get('transfer_shelf_location'))
+        return ids - {shelf_camera} if shelf_camera in ids else set()
+    if action == 'verify' and _enabled(cfg.get('verify_ground_truth')):
+        return ids
+    return set()
 
 
 class HostStagePacer:
@@ -202,7 +241,8 @@ class TickProfiler:
 
     ``begin()`` at the top of ``IsaacPort.advance``, ``mark(name)`` after each section, ``end(rendered)``
     at the bottom; the time from one ``end`` to the next ``begin`` is the mission logic outside the port
-    (navigation / manipulation / behaviour tree) and is reported as ``mission``. A pure accumulator: the
+    (navigation / manipulation / behaviour tree) and is reported as ``mission``. ``flush()`` at a stage
+    change emits the partial window, so a line never mixes two stages' costs. A pure accumulator: the
     clock is injectable and ``report()`` returns the line it prints, so it is unit-tested."""
 
     def __init__(self, period_s, *, clock=time.perf_counter, emit=None):
@@ -212,6 +252,8 @@ class TickProfiler:
         self._reset_window(None, None)
         self._t = None
         self._last_end = None
+        self._last_sim = None
+        self._action = None
 
     def _reset_window(self, sim, wall):
         self._sections = {}
@@ -221,8 +263,9 @@ class TickProfiler:
 
     def begin(self):
         now = self._clock()
-        if self._last_end is not None:
-            self._sections['mission'] = self._sections.get('mission', 0.0) + (now - self._last_end)
+        if self._last_end is not None and self._t is not None:
+            # Mission logic between ticks not carved out by an explicit mark ('nav', 'manip').
+            self._sections['mission'] = self._sections.get('mission', 0.0) + (now - self._t)
         self._t = now
 
     def mark(self, name):
@@ -233,7 +276,7 @@ class TickProfiler:
 
     def end(self, sim_now, rendered, action=None):
         self.mark('other')
-        self._last_end = self._t
+        self._last_end, self._last_sim, self._action = self._t, sim_now, action
         self._ticks += 1
         self._rendered += 1 if rendered else 0
         wall = self._last_end
@@ -246,6 +289,16 @@ class TickProfiler:
             self._emit(line)
             return line
         return None
+
+    def flush(self):
+        """Emit the open window now (call at a stage change, between two ticks) so the per-action lines
+        never straddle a stage boundary; a window with no elapsed sim time is dropped silently."""
+        if self._win_sim is None or self._last_sim is None or self._last_sim <= self._win_sim:
+            return None
+        line = self.report(self._last_sim, self._last_end, self._action)
+        self._reset_window(self._last_sim, self._last_end)
+        self._emit(line)
+        return line
 
     def report(self, sim_now, wall, action=None):
         span_sim = sim_now - self._win_sim
@@ -282,24 +335,84 @@ def set_cameras_enabled(cameras, enabled, *, toggle=None, log=_log):
 
 
 class IdleCameraPauser:
-    """Pause the cameras no navigation-only stage reads; restart them when a sensing stage begins.
+    """Pause the cameras no stage reads; restart them when a stage that reads them begins.
 
     ``begin_action(action)``: an action outside HOST_COUPLED_ACTIONS (couple/outbound/park/return)
-    disables every camera's render product; a sensing action re-enables ALL of them, so the physical
-    state is never darker than what the sensing execution gate (which keeps managing suspension inside
-    the stage) believes it is. Idempotent; the decision is pure, the toggle is injected."""
+    pauses every camera; a sensing action enables every camera except ``unread(action)`` (the
+    ``pause_unread_decode`` set, empty by default), so the physical state is never darker than what the
+    sensing execution gate (which keeps managing suspension inside the stage) needs. A paused camera is
+    VETOED for the stage: the gate's re-enable (``set_render_products_enabled``) is held off. ``install()``
+    wraps each camera so a consumer READ of a paused camera resumes it on demand (``on_demand``) -- the
+    first such capture sees no new frame and retries, the next sensing render is fresh -- so a wrong
+    "unread" guess never leaves a consumer without frames. Idempotent per camera; toggles injected."""
 
-    def __init__(self, cameras, *, toggle=None, log=_log):
+    def __init__(self, cameras, *, unread=None, toggle=None, log=_log):
         self.cameras = {k: v for k, v in dict(cameras).items() if v is not None}
+        self._unread = unread or (lambda action: ())
         self._toggle, self._log = toggle, log
-        self.enabled = None          # unknown until the first begin_action
+        self.state = {}             # key -> physically enabled, as last driven here
+        self.vetoed = set()         # keys the sensing gate may not re-enable this stage
+        self.action = None
+        self.resumed = []           # (action, key) on-demand resumes, for the run log / tests
+
+    def plan(self, action):
+        """Pure: (enable_keys, pause_keys) for ``action``."""
+        keys = set(self.cameras)
+        pause = (keys & set(self._unread(action))) if action in HOST_COUPLED_ACTIONS else keys
+        return sorted(keys - pause), sorted(pause)
+
+    def _set(self, keys, enabled):
+        if not keys:
+            return []
+        applied = set_cameras_enabled({k: self.cameras[k] for k in keys}, enabled,
+                                      toggle=self._toggle, log=self._log)
+        for key in keys:
+            self.state[key] = enabled
+        return applied
 
     def begin_action(self, action):
-        want = action in HOST_COUPLED_ACTIONS
-        if self.enabled is want:
+        on, off = self.plan(action)
+        self.action = action
+        self.vetoed = set(off)
+        turn_on = [k for k in on if self.state.get(k) is not True]
+        turn_off = [k for k in off if self.state.get(k) is not False]
+        if not turn_on and not turn_off:
             return None
-        applied = set_cameras_enabled(self.cameras, want, toggle=self._toggle, log=self._log)
-        self.enabled = want
-        self._log('SIM_SPEED idle cameras %s for %s: %s'
-                  % ('ENABLED' if want else 'PAUSED', action, applied or 'none'))
+        applied = self._set(turn_on, True) + self._set(turn_off, False)
+        self._log('SIM_SPEED cameras for %s: enabled=%s paused=%s (applied %s)'
+                  % (action, on or 'none', off or 'none', applied or 'none'))
         return applied
+
+    def gate_allows(self, key, enabled):
+        """The enable state another caller (the sensing gate) may apply: a vetoed camera stays paused."""
+        return bool(enabled) and key not in self.vetoed
+
+    def on_demand(self, key):
+        """A consumer read ``key``: if it is paused, resume it for the rest of this stage."""
+        if key not in self.vetoed and self.state.get(key) is not False:
+            return False
+        self.vetoed.discard(key)
+        self._set([key], True)
+        self.resumed.append((self.action, key))
+        self._log('SIM_SPEED on-demand resume %s (a consumer read it during %s)' % (key, self.action))
+        return True
+
+    def install(self):
+        """Wrap every camera (instance attributes; the class is untouched): reads resume on demand, and
+        the sensing gate's ``set_render_products_enabled`` goes through ``gate_allows``. Best-effort."""
+        for key, camera in self.cameras.items():
+            try:
+                read = camera.get_current_frame
+
+                def get_current_frame(*args, _read=read, _key=key, **kwargs):
+                    self.on_demand(_key)
+                    return _read(*args, **kwargs)
+                camera.get_current_frame = get_current_frame
+                toggle = getattr(camera, 'set_render_products_enabled', None)
+                if callable(toggle):
+                    def set_render_products_enabled(enabled, _toggle=toggle, _key=key):
+                        return _toggle(self.gate_allows(_key, enabled))
+                    camera.set_render_products_enabled = set_render_products_enabled
+            except Exception as exc:                              # noqa: BLE001 -- pure optimisation
+                self._log('SIM_SPEED camera wrap skipped %s: %r' % (key, exc))
+        return self

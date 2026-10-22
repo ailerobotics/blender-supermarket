@@ -31,7 +31,7 @@ def test_absent_config_is_legacy():
 def test_max_profile_turns_every_lever_on():
     speed = S.from_config({'sim_speed': {'profile': 'max'}})
     assert speed.active and speed.profile == 'max'
-    assert speed.pause_idle_cameras is True
+    assert speed.pause_idle_cameras is True and speed.pause_unread_decode is True
     assert speed.pacing == 'host_coupled' and speed.host_stage_max_ratio == 1.0
     assert speed.walkthrough_hz == 3.0 and speed.trace_probe is False
     assert speed.bt_snapshot_hz == 5.0 and speed.tick_profile_s == 10.0
@@ -159,19 +159,124 @@ def test_tick_profiler_reports_sections_and_ratio():
     assert ratio == pytest.approx((1 / 60) / 0.017, rel=0.02)
 
 
+def test_tick_profiler_marks_between_ticks_split_the_mission_bucket():
+    t = [0.0]
+    lines = []
+    prof = S.TickProfiler(0.5, clock=lambda: t[0], emit=lines.append)
+    sim = 0.0
+    for _ in range(60):
+        prof.begin()
+        t[0] += 0.004
+        prof.mark('step')
+        sim += 1 / 60
+        prof.end(sim, rendered=False, action='transfer')
+        t[0] += 0.003
+        prof.mark('nav')                                           # RuntimeAdapter marks after nav.step
+        t[0] += 0.002
+        prof.mark('manip')
+        t[0] += 0.001                                              # the residual: BT / bookkeeping
+    assert lines
+    for line in lines:                                             # one tick of marks may straddle a window
+        ms = dict(kv.split('=') for kv in line.split('ms_per_tick: ')[1].split())
+        assert float(ms['nav']) == pytest.approx(3.0, abs=0.15)
+        assert float(ms['manip']) == pytest.approx(2.0, abs=0.15)
+        assert float(ms['mission']) == pytest.approx(1.0, abs=0.15)
+        assert float(ms['step']) == pytest.approx(4.0, abs=0.15)
+
+
+def test_tick_profiler_flush_closes_the_window_at_a_stage_change():
+    t = [0.0]
+    lines = []
+    prof = S.TickProfiler(100.0, clock=lambda: t[0], emit=lines.append)   # period never reached
+    sim = 0.0
+    for action, ticks, cost in (('couple', 30, 0.040), ('outbound', 20, 0.010)):
+        for _ in range(ticks):
+            prof.begin()
+            t[0] += cost
+            prof.mark('step')
+            sim += 1 / 60
+            prof.end(sim, rendered=False, action=action)
+        prof.flush()                                               # IsaacPort.begin_action of the next stage
+    assert [line.split()[1] for line in lines] == ['action=couple', 'action=outbound']
+    assert 'step=40.0' in lines[0] and 'step=10.0' in lines[1]     # no cost bleeds across the stage change
+    assert 'ticks=20' in lines[1]
+    assert prof.flush() is None and len(lines) == 2                # nothing new since the last flush
+    assert S.TickProfiler(1.0, emit=lines.append).flush() is None  # never ticked
+
+
 # ---------------------------------------------------------------- idle cameras
 def test_idle_camera_pauser_pauses_nav_stages_and_restores_sensing():
     calls, logs = [], []
-    pauser = S.IdleCameraPauser({'station:source': 'S', 'arm': 'A', 'gone': None},
+    pauser = S.IdleCameraPauser({'station:source': 'S', 'station:cart': 'C', 'gone': None},
                                 toggle=lambda cam, on: calls.append((cam, on)) or True,
                                 log=logs.append)
-    assert pauser.begin_action('couple') == ['station:source', 'arm']
-    assert calls == [('S', False), ('A', False)]
+    assert sorted(pauser.begin_action('couple')) == ['station:cart', 'station:source']
+    assert sorted(calls) == [('C', False), ('S', False)]
     assert pauser.begin_action('outbound') is None                 # idempotent: no re-toggle
-    assert pauser.begin_action('transfer') == ['station:source', 'arm']
-    assert calls[-2:] == [('S', True), ('A', True)]
+    assert sorted(pauser.begin_action('transfer')) == ['station:cart', 'station:source']
+    assert sorted(calls[-2:]) == [('C', True), ('S', True)]
     assert pauser.begin_action('verify') is None
-    assert any('PAUSED for couple' in m for m in logs) and any('ENABLED for transfer' in m for m in logs)
+    assert any('for couple' in m and 'paused=' in m for m in logs)
+
+
+def test_unread_station_cameras_per_stage_and_config():
+    ids = ('source', 'cart', 'shelf')
+    locs = {'backstock_00': 'source', 'rollwagen': 'cart', 'G3_back_s2': 'shelf'}
+    gt = {'transfer_ground_truth': {'enabled': True}, 'verify_ground_truth': {'enabled': True},
+          'transfer_shelf_location': 'G3_back_s2'}
+    assert S.unread_station_cameras(gt, 'transfer', ids, locs) == {'source', 'cart', 'shelf'}
+    assert S.unread_station_cameras(gt, 'verify', ids, locs) == {'source', 'cart', 'shelf'}
+    assert S.unread_station_cameras(gt, 'collect', ids, locs) == set()          # collect keeps all
+    camera = {'transfer_shelf_location': 'G3_back_s2'}
+    assert S.unread_station_cameras(camera, 'transfer', ids, locs) == {'source', 'cart'}   # shelf read
+    assert S.unread_station_cameras(camera, 'verify', ids, locs) == set()       # camera verify reads
+    # Unknown shelf camera => keep everything (fail safe); disabled ground truth == camera mode.
+    assert S.unread_station_cameras({'transfer_shelf_location': 'X'}, 'transfer', ids, locs) == set()
+    off = {'transfer_ground_truth': {'enabled': False}, 'transfer_shelf_location': 'G3_back_s2'}
+    assert S.unread_station_cameras(off, 'transfer', ids, locs) == {'source', 'cart'}
+
+
+class _Cam:
+    """A camera with the RenderedCamera seams the pauser wraps."""
+    def __init__(self, name, log):
+        self.name, self.log, self.frames = name, log, 0
+
+    def get_current_frame(self, *args, **kwargs):
+        self.frames += 1
+        return {'rendering_frame': self.frames}
+
+    def set_render_products_enabled(self, enabled):              # what the sensing gate calls
+        self.log.append(('gate', self.name, enabled))
+        return True
+
+
+def test_unread_decode_paused_in_sensing_stage_gate_vetoed_and_resumed_on_demand():
+    log, logs = [], []
+    cams = {'station:source': _Cam('source', log), 'station:shelf': _Cam('shelf', log),
+            'station:cart': _Cam('cart', log)}
+    unread = {'transfer': {'station:source', 'station:shelf'}}
+    pauser = S.IdleCameraPauser(cams, unread=lambda action: unread.get(action, ()),
+                                toggle=lambda cam, on: log.append(('pauser', cam.name, on)) or True,
+                                log=logs.append).install()
+    pauser.begin_action('transfer')
+    assert ('pauser', 'cart', True) in log                         # a camera the stage reads stays on
+    assert {('pauser', 'source', False), ('pauser', 'shelf', False)} <= set(log)
+    # The sensing gate resuming its decode render cannot re-enable a camera this stage never reads ...
+    cams['station:shelf'].set_render_products_enabled(True)
+    assert log[-1] == ('gate', 'shelf', False)
+    # ... but a consumer that DOES read it resumes it on demand (render on demand, never a dark camera).
+    frame = cams['station:shelf'].get_current_frame(clone=True)
+    assert frame['rendering_frame'] == 1
+    assert ('pauser', 'shelf', True) in log and pauser.resumed == [('transfer', 'station:shelf')]
+    cams['station:shelf'].set_render_products_enabled(True)
+    assert log[-1] == ('gate', 'shelf', True)                      # veto lifted for the stage
+    assert any('on-demand resume station:shelf' in m for m in logs)
+    # Reads of enabled cameras are free (no toggle), and a nav stage pauses + vetoes everything again.
+    n = len(log)
+    cams['station:cart'].get_current_frame()
+    assert len(log) == n
+    pauser.begin_action('return')
+    assert pauser.vetoed == set(cams)
 
 
 def test_idle_camera_toggle_failure_is_logged_not_raised():
@@ -187,17 +292,15 @@ def test_idle_camera_toggle_failure_is_logged_not_raised():
     assert any('toggle skipped b' in m for m in logs)
 
 
-def test_idle_camera_set_collects_station_arm_and_mast_never_the_chase():
+def test_idle_camera_set_is_the_station_decode_cameras_only():
     chase = object()
-    sources = {'cameras': {'source': 'SRC', 'cart': 'CART'}, 'recording_camera': chase,
+    sources = {'cameras': {'source': 'SRC', 'cart': 'CART', 'gone': None}, 'recording_camera': chase,
                'mast_depth': NS(camera='MAST')}
-    manip = NS(controller=NS(_collect_bridge=NS(arm_camera='ARM'), _sensors=NS(camera='ARM2')))
-    cams = idle_camera_set(sources, manip)
-    assert cams == {'station:cart': 'CART', 'station:source': 'SRC', 'arm': 'ARM', 'mast': 'MAST'}
-    assert chase not in cams.values()
-    # Fallback arm handle; absent mast / manipulation => simply absent.
-    assert idle_camera_set({'cameras': {}}, NS(controller=NS(_sensors=NS(camera='ARM2')))) == {'arm': 'ARM2'}
-    assert idle_camera_set({}, None) == {}
+    cams = idle_camera_set(sources)
+    # Never the chase camera, and never the mast / arm depth cameras: the masked-depth bridge stamps a
+    # frame with the publishing tick's sim time, so a pre-pause buffer would reach nvblox as current.
+    assert cams == {'station:cart': 'CART', 'station:source': 'SRC'}
+    assert idle_camera_set({}) == {} and idle_camera_set(None) == {}
 
 
 # ---------------------------------------------------------------- BT snapshot throttle
@@ -340,15 +443,15 @@ def test_port_max_profile_disables_legacy_pacer_and_pauses_idle_cameras(tmp_path
             raise AssertionError
 
     speed = S.from_config({'sim_speed': {'profile': 'max'}})
-    cams = {'station:source': Cam('source'), 'arm': Cam('arm')}
+    cams = {'station:source': Cam('source'), 'station:cart': Cam('cart')}
     port, _ = _fake_port(tmp_path, sim_speed=speed, idle_cameras=cams, realtime=True)
     assert port.realtime is False                                   # legacy absolute pacer removed
     assert isinstance(port._host_pacer, S.HostStagePacer)
     port._idle_cameras._toggle = lambda cam, on: toggles.append((cam.name, on)) or True
     port.begin_action('couple', {})
-    assert toggles == [('source', False), ('arm', False)]
+    assert sorted(toggles) == [('cart', False), ('source', False)]
     port.begin_action('transfer', {})
-    assert toggles[-2:] == [('source', True), ('arm', True)]
+    assert sorted(toggles[-2:]) == [('cart', True), ('source', True)]
     assert set(SENSING_ACTIONS) == set(S.HOST_COUPLED_ACTIONS)
 
 
@@ -362,9 +465,34 @@ def test_port_tick_profile_line(tmp_path, capsys):
         assert section in out
 
 
+def test_port_flushes_the_tick_profile_window_at_each_stage_change(tmp_path, capsys):
+    port, _ = _fake_port(tmp_path, sim_speed=S.from_config({'sim_speed': {'tick_profile_s': 100.0}}))
+    _run(port, 'park', 10)
+    _run(port, 'transfer', 10)
+    port.begin_action('verify', {})
+    actions = [line.split()[1] for line in capsys.readouterr().out.splitlines()
+               if line.startswith('TICK_PROFILE')]
+    assert actions == ['action=park', 'action=transfer']
+
+
 def test_sim_speed_is_a_registered_runtime_key_for_the_activation_preflight():
     # The orchestrator can `--require sim_speed` so a host/runtime config mis-placement fails the boot.
     from twin.restock_manipulation.config_preflight import KEY_CONSUMER, RUNTIME, check_activation
     assert KEY_CONSUMER['sim_speed'] == RUNTIME
     assert check_activation({}, {'sim_speed': {'profile': 'max'}}, ['sim_speed']) == []
     assert 'MIS-PLACED' in check_activation({'sim_speed': {'profile': 'max'}}, {}, ['sim_speed'])[0]
+
+
+def test_port_builds_with_a_ready_pauser_and_pauses_unread_decode_in_transfer(tmp_path):
+    log = []
+    cams = {'station:source': _Cam('source', log), 'station:cart': _Cam('cart', log),
+            'station:shelf': _Cam('shelf', log)}
+    pauser = S.IdleCameraPauser(cams, unread=lambda action: (
+        {'station:cart', 'station:shelf'} if action == 'transfer' else ()),
+        toggle=lambda cam, on: log.append(('pauser', cam.name, on)) or True)
+    port, _ = _fake_port(tmp_path, sim_speed=S.from_config({'sim_speed': 'max'}), idle_cameras=pauser)
+    assert port._idle_cameras is pauser
+    port.begin_action('transfer', {})
+    assert ('pauser', 'source', True) in log
+    assert {('pauser', 'cart', False), ('pauser', 'shelf', False)} <= set(log)
+    _run(port, 'transfer', 3)                                     # host-coupled stage steps fine
