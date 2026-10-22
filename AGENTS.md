@@ -182,7 +182,7 @@ repo's `scenes/`, `export/` or `renders/`.
   `docs/examples/dynobs-mission-fragment.json`. CPU-proven only
   (`test_navigation_mission_source.py`); the in-sim GPU evidence run rides the
   integration mission boot (owns GPU priority + commissioning + host-stack) and is
-  PENDING (`start_at` supports only `couple` today, so a bounded nav-only run needs it
+  PENDING (`start_at` supports `couple`/`transfer`; a bounded nav-only run still needs it
   extended to `outbound` — integration-owned).
 - **Simulated people + human safety** (`scripts/twin/humans/`, opt-in, default
   OFF): an absent `humans` runtime-config block imports nothing and leaves the
@@ -271,6 +271,13 @@ repo's `scenes/`, `export/` or `renders/`.
   scenario events. Tests: `test_restock_bt.py` + `test_restock_bt_phases.py` (phased decomposition +
   parity; tree tier needs py_trees). Design + proof: `data/sim-restock-bt-driver-v1/report.md`
   (superseding the original `data/sim-restock-bt-v1/report.md`).
+- **Dev bench start/stop** (opt-in, default-off): `start_at` (`couple`|`transfer`) begins the mission
+  at a stage with the skipped prefix synthesized (`restock/shortcut.py`, recorded as `*_shortcut`);
+  `start_staging: recorded_bay_park` spawns the coupled train + deck carton at the recorded bay
+  park->transfer handover; `stop_after` ends the run after a stage (`mission.bounded_stages`). Same keys
+  as `run_mobile_restock.py --start-at/--start-staging/--stop-after`. Such runs are labelled in
+  mission.json and by a burned-in walkthrough caption. RUNBOOK §11-bench; proof
+  `scripts/check_transfer_bench_staging.py`.
 - **Uncouple-at-parking-spot on return** (opt-in, default-off): `return` tows the cart home coupled
   unless `config['uncouple_on_return']` + a `cart_parking` mission pose are set, when it tows the cart
   to the parking spot, brakes it, releases the tow coupling via `MobileController.uncouple(obs)` (new,

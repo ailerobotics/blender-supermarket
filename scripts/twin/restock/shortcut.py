@@ -173,20 +173,46 @@ def staged_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
 
 
 def walkthrough_caption(config):
-    """The caption burned into a shortcut run's walkthrough (and stored in mission.json), so a bench
-    video can never pass for the full seven-stage run. None unless ``config['start_at']`` is set."""
+    """The caption burned into a bench run's walkthrough (and stored in mission.json), so a bench video
+    can never pass for the full seven-stage run. None unless ``config`` sets ``start_at`` (stages
+    synthesized) or ``stop_after`` (stages cut)."""
     start_at = config.get('start_at') if isinstance(config, dict) else None
-    if not start_at:
+    stop_after = config.get('stop_after') if isinstance(config, dict) else None
+    if not start_at and not stop_after:
         return None
     stages = tuple(config.get('stages') or ACTIONS)
-    skipped = stages[:stages.index(start_at)] if start_at in stages else ()
-    text = (f'BENCH RUN start_at={start_at}: '
-            + (', '.join(skipped) + ' SYNTHESIZED, not performed' if skipped else 'no stage skipped'))
+    head, details = [], []
+    if start_at:
+        skipped = stages[:stages.index(start_at)] if start_at in stages else ()
+        head.append(f'start_at={start_at}')
+        details.append(', '.join(skipped) + ' SYNTHESIZED, not performed' if skipped else 'no stage skipped')
+    if stop_after:
+        not_run = ACTIONS[ACTIONS.index(stop_after) + 1:] if stop_after in ACTIONS else ()
+        head.append(f'stop_after={stop_after}')
+        details.append(', '.join(not_run) + ' NOT RUN' if not_run else 'no stage cut')
+    text = f"BENCH RUN {' '.join(head)}: {'; '.join(details)}"
     staging = config.get('start_staging')
     if staging is not None:
         preset = staging if isinstance(staging, str) else staging.get('preset', 'recorded_bay_park')
         text += f' | staged: {preset}'
     return text
+
+
+def bounded_summary(config):
+    """mission.json fields for a ``stop_after`` targeted test ({} when absent): the stop stage, the
+    stages driven, the stages NOT run and the walkthrough caption -- the run's 'complete' covers only
+    the stages it drove."""
+    stop_after = config.get('stop_after') if isinstance(config, dict) else None
+    if not stop_after:
+        return {}
+    stages = list(config.get('stages') or ACTIONS)
+    start_at = config.get('start_at')
+    driven = stages[stages.index(start_at):] if start_at in stages else stages
+    not_run = list(ACTIONS[ACTIONS.index(stop_after) + 1:])
+    return {'stop_after': stop_after, 'stages_driven': driven, 'not_run': not_run,
+            'walkthrough_caption': walkthrough_caption(config),
+            'bounded_note': (f'BOUNDED RUN: stopped after {stop_after}; not run: '
+                             f"{', '.join(not_run) or 'none'}; state covers only {', '.join(driven)}")}
 
 
 def shortcut_summary(shortcut, config, staging=None):
