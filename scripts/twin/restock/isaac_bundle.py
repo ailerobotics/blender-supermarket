@@ -604,9 +604,11 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     from ..restock_manipulation.transfer_mode import transfer_caption
     # collect-gt: a ground-truth collect run names the workaround in the same burned-in caption; so does a
     # transfer workaround mode (RESTOCK_TRANSFER_MODE).
+    # The opt-in sim-only carton-vs-cage contact filter (restock.cage_collision) is named there too.
+    from .cage_collision import caption as cage_caption
     recorder = (Recorder(output / 'mission-frames', fps=plan.recording_fps,
-                         caption=transfer_caption(ground_truth_collect.join_caption(walkthrough_caption(config),
-                                                                                    config)))
+                         caption=cage_caption(transfer_caption(ground_truth_collect.join_caption(
+                             walkthrough_caption(config), config)), config))
                 if recording_camera is not None else None)
     # vr1 (labelled demo workaround, default OFF): config['verify_ground_truth'].enabled swaps the
     # camera InventoryVerifier for the SIM GROUND-TRUTH verifier (handling-unit pose vs the authored bay

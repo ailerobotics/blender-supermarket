@@ -40,8 +40,11 @@ def promote_stock(stage, path, sku, mass_kg):
 
 
 def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
-          stock_mass_kg, spec=MobileSpec(), scenario=None):
+          stock_mass_kg, spec=MobileSpec(), scenario=None, cage_collision=None):
     from pxr import Gf, UsdGeom, UsdPhysics, Usd
+    from . import cage_collision as _cage
+    # Validate the opt-in sim-only cage filter mode BEFORE creating the output (unknown value => refuse).
+    cage_mode = _cage.mode({_cage.KEY: cage_collision})
     store, robot_usd, output = map(lambda x: Path(x).resolve(), (store, robot_usd, output))
     if output.exists() or output in (store, robot_usd):
         raise ValueError('scene output must be a new scratch file')
@@ -71,13 +74,18 @@ def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
         xform.AddRotateZOp().Set(math.degrees(pose[2]))
     initial = author_initial_scenario(stage, scenario) if scenario is not None else None
     stock = initial['stock'] if initial else promote_stock(stage,stock_path,sku,stock_mass_kg)
+    # Opt-in SIM-ONLY workaround (restock.cage_collision): carton-vs-cage contacts filtered; None => off.
+    cage = _cage.author_filter(stage,stock,assets['cart']['body']) if cage_mode else None
     stage.GetRootLayer().Save()
     if any(hashlib.sha256(p.read_bytes()).hexdigest()!=digest for p,digest in hashes.items()):
         raise RuntimeError('input USD layer changed during composition')
-    return dict(stage=str(output),assets=assets,stock=stock,initial_scenario=initial,
-                static_colliders=static,product_colliders=products,
-                evidence='offline_usd_schema_only',physics_verified=False,
-                input_sha256={str(p):digest for p,digest in hashes.items()})
+    result = dict(stage=str(output),assets=assets,stock=stock,initial_scenario=initial,
+                  static_colliders=static,product_colliders=products,
+                  evidence='offline_usd_schema_only',physics_verified=False,
+                  input_sha256={str(p):digest for p,digest in hashes.items()})
+    if cage is not None:
+        result['cage_collision'] = cage
+    return result
 
 
 def label_stock(stage, stock_path, sku, texture_path, *, side_m=.12):
