@@ -5,14 +5,15 @@ Checks (each PASS / WARN / FAIL / UNVERIFIED):
                          shortcut stage counts as present but is a WARN (synthesized, not performed).
   * mission_succeeded -- mission.json state == 'complete' with no degraded stage.
   * stages_on_video   -- every performed stage has walkthrough frames inside its trace window.
-  * carton_on_cart    -- the carton rests on the rollwagen deck through couple/outbound/park.
+  * carton_on_cart    -- the carton rests on the rollwagen stock support (the scenario's
+                         ``cart_support_z_world``: the upper shelf in the mission) through couple/outbound/park.
   * carton_on_bay     -- after the transfer, the carton rests on the transfer-bay top.
   * demo_video        -- a walkthrough video exists in the run dir (informational).
 
 Carton evidence, best first: the recorded carton + cart poses (nav-trace ``carton``/``cart`` fields,
 written when the run set RESTOCK_TRACE_POSES=1), cross-checked for a frozen (stale) pose read; else
 frame analysis -- the overhead chase frame is sampled inside the projected carton footprint (cart: the
-deck-rest position given the measured base pose + hitch geometry; bay: the static bay top) and the
+support-rest position given the measured base pose + hitch geometry; bay: the static bay top) and the
 fraction of carton-coloured pixels decides it. Frame analysis is labelled as such in the table.
 """
 from __future__ import annotations
@@ -202,16 +203,17 @@ def check_stage_frames(run):
 def check_carton_on_cart(run, model=None, camera=None):
     model = model or E.cart_model(run)
     camera = camera or E.ChaseCamera()
+    where = E.support_name(model)
     windows = E.stage_windows(run)
     status = E.stage_status(run)
     stages = [s for s in ('couple', 'outbound', 'park') if s in windows and status[s] != 'shortcut']
     synthesized = [s for s in ('couple', 'outbound', 'park') if status[s] == 'shortcut']
     if not stages and synthesized:
         # A start-phase bench (e.g. start_at=transfer) never towed: say so, and still check the carton
-        # is on the deck where the run begins (its first second of footage).
+        # is on the cart support where the run begins (its first second of footage).
         first = [f for f in run.frames if run.frames and f.t <= run.frames[0].t + 1.0]
         fr = carton_fractions_on_cart(run, model, camera, first) if not run.has_pose_trace else []
-        seen = f'; carton on deck at the start {sum(v >= FRAME_SHOWS_CARTON for _, v in fr)}/{len(fr)} frames' \
+        seen = f'; carton on {where} at the start {sum(v >= FRAME_SHOWS_CARTON for _, v in fr)}/{len(fr)} frames' \
             if fr else ''
         return Check('carton_on_cart', UNVERIFIED, f'{"/".join(synthesized)} synthesized (start-phase '
                      f'shortcut): no tow recorded to check{seen}')
@@ -235,7 +237,7 @@ def check_carton_on_cart(run, model=None, camera=None):
             return Check('carton_on_cart', UNVERIFIED, 'pose trace present but no carton/cart rows in stages')
         ok = (n_total - bad_total) / n_total >= POSE_ROWS_PASS
         return Check('carton_on_cart', PASS if ok else FAIL,
-                     'pose trace rows on deck: ' + ', '.join(per))
+                     f'pose trace rows on {where}: ' + ', '.join(per))
     per, all_ok, n_any, details = [], True, 0, {}
     by_stage = E.frames_by_stage(run)
     for s in stages:
@@ -261,7 +263,7 @@ def check_carton_on_cart(run, model=None, camera=None):
     if n_any == 0:
         return Check('carton_on_cart', UNVERIFIED, 'no pose trace and no in-view frame to analyse')
     return Check('carton_on_cart', PASS if all_ok else FAIL,
-                 'frame analysis (no pose trace) frames showing carton on deck: ' + ', '.join(per), details)
+                 f'frame analysis (no pose trace) frames showing carton on {where}: ' + ', '.join(per), details)
 
 
 def check_carton_on_bay(run, model=None, camera=None):

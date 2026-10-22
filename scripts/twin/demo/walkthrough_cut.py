@@ -315,7 +315,7 @@ class Renderer:
         caption = E.CAPTIONS[stage]
         if uncoupled:
             caption = {'park': 'Parked at the transfer bay; tow hitch released (uncoupled at the parking spot)',
-                       'return': 'Uncoupled at the parking spot; returning to the dock without the cart'}.get(
+                       'return': 'Uncoupled at the cart parking spot; returning to the dock without the cart'}.get(
                 stage, caption + ' (cart uncoupled)')
         y = _text_block(d, (20, 48), caption, font(17), FG + (255,), SCENE_W - 40, 3)
         labels = self.plan.stage_labels(stage)
@@ -415,8 +415,7 @@ class Renderer:
             d.text((80, 156), 'Isaac Sim walkthrough · mobile UR10 + rollwagen', font=font(24), fill=DIM)
             d.text((80, 210), f'{run.name}', font=font(22, True), fill=ACCENT)
             y = 260
-            summary = ('Seven stages: collect -> couple -> outbound tow -> park & uncouple -> transfer -> '
-                       'verify -> return. The carton rides on the rollwagen deck from collect to transfer.')
+            summary = title_summary(self.model)
             y = _text_block(d, (80, y), summary, font(20), FG, W, 6) + 16
             labels = plan.labels
             if labels:
@@ -439,8 +438,8 @@ class Renderer:
             if shot.card == 'shortcut':
                 shortcut = run.mission.get('shortcut') or {}
                 text = (f'NOT PERFORMED IN THIS RUN: start-phase shortcut (start_at={shortcut.get("start_at")}). '
-                        'The simulator placed the carton on the rollwagen deck and posed the robot; this stage '
-                        'was synthesized, not actuated.')
+                        f'The simulator placed the carton on the rollwagen {E.support_name(self.model)} and posed '
+                        'the robot; this stage was synthesized, not actuated.')
                 _text_block(d, (80, y), text, font(22, True), AMBER, W, 6)
         elif shot.card == 'unreached':
             d.text((80, 200), 'Not reached in this run', font=font(36, True), fill=RED)
@@ -481,6 +480,12 @@ class Renderer:
 
 
 # ---------------- encoding ----------------
+def title_summary(model):
+    """The title card's one-paragraph mission summary (stage order + what the carton rides on)."""
+    return (f'Seven stages: {E.STAGE_FLOW}. The carton rides on the rollwagen {E.support_name(model)} '
+            'from collect to transfer.')
+
+
 def find_ffmpeg(explicit=None):
     for cand in (explicit, os.environ.get('FFMPEG'), shutil.which('ffmpeg')):
         if cand and Path(cand).is_file():

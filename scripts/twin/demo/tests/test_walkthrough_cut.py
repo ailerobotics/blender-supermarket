@@ -339,3 +339,35 @@ def test_bench_caption_and_staging_mode_labels(tmp_path):
     assert not any(t == 'start_at=transfer' for t in texts)       # said per stage, not twice
     check = _by_name(C.run_checks(run))['carton_on_cart']
     assert check.result == C.UNVERIFIED and 'synthesized' in check.evidence
+
+
+# ---------------- stage titles: the uncouple belongs to RETURN (preflight review L4) ----------------
+def test_uncouple_is_labelled_on_return_not_park():
+    """The robot stays coupled through park/transfer/verify and uncouples at the start of return at the
+    cart parking spot, so park never claims the uncouple; the seven-stage order and other labels stay."""
+    assert E.STAGES == ('collect', 'couple', 'outbound', 'park', 'transfer', 'verify', 'return')
+    assert E.TITLES == {'collect': 'Collect', 'couple': 'Couple', 'outbound': 'Outbound tow', 'park': 'Park',
+                        'transfer': 'Transfer', 'verify': 'Verify', 'return': 'Return & uncouple'}
+    assert 'uncouple' not in E.TITLES['park'].lower() and 'uncouple' not in E.CAPTIONS['park'].lower()
+    assert 'uncouple' in E.CAPTIONS['return'] and 'parking spot' in E.CAPTIONS['return']
+    flow = E.STAGE_FLOW
+    assert flow.index('park') < flow.index('transfer') < flow.index('verify') < flow.index('return')
+    assert '-> park ->' in flow and 'park &' not in flow
+    assert flow.endswith('return (uncouple at the cart parking spot)')
+
+
+def test_title_card_names_the_upper_shelf_from_the_scenario(tmp_path):
+    run = E.load_run(make_run(tmp_path))
+    model = E.cart_model(run)
+    assert model.support_z == pytest.approx(0.9325) and E.support_name(model) == 'upper shelf'
+    text = W.title_summary(model)
+    assert 'rollwagen upper shelf' in text and 'deck' not in text and 'park & uncouple' not in text
+    assert E.STAGE_FLOW in text
+    deck = E.CartModel(support_z=0.225)
+    assert E.support_name(deck) == 'deck' and 'rollwagen deck' in W.title_summary(deck)
+
+
+def test_carton_on_cart_check_names_the_support(tmp_path):
+    run = E.load_run(make_run(tmp_path, poses=True))
+    check = _by_name(C.run_checks(run))['carton_on_cart']
+    assert 'on upper shelf' in check.evidence and 'on deck' not in check.evidence
