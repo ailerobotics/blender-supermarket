@@ -288,6 +288,17 @@ repo's `scenes/`, `export/` or `renders/`.
   0.25 m above): `RESTOCK_SCRIPTED_TRANSFER_PLACE=front` (env, scripted only, default off) slides the carton
   in under the board instead of descending through it — task-space plan, still arm only; staging keys +
   CPU proof `scripts/check_front_transfer_staging.py`, `data/sim-video-story-sources-v1/report.md`.
+- **Load-aware arm gravity feedforward** (RUNTIME `arm_gravity_ff_loaded_carry`, default off ⇒
+  byte-identical): the executor LOADED pick settled `ur_shoulder_lift` ~0.098 rad short (execretest
+  `TRAJ_HOST_GOAL_MISS`) because the gravity FF in `physics_setup.apply` was evaluated at the COMMANDED
+  (goal) pose while the arm lagged at the measured pose AND the carried carton was absent from the FF mass
+  model — on the soft shoulder joint the ~1 Nm residual the two leave breaks the tight 0.010 rad goal tol
+  (each correction ALONE is worse; CPU torque balance in `data/sim-robust-executor-shoulder-sag-v1/report.md`).
+  On ⇒ evaluate robot gravity at the MEASURED arm config + add the held carton's gravity (payload mass from
+  scenario `handling_unit.mass_kg`, held-gated on `NativePanelContact.read`), driving net→0 so the arm REACHES
+  the goal; `trajectory_host` goal tol stays tight (pure `goal_reached`). Pure helpers `gravity_ff_effort` /
+  `build_payload_gravity`, CPU tests `tests/test_restock_shoulder_sag_ff.py`; GPU fragment
+  `docs/examples/shoulder-sag-ff-mission-fragment.json`.
 - **Rollwagen cage clearance** (sim-only workaround, RUNTIME config `cage_collision: "filtered"`, default
   off; `restock/cage_collision.py`): a FilteredPairsAPI on the carton against the 50 cage colliders (deck,
   upper shelf and drawbar still collide; rays and cuMotion untouched), labelled in mission.json and the

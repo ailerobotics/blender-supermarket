@@ -319,6 +319,58 @@ def build_arm_gravity(model, arm_names, link_masses):
     return grav
 
 
+def build_payload_gravity(model, arm_names, attach_link):
+    """Return ``payload_grav(q6, mass_kg) -> ndarray[6]``: the EXTRA generalized gravity torque a point
+    mass ``mass_kg`` carried at ``attach_link``'s frame origin adds to each arm joint (in ``arm_names``
+    order) at arm config ``q6``. The payload (a carried carton welded at the gripper) is downstream of
+    every arm joint, so the same cross-product as build_arm_gravity applies with the payload as the one
+    downstream mass: ``G_j = mass_kg * g . (axis_j x (p_attach - o_j))``. Pure (no Isaac); importable for
+    CPU test. ``mass_kg<=0`` or the link missing from FK => zeros."""
+    from twin import urdf_probe as up
+    jby = {j.name: j for j in model.joints}
+    g = np.asarray(_GRAVITY_VEC, float)
+
+    def payload_grav(q6, mass_kg):
+        if not mass_kg or mass_kg <= 0:
+            return np.zeros(6)
+        world = up.link_world_transforms(model, dict(zip(arm_names, [float(x) for x in q6])))
+        if attach_link not in world:
+            return np.zeros(6)
+        p = world[attach_link][:3, 3]
+        out = np.zeros(6)
+        for i, n in enumerate(arm_names):
+            oj, axw = _joint_world_frame(jby[n], world)
+            out[i] = float(mass_kg) * np.dot(g, np.cross(axw, p - oj))
+        return out
+
+    return payload_grav
+
+
+def gravity_ff_effort(grav_fn, q_commanded, q_measured, *, at_measured, ff_sign, ff_min_nm,
+                      payload_grav_fn=None, payload_kg=0.0, held=False):
+    """The joint-effort gravity feedforward vector (ndarray[6]), computed purely from the supplied
+    gravity functions. Isolated from Isaac so the sizing is CPU-testable.
+
+    Two load-aware refinements, both OFF by default (``at_measured=False`` + ``payload_kg=0`` =>
+    byte-identical to the legacy FF = ``where(|G(q_commanded)|>=min, sign*G, 0)``):
+
+    * ``at_measured``: evaluate the robot gravity at the MEASURED arm config, not the commanded one.
+      Gravity acts where the arm physically IS; the commanded config leads the measured one by the
+      tracking lag, and on a heavily gravity-loaded joint that over-compensation leaves a steady-state
+      offset (execretest shoulder_lift: FF anchored at the goal while the arm sat 0.098 rad short).
+    * payload: when ``held`` and ``payload_kg>0``, add the carried payload's gravity (the welded carton
+      the legacy ``_ISAAC_BODY_MASSES`` model omits) via ``payload_grav_fn(q_ff, payload_kg)``.
+
+    On execretest's soft shoulder_lift ONLY the two together drive the terminal net torque to ~0 (each
+    alone makes the offset worse); see data/sim-robust-executor-shoulder-sag-v1/report.md. The ``ff_min_nm``
+    threshold + ``ff_sign`` are applied to the combined robot+payload torque exactly as the legacy path."""
+    q_ff = q_measured if at_measured else q_commanded
+    g = np.asarray(grav_fn(q_ff), float)
+    if held and payload_kg and payload_kg > 0 and payload_grav_fn is not None:
+        g = g + np.asarray(payload_grav_fn(q_ff, payload_kg), float)
+    return np.where(np.abs(g) >= ff_min_nm, ff_sign * g, 0.0)
+
+
 def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     """Import actual mobile CAD, compose scratch USD and initialize drive control.
 
@@ -560,26 +612,70 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     _grav_fn=None
     try:
         from twin import urdf_probe as _up
-        _grav_fn=build_arm_gravity(_up.parse_urdf(str(urdf)),_arm_names,_ISAAC_BODY_MASSES)
+        _model=_up.parse_urdf(str(urdf))
+        _grav_fn=build_arm_gravity(_model,_arm_names,_ISAAC_BODY_MASSES)
     except Exception as exc:
         print(f'ARM_GRAVITY_FF_MODEL_UNAVAILABLE {exc}',flush=True)
         _grav_fn=None
+        _model=None
+    # Load-aware FF refinement (sim-robust-executor-shoulder-sag-v1, executor LOADED pick). OFF by default
+    # => byte-identical to the legacy FF (robot gravity at the COMMANDED pose, no payload). When
+    # arm_gravity_ff_loaded_carry is on, evaluate the robot gravity at the MEASURED arm config AND add the
+    # carried carton's gravity (gated on the gripper being held), which together drive the terminal net
+    # torque on the soft shoulder_lift to ~0 so the executor's loaded pick reaches its goal. execretest
+    # shoulder_lift settled 0.098 rad short because the FF was anchored at the goal while the arm lagged,
+    # and the 0.45 kg welded carton was omitted from the FF mass model; each correction ALONE is worse,
+    # only both together cancel (data/sim-robust-executor-shoulder-sag-v1/report.md). The payload mass
+    # defaults to the scenario's handling-unit mass; the attach frame defaults to the gripper pad tool.
+    _ff_loaded=bool(config.get('arm_gravity_ff_loaded_carry',False))
+    _ff_payload_link=str(config.get('arm_gravity_ff_payload_link','gripper_pad_tcp'))
+    try:
+        _ff_payload_kg=float(config.get('arm_gravity_ff_payload_kg',
+                                        scenario.get('handling_unit',{}).get('mass_kg',0.0)))
+    except Exception:
+        _ff_payload_kg=0.0
+    _payload_grav_fn=None
+    if _ff_loaded and _model is not None and _ff_payload_kg>0:
+        try:
+            _payload_grav_fn=build_payload_gravity(_model,_arm_names,_ff_payload_link)
+        except Exception as exc:
+            print(f'ARM_GRAVITY_FF_PAYLOAD_UNAVAILABLE {exc}',flush=True)
+            _payload_grav_fn=None
+    # Held-state gate for the payload term: set to contact.read (the mission's canonical gripper latch,
+    # which honours the shared stage weld) AFTER the contact is created below. None => not-held, so the
+    # payload term stays off (safe: a loaded-carry run with the carton welded reads held throughout).
+    _payload_held_holder={'fn':None}
+    if _ff_loaded:
+        print(f'ARM_GRAVITY_FF_LOADED at_measured=True payload_kg={_ff_payload_kg:.3f} '
+              f'payload_link={_ff_payload_link} (robot gravity at measured pose + held carton; '
+              f'off => legacy commanded-pose FF, no payload)',flush=True)
     def apply(q,v,indices):
         efforts=None
-        # fm356 option (A): gravity-comp feedforward computed ON CPU from the URDF + masses at the
-        # COMMANDED arm config q (q is aligned to indices==_arm_idx, i.e. arm_names order), feeding -G
-        # as joint effort. Replaces the broken Isaac gravity query (run-279 spurious +78.76 on the
-        # vertical pan; run-281 all-zeros). Threshold + sign unchanged. Fully guarded: any failure =>
+        # fm356 option (A): gravity-comp feedforward computed ON CPU from the URDF + masses, feeding -G as
+        # joint effort. Replaces the broken Isaac gravity query (run-279 spurious +78.76 on the vertical
+        # pan; run-281 all-zeros). Legacy path (load-aware off) evaluates G at the COMMANDED arm config q
+        # with no payload -- byte-identical. Threshold + sign unchanged. Fully guarded: any failure =>
         # efforts=None (clean position drive, exactly as the ff-off path). Per tick this is one FK pass
-        # + a dot-product sum over the arm's downstream links (cheap); no Isaac call.
+        # (two when the payload term is active) + a dot-product sum over the arm's downstream links; no
+        # Isaac gravity call. gravity_ff_effort holds the pose-selection + payload sizing (CPU-tested).
         if _grav_ff and _grav_fn is not None and list(indices)==list(_arm_idx):
             try:
-                g=np.asarray(_grav_fn(q),float)
-                efforts=np.where(np.abs(g)>=_ff_min_nm,_ff_sign*g,0.0)
+                q_meas=q
+                if _ff_loaded:
+                    try:
+                        q_meas=np.asarray(robot.get_joint_positions(joint_indices=_arm_idx),float)
+                    except Exception:
+                        q_meas=q   # measured read failed: fall back to commanded (never crash the FF)
+                _held=bool(_payload_held_holder['fn']()) if (_ff_loaded and _payload_held_holder['fn']) else False
+                efforts=gravity_ff_effort(_grav_fn,q,q_meas,at_measured=_ff_loaded,ff_sign=_ff_sign,
+                                          ff_min_nm=_ff_min_nm,payload_grav_fn=_payload_grav_fn,
+                                          payload_kg=_ff_payload_kg,held=_held)
                 if _ff_log[0]<3:
                     _ff_log[0]+=1
+                    g=np.asarray(_grav_fn(q_meas if _ff_loaded else q),float)
                     print(f'ARM_GRAVITY_FF names={_arm_names} '
                           f'g={np.array2string(g,precision=2,separator=",")} '
+                          f'held={_held} '
                           f'ff={np.array2string(efforts,precision=2,separator=",")}',flush=True)
             except Exception as exc:
                 if _ff_log[0]<1:
@@ -608,6 +704,11 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     from ..restock_manipulation.transfer_carry import weld_attach as _weld_attach
     contact=NativePanelContact(stage,'/RestockPanelGripper',
                                sim_attach_fallback=_weld_attach(config))
+    # Wire the load-aware FF payload term to the canonical gripper latch: the payload gravity is added
+    # only while the carton is actually held (contact.read() honours the shared stage weld). Off => the
+    # holder stays None => no payload term, so a run without arm_gravity_ff_loaded_carry is byte-identical.
+    if _ff_loaded:
+        _payload_held_holder['fn']=contact.read
     # Register native ROS/image graph nodes only after the final scene has
     # finished opening/resetting. A bridge loaded during import/reopen caused
     # a native image-graph crash in the installed Isaac5.1 stack.

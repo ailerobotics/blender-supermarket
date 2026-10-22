@@ -65,6 +65,11 @@ KEY_CONSUMER = {
     'arm_damping_abs': RUNTIME,
     'arm_max_effort': RUNTIME,
     'arm_gravity_ff': RUNTIME,
+    # sim-robust-executor-shoulder-sag-v1: load-aware gravity FF for the executor LOADED pick. All three
+    # are read by physics_setup.assemble (RUNTIME). Opt-in, default-off => byte-identical.
+    'arm_gravity_ff_loaded_carry': RUNTIME,
+    'arm_gravity_ff_payload_kg': RUNTIME,
+    'arm_gravity_ff_payload_link': RUNTIME,
     'stage_timeout_s': RUNTIME,
     'commissioning_dir': RUNTIME,
     # couple/outbound/park activation (fm356): the nav stack + mode that drive the post-collect stages
