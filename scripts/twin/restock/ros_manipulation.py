@@ -252,23 +252,38 @@ class RosManipulationRuntime:
                     # replies failed before suction engages) was invisible. stop() closes the arm feed.
                     print('MANIP_HOST_FAILED op=%s phase=%r reason=%r' % (
                         self.operation, self.latest.phase, self.latest.reason), flush=True)
-                    self.stop()
+                    # Per-op failure: hold safely but KEEP the station masked-depth feed alive so the
+                    # station ack stays fresh and the mission surfaces THIS reason, not a downstream
+                    # StationAckStreamStalled. The feed is torn down once, at mission teardown.
+                    self.stop(close_sensing=False)
             return self.latest
         except Exception as exc:
             print('MANIP_STEP_EXCEPTION op=%s %s: %s' % (
                 self.operation, type(exc).__name__, str(exc)[:200]), flush=True)
-            self.stop()
+            self.stop(close_sensing=False)
             self.latest = Result('failed','host',str(exc))
             return self.latest
 
-    def stop(self):
+    def stop(self, *, close_sensing=True):
+        """Safe halt: hold the gripper/graph and stop the parked station.
+
+        ``close_sensing`` gates tearing down the Isaac-side masked-depth publisher subprocess.
+        It MUST stay True for a genuine mission teardown (the external MissionRuntime.stop path),
+        which terminates the feed cleanly. It is False when a PER-OP manipulation failure halts the
+        stage (step()'s host-failed / exception handlers): the masked-depth feed is a STATION-level
+        resource the host incorporation-ack consumes, so killing it on a single failed transfer
+        froze the station ack stamp and faulted the mission with the misleading
+        StationAckStreamStalled -- masking the real stage reason ('collision planning or execution
+        failed', run-347/bench1/transfer2, 36/36 recorded deaths were this close(), rc=0, never an
+        OOM crash). Keeping the feed alive across a per-op failure lets the mission report the TRUE
+        reason and tear the feed down once, at the real end."""
         if self.station is not None:
             try:
                 self.station.stop()
             finally:
                 if self.feedback is not None:
                     self.feedback.collision_time = -1.
-        if self.sensing_bridge is not None and hasattr(self.sensing_bridge, 'close'):
+        if close_sensing and self.sensing_bridge is not None and hasattr(self.sensing_bridge, 'close'):
             try:
                 self.sensing_bridge.close()  # terminate the out-of-Isaac publisher subprocess
             except Exception:

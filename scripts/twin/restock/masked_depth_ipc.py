@@ -67,9 +67,18 @@ def read_frame(recv):
 
 
 class FrameWriter:
-    """Isaac-side client: connect to the subprocess socket and send masked-depth frames."""
+    """Isaac-side client: connect to the subprocess socket and send masked-depth frames.
 
-    def __init__(self, socket_path, *, connect_timeout_s=30.0, _sock=None):
+    ``send_buffer_bytes`` / ``send_timeout_s`` BOUND the client-side buffering so a stalled or
+    dead publisher cannot back the Isaac physics loop up without limit: SO_SNDBUF caps the kernel
+    send buffer and a send timeout turns an unbounded ``sendall`` block into a prompt OSError the
+    supervisor can act on (restart the feed) instead of wedging the tick. Both default to ``None``
+    (the legacy unbounded, blocking behaviour) so existing callers/tests are byte-identical; the
+    bridge opts into a bound.
+    """
+
+    def __init__(self, socket_path, *, connect_timeout_s=30.0, send_buffer_bytes=None,
+                 send_timeout_s=None, _sock=None):
         self.socket_path = socket_path
         if _sock is not None:
             self.sock = _sock
@@ -80,6 +89,10 @@ class FrameWriter:
         while time.monotonic() < deadline:
             try:
                 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                if send_buffer_bytes:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, int(send_buffer_bytes))
+                if send_timeout_s:
+                    s.settimeout(float(send_timeout_s))
                 s.connect(socket_path)
                 self.sock = s
                 return
@@ -96,6 +109,92 @@ class FrameWriter:
             self.sock.close()
         except OSError:
             pass
+
+
+class SubprocessSupervisor:
+    """Keep a masked-depth publisher subprocess alive across an UNEXPECTED exit.
+
+    The Isaac-side bridge ships frames to an out-of-Isaac rclpy publisher over a Unix socket
+    (:class:`FrameWriter` -> :func:`serve`). A publisher that dies mid-mission -- a genuine crash
+    (e.g. VRAM pressure), a broken pipe, or any non-``close()`` exit -- silently stops the host
+    nvblox/incorporation-ack stream, which freezes the station ack stamp and faults the mission
+    with the misleading ``StationAckStreamStalled`` (masking the real stage reason). This
+    supervisor detects the death on the NEXT :meth:`send` and respawns the subprocess +
+    reconnects the writer, bounded by ``max_restarts``, so the feed self-heals WITHIN the station
+    ack's freshness window (stage-clock seconds; under render pacing a sub-second wall respawn is
+    well inside it) instead of starving it. A death caused by our own :meth:`close` never restarts
+    (``_closed`` latches).
+
+    ``spawn()`` is the one injected seam: it (re)launches the publisher and returns
+    ``(proc, writer)`` where ``proc`` exposes ``poll()``/``returncode``/``terminate()``/``kill()``/
+    ``wait()`` (a ``subprocess.Popen``) and ``writer`` exposes ``send(header, depth)``/``close()``
+    (a :class:`FrameWriter`). Keeping the spawn out of this class makes the whole restart policy
+    CPU-testable with fakes -- no Isaac process, no real socket.
+    """
+
+    def __init__(self, spawn, *, feed='camera_0_arm', max_restarts=20, log=print):
+        self._spawn = spawn
+        self.feed = feed
+        self.max_restarts = int(max_restarts)
+        self._log = log
+        self._closed = False
+        self.restarts = 0
+        self.proc, self.writer = spawn()
+
+    def send(self, header, depth_bytes):
+        """Ship one frame, respawning first if the publisher exited since the last send.
+
+        Raises only when the feed is genuinely exhausted (restart budget spent) or already
+        closed -- so the caller's existing failure handling still applies -- while a transient
+        crash is healed silently (one frame may be lost, never the whole feed)."""
+        if self._closed:
+            raise RuntimeError('masked-depth supervisor is closed')
+        if self.proc.poll() is not None:
+            self._restart('writer_exit rc=%s' % self.proc.returncode)
+        try:
+            self.writer.send(header, depth_bytes)
+        except (BrokenPipeError, ConnectionError, OSError) as exc:
+            # The peer died between the poll above and this send; restart once and retry so a
+            # single lost frame does not become a dead feed. A second failure propagates.
+            self._restart('send_error %s' % type(exc).__name__)
+            self.writer.send(header, depth_bytes)
+
+    def _restart(self, why):
+        if self.restarts >= self.max_restarts:
+            raise RuntimeError('masked-depth publisher exhausted restart budget (%d) after %s'
+                               % (self.max_restarts, why))
+        self.restarts += 1
+        self._log('MASKED_DEPTH_BRIDGE_RESTART feed=%s attempt=%d/%d why=%s'
+                  % (self.feed, self.restarts, self.max_restarts, why))
+        self._reap()
+        self.proc, self.writer = self._spawn()
+
+    def _reap(self):
+        """Close the old writer and terminate the old subprocess (best-effort, never raises)."""
+        try:
+            self.writer.close()
+        except Exception:
+            pass
+        try:
+            if self.proc.poll() is None:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=5)
+                except Exception:
+                    self.proc.kill()
+        except Exception:
+            pass
+
+    def close(self):
+        self._closed = True
+        self._reap()
+
+    def poll(self):
+        return self.proc.poll()
+
+    @property
+    def returncode(self):
+        return self.proc.returncode
 
 
 def serve(socket_path, *, idle_timeout_s=600.0, depth_topic=WRIST_DEPTH_TOPIC,

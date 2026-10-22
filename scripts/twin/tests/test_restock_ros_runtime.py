@@ -102,6 +102,30 @@ def test_mission_wrapper_chain_resolves_every_probed_method_fm400():
     assert inner._base_repositioned is True                        # arrival latched for the next host packet
 
 
+def test_per_op_host_failure_keeps_sensing_feed_alive_but_teardown_closes_it():
+    # transfer2 / bench1 (36/36 recorded arm-feed deaths, all writer_eof rc=0): a PER-OP transfer
+    # host 'failed' must HOLD the gripper but NOT tear down the station masked-depth feed -- closing
+    # it froze the station ack stamp -> StationAckStreamStalled, masking the true reason. The feed is
+    # closed exactly once, at the real mission teardown (the external stop()).
+    events = []
+    bridge = NS(close=lambda: events.append('bridge_close'), target_location=None,
+                publish=lambda now: events.append('publish'))
+    station = NS(stop=lambda: events.append('station_stop'), heartbeat=lambda: None)
+    graph = NS(start=lambda *a: None, publish_sensors=lambda s: None,
+               poll=lambda *a: dict(status='failed', phase='plan',
+                                    reason='collision planning or execution failed'),
+               close=lambda: events.append('hold'))
+    rt = RosManipulationRuntime(graph, lambda *a: None, prepare_station=lambda *a: None,
+                                sensing_bridge=bridge, station=station)
+    rt.start('transfer', dict(job_id='j', source_bin='b', shelf_id='G3'))
+    r = rt.step(.01, 1.0)
+    assert r.status == 'failed' and r.reason == 'collision planning or execution failed'
+    assert 'hold' in events and 'station_stop' in events     # gripper held + station stopped
+    assert 'bridge_close' not in events                      # the station feed SURVIVED the per-op failure
+    rt.stop()                                                # mission teardown DOES close it, once
+    assert events.count('bridge_close') == 1
+
+
 def test_set_base_repositioned_stamps_published_sensor_packet_fm400():
     # fm400 handshake, Isaac side: once the adapter signals arrival, the next published sensor packet
     # carries base_repositioned=True across the ROS boundary (the host controller reads it from Sensors).
