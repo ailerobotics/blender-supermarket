@@ -687,5 +687,62 @@ class RosHostLaunchWiring(unittest.TestCase):
             self.assertIn(location, cfg['walls'])
 
 
+class IncorporationAckLivenessOrderingTest(unittest.TestCase):
+    """sim-robust-collect-place-v1: the host tick() now publishes the station liveness ack BEFORE its
+    ESDF-service maintenance, so a cuMotion replan storm saturating the shared get_esdf_and_gradient
+    during a long place press cannot delay the heartbeat (collectsrc 30 s station-heartbeat gap). The
+    reorder is correct iff these pure-state invariants hold: the liveness snapshot is computable WITHOUT
+    a fresh integration, a stale/contended ESDF leaves a LIVE (non-failed) heartbeat, and readiness
+    still advances ONLY through a real integration -- so a genuinely dead host is never masked."""
+
+    def prepared(self):
+        from twin.restock_host.incorporation_ack import IncorporationAckState
+        clock = [100.0]
+        st = IncorporationAckState(wall_clock=lambda: clock[0])
+        self.assertEqual(st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=10.0,
+                                        parked=True, camera_frame='restock_camera_collect'), 10.0), 'prepare')
+        return st, clock
+
+    def test_liveness_heartbeat_without_any_integration(self):
+        # No ESDF result consumed yet (the maintenance runs AFTER publish): the snapshot is still a live,
+        # fresh-stamped heartbeat -- active, warming, not failed -- so the mission keeps seeing the host.
+        st, _ = self.prepared()
+        snap = st.snapshot(10.1, endpoints_ready=True, process_alive=True)
+        self.assertEqual(snap['state'], 'warming')
+        self.assertEqual(snap['reason'], '')
+        self.assertAlmostEqual(snap['stamp'], 10.1)      # advancing stamp == a live heartbeat
+        self.assertEqual(snap['collision_time'], -1.)    # but readiness withheld (no real integration)
+
+    def test_stale_integration_keeps_heartbeat_but_not_ready(self):
+        # A planner-contended ESDF means the last integration is now stale (> 0.5 s old). Readiness drops
+        # (collision_time withheld) but the station STILL heartbeats (not failed): the press does not
+        # starve liveness. Heartbeat gaps (sim/wall) stay within budget here, so no fault.
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        st.accept(dict(action='heartbeat', epoch=1, sequence=1, stamp=10.9, parked=True), 10.9)
+        snap = st.snapshot(11.0, endpoints_ready=True, process_alive=True)   # now - collision_time = 0.8 > 0.5
+        self.assertNotEqual(snap['state'], 'failed')     # heartbeat alive through a stale/contended ESDF
+        self.assertEqual(snap['state'], 'warming')
+        self.assertEqual(snap['collision_time'], -1.)    # not ready: the stale integration is withheld
+
+    def test_readiness_only_from_a_real_fresh_integration(self):
+        # No faking: ready requires a real integration stamp strictly after parked_since AND fresh.
+        st, _ = self.prepared()
+        snap = st.snapshot(10.1, endpoints_ready=True, process_alive=True)
+        self.assertNotEqual(snap['state'], 'ready')
+        st.acknowledge(10.2, 1)
+        snap = st.snapshot(10.3, endpoints_ready=True, process_alive=True)
+        self.assertEqual(snap['state'], 'ready')
+        self.assertAlmostEqual(snap['collision_time'], 10.2)
+
+    def test_dead_process_still_goes_silent_not_masked(self):
+        # The reorder must not mask a real death: process_alive False still faults 'station process lost'.
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        snap = st.snapshot(10.3, endpoints_ready=True, process_alive=False)
+        self.assertEqual(snap['state'], 'failed')
+        self.assertEqual(snap['reason'], 'station process lost')
+
+
 if __name__ == '__main__':
     unittest.main()

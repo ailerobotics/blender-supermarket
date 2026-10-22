@@ -93,6 +93,16 @@ repo's `scenes/`, `export/` or `renders/`.
   `_capture_transfer` stamp `now + 300` themselves (fm488). Pinned by
   `tests/test_collect_target_bridge.py`. Cold GT-collect proof + switch keys:
   `data/sim-video-collect-arm-v1/report.md`.
+  **Place-on-cart GPU/heartbeat bound**: an unplannable cart-place goal (self-colliding IK branch,
+  `'Invalid c-space position: self collision detected'`) used to churn the full `REPLAN_MAX`
+  same-goal replans and OOM the 12 GB card (`cumotion::FatalException`, `cuda_array.cu`) / starve the
+  shared `get_esdf_and_gradient` service into a 30 s station-heartbeat gap. `ros_adapter.py` now caps
+  total cuMotion plan dispatches per move (`PLAN_TOTAL_ATTEMPTS_CAP`/`RESTOCK_PLAN_ATTEMPTS_CAP`=10)
+  and shortens the joint-space same-goal replan budget (`REPLAN_MAX_JOINT_SPACE`/
+  `RESTOCK_REPLAN_MAX_JOINT_SPACE`=3) so a self-colliding target advances to the next IK branch fast;
+  `restock_host/incorporation_ack.py` publishes the station liveness ack BEFORE its ESDF maintenance
+  so a plan storm can't starve the heartbeat (readiness still gated on a real integration). Report +
+  the collect+couple validation env: `data/sim-robust-collect-place-v1/report.md`.
 - **Tray/slot fit preflight** (opt-in, default-off): `restock/fit_preflight.py` refuses a
   handling unit that will not fit the destination slot BEFORE reserving stock or booting
   Isaac, instead of failing opaquely at place. `fit = ok | wont_fit | unknown` from a

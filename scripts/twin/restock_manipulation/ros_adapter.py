@@ -40,6 +40,17 @@ def sim_execute_budget(duration, scale=None):
 # seed-variant base/plate collision (INVALID_MOTION_PLAN, run-129/134 ~half of seeds) into a
 # near-certain pass at ~1 s of planning per retry (firstmate standing-authority lever).
 REPLAN_MAX = 12
+# Same-goal re-plan budget for a JOINT-SPACE (cart PLACE / fixed-shape) goal. Re-sending an IDENTICAL
+# joint-constraint target draws a fresh stochastic cuMotion seed, which recovers a seed-variant
+# base/plate clip -- BUT a joint target that is itself in SELF-COLLISION (the place pose IK landed on a
+# ur_wrist_2-vs-forearm branch: 'Invalid c-space position: self collision detected', collectsrc
+# place-on-cart) is rejected deterministically on every re-plan, so burning all REPLAN_MAX on it only
+# hammers the GPU before the port finally tries the NEXT IK SEED -- a DIFFERENT branch, the only thing
+# that can clear a self-colliding target. Keep joint-space same-goal re-plans small so the port advances
+# to the next seed/branch fast (both bounding GPU churn AND giving the place a real chance on another
+# branch); pose goals keep the full REPLAN_MAX. Env-overridable; clamped to [0, REPLAN_MAX]. Only affects
+# a move that is ALREADY being rejected (a healthy move plans in one), so healthy runs are unchanged.
+REPLAN_MAX_JOINT_SPACE = max(0, min(REPLAN_MAX, int(os.environ.get('RESTOCK_REPLAN_MAX_JOINT_SPACE', 3))))
 # RESTOCK_TRANSFER_CARRY=wrist_guard: wrist-flipped IK re-seeds per move before falling back to the plain
 # seed list (each costs one ~2 s KDL call); bounded so two IK branches cannot ping-pong forever.
 WRIST_FLIP_MAX = 3
@@ -64,6 +75,18 @@ RESPAWN_WAIT_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_RESPAWN_W
 # fast. Legit stochastic retries succeed in ~1 s each and never approach this.
 MOVE_WALL_TIMEOUT_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_MOVE_WALL_TIMEOUT_S', 25.0))))  # fm362: the ik/plan-accept WALL deadline default
 PLAN_TOTAL_WALL_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_PLAN_WALL_CAP_S', 22.0))))  # fm362 sim-only env widen
+# Hard COUNT cap on the TOTAL cuMotion plan dispatches for a single move (same-goal re-plans AND IK-seed
+# fallbacks AND crash-retry re-sends). The 12 GB GPU (the always-on whispr service holds ~2.2 GB) OOMs
+# cuMotion (FatalException, cuda_array.cu) after ~13 back-to-back plans against an unplannable place goal:
+# each plan re-requests the nvblox ESDF and allocates on-device, so an unplannable goal churned the whole
+# REPLAN_MAX x seeds budget into a CUDA out-of-memory (collectsrc place-on-cart) AND saturated the shared
+# get_esdf_and_gradient service, starving the host station-supervisor's ESDF poll so its acks froze and
+# the mission saw a 30 s station-heartbeat gap -> e-stop. The PLAN_TOTAL_WALL_CAP_S above is time-based and
+# 12 plans tipped the card in ~6 s, well under it, so a COUNT cap is the direct GPU bound. A healthy move
+# plans in one and a legit stochastic retry passes in 2-4, so a cap below the observed OOM count surfaces
+# an unplannable move as a CLEAN bounded 'planning failed' before the card OOMs -- never a lost GPU run.
+# Env-overridable; clamped. Default 10 is below the ~13 OOM count with margin and far above any healthy move.
+PLAN_TOTAL_ATTEMPTS_CAP = max(2, min(64, int(os.environ.get('RESTOCK_PLAN_ATTEMPTS_CAP', 10))))
 # fm364/run-293: host /sensors stream wall backstop (RosTransferBridge default). Sim-only env widen;
 # default 30 = byte-identical real-rig. The long carton-loaded collect's held sensing starves the
 # stream past 30 s wall -> sim sets 180.
@@ -103,10 +126,27 @@ def env_wins(env_var, passed, module_default):
 GOAL_POSITION_TOL_DEFAULT = 0.01
 
 
-def _should_replan(replan_attempts, has_plan_goal):
-    """On a MoveIt plan rejection, re-plan the SAME goal (a fresh stochastic cuMotion seed) up to
-    REPLAN_MAX times before falling back to the next IK seed / failing. Pure for CPU testing."""
-    return replan_attempts < REPLAN_MAX and has_plan_goal
+def _replan_budget(joint_space):
+    """Same-goal re-plan budget by goal type: tighter for a joint-space goal (a self-colliding joint
+    target is rejected deterministically every re-plan, so fall through to the next IK seed/branch fast)
+    than for a pose goal (whose rejections are stochastic seed-variant collisions a re-plan clears).
+    Pure for CPU testing."""
+    return REPLAN_MAX_JOINT_SPACE if joint_space else REPLAN_MAX
+
+
+def _should_replan(replan_attempts, has_plan_goal, joint_space=False):
+    """On a MoveIt plan rejection, re-plan the SAME goal (a fresh stochastic cuMotion seed) up to the
+    goal-type budget (``_replan_budget``) before falling back to the next IK seed / failing. Pure for
+    CPU testing. joint_space defaults False so existing callers/tests keep the REPLAN_MAX behaviour."""
+    return replan_attempts < _replan_budget(joint_space) and has_plan_goal
+
+
+def _plan_attempts_exhausted(plan_dispatches):
+    """Hard GPU backstop (``PLAN_TOTAL_ATTEMPTS_CAP``): True once a single move has dispatched that many
+    cuMotion plans (across re-plans, seeds and crash-retries), so an unplannable goal fails cleanly and
+    bounded before the 12 GB card OOMs and before the shared ESDF service is starved into a station-
+    heartbeat gap. Pure for CPU testing."""
+    return plan_dispatches >= PLAN_TOTAL_ATTEMPTS_CAP
 
 
 def _should_crash_retry(crash_retries, has_plan_goal):
@@ -358,6 +398,12 @@ class RosMotionPort:
         self._server_crash_retries = 0     # move_group-respawn re-send budget (see MOVE_GROUP_CRASH_RETRY_MAX)
         self._awaiting_server_respawn = False  # True while holding the move open for a respawned move_group
         self._plan_goal = None             # the MoveGroup goal to re-send on a plan rejection
+        self._plan_dispatches = 0          # total cuMotion plan dispatches this move (see PLAN_TOTAL_ATTEMPTS_CAP)
+        # Goal type for the re-plan budget: pose goals re-plan REPLAN_MAX times (stochastic seed recovery),
+        # joint-space goals only REPLAN_MAX_JOINT_SPACE (a self-colliding joint target is deterministic ->
+        # advance to the next seed/branch fast). Default False here; the KDL -> joint-space path (_poll)
+        # sets it True when it builds the joint-constraint goal. The pose path below keeps it False.
+        self._plan_goal_joint_space = False
         self._plan_started_wall = time.monotonic()   # total planning-wall cap anchor (see PLAN_TOTAL_WALL_CAP_S)
         # Straight-line contact descent (firstmate run-191). The contact move is BY DEFINITION a short
         # straight descent INTO the target carton, so a collision planner that still holds the carton
@@ -610,6 +656,12 @@ class RosMotionPort:
         return goal
 
     def _send(self, client, goal, state):
+        # Count every cuMotion plan DISPATCH for this move (plan action only, not ik/execute), so the
+        # hard GPU backstop (_plan_attempts_exhausted / PLAN_TOTAL_ATTEMPTS_CAP) bounds the total plans a
+        # single move can throw at the 12 GB card -- re-plans, seed fallbacks and crash-retries all land
+        # here. Reset per move in begin()/begin_joint_goal().
+        if client is self.plan and state == 'plan_accept':
+            self._plan_dispatches = getattr(self, '_plan_dispatches', 0) + 1
         generation = self.generation
         future = client.send_goal_async(goal)
         # If cancellation races goal acceptance, cancel the late handle too.
@@ -655,6 +707,8 @@ class RosMotionPort:
         self._server_crash_retries=0
         self._awaiting_server_respawn=False
         self._plan_goal=None
+        self._plan_dispatches=0            # total cuMotion plan dispatches this move (PLAN_TOTAL_ATTEMPTS_CAP)
+        self._plan_goal_joint_space=True   # a fixed joint-constraint goal -> tighter same-goal re-plan budget
         self._straight_line=False
         self._plan_started_wall=time.monotonic()
         goal=MoveGroup.Goal()
@@ -1079,6 +1133,7 @@ class RosMotionPort:
             req.goal_constraints = [constraints]
             goal.planning_options.plan_only = True
             self._plan_goal = goal          # remember for a fresh-seed re-plan on rejection
+            self._plan_goal_joint_space = True  # joint-constraint target -> tighter same-goal re-plan budget
             self._send(self.plan, goal, 'plan_accept')
         elif self.state in ('plan_accept', 'execute_accept'):
             if not result or not result.accepted:
@@ -1097,7 +1152,16 @@ class RosMotionPort:
                 # retrying (seed/replan) and surface a clean motion failure before the /sensors backstop.
                 if time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic()) > getattr(self, 'plan_wall_cap_s', PLAN_TOTAL_WALL_CAP_S):
                     raise RuntimeError('planning failed (exhausted within wall cap)')
-                if _should_replan(self._replan_attempts, getattr(self, '_plan_goal', None) is not None):
+                # Hard GPU backstop: once this move has dispatched PLAN_TOTAL_ATTEMPTS_CAP cuMotion plans,
+                # stop -- an unplannable goal (e.g. a self-colliding cart-place branch) would otherwise churn
+                # the whole re-plan x seed budget and OOM the 12 GB card / starve the ESDF service into a
+                # station-heartbeat gap (collectsrc). Surfaces a clean, bounded motion failure instead.
+                if _plan_attempts_exhausted(getattr(self, '_plan_dispatches', 0)):
+                    print('PLAN_ATTEMPTS_CAP dispatches=%d cap=%d state=plan_result -> fail fast (bounded GPU)'
+                          % (getattr(self, '_plan_dispatches', 0), PLAN_TOTAL_ATTEMPTS_CAP), flush=True)
+                    raise RuntimeError('planning failed (plan attempt cap)')
+                if _should_replan(self._replan_attempts, getattr(self, '_plan_goal', None) is not None,
+                                  getattr(self, '_plan_goal_joint_space', False)):
                     self._replan_attempts += 1
                     self.deadline_clock = time.monotonic
                     self.deadline = time.monotonic() + self.timeout   # fresh planning budget per retry
