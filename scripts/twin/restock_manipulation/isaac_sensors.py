@@ -364,6 +364,15 @@ class IsaacCartonSensors:
             if (np.asarray(slot.label_mask).dtype != bool or np.shape(slot.label_mask) != depth.shape):
                 raise ValueError('separate registered label mask required')
         marker_ids = {marker for s in self.slots for marker in s.support_view.registration.marker_ids}
+        # fm466: a support carries TWO printed registration markers (support:<station>:0/1), but the
+        # baseline only registers the markers that cleanly decoded AT COMMISSION TIME -- so a support
+        # whose auxiliary marker was marginal when commissioned (e.g. at a dimmer commissioning
+        # intensity_scale) stores only the primary in marker_ids. Once the mission lights brighter the
+        # auxiliary decodes robustly and, under the all-support label search mask, lands in a calibrated
+        # slot: it is neither in marker_ids nor a SKU profile, so it tripped 'unknown or undecoded label
+        # in calibrated slot' (run-343). A decoded code in the reserved `support:` namespace is ALWAYS a
+        # registration marker, never inventory, so skip it regardless of which subset the baseline
+        # registered -- support identity never becomes a SKU (the invariant line 384 already asserts).
         qr = context.qr_observation
         if qr is None and reuse:
             qr = self._reuse_qr  # directly-decoded frame (no shared context) re-presented under stride
@@ -380,7 +389,7 @@ class IsaacCartonSensors:
         candidates = [(d.text,np.asarray(d.corners)) for d in qr.detections]
         candidates.extend(('',np.asarray(p)) for p in qr.unreadable_corners)
         for index, (code, polygon) in enumerate(candidates):
-            if code in marker_ids:
+            if code in marker_ids or (isinstance(code, str) and code.startswith('support:')):
                 continue  # support identity never becomes inventory/SKU
             centre = np.mean(polygon, axis=0)
             ui,vi = np.rint(centre).astype(int)

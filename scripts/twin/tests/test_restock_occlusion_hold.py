@@ -199,15 +199,16 @@ def _source_rig(tmp_path, window=20.):
     return isaac_sensors, adapter, camera, motion, NS(read=lambda: False), (k, witness, frame, camera_pose)
 
 
-def _frame_with_unknown_label(frame, k, camera_pose, *, frame_id, stamp):
+def _frame_with_unknown_label(frame, k, camera_pose, *, frame_id, stamp, text='mystery-sku'):
     """Paint an extra QR for a SKU that is not in the profiles at the slot centre: it lands in the
     calibrated slot's label mask and decodes as an unknown (or undecoded) label -> capture's
     'unknown or undecoded label in calibrated slot' site (isaac_sensors.py). The deck support
-    markers stay where they are, so the support still registers."""
+    markers stay where they are, so the support still registers. ``text`` overrides the painted code
+    (e.g. an unregistered 'support:...' marker, which fm466 must skip rather than refuse)."""
     import cv2
     from .test_restock_commissioning import quad, pix
     gray = frame['rgb'][:,:,0].copy()
-    code = cv2.copyMakeBorder(cv2.QRCodeEncoder_create().encode('mystery-sku'),4,4,4,4,cv2.BORDER_CONSTANT,value=255)
+    code = cv2.copyMakeBorder(cv2.QRCodeEncoder_create().encode(text),4,4,4,4,cv2.BORDER_CONSTANT,value=255)
     code = cv2.resize(code,(220,220),interpolation=cv2.INTER_NEAREST)
     _,corners,_ = cv2.QRCodeDetector().detectAndDecode(code)
     dest = pix(quad([0,0,.2],[.12,.12]),k,camera_pose)
@@ -278,6 +279,34 @@ def test_undecoded_label_refused_without_a_prior_clean_read(tmp_path, monkeypatc
     motion.collision_time = 1.10
     with pytest.raises(ValueError, match='unknown or undecoded'):
         adapter.capture(1.10, 'backstock_00', 'backstock_00', motion, contact)
+
+
+def test_unregistered_support_marker_in_slot_is_skipped_not_refused(tmp_path, monkeypatch):
+    """fm466: a support's AUXILIARY registration marker (support:source:1) that the baseline did not
+    register (it was marginal at a dimmer commission scale) decodes in the mission and lands in the
+    calibrated slot's all-support label mask. A code in the reserved 'support:' namespace is a
+    registration marker, never inventory, so capture must SKIP it -- NOT raise 'unknown or undecoded
+    label in calibrated slot' as a genuine mystery SKU would (run-343 cold-collect trip). Inject the
+    extra decoded marker through the decoder (a synthetic warp cannot render a cleanly decodable extra
+    QR) so the candidate carries a real decoded 'support:*' text at the slot centre."""
+    from dataclasses import replace
+    from .test_restock_manipulation import FixturePoseBridge
+    from scripts.twin.restock_camera.qr import FixedTileQR, QRDetection
+    from .test_restock_commissioning import quad, pix
+    monkeypatch.setattr('scripts.twin.restock_manipulation.isaac_sensors.load_pose_bridge',
+                        lambda root: FixturePoseBridge())
+    _, adapter, camera, motion, contact, (k, witness, frame, camera_pose) = _source_rig(tmp_path)
+    corners = tuple(map(tuple, pix(quad([0, 0, .2], [.06, .06]), k, camera_pose)))
+
+    class _Injecting:   # the real tiled decode (registers support:a/support:b) + an extra decoded marker
+        def __init__(self): self.real = FixedTileQR('source')
+        def decode(self, rgb, evidence, *, now, parked, roi=None):
+            q = self.real.decode(rgb, evidence, now=now, parked=parked, roi=roi)
+            return replace(q, detections=q.detections + (QRDetection('support:c', corners),))
+    adapter.decoder = _Injecting()
+    # First ever frame (no prior clean read): a genuine unknown SKU would strictly refuse here; the
+    # unregistered 'support:' marker must be skipped instead, so the capture completes without the raise.
+    adapter.capture(1.00, 'backstock_00', 'backstock_00', motion, contact)   # no 'unknown or undecoded'
 
 
 def test_undecoded_label_refused_once_the_window_expires(tmp_path, monkeypatch):
