@@ -369,17 +369,22 @@ repo's `scenes/`, `export/` or `renders/`.
   0.25 m above): `RESTOCK_SCRIPTED_TRANSFER_PLACE=front` (env, scripted only, default off) slides the carton
   in under the board instead of descending through it — task-space plan, still arm only; staging keys +
   CPU proof `scripts/check_front_transfer_staging.py`, `data/sim-video-story-sources-v1/report.md`.
-- **Load-aware arm gravity feedforward** (RUNTIME `arm_gravity_ff_loaded_carry`, default off ⇒
-  byte-identical): the executor LOADED pick settled `ur_shoulder_lift` ~0.098 rad short (execretest
-  `TRAJ_HOST_GOAL_MISS`) because the gravity FF in `physics_setup.apply` was evaluated at the COMMANDED
-  (goal) pose while the arm lagged at the measured pose AND the carried carton was absent from the FF mass
-  model — on the soft shoulder joint the ~1 Nm residual the two leave breaks the tight 0.010 rad goal tol
-  (each correction ALONE is worse; CPU torque balance in `data/sim-robust-executor-shoulder-sag-v1/report.md`).
-  On ⇒ evaluate robot gravity at the MEASURED arm config + add the held carton's gravity (payload mass from
-  scenario `handling_unit.mass_kg`, held-gated on `NativePanelContact.read`), driving net→0 so the arm REACHES
-  the goal; `trajectory_host` goal tol stays tight (pure `goal_reached`). Pure helpers `gravity_ff_effort` /
-  `build_payload_gravity`, CPU tests `tests/test_restock_shoulder_sag_ff.py`; GPU fragment
-  `docs/examples/shoulder-sag-ff-mission-fragment.json`.
+- **Executor LOADED-pick `ur_shoulder_lift` ~0.10 rad miss is NOT a gravity sag** (sim-robust-executor-
+  shoulder-drive-v1, CORRECTS the PR218 premise). CPU static balance on the run URDF: true gravity on
+  shoulder_lift at the stall pose ≈125 Nm, far under the 400 Nm drive force limit (`Kp=3e5`, `max_effort=400`
+  readback), so the drive has ample authority and a gravity droop would be ~4e-4 rad — the miss is
+  feedforward-INDEPENDENT (execff 0.1002 with `arm_gravity_ff_loaded_carry` on vs 0.0981 off). The joint
+  FREEZES because the scripted side-grip pick physically jams ~40 mm short of the carton (min pad→carton gap
+  39.8 mm, 5.3° off flush vs the 3 mm/2° weld gate; `extract_m` 0.306 vs 0.46) — an unmodeled collision, so
+  NO FF/stiffness/tolerance on shoulder_lift makes it grasp (a bounded tol = a false-green pick that cannot
+  weld). `trajectory_host.classify_goal_miss` now NAMES this ("pick physically blocked: <joint> frozen … not
+  gravity sag", + gap/flush when the optional `/restock_sim/arm_controller/pick_surface` feed supplies them)
+  instead of the generic goal-miss. The real pick-reach fix is the transfer-fallback lane's (side-grip
+  geometry) or `RESTOCK_TRANSFER_MODE=live_pose`. Report `data/sim-robust-executor-shoulder-drive-v1/report.md`,
+  tests `tests/test_restock_trajectory_host.py`. The opt-in `arm_gravity_ff_loaded_carry` FF (measured-pose
+  robot gravity + held carton via `gravity_ff_effort`/`build_payload_gravity`) stays available, default off ⇒
+  byte-identical, but it does NOT close this miss; `tests/test_restock_shoulder_sag_ff.py` now asserts the
+  honest "not gravity sag" balance (PR218's fitted `J*Kp≈10 Nm/rad` reproduction was removed).
 - **Rollwagen cage clearance** (sim-only workaround, RUNTIME config `cage_collision: "filtered"`, default
   off; `restock/cage_collision.py`): a FilteredPairsAPI on the carton against the 50 cage colliders (deck,
   upper shelf and drawbar still collide; rays and cuMotion untouched), labelled in mission.json and the
