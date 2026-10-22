@@ -498,6 +498,14 @@ repo's `scenes/`, `export/` or `renders/`.
   black). Encodes with `restock.recording.Recorder` (or an in-memory rawvideo→ffmpeg stream
   when disk is tight). CPU tests: `scripts/twin/demo/tests/`; design + choreographed-vs-measured
   split: `~/firstmate/data/sim-demo-video-v1/report.md`.
+  **Running `run_demo_gpu.py`**: use the `env_isaaclab` python (system `python3` has no
+  `isaacsim`) under the ROS isolation the guard enforces (`ROS_DOMAIN_ID=88 ROS_LOCALHOST_ONLY=1
+  ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`; the box defaults to `SUBNET`). `--frame-start/--frame-end`
+  renders ONE stage/segment as a compilation source (outbound = global frames 460–739 at fps 10).
+  The OUTBOUND choreography must leave the backroom through the `sales_backroom_portal`
+  (centre x=−3.875, 2.5 m opening at y=11.125; `store_environment.py`), NOT the solid wall —
+  pinned by `scripts/twin/demo/tests/test_door_path.py` (base/cart footprint vs wall/door,
+  articulation < 55°).
 - **Real-mission demo cut + run checker** (CPU, only READS the run dir; RUNBOOK §20):
   `scripts/make_walkthrough_cut.py` turns a run's `mission-frames/` + `nav-trace.jsonl` +
   `mission.json` into the captioned, time-lapsed `walkthrough-demo.mp4`, labelling every
