@@ -169,6 +169,15 @@ repo's `scenes/`, `export/` or `renders/`.
   CPU dry-run through the real BT/`Mission`/`RuntimeAdapter`: `scripts/check_mission_tail.py`
   (RUNBOOK §21, guarded by `test_restock_mission_tail.py`); the labelled ground-truth verify switch
   and the reachable return poses are in `docs/examples/mission-tail-fragment.json`.
+- **Transfer workaround modes** (env `RESTOCK_TRANSFER_MODE`, read by Isaac AND the host, never a config
+  key; default off): `live_pose` = real-arm pick from the live carton pose + near-face yaw, no transfer
+  reposition (`restock_manipulation/transfer_mode.py`); `scripted` = the labelled safety net
+  (`restock/scripted_transfer.py`): no warm-up/host job, kinematic carton onto `transfer_ground_truth.target`
+  (needs `enabled`; evidence `source='ground_truth'`), arm `RESTOCK_SCRIPTED_TRANSFER_ARM=still` (default) |
+  `executor`. **Sharp edge: never drive the arm from Isaac (`ArmCommandGate.apply`) beside a live
+  `trajectory_host`** — its idle hold trips the gate envelope + its tracking e-stop; send FollowJointTrajectory
+  goals instead. From the bay park the side grip extracts only ~0.35 of 0.46 m out of the rollwagen mouth.
+  Write-up: `~/firstmate/data/sim-video-transfer-fallback-v1/report.md`.
 - **Moving obstacles** (opt-in, default-off): `navigation/dynamic.py` tracks
   per-frame `Detection(position,radius,source)` into velocity-predicted occupancy
   points unioned (add-only) into `Observation.obstacles`, so the existing gates
