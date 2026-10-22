@@ -1,15 +1,17 @@
-"""CPU tests for the load-aware gravity feedforward (sim-robust-executor-shoulder-sag-v1).
+"""CPU tests for the opt-in load-aware gravity feedforward helper (``arm_gravity_ff_loaded_carry``, default
+off) AND for the correct diagnosis of the executor LOADED-pick shoulder_lift miss.
 
-The executor's LOADED pick settled ur_shoulder_lift 0.098 rad short of its goal (execretest, PR 214):
-TRAJ_HOST_GOAL_MISS per_joint_err=[8e-5, 0.0981, 5.7e-5, ...] -> TRAJ_HOST_FAULT. The cause, established
-by a static torque balance at the pick pose (these tests), is a COMBINATION:
-  1. the gravity FF was evaluated at the COMMANDED (goal) arm config while the arm physically lagged at
-     the measured pose, so a heavily gravity-loaded joint was over-compensated; and
-  2. the 0.45 kg welded carton was omitted from the FF mass model.
-On the soft shoulder_lift joint (effective J*Kp ~= 10 Nm/rad, back-calculated from the run and matching
-the exact 0.098 reproduction) the ~1 Nm residual the two leave produces the miss. Only evaluating the FF
-at the MEASURED pose AND adding the held carton drives the net torque to ~0 (each correction ALONE is
-worse). The pure helper gravity_ff_effort holds that logic; build_payload_gravity the carton torque.
+HISTORY/CORRECTION (sim-robust-executor-shoulder-drive-v1): PR 218 added the load-aware FF (robot gravity at
+the measured pose + held carton) believing the executor pick's ur_shoulder_lift ~0.098 rad miss was a
+gravity sag, and shipped an equilibrium test built on a *fitted* effective "J*Kp ~= 10 Nm/rad" for the
+shoulder drive. That number has no physical basis -- the drive stiffness read back from the sim is 3e5 with
+a 400 Nm force limit -- and the FF changed nothing in the live run (execff shoulder_lift 0.1002 rad, vs
+0.0981 without the key: feedforward-INDEPENDENT). The real cause is a PHYSICAL BLOCK: the scripted side-grip
+pick jams ~40 mm short of the carton, so no FF, stiffness, or goal tolerance on shoulder_lift closes it.
+This module now (1) keeps the pure helper tests (the opt-in key stays, default off, harmless), and (2)
+replaces the fitted-sag equilibrium test with an honest static balance proving the miss is NOT a gravity
+sag. The named goal-miss diagnostic that reports it lives in trajectory_host.classify_goal_miss
+(test_restock_trajectory_host). See data/sim-robust-executor-shoulder-drive-v1/report.md.
 """
 import os
 import sys
@@ -27,15 +29,16 @@ URDF = os.path.expanduser('~/datasets/twin-robot-in-store-boot-v1/host-cad/mobil
 ARM = list(ARM_JOINTS)
 LIFT = 1
 
-# The execretest terminal state (host-stack.log TRAJ_HOST_GOAL_MISS), arm order [pan,lift,elbow,w1,w2,w3].
+# The execretest/execff terminal state (host-stack.log TRAJ_HOST_GOAL_MISS), arm order [pan,lift,elbow,w*].
 GOAL = np.array([0.3481, -3.6472, 2.2171, -1.7122, 1.2201, 3.1418])
 MEAS = np.array([0.3482, -3.5491, 2.2172, -1.7122, 1.2201, 3.1418])
 CARTON_KG = 0.45
-# Effective torque-per-rad of the shoulder_lift drive, back-calculated from the run: the drive supplied
-# ~-0.965 Nm at a +0.098 rad error (elbow, same Kp, supplied -9.5 Nm at +1e-4 rad => J*Kp ~= 95000, so
-# shoulder is ~1e4x softer -- the asymmetry that makes only shoulder_lift miss). Used to turn a residual
-# net torque into the predicted steady-state offset so the sizing test is a real pass/fail, not a replot.
-JKP_SHOULDER = 9.85
+OBSERVED_LIFT_MISS = 0.098           # the live shoulder_lift shortfall (rad), FF on or off
+# The shoulder_lift position drive as read back from the sim (ARM_GAINS_READBACK): a stiff position PD with
+# a hard per-joint force limit. These are the physical numbers the balance below uses -- NOT a fitted
+# softness.
+DRIVE_KP = 3.0e5                     # rad -> Nm position-drive stiffness
+DRIVE_MAX_FORCE = 400.0              # Nm per-joint effort ceiling (set_max_efforts readback)
 GOAL_POS_TOL = 0.010
 
 
@@ -93,8 +96,11 @@ class GravityFfEffortPureTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.path.isfile(URDF), f'mobile URDF absent: {URDF}')
-class LoadedPickEquilibriumTests(unittest.TestCase):
-    """Static torque balance at the execretest pick pose: reproduce the 0.098 rad miss and prove the fix."""
+class ShoulderLiftMissIsNotGravitySagTests(unittest.TestCase):
+    """Honest static torque balance at the execff pick pose: the shoulder_lift miss is NOT a gravity sag.
+
+    Replaces the removed fitted "J*Kp ~= 10 Nm/rad" reproduction. These assert the real drive physics, so the
+    suite no longer encodes a non-existent sag model (sim-robust-executor-shoulder-drive-v1)."""
 
     @classmethod
     def setUpClass(cls):
@@ -105,52 +111,46 @@ class LoadedPickEquilibriumTests(unittest.TestCase):
         cls.grav = staticmethod(build_arm_gravity(model, ARM, _ISAAC_BODY_MASSES))
         cls.payload = staticmethod(build_payload_gravity(model, ARM, 'gripper_pad_tcp'))
 
-    def _predicted_shoulder_err(self, ff):
-        # True physical gravity + carton at the resting (measured) pose; the sim FF model matches PhysX
-        # (it IS the sim's own FF function), confirmed by the exact 0.098 reproduction below. The drive
-        # must hold the residual net = ff + G_actual; offset = -net/(J*Kp).
-        net = (ff + self.grav(MEAS) + self.payload(MEAS, CARTON_KG))[LIFT]
-        return -net / JKP_SHOULDER
+    def _total_lift_gravity(self):
+        # True generalized gravity the drive must hold on shoulder_lift at the resting (measured) pose,
+        # robot + the 0.45 kg welded carton.
+        return (self.grav(MEAS) + self.payload(MEAS, CARTON_KG))[LIFT]
 
-    def test_model_matches_sim_ff_log_at_start_pose(self):
-        # The sim logged ARM_GRAVITY_FF g=[0,-33.1,78.8,13.7,...] at the start pose; the CPU model must
-        # match (same code) so the goal-pose balance below is trustworthy.
-        start = np.array([-0.0, -2.5002, 1.7004, -0.7001, -1.5708, -0.0001])
-        g = self.grav(start)
-        for got, ref in zip(g, [0.0, -33.1, 78.8, 13.7, 0.0, 0.0]):
-            self.assertLess(abs(got - ref), 1.0)
+    def test_gravity_is_far_below_the_drive_force_limit(self):
+        # If the miss were a gravity sag, the drive would be saturating against gravity. It is not: the
+        # shoulder_lift gravity (robot + carton) is well under the 400 Nm per-joint force ceiling, so the
+        # drive has ample authority to hold the joint at its goal.
+        g = abs(self._total_lift_gravity())
+        self.assertGreater(g, 50.0)                 # it IS a meaningfully gravity-loaded joint (~127 Nm)...
+        self.assertLess(g, 0.5 * DRIVE_MAX_FORCE)   # ...but far under the 400 Nm force limit (no saturation)
 
-    def test_legacy_ff_reproduces_the_098_miss(self):
-        ff = gravity_ff_effort(self.grav, GOAL, MEAS, at_measured=False, ff_sign=-1.0, ff_min_nm=3.0)
-        err = self._predicted_shoulder_err(ff)
-        self.assertAlmostEqual(abs(err), 0.098, delta=0.01)   # reproduces the observed 0.0981 rad
-        self.assertGreater(abs(err), GOAL_POS_TOL)             # and it fails the tight goal tolerance
+    def test_position_drive_demand_dwarfs_gravity(self):
+        # The position-drive torque demanded to hold the OBSERVED 0.098 rad error is Kp*err ~= 29 kNm, which
+        # the force limit clamps to 400 Nm -- still >> the ~127 Nm gravity. A drive with this much authority
+        # over gravity cannot sit 0.098 rad short unless something PHYSICAL blocks the joint.
+        demand = DRIVE_KP * OBSERVED_LIFT_MISS
+        self.assertGreater(demand, 10000.0)
+        self.assertGreater(DRIVE_MAX_FORCE, 2.0 * abs(self._total_lift_gravity()))
 
-    def test_each_correction_alone_is_not_better(self):
-        # Adding the carton to the commanded-pose FF, or evaluating at measured WITHOUT the carton, both
-        # LEAVE a larger offset -- so the two must ship together (not as a half-fix footgun).
-        carton_only = gravity_ff_effort(self.grav, GOAL, MEAS, at_measured=False, ff_sign=-1.0,
-                                        ff_min_nm=3.0, payload_grav_fn=self.payload, payload_kg=CARTON_KG,
-                                        held=True)
-        measured_only = gravity_ff_effort(self.grav, GOAL, MEAS, at_measured=True, ff_sign=-1.0,
-                                          ff_min_nm=3.0)
-        self.assertGreater(abs(self._predicted_shoulder_err(carton_only)), GOAL_POS_TOL)
-        self.assertGreater(abs(self._predicted_shoulder_err(measured_only)), GOAL_POS_TOL)
+    def test_gravity_droop_offset_is_microradian_not_0098(self):
+        # A position PD drive's gravity-droop steady-state error is gravity/Kp. Here that is ~4e-4 rad --
+        # two orders of magnitude below the observed 0.098 rad. So 0.098 rad is NOT gravity droop, and no
+        # feedforward (which only cancels gravity/Kp) could account for it. Matches the FF-independent run
+        # (execff 0.1002 with the FF on vs 0.0981 off).
+        droop = abs(self._total_lift_gravity()) / DRIVE_KP
+        self.assertLess(droop, 1e-3)
+        self.assertGreater(OBSERVED_LIFT_MISS, 50.0 * droop)
 
-    def test_measured_pose_plus_held_payload_reaches_goal(self):
+    def test_ff_cannot_move_the_equilibrium_enough_to_explain_the_miss(self):
+        # Even a maximally wrong/right feedforward (the full +/- gravity) shifts the drive equilibrium by at
+        # most 2*gravity/Kp -- still microradian. The load-aware FF (measured pose + carton) is correct and
+        # tiny; it cannot be the lever for a 0.098 rad miss. This is why PR 218's FF changed nothing.
         ff = gravity_ff_effort(self.grav, GOAL, MEAS, at_measured=True, ff_sign=-1.0, ff_min_nm=3.0,
                                payload_grav_fn=self.payload, payload_kg=CARTON_KG, held=True)
-        err = self._predicted_shoulder_err(ff)
-        self.assertLessEqual(abs(err), GOAL_POS_TOL)           # the fix: within the tight 0.010 rad goal
-        # and it does not merely nudge -- the residual net torque is driven essentially to zero.
-        net = (ff + self.grav(MEAS) + self.payload(MEAS, CARTON_KG))[LIFT]
-        self.assertLess(abs(net), 0.1)
-
-    def test_shoulder_pan_ff_stays_zero(self):
-        # The vertical yaw axis carries no gravity torque; the fix must not invent one on it.
-        ff = gravity_ff_effort(self.grav, GOAL, MEAS, at_measured=True, ff_sign=-1.0, ff_min_nm=3.0,
-                               payload_grav_fn=self.payload, payload_kg=CARTON_KG, held=True)
-        self.assertEqual(ff[0], 0.0)
+        # the FF is sized near the gravity it cancels (same order), not near the 29 kNm drive demand
+        self.assertLess(abs(ff[LIFT]), DRIVE_MAX_FORCE)
+        max_equilibrium_shift = 2.0 * abs(self._total_lift_gravity()) / DRIVE_KP
+        self.assertLess(max_equilibrium_shift, 0.01 * OBSERVED_LIFT_MISS)
 
 
 if __name__ == '__main__':

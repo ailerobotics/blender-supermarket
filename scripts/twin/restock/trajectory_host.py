@@ -131,10 +131,66 @@ def goal_reached(sim_age, pos_err, vel_mag, pos_tol, *, sim_age_tol=0.2, vel_tol
     measured feedback is SIM-fresh (``sim_age<=sim_age_tol``), every joint is within the position
     tolerance (``pos_err`` is the max |measured-goal| across joints) and the arm has settled below the
     velocity tolerance. Freshness is sim-clocked only (no wall term) so render pacing never false-fails a
-    settled grasp. ``pos_tol`` stays tight (grasp precision) -- the sim-robust-executor-shoulder-sag fix
-    makes the LOADED arm actually REACH the goal (payload+measured-pose gravity FF) rather than loosening
-    this gate; execretest's 0.098 rad shoulder_lift miss correctly fails at the 0.010 rad tolerance."""
+    settled grasp. ``pos_tol`` stays tight (grasp precision) and is NOT loosened for the loaded pick: the
+    executor LOADED-pick shoulder_lift miss is NOT a gravity sag a feedforward or a wider tolerance could
+    close -- it is a physical block (the scripted side-grip pick jams short of the carton); see
+    classify_goal_miss and sim-robust-executor-shoulder-drive-v1."""
     return sim_age <= sim_age_tol and pos_err <= pos_tol and vel_mag <= vel_tol
+
+
+# Named goal-miss classification (sim-robust-executor-shoulder-drive-v1). A terminal settle failure used to
+# raise a GENERIC "measured goal tolerance not reached", which hid WHY and was repeatedly misread as a
+# gravity sag (the FF chase of PR 205->210->214->218). The executor LOADED pick's ur_shoulder_lift settles
+# ~0.10 rad short with the other five joints at the goal (~1e-5 rad) and the blocked joint FROZEN (vel~0),
+# because the scripted side-grip pick physically jams ~40 mm short of the carton -- an unmodeled collision
+# in the pick descent, NOT a gravity sag. Proof (CPU, data/sim-robust-executor-shoulder-drive-v1): the true
+# gravity on shoulder_lift at the stall pose is ~125 Nm, far under the 400 Nm drive force limit, so the drive
+# has ample authority and the miss is feedforward-INDEPENDENT (0.098 off vs 0.100 on) -- the signature of a
+# kinematic/contact block, not a torque balance. classify_goal_miss turns that joint signature into a named
+# 'pick physically blocked' fault so the real cause is attributable without another blind run. Pure/CPU-
+# testable. A genuine multi-joint miss, a joint only marginally past tol, or a still-moving joint stays
+# GENERIC (so a real tracking/settle edge is never mislabelled a blocked pick).
+GOAL_MISS_FAR_RAD = 0.03            # a single joint this far past tol is a gross miss, not settle/track noise
+GOAL_MISS_FROZEN_VEL = 0.05         # the blocked joint has settled against the block (rad/s)
+_GOAL_MISS_GENERIC = 'measured goal tolerance not reached'
+
+
+def classify_goal_miss(per_joint_err, per_joint_vel, pos_tol, *, joint_names=ARM_JOINTS,
+                       surface=None, far_rad=GOAL_MISS_FAR_RAD, frozen_vel=GOAL_MISS_FROZEN_VEL):
+    """Classify a terminal goal miss into a NAMED fault reason (pure/CPU-testable), returned as a string.
+
+    Returns a 'pick physically blocked' reason iff the miss is EXACTLY ONE joint far from goal
+    (``|err|>pos_tol`` and ``|err|>=far_rad``) that has FROZEN (``|vel|<=frozen_vel``) while every other
+    joint reached the goal (``|err|<=pos_tol``) -- the host-visible signature of the scripted side-grip pick
+    jamming short of the carton. The planned goal IS the contact pose, so a joint frozen far short means the
+    tool is far from the planned contact: joint evidence alone is authoritative for the executor. ``surface``
+    (``gap_mm, flush_deg``), when a sim/controller side-channel supplies the measured gripper->target gap and
+    flush angle, ENRICHES the reason with those numbers (it never flips the classification -- the joints
+    decide; a missing/garbled reading just omits the mm/deg). Any other miss stays the GENERIC reason, so a
+    real multi-joint tracking error or a tolerance-edge settle is never mislabelled a blocked pick."""
+    try:
+        err = np.asarray(per_joint_err, float)
+        vel = np.asarray(per_joint_vel, float)
+        over = [i for i in range(len(err)) if abs(err[i]) > pos_tol]
+        if len(over) != 1:
+            return _GOAL_MISS_GENERIC
+        j = over[0]
+        if not (abs(err[j]) >= far_rad and abs(vel[j]) <= frozen_vel):
+            return _GOAL_MISS_GENERIC
+        name = joint_names[j] if j < len(joint_names) else 'joint[%d]' % j
+        surf = ' (gripper->surface reading unavailable to the executor)'
+        if surface is not None:
+            try:
+                gap_mm, flush_deg = float(surface[0]), float(surface[1])
+                if math.isfinite(gap_mm) and math.isfinite(flush_deg):
+                    surf = (' gripper %.1f mm / %.1f deg from the target surface '
+                            '(grasp weld gate <=3 mm / <=2 deg)' % (gap_mm, flush_deg))
+            except (TypeError, ValueError, IndexError):
+                pass
+        return ('pick physically blocked: %s frozen %.4f rad short of goal while the other joints reached '
+                'it;%s -- pick geometry infeasible from this pose, not gravity sag' % (name, abs(err[j]), surf))
+    except Exception:
+        return _GOAL_MISS_GENERIC
 
 
 def feedback_fresh(gap):
@@ -290,7 +346,12 @@ def main():
                # The controller latches a WIDER value on the carton-loaded PLACE extend via the
                # goal_position_tol side-channel topic (the FJT goal_tolerance is unreachable through
                # MoveIt's ExecuteTrajectory) and resets it to the default on every other move.
-               goal_pos_tol=GOAL_POSITION_TOL)
+               goal_pos_tol=GOAL_POSITION_TOL,
+               # sim-robust-executor-shoulder-drive-v1: latest measured gripper->target (gap_mm, flush_deg)
+               # from the optional pick_surface side-channel; None until a publisher feeds it. Only ENRICHES
+               # a 'pick physically blocked' goal-miss reason with the measured numbers (never changes the
+               # classification), so absent => byte-identical behaviour with joint-only naming.
+               pick_surface=None)
     group=ReentrantCallbackGroup()
     command=node.create_publisher(JointState,'/restock_sim/arm_joint_command',10)
     stop=node.create_publisher(Bool,'/restock_sim/manipulation/stop',10)
@@ -571,7 +632,13 @@ def main():
                                   f'meas_q={np.array2string(measured[1],precision=4,separator=",")} '
                                   f'goal_q={np.array2string(plan.end,precision=4,separator=",")}',
                                   flush=True)
-                            raise RuntimeError('measured goal tolerance not reached')
+                            # Name WHY instead of the generic miss: a single frozen joint far from goal while
+                            # the others reached it is the scripted pick jamming short of the carton (a
+                            # physical block, not a gravity sag the FF chase assumed). sim-robust-executor-
+                            # shoulder-drive-v1. surface (gap/flush) enriches the reason when a side-channel
+                            # feeds it; absent => joint-only naming, which is authoritative for the executor.
+                            raise RuntimeError(classify_goal_miss(
+                                perr, measured[2], state['goal_pos_tol'], surface=state['pick_surface']))
                 time.sleep(.01)
             raise RuntimeError('executor shutdown')
         except Exception as exc:
@@ -599,13 +666,32 @@ def main():
         # (the controller never widens it for the grasp).
         with lock:
             state['goal_pos_tol']=min(0.2,max(GOAL_POSITION_TOL,float(msg.data)))
+    def pick_surface_signal(msg):
+        # sim-robust-executor-shoulder-drive-v1: optional measured gripper->target surface reading
+        # [gap_mm, flush_deg] from the sim contact observer, used ONLY to enrich a 'pick physically blocked'
+        # goal-miss reason with the measured numbers. Absent/garbled => state stays None and the named
+        # reason is joint-only; it never changes the classification, so a run without this feed is
+        # byte-identical. Two finite values required.
+        try:
+            d=list(msg.data)
+            val=(float(d[0]),float(d[1])) if len(d)>=2 else None
+        except (TypeError,ValueError,IndexError):
+            val=None
+        with lock:
+            state['pick_surface']=val
     node.create_subscription(JointState,'/restock_sim/joint_states',feedback,10,callback_group=group)
     node.create_subscription(Bool,'/restock_sim/arm_contact',contact_signal,10,callback_group=group)
     # TRANSIENT_LOCAL (latched) so the latest controller-set tolerance is delivered even though this
     # executor subscribes after the controller's publisher is created (fm345 (c)).
     from rclpy.qos import QoSProfile, DurabilityPolicy
-    from std_msgs.msg import Float64
+    from std_msgs.msg import Float64, Float64MultiArray
     node.create_subscription(Float64,'/restock_sim/arm_controller/goal_position_tol',goal_tol_signal,
+                             QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL),
+                             callback_group=group)
+    # Optional gripper->target surface feed (gap_mm, flush_deg); latched so the latest reading is delivered.
+    # No publisher today => the named goal-miss reason falls back to joint-only (the integration lane can
+    # wire the sim contact observer's SEAL_DIAG gap/flush onto this topic for the GPU proof).
+    node.create_subscription(Float64MultiArray,'/restock_sim/arm_controller/pick_surface',pick_surface_signal,
                              QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL),
                              callback_group=group)
     node.create_timer(.02,tick,callback_group=group)

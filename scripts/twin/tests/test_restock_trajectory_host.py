@@ -4,16 +4,18 @@ from types import SimpleNamespace as NS
 import numpy as np
 import pytest
 
-from twin.restock.trajectory_host import Plan, goal_reached, GOAL_POSITION_TOL, GOAL_VELOCITY_TOL
+from twin.restock.trajectory_host import (
+    Plan, goal_reached, classify_goal_miss, GOAL_POSITION_TOL, GOAL_VELOCITY_TOL)
 from twin.restock_manipulation.cad_tool import ARM_JOINTS
 
 
 def test_goal_reached_requires_fresh_settled_within_tolerance():
     # Settled at the goal: fresh sim age, zero error, zero velocity -> reached.
     assert goal_reached(0.0, 0.0, 0.0, GOAL_POSITION_TOL)
-    # A per-joint miss at the tight tolerance is NOT reached: execretest's shoulder_lift ended 0.0981 rad
-    # short, which must keep failing the gate (the sim-robust-executor-shoulder-sag fix makes the LOADED
-    # arm REACH the goal via the payload+measured-pose gravity FF, it does NOT loosen this tolerance).
+    # A per-joint miss at the tight tolerance is NOT reached: execff's shoulder_lift ended ~0.10 rad short,
+    # which must keep failing the gate. This tolerance is NOT loosened for the loaded pick -- that miss is a
+    # physical block (the scripted pick jams short of the carton), named by classify_goal_miss, not a
+    # gravity sag a wider tolerance or feedforward could close (sim-robust-executor-shoulder-drive-v1).
     assert not goal_reached(0.0, 0.0981, 0.0, GOAL_POSITION_TOL)
     assert goal_reached(0.0, GOAL_POSITION_TOL, 0.0, GOAL_POSITION_TOL)          # exactly at tol: reached
     assert not goal_reached(0.0, GOAL_POSITION_TOL + 1e-6, 0.0, GOAL_POSITION_TOL)
@@ -24,6 +26,62 @@ def test_goal_reached_rejects_stale_or_moving():
     assert not goal_reached(0.0, 0.0, GOAL_VELOCITY_TOL + 0.01, GOAL_POSITION_TOL)  # still moving
     # A controller-latched wider tolerance (the loaded-place side channel) is honoured as the pos_tol arg.
     assert goal_reached(0.0, 0.05, 0.0, 0.08)
+
+
+# ---- classify_goal_miss (sim-robust-executor-shoulder-drive-v1): name the physical-block pick miss ----
+GENERIC = 'measured goal tolerance not reached'
+# The execff terminal signature, arm order [pan, lift, elbow, w1, w2, w3]: only shoulder_lift (index 1)
+# misses, frozen 0.10 rad short while the other five reached the goal (~1e-5 rad).
+EXECFF_ERR = [6.3e-5, 0.1002, 3.6e-5, -1.0e-5, -4.3e-5, -3.5e-5]
+EXECFF_VEL = [0.0079, -0.001, 0.0142, -0.021, -0.0117, 0.0024]
+
+
+def test_classify_names_the_physical_block_from_the_joint_signature():
+    reason = classify_goal_miss(EXECFF_ERR, EXECFF_VEL, GOAL_POSITION_TOL)
+    assert reason != GENERIC
+    assert 'pick physically blocked' in reason
+    assert 'ur_shoulder_lift_joint' in reason        # the single frozen joint is named
+    assert '0.1002' in reason                          # the measured shortfall is reported
+    assert 'not gravity sag' in reason                 # the correction is stated explicitly
+    # No surface feed => the reason says the gripper->surface reading is unavailable, not a fabricated gap.
+    assert 'unavailable' in reason
+
+
+def test_classify_enriches_with_surface_gap_and_flush_when_fed():
+    reason = classify_goal_miss(EXECFF_ERR, EXECFF_VEL, GOAL_POSITION_TOL, surface=(39.8, 5.3))
+    assert 'pick physically blocked' in reason
+    assert '39.8 mm' in reason and '5.3 deg' in reason   # the measured gap + flush angle appear
+    assert 'unavailable' not in reason
+
+
+def test_classify_true_multijoint_miss_stays_generic():
+    # Two joints past tolerance (a genuine tracking error, not a single blocked joint) -> generic.
+    err = [0.05, 0.1002, 3.6e-5, -1.0e-5, -4.3e-5, -3.5e-5]
+    assert classify_goal_miss(err, EXECFF_VEL, GOAL_POSITION_TOL) == GENERIC
+
+
+def test_classify_marginal_single_joint_miss_stays_generic():
+    # One joint just past the tight tol but well under the gross-miss floor (settle/tolerance edge) -> generic.
+    err = [6.3e-5, 0.015, 3.6e-5, -1.0e-5, -4.3e-5, -3.5e-5]
+    assert classify_goal_miss(err, [0.0] * 6, GOAL_POSITION_TOL) == GENERIC
+
+
+def test_classify_single_far_joint_still_moving_stays_generic():
+    # Far from goal but NOT frozen (still decelerating) -> not yet a block; stay generic.
+    vel = [0.0, 0.4, 0.0, 0.0, 0.0, 0.0]
+    assert classify_goal_miss(EXECFF_ERR, vel, GOAL_POSITION_TOL) == GENERIC
+
+
+def test_classify_honours_a_widened_pos_tol():
+    # Under a controller-latched wider tolerance the same small errors are all within tol -> no miss class.
+    assert classify_goal_miss(EXECFF_ERR, EXECFF_VEL, 0.2) == GENERIC
+
+
+def test_classify_survives_garbled_surface_without_crashing():
+    # A malformed surface reading must not crash the fault path, nor suppress the joint-only naming.
+    for bad in [(float('nan'), 2.0), ('x',), None, (1.0,)]:
+        reason = classify_goal_miss(EXECFF_ERR, EXECFF_VEL, GOAL_POSITION_TOL, surface=bad)
+        assert 'pick physically blocked' in reason
 
 
 def trajectory(end=.1,duration=2.,velocity=0.):
