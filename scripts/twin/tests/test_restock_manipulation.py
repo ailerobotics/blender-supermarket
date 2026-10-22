@@ -431,6 +431,56 @@ def test_contact_stall_wall_budget_default_off_is_byte_identical_fm425():
     assert r.status != 'failed' or 'contact stalled' not in r.reason, r.reason
 
 
+def test_grasp_press_sim_budget_fail_fast():
+    # sim-robust-collect-arrival-v1 (runs 321/327): the honest collect pressed for a seal and, when the
+    # native suction never latched and no weld formed, the grasp phase (grasp_retry_max=0) looped forever
+    # returning bare controls until the opaque 90 s WALL arm-command heartbeat watchdog killed the mission
+    # ('arm command heartbeat lost', no named cause). A SIM-CLOCK press budget bounds the WHOLE unconfirmed
+    # press and fails fast with a NAMED reason first (render-pacing-safe, unlike the WALL contact budget).
+    c, m = make_controller('collect', grasp_press_timeout_s=3.0)   # grasp_retry_max=0 (default)
+    run_to(c, 'grasp')
+    start = c._press_sim_start                      # the clock latched when the contact phase began
+    assert start is not None
+    r = c.step(.1, packet(c, start + 2.9, contact=False))          # still within the budget -> running
+    assert r.status == 'running', r.reason
+    r = c.step(.1, packet(c, start + 3.2, contact=False))          # past the budget, no seal -> fail fast
+    assert r.status == 'failed' and 'grasp press exceeded' in r.reason and 'heartbeat' in r.reason, r.reason
+
+
+def test_grasp_press_sim_budget_default_off_is_byte_identical():
+    # Default (grasp_press_timeout_s == 0) => the press clock never arms and an arbitrarily long press
+    # does not fail here (the coarse phase_timeout / host watchdog still backstop) -> absent config is
+    # byte-identical.
+    c, m = make_controller('collect')
+    assert c.grasp_press_timeout_s == 0.0
+    t = run_to(c, 'grasp')
+    assert c._press_sim_start is None               # the clock never arms when the budget is off
+    r = c.step(.1, packet(c, t + 10_000.0, contact=False))         # absurd sim elapsed in the press
+    assert r.status != 'failed' or 'grasp press exceeded' not in r.reason, r.reason
+
+
+def test_grasp_press_sim_budget_is_not_rearmed_by_retries():
+    # The budget latches ONCE when the press begins and a grasp re-seat (retry) re-enters the contact
+    # phase WITHOUT re-arming it, so a press that re-seats repeatedly still fails fast on the SIM clock --
+    # i.e. the whole press (all attempts) is bounded, not each attempt. Here the retry budget (10 retries
+    # x 5 wait ticks) is set well beyond the 3 s press budget, so the press budget is what stops the loop.
+    c, m = make_controller('collect', grasp_press_timeout_s=3.0)
+    c.grasp_retry_max, c.grasp_wait_ticks = 10, 5
+    run_to(c, 'grasp')
+    start = c._press_sim_start
+    now = c.last_time                                # step forward from the current (monotonic) sim clock
+    failed = None
+    for _ in range(80):                              # > the 3 s budget worth of 0.1 s ticks
+        now += 0.1
+        r = c.step(.1, packet(c, now, contact=False))
+        if r.status == 'failed':
+            failed = r.reason
+            break
+    assert failed is not None and 'grasp press exceeded' in failed, failed
+    assert now - start > c.grasp_press_timeout_s     # the whole press (incl. re-seats) was bounded
+    assert c._grasp_retries >= 1                      # a re-seat DID happen, yet the clock was not re-armed
+
+
 def test_collision_stale_pause_keeps_stream_alive_and_wall_fail_fast_fm427():
     # fm427 (A1) / run-323 cold lift: the COLLISION_STALE_PAUSE held the post-attach lift on a genuinely-
     # stale collision stamp (the benign weld/ESDF re-incorporation lag) by returning EMPTY controls -- a

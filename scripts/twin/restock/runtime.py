@@ -125,7 +125,8 @@ class NavigationBridge:
         self.detection_source = detection_source
 
     def start(self, goal, coupled, *, goal_articulation=None, arrival_xy_tol=None,
-              arrival_yaw_tol=None, static_drive=False, carry_drive=False):
+              arrival_yaw_tol=None, static_drive=False, carry_drive=False,
+              strict_xy_arrival=False):
         kw = {}
         if goal_articulation is not None:
             kw['goal_articulation'] = goal_articulation
@@ -137,6 +138,8 @@ class NavigationBridge:
             kw['static_drive'] = True
         if carry_drive:
             kw['carry_drive'] = True
+        if strict_xy_arrival:
+            kw['strict_xy_arrival'] = True
         self.controller.start(goal, coupled, **kw)
 
     def step(self, dt, packet):
@@ -455,6 +458,13 @@ class RuntimeAdapter:
                 goal = {'collect': 'pickup', 'outbound': 'shelf_approach', 'return': 'home'}[action]
                 kwargs = ({'goal_articulation':self.goal_articulation[action]}
                           if action in self.goal_articulation else {})
+                if action == 'collect':
+                    # Tolerance-aware final approach for the grasp-critical source park: never DECLARE
+                    # arrived outside the real xy tolerance (so the pick starts within grasp reach), even
+                    # when the global XY hysteresis latch (couple standoff, fm482) is configured. A no-op
+                    # when the latch is off (the bare xy <= tol test is already strict) => byte-identical
+                    # for a run with no hysteresis; it only ever TIGHTENS the collect arrival.
+                    kwargs['strict_xy_arrival'] = True
                 self._start_nav_leg(self.poses[goal], action in ('outbound', 'return'), **kwargs)
                 self.phase = 'navigate'
         elif action == 'transfer' and self.scripted_transfer is not None:

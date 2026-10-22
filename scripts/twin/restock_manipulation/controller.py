@@ -93,7 +93,7 @@ class TransferController:
                  cage_preplace_shape=None, reposition_before_place: bool = False,
                  grasp_track_m=None, require_collect_source_evidence: bool = False,
                  transfer_ground_truth: bool = False, ground_truth_pick: bool = False,
-                 collect_ground_truth: bool = False):
+                 collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0):
         self.steady_clock=steady_clock
         # collect-gt (demo, opt-in, default off): GROUND-TRUTH COLLECT. Accept the collect SOURCE observation
         # labelled 'ground_truth' (the controlled carton asset's simulated pose, served Isaac-side when the
@@ -217,6 +217,21 @@ class TransferController:
         # advance (progress). 0 s (default) => off => byte-identical; bounded below the 90 s backstop.
         self.contact_stuck_wall_s = _float_env_bounded('RESTOCK_CONTACT_STUCK_WALL_S', 0.0, 0.0, 85.0)
         self._contact_progress_wall = None   # wall time of the last contact-phase progress (see step)
+        # SIM-CLOCK pre-weld press budget (grasp_press_timeout_s, SIM seconds; default 0 => off =>
+        # byte-identical). The honest collect presses for a seal across the contact descent + the grasp
+        # confirm/retry loop; when the native suction never latches and no weld forms, the grasp phase
+        # returns bare controls every tick (grasp_retry_max=0) and the only backstop is the COARSE sim
+        # phase_timeout or -- under render pacing, where wall >> sim -- the opaque 90 s WALL arm-command
+        # heartbeat watchdog (runs 321/327 died 'arm command heartbeat lost' at collect). This is a bound
+        # on the WHOLE unconfirmed press, measured on the SIM clock (render-pacing-safe, unlike the WALL
+        # contact_stuck_wall_s above; see 'Freshness on sim clock, not wall'): it FAILS FAST with a named
+        # reason before that watchdog, and because retries never re-arm it, a press cannot loop forever.
+        # Clamped to (0, phase_timeout] so it is a TIGHTER bound than the coarse per-phase timeout.
+        if not (isinstance(grasp_press_timeout_s, (int, float))
+                and math.isfinite(grasp_press_timeout_s) and grasp_press_timeout_s >= 0):
+            raise ValueError('grasp_press_timeout_s must be a finite, non-negative number of sim seconds')
+        self.grasp_press_timeout_s = min(float(grasp_press_timeout_s), float(phase_timeout))
+        self._press_sim_start = None   # sim time the current unconfirmed pre-weld press began (see step)
         # fm427 (A1) (run-323 cold lift): the fm419(a) COLLISION_STALE_PAUSE holds the post-attach lift on
         # a genuinely-stale collision stamp (run-323: collision_dt 0.52->0.65 s, the benign weld/ESDF
         # re-incorporation lag) by returning EMPTY controls -- a SILENT hold. Under render pacing that
@@ -482,6 +497,8 @@ class TransferController:
         self._contact_waits = 0         # bounded grace ticks awaiting a fresh acquisition deadline
         self._contact_step = 0.0        # cumulative contact-feedback over-press travel (m); see __init__
         self._contact_freeze = 0        # freeze-settle hold ticks at a contact step (see CONTACT_FREEZE_TICKS)
+        self._contact_progress_wall = None  # fm425: wall time of the last contact-phase progress (per op)
+        self._press_sim_start = None    # sim time the current unconfirmed pre-weld press began (see __init__)
         self._grasp_confirm = 0         # fm395: consecutive confirmed-attachment ticks in grasp
         self._grasp_waits = 0           # fm395: ticks awaiting a confirmed attachment before a grasp retry
         self._grasp_retries = 0         # fm395: bounded grasp re-seat retries used this operation
@@ -730,6 +747,23 @@ class TransferController:
                                   '(> %.0fs budget; native suction did not latch and no SIM_ATTACH weld '
                                   'formed) -- failing fast before the arm-command heartbeat watchdog'
                                   % (stalled, self.contact_stuck_wall_s))
+        # Sim-clock pre-weld press budget (grasp_press_timeout_s; default 0 => off => byte-identical).
+        # Bounds the WHOLE unconfirmed press across the contact descent and the grasp confirm/retry loop:
+        # the clock latches when the press first begins and clears only once the press is OVER (a CONFIRMED
+        # held carton, or the phase has advanced past the press) -- so a never-sealing press or a flickering
+        # contact that never confirms fails fast with a NAMED reason instead of looping until the opaque
+        # wall arm-command heartbeat watchdog. See __init__.
+        if self.grasp_press_timeout_s > 0:
+            if self.phase in ('contact', 'grasp') and not self.held:
+                if self._press_sim_start is None:
+                    self._press_sim_start = now
+                elif now - self._press_sim_start > self.grasp_press_timeout_s:
+                    return self._fail('grasp press exceeded %.1fs sim without a confirmed held carton '
+                                      '(native suction did not latch and no weld formed across the contact '
+                                      'descent and the grasp confirm/retry loop) -- failing fast before the '
+                                      'arm-command heartbeat watchdog' % self.grasp_press_timeout_s)
+            else:
+                self._press_sim_start = None
         try:
             if sensors.valid_until_steady is not None:
                 require_fresh(sensors.valid_until_steady,self.steady_clock)

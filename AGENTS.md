@@ -103,6 +103,14 @@ repo's `scenes/`, `export/` or `renders/`.
   `restock_host/incorporation_ack.py` publishes the station liveness ack BEFORE its ESDF maintenance
   so a plan storm can't starve the heartbeat (readiness still gated on a real integration). Report +
   the collect+couple validation env: `data/sim-robust-collect-place-v1/report.md`.
+  **Honest-collect robustness** (opt-in, default-off ⇒ byte-identical): the grasp-critical collect
+  source park uses a tolerance-aware arrival (`navigation` `strict_xy_arrival`, set automatically on the
+  collect leg — never declares `arrived` outside the true xy tol even under the fm482 hysteresis latch),
+  and the host config key `grasp_press_timeout_s` (SIM seconds, `ros_host.py`) bounds the WHOLE
+  unconfirmed pre-weld press so an unsealing grasp FAILS FAST with a named reason before the opaque 90 s
+  WALL arm-command heartbeat (runs 321/327). Design + bounded collect-only validation config
+  (`--stop-after collect`, no GT): `data/sim-robust-collect-arrival-v1/report.md`,
+  `docs/examples/collect-only-validation-fragment.json`.
 - **Tray/slot fit preflight** (opt-in, default-off): `restock/fit_preflight.py` refuses a
   handling unit that will not fit the destination slot BEFORE reserving stock or booting
   Isaac, instead of failing opaquely at place. `fit = ok | wont_fit | unknown` from a

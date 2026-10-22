@@ -39,7 +39,7 @@ class RuntimeTests(unittest.TestCase):
                         True, False, 0., True)
         self.port = NS(advance=lambda dt: self.p, controls=lambda c:None,
                        stop=lambda:self.stops.append('port'))
-        self.nav = NS(start=lambda goal,coupled:None,
+        self.nav = NS(start=lambda goal,coupled,**kw:None,
                       step=lambda dt,p:NS(status='succeeded',linear=0.,angular=0.,reason=''),
                       cancel=lambda:self.stops.append('nav'))
         self.mobile = NS(park=lambda:self.stops.append('base'),
@@ -184,6 +184,23 @@ class RuntimeTests(unittest.TestCase):
             r = adapter.step(.1)
             self.assertEqual(r.status, 'running')   # never tripped by the inherited transfer wall-time
         self.assertEqual(nav_goals[-1], ((2.0, -1.0, 1.57), True))  # coupled tow leg was dispatched
+
+    def test_collect_source_leg_requests_tolerance_aware_strict_arrival(self):
+        # sim-robust-collect-arrival-v1: the grasp-critical collect source park must request
+        # strict_xy_arrival so the pick never begins with the base declared 'arrived' outside the true xy
+        # tolerance (cold collect declared arrived at xy 0.169 vs a 0.150 tol under the hysteresis latch).
+        # The free outbound drive must NOT request it.
+        seen = []
+        self.nav = NS(start=lambda goal, coupled, **kw: seen.append((tuple(goal), coupled, kw)),
+                      step=lambda dt, p: NS(status='running', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        self.assertTrue(seen and seen[-1][2].get('strict_xy_arrival') is True)
+        seen.clear()
+        adapter.start('outbound', self.job)
+        self.assertTrue(seen and 'strict_xy_arrival' not in seen[-1][2])
 
     def test_collect_drives_to_place_approach_between_pick_and_place(self):
         # fm390: when the arm reaches TRANSIT (carry fold done) and a place_approach pose is configured,
