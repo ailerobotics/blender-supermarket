@@ -100,6 +100,30 @@ def in_clear_region(q, wrist1_cap, wrist2_min):
     return wrap_angle(q[3]) <= wrist1_cap and wrap_angle(q[4]) >= wrist2_min
 
 
+def clear_branch(q, wrist1_cap, lower, upper, *, tol=1e-9):
+    """Re-express the arm config ``q`` so the COMMANDED ur_wrist_1 (index 3) lies in the clear band
+    (raw value <= ``wrist1_cap``) by shifting it a whole number of turns -- an exact +/-2*pi shift of a
+    single revolute joint is the IDENTICAL tool pose, so the TCP is unchanged. Returns a new list (or the
+    same values) with wrist_1 set to the largest in-limit turn <= the cap, or ``None`` when no in-limit turn
+    satisfies the cap (the pose has no clear-branch COMMAND).
+
+    This is the fix for the wrap blind spot in ``in_clear_region``: that predicate wraps wrist_1 to
+    (-pi, pi], so an IK solution whose RAW wrist_1 is e.g. +4.12 (wraps to -2.16 <= cap) reads as "clear"
+    even though a joint starting below the ~0.69 ur_wrist_1-vs-ur_forearm stop has to sweep UP through the
+    stop to reach +4.12. Commanding the equivalent branch (-2.16) reaches the same clear orientation without
+    crossing the stop. wrist_2/wrist_3 are left untouched -- their branch is chosen by the selection guard
+    (``in_clear_region``), and shifting wrist_2 by 2*pi would not change its colliding orientation."""
+    q = [float(v) for v in q]
+    w1 = q[3]
+    lo, hi = float(lower[3]), float(upper[3])
+    cands = [w1 + k * 2.0 * math.pi for k in range(-3, 4)]
+    cands = [c for c in cands if lo - tol <= c <= hi + tol and c <= wrist1_cap + tol]
+    if not cands:
+        return None
+    q[3] = max(cands)
+    return q
+
+
 def wrist_flip_seed(q):
     """The wrist-flipped twin of ``q`` as an IK SEED: wrist_1 - pi, -wrist_2, wrist_3 + pi (shoulder/elbow
     unchanged). For a UR it is exact only when the wrist_2 offset is zero; with the real 0.116 m offset the
