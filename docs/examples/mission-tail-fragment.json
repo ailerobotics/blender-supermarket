@@ -6,7 +6,11 @@
     "cart_parking_backaway": [-0.6, 13.8, 3.14159]
   },
   "_optional_lidar_sensor_yaw_fix": {
-    "_comment": "Default OFF and NOT needed for the tail (the home leg above succeeds under both wirings). isaac_bundle passes the lidar URDF origin (0.52, 0, 0.15) = (x, y, z) as Scan.sensor_to_base, which is (x, y, YAW): every live return is rotated 0.15 rad about the sensor. true => (0.52, 0, 0.0). It changes what couple/outbound see, so enable it only with the navigation lane's re-check of those stages.",
-    "lidar_sensor_yaw_fix": true
+    "_comment": "The lidar yaw-0 fix is now ON BY DEFAULT (sim-restock-lidar-yaw-fix-eval): the lidar_frame is a fixed rpy-0 child of base_link, so the correct Scan.sensor_to_base YAW is 0, never the URDF z (0.15 m mount height). The legacy wiring read that z as an 8.59 deg yaw, rotating every return and smearing a wall 3 m ahead down to 2.25 m (0.75 m proud) -- the sole source of the tow-lane 'proud phantom' returns (warm8/warm11 replay: fixed 0 returns > 0.12 m from any mapped AABB vs ~12k legacy) and the capsule-vs-planner deadlock. Omit this key to get the fix. Set it false ONLY to reproduce a pre-fix recorded run. Decision + CPU proof: data/sim-restock-lidar-yaw-fix-eval/report.md; proof scripts/check_lidar_yaw_fix.py.",
+    "lidar_sensor_yaw_fix": false
+  },
+  "_optional_retire_trust_static_waiver": {
+    "_comment": "With the yaw fix the phantom class that FORCED navigation.tow_lane_trust_static (run-321b/322b lane_blocked) is gone: the fixed cloud validates warm8's outbound lane with trust_static OFF (CPU proof: scripts/check_lidar_yaw_fix.py check_waivers). REMOVE tow_lane_trust_static from the runtime config once the bounded GPU run (fix on, trust_static off) confirms no residual unmapped-static block. KEEP tow_lane_static_tol_m (the small proud tolerance still covers finer-than-AABB geometry) and tow_lane_trust_unknown (the coverage waiver for the turn-in-place self-occlusion, fm437/fm439 -- a sensing-geometry deadlock the yaw fix does NOT address).",
+    "navigation": {"tow_lane_trust_static": false}
   }
 }

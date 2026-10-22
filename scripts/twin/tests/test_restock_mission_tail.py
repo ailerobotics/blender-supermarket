@@ -108,11 +108,14 @@ class GroundTruthSwitches(unittest.TestCase):
                                                  'return_mode': 'uncouple_at_cart_parking'})
         self.assertEqual(ground_truth_place_actions(config), ('transfer',))
         self.assertEqual(mission_ground_truth_sources(config), ('ground_truth',))
-        # the lidar wiring fix is recorded as provenance, not as a captioned *_mode workaround
-        lidar = mission_modes(dict(config, lidar_sensor_yaw_fix=True))['lidar_sensor_to_base']
-        self.assertIn('lidar_sensor_yaw_fix', lidar)
+        # the lidar yaw-0 fix is ON by default now (vr1), so a fix run records NO lidar provenance (it is
+        # the norm); only the EXCEPTIONAL legacy wiring is recorded as provenance, never a captioned *_mode.
+        self.assertNotIn('lidar_sensor_to_base', mission_modes(dict(config, lidar_sensor_yaw_fix=True)))
+        self.assertNotIn('lidar_sensor_to_base', mission_modes(config))         # absent => default fix
+        legacy = mission_modes(dict(config, lidar_sensor_yaw_fix=False))['lidar_sensor_to_base']
+        self.assertIn('legacy', legacy)
         self.assertFalse(any(k.endswith('_mode') and 'lidar' in k for k in
-                             mission_modes(dict(config, lidar_sensor_yaw_fix=True))))
+                             mission_modes(dict(config, lidar_sensor_yaw_fix=False))))
 
     def test_mission_refuses_ground_truth_evidence_unless_opted_in(self):
         class Adapter:
@@ -247,6 +250,49 @@ class HomeLegNavigation(unittest.TestCase):
         self.assertEqual(lidar_wall_probe((LIDAR_XYZ[0], LIDAR_XYZ[1], 0.0)), (3.0, 3.0))
         lo, hi = lidar_wall_probe(LIDAR_XYZ)          # the legacy (x, y, z) tuple read as (x, y, yaw)
         self.assertGreater(hi - lo, 1.0)
+
+    def test_lidar_sensor_frame_orientation_locked_and_fix_is_default(self):
+        """REGRESSION LOCK (sim-restock-lidar-yaw-fix-eval): the lidar_frame is a FIXED, rpy-0 child of
+        base_link -- its physical yaw about base_link is exactly 0, and the URDF z is a mount HEIGHT, not a
+        rotation. So the range sensor's ``sensor_to_base`` YAW must always be 0 (never the z), and the fix
+        is the DEFAULT. If anything regresses the frame to carry a rotation, or wires the z back in as yaw
+        by default, this fails."""
+        from twin.urdf_probe import parse_urdf
+        from twin.restock.isaac_bundle import lidar_sensor_to_base
+        from twin.mobile_assets import build_mobile_urdf
+        # Generate the real mobile URDF from a minimal UR source chain and read the lidar_frame joint, so
+        # the asset-level invariant (fixed, rpy-0) is checked on the actual generator output.
+        source = '''<robot name="test_fixture">
+          <link name="world"/><link name="pedestal_link"/><link name="pedestal_top"/>
+          <link name="ur_base_link"/><link name="arm"/><link name="ur_tool0"/>
+          <joint name="pedestal_joint" type="fixed"><parent link="world"/><child link="pedestal_link"/></joint>
+          <joint name="pedestal_top_joint" type="fixed"><parent link="pedestal_link"/><child link="pedestal_top"/></joint>
+          <joint name="ur_base_joint" type="fixed"><parent link="pedestal_top"/><child link="ur_base_link"/></joint>
+          <joint name="shoulder" type="revolute"><parent link="ur_base_link"/><child link="arm"/>
+          <limit lower="-3" upper="3" effort="100" velocity="1"/></joint>
+          <joint name="tool0_joint" type="fixed"><parent link="arm"/><child link="ur_tool0"/>
+          <origin xyz="0 0 0.3" rpy="0 0 0"/></joint>
+          <ros2_control name="fixture"><joint name="shoulder"><state_interface name="position">
+          <param name="initial_value">-2.5</param></state_interface></joint></ros2_control>
+          </robot>'''
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / 'arm.urdf'
+            src.write_text(source)
+            out = Path(tmp) / 'mobile.urdf'
+            build_mobile_urdf(str(src), str(out))
+            joint = parse_urdf(str(out)).joints_by_child['lidar_frame']
+            self.assertEqual(joint.jtype, 'fixed')
+            self.assertEqual(tuple(round(v, 6) for v in joint.origin_rpy), (0.0, 0.0, 0.0),
+                             'lidar_frame must be physically UNROTATED; its z is a mount height, not a yaw')
+            self.assertNotEqual(joint.origin_xyz[2], 0.0,
+                                'the frame carries a nonzero z (the value the legacy bug read as yaw)')
+            origin = joint.origin_xyz
+        # The production resolver: absent/true => yaw 0 (the fix, default); explicit false => legacy z-as-yaw.
+        self.assertEqual(lidar_sensor_to_base(origin, {}), (origin[0], origin[1], 0.0))
+        self.assertEqual(lidar_sensor_to_base(origin, {'lidar_sensor_yaw_fix': True}),
+                         (origin[0], origin[1], 0.0))
+        self.assertEqual(lidar_sensor_to_base(origin, {'lidar_sensor_yaw_fix': False}),
+                         (origin[0], origin[1], origin[2]))
 
     def test_recommended_return_poses_reach_home_uncoupled(self):
         # The vr1 return poses (docs/examples/mission-tail-fragment.json): from the cart parking spot,

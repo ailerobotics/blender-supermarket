@@ -1,0 +1,169 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "sensor_yaw_offset_is_the_urdf_z",
+      "passed": true,
+      "urdf_z_m": 0.15,
+      "read_as_yaw_rad": 0.15,
+      "read_as_yaw_deg": 8.59
+    },
+    {
+      "name": "wall_1m_fixed_reproduces_exactly",
+      "passed": true,
+      "fixed_span": [
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "wall_1m_legacy_reads_proud",
+      "passed": true,
+      "legacy_span": [
+        0.312,
+        1.677
+      ],
+      "proud_depth_m": 0.688
+    },
+    {
+      "name": "wall_2m_fixed_reproduces_exactly",
+      "passed": true,
+      "fixed_span": [
+        2.0,
+        2.0
+      ]
+    },
+    {
+      "name": "wall_2m_legacy_reads_proud",
+      "passed": true,
+      "legacy_span": [
+        1.26,
+        2.707
+      ],
+      "proud_depth_m": 0.74
+    },
+    {
+      "name": "wall_3m_fixed_reproduces_exactly",
+      "passed": true,
+      "fixed_span": [
+        3.0,
+        3.0
+      ]
+    },
+    {
+      "name": "wall_3m_legacy_reads_proud",
+      "passed": true,
+      "legacy_span": [
+        2.245,
+        3.7
+      ],
+      "proud_depth_m": 0.755
+    },
+    {
+      "name": "wall_5m_fixed_reproduces_exactly",
+      "passed": true,
+      "fixed_span": [
+        5.0,
+        5.0
+      ]
+    },
+    {
+      "name": "wall_5m_legacy_reads_proud",
+      "passed": true,
+      "legacy_span": [
+        4.206,
+        5.693
+      ],
+      "proud_depth_m": 0.794
+    },
+    {
+      "name": "fix_reduces_kept_phantom_returns",
+      "passed": true,
+      "legacy_kept": 11956,
+      "fixed_kept": 0,
+      "reduction_pct": 100.0
+    },
+    {
+      "name": "fix_reduces_capsule_deadlock_cases",
+      "passed": true,
+      "legacy_stops": 9,
+      "fixed_stops": 0,
+      "poses": 153
+    },
+    {
+      "name": "fix_opens_lane_clearance[outbound_dock_to_bay]",
+      "passed": true,
+      "legacy_min_clearance_m": 0.75,
+      "fixed_min_clearance_m": 1.024
+    },
+    {
+      "name": "fix_opens_lane_clearance[return_bay_to_parking]",
+      "passed": true,
+      "legacy_min_clearance_m": 0.743,
+      "fixed_min_clearance_m": 0.899
+    },
+    {
+      "name": "legacy_cloud_blocks_lane_without_trust_static",
+      "passed": true,
+      "pose": [
+        -0.63,
+        13.87,
+        -1.17
+      ]
+    },
+    {
+      "name": "legacy_cloud_needs_trust_static_to_reopen",
+      "passed": true,
+      "pose": [
+        -0.63,
+        13.87,
+        -1.17
+      ]
+    },
+    {
+      "name": "fix_validates_all_blocked_lanes_without_trust_static",
+      "passed": true,
+      "legacy_blocked": 1,
+      "fixed_still_blocked": 0
+    },
+    {
+      "name": "fix_new_obstacle_on_lane_still_blocks",
+      "passed": true,
+      "new_obstacle": [
+        -3.19,
+        15.25
+      ]
+    }
+  ],
+  "static_obstacles": 806,
+  "nav_trace": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/warm8/nav-trace.jsonl",
+  "worst_proud_depth_m": 0.794,
+  "replay": {
+    "poses": 153,
+    "beams": 180,
+    "stale_after_s": 3.0,
+    "legacy": {
+      "total_returns": 25203,
+      "kept_beyond_tol": 11956,
+      "capsule_stops": 9,
+      "lane_min_clearance_m": {
+        "outbound_dock_to_bay": 0.75,
+        "return_bay_to_parking": 0.743
+      }
+    },
+    "fixed": {
+      "total_returns": 25203,
+      "kept_beyond_tol": 0,
+      "capsule_stops": 0,
+      "lane_min_clearance_m": {
+        "outbound_dock_to_bay": 1.024,
+        "return_bay_to_parking": 0.899
+      }
+    }
+  },
+  "waivers": {
+    "poses": 173,
+    "legacy_blocked_poses": 1,
+    "proud_tol_m": 0.12
+  }
+}
