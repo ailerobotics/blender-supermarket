@@ -169,8 +169,13 @@ class IsaacPort:
                  stationary_dxy=0.005, stationary_dyaw=0.01, command_gate=None,
                  position_uncertainty=0.05, phase_drive=None, arm_joints=None,
                  stage_scoped_teardown=None, release_source_capture=None,
-                 collect_keep_source_render=False, collect_observe_force_render_ticks=0):
+                 collect_keep_source_render=False, collect_observe_force_render_ticks=0,
+                 trace_carton_path=None):
         self.world,self.robot=world,robot
+        # Demo-cut evidence (RESTOCK_TRACE_POSES=1 via isaac_bundle): the handling-unit prim whose world
+        # pose -- with the cart pose and Isaac stage time -- is appended to each nav-trace row for the
+        # offline run checker (twin.demo.run_check). None (default) => the trace row is byte-identical.
+        self._trace_carton_path=trace_carton_path
         # fm380: optional callable to DESTROY the collect-only sensing cameras' render products at the
         # collect->couple boundary (stage-scoped sensing). None (default) => never called => byte-
         # identical. isaac_bundle passes it ONLY when RESTOCK_STAGE_SCOPED_SENSING is set.
@@ -583,6 +588,8 @@ class IsaacPort:
                     vel=dict(rv=round(float(np.linalg.norm(rv)),4),rw=round(float(np.linalg.norm(rw)),4),
                              cv=round(float(np.linalg.norm(cv)),4),cw=round(float(np.linalg.norm(cw)),4)),
                     unknown=sum(1 for u in scan.unknown if u),probe=rec))
+                if self._trace_carton_path is not None:
+                    line=line[:-1]+', '+_json.dumps(self._trace_poses(cur,c,cz))[1:]
                 with (self.recorder.directory.parent/'nav-trace.jsonl').open('a') as _f:
                     _f.write(line+'\n')
             except Exception as _e:
@@ -602,6 +609,25 @@ class IsaacPort:
         return Packet(f'physics:{self.tick}','sensor',now,
             odometry,navigation,docking,None,
             ready,coupled,articulation,parked,evidence)
+
+    def _trace_poses(self, cur, cart, cart_z):
+        """Carton + cart world poses for the nav-trace row (RESTOCK_TRACE_POSES=1). The carton is read
+        from the live handling-unit prim (the same stage read isaac_factory's place gate uses); a
+        failed read records carton=None rather than a stale value. Never raises."""
+        out={'world_t':round(float(cur),4),
+             'cart':[round(cart.x,4),round(cart.y,4),round(math.degrees(cart.yaw),2),round(float(cart_z),4)],
+             'carton':None}
+        try:
+            from pxr import UsdGeom
+            prim=self.world.stage.GetPrimAtPath(self._trace_carton_path)
+            if prim and prim.IsValid():
+                m=UsdGeom.XformCache().GetLocalToWorldTransform(prim)
+                p=m.ExtractTranslation()
+                out['carton']=[round(float(p[0]),4),round(float(p[1]),4),round(float(p[2]),4),
+                               round(math.degrees(math.atan2(float(m[0][1]),float(m[0][0]))),2)]
+        except Exception:
+            pass
+        return out
 
     def mission_time(self):
         """Mission-relative acquisition clock (tick*dt) at the current stage time -- the clock the

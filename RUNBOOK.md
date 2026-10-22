@@ -1240,3 +1240,20 @@ ROS_LOCALHOST_ONLY=1 PYTHONPATH=scripts <env_isaaclab python> scripts/run_restoc
 <store-vision .venv python> scripts/run_route_alerts_smoke.py --render <scratch>/render --out
 <scratch>/detect` (asserts obstruction.detected + a dynobs Detection). Write-up +
 "on-the-route" follow-up (a mobile RGB-D route camera): `data/sim-route-alerts-v1/report.md`.
+
+## 20. Demo cut + run checker — the captain's walkthrough video (CPU, read-only on the run)
+
+Assemble the demo cut of a finished mission run (title card, a caption per stage for all seven
+stages, the mission.json workaround labels on screen, slow stretches time-lapsed, closing result
+card) and check the run before sending it. Neither needs the GPU; both only READ the run dir.
+```
+FFMPEG=<env_isaaclab>/lib/python3.11/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2
+python3 scripts/check_walkthrough_run.py <run-dir> [--json check.json]     # exit 0 = PASS/WARN
+python3 scripts/make_walkthrough_cut.py <run-dir> --ffmpeg "$FFMPEG" [--out X.mp4]
+#   default output <run-dir>/walkthrough-demo.mp4 (+ .cut.json edit list); refuses to overwrite
+```
+The checker proves the carton rode on the rollwagen (couple/outbound/park) and landed on the bay
+top from the recorded poses when the run set `RESTOCK_TRACE_POSES=1` (carton + cart pose + Isaac
+stage time per nav-trace row; off by default, observation only), else by frame analysis of the
+overhead chase frames (labelled as such). Tests: `PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+python3 -m pytest scripts/twin/demo/tests/test_walkthrough_cut.py -q` (set `FFMPEG` for the encode test).
