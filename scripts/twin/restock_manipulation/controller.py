@@ -303,7 +303,15 @@ class TransferController:
         if self.cage_preplace_shape is not None and (len(self.cage_preplace_shape) != 6
                 or not all(map(math.isfinite, self.cage_preplace_shape))):
             raise ValueError('cage_preplace_shape must be 6 finite joint values')
-        self.cart_location, self.max_age = cart_location, max_age
+        # fm476: SIM-ONLY env override for the sensor-packet freshness bound. The fm465 light rig makes
+        # the TRANSFER capture's full-res render slow, so by the time the packet reaches the host the
+        # sim /clock has advanced ~0.55 s past the packet stamp -- STALE beyond the 0.5 s default, so the
+        # host rejected the first transfer packet ('timestamp stale or future (now-stamp=0.550, ...)')
+        # -> 'failed' -> arm feed death -> stall (run-350, fm474/475 diagnosis). Raising the bound is
+        # SAFE here: the transfer (and collect) scene is PARKED/static, so a slightly older packet is
+        # strictly consistent. Unset => the 0.5 s default (byte-identical real-rig).
+        self.cart_location = cart_location
+        self.max_age = _float_env_bounded('RESTOCK_SENSOR_MAX_AGE_S', max_age, 0.1, 5.0)
         # fm423 (b) / run-321 cold collect: the relayed host stamps (collision_time from
         # station/status, feedback_time from /joint_states) ride a DIFFERENT clock relay than the
         # controller's node `now`, so under render pacing a freshly-incorporated stamp can arrive
