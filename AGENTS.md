@@ -438,6 +438,11 @@ repo's `scenes/`, `export/` or `renders/`.
   from the `RESTOCK_TRACE_POSES=1` nav-trace poses; without them it falls back to labelled
   frame analysis (chase-camera model). Frame `simulation_time` is Isaac stage time and trace
   `t` is mission time (offset 0.05 s cold, 0.55 s warm); `twin/demo/run_evidence.py` aligns them.
+  Opt-in `--bt-panel` replaces the route-map panel with the demo-004 decision/reason tree (1920x1080,
+  `walkthrough-bt.mp4`), driven entirely by the RECORDED evidence — `twin/demo/bt_timeline.py` replays
+  `bt_events.jsonl`/`bt_snapshot.json` to per-frame node statuses + the authored step labels, and
+  measures each reason (couple hitch gap, base→bay distance, lane progress, placed Δ, the failed step's
+  recorded fault) from the traced poses via `twin/demo/measures.py`. Default (no flag) is byte-identical.
 
 ## Maintaining this file
 
