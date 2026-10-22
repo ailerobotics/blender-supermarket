@@ -453,6 +453,13 @@ repo's `scenes/`, `export/` or `renders/`.
   age (the fm476 "slow render 0.55 s" and both bench1 transfer failures). Staged starts fix it via
   `restock/staged_start.py` (`Sensors.clock_offset`, default on; plus the first-manipulation settle
   hold `staged_start_settle_s`). Any new cross-clock host check must subtract `clock_offset`.
+  **Sharp edge: a transfer-start shortcut LATCHES the arm command gate.** The `start_at='transfer'`
+  coupling settle holds the arm via `assembly.hold()` → `ArmCommandGate.hold()`, which sets `faulted=True`
+  (a terminal e-stop, never self-reset), so a bench's executor/cuMotion/live_pose arm would otherwise sit
+  silently dead-gated at the stow pose (no `ARM_CMD_ENVELOPE`; the frozen arm faults the host's trajectory
+  reference at 1.3 rad — misread as a clock/self-collision fault). `apply_start_state` calls the new
+  `ArmCommandGate.resume()` at the end of that block to re-arm the gate; any new shortcut that holds the arm
+  must do the same.
 - **Uncouple-at-parking-spot on return** (opt-in, default-off): `return` tows the cart home coupled
   unless `config['uncouple_on_return']` + a `cart_parking` mission pose are set, when it tows the cart
   to the parking spot, brakes it, releases the tow coupling via `MobileController.uncouple(obs)` (new,

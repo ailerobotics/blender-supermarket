@@ -453,6 +453,29 @@ def test_arm_tracking_jump_latches_measured_hold_and_rejects_later_move():
     assert np.array_equal(applied[-1][0],np.zeros(6))
 
 
+def test_resume_rearms_a_latched_gate_so_a_streamed_command_actuates():
+    # execretest root cause: the start_at=transfer shortcut holds the arm via assembly.hold(), which
+    # latches ArmCommandGate.faulted (hold() is otherwise terminal and never self-resets). Every later
+    # executor command is then dropped at `if self.faulted` -> the arm stays frozen at the stow pose and
+    # the host tracking reference diverges to a 1.3 rad fault. resume() must re-arm the gate so a streamed
+    # reference again CHANGES the applied drive target.
+    gate,applied=gate_fixture()
+    gate.hold()                                   # the shortcut's assembly.hold() latches the fault
+    assert gate.faulted
+    # A command while latched is dropped (the applied target stays the held measured pose).
+    gate.command(names=list(ARM_JOINTS),positions=[.2]*6,velocities=[.01]*6,
+                 efforts=[],stamp=1.,now=1.)
+    assert gate.faulted and np.array_equal(applied[-1][0],np.zeros(6))
+    gate.resume()                                 # the shortcut re-arms the gate at handoff
+    assert not gate.faulted and gate.hold_target is None and not gate.started
+    # The resume re-seats a clean hold at the measured pose...
+    assert np.array_equal(applied[-1][0],np.zeros(6))
+    # ...and the next streamed reference is now APPLIED (the arm follows).
+    gate.command(names=list(ARM_JOINTS),positions=[.1]*6,velocities=[.03]*6,
+                 efforts=[],stamp=2.,now=2.)
+    assert not gate.faulted and np.allclose(applied[-1][0],0.1) and np.allclose(applied[-1][1],0.03)
+
+
 def test_masked_depth_renders_on_sensing_cadence_through_suspension():
     # ESDF/masked-depth must keep publishing on the sensing cadence even while the decode capture is
     # gate-suspended (run-139 'stale parked-station' when the suspension's render-skip stopped it).
