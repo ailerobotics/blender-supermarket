@@ -33,6 +33,32 @@ def test_fixture_sensor_refused_and_seal_preserved_by_hold():
     assert calls==['calibrate','start','hold']
 
 
+def test_ground_truth_place_target_accepted_with_sensor_observations():
+    # fm471/run-347: the ground-truth PLACE target (fm461 demo fallback) must PASS the provenance gate
+    # when the observations are sensor-sourced -- it is honestly labelled 'ground_truth', never a fixture
+    # smuggled into a pick. Without this it raised at transfer -> stop() -> arm feed death -> stall.
+    packet=NS(simulation_time=1.,observations=[NS(source='sensor')],target=NS(source='ground_truth'))
+    runtime,calls,_=make_runtime(packet)
+    assert runtime.step(.01,1.).status=='running'       # provenance OK -> polled, no raise/hold
+    assert 'sensor' in calls and 'hold' not in calls
+
+
+def test_non_sensor_non_ground_truth_target_still_refused():
+    # Any OTHER non-sensor target provenance is still an integrity violation (fail-closed).
+    packet=NS(simulation_time=1.,observations=[NS(source='sensor')],target=NS(source='fixture'))
+    runtime,calls,_=make_runtime(packet)
+    assert runtime.step(.01,1.).status=='failed'
+    assert calls[-1]=='hold'
+
+
+def test_fixture_observation_still_refused_even_with_ground_truth_target():
+    # The PICK (observation) must still be sensor-sourced; a fixture observation is refused regardless.
+    packet=NS(simulation_time=1.,observations=[NS(source='test_fixture')],target=NS(source='ground_truth'))
+    runtime,calls,_=make_runtime(packet)
+    assert runtime.step(.01,1.).status=='failed'
+    assert calls[-1]=='hold'
+
+
 def test_repeated_camera_timestamp_fails_closed():
     packet=NS(simulation_time=1.,observations=[NS(source='sensor')],target=None)
     runtime,calls,_=make_runtime(packet)

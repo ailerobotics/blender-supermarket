@@ -182,8 +182,17 @@ class RosManipulationRuntime:
                 if (not math.isfinite(stamp) or stamp <= self.last_sensor_time or
                         not -0.02 <= simulation_time-stamp <= .5):
                     raise ValueError('stale or repeated camera packet')
-                items = list(packet.observations)+([packet.target] if packet.target else [])
-                if any(item.source != 'sensor' for item in items):
+                # Observations (what we PICK) must be sensor-sourced -- never grasp a fixture. The place
+                # TARGET may ADDITIONALLY be 'ground_truth': fm461's sanctioned demo fallback places the
+                # carton at a known bay pose when the shelf is not camera-commissioned. _capture_transfer
+                # only labels the target 'ground_truth' when transfer_ground_truth opted in (and does so
+                # honestly, never as 'sensor'), so accepting it here cannot smuggle a fixture into a pick;
+                # any OTHER non-sensor provenance on either observations or target is an integrity
+                # violation that still raises (fail-closed). run-347: without this, the ground-truth place
+                # target tripped the gate at transfer -> stop() -> arm feed death -> StationAckStreamStalled.
+                if any(o.source != 'sensor' for o in packet.observations):
+                    raise ValueError('production manipulation requires sensor provenance')
+                if packet.target is not None and packet.target.source not in ('sensor', 'ground_truth'):
                     raise ValueError('production manipulation requires sensor provenance')
                 if self._base_repositioned and not packet.base_repositioned:
                     packet = replace(packet, base_repositioned=True)   # fm400: carry arrival to the host
