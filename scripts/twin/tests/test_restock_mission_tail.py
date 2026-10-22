@@ -214,6 +214,17 @@ class TailDryRun(unittest.TestCase):
         self.assertEqual(mission.state, 'failed')
         self.assertIn('transfer evidence mismatch', mission.reason)
 
+    def test_never_settling_train_fails_named_not_forced(self):
+        # The uncouple settle wait is bounded: a train that never reads stationary is refused with a
+        # NAMED reason (never force-detached), and the mission ends instead of hanging.
+        mission, _s, rig, _mj, lines = self._run(_config(verify_ground_truth={'enabled': True}),
+                                                 unsettle_after_pin=10 ** 7)
+        self.assertEqual(mission.state, 'failed')
+        self.assertNotIn('uncouple', rig.mobile.calls)
+        failed = [json.loads(line)['data']['reason'] for line in lines
+                  if json.loads(line)['type'] == 'stage_failed']
+        self.assertIn('uncouple refused: train not stationary/parked', failed[0])
+
     def test_backaway_waypoint_is_driven_uncoupled(self):
         poses = dict(FIXTURE['config']['mission_poses'], cart_parking_backaway=[-0.6, 13.8, math.pi])
         mission, _s, rig, _mj, _l = self._run(_config(verify_ground_truth={'enabled': True}, mission_poses=poses))

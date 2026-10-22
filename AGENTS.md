@@ -159,7 +159,16 @@ repo's `scenes/`, `export/` or `renders/`.
   design in `data/sim-restock-nav-lanes-v1/report.md`. **Couple speed / outbound stall** (fm482, both
   opt-in): `navigation.arrival_xy_hysteresis_m` stops the couple-standoff arrival dither (~700 s wall per
   warm run) and `navigation.coupled_creep_escape` stops the outbound `measured_turn_radius` noise
-  livelock; offline proof on the recorded runs `scripts/check_couple_speed.py`.
+  livelock; offline proof on the recorded runs `scripts/check_couple_speed.py`. **Sharp edge:
+  `Scan.sensor_to_base` is (x, y, YAW)** but `isaac_bundle` passes the lidar URDF origin (x, y, z),
+  rotating every live return 0.15 rad about the sensor (a likely root of "lidar-proud" phantoms);
+  `lidar_sensor_yaw_fix: true` uses yaw 0 — default off, re-check couple/outbound before enabling
+  (probe: `twin/restock/tail_nav.py` `lidar_wall_probe`).
+- **Mission tail** (transfer → verify → uncouple return → end): the uncouple happens in RETURN at
+  `cart_parking`, AFTER transfer + verify (tow → brake/pin → uncouple → back away → home uncoupled).
+  CPU dry-run through the real BT/`Mission`/`RuntimeAdapter`: `scripts/check_mission_tail.py`
+  (RUNBOOK §21, guarded by `test_restock_mission_tail.py`); the labelled ground-truth verify switch
+  and the reachable return poses are in `docs/examples/mission-tail-fragment.json`.
 - **Moving obstacles** (opt-in, default-off): `navigation/dynamic.py` tracks
   per-frame `Detection(position,radius,source)` into velocity-predicted occupancy
   points unioned (add-only) into `Observation.obstacles`, so the existing gates

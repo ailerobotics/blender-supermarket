@@ -410,6 +410,7 @@ class RuntimeAdapter:
                 self.phase = 'navigate'
                 self._return_leg = 'home'
             elif action == 'return' and self._uncouple_return():
+                self._uncouple_wait_s = 0.0
                 if self._cart_pinned_for_uncouple and hasattr(self.mobile, 'release_cart_brake'):
                     # vr1: an interrupted brake/uncouple leg left the STILL-COUPLED cart world-pinned; free
                     # it so the re-begun coupled tow is not dragging a pinned cart (re-pinned at 'brake').
@@ -909,6 +910,10 @@ class RuntimeAdapter:
         series. vr1: an unsettled train WAITS (bounded) rather than failing -- see the caller."""
         if self._return_leg == 'brake':
             if not p.parked:
+                self._uncouple_wait_s += dt
+                if self._uncouple_wait_s > _UNCOUPLE_SETTLE_MAX_S:
+                    return Result('failed', reason=f'cart brake refused: base not parked for '
+                                                   f'{self._uncouple_wait_s:.1f}s at the cart parking spot')
                 return Result('running', reason='waiting for measured parking before braking the cart')
             self.mobile.hold_cart_pin()   # pin the parked cart to the world before releasing the joint
             self._cart_pinned_for_uncouple = True
