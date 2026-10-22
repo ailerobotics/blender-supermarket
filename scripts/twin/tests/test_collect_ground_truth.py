@@ -603,3 +603,27 @@ def test_create_loads_the_warm_slot_from_the_runtime_scenario_only_when_enabled(
     assert slot['load_center_body_xy'] == (0.18, 0.0) and slot['support_z_world'] == 0.9325
     with pytest.raises(ValueError):                                                  # fail closed at boot
         _create_params(monkeypatch, tmp_path, {'initial_staging': {}})
+
+
+def test_replay_cli_reads_the_recorded_launch_and_failure_signature(tmp_path):
+    """scripts/check_collect_ground_truth.py (the recorded-run replay): the launch args and the cold-collect
+    failure signature are parsed from the run's own console/host logs, never assumed."""
+    import json
+    import check_collect_ground_truth as replay
+    run = tmp_path / 'run-9'
+    run.mkdir()
+    (run / 'mission.json').write_text(json.dumps({'state': 'failed', 'reason': 'StationAckStreamStalled: x'}))
+    (tmp_path / 'run-9-manip.txt').write_text('restock_manip: no initial sensor frame\n')
+    console = ("Passing the following args to the base kit application:  ['--execute', '--scenario', '/s.json', "
+               "'--runtime-config', '/r.json', '--output', '/o']\n"
+               'COLLECT_CAPTURE calls=1 provider_error=ValueError:unknown or undecoded label in calibrated slot\n'
+               'COLLECT_CAPTURE calls=11 target=None parked=True\n'
+               'COLLECT_CAPTURE calls=12 sku=juice_orange roi=(1, 2, 3, 4) pose=(-0.001, 1.1, 0.261, 0.0, 0.0, 1.0, 0.0)\n')
+    assert replay.launch_args(console) == {'--scenario': '/s.json', '--runtime-config': '/r.json'}
+    sig = replay.signature(run, console)
+    assert sig['camera_target_frames'] == 1 and sig['first_camera_pose'][:3] == (-0.001, 1.1, 0.261)
+    assert sig['camera_provider_errors'] == {'ValueError:unknown or undecoded label in calibrated slot': 1}
+    assert sig['camera_target_none_logged'] == 1 and sig['host_no_initial_sensor_frame']
+    assert sig['mission'].startswith('failed: StationAckStreamStalled')
+    with pytest.raises(ValueError):
+        replay.launch_args('no launch line here')
