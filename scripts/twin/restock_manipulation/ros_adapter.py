@@ -77,6 +77,17 @@ STARTUP_GRACE_S = max(1.0, min(120.0, float(os.environ.get('RESTOCK_STARTUP_GRAC
 # held-sensing move; the WALL backstop (SENSOR_STREAM_WALL_BACKSTOP_S) stays the true dead-stream detector
 # (a frozen sim clock never advances this bound). Default 1.0 = byte-identical real-rig (sim == wall).
 SENSOR_WATCHDOG_S = max(0.5, min(120.0, float(os.environ.get('RESTOCK_SENSOR_WATCHDOG_S', 1.0))))
+# fm490 (sim-video-collect-source-v1, cold GT-collect): the fm390 reposition carry-drive holds the arm
+# in TRANSIT and PAUSES the station by design while the mission drives the base to place_approach, so
+# /sensors legitimately stops for the WHOLE render-paced drive -- the cold run went ~31 s SIM / ~740 s
+# WALL with no frame, which trips BOTH the per-frame SIM bound (the gap is real, not a dead stream) and
+# the WALL backstop -> host e-stop AT ARRIVAL, before place. Neither bound is meaningful during the
+# intentional pause (the mission's own nav drive watchdogs own the drive), so both are suspended across
+# the TRANSIT hold; this is the generous WALL budget that still hard-stops a reposition that never
+# arrives. Env-overridable; 1200 s matches RESTOCK_NAV_GOAL_TIMEOUT_S. phase=='transit' only occurs with
+# reposition_before_place on, so default runs never enter the branch (byte-identical).
+TRANSIT_SENSING_PAUSE_WALL_S = max(60.0, min(3600.0,
+                                            float(os.environ.get('RESTOCK_TRANSIT_SENSING_PAUSE_WALL_S', 1200.0))))
 
 
 def env_wins(env_var, passed, module_default):
@@ -1240,6 +1251,10 @@ class RosTransferBridge:
         self.watchdog_seconds = env_wins('RESTOCK_SENSOR_WATCHDOG_S', watchdog_seconds, SENSOR_WATCHDOG_S)
         self.startup_grace_seconds = env_wins('RESTOCK_STARTUP_GRACE_S', startup_grace_seconds, STARTUP_GRACE_S)
         self.wall_backstop_seconds = wall_backstop_seconds
+        # fm490: WALL budget for the TRANSIT sensing-pause (reposition carry-drive); both /sensors bounds
+        # are suspended across the pause, this is the only backstop then. Reset each time transit begins.
+        self.transit_pause_wall_s = TRANSIT_SENSING_PAUSE_WALL_S
+        self._transit_pause_start_wall = None
         self.first_frame = False
         self.job_start_wall = None
         self.timer = node.create_timer(.1, self._watchdog,
@@ -1343,6 +1358,26 @@ class RosTransferBridge:
             # (inside retry_or_fail_move) clears the port so this 0.1 s check does not re-fire meanwhile.
             self._emit(self.controller.retry_or_fail_move('arm motion failed (goal tolerance not reached)'))
             return
+        # fm490: TRANSIT sensing-pause (fm390 reposition carry-drive). /sensors is intentionally stopped
+        # while the mission drives the base to place_approach, so both the per-frame SIM bound and the
+        # WALL backstop below would false-trip (cold run: ~31 s sim / ~740 s wall of no frame). Suspend
+        # them for the pause and keep the packet timers fresh so the resume (first re-warmed frame) does
+        # not see a stale gap -- under a generous wall budget that still hard-stops a drive that never
+        # arrives. Motion/planning faults above still surface. phase=='transit' needs reposition_before_
+        # place, so a default run never enters here (byte-identical).
+        if self.controller.phase == 'transit':
+            if self._transit_pause_start_wall is None:
+                self._transit_pause_start_wall = wall_now
+            elif wall_now - self._transit_pause_start_wall > self.transit_pause_wall_s:
+                self._emit(self.controller._fail(
+                    'reposition carry-drive exceeded transit sensing-pause budget (%.0fs > %.0fs wall)'
+                    % (wall_now - self._transit_pause_start_wall, self.transit_pause_wall_s)))
+                return
+            self.last_packet_wall = wall_now
+            if self.last_packet_sim is not None:
+                self.last_packet_sim = self.node.get_clock().now().nanoseconds * 1e-9
+            return
+        self._transit_pause_start_wall = None
         if not self.first_frame:
             # No /sensors yet: the looser startup grace (not the 1 s per-frame bound) applies, so a
             # warm-up + cold first ESDF has time to produce the first frame. Stays in WALL time; a
