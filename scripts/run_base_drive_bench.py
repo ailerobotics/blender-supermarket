@@ -7,7 +7,9 @@ mobile base (NO cart coupling), commands an OPEN-LOOP step profile (straight 0.2
 (v, omega) per tick. This isolates the DRIVE's ability to achieve the command from the follower/gate --
 run-325/326 showed the base under-tracks even uncoupled (cart drag refuted). One physics lever per run
 (fm434 order: wheel traction, then solver iterations, then physics_dt; the wheel-radius/diff-drive units
-error was ruled out statically). Short: <= 15 min wall under /tmp/aile-gpu.lock, --heavy-threshold-mb 2500
+error was ruled out statically; fm-sim-robust-coupled-traction adds the wheel-drive force/damping lever
+--wheel-drive-max-force/--wheel-drive-damping -> config['wheel_drive']). Short: <= 15 min wall under
+/tmp/aile-gpu.lock, --heavy-threshold-mb 2500
 for whispr, never --force. Writes base-drive-bench.json with per-phase tracking ratios + within_tol.
 
 Parent/worker like run_nav_towing_probe: the parent takes the GPU slot + builds the NVIDIA-runtime env and
@@ -29,6 +31,7 @@ from twin.tools.base_drive_bench import step_profile, tracking_report
 
 
 def worker(config_path, output, *, wheel_friction, solver_iters, physics_dt,
+           wheel_drive_max_force=None, wheel_drive_damping=None,
            straight_s=4.0, arc_s=6.0, v=0.25, min_radius=1.5, max_wall_s=540.0):
     import numpy as np
     from isaacsim import SimulationApp
@@ -43,6 +46,16 @@ def worker(config_path, output, *, wheel_friction, solver_iters, physics_dt,
         cfg = dict(config)
         if wheel_friction is not None:
             cfg['wheel_friction'] = float(wheel_friction)          # lever 1: traction
+        # fm-sim-robust-coupled-traction: lever 2, the SIM wheel-drive force/damping (config['wheel_drive']
+        # -> MobileController drive_max_force/drive_damping). Overlaid onto any wheel_drive already in the
+        # config; absent => the config's value (or the 80 N.m / 100 class default), byte-identical.
+        if wheel_drive_max_force is not None or wheel_drive_damping is not None:
+            wd = dict(cfg.get('wheel_drive') or {})
+            if wheel_drive_max_force is not None:
+                wd['max_force'] = float(wheel_drive_max_force)
+            if wheel_drive_damping is not None:
+                wd['damping'] = float(wheel_drive_damping)
+            cfg['wheel_drive'] = wd
         dt = float(physics_dt) if physics_dt else 1.0 / 60.0       # lever 4
         assembly = assemble(app=app, config=cfg, scenario=scenario, output=output / 'assembly')
         if solver_iters is not None:                               # lever 3: articulation position iters
@@ -68,7 +81,8 @@ def worker(config_path, output, *, wheel_friction, solver_iters, physics_dt,
             if time.monotonic() - t0 > max_wall_s:
                 break
         report = tracking_report(cmds[:len(achieved)], achieved)
-        report.update(wheel_friction=cfg.get('wheel_friction'), solver_iters=solver_iters,
+        report.update(wheel_friction=cfg.get('wheel_friction'), wheel_drive=cfg.get('wheel_drive'),
+                      solver_iters=solver_iters,
                       physics_dt=dt, ticks=len(achieved), v=v, min_radius=min_radius, status='ok')
         (output / 'base-drive-bench.json').write_text(json.dumps(report, indent=2))
         print('BASE_DRIVE_BENCH ' + json.dumps(report), flush=True)
@@ -87,6 +101,10 @@ def main():
     p.add_argument('--isaac-python', type=Path)
     p.add_argument('--nvidia-runtime', type=Path)
     p.add_argument('--wheel-friction', type=float)
+    p.add_argument('--wheel-drive-max-force', type=float,
+                   help='SIM wheel-drive torque cap (N.m); config wheel_drive.max_force (default 80)')
+    p.add_argument('--wheel-drive-damping', type=float,
+                   help='SIM wheel-drive damping; config wheel_drive.damping (default 100)')
     p.add_argument('--solver-iters', type=int)
     p.add_argument('--physics-dt', type=float)
     p.add_argument('--heavy-threshold-mb', type=int, choices=(1500, 2500), default=1500)
@@ -95,6 +113,8 @@ def main():
     args = p.parse_args()
     if args.worker:
         worker(args.config, args.output, wheel_friction=args.wheel_friction,
+               wheel_drive_max_force=args.wheel_drive_max_force,
+               wheel_drive_damping=args.wheel_drive_damping,
                solver_iters=args.solver_iters, physics_dt=args.physics_dt); return
     if not args.isaac_python or not args.nvidia_runtime:
         p.error('--isaac-python and --nvidia-runtime required')
@@ -107,7 +127,10 @@ def main():
         rec['guard'] = asdict(decision)
         cmd = [str(args.isaac_python), str(Path(__file__).resolve()), '--worker',
                '--config', str(args.config), '--output', str(args.output)]
-        for flag, val in (('--wheel-friction', args.wheel_friction), ('--solver-iters', args.solver_iters),
+        for flag, val in (('--wheel-friction', args.wheel_friction),
+                          ('--wheel-drive-max-force', args.wheel_drive_max_force),
+                          ('--wheel-drive-damping', args.wheel_drive_damping),
+                          ('--solver-iters', args.solver_iters),
                           ('--physics-dt', args.physics_dt)):
             if val is not None:
                 cmd += [flag, str(val)]
