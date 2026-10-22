@@ -107,3 +107,25 @@ active in the host config (the cold run reached `transit`). Optional: set
 `RESTOCK_TRANSIT_SENSING_PAUSE_WALL_S` if a different budget is wanted. Schedule the
 collect-only run (`stages=["collect","couple"]`, `RESTOCK_COLLECT_GROUND_TRUTH=1`, walkthrough
 camera, warm8 framing) once this fix is merged.
+
+## 6. Re-run outcome (collectsrc, with the PR #187 fix) — fix VALIDATED
+
+The integration lane ran the collect-only re-run (`mission/collectsrc`,
+`mission-runtime-collectonly.json`, stages collect+couple, `RESTOCK_COLLECT_GROUND_TRUTH=1`,
+walkthrough cam) with the PR #187 TRANSIT-sensing-pause fix. **The fix held:** attempt 1
+picked the carton, lifted + tucked, **carried it to the rollwagen** (the old transit
+sensor-stream trip is GONE), perceived the deck, and reached the carton over the deck for the
+place — i.e. it advanced from "dies in transit" all the way to the PLACE step.
+
+It then failed during the place with a **new, unrelated** blocker: cuMotion place-stage
+planning hit **CUDA out-of-memory** (`cumotion::FatalException: CUDA error: out of memory`,
+`cuda_array.cu:66`), the host component container died (exit -6), and the station supervisor
+heartbeat went silent (30.1 s) → mission failed. This is the known 12 GB VRAM ceiling with
+`whispr` (~2.2 GB) holding the margin; render/GI is not the lever (fm373, see
+[[mission-vram-ceiling-12gb]]). It is **not** the sensing-pause fix and **not** a pacing
+watchdog.
+
+Delivered `collect-src-002` (345 frames; clean cut 0–323: shelf pick → lift → carry → arrive →
+reach over the cart deck; the set-down+release is not completed). Carton tilt: none physically
+(GT pose ≈ 0°); the overhead-cam skew is perspective. To complete the place: free the VRAM
+margin (stop `whispr`) and re-run — an infra/integration action, no code change on this lane.
