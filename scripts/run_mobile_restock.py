@@ -462,6 +462,11 @@ def run(args, manifest, scenario):
                                       + ', '.join(m.shortcut['skipped'])
                                       + ' were synthesized (robot pose, braked base, carton '
                                         'attach), not performed; see events *_shortcut.')
+                        # start_at + the applied start staging + the walkthrough caption, so a bench
+                        # run's record and video can never pass for the full seven-stage run.
+                        from twin.restock.shortcut import shortcut_summary
+                        s.update(shortcut_summary(m.shortcut, config,
+                                                  getattr(bundle, 'start_staging', None)))
                     # Persist the per-stage summary now, before the finally runs app.close():
                     # Isaac's SimulationApp.close() can terminate the process hard and skip the
                     # outer finally (which re-writes mission.json with events as a fallback).

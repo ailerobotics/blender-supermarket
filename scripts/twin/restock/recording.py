@@ -12,13 +12,17 @@ import subprocess
 
 
 class Recorder:
-    def __init__(self, directory, *, fps=30):
+    def __init__(self, directory, *, fps=30, caption=None):
         if type(fps) is not int or fps <= 0:
             raise ValueError('positive integer recording FPS required')
         self.directory=Path(directory)
         self.directory.mkdir(parents=True,exist_ok=False)
         self.fps,self.frames=fps,[]
         self.ids=set()
+        # Optional run caption (a start-phase shortcut bench run): persisted in frames.json so any
+        # later encode -- including a re-encode from the manifest -- burns it into the walkthrough.
+        # None => frames.json and the encode are byte-identical.
+        self.caption=caption
 
     def capture(self, frame):
         """Record a newly acquired camera frame; skip only an unchanged cache.
@@ -63,8 +67,10 @@ class Recorder:
                    file=path.name,sha256=hashlib.sha256(path.read_bytes()).hexdigest())
         self.frames.append(frame);self.ids.add(render_id)
         # Save incrementally so an interrupted run retains inspectable evidence.
-        (self.directory/'frames.json').write_text(json.dumps(dict(nominal_fps=self.fps,
-            timing='variable acquisition intervals',frames=self.frames),indent=2)+'\n')
+        manifest=dict(nominal_fps=self.fps,timing='variable acquisition intervals',frames=self.frames)
+        if self.caption:
+            manifest['caption']=self.caption
+        (self.directory/'frames.json').write_text(json.dumps(manifest,indent=2)+'\n')
 
     @classmethod
     def from_manifest(cls, path):
@@ -76,10 +82,16 @@ class Recorder:
         result.fps=data.get('nominal_fps',data.get('fps',30))
         result.frames=data['frames']
         result.ids={f['render_id'] for f in result.frames}
+        result.caption=data.get('caption')
         return result
 
-    def encode(self, output, *, ffmpeg):
+    def encode(self, output, *, ffmpeg, caption=None):
+        """Encode the captures to a VFR H.264 ``output``. ``caption`` (default: the recorder's own) is
+        burned in as a full-length top banner + set as the title/comment metadata and written beside
+        the video as ``<output>.caption.srt``; if the burn-in filter is unavailable the video is still
+        encoded uncaptioned (metadata + sidecar kept) and the timing record says so."""
         output=Path(output)
+        caption=caption if caption is not None else getattr(self,'caption',None)
         if not self.frames:
             raise ValueError('need captured frames')
         if output.exists():
@@ -111,11 +123,30 @@ class Recorder:
         manifest=output.with_suffix('.ffconcat')
         with manifest.open('x') as stream:
             stream.write('\n'.join(lines)+'\n')
-        subprocess.run([str(ffmpeg),'-nostdin','-n','-loglevel','error','-f','concat','-safe','0',
+        command=[str(ffmpeg),'-nostdin','-n','-loglevel','error','-f','concat','-safe','0',
             '-i',str(manifest),'-an','-c:v','libx264','-pix_fmt','yuv420p','-bf','0',
             '-fps_mode','passthrough','-enc_time_base','1:1000000',
-            '-video_track_timescale','1000000','-crf','20','-movflags','+faststart',str(output)],
-            check=True,timeout=120)
+            '-video_track_timescale','1000000','-crf','20','-movflags','+faststart',str(output)]
+        burned=caption_error=None
+        if caption:
+            command[-1:-1]=['-metadata',f'title={caption}','-metadata',f'comment={caption}']
+            srt=output.with_suffix('.caption.srt')
+            srt.write_text('1\n00:00:00,000 --> 99:59:59,000\n'+' '.join(str(caption).split())+'\n')
+            burned=False
+            if re.fullmatch(r'[\w./ -]+',str(srt.resolve())):
+                filt=(f"subtitles=filename='{srt.resolve()}':force_style='Alignment=6,Fontsize=11,"
+                      "BorderStyle=3,OutlineColour=&H80000000,PrimaryColour=&H0000FFFF,MarginV=6'")
+                try:
+                    subprocess.run(command[:-1]+['-vf',filt,command[-1]],check=True,timeout=300,
+                                   capture_output=True,text=True)
+                    burned=True
+                except (subprocess.CalledProcessError,subprocess.TimeoutExpired) as exc:
+                    caption_error=(getattr(exc,'stderr','') or str(exc))[-400:]
+                    output.unlink(missing_ok=True)
+            else:
+                caption_error='caption sidecar path not filter-safe; metadata-only caption'
+        if not burned:
+            subprocess.run(command,check=True,timeout=120)
         if not output.is_file() or output.stat().st_size==0:
             raise RuntimeError('encoder produced no video')
         decoded=subprocess.run([str(ffmpeg),'-nostdin','-v','info','-i',str(output),
@@ -134,5 +165,7 @@ class Recorder:
                     last_frame_duration='one video timebase tick; no later acquisition inferred',
                     first_simulation_time=self.frames[0]['simulation_time'],
                     last_simulation_time=self.frames[-1]['simulation_time'])
+        if caption:
+            result.update(caption=caption,caption_burned=bool(burned),caption_error=caption_error)
         output.with_suffix('.timing.json').write_text(json.dumps(result,indent=2)+'\n')
         return result

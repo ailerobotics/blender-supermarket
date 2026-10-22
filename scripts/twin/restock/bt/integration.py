@@ -101,6 +101,8 @@ def run_once_bt(db, scenario, bundle, config, output_dir, *, mission_factory, is
         summary['note'] += (' START-PHASE SHORTCUT: stages ' + ', '.join(mission.shortcut['skipped'])
                             + ' were synthesized (robot pose, braked base, carton attach), not '
                               'performed; see events *_shortcut.')
+        from ..shortcut import shortcut_summary
+        summary.update(shortcut_summary(mission.shortcut, config, getattr(bundle, 'start_staging', None)))
     summary['bt_view'] = str((output_dir / 'bt_view.html'))
     try:
         early = dict(summary, events=db.events(scenario['job']['job_id']))
