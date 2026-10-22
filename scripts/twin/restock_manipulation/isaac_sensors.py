@@ -400,6 +400,27 @@ class IsaacCartonSensors:
                 if tolerant:
                     occluded_labels.update(s.location for s in matches)
                     continue
+                # Decisive decode diagnostic (fires ONLY on this rare refusal, so always-on is cheap):
+                # name WHY the label in a calibrated slot did not decode, so the root (too few px/module
+                # i.e. framing/distance vs enough px but low contrast/blur vs a spurious non-QR quad vs
+                # the markers decoded but the carton did not) is readable from the run log without a
+                # saved sensing frame. `quad_px` is the failing polygon's pixel bbox; `code` is '' when it
+                # came from an UNREADABLE quad (qr.unreadable_corners) vs a decoded-but-unknown text.
+                try:
+                    _poly = np.asarray(polygon, float)
+                    _w = float(_poly[:, 0].max() - _poly[:, 0].min())
+                    _h = float(_poly[:, 1].max() - _poly[:, 1].min())
+                    _decoded = [getattr(d, 'text', '') for d in qr.detections]
+                    _ever = {s.location: (s.location in self._label_clean) for s in matches}
+                    print(
+                        'DECODE_FAIL cam=%s slots=%s code=%r quad_px=%.0fx%.0f '
+                        'decoded=%s n_unreadable=%d ever_clean=%s window=%s rgb=%sx%s' % (
+                            self.camera_id, [s.location for s in matches], code, _w, _h,
+                            _decoded, len(qr.unreadable_corners), _ever, window,
+                            depth.shape[1], depth.shape[0]),
+                        flush=True)
+                except Exception:
+                    pass
                 raise ValueError('unknown or undecoded label in calibrated slot')
             if len(matches) != 1:
                 rejected.append('label outside unique calibrated slot')
