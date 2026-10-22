@@ -557,7 +557,9 @@ To iterate transfer -> verify -> return without paying couple/outbound/park, set
 mission runtime-config: `"start_at": "transfer"` and `"start_staging": "recorded_bay_park"`
 (`twin/restock/shortcut.py`). The build spawns the robot at the recorded park->transfer
 handover of the gentle bay route (runs 351/353/354/356), the rollwagen coupled behind it on
-the hitch, and the carton resting on the deck at `initial_staging.cart_load_center_body_xy`;
+the hitch, and the carton resting on the cart's upper shelf (`initial_staging.cart_support_z_world`)
+at `initial_staging.cart_load_center_body_xy` -- the spot the warm couple shortcut uses, decided by a
+live-pose reach check (the deck is collision-tight over the hitch);
 `start_staging` may also be an object overriding `robot_base_pose`, `articulation`,
 `carton_load_center_body_xy`, `carton_support_z_world`. mission.json records `start_at`,
 `start_staging_mode` and the staged poses; the walkthrough carries a burned-in BENCH caption.
