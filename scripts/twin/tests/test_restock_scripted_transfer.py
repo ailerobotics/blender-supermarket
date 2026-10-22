@@ -621,3 +621,78 @@ def test_isaac_driver_drives_the_carton_kinematically_through_usd():
     assert UsdPhysics.RigidBodyAPI(prim).GetKinematicEnabledAttr().Get() is True   # stays kinematic (fm379)
     assert np.allclose(driver.tool_world_T()[:3, 3], (-2.9, 15.25, 1.0))
     assert np.allclose(driver.arm_joint_positions(), STOW)
+
+
+# ---------------------------------------------------------------- place approach (front insert, opt-in)
+# The sales-floor endcap slot G3_back_s2 has its s3 board 0.25 m above the slot surface (0.03 m thick, front
+# ticket rail +6 mm); the backroom bay is the same slot geometry with nothing above it. Model that board over
+# the bay TARGET in the bay frame (the robot sits on the -y side, so the slot's open front faces -y).
+UPPER_BOARD = ((TARGET[0] - 0.47, TARGET[1] - 0.22, TARGET[2] + 0.25),
+               (TARGET[0] + 0.47, TARGET[1] + 0.256, TARGET[2] + 0.53))      # s3 board + its products
+SLOT_RAIL = ((TARGET[0] - 0.47, TARGET[1] - 0.226, TARGET[2] - 0.036),
+             (TARGET[0] + 0.47, TARGET[1] - 0.22, TARGET[2] + 0.006))        # s2 front ticket rail
+
+
+def _box_hits(trace, slab, tol=1e-3):
+    hx, hy, hz = (v / 2 for v in DIMS)
+    pts = np.array([[sx * hx, sy * hy, sz * hz, 1.] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
+    hits = 0
+    for T in trace:
+        c = (T @ pts.T).T[:, :3]
+        lo, hi = c.min(0), c.max(0)
+        hits += all(lo[i] < slab[1][i] - tol and hi[i] > slab[0][i] + tol for i in range(3))
+    return hits
+
+
+def test_place_approach_switch_defaults_off_and_fails_loud():
+    assert st.scripted_place_approach({}) == st.PLACE_ABOVE
+    assert st.scripted_place_approach({st.PLACE_ENV: ' Front '}) == st.PLACE_FRONT
+    with pytest.raises(ValueError, match='place approach'):
+        st.scripted_place_approach({st.PLACE_ENV: 'sideways'})
+    with pytest.raises(ValueError, match='place_approach'):
+        _plan_place(None, 'sideways')
+
+
+def _plan_place(ik, place_approach):
+    base_inv = np.linalg.inv(BASE)
+    goal = (base_inv @ np.array([TARGET[0], TARGET[1], TARGET[2] + DIMS[2] / 2 + 0.002, 1.0]))[:3]
+    return st.plan_transfer(ik, STOW, base_inv @ CARTON, goal, math.radians(0.5), dims=DIMS,
+                            place_approach=place_approach)
+
+
+def test_default_place_is_byte_identical(ik):
+    default, above = _plan(ik, True), _plan_place(ik, st.PLACE_ABOVE)
+    assert 'place_approach' not in default.choice and default.choice == above.choice
+    for a, b in zip(default.keyframes, above.keyframes):
+        assert a.name == b.name and a.line == b.line and np.array_equal(a.tcp, b.tcp)
+
+
+def test_front_place_slides_level_into_the_slot_under_the_upper_board(ik):
+    above, front = FakeDriver(ik), FakeDriver(ik)
+    assert _run(_runner(ik, above)).status == 'succeeded'
+    r = _run(_runner(ik, front, place_approach=st.PLACE_FRONT))
+    assert r.status == 'succeeded' and r.evidence['near_face']['place_approach'] == st.PLACE_FRONT
+    # the default top-down descent drives the carton through the board; the front insert never touches it
+    assert _box_hits(above.carton_trace, UPPER_BOARD) > 0
+    assert _box_hits(front.carton_trace, UPPER_BOARD) == 0
+    assert _box_hits(front.carton_trace, SLOT_RAIL) == 0
+    assert all(abs(T[2, 2]) > 0.999 for T in front.carton_trace)                 # level throughout
+    assert np.allclose(front.c[:3, 3], (TARGET[0], TARGET[1], TARGET[2] + 0.082))  # exact ground-truth place
+    plan = _plan_place(ik, st.PLACE_FRONT)
+    pre, place = (next(k for k in plan.keyframes if k.name == n) for n in ('above_place', 'place'))
+    assert pre.line and place.line                                       # straight TCP lines, no joint swing
+    assert pre.tcp[2, 3] == pytest.approx(place.tcp[2, 3])               # the slide-in is level
+    assert not plan.ik_complete                                          # task-space plan: still arm only
+
+
+def test_front_place_is_labelled_only_when_scripted_and_on():
+    on = {**SCRIPTED_ENV, st.PLACE_ENV: 'front'}
+    s = st.stamp_place_summary({'note': 'n', 'walkthrough_caption': 'cap', 'workarounds': ['transfer_mode=scripted']},
+                               on)
+    assert s['transfer_place_mode'] == 'front_insert'
+    assert s['workarounds'] == ['transfer_mode=scripted', st.PLACE_LABEL]
+    assert s['walkthrough_caption'] == f'cap | {st.PLACE_CAPTION}' and 'TRANSFER_PLACE=front_insert' in s['note']
+    assert st.stamp_place_summary(dict(s), on) == s                       # idempotent
+    for env in ({}, SCRIPTED_ENV, {st.PLACE_ENV: 'front'}, {**SCRIPTED_ENV, st.PLACE_ENV: 'bogus'}):
+        assert st.stamp_place_summary({'note': 'n'}, env) == {'note': 'n'}
+        assert st.place_caption('cap', env) == 'cap'

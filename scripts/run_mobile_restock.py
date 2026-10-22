@@ -504,6 +504,9 @@ def run(args, manifest, scenario):
                     stamp_summary(s)   # opt-in RESTOCK_TRANSFER_MODE => transfer_mode + note; absent => no-op
                     from twin.restock_manipulation import transfer_carry
                     transfer_carry.stamp_summary(s)   # opt-in RESTOCK_TRANSFER_CARRY => transfer_carry + note
+                    # opt-in RESTOCK_SCRIPTED_TRANSFER_PLACE=front (scripted mode) => transfer_place_mode + note
+                    from twin.restock.scripted_transfer import stamp_place_summary
+                    stamp_place_summary(s)
                     # collect-gt: name the ground-truth collect workaround (collect_mode + note) when it ran.
                     from twin.restock_manipulation import ground_truth_collect
                     ground_truth_collect.label_summary(s, m.shortcut)
