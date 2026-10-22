@@ -997,6 +997,7 @@ class RuntimeAdapter:
             # tick WAITS (the base is held, nothing is commanded) instead of failing the whole stage -- a
             # failure here is unrecoverable once the coupling is released (see _cart_left_parked).
             return self._step_return_uncouple(p, dt)
+        place_shove_tolerated = False
         if not p.parked:
             tol = self._loaded_place_base_excursion(p)
             if tol is None:
@@ -1010,12 +1011,27 @@ class RuntimeAdapter:
             # Expected, bounded place-descent reaction: the base is braked and re-settles; keep placing so
             # the place/release/stow sequence completes. The ground-truth carton-on-deck verify is the
             # placement proof, and the excursion bound above still fails a genuine runaway.
+            place_shove_tolerated = True
         if self.action == 'park':
             if not p.coupled:
                 return Result('failed', reason='cart lost before transfer')
             return Result('succeeded', self._evidence(p, stationary=True))
         if self.action in ('collect', 'transfer'):
-            r = self.manip.step(dt, p)
+            # sim-robust-place-descent-plan-v1: when the loaded-place base-settle tolerance above tolerated
+            # the transient descent-reaction shove, present the station/host parking gate the SAME
+            # effective-parked verdict the mission guard just reached. The sensor-owning host runtime feeds
+            # this packet's `parked` straight into the station channel's own parking gate
+            # (native_channel.StationClient.tick: `if not parked: raise 'station lost measured parking'`)
+            # AND the capture's motion.parked() via set_parked. Without this the station gate raises on the
+            # IDENTICAL ~cm transient the mission guard just tolerated -- collect3 died exactly here: the
+            # place descent reached z=0.608 and was descending (gripper gap 31->15 mm) when a 25.7 mm base
+            # shove flipped packet.parked False, the station gate raised, the step returned failed/'host',
+            # the arm never placed/released/stowed, and every re-begin then failed arm_not_in_transport.
+            # Scoped exactly to the already-tolerated loaded collect place (place_shove_tolerated is only
+            # set inside the collect-scoped excursion tolerance); unset/off => p passes through unchanged
+            # (byte-identical), so the scripted/still transfer path is untouched.
+            manip_packet = replace(p, parked=True) if place_shove_tolerated else p
+            r = self.manip.step(dt, manip_packet)
             _profile_mark(self.port, 'manip')   # sim_speed TICK_PROFILE split; no-op unless profiling
             self._last_manip_phase = getattr(r, 'phase', None)  # feeds next tick's port.gate()
             # fm390: the arm has folded to the carry pose and is HOLDING in TRANSIT -- drive the base to
