@@ -34,6 +34,12 @@ to ~2 s of wall time, during which it cannot heartbeat (it is blocked inside the
 run-72 faulted on the old 1.0 s wall guard with ``wall gap 1.85 s``. The wall guard is 3.0 s
 so a normal render-paced client survives a ~2 s capture tick while a genuinely hung client
 (no tick completes) is still caught within 3 s.
+
+Each ``tick`` publishes the liveness ack BEFORE its mapper maintenance (graph discovery + a fresh
+``get_esdf_and_gradient`` request), so a cuMotion replan storm saturating that shared service during
+a long place press cannot delay the station heartbeat (the collectsrc place-on-cart 30 s gap). Only a
+DONE ESDF result is consumed before publishing, so ``collision_time`` stays current without blocking;
+readiness still advances ONLY through a real NVIDIA integration, so a dead host still goes silent.
 """
 import argparse
 import json
@@ -259,6 +265,46 @@ def main():
         nonlocal pending, pending_epoch, pending_wall, last_discovery, endpoints_ready, diag_left
         try:
             stamp = now()
+            # STATION LIVENESS FIRST. The old order ran the mapper maintenance (graph discovery + a fresh
+            # get_esdf_and_gradient request) BEFORE publishing, so when cuMotion SATURATES that same shared
+            # service during a long place press (its replan storm re-requests the ESDF every plan), this
+            # node's own service work queued behind it and the liveness ack publish at the end of the tick
+            # was delayed -- the mission then saw the station go silent and e-stopped on the 30 s heartbeat
+            # gap (collectsrc place-on-cart). Consume only a DONE ESDF result first (cheap, non-blocking, so
+            # collision_time stays current), then compute + PUBLISH the liveness snapshot, THEN do the
+            # service-contended maintenance. The heartbeat no longer rides behind the planner-contended ESDF
+            # path. This hides no real death: a dead process still publishes nothing, and readiness
+            # (collision_time fresh > parked_since) still advances ONLY through a real NVIDIA integration.
+            if state.active and not state.fault and pending is not None and pending.done():
+                response = pending.result()
+                pending = None
+                # Warm-up / empty / stale responses never advance the acknowledgement.
+                try:
+                    incorporated = incorporated_time(response, now=stamp, parked_since=state.parked_since)
+                    state.acknowledge(incorporated, pending_epoch)
+                except (ValueError, AttributeError) as exc:
+                    if diag_left > 0:
+                        diag_left -= 1
+                        try:
+                            h = response.header
+                            rs = h.stamp.sec + h.stamp.nanosec * 1e-9
+                            node.get_logger().warn(
+                                f'incorp reject: {exc}; success={getattr(response, "success", "?")} '
+                                f'frame={h.frame_id!r} resp_stamp={rs:.3f} now={stamp:.3f} '
+                                f'dt={stamp - rs:.3f} parked_since={state.parked_since:.3f} '
+                                f'ndata={len(response.esdf_and_gradients.data)}')
+                        except Exception as e2:
+                            node.get_logger().warn(f'incorp reject: {exc}; (no header: {e2})')
+            # The launch's OnProcessExit guard tears this node down with the stack, so a
+            # live ack node implies the planner/mapper processes are still alive.
+            result = state.snapshot(stamp, endpoints_ready=endpoints_ready, process_alive=True)
+            if state.fault:
+                stop.publish(Bool(data=True))
+            publisher.publish(String(data=json.dumps(result, allow_nan=False)))
+            # Mapper maintenance AFTER the liveness publish: graph discovery (endpoints_ready, used by the
+            # NEXT snapshot) and issuing/cancelling the get_esdf_and_gradient request -- the parts that
+            # touch the planner-contended service. A slow service here now delays only the NEXT integration
+            # (collision_time), never this tick's already-published liveness heartbeat.
             if state.active and not state.fault:
                 if time.monotonic() - last_discovery > .5:
                     actions = []
@@ -271,26 +317,6 @@ def main():
                     # gate collision_time -- the same exclusion the stack probe/verify apply.
                     endpoints_ready = not [m for m in missing if 'follow_joint_trajectory' not in m]
                     last_discovery = time.monotonic()
-                if pending is not None and pending.done():
-                    response = pending.result()
-                    pending = None
-                    # Warm-up / empty / stale responses never advance the acknowledgement.
-                    try:
-                        incorporated = incorporated_time(response, now=stamp, parked_since=state.parked_since)
-                        state.acknowledge(incorporated, pending_epoch)
-                    except (ValueError, AttributeError) as exc:
-                        if diag_left > 0:
-                            diag_left -= 1
-                            try:
-                                h = response.header
-                                rs = h.stamp.sec + h.stamp.nanosec * 1e-9
-                                node.get_logger().warn(
-                                    f'incorp reject: {exc}; success={getattr(response, "success", "?")} '
-                                    f'frame={h.frame_id!r} resp_stamp={rs:.3f} now={stamp:.3f} '
-                                    f'dt={stamp - rs:.3f} parked_since={state.parked_since:.3f} '
-                                    f'ndata={len(response.esdf_and_gradients.data)}')
-                            except Exception as e2:
-                                node.get_logger().warn(f'incorp reject: {exc}; (no header: {e2})')
                 if pending is not None and time.monotonic() - pending_wall > 2.:
                     pending.cancel()
                     pending = None
@@ -313,12 +339,6 @@ def main():
                     pending = service.call_async(request)
                     pending_epoch = state.epoch
                     pending_wall = time.monotonic()
-            # The launch's OnProcessExit guard tears this node down with the stack, so a
-            # live ack node implies the planner/mapper processes are still alive.
-            result = state.snapshot(stamp, endpoints_ready=endpoints_ready, process_alive=True)
-            if state.fault:
-                stop.publish(Bool(data=True))
-            publisher.publish(String(data=json.dumps(result, allow_nan=False)))
         except Exception as exc:
             state.fault = str(exc)
             stop.publish(Bool(data=True))

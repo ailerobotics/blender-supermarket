@@ -54,5 +54,34 @@ class WallGateOverrideTests(unittest.TestCase):
         self.assertLessEqual(v, 300.0)
 
 
+# (attribute, default, env var, widened value) -- the sim-robust-collect-place-v1 COUNT caps on the
+# plan path (ints, not wall seconds), so they ride their own test rather than the float GATES sweep.
+COUNT_GATES = [
+    ('PLAN_TOTAL_ATTEMPTS_CAP', 10, 'RESTOCK_PLAN_ATTEMPTS_CAP', 8),
+    ('REPLAN_MAX_JOINT_SPACE', 3, 'RESTOCK_REPLAN_MAX_JOINT_SPACE', 2),
+]
+
+
+class PlanCountCapOverrideTests(unittest.TestCase):
+    MOD = 'twin.restock_manipulation.ros_adapter'
+
+    def test_defaults_when_unset(self):
+        for attr, default, env, _ in COUNT_GATES:
+            self.assertEqual(_value_with(self.MOD, attr, {env: None}), default, f'{attr} default drifted')
+
+    def test_env_overrides_each_cap(self):
+        for attr, _, env, wide in COUNT_GATES:
+            self.assertEqual(_value_with(self.MOD, attr, {env: str(wide)}), wide, f'{attr} ignored its env')
+
+    def test_clamped_sane(self):
+        # Absurd values are clamped, never blindly trusted.
+        self.assertLessEqual(_value_with(self.MOD, 'PLAN_TOTAL_ATTEMPTS_CAP',
+                                         {'RESTOCK_PLAN_ATTEMPTS_CAP': '99999'}), 64)
+        # Joint-space re-plans can never exceed the overall REPLAN_MAX.
+        from twin.restock_manipulation.ros_adapter import REPLAN_MAX
+        self.assertLessEqual(_value_with(self.MOD, 'REPLAN_MAX_JOINT_SPACE',
+                                         {'RESTOCK_REPLAN_MAX_JOINT_SPACE': '99999'}), REPLAN_MAX)
+
+
 if __name__ == '__main__':
     unittest.main()

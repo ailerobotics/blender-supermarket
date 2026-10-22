@@ -90,6 +90,98 @@ class ReplanRetry(unittest.TestCase):
         from twin.restock_manipulation.ros_adapter import _should_replan
         self.assertFalse(_should_replan(0, has_plan_goal=False))
 
+    def test_pose_goal_keeps_full_budget(self):
+        # Default joint_space=False (pose goal) is byte-identical to the old REPLAN_MAX behaviour.
+        from twin.restock_manipulation.ros_adapter import _should_replan, REPLAN_MAX
+        self.assertTrue(_should_replan(REPLAN_MAX - 1, True, joint_space=False))
+        self.assertFalse(_should_replan(REPLAN_MAX, True, joint_space=False))
+
+
+class JointSpaceReplanBudget(unittest.TestCase):
+    """A joint-space (cart PLACE / fixed-shape) goal gets a TIGHTER same-goal re-plan budget: a
+    self-colliding joint target is rejected deterministically every re-plan, so the port must advance
+    to the next IK seed/branch fast instead of hammering the GPU on an unplannable target (collectsrc
+    place-on-cart OOM). Pose goals keep REPLAN_MAX (their rejections are stochastic seed-variant clips)."""
+    def test_joint_space_budget_is_tighter(self):
+        from twin.restock_manipulation.ros_adapter import _replan_budget, REPLAN_MAX, REPLAN_MAX_JOINT_SPACE
+        self.assertLessEqual(REPLAN_MAX_JOINT_SPACE, REPLAN_MAX)
+        self.assertEqual(_replan_budget(joint_space=True), REPLAN_MAX_JOINT_SPACE)
+        self.assertEqual(_replan_budget(joint_space=False), REPLAN_MAX)
+
+    def test_joint_space_stops_at_its_budget(self):
+        from twin.restock_manipulation.ros_adapter import _should_replan, REPLAN_MAX_JOINT_SPACE
+        # Within the joint-space budget -> re-plan; at/over it -> fall through to the next seed.
+        if REPLAN_MAX_JOINT_SPACE > 0:
+            self.assertTrue(_should_replan(REPLAN_MAX_JOINT_SPACE - 1, True, joint_space=True))
+        self.assertFalse(_should_replan(REPLAN_MAX_JOINT_SPACE, True, joint_space=True))
+
+    def test_joint_space_falls_through_before_pose_goal_would(self):
+        # At the joint-space budget the joint goal stops re-planning while a pose goal (same attempt
+        # count) still would -- the whole point: reach the next branch faster for a self-colliding target.
+        from twin.restock_manipulation.ros_adapter import _should_replan, REPLAN_MAX, REPLAN_MAX_JOINT_SPACE
+        if REPLAN_MAX_JOINT_SPACE < REPLAN_MAX:
+            n = REPLAN_MAX_JOINT_SPACE
+            self.assertFalse(_should_replan(n, True, joint_space=True))
+            self.assertTrue(_should_replan(n, True, joint_space=False))
+
+
+class PlanAttemptsCap(unittest.TestCase):
+    """Hard COUNT backstop on cuMotion plan dispatches per move (PLAN_TOTAL_ATTEMPTS_CAP). An unplannable
+    goal that churns the whole re-plan x seed budget OOMs the 12 GB card (collectsrc, ~13 plans) and
+    starves the shared ESDF service into a station-heartbeat gap; the cap fails the move cleanly first."""
+    def test_cap_is_below_observed_oom_count_and_above_healthy_moves(self):
+        from twin.restock_manipulation.ros_adapter import PLAN_TOTAL_ATTEMPTS_CAP
+        self.assertLess(PLAN_TOTAL_ATTEMPTS_CAP, 13)   # below the collectsrc OOM count (~13 plans)
+        self.assertGreaterEqual(PLAN_TOTAL_ATTEMPTS_CAP, 5)  # above any healthy move (plans in 1, retries 2-4)
+
+    def test_exhausts_at_cap(self):
+        from twin.restock_manipulation.ros_adapter import _plan_attempts_exhausted, PLAN_TOTAL_ATTEMPTS_CAP
+        self.assertFalse(_plan_attempts_exhausted(PLAN_TOTAL_ATTEMPTS_CAP - 1))
+        self.assertTrue(_plan_attempts_exhausted(PLAN_TOTAL_ATTEMPTS_CAP))
+        self.assertTrue(_plan_attempts_exhausted(PLAN_TOTAL_ATTEMPTS_CAP + 5))
+
+    def test_send_counts_only_plan_dispatches(self):
+        # _send increments _plan_dispatches for a plan-accept on self.plan, never for ik/execute sends.
+        port = RosMotionPort.__new__(RosMotionPort)
+        port.generation = 0
+        port.plan = object()
+        port.execute = object()
+        port.ik = object()
+        sent = []
+
+        class _Client:
+            def __init__(self, owner, name):
+                self.owner, self.name = owner, name
+            def send_goal_async(self, goal):
+                sent.append(self.name)
+                return S(add_done_callback=lambda cb: None)
+        port.plan = _Client(port, 'plan')
+        port.execute = _Client(port, 'execute')
+        port._plan_dispatches = 0
+        port._send(port.plan, object(), 'plan_accept')
+        port._send(port.plan, object(), 'plan_accept')
+        port._send(port.execute, object(), 'execute_accept')
+        self.assertEqual(port._plan_dispatches, 2)   # only the two plan-accept dispatches counted
+
+
+class PressBoundUnderHeartbeat(unittest.TestCase):
+    """The place press must be BOUNDED below the station heartbeat-unavailable window, so an unplannable
+    place fails with a clean planning reason rather than silently running until the 30 s heartbeat gap
+    e-stops the mission (collectsrc). The plan-wall cap is the time bound; the attempts cap the GPU bound.
+    Both must sit under the heartbeat window the sim profile runs with."""
+    def test_plan_wall_cap_under_heartbeat_window(self):
+        from twin.restock_manipulation.ros_adapter import PLAN_TOTAL_WALL_CAP_S
+        # The sim profile runs RESTOCK_HEARTBEAT_UNAVAILABLE_S=30 (collectsrc). The per-move planning wall
+        # cap must be under it so planning fails cleanly before the heartbeat guard can trip on the press.
+        self.assertLess(PLAN_TOTAL_WALL_CAP_S, 30.0)
+
+    def test_attempts_cap_bounds_the_press(self):
+        # A finite attempts cap guarantees the press cannot issue unbounded plans (which is what drove the
+        # ESDF-service starvation behind the 30 s heartbeat gap), independent of the wall cap.
+        from twin.restock_manipulation.ros_adapter import PLAN_TOTAL_ATTEMPTS_CAP
+        self.assertTrue(0 < PLAN_TOTAL_ATTEMPTS_CAP < 64)
+
+
 class FailedResultPending(unittest.TestCase):
     """failed_result_pending() lets the /sensors-independent bridge watchdog surface a GOAL_MISS/abort
     during the lift (which suspends sensing, stalling poll) within ~0.1 s instead of hanging (run-224)."""
