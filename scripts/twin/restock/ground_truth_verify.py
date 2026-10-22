@@ -199,10 +199,12 @@ def mission_modes(config):
         modes['transfer_verify_mode'] = VERIFY_MODE
     if isinstance(config, dict) and config.get('uncouple_on_return'):
         modes['return_mode'] = 'uncouple_at_cart_parking'
-    if isinstance(config, dict) and config.get('lidar_sensor_yaw_fix'):
-        # Provenance, not a workaround (a geometry-wiring fix; deliberately not a *_mode key so the
-        # walkthrough does not caption it): which lidar sensor->base offset this run's nav consumed.
-        modes['lidar_sensor_to_base'] = 'xy_yaw0 (vr1 lidar_sensor_yaw_fix)'
+    if isinstance(config, dict) and config.get('lidar_sensor_yaw_fix', True) is False:
+        # Provenance, not a workaround (a geometry-wiring choice; deliberately not a *_mode key so the
+        # walkthrough does not caption it): the vr1 yaw-0 fix is the DEFAULT now, so record only the
+        # EXCEPTIONAL legacy wiring (lidar_sensor_yaw_fix: false) -- the rotated pre-fix offset this run's
+        # nav consumed. {} (no key) means the default, correct yaw-0 wiring.
+        modes['lidar_sensor_to_base'] = 'xy_z_legacy (pre-vr1 rotated wiring; lidar_sensor_yaw_fix=false)'
     # sim-video-speedup-v1: the opt-in speed profile (sim_speed_mode + its resolved levers); {} when off.
     from .sim_speed import summary_fields as _sim_speed_fields
     modes.update(_sim_speed_fields(config))

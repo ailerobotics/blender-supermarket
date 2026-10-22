@@ -54,6 +54,19 @@ def _finite_pose(pose):
             and all(isinstance(v, (int, float)) and math.isfinite(v) for v in pose))
 
 
+def lidar_sensor_to_base(origin_xyz, config):
+    """The ``Scan.sensor_to_base`` = ``(x, y, YAW)`` tuple the range sensor consumes, resolved from the
+    URDF lidar_frame origin ``(x, y, z)`` and ``config['lidar_sensor_yaw_fix']``.
+
+    The lidar_frame is a FIXED rpy-0 child of base_link, so its physical yaw about base_link is exactly 0:
+    the URDF z is a mount HEIGHT, never a rotation. The correct offset yaw is therefore 0, which is the
+    DEFAULT (vr1 / sim-restock-lidar-yaw-fix-eval). ``lidar_sensor_yaw_fix: false`` restores the legacy
+    bug -- the z read AS a yaw -- for reproducing a pre-fix recorded run. Pure; locked by
+    test_restock_mission_tail (the sensor-frame-orientation regression)."""
+    yaw_fix = config.get('lidar_sensor_yaw_fix', True) is not False
+    return (origin_xyz[0], origin_xyz[1], 0.0 if yaw_fix else origin_xyz[2])
+
+
 # Opt-in DEV render economy (devloop lane). A full-fidelity production run renders the
 # walkthrough camera every ``record_stride`` ticks and the sensing camera every
 # ``sensing_stride`` ticks; on a render-paced mission that whole-scene render is the
@@ -581,15 +594,19 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     print('CARRY_SELF_MASK carry_self_radius_m=%.3f (0 => off; masks near-field self only while carrying)'
           % _carry_self_radius, flush=True)
     # vr1 FINDING (lidar yaw): Scan.sensor_to_base is (x, y, YAW) but the URDF origin is (x, y, Z) =
-    # (0.52, 0, 0.15), so the legacy wiring below reconstructs every live return 0.15 rad (8.6 deg) off its
-    # cast bearing -- a wall 3 m ahead reads as points spread over x 2.25..3.70 (CPU proof:
-    # scripts/check_mission_tail.py lidar check). The rays are cast at the base yaw (_lidar_pose), so the
-    # correct offset yaw is 0. config['lidar_sensor_yaw_fix'] = true uses (x, y, 0.0); absent/false keeps
-    # the legacy (x, y, z) tuple byte-identical, because couple/outbound were tuned live against it.
-    _lidar_to_base = ((_lidar_xyz[0], _lidar_xyz[1], 0.0) if config.get('lidar_sensor_yaw_fix')
-                      else _lidar_xyz)
+    # (0.52, 0, 0.15), so the LEGACY wiring reconstructs every live return 0.15 rad (8.6 deg) off its cast
+    # bearing -- a wall 3 m ahead reads as points spread over x 2.25..3.70 (CPU proof:
+    # scripts/check_lidar_yaw_fix.py). The lidar_frame is a fixed rpy-0 child of base_link, so the correct
+    # offset yaw is EXACTLY 0; the Z is a mount height, never a rotation. The sim-restock-lidar-yaw-fix-eval
+    # replay of warm8/warm11 showed the rotation is the sole source of the tow-lane "proud phantom" returns
+    # (fixed: 0 returns > 0.12 m from any mapped AABB; legacy: ~12k) and the capsule deadlock cases, so the
+    # fix is ON by default (data/sim-restock-lidar-yaw-fix-eval/report.md). `lidar_sensor_yaw_fix: false`
+    # restores the legacy rotated (x, y, z) tuple (backward-compatible escape hatch, e.g. to reproduce a
+    # pre-fix recorded run).
+    _lidar_to_base = lidar_sensor_to_base(_lidar_xyz, config)
     print('LIDAR_SENSOR_TO_BASE %s (lidar_sensor_yaw_fix=%s)'
-          % (tuple(round(v, 3) for v in _lidar_to_base), bool(config.get('lidar_sensor_yaw_fix'))), flush=True)
+          % (tuple(round(v, 3) for v in _lidar_to_base),
+             config.get('lidar_sensor_yaw_fix', True) is not False), flush=True)
     range_sensor = IsaacRangeSensor(
         get_sensor_pose=lambda: _lidar_pose(assembly.robot_body, _lidar_xyz[0], _lidar_xyz[1]),
         sensor_to_base=_lidar_to_base, self_paths=(robot_root,), coupled_self_paths=cart_self_paths,

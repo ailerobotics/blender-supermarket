@@ -184,11 +184,17 @@ repo's `scenes/`, `export/` or `renders/`.
   net-progress monitor `navigation.coupled_progress_escape` (escalate→fault `coupled_no_progress`→replan in
   sim-seconds); see docs/restock_navigation.md, `scripts/check_outbound_progress.py`,
   `docs/examples/outbound-progress-mission-fragment.json`. Uncoupled drive-fidelity lever = `caster_lift_m`
-  (fm434 bench `base-drive-bench-*`: 0.097→0.988). **Sharp edge:
-  `Scan.sensor_to_base` is (x, y, YAW)** but `isaac_bundle` passes the lidar URDF origin (x, y, z),
-  rotating every live return 0.15 rad about the sensor (a likely root of "lidar-proud" phantoms);
-  `lidar_sensor_yaw_fix: true` uses yaw 0 — default off, re-check couple/outbound before enabling
-  (probe: `twin/restock/tail_nav.py` `lidar_wall_probe`).
+  (fm434 bench `base-drive-bench-*`: 0.097→0.988). **Lidar sensor-frame yaw (vr1, now FIXED default-on):**
+  `Scan.sensor_to_base` is (x, y, YAW) but the legacy `isaac_bundle` wiring passed the lidar URDF origin
+  (x, y, z) — the `lidar_frame` is a fixed rpy-0 child of base_link, so its z (0.15 m) is a mount height,
+  NOT a yaw; reading it as yaw rotated every return 8.59° and was the sole source of the tow-lane
+  "lidar-proud" phantoms (warm8/warm11 replay: fixed 0 returns > 0.12 m from any mapped AABB vs ~12k legacy)
+  and the ~0.83 m capsule-vs-planner deadlock. `isaac_bundle.lidar_sensor_to_base` now defaults yaw 0;
+  `lidar_sensor_yaw_fix: false` restores the legacy rotated wiring (reproduce a pre-fix run only). Because
+  the fix removes the phantom class that forced it, `navigation.tow_lane_trust_static` is proposed for
+  retirement (pending the bounded GPU run) — but KEEP `tow_lane_static_tol_m` and the `tow_lane_trust_unknown`
+  coverage waiver (independent of the yaw bug). CPU proof `scripts/check_lidar_yaw_fix.py`; decision + GPU
+  config `data/sim-restock-lidar-yaw-fix-eval/` (orientation locked by `test_restock_mission_tail.py`).
 - **Mission tail** (transfer → verify → uncouple return → end): the uncouple happens in RETURN at
   `cart_parking`, AFTER transfer + verify (tow → brake/pin → uncouple → back away → home uncoupled).
   CPU dry-run through the real BT/`Mission`/`RuntimeAdapter`: `scripts/check_mission_tail.py`

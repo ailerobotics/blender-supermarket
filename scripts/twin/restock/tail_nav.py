@@ -151,7 +151,7 @@ def simulate_home_leg(config, scenario, environment, *, start=None, home=None, b
     poses = config['mission_poses']
     start = tuple(start or poses['cart_parking'])
     legs = return_legs(config, home=home, backaway=backaway)
-    fix = bool(config.get('lidar_sensor_yaw_fix')) if lidar_yaw_fix is None else bool(lidar_yaw_fix)
+    fix = bool(config.get('lidar_sensor_yaw_fix', True)) if lidar_yaw_fix is None else bool(lidar_yaw_fix)
     to_base = (LIDAR_XYZ[0], LIDAR_XYZ[1], 0.0) if fix else LIDAR_XYZ   # == isaac_bundle wiring
     nav_cfg = dict(config['navigation'], environment=environment, scenario=scenario)
     nav_cfg.pop('environment_path', None)
@@ -316,9 +316,12 @@ def check_home_leg(config, scenario, environment, rep, *, camera_config=None):
     legacy = lidar_wall_probe(LIDAR_XYZ)
     fixed = lidar_wall_probe((LIDAR_XYZ[0], LIDAR_XYZ[1], 0.0))
     rep.add('PASS' if fixed == (3.0, 3.0) else 'FAIL', 'lidar_yaw_fix_reproduces_wall', fixed_span=fixed)
-    rep.add('WARN' if not config.get('lidar_sensor_yaw_fix') else 'PASS', 'lidar_legacy_wiring_rotates_returns',
-            legacy_span=legacy, note='legacy sensor_to_base=(x,y,z) rotates every return 0.15 rad; set '
-                                     '"lidar_sensor_yaw_fix": true to use yaw 0')
+    # The fix is ON by default now (vr1 / sim-restock-lidar-yaw-fix-eval); WARN only when a config explicitly
+    # selects the legacy rotated wiring with "lidar_sensor_yaw_fix": false.
+    rep.add('WARN' if config.get('lidar_sensor_yaw_fix', True) is False else 'PASS',
+            'lidar_legacy_wiring_rotates_returns',
+            legacy_span=legacy, note='legacy sensor_to_base=(x,y,z) rotates every return 0.15 rad; the fix '
+                                     '(yaw 0) is the default -- drop "lidar_sensor_yaw_fix": false to use it')
     configured = simulate_home_leg(config, scenario, environment, camera_config=camera_config)
     rep.check(configured['status'] == 'succeeded', 'home_leg_configured_home_reached', **configured)
     other = simulate_home_leg(config, scenario, environment, camera_config=camera_config,

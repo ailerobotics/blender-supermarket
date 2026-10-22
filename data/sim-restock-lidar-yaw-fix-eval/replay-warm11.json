@@ -1,0 +1,132 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "sensor_yaw_offset_is_the_urdf_z",
+      "passed": true,
+      "urdf_z_m": 0.15,
+      "read_as_yaw_rad": 0.15,
+      "read_as_yaw_deg": 8.59
+    },
+    {
+      "name": "wall_1m_fixed_reproduces_exactly",
+      "passed": true,
+      "fixed_span": [
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "wall_1m_legacy_reads_proud",
+      "passed": true,
+      "legacy_span": [
+        0.312,
+        1.677
+      ],
+      "proud_depth_m": 0.688
+    },
+    {
+      "name": "wall_2m_fixed_reproduces_exactly",
+      "passed": true,
+      "fixed_span": [
+        2.0,
+        2.0
+      ]
+    },
+    {
+      "name": "wall_2m_legacy_reads_proud",
+      "passed": true,
+      "legacy_span": [
+        1.26,
+        2.707
+      ],
+      "proud_depth_m": 0.74
+    },
+    {
+      "name": "wall_3m_fixed_reproduces_exactly",
+      "passed": true,
+      "fixed_span": [
+        3.0,
+        3.0
+      ]
+    },
+    {
+      "name": "wall_3m_legacy_reads_proud",
+      "passed": true,
+      "legacy_span": [
+        2.245,
+        3.7
+      ],
+      "proud_depth_m": 0.755
+    },
+    {
+      "name": "wall_5m_fixed_reproduces_exactly",
+      "passed": true,
+      "fixed_span": [
+        5.0,
+        5.0
+      ]
+    },
+    {
+      "name": "wall_5m_legacy_reads_proud",
+      "passed": true,
+      "legacy_span": [
+        4.206,
+        5.693
+      ],
+      "proud_depth_m": 0.794
+    },
+    {
+      "name": "fix_reduces_kept_phantom_returns",
+      "passed": true,
+      "legacy_kept": 11781,
+      "fixed_kept": 0,
+      "reduction_pct": 100.0
+    },
+    {
+      "name": "fix_reduces_capsule_deadlock_cases",
+      "passed": true,
+      "legacy_stops": 9,
+      "fixed_stops": 0,
+      "poses": 151
+    },
+    {
+      "name": "fix_opens_lane_clearance[outbound_dock_to_bay]",
+      "passed": true,
+      "legacy_min_clearance_m": 0.794,
+      "fixed_min_clearance_m": 1.024
+    },
+    {
+      "name": "fix_opens_lane_clearance[return_bay_to_parking]",
+      "passed": true,
+      "legacy_min_clearance_m": 0.768,
+      "fixed_min_clearance_m": 0.899
+    }
+  ],
+  "static_obstacles": 806,
+  "nav_trace": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/warm11/nav-trace.jsonl",
+  "worst_proud_depth_m": 0.794,
+  "replay": {
+    "poses": 151,
+    "beams": 180,
+    "stale_after_s": 3.0,
+    "legacy": {
+      "total_returns": 24880,
+      "kept_beyond_tol": 11781,
+      "capsule_stops": 9,
+      "lane_min_clearance_m": {
+        "outbound_dock_to_bay": 0.794,
+        "return_bay_to_parking": 0.768
+      }
+    },
+    "fixed": {
+      "total_returns": 24880,
+      "kept_beyond_tol": 0,
+      "capsule_stops": 0,
+      "lane_min_clearance_m": {
+        "outbound_dock_to_bay": 1.024,
+        "return_bay_to_parking": 0.899
+      }
+    }
+  }
+}
