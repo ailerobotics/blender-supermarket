@@ -1,421 +1,387 @@
-# Blender Supermarket — a generated digital twin
+# Blender Supermarket — a generated store and a robot that restocks it
 
-A walk-through model of a railway-station supermarket ("Freshmart"), built for
-robotics simulation. 26 × 22 m of shop floor, seven double-sided gondola runs on
-a real planogram, 93 fictional-brand SKUs with printed labels and shelf-edge
-price tags, glass-door and open chillers, four checkout lanes, a produce corner,
-a bakery wall and hanging aisle signage — about 26 000 objects and 23 400 product
-instances, built headless in ~4 seconds and exported to USD for Isaac Sim.
-
-The **commands** to drive all of this live in **[RUNBOOK.md](RUNBOOK.md)** — start
-and stop Blender, talk to it over MCP, regenerate the store, render, and export.
-This README is the *why*: the design, what the repository chooses to keep, and the
-decisions behind both.
+This repository builds a **photo-real supermarket entirely from data** and then runs a
+**mobile manipulation robot through a full restocking mission inside it, in NVIDIA Isaac
+Sim**. A procedurally generated Blender store (26 × 22 m, ~26 000 objects, 93 branded
+SKUs) is exported to USD; a mobile UR10 on a towable cart then drives to the backroom,
+picks a carton, couples the cart, tows it onto the sales floor, places stock on a shelf,
+verifies the planogram and returns — all driven by a behaviour tree, sensor-gated at every
+step. Everything is reproducible from committed source: the store from a catalog + planogram,
+the mission from a state machine with measured evidence at every stage.
 
 ---
 
-## Why the store is generated, not modelled
+## Demo
 
-The store is produced by four small programs from a product catalog and a
-planogram. It is deliberately **not** a hand-sculpted Blender scene. The reason is
-what the twin is *for*: a shelf-scanning / navigation robot needs a store that can
-change — reprice a product, move a category to another aisle, widen the gondola
-pitch, add a SKU — and it needs every object to carry machine-readable ground
-truth (which SKU, which category, which shelf slot, what price). Both of those are
-painful in a hand-built mesh and trivial when the store is a function of data:
+A single run through all seven mission stages, with a live **decision / reason tree** panel
+on the right showing what the robot is deciding and why (this is `mission/demo-008`, a compiled
+walkthrough that stitches real Isaac-Sim footage for the early stages with choreographed footage
+for the later ones — see [Results & known limitations](#results--known-limitations)).
 
-- **Editable and reproducible.** The layout is a set of Python tables
-  (`GONDOLAS`, `WALL_UNITS`, `CHILLERS` in `scripts/gen_planogram.py`) and a
-  product list (`scripts/catalog.py`). Change a value, re-run, and the whole store
-  rebuilds deterministically in seconds. Nothing is drawn by hand, so nothing
-  drifts out of sync.
-- **Labelled by construction.** Because every product is placed by code from the
-  catalog, the builder writes custom properties onto each object (sku, category,
-  brand, price, shelf slot, facing, row) and onto each fixture. Those survive the
-  USD export as `userProperties:*` and become free training labels downstream — see
-  *Consuming the USD export* below.
-- **Cheap to scale.** All copies of one SKU share a single prototype (a collection
-  instance), so 23 400 products cost 196 real meshes on disk and export as true USD
-  instances. Modelling that by hand is not sensible; generating it is.
+![Seven-stage restock mission with live decision tree](docs/media/demo-008-mission.gif)
 
-The result is a store that is data first and geometry second — the geometry is an
-output, and the inputs (catalog, planogram tables) are the things a human edits.
+▶ **Full-resolution video (43 s, 1080p):** [`docs/media/demo-008-mission.mp4`](docs/media/demo-008-mission.mp4)
+
+The panel is rendered per-frame from the behaviour tree and the scene state, so pixels and
+labels agree by construction:
+
+![Decision / reason tree panel beside the Isaac Sim scene](docs/media/decision-reason-tree.png)
 
 ---
 
-## The four stages
+## What's inside
 
-The pipeline composes as **catalog → planogram → labels → scene**, each stage
-consuming the previous stage's output. RUNBOOK.md §3 has the exact commands.
+### The thing being modelled
 
-| # | Stage | Program | Reads | Writes |
-|---|-------|---------|-------|--------|
-| 1 | **Catalog** | `scripts/catalog.py` | — (it *is* the source data) | 93 SKUs in memory: real dimensions, packaging form, brand, colours, price, weight |
-| 2 | **Planogram** | `scripts/gen_planogram.py` | catalog | `scripts/planogram.json` — store size, every gondola/wall/chiller, and each bay's shelf heights and facings |
-| 3 | **Labels** | `scripts/gen_labels.py` | catalog + planogram | `assets/labels/*.png` (product artwork + `tag_*` price tags), `assets/signs/*.png` (aisle, category and store signs), rendered with PIL |
-| 4 | **Scene** | `scripts/build_supermarket.py` | base scene + planogram + labels + catalog | the built `.blend` (see RUNBOOK §3 for the `--save` command) |
+| Domain object | What it is | Where it comes from |
+|---|---|---|
+| **The store** | 26 × 22 m shop floor, 7 double-sided gondola runs, glass & open chillers, 4 checkout lanes, produce corner, bakery wall, aisle signage. ~26 000 objects, ~23 400 product instances, ~54 150 USD prims. | Generated by `scripts/build_supermarket.py` from a catalog + planogram |
+| **The products** | 93 fictional-brand SKUs with real dimensions, packaging form, price, weight; printed labels and shelf-edge price tags. | `scripts/catalog.py` + `scripts/gen_labels.py` |
+| **The robot** | A Universal Robots **UR10** (26 links / 25 joints, ~1.3 m reach) with a suction-panel gripper, mounted on a **differential-drive mobile base** (replaces the fixed pedestal). | `scripts/build_mobile_assets.py`, `docs/mobile_robot_rollwagen.md` |
+| **The cart ("rollwagen")** | A passive three-sided cage trolley, 0.80 × 0.68 × 1.65 m, ~35 kg, four swivel casters, front drawbar. Robot + cart ≈ 215 kg towed. | `scripts/build_mobile_assets.py` (authors `rollwagen.usda`) |
+| **The mission** | A 7-stage restock: **collect → couple → outbound → park → transfer → verify → return**, each gated on measured sensor evidence; inventory committed only at `verify`. | `scripts/twin/restock/mission.py` |
 
-Stage 4 runs in 13 named sub-stages
-(`clear structure library gondolas walls chillers front produce signage lighting
-cameras hierarchy render`) either headless (`blender -b … --python
-build_supermarket.py`) or live inside the running GUI through the MCP bridge, one
-stage per call. From the built scene, three leaf programs branch off — stills
-(`render_shots.py`), the fly-through video (`render_walkthrough.py`) and the USD
-export (`export_usd.py`) — plus a self-contained HTML report (`gen_report.py`).
+### Technology stack (versions as evidenced in the repo)
 
-**Order matters for a fresh checkout:** stage 4 loads the label PNGs from
-`assets/labels/`, so run stage 3 (`gen_labels.py`) before the build. The committed
-`planogram.json` means you can skip stage 2 unless you have changed the layout
-tables. See *Rebuilding from a fresh clone* below.
+| Layer | Technology | Version (source) |
+|---|---|---|
+| Scene authoring | **Blender** (procedural build, EEVEE/Cycles render, USD export) | 4.5.13 LTS (`RUNBOOK.md`) |
+| Interchange | **OpenUSD** | USD 0.24.5 bundled in Isaac; CPU validation via the `usd-core` wheel (`docs/twin_usd_facts.json`) |
+| Simulator | **NVIDIA Isaac Sim** (+ PhysX, OmniGraph ROS 2 bridge) | 5.1.0 (`docs/isaac_robot_in_store.md`, `docs/restock_navigation.md`) |
+| Middleware | **ROS 2 Jazzy** (rclpy; Isaac Python 3.11 / host Python 3.12 split) | Jazzy (`RUNBOOK.md`, `/opt/ros/jazzy`) |
+| Mapping | **NVIDIA Isaac ROS nvblox** (ESDF obstacle map) | Isaac ROS 4.4 (`docs/navigation_temporal_mapping.md`, `native/.../package.xml`) |
+| Navigation | **Nav2** (Smac Hybrid planner) + an articulated hybrid-A\* for base + towed cart | Jazzy Nav2 (`scripts/twin/navigation/nav2.py`, `docs/restock_navigation.md`) |
+| Motion planning | **cuMotion / cuRobo** (`isaac_ros_cumotion`), MoveIt message API | cuRobo V2 ≥ 0.8.0 (`docs/arm_mpc_avoid.md`); `moveit_msgs` 2.6.0 (`docs/restock_manipulation.md`) |
+| Mission driver | **py_trees** behaviour tree (ROS-free core; optional `py_trees_ros` viewers) | task-venv, version unpinned (`docs/restock_bt.md`) |
+| Perception / vision | RGB-D wrist (eye-in-hand) + mast depth cameras, QR/fiducial decode (OpenCV), optional store-vision suite | `scripts/twin/restock_camera/`, `docs/restock_camera.md` |
+| Python libs | numpy, OpenCV (`cv2`), Pillow, imageio-ffmpeg, sqlite3 (inventory) | versions not pinned in repo |
+| Native code | one ament/ROS 2 package `restock_mapper_evidence` (nvblox mapper-evidence + admission policy) | `native/restock_mapper_evidence/` (Apache-2.0) |
 
-> **Path caveat.** `build_supermarket.py`, `export_usd.py` and `render_shots.py`
-> derive `ROOT` from the script's own location (since 2026-09-14), so they run
-> self-contained in any checkout/worktree; set `SUPERMARKET_ROOT` to override, and
-> the live-GUI `exec(open(...).read())` path (no `__file__`) falls back to the
-> canonical `~/workspaces/blender-supermarket`. `gen_planogram.py` and
-> `gen_labels.py` have always used script-relative paths. **Still hardcoded:**
-> `render_walkthrough.py` (`ROOT = ~/workspaces/blender-supermarket`) — run it from
-> that checkout or adjust the path.
+> **No heavyweight dependency is vendored.** The URDFs (UR10 + gripper), cuRobo, Nav2 and the
+> store-vision suite live in external workspaces and are *referenced*, not committed; this repo
+> holds the store generator, the mission orchestration, the sensing/planning contracts, and a
+> large suite of **offline CPU validators** that prove each piece without booting the simulator.
 
----
+### Data & artifacts
 
-## What the base scene carries (and the build cannot regenerate)
-
-`scenes/supermarket_base.blend` is the starting point every headless build opens.
-It is small by design and holds only the things that came from the **network** and
-therefore cannot be reproduced by running the generator scripts offline:
-
-- **Two Poly Haven PBR materials** — `floor_tiles_08` and `white_plaster_02`
-  (2k), downloaded through the MCP `download_polyhaven_asset` tool. The builder
-  re-uses them by name (`polyhaven_mat()`), only re-scaling their mapping and
-  wiring the normal map; if they are absent it silently falls back to a flat grey
-  material, so the store still builds but loses its floor and wall look.
-- **The world HDRI** — `wide_street_01_2k.hdr`, the street seen through the
-  shopfront glazing and the scene's ambient light.
-
-These are **externally linked**, not packed: the base `.blend` references the JPEG
-and HDR files in `assets/textures/` by relative path (verified: the image
-datablocks carry no packed data). So the base scene and `assets/textures/` are a
-pair — both are required, both came from Poly Haven, and both are therefore kept
-in version control (see the file policy). The two Poly Haven materials and the
-world are pinned with a fake user so a `.blend` save never purges them for having
-no object user.
-
-Everything else in a built scene — all fixtures, all products, all the fixture
-materials (`FX_*`, `PR_*`), the lighting, cameras and signage — is generated by
-`build_supermarket.py` and needs no network.
+- **Inputs a human edits:** `scripts/catalog.py` (products), the layout tables in
+  `scripts/gen_planogram.py`, and the mission scenario (`scripts/restock_scenario.json`).
+- **Generated offline & cheap (gitignored):** the built `.blend`, labels/signs, the USD export.
+- **Versioned evidence:** the network-sourced base scene + textures, and GPU-hour render evidence
+  (`renders/`, `report.html`). See [the file-policy table in `RUNBOOK.md`](RUNBOOK.md) and the
+  decision log at the end of this README.
+- **Formats:** USD (`.usdc`/`.usda`, Z-up, 1 m/unit, default prim `/Supermarket`), SQLite
+  (`inventory.sqlite`, per-run), JSON configs and scenarios.
 
 ---
 
-## The camera set
+## How it works
 
-`build_cameras()` places nine cameras, saved in the scene's `Cameras` collection.
-Eight are fixed vantage points; the last is an animated fly-through.
+### Architecture — from data to a running mission
 
-| Camera | Purpose |
-|--------|---------|
-| `Cam_Entrance` | The establishing shot from just inside the doors — produce, aisle signs, checkouts and chillers in one frame. The report hero image. |
-| `Cam_Aisle` | Straight down aisle 4 between water/juice and canned goods — the "shopper's eye" corridor view (1.6 m). |
-| `Cam_Shelf` | A close-up of the soft-drinks bay 1.4 m from the ticket rail — for judging label legibility, rims and price tags at shelf distance (the robot's working range). |
-| `Cam_Checkout` | Lanes 1–3 with impulse shelves and the street HDRI through the glazing. |
-| `Cam_Produce` | The produce tables and crates in front of the dairy chillers. |
-| `Cam_Overview` | A high (3.7 m) corner view of the whole floor — wine wall, aisle signs, pallets, checkouts, exit. |
-| `Cam_Exterior` | Outside the building — the facade and store sign. |
-| `Cam_TopDown` | An orthographic plan view; `render_shots.py` hides the ceiling and lights for it, giving a clean planogram cutaway. |
-| `Cam_Walk` | The animated walk-through: 17 waypoints, 30 frames apart, from the entrance through aisles 4 and 6 to a checkout lane and out the exit (510 frames at 24 fps ≈ 21 s), gaze levelled 4 m ahead. `render_walkthrough.py` renders it to `renders/walkthrough.mp4`. |
+The store is **data first, geometry second**: a catalog and a planogram drive a Blender build,
+which exports to USD; Isaac Sim composes the robot into that USD and runs the mission, whose
+stages are gated by three sensing/planning lanes and driven by a behaviour tree.
 
-For roaming the scene live (walk navigation, eye height, gravity), see RUNBOOK §4.
+```mermaid
+flowchart TD
+    subgraph authoring["Scene authoring (Blender, offline)"]
+        CAT["catalog.py<br/>93 SKUs"]
+        PLAN["gen_planogram.py<br/>planogram.json"]
+        LAB["gen_labels.py<br/>labels + price tags (PIL)"]
+        BUILD["build_supermarket.py<br/>procedural store (~4 s)"]
+        USD["export_usd.py<br/>supermarket.usdc (Z-up, 1 m/unit)"]
+        CAT --> PLAN --> BUILD
+        CAT --> LAB --> BUILD
+        PLAN --> LAB
+        BUILD --> USD
+    end
 
----
+    subgraph compose["Compose robot into store (USD / Isaac)"]
+        COMP["twin/compose.py<br/>+ colliders, UR10 URDF, spawn pose"]
+        USD --> COMP
+    end
 
-## Consuming the USD export
+    subgraph runtime["Mission runtime (Isaac Sim 5.1 + ROS 2 Jazzy)"]
+        MISSION["restock/mission.py<br/>7-stage state machine"]
+        BT["restock/bt/ (py_trees)<br/>behaviour-tree driver"]
+        NAV["navigation/<br/>Nav2 + articulated A* (base + cart)"]
+        CAM["restock_camera/<br/>RGB-D sensing, commissioning"]
+        MANIP["restock_manipulation/<br/>cuRobo/MoveIt transfer"]
+        HOST["restock_host/ + native/<br/>isolated planner + nvblox mapper"]
+        BT --> MISSION
+        MISSION --> NAV
+        MISSION --> CAM
+        MISSION --> MANIP
+        MISSION --> HOST
+        COMP --> MISSION
+    end
 
-`scripts/export_usd.py` writes `export/supermarket.usdc` (plus `export/textures/`)
-for a simulator such as **NVIDIA Isaac Sim**. The stage is **Z-up, 1 metre per
-unit**, rooted at prim `/Supermarket`, with UsdPreviewSurface materials, exported
-lights and cameras. RUNBOOK §6 has the import steps; the design intent:
-
-- **Instancing.** Products export as USD instances (~24 900 instanceable prims
-  over ~196 prototypes; only a few hundred real meshes on the stage). This keeps
-  the stage light and means a collider or material change applied to a *prototype*
-  applies to every instance of that SKU at once — exactly what you want for tens of
-  thousands of products.
-- **Semantics for free.** Every product prim carries
-  `userProperties:sku, category, brand, price, slot, facing, row`; every fixture
-  carries `fixture, gondola, side, bay, level`. Map `sku`/`category` to semantic
-  labels for Replicator ground truth; the `slot` id gives planogram-compliance
-  labels (the SKU expected at each shelf position) at no extra cost.
-- **Physics is added downstream.** Products export as static Xforms. In the
-  simulator add colliders (convex hull on products, triangle mesh on fixtures and
-  structure) and make only the products the robot handles into rigid bodies (mass
-  from the catalog weight); leave the rest static.
-- **Lighting note.** The world HDRI is *not* exported (world-material conversion is
-  off); light the imported stage with a dome light. PET bottles use transmission —
-  if RTX real-time looks noisy, swap their prototype material for an opaque tinted
-  plastic in Blender and re-export.
-
-**Standing a robot in the store.** `scripts/compose_robot_in_store.py` (+ its
-`.sh` wrapper) composes the fleet's UR10 into this export under Isaac Sim: it
-authors the physics/colliders the export deliberately lacks, imports the robot
-URDF, and places it at a geometry-derived aisle pose. It **refuses to boot beside
-the captain's live Blender GUI** (VRAM/OOM risk). `--report-usd` / `--dry-run`
-read the stage and print the plan with **no GPU boot**. See
-[docs/isaac_robot_in_store.md](docs/isaac_robot_in_store.md) for the command
-sequence, the measured USD facts, and the candidate spawn pose.
-
-**Validate the export offline (no Isaac, no GPU).** `scripts/validate_usd.py` opens
-the stage with the CPU-only `usd-core` wheel and proves it is Isaac-loadable — up-axis,
-scale, default prim, that **every texture / reference / payload resolves** (no absolute
-build-machine paths, nothing outside `export/`), the prim paths the composer needs, and
-the physics census. Exit `0`/`1`; run it after every export. Commands in RUNBOOK §6a;
-the full pre-flight is [data/twin-usd-validate-v1/report.md](data/twin-usd-validate-v1/report.md).
-Current verified stage: Z-up, 1 m/unit, default prim `/Supermarket`, **54 150 prims**
-(24 927 instances, 196 prototypes), floor at z = 0 spanning the **26 × 22 m** shop floor,
-render-only geometry (the composer adds physics). **Known defect:** the export authors
-**6 dangling floor/wall textures** — floor (`floor_tiles_08`) and all five walls
-(`white_plaster_02`) load *untextured* in Isaac because the MCP-imported Poly Haven
-image datablocks are named `<map>.jpg` but backed by `tmp*.jpg` temp files, so the
-exporter writes the temp names while authoring the datablock names. It is **cosmetic
-only** (geometry, placement and physics-authoring are unaffected; the robot still
-stands). Fixed in `export_usd.py` (`_stage_textures_for_export()`) for the next export;
-on the current artifact the offline pre-flight (`scripts/preflight.py`, RUNBOOK §8) clears
-it automatically, and `validate_usd.py --repair-textures` does it standalone.
-
----
-
-## Rebuilding from a fresh clone
-
-A clone contains all the *sources*, the *un-regenerable, network-sourced* assets,
-and the *expensive-to-render evidence* (stills, walkthrough, report). The
-artifacts that are cheap to rebuild — the built scene, labels/signs and the USD
-export — are gitignored; regenerate them with the pipeline below (steps 1–4a).
-The render steps (4b) are only needed if you have changed the store and want to
-refresh the committed evidence. Full commands are in RUNBOOK.md:
-
-```
-# 1. (only if you changed the layout tables) planogram
-python3 scripts/gen_planogram.py                      # -> scripts/planogram.json
-
-# 2. labels, tags and signs  (build step below needs these on disk)
-python3 scripts/gen_labels.py                         # -> assets/labels, assets/signs
-
-# 3. the scene, from the network-sourced base file
-blender -b scenes/supermarket_base.blend --python scripts/build_supermarket.py -- --all --save scenes/supermarket.blend
-
-# 4a. cheap derived output (ignored), from the built scene
-blender -b scenes/supermarket.blend --python scripts/export_usd.py            # -> export/  (~26 s)
-
-# 4b. expensive evidence (versioned) — only to refresh after a store change
-blender -b scenes/supermarket.blend --python scripts/render_shots.py -- ...   # -> renders/*.png (GPU-hours)
-blender -b scenes/supermarket.blend --python scripts/render_walkthrough.py -- ...  # -> renders/walkthrough.mp4 (GPU-hours)
-python3 scripts/gen_report.py                         # -> report.html
+    subgraph outputs["Operator-facing outputs"]
+        DEMO["demo/<br/>decision-tree video compositor"]
+        DASH["dashboard/<br/>phone-first read-only status"]
+        INV[("inventory.sqlite<br/>durable stock record")]
+        MISSION --> DEMO
+        MISSION --> DASH
+        MISSION --> INV
+    end
 ```
 
-The only thing a clone *cannot* reproduce offline is the base scene's Poly Haven
-materials and HDRI — which is exactly why they are versioned rather than
-regenerated. Everything else above is reproducible from committed files with no
-network (verified — see the decision log).
+**The host / Isaac split.** The simulator runs on Isaac's Python 3.11; the motion planner,
+nvblox mapper and arm trajectory executor run out-of-process on host ROS 2 Jazzy (Python 3.12),
+connected over the OmniGraph ROS 2 bridge. This keeps cuRobo/nvblox off the simulator interpreter
+and lets the whole planning stack be tested on CPU. See `docs/restock_host.md` and
+`docs/restock_manipulation.md`.
+
+### The mission — a behaviour tree over a 7-stage state machine
+
+The canonical mission is a bounded **state machine** (`scripts/twin/restock/mission.py`): seven
+stages in a fixed order, each requiring *measured* evidence (`source == 'sensor'`, fresh
+timestamp, the stage's success field, e.g. `loaded`/`coupled`/`arrived`/`released`/`home`) before
+it advances. Inventory is **reserved** at the start and **committed only at `verify`**.
+
+The default run driver (`"bt": true`) ticks that same state machine through a
+[py_trees](https://py-trees.readthedocs.io) behaviour tree
+(`scripts/twin/restock/bt/`), which adds reactive safety handling and a live phone-friendly
+visualization — reproducing the state machine **byte-identically** (same begin/step/finalize
+calls, same durable record), proven on CPU by parity tests.
+
+```mermaid
+flowchart TD
+    ROOT["restock_root (Sequence)<br/>re-evaluated every tick"]
+    PUMP["event_pump<br/>drain event bus → blackboard"]
+    REACT["reactive (Sequence)"]
+    MISS["mission (Sequence, memory)<br/>resumes at the running stage"]
+    ROOT --> PUMP --> REACT --> MISS
+
+    HG["health_guard<br/>stuck / low_battery → park (FAILS)"]
+    HS["human_safety<br/>slow → stop + pause arm → resume"]
+    OA["obstacle_avoid<br/>dynamic obstacle → wait + re-plan"]
+    BG["baseline_guard<br/>baseline_expired → re-commission"]
+    REACT --> HG
+    REACT --> HS
+    REACT --> OA
+    REACT --> BG
+
+    S1["stage: collect"]
+    S2["stage: couple"]
+    S3["stage: outbound"]
+    S4["stage: park"]
+    S5["stage: transfer"]
+    S6["stage: verify"]
+    S7["stage: return"]
+    FIN["finalize<br/>record complete / failed once"]
+    MISS --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> FIN
+
+    S1 -. "explicit position-first leaves" .-> C1["drive→pick · perceive carton ·<br/>grasp·lift·tuck · drive→cart ·<br/>perceive deck · place · verify placed"]
+```
+
+`event_pump` and `reactive` run **before** `mission` every tick, so a safety event is observed
+and the control flags applied before the active leaf decides whether to step. Each stage is a
+subtree of explicit **navigate → perceive → manipulate** leaves (`bt/stage_phases.py`); a step
+failure is classified onto the timeline and retried within a bounded budget before the mission
+fails honestly. Full contract: [`docs/restock_bt.md`](docs/restock_bt.md).
 
 ---
 
-## File policy — what is versioned and why
+## Code structure
 
-The governing rule:
+```
+blender-supermarket/
+├── scripts/
+│   ├── build_supermarket.py        Procedural Blender store builder (catalog + planogram → scene)
+│   ├── catalog.py / gen_planogram.py / gen_labels.py   Product data, layout tables, printed labels
+│   ├── export_usd.py               Export the store to USD for Isaac Sim (Z-up, instanced)
+│   ├── render_shots.py / render_walkthrough.py / gen_report.py   Stills, fly-through, HTML report
+│   ├── build_mobile_assets.py      Author the mobile UR10 URDF + rollwagen cart USD (offline)
+│   ├── compose_robot_in_store.py   Compose the UR10 into the store USD (+colliders, spawn pose)
+│   ├── validate_usd.py / validate_robot_urdf.py / preflight.py   Offline (no-GPU) validators
+│   ├── run_mobile_restock.py(.sh)  Mission: offline contract checks, or guarded Isaac run (--execute)
+│   ├── run_restock_commissioning*.py   Commission empty-shelf baselines per station
+│   ├── check_*.py / plan_*.py      ~30 CPU-only proofs (nav legs, reach, tow lanes, staging, cuts)
+│   ├── run_*_gpu.py / *_gpu.sh      Guarded GPU/Isaac entrypoints (benches, probes, demo capture)
+│   └── twin/                        Core package (stand the robot in the store, run the mission)
+│       ├── compose.py / colliders.py / geometry.py   Pure-USD composition + placement maths
+│       ├── gpu_guard.py / settle.py / urdf_probe.py / usd_probe.py   Guards & offline readers
+│       ├── mobile*.py               Mobile base + cart controls, asset authoring, USD drive adapter
+│       ├── restock/                 Mission layer (simulation-only orchestration)
+│       │   ├── mission.py           Bounded 7-stage state machine (no Isaac/ROS imports)
+│       │   ├── runtime.py           Integration adapter: nav, coupling, sensor-led transfer
+│       │   ├── inventory.py         Transactional stock reservations + durable progress
+│       │   ├── station*.py          Parked-station mapper lifecycle contract
+│       │   ├── scripted_transfer.py Sim-only scripted transfer fallback (default off)
+│       │   ├── isaac_*.py / native_*.py / masked_depth*.py   In-Isaac stage, cameras, transport
+│       │   └── bt/                  Behaviour-tree run driver (tree, driver, leaves, events, view…)
+│       ├── restock_camera/          CPU camera geometry + fail-closed depth calibration + QR
+│       ├── restock_host/            Task-isolated host planner config + nvblox incorporation
+│       ├── restock_manipulation/    Sensor-driven transfer: cuRobo→Isaac drives, MoveIt/ROS ports
+│       ├── navigation/              Nav2 route + articulated A*, observed-space voxels, tow lanes
+│       ├── demo/                    7-stage demo video compositor + decision/reason-tree panel
+│       ├── humans/                  Optional simulated people + human-safety reaction (opt-in)
+│       ├── route_alerts/            Robot as a mobile store sensor while it drives (opt-in)
+│       ├── dashboard/               Phone-first read-only fleet dashboard (CPU, stdlib HTTP)
+│       ├── tools/                   Developer benches/probes (arm carry, MPC, tow-path plot…)
+│       └── tests/                   ~150-file pytest suite + fixtures (all subsystems, CPU)
+│   ├── scenarios/                   Store-vision synthetic dataset generator (runs in Blender)
+│   └── restock_runtime/             Task-local nvblox host-stack runtime closure + probes
+├── native/restock_mapper_evidence/  ROS 2 (ament) package: nvblox mapper-evidence + admission policy
+├── docs/                            Per-subsystem design docs (see table below) + docs/media/
+├── data/                            Dated evidence / reports per deliverable (internal work logs)
+├── scenes/supermarket_base.blend    Base scene holding the network-sourced materials + HDRI
+├── assets/textures/                 Poly Haven PBR maps + world HDRI (externally linked)
+├── renders/ · report_assets/ · report.html   Rendered stills, thumbnails, portable report
+├── RUNBOOK.md                       Every command (build, render, export, mission, benches)
+└── AGENTS.md                        Project build/architecture/sharp-edge notes
+```
 
-> **An artifact is ignored only when its regeneration is both _offline_ and
-> _cheap_ — seconds to about a minute — and the measured cost is recorded below.**
-> Anything whose reproduction needs the network, or costs more than that (a render
-> farm's GPU-hours), is versioned even though a command exists to rebuild it:
-> something that takes hours is irreplaceable in practice, and the renders are the
-> project's visible evidence.
+Key design docs under `docs/`:
 
-Possibility alone is not enough — the built scene and the USD export regenerate in
-seconds, so they are ignored; the Cycles stills and the walkthrough video regenerate
-in GPU-hours, so they are kept. `.gitignore` implements this; the table is its
-rationale, with the regeneration cost **measured on this machine** (single RTX-class
-GPU) so the rule is auditable.
-
-| Artifact | Size | Decision | Regen cost (measured) | Why |
-|----------|------|----------|-----------------------|-----|
-| `scenes/supermarket_base.blend` | 32 MB | **versioned** | n/a (network) | Holds the Poly Haven materials + HDRI, which came from the network; no script rebuilds it. |
-| `assets/textures/` (Poly Haven PBR + HDRI) | 26 MB | **versioned** | n/a (network) | Downloaded from Poly Haven; externally linked by the base `.blend`. Not regenerable offline. |
-| `report_assets/*.jpg` | 1.4 MB | **versioned** | n/a (curated) | Hand-curated JPEG stills that `gen_report.py` inlines. No committed command produces them — inputs, not outputs. |
-| `data/twin-realism-v1/` (report + before/after JPEGs) | 2.3 MB | **versioned** | n/a (curated evidence) | The realism-pass v1 write-up and its before/after stills (JPEG, downscaled) — a curated deliverable like `report_assets/`. **No new texture assets**: the floor/label realism is procedural, so nothing was added under `assets/`. |
-| `scripts/**` (incl. `catalog.py`) | — | **versioned** | — | Source. |
-| `scripts/planogram.json` | 0.4 MB | **versioned** | 0.03 s | Cheap, but kept anyway: the small, diffable, deterministic interface between the planogram and label/scene stages; lets a rebuild skip stage 2. |
-| `renders/*.png` (8 Cycles stills) | ~ | **versioned** | **GPU-hours** — Cycles 200 samples, 1920×1080, ×8 cameras, OptiX (measured proxy: 34.6 s for one 640×360 EEVEE 16-sample still; full quality is orders of magnitude more and was not re-run) | Not cheap to reproduce, and the visible evidence of the project. `blender -b scenes/supermarket.blend --python scripts/render_shots.py -- --samples 200 --res 1920x1080` |
-| `renders/walkthrough.mp4` | ~ | **versioned** | **GPU-hours** — 510 frames, EEVEE, 1280×720 (measured proxy: 23.2 s for 4 frames at 320×180 EEVEE 8-sample; full length is ~two orders of magnitude more, not re-run) | Same: expensive, and visible evidence. `blender -b scenes/supermarket.blend --python scripts/render_walkthrough.py --` |
-| `report.html` | 1.7 MB | **versioned** | 0.03 s | The exception to the cost rule: it is cheap, but it is the human-facing deliverable that presents the render evidence (inlining the `report_assets` stills), so it is kept with `renders/` as the project's visible record. `python3 scripts/gen_report.py` |
-| `scenes/supermarket.blend` (built scene) | 116 MB | **ignored** | **4.0 s** | Offline and cheap. `blender -b scenes/supermarket_base.blend --python scripts/build_supermarket.py -- --all --save scenes/supermarket.blend` |
-| `assets/labels/`, `assets/signs/` | 5 MB | **ignored** | **6.7 s** | Deterministic PIL output, offline and cheap: `python3 scripts/gen_labels.py` from `catalog.py` + `planogram.json`. |
-| `export/` (`supermarket.usdc` + `textures/`) | 21 MB | **ignored** | **26.3 s** | Offline and cheap, from the built scene: `blender -b scenes/supermarket.blend --python scripts/export_usd.py`. |
-| `*.blend1`, `logs/`, `__pycache__/`, `*.pyc` | — | **ignored** | — | Autosaves, run logs and bytecode — transient by definition. |
-
-Every cost above was measured by regenerating the artifact headless into a scratch
-path (the built scene, USD export, labels, planogram and report were also compared
-to the committed copy and matched — see the decision log). The two render classes
-were exercised with reduced-cost proxies to prove the pipeline runs; their
-full-quality cost is GPU-hours, which is precisely why they are versioned rather
-than reproduced.
+| Doc | Covers |
+|---|---|
+| `restock_bt.md` | The behaviour-tree mission driver, tree shape, event contract |
+| `restock_manipulation.md` | Sensor-driven transfer: grasp, cuRobo/MoveIt, gripper |
+| `restock_navigation.md` | Mobile nav, coupled-cart swept envelope, tow lanes |
+| `restock_camera.md` | Camera geometry, depth calibration, commissioning |
+| `restock_host.md` | Isolated host planner + nvblox mapper |
+| `mobile_robot_rollwagen.md` | Mobile UR10 + passive cart design |
+| `isaac_robot_in_store.md` | Standing the robot in the store under Isaac Sim |
+| `navigation_observed_space.md` · `navigation_temporal_mapping.md` | Depth-voxel & nvblox map contracts |
+| `scenario-format.md` | Store-vision synthetic dataset format |
+| `arm_mpc_avoid.md` · `route_alerts.md` · `fleet_dashboard.md` | Reactive arm MPC, store-sensor alerts, dashboard |
 
 ---
 
-## Repository facts
+## How to run
 
-- **Blender 4.5.13 LTS**, installed as a tarball at `~/opt/blender`
-  (symlink `~/.local/bin/blender`). The LTS line is chosen for a stable Python API
-  and the USD exporter the Isaac pipeline relies on.
-- **blender-mcp bridge** (ahujasid), run on demand with `uvx blender-mcp` and
-  registered in Claude Code at user scope; the Blender-side addon "MCP for Blender"
-  auto-starts a socket on `localhost:9876`. It lets an agent build and inspect the
-  scene in the *live* GUI, stage by stage. Setup and re-registration in RUNBOOK §2.
-  Server telemetry has been switched off (`disable_telemetry`).
-- **No git remote.** This is a **local-only** project; firstmate registered it as
-  such on **2026-09-09**. There is nothing to push or pull — history lives on this
-  machine.
+### Prerequisites
+
+- **Blender 4.5 LTS** (for the store generator / render / USD export).
+- **Python 3** with `numpy` and the `usd-core` wheel (for the offline USD validators); `Pillow`
+  for label generation; `pytest` for the test suite.
+- **For the live mission only:** NVIDIA Isaac Sim 5.1, ROS 2 Jazzy, Isaac ROS 4.4 (nvblox),
+  cuRobo V2, Nav2, and the external UR10 + gripper URDFs. A single RTX-class GPU. None of this is
+  needed for the store generation or the CPU proofs.
+
+Set `SUPERMARKET_ROOT` to the repo if you run scripts from outside it (otherwise they derive their
+root from the script location).
+
+### 1 — Generate the store and export to USD (offline, no GPU)
+
+```bash
+python3 scripts/gen_planogram.py            # layout → scripts/planogram.json (skip unless layout changed)
+python3 scripts/gen_labels.py               # product labels + price tags → assets/labels, assets/signs
+blender -b scenes/supermarket_base.blend --python scripts/build_supermarket.py -- --all --save scenes/supermarket.blend   # ~4 s
+blender -b scenes/supermarket.blend --python scripts/export_usd.py                # → export/supermarket.usdc (~26 s)
+python3 scripts/validate_usd.py export/supermarket.usdc                            # proves it is Isaac-loadable
+```
+
+**Expected:** a built scene of ~26 000 objects / ~23 400 product instances; a USD stage of
+~54 150 prims (Z-up, 1 m/unit, default prim `/Supermarket`); the validator exits `0`.
+
+### 2 — Prove the mission offline (CPU only, no Isaac)
+
+```bash
+# Robot-in-store pre-flight (store USD + robot URDF + composer), one command, no GPU:
+python3 scripts/preflight.py
+
+# Mission contract checks and targeted CPU proofs:
+PYTHONPATH=scripts python3 -m pytest -q scripts/twin/tests/test_restock_mission.py
+python3 scripts/check_restock_navigation.py          # nav planning/control evidence
+python3 scripts/check_tow_lanes.py                   # coupled tow-lane feasibility
+
+# Behaviour-tree layer (task-owned venv; never the shared Isaac env):
+python3 -m venv .venv-bt && .venv-bt/bin/pip install py_trees pytest
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= .venv-bt/bin/python -m pytest -q scripts/twin/tests/test_restock_bt.py
+```
+
+**Expected:** pre-flight prints `STORE / ROBOT / COMPOSER PASS` and exits `0`; the CPU proofs
+pass without a GPU. These validators are the project's CI-style gate: a change is checked offline
+before any simulator time is spent.
+
+### 3 — Run the live mission (guarded, needs Isaac Sim + a free GPU)
+
+```bash
+# CPU preflight by default; append --execute only inside an authorized GPU session:
+bash scripts/run_mobile_restock.sh --manifest "$ENVIRONMENT_MANIFEST" \
+     --scenario scripts/restock_scenario.json
+
+# Iterate a single stage without paying the whole cycle (dev bench):
+PYTHONPATH=scripts python3 scripts/run_mobile_restock.py --start-at transfer \
+     --start-staging recorded_bay_park --stop-after verify
+```
+
+The launch is **GPU-guarded**: it refuses to boot beside a heavy GPU consumer (e.g. an open
+Blender session) to avoid an out-of-memory crash. A run writes a per-run directory with
+`mission.json`, the `inventory.sqlite` record, the live `bt_view.html` tree view, and a rendered
+`walkthrough.mp4`. Full command reference (commissioning, benches, nav, dashboard): `RUNBOOK.md`.
+
+---
+
+## Results & known limitations
+
+**What works and is proven.** The store generator and USD export are deterministic and verified
+byte-for-byte against committed copies; the offline validators (USD, robot URDF, pre-flight, nav
+legs, tow lanes, staging, cut ranges) pass on CPU. The mission state machine and its behaviour-tree
+driver are covered by a ~150-file CPU test suite, including a byte-identical parity test between the
+two. Individual stages have been exercised live in Isaac Sim — a **real** carton pick, grasp/weld
+attach, coupled tow through the service door, cart arrival, and shelf transfer — captured as the
+demo footage above.
+
+**Honest framing of the demo.** The hero video `demo-008` is a *compiled* walkthrough: its
+`collect` and `couple` stages are **real** Isaac-Sim footage, while `outbound`, `park`, `transfer`,
+`verify` and `return` are **choreographed** segments (scripted poses with the same compositor and
+decision tree). An end-to-end, single-boot run of all seven stages has **not** yet been captured;
+the current blockers are documented per-run in `data/` (GPU VRAM ceiling on a 12 GB card, sensor
+freshness under render-paced simulation, and arm self-collision on the loaded lift). The suction
+grasp uses a simulator "weld" (fixed-joint) attach rather than true suction sealing.
+
+**What is simulation-only or external.** This is a **digital twin**, not hardware control: the
+trajectory executor publishes joint-drive targets inside the sim and never commands a physical
+robot. cuRobo, Nav2, the UR10/gripper URDFs and the store-vision suite are external dependencies,
+referenced not vendored, so a live run requires their installation. Fixture/ground-truth evidence
+is accepted only in tests; production rejects it.
+
+---
+
+## Licence & attribution
+
+- **Repository licence: the owner's choice (not yet recorded in this repo).** No top-level
+  `LICENSE` file is committed. The bundled native ROS package
+  `native/restock_mapper_evidence/` declares **Apache-2.0**. Add a repo-wide `LICENSE` reflecting
+  the intended choice before publishing.
+- **Third-party components** carry their own licences: NVIDIA Isaac Sim / Isaac ROS / cuMotion
+  (NVIDIA licences), cuRobo (Apache-2.0), ROS 2 Jazzy & Nav2 (Apache-2.0), Blender (GPL),
+  py_trees (BSD), and the base scene's PBR materials + HDRI from **Poly Haven** (CC0).
+- **Attribution:** developed by Aile Robotics. Brand names on the modelled products are
+  fictional; the store, products and prices are synthetic.
 
 ---
 
 ## Decision log
 
-Dated record of the choices baked into the repo. Newest first.
+Dated record of the choices baked into the repo. Newest first. (Commands live in `RUNBOOK.md`;
+subsystem rationale in `docs/` and `AGENTS.md`.)
 
-### 2026-09-19 — Robot-in-store run prepared; owner deferred the Isaac boot
-Prepared the first real Isaac Sim run of RUNBOOK §8 (stand the UR10 in the store) up to —
-but **not including** — the GPU boot: asked, the owner answered **"not yet"**, so no
-simulator has been booted. Landed everything that needs no boot: re-generated the stale
-USD export headlessly from this HEAD (pre-flight **PASS**, 77 offline tests green); a
-bounded run wrapper `scripts/run_robot_in_store_gpu.sh` (readiness gate + hard 20-min
-wall-clock cap + RAM watchdog that stops only its own process group by PID + peak GPU/RAM
-sampler); base-height settle logging + verdict in `compose_robot_in_store.py`
-(pure logic in `twin/settle.py`, unit-tested) so the run proves *rests-on-floor*; and a
-fix to `compose_robot_in_store.sh` (source ROS `setup.bash` under `set +u`, else the
-wrapper aborted and the URDF import lost its ROS package path). **GPU-guard default is
-unchanged** (heavy-consumer threshold stays 1500 MiB): the always-on `whispr` service
-(~2.2 GB VRAM) trips it, so the guard correctly refuses beside it — accepted as an
-**opt-in** `HEAVY_MB=2500` on the wrapper, never a baked default and never `--force`.
-When the owner approves, the whole run is `bash scripts/run_robot_in_store_gpu.sh`.
-Write-up + PENDING boot sections: `data/twin-robot-in-store-v1/report.md` (+ `report.html`).
+### Store generated from a catalog + planogram, not hand-modelled
+Chosen so the store is editable, reproducible and **labelled by construction**: every product is
+placed by code, so each object carries `sku, category, brand, price, slot, facing, row` custom
+properties that survive the USD export as `userProperties:*` — free semantic / planogram-compliance
+ground truth for a simulator. Products share one prototype mesh each and export as true USD
+instances, so ~23 400 products cost a few hundred real meshes.
 
-### 2026-09-14 — Realism pass v1 on the generated store
-Audited three representative cameras (`Cam_Entrance` / `Cam_Aisle` / `Cam_Shelf`)
-rendered from `main` at evidence quality, ranked the realism gaps, and fixed the top
-ones in the **generator** (all in `build_supermarket.py`, each its own commit, so a
-rebuild reproduces them):
+### USD instancing + Z-up metres for Isaac Sim
+The export uses linked-duplicate → USD instancing and Z-up / metre units so the stage is light and
+drops into Isaac Sim with colliders and physics added on the prototypes. The world HDRI is not
+exported; light the imported stage with a dome light.
 
-- **Floor** — the strongest "this is CG" cue: matte, no reflections. `polish_floor()`
-  turns the Poly Haven tile into polished commercial vinyl — a low-roughness clear
-  coat for soft reflections of the LEDs, tightened base roughness, and a procedural
-  traffic-wear / grime layer so it is scuffed, not showroom-perfect.
-- **Cloned products / plastic produce** — `add_instance_variation()` adds a
-  per-instance brightness/saturation wobble (Object Info › Random, brand hue
-  preserved) to every branded label, the fruit and the bread; `place_products()`
-  gains wider yaw/lean/depth jitter; produce/bakery gain per-instance size grading.
-- **Clipped-flat lighting** — a compositor fog-glow bloom on the LED fixtures and
-  exposure −0.3 → −0.35.
+### Mission is a bounded state machine with measured evidence at every stage
+Each stage requires fresh sensor evidence and the stage's success field before it advances; stock
+is reserved up front and committed only at `verify`. The behaviour-tree driver reproduces this
+state machine byte-identically while adding reactive safety handling and a live tree view — so the
+safety reactions and the recorded outcome are the same whether or not the tree is used.
 
-Rendered on **CPU Cycles** (the RTX 3060 was held by the live `ur10-cumotion` Isaac
-stack; `render_shots.py` gained `--cpu`). **Pre-flight stays green**: re-exported the
-scene and `preflight.py` returns STORE / ROBOT / COMPOSER **PASS (exit 0)**. The new
-realism is *procedural*, so the USD export carries the same base textures as before —
-no new dangling references; the 6 floor/wall maps remain the **COSMETIC** standing
-defect (below), auto-repaired. Also made `ROOT` derive from each script's location so
-a headless rebuild is self-contained in any checkout/worktree (env `SUPERMARKET_ROOT`
-overrides; the live-GUI `exec()` path still falls back to the canonical path).
-Evidence, before/after and render costs: `data/twin-realism-v1/report.md`
-(+ `report.html`).
-
-### 2026-09-10 — One-command pre-flight goes green; texture repair, not a commit
-The captain's go/no-go is a single command (`scripts/preflight.py`, RUNBOOK §8). It was
-coming back red for the known **cosmetic** floor/wall texture defect — a red that did not
-mean "do not boot", which is how a check gets ignored. Two changes fix that without
-suppressing anything:
-
-1. **The pre-flight repairs the current export in place before validating it** — copies
-   the 6 authored-but-missing textures from the versioned `assets/textures/` into the
-   gitignored `export/textures/` (offline, deterministic, no Blender). So the one command
-   is self-sufficient and green on a stale on-disk export.
-2. **The store check now grades a failure BLOCKING vs COSMETIC.** A dangling *texture*
-   (untextured surface, geometry intact) is cosmetic → verdict `PASS*`, exit 0, boot
-   anyway. A dangling *reference/payload/sublayer* or any structural defect (up-axis,
-   scale, default prim, floor, composer path) is blocking → `FAIL`, exit 1, do not boot.
-   A red pre-flight now always means "do not boot".
-
-**Artifact decision — repaired on demand, NOT committed.** `export/` stays gitignored
-per the file-policy rule above (regeneration is offline and cheap). The repair is part of
-that on-demand regeneration, reproducible by anyone running the one command. Cost basis
-(measured on this machine): the repair copies the 6 maps (**6.5 MB**, already versioned in
-`assets/textures/` — so it adds **0 new bytes to git**) and the validate+repair pass runs
-in **~7 s** offline. The alternative — committing the repaired artifact — would version
-**28 MB** of regenerable binary (`export/` = 4.6 MB `.usdc` + ~23 MB textures) in breach of
-the policy; the other alternative, a full re-export (**26.3 s** of Blender, and it needs the
-GUI-held scene), is exactly the GPU-adjacent work the pre-flight exists to avoid. The
-durable source-side fix for the *next* export already lives in `export_usd.py`.
-
-### 2026-09-10 — Offline USD validator + floor/wall texture-export fix
-Pre-flighting the Isaac robot-in-store step **without a GPU** found the export authors
-**6 dangling floor/wall textures**: `polyhaven_mat()` reuses the MCP-imported Poly Haven
-materials, whose image datablocks are named `floor_tiles_08_*.jpg` / `white_plaster_02_*.jpg`
-but backed by `tmp*.jpg` temp downloads, so Blender's exporter writes the temp filenames
-into `export/textures/` while authoring the datablock names — floor and all five walls
-load untextured in Isaac (cosmetic; geometry, placement and the composer's physics
-authoring are unaffected). Fix in `export_usd.py` (`_stage_textures_for_export()` makes
-each image's backing basename equal its datablock name before export); the current
-artifact is repairable offline via `validate_usd.py --repair-textures` (the six exact
-names exist in the versioned `assets/textures/`). `scripts/validate_usd.py` is the
-repeatable check — CPU-only `usd-core` (no Isaac/GPU), exit 0/1, self-test + 7 pytest
-tests. Everything else verified clean: Z-up, 1 m/unit, default prim `/Supermarket`, all
-composer prim paths present. Full report: `data/twin-usd-validate-v1/report.md`.
-
-### 2026-09-09 — File policy refined: ignore only what is offline AND cheap
-The repo was committed whole (b4bfa88) to stop untracked work being lost; this
-decides which large artifacts stay. The condition for *ignoring* an artifact is
-two-part: its regeneration must be **offline** and **cheap** (seconds to about a
-minute). Reproducibility alone is not enough — the Cycles stills and the
-walkthrough video *can* be regenerated, but only at GPU-hours, so they are kept
-along with `report.html`, which presents them and is the project's visible
-evidence. The genuinely cheap outputs are ignored: built scene (**4.0 s**),
-labels/signs (**6.7 s**), `export/` (**26.3 s**). Versioned: base scene and
-`assets/textures/` (network), `report_assets/` (curated), `planogram.json` (0.03 s
-but the small stage interface), `renders/` and `walkthrough.mp4` (GPU-hours),
-`report.html` (0.03 s but the deliverable), all sources.
-
-Reproducibility was verified by regenerating each into a scratch path and comparing
-to the committed copy: `planogram.json` and all 223 label/sign PNGs came back
-**byte-identical**; a headless rebuild produced **26 006 objects / 23 418 product
-instances** (committed scene: same); the USD export came back 4 781 652 vs
-4 783 096 bytes with 225 textures each (0.03 % delta); a headless EEVEE still and a
-4-frame `Cam_Walk` MP4 both rendered (reduced-cost proxies, since full quality is
-GPU-hours); `report.html` regenerated identically apart from its embedded date and
-runtime-probed sizes. All regeneration costs in the file-policy table were measured
-on this machine. See that table.
-
-### 2026-09-09 — `planogram.json` stays versioned though it is regenerable
-It is the small, diffable, deterministic hand-off between the planogram stage and
-the label/scene stages. Committing it lets a rebuild skip stage 2 unless the
-layout tables changed, and makes a layout change reviewable as a JSON diff. The
-ignore rule permits versioning a regenerable file; it only forbids *ignoring* a
-non-regenerable one.
-
-### 2026-09-06 — Base scene holds the network assets, externally linked
-The Poly Haven materials and HDRI are the only things a rebuild cannot reproduce
-offline, so they live in `scenes/supermarket_base.blend` (the file every build
-opens) rather than being re-downloaded per build. They are pinned with a fake user
-so a save never purges the unused datablocks, and the texture files are linked
-from `assets/textures/` rather than packed — hence both the base scene and that
-folder are versioned together.
-
-### 2026-09-06 — Store generated from a catalog + planogram, not hand-modelled
-Chosen so the store is editable, reproducible and labelled by construction, and so
-products can share one prototype mesh each and export as true USD instances. The
-inputs a human edits are `catalog.py` and the layout tables in
-`gen_planogram.py`; the geometry is an output.
-
-### 2026-09-06 — Products carry semantics through to USD
-Each product and fixture is tagged at build time (sku, category, brand, price,
-slot, facing, row / fixture, gondola, side, bay, level) so the USD export gives a
-simulator planogram-compliance and semantic-segmentation ground truth for free.
-
-### 2026-09-06 — USD instancing + Z-up metres for Isaac Sim
-Export uses linked-duplicate → USD instancing and Z-up/metre units so the stage is
-light and drops into Isaac Sim with colliders and physics added on the prototypes.
+### File policy — ignore only what is offline AND cheap to regenerate
+An artifact is gitignored only when its regeneration is both **offline** and **cheap** (seconds to
+a minute): the built scene, labels/signs and the USD export. Network-sourced assets (base scene,
+textures) and GPU-hour render evidence (`renders/`, `report.html`) are versioned. See the measured
+cost table in `RUNBOOK.md`.

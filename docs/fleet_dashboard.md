@@ -12,12 +12,12 @@ a mission run is **byte-identical** whether or not the dashboard is up. No GPU.
 ## What it shows
 
 1. **Mission pulse** — from the existing firstmate watch page `status.json`
-   (`http://100.100.47.65:8787/`, read-only): alive/idle, run name, frame count, the live
+   (`http://<DASHBOARD_HOST>:8787/`, read-only): alive/idle, run name, frame count, the live
    trace (stage, tick, sim time, coupled/parked, base x/y).
 2. **Mission pipeline** — the `reserved → collect → couple → outbound → park → transfer →
    verify → return` timeline for the resolved run, read from that run's
    `mission.json` events under
-   `/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/<run>/`. The stage the
+   `~/datasets/twin-robot-in-store-boot-v1/mission/<run>/`. The stage the
    run is sitting on reads *active* while running and *failed* if the run failed there (a
    recorded stage-entry event means "entered", not "completed"); verify's physics-verified
    verdict is surfaced on success.
@@ -34,7 +34,7 @@ a mission run is **byte-identical** whether or not the dashboard is up. No GPU.
 The dashboard **reads** the firstmate-owned watch page (`:8787`) rather than replacing it:
 it consumes that page's `status.json` for the live pulse and links its media back to it. It
 **reads** the mission run directories for per-run detail. It binds to the tailnet IP
-`100.100.47.65` on a **free** port (default `8794`; `8787/8790/8791/8793` are taken) so it
+`<DASHBOARD_HOST>` on a **free** port (default `8794`; `8787/8790/8791/8793` are taken) so it
 coexists with the watch page. All media links point at the upstream base.
 
 ## Store-state export contract

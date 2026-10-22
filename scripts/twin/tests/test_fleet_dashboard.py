@@ -366,8 +366,9 @@ def test_resolve_run_dir(tmp_path):
     assert aggregate.resolve_run_dir(str(tmp_path / "missing"), None) is None
 
 
-def test_default_bind_is_tailnet_and_free_port():
-    # The brief pins the bind to the tailnet IP on a free port (>=8794).
-    assert server.DEFAULT_HOST == "100.100.47.65"
+def test_default_bind_is_loopback_and_free_port():
+    # Public-safe default: bind loopback on a free port (>=8794). The deploy host is
+    # supplied via RESTOCK_DASHBOARD_HOST (e.g. a tailnet address), never baked in.
+    assert server.DEFAULT_HOST == "127.0.0.1"
     assert server.DEFAULT_PORT >= 8794
     assert server.DEFAULT_PORT not in (8787, 8790, 8791, 8793)

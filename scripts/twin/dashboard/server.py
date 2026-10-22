@@ -23,9 +23,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from twin.dashboard import aggregate, store_state, triggers
 from twin.dashboard.page import PAGE
 
-DEFAULT_RUN_ROOT = "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission"
-DEFAULT_UPSTREAM = "http://100.100.47.65:8787"
-DEFAULT_HOST = "100.100.47.65"
+# Defaults are public-safe and env-overridable: the dashboard binds loopback and
+# reads runs from under $HOME unless an operator points it elsewhere. Set
+# RESTOCK_DASHBOARD_HOST / RESTOCK_DASHBOARD_UPSTREAM / RESTOCK_RUN_ROOT to deploy
+# on a specific (e.g. tailnet) address.
+DEFAULT_RUN_ROOT = os.environ.get(
+    "RESTOCK_RUN_ROOT",
+    os.path.expanduser("~/datasets/twin-robot-in-store-boot-v1/mission"),
+)
+DEFAULT_HOST = os.environ.get("RESTOCK_DASHBOARD_HOST", "127.0.0.1")
+DEFAULT_UPSTREAM = os.environ.get("RESTOCK_DASHBOARD_UPSTREAM", f"http://{DEFAULT_HOST}:8787")
 DEFAULT_PORT = 8794
 
 
@@ -46,7 +53,7 @@ def fetch_upstream(base: str, timeout: float) -> tuple[dict | None, bool]:
     """Fetch ``<base>/status.json``. Returns ``(dict|None, ok)``; never raises."""
     url = base.rstrip("/") + "/status.json"
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 (fixed tailnet URL)
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 (operator-configured upstream)
             data = json.loads(resp.read().decode("utf-8"))
     except Exception:
         return None, False
