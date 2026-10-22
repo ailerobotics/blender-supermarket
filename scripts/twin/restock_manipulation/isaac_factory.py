@@ -126,6 +126,7 @@ class ManipConfig:
     sim_attach_fallback: bool = False  # labelled sim attach-fallback (cad_tool); default OFF, see SIM_ATTACH_CONTACT_MM
     station_heartbeat_s: float = 10.0  # StationClient wall heartbeat-unavailable bound; real-rig 10 s, sim raises it
     station_stage_unavailable_s: float = 3.0  # StationClient sim-clock (stage) supervisor-liveness bound (primary)
+    gt_place_slot: dict = field(default_factory=dict)  # collect-gt: warm-shortcut place slot (ground-truth collect only)
 
 
 def parse_manipulation_config(config, job_sku):
@@ -389,7 +390,8 @@ class CollectTargetBridge:
     """
     def __init__(self, *, stage, arm_camera, arm_camera_path, base_path, profiles,
                  motion, contact, joints, source_location, cart_placement=None, cart_root=None,
-                 mobile_base_path=None, cart_support_path=None, verify_place=False):
+                 mobile_base_path=None, cart_support_path=None, verify_place=False,
+                 gt_place_slot=None):
         self.stage, self.arm_camera, self.arm_camera_path = stage, arm_camera, arm_camera_path
         self.base_path, self.profiles = base_path, profiles
         # The arm executes relative to the MOBILE chassis (base_link), which carries the dock yaw
@@ -445,6 +447,11 @@ class CollectTargetBridge:
         # (the place re-registration needs it) but claims no source localisation. Off => byte-identical.
         self.collect_ground_truth = gtc.enabled()
         self._gt_carton_held = False
+        # The ONE carton spot (sim-video-transfer-fallback-v1 decision): the warm-shortcut slot from the
+        # scenario initial_staging -- rollwagen UPPER shelf, cart body (+0.18, 0), yaw -90 deg cart-relative.
+        # Ground-truth collect places there instead of the deck so cold and warm runs hand the transfer
+        # the same carton pose. Empty => the existing _cart_target placement.
+        self.gt_place_slot = dict(gt_place_slot or {})
 
     def set_shelf_target_provider(self, provider):
         self.shelf_provider = provider
@@ -599,14 +606,7 @@ class CollectTargetBridge:
                 wc = np.array([(mn[0] + mx[0]) / 2.0, (mn[1] + mx[1]) / 2.0, float(mx[2]), 1.0])
                 self._deck_local = np.linalg.inv(Tc) @ wc            # rigid in the cart frame
                 self._deck_extent = (float(mx[0] - mn[0]), float(mx[1] - mn[1]))
-            local = self._deck_local
-            dx = gtc.deck_slot_x()
-            if dx:
-                # collect-gt opt-in RESTOCK_COLLECT_DECK_SLOT_X: shift the deck slot along the cart BODY +x
-                # (toward the hitch/robot side) for transfer reach, clamped so the carton stays on the deck.
-                # Shared by the collect place AND the transfer cart-source read, so both stay consistent.
-                local = local + np.array([dx, 0.0, 0.0, 0.0])
-            w = Tc @ local
+            w = Tc @ self._deck_local
             world = np.array([float(w[0]), float(w[1]), float(w[2]), 1.0])
         else:
             lx, ly = cp['load_center_body_xy']
@@ -705,6 +705,30 @@ class CollectTargetBridge:
                                         'note': 'collect-gt: simulated carton asset pose (sim ground truth)'},
                             location=self.source_location, station_frame='ur_base_link')
 
+    def _gt_place_target(self, now):
+        """collect-gt: the collect PLACE target at the warm-shortcut slot (gt_place_slot) on the cart's LIVE
+        pose: the support point in ur_base_link + the slot's base-relative yaw (world yaw re-expressed
+        through the chassis by _map_pose_to_base, like the pick), so the wall policy lands the carton at the
+        slot yaw with the gripped face toward the hitch. Controlled-asset derived like _cart_target, hence
+        the same 'sensor' label. None without a cart/stage."""
+        cp = self.cart_placement
+        if not cp or not self.cart_root or self.stage is None:
+            return None
+        import numpy as np
+        from pxr import UsdGeom
+        from twin.restock_manipulation.types import Target
+        cart_prim = self.stage.GetPrimAtPath(self.cart_root)
+        base = self.stage.GetPrimAtPath(self.base_path)
+        if not cart_prim or not base:
+            return None
+        cache = UsdGeom.XformCache()
+        pose = gtc.slot_pose(np.asarray(cache.GetLocalToWorldTransform(cart_prim)).T,
+                             np.asarray(cache.GetLocalToWorldTransform(base)).T, self.gt_place_slot)
+        return Target(observation_id=f'cart:{cp["location"]}:{now:.3f}', source='sensor',
+                      simulation_time=float(now), location=cp['location'],
+                      pose=tuple(self._map_pose_to_base(pose)), clear=True,
+                      free_dimensions=tuple(cp['free_dimensions']), frame='ur_base_link')
+
     def _capture_ground_truth_collect(self, now):
         """collect-gt: the collect capture under RESTOCK_COLLECT_GROUND_TRUTH. Mirrors the camera path's
         gates (parked, fresh) and packet, but the source observation is the carton asset's pose labelled
@@ -749,7 +773,8 @@ class CollectTargetBridge:
         except Exception:
             joints = (0.,) * 6
         try:
-            cart_target = self._cart_target(now, target)
+            cart_target = (self._gt_place_target(now) if self.gt_place_slot
+                           else self._cart_target(now, target))
         except Exception as exc:
             cart_target = None
             if self._calls % 10 == 1:
@@ -1100,11 +1125,12 @@ def _build_runtime(*, app, assembly, params, output):
         joints=feedback.joint_positions,
         source_location=params.collect_source_location,
         cart_placement=params.cart_placement, cart_root=cart_root,
-        cart_support_path=cart_support_path, verify_place=bool(verify_place))
+        cart_support_path=cart_support_path, verify_place=bool(verify_place),
+        gt_place_slot=params.gt_place_slot)
     # collect-gt: name the workaround at boot so a wrongly-set switch is visible before the first stage.
-    print('COLLECT_GROUND_TRUTH enabled=%s deck_slot_x=%.3f (%s=1: collect pick from the simulated '
-          'carton asset pose, labelled ground_truth; default off)'
-          % (collect_bridge.collect_ground_truth, gtc.deck_slot_x(), gtc.ENV), flush=True)
+    print('COLLECT_GROUND_TRUTH enabled=%s place_slot=%s (%s=1: collect pick from the simulated carton '
+          'asset pose, labelled ground_truth; place at the warm-shortcut slot; default off)'
+          % (collect_bridge.collect_ground_truth, params.gt_place_slot or None, gtc.ENV), flush=True)
 
     sensing_bridge = None
     if params.masked_depth.get('enabled'):
@@ -1197,6 +1223,16 @@ def create(*, app, assembly, plan, config, output, _builder=None):
     from twin.restock.runtime import ManipulationBridge
 
     params = parse_manipulation_config(config, plan.job_sku)
+    if gtc.enabled():
+        # collect-gt: place at the warm-shortcut slot, read from the SAME scenario the shortcut uses
+        # (fail closed at boot if it cannot be read -- never an invented spot).
+        import json
+        from dataclasses import replace
+        from pathlib import Path
+        scenario = config.get('scenario')
+        if isinstance(scenario, (str, Path)):
+            scenario = json.loads(Path(scenario).read_text())
+        params = replace(params, gt_place_slot=gtc.warm_slot(scenario))
     build = _builder or _build_runtime
     runtime = build(app=app, assembly=assembly, params=params, output=output)
 

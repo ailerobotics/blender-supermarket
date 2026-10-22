@@ -47,17 +47,41 @@ def test_mission_labels_off_on_and_shortcut():
     assert gtc.label_summary(dict(s), env={}) == s                  # off => summary untouched
     on = gtc.label_summary(dict(s), env={ENV: '1'})
     assert on['collect_mode'] == 'ground_truth' and 'GROUND-TRUTH COLLECT' in on['note']
+    assert on['walkthrough_caption'] == gtc.CAPTION
     skipped = gtc.label_summary(dict(s), {'start_at': 'couple', 'skipped': ['collect']}, env={ENV: '1'})
     assert skipped == s                                             # collect never ran -> no label
+    bench = gtc.label_summary(dict(s, walkthrough_caption='BENCH RUN'), env={ENV: '1'})
+    assert bench['walkthrough_caption'] == 'BENCH RUN | ' + gtc.CAPTION
 
 
-def test_deck_slot_x_default_zero_and_clamped():
-    assert gtc.deck_slot_x({}) == 0.0
-    assert gtc.deck_slot_x({gtc.DECK_SLOT_ENV: '0.06'}) == pytest.approx(0.06)
-    assert gtc.deck_slot_x({gtc.DECK_SLOT_ENV: '0.5'}) == pytest.approx(gtc.DECK_SLOT_MAX_M)
-    assert gtc.deck_slot_x({gtc.DECK_SLOT_ENV: '-0.5'}) == pytest.approx(-gtc.DECK_SLOT_MAX_M)
-    assert gtc.deck_slot_x({gtc.DECK_SLOT_ENV: 'nan'}) == 0.0
-    assert gtc.deck_slot_x({gtc.DECK_SLOT_ENV: 'x'}) == 0.0
+def test_walkthrough_caption_joins_only_when_collect_runs():
+    assert gtc.join_caption(None, {}, env={}) is None               # off => byte-identical (no caption)
+    assert gtc.join_caption('BENCH', {}, env={}) == 'BENCH'
+    assert gtc.join_caption(None, {}, env={ENV: '1'}) == gtc.CAPTION
+    assert gtc.join_caption(None, {'start_at': 'collect'}, env={ENV: '1'}) == gtc.CAPTION
+    assert gtc.join_caption('BENCH', {'start_at': 'couple'}, env={ENV: '1'}) == 'BENCH'   # collect skipped
+
+
+SCENARIO_STAGING = {   # mission-scenario.json initial_staging (the warm shortcut's slot fields)
+    'cart_body_pose': [-5.73, 15.25, 0], 'cart_load_center_body_xy': [0.18, 0.0],
+    'cart_support_z_world': 0.9325, 'unit_yaws_world': {'source': math.pi, 'cart': -math.pi / 2, 'shelf': 0.0}}
+
+
+def test_warm_slot_reads_the_shortcut_staging_fields():
+    slot = gtc.warm_slot({'initial_staging': SCENARIO_STAGING})
+    assert slot['load_center_body_xy'] == (0.18, 0.0) and slot['support_z_world'] == 0.9325
+    assert slot['yaw_cart_rel'] == pytest.approx(-math.pi / 2)
+    yawed = dict(SCENARIO_STAGING, cart_body_pose=[-5.73, 15.25, 0.3])       # cart-RELATIVE yaw
+    assert gtc.warm_slot({'initial_staging': yawed})['yaw_cart_rel'] == pytest.approx(-math.pi / 2 - 0.3)
+
+
+@pytest.mark.parametrize('broken', [
+    {}, {'initial_staging': None}, {'initial_staging': dict(SCENARIO_STAGING, cart_load_center_body_xy=[0.1])},
+    {'initial_staging': dict(SCENARIO_STAGING, cart_support_z_world=float('nan'))},
+    {'initial_staging': dict(SCENARIO_STAGING, unit_yaws_world={})}])
+def test_warm_slot_fails_closed(broken):
+    with pytest.raises(ValueError):
+        gtc.warm_slot(broken)
 
 
 def _T(x, y, z, yaw):
@@ -85,6 +109,14 @@ def test_carton_top_pose_is_expressed_in_a_yawed_arm_base():
     assert math.hypot(pose[0], pose[1]) == pytest.approx(1.1, abs=1e-9)
     assert pose[0] == pytest.approx(1.1 * math.sin(yb), abs=1e-9)    # R(-yb) @ (0, 1.1)
     assert pose[2] == pytest.approx(0.261, abs=1e-9)
+
+
+def test_slot_pose_is_the_support_point_with_the_slot_world_yaw():
+    slot = gtc.warm_slot({'initial_staging': SCENARIO_STAGING})
+    # robot at place_approach (-4.5, 15.4, pi), arm base 0.499 up; cart at its dock (-5.73, 15.25, 0)
+    pose = gtc.slot_pose(_T(-5.73, 15.25, 0.0, 0.0), _T(-4.5, 15.4, 0.499, math.pi), slot)
+    assert pose[:3] == pytest.approx((1.05, 0.15, 0.9325 - 0.499), abs=1e-9)   # in front, shelf height
+    assert 2 * math.atan2(pose[5], pose[6]) == pytest.approx(-math.pi / 2)    # WORLD yaw = cart - 90 deg
 
 
 def test_carton_top_pose_rejects_bad_transforms():
@@ -378,7 +410,7 @@ def _box(stage, path, center, half):
     x.AddScaleOp().Set(Gf.Vec3f(*half))
 
 
-def _stage(base_yaw_deg=0.0):
+def _stage(base_yaw_deg=0.0, base_xy=(-5.73, 16.0)):
     """The cold-collect start as scene.py + mission-scenario.json author it (backroom dock)."""
     stage = Usd.Stage.CreateInMemory()
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
@@ -392,8 +424,8 @@ def _stage(base_yaw_deg=0.0):
     mesh.AddTranslateOp().Set(Gf.Vec3d(-5.73, 17.1, 0.6 + z))          # support_center_xy, unit_bottom_z
     mesh.AddRotateZOp().Set(180.0)                                      # unit_yaws_world.source = pi
     mesh.GetPrim().SetCustomDataByKey('restock:sku', 'juice_orange')
-    _xf(stage, '/World/base_link', (-5.73, 16.0, 0.24), base_yaw_deg)  # pickup pose
-    _xf(stage, '/World/ur_base_link', (-5.73, 16.0, 0.499), base_yaw_deg)
+    _xf(stage, '/World/base_link', (*base_xy, 0.24), base_yaw_deg)  # pickup pose by default
+    _xf(stage, '/World/ur_base_link', (*base_xy, 0.499), base_yaw_deg)
     _xf(stage, '/Rollwagen', (-5.73, 15.25, 0.0))                       # cart_body_pose
     UsdGeom.Xform.Define(stage, '/Rollwagen/chassis')
     _box(stage, '/Rollwagen/chassis/deck', (0.0, 0.0, 0.19995), (0.4, 0.34, 0.02505))   # deck top 0.225
@@ -401,7 +433,7 @@ def _stage(base_yaw_deg=0.0):
     return stage
 
 
-def _bridge(stage, monkeypatch, *, held=False, parked=True, provider=None):
+def _bridge(stage, monkeypatch, *, held=False, parked=True, provider=None, slot=None):
     from twin.restock_manipulation.isaac_factory import CollectTargetBridge
     monkeypatch.setenv(ENV, '1')
     cam = NS(get_current_frame=lambda: {'distance_to_image_plane': np.zeros((240, 424))},
@@ -415,7 +447,8 @@ def _bridge(stage, monkeypatch, *, held=False, parked=True, provider=None):
         motion=NS(parked=lambda: parked, collision_time=9.0),
         contact=NS(read=lambda: held, path='/RestockPanelGripper'), joints=lambda: (0.,) * 6,
         source_location='backstock_00', mobile_base_path='/World/base_link', cart_placement=cp,
-        cart_root='/Rollwagen', cart_support_path='/Rollwagen/chassis/deck', verify_place=True)
+        cart_root='/Rollwagen', cart_support_path='/Rollwagen/chassis/deck', verify_place=True,
+        gt_place_slot=slot)
     b._arm_base_from_camera = lambda: np.eye(4)
     b.provider = provider
     return b
@@ -490,14 +523,83 @@ def test_switch_off_keeps_the_camera_path(monkeypatch):
     assert b.capture(1.0, 'backstock_00', 'rollwagen') is None           # camera provider: nothing sensed
 
 
-def test_deck_slot_shift_moves_the_shared_deck_target_along_cart_body_x(monkeypatch):
-    stage = _stage()
-    b = _bridge(stage, monkeypatch)
-    monkeypatch.delenv(gtc.DECK_SLOT_ENV, raising=False)
-    (x0, y0, z0), _ = b._cart_pose_station()
-    monkeypatch.setenv(gtc.DECK_SLOT_ENV, '0.08')
-    (x1, y1, z1), _ = b._cart_pose_station()
-    assert (x1 - x0, y1 - y0, z1 - z0) == pytest.approx((0.08, 0.0, 0.0), abs=1e-9)
-    monkeypatch.setenv(gtc.DECK_SLOT_ENV, '0.5')                       # clamped: stays on the deck
-    (x2, _, _), _ = b._cart_pose_station()
-    assert x2 - x0 == pytest.approx(gtc.DECK_SLOT_MAX_M, abs=1e-9)
+def test_place_target_is_the_warm_slot_not_the_deck(monkeypatch):
+    slot = gtc.warm_slot({'initial_staging': SCENARIO_STAGING})
+    b = _bridge(_stage(), monkeypatch, provider=_never, slot=slot)        # robot at pickup
+    tgt = b.capture(1.0, 'backstock_00', 'rollwagen').target
+    # shelf support point at cart body (+0.18, 0) -> world (-5.55, 15.25, 0.9325) -> pickup ur_base_link
+    assert tgt.pose[:3] == pytest.approx((0.18, -0.75, 0.9325 - 0.499), abs=1e-6)
+    assert 2 * math.atan2(tgt.pose[5], tgt.pose[6]) == pytest.approx(-math.pi / 2)   # base yaw 0 here
+    assert tgt.source == 'sensor' and tgt.location == 'rollwagen' and tgt.clear
+
+
+def test_place_target_reregistered_at_place_approach_is_base_relative(monkeypatch):
+    # After the fm390 reposition the base faces the cart mouth (yaw pi); the re-read target must give
+    # the wall policy a BASE-relative yaw (-90 - 180 = +90 deg) so the carton lands at -90 cart-relative.
+    slot = gtc.warm_slot({'initial_staging': SCENARIO_STAGING})
+    b = _bridge(_stage(base_yaw_deg=180.0, base_xy=(-4.5, 15.4)), monkeypatch, held=True, slot=slot)
+    tgt = b.capture(9.0, 'backstock_00', 'rollwagen').target
+    assert tgt.pose[:3] == pytest.approx((1.05, 0.15, 0.4335), abs=1e-6)
+    yaw = math.degrees(2 * math.atan2(tgt.pose[5], tgt.pose[6])) % 360.0
+    assert yaw == pytest.approx(90.0, abs=1e-6)
+
+
+SHELFBOT_ROOT = Path.home() / 'workspaces' / 'shelfbot_newgripper'
+
+
+@pytest.mark.skipif(not (SHELFBOT_ROOT / 'shelfbot' / 'motion_planning' / 'geometry.py').is_file(),
+                    reason='shelfbot (gripper) source not on this machine')
+def test_real_wall_policy_places_at_the_ik_proven_slot_contact(monkeypatch):
+    """Closed loop with the REAL shelfbot side-grip wall policy: the ground-truth pick (pickup) and the
+    warm-slot place target (re-read at place_approach) produce the contact points the actual-URDF IK
+    probe (scripts/check_restock_reach.check, robot at place_approach) proves reachable:
+    pick contact base_link (0, 0.897, 0.44), place contact base_link (0.847, 0.15, 0.7725)."""
+    from twin.restock_manipulation.wall_policy import WallCartonPolicy
+    tool = NS(validate_profile=lambda p: None, panel_size=(0.30, 0.20))
+    policy = WallCartonPolicy(SHELFBOT_ROOT, tool, walls={'backstock_00': 3, 'rollwagen': 3})
+    prof = ProductProfile('juice_orange', (.6, .4, .16), (.5, .5, .5, .5), tcp_surface_offset=.00275,
+                          approach=.12, max_reach=1.3, grasp_mode='side')
+    slot = gtc.warm_slot({'initial_staging': SCENARIO_STAGING})
+    pick_bridge = _bridge(_stage(), monkeypatch, provider=_never, slot=slot)
+    pick = pick_bridge.capture(1.0, 'backstock_00', 'rollwagen')
+    place_bridge = _bridge(_stage(base_yaw_deg=180.0, base_xy=(-4.5, 15.4)), monkeypatch, held=True, slot=slot)
+    target = place_bridge.capture(9.0, 'backstock_00', 'rollwagen').target
+    poses = policy.build(pick.observations[0], target, prof)
+    to_base_link = 0.499 - 0.24                                          # ur_base_link -> base_link z
+    assert poses['contact'][:3] == pytest.approx((0.0, 0.89725, 0.44 - to_base_link), abs=2e-3)
+    assert poses['place'][:3] == pytest.approx((0.84725, 0.15, 0.7725 - to_base_link), abs=2e-3)
+    for name in ('approach', 'contact', 'lift', 'preplace', 'place', 'retreat'):
+        assert math.dist(poses[name][:3], (0, 0, 0)) <= prof.max_reach, name   # controller _pose_ok gate
+
+
+def _create_params(monkeypatch, tmp_path, scenario):
+    from twin.restock_manipulation.isaac_factory import create
+    eye = [[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0], [0, 0, 0, 1.0]]
+    path = tmp_path / 'mission-scenario.json'
+    import json
+    path.write_text(json.dumps(scenario))
+    config = {'scenario': str(path), 'manipulation': {
+        'profiles': [{'sku': 'juice_orange', 'dimensions': [.6, .4, .16], 'tcp_quaternion': [.5, .5, .5, .5],
+                      'grasp_mode': 'side'}],
+        'stations': {'source': {'slots': [{'id': 's0'}], 'base_from_camera': eye},
+                     'shelf': {'slots': [{'id': 'd0'}], 'base_from_camera': eye}},
+        'shelfbot_root': '/x'}}
+    built = {}
+
+    def builder(*, app, assembly, params, output):
+        built['params'] = params
+        return NS(controller=NS(cart_location='rollwagen'))
+    create(app=object(), assembly=object(), plan=NS(job_sku='juice_orange'), config=config,
+           output=tmp_path, _builder=builder)
+    return built['params']
+
+
+def test_create_loads_the_warm_slot_from_the_runtime_scenario_only_when_enabled(monkeypatch, tmp_path):
+    scenario = {'initial_staging': SCENARIO_STAGING}
+    monkeypatch.delenv(ENV, raising=False)
+    assert _create_params(monkeypatch, tmp_path, scenario).gt_place_slot == {}      # off: untouched
+    monkeypatch.setenv(ENV, '1')
+    slot = _create_params(monkeypatch, tmp_path, scenario).gt_place_slot
+    assert slot['load_center_body_xy'] == (0.18, 0.0) and slot['support_z_world'] == 0.9325
+    with pytest.raises(ValueError):                                                  # fail closed at boot
+        _create_params(monkeypatch, tmp_path, {'initial_staging': {}})
