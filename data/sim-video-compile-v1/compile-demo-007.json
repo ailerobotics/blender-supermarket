@@ -1,0 +1,74 @@
+{
+  "_comment": "demo-007 (captain 17:25): like demo-006 but the place is onto the STORE SHELF (demo-005), not the backroom bay. collect=collect-src-002 f0-323; couple+outbound=warm8 (outbound = clean backroom drive, captioned, no INTERIM tag); park/transfer/verify/return all from demo-005 (store-shelf place + coupled return through the door to cart parking). Continuous panel/timers, cross-fades at source seams.",
+  "mission_root": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission",
+  "title": "demo-007",
+  "fps": 15,
+  "xfade_frames": 8,
+  "segments": [
+    {
+      "stage": "collect",
+      "source": "collect-src-002",
+      "kind": "real",
+      "frame_start": 0,
+      "frame_end": 323,
+      "stride": 2,
+      "caption": "Pick the carton off the warehouse shelf and carry it to the rollwagen"
+    },
+    {
+      "stage": "couple",
+      "source": "warm8",
+      "kind": "real",
+      "frame_start": 0,
+      "frame_end": 126
+    },
+    {
+      "stage": "outbound",
+      "source": "warm8",
+      "kind": "real",
+      "frame_start": 126,
+      "frame_end": 164,
+      "caption": "Tow the coupled rollwagen out of the backroom toward the store"
+    },
+    {
+      "stage": "park",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1110,
+      "frame_end": 1169,
+      "stride": 2,
+      "band": true,
+      "caption": "Park the rollwagen at the store shelf"
+    },
+    {
+      "stage": "transfer",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1170,
+      "frame_end": 1364,
+      "stride": 2,
+      "band": true,
+      "caption": "Arm moves the carton from the rollwagen onto the store shelf"
+    },
+    {
+      "stage": "verify",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1365,
+      "frame_end": 1424,
+      "stride": 2,
+      "band": true,
+      "caption": "Confirm the carton is on the store shelf; commit the stock"
+    },
+    {
+      "stage": "return",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1425,
+      "frame_end": 1822,
+      "stride": 3,
+      "band": true,
+      "title": "Return to the warehouse",
+      "caption": "Tow the rollwagen back through the door to the warehouse and park (still coupled)"
+    }
+  ]
+}
