@@ -452,12 +452,17 @@ class IsaacCartonSensors:
                     _h = float(_poly[:, 1].max() - _poly[:, 1].min())
                     _decoded = [getattr(d, 'text', '') for d in qr.detections]
                     _ever = {s.location: (s.location in self._label_clean) for s in matches}
+                    # fm472: also surface which slots ALREADY have an observation this frame and WHY any
+                    # decoded candidate was REJECTED -- when a decoded carton SKU is in `decoded` but its
+                    # slot is NOT observed, fm469 cannot suppress a spurious unreadable quad, so the reject
+                    # reason (height / suction-patch / footprint / non-unique slot) names the real root.
+                    _obs_locs = sorted({o.location for o in observations})
                     print(
                         'DECODE_FAIL cam=%s slots=%s code=%r quad_px=%.0fx%.0f '
-                        'decoded=%s n_unreadable=%d ever_clean=%s window=%s rgb=%sx%s' % (
+                        'decoded=%s n_unreadable=%d ever_clean=%s window=%s rgb=%sx%s observed=%s rejected=%s' % (
                             self.camera_id, [s.location for s in matches], code, _w, _h,
                             _decoded, len(qr.unreadable_corners), _ever, window,
-                            depth.shape[1], depth.shape[0]),
+                            depth.shape[1], depth.shape[0], _obs_locs, rejected[:4]),
                         flush=True)
                     # fm465 (captain A): persist the ACTUAL sensing-camera RGB + the failing quad crop so
                     # the decode root can be SEEN (the walkthrough RGB is not the sensing frame). Opt-in via
