@@ -433,7 +433,7 @@ class RuntimeAdapter:
                 # vr1: a RE-BEGUN return after this mission already uncoupled (BT StageRetry / fm363
                 # STEP_RETRY of a failed home leg): the cart is parked + pinned and NOT coupled, so resume
                 # the empty drive home from the live pose instead of re-towing a cart that is gone.
-                self.nav.start(self.poses['home'], False)
+                self._start_nav_leg(self.poses['home'], False)
                 self.phase = 'navigate'
                 self._return_leg = 'home'
             elif action == 'return' and self._uncouple_return():
@@ -448,14 +448,14 @@ class RuntimeAdapter:
                 # coupled tow, so it keeps the return goal-articulation tolerance.
                 kwargs = ({'goal_articulation': self.goal_articulation['return']}
                           if 'return' in self.goal_articulation else {})
-                self.nav.start(self.poses['cart_parking'], True, **kwargs)
+                self._start_nav_leg(self.poses['cart_parking'], True, **kwargs)
                 self.phase = 'navigate'
                 self._return_leg = 'cart_parking'
             else:
                 goal = {'collect': 'pickup', 'outbound': 'shelf_approach', 'return': 'home'}[action]
                 kwargs = ({'goal_articulation':self.goal_articulation[action]}
                           if action in self.goal_articulation else {})
-                self.nav.start(self.poses[goal], action in ('outbound', 'return'), **kwargs)
+                self._start_nav_leg(self.poses[goal], action in ('outbound', 'return'), **kwargs)
                 self.phase = 'navigate'
         elif action == 'transfer' and self.scripted_transfer is not None:
             # SIM-ONLY scripted transfer (labelled workaround): no host manipulation job and no station
@@ -488,7 +488,7 @@ class RuntimeAdapter:
         # margin at the backstock Support cannot false-block the leg (see self.couple_static_drive).
         if self.couple_static_drive:
             kw['static_drive'] = True
-        self.nav.start(self.poses[goal_name], False, **kw)
+        self._start_nav_leg(self.poses[goal_name], False, **kw)
 
     def _uncouple_return(self):
         """True when the return stage leaves the cart parked and drives home empty, instead of towing
@@ -606,6 +606,28 @@ class RuntimeAdapter:
                     % (self.action, waited, self.nav_stuck_wall_s, reason))
         return None
 
+    def _start_nav_leg(self, goal, coupled, **kw):
+        """Dispatch a FRESH navigation leg and (re)start its no-base-progress WALL budget from THIS
+        leg's start (fm-return-rebegin).
+
+        The fm425 stuck timer (``_nav_stuck_wall``/``_nav_stuck_pose``) is only ever advanced inside
+        the navigate phase (``_nav_stuck_check``); a NON-navigate phase never touches it. So the WALL
+        seconds a stage legitimately spends stationary in a preceding non-navigate phase -- the long
+        park + transfer + verify before the uncouple-return tow (warm7: ~207 s wall carried from the
+        outbound tow's last progress through the whole transfer) -- would otherwise be charged against
+        this leg's VERY FIRST navigate tick and trip the budget before the controller finishes its
+        normal planning_stop -> route_ready sequence. That failed the return on tick one, and because
+        the StageRetry re-begin also runs through here without clearing the baseline, every bounded
+        re-attempt re-failed instantly (the 'per-tick re-begin', elapsed=0.02, route never persisted).
+        The single-leg outbound never hits it: its nav leg follows the couple navigate/fine-dock, so
+        its baseline is already fresh. Clearing the baseline on a genuinely new leg is identical to a
+        progress reset, so the within-leg frozen-stage detection (run-323b) is unchanged -- no
+        ``start`` ever occurs between a frozen leg's own ticks."""
+        self._nav_stuck_wall = None
+        self._nav_stuck_pose = None
+        self._nav_stuck_reason = None
+        self.nav.start(goal, coupled, **kw)
+
     def _step(self, dt):
         self.time += dt
         gate = getattr(self.port, 'gate', None)  # drive the opt-in sensing gate from last phase
@@ -684,7 +706,7 @@ class RuntimeAdapter:
                     return Result('running', reason='towed to cart parking spot; braking cart before uncouple')
                 if self._return_leg == 'cart_parking_backaway':
                     # Backed clear of the parked cart (uncoupled): drive home empty.
-                    self.nav.start(self.poses['home'], False)
+                    self._start_nav_leg(self.poses['home'], False)
                     self.phase = 'navigate'
                     self._return_leg = 'home'
                     return Result('running', reason='backed away from parked cart; driving home empty')
@@ -696,9 +718,9 @@ class RuntimeAdapter:
                 if self._reposition_seq_i < len(self._reposition_seq) - 1:
                     # Reached the staging waypoint (east of the cart); advance to place_approach.
                     self._reposition_seq_i += 1
-                    self.nav.start(self._reposition_seq[self._reposition_seq_i], False, static_drive=True,
-                                   carry_drive=self.carry_reposition_drive,  # fm431 (B1): drive while carrying
-                                   arrival_xy_tol=0.15, arrival_yaw_tol=0.20)  # fm408: cover the base static-drive residual (run-315 diag: xy~0.11, yaw~0.16)
+                    self._start_nav_leg(self._reposition_seq[self._reposition_seq_i], False, static_drive=True,
+                                        carry_drive=self.carry_reposition_drive,  # fm431 (B1): drive while carrying
+                                        arrival_xy_tol=0.15, arrival_yaw_tol=0.20)  # fm408: cover the base static-drive residual (run-315 diag: xy~0.11, yaw~0.16)
                     self.phase = 'navigate'
                     return Result('running',
                                   reason=f'reposition advancing to {self._reposition_seq[self._reposition_seq_i]}')
@@ -897,9 +919,9 @@ class RuntimeAdapter:
                 # but the carry-fold self-geometry pollutes the live scan (run-304/307 ring the per-tick mask
                 # did not clear). Static-only route + gates for these legs only; every other leg keeps full
                 # live obstacle avoidance.
-                self.nav.start(self._reposition_seq[0], False, static_drive=True,
-                               carry_drive=self.carry_reposition_drive,  # fm431 (B1): drive while carrying
-                               arrival_xy_tol=0.15, arrival_yaw_tol=0.20)  # fm408: cover the static-drive yaw residual (run-315 diag)
+                self._start_nav_leg(self._reposition_seq[0], False, static_drive=True,
+                                    carry_drive=self.carry_reposition_drive,  # fm431 (B1): drive while carrying
+                                    arrival_xy_tol=0.15, arrival_yaw_tol=0.20)  # fm408: cover the static-drive yaw residual (run-315 diag)
                 self.phase = 'navigate'
                 self._collect_reposition_pending = True
                 return Result('running', reason=f'pick done; staging base to {self._reposition_seq[0]} '
@@ -1015,11 +1037,11 @@ class RuntimeAdapter:
                 return Result('running', reason='awaiting measured uncoupled observation')
             backaway = self.poses.get('cart_parking_backaway')
             if backaway is not None:
-                self.nav.start(backaway, False)   # pull clear of the parked cart, uncoupled
+                self._start_nav_leg(backaway, False)   # pull clear of the parked cart, uncoupled
                 self.phase = 'navigate'
                 self._return_leg = 'cart_parking_backaway'
                 return Result('running', reason='uncoupled; backing away from the parked cart')
-            self.nav.start(self.poses['home'], False)   # no back-away waypoint: drive home empty
+            self._start_nav_leg(self.poses['home'], False)   # no back-away waypoint: drive home empty
             self.phase = 'navigate'
             self._return_leg = 'home'
             return Result('running', reason='uncoupled; driving home empty')

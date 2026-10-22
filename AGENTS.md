@@ -185,6 +185,16 @@ repo's `scenes/`, `export/` or `renders/`.
   follower via `nav_factory` from the recorded end-of-verify pose, fixture `tests/fixtures/return_cartyaw_nav.json`;
   a dropped rebase key at the default tol re-stalls and fails) and `check_mission_tail --return-tracking`
   (same drive on the real grid instead of the stub) — both via `tail_nav.py` `simulate_coupled_return`.
+  **Sharp edge (fresh nav leg must reset the stuck timer):** the fm425 no-base-progress WALL fail-fast
+  (`RuntimeAdapter._nav_stuck_check`) only advances inside the navigate phase, so wall-time spent
+  legitimately stationary in a preceding NON-navigate phase (park + transfer + verify before the
+  uncouple-return tow) would be charged against the return leg's very first tick and fail it before the
+  controller plans — each StageRetry re-begin then re-failing instantly (warm7: `planning_stop`
+  elapsed=0.02, "no base progress for 207s wall"). Every adapter nav dispatch goes through
+  `RuntimeAdapter._start_nav_leg`, which clears the baseline so each leg's budget starts at its own
+  start (outbound never hit it — its leg follows the couple drive). Pinned by
+  `test_restock_runtime.py` (`*_return_rebegin`, `*_does_not_inherit_stuck_budget_from_transfer`);
+  the lane itself plans + persists a route from the warm7 end pose (`scripts/check_tow_lanes.py`).
 - **Transfer workaround modes** (env `RESTOCK_TRANSFER_MODE`, read by Isaac AND the host, never a config
   key; default off): `live_pose` = real-arm pick from the live carton pose + near-face yaw, no transfer
   reposition (`restock_manipulation/transfer_mode.py`); `scripted` = the labelled safety net
