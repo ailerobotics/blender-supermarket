@@ -65,8 +65,12 @@ RECORDED_BAY_PARK_RUNS = {           # run -> robot base (x, y, yaw rad) at park
     'run-356': (-2.079, 15.254, math.radians(-0.5)),
 }
 RECORDED_BAY_PARK_CART_IN_BASE_XY = (-1.27, 0.0)   # deck centre in ur_base_link (TRANSFER_CAPTURE cart=)
-# Rollwagen deck top in world z: chassis origin (deck centre) at z=0.20 + half the 0.05 m deck
-# (mobile_assets.author_cart). The scenario's cart_support_z_world (0.9325) is the UPPER shelf.
+# Carton spot (decided by sim-video-transfer-fallback-v1's live-pose reach check): the rollwagen UPPER
+# shelf at the scenario's cart_load_center_body_xy (+0.18, 0) and cart_support_z_world (0.9325 shelf top
+# -> carton centre z 1.0125), yaw -pi/2 cart-relative -- exactly where the warm start_at=couple shortcut
+# leaves it (worst reach 1.040 m from the bay park, through the open +x mouth, clear of the drawbar). The
+# deck (top z 0.225 = chassis origin 0.20 + half the 0.05 m deck, mobile_assets.author_cart) is
+# collision-tight over the hitch; it stays available as an explicit carton_support_z_world override.
 DECK_TOP_Z_WORLD = 0.225
 START_STAGING_PRESETS = ('recorded_bay_park',)
 
@@ -100,8 +104,9 @@ def resolve_start_staging(config):
 
     Object keys (all optional; preset defaults): ``preset`` ('recorded_bay_park'), ``robot_base_pose``
     [x, y, yaw], ``articulation`` (rad), ``carton_load_center_body_xy`` [x, y] (default: the scenario's
-    ``initial_staging.cart_load_center_body_xy``, the fm479 slot), ``carton_support_z_world`` (default
-    the deck top). Fails closed unless ``start_at`` is 'transfer'."""
+    ``initial_staging.cart_load_center_body_xy``, +0.18), ``carton_support_z_world`` (default: the
+    scenario's ``initial_staging.cart_support_z_world``, the upper shelf the warm couple shortcut uses;
+    ``DECK_TOP_Z_WORLD`` puts it on the deck). Fails closed unless ``start_at`` is 'transfer'."""
     spec = config.get('start_staging') if isinstance(config, dict) else None
     if spec is None:
         return None
@@ -120,7 +125,7 @@ def resolve_start_staging(config):
     robot = spec.get('robot_base_pose', RECORDED_BAY_PARK_ROBOT_POSE)
     articulation = spec.get('articulation', 0.0)
     load_xy = spec.get('carton_load_center_body_xy')
-    support_z = spec.get('carton_support_z_world', DECK_TOP_Z_WORLD)
+    support_z = spec.get('carton_support_z_world')
     if not (isinstance(robot, (list, tuple)) and len(robot) == 3 and _finite(*robot)):
         raise ValueError('start_staging.robot_base_pose must be finite x/y/yaw')
     if not _finite(articulation) or abs(articulation) > math.radians(5):
@@ -128,12 +133,12 @@ def resolve_start_staging(config):
     if load_xy is not None and not (isinstance(load_xy, (list, tuple)) and len(load_xy) == 2
                                     and _finite(*load_xy)):
         raise ValueError('start_staging.carton_load_center_body_xy must be finite x/y')
-    if not _finite(support_z):
+    if support_z is not None and not _finite(support_z):
         raise ValueError('start_staging.carton_support_z_world must be finite')
     return {'preset': preset, 'robot_base_pose': tuple(float(v) for v in robot),
             'articulation': float(articulation),
             'carton_load_center_body_xy': None if load_xy is None else tuple(float(v) for v in load_xy),
-            'carton_support_z_world': float(support_z), 'coupled': True}
+            'carton_support_z_world': None if support_z is None else float(support_z), 'coupled': True}
 
 
 def staged_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
@@ -155,17 +160,20 @@ def staged_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
     st['cart_body_pose'] = list(cart)
     if staging['carton_load_center_body_xy'] is not None:
         st['cart_load_center_body_xy'] = list(staging['carton_load_center_body_xy'])
-    st['cart_support_z_world'] = staging['carton_support_z_world']
+    if staging['carton_support_z_world'] is not None:
+        st['cart_support_z_world'] = staging['carton_support_z_world']
     yaws = dict(st.get('unit_yaws_world', {}))
     if _finite(yaws.get('cart')):                      # the carton turns with the cart
         yaws['cart'] = _wrap(float(yaws['cart']) + dyaw)
     st['unit_yaws_world'] = yaws
+    if not _finite(st.get('cart_support_z_world')):
+        raise ValueError('scenario.initial_staging.cart_support_z_world (carton support z) is required')
     record = {'mode': f"start_phase_shortcut:{staging['preset']}", 'preset': staging['preset'],
               'robot_base_pose': [round(v, 4) for v in robot],
               'cart_body_pose': [round(v, 4) for v in cart],
               'articulation': staging['articulation'], 'coupled': True,
               'carton_load_center_body_xy': [round(float(v), 4) for v in st['cart_load_center_body_xy']],
-              'carton_support_z_world': staging['carton_support_z_world'],
+              'carton_support_z_world': float(st['cart_support_z_world']),
               'source_runs': sorted(RECORDED_BAY_PARK_RUNS),
               'note': ('robot+cart spawned at the recorded park->transfer handover of a real coupled tow '
                        '(not driven); carton synthesized resting on the cart at carton_support_z_world')}

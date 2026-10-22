@@ -9,7 +9,8 @@ and checks the start staging ``shortcut.staged_scenario`` builds for ``start_at=
 * robot base pose vs every run's handover pose (xy / yaw tolerance), coupled + parked there;
 * rollwagen: deck centre in ur_base_link vs the run's own TRANSFER_CAPTURE ``cart=`` measurement, the
   hitch residual (must be ~0) and the cart yaw vs the run's last tow-lane ``cart_err``;
-* carton centre on the DECK at the configured slot;
+* carton centre at the decided spot: the scenario's upper shelf (cart_support_z_world) at its
+  cart_load_center_body_xy -- the same spot the warm start_at=couple shortcut uses;
 * the mission (state machine, and the behaviour tree when py_trees imports) begins at transfer with
   collect/couple/outbound/park recorded as ``*_shortcut``.
 
@@ -30,8 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from twin.mobile import Pose2                                        # noqa: E402
 from twin.restock.inventory import Inventory, Job                    # noqa: E402
 from twin.restock.mission import Mission, Result                     # noqa: E402
-from twin.restock.shortcut import (DECK_TOP_Z_WORLD, plan_start_state,  # noqa: E402
-                                   staged_scenario)
+from twin.restock.shortcut import plan_start_state, staged_scenario  # noqa: E402
 
 DEFAULT_MISSION_DIR = Path.home() / 'datasets/twin-robot-in-store-boot-v1/mission'
 CAPTURE = re.compile(r'^TRANSFER_CAPTURE calls=\d+ .*?cart=\(([-\d.]+),([-\d.]+),([-\d.]+)\)')
@@ -154,13 +154,14 @@ def main():
             check(f'{run} cart yaw vs tow lane', abs(cart.yaw) <= h['last_cart_err'] + a.yaw_tol,
                   f"staged cart yaw {cart.yaw:+.4f} rad vs recorded |cart_err| {h['last_cart_err']:.3f} rad")
     check('hitch residual', hitch_residual <= 1e-6, f'{hitch_residual:.2e} m (Coupler gate 0.025 m)')
-    deck_z = DECK_TOP_Z_WORLD + scenario['handling_unit']['dimensions_m'][2] / 2
-    load = st['cart_load_center_body_xy']
+    shelf_z = scenario['initial_staging']['cart_support_z_world']
+    load = scenario['initial_staging']['cart_load_center_body_xy']
     want = (cart.x + load[0] * math.cos(cart.yaw) - load[1] * math.sin(cart.yaw),
-            cart.y + load[0] * math.sin(cart.yaw) + load[1] * math.cos(cart.yaw), deck_z)
-    check('carton on deck at slot', math.dist(plan.carton_position, want) <= 1e-9 and plan.couple_cart,
-          f'carton centre {tuple(round(v, 4) for v in plan.carton_position)} = deck top {DECK_TOP_Z_WORLD} + '
-          f'half height, body slot {load}; couple_cart={plan.couple_cart}')
+            cart.y + load[0] * math.sin(cart.yaw) + load[1] * math.cos(cart.yaw),
+            shelf_z + scenario['handling_unit']['dimensions_m'][2] / 2)
+    check('carton on upper shelf at the decided spot', math.dist(plan.carton_position, want) <= 1e-9
+          and plan.couple_cart, f'carton centre {tuple(round(v, 4) for v in plan.carton_position)} = shelf '
+          f'top {shelf_z} + half height, body {load} (warm couple shortcut spot); couple_cart={plan.couple_cart}')
     entries = [entry_check(scenario['job'], tree=False)]
     try:
         import py_trees  # noqa: F401

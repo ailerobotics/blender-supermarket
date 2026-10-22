@@ -2,8 +2,9 @@
 
 Proves offline: the staged robot pose equals the recorded park->transfer handover of runs 351, 353,
 354 and 356 within tolerance; the staged cart sits on the hitch exactly where those runs measured the
-deck (TRANSFER_CAPTURE) and passes the Coupler attach gate; the carton rests on the DECK at the fm479
-slot; the mission/tree enter transfer directly with the skipped prefix recorded as ``*_shortcut``; and
+deck (TRANSFER_CAPTURE) and passes the Coupler attach gate; the carton rests on the UPPER shelf at
+the decided spot (body +0.18, centre z 1.0125, yaw -pi/2 cart-relative == the warm couple shortcut); the
+mission/tree enter transfer directly with the skipped prefix recorded as ``*_shortcut``; and
 the bench is labelled in mission.json and the walkthrough caption. The absent-config path is the
 identity. ``scripts/check_transfer_bench_staging.py`` repeats the pose proof against the raw run files.
 """
@@ -98,24 +99,37 @@ class StagedPoseTests(unittest.TestCase):
         Coupler(spec).attach(obs, lambda: made.append(True))
         self.assertEqual(made, [True])
 
-    def test_carton_rests_on_the_deck_at_the_fm479_slot(self):
+    def test_carton_rests_on_the_upper_shelf_at_the_decided_spot(self):
         plan = plan_start_state(self.variant, 'transfer')
         self.assertTrue(plan.couple_cart)
         self.assertEqual(list(plan.skipped), SKIPPED)
         cx, cy, cyaw = self.st['cart_body_pose']
         self.assertAlmostEqual(plan.carton_position[0], cx + 0.18 * math.cos(cyaw), places=9)
         self.assertAlmostEqual(plan.carton_position[1], cy + 0.18 * math.sin(cyaw), places=9)
-        self.assertAlmostEqual(plan.carton_position[2], DECK_TOP_Z_WORLD + 0.16 / 2, places=9)
-        self.assertAlmostEqual(DECK_TOP_Z_WORLD, 0.20 + 0.05 / 2)       # deck centre z + half deck
+        self.assertAlmostEqual(plan.carton_position[2], 1.0125, places=9)   # shelf top 0.9325 + 0.08
+        # Same spot the warm start_at=couple shortcut synthesizes on the (dock-staged) cart, in cart frame.
+        couple = plan_start_state(mission_scenario(), 'couple')
+        dock_x, dock_y, _ = mission_scenario()['initial_staging']['cart_body_pose']
+        self.assertAlmostEqual(couple.carton_position[0] - dock_x, plan.carton_position[0] - cx, places=3)
+        self.assertAlmostEqual(couple.carton_position[2], plan.carton_position[2], places=9)
         # carton keeps its on-cart yaw (-pi/2 on a yaw-0 cart), turned with the staged cart yaw.
         w, _, _, z = plan.carton_orientation_wxyz
         self.assertLessEqual(yaw_err(2 * math.atan2(z, w), -math.pi / 2 + cyaw), 1e-9)
+
+    def test_deck_override(self):
+        variant, record = staged_scenario(mission_scenario(), bench_config(start_staging={
+            'carton_support_z_world': DECK_TOP_Z_WORLD}))
+        self.assertAlmostEqual(plan_start_state(variant, 'transfer').carton_position[2],
+                               DECK_TOP_Z_WORLD + 0.16 / 2, places=9)
+        self.assertAlmostEqual(DECK_TOP_Z_WORLD, 0.20 + 0.05 / 2)       # deck centre z + half deck
+        self.assertEqual(record['carton_support_z_world'], DECK_TOP_Z_WORLD)
 
     def test_record_names_the_workaround(self):
         self.assertEqual(self.record['mode'], 'start_phase_shortcut:recorded_bay_park')
         self.assertTrue(self.record['coupled'])
         self.assertEqual(self.record['source_runs'], sorted(RECORDED_BAY_PARK_RUNS))
         self.assertEqual(self.record['carton_load_center_body_xy'], [0.18, 0.0])
+        self.assertEqual(self.record['carton_support_z_world'], 0.9325)
 
     def test_scenario_is_not_mutated(self):
         sc = mission_scenario()

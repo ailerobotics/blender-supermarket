@@ -273,7 +273,7 @@ repo's `scenes/`, `export/` or `renders/`.
   (superseding the original `data/sim-restock-bt-v1/report.md`).
 - **Dev bench start/stop** (opt-in, default-off): `start_at` (`couple`|`transfer`) begins the mission
   at a stage with the skipped prefix synthesized (`restock/shortcut.py`, recorded as `*_shortcut`);
-  `start_staging: recorded_bay_park` spawns the coupled train + deck carton at the recorded bay
+  `start_staging: recorded_bay_park` spawns the coupled train + upper-shelf carton at the recorded bay
   park->transfer handover; `stop_after` ends the run after a stage (`mission.bounded_stages`). Same keys
   as `run_mobile_restock.py --start-at/--start-staging/--stop-after`. Such runs are labelled in
   mission.json and by a burned-in walkthrough caption. RUNBOOK §11-bench; proof
