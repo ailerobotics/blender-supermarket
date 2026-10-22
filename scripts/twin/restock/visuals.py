@@ -137,19 +137,26 @@ def _material(stage, scope_path, name, hex_srgb, roughness=0.5, metallic=0.0):
 
 
 def _bind(stage, prim_path, material):
-    """Bind ``material`` to the prim at ``prim_path`` if it exists (visual only).
+    """Bind ``material`` at the LINK prim ``prim_path`` (visual only); the render-purpose
+    binding inherits onto the link's visual meshes.
 
-    Binds to the link's ``visuals`` child when present so only renderable geometry
-    is affected and the collision subtree is left untouched; otherwise binds to the
-    link prim (inherited by descendants). Returns the bound path or None."""
+    Bind at the link, never at its ``visuals`` child. In the imported robot each
+    ``<link>/visuals`` carries a REFERENCE into the URDF-importer physics layer, and
+    several are placeholder/frame links (``ur_base``, ``ur_flange``, ``*_frame`` …) whose
+    reference is UNRESOLVED (dangling). Authoring a material-binding override directly
+    onto those prims floods Isaac with ``Unresolved reference`` errors and corrupts the
+    articulation composition — the warm9 failure where the towed base stayed parked
+    (533/540 ticks) the whole outbound and made no progress. The link prim itself carries
+    no such reference, so authoring there never touches the physics layer; the binding
+    still inherits onto the visual meshes at render, while PhysX reads wheel friction from
+    the separate physics-purpose binding on the collider (configure_wheel_traction).
+    Returns the bound path or None."""
     from pxr import UsdShade
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
         return None
-    visuals = prim.GetChild('visuals')
-    target = visuals if (visuals and visuals.IsValid()) else prim
-    UsdShade.MaterialBindingAPI.Apply(target).Bind(material)
-    return str(target.GetPath())
+    UsdShade.MaterialBindingAPI.Apply(prim).Bind(material)
+    return str(prim.GetPath())
 
 
 def _retone_env_material(stage, mat_path, rgb_linear, roughness):
