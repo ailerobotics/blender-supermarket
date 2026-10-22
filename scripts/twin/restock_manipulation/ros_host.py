@@ -159,6 +159,12 @@ def main():
         cage_mouth_standoff=float(config.get('cage_mouth_standoff', 0.55)),
         cage_insert_gap=float(config.get('cage_insert_gap', 0.03)),
         cage_preplace_shape=config.get('cage_preplace_shape'),
+        # sim-robust-cart-place-goal-v1: the NON-cage COLLECT place-on-cart counterparts. A CPU-validated
+        # UPRIGHT clear-region preplace joint shape (driven like cage_preplace_shape so the deck preplace
+        # avoids the un-holdable deep fold / self-colliding branch), and the wrist-guard extended to the
+        # collect place/retreat pose-IK (clear-branch re-seed). Both absent/False => byte-identical.
+        collect_place_preplace_shape=config.get('collect_place_preplace_shape'),
+        collect_place_wrist_guard=bool(config.get('collect_place_wrist_guard', False)),
         # fm390: drive the base in front of the rollwagen mouth between the carry fold and the place
         # (lift->tuck->TRANSIT->[base nav]->preplace), instead of the arm-only cage insert. Absent =>
         # byte-identical. Mutually exclusive in practice with cart_cage_place (base nav replaces it).
@@ -239,6 +245,10 @@ def main():
         'carry_lift_shape': controller.carry_lift_shape,
         'carry_wrist2_min': controller.carry_wrist2_min,
         'grasp_track_m': controller.grasp_track_m,   # fm410: lift-probe carton-tracking confirm threshold (m)
+        # sim-robust-cart-place-goal-v1: log the EFFECTIVE non-cage collect place goal guards so a console
+        # grep proves they activated in the host that consumes them (host-vs-runtime-config-split trap).
+        'collect_place_preplace_shape': controller.collect_place_preplace_shape,
+        'collect_place_wrist_guard': controller.collect_place_wrist_guard,
         'reposition_before_place': controller.reposition_before_place,
         'transfer_mode': controller.transfer_mode,   # env RESTOCK_TRANSFER_MODE (None = off)
         'transfer_carry': sorted(controller.transfer_carry),   # env RESTOCK_TRANSFER_CARRY ([] = off)

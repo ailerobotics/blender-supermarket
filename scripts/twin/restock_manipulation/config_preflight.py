@@ -42,6 +42,9 @@ KEY_CONSUMER = {
     'sim_cart_place_policy': HOST,
     'reposition_before_place': HOST,   # fm390: ros_host builds the controller with it (base drives to place_approach)
     'cage_preplace_shape': HOST,
+    # sim-robust-cart-place-goal-v1: non-cage collect place-on-cart goal guards (ros_host -> TransferController)
+    'collect_place_preplace_shape': HOST,   # fixed UPRIGHT clear-region preplace joint shape (begin_joint_goal)
+    'collect_place_wrist_guard': HOST,       # clear-branch wrist-guard extended to the collect place/retreat pose-IK
     'cart_pan_joint0': HOST,
     'cart_tuck_shape': HOST,
     'base_collision_object': HOST,

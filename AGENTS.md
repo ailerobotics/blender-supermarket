@@ -103,6 +103,15 @@ repo's `scenes/`, `export/` or `renders/`.
   `restock_host/incorporation_ack.py` publishes the station liveness ack BEFORE its ESDF maintenance
   so a plan storm can't starve the heartbeat (readiness still gated on a real integration). Report +
   the collect+couple validation env: `data/sim-robust-collect-place-v1/report.md`.
+  **Place-on-cart goal/branch fix** (opt-in, default-off ⇒ byte-identical): the non-cage reposition deck
+  place poses have TWO collision-free IK families — UPRIGHT (`shoulder_lift≈-1.9`, holdable) and a DEEP
+  fold (`≈-3.57`, the soft arm can't hold under load → collect1 sagged 0.39 rad short → heartbeat lost);
+  the host's folded-carry seed also hits the self-colliding wrist branch (collectsrc's storm). Fix the
+  GOAL, not the planner: host keys `collect_place_preplace_shape` (a fixed UPRIGHT clear-region preplace
+  driven via `begin_joint_goal` like `cage_preplace_shape`) + `collect_place_wrist_guard` (the transfer
+  wrist-guard clear-branch re-seed extended to the collect place/retreat pose-IK). CPU proof
+  `tests/test_restock_cart_place_goal.py`; targets + reach margins `data/sim-robust-cart-place-goal-v1/`
+  (`station-contract.md`, `report.md`); GPU fragment `docs/examples/cart-place-goal-mission-fragment.json`.
   **Honest-collect robustness** (opt-in, default-off ⇒ byte-identical): the grasp-critical collect
   source park uses a tolerance-aware arrival (`navigation` `strict_xy_arrival`, set automatically on the
   collect leg — never declares `arrived` outside the true xy tol even under the fm482 hysteresis latch),
