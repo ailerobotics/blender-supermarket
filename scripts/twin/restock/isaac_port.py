@@ -186,10 +186,15 @@ class IsaacPort:
             realtime=False            # the legacy absolute real-time pacer would cap a fast run at 1x
         self._host_pacer=(HostStagePacer(self._speed.host_stage_max_ratio)
                           if self._speed.pacing=='host_coupled' else None)
-        # Cameras no navigation-only stage reads (station decode + arm/mast depth): paused for
-        # couple/outbound/park/return, re-enabled when a sensing stage begins.
-        self._idle_cameras=(IdleCameraPauser(idle_cameras or {})
-                            if self._speed.pause_idle_cameras and idle_cameras else None)
+        # Cameras no navigation-only stage reads (the station decode cameras): paused for
+        # couple/outbound/park/return, re-enabled when a sensing stage begins (minus the decode cameras
+        # that stage does not read, pause_unread_decode); a consumer read resumes a paused one on demand.
+        # ``idle_cameras`` is a {name: camera} map or a ready IdleCameraPauser (isaac_bundle builds one).
+        self._idle_cameras=None
+        if self._speed.pause_idle_cameras and idle_cameras:
+            pauser=(idle_cameras if hasattr(idle_cameras,'begin_action')
+                    else IdleCameraPauser(idle_cameras))
+            self._idle_cameras=pauser.install()
         self._profiler=(TickProfiler(self._speed.tick_profile_s)
                         if self._speed.tick_profile_s else None)
         # Demo-cut evidence (RESTOCK_TRACE_POSES=1 via isaac_bundle): the handling-unit prim whose world
@@ -731,11 +736,14 @@ class IsaacPort:
         # off (budget stays 0) => byte-identical.
         if action == 'collect':
             self._collect_observe_forced=0
+        profiler=getattr(self,'_profiler',None)
+        if profiler is not None:
+            profiler.flush()              # sim_speed tick_profile_s: one TICK_PROFILE line per stage window
         self.current_action=action
         idle=getattr(self,'_idle_cameras',None)
         if idle is not None:
-            # sim_speed pause_idle_cameras: couple/outbound/park/return read no camera, so stop the
-            # decode (+ arm/mast depth) render products there; a sensing stage re-enables them all.
+            # sim_speed pause_idle_cameras: couple/outbound/park/return read no station camera, so stop
+            # the decode render products there; a sensing stage re-enables the ones it reads.
             idle.begin_action(action)
         if self.on_action is not None:
             self.on_action(action,job)
