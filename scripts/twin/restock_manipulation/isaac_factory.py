@@ -658,8 +658,36 @@ class CollectTargetBridge:
         # controller gate (transfer_ground_truth) and the evidence never misrepresent it as a measurement.
         prov = getattr(slot, 'provenance', None)
         tgt_source = 'ground_truth' if isinstance(prov, dict) and prov.get('source') == 'ground_truth' else 'sensor'
+        # fm477: the ground-truth bay target's pose_station is a WORLD/map pose (the authored bay surface),
+        # but the Target/controller treat the shelf provider's pose_station as ur_base_link (the real
+        # camera provider reprojects to base; the ground-truth provider has no stage). Reproject it to
+        # ur_base_link with the live arm-base transform, or the controller reads a ~16 m world coordinate
+        # as a base-frame reach and fails 'unreachable or undersized target' -- exactly the pose_station=
+        # ur_base_link assumption this method's own NOTE flagged to validate at the first transfer (run-351).
+        tgt_pose = tuple(slot.pose_station)
+        if tgt_source == 'ground_truth' and self.stage is not None:
+            import numpy as np
+            from pxr import UsdGeom
+            Tbu = np.linalg.inv(np.asarray(UsdGeom.XformCache().GetLocalToWorldTransform(
+                self.stage.GetPrimAtPath(self.base_path))).T)      # base_from_world (4x4)
+            bp = Tbu @ np.array([tgt_pose[0], tgt_pose[1], tgt_pose[2], 1.0])
+            R = Tbu[:3, :3]                                         # the ground-truth world quat is identity
+            tr = R[0, 0] + R[1, 1] + R[2, 2]
+            if tr > 0:
+                s = math.sqrt(tr + 1.0) * 2; qw = .25 * s; qx = (R[2,1]-R[1,2])/s; qy = (R[0,2]-R[2,0])/s; qz = (R[1,0]-R[0,1])/s
+            elif R[0,0] >= R[1,1] and R[0,0] >= R[2,2]:
+                s = math.sqrt(1.0+R[0,0]-R[1,1]-R[2,2]) * 2; qw = (R[2,1]-R[1,2])/s; qx = .25*s; qy = (R[0,1]+R[1,0])/s; qz = (R[0,2]+R[2,0])/s
+            elif R[1,1] >= R[2,2]:
+                s = math.sqrt(1.0+R[1,1]-R[0,0]-R[2,2]) * 2; qw = (R[0,2]-R[2,0])/s; qx = (R[0,1]+R[1,0])/s; qy = .25*s; qz = (R[1,2]+R[2,1])/s
+            else:
+                s = math.sqrt(1.0+R[2,2]-R[0,0]-R[1,1]) * 2; qw = (R[1,0]-R[0,1])/s; qx = (R[0,2]+R[2,0])/s; qy = (R[1,2]+R[2,1])/s; qz = .25*s
+            tgt_pose = (float(bp[0]), float(bp[1]), float(bp[2]), float(qx), float(qy), float(qz), float(qw))
+            if self._calls % 10 == 1:
+                print('TRANSFER_GT_REPROJECT world=%s -> base=(%.3f,%.3f,%.3f) dist=%.3f' % (
+                    tuple(round(c, 3) for c in slot.pose_station[:3]), bp[0], bp[1], bp[2],
+                    float(np.linalg.norm(bp[:3]))), flush=True)
         tgt = Target(observation_id=f'shelf:{slot.stamp}', source=tgt_source, simulation_time=float(now),
-                     location=slot.location, pose=tuple(slot.pose_station), clear=bool(slot.clear),
+                     location=slot.location, pose=tgt_pose, clear=bool(slot.clear),
                      free_dimensions=tuple(slot.free_dimensions), frame='ur_base_link')
         try:
             joints = tuple(float(j) for j in self.joints())
