@@ -34,12 +34,12 @@ band). Ranges come from `data/sim-video-stage-audit-v1/stage_sources.json`.
 
 ## v1 result (2026-10-22)
 
-`mission/demo-006/walkthrough.mp4` — 52.7 s, 791 frames, 1920×1080, 15 fps; clock continuous
-0.7→52.9 s, stage numbers 1→7, 0 dim/black frames. Spine:
+`mission/demo-006/walkthrough.mp4` — 45.9 s, 689 frames, 1920×1080, 15 fps; clock continuous
+1.4→45.9 s, stage numbers 1→7, 0 dim/black frames. Spine:
 
 | stage | source | note |
 |-------|--------|------|
-| collect | run-326 f0–400 | **INTERIM** partial real pick; deposit-onto-rollwagen awaits the GPU ground-truth re-run → `mission/collect-src-001` |
+| collect | collect-src-001 f0–298 | real shelf pick + lift + carry to the rollwagen (cold GT run); **no place yet** — full pick→place re-run pending (part B of the collect lane) |
 | couple | warm8 f0–126 | real couple |
 | outbound | warm8 f126–164 | **INTERIM** clean backroom-bay drive (no wall clip, but not the door) → `mission/door-src-001` |
 | park | warm8 f164 | 1-frame transition, held 1.2 s |
@@ -47,9 +47,13 @@ band). Ranges come from `data/sim-video-stage-audit-v1/stage_sources.json`.
 | verify | warm8 f223 | ground-truth, held 1.2 s |
 | return | warm8 f223–358 | real return home |
 
-Two slots (`collect`, `outbound`) are interim; swapping them is a one-line edit of the spec once the
-helper runs land. No frame-recorded run ever completed collect, and no run drives the door (see the
+One slot (`outbound`) is still interim; swapping it is a one-line edit of the spec once the door
+helper run lands. Collect is a real pick/lift/carry but stops before the place (the cold run died on
+a watchdog e-stop at arrival); the on-screen label says so. No run drives the door yet (see the
 audit); those are honest, labelled gaps, not hidden.
+
+`collect-src-001` is a carved single-stage clip (no `mission.json`); `stitch.load_run_lenient`
+assembles it into an equivalent run (empty event log, panel from its own `bt_events`).
 
 ## Tests
 
