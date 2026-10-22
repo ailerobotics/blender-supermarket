@@ -329,6 +329,20 @@ def test_guard_fails_honestly_when_no_seed_reaches_the_clear_region(monkeypatch,
     assert 'flips exhausted' in capsys.readouterr().out
 
 
+def test_guarded_retreat_seeds_the_measured_clear_config_first(monkeypatch):
+    # retreat is not near_start: unguarded it seeds stow first; guarded, the measured (clear) config leads.
+    port, seeds, goals, stopped = _guard_port(monkeypatch, _kdl_like)
+    port.stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    port.begin(PREPLACE_POSE, WARM2_CLEAR, joint_space=True, wrist_guard=(0.65, 0.0))
+    assert _drive(port) == 'succeeded'
+    assert seeds[0] == WARM2_CLEAR and _goal_q(goals[0]) == WARM2_CLEAR and len(seeds) == 1
+    port2, seeds2, _, _ = _guard_port(monkeypatch, _kdl_like)
+    port2.stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    port2.begin(PREPLACE_POSE, WARM2_CLEAR, joint_space=True)               # unguarded: legacy seed order
+    _drive(port2)
+    assert seeds2[0] == port2.stow
+
+
 def test_joint_goal_after_a_guarded_move_is_unguarded(monkeypatch):
     port, seeds, goals, stopped = _guard_port(monkeypatch, _kdl_like)
     port.begin(PREPLACE_POSE, CARRY_SHAPE, joint_space=True, near_start=True, wrist_guard=(0.65, 0.0))

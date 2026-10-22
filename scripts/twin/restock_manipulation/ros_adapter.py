@@ -389,8 +389,11 @@ class RosMotionPort:
         self._goal_pose = tuple(float(v) for v in pose)
         # fm347 (3): near_start -> try the MEASURED (pan) config as the FIRST IK seed so KDL returns the
         # branch nearest the pan (not a stow-nominal branch); the normal seeds remain as fallbacks.
+        # transfer_carry wrist_guard: the measured config of a guarded move is itself in the clear wrist
+        # branch (the previous guarded move ended there), so seed it FIRST too (the retreat is not
+        # near_start) -- KDL then answers the nearby clear solution before any stow-branch twin.
         self._seeds = ([tuple(joints)] + self._seed_configs(joints)
-                       if self._near_start else self._seed_configs(joints))
+                       if self._near_start or self._wrist_guard is not None else self._seed_configs(joints))
         self._seed_idx = 0
         self._send_ik(self._seeds[0])
 
