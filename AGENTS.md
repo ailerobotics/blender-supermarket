@@ -217,6 +217,16 @@ repo's `scenes/`, `export/` or `renders/`.
   the silent `still` degrade that starves the arm-command heartbeat). Offline proof (incl. the sphere model
   + warm5 host-validation replay): `data/sim-video-executor-arm-v1/report.md`,
   `tests/test_restock_scripted_transfer.py`.
+- **Rollwagen cage clearance** (sim-only workaround, RUNTIME config `cage_collision: "filtered"`, default
+  off; `restock/cage_collision.py`): a FilteredPairsAPI on the carton against the 50 cage colliders (deck,
+  upper shelf and drawbar still collide; rays and cuMotion untouched), labelled in mission.json and the
+  caption. Why it is not a path: the 0.6 m carton side threads the 0.615 m front-post mouth with 7.5 mm
+  per side, and leaving the cage takes 0.4125 m out through the mouth (rising 0.72 m over the top is out
+  of reach), but a fixed-orientation straight line out stays IK-feasible for only ~0.41 m (collect, from
+  `place_approach`) / ~0.36 m (transfer, coupled park) on every UR10 branch. **Sharp edge:
+  `begin(straight_line=True)` is ONE 2-point joint-space smoothstep, not a Cartesian line.** Over a 0.4 m
+  insert it bows 45–64 mm and strikes a post; it takes 5–9 segments to stay clear.
+  CPU proof: `scripts/check_cage_clearance.py`.
 - **Moving obstacles** (opt-in, default-off): `navigation/dynamic.py` tracks
   per-frame `Detection(position,radius,source)` into velocity-predicted occupancy
   points unioned (add-only) into `Observation.obstacles`, so the existing gates
