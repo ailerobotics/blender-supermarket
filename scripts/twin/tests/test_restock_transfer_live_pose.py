@@ -29,6 +29,7 @@ import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SCRIPTS))
+from twin.restock_manipulation import transfer_carry as tc  # noqa: E402
 from twin.restock_manipulation import transfer_mode as tm  # noqa: E402
 from twin.restock_manipulation.controller import TransferController  # noqa: E402
 from twin.restock_manipulation.types import Observation, ProductProfile, Sensors, Target  # noqa: E402
@@ -288,7 +289,9 @@ def run_stage(c, source, stow, ticks=200):
 
 
 def test_live_pose_transfer_completes_from_the_run356_park_pose(policy, monkeypatch, capsys):
+    # The honest live transfer requires BOTH switches: live_pose (pick reach) + wrist_guard (place branch).
     monkeypatch.setenv(tm.ENV, 'live_pose')
+    monkeypatch.setenv(tc.ENV, 'wrist_guard')
     c, m, stow = host_controller(policy)
     phases, r = run_stage(c, live_source(), stow)
     assert r.status == 'succeeded', (c.phase, r.reason)
@@ -326,6 +329,53 @@ def test_collect_is_untouched_by_the_switch(policy, monkeypatch):
     c.start('collect', JOB)
     assert c.transfer_mode == 'live_pose' and not c._live_pose_transfer()
     assert c._repositions_before_place() is True
+
+
+# -- live_pose requires the wrist_guard: fail fast, never silently run the jam-prone place -------------
+
+def test_live_pose_transfer_without_wrist_guard_fails_fast_with_a_named_reason(policy, monkeypatch, capsys):
+    # live_pose fixes the PICK reach but its preplace/place/retreat are seeded-KDL joint-space moves that
+    # jam the ur_wrist_2-vs-forearm branch without the guard (audit transfer-preplace-wrist-branch-jam).
+    # The controller must refuse FAST with a named reason, not silently drive into the self-collision stop.
+    monkeypatch.setenv(tm.ENV, 'live_pose')
+    monkeypatch.delenv(tc.ENV, raising=False)
+    c, m, stow = host_controller(policy)
+    assert c.transfer_mode == 'live_pose' and not c.transfer_carry
+    phases, r = run_stage(c, live_source(), stow)
+    assert r.status == 'failed'
+    assert 'RESTOCK_TRANSFER_CARRY=wrist_guard' in r.reason and 'wrist_2' in r.reason
+    # fail fast: it never issued any arm move (no jam-prone preplace reached the planner)
+    assert m.moves == [] and m.joint_goals == []
+    # it failed at the first transfer step, in observe, before any reach work
+    assert set(phases) <= {'observe'}
+
+
+def test_live_pose_with_wrist_guard_does_not_trip_the_requirement(policy, monkeypatch):
+    # The guard present => the requirement is satisfied and the transfer proceeds past observe.
+    monkeypatch.setenv(tm.ENV, 'live_pose')
+    monkeypatch.setenv(tc.ENV, 'wrist_guard')
+    c, _, stow = host_controller(policy)
+    assert tc.WRIST_GUARD in c.transfer_carry
+    phases, r = run_stage(c, live_source(), stow)
+    assert r.status == 'succeeded', (c.phase, r.reason)
+    assert 'approach' in phases   # it advanced past observe into the reach
+
+
+def test_wrist_guard_requirement_is_live_pose_only_backward_compatible(policy, monkeypatch, capsys):
+    # The requirement is scoped to live_pose: a DEFAULT-OFF transfer (no mode) is byte-identical and must
+    # NOT demand the guard -- it still reaches its legacy reach-envelope failure, not the new named reason.
+    monkeypatch.delenv(tm.ENV, raising=False)
+    monkeypatch.delenv(tc.ENV, raising=False)
+    c, _, stow = host_controller(policy)
+    assert c.transfer_mode is None and not c.transfer_carry
+    _, r = run_stage(c, legacy_source(), stow)
+    assert r.status == 'failed' and r.reason == 'approach outside reach envelope'
+    assert 'RESTOCK_TRANSFER_CARRY=wrist_guard' not in r.reason
+    # collect with live_pose set is also never subject to the transfer-only requirement
+    monkeypatch.setenv(tm.ENV, 'live_pose')
+    cc = TransferController(Motion(), {'juice_orange': PROFILE}, pose_policy=policy)
+    cc.start('collect', JOB)
+    assert not cc._live_pose_transfer()   # collect is exempt; the observe check never fires for it
 
 
 # -- Isaac capture: the live carton TOP from the handling-unit prim (usd-core, no Isaac) ---------------
