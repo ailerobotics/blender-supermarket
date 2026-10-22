@@ -393,7 +393,8 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              hold_cart_through_couple=bool(config.get('hold_cart_through_couple')),
                              couple_static_drive=bool(config.get('couple_static_drive')),
                              uncouple_on_return=bool(config.get('uncouple_on_return')),
-                             carry_reposition_drive=bool(config.get('carry_reposition_drive')))
+                             carry_reposition_drive=bool(config.get('carry_reposition_drive')),
+                             couple_standoff_tolerance=config.get('couple_standoff_tolerance'))
 
     # Opt-in warm-session reset provider (dev iteration): config['warm_reset'] names a
     # lane-owned builder `module:function` called once here with the live scene; it returns the

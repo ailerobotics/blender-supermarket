@@ -329,7 +329,7 @@ class Controller:
     def __init__(self, grid, footprint, *, max_speed=0.25, max_angular=0.35,
                  brake_acceleration=0.4, stale_after=0.3, blocked_timeout=8.0,
                  goal_timeout=180.0, allow_test_fixtures=False, docking=None,
-                 directional_zone=True):
+                 directional_zone=True, arrival_xy_hysteresis=0.0):
         self.grid, self.footprint = grid, footprint
         self.max_speed, self.max_angular = max_speed, max_angular
         self.brake_acceleration, self.stale_after = brake_acceleration, stale_after
@@ -376,11 +376,27 @@ class Controller:
         # (byte-identical). Set only on the uncoupled reposition legs, and SAFE only when the arm is in
         # the stable carry -- the in-sim drive + no-drop validation is a GPU check (run-326).
         self.carry_drive = False
+        # fm482 (sim-video-couple-speed): arrival XY HYSTERESIS (navigation.arrival_xy_hysteresis_m).
+        # Without it the arrival test is a bare `xy <= arrival_xy_tol` on every tick, so a base that
+        # crosses the tolerance circle and then turns in place to the goal yaw is pushed back OUT by
+        # the rotation itself (a real diff base does not pivot about its measured centre: ~2.8 cm/rad,
+        # run-356) -> the drive branch turns it back toward the goal POINT -> it re-enters -> turns to
+        # the goal YAW again: a limit cycle at the circle. Warm runs 347-356 swept ~39 rad of yaw for a
+        # net 1.0 rad at the couple standoff (xy ~0.050 vs tol 0.050), 162 s sim / ~680 s wall per run.
+        # With hysteresis > 0 the XY capture LATCHES once inside arrival_xy_tol and only releases past
+        # arrival_xy_tol + hysteresis (the Nav2 stateful goal-checker pattern), so the rotate-to-yaw and
+        # settle run to completion. Arrival still requires yaw within tolerance, stopped, and a clear
+        # gate. 0.0 (default) => the legacy per-tick test (byte-identical).
+        if not (math.isfinite(arrival_xy_hysteresis) and 0.0 <= arrival_xy_hysteresis <= 0.5):
+            raise ValueError('arrival_xy_hysteresis must be in [0, 0.5] m')
+        self.arrival_xy_hysteresis = float(arrival_xy_hysteresis)
+        self._xy_latched = False
 
     def start(self, goal, coupled, *, arrival_xy_tol=None, arrival_yaw_tol=None, static_drive=False,
               carry_drive=False):
         self.static_drive = bool(static_drive)
         self.carry_drive = bool(carry_drive)
+        self._xy_latched = False
         if len(goal) != 3 or not all(math.isfinite(v) for v in goal):
             raise ValueError('goal must be finite map [x,y,yaw]')
         if arrival_xy_tol is not None and (not math.isfinite(arrival_xy_tol) or arrival_xy_tol <= 0):
@@ -543,8 +559,20 @@ class Controller:
                           'gate0=%r in_xy=%s pose=%s goal=%s'
                           % (_xy, self.arrival_xy_tol, abs(wrap(self.goal[2]-pose[2])), self.arrival_yaw_tol,
                              odometry.linear, odometry.angular, _gate.reason, _xy <= self.arrival_xy_tol,
-                             tuple(round(c,3) for c in pose), tuple(round(c,3) for c in self.goal)), flush=True)
-        if math.dist(pose[:2],self.goal[:2]) <= self.arrival_xy_tol:
+                             tuple(round(c,3) for c in pose), tuple(round(c,3) for c in self.goal))
+                          + (' latched=%s' % self._xy_latched if self.arrival_xy_hysteresis > 0 else ''),
+                          flush=True)
+        xy = math.dist(pose[:2],self.goal[:2])
+        if self.arrival_xy_hysteresis > 0:
+            # fm482: latch the XY capture; release only past tol + hysteresis (see __init__).
+            if xy <= self.arrival_xy_tol:
+                self._xy_latched = True
+            elif xy > self.arrival_xy_tol + self.arrival_xy_hysteresis:
+                self._xy_latched = False
+            in_xy = self._xy_latched
+        else:
+            in_xy = xy <= self.arrival_xy_tol
+        if in_xy:
             error = wrap(self.goal[2]-pose[2])
             if abs(error) <= self.arrival_yaw_tol:
                 if abs(odometry.linear) > 0.02 or abs(odometry.angular) > 0.03:
