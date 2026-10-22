@@ -391,6 +391,14 @@ repo's `scenes/`, `export/` or `renders/`.
   Camera/viewport render black). Encodes with `restock.recording.Recorder`. CPU tests:
   `scripts/twin/demo/tests/`; design + choreographed-vs-measured split:
   `~/firstmate/data/sim-demo-video-v1/report.md`.
+- **Real-mission demo cut + run checker** (CPU, only READS the run dir; RUNBOOK §20):
+  `scripts/make_walkthrough_cut.py` turns a run's `mission-frames/` + `nav-trace.jsonl` +
+  `mission.json` into the captioned, time-lapsed `walkthrough-demo.mp4`, labelling every
+  `mission.json` workaround (`start_at`, `*_mode`, a non-sensor `source`) on screen.
+  `scripts/check_walkthrough_run.py` is the pre-send gate. Carton-on-cart/on-bay evidence comes
+  from the `RESTOCK_TRACE_POSES=1` nav-trace poses; without them it falls back to labelled
+  frame analysis (chase-camera model). Frame `simulation_time` is Isaac stage time and trace
+  `t` is mission time (offset 0.05 s cold, 0.55 s warm); `twin/demo/run_evidence.py` aligns them.
 
 ## Maintaining this file
 
