@@ -126,6 +126,17 @@ def executor_exit_action(*, raised_exc, prior_fault, context_ok, transient_budge
     return ('retry', None)
 
 
+def goal_reached(sim_age, pos_err, vel_mag, pos_tol, *, sim_age_tol=0.2, vel_tol=GOAL_VELOCITY_TOL):
+    """Terminal goal-settle predicate (pure/CPU-testable): the move has reached its goal iff the latest
+    measured feedback is SIM-fresh (``sim_age<=sim_age_tol``), every joint is within the position
+    tolerance (``pos_err`` is the max |measured-goal| across joints) and the arm has settled below the
+    velocity tolerance. Freshness is sim-clocked only (no wall term) so render pacing never false-fails a
+    settled grasp. ``pos_tol`` stays tight (grasp precision) -- the sim-robust-executor-shoulder-sag fix
+    makes the LOADED arm actually REACH the goal (payload+measured-pose gravity FF) rather than loosening
+    this gate; execretest's 0.098 rad shoulder_lift miss correctly fails at the 0.010 rad tolerance."""
+    return sim_age <= sim_age_tol and pos_err <= pos_tol and vel_mag <= vel_tol
+
+
 def feedback_fresh(gap):
     """A relayed joint-feedback frame is fresh if now()-stamp (sim) is within a sub-tick negative
     lead (the /clock-vs-/joint_states delivery-order race) and the forward staleness bound."""
@@ -543,7 +554,7 @@ def main():
                         # though <=0.1 s SIM apart (run-106 reached the trajectory end with the arm at
                         # the goal, then faulted on the wall term). The feedback-staleness watchdog
                         # (tick(), 30 s wall backstop) still hard-stops a genuinely frozen sim.
-                        if now()-measured[0]<=.2 and pos_err<=state['goal_pos_tol'] and vel_mag<=GOAL_VELOCITY_TOL:
+                        if goal_reached(now()-measured[0],pos_err,vel_mag,state['goal_pos_tol']):
                             state['target']=plan.end.copy()
                             state['plan']=None
                             handle.succeed()

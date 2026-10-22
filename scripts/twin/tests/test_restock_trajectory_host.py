@@ -4,8 +4,26 @@ from types import SimpleNamespace as NS
 import numpy as np
 import pytest
 
-from twin.restock.trajectory_host import Plan
+from twin.restock.trajectory_host import Plan, goal_reached, GOAL_POSITION_TOL, GOAL_VELOCITY_TOL
 from twin.restock_manipulation.cad_tool import ARM_JOINTS
+
+
+def test_goal_reached_requires_fresh_settled_within_tolerance():
+    # Settled at the goal: fresh sim age, zero error, zero velocity -> reached.
+    assert goal_reached(0.0, 0.0, 0.0, GOAL_POSITION_TOL)
+    # A per-joint miss at the tight tolerance is NOT reached: execretest's shoulder_lift ended 0.0981 rad
+    # short, which must keep failing the gate (the sim-robust-executor-shoulder-sag fix makes the LOADED
+    # arm REACH the goal via the payload+measured-pose gravity FF, it does NOT loosen this tolerance).
+    assert not goal_reached(0.0, 0.0981, 0.0, GOAL_POSITION_TOL)
+    assert goal_reached(0.0, GOAL_POSITION_TOL, 0.0, GOAL_POSITION_TOL)          # exactly at tol: reached
+    assert not goal_reached(0.0, GOAL_POSITION_TOL + 1e-6, 0.0, GOAL_POSITION_TOL)
+
+
+def test_goal_reached_rejects_stale_or_moving():
+    assert not goal_reached(0.5, 0.0, 0.0, GOAL_POSITION_TOL)                     # stale sim age (>0.2)
+    assert not goal_reached(0.0, 0.0, GOAL_VELOCITY_TOL + 0.01, GOAL_POSITION_TOL)  # still moving
+    # A controller-latched wider tolerance (the loaded-place side channel) is honoured as the pos_tol arg.
+    assert goal_reached(0.0, 0.05, 0.0, 0.08)
 
 
 def trajectory(end=.1,duration=2.,velocity=0.):
