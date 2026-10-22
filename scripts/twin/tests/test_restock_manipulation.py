@@ -29,7 +29,11 @@ class FixtureMotion:
         self._raised_count = 0
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
-              wrist2_min=None, slow=False, goal_tol=None, near_start=False):
+              wrist2_min=None, slow=False, goal_tol=None, near_start=False, **_extra):
+        # _extra absorbs the optional per-move kwargs the real port accepts (e.g. wrist_guard from
+        # collect_place_wrist_guard / transfer_carry); recorded for assertions when a test needs them.
+        self.begin_extra = getattr(self, 'begin_extra', [])
+        self.begin_extra.append(dict(_extra))
         self.moves.append(pose)
         self.joint_space_moves = getattr(self, 'joint_space_moves', [])
         self.joint_space_moves.append(joint_space)
@@ -1800,3 +1804,91 @@ def test_gripper_command_result_carries_the_acquisition_deadline():
     r = c.step(.1, packet(c, t + .1, contact=False, valid_until_steady=_fresh()))   # suction enabled
     assert {'kind': 'gripper', 'enabled': True} in r.controls
     assert r.valid_until_steady is not None     # carried Sensors -> Result so isaac_ros_graph accepts
+
+
+# --------------------------------------------------------------------------------------------------
+# sim-robust-cart-place-descent-v1: the COLLECT place onto the rollwagen deck must run descent ->
+# release (weld detach) -> retreat -> stow all the way to the transport pose, and a release that does
+# NOT detach the weld must FAIL FAST with a named reason instead of carrying the carton back up on
+# retreat/stow or stalling to the coarse phase_timeout. (collect2 never reached release -- the mission's
+# base-moved guard aborted at the descent; those runtime guard tests live in test_restock_runtime.py.)
+
+_TRANSPORT = (0.1, -2.5, 1.7, -0.7, -1.5708, 0.0)   # a stow (transport) joint config for these tests
+
+
+def test_release_detach_timeout_off_by_default_and_rejects_bad_values():
+    c, _ = make_controller('collect', transport_joints=_TRANSPORT)
+    assert c.release_detach_timeout_s == 0.0                      # default off => rely on phase_timeout
+    with pytest.raises(ValueError):
+        make_controller('collect', release_detach_timeout_s=float('nan'))
+    with pytest.raises(ValueError):
+        make_controller('collect', release_detach_timeout_s=-1.0)
+    # clamped to <= phase_timeout (a tighter bound than the coarse per-phase timeout)
+    c2, _ = make_controller('collect', transport_joints=_TRANSPORT, release_detach_timeout_s=1e9)
+    assert c2.release_detach_timeout_s == c2.phase_timeout
+
+
+def test_collect_place_runs_descent_release_stow_to_the_transport_pose():
+    """Replay the collect place from release onward: the gripper-open detaches the weld (contact clears),
+    the empty arm retreats, and stow drives to the TRANSPORT joint config, whose feedback is checked
+    before verify. Proves the descent->release->retreat->stow sequence reaches transport."""
+    c, m = make_controller('collect', transport_joints=_TRANSPORT,
+                           collect_place_wrist_guard=True, release_detach_timeout_s=5.0)
+    t = run_to(c, 'release')                                      # observe..place reached, release not yet issued
+    # First release tick: emit the gripper-open (contact still latched this tick).
+    r = c.step(.1, packet(c, t, contact=True, joint_positions=_TRANSPORT, valid_until_steady=_fresh()))
+    assert {'kind': 'gripper', 'enabled': False} in r.controls
+    assert c.phase == 'release' and r.status == 'running'
+    # Weld lets go (contact clears) -> detach acknowledged -> retreat; then run the empty retreat ->
+    # stow (begin_joint_goal to transport) -> transport feedback check -> verify. Drive tick by tick
+    # (each move phase issues then polls) with the weld released (contact False) and the arm reporting
+    # the transport joints, tracking the phases reached.
+    phases, tt = [], t + .1
+    for _ in range(20):
+        r = c.step(.1, packet(c, tt, contact=False, joint_positions=_TRANSPORT, valid_until_steady=_fresh()))
+        phases.append(c.phase)
+        assert r.status != 'failed', r.reason
+        if c.phase == 'verify':
+            break
+        tt += .1
+    assert m.payloads[-1] is False                               # the detach was commanded (weld released)
+    assert 'retreat' in phases and 'stow' in phases              # empty retreat then the stow move ran
+    assert c.phase == 'verify'                                   # reached the transport pose, en route to verify
+    stow_goal = m.stows[-1][0]
+    assert list(stow_goal) == list(_TRANSPORT)                   # stow drove the transport (stow) joint config
+
+
+def test_release_fails_fast_when_the_weld_does_not_detach():
+    """The failing-release case: the gripper-open is emitted but the SIM_ATTACH weld / suction keeps
+    holding (contact stays True). With a release-detach budget the release FAILS FAST with a named reason
+    once the SIM-clock budget elapses -- never carries the carton up on retreat/stow, never stalls to the
+    coarse phase_timeout."""
+    c, m = make_controller('collect', transport_joints=_TRANSPORT, release_detach_timeout_s=1.0)
+    t = run_to(c, 'release')
+    r = c.step(.1, packet(c, t, contact=True, valid_until_steady=_fresh()))     # emit gripper-open
+    assert c.phase == 'release' and r.status == 'running'
+    # Weld stuck: step with contact held. Must not fail before the 1.0 s sim budget...
+    tt = t + .1
+    for _ in range(9):                                            # ~0.9 s of sim, still inside the budget
+        r = c.step(.1, packet(c, tt, contact=True, valid_until_steady=_fresh()))
+        assert r.status == 'running', r.reason
+        tt += .1
+    r = c.step(.1, packet(c, tt, contact=True, valid_until_steady=_fresh()))    # past 1.0 s sim
+    assert r.status == 'failed'
+    assert 'did not detach' in r.reason and 'weld/suction still engaged' in r.reason
+    assert c.phase == 'failed'
+    assert m.payloads == [True]                                  # never commanded a (false) detach / never advanced
+
+
+def test_release_with_budget_off_does_not_fast_fail_a_stuck_weld():
+    """Backward compatible: with the budget off (default 0) a stuck release stays 'running' (the coarse
+    phase_timeout / host watchdog remain the only backstop) -- byte-identical to the pre-fix release."""
+    c, m = make_controller('collect', transport_joints=_TRANSPORT)   # release_detach_timeout_s default 0
+    t = run_to(c, 'release')
+    c.step(.1, packet(c, t, contact=True, valid_until_steady=_fresh()))
+    tt = t + .1
+    for _ in range(30):                                          # 3 s of a stuck weld: never fast-fails
+        r = c.step(.1, packet(c, tt, contact=True, valid_until_steady=_fresh()))
+        assert r.status == 'running', r.reason
+        tt += .1
+    assert c.phase == 'release'

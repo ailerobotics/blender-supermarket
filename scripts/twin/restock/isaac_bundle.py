@@ -418,7 +418,13 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              # Staged start (start_at set, not collect): hold the first manipulation
                              # dispatch until the sim settled (config['staged_start_settle_s'], default
                              # 20 s); 0.0 on a cold run => no hold, byte-identical. See staged_start.py.
-                             staged_settle_s=staged_settle_seconds(config))
+                             staged_settle_s=staged_settle_seconds(config),
+                             # sim-robust-cart-place-descent-v1: tolerate a bounded base excursion from the
+                             # place_approach anchor during the loaded collect place onto the deck (the
+                             # extended carton-loaded arm's descent transiently shoves the yaw-lock-only
+                             # braked base), so the place/release/stow sequence completes; a shove beyond
+                             # the bound fails with a named reason. Absent => the strict guard (byte-identical).
+                             collect_place_base_settle_m=config.get('collect_place_base_settle_m'))
     if staged_clock_sync(config):
         # Staged start: the shortcut's settle steps leave /clock a constant offset ahead of the packet
         # clock; stamp it on every host sensor packet so the host freshness checks measure true age

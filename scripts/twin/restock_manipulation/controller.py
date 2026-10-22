@@ -94,7 +94,8 @@ class TransferController:
                  collect_place_preplace_shape=None, collect_place_wrist_guard: bool = False,
                  grasp_track_m=None, require_collect_source_evidence: bool = False,
                  transfer_ground_truth: bool = False, ground_truth_pick: bool = False,
-                 collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0):
+                 collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0,
+                 release_detach_timeout_s: float = 0.0):
         self.steady_clock=steady_clock
         # collect-gt (demo, opt-in, default off): GROUND-TRUTH COLLECT. Accept the collect SOURCE observation
         # labelled 'ground_truth' (the controlled carton asset's simulated pose, served Isaac-side when the
@@ -233,6 +234,19 @@ class TransferController:
             raise ValueError('grasp_press_timeout_s must be a finite, non-negative number of sim seconds')
         self.grasp_press_timeout_s = min(float(grasp_press_timeout_s), float(phase_timeout))
         self._press_sim_start = None   # sim time the current unconfirmed pre-weld press began (see step)
+        # sim-robust-cart-place-descent-v1: SIM-CLOCK release-detach budget (release_detach_timeout_s, SIM
+        # seconds; default 0 => off => rely on the coarse phase_timeout, byte-identical). After the place
+        # descent the RELEASE emits a gripper-open and waits for the measured contact to clear (the
+        # SIM_ATTACH weld / suction to let go) before advancing to retreat/stow. If the weld fails to
+        # detach, the carton would be carried back UP on retreat/stow -- the opposite of 'carton left on the
+        # deck'. Without a tight bound the release just loops 'running' to the coarse phase_timeout; this
+        # FAILS FAST with a NAMED reason (SIM-clock, render-pacing-safe; see 'Freshness on sim clock, not
+        # wall'). Clamped to (0, phase_timeout] so it is a tighter bound than the per-phase timeout.
+        if not (isinstance(release_detach_timeout_s, (int, float))
+                and math.isfinite(release_detach_timeout_s) and release_detach_timeout_s >= 0):
+            raise ValueError('release_detach_timeout_s must be a finite, non-negative number of sim seconds')
+        self.release_detach_timeout_s = (min(float(release_detach_timeout_s), float(phase_timeout))
+                                         if release_detach_timeout_s > 0 else 0.0)
         # fm427 (A1) (run-323 cold lift): the fm419(a) COLLISION_STALE_PAUSE holds the post-attach lift on
         # a genuinely-stale collision stamp (run-323: collision_dt 0.52->0.65 s, the benign weld/ESDF
         # re-incorporation lag) by returning EMPTY controls -- a SILENT hold. Under render pacing that
@@ -1347,6 +1361,15 @@ class TransferController:
                 if not self.motion.update_payload(False, self.profile):
                     return self._fail('payload collision detachment not acknowledged')
                 self._transition('retreat')
+                return self._result()
+            # sim-robust-cart-place-descent-v1: the gripper-open was emitted but the measured contact has
+            # not cleared -- the SIM_ATTACH weld / suction is still holding the carton. self.elapsed counts
+            # SIM seconds in this release phase (reset on entry, advanced at the top of step). Fail fast with
+            # a named reason rather than carry the carton back up on retreat/stow or stall to phase_timeout.
+            if self.release_detach_timeout_s and self.elapsed > self.release_detach_timeout_s:
+                return self._fail('release did not detach the held carton within %.1fs sim of the '
+                                  'gripper-open command (weld/suction still engaged)'
+                                  % self.release_detach_timeout_s)
             return self._result()
         if self.phase == 'stow':
             if s.contact or self.held:

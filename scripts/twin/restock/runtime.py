@@ -53,6 +53,15 @@ _SENSOR_STALL_WINDOW_S = 20.
 # RuntimeAdapter(ground_truth_place_actions=('transfer',)) (transfer_ground_truth.enabled) + Mission opt-in.
 _GT_PLACE_EVIDENCE_STAGES = ('collect',)
 
+# sim-robust-cart-place-descent-v1: the collect manip phases that make up the reposition PLACE onto the
+# rollwagen deck (the arm has folded to the carry pose and is now lowering/placing/retreating/stowing).
+# During these the EXTENDED, carton-loaded arm's descent reaction transiently shoves the yaw-lock-only
+# braked base a few cm in translation (collect2: base x -4.518 -> -4.559, ~4 cm, which flipped the 0.25 s
+# windowed `parked` flag False for 3 ticks and tripped the stationary guard mid-descent). Scoped so the
+# bounded base-settle tolerance below never relaxes the strict guard outside the loaded place.
+_LOADED_PLACE_PHASES = frozenset(
+    {'transit', 'preplace', 'place', 'release', 'retreat', 'retreat_tuck', 'stow'})
+
 # vr1: bounded settle wait (sim seconds) before releasing the tow coupling at the cart parking spot.
 # Coupler.detach REFUSES a moving/stale train (any base/cart speed or yaw rate > 0.02), and the cart pin
 # engaged one tick earlier can leave a sub-second transient, so the uncouple waits for a measured
@@ -245,7 +254,8 @@ class RuntimeAdapter:
                  uncouple_on_return=False, wall_clock=time.monotonic, nav_stuck_wall_s=None,
                  nav_stuck_sim_s=None,
                  carry_reposition_drive=False, couple_standoff_tolerance=None,
-                 ground_truth_place_actions=(), staged_settle_s=0.0):
+                 ground_truth_place_actions=(), staged_settle_s=0.0,
+                 collect_place_base_settle_m=None):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         # Staged-start settle hold (twin.restock.staged_start; the bundle passes
         # config['staged_start_settle_s'] only when start_at is set and not collect): the warm-up of the
@@ -289,6 +299,30 @@ class RuntimeAdapter:
         # holds => byte-identical. SIM-only safety: valid only with the arm in the verified carry; the
         # in-sim drive + no-drop validation is a GPU check (run-326). See navigation.core carry_drive.
         self.carry_reposition_drive = bool(carry_reposition_drive)
+        # sim-robust-cart-place-descent-v1 (opt-in, default off => byte-identical): the reposition collect
+        # PLACE lowers the welded carton onto the rollwagen deck with the arm extended; its descent reaction
+        # shoves the YAW-LOCK-ONLY braked base a few cm in TRANSLATION (isaac_port keeps translation free
+        # while a carton is welded, to relieve the world->base->arm->weld->carton loop). In collect2 that
+        # ~4 cm transient flipped the 0.25 s windowed `parked` flag False for 3 ticks, and the strict
+        # stationary guard (`not p.parked`) aborted the stage mid-descent with 'base moved during stationary
+        # operation' -- the carton stayed held, the arm never stowed, and every re-begin then failed
+        # 'arm_not_in_transport_timeout'. The reaction is an EXPECTED transient that re-settles, and the
+        # shove (~4 cm) is far inside the 0.25 m ground-truth place-verify xy tol, so when this is set we
+        # tolerate a BOUNDED base excursion from the place_approach anchor through the loaded place phases
+        # and let the place/release/stow sequence COMPLETE; a base pushed BEYOND the bound is a real fault
+        # with a named reason (never a silent slide). The ground-truth carton-on-deck verify stays the
+        # placement proof. None/0 => the strict guard everywhere (byte-identical). Collect-only (the
+        # transfer place has its own carry/mode handling); SIM-only (the real base brakes rigidly).
+        self.collect_place_base_settle_m = None
+        if collect_place_base_settle_m is not None:
+            v = collect_place_base_settle_m
+            if not (isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and math.isfinite(v) and 0 < v <= 0.3):
+                raise ValueError('collect_place_base_settle_m must be a finite value in (0, 0.3] m')
+            self.collect_place_base_settle_m = float(v)
+        # Base (x, y) captured at the place_approach re-park (end of rewarm); the loaded-place base-settle
+        # tolerance measures the excursion from it. None until the reposition place begins / after a re-begin.
+        self._place_base_anchor = None
         # Opt-in uncouple-at-parking-spot on return (captain 2026-10-20: "robot should uncouple at the
         # parking spot"): instead of towing the cart home coupled, the return stage tows it to a cart
         # parking spot (`cart_parking` pose, from the nav-lanes lane), brakes the cart, releases the tow
@@ -432,6 +466,7 @@ class RuntimeAdapter:
         self._collect_repositioned = False
         self._reposition_seq = []          # fm390 nav proof #2: staged drive to place_approach
         self._reposition_seq_i = 0
+        self._place_base_anchor = None     # re-armed at the place_approach re-park (sim-robust-cart-place-descent-v1)
         if action == 'couple':
             # Couple nav runs an in-order sequence of waypoints ending at the ON-AXIS standoff,
             # then the fine-dock servo inserts STRAIGHT along the cart axis to the drawbar:
@@ -681,6 +716,25 @@ class RuntimeAdapter:
         self._nav_stuck_reason = None
         self.nav.start(goal, coupled, **kw)
 
+    def _loaded_place_base_excursion(self, p):
+        """sim-robust-cart-place-descent-v1: the measured base xy excursion (m) from the place_approach
+        anchor IFF the loaded-place base-settle tolerance applies this tick, else None (keep the strict
+        stationary guard -- byte-identical when the key is off).
+
+        Applies only when the opt-in ``collect_place_base_settle_m`` is set AND this is the reposition
+        collect place (``_collect_repositioned``) AND the controller is in a loaded place phase AND the
+        place_approach anchor + a usable base odometry pose are both present. Any gap => None => strict."""
+        if (self.collect_place_base_settle_m is None or self.action != 'collect'
+                or not self._collect_repositioned or self._place_base_anchor is None
+                or self._last_manip_phase not in _LOADED_PLACE_PHASES):
+            return None
+        try:
+            ox, oy = float(p.odometry.pose[0]), float(p.odometry.pose[1])
+        except (AttributeError, TypeError, IndexError, ValueError):
+            return None  # no usable base pose => fall back to the strict guard
+        ax, ay = self._place_base_anchor
+        return math.hypot(ox - ax, oy - ay)
+
     def _step(self, dt):
         self.time += dt
         gate = getattr(self.port, 'gate', None)  # drive the opt-in sensing gate from last phase
@@ -884,6 +938,14 @@ class RuntimeAdapter:
             # True once a fresh ESDF has integrated strictly after the new parked epoch at this pose.
             if ready:
                 self.phase = 'execute'
+                # sim-robust-cart-place-descent-v1: anchor the base pose here (parked at place_approach, a
+                # fresh collision map just incorporated) so the loaded-place base-settle tolerance measures
+                # the descent-reaction shove from the pose the place was planned against. Only used when
+                # collect_place_base_settle_m is set; captured unconditionally (cheap, no behaviour change).
+                try:
+                    self._place_base_anchor = (float(p.odometry.pose[0]), float(p.odometry.pose[1]))
+                except (AttributeError, TypeError, IndexError, ValueError):
+                    self._place_base_anchor = None
                 return Result('running', reason='re-warm done; fresh collision map; resuming place from place_approach')
             if self._warmn >= _REWARM_MAX_TICKS:
                 return Result('failed', reason='no fresh collision map re-incorporated at place_approach')
@@ -936,7 +998,18 @@ class RuntimeAdapter:
             # failure here is unrecoverable once the coupling is released (see _cart_left_parked).
             return self._step_return_uncouple(p, dt)
         if not p.parked:
-            return Result('failed', reason='base moved during stationary operation')
+            tol = self._loaded_place_base_excursion(p)
+            if tol is None:
+                return Result('failed', reason='base moved during stationary operation')
+            if tol > self.collect_place_base_settle_m:
+                # sim-robust-cart-place-descent-v1: a real runaway (not the expected transient descent
+                # reaction) -- fail with a NAMED reason, never a silent slide onto the wrong deck point.
+                return Result('failed', reason=(
+                    'base pushed %.3f m beyond the %.3f m collect-place settle tolerance by the loaded '
+                    'place-descent reaction' % (tol, self.collect_place_base_settle_m)))
+            # Expected, bounded place-descent reaction: the base is braked and re-settles; keep placing so
+            # the place/release/stow sequence completes. The ground-truth carton-on-deck verify is the
+            # placement proof, and the excursion bound above still fails a genuine runaway.
         if self.action == 'park':
             if not p.coupled:
                 return Result('failed', reason='cart lost before transfer')
