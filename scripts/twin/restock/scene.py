@@ -78,8 +78,8 @@ def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
     stock = initial['stock'] if initial else promote_stock(stage,stock_path,sku,stock_mass_kg)
     # Opt-in SIM-ONLY workaround (restock.cage_collision): carton-vs-cage contacts filtered; None => off.
     cage = _cage.author_filter(stage,stock,assets['cart']['body']) if cage_mode else None
-    # Config-switched visual-only material pass (restock.visuals; DEFAULT OFF => byte-identical). Visual
-    # materials only -- never geometry/colliders/physics/QR/markers. A run opts in with config['visuals'].
+    # Config-switched visual-only material pass (restock.visuals; DEFAULT ON). Visual materials only --
+    # never geometry/colliders/physics/QR/markers. Set config['visuals']=false to restore the plain look.
     vis = _visuals.apply(stage, assets, root) if _visuals.enabled(visuals) else None
     stage.GetRootLayer().Save()
     if any(hashlib.sha256(p.read_bytes()).hexdigest()!=digest for p,digest in hashes.items()):

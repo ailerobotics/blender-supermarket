@@ -348,7 +348,7 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
              if _cage else ('off',0,[])),flush=True)
     _vis=composition.get('visuals')
     print('VISUALS enabled=%s bound=%d env_retoned=%d (visual materials only: UR10 palette, grey base, '
-          'galvanised rollwagen, sealed backroom; DEFAULT OFF => plain white look)'
+          'galvanised rollwagen, sealed backroom; DEFAULT ON, visuals=false => plain white look)'
           % ((True,_vis['bound_count'],len(_vis['env_retoned'])) if _vis else (False,0,0)),flush=True)
     if not open_stage(composition['stage']):
         raise RuntimeError('could not open task composed stage')
