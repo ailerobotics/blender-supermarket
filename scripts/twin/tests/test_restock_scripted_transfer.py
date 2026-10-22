@@ -27,8 +27,13 @@ from twin.restock.runtime import Packet, RuntimeAdapter  # noqa: E402
 from twin.restock.trajectory_host import Plan  # noqa: E402
 from twin.restock_manipulation import transfer_mode as tm  # noqa: E402
 from twin.restock_manipulation.ros_adapter import validate_trajectory  # noqa: E402
+from twin.restock_manipulation.transfer_carry import (DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN,  # noqa: E402
+                                                      in_clear_region)
 
 RUN356_URDF = Path('/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/run-356/mobile-import.urdf')
+DATASET = Path('/home/manishsaini/datasets/twin-robot-in-store-boot-v1')
+MOBILE_XRDF = DATASET / 'host-cad' / 'mobile.xrdf'
+WARM5_HOSTLOG = DATASET / 'mission' / 'warm5' / 'host-stack.log'
 STOW = np.array([0., -2.5, 1.7, -0.7, -1.5708, 0.])
 BASE = st.pose_T((-2.079, 15.254, 0.50), st.yaw_quat(math.radians(-0.5)))
 CARTON = st.pose_T((-3.169, 15.265, 1.0125), st.yaw_quat(-math.pi / 2))
@@ -115,7 +120,10 @@ class FakeExecutor:
     def __init__(self, driver, ik, outcomes=None, dt=1 / 30):
         self.driver, self.ik, self.dt = driver, ik, dt
         self.outcomes = dict(outcomes or {})
-        self.sent, self.running = [], None
+        self.sent, self.running, self.holds = [], None, []
+
+    def hold(self, measured):
+        self.holds.append(np.asarray(measured, float))      # keep-alive: current joints held, not silence
 
     def send(self, name, points):
         limits = list(zip(self.ik.lower, self.ik.upper))
@@ -273,6 +281,104 @@ def test_run356_plan_solves_every_keyframe_inside_reach(ik):
         assert st.hermite_violation(st.segment_points(plan.keyframes, names), (ik.lower, ik.upper)) is None
 
 
+def _plan(ik, wrist_guard):
+    base_inv = np.linalg.inv(BASE)
+    goal = (base_inv @ np.array([TARGET[0], TARGET[1], TARGET[2] + DIMS[2] / 2 + 0.002, 1.0]))[:3]
+    return st.plan_transfer(ik, STOW, base_inv @ CARTON, goal, math.radians(0.5), dims=DIMS,
+                            wrist_guard=wrist_guard)
+
+
+def test_wrist_guard_puts_the_pick_on_the_clear_branch_without_moving_the_tcp(ik):
+    # warm5 (2026-10-22): the scripted executor pick followed the ur_gripper-vs-ur_forearm self-colliding
+    # wrist branch (wrist_1 ~1.37, wrist_2 ~-1.27), the host executor faulted on the >1.3 rad tracking error,
+    # the e-stop then rejected the retry and the arm-command heartbeat starved. The default-on wrist guard
+    # keeps every MOVING keyframe in the clear carry wrist branch (wrist_1 <= cap, wrist_2 >= min) -- while
+    # the unguarded plan does not -- and the TCP poses are identical, so the still-mode carton path is
+    # byte-for-byte unchanged (only the arm's joint branch moves).
+    guarded, unguarded = _plan(ik, True), _plan(ik, False)
+    assert guarded.ik_complete and unguarded.ik_complete
+    moving = [k for k in guarded.keyframes if k.name != 'stow']       # 'stow' == the parked start/return pose
+    assert all(in_clear_region(k.q, DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN) for k in moving)
+    pick_half = {'reach_high', 'approach', 'contact', 'lift'}
+    unguarded_pick = [k for k in unguarded.keyframes if k.name in pick_half]
+    assert not all(in_clear_region(k.q, DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN) for k in unguarded_pick)
+    # identical tool path => identical carton path in still mode
+    by_name = {k.name: k for k in unguarded.keyframes}
+    for k in guarded.keyframes:
+        assert np.allclose(k.tcp, by_name[k.name].tcp, atol=1e-6)
+    assert guarded.choice == unguarded.choice                        # same near-face / reach / extract
+
+
+def _selfcollision_min_gap_fn():
+    """min signed self-collision gap (m) over the arm's own non-ignored link-sphere pairs at a config, from
+    the asset URDF FK + XRDF spheres (dataset-gated; the integration lane's validated sphere geometry)."""
+    import yaml
+    from twin.restock_host.world_obstacles import arm_spheres_world
+    xrdf = yaml.safe_load(MOBILE_XRDF.read_text())
+    ignore = set()
+    for a, bs in (xrdf.get('self_collision', {}).get('ignore', {}) or {}).items():
+        for b in bs:
+            ignore.add(frozenset((a, b)))
+    arm_order = list(st.ARM_JOINTS)
+
+    def gap(q):
+        centres, radii, owners = arm_spheres_world(str(RUN356_URDF), str(MOBILE_XRDF),
+                                                   dict(zip(arm_order, [float(x) for x in q])))
+        owners = np.asarray(owners)
+        links = sorted(set(owners.tolist()))
+        worst = math.inf
+        for i in range(len(links)):
+            for j in range(i + 1, len(links)):
+                a, b = links[i], links[j]
+                if frozenset((a, b)) in ignore:
+                    continue
+                ca, ra = centres[owners == a], radii[owners == a]
+                cb, rb = centres[owners == b], radii[owners == b]
+                d = np.linalg.norm(ca[:, None, :] - cb[None, :, :], axis=2)
+                worst = min(worst, float((d - ra[:, None] - rb[None, :]).min()))
+        return worst
+    return gap
+
+
+@pytest.mark.skipif(not (RUN356_URDF.is_file() and MOBILE_XRDF.is_file()),
+                    reason='needs the dataset URDF + XRDF sphere model')
+def test_guard_is_self_collision_clear_where_the_unguarded_pick_penetrates():
+    # Real geometry (asset URDF FK + XRDF collision spheres), not just the clear-region predicate: the
+    # unguarded scripted pick interpenetrates the arm (gripper vs forearm), the guarded one stays clear.
+    gap = _selfcollision_min_gap_fn()
+    ik = st.ArmIK(RUN356_URDF)
+    unguarded = min(gap(k.q) for k in _plan(ik, False).keyframes if k.q is not None)
+    guarded = min(gap(k.q) for k in _plan(ik, True).keyframes if k.q is not None)
+    assert unguarded < 0.0, f'expected the unguarded pick to self-collide, min gap {unguarded:.4f}'
+    assert guarded > 0.0, f'guarded plan must stay self-collision-clear, min gap {guarded:.4f}'
+
+
+@pytest.mark.skipif(not (RUN356_URDF.is_file() and MOBILE_XRDF.is_file() and WARM5_HOSTLOG.is_file()),
+                    reason='needs warm5 host-stack.log + the dataset URDF/XRDF')
+def test_warm5_recorded_pick_was_host_accepted_and_physically_self_collided():
+    # Replay warm5's recorded executor pick through the HOST validation path: the host ACCEPTED it (the
+    # TRAJ_HOST_PLAN line is logged only on GoalResponse.ACCEPT) and it passes validate_trajectory, so the
+    # warm5 failure was a physical tracking fault, not a validation rejection -- yet the sphere model shows
+    # it self-collides, exactly the branch the guard replaces.
+    import ast
+    import re
+    lines = WARM5_HOSTLOG.read_text().splitlines()
+    plan_line = next(l for l in lines if 'TRAJ_HOST_PLAN' in l and 'points=' in l)   # logged only on ACCEPT
+    names = ast.literal_eval(re.search(r'names=(\[.*?\])', plan_line).group(1))
+    pts = ast.literal_eval(re.search(r'points=(\[.*\])\s*$', plan_line).group(1))
+    order = [names.index(j) for j in st.ARM_JOINTS]
+    samples = [(float(t), np.array([float(q[k]) for k in order])) for t, q in pts]
+    start = samples[0][1]
+    limits = list(zip(st.ArmIK(RUN356_URDF).lower, st.ArmIK(RUN356_URDF).upper))
+    traj = NS(joint_names=list(st.ARM_JOINTS),
+              points=[NS(positions=list(q), velocities=([0.] * 6 if i == len(samples) - 1 else []),
+                         effort=[], time_from_start=NS(sec=int(t), nanosec=int(round((t - int(t)) * 1e9))))
+                      for i, (t, q) in enumerate(samples)])
+    validate_trajectory(traj, start, limits)                         # host accepts it -> no exception
+    gap = _selfcollision_min_gap_fn()
+    assert min(gap(q) for _t, q in samples) < 0.0                    # yet it physically self-collides
+
+
 # ---------------------------------------------------------------- stage runs
 
 def test_still_mode_lands_the_carton_on_the_ground_truth_target_without_arm_commands(ik):
@@ -326,21 +432,46 @@ def test_executor_carton_is_rigid_on_the_measured_tool(ik):
     assert max(np.max(np.abs(R - rels[0])) for R in rels) < 0.02          # one-tick lag at most
 
 
-def test_a_rejected_goal_falls_back_to_the_still_path_and_says_so(ik):
+def test_a_rejected_goal_fails_fast_and_keeps_the_arm_held(ik):
+    # The warm5 trap: a host rejection used to degrade silently to still mode, which -- once the host
+    # executor has e-stopped -- sends no arm command and the Isaac arm-command heartbeat starves into the
+    # misleading 'arm command heartbeat lost' crash. In executor mode a rejection now fails FAST with a named
+    # reason and holds the current joints (keep-alive), never the silent still fallback.
     driver = FakeDriver(ik)
     arm = FakeExecutor(driver, ik, outcomes={'pick': 'rejected'})
     r = _run(_runner(ik, driver, arm=arm))
-    assert r.status == 'succeeded'
-    assert r.evidence['arm_mode'] == 'still' and r.evidence['arm_follow'] is False
-    assert 'rejected' in r.evidence['arm_fallback_reason']
-    assert driver.calls == ['attach', 'place'] and r.evidence['xy_offset'] < 1e-9
+    assert r.status == 'failed'
+    assert 'rejected the pick trajectory' in r.reason and 'no silent still fallback' in r.reason
+    assert arm.holds                                            # keep-alive hold issued (heartbeat alive)
+    assert driver.calls == []                                   # nothing grasped/placed: no carton teleport
 
 
-def test_an_aborted_goal_fails_the_stage_honestly(ik):
+def test_an_aborted_goal_fails_the_stage_honestly_and_holds(ik):
     driver = FakeDriver(ik)
     arm = FakeExecutor(driver, ik, outcomes={'carry': 'aborted'})
     r = _run(_runner(ik, driver, arm=arm))
     assert r.status == 'failed' and 'aborted the carry trajectory' in r.reason
+    assert arm.holds                                            # keep-alive on abort too
+
+
+def test_an_infeasible_segment_fails_fast_not_silent_still(ik):
+    # A trajectory the host would refuse (pre-send Hermite check) must also fail fast with a named reason,
+    # never the silent still fallback.
+    driver = FakeDriver(ik)
+    arm = FakeExecutor(driver, ik)
+    runner = _runner(ik, driver, arm=arm)
+    runner.begin()
+    # corrupt the first pick keyframe's samples so the re-seeded Hermite check refuses the segment: start at
+    # the measured pose (STOW, so the start-match gate passes) then a 5 rad jump in 10 ms (accel violation)
+    bad = runner.plan.keyframes[0]
+    bad.samples = [(0.0, STOW.copy(), np.zeros(6)), (0.01, STOW + 5.0, np.zeros(6))]
+    r = None
+    for i in range(20000):
+        r = runner.step(1 / 30, _packet(i + 1))
+        if r.status != 'running':
+            break
+    assert r.status == 'failed' and 'infeasible' in r.reason and 'no silent still fallback' in r.reason
+    assert arm.holds and arm.sent == []                         # never sent the bad goal; held instead
 
 
 # ---------------------------------------------------------------- mission integration
