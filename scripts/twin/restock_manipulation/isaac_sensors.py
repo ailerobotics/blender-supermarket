@@ -419,6 +419,25 @@ class IsaacCartonSensors:
                             _decoded, len(qr.unreadable_corners), _ever, window,
                             depth.shape[1], depth.shape[0]),
                         flush=True)
+                    # fm465 (captain A): persist the ACTUAL sensing-camera RGB + the failing quad crop so
+                    # the decode root can be SEEN (the walkthrough RGB is not the sensing frame). Opt-in via
+                    # RESTOCK_DECODE_DUMP_DIR, bounded to the first few refusals so it never fills disk.
+                    _dump = os.environ.get('RESTOCK_DECODE_DUMP_DIR')
+                    if _dump:
+                        n = getattr(self, '_decode_dump_count', 0)
+                        if n < 6:
+                            self._decode_dump_count = n + 1
+                            os.makedirs(_dump, exist_ok=True)
+                            bgr = np.ascontiguousarray(rgb[:, :, 2::-1]) if rgb.ndim == 3 and rgb.shape[2] >= 3 else rgb
+                            tag = '%s_%s_%03d' % (self.camera_id, matches[0].location, n)
+                            cv2.imwrite(os.path.join(_dump, 'decodefail_%s_full.png' % tag), bgr)
+                            pad = 24
+                            x0 = max(0, int(_poly[:, 0].min()) - pad); x1 = min(bgr.shape[1], int(_poly[:, 0].max()) + pad)
+                            y0 = max(0, int(_poly[:, 1].min()) - pad); y1 = min(bgr.shape[0], int(_poly[:, 1].max()) + pad)
+                            if x1 > x0 and y1 > y0:
+                                cv2.imwrite(os.path.join(_dump, 'decodefail_%s_crop.png' % tag), bgr[y0:y1, x0:x1])
+                            print('DECODE_FAIL dumped %s (quad bbox %d,%d..%d,%d) to %s' % (tag, x0, y0, x1, y1, _dump),
+                                  flush=True)
                 except Exception:
                     pass
                 raise ValueError('unknown or undecoded label in calibrated slot')
