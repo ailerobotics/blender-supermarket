@@ -91,6 +91,7 @@ class TransferController:
                  cart_cage_place: bool = False, cage_axis=(1.0, 0.0, 0.0),
                  cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03,
                  cage_preplace_shape=None, reposition_before_place: bool = False,
+                 collect_place_preplace_shape=None, collect_place_wrist_guard: bool = False,
                  grasp_track_m=None, require_collect_source_evidence: bool = False,
                  transfer_ground_truth: bool = False, ground_truth_pick: bool = False,
                  collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0):
@@ -338,6 +339,31 @@ class TransferController:
         if self.cage_preplace_shape is not None and (len(self.cage_preplace_shape) != 6
                 or not all(map(math.isfinite, self.cage_preplace_shape))):
             raise ValueError('cage_preplace_shape must be 6 finite joint values')
+        # sim-robust-cart-place-goal-v1: the COLLECT place-on-cart counterpart of cage_preplace_shape,
+        # for the NON-cage reposition place (reposition_before_place + cart_cage_place False -- the base
+        # drives in front of the rollwagen mouth, so there is no cage insert). The deck place/preplace
+        # poses have TWO collision-free IK families: an UPRIGHT one (shoulder_lift ~ -1.9) and a DEEP fold
+        # (~ -3.57). The host KDL/cuMotion nearest-branch seeds from the folded carry config and lands
+        # EITHER in the deep fold -- which the soft arm cannot HOLD under the carton load (collect1:
+        # shoulder_lift sagged 0.39 rad short of -3.596 at steady state -> PATH_TOLERANCE_VIOLATED ->
+        # arm-command heartbeat lost) -- OR in a wrist self-colliding branch (collectsrc: 'Invalid c-space
+        # position: self collision detected', the 12-replan storm). Driving the preplace to this FIXED,
+        # CPU-validated UPRIGHT clear-region 6-joint config (begin_joint_goal, like cage_preplace_shape)
+        # fixes the GOAL branch: FK TCP ~ the sensed preplace standoff, in the low-droop upright branch,
+        # so the subsequent place (pose-IK, near_start-seeded from here, collect_place_wrist_guard on)
+        # stays upright + clear and tracks the SENSED deck target. None => pose-IK preplace (byte-identical).
+        # Validated clear-region + reach margin by tests/test_restock_cart_place_goal.py and recorded in
+        # data/sim-robust-cart-place-goal-v1/station-contract.md.
+        self.collect_place_preplace_shape = (tuple(float(v) for v in collect_place_preplace_shape)
+                                             if collect_place_preplace_shape is not None else None)
+        if self.collect_place_preplace_shape is not None and (len(self.collect_place_preplace_shape) != 6
+                or not all(map(math.isfinite, self.collect_place_preplace_shape))):
+            raise ValueError('collect_place_preplace_shape must be 6 finite joint values')
+        # sim-robust-cart-place-goal-v1: extend the transfer wrist-guard clear-branch selection
+        # (in_clear_region / wrist_flip_seed, transfer_carry.py) to the COLLECT place moves
+        # (place/retreat pose-IK; the preplace is the fixed shape above). Off (default) => the collect
+        # place pose-IK is unguarded => byte-identical. See _place_wrist_guard.
+        self.collect_place_wrist_guard = bool(collect_place_wrist_guard)
         # fm476: SIM-ONLY env override for the sensor-packet freshness bound. The fm465 light rig makes
         # the TRANSFER capture's full-res render slow, so by the time the packet reaches the host the
         # sim /clock has advanced ~0.55 s past the packet stamp -- STALE beyond the 0.5 s default, so the
@@ -529,11 +555,19 @@ class TransferController:
         """RESTOCK_TRANSFER_MODE=live_pose AND this run is the transfer (collect is never affected)."""
         return self.transfer_mode == LIVE_POSE and getattr(self, 'operation', None) == 'transfer'
 
-    def _transfer_wrist_guard(self):
-        """RESTOCK_TRANSFER_CARRY=wrist_guard on a TRANSFER: the (wrist1_cap, wrist2_min) clear carry region
-        every transfer place move's KDL goal must satisfy (the configured carry guards, else the
-        bench-proven 0.65 / 0.0). None => off (collect, or the flag unset) => byte-identical begin()."""
-        if WRIST_GUARD not in self.transfer_carry or getattr(self, 'operation', None) != 'transfer':
+    def _place_wrist_guard(self):
+        """The (wrist1_cap, wrist2_min) clear carry region a place-side KDL goal must satisfy, else the
+        adapter re-seeds from the wrist-flipped twin (same TCP, clear branch). Active for:
+          * a TRANSFER with RESTOCK_TRANSFER_CARRY=wrist_guard (the warm2 preplace jam, unchanged), or
+          * a COLLECT place-on-cart with collect_place_wrist_guard set (sim-robust-cart-place-goal-v1:
+            the deck place pose-IK otherwise lands in the ur_wrist_2-vs-ur_forearm self-colliding branch,
+            collectsrc's 12-replan 'Invalid c-space position' storm).
+        The region is the configured carry guards, else the bench-proven 0.65 / 0.0 (data/sim-restock-
+        armbench-v1). None => off => byte-identical begin()."""
+        op = getattr(self, 'operation', None)
+        on = ((op == 'transfer' and WRIST_GUARD in self.transfer_carry)
+              or (op == 'collect' and self.collect_place_wrist_guard))
+        if not on:
             return None
         cap = DEFAULT_WRIST1_CAP if self.carry_wrist1_cap is None else self.carry_wrist1_cap
         w2min = DEFAULT_WRIST2_MIN if self.carry_wrist2_min is None else self.carry_wrist2_min
@@ -944,7 +978,7 @@ class TransferController:
             if self.transfer_carry and getattr(self, 'operation', None) == 'transfer':
                 # Label the carry workarounds honestly in the evidence + console (mission.json records them).
                 label = {'source': 'transfer_carry', 'transfer_carry': sorted(self.transfer_carry)}
-                guard = self._transfer_wrist_guard()
+                guard = self._place_wrist_guard()
                 if guard is not None:
                     label['wrist_guard'] = {'wrist1_cap': guard[0], 'wrist2_min': guard[1],
                                             'phases': list(GUARDED_PHASES)}
@@ -997,6 +1031,25 @@ class TransferController:
                                                  slow=True, goal_tol=0.2)
                     self.issued = True
                     return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+                # sim-robust-cart-place-goal-v1: droop-safe + self-collision-safe fixed-shape PREPLACE for
+                # the NON-cage COLLECT place-on-cart. The reposition place drives the base to the rollwagen
+                # mouth, then the pose-IK preplace's nearest-branch seed (from the folded carry config) lands
+                # in a branch the arm cannot execute: either the ur_wrist_2-vs-ur_forearm self-collision
+                # (collectsrc's 'Invalid c-space position' replan storm) or the DEEP shoulder_lift fold
+                # (~ -3.57) the soft drive cannot HOLD under the carton load (collect1 sagged 0.39 rad short
+                # -> PATH_TOLERANCE_VIOLATED -> heartbeat lost). This CPU-validated UPRIGHT clear-region shape
+                # (shoulder_lift ~ -1.9; FK TCP ~ the sensed preplace standoff) is driven as a fixed
+                # collision-planned begin_joint_goal exactly like cage_preplace_shape; the place (pose-IK
+                # below, near_start-seeded from here with collect_place_wrist_guard on) then tracks the SENSED
+                # deck target, staying on the upright clear branch. Scoped to collect preplace, non-cage.
+                # Absent => the pose-IK preplace (byte-identical).
+                if (self.phase == 'preplace' and not self.cart_cage_place
+                        and getattr(self, 'operation', None) == 'collect'
+                        and self.collect_place_preplace_shape is not None):
+                    self.motion.begin_joint_goal(self.collect_place_preplace_shape, s.joint_positions,
+                                                 slow=True, goal_tol=0.2)
+                    self.issued = True
+                    return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
                 # fm403: wrist_2-safe fixed-shape LIFT. The task-space lift IK can flip wrist_2 to the
                 # negative self-colliding branch (w2 -> -1.25 crosses the ur_wrist_2-vs-ur_forearm stop;
                 # runs 300d/305/311 jammed even with wrist_1 capped -- the bench showed w1 cleared but w2
@@ -1044,7 +1097,7 @@ class TransferController:
                 # RESTOCK_TRANSFER_CARRY=wrist_guard: the transfer place moves' KDL goal must land in the clear
                 # wrist branch (warm2: the preplace IK chose w1 2.08 / w2 -1.02 and jammed at the stop). Passed
                 # ONLY when active, so an unset flag keeps this begin() call byte-identical.
-                guard = self._transfer_wrist_guard()
+                guard = self._place_wrist_guard()
                 extra = ({'wrist_guard': guard} if guard is not None and joint_space and not straight
                          and self.phase in GUARDED_PHASES else {})
                 self.motion.begin(target, s.joint_positions, straight_line=straight,
