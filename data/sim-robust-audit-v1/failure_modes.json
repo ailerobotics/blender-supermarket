@@ -1,0 +1,133 @@
+{
+  "schema": "sim-robust-audit-v1",
+  "generated": "2026-10-22",
+  "scope": "Isaac restocking mission (branch fm/twin-robot-in-store-boot-v1, PR https://github.com/ailerobotics/blender-supermarket/pull/15). Runs audited: warm3,warm5,warm6,warm7,warm8,warm9,warm10,warm11,cold,collectsrc under ~/datasets/twin-robot-in-store-boot-v1/mission/, plus the run-3NN real-collect series (2026-10-20/21).",
+  "honest_run_definition": "A workaround-free end-to-end run would drop all four crutches currently in use: (1) start-phase shortcut at couple, (2) scripted still-arm transfer, (3) ground-truth verify, (4) ground-truth collect. Only warm8 and warm11 COMPLETE, and both lean on all four. The honest 'cold' run (real collect, real transfer, real verify) FAILS at collect.",
+  "biggest_blocker_rank": 1,
+  "lanes_already_owned": [
+    {"lane": "outbound drive-progress stall", "modes": ["nav-tow-no-base-progress"]},
+    {"lane": "collect place-on-cart failure", "modes": ["cumotion-cuda-oom-place-on-cart"]}
+  ],
+  "failure_modes": [
+    {
+      "id": "cumotion-cuda-oom-place-on-cart",
+      "rank": 1,
+      "stage": "collect -> place-on-cart (loaded cart target)",
+      "symptom_line": "collectsrc/host-stack.log:9684 '[component_container_mt-2] terminate called after throwing an instance of \\'cumotion::FatalException\\' what(): CUDA error: out of memory (/cumotion/src/cumotion/util/cuda_array.cu:66)'; preceded by repeated host-stack.log:9514/9551/9586/9655 'Planner ... cuMotion ... failed with error code PLANNING_FAILED'; consequence collectsrc.console.log:21714 'MANIP_STEP_EXCEPTION op=collect RuntimeError: station supervisor heartbeat unavailable: host stack went silent after last state=ready (wall gap 30.1s)'; mission.json reason 'RuntimeError: arm command heartbeat lost [... native_transport.py:167 watchdog]'.",
+      "root_cause": "Repeated cuMotion PLANNING_FAILED retries at the loaded place-on-cart pose drive peak VRAM past the 12GB RTX 3060 ceiling; the component_container_mt process throws cumotion::FatalException (CUDA OOM, exit -6), taking move_group + trajectory_host + ros_host down (host-stack.log:9687/9768/9773). The Isaac side then sees 30.1s of host silence and the arm-heartbeat watchdog fires. Matches 'Mission VRAM ceiling on 12GB card' (~11.9GB peak, whispr ~2.2GB is the margin).",
+      "status": "open (lane: collect place-on-cart)",
+      "frequency": "collectsrc (place-on-cart); terminal 'arm command heartbeat lost' also in run-321, run-327; brief notes an earlier run hit the same cuMotion CUDA OOM directly.",
+      "impact": "Hard blocker for a workaround-free run: even with ground-truth collect + couple (PR 187), the honest place-on-cart cannot plan within the VRAM budget, so the mission cannot proceed past collect to transit on this GPU.",
+      "fix": "Bound and serialize cuMotion plan attempts and free the planner's CUDA arena between retries; shrink the planner collision-world/voxel footprint for the place-on-cart query; guarantee whispr (~2.2GB) is not resident during the run (opt-in HEAVY_MB only). Consider a plan-retry ceiling that aborts gracefully instead of hammering until OOM.",
+      "test": "CPU unit asserting the place-on-cart plan-retry budget is bounded (no unbounded PLANNING_FAILED loop); a GPU place-on-cart harness with a peak-VRAM sampler that must stay under the measured ceiling across N retries."
+    },
+    {
+      "id": "transfer-preplace-wrist-branch-jam",
+      "rank": 2,
+      "stage": "transfer (place carton at shelf G3_back_s2)",
+      "symptom_line": "warm3/cold use the crutch: console 'SCRIPTED_TRANSFER SUCCEEDED ground-truth placement ... arm=still fallback=None' (cold.console.log ~SCRIPTED_TRANSFER). Real-arm transfer root cause recorded as preplace KDL selecting the wrist_2-vs-forearm elbow branch -> ~1.3 rad track fault -> host e-stop; transfer pick additionally targets the deck-top AABB (z~0.225) instead of the carton resting on the cart upper shelf (z~1.01).",
+      "root_cause": "Preplace inverse kinematics picks a wrist_2-vs-forearm self-colliding branch; and the pick reach aims at the deck AABB, not the live carton pose. Without the scripted still-arm placement no run performs a real transfer.",
+      "status": "workaround in use (scripted still-arm transfer); partial fixes PR 170 (RESTOCK_TRANSFER_CARRY=wrist_guard), fm479 was inert (isaac_factory reads manipulation.cart_placement).",
+      "frequency": "Every completing run (warm8, warm11) and warm3/cold use scripted transfer; real-arm transfer failed in warm2 and the preplace diagnostics.",
+      "impact": "Blocks removal of workaround (2): the mission has never executed an honest place.",
+      "fix": "Enable wrist_guard branch selection for the preplace trajectory and drive the pick from the live carton pose (manipulation.cart_placement z~1.01), not the deck AABB.",
+      "test": "Bench preplace branch-selection guard passing 12/12 (no wrist_2-vs-forearm branch); assert pick target equals live carton pose within tolerance."
+    },
+    {
+      "id": "nav-tow-no-base-progress",
+      "rank": 3,
+      "stage": "coupled tow (outbound_dock_to_bay and return_bay_to_parking)",
+      "symptom_line": "warm6 mission.json 'outbound stuck with no base progress for 120s wall (> 120s budget; last reason \\'planning_stop\\')'; warm9 '... 121s ... last reason \\'tracking\\''; warm3 'return stuck ... 217s'; warm7 'return stuck ... 207s'; console markers warm6.console.log:6531 NAV_STEP reason='stop_replan_tracking_error' (x12) then :6584 NAV_PLAN_DIAG route_none->planning_stop; warm10.console.log:2864 route_none->planning_stop at pose (-3.932,15.272) while TRACK_DIAG err=0.037 tol=0.300 (tracking nominal, base not advancing).",
+      "root_cause": "Several coupled-tow causes converge on the same wall no-progress abort: (a) planner cannot validate the lane near the bay throat -> route_none->planning_stop (warm5/6/7); (b) co-planar 4-contact caster starves drive-wheel normal force -> crawl (fixed by caster_lift_m, landed live run-327: outbound 1.09m->4.87m); (c) return-lane cart-yaw trap: follower drops the validated route when cart_err 0.230 > lane_cart_yaw_tol 0.20 (warm3 return); (d) residual drive-traction variance (warm10, base no progress while tracking nominal).",
+      "status": "partially fixed (caster_lift live run-327; arrival hysteresis PR https://github.com/ailerobotics/blender-supermarket/pull/162) / open (lane: outbound drive-progress stall).",
+      "frequency": "warm3, warm6, warm7, warm9, warm10; run-352, run-355 ('outbound stuck ... 121s planning_stop').",
+      "impact": "Blocks coupled transit in both directions; is the dominant warm-run abort when collect/transfer are shortcut.",
+      "fix": "Per sub-cause: keep caster_lift_m; discount near-static lidar returns in the swept envelope (fm423 navigation.tow_lane_static_tol_m=0.12); relax return lane_cart_yaw_tol / cart_parking offset; sim-clock-gate the no-base-progress watchdog so render pacing does not shorten the real budget.",
+      "test": "Nav fixture reproducing route_none->planning_stop near the throat; drive-bench normal-force/throughput check with vs without caster_lift; return-lane cart-yaw follower test asserting the validated route is retained at cart_err just above tol."
+    },
+    {
+      "id": "honest-collect-host-estop",
+      "rank": 4,
+      "stage": "collect (grasp at source station)",
+      "symptom_line": "cold.console.log:20144 'MANIP_HOST_FAILED op=collect phase=\\'host\\' reason=\\'host emergency stop\\''; preceded by cold.console.log NAV_ARRIVAL_DIAG 'xy=0.1687 xy_tol=0.150 yaw_err=0.2976 yaw_tol=0.200 ... latched=True pose=(-4.52,15.568,-2.844) goal=(-4.5,15.4,3.142)' and a long run of 'BASE_FULL_BRAKE engaged (fixed-to-world) for pre-weld grasp press'. run-309/313/316 mission.json reason 'host emergency stop'.",
+      "root_cause": "At the collect station the base parks ~0.17m / ~0.30rad outside the grasp tolerance (xy 0.1687 > 0.150, yaw_err 0.2976 > 0.200) yet latches 'arrived'; the arm cannot reach/seal, so the run spins in a pre-weld grasp-press loop until the host times out and e-stops. Related real-collect decode chain (no initial sensor frame / StationAckStreamStalled) is the other collect root.",
+      "status": "open; ground-truth collect workaround RESTOCK_COLLECT_GROUND_TRUTH=1 (PR https://github.com/ailerobotics/blender-supermarket/pull/163) still e-stops in the cold run.",
+      "frequency": "cold; run-309, run-313, run-316 (all 'host emergency stop' at collect).",
+      "impact": "The honest end-to-end mission dies here first; collect must pass before transfer/verify can even be exercised honestly.",
+      "fix": "Tighten the collect arrival gate (per-goal arrival_xy_tol/arrival_yaw_tol + arrival_xy_hysteresis so 'arrived' is not latched outside grasp tol) or widen the arm reach gate to cover the parked offset; wire the decode light rig (fm465) for the source camera.",
+      "test": "Collect-approach fixture asserting the base reaches within grasp xy/yaw tolerance before grasp-press; decode dump (RESTOCK_DECODE_DUMP_DIR) proving the source carton slot decodes."
+    },
+    {
+      "id": "wall-clock-watchdog-vs-render-pacing",
+      "rank": 5,
+      "stage": "cross-cutting (collect, transit, couple, place)",
+      "symptom_line": "mission.json 'RuntimeError: arm command heartbeat lost [isaac_port.py:... advance | native_transport.py:258 tick | native_transport.py:167 watchdog]' (warm5, cold, collectsrc, run-321, run-327); run-341/346/348 'StationAckStreamStalled: station_ack_stream_stalled: stamp frozen at 3.25s for 5.0s (publisher stopped) [ros_manipulation.py:143 warm]'; run-350/354/356 'stamp frozen at ~216.4s for 5.0s'; collectsrc 'host stack went silent ... (wall gap 30.1s)'.",
+      "root_cause": "Arm-heartbeat, station-ack-stall and host-silence watchdogs all measure WALL time; under render-paced sim (wall runs far slower than sim time) a healthy-but-slow pipeline false-trips, and the same terminal line ('arm command heartbeat lost') masks very different upstream causes (arm self-collision, host OOM death, slow render).",
+      "status": "partially fixed (freshness on sim clock PRs; transit sensing pause PR https://github.com/ailerobotics/blender-supermarket/pull/187) / open for the arm-heartbeat and station-ack watchdogs.",
+      "frequency": "Pervasive across the collect/transfer/transit runs; the arm-heartbeat line is the single most common terminal symptom.",
+      "impact": "Converts transient slowness into hard aborts and hides the true root cause, inflating apparent failure diversity and burning GPU wall budget.",
+      "fix": "Gate every watchdog/freshness check on the sim/node clock with a generous wall backstop (per 'Freshness on sim clock, not wall'); tag the terminal error with the real upstream trigger instead of the generic heartbeat.",
+      "test": "Unit feeding render-paced (wall >> sim) timestamps and asserting no watchdog false-trip; assert the terminal reason carries the upstream cause."
+    },
+    {
+      "id": "grasp-seal-never-achieved",
+      "rank": 6,
+      "stage": "collect (grasp / weld)",
+      "symptom_line": "warm5.console.log SEAL_DIAG (x many) 'read ... fb=False status=GripperStatus.Open gripped_n=0 gripped=[] enabled=False min_gap_mm=71.02 tilt_deg=20.5 pad_vs_surface_deg=25.3 ... hit_bodies=[\\'/MobileRobot/ur_upper_arm_link/collisions/upperarm/node_STL_BINARY_\\']'; warm5 mission.json 'arm command heartbeat lost'.",
+      "root_cause": "Native suction never seals (plugin limitation); the working attach is a <5mm weld. In warm5 the gripper reads Open with a 71mm gap and the sensed contact is the arm's own upper_arm_link (self-collision), so the grasp press never completes and the wall watchdog then kills it.",
+      "status": "known / weld workaround is the real attach; grasp approach confirmed square-on (0.5mm) in runs 302-312.",
+      "frequency": "warm5; grasp/weld diagnostics across run-3NN.",
+      "impact": "Honest grasp relies on the weld; native seal is not a viable path.",
+      "fix": "Keep the <5mm weld as the attach; add a self-collision guard so the gripper does not press against upper_arm_link; confirm physics grasp_track_m before declaring grasp.",
+      "test": "Bench grasp asserting weld engages at <5mm with no upper_arm_link self-contact."
+    },
+    {
+      "id": "station-ack-stream-stalled-couple",
+      "rank": 7,
+      "stage": "couple / warm start (station ack stream)",
+      "symptom_line": "run-341 mission.json 'StationAckStreamStalled: station_ack_stream_stalled: stamp frozen at 0.95s for 5.1s (publisher stopped) [ros_manipulation.py:143 warm]'; run-346/348 'stamp frozen at 3.25s for 5.0s'; run-350/354/356 'stamp frozen at ~216.4s for 5.0s'.",
+      "root_cause": "The station-ack publisher stops emitting (stamp frozen) and the 5s wall stall-detector fires. Overlaps with wall-clock-vs-render-pacing (rank 5); the ~216s-frozen cases coincide with the legacy couple arrival dither (xy-tol limit cycle).",
+      "status": "partially fixed (arrival hysteresis PR https://github.com/ailerobotics/blender-supermarket/pull/162 cuts the ~215s couple standoff to ~3s sim) / open where the publisher genuinely stops.",
+      "frequency": "run-341, run-346, run-348, run-350, run-354, run-356.",
+      "impact": "Blocks the honest couple; the start-phase shortcut at couple is the active workaround.",
+      "fix": "navigation.arrival_xy_hysteresis_m=0.03 for the couple standoff; sim-clock-gate the station-ack stall detector with a wall backstop.",
+      "test": "Couple fixture asserting arrival settles within a few sim-seconds and the ack stream stays fresh on the sim clock."
+    },
+    {
+      "id": "visuals-bind-crash-outbound",
+      "rank": 8,
+      "stage": "startup / outbound (visuals enabled)",
+      "symptom_line": "warm9.console.log:1851 'VISUALS enabled=True bound=90 env_retoned=2'; warm9 failed outbound with visuals on (binding bug).",
+      "root_cause": "Visual-material binding bug triggered only when VISUALS=True (warm9 bound=90). warm10 re-ran with VISUALS=False to isolate drive-traction.",
+      "status": "fixed by PR https://github.com/ailerobotics/blender-supermarket/pull/179 (visuals bind).",
+      "frequency": "warm9 (one occurrence; warm10 was the visuals-off control).",
+      "impact": "Was blocking runs with visuals for the demo/video; fixed.",
+      "fix": "PR 179 fixes the binding; verify a visuals-on run reaches the same stage as visuals-off.",
+      "test": "Run with VISUALS=True reaching transit without the bind crash."
+    },
+    {
+      "id": "broken-pipe-control-ipc",
+      "rank": 9,
+      "stage": "collect (control IPC relay)",
+      "symptom_line": "run-321b mission.json 'BrokenPipeError: [Errno 32] Broken pipe [native_transport.py:271 _publish_relay | control_ipc.py:185 publish | control_ipc.py:106 send]'.",
+      "root_cause": "Secondary symptom of the host stack dying (see cumotion-cuda-oom / host silence): the control IPC relay writes to a pipe whose reader (host process) already exited.",
+      "status": "open (downstream of host death; not an independent root).",
+      "frequency": "run-321b.",
+      "impact": "Noise that obscures the real host-death cause; should be caught and reported as host-exit, not a raw BrokenPipe.",
+      "fix": "Detect reader exit and surface the host-exit reason instead of the raw BrokenPipeError.",
+      "test": "Kill the host reader mid-run and assert the relay reports host-exit, not BrokenPipe."
+    },
+    {
+      "id": "ground-truth-collect-and-verify-crutch",
+      "rank": 10,
+      "stage": "collect + verify",
+      "symptom_line": "cold.console.log:1937 'COLLECT_GROUND_TRUTH enabled=True place_slot={...}'; warm runs rely on ground-truth verify (sensor-independent) rather than the sensor verification provider.",
+      "root_cause": "Collect picks from the simulated carton asset pose (ground_truth) and verify reads ground truth, bypassing the source-camera decode and the sensor verification provider, because the honest sensor path (decode chain) is not yet reliable.",
+      "status": "workaround in use (RESTOCK_COLLECT_GROUND_TRUTH=1, PR https://github.com/ailerobotics/blender-supermarket/pull/163; GT verify).",
+      "frequency": "All warm completes + cold/collectsrc use GT collect; GT verify in the warm completes.",
+      "impact": "Removing workarounds (3) and (4) depends on honest-collect-host-estop and the decode chain (fm465/466/467) being fixed first.",
+      "fix": "Land the decode light rig + marker/tile-seam fixes; switch verify to shelf_verification_provider on the fixed shelf camera.",
+      "test": "Collect decodes the source slot and verify reads the sensor provider, end to end, with GT disabled."
+    }
+  ]
+}
