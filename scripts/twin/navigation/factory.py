@@ -120,6 +120,14 @@ def _nav_sim_env(var, lo, hi):
         return None
 
 
+def _strict_bool(nav, key):
+    """A default-off boolean switch; refuse a non-boolean (e.g. the string "false") rather than coerce."""
+    value = nav.get(key, False)
+    if not isinstance(value, bool):
+        raise ValueError(f'navigation.{key} must be a boolean')
+    return value
+
+
 def _controller_kwargs(nav):
     kwargs = {}
     for limit in ('goal_timeout', 'blocked_timeout', 'max_speed', 'max_angular',
@@ -144,6 +152,13 @@ def _controller_kwargs(nav):
         if not isinstance(nav['directional_zone'], bool):
             raise ValueError('navigation.directional_zone must be a boolean')
         kwargs['directional_zone'] = nav['directional_zone']
+    # fm482: opt-in arrival XY hysteresis for the uncoupled reference legs (the couple standoff
+    # dither). Absent/0 => the legacy per-tick arrival test (byte-identical). See core.Controller.
+    if 'arrival_xy_hysteresis_m' in nav:
+        value = nav['arrival_xy_hysteresis_m']
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError('navigation.arrival_xy_hysteresis_m must be a number of metres')
+        kwargs['arrival_xy_hysteresis'] = float(value)
     # Production never accepts fixtures: the knob is intentionally not exposed.
     if nav.get('allow_test_fixtures'):
         raise ValueError('allow_test_fixtures is forbidden in a production bundle')
@@ -318,6 +333,8 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
                                        lane_track_tol=float(nav.get('tow_lane_track_tol_m', 0.25)),
                                        lane_track_envelope=bool(nav.get('tow_lane_track_envelope', False)),
                                        lane_cart_yaw_rebase=bool(nav.get('tow_lane_cart_yaw_rebase', False)),
+                                       coupled_creep_escape=_strict_bool(nav, 'coupled_creep_escape'),
+                                       coupled_creep_floor=float(nav.get('coupled_creep_floor_mps', 0.03)),
                                        **_controller_kwargs(nav))
 
     if 'dynamic_obstacles' in nav and mode != 'sensor':

@@ -478,8 +478,25 @@ class ArticulatedController(Controller):
                  lane_curve_speed_floor=0.25, lane_max_curvature=None,
                  lane_coast_refusals=False, lane_trust_unknown=False,
                  measured_turn_fault_s=None, lane_track_tol=0.25,
-                 lane_track_envelope=False, lane_cart_yaw_rebase=False, **kwargs):
+                 lane_track_envelope=False, lane_cart_yaw_rebase=False,
+                 coupled_creep_escape=False, coupled_creep_floor=0.03, **kwargs):
         self.require_temporal_map=require_temporal_map
+        # fm481/fm482 (navigation.coupled_creep_escape, default off => byte-identical): the coupled
+        # measured-curvature brake divides odom.angular by odom.linear, and at a near-stationary crawl that
+        # ratio is velocity NOISE, not a real sub-R_min arc. run-352/355 outbound: the tow stopped abruptly
+        # ~0.4-0.5 m in (0.23 -> 0.03 m/s in one tick), then |rv|~|rw|~0.01-0.06 jitter tripped
+        # measured_turn_radius on most ticks; each refusal commands a stop, so the base never re-left the
+        # noise band (121 s livelock -> nav-stuck fail). With the escape ON, inside the band
+        # |odom.linear| < max(0.06, 2*floor) a FORWARD command keeps a creep (v >= coupled_creep_floor) with
+        # the arc clamped to the min turn radius, and the commanded creep is still footprint- and
+        # braking-rollout-checked, so the base accelerates OUT of the band. Above the band the brake is
+        # unchanged (a genuine sub-R_min arc at tow speed still refuses).
+        self.coupled_creep_escape=bool(coupled_creep_escape)
+        if not (isinstance(coupled_creep_floor,(int,float)) and math.isfinite(coupled_creep_floor)
+                and 0.0<coupled_creep_floor<=0.1):
+            raise ValueError('coupled_creep_floor must be in (0, 0.1] m/s')
+        self.coupled_creep_floor=float(coupled_creep_floor)
+        self.creep_escapes=0                                # ticks the escape replaced a noise refusal
         # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
         # swept train envelope as free (the static map proved that corridor clear), so the base is not
         # frozen at an unmapped turn (run-327b: outbound drove 4.87 m then 'unknown_navigation_cell' at the
@@ -867,6 +884,15 @@ class ArticulatedController(Controller):
         w=max(-self.max_angular,min(angular,self.max_angular))
         if abs(w)*1.5>v+1e-9:
             return Result(reason='turn_radius')
+        # fm481/fm482 creep escape (see __init__): decided BEFORE the braking computations so the
+        # stop distance, coverage and rollouts below all check the command actually sent.
+        escape=(self.coupled_creep_escape and v>1e-6
+                and 0.02<abs(odom.linear)<max(0.06,2*self.coupled_creep_floor)
+                and abs(odom.angular/odom.linear)>1/1.5+0.03)
+        if escape:
+            v=max(v,min(self.coupled_creep_floor,self.max_speed))
+            wmax=v/self.footprint.min_turn_radius
+            w=max(-wmax,min(w,wmax))
         state=TrainState(*odom.pose,wrap(odom.pose[2]-obs.articulation))
         speed=max(v,abs(odom.linear))
         delay=self.stale_after+(temporal.reaction_delay(now) if temporal else 0.)
@@ -887,9 +913,13 @@ class ArticulatedController(Controller):
             return Result(reason='obstacle_stop')
         # During a command change braking follows measured curvature, too.
         if abs(odom.linear)>0.02:
-            measured_k=odom.angular/odom.linear
-            if abs(measured_k)>1/1.5+0.03:
-                return Result(reason='measured_turn_radius')
+            if escape:
+                measured_k=k        # noise-band ratio is not an arc: brake along the clamped command
+                self.creep_escapes+=1
+            else:
+                measured_k=odom.angular/odom.linear
+                if abs(measured_k)>1/1.5+0.03:
+                    return Result(reason='measured_turn_radius')
             braking=self.world.rollout(state,stop,max(-1/1.5,min(1/1.5,measured_k)),
                                       obs.obstacles,uncertainty)
             if not braking:

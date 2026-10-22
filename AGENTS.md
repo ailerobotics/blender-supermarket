@@ -156,7 +156,10 @@ repo's `scenes/`, `export/` or `renders/`.
   and the east-facing `home` reorientation-loop return is replaced by the west-facing
   `mission_poses.cart_parking` `[-9,16,π]`); uncoupled drives unchanged. Example fragment
   `docs/examples/tow-lanes-mission-fragment.json`; offline proof `scripts/check_tow_lanes.py`;
-  design in `data/sim-restock-nav-lanes-v1/report.md`.
+  design in `data/sim-restock-nav-lanes-v1/report.md`. **Couple speed / outbound stall** (fm482, both
+  opt-in): `navigation.arrival_xy_hysteresis_m` stops the couple-standoff arrival dither (~700 s wall per
+  warm run) and `navigation.coupled_creep_escape` stops the outbound `measured_turn_radius` noise
+  livelock; offline proof on the recorded runs `scripts/check_couple_speed.py`.
 - **Moving obstacles** (opt-in, default-off): `navigation/dynamic.py` tracks
   per-frame `Detection(position,radius,source)` into velocity-predicted occupancy
   points unioned (add-only) into `Observation.obstacles`, so the existing gates

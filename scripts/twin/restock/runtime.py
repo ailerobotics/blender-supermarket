@@ -191,8 +191,24 @@ class RuntimeAdapter:
                  stall_window_s=_SENSOR_STALL_WINDOW_S, route_alerts=None, fine_dock=None,
                  hold_cart_through_couple=False, couple_static_drive=False,
                  uncouple_on_return=False, wall_clock=time.monotonic, nav_stuck_wall_s=None,
-                 carry_reposition_drive=False):
+                 carry_reposition_drive=False, couple_standoff_tolerance=None):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
+        # fm482 (config['couple_standoff_tolerance'], default None => xy 0.05 m + the nav default yaw
+        # 0.08 rad, byte-identical): the arrival tolerance of the on-axis couple STANDOFF leg. The
+        # standoff is not the latch -- the fine-dock servo closes the residual onto the measured drawbar
+        # (attach needs hitch <= 25 mm / yaw <= 5 deg) -- so it may be looser than the latch, up to the
+        # fine-dock capture bound proven offline by scripts/check_couple_speed.py.
+        self.couple_standoff_tolerance = None
+        if couple_standoff_tolerance is not None:
+            tol = dict(couple_standoff_tolerance)
+            unknown = set(tol) - {'xy_m', 'yaw_rad'}
+            if unknown:
+                raise ValueError(f'couple_standoff_tolerance: unknown keys {sorted(unknown)}')
+            for key, cap in (('xy_m', 0.15), ('yaw_rad', 0.35)):
+                if key in tol and not (isinstance(tol[key], (int, float)) and not isinstance(tol[key], bool)
+                                       and math.isfinite(tol[key]) and 0 < tol[key] <= cap):
+                    raise ValueError(f'couple_standoff_tolerance.{key} must be in (0, {cap}]')
+            self.couple_standoff_tolerance = {k: float(v) for k, v in tol.items()}
         # fm431 (B1) / run-325 cold TRANSIT: relax the nav arm-transport gate on the mid-collect
         # reposition legs so the base can drive to place_approach while the arm CARRIES the carton (the
         # stable braked carry, already lidar self-masked). False (default) => the empty-gripper gate
@@ -358,6 +374,11 @@ class RuntimeAdapter:
         # Tight XY arrival for the on-axis standoff so the fine-dock insert starts near the cart
         # axis (its cross-track is what the servo nulls while reversing); normal arrival otherwise.
         kw = {'arrival_xy_tol': 0.05} if goal_name == 'couple_standoff' else {}
+        if goal_name == 'couple_standoff' and self.couple_standoff_tolerance is not None:
+            tol = self.couple_standoff_tolerance   # fm482: config override (see __init__)
+            kw['arrival_xy_tol'] = tol.get('xy_m', 0.05)
+            if 'yaw_rad' in tol:
+                kw['arrival_yaw_tol'] = tol['yaw_rad']
         # Opt-in trusted-static couple approach: route against the static map so the thin live
         # margin at the backstock Support cannot false-block the leg (see self.couple_static_drive).
         if self.couple_static_drive:
@@ -387,6 +408,36 @@ class RuntimeAdapter:
     def _evidence(self, packet, **extra):
         return dict(observation_id=packet.observation_id, source=packet.source,
                     simulation_time=packet.simulation_time, **extra)
+
+    def _nav_controller(self):
+        """The navigation controller behind the bridge (unwrapping the sensor/Nav2 adapters' inner
+        controller); None for a fixture without one."""
+        core = getattr(self.nav, 'controller', None)
+        for attr in ('controller', 'safe'):
+            if core is not None and not hasattr(core, 'arrival_xy_hysteresis') and hasattr(core, attr):
+                core = getattr(core, attr)
+        return core
+
+    def _nav_workarounds(self, action):
+        """fm482: name the opt-in couple/outbound nav switches in the stage evidence (mission.json) as
+        scalar ``*_mode`` fields, which the walkthrough cut (twin.demo.run_evidence.workaround_labels)
+        puts on screen as that stage's caption label. {} when none is on => byte-identical events."""
+        nav = self._nav_controller()
+        if action == 'couple':
+            parts = []
+            hysteresis = getattr(nav, 'arrival_xy_hysteresis', 0.0) or 0.0
+            if hysteresis > 0:
+                parts.append(f'standoff xy-hysteresis {hysteresis:g} m')
+            tol = self.couple_standoff_tolerance
+            if tol is not None:
+                parts.append('standoff tol ' + ' / '.join(
+                    f'{k[:-2] if k.endswith("_m") else k[:-4]} {v:g}{" m" if k.endswith("_m") else " rad"}'
+                    for k, v in sorted(tol.items())))
+            return {'couple_arrival_mode': '; '.join(parts)} if parts else {}
+        if action == 'outbound' and getattr(nav, 'coupled_creep_escape', False):
+            ticks = int(getattr(nav, 'creep_escapes', 0))
+            return {'outbound_brake_mode': f'coupled creep-escape ({ticks} noise-band ticks)'}
+        return {}
 
     def _sensor_stall(self, result):
         """Return a failure reason if the collect/transfer reach has stalled, else None.
@@ -503,7 +554,7 @@ class RuntimeAdapter:
                 limit = self.goal_articulation.get('outbound')
                 if limit is not None and abs(p.articulation) >= limit:
                     raise ValueError('cart articulation exceeds manipulation/return goal tolerance')
-                return Result('succeeded', self._evidence(p, arrived=True))
+                return Result('succeeded', self._evidence(p, arrived=True, **self._nav_workarounds('outbound')))
             if self.action == 'return':
                 if not self._uncouple_return():
                     # Legacy tow-home: the cart is still coupled at home (byte-identical path).
@@ -663,7 +714,7 @@ class RuntimeAdapter:
                 return Result('running', reason='awaiting post-attach observation')
             state = self.mobile.coupling_state(p.docking)
             if p.coupled and state['healthy']:
-                return Result('succeeded', self._evidence(p, coupled=True))
+                return Result('succeeded', self._evidence(p, coupled=True, **self._nav_workarounds('couple')))
             return Result('running', reason='awaiting healthy physical coupling')
         if not p.parked:
             return Result('failed', reason='base moved during stationary operation')
