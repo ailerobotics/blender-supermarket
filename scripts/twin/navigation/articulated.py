@@ -7,7 +7,12 @@ articulation. Slip/model error must stay within the configured tracking margin.
 from dataclasses import dataclass
 import heapq
 import math
+import os
 import time
+
+# fm505: default-off controller-internal nav-plan diagnostics (every point where the coupled drive
+# can end up route=None), so a LIVE return/outbound stall names its cause on the first bench run.
+_NAV_PLAN_DIAG = os.environ.get('RESTOCK_NAV_PLAN_DIAG') == '1'
 
 from twin.mobile import MobileSpec, Pose2, occupied_envelope, swept_envelope, wrap
 from .core import Controller, Footprint, Result
@@ -662,6 +667,12 @@ class ArticulatedController(Controller):
             # articulation follows the lane (not a generic per-action value the coupled train may be
             # unable to reach into this goal). Documented in docs/restock_navigation.md.
             self.goal_articulation=self._active_lane.goal_articulation
+        if _NAV_PLAN_DIAG:
+            print('NAV_PLAN_DIAG start goal=%s coupled=%s active_lane=%s lanes=%s'
+                  % (tuple(round(c,3) for c in self.goal), coupled,
+                     (self._active_lane.name if self._active_lane is not None else None),
+                     ([ln.name for ln in self.lane_graph.lanes] if self.lane_graph else None)),
+                  flush=True)
 
     def plan_observed_route(self,state,obs,uncertainty):
         """Plan against current nvblox unknown/occupied cells when configured."""
@@ -715,10 +726,24 @@ class ArticulatedController(Controller):
             rebased=self._rebase_cart_yaw(lane.route,state,world)
             near=min(rebased.states,key=lambda s:math.hypot(s.x-state.x,s.y-state.y)) if rebased.states else None
             cart_ok=near is not None and abs(wrap(near.cart_yaw-state.cart_yaw))<=self.lane_cart_yaw_tol
+            if _NAV_PLAN_DIAG:
+                print('NAV_PLAN_DIAG acquire(rebase) lane=%s xy_ok=%s cart_ok=%s pose=%s lane_start=%s '
+                      'cart_yaw=%.3f near_cart_yaw=%s cart_tol=%.3f reacquire=%s'
+                      % (lane.name,xy_ok,cart_ok,tuple(round(c,3) for c in state.pose),
+                         tuple(round(c,3) for c in lane.start),state.cart_yaw,
+                         (round(near.cart_yaw,3) if near is not None else None),
+                         self.lane_cart_yaw_tol,self.lane_reacquire_along_route),flush=True)
             if not (xy_ok and cart_ok):
                 return Route([],[],'lane_not_acquired')
-        elif not lane.acquirable(state.pose,state.cart_yaw,along_route=self.lane_reacquire_along_route):
-            return Route([],[],'lane_not_acquired')
+        else:
+            acq=lane.acquirable(state.pose,state.cart_yaw,along_route=self.lane_reacquire_along_route)
+            if _NAV_PLAN_DIAG:
+                print('NAV_PLAN_DIAG acquire lane=%s acquirable=%s pose=%s lane_start=%s cart_yaw=%.3f reacquire=%s'
+                      % (lane.name,acq,tuple(round(c,3) for c in state.pose),
+                         tuple(round(c,3) for c in lane.start),state.cart_yaw,self.lane_reacquire_along_route),
+                      flush=True)
+            if not acq:
+                return Route([],[],'lane_not_acquired')
         # Re-validate the authored lane against the LIVE obstacle cloud. When the opt-in proud
         # tolerance is set, discount live returns within that distance of KNOWN static geometry
         # (proud returns of the shelf/support the lane hugs) so they cannot false-block the lane;
@@ -970,16 +995,33 @@ class ArticulatedController(Controller):
         if self.route is None:
             if not self.planning_stop:
                 self.planning_stop=True
+                if _NAV_PLAN_DIAG:
+                    print('NAV_PLAN_DIAG route_none->planning_stop active_lane=%s elapsed=%.2f pose=%s'
+                          % ((self._active_lane.name if self._active_lane is not None else None),
+                             self.elapsed, tuple(round(c,3) for c in odom.pose)), flush=True)
                 return Result(reason='planning_stop')
             if abs(odom.linear)>0.02 or abs(odom.angular)>0.03:
+                if _NAV_PLAN_DIAG:
+                    print('NAV_PLAN_DIAG waiting_stopped_for_plan rv=%.4f rw=%.4f'
+                          % (odom.linear, odom.angular), flush=True)
                 return Result(reason='waiting_stopped_for_plan')
             if obs.temporal_map is not None:
                 reason=obs.temporal_map.readiness(now)
-                if reason:return self._wait(dt,reason)
+                if reason:
+                    if _NAV_PLAN_DIAG:
+                        print('NAV_PLAN_DIAG temporal_map_not_ready reason=%r' % reason, flush=True)
+                    return self._wait(dt,reason)
             self.route=self.plan_observed_route(state,obs,max(0.02,odom.position_uncertainty))
             self.planned_obstacles=obs.obstacles
             self.planned_map=obs.temporal_map.slice if obs.temporal_map is not None else None
             self.index=0
+            if _NAV_PLAN_DIAG:
+                print('NAV_PLAN_DIAG plan_observed_route active_lane=%s states=%d reason=%r goal=%s state=%s'
+                      % ((self._active_lane.name if self._active_lane is not None else None),
+                         len(self.route.states), self.route.reason,
+                         tuple(round(c,3) for c in self.goal),
+                         (round(state.x,3),round(state.y,3),round(state.yaw,3),round(state.cart_yaw,3))),
+                      flush=True)
             return Result(reason='route_ready' if self.route.states else self.route.reason)
         if not self.route.states:
             if (obs.obstacles!=self.planned_obstacles or
