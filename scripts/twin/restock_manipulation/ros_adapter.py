@@ -1235,8 +1235,20 @@ class RosTransferBridge:
         try:
             sensors = sensors_from_json(message.data)
             now = self.node.get_clock().now().nanoseconds * 1e-9
-            if not 0 <= now - sensors.simulation_time <= self.controller.max_age:
-                raise ValueError('packet simulation timestamp stale or future')
+            # fm475: under render pacing the host /clock (node now) can arrive marginally BEHIND a freshly
+            # stamped packet -- a one-to-few physics-step delivery-order lead -- so a fresh-but-future
+            # stamp wrongly failed the hard '0 <= now-stamp' lower bound and the host rejected the WHOLE
+            # transfer packet ('timestamp stale or future') -> 'failed' -> arm feed death -> stall
+            # (run-347/348/349 transfer). Tolerate a sub-step future lead EXACTLY as the controller
+            # freshness does (self.controller.render_lead, default 0.2 s, env RESTOCK_FRESH_RENDER_LEAD_S):
+            # a stamp up to render_lead ahead is fresh (strictly MORE current data -- safe); a genuinely
+            # STALE stamp (age > max_age) or a wildly-future one (> render_lead) still rejects. Carry the
+            # measured delta into the reason so a residual trip names its magnitude.
+            _delta = now - sensors.simulation_time
+            if not -self.controller.render_lead <= _delta <= self.controller.max_age:
+                raise ValueError('packet simulation timestamp stale or future '
+                                 '(now-stamp=%.3f, lead=%.3f, max_age=%.3f)'
+                                 % (_delta, self.controller.render_lead, self.controller.max_age))
             dt = .01 if self.last_sim is None else sensors.simulation_time - self.last_sim
             self.last_sim = sensors.simulation_time
             self._emit(self.controller.step(dt, sensors))
