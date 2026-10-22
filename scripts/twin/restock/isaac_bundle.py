@@ -290,6 +290,11 @@ class Bundle:
     # Record of the opt-in recorded start staging (shortcut.staged_scenario) for mission.json; None
     # unless config['start_staging'] is set.
     start_staging: dict = None
+    # Best-effort RTX render-product / camera-feed releases, run by release_render() BEFORE
+    # SimulationApp.close() so VRAM is freed before the renderer shuts down -- the failure path
+    # (a run that ends on a per-op manip failure) then tears the renderer down with the same
+    # headroom a clean exit has, instead of core-dumping. Empty => release_render() is a no-op.
+    _render_closers: tuple = ()
 
     def close(self):
         errors = []
@@ -300,6 +305,18 @@ class Bundle:
                 errors.append(str(exc))
         if errors:
             raise RuntimeError('; '.join(errors))
+
+    def release_render(self):
+        """Pause every known camera's RTX render product so its GPU buffers are freed before
+        ``SimulationApp.close()``. Teardown robustness only -- run AFTER the walkthrough is encoded
+        (nothing reads a render product at this point) and BEFORE the app close. Never raises (a
+        render-release failure must not skip the app close); returns the number attempted."""
+        for closer in self._render_closers:
+            try:
+                closer()
+            except Exception:  # noqa: BLE001 -- best-effort VRAM release; never block the app close
+                pass
+        return len(self._render_closers)
 
 
 def _resolve_factory(config, key):
@@ -456,7 +473,29 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
         warm_reset = build_warm_reset(app=app, assembly=assembly, parts=parts, plan=plan,
                                       config=config, output=output)
     return Bundle(adapter=adapter, recording=recording, _closers=tuple(closers),
-                  warm_reset=warm_reset, start_staging=start_staging)
+                  warm_reset=warm_reset, start_staging=start_staging,
+                  _render_closers=_render_closers(assembly))
+
+
+def _render_closers(assembly):
+    """Best-effort zero-arg callables that pause each known camera's RTX render product, for
+    :meth:`Bundle.release_render` to run before ``SimulationApp.close()``.
+
+    Covers the station decode cameras (the dominant 2560x1920 source/cart/shelf render products)
+    and any location cameras. The chase recorder camera and the arm/mast masked-depth feeds are
+    NOT included here: the recorder is finalized by its own closer and the masked-depth ROS
+    bridges are stopped by ``Bundle.close()`` before the app close. Each closer delegates to the
+    pre-existing best-effort toggle, which already logs-and-skips a raw ``Camera`` with no hydra
+    pause -- so this never raises and adds no new VRAM-release path to validate on CPU."""
+    from .native_cameras import set_camera_render_products_enabled
+    sources = getattr(assembly, 'sensing_sources', None)
+    sources = sources if isinstance(sources, dict) else {}
+    cams = []
+    for key in ('cameras', 'location_cameras'):
+        for cam in (sources.get(key) or {}).values():
+            if cam is not None:
+                cams.append(cam)
+    return tuple((lambda c=cam: set_camera_render_products_enabled(c, False)) for cam in cams)
 
 
 def _hitch_geometry(config):
