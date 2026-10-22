@@ -230,11 +230,24 @@ class IsaacRosGraph:
                     return self._status_fault('host process/status wall backstop')
         return result
 
-    def close(self):
+    def close(self, *, close_control=True):
+        """Hold the held payload sealed and fault the graph. ``close_control`` gates tearing down the
+        out-of-Isaac control publisher subprocess (``host_control``).
+
+        That subprocess is a SHARED, STATION-level resource: it both PUBLISHES job/sensors to the host
+        AND forwards the host->Isaac return topics -- including ``/restock_sim/station/status``, which the
+        StationClient reads for its parked-mapper ack. Terminating it on a PER-OP manipulation failure
+        (``ros_manipulation.stop(close_sensing=False)``) killed the station/status forwarding mid-transfer:
+        the StationClient's reader thread hit EOF, kept reading the LAST ack stamp forever, and the
+        frozen-stamp watchdog raised ``StationAckStreamStalled`` -- masking the true stage reason
+        (``collision planning or execution failed``; armcam/transfer2/bench1 all froze at ~sim 31 s this
+        way). Like the masked-depth feed (``close_sensing``), the relay is a per-mission resource: keep it
+        alive across a per-op failure so the ack stays fresh and the true reason surfaces; tear it down
+        exactly once, at the genuine mission teardown (``close_control=True``, the default)."""
         self.hold()  # leave any physically held payload sealed
         self.active = False
         self.faulted = True
-        if self.host_control is not None:
+        if close_control and self.host_control is not None:
             try:
                 self.host_control.close()  # terminate the out-of-Isaac control publisher subprocess
             except Exception:

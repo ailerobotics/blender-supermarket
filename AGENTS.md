@@ -165,7 +165,14 @@ repo's `scenes/`, `export/` or `renders/`.
   ack window (bounded `max_restarts`), and `FrameWriter` bounds its send buffer. Pre-boot VRAM gate
   `scripts/twin/restock/gpu_budget.py` (12 GB card, whispr ~2.2 GB resident): one arm feed fits, a 2nd
   full-res feed doesn't — keep `mast_depth` off for live_pose transfer. Report + bounded config
-  fragment: `data/sim-robust-arm-cam-feed-v1/`.
+  fragment: `data/sim-robust-arm-cam-feed-v1/`. **Same rule for the SHARED control relay**
+  (`control_ipc.HostControlPublisher`, `host_control`): it is one subprocess forwarding
+  `/restock_sim/station/status` (StationClient) AND `/manipulation/status` (graph), so the per-op
+  `ros_manipulation.stop(close_sensing=False)` must NOT tear it down either — `IsaacRosGraph.close`
+  takes `close_control=` (gated on `close_sensing`), closing the relay only at genuine teardown. Closing
+  it on a per-op `failed` was the OTHER half of the live_pose freeze: the StationClient read a frozen ack
+  → `StationAckStreamStalled` at ~sim 31 s, masking the true `collision planning or execution failed`
+  (armcam/transfer2/bench1). Report: `data/sim-robust-station-ack-v1/report.md`.
 - **Mobile navigation**: `scripts/twin/navigation/` and
   [docs/restock_navigation.md](docs/restock_navigation.md) define sensor, footprint
   and goal contracts; RUNBOOK §12 has CPU checks and isolated Nav2 launch. Coupled

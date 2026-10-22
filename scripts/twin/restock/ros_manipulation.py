@@ -267,16 +267,19 @@ class RosManipulationRuntime:
     def stop(self, *, close_sensing=True):
         """Safe halt: hold the gripper/graph and stop the parked station.
 
-        ``close_sensing`` gates tearing down the Isaac-side masked-depth publisher subprocess.
-        It MUST stay True for a genuine mission teardown (the external MissionRuntime.stop path),
-        which terminates the feed cleanly. It is False when a PER-OP manipulation failure halts the
-        stage (step()'s host-failed / exception handlers): the masked-depth feed is a STATION-level
-        resource the host incorporation-ack consumes, so killing it on a single failed transfer
-        froze the station ack stamp and faulted the mission with the misleading
-        StationAckStreamStalled -- masking the real stage reason ('collision planning or execution
-        failed', run-347/bench1/transfer2, 36/36 recorded deaths were this close(), rc=0, never an
-        OOM crash). Keeping the feed alive across a per-op failure lets the mission report the TRUE
-        reason and tear the feed down once, at the real end."""
+        ``close_sensing`` gates tearing down the Isaac-side masked-depth publisher subprocess AND the
+        shared out-of-Isaac control relay (``graph``'s ``host_control``). It MUST stay True for a genuine
+        mission teardown (the external MissionRuntime.stop path), which terminates both cleanly. It is
+        False when a PER-OP manipulation failure halts the stage (step()'s host-failed / exception
+        handlers): BOTH are STATION-level resources the host incorporation-ack feeds/forwards, so killing
+        either on a single failed transfer froze the station ack stamp and faulted the mission with the
+        misleading StationAckStreamStalled -- masking the real stage reason ('collision planning or
+        execution failed', run-347/bench1/transfer2/armcam, 36/36 recorded deaths were this close(),
+        rc=0, never an OOM crash). The masked-depth feed is one resource; the control relay the
+        StationClient reads /restock_sim/station/status through is the OTHER (graph.close() terminated it,
+        so the ack-read thread hit EOF and read the last stamp forever -> the frozen-stamp watchdog fired).
+        Keeping BOTH alive across a per-op failure lets the mission report the TRUE reason; they are torn
+        down once, at the real end."""
         if self.station is not None:
             try:
                 self.station.stop()
@@ -288,4 +291,7 @@ class RosManipulationRuntime:
                 self.sensing_bridge.close()  # terminate the out-of-Isaac publisher subprocess
             except Exception:
                 pass
-        self.graph.close()  # hold; never unseal a held object on failure
+        # hold; never unseal a held object on failure. On a per-op failure (close_sensing=False) keep the
+        # shared control relay alive so /restock_sim/station/status keeps flowing to the StationClient and
+        # the ack does not freeze; the genuine teardown (close_sensing=True) closes it.
+        self.graph.close(close_control=close_sensing)
