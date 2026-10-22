@@ -108,6 +108,9 @@ def run_once_bt(db, scenario, bundle, config, output_dir, *, mission_factory, is
     if bounded:
         summary.update(bounded)
         summary['note'] += ' ' + bounded['bounded_note']
+    # collect-gt: name the ground-truth collect workaround (collect_mode + note) when it ran.
+    from ...restock_manipulation import ground_truth_collect
+    ground_truth_collect.label_summary(summary, mission.shortcut)
     summary['bt_view'] = str((output_dir / 'bt_view.html'))
     from ...restock_manipulation.transfer_mode import stamp_summary
     stamp_summary(summary)   # opt-in RESTOCK_TRANSFER_MODE workaround => transfer_mode + note; absent => no-op

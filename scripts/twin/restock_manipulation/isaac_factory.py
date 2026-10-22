@@ -24,6 +24,7 @@ import math
 from dataclasses import dataclass, field
 
 from .transfer_mode import LIVE_POSE, transfer_mode
+from . import ground_truth_collect as gtc
 from .types import ProductProfile
 
 STATIONS = ('source', 'shelf')
@@ -437,6 +438,13 @@ class CollectTargetBridge:
         if self.transfer_mode:
             print(f'TRANSFER_MODE {self.transfer_mode} isaac-capture: transfer source = live carton top pose '
                   f'({self._handling_unit_path})', flush=True)
+        # GROUND-TRUTH COLLECT (collect-gt) (RESTOCK_COLLECT_GROUND_TRUTH=1, default off): serve the collect pick
+        # from the controlled carton asset's simulated pose instead of the source-camera provider (which
+        # refused every frame in cold runs 343-348, so /sensors never started). The source observation is
+        # served only until the carton is first held; after that the packet keeps the cart target alive
+        # (the place re-registration needs it) but claims no source localisation. Off => byte-identical.
+        self.collect_ground_truth = gtc.enabled()
+        self._gt_carton_held = False
 
     def set_shelf_target_provider(self, provider):
         self.shelf_provider = provider
@@ -591,7 +599,14 @@ class CollectTargetBridge:
                 wc = np.array([(mn[0] + mx[0]) / 2.0, (mn[1] + mx[1]) / 2.0, float(mx[2]), 1.0])
                 self._deck_local = np.linalg.inv(Tc) @ wc            # rigid in the cart frame
                 self._deck_extent = (float(mx[0] - mn[0]), float(mx[1] - mn[1]))
-            w = Tc @ self._deck_local
+            local = self._deck_local
+            dx = gtc.deck_slot_x()
+            if dx:
+                # collect-gt opt-in RESTOCK_COLLECT_DECK_SLOT_X: shift the deck slot along the cart BODY +x
+                # (toward the hitch/robot side) for transfer reach, clamped so the carton stays on the deck.
+                # Shared by the collect place AND the transfer cart-source read, so both stay consistent.
+                local = local + np.array([dx, 0.0, 0.0, 0.0])
+            w = Tc @ local
             world = np.array([float(w[0]), float(w[1]), float(w[2]), 1.0])
         else:
             lx, ly = cp['load_center_body_xy']
@@ -653,6 +668,98 @@ class CollectTargetBridge:
         height = float(next(iter(self.profiles.values())).dimensions[2])
         yaw = math.atan2(float(Tu[1, 0]), float(Tu[0, 0])) - math.atan2(float(Tub[1, 0]), float(Tub[0, 0]))
         return (float(p[0]), float(p[1]), float(p[2]) + height / 2.0), yaw
+
+    def _ground_truth_target(self, now):
+        """GROUND-TRUTH COLLECT (collect-gt): the pick target from the controlled carton asset's simulated pose.
+
+        Same shape as the camera ``SourceTarget`` (top-face centre in ur_base_link + world/map yaw, see
+        ground_truth_collect.carton_top_pose), so the packet, ROI reprojection and ``_map_pose_to_base``
+        path downstream are unchanged. Provenance is 'ground_truth', never 'sensor'. None when the stage,
+        carton prim or its grasp profile is missing -- nothing is filled in from scenario constants."""
+        if self.stage is None:
+            return None
+        import numpy as np
+        from pxr import Usd, UsdGeom
+        from twin.restock_camera.source_target import SourceTarget
+        unit = self.stage.GetPrimAtPath(self._handling_unit_path)
+        base = self.stage.GetPrimAtPath(self.base_path)
+        if not unit or not base:
+            return None
+        sku = unit.GetCustomDataByKey('restock:sku') or (next(iter(self.profiles)) if self.profiles else '')
+        profile = self.profiles.get(sku)
+        if profile is None:
+            return None
+        cache = UsdGeom.XformCache()
+        Tu = np.asarray(cache.GetLocalToWorldTransform(unit)).T
+        if self._unit_local_center is None:          # shared rigid carton-local centre (see above)
+            bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                     [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+            rng = bbox.ComputeWorldBound(unit).ComputeAlignedRange()
+            mn, mx = rng.GetMin(), rng.GetMax()
+            wc = np.array([(mn[0] + mx[0]) / 2.0, (mn[1] + mx[1]) / 2.0, (mn[2] + mx[2]) / 2.0, 1.0])
+            self._unit_local_center = np.linalg.inv(Tu) @ wc
+        Tb = np.asarray(cache.GetLocalToWorldTransform(base)).T
+        pose = gtc.carton_top_pose(Tu, Tb, self._unit_local_center[:3], profile.dimensions[2])
+        return SourceTarget(sku=sku, pose_station=pose, stamp=float(now),
+                            provenance={'source': gtc.SOURCE, 'asset': self._handling_unit_path,
+                                        'note': 'collect-gt: simulated carton asset pose (sim ground truth)'},
+                            location=self.source_location, station_frame='ur_base_link')
+
+    def _capture_ground_truth_collect(self, now):
+        """collect-gt: the collect capture under RESTOCK_COLLECT_GROUND_TRUTH. Mirrors the camera path's
+        gates (parked, fresh) and packet, but the source observation is the carton asset's pose labelled
+        'ground_truth'. Once the carton has been held it is no longer AT the source, so later packets claim
+        no source observation (like the fm410 survival packet) yet keep the cart placement target that
+        the place re-registration and the preplace re-check need. None while the base is not parked."""
+        from twin.restock_manipulation.types import Sensors, Observation
+        parked = bool(self.motion.parked())
+        if not parked:
+            if self._calls % 10 == 1:
+                print(f'COLLECT_GT calls={self._calls} parked=False', flush=True)
+            return None
+        held = self._carton_attached()
+        if held:
+            self._gt_carton_held = True
+        try:
+            target = self._ground_truth_target(now)
+        except Exception as exc:
+            target = None
+            if self._calls % 10 == 1:
+                print(f'COLLECT_GT calls={self._calls} target_error={type(exc).__name__}:{exc}', flush=True)
+        if target is None:
+            if self._calls % 10 == 1:
+                print(f'COLLECT_GT calls={self._calls} target=None (no carton asset/profile)', flush=True)
+            return None
+        observations = ()
+        if not self._gt_carton_held:
+            roi = self._reproject(target)
+            if roi is not None:
+                self.sensed_target_bboxes = (dict(roi=roi, location=self.source_location),)
+            observations = (Observation(observation_id=f'ground_truth:{now:.3f}', source=gtc.SOURCE,
+                                        simulation_time=float(now), sku=target.sku,
+                                        location=self.source_location,
+                                        pose=tuple(self._map_pose_to_base(target.pose_station)),
+                                        confidence=1.0, frame='ur_base_link'),)
+        if self._calls % 10 == 1:
+            print(f'COLLECT_GT calls={self._calls} sku={target.sku} held={self._gt_carton_held} '
+                  f'pose={tuple(round(v, 3) for v in target.pose_station)} (ground-truth, not camera)',
+                  flush=True)
+        try:
+            joints = tuple(float(j) for j in self.joints())
+        except Exception:
+            joints = (0.,) * 6
+        try:
+            cart_target = self._cart_target(now, target)
+        except Exception as exc:
+            cart_target = None
+            if self._calls % 10 == 1:
+                print(f'COLLECT_GT calls={self._calls} cart_target_error={type(exc).__name__}:{exc}', flush=True)
+        try:
+            placed_pose = self._carton_center_station()
+        except Exception:
+            placed_pose = None
+        return Sensors(now, observations, cart_target, parked, bool(self.contact.read()), now,
+                       self._collision_time(), joints, (), float(now), None, placed_pose)
 
     def _capture_transfer(self, now):
         """Transfer sensing: the carton on the cart (derived cart pose, controlled asset) as the
@@ -811,6 +918,8 @@ class CollectTargetBridge:
         cart_loc = self.cart_placement.get('location')
         if cart_loc and source == cart_loc:
             return self._capture_transfer(now)
+        if self.collect_ground_truth:              # collect-gt: labelled ground-truth pick, never the camera
+            return self._capture_ground_truth_collect(now)
         if self.provider is None:
             if self._calls % 30 == 1:
                 print(f'COLLECT_CAPTURE calls={self._calls} provider=None', flush=True)
@@ -992,6 +1101,10 @@ def _build_runtime(*, app, assembly, params, output):
         source_location=params.collect_source_location,
         cart_placement=params.cart_placement, cart_root=cart_root,
         cart_support_path=cart_support_path, verify_place=bool(verify_place))
+    # collect-gt: name the workaround at boot so a wrongly-set switch is visible before the first stage.
+    print('COLLECT_GROUND_TRUTH enabled=%s deck_slot_x=%.3f (%s=1: collect pick from the simulated '
+          'carton asset pose, labelled ground_truth; default off)'
+          % (collect_bridge.collect_ground_truth, gtc.deck_slot_x(), gtc.ENV), flush=True)
 
     sensing_bridge = None
     if params.masked_depth.get('enabled'):

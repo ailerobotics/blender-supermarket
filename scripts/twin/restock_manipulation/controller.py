@@ -5,6 +5,7 @@ import os
 import time
 from ..restock_camera.freshness import require_fresh
 
+from . import ground_truth_collect as gtc
 from .fit import axis_fits
 from .transfer_mode import LIVE_POSE, near_face_poses, transfer_mode
 from .types import MotionPort, ProductProfile, Result, Sensors
@@ -89,8 +90,15 @@ class TransferController:
                  cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03,
                  cage_preplace_shape=None, reposition_before_place: bool = False,
                  grasp_track_m=None, require_collect_source_evidence: bool = False,
-                 transfer_ground_truth: bool = False, ground_truth_pick: bool = False):
+                 transfer_ground_truth: bool = False, ground_truth_pick: bool = False,
+                 collect_ground_truth: bool = False):
         self.steady_clock=steady_clock
+        # collect-gt (demo, opt-in, default off): GROUND-TRUTH COLLECT. Accept the collect SOURCE observation
+        # labelled 'ground_truth' (the controlled carton asset's simulated pose, served Isaac-side when the
+        # source camera refuses every frame) and let it stand in for the fm449 clean-camera gate, recording
+        # collect_mode='ground_truth' in the evidence + run log. Enabled by this arg OR the shared env
+        # RESTOCK_COLLECT_GROUND_TRUTH (the host process inherits the orchestrate run env). Off => unchanged.
+        self.collect_ground_truth = bool(collect_ground_truth) or gtc.enabled()
         # fm390: drive the BASE in front of the rollwagen mouth between the carry fold and the place,
         # instead of reaching the place around from the collect station pose. When set (with the staged
         # cart swing), the carry fold goes lift -> tuck -> TRANSIT (hold, emit one reposition_base control)
@@ -483,6 +491,9 @@ class TransferController:
         allowed = ('sensor', 'test_fixture') if self.fixture_mode else ('sensor',)
         if self.transfer_ground_truth:
             allowed = allowed + ('ground_truth',)   # fm461: the authored bay transfer target (demo fallback)
+        elif (self.collect_ground_truth and getattr(self, 'operation', None) == 'collect'
+              and getattr(item, 'location', None) == getattr(self, 'source', None)):
+            allowed = allowed + (gtc.SOURCE,)        # collect-gt: the ground-truth collect pick (source only)
         return (item.source in allowed and bool(item.observation_id)
                 and self._fresh(item.simulation_time, now) and item.frame == self.frame)
 
@@ -808,7 +819,12 @@ class TransferController:
             # clean capture within collect_source_evidence_wait_ticks fails fast with the named reason.
             # Default off (flag False) => the branch never arms => byte-identical. Placed before any commit
             # side-effect (evidence append / transition) so a wait neither advances nor double-records.
-            if self.require_collect_source_evidence and getattr(self, 'operation', None) == 'collect':
+            # collect-gt: a ground-truth collect pick has, by design, no camera frame to be clean -- the camera
+            # refusal is exactly what it works around -- so the gate stands aside for it (labelled below).
+            gt_pick = (self.collect_ground_truth and getattr(self, 'operation', None) == 'collect'
+                       and source.source == gtc.SOURCE)
+            if (self.require_collect_source_evidence and getattr(self, 'operation', None) == 'collect'
+                    and not gt_pick):
                 clean = False
                 provider = self._collect_source_evidence
                 if provider is not None:
@@ -838,6 +854,13 @@ class TransferController:
             self.source_pose = source.pose
             self._source_obs = source   # fm390: re-run the place policy against a fresh target after repositioning
             self.evidence.append(asdict(source))
+            if gt_pick:
+                self.evidence.append({'source': 'ground_truth_collect', 'collect_mode': gtc.MODE,
+                                      'location': self.source,
+                                      'pick_pose': tuple(round(v, 4) for v in source.pose)})
+                print('GROUND_TRUTH_COLLECT source=%s pick=%s (simulated carton asset pose, not camera; '
+                      'collect_mode=ground_truth)' % (self.source, tuple(round(v, 3) for v in source.pose[:3])),
+                      flush=True)
             if self.ground_truth_pick and self.operation == 'transfer':
                 # fm462: label the (already controlled-asset) transfer pick ground-truth, honestly.
                 self.evidence.append({'source': 'ground_truth_pick', 'location': self.source,
@@ -1272,6 +1295,8 @@ class TransferController:
                                               'simulation_time': float(now), 'carton_pose_station': tuple(c),
                                               'support_pose_station': tuple(self.target_surface),
                                               'xy_offset': float(xy), 'bottom_gap': float(bottom_gap)})
+                        if self.collect_ground_truth and self.operation == 'collect':
+                            self.evidence[-1]['collect_mode'] = gtc.MODE   # collect-gt: carried to mission.json
                         if gt_transfer:
                             print('GROUND_TRUTH_VERIFY transfer destination=%s carton=%s bay_target=%s '
                                   'xy_offset=%.3f bottom_gap=%.3f (ground-truth, not camera)'

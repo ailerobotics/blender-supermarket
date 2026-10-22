@@ -22,6 +22,10 @@ ACTIONS = ('collect', 'couple', 'outbound', 'park', 'transfer', 'verify', 'retur
 # payload acts (grasp/place/release) and verify commits stock, so re-beginning them would DOUBLE-ACT --
 # those are excluded here and rely on their inner per-move retries instead (fm363's explicit scoping).
 _RETRYABLE_STAGES = ('couple', 'outbound', 'park', 'return')
+# collect-gt: stages whose evidence may be explicitly-labelled sim GROUND TRUTH (source 'ground_truth' AND
+# ground_truth=True: the fm389 place check converted by the runtime). Never 'verify' -- the stock-commit
+# gate stays sensor-only. Unlabelled or other stages keep the sensor-only rule.
+_GT_EVIDENCE_STAGES = ('collect',)
 
 
 def bounded_stages(stages=None, stop_after=None, start_at=None):
@@ -159,6 +163,9 @@ class Mission:
 
     def _validate(self, evidence):
         sources = {'sensor'} | ({'test_fixture'} if self.fixture_mode else set())
+        if (self.state in _GT_EVIDENCE_STAGES and evidence.get('source') == 'ground_truth'
+                and evidence.get('ground_truth') is True):
+            sources = sources | {'ground_truth'}    # collect-gt: labelled sim ground-truth (never verify)
         if evidence.get('source') not in sources:
             raise ValueError('action requires sensor evidence')
         if not isinstance(evidence.get('observation_id'), str) or not evidence['observation_id']:

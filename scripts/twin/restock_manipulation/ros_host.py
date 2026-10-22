@@ -180,6 +180,9 @@ def main():
                           if isinstance(config.get('transfer_ground_truth'), dict) else False,
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
+    # collect-gt: the ground-truth collect switch is the shared RESTOCK_COLLECT_GROUND_TRUTH env (inherited from
+    # the run env); log the host's view at boot so an Isaac/host activation split is visible immediately.
+    print('COLLECT_GROUND_TRUTH host enabled=%s' % controller.collect_ground_truth, flush=True)
     # The first decode-grade frame + support registration under render pacing needs several
     # ~1 s RTX renders (~5-15 s WALL); the default 5 s wall startup grace flaked (run-108 failed
     # 'no initial sensor frame' where run-106/107 cleared it only by luck). Widen it for the sim
