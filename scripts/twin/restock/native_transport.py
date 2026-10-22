@@ -116,6 +116,26 @@ class ArmCommandGate:
         self.faulted=True
         self.apply(self.hold_target,np.zeros(6),self.indices)
 
+    def resume(self):
+        """Clear a latched hold()/fault so the gate accepts host commands again, re-seating a clean hold
+        at the current measured joints. The ONLY caller is the dev-bench start-phase shortcut
+        (restock.shortcut.apply_start_state): its transfer-start settle holds the arm via
+        ``assembly.hold()`` -- which latches ``faulted`` (hold() is otherwise a terminal e-stop) -- but
+        the mission that then runs MUST drive the arm (the executor/cuMotion transfer). Without this the
+        first real arm command is silently dropped at ``if self.faulted`` in command() and the arm stays
+        frozen at the stow pose; the executor transfer then faulted on the reference-vs-frozen-arm
+        divergence (1.3 rad, execretest 2026-10-22 -- NOT the clock anchor nor a self-collision). Re-arms
+        the gate (faulted + contact-hold cleared, hold_target dropped, sequence/started reset) and
+        commands the measured pose so the arm holds until the first host command. Never on the production
+        path (no shortcut => apply_start_state is not called => byte-identical)."""
+        self.faulted=False
+        self._contact_hold=False
+        self._contact_hold_target=None
+        self.hold_target=None
+        self.last_stamp=-1.
+        self.started=False
+        self.apply(self.measured(),np.zeros(6),self.indices)
+
     def command(self, *, names, positions, velocities, efforts, stamp, now):
         if self.faulted:
             self.hold()
