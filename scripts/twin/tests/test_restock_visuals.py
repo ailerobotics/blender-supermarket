@@ -16,15 +16,14 @@ from twin.restock import visuals as V
 
 
 @pytest.mark.parametrize('config,want', [
-    # DEFAULT OFF: absent/None/false => byte-identical.
-    ({}, False), ({'visuals': None}, False), (None, False), ({'visuals': False}, False),
-    ({'visuals': {'enabled': False}}, False), ({'visuals': 'off'}, False),
-    ({'visuals': '0'}, False), ({'visuals': 'false'}, False),
-    # Explicit opt-in.
-    ({'visuals': True}, True), ({'visuals': {'enabled': True}}, True),
-    ({'visuals': {}}, True), ({'visuals': 'on'}, True),
+    # DEFAULT ON: absent/None/true/{} => enabled.
+    ({}, True), ({'visuals': None}, True), (None, True), ({'visuals': True}, True),
+    ({'visuals': {'enabled': True}}, True), ({'visuals': {}}, True), ({'visuals': 'on'}, True),
+    # Explicit opt-out restores the plain look.
+    ({'visuals': False}, False), ({'visuals': {'enabled': False}}, False),
+    ({'visuals': 'off'}, False), ({'visuals': '0'}, False), ({'visuals': 'false'}, False),
 ])
-def test_switch_defaults_off_and_honours_opt_in_forms(config, want):
+def test_switch_defaults_on_and_honours_opt_out_forms(config, want):
     assert V.enabled(config) is want
 
 

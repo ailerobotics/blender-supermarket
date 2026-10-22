@@ -15,9 +15,9 @@ support/shelf markers the station cameras decode, or any xform. It only:
   * overrides the ``diffuseColor``/``roughness`` of a few *backroom* store
     materials (sublayered read-only store; the override lives in the output
     root layer, so the committed store file is never touched).
-**Default OFF** (``visuals`` key absent ⇒ the pass is a no-op and the scene is
-byte-identical to the pre-visuals look). A run opts in with ``"visuals": true`` /
-``{"enabled": true}``.
+**Default ON** (``visuals`` key absent ⇒ enabled, so the mission's next render picks
+it up). A run restores the plain look with ``"visuals": false`` / ``{"enabled": false}``
+/ ``"off"``.
 
 Palette (sRGB hex; authored into USD as linear diffuseColor). The UR values
 follow Universal Robots' own scheme — grey-aluminium housings (RAL 9007), light
@@ -97,17 +97,17 @@ _ENV_MATERIALS = {
 
 
 def enabled(config) -> bool:
-    """Whether the visuals pass runs. **Default OFF** (absent/None ⇒ disabled), so a
-    run with no ``visuals`` key composes byte-identically to today's plain look. The
-    integration lane opts a run in with ``"visuals": true`` / ``{"enabled": true}`` /
-    ``"on"``. Mirrors the opt-in style of ``cage_collision``."""
+    """Whether the visuals pass runs. **Default ON** (absent/None ⇒ enabled), so the
+    mission's next render picks up the new look with no config edit. A run restores the
+    plain white look with ``"visuals": false`` / ``{"enabled": false}`` / ``"off"``.
+    Mirrors ``cage_collision``'s shape (inverted: default on)."""
     raw = config.get(KEY) if isinstance(config, dict) else config
-    if raw is None or raw is False:
+    if raw is False:
         return False
-    if raw is True:
+    if raw is None or raw is True:
         return True
     if isinstance(raw, dict):
-        return bool(raw.get('enabled', True))  # a present block is an explicit opt-in
+        return bool(raw.get('enabled', True))
     if str(raw).strip().lower() in _OFF:
         return False
     return True

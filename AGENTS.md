@@ -312,8 +312,8 @@ repo's `scenes/`, `export/` or `renders/`.
   joint caps, dark housings) onto the imported arm link prims, a neutral grey to the mobile
   base, galvanised steel + blue plastic to the rollwagen, and re-tones the backroom concrete/
   walls via read-only overrides on the sublayered store. Top-level runtime key `visuals`,
-  **DEFAULT OFF** (absent ⇒ byte-identical plain look; opt a run in with `true`/`{"enabled":true}`/
-  `"on"`); example `docs/examples/visuals-mission-fragment.json`. It never touches
+  **DEFAULT ON** (absent ⇒ enabled; restore the plain look with `false`/`{"enabled":false}`/
+  `"off"`); example `docs/examples/visuals-mission-fragment.json`. It never touches
   geometry/colliders/physics/joints/cameras/lights or the carton QR + decode markers, so the
   sensing/decode suites are unchanged. CPU proof: `tests/test_restock_visuals.py`.
 - **Service environment**: `scripts/store_environment.py` adds the connected backroom;
