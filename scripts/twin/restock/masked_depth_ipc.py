@@ -147,10 +147,21 @@ def serve(socket_path, *, idle_timeout_s=600.0, depth_topic=WRIST_DEPTH_TOPIC,
     conn, _ = srv.accept()
     conn.settimeout(idle_timeout_s)
     published = 0
+    # fm463 lifecycle instrumentation: name WHY this publisher subprocess exits (writer EOF from a
+    # bridge close, an idle timeout, or an exception such as the rclpy context going invalid after a
+    # SIGTERM) and WHICH feed it is -- so a death in the run log names its own trigger even with the
+    # mast off. `feed` is derived from the per-feed socket path (restock_camera_arm vs _mast).
+    _feed = 'camera_1_mast' if 'mast' in str(socket_path) else 'camera_0_arm'
+    _exit_reason = 'unknown'
     try:
         while True:
-            frame = read_frame(conn.recv)
+            try:
+                frame = read_frame(conn.recv)
+            except socket.timeout:
+                _exit_reason = 'idle_timeout_%.0fs' % idle_timeout_s
+                break
             if frame is None:
+                _exit_reason = 'writer_eof'   # the Isaac-side FrameWriter closed (a bridge close())
                 break
             header, depth = frame
             stamp = Time(sec=int(header['stamp_sec']), nanosec=int(header['stamp_nsec']))
@@ -179,8 +190,18 @@ def serve(socket_path, *, idle_timeout_s=600.0, depth_topic=WRIST_DEPTH_TOPIC,
             if published % 20 == 0:          # periodic so the count survives a SIGTERM kill
                 node.get_logger().info(f'masked-depth publisher: published={published}')
             rclpy.spin_once(node, timeout_sec=0.0)
+    except BaseException as _e:   # rclpy context invalid after a SIGTERM, a publish error, etc.
+        _exit_reason = 'exception:%s:%s' % (type(_e).__name__, str(_e)[:160])
     finally:
-        node.get_logger().info(f'masked-depth publisher exiting; published={published}')
+        # fm463: print (not node.get_logger -- the rclpy context may already be invalid) so the reason
+        # always lands even on a signal-induced context shutdown.
+        print('MASKED_DEPTH_SERVE_EXIT feed=%s reason=%s published=%d' % (_feed, _exit_reason, published),
+              flush=True)
+        try:
+            node.get_logger().info(f'masked-depth publisher exiting; published={published} '
+                                   f'feed={_feed} reason={_exit_reason}')
+        except Exception:
+            pass
         node.destroy_node()
         try:
             rclpy.shutdown()                 # guard the double-shutdown RCLError when a second masked-depth

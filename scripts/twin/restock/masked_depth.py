@@ -340,6 +340,17 @@ class ArmDepthSubprocessBridge:
         return stamp_s
 
     def close(self):
+        # fm463 lifecycle instrumentation: a masked-depth publisher death freezes the station, so name
+        # EXACTLY who closed which feed and when. The caller stack names the trigger (stop() / a stage
+        # teardown / a sensing rebuild); the feed tags camera_0 (arm) vs camera_1 (mast); the returncode
+        # is the subprocess exit code (negative => killed by signal -N). A publisher that dies WITHOUT a
+        # matching MASKED_DEPTH_BRIDGE_CLOSE line died on its own (crash/timeout), not from a close().
+        import traceback as _tb, time as _t
+        feed = 'camera_1_mast' if 'mast' in str(self.frame_id) else 'camera_0_arm'
+        caller = ''.join(_tb.format_stack()[-7:-1])
+        print('MASKED_DEPTH_BRIDGE_CLOSE feed=%s frame_id=%s wall=%.3f pid=%s alive=%s\n  caller:\n%s'
+              % (feed, self.frame_id, _t.time(), getattr(self._proc, 'pid', None),
+                 self._proc.poll() is None, caller), flush=True)
         try:
             self._writer.close()
         finally:
@@ -349,6 +360,8 @@ class ArmDepthSubprocessBridge:
                     self._proc.wait(timeout=5)
                 except Exception:
                     self._proc.kill()
+            print('MASKED_DEPTH_BRIDGE_CLOSED feed=%s returncode=%s (negative=killed by signal)'
+                  % (feed, self._proc.returncode), flush=True)
 
 
 def _rig_root(path):
