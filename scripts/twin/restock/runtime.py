@@ -14,6 +14,7 @@ from typing import Protocol
 
 from .mission import Result
 from .staged_start import SettleHold
+from . import pace_watchdog
 
 # Safety cap on the parked collision-map warm-up (RuntimeAdapter 'warm' phase): the warm-up
 # normally exits as soon as the station reports a fresh collision_time (a few ticks once nvblox
@@ -242,6 +243,7 @@ class RuntimeAdapter:
                  stall_window_s=_SENSOR_STALL_WINDOW_S, route_alerts=None, fine_dock=None,
                  hold_cart_through_couple=False, couple_static_drive=False,
                  uncouple_on_return=False, wall_clock=time.monotonic, nav_stuck_wall_s=None,
+                 nav_stuck_sim_s=None,
                  carry_reposition_drive=False, couple_standoff_tolerance=None,
                  ground_truth_place_actions=(), staged_settle_s=0.0):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
@@ -384,8 +386,25 @@ class RuntimeAdapter:
         if not (math.isfinite(nav_stuck_wall_s) and 0.0 <= nav_stuck_wall_s <= 3000.0):
             raise ValueError('nav_stuck_wall_s must be a finite number of seconds in [0, 3000]')
         self.nav_stuck_wall_s = float(nav_stuck_wall_s)
+        # sim-robust-watchdogs: SIM-clock no-base-progress budget. A pure-WALL budget charges render-paced
+        # wall seconds against the base: under the measured 0.17-0.31x sim-to-wall ratio a 120 s WALL budget
+        # is only ~20-37 SIM seconds, so a legitimately slow (but progressing-in-sim) leg can be starved of
+        # the SIM-seconds it was meant to get. When set, the base is given this many SIM seconds of no
+        # progress before the stage fails -- immune to render pace -- while the WALL budget above stays as
+        # the generous GPU-wall-cap backstop (sim-robust-audit rank 3/5 'sim-clock-gate the no-base-progress
+        # watchdog'). A genuinely frozen base still trips: the sim clock keeps advancing past the sim budget.
+        # None/0 => off (byte-identical); env RESTOCK_NAV_STUCK_SIM_S. See pace_watchdog.is_dead(mode='either').
+        if nav_stuck_sim_s is None:
+            try:
+                nav_stuck_sim_s = float(os.environ.get('RESTOCK_NAV_STUCK_SIM_S', 0.0))
+            except (TypeError, ValueError):
+                nav_stuck_sim_s = 0.0
+        if not (math.isfinite(nav_stuck_sim_s) and 0.0 <= nav_stuck_sim_s <= 3000.0):
+            raise ValueError('nav_stuck_sim_s must be a finite number of seconds in [0, 3000]')
+        self.nav_stuck_sim_s = float(nav_stuck_sim_s)
         self._nav_stuck_reason = None     # the running reason currently being timed
         self._nav_stuck_wall = None       # wall time that reason/pose last changed (progress)
+        self._nav_stuck_sim = None        # sim time (self.time) at that progress mark
         self._nav_stuck_pose = None       # base pose at that progress mark
         self.action = None
         self.last_packet_id = None
@@ -590,9 +609,16 @@ class RuntimeAdapter:
         -- NOT on a reason change -- so a stage that cycles reasons while frozen (run-323b: outbound
         alternating lane_not_acquired<->replan_changed_observations with ~0.37 m total drift then frozen,
         which the earlier reason-keyed check and every SIM-clock cap missed) is still caught. Off
-        (nav_stuck_wall_s == 0) => always None (byte-identical); a missing odometry pose is treated as
-        no-progress so a truly frozen stage still trips. The message names the CURRENT (last) reason."""
-        if self.nav_stuck_wall_s <= 0:
+        (both budgets == 0) => always None (byte-identical); a missing odometry pose is treated as
+        no-progress so a truly frozen stage still trips. The message names the CURRENT (last) reason.
+
+        sim-robust-watchdogs: the SIM budget (nav_stuck_sim_s) is the pace-aware PRIMARY -- it measures
+        no-progress in SIM seconds (self.time), so render pacing cannot shorten the real budget the base
+        was meant to get; the WALL budget (nav_stuck_wall_s) stays as the generous GPU-wall-cap backstop.
+        is_dead(mode='either'): a stage frozen for either budget is stuck (a real nav stall trips on the
+        sim leg because the sim clock keeps advancing past the sim budget while the base does not move;
+        a wholly hung sim that cannot advance self.time trips on the wall leg)."""
+        if self.nav_stuck_wall_s <= 0 and self.nav_stuck_sim_s <= 0:
             return None
         pose = getattr(odometry, 'pose', None)
         now_wall = self.wall_clock()
@@ -605,15 +631,31 @@ class RuntimeAdapter:
                           or abs(dyaw) > math.radians(1.0))
         if self._nav_stuck_wall is None or progressed:
             self._nav_stuck_wall = now_wall
+            self._nav_stuck_sim = self.time
             self._nav_stuck_pose = pose
             self._nav_stuck_reason = reason
             return None
         self._nav_stuck_reason = reason   # keep the latest reason for the failure message
         waited = now_wall - self._nav_stuck_wall
-        if waited > self.nav_stuck_wall_s:
-            return ('%s stuck with no base progress for %.0fs wall (> %.0fs budget; last reason %r); '
+        waited_sim = self.time - self._nav_stuck_sim if self._nav_stuck_sim is not None else None
+        # When a SIM budget is set it GOVERNS and is pace-immune: a frozen base trips after
+        # nav_stuck_sim_s SIM seconds however slowly the render runs, and the (pace-sensitive) WALL leg is
+        # NOT also applied -- otherwise render pacing would shorten the real budget (120 s wall is only
+        # ~20-37 s sim at the measured 0.17-0.31x). The legacy WALL budget is used alone only when no sim
+        # budget is configured (byte-identical). The orchestrator's external wall SIGKILL cap remains the
+        # ultimate GPU-hours backstop in both cases.
+        sim_on = self.nav_stuck_sim_s > 0
+        if pace_watchdog.is_dead(sim_elapsed=waited_sim, wall_elapsed=waited,
+                                 sim_budget=self.nav_stuck_sim_s if sim_on else None,
+                                 wall_backstop=self.nav_stuck_wall_s if (self.nav_stuck_wall_s > 0 and not sim_on) else None,
+                                 mode='either'):
+            if sim_on:
+                measure = 'for %.0fs sim (> %.0fs sim budget)' % (waited_sim, self.nav_stuck_sim_s)
+            else:
+                measure = 'for %.0fs wall (> %.0fs budget)' % (waited, self.nav_stuck_wall_s)
+            return ('%s stuck with no base progress %s; last reason %r; '
                     'failing the attempt fast instead of burning the GPU wall cap'
-                    % (self.action, waited, self.nav_stuck_wall_s, reason))
+                    % (self.action, measure, reason))
         return None
 
     def _start_nav_leg(self, goal, coupled, **kw):
@@ -634,6 +676,7 @@ class RuntimeAdapter:
         progress reset, so the within-leg frozen-stage detection (run-323b) is unchanged -- no
         ``start`` ever occurs between a frozen leg's own ticks."""
         self._nav_stuck_wall = None
+        self._nav_stuck_sim = None
         self._nav_stuck_pose = None
         self._nav_stuck_reason = None
         self.nav.start(goal, coupled, **kw)

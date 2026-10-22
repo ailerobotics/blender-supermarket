@@ -12,6 +12,7 @@ import numpy as np
 
 from twin.restock_manipulation.cad_tool import ARM_JOINTS
 from twin.restock_manipulation.ros_adapter import require_sim_domain
+from . import pace_watchdog
 
 
 def _frame_id(path):
@@ -24,6 +25,16 @@ def _frame_id(path):
 # the wall bound is only a frozen-sim backstop, far larger than the worst render-paced command gap.
 ARM_HEARTBEAT_SIM_S = 0.5
 ARM_HEARTBEAT_WALL_BACKSTOP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_ARM_HEARTBEAT_WALL_BACKSTOP_S', 30.0))))  # fm362 sim-only env widen
+# Arm-command heartbeat SIM-clock liveness budget (sim-robust-watchdogs). The heartbeat's PRIMARY death
+# signal: the host trajectory executor is alive iff it keeps emitting commands whose stamps advance. When
+# the host dies (e.g. cuMotion CUDA OOM takes move_group + trajectory_host down -- sim-robust-audit rank 1)
+# the greatest-received stamp (_host_now) freezes while Isaac keeps stepping /clock, so (sim now - _host_now)
+# grows past this budget within a few SIM seconds -- independent of how slowly the render runs. Budget is
+# well above the worst host<->ISAAC /clock relay lag (~2.5 s seen at approach under heavy cuMotion load) so a
+# healthy-but-render-lagged stream never false-trips (the lag the host-domain freshness gate already cancels).
+# The WALL backstop above stays ONLY as the frozen-sim catch (if Isaac itself hangs, sim now cannot advance to
+# trip this). See pace_watchdog.is_dead(mode='either') and freshness-sim-clock-not-wall.
+ARM_HEARTBEAT_SIM_BACKSTOP_S = max(2.0, min(120.0, float(os.environ.get('RESTOCK_ARM_HEARTBEAT_SIM_BACKSTOP_S', 8.0))))
 
 
 def joint_states_payload(now, names, positions, velocities):
@@ -66,6 +77,13 @@ class ArmCommandGate:
         # command has stamp==_host_now (age 0 -> always fresh); only a genuinely old resend is rejected.
         self._host_now=float('-inf')
         self.last_receive=time.monotonic()
+        # Frozen-sim backstop bookkeeping (sim-robust-watchdogs): the greatest sim `now` the watchdog has
+        # seen, and the wall time it last ADVANCED. The wall backstop measures wall-since-now-advanced (NOT
+        # wall-since-last-command), so a slow-but-advancing render never arms it -- only a sim whose clock
+        # has stopped moving while the watchdog keeps being called (a paused/wedged sim the sim leg cannot
+        # see, since sim now - _host_now then cannot grow either).
+        self._wd_now=float('-inf')
+        self._wd_now_wall=time.monotonic()
         self.started=False
         self.faulted=False
         self.hold_target=None
@@ -156,15 +174,29 @@ class ArmCommandGate:
             raise
 
     def watchdog(self, now):
-        # Arm-command heartbeat. With the freshness gate now in the HOST /clock domain (self._host_now),
-        # a sim-time "now - last_stamp" heartbeat would re-introduce the very relay lag the same-clock fix
-        # removes (ISAAC now runs ahead of the host stamps), so the heartbeat is the generous WALL
-        # backstop ONLY: a genuinely dead/stalled arm stream stops advancing last_receive and faults
-        # after ARM_HEARTBEAT_WALL_BACKSTOP_S. Under render pacing arm commands are 1.7-3.5 s apart in
-        # WALL but the backstop is far larger, so it never false-trips a healthy render-paced grasp.
-        if self.started and time.monotonic()-self.last_receive>ARM_HEARTBEAT_WALL_BACKSTOP_S:
-            self.hold()
-            raise RuntimeError('arm command heartbeat lost')
+        # Arm-command heartbeat, pace-aware (sim-robust-watchdogs). PRIMARY is the SIM clock: the host
+        # trajectory executor is alive iff its command stamps keep advancing, so when it dies the
+        # greatest-received stamp (_host_now) freezes while Isaac keeps stepping and (now - _host_now)
+        # grows past ARM_HEARTBEAT_SIM_BACKSTOP_S within a few SIM seconds -- regardless of render pace.
+        # A generous sim budget (>> the ~2.5 s host<->ISAAC relay lag the host-domain freshness gate
+        # already cancels) means a healthy-but-slow render never false-trips (the earlier pure-WALL
+        # backstop charged render-paced command gaps against wall time -- 'arm command heartbeat lost'
+        # was the single most common terminal symptom, sim-robust-audit rank 5). The WALL backstop
+        # stays ONLY as the frozen-sim catch, and measures wall-since-SIM-NOW-ADVANCED (reset below
+        # whenever `now` moves) so a slow-but-advancing render never arms it -- only a sim whose clock has
+        # stopped while the watchdog keeps ticking, which the sim leg (now - _host_now) cannot grow to see.
+        # 'either' leg => dead.
+        if math.isfinite(now) and now > self._wd_now:
+            self._wd_now = now
+            self._wd_now_wall = time.monotonic()
+        if self.started:
+            sim_elapsed = now - self._host_now if math.isfinite(self._host_now) and math.isfinite(now) else None
+            if pace_watchdog.is_dead(sim_elapsed=sim_elapsed,
+                                     wall_elapsed=time.monotonic() - self._wd_now_wall,
+                                     sim_budget=ARM_HEARTBEAT_SIM_BACKSTOP_S,
+                                     wall_backstop=ARM_HEARTBEAT_WALL_BACKSTOP_S, mode='either'):
+                self.hold()
+                raise RuntimeError('arm command heartbeat lost')
         if self.faulted:
             self.hold()
 

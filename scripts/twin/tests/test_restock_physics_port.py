@@ -360,22 +360,44 @@ def test_arm_drive_targets_do_not_accept_old_sequence():
     assert len(applied)==1 and not gate.faulted
 
 
-def test_arm_heartbeat_is_wall_backstop_only(monkeypatch):
-    # firstmate 291 same-clock fix: with freshness now in the host /clock domain, the heartbeat is the
-    # generous WALL backstop ONLY. A render-paced WALL gap under the backstop (and any SIM-now value) is
-    # NOT a lost heartbeat; only a gap beyond ARM_HEARTBEAT_WALL_BACKSTOP_S faults.
+def test_arm_heartbeat_sim_primary_with_frozen_sim_wall_backstop(monkeypatch):
+    # sim-robust-watchdogs: the heartbeat's PRIMARY is the SIM clock -- the host executor is alive iff its
+    # command stamps keep advancing, so a dead host (stamps frozen while Isaac keeps stepping) faults once
+    # sim now - _host_now exceeds ARM_HEARTBEAT_SIM_BACKSTOP_S, regardless of render pace. The WALL backstop
+    # now measures wall-since-SIM-NOW-ADVANCED, catching only a frozen sim (now not advancing while the
+    # watchdog keeps ticking), NOT a slow-but-advancing render. (Replaces the old wall-backstop-only
+    # contract; the full false-trip/true-death replays live in test_sim_robust_watchdogs.py.)
     import twin.restock.native_transport as nt
     clock = [1000.0]
     monkeypatch.setattr(nt.time, 'monotonic', lambda: clock[0])
     gate, _ = gate_fixture()
     gate.command(names=list(ARM_JOINTS), positions=[.01]*6, velocities=[.01]*6,
                  efforts=[], stamp=5.0, now=5.0)
-    clock[0] = 1000.0 + nt.ARM_HEARTBEAT_WALL_BACKSTOP_S - 1.0   # under the wall backstop
-    gate.watchdog(now=9.9)                 # a large SIM-now gap no longer matters (host-domain)
+    # A render-paced tick: huge WALL gap but sim now advanced close to the host stamp -> alive.
+    clock[0] = 1000.0 + nt.ARM_HEARTBEAT_WALL_BACKSTOP_S + 100.0
+    gate.watchdog(now=5.3)                 # sim gap 0.3 s; now advanced so the wall leg is disarmed
     assert not gate.faulted
-    clock[0] = 1000.0 + nt.ARM_HEARTBEAT_WALL_BACKSTOP_S + 1.0   # past the wall backstop
+    # True host death: stamps frozen (no new command) while sim now advances past the sim budget.
     with pytest.raises(RuntimeError, match='heartbeat lost'):
-        gate.watchdog(now=9.9)
+        gate.watchdog(now=5.0 + nt.ARM_HEARTBEAT_SIM_BACKSTOP_S + 0.1)
+
+
+def test_arm_heartbeat_wall_backstop_fires_only_on_a_frozen_sim(monkeypatch):
+    # The WALL backstop catches a sim whose clock has STOPPED advancing while the watchdog keeps ticking
+    # (the sim leg cannot grow then). A frozen now + wall past the backstop faults.
+    import twin.restock.native_transport as nt
+    clock = [1000.0]
+    monkeypatch.setattr(nt.time, 'monotonic', lambda: clock[0])
+    gate, _ = gate_fixture()
+    gate.command(names=list(ARM_JOINTS), positions=[.01]*6, velocities=[.01]*6,
+                 efforts=[], stamp=5.0, now=5.0)
+    gate.watchdog(now=5.2)                 # arms the wall timer at now=5.2
+    clock[0] = 1000.0 + nt.ARM_HEARTBEAT_WALL_BACKSTOP_S - 1.0
+    gate.watchdog(now=5.2)                 # now frozen; wall gap under the backstop -> alive
+    assert not gate.faulted
+    clock[0] = 1000.0 + nt.ARM_HEARTBEAT_WALL_BACKSTOP_S + 1.0
+    with pytest.raises(RuntimeError, match='heartbeat lost'):
+        gate.watchdog(now=5.2)             # now still frozen; wall gap past the backstop -> dead
 
 
 def test_arm_freshness_is_host_domain_relay_lag_cancels():

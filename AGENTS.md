@@ -203,6 +203,20 @@ repo's `scenes/`, `export/` or `renders/`.
   retirement (pending the bounded GPU run) — but KEEP `tow_lane_static_tol_m` and the `tow_lane_trust_unknown`
   coverage waiver (independent of the yaw bug). CPU proof `scripts/check_lidar_yaw_fix.py`; decision + GPU
   config `data/sim-restock-lidar-yaw-fix-eval/` (orientation locked by `test_restock_mission_tail.py`).
+- **Pace-aware producer watchdogs**: the mission renders slower than wall (measured 0.17-0.31x
+  sim-to-wall), so a wall-timed watchdog false-trips a healthy-but-slow pipeline. The shared predicate
+  `twin/restock/pace_watchdog.py` `is_dead(mode='either'|'both')` states the rule once (fire only when
+  truly dead: stamps frozen while sim advances, AND/OR enough wall elapsed that an alive producer would
+  have recovered). Converted: the arm-command heartbeat (`native_transport.ArmCommandGate.watchdog`,
+  SIM-clock primary + wall-since-sim-now-advanced backstop, `RESTOCK_ARM_HEARTBEAT_SIM_BACKSTOP_S`), the
+  station-ack frozen-stamp `StationAckStreamStalled` (now needs stage AND wall,
+  `RESTOCK_STATION_ACK_FROZEN_WALL_S`, killed the warm false trips of runs 341/346/348/350/354/356), and
+  the no-base-progress nav-stuck (`RuntimeAdapter._nav_stuck_check` gained a governing SIM budget
+  `RESTOCK_NAV_STUCK_SIM_S`; legacy wall path byte-identical when unset). Already-sim-clock watchdogs
+  (station host-silence/stage-liveness, nav `blocked_timeout`/`goal_timeout`, `/manipulation/status`
+  feedback) are unchanged + regression-locked. CPU tests `twin/tests/test_sim_robust_watchdogs.py`;
+  inventory + integration-lane env switches `data/sim-robust-watchdogs-simtime-v1/report.md`. See the
+  `freshness-sim-clock-not-wall` principle.
 - **Mission tail** (transfer → verify → uncouple return → end): the uncouple happens in RETURN at
   `cart_parking`, AFTER transfer + verify (tow → brake/pin → uncouple → back away → home uncoupled).
   CPU dry-run through the real BT/`Mission`/`RuntimeAdapter`: `scripts/check_mission_tail.py`
