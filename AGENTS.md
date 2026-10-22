@@ -190,7 +190,15 @@ repo's `scenes/`, `export/` or `renders/`.
   frame (warm2 was misread as "carton fell to the lower deck" while the weld still held it). Carry switch
   `RESTOCK_TRANSFER_CARRY=wrist_guard[,weld]` (env, both processes, default off; RUNBOOK §13e) keeps the
   transfer place-move KDL IK out of the `ur_wrist_2`-vs-forearm stop (`weld` labels the weld attach,
-  `transfer_attach: weld`); replay a run with `scripts/check_transfer_carry_replay.py`.
+  `transfer_attach: weld`); replay a run with `scripts/check_transfer_carry_replay.py`. **`scripted` with
+  `arm=executor` has its OWN DLS IK** (`scripted_transfer.ArmIK`, NOT cuMotion/KDL), so the live-pose
+  `wrist_guard` does not apply to it — it carries a `plan_transfer(wrist_guard=True)` default that forces
+  the PICK half onto the same clear branch (reusing `transfer_carry.in_clear_region`/`wrist_flip_seed`),
+  else the pick seeds the gripper-vs-forearm self-collision and the host faults on the >1.3 rad tracking
+  error (warm5). A mid-transfer executor refusal FAILS FAST with a named reason + a keep-alive hold (never
+  the silent `still` degrade that starves the arm-command heartbeat). Offline proof (incl. the sphere model
+  + warm5 host-validation replay): `data/sim-video-executor-arm-v1/report.md`,
+  `tests/test_restock_scripted_transfer.py`.
 - **Moving obstacles** (opt-in, default-off): `navigation/dynamic.py` tracks
   per-frame `Detection(position,radius,source)` into velocity-predicted occupancy
   points unioned (add-only) into `Observation.obstacles`, so the existing gates

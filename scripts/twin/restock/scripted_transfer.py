@@ -39,6 +39,8 @@ from pathlib import Path
 import numpy as np
 
 from ..restock_manipulation.ground_truth_collect import SOURCE as GT_SOURCE
+from ..restock_manipulation.transfer_carry import (DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN,
+                                                   in_clear_region, wrist_flip_seed)
 from ..restock_manipulation.transfer_mode import SCRIPTED, transfer_mode
 from .mission import Result
 
@@ -217,13 +219,24 @@ _JUMP_MAX = 0.35                  # max joint change per continuation step (rad)
 
 def plan_transfer(ik, q_start, carton_base, goal_centre_base, goal_yaw_base, *, dims, wall=3,
                   contact_margin=0.00275, standoff=0.15, lift=0.03, clear=0.15, extract_margin=0.06,
-                  time_scale=1.0):
+                  time_scale=1.0, wrist_guard=True, wrist1_cap=DEFAULT_WRIST1_CAP,
+                  wrist2_min=DEFAULT_WRIST2_MIN):
     """Keyframes for the scripted pick (carton pose ``carton_base``, 4x4 in ur_base_link) and place (carton
     centre ``goal_centre_base`` at yaw ``goal_yaw_base``). The carton and the target are symmetric under a
     180 deg yaw: the representatives that minimise the worst grip-station reach are used (live_pose's
     near-face rule), so the gripped wall faces the arm at both ends. Straight segments (approach, contact,
     lift, extract, raise, place, retreat) are solved by continuation IK so the TCP really moves on a line;
-    the extract stops where the arm runs out of reach (recorded as extract_m vs extract_wanted_m)."""
+    the extract stops where the arm runs out of reach (recorded as extract_m vs extract_wanted_m).
+
+    ``wrist_guard`` (default on): every seeded keyframe IK must land in the bench-proven CLEAR wrist region
+    (wrist_1 <= ``wrist1_cap``, wrist_2 >= ``wrist2_min``; the live_pose ``RESTOCK_TRANSFER_CARRY=wrist_guard``
+    predicate), re-seeded from its WRIST-FLIPPED twin when the nearest branch is not clear. The TCP poses are
+    unchanged (same tool path, so the still-mode carton path is byte-identical), but the arm follows the clear
+    branch -- without it the scripted executor pick picks the ur_gripper-vs-ur_forearm self-colliding branch
+    (wrist_1 ~1.37, wrist_2 ~-1.27) and the host trajectory executor faults on the >1.3 rad tracking error
+    (warm5, 2026-10-22). The place half already resolves clear; the guard carries the PICK half onto it too
+    via the continuation IK seeded from the clear ``reach_high``."""
+    guard = (wrist1_cap, wrist2_min) if wrist_guard else None
     q_start = np.asarray(q_start, float)
     c0 = carton_base[:3, 3]
     psi0 = T_yaw(carton_base)
@@ -274,7 +287,7 @@ def plan_transfer(ik, q_start, carton_base, goal_centre_base, goal_yaw_base, *, 
             if path:
                 k.tcp, k.path, k.q = T_end, path, path[-1]
         else:
-            q, perr, rerr = _solve_seeded(ik, k.tcp, prev_q)
+            q, perr, rerr = _solve_seeded(ik, k.tcp, prev_q, guard=guard)
             if perr <= _POS_TOL and rerr <= _ROT_TOL:
                 k.q, k.path = q, [q]
         k.ik_error = (perr, rerr)
@@ -323,9 +336,12 @@ def _shift(T, d):
     return out
 
 
-def _solve_seeded(ik, T, prev):
+def _solve_seeded(ik, T, prev, *, guard=None):
     """IK from the previous keyframe, then from pan-retargeted variants of it; the converged solution
-    closest to the previous configuration wins (keeps the swing on one branch)."""
+    closest to the previous configuration wins (keeps the swing on one branch). With ``guard`` =
+    (wrist1_cap, wrist2_min) set, a WRIST-FLIPPED twin of each seed is also tried and an in-clear-region
+    solution is preferred over a colliding one (the same clear carry branch the live_pose wrist guard uses),
+    so the scripted pick never seeds the ur_gripper-vs-ur_forearm self-collision branch."""
     prev = np.asarray(prev, float)
     target_pan = math.atan2(T[1, 3], T[0, 3])
     seeds = [prev]
@@ -334,11 +350,15 @@ def _solve_seeded(ik, T, prev):
             s = prev.copy()
             s[0] = pan
             seeds.append(s)
+    if guard is not None:                               # also seed the clear (wrist-flipped) branch
+        seeds = seeds + [np.array(wrist_flip_seed(s)) for s in list(seeds)]
     best = None
     for seed in seeds:
         q, perr, rerr = ik.solve(T, seed)
         ok = perr <= _POS_TOL and rerr <= _ROT_TOL
-        key = (not ok, float(np.linalg.norm(q - prev)) if ok else perr + rerr)
+        # Prefer a reachable, IN-CLEAR-REGION branch; among equals, the one closest to the previous config.
+        clear_penalty = (guard is not None and ok and not in_clear_region(q, guard[0], guard[1]))
+        key = (not ok, clear_penalty, float(np.linalg.norm(q - prev)) if ok else perr + rerr)
         if best is None or key < best[0]:
             best = (key, q, perr, rerr)
     return best[1], best[2], best[3]
@@ -548,6 +568,23 @@ class ScriptedTransfer:
                   flush=True)
         self.arm_mode = ARM_STILL
 
+    def _fail_executor(self, name, kind, detail):
+        """A MID-TRANSFER executor refusal (pre-send infeasibility, host rejection, abort or settle timeout).
+        Never degrade silently to the still carton-only path: once the host executor has e-stopped, still
+        mode sends NO arm command and the Isaac arm-command heartbeat starves into the misleading 'arm
+        command heartbeat lost' crash (warm5, 2026-10-22). Fail the stage FAST with a NAMED reason -- so the
+        mission reports the true cause and tears down before the wall-backstop watchdog can trip -- while
+        keeping the arm command stream alive by holding the current joints through the executor (best effort;
+        a genuinely faulted executor rejects the hold too, but the fast failure still beats the backstop)."""
+        if self.arm is not None:
+            self.arm.hold(np.asarray(self.driver.arm_joint_positions(), float))
+        self.fallback_reason = f'executor {kind}: {detail}'
+        self.state = 'failed'
+        self.fail_reason = (f'SCRIPTED TRANSFER executor {kind} the {name} trajectory: {detail} '
+                            f'-- failed fast (arm held, no silent still fallback)')
+        print('SCRIPTED_TRANSFER executor %s %s: %s -- failing fast, arm held (no silent still fallback)'
+              % (name, kind, detail), flush=True)
+
     def _timeline(self):
         """[(t0, t1, kind, a, b)] with kind 'move' (keyframe a -> b) or 'grasp'/'release' dwell; the still
         clock (time_scale stretches it)."""
@@ -643,16 +680,16 @@ class ScriptedTransfer:
             points = segment_points(self.plan.keyframes, names)
             measured = np.asarray(d.arm_joint_positions(), float)
             if points and float(np.max(np.abs(measured - points[0][1]))) > EXECUTOR_START_TOL:
-                self._fallback(f'arm not at the {name} start (max joint error '
-                               f'{float(np.max(np.abs(measured - points[0][1]))):.3f} rad)')
-                self.t = self._segment_start(name)
+                self._fail_executor(name, 'start-mismatch',
+                                    f'arm not at the start (max joint error '
+                                    f'{float(np.max(np.abs(measured - points[0][1]))):.3f} rad)')
                 return None
             if points:
                 points[0] = (0.0, measured, np.zeros(6))     # re-seed to the live state (fm357)
                 why = hermite_violation(points, (self.ik.lower, self.ik.upper))
                 if why is not None:
-                    self._fallback(f'{name} trajectory not executor-feasible after re-seed: {why}')
-                    self.t = self._segment_start(name)
+                    self._fail_executor(name, 'infeasible',
+                                        f'trajectory not executor-feasible after re-seed: {why}')
                     return None
                 self.arm.send(name, points)
                 ex.update(step='wait', clock=0.0, budget=points[-1][0] + EXECUTOR_SETTLE_S)
@@ -668,21 +705,17 @@ class ScriptedTransfer:
             result = self.arm.poll()
             if result is None:
                 if ex['clock'] > ex['budget']:
-                    self.state = 'failed'
-                    self.fail_reason = (f'SCRIPTED TRANSFER executor {name} did not finish within '
-                                        f'{ex["budget"]:.0f} sim s')
+                    self._fail_executor(name, 'settle-timeout',
+                                        f'did not finish within {ex["budget"]:.0f} sim s')
                 return None
             status = result.get('status')
             if status == 'succeeded':
                 ex.update(step='dwell', clock=0.0)
                 return None
             if status == 'rejected':
-                self._fallback(f'executor rejected the {name} trajectory: {result.get("detail")}')
-                self.t = self._segment_start(name)
+                self._fail_executor(name, 'rejected', result.get('detail'))
                 return None
-            self.state = 'failed'
-            self.fail_reason = (f'SCRIPTED TRANSFER executor aborted the {name} trajectory: '
-                                f'{result.get("detail")}')
+            self._fail_executor(name, 'aborted', result.get('detail'))
             return None
         # dwell after a segment: grasp after pick, release after carry, then the next segment
         if name == 'pick':
@@ -784,6 +817,18 @@ class ExecutorArm:
         clean_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
         with open(self._log, 'w') as log:
             self._proc = self._popen(['bash', '-c', command], env=clean_env, stdout=log, stderr=log)
+
+    def hold(self, measured):
+        """Keep-alive: command the arm to HOLD its current measured joints as ONE immediate rest-to-rest
+        goal, so the host executor keeps streaming and the Isaac arm-command heartbeat does not starve while
+        a failing transfer winds down. Fired on a mid-transfer refusal instead of going silent; a genuinely
+        e-stopped executor rejects the hold too, which is fine (the stage still fails fast, below the wall
+        backstop). Never raises -- a keep-alive that cannot be sent must not mask the real failure."""
+        q = [float(x) for x in measured]
+        try:
+            self.send('hold', [(0.0, q, [0.0] * 6), (SAMPLE_DT, q, [0.0] * 6)])
+        except Exception as exc:                        # a stuck prior proc / spawn failure: best effort only
+            print('SCRIPTED_TRANSFER executor hold keep-alive could not be sent: %s' % exc, flush=True)
 
     def poll(self):
         if self._proc is None or self._proc.poll() is None:
