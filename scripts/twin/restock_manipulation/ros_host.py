@@ -237,6 +237,7 @@ def main():
         'grasp_track_m': controller.grasp_track_m,   # fm410: lift-probe carton-tracking confirm threshold (m)
         'reposition_before_place': controller.reposition_before_place,
         'transfer_mode': controller.transfer_mode,   # env RESTOCK_TRANSFER_MODE (None = off)
+        'transfer_carry': sorted(controller.transfer_carry),   # env RESTOCK_TRANSFER_CARRY ([] = off)
         'sim_cart_place_policy': _policy is not None and bool(config.get('sim_cart_place_policy')),
         'base_collision_object': bool(config.get('base_collision_object', False)),
         'world_obstacles': [s['id'] for s in config.get('world_obstacles', [])],

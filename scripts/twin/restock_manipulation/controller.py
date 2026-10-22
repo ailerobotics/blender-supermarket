@@ -7,6 +7,8 @@ from ..restock_camera.freshness import require_fresh
 
 from . import ground_truth_collect as gtc
 from .fit import axis_fits
+from .transfer_carry import (DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN, GUARDED_PHASES, WRIST_GUARD,
+                             carry_flags)
 from .transfer_mode import LIVE_POSE, near_face_poses, transfer_mode
 from .types import MotionPort, ProductProfile, Result, Sensors
 
@@ -112,6 +114,10 @@ class TransferController:
         # lift -> tuck -> preplace (no TRANSIT hold, no collect-cart pan). Unset => None => byte-identical.
         self.transfer_mode = transfer_mode()
         self.near_face = None     # live_pose: which yaw representatives the transfer observe chose
+        # Opt-in SIM transfer CARRY flags (env RESTOCK_TRANSFER_CARRY, twin.restock_manipulation.transfer_carry,
+        # read in BOTH processes). 'wrist_guard': the transfer place moves keep the KDL IK goal in the clear
+        # wrist branch (warm2 preplace jam). Unset => empty => byte-identical.
+        self.transfer_carry = carry_flags()
         # fm395 (A): require a STABLE confirmed attachment (s.contact = native grippedObjects OR the sim
         # fallback weld) for grasp_confirm_ticks consecutive ticks before lifting -- never advance to lift
         # on a single transient contact (run-306: a one-tick weld, released by a status flicker, let the
@@ -506,6 +512,16 @@ class TransferController:
         """RESTOCK_TRANSFER_MODE=live_pose AND this run is the transfer (collect is never affected)."""
         return self.transfer_mode == LIVE_POSE and getattr(self, 'operation', None) == 'transfer'
 
+    def _transfer_wrist_guard(self):
+        """RESTOCK_TRANSFER_CARRY=wrist_guard on a TRANSFER: the (wrist1_cap, wrist2_min) clear carry region
+        every transfer place move's KDL goal must satisfy (the configured carry guards, else the
+        bench-proven 0.65 / 0.0). None => off (collect, or the flag unset) => byte-identical begin()."""
+        if WRIST_GUARD not in self.transfer_carry or getattr(self, 'operation', None) != 'transfer':
+            return None
+        cap = DEFAULT_WRIST1_CAP if self.carry_wrist1_cap is None else self.carry_wrist1_cap
+        w2min = DEFAULT_WRIST2_MIN if self.carry_wrist2_min is None else self.carry_wrist2_min
+        return (cap, w2min)
+
     def _repositions_before_place(self):
         """fm390's TRANSIT base-reposition handshake applies. Never for a live_pose transfer: the runtime
         drives that reposition for collect only, so a transfer would hold in TRANSIT to the phase timeout."""
@@ -879,6 +895,14 @@ class TransferController:
                       % (tuple(round(v, 3) for v in source.pose[:3]), tuple(round(v, 3) for v in target.pose[:3]),
                          self.near_face, {k: round(math.dist(v[:3], (0, 0, 0)), 3)
                                           for k, v in self.poses.items()}), flush=True)
+            guard = self._transfer_wrist_guard()
+            if guard is not None:
+                # Label the carry workaround honestly in the evidence + console (mission.json records it).
+                self.evidence.append({'source': 'transfer_carry', 'transfer_carry': sorted(self.transfer_carry),
+                                      'wrist_guard': {'wrist1_cap': guard[0], 'wrist2_min': guard[1],
+                                                      'phases': list(GUARDED_PHASES)}})
+                print('TRANSFER_CARRY wrist_guard active: %s KDL goals must keep wrist_1<=%.2f, wrist_2>=%.2f '
+                      '(wrist-flipped re-seed)' % ('/'.join(GUARDED_PHASES), guard[0], guard[1]), flush=True)
             self._transition('approach')
         if self.phase in self.poses:
             # OBSERVE-THEN-EXECUTE lock (firstmate 2026-10-15, key approach-sensing-occlusion): once
@@ -965,10 +989,16 @@ class TransferController:
                 # fm347 (3): the PLACE moves seed the IK from the measured PAN config and branch to the
                 # nearest config to it, so shoulder_pan stays on the pan branch (cart_pan_joint0) instead
                 # of flipping to a far stow-nominal branch (run-273: ~3.9 rad base rotation stalled j0).
+                # RESTOCK_TRANSFER_CARRY=wrist_guard: the transfer place moves' KDL goal must land in the clear
+                # wrist branch (warm2: the preplace IK chose w1 2.08 / w2 -1.02 and jammed at the stop). Passed
+                # ONLY when active, so an unset flag keeps this begin() call byte-identical.
+                guard = self._transfer_wrist_guard()
+                extra = ({'wrist_guard': guard} if guard is not None and joint_space and not straight
+                         and self.phase in GUARDED_PHASES else {})
                 self.motion.begin(target, s.joint_positions, straight_line=straight,
                                   joint_space=joint_space, wrist1_cap=carry_cap, wrist2_min=carry_w2min,
                                   slow=place_move, goal_tol=(0.12 if place_move else None),
-                                  near_start=place_move)
+                                  near_start=place_move, **extra)
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': self.poses[self.phase]},))
             if self.phase == 'contact' and not self._contact_suction:

@@ -40,6 +40,9 @@ def sim_execute_budget(duration, scale=None):
 # seed-variant base/plate collision (INVALID_MOTION_PLAN, run-129/134 ~half of seeds) into a
 # near-certain pass at ~1 s of planning per retry (firstmate standing-authority lever).
 REPLAN_MAX = 12
+# RESTOCK_TRANSFER_CARRY=wrist_guard: wrist-flipped IK re-seeds per move before falling back to the plain
+# seed list (each costs one ~2 s KDL call); bounded so two IK branches cannot ping-pong forever.
+WRIST_FLIP_MAX = 3
 # Bounded recovery from a move_group PROCESS crash (SIGABRT double-free in the cuMotion result
 # handling, run-266/268): the action server VANISHES mid-move. The launch now respawns move_group
 # instead of tearing the host stack down, so the planning client waits for the respawned server and
@@ -314,10 +317,14 @@ class RosMotionPort:
         self._goal_tol_pub.publish(Float64(data=tol))
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
-              wrist2_min=None, slow=False, goal_tol=None, near_start=False):
+              wrist2_min=None, slow=False, goal_tol=None, near_start=False, wrist_guard=None):
         from moveit_msgs.srv import GetPositionIK
         if self.state not in ('idle', 'succeeded', 'failed'):
             raise RuntimeError('motion already active')
+        # RESTOCK_TRANSFER_CARRY=wrist_guard (transfer_carry.py): (wrist1_cap, wrist2_min) the seeded-KDL
+        # joint-space goal must satisfy, else it is re-seeded from its wrist-flipped twin. None => off.
+        self._wrist_guard = None if wrist_guard is None else (float(wrist_guard[0]), float(wrist_guard[1]))
+        self._wrist_flips = 0
         if not self.ik.service_is_ready() or not self.plan.server_is_ready() or not self.execute.server_is_ready():
             raise RuntimeError('simulated IK/planner/executor unavailable')
         if (len(pose) != 7 or not all(map(math.isfinite, pose)) or len(joints) != 6
@@ -503,6 +510,33 @@ class RosMotionPort:
             return True
         return False
 
+    def _guard_rejects(self, q):
+        """RESTOCK_TRANSFER_CARRY=wrist_guard: False when the unwrapped KDL goal ``q`` is in the clear carry
+        wrist region (plan it). Otherwise dispatch a re-seed and return True -- first the solution's
+        wrist-flipped twin (the same tool pose in the clear branch; bounded by WRIST_FLIP_MAX so two
+        branches cannot ping-pong), then the remaining seeds -- or RAISE once every seed is spent, so the
+        arm is never planned into the ur_wrist_2-vs-ur_forearm stop (warm2: KDL w1 2.08 / w2 -1.02)."""
+        from .transfer_carry import in_clear_region, wrist_flip_seed
+        cap, w2min = self._wrist_guard
+        if in_clear_region(q, cap, w2min):
+            print('WRIST_GUARD accept q=%s (w1<=%.2f, w2>=%.2f) seed=%d flips=%d'
+                  % ([round(v, 3) for v in q], cap, w2min, self._seed_idx, self._wrist_flips), flush=True)
+            return False
+        if self._wrist_flips < WRIST_FLIP_MAX:
+            self._wrist_flips += 1
+            flip = wrist_flip_seed(q)
+            print('WRIST_GUARD reject q=%s (w1<=%.2f, w2>=%.2f) -> wrist-flipped re-seed %s (%d/%d)'
+                  % ([round(v, 3) for v in q], cap, w2min, [round(v, 3) for v in flip],
+                     self._wrist_flips, WRIST_FLIP_MAX), flush=True)
+            self._seeds.insert(self._seed_idx + 1, flip)
+            self._next_seed()
+            return True
+        print('WRIST_GUARD reject q=%s (w1<=%.2f, w2>=%.2f) flips exhausted -> next seed'
+              % ([round(v, 3) for v in q], cap, w2min), flush=True)
+        if self._next_seed():
+            return True
+        raise RuntimeError('IK outside the carry wrist region (wrist_1<=%.2f, wrist_2>=%.2f)' % (cap, w2min))
+
     def _pose_plan_goal(self, pose, joints, wrist1_cap=None, wrist2_min=None):
         """MoveGroup plan request to a cartesian TCP pose (position+orientation goal constraints in
         ur_base_link); cuMotion does its own collision-aware IK, so a single collision model (XRDF)
@@ -596,6 +630,7 @@ class RosMotionPort:
         # pose. The straight-line insert (place) re-solves to the SENSED place, correcting the offset.
         self._publish_goal_tol(goal_tol)
         self._near_start = False   # fm347 (3): begin_joint_goal moves use their own goal, never the near_start IK branch
+        self._wrist_guard = None   # transfer_carry: a fixed joint goal has no IK branch to guard
         # Reset the planning anchors for THIS move, exactly as begin() does (firstmate 292 / run-238):
         # without a fresh _plan_started_wall the total-planning-wall cap carried the stale anchor from
         # the previous pose-goal move (lift), so the tuck/pan/stow joint goal tripped
@@ -1008,6 +1043,8 @@ class RosMotionPort:
                 if self._next_seed():            # no in-limit branch for this solution; try next seed
                     return 'running'
                 raise ValueError('IK outside joint limits')
+            if getattr(self, '_wrist_guard', None) is not None and self._guard_rejects(q):
+                return 'running'
             goal = MoveGroup.Goal()
             req = goal.request
             req.group_name, req.pipeline_id = self.group, self.pipeline
