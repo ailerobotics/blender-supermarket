@@ -152,7 +152,9 @@ flowchart TD
     PUMP["event_pump<br/>drain event bus → blackboard"]
     REACT["reactive (Sequence)"]
     MISS["mission (Sequence, memory)<br/>resumes at the running stage"]
-    ROOT --> PUMP --> REACT --> MISS
+    ROOT --> PUMP
+    ROOT --> REACT
+    ROOT --> MISS
 
     HG["health_guard<br/>stuck / low_battery → park (FAILS)"]
     HS["human_safety<br/>slow → stop + pause arm → resume"]
