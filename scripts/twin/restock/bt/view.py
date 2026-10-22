@@ -63,7 +63,7 @@ def snapshot_dict(ctx, root, *, tick=None):
 
 class SnapshotWriter:
     """Writes ``bt_snapshot.json`` / ``bt_events.jsonl`` per tick and ``bt_view.html`` once."""
-    def __init__(self, out_dir, *, title='restock mission'):
+    def __init__(self, out_dir, *, title='restock mission', min_interval_s=None):
         self.dir = Path(out_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.title = title
@@ -71,9 +71,19 @@ class SnapshotWriter:
         self.events_path = self.dir / 'bt_events.jsonl'
         self.html_path = self.dir / 'bt_view.html'
         self._log_written = 0
+        # sim_speed bt_snapshot_hz (sim-video-speedup-v1): rewrite at most every ``min_interval_s`` of
+        # SIM time (ctx.now); a terminal mission is always written. None (default) => every tick.
+        self.min_interval_s = min_interval_s
+        self._last_written = None
         self.html_path.write_text(_HTML.replace('__TITLE__', title))
 
     def write(self, ctx, root, *, tick=None):
+        if self.min_interval_s is not None and self._last_written is not None:
+            now = float(getattr(ctx, 'now', 0.0) or 0.0)
+            terminal = bool(getattr(getattr(ctx, 'mission', None), 'terminal', False))
+            if not terminal and now - self._last_written < self.min_interval_s:
+                return None
+        self._last_written = float(getattr(ctx, 'now', 0.0) or 0.0)
         snap = snapshot_dict(ctx, root, tick=tick)
         tmp = self.snapshot_path.with_suffix('.json.tmp')
         tmp.write_text(json.dumps(snap, allow_nan=False))
