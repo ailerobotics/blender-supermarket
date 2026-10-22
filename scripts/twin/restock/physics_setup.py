@@ -600,8 +600,10 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # sim attach-fallback MUST be enabled HERE (runs 204-206: the flag was only on isaac_factory's
     # separate instance, so the port ticked an unflagged contact and the fallback never ran). Default
     # OFF; the real rig never runs this native authoring.
+    # RESTOCK_TRANSFER_CARRY=weld also turns it on (labelled transfer_attach=weld; transfer_carry.weld_attach).
+    from ..restock_manipulation.transfer_carry import weld_attach as _weld_attach
     contact=NativePanelContact(stage,'/RestockPanelGripper',
-                               sim_attach_fallback=bool(config.get('sim_attach_fallback', False)))
+                               sim_attach_fallback=_weld_attach(config))
     # Register native ROS/image graph nodes only after the final scene has
     # finished opening/resetting. A bridge loaded during import/reopen caused
     # a native image-graph crash in the installed Isaac5.1 stack.

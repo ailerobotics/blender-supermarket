@@ -177,7 +177,12 @@ repo's `scenes/`, `export/` or `renders/`.
   `executor`. **Sharp edge: never drive the arm from Isaac (`ArmCommandGate.apply`) beside a live
   `trajectory_host`** — its idle hold trips the gate envelope + its tracking e-stop; send FollowJointTrajectory
   goals instead. From the bay park the side grip extracts only ~0.35 of 0.46 m out of the rollwagen mouth.
-  Write-up: `~/firstmate/data/sim-video-transfer-fallback-v1/report.md`.
+  Write-up: `~/firstmate/data/sim-video-transfer-fallback-v1/report.md`. **Sharp edge:** in `live_pose`
+  the `TRANSFER_CAPTURE cart=(x,y,z)` console field is the LIVE carton top in `ur_base_link`, not the cart
+  frame (warm2 was misread as "carton fell to the lower deck" while the weld still held it). Carry switch
+  `RESTOCK_TRANSFER_CARRY=wrist_guard[,weld]` (env, both processes, default off; RUNBOOK §13e) keeps the
+  transfer place-move KDL IK out of the `ur_wrist_2`-vs-forearm stop (`weld` labels the weld attach,
+  `transfer_attach: weld`); replay a run with `scripts/check_transfer_carry_replay.py`.
 - **Moving obstacles** (opt-in, default-off): `navigation/dynamic.py` tracks
   per-frame `Detection(position,radius,source)` into velocity-predicted occupancy
   points unioned (add-only) into `Observation.obstacles`, so the existing gates
