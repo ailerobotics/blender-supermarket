@@ -417,6 +417,18 @@ class IsaacCartonSensors:
             if not matches:
                 continue
             if code not in self.profiles:
+                # fm469: if the slot's carton SKU already decoded into an OBSERVATION this frame (the
+                # candidate loop processes decoded detections before unreadable corners), then an
+                # unreadable quad landing in that same slot is NOT the carton -- the carton decoded -- but
+                # a spurious non-QR quad the detector mis-quads on a textured surface (run-346: the robot
+                # gripper's fine grid at the top of the view + small stray quads, both caught by the
+                # all-support label mask). The carton is already observed, so ignore it. ONLY when the
+                # carton is NOT observed (genuine gripper occlusion of the label) does an unreadable quad
+                # in the slot matter -> the occlusion window / strict-refuse path below. This is robust to
+                # a spurious quad of ANY size or location (size/overlap filters are not), while preserving
+                # the occlusion hold.
+                if any(any(o.location == s.location for o in observations) for s in matches):
+                    continue
                 # The reaching arm/gripper occludes the carton label (on the carton top) during the
                 # grasp, so it decodes as undecoded/unknown. While within the occlusion window since
                 # the slot was last cleanly read, hold it (flag occluded) instead of refusing, so
