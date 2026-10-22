@@ -551,6 +551,23 @@ bash scripts/run_mobile_restock.sh --manifest "$ENVIRONMENT_MANIFEST" \
   --scenario scripts/restock_scenario.json
 ```
 
+### 11-bench. Warm start at transfer (dev bench, opt-in)
+
+To iterate transfer -> verify -> return without paying couple/outbound/park, set in the
+mission runtime-config: `"start_at": "transfer"` and `"start_staging": "recorded_bay_park"`
+(`twin/restock/shortcut.py`). The build spawns the robot at the recorded park->transfer
+handover of the gentle bay route (runs 351/353/354/356), the rollwagen coupled behind it on
+the hitch, and the carton resting on the deck at `initial_staging.cart_load_center_body_xy`;
+`start_staging` may also be an object overriding `robot_base_pose`, `articulation`,
+`carton_load_center_body_xy`, `carton_support_z_world`. mission.json records `start_at`,
+`start_staging_mode` and the staged poses; the walkthrough carries a burned-in BENCH caption.
+Absent `start_staging` => byte-identical. CPU proof against the raw run files:
+
+```bash
+python3 scripts/check_transfer_bench_staging.py --runs 351 353 354 356
+python3 -m pytest -q scripts/twin/tests/test_restock_transfer_bench.py
+```
+
 ### 11a. Demand-driven mission job (store-vision plan, CPU, opt-in)
 
 The mission job is normally the one hardcoded in `scripts/restock_scenario.json`.

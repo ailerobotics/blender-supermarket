@@ -274,6 +274,9 @@ class Bundle:
     # so the mission can be re-run in the SAME Isaac session without a re-boot/re-commission. None
     # unless config['warm_reset'] names a provider; the launcher runs a single attempt without it.
     warm_reset: object = None
+    # Record of the opt-in recorded start staging (shortcut.staged_scenario) for mission.json; None
+    # unless config['start_staging'] is set.
+    start_staging: dict = None
 
     def close(self):
         errors = []
@@ -337,14 +340,23 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
     plan = plan_bundle(manifest, scenario, config)
     output = Path(output)
 
+    # Opt-in recorded start staging (config['start_staging'], start_at='transfer' only): the physical
+    # build spawns the robot + cart at the recorded park->transfer handover instead of the scenario's
+    # dock spawn. Only the build + shortcut synthesis see the variant; the runtime keeps the scenario.
+    # Absent => (scenario, None), the same object -> byte-identical.
+    build_scenario, start_staging = scenario, None
+    if config.get('start_staging') is not None:
+        from .shortcut import staged_scenario
+        build_scenario, start_staging = staged_scenario(scenario, config, **_hitch_geometry(config))
+
     assemble = _assemble or _real_assemble
-    assembly = assemble(app=app, config=config, scenario=scenario, output=output)
+    assembly = assemble(app=app, config=config, scenario=build_scenario, output=output)
 
     # Start-phase shortcut (dev iteration only): synthesize the skipped prefix's physical end
     # state before any mission tick. Guarded by config['start_at']; absent => untouched.
     if config.get('start_at'):
         from .shortcut import apply_start_state
-        apply_start_state(assembly, config, scenario)
+        apply_start_state(assembly, config, build_scenario)
 
     build_runtime = _runtime or _build_isaac_runtime
     parts = build_runtime(app=app, assembly=assembly, plan=plan, config=config, output=output,
@@ -395,7 +407,21 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
         warm_reset = build_warm_reset(app=app, assembly=assembly, parts=parts, plan=plan,
                                       config=config, output=output)
     return Bundle(adapter=adapter, recording=recording, _closers=tuple(closers),
-                  warm_reset=warm_reset)
+                  warm_reset=warm_reset, start_staging=start_staging)
+
+
+def _hitch_geometry(config):
+    """Hitch offsets (robot ``hitch_x``, cart ``cart_hitch_x``) from the mobile manifest the physics
+    build uses, so the staged cart sits exactly on the hitch the shortcut then latches. Falls back to
+    the MobileSpec defaults when no manifest is configured (CPU contract tests)."""
+    from twin.mobile import MobileSpec
+    spec = {}
+    path = config.get('mobile_manifest')
+    if path:
+        import json as _json
+        spec = _json.loads(Path(path).read_text()).get('spec', {})
+    return {'hitch_x': float(spec.get('hitch_x', MobileSpec.hitch_x)),
+            'cart_hitch_x': float(spec.get('cart_hitch_x', MobileSpec.cart_hitch_x))}
 
 
 def _real_assemble(*, app, config, scenario, output):
@@ -530,7 +556,13 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         carry_self_radius=_carry_self_radius)
     # fm376: no walkthrough render product (recording_camera None) => no Recorder; the port then
     # self-disables the record cadence and the walkthrough is composed offline from sensing frames.
-    recorder = Recorder(output / 'mission-frames', fps=plan.recording_fps) if recording_camera is not None else None
+    # A start-phase shortcut run carries a caption (shortcut.walkthrough_caption; None otherwise =>
+    # byte-identical) that the encode burns into walkthrough.mp4, so a bench video can never pass
+    # for the full run.
+    from .shortcut import walkthrough_caption
+    recorder = (Recorder(output / 'mission-frames', fps=plan.recording_fps,
+                         caption=walkthrough_caption(config))
+                if recording_camera is not None else None)
     verifier = InventoryVerifier(capture, source=plan.verification_source)
 
     def on_action(action, job):
