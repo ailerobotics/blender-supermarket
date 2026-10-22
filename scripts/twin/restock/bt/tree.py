@@ -65,7 +65,7 @@ def build_stage(ctx, action, *, max_retries=2):
     adapter = getattr(ctx.mission, 'adapter', None)
     plan = stage_plan(action, adapter)
     steps = plan if plan else [(action, 'stage')]
-    run = StageRun(ctx, action, len(steps))
+    run = StageRun(ctx, action, len(steps), steps)
     seq = py_trees.composites.Sequence(name=f'{action} steps', memory=True)
     seq.add_children([PhaseGate(run, i, label, kind) for i, (label, kind) in enumerate(steps)])
     return StageRetry(seq, run, max_retries=max_retries)

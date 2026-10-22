@@ -58,6 +58,27 @@ def adapter_is_phased(adapter) -> bool:
     return hasattr(adapter, 'phase')
 
 
+# vr1: steps whose evidence comes from a labelled SIM GROUND-TRUTH workaround when the adapter declares
+# that stage's mode (adapter.stage_modes, set by the bundle from the runtime config): the transfer's slot
+# target + placement check (fm461) and the mission-level inventory verify. The tag rides in the leaf name,
+# the live view and the stage timeline, so the walkthrough caption names the workaround.
+_MODE_TAGGED_KINDS = {'transfer': (PERCEIVE, VERIFY), 'verify': (PERCEIVE,), 'collect': (VERIFY,)}
+
+
+def _stage_mode(action, adapter):
+    modes = getattr(adapter, 'stage_modes', None)
+    return modes.get(action) if isinstance(modes, dict) else None
+
+
+def _tag_mode(action, plan, adapter):
+    mode = _stage_mode(action, adapter)
+    kinds = _MODE_TAGGED_KINDS.get(action, ())
+    if not mode or not plan or not kinds:
+        return plan
+    tag = ' [%s]' % str(mode).replace('_', ' ')
+    return [((label + tag) if kind in kinds else label, kind) for label, kind in plan]
+
+
 def stage_plan(action, adapter):
     """The ordered ``(label, kind)`` plan for ``action`` on ``adapter``, or ``None`` for a non-phased
     adapter (single-leaf fallback). ``return`` resolves to the uncouple plan when the adapter opts in."""
@@ -65,7 +86,7 @@ def stage_plan(action, adapter):
         return None
     if action == 'return' and _return_is_uncouple(adapter):
         return RETURN_UNCOUPLE_PLAN
-    return PLANS.get(action)
+    return _tag_mode(action, PLANS.get(action), adapter)
 
 
 def _collect_milestone(adapter) -> int:

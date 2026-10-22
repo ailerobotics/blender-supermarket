@@ -29,6 +29,17 @@ def build_bus(scenario=None, *, extra_sources=()):
     return EventBus(sources), queue
 
 
+STAGE_EVENT_TYPES = ('stage_shortcut', 'stage_begin', 'stage_step', 'stage_succeeded', 'stage_degraded',
+                     'stage_failed', 'mission_complete', 'mission_failed')
+
+
+def stage_timeline(ctx):
+    """vr1: the stage/step entries of the BT event log, in order -- the same records bt_events.jsonl
+    carries (``{t, type, data: {stage, attempt, sim_time, step, label, kind, ...}, action: 'stage'}``)."""
+    from .context import EVENT_LOG
+    return [dict(entry) for entry in ctx.bb.get(EVENT_LOG) if entry.get('type') in STAGE_EVENT_TYPES]
+
+
 def run_mission_tree(mission, bus, *, reactions=None, dt=1 / 60, max_ticks=60 * 20 * 60,
                      snapshot=None, max_retries=2, on_tick=None, is_running=None):
     """Drive ``mission`` to a terminal state through the behaviour tree. Returns a summary dict
@@ -43,6 +54,13 @@ def run_mission_tree(mission, bus, *, reactions=None, dt=1 / 60, max_ticks=60 * 
     """
     mission.start(begin=False)
     ctx = MissionContext(mission, bus, reactions=reactions, snapshot=snapshot)
+    if mission.shortcut is not None:
+        # vr1: name the synthesized (not performed) prefix on the stage timeline so the walkthrough can
+        # caption it honestly (e.g. 'collect: warm-start shortcut, synthesized').
+        for stage in mission.shortcut['skipped']:
+            ctx.log('stage_shortcut', {'stage': stage, 'sim_time': 0.0,
+                                       'note': 'start-phase shortcut: synthesized, not performed'},
+                    action='stage')
     root = build_tree(ctx, max_retries=max_retries)
     tree = py_trees.trees.BehaviourTree(root)
     tree.setup()
@@ -76,7 +94,9 @@ def run_mission_tree(mission, bus, *, reactions=None, dt=1 / 60, max_ticks=60 * 
                'orchestrator': 'behaviour_tree', 'ticks': ticks,
                'degraded': list(mission.degraded),
                'physics_verified': False,
-               'note': 'Mission success alone does not verify video, contacts or autonomy.'}
+               'note': 'Mission success alone does not verify video, contacts or autonomy.',
+               # vr1: the per-stage/step timeline (sim clock of the walkthrough frames) for the video cut.
+               'stage_timeline': stage_timeline(ctx)}
     if mission.shortcut is not None:
         summary['shortcut'] = mission.shortcut
     return ctx, root, summary

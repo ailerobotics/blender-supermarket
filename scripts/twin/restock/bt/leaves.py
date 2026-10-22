@@ -187,16 +187,36 @@ class StageRun:
     * ``step_stage`` -> ``running`` (advance ``milestone`` off the adapter's observed phase),
       ``succeeded`` / ``degraded`` (``done``), or ``('failed', reason)`` (``fail_reason``).
     """
-    def __init__(self, ctx, action, n_steps):
+    def __init__(self, ctx, action, n_steps, steps=None):
         self.ctx = ctx
         self.action = action
         self.n_steps = max(1, int(n_steps))
+        # vr1: the (label, kind) plan, so the timeline names each position-first step the walkthrough
+        # cuts on; defaults to one leaf named after the stage (a non-phased fixture).
+        self.steps = list(steps) if steps else [(action, 'stage')]
         self.begun = False
         self.done = None             # None | 'succeeded' | 'degraded'
         self.fail_reason = None      # set the tick step_stage reports ('failed', reason)
         self.milestone = 0
+        self.attempt = 0
         self._held = False
         self._tick = None            # ctx.now of the last pump (one step per tree tick)
+
+    def _sim_time(self):
+        # The mission's dt-accumulated clock == the packet/frame simulation_time the recorder stamps on
+        # walkthrough frames (the tree tick clock runs ahead of it by the free begin ticks).
+        return round(float(getattr(self.ctx.mission, 'time', 0.0)), 4)
+
+    def _log_stage(self, etype, **data):
+        """vr1: durable stage timeline entry (bt_events.jsonl + mission.json stage_timeline) so the
+        walkthrough can cut + caption every stage and step from the run itself."""
+        self.ctx.log(etype, dict({'stage': self.action, 'attempt': self.attempt,
+                                  'sim_time': self._sim_time()}, **data), action='stage')
+
+    def _log_step(self, index, *, skipped=False):
+        label, kind = self.steps[min(index, len(self.steps) - 1)]
+        extra = {'skipped': True} if skipped else {}
+        self._log_stage('stage_step', step=index, label=label, kind=kind, **extra)
 
     def begin(self):
         self.ctx.mission.begin_stage(self.action)
@@ -204,6 +224,9 @@ class StageRun:
         self.milestone = 0
         self.fail_reason = None
         self.done = None
+        self.attempt += 1
+        self._log_stage('stage_begin', steps=[label for label, _ in self.steps])
+        self._log_step(0)
 
     def _classify(self):
         idx = _milestone(self.action, getattr(self.ctx.mission, 'adapter', None))
@@ -231,11 +254,16 @@ class StageRun:
             self._held = False
         outcome = ctx.mission.step_stage(ctx.dt)
         if outcome == 'running':
+            before = self.milestone
             self.milestone = self._classify()
+            for index in range(before + 1, self.milestone + 1):   # vr1: one entry per step reached
+                self._log_step(index, skipped=index < self.milestone)
         elif outcome in ('succeeded', 'degraded'):
             self.done = outcome
+            self._log_stage('stage_' + outcome)
         else:
             self.fail_reason = outcome[1]      # ('failed', reason)
+            self._log_stage('stage_failed', reason=str(self.fail_reason)[:300])
 
     def reset_for_retry(self):
         self.begin()
@@ -332,6 +360,10 @@ class Finalize(py_trees.behaviour.Behaviour):
             if not self.ctx.mission.terminal:
                 self.ctx.mission.finalize()
             self._done = True
+            mission = self.ctx.mission
+            self.ctx.log('mission_' + mission.state,     # vr1: the walkthrough's closing card
+                         {'state': mission.state, 'reason': mission.reason,
+                          'sim_time': round(float(getattr(mission, 'time', 0.0)), 4)}, action='stage')
         state = self.ctx.mission.state
         self.feedback_message = f'mission {state}'
         return SUCCESS if state == 'complete' else FAILURE

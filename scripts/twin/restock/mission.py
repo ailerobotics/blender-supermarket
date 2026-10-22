@@ -26,7 +26,8 @@ _RETRYABLE_STAGES = ('couple', 'outbound', 'park', 'return')
 # collect-gt: stages whose evidence may be explicitly-labelled sim GROUND TRUTH (source 'ground_truth' AND
 # ground_truth=True: the fm389 place check converted by the runtime). Never 'verify' -- the stock-commit
 # gate stays sensor-only. Unlabelled or other stages, or RESTOCK_COLLECT_GROUND_TRUTH unset, keep the
-# sensor-only rule.
+# sensor-only rule. (Separate, config-gated: vr1's Mission(ground_truth_sources) for the bay demo's labelled
+# ground-truth transfer + verify -- see twin.restock.ground_truth_verify.)
 _GT_EVIDENCE_STAGES = ('collect',)
 
 
@@ -61,7 +62,7 @@ class Adapter(Protocol):
 class Mission:
     def __init__(self, inventory: Inventory, job: Job, adapter: Adapter,
                  timeout_s=120., fixture_mode=False, max_evidence_age_s=1., stages=None,
-                 start_at=None, fit_preflight=None):
+                 start_at=None, fit_preflight=None, ground_truth_sources=()):
         if not math.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError('timeout must be finite and positive')
         if not math.isfinite(max_evidence_age_s) or max_evidence_age_s < 0:
@@ -96,6 +97,15 @@ class Mission:
         # never block here: the place-phase gate stays the measured backstop and verify stays the
         # stock-commit source of truth.
         self.fit_preflight = fit_preflight
+        # vr1 (labelled sim workaround, default OFF): extra evidence SOURCES a stage may succeed on,
+        # beyond the measured 'sensor' -- the fm461 demo's sim ground truth ('ground_truth': the transfer
+        # place check + the mission-level ground-truth verify, used while the bay's shelf camera is not
+        # commissioned). Only 'ground_truth' is allowed; the evidence keeps that label (never relabelled
+        # 'sensor') and every other gate (identity, freshness, sku/qty/location, transfer_confirmed,
+        # single stock commit) is unchanged. () (default) => only 'sensor' (+fixtures) => byte-identical.
+        self.ground_truth_sources = frozenset(ground_truth_sources or ())
+        if not self.ground_truth_sources <= {'ground_truth'}:
+            raise ValueError("ground_truth_sources may only contain 'ground_truth'")
         self.inventory, self.job, self.adapter = inventory, job, adapter
         self.timeout_s, self.fixture_mode = timeout_s, fixture_mode
         self.max_evidence_age_s = max_evidence_age_s
@@ -164,7 +174,8 @@ class Mission:
         self.inventory.record(self.job.job_id, 'failed', {'reason': self.reason})
 
     def _validate(self, evidence):
-        sources = {'sensor'} | ({'test_fixture'} if self.fixture_mode else set())
+        sources = ({'sensor'} | ({'test_fixture'} if self.fixture_mode else set())
+                   | self.ground_truth_sources)
         if (self.state in _GT_EVIDENCE_STAGES and _gtc.enabled() and evidence.get('source') == 'ground_truth'
                 and evidence.get('ground_truth') is True):
             sources = sources | {'ground_truth'}    # collect-gt: labelled sim ground-truth (never verify)
