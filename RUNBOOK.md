@@ -1016,6 +1016,23 @@ resolution (9.9 / 11.9 px/module, unoccluded) and the baseline covers `G3_back_s
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_shelf_target.py -q
 ```
 
+### 13d. Ground-truth collect (labelled SIM demo workaround, default off)
+
+`RESTOCK_COLLECT_GROUND_TRUTH=1` in the mission run env (read by the Isaac process AND the host
+manipulation stack) serves the collect pick from the simulated pose of the controlled carton asset
+(`/RestockScenario/HandlingUnit`) instead of the fixed source camera, and places the carton at the
+warm `start_at` shortcut's slot (scenario `initial_staging`: rollwagen upper shelf, cart body
+(+0.18, 0), yaw −90° cart-relative; `RESTOCK_PLACE_ON_DECK` is not used for this place). The pick is
+labelled `source='ground_truth'` and the run records `collect_mode: ground_truth` in mission.json and
+the walkthrough caption; `verify` stays the stock-commit gate. Unset ⇒ byte-identical. Design + why:
+`scripts/twin/restock_manipulation/ground_truth_collect.py`. CPU tests, then a replay of the
+production bridge on RECORDED run stages (camera-vs-ground-truth delta + policy reach gate):
+
+```bash
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_collect_ground_truth.py -q
+PYTHONPATH=scripts .venv-usd/bin/python scripts/check_collect_ground_truth.py ~/datasets/twin-robot-in-store-boot-v1/mission/run-343
+```
+
 ## 14. Controlled static-scene navigation mapper commissioning
 
 This is an uncommissioned integration handoff, not a moving-mission readiness

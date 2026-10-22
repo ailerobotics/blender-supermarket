@@ -9,6 +9,7 @@ import math
 import os
 import time
 from ..restock_camera.freshness import require_fresh
+from ..restock_manipulation import ground_truth_collect as gtc
 from typing import Protocol
 
 from .mission import Result
@@ -43,6 +44,12 @@ _WARM_SETTLE_GRACE_TICKS = 20
 # sensor-stream watchdog. The window matches the PR#80 hold (data/sim-restock-camera-v2);
 # the host watchdog remains the backstop and is never bypassed.
 _SENSOR_STALL_WINDOW_S = 20.
+# collect-gt: manip stages whose final controller evidence may be the fm389 ground-truth place check
+# (RESTOCK_VERIFY_PLACE), converted to labelled ground_truth stage evidence -- only while
+# RESTOCK_COLLECT_GROUND_TRUTH is on (unset => the pre-existing 'transfer evidence mismatch', byte-identical).
+# 'transfer' hits the same mismatch under fm461 ground-truth verify; it is the integration lane's to add
+# here AND to mission._GT_EVIDENCE_STAGES.
+_GT_PLACE_EVIDENCE_STAGES = ('collect',)
 
 
 @dataclass(frozen=True)
@@ -807,7 +814,17 @@ class RuntimeAdapter:
                     raise ValueError('transfer returned no observation evidence')
                 last = r.evidence[-1]
                 expected = self.job.shelf_id if self.action == 'transfer' else self.manip.cart_location
-                if (last.get('source') not in sources or last.get('sku') != self.job.sku or
+                final_sources = sources
+                if (gtc.enabled() and self.action in _GT_PLACE_EVIDENCE_STAGES and isinstance(last, dict)
+                        and last.get('source') == gtc.PLACE_CHECK):
+                    # collect-gt: under RESTOCK_VERIFY_PLACE the stage's final evidence is the controller's
+                    # sim-measured ground-truth place check (no camera frames the cart), which has no
+                    # sku/observation_id and is not 'sensor' -- so every completed collect would die here
+                    # ('transfer evidence mismatch'). Convert it to honestly-labelled ground_truth evidence.
+                    last = gtc.stage_evidence_from_place_check(
+                        last, sku=self.job.sku, quantity=self.job.quantity, expected_location=expected)
+                    final_sources = tuple(sources) + (gtc.SOURCE,)
+                if (last.get('source') not in final_sources or last.get('sku') != self.job.sku or
                         last.get('location') != expected or last.get('quantity') != self.job.quantity):
                     raise ValueError('transfer evidence mismatch')
                 key = 'released' if self.action == 'transfer' else 'loaded'

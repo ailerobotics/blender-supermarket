@@ -561,8 +561,10 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # byte-identical) that the encode burns into walkthrough.mp4, so a bench video can never pass
     # for the full run.
     from .shortcut import walkthrough_caption
+    from ..restock_manipulation import ground_truth_collect
+    # collect-gt: a ground-truth collect run names the workaround in the same burned-in caption.
     recorder = (Recorder(output / 'mission-frames', fps=plan.recording_fps,
-                         caption=walkthrough_caption(config))
+                         caption=ground_truth_collect.join_caption(walkthrough_caption(config), config))
                 if recording_camera is not None else None)
     verifier = InventoryVerifier(capture, source=plan.verification_source)
 

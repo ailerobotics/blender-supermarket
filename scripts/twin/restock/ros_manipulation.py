@@ -7,6 +7,7 @@ runtime dependencies supplied by the guarded simulator bundle.
 import math
 from dataclasses import replace
 
+from twin.restock_manipulation import ground_truth_collect as gtc
 from twin.restock_manipulation.types import Result
 from .native_channel import StationAckStreamStalled
 
@@ -190,7 +191,12 @@ class RosManipulationRuntime:
                 # any OTHER non-sensor provenance on either observations or target is an integrity
                 # violation that still raises (fail-closed). run-347: without this, the ground-truth place
                 # target tripped the gate at transfer -> stop() -> arm feed death -> StationAckStreamStalled.
-                if any(o.source != 'sensor' for o in packet.observations):
+                # collect-gt: under RESTOCK_COLLECT_GROUND_TRUTH the collect pick observation is the controlled
+                # carton asset's simulated pose, honestly labelled 'ground_truth'; accept exactly that label,
+                # for collect only. Anything else non-sensor still raises (fail-closed); unset => unchanged.
+                allowed_obs = (('sensor', gtc.SOURCE) if self.operation == 'collect' and gtc.enabled()
+                               else ('sensor',))
+                if any(o.source not in allowed_obs for o in packet.observations):
                     raise ValueError('production manipulation requires sensor provenance')
                 if packet.target is not None and packet.target.source not in ('sensor', 'ground_truth'):
                     raise ValueError('production manipulation requires sensor provenance')
