@@ -10,7 +10,7 @@ def make_runtime(packet):
     calls=[]
     graph=NS(start=lambda *a:calls.append('start'),
              publish_sensors=lambda s:calls.append('sensor'),
-             poll=lambda *a:None,close=lambda:calls.append('hold'))
+             poll=lambda *a:None,close=lambda **k:calls.append('hold'))
     runtime=RosManipulationRuntime(graph,lambda *a:packet,
                                   prepare_station=lambda *a:calls.append('calibrate'))
     runtime.start('collect',dict(job_id='j',source_bin='back',shelf_id='shelf'))
@@ -74,7 +74,8 @@ def _mission_wrapper_chain():
     stops = []
     station = NS(stop=lambda: stops.append('stop'))
     feedback = NS(collision_time=1.0, parked=lambda: True, set_parked=lambda v: None)
-    graph = NS(start=lambda *a: None, publish_sensors=lambda s: None, poll=lambda *a: None, close=lambda: None)
+    graph = NS(start=lambda *a: None, publish_sensors=lambda s: None, poll=lambda *a: None,
+               close=lambda **k: None)
     inner = RosManipulationRuntime(graph, lambda *a: None, prepare_station=lambda *a: None,
                                    station=station, feedback=feedback)
     host = HostManipulationRuntime(runtime=inner, sensors=NS(), motion=NS(), profiles={})
@@ -103,10 +104,11 @@ def test_mission_wrapper_chain_resolves_every_probed_method_fm400():
 
 
 def test_per_op_host_failure_keeps_sensing_feed_alive_but_teardown_closes_it():
-    # transfer2 / bench1 (36/36 recorded arm-feed deaths, all writer_eof rc=0): a PER-OP transfer
-    # host 'failed' must HOLD the gripper but NOT tear down the station masked-depth feed -- closing
-    # it froze the station ack stamp -> StationAckStreamStalled, masking the true reason. The feed is
-    # closed exactly once, at the real mission teardown (the external stop()).
+    # transfer2 / bench1 / armcam (36/36 recorded arm-feed deaths, all writer_eof rc=0): a PER-OP transfer
+    # host 'failed' must HOLD the gripper but NOT tear down the two STATION-level resources -- the
+    # masked-depth feed (sensing_bridge) AND the shared control relay the station ack rides on
+    # (graph.close's host_control). Closing either froze the station ack stamp -> StationAckStreamStalled,
+    # masking the true reason. Both are torn down exactly once, at the real mission teardown.
     events = []
     bridge = NS(close=lambda: events.append('bridge_close'), target_location=None,
                 publish=lambda now: events.append('publish'))
@@ -114,16 +116,19 @@ def test_per_op_host_failure_keeps_sensing_feed_alive_but_teardown_closes_it():
     graph = NS(start=lambda *a: None, publish_sensors=lambda s: None,
                poll=lambda *a: dict(status='failed', phase='plan',
                                     reason='collision planning or execution failed'),
-               close=lambda: events.append('hold'))
+               close=lambda **k: events.append(('graph_close', k.get('close_control', True))))
     rt = RosManipulationRuntime(graph, lambda *a: None, prepare_station=lambda *a: None,
                                 sensing_bridge=bridge, station=station)
     rt.start('transfer', dict(job_id='j', source_bin='b', shelf_id='G3'))
     r = rt.step(.01, 1.0)
     assert r.status == 'failed' and r.reason == 'collision planning or execution failed'
-    assert 'hold' in events and 'station_stop' in events     # gripper held + station stopped
-    assert 'bridge_close' not in events                      # the station feed SURVIVED the per-op failure
-    rt.stop()                                                # mission teardown DOES close it, once
+    assert 'station_stop' in events                          # gripper held + station stopped
+    assert ('graph_close', False) in events                  # graph held, but control relay KEPT (per-op)
+    assert 'bridge_close' not in events                      # the masked-depth feed SURVIVED the per-op failure
+    assert not any(e == ('graph_close', True) for e in events)  # relay not torn down on a per-op failure
+    rt.stop()                                                # mission teardown DOES close both, once
     assert events.count('bridge_close') == 1
+    assert events.count(('graph_close', True)) == 1          # relay torn down exactly once, at teardown
 
 
 def test_set_base_repositioned_stamps_published_sensor_packet_fm400():
@@ -137,7 +142,7 @@ def test_set_base_repositioned_stamps_published_sensor_packet_fm400():
         return Sensors(simulation_time, (obs,), None, True, False, simulation_time, simulation_time,
                        (0.,) * 6, ('rollwagen',), simulation_time)
     graph = NS(start=lambda *a: None, publish_sensors=lambda s: published.append(s),
-               poll=lambda *a: None, close=lambda: None)
+               poll=lambda *a: None, close=lambda **k: None)
     rt = RosManipulationRuntime(graph, capture, prepare_station=lambda *a: None)
     rt.start('collect', dict(job_id='j', source_bin='back', shelf_id='shelf'))
     rt.step(.01, 1.0)
