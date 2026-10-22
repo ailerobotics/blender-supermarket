@@ -209,9 +209,17 @@ class RosManipulationRuntime:
                     reply.get('phase','host'),reply.get('reason',''),controls=(),
                     evidence=tuple(reply.get('evidence',())))
                 if self.latest.status == 'failed':
+                    # fm474: name the HOST failure reason on the console. The reply reason is otherwise
+                    # only on the manip status topic (echo unreliable) and is overwritten in mission.json
+                    # by the downstream StationAckStreamStalled, so the transfer-pick root (why the host
+                    # replies failed before suction engages) was invisible. stop() closes the arm feed.
+                    print('MANIP_HOST_FAILED op=%s phase=%r reason=%r' % (
+                        self.operation, self.latest.phase, self.latest.reason), flush=True)
                     self.stop()
             return self.latest
         except Exception as exc:
+            print('MANIP_STEP_EXCEPTION op=%s %s: %s' % (
+                self.operation, type(exc).__name__, str(exc)[:200]), flush=True)
             self.stop()
             self.latest = Result('failed','host',str(exc))
             return self.latest
