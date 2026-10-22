@@ -1713,3 +1713,18 @@ def test_fm372_retry_max_env_clamped_and_malformed_safe(monkeypatch):
     c, _ = _staged_controller()
     assert c._staged_move_retry_max == 8          # clamped to [0, 8]
     assert c._move_deadline_retry_max == 2        # malformed -> module default
+
+
+def test_gripper_command_result_carries_the_acquisition_deadline():
+    """fm488: the gripper command Result MUST carry a non-None valid_until_steady, else isaac_ros_graph
+    refuses it ('missing acquisition deadline for gripper command') -- the transfer-at-contact and the
+    cold collect-only gripper failures. The Isaac capture (isaac_factory._capture_transfer /
+    _capture_ground_truth_collect) therefore stamps valid_until_steady=now+window on its Sensors; this
+    guards that a present deadline flows through the controller onto the gripper-enable Result."""
+    c, m = make_controller()
+    t = run_to(c, 'contact')
+    m.outcome = 'running'
+    c.step(.1, packet(c, t, contact=False, valid_until_steady=_fresh()))            # issue the move
+    r = c.step(.1, packet(c, t + .1, contact=False, valid_until_steady=_fresh()))   # suction enabled
+    assert {'kind': 'gripper', 'enabled': True} in r.controls
+    assert r.valid_until_steady is not None     # carried Sensors -> Result so isaac_ros_graph accepts

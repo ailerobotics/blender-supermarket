@@ -64,6 +64,48 @@ def test_held_acquisition_deadline_is_threaded_onto_the_host_packet():
     assert b2.capture(1.0, 'backstock_00', 'rollwagen').valid_until_steady is None
 
 
+def test_ground_truth_collect_capture_stamps_the_acquisition_deadline():
+    # fm488 (cold collect-only failure): the GROUND-TRUTH collect path has no camera framing the pick to
+    # thread a source deadline, so _capture_ground_truth_collect must itself stamp a non-None sim-clock
+    # valid_until_steady (now + window) on EVERY packet -- pre-grasp and after the carton is held. Else the
+    # contact gripper command is refused 'missing acquisition deadline for gripper command' (isaac_ros_graph)
+    # and the collect aborts before the arm moves. This pins the stamp at the SOURCE (the controller guard in
+    # test_restock_manipulation feeds a synthetic fresh deadline, so it cannot catch a revert here).
+    from scripts.twin.restock_manipulation.types import Target
+    b = _bridge(lambda now: None)
+    b.collect_ground_truth = True                      # RESTOCK_COLLECT_GROUND_TRUTH path (source != cart)
+    b._ground_truth_target = lambda now: NS(sku='juice_orange', pose_station=(0., 0., 1.5, 0., 0., 0., 1.))
+    b._reproject = lambda target: None
+    b._map_pose_to_base = lambda pose: tuple(float(v) for v in pose)   # pxr-agnostic (GPU-only map->base yaw)
+    b._cart_target = lambda now, src: Target(observation_id='cart', source='ground_truth',
+                                             simulation_time=now, location='rollwagen',
+                                             pose=(0., 0., 1.0, 0., 0., 0., 1.), clear=True,
+                                             free_dimensions=(.6, .4, .16), frame='ur_base_link')
+    b._carton_center_station = lambda: None
+    b._carton_attached = lambda: False                 # pre-grasp: the carton is not yet held (contact moment)
+    pre = b.capture(5.0, 'backstock_00', 'rollwagen')  # dispatches to _capture_ground_truth_collect
+    assert pre is not None and pre.valid_until_steady == 5.0 + 300.0
+    b._carton_attached = lambda: True                  # after the grasp (no source obs, target still alive)
+    b._gt_carton_held = True
+    post = b.capture(9.0, 'backstock_00', 'rollwagen')
+    assert post is not None and post.observations == () and post.valid_until_steady == 9.0 + 300.0
+
+
+def test_transfer_capture_stamps_the_acquisition_deadline():
+    # fm488: the transfer place has the same no-camera-framing-the-pick gap at CONTACT; _capture_transfer
+    # must stamp valid_until_steady=now+window so the gripper command is not refused by isaac_ros_graph.
+    from scripts.twin.restock_manipulation.types import Target  # noqa: F401 (symmetry with the collect guard)
+    b = _bridge(lambda now: None)
+    b.cart_placement = {'location': 'rollwagen'}
+    b.shelf_provider = lambda now: NS(pose_station=(0., 0., 1.0, 0., 0., 0., 1.), stamp=now,
+                                      location='G3_back_s2', clear=True, free_dimensions=(.6, .4, .16),
+                                      provenance={'camera_id': 'shelf', 'source': 'ground_truth'})
+    b._cart_pose_station = lambda: ((0., 0., 1.0), 0.0)
+    b._carton_center_station = lambda: None
+    pkt = b.capture(5.0, 'rollwagen', 'G3_back_s2')     # source == cart location -> _capture_transfer
+    assert pkt is not None and pkt.valid_until_steady == 5.0 + 300.0
+
+
 def test_none_when_nothing_sensed():
     b = _bridge(lambda now: None)
     assert b.capture(1.0, 'backstock_00', 'rollwagen') is None
