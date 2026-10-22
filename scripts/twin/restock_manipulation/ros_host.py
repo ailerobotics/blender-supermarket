@@ -174,6 +174,10 @@ def main():
         # fm461 (demo fallback): accept the authored GROUND-TRUTH bay transfer target + ground-truth verify
         # when the shelf station is not camera-commissioned. Absent/False => byte-identical.
         transfer_ground_truth=bool(config.get('transfer_ground_truth', False)),
+        # fm462 (demo, opt-in): label the (already controlled-asset) transfer pick ground-truth. Nested
+        # under the transfer_ground_truth block; default off. Does NOT bypass the station/masked-depth pump.
+        ground_truth_pick=bool(config.get('transfer_ground_truth', {}).get('ground_truth_pick', False))
+                          if isinstance(config.get('transfer_ground_truth'), dict) else False,
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # The first decode-grade frame + support registration under render pacing needs several

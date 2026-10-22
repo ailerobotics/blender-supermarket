@@ -88,7 +88,7 @@ class TransferController:
                  cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03,
                  cage_preplace_shape=None, reposition_before_place: bool = False,
                  grasp_track_m=None, require_collect_source_evidence: bool = False,
-                 transfer_ground_truth: bool = False):
+                 transfer_ground_truth: bool = False, ground_truth_pick: bool = False):
         self.steady_clock=steady_clock
         # fm390: drive the BASE in front of the rollwagen mouth between the carry fold and the place,
         # instead of reaching the place around from the collect station pose. When set (with the staged
@@ -175,6 +175,13 @@ class TransferController:
         # labelled ground_truth in the evidence + run log. Off (default) => only sensor-sourced transfer
         # targets + the camera 2-frame verify, byte-identical.
         self.transfer_ground_truth = bool(transfer_ground_truth)
+        # fm462 (demo, opt-in): LABEL the transfer PICK as ground-truth. NOTE: the transfer cart-source
+        # observation is ALREADY a controlled-asset read (isaac_factory._cart_pose_station -- the cart's
+        # live measured deck pose, NOT camera-sensed stock), so this does not change WHERE the arm picks;
+        # it records that the pick target is ground-truth (source 'ground_truth_pick') in the evidence +
+        # run log so the demo is labeled honestly. It does NOT bypass the station-ACK/masked-depth pump
+        # (StationAckStreamStalled) -- that is a publisher process-death, fixed on the sensing side, not here.
+        self.ground_truth_pick = bool(ground_truth_pick)
         self.collect_source_evidence_wait_ticks = _int_env('RESTOCK_COLLECT_SOURCE_EVIDENCE_WAIT_TICKS', 40, 1, 600)
         self._collect_source_evidence = None   # injected callable(now) -> bool: clean source capture this tick
         self._collect_source_evidence_waits = 0
@@ -803,6 +810,13 @@ class TransferController:
             self.source_pose = source.pose
             self._source_obs = source   # fm390: re-run the place policy against a fresh target after repositioning
             self.evidence.append(asdict(source))
+            if self.ground_truth_pick and self.operation == 'transfer':
+                # fm462: label the (already controlled-asset) transfer pick ground-truth, honestly.
+                self.evidence.append({'source': 'ground_truth_pick', 'location': self.source,
+                                      'pick_pose': tuple(round(v, 4) for v in source.pose)})
+                print('GROUND_TRUTH_PICK transfer source=%s pick=%s (ground-truth controlled-asset cart '
+                      'deck, not camera)' % (self.source, tuple(round(v, 3) for v in source.pose[:3])),
+                      flush=True)
             self._transition('approach')
         if self.phase in self.poses:
             # OBSERVE-THEN-EXECUTE lock (firstmate 2026-10-15, key approach-sensing-occlusion): once

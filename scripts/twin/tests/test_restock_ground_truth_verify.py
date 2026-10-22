@@ -18,7 +18,7 @@ class GroundTruthProvider(unittest.TestCase):
         self.assertEqual(t.stamp, 12.5)
 
 
-def _make_controller(transfer_ground_truth):
+def _make_controller(transfer_ground_truth, ground_truth_pick=False):
     # minimal controller for the _provenance gate; no motion needed for the gate itself
     from twin.restock_manipulation.controller import TransferController
     from twin.restock_manipulation.types import ProductProfile
@@ -27,7 +27,21 @@ def _make_controller(transfer_ground_truth):
         def pose(self): return (0,)*7
     prof = ProductProfile('juice_orange', (0.2, 0.2, 0.2), (1., 0., 0., 0.))
     return TransferController(_M(), {'juice_orange': prof},
-                             transfer_ground_truth=transfer_ground_truth)
+                             transfer_ground_truth=transfer_ground_truth,
+                             ground_truth_pick=ground_truth_pick)
+
+
+class GroundTruthPickFlag(unittest.TestCase):
+    """fm462 Option A: the ground_truth_pick flag is plumbed and default-off. NOTE: the transfer pick is
+    ALREADY controlled-asset (isaac_factory._cart_pose_station); this flag only LABELS it ground-truth and
+    does NOT bypass the station/masked-depth pump (the StationAckStreamStalled freeze is a publisher crash)."""
+    def test_flag_stored_and_default_off(self):
+        self.assertTrue(_make_controller(True, ground_truth_pick=True).ground_truth_pick)
+        self.assertFalse(_make_controller(True).ground_truth_pick)            # default off
+        self.assertFalse(_make_controller(False).ground_truth_pick)
+        # independent of transfer_ground_truth (label can be on even without the GT target gate, though the
+        # mission sets them together); absent => byte-identical real-sensing pick label path (no evidence tag)
+        self.assertTrue(_make_controller(False, ground_truth_pick=True).ground_truth_pick)
 
 
 class ProvenanceGate(unittest.TestCase):
