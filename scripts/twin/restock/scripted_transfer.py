@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -567,6 +568,39 @@ def stamp_place_summary(summary, environ=None):
 
 EXECUTOR_START_TOL = 0.05     # validate_trajectory: first waypoint vs measured joints (rad)
 EXECUTOR_SETTLE_S = 60.0      # sim seconds past a segment's end for the executor's terminal settle
+# IK-plan latency budget (WALL seconds) between begin() (which runs the whole transfer IK) and the arm
+# goal being sent. Reported every run; over-budget is logged LOUD, not fatal: the executor now re-stamps
+# the trajectory origin to the first post-feedback stamp (trajectory_host.anchored_start), so a slow IK no
+# longer races the execution clock -- but a creeping latency is still worth surfacing. Env override:
+# RESTOCK_SCRIPTED_TRANSFER_IK_BUDGET_S (0/negative disables the warning; the latency is still reported).
+IK_PLAN_BUDGET_DEFAULT_S = 120.0
+
+
+def ik_plan_budget_seconds(environ=None):
+    """``RESTOCK_SCRIPTED_TRANSFER_IK_BUDGET_S`` (default 120 s). <=0 disables the over-budget warning.
+    Unparseable => ValueError (fail loud at boot). Pure."""
+    env = os.environ if environ is None else environ
+    raw = env.get('RESTOCK_SCRIPTED_TRANSFER_IK_BUDGET_S')
+    if raw is None or str(raw).strip() == '':
+        return IK_PLAN_BUDGET_DEFAULT_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f'RESTOCK_SCRIPTED_TRANSFER_IK_BUDGET_S={raw!r} is not a number of seconds')
+    if not math.isfinite(value):
+        raise ValueError('RESTOCK_SCRIPTED_TRANSFER_IK_BUDGET_S must be finite')
+    return value
+
+
+def ik_latency_report(latency_s, budget_s):
+    """One line describing the begin()->send IK-plan latency and whether it is over budget. Returns
+    ``(over_budget: bool, line: str)``. ``budget_s <= 0`` disables the verdict (never over). Pure, so the
+    report is CPU-testable without a live transfer."""
+    latency_s = float(latency_s)
+    over = budget_s > 0 and latency_s > float(budget_s)
+    verdict = (f'OVER budget {budget_s:g}s' if over else
+               (f'within budget {budget_s:g}s' if budget_s > 0 else 'budget disabled'))
+    return over, f'ik_plan_latency={latency_s:.1f}s ({verdict})'
 
 
 class ScriptedTransfer:
@@ -586,8 +620,11 @@ class ScriptedTransfer:
 
     def __init__(self, driver, *, ik, target_xyz_world, target_yaw_world=0.0, dims, location, sku,
                  quantity=1, wall=3, contact_margin=0.00275, standoff=0.15, time_scale=1.0,
-                 drop_gap=0.002, xy_tol=0.25, z_tol=0.12, arm=None, place_approach=PLACE_ABOVE):
+                 drop_gap=0.002, xy_tol=0.25, z_tol=0.12, arm=None, place_approach=PLACE_ABOVE,
+                 ik_plan_budget_s=IK_PLAN_BUDGET_DEFAULT_S):
         self.driver, self.ik, self.arm = driver, ik, arm
+        self.ik_plan_budget_s = float(ik_plan_budget_s)
+        self.ik_plan_latency_s = None       # begin()->plan WALL latency (the transfer IK), reported below
         self.place_approach = place_approach
         self.target_xyz_world = tuple(float(v) for v in target_xyz_world)
         self.target_yaw_world = float(target_yaw_world)
@@ -618,9 +655,16 @@ class ScriptedTransfer:
         goal_world = np.array([gx, gy, gz + self.dims[2] / 2.0 + self.drop_gap, 1.0])
         goal_base = (world_to_base @ goal_world)[:3]
         goal_yaw_base = self.target_yaw_world - T_yaw(self.base_world)
+        _ik_t0 = time.perf_counter()
         self.plan = plan_transfer(self.ik, d.arm_joint_positions(), carton_base, goal_base, goal_yaw_base,
                                   dims=self.dims, wall=self.wall, contact_margin=self.contact_margin,
                                   standoff=self.standoff, place_approach=self.place_approach)
+        # IK-plan latency: the WALL time spent building the joint path here (the dominant begin()->send
+        # cost). Reported every run; the executor's feedback-clock re-anchor (trajectory_host) means a slow
+        # plan no longer races the execution clock, but a creeping latency is surfaced LOUD when over budget.
+        self.ik_plan_latency_s = time.perf_counter() - _ik_t0
+        over, line = ik_latency_report(self.ik_plan_latency_s, self.ik_plan_budget_s)
+        print('SCRIPTED_TRANSFER %s %s' % ('WARNING ik-plan slow:' if over else 'ik-plan:', line), flush=True)
         self.goal_world = self.base_world @ self.plan.carton_goal_base
         self.t, self.state, self.carried, self.released = 0.0, 'running', False, False
         self.offset = self.plan.grasp_offset
@@ -848,6 +892,8 @@ class ScriptedTransfer:
                     transfer_mode=SCRIPTED, verify_mode='ground_truth', scripted=True,
                     arm_mode=self.arm_mode, arm_follow=self.arm_follow,
                     arm_fallback_reason=self.fallback_reason, ik_complete=bool(self.plan.ik_complete),
+                    ik_plan_latency_s=(round(self.ik_plan_latency_s, 3)
+                                       if self.ik_plan_latency_s is not None else None),
                     near_face=dict(self.plan.choice), **self.check)
 
 
@@ -1066,7 +1112,8 @@ def build_scripted_transfer(*, assembly, config, scenario, output=None, environ=
         contact_margin=float(unit.get('tcp_surface_offset_m', 0.00275)),
         standoff=float(opts.get('standoff', 0.15)),
         time_scale=float(opts.get('time_scale', env.get('RESTOCK_SCRIPTED_TRANSFER_TIME_SCALE', 1.0))),
-        arm=arm, place_approach=place_approach)
+        arm=arm, place_approach=place_approach,
+        ik_plan_budget_s=float(opts.get('ik_plan_budget_s', ik_plan_budget_seconds(env))))
     print('TRANSFER_MODE scripted: transfer stage = scripted %s + kinematic carton path to the ground-truth '
           'target %s%s (urdf=%s)' % ('arm (host executor)' if arm is not None else 'carton path, arm still',
                                      tuple(target[:3]),
