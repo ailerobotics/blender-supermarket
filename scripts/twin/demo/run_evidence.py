@@ -22,8 +22,11 @@ from pathlib import Path
 
 STAGES = ('collect', 'couple', 'outbound', 'park', 'transfer', 'verify', 'return')
 
+# The robot stays coupled through park/transfer/verify and uncouples at the START of return, at the cart
+# parking spot (runtime return legs: tow -> brake -> uncouple -> back away -> home), so the uncouple is
+# named on RETURN, never on park.
 TITLES = {'collect': 'Collect', 'couple': 'Couple', 'outbound': 'Outbound tow',
-          'park': 'Park & uncouple', 'transfer': 'Transfer', 'verify': 'Verify', 'return': 'Return'}
+          'park': 'Park', 'transfer': 'Transfer', 'verify': 'Verify', 'return': 'Return & uncouple'}
 
 CAPTIONS = {
     'collect': 'Pick the carton from the backstock and load it onto the rollwagen',
@@ -32,8 +35,12 @@ CAPTIONS = {
     'park': 'Stop at the transfer bay parking spot',
     'transfer': 'Arm moves the carton from the rollwagen onto the bay top',
     'verify': 'Confirm the carton is on the bay; commit the stock',
-    'return': 'Return to the dock',
+    'return': 'Tow the cart to its parking spot, uncouple, drive home empty',
 }
+
+# Title-card / caption summary of the seven stages, in mission order (the uncouple is part of return).
+STAGE_FLOW = ('collect -> couple -> outbound tow -> park -> transfer -> verify -> '
+              'return (uncouple at the cart parking spot)')
 
 # The evidence key each performed stage must carry (mirrors twin.restock.mission._validate).
 _SUCCESS_KEYS = {'collect': 'loaded', 'couple': 'coupled', 'outbound': 'arrived', 'park': 'stationary',
@@ -437,6 +444,15 @@ class CartModel:
     bay_center: tuple = (-2.0, 16.42)
     bay_size: tuple = (0.7, 0.5)
     bay_top_z: float = 0.73
+
+
+# Rollwagen stock supports (world z of the top surface): the deck top is 0.225 m, the upper shelf 0.9325 m.
+UPPER_SHELF_MIN_Z = 0.5
+
+
+def support_name(model):
+    """What the carton rides on, for on-screen wording: 'upper shelf' or 'deck' from ``support_z``."""
+    return 'upper shelf' if model.support_z >= UPPER_SHELF_MIN_Z else 'deck'
 
 
 def cart_model(run):

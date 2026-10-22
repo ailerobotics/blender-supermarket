@@ -1049,6 +1049,27 @@ PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/tw
 PYTHONPATH=scripts .venv-usd/bin/python scripts/check_collect_ground_truth.py ~/datasets/twin-robot-in-store-boot-v1/mission/run-343
 ```
 
+### 13e. Transfer carry wrist guard (labelled SIM workaround, default off)
+
+`RESTOCK_TRANSFER_CARRY=wrist_guard` in the mission run env (read by the host manipulation stack AND the
+Isaac process, like `RESTOCK_TRANSFER_MODE`) makes every TRANSFER seeded-KDL joint-space move (preplace,
+place, retreat) land in the clear carry wrist region — wrist_1 ≤ `carry_wrist1_cap`, wrist_2 ≥
+`carry_wrist2_min` (host config; 0.65 / 0.0 if unset) — re-seeding a colliding solution from its
+wrist-flipped twin, else failing the move before any motion. It fixes the warm2 preplace jam (KDL chose
+wrist_1 2.08 / wrist_2 −1.02 → pinned at the `ur_wrist_2`-vs-forearm stop → trajectory-host tracking
+fault → 'host emergency stop'). Activation: `TRANSFER_CARRY wrist_guard active` + `WRIST_GUARD
+accept|reject` (host stack), `transfer_carry` in `HOST_EFFECTIVE_CONFIG`, mission.json
+`transfer_carry`/`workarounds` and the burned-in caption. Unset ⇒ byte-identical. Add `,weld`
+(`RESTOCK_TRANSFER_CARRY=wrist_guard,weld`) to name what holds the carton: the SIM_ATTACH_FALLBACK
+fixed-joint weld (grasp contact → release at the place pose; the native suction never seals) —
+mission.json `transfer_attach: weld` + caption, and it turns the weld on if `sim_attach_fallback` was off.
+Design: `scripts/twin/restock_manipulation/transfer_carry.py`. CPU tests, then the replay on a recorded run:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_transfer_carry.py -q
+python3 scripts/check_transfer_carry_replay.py ~/datasets/twin-robot-in-store-boot-v1/mission/warm2   # exit 0 = prevented
+```
+
 ## 14. Controlled static-scene navigation mapper commissioning
 
 This is an uncommissioned integration handoff, not a moving-mission readiness

@@ -81,7 +81,10 @@ def run_once_bt(db, scenario, bundle, config, output_dir, *, mission_factory, is
     mission = mission_factory()
     bus, queue = build_bus(scenario)
     # Write the live view FIRST so bt_view.html exists even if a later step fails.
-    writer = SnapshotWriter(output_dir, title=f"restock {scenario.get('job', {}).get('job_id', '')}")
+    from ..sim_speed import from_config as _sim_speed
+    _hz = _sim_speed(config).bt_snapshot_hz     # sim_speed bt_snapshot_hz; None (default) => every tick
+    writer = SnapshotWriter(output_dir, title=f"restock {scenario.get('job', {}).get('job_id', '')}",
+                            min_interval_s=(1.0 / _hz) if _hz else None)
     # The ROS event subscriber is OPT-IN (config 'bt_ros_events'): it creates a second rclpy node
     # inside the Isaac process, which already runs its own ROS2 bridge -- doing so unconditionally
     # SIGABRTs the simulator (proven in the sim-restock-bt-v1 GPU proof). A scripted-scenario run
@@ -118,6 +121,10 @@ def run_once_bt(db, scenario, bundle, config, output_dir, *, mission_factory, is
     summary['bt_view'] = str((output_dir / 'bt_view.html'))
     from ...restock_manipulation.transfer_mode import stamp_summary
     stamp_summary(summary)   # opt-in RESTOCK_TRANSFER_MODE workaround => transfer_mode + note; absent => no-op
+    from ..cage_collision import stamp_summary as cage_stamp
+    cage_stamp(summary, config)   # opt-in sim-only carton-vs-cage contact filter; off => no-op
+    from ...restock_manipulation import transfer_carry
+    transfer_carry.stamp_summary(summary)   # opt-in RESTOCK_TRANSFER_CARRY => transfer_carry + note; absent => no-op
     try:
         early = dict(summary, events=db.events(scenario['job']['job_id']))
         (output_dir / 'mission.json').write_text(json.dumps(early, indent=2, allow_nan=False) + '\n')

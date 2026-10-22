@@ -203,6 +203,9 @@ def mission_modes(config):
         # Provenance, not a workaround (a geometry-wiring fix; deliberately not a *_mode key so the
         # walkthrough does not caption it): which lidar sensor->base offset this run's nav consumed.
         modes['lidar_sensor_to_base'] = 'xy_yaw0 (vr1 lidar_sensor_yaw_fix)'
+    # sim-video-speedup-v1: the opt-in speed profile (sim_speed_mode + its resolved levers); {} when off.
+    from .sim_speed import summary_fields as _sim_speed_fields
+    modes.update(_sim_speed_fields(config))
     return modes
 
 

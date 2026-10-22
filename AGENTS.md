@@ -85,6 +85,14 @@ repo's `scenes/`, `export/` or `renders/`.
 - **Mobile restock manipulation**: sensor/ROS contracts and supported handling units
   live in `docs/restock_manipulation.md`; CPU checks are in RUNBOOK §13.
   Runtime inputs must come from sensors; fixtures cannot certify inventory.
+  **Sharp edge**: a `/manipulation/status` carrying a gripper control MUST have a non-None
+  `valid_until_steady` or the host gate (`restock_manipulation/isaac_ros_graph.py`) refuses it
+  (`'missing acquisition deadline for gripper command'`) and the grasp aborts at CONTACT. The
+  camera collect threads the source deadline; the GT-collect / transfer / live-pose capture paths
+  have no camera framing the pick, so `CollectTargetBridge._capture_ground_truth_collect` /
+  `_capture_transfer` stamp `now + 300` themselves (fm488). Pinned by
+  `tests/test_collect_target_bridge.py`. Cold GT-collect proof + switch keys:
+  `data/sim-video-collect-arm-v1/report.md`.
 - **Tray/slot fit preflight** (opt-in, default-off): `restock/fit_preflight.py` refuses a
   handling unit that will not fit the destination slot BEFORE reserving stock or booting
   Isaac, instead of failing opaquely at place. `fit = ok | wont_fit | unknown` from a
@@ -177,7 +185,12 @@ repo's `scenes/`, `export/` or `renders/`.
   `executor`. **Sharp edge: never drive the arm from Isaac (`ArmCommandGate.apply`) beside a live
   `trajectory_host`** — its idle hold trips the gate envelope + its tracking e-stop; send FollowJointTrajectory
   goals instead. From the bay park the side grip extracts only ~0.35 of 0.46 m out of the rollwagen mouth.
-  Write-up: `~/firstmate/data/sim-video-transfer-fallback-v1/report.md`.
+  Write-up: `~/firstmate/data/sim-video-transfer-fallback-v1/report.md`. **Sharp edge:** in `live_pose`
+  the `TRANSFER_CAPTURE cart=(x,y,z)` console field is the LIVE carton top in `ur_base_link`, not the cart
+  frame (warm2 was misread as "carton fell to the lower deck" while the weld still held it). Carry switch
+  `RESTOCK_TRANSFER_CARRY=wrist_guard[,weld]` (env, both processes, default off; RUNBOOK §13e) keeps the
+  transfer place-move KDL IK out of the `ur_wrist_2`-vs-forearm stop (`weld` labels the weld attach,
+  `transfer_attach: weld`); replay a run with `scripts/check_transfer_carry_replay.py`.
 - **Moving obstacles** (opt-in, default-off): `navigation/dynamic.py` tracks
   per-frame `Detection(position,radius,source)` into velocity-predicted occupancy
   points unioned (add-only) into `Observation.obstacles`, so the existing gates

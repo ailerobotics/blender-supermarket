@@ -339,7 +339,13 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     composition=build(store,robot_usd,output/'mission.usda',
         robot_pose=staging['robot_base_pose'],cart_pose=staging['cart_body_pose'],
         stock_path=None,sku=scenario['job']['sku'],
-        stock_mass_kg=scenario['handling_unit']['mass_kg'],spec=spec,scenario=scenario)
+        stock_mass_kg=scenario['handling_unit']['mass_kg'],spec=spec,scenario=scenario,
+        cage_collision=config.get('cage_collision'))
+    # Opt-in SIM-ONLY carton-vs-cage contact filter (restock.cage_collision; labelled demo workaround).
+    _cage=composition.get('cage_collision')
+    print('CAGE_COLLISION mode=%s filtered=%d kept=%s (sim-only workaround; off => cage collides)'
+          % ((_cage['mode'],len(_cage['filtered']),[p.rsplit('/',1)[-1] for p in _cage['kept']])
+             if _cage else ('off',0,[])),flush=True)
     if not open_stage(composition['stage']):
         raise RuntimeError('could not open task composed stage')
     for _ in range(300):
@@ -594,8 +600,10 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # sim attach-fallback MUST be enabled HERE (runs 204-206: the flag was only on isaac_factory's
     # separate instance, so the port ticked an unflagged contact and the fallback never ran). Default
     # OFF; the real rig never runs this native authoring.
+    # RESTOCK_TRANSFER_CARRY=weld also turns it on (labelled transfer_attach=weld; transfer_carry.weld_attach).
+    from ..restock_manipulation.transfer_carry import weld_attach as _weld_attach
     contact=NativePanelContact(stage,'/RestockPanelGripper',
-                               sim_attach_fallback=bool(config.get('sim_attach_fallback', False)))
+                               sim_attach_fallback=_weld_attach(config))
     # Register native ROS/image graph nodes only after the final scene has
     # finished opening/resetting. A bridge loaded during import/reopen caused
     # a native image-graph crash in the installed Isaac5.1 stack.

@@ -602,11 +602,14 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     from .shortcut import walkthrough_caption
     from ..restock_manipulation import ground_truth_collect
     from ..restock_manipulation.transfer_mode import transfer_caption
+    from ..restock_manipulation.transfer_carry import carry_caption
     # collect-gt: a ground-truth collect run names the workaround in the same burned-in caption; so does a
-    # transfer workaround mode (RESTOCK_TRANSFER_MODE).
+    # transfer workaround mode (RESTOCK_TRANSFER_MODE) and transfer carry flag (RESTOCK_TRANSFER_CARRY).
+    # The opt-in sim-only carton-vs-cage contact filter (restock.cage_collision) is named there too.
+    from .cage_collision import caption as cage_caption
     recorder = (Recorder(output / 'mission-frames', fps=plan.recording_fps,
-                         caption=transfer_caption(ground_truth_collect.join_caption(walkthrough_caption(config),
-                                                                                    config)))
+                         caption=cage_caption(carry_caption(transfer_caption(ground_truth_collect.join_caption(
+                             walkthrough_caption(config), config))), config))
                 if recording_camera is not None else None)
     # vr1 (labelled demo workaround, default OFF): config['verify_ground_truth'].enabled swaps the
     # camera InventoryVerifier for the SIM GROUND-TRUTH verifier (handling-unit pose vs the authored bay
@@ -646,6 +649,23 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     record_stride, sensing_stride, _economy_note = resolve_render_strides(config, os.environ)
     if _economy_note:
         print(_economy_note, flush=True)
+    # sim-video-speedup-v1: opt-in config['sim_speed'] (absent => SimSpeed() legacy => byte-identical).
+    from . import sim_speed as _sim_speed
+    speed = _sim_speed.from_config(config)
+    idle_cameras = None
+    if speed.active:
+        record_stride = _sim_speed.widen_record_stride(
+            record_stride, speed, float(assembly.world.get_physics_dt()))
+        cameras = idle_camera_set(assembly.sensing_sources)
+        station_ids = [key.split(':', 1)[1] for key in cameras if key.startswith('station:')]
+        locations = (assembly.sensing_sources or {}).get('location_cameras') or {}
+
+        def unread(action):     # pause_unread_decode: station cameras this stage's consumers never read
+            return {'station:' + cid for cid in
+                    _sim_speed.unread_station_cameras(config, action, station_ids, locations)}
+        idle_cameras = _sim_speed.IdleCameraPauser(cameras, unread=unread if speed.pause_unread_decode else None)
+        print(speed.describe() + f' record_stride={record_stride} idle_cameras={sorted(cameras)} '
+              f'unread transfer={sorted(unread("transfer"))} verify={sorted(unread("verify"))}', flush=True)
     # Opt-in sensing execution gate (default off): pass the camera-lane set_render_suspended seam to
     # the port ONLY when config['sensing_execution_gate'] is on, so the port's phase-driven gate()
     # suspends the decode render during the reach. Off => seam is None and the port is byte-identical.
@@ -696,7 +716,10 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # (real fresh cart render) + destroy the source render product. None unless the knob is set.
         release_source_capture=(sensing.get('release_source_capture')
                                 if os.environ.get('RESTOCK_PHASE_AWARE_COLLECT_CAPTURE') else None),
-        arm_joints=_ARM_JOINTS)
+        arm_joints=_ARM_JOINTS,
+        # sim-video-speedup-v1 levers (pacing, idle-camera pause, trace probe, tick profile); legacy
+        # SimSpeed() + no idle cameras when config['sim_speed'] is absent => byte-identical.
+        sim_speed=speed, idle_cameras=idle_cameras)
 
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)
@@ -707,6 +730,17 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         closers = closers + (_mast_bridge.close,)
     return {'navigation': navigation, 'mobile': assembly.mobile, 'manipulation': manipulation,
             'port': port, 'closers': closers, 'recording': recording}
+
+
+def idle_camera_set(sensing_sources):
+    """sim_speed pause_idle_cameras: the station decode cameras (``sensing_sources['cameras']``, the
+    2560x1920 source/cart/shelf), keyed ``station:<id>`` -- the render products the navigation-only
+    stages never read. Never the walkthrough chase camera, and never the arm / mast depth cameras: the
+    masked-depth bridge stamps a frame with the publishing tick's sim time (to match /tf for nvblox),
+    so a buffer rendered before a pause would land in the ESDF at the wrong pose. Pure."""
+    sources = sensing_sources if isinstance(sensing_sources, dict) else {}
+    return {'station:' + cid: cam for cid, cam in sorted((sources.get('cameras') or {}).items())
+            if cam is not None}
 
 
 def _stage_unit_pose_reader(stage, prim_path):

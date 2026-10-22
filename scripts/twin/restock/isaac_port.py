@@ -161,6 +161,12 @@ class MissionCamera:
 
 
 class IsaacPort:
+    # sim-video-speedup-v1 lever handles (set in __init__ from config['sim_speed']); class defaults keep
+    # the legacy behaviour for partially-constructed ports (CPU tests build them via __new__).
+    _host_pacer = None
+    _idle_cameras = None
+    _profiler = None
+
     def __init__(self, *, world, robot, robot_body, cart_body, mobile, range_sensor,
                  transport, contact, hold_arm, verification, recording_camera=None,
                  recorder=None, native_transport=None, after_step=None,
@@ -170,8 +176,27 @@ class IsaacPort:
                  position_uncertainty=0.05, phase_drive=None, arm_joints=None,
                  stage_scoped_teardown=None, release_source_capture=None,
                  collect_keep_source_render=False, collect_observe_force_render_ticks=0,
-                 trace_carton_path=None):
+                 trace_carton_path=None, sim_speed=None, idle_cameras=None):
         self.world,self.robot=world,robot
+        # sim-video-speedup-v1: opt-in speed levers (twin.restock.sim_speed; config['sim_speed']). None
+        # (default) => SimSpeed() == the legacy behaviour on every path below (byte-identical).
+        from .sim_speed import SimSpeed, HostStagePacer, IdleCameraPauser, TickProfiler
+        self._speed=sim_speed if sim_speed is not None else SimSpeed()
+        if self._speed.pacing!='legacy':
+            realtime=False            # the legacy absolute real-time pacer would cap a fast run at 1x
+        self._host_pacer=(HostStagePacer(self._speed.host_stage_max_ratio)
+                          if self._speed.pacing=='host_coupled' else None)
+        # Cameras no navigation-only stage reads (the station decode cameras): paused for
+        # couple/outbound/park/return, re-enabled when a sensing stage begins (minus the decode cameras
+        # that stage does not read, pause_unread_decode); a consumer read resumes a paused one on demand.
+        # ``idle_cameras`` is a {name: camera} map or a ready IdleCameraPauser (isaac_bundle builds one).
+        self._idle_cameras=None
+        if self._speed.pause_idle_cameras and idle_cameras:
+            pauser=(idle_cameras if hasattr(idle_cameras,'begin_action')
+                    else IdleCameraPauser(idle_cameras))
+            self._idle_cameras=pauser.install()
+        self._profiler=(TickProfiler(self._speed.tick_profile_s)
+                        if self._speed.tick_profile_s else None)
         # Demo-cut evidence (RESTOCK_TRACE_POSES=1 via isaac_bundle): the handling-unit prim whose world
         # pose -- with the cart pose and Isaac stage time -- is appended to each nav-trace row for the
         # offline run checker (twin.demo.run_check). None (default) => the trace row is byte-identical.
@@ -366,7 +391,17 @@ class IsaacPort:
                 and upcoming_tick%self.record_stride==0)
         return sensing,record
 
+    def _mark(self, name):
+        if self._profiler is not None:
+            self._profiler.mark(name)
+
+    def _trace_probe(self):
+        speed = getattr(self, '_speed', None)
+        return True if speed is None else speed.trace_probe
+
     def advance(self, dt):
+        if self._profiler is not None:
+            self._profiler.begin()
         if not math.isclose(float(self.world.get_physics_dt()),dt,abs_tol=1e-8):
             raise ValueError('mission and physics step mismatch')
         if self.realtime:
@@ -375,6 +410,11 @@ class IsaacPort:
             remaining=self.wall_origin+(self.tick+1)*dt-time.monotonic()
             if remaining>0:
                 time.sleep(remaining)
+        if self._host_pacer is not None:
+            # sim_speed pacing='host_coupled': no pacing in the in-process stages; a sliding real-time
+            # cap (host_stage_max_ratio) only while the host stack is in the loop (collect/transfer/verify).
+            self._host_pacer.wait(self.current_action, dt)
+        self._mark('pace')
         # Render only when this tick produces a frame someone reads: a recorder-cadence
         # frame, or any sensing stage (perception / manip depth / verification). The
         # dominant per-tick cost is the whole-scene render; the navigation-only stages
@@ -384,7 +424,9 @@ class IsaacPort:
         # suspended, so the host collision map / parked-station ack stay fresh through the reach.
         self.masked_depth_tick=_masked_depth_due(self.current_action, self.tick+1,
                                                  self.sensing_stride, self.masked_depth is not None)
-        self.world.step(render=bool(self.sensing_tick or self.record_tick or self.masked_depth_tick))
+        _render=bool(self.sensing_tick or self.record_tick or self.masked_depth_tick)
+        self.world.step(render=_render)
+        self._mark('step_render' if _render else 'step')
         self.tick+=1
         # Labelled sim attach-fallback weld (firstmate run-209/210). On a measured <=0.5mm flush contact,
         # weld directly. No stationary-settle freeze: the SIM PARKING BRAKE (below) rigidly holds the base
@@ -429,6 +471,7 @@ class IsaacPort:
             self.mobile.engage_cart_brake()
         else:
             self.mobile.release_cart_brake()
+        self._mark('post_step')
         # Mission-relative acquisition clock on the nominal fixed timestep. Deriving it
         # from world.current_time instead drifts: Isaac's physics dt differs from the
         # mission dt by ~1e-9 per step (both pass the isclose guard above), which left
@@ -452,6 +495,7 @@ class IsaacPort:
                   f'wall={time.monotonic()-self.wall_origin:.2f}', flush=True)
         if self.native_transport is not None:
             self.native_transport.tick(cur)
+        self._mark('host_bridge')
         joints=np.asarray(self.robot.get_joint_positions(),float)
         if joints.shape != (len(self.names),) or not np.isfinite(joints).all():
             raise ValueError('invalid measured articulation encoders')
@@ -509,8 +553,10 @@ class IsaacPort:
             broll,bpitch=body_roll_pitch_deg(self.robot_body)
             print(f'BASE_ATT roll_deg={broll:.3f} pitch_deg={bpitch:.3f} z_m={rz:.4f} '
                   f'action={self.current_action} now={now:.2f}',flush=True)
+        self._mark('measure')
         if self.after_step is not None:
             self.after_step(now,parked)
+            self._mark('after_step')
         # fm390: during the mid-collect reposition carry (the controller holds the carry fold in TRANSIT
         # while the BASE drives to place_approach), the gripper is DELIBERATELY holding the carton, so the
         # empty-gripper requirement must not block the drive (run-302 failed 'arm_not_in_transport_timeout'
@@ -520,6 +566,7 @@ class IsaacPort:
         # reposition mode, so an absent reposition leaves this byte-identical.
         carrying_reposition = (self._phase == 'transit')
         ready=self.transport.contains(positions) and (carrying_reposition or not self.contact.read())
+        self._mark('envelope')
         # A towed cart is rig self-geometry only while physically coupled: tell the range sensor
         # the measured latch state so its rear beams hitting the cart become self/unknown (not a
         # phantom obstacle behind the robot) while coupled, and a decoupled cart stays a real
@@ -541,6 +588,7 @@ class IsaacPort:
         # signal: self._phase=='transit'. Inert unless carry_self_radius_m is configured => byte-identical.
         self.range_sensor.carry_active=(self._phase=='transit')
         scan=self.range_sensor.read(now)
+        self._mark('lidar')
         articulation=wrap(r.yaw-c.yaw)
         # Reference navigation consumes a localized Odometry + an obstacle Observation,
         # not raw wheel encoders and a Scan. The measured base pose is the reference
@@ -550,6 +598,7 @@ class IsaacPort:
                           position_uncertainty=self._odom_position_uncertainty)
         navigation=nav_observation(scan,odometry,coupled=coupled,arm_transport=ready,
                                    articulation=articulation)
+        self._mark('observation')
         if self.recorder is not None:
             # Per-tick nav-coverage trace (JSONL): for every tick, evaluate the uncoupled
             # gate's exact coverage probe (coverage_certifies at the real gate radius
@@ -571,8 +620,11 @@ class IsaacPort:
                 stop_turn=sp_turn*0.3+sp_turn*sp_turn/(2*0.4)
                 unc=0.05  # Odometry.position_uncertainty default used in advance()
                 rec={}
-                for tag,R,stop in (('gate_drive',0.70,stop_drive),('gate_turn',0.70,stop_turn),
-                                   ('bracket_0p60',0.60,stop_drive),('bracket_0p90',0.90,stop_drive)):
+                # sim_speed trace_probe=False: keep the row, drop the 4-radius coverage probe (a pure
+                # diagnostic no consumer reads, evaluated per beam in Python every tick).
+                for tag,R,stop in ((('gate_drive',0.70,stop_drive),('gate_turn',0.70,stop_turn),
+                                    ('bracket_0p60',0.60,stop_drive),('bracket_0p90',0.90,stop_drive))
+                                   if self._trace_probe() else ()):
                     rad=R+unc
                     blind=[round(_math.degrees(wrap(a-heading)),1) for a,reach in field.beams
                            if sweep_extent(wrap(a-heading),rad,stop)>rad+1e-9
@@ -587,7 +639,8 @@ class IsaacPort:
                     lin=round(float(np.linalg.norm(rv)),4),coupled=bool(coupled),parked=bool(parked),
                     vel=dict(rv=round(float(np.linalg.norm(rv)),4),rw=round(float(np.linalg.norm(rw)),4),
                              cv=round(float(np.linalg.norm(cv)),4),cw=round(float(np.linalg.norm(cw)),4)),
-                    unknown=sum(1 for u in scan.unknown if u),probe=rec))
+                    unknown=sum(1 for u in scan.unknown if u),
+                    **({'probe':rec} if self._trace_probe() else {})))
                 if self._trace_carton_path is not None:
                     line=line[:-1]+', '+_json.dumps(self._trace_poses(cur,c,cz))[1:]
                 with (self.recorder.directory.parent/'nav-trace.jsonl').open('a') as _f:
@@ -597,15 +650,21 @@ class IsaacPort:
                     if self.tick==1:
                         (self.recorder.directory.parent/'nav-trace.err').write_text(repr(_e))
                 except Exception: pass
+        self._mark('trace')
         if self.masked_depth is not None and self.masked_depth_tick:
             # Rig-masked depth (+ camera info) for the host nvblox consumer, published only
             # while a sensing stage needs the manipulation collision world. Off (None) by
             # default; the raw-depth OmniGraph path is unchanged until the host opts in.
             self.masked_depth.publish(now)
+            self._mark('mast_depth')
         evidence=self.verification(now)
+        self._mark('verification')
         if self.record_tick:
             frame=self.recording_camera.get_current_frame()
             self.recorder.capture(frame)
+            self._mark('record')
+        if self._profiler is not None:
+            self._profiler.end(now, _render, self.current_action)
         return Packet(f'physics:{self.tick}','sensor',now,
             odometry,navigation,docking,None,
             ready,coupled,articulation,parked,evidence)
@@ -677,7 +736,15 @@ class IsaacPort:
         # off (budget stays 0) => byte-identical.
         if action == 'collect':
             self._collect_observe_forced=0
+        profiler=getattr(self,'_profiler',None)
+        if profiler is not None:
+            profiler.flush()              # sim_speed tick_profile_s: one TICK_PROFILE line per stage window
         self.current_action=action
+        idle=getattr(self,'_idle_cameras',None)
+        if idle is not None:
+            # sim_speed pause_idle_cameras: couple/outbound/park/return read no station camera, so stop
+            # the decode render products there; a sensing stage re-enables the ones it reads.
+            idle.begin_action(action)
         if self.on_action is not None:
             self.on_action(action,job)
 

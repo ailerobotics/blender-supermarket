@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from .transfer_carry import weld_attach as _weld_attach
 from .transfer_mode import LIVE_POSE, transfer_mode
 from . import ground_truth_collect as gtc
 from .types import ProductProfile
@@ -220,7 +221,7 @@ def parse_manipulation_config(config, job_sku):
                        grasp_mode=next(iter(modes)), pose_bridge_root=pose_bridge_root,
                        masked_depth=masked_depth, collect_source_location=collect_source_location,
                        cart_placement=cart_placement, arm_camera_reaim=arm_camera_reaim,
-                       sim_attach_fallback=bool(config.get('sim_attach_fallback', False)),
+                       sim_attach_fallback=_weld_attach(config),
                        station_heartbeat_s=float(config.get('station_heartbeat_s', 10.0)),
                        station_stage_unavailable_s=float(config.get('station_stage_unavailable_s', 3.0)))
 

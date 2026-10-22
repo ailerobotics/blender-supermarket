@@ -502,9 +502,14 @@ def run(args, manifest, scenario):
                         s['note'] += ' ' + bounded['bounded_note']
                     from twin.restock_manipulation.transfer_mode import stamp_summary
                     stamp_summary(s)   # opt-in RESTOCK_TRANSFER_MODE => transfer_mode + note; absent => no-op
+                    from twin.restock_manipulation import transfer_carry
+                    transfer_carry.stamp_summary(s)   # opt-in RESTOCK_TRANSFER_CARRY => transfer_carry + note
                     # collect-gt: name the ground-truth collect workaround (collect_mode + note) when it ran.
                     from twin.restock_manipulation import ground_truth_collect
                     ground_truth_collect.label_summary(s, m.shortcut)
+                    # opt-in sim-only carton-vs-cage contact filter => cage_collision_mode + note; off => no-op.
+                    from twin.restock.cage_collision import stamp_summary as cage_stamp
+                    cage_stamp(s, config)
                     # Persist the per-stage summary now, before the finally runs app.close():
                     # Isaac's SimulationApp.close() can terminate the process hard and skip the
                     # outer finally (which re-writes mission.json with events as a fallback).

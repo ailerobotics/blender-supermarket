@@ -74,6 +74,8 @@ KEY_CONSUMER = {
     'nav_mode': RUNTIME,
     'navigation': RUNTIME,
     'collect_observe_force_render_ticks': RUNTIME,   # fm452: COLD force-render window; isaac_bundle reads it
+    'cage_collision': RUNTIME,   # sim-only carton-vs-cage contact filter; physics_setup -> scene.build reads it
+    'sim_speed': RUNTIME,        # sim-video-speedup-v1 speed profile; isaac_bundle/isaac_port + bt view read it
 }
 
 # fm402: cap/limit keys the controller reads OPTIONALLY (config.get with a silent default). These are
