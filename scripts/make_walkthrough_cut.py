@@ -30,11 +30,15 @@ def main(argv=None):
     parser.add_argument('--scenario', type=Path, help='mission scenario JSON (default: auto-discovered)')
     parser.add_argument('--console-log', type=Path, help='run console log (default: ../<run>.console.log)')
     parser.add_argument('--no-checks', action='store_true', help='skip the checker verdicts on the closing card')
+    parser.add_argument('--bt-panel', action='store_true',
+                        help='replace the route-map panel with the demo-004 decision/reason tree, driven by '
+                             'the recorded bt_events + traced poses (1920x1080; default out walkthrough-bt.mp4)')
     args = parser.parse_args(argv)
     ffmpeg = W.find_ffmpeg(args.ffmpeg)
     if ffmpeg is None:
         parser.error('no ffmpeg found: pass --ffmpeg or set $FFMPEG')
-    out = args.out or (args.run_dir / 'walkthrough-demo.mp4')
+    default_name = 'walkthrough-bt.mp4' if args.bt_panel else 'walkthrough-demo.mp4'
+    out = args.out or (args.run_dir / default_name)
     if out.exists():
         if not args.overwrite:
             parser.error(f'{out} exists (pass --overwrite to replace it)')
@@ -45,10 +49,11 @@ def main(argv=None):
     t0 = time.monotonic()
     run = E.load_run(args.run_dir, console_log=args.console_log, scenario=args.scenario)
     checks = [] if args.no_checks else C.run_checks(run)
-    plan = W.build_plan(run, checks=checks, views=W.discover_views(run))
+    plan = W.build_plan(run, checks=checks, views=W.discover_views(run), bt_panel=args.bt_panel)
     summary = W.render_video(plan, out, ffmpeg=ffmpeg)
-    print(json.dumps({k: summary[k] for k in ('video', 'duration_s', 'output_frames', 'recorded_frames_used',
-                                              'recorded_frames_total', 'result', 'clock_source')}, indent=1))
+    print(json.dumps({k: summary[k] for k in ('video', 'size', 'bt_panel', 'duration_s', 'output_frames',
+                                              'recorded_frames_used', 'recorded_frames_total', 'result',
+                                              'clock_source')}, indent=1))
     print(f'built in {time.monotonic() - t0:.1f}s; edit list: {out.with_suffix(".cut.json")}')
     return 0
 

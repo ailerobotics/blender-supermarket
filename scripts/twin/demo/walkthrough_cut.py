@@ -36,6 +36,12 @@ SCENE_W, SCENE_H = 960, 720
 PANEL_W = OUT_W - SCENE_W
 FPS = 30
 
+# --bt-panel output: the demo-004 decision/reason tree (BT_PANEL_W wide) beside the walkthrough scene.
+# 1920x1080 keeps the 16:9 cards exact and gives the full seven-stage tree room to breathe; the
+# 960x720 scene scales x1.5 into the 1440x1080 left region (same aspect, no letterbox).
+BT_OUT_W, BT_OUT_H = 1920, 1080
+BT_PANEL_W = 480
+
 BASE_SPEED = 4.0            # footage speed while the robot moves (3 fps capture -> 12 fps shown)
 SLOW_SPEED = 16.0           # creeping / settling stretches (dock alignment, waits)
 MAX_STAGE_S = 20.0          # cap on one stage's on-screen footage; faster time-lapse beyond it
@@ -126,6 +132,8 @@ class Plan:
     shots: list = field(default_factory=list)
     checks: list = field(default_factory=list)
     views: dict = field(default_factory=dict)    # extra camera name -> [Frame]
+    bt_panel: bool = False                        # replace the route panel with the recorded BT tree
+    bt: object = None                             # bt_timeline.BtTimeline when bt_panel is on
 
     def stage_labels(self, stage):
         return [l for l in self.labels if l.stage == stage]
@@ -175,10 +183,15 @@ def footage_shots(run, stage, frames, next_t=None):
     return shots
 
 
-def build_plan(run, *, checks=None, views=None):
+def build_plan(run, *, checks=None, views=None, bt_panel=False):
     status = E.stage_status(run)
+    bt = None
+    if bt_panel:
+        from . import bt_timeline
+        bt = bt_timeline.BtTimeline.from_run(run)
     plan = Plan(run=run, status=status, labels=E.workaround_labels(run), windows=E.stage_windows(run),
-                t_uncouple=E.uncouple_time(run), checks=list(checks or []), views=dict(views or {}))
+                t_uncouple=E.uncouple_time(run), checks=list(checks or []), views=dict(views or {}),
+                bt_panel=bt_panel, bt=bt)
     shots = [Shot('card', TITLE_S, card='title')]
     by_stage = E.frames_by_stage(run)
     last_frame = None
@@ -226,6 +239,19 @@ class Renderer:
         self._band_cache = {}
         self._panel_cache = {}
         self._map = None
+        self.out_w, self.out_h = (BT_OUT_W, BT_OUT_H) if plan.bt_panel else (OUT_W, OUT_H)
+        self._bt_reasons = {}
+        self._bt_final_status = {}
+        self._bt_last_frame_t = {}
+        if plan.bt_panel and plan.bt is not None:
+            from . import bt_timeline
+            bt_timeline.seed_reasons(plan.bt, self.run, self.model, self._bt_reasons)
+            self._bt_final_status = {s: v['status']
+                                     for s, v in plan.bt.state_at(plan.bt.last_event_t).items()}
+            for shot in plan.shots:                  # latest recorded frame shown for each stage
+                if shot.stage and shot.frame is not None:
+                    self._bt_last_frame_t[shot.stage] = max(self._bt_last_frame_t.get(shot.stage, -1.0),
+                                                            shot.frame.t)
 
     # ---- static pieces ----
     def _map_geometry(self):
@@ -348,12 +374,15 @@ class Renderer:
         return None
 
     # ---- frames ----
-    def footage(self, shot):
+    def _scene_left(self, shot):
+        """The 960x720 scene region: the recorded frame + optional pip + the stage caption band +
+        the speed badge + the sim clock. Shared by the default cut (which pastes the route panel to
+        its right) and the --bt-panel cut (which pastes the decision tree panel instead)."""
         from PIL import ImageDraw
         run, frame, stage = self.run, shot.frame, shot.stage
         t = frame.t
         uncoupled = self.plan.t_uncouple is not None and t >= self.plan.t_uncouple
-        canvas = self._Image.new('RGB', (OUT_W, OUT_H), BG)
+        canvas = self._Image.new('RGB', (SCENE_W, SCENE_H), BG)
         canvas.paste(self._scene(frame), (0, 0))
         pip = self._pip(stage, t)
         if pip is not None:
@@ -385,6 +414,15 @@ class Renderer:
             d.text((SCENE_W - 18 - cw, 15), clock, font=font(15), fill=FG)
         else:
             d.text((18, 46), clock, font=font(15), fill=FG)
+        return canvas
+
+    def footage(self, shot):
+        from PIL import ImageDraw
+        run, frame, stage = self.run, shot.frame, shot.stage
+        t = frame.t
+        canvas = self._Image.new('RGB', (OUT_W, OUT_H), BG)
+        canvas.paste(self._scene_left(shot), (0, 0))
+        row = run.row_at(t)
         # right panel with the live robot marker on the route map.
         panel, off = self._panel(stage)
         pd = ImageDraw.Draw(panel)
@@ -403,6 +441,45 @@ class Renderer:
             pd.rectangle((cx - 4, cy - 4 + off, cx + 4, cy + 4 + off), outline=AMBER, width=2)
         canvas.paste(panel, (SCENE_W, 0))
         return canvas
+
+    # ---- the --bt-panel cut: recorded decision/reason tree beside the scene ----
+    def _bt_panel_time(self, shot):
+        """Mission time to render the tree at for ``shot``: the frame's own time when that frame
+        belongs to the shot's stage, else the stage's last recorded event time (so a stage held as a
+        'still' -- e.g. a sub-second park or the failed return -- shows its own terminal tree state).
+        For the LAST shown frame of a stage that ultimately FAILED (the fault often lands a few tens of
+        ms after the final capture), render at the stage end so the tree honestly turns that stage red."""
+        t = shot.frame.t
+        stage = shot.stage
+        if stage:
+            end = self.plan.bt.stage_end.get(stage)
+            if self.run.action_at(t) != stage and end is not None:
+                return end
+            if (end is not None and self._bt_final_status.get(stage) == 'failure'
+                    and t >= self._bt_last_frame_t.get(stage, math.inf) - 1e-6):
+                return end
+        return t
+
+    def footage_bt(self, shot):
+        """Scene (left, scaled into 1440x1080) + the recorded decision/reason tree panel (right)."""
+        from . import bt_timeline
+        from . import compositor as X
+        from . import panel as panel_mod
+        t = self._bt_panel_time(shot)
+        frame_index = shot.frame.index if shot.frame else 0
+        entry = bt_timeline.panel_entry(self.plan.bt, self.run, self.model, t=t,
+                                        header_stage=shot.stage, frame_index=frame_index,
+                                        step_reasons=self._bt_reasons)
+        panel_img = panel_mod.render_panel(entry, size=(BT_PANEL_W, self.out_h))
+        return X.composite_frame(self._scene_left(shot), panel_img,
+                                 out_size=(self.out_w, self.out_h), panel_w=BT_PANEL_W, bg=BG)
+
+    def card_scaled(self, shot):
+        """A full-screen explanatory card at the bt-panel output size (the 16:9 card scaled exactly)."""
+        card = self.card(shot)
+        if card.size != (self.out_w, self.out_h):
+            card = card.resize((self.out_w, self.out_h), self._Image.LANCZOS)
+        return card
 
     def card(self, shot):
         from PIL import ImageDraw
@@ -520,8 +597,9 @@ def render_video(plan, output, *, ffmpeg, crf=20, preset='veryfast'):
     if output.exists():
         raise FileExistsError(f'refusing to overwrite {output}')
     renderer = Renderer(plan)
+    out_w, out_h = renderer.out_w, renderer.out_h
     cmd = [ffmpeg, '-nostdin', '-n', '-loglevel', 'error', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
-           '-s', f'{OUT_W}x{OUT_H}', '-r', str(FPS), '-i', 'pipe:0', '-an', '-c:v', 'libx264',
+           '-s', f'{out_w}x{out_h}', '-r', str(FPS), '-i', 'pipe:0', '-an', '-c:v', 'libx264',
            '-preset', preset, '-crf', str(crf), '-pix_fmt', 'yuv420p', '-movflags', '+faststart', str(output)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     emitted, acc, shown = 0, 0.0, 0
@@ -533,7 +611,10 @@ def render_video(plan, output, *, ffmpeg, crf=20, preset='veryfast'):
             n = round(acc * FPS) - start
             if n <= 0:
                 continue                       # time-lapse: this capture falls between output frames
-            img = renderer.card(shot) if shot.kind == 'card' else renderer.footage(shot)
+            if plan.bt_panel:
+                img = renderer.card_scaled(shot) if shot.kind == 'card' else renderer.footage_bt(shot)
+            else:
+                img = renderer.card(shot) if shot.kind == 'card' else renderer.footage(shot)
             data = img.tobytes()
             for _ in range(n):
                 proc.stdin.write(data)
@@ -551,7 +632,8 @@ def render_video(plan, output, *, ffmpeg, crf=20, preset='veryfast'):
         raise
     if not output.is_file() or output.stat().st_size == 0:
         raise RuntimeError('encoder produced no video')
-    summary = {'video': str(output), 'run': str(plan.run.run_dir), 'fps': FPS, 'size': [OUT_W, OUT_H],
+    summary = {'video': str(output), 'run': str(plan.run.run_dir), 'fps': FPS, 'size': [out_w, out_h],
+               'bt_panel': plan.bt_panel,
                'output_frames': emitted, 'duration_s': round(emitted / FPS, 2),
                'recorded_frames_used': sum(1 for e in edl if e['kind'] == 'frame'),
                'recorded_frames_total': len(plan.run.frames), 'clock_offset_s': plan.run.clock_offset,
