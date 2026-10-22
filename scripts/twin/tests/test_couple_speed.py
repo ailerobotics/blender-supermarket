@@ -233,7 +233,7 @@ class RuntimeStandoffTests(unittest.TestCase):
     def test_couple_evidence_names_the_switches_only_when_on(self):
         on, _ = self._adapter(controller=NS(arrival_xy_hysteresis=0.03))
         off, _ = self._adapter()
-        for adapter, expect in ((on, {'arrival_xy_hysteresis_m': 0.03}), (off, None)):
+        for adapter, expect in ((on, 'standoff xy-hysteresis 0.03 m'), (off, None)):
             self.p = replace(self.p, observation_id='a', simulation_time=.1, coupled=False)
             adapter.time = 0.0; adapter.last_packet_id = None
             adapter.start('couple', self.job)
@@ -245,7 +245,9 @@ class RuntimeStandoffTests(unittest.TestCase):
                 if r.status == 'succeeded':
                     break
             self.assertEqual(r.status, 'succeeded')
-            self.assertEqual(r.evidence.get('nav_workaround_mode'), expect)
+            self.assertEqual(r.evidence.get('couple_arrival_mode'), expect)
+            if expect is None:
+                self.assertEqual(set(r.evidence), {'observation_id', 'source', 'simulation_time', 'coupled'})
 
     def test_outbound_evidence_records_creep_escape(self):
         adapter, _ = self._adapter(controller=NS(arrival_xy_hysteresis=0.0, coupled_creep_escape=True,
@@ -254,7 +256,25 @@ class RuntimeStandoffTests(unittest.TestCase):
         adapter.start('outbound', self.job)
         r = adapter.step(.1)
         self.assertEqual(r.status, 'succeeded')
-        self.assertEqual(r.evidence['nav_workaround_mode'], {'coupled_creep_escape': True, 'creep_escape_ticks': 7})
+        self.assertEqual(r.evidence['outbound_brake_mode'], 'coupled creep-escape (7 noise-band ticks)')
+
+    def test_standoff_tolerance_named_in_couple_mode(self):
+        adapter, _ = self._adapter(controller=NS(arrival_xy_hysteresis=0.03),
+                                   couple_standoff_tolerance={'xy_m': 0.05, 'yaw_rad': 0.12})
+        self.assertEqual(adapter._nav_workarounds('couple'),
+                         {'couple_arrival_mode': 'standoff xy-hysteresis 0.03 m; standoff tol xy 0.05 m / yaw 0.12 rad'})
+
+    def test_walkthrough_cut_puts_the_modes_on_screen(self):
+        # The demo cut's own label extractor must surface both modes as caption labels of their stages.
+        from twin.demo import run_evidence as E
+        events = [{'state': 'couple_succeeded', 'evidence': {'source': 'sensor',
+                                                            'couple_arrival_mode': 'standoff xy-hysteresis 0.03 m'}},
+                  {'state': 'outbound_succeeded', 'evidence': {'source': 'sensor',
+                                                              'outbound_brake_mode': 'coupled creep-escape (7 noise-band ticks)'}}]
+        run = NS(mission={'state': 'failed', 'events': events}, events=events, caption=None)
+        labels = {(l.stage, l.key, l.value) for l in E.workaround_labels(run)}
+        self.assertIn(('couple', 'couple_arrival_mode', 'standoff xy-hysteresis 0.03 m'), labels)
+        self.assertIn(('outbound', 'outbound_brake_mode', 'coupled creep-escape (7 noise-band ticks)'), labels)
 
 
 if __name__ == '__main__':

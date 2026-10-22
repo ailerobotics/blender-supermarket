@@ -425,6 +425,27 @@ gate still stops the tow for a new obstacle with trust-static ON (`check_trust_s
 numbers in `data/sim-restock-nav-lanes-v1/report.md`. CPU unit tests: `tests/test_navigation_lanes.py`,
 `tests/test_navigation_factory.py`.
 
+**Arrival XY hysteresis** (`navigation.arrival_xy_hysteresis_m`, opt-in, default `0` ⇒ the legacy
+per-tick arrival test, byte-identical; fm482): the reference arrival test was a bare `xy <= tol` every
+tick, so a base captured just inside the circle that then turns in place to the goal yaw is pushed back
+out by the turn itself (the measured point sits ~8 mm off the turning pivot), and the drive branch turns
+it back toward the goal point — a limit cycle. At the couple standoff (tol 0.05 m) warm runs 347–356
+swept ~41 rad of yaw for a net 1.0 rad, 162–188 s sim / 680–790 s wall per run. With hysteresis the XY
+capture latches and releases only past `tol + hysteresis`; arrival still needs the yaw tolerance, a
+stopped base and a clear gate. Staged `0.03` (inside the fine-dock capture bound). The standoff leg's own
+tolerance can be overridden with the top-level `couple_standoff_tolerance` `{xy_m, yaw_rad}`.
+
+**Coupled creep escape** (`navigation.coupled_creep_escape`, opt-in, default `false` ⇒ byte-identical;
+fm481/fm482; floor `navigation.coupled_creep_floor_mps`, default 0.03): the coupled measured-curvature
+brake divides `odom.angular` by `odom.linear`; at a crawl that ratio is noise. runs 352/355 stopped
+abruptly ~0.4–0.5 m into the outbound, then tripped `measured_turn_radius` on ~700 noise ticks each (every
+refusal commands a stop, so the base never left the band) → 121 s livelock. With the escape, inside
+`|odom.linear| < max(0.06, 2·floor)` a forward command keeps a creep (≥ floor) with the arc clamped to
+the min turn radius, and the coverage/footprint/braking rollouts check that command; above the band the
+brake is unchanged. Both switches are named in the stage evidence (`couple_arrival_mode`,
+`outbound_brake_mode`). Example: `docs/examples/couple-speed-mission-fragment.json`; offline proof
+`scripts/check_couple_speed.py` (RUNBOOK §12); CPU tests `tests/test_couple_speed.py`.
+
 **Wall-clock stuck-stage fail-fast** (`RESTOCK_NAV_STUCK_WALL_S`, opt-in, default `0` = off): the nav
 `blocked_timeout`/`goal_timeout` are **sim-clock** caps, which under render pacing (sim advances far
 slower than wall) cannot fire — run-322b's outbound sat on `lane_blocked` for ~50 min WALL and only the

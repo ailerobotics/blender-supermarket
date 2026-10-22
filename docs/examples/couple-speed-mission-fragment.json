@@ -1,0 +1,12 @@
+{
+  "_comment": "fm482 (sim-video-couple-speed-v1): MERGE into the mission runtime-config. Both switches are default-off (absent => byte-identical). arrival_xy_hysteresis_m latches the couple-standoff XY capture so the turn-to-yaw finishes instead of dithering on the tolerance circle (warm runs 347-356: ~700 s wall per run). coupled_creep_escape keeps a forward creep (arc clamped to the 1.5 m min turn radius) inside the |v|<0.06 m/s odometry-noise band instead of refusing on measured_turn_radius (runs 352/355: 121 s livelock). When on, each is named in the couple/outbound stage evidence (couple_arrival_mode / outbound_brake_mode) and so in the walkthrough-cut captions. Proof: scripts/check_couple_speed.py.",
+  "navigation": {
+    "arrival_xy_hysteresis_m": 0.03,
+    "coupled_creep_escape": true,
+    "coupled_creep_floor_mps": 0.03
+  },
+  "_optional_couple_standoff_tolerance": {
+    "_comment": "Top-level config['couple_standoff_tolerance']; leave UNSET (xy 0.05 m / yaw 0.08 rad). The fine-dock capture bound (check_couple_speed A3) is xy <= 0.08 m for |yaw| <= 0.16 rad, xy <= 0.07 m up to 0.35 rad; keep xy + hysteresis inside it.",
+    "couple_standoff_tolerance": {"xy_m": 0.05, "yaw_rad": 0.08}
+  }
+}

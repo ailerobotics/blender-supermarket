@@ -314,6 +314,14 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest \
 # runtime-config and run the mission (integration-owned boot: GPU priority + station
 # commissioning + host-stack). See docs/restock_navigation.md "Mission detection feed".
 
+# Couple speed + coupled outbound stall (fm482): replays the recorded warm runs' nav-trace.jsonl and
+# drives the REAL controller + fine-dock servo closed-loop. Switches: navigation.arrival_xy_hysteresis_m,
+# navigation.coupled_creep_escape (docs/examples/couple-speed-mission-fragment.json). Exit 0 = PASS.
+PYTHONPATH=scripts python3 scripts/check_couple_speed.py --environment "$ENVIRONMENT_MANIFEST" \
+  --scenario "$MISSION_SCENARIO" --runtime-config "$MISSION_RUNTIME_CONFIG" \
+  --runs-dir "$MISSION_RUNS_DIR" --runs 347 348b 349 350 351 352 353 354 355 356
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest scripts/twin/tests/test_couple_speed.py -q
+
 # Optional host-Python Jazzy overlay, extracted only into task-owned storage.
 # Uses existing trusted apt indexes; no sudo, package install, or service restart.
 python3 scripts/setup_restock_nav2.py --output "$TASK_OUTPUT/nav2"

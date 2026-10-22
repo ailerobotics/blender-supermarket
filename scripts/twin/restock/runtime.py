@@ -419,20 +419,25 @@ class RuntimeAdapter:
         return core
 
     def _nav_workarounds(self, action):
-        """fm482: name the opt-in couple/outbound nav switches in the stage evidence (mission.json) so a
-        run (and its walkthrough caption) says which were on. {} when none is => byte-identical events."""
+        """fm482: name the opt-in couple/outbound nav switches in the stage evidence (mission.json) as
+        scalar ``*_mode`` fields, which the walkthrough cut (twin.demo.run_evidence.workaround_labels)
+        puts on screen as that stage's caption label. {} when none is on => byte-identical events."""
         nav = self._nav_controller()
-        out = {}
         if action == 'couple':
+            parts = []
             hysteresis = getattr(nav, 'arrival_xy_hysteresis', 0.0) or 0.0
             if hysteresis > 0:
-                out['arrival_xy_hysteresis_m'] = hysteresis
-            if self.couple_standoff_tolerance is not None:
-                out['couple_standoff_tolerance'] = dict(self.couple_standoff_tolerance)
-        elif action == 'outbound' and getattr(nav, 'coupled_creep_escape', False):
-            out['coupled_creep_escape'] = True
-            out['creep_escape_ticks'] = int(getattr(nav, 'creep_escapes', 0))
-        return {'nav_workaround_mode': out} if out else {}
+                parts.append(f'standoff xy-hysteresis {hysteresis:g} m')
+            tol = self.couple_standoff_tolerance
+            if tol is not None:
+                parts.append('standoff tol ' + ' / '.join(
+                    f'{k[:-2] if k.endswith("_m") else k[:-4]} {v:g}{" m" if k.endswith("_m") else " rad"}'
+                    for k, v in sorted(tol.items())))
+            return {'couple_arrival_mode': '; '.join(parts)} if parts else {}
+        if action == 'outbound' and getattr(nav, 'coupled_creep_escape', False):
+            ticks = int(getattr(nav, 'creep_escapes', 0))
+            return {'outbound_brake_mode': f'coupled creep-escape ({ticks} noise-band ticks)'}
+        return {}
 
     def _sensor_stall(self, result):
         """Return a failure reason if the collect/transfer reach has stalled, else None.
