@@ -648,6 +648,16 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     record_stride, sensing_stride, _economy_note = resolve_render_strides(config, os.environ)
     if _economy_note:
         print(_economy_note, flush=True)
+    # sim-video-speedup-v1: opt-in config['sim_speed'] (absent => SimSpeed() legacy => byte-identical).
+    from . import sim_speed as _sim_speed
+    speed = _sim_speed.from_config(config)
+    idle_cameras = None
+    if speed.active:
+        record_stride = _sim_speed.widen_record_stride(
+            record_stride, speed, float(assembly.world.get_physics_dt()))
+        idle_cameras = idle_camera_set(assembly.sensing_sources, manipulation)
+        print(speed.describe() + f' record_stride={record_stride} idle_cameras={sorted(idle_cameras)}',
+              flush=True)
     # Opt-in sensing execution gate (default off): pass the camera-lane set_render_suspended seam to
     # the port ONLY when config['sensing_execution_gate'] is on, so the port's phase-driven gate()
     # suspends the decode render during the reach. Off => seam is None and the port is byte-identical.
@@ -698,7 +708,10 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # (real fresh cart render) + destroy the source render product. None unless the knob is set.
         release_source_capture=(sensing.get('release_source_capture')
                                 if os.environ.get('RESTOCK_PHASE_AWARE_COLLECT_CAPTURE') else None),
-        arm_joints=_ARM_JOINTS)
+        arm_joints=_ARM_JOINTS,
+        # sim-video-speedup-v1 levers (pacing, idle-camera pause, trace probe, tick profile); legacy
+        # SimSpeed() + no idle cameras when config['sim_speed'] is absent => byte-identical.
+        sim_speed=speed, idle_cameras=idle_cameras)
 
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)
@@ -709,6 +722,26 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         closers = closers + (_mast_bridge.close,)
     return {'navigation': navigation, 'mobile': assembly.mobile, 'manipulation': manipulation,
             'port': port, 'closers': closers, 'recording': recording}
+
+
+def idle_camera_set(sensing_sources, manipulation):
+    """sim_speed pause_idle_cameras: every render product the navigation-only stages never read --
+    the station decode cameras (``sensing_sources['cameras']``), the arm eye-in-hand masked-depth
+    camera and the mast depth camera -- keyed ``station:<id>`` / ``arm`` / ``mast``. The walkthrough
+    chase camera is never in it. Best-effort lookups (a missing handle is simply absent). Pure."""
+    cameras = {}
+    sources = sensing_sources if isinstance(sensing_sources, dict) else {}
+    for cid, cam in sorted((sources.get('cameras') or {}).items()):
+        cameras['station:' + cid] = cam
+    controller = getattr(manipulation, 'controller', None)
+    arm = (getattr(getattr(controller, '_collect_bridge', None), 'arm_camera', None)
+           or getattr(getattr(controller, '_sensors', None), 'camera', None))
+    if arm is not None:
+        cameras['arm'] = arm
+    mast = getattr(sources.get('mast_depth'), 'camera', None)
+    if mast is not None:
+        cameras['mast'] = mast
+    return cameras
 
 
 def _stage_unit_pose_reader(stage, prim_path):
