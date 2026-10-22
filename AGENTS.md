@@ -197,7 +197,11 @@ repo's `scenes/`, `export/` or `renders/`.
   the lane itself plans + persists a route from the warm7 end pose (`scripts/check_tow_lanes.py`).
 - **Transfer workaround modes** (env `RESTOCK_TRANSFER_MODE`, read by Isaac AND the host, never a config
   key; default off): `live_pose` = real-arm pick from the live carton pose + near-face yaw, no transfer
-  reposition (`restock_manipulation/transfer_mode.py`); `scripted` = the labelled safety net
+  reposition (`restock_manipulation/transfer_mode.py`). **`live_pose` REQUIRES
+  `RESTOCK_TRANSFER_CARRY=wrist_guard`** — it fixes only the PICK reach; its preplace/place/retreat stay
+  seeded-KDL, so without the guard the controller FAILS FAST at observe with a named reason rather than
+  silently running the `ur_wrist_2`-vs-forearm jam (audit `transfer-preplace-wrist-branch-jam`). `scripted`
+  = the labelled safety net
   (`restock/scripted_transfer.py`): no warm-up/host job, kinematic carton onto `transfer_ground_truth.target`
   (needs `enabled`; evidence `source='ground_truth'`), arm `RESTOCK_SCRIPTED_TRANSFER_ARM=still` (default) |
   `executor`. **Sharp edge: never drive the arm from Isaac (`ArmCommandGate.apply`) beside a live

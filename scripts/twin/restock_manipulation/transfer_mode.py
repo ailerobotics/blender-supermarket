@@ -19,6 +19,11 @@ and ``stamp_summary`` records it in mission.json.
     handshake (the runtime never drives a transfer reposition), so a transfer that passed the pick would
     hold in TRANSIT until the phase timeout. live_pose routes lift -> tuck -> preplace (the collect-cart pan
     is skipped too) and reach-gates EVERY station, place side included, at observe.
+  * REQUIRES the wrist_guard: live_pose fixes the PICK reach but its preplace/place/retreat are still
+    seeded-KDL joint-space moves whose IK can jam the ur_wrist_2-vs-ur_forearm self-collision branch
+    (audit transfer-preplace-wrist-branch-jam). The controller fails a live_pose transfer FAST with a named
+    reason at observe unless ``RESTOCK_TRANSFER_CARRY=wrist_guard`` is also set, rather than silently
+    running the jam-prone planner (which dies as a generic 'arm command heartbeat lost' e-stop).
 """
 from __future__ import annotations
 

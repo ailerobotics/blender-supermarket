@@ -1070,6 +1070,17 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_resto
 python3 scripts/check_transfer_carry_replay.py ~/datasets/twin-robot-in-store-boot-v1/mission/warm2   # exit 0 = prevented
 ```
 
+**`RESTOCK_TRANSFER_MODE=live_pose` REQUIRES `wrist_guard`.** `live_pose` fixes only the PICK reach; its
+preplace/place/retreat stay seeded-KDL. A live-pose transfer with the guard OFF now FAILS FAST at observe
+('live_pose transfer requires RESTOCK_TRANSFER_CARRY=wrist_guard …') instead of silently running the jam.
+The bounded TRANSFER-ONLY GPU validation config (staged at the recorded bay park, stop after verify) is
+`docs/examples/transfer-live-mission-fragment.json` — env + command + runtime keys + PASS/FAIL criteria:
+
+```bash
+RESTOCK_TRANSFER_MODE=live_pose RESTOCK_TRANSFER_CARRY=wrist_guard \
+  python3 scripts/run_mobile_restock.py --start-at transfer --start-staging recorded_bay_park --stop-after verify
+```
+
 ## 14. Controlled static-scene navigation mapper commissioning
 
 This is an uncommissioned integration handoff, not a moving-mission readiness

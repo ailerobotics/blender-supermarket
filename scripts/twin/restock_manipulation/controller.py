@@ -740,6 +740,18 @@ class TransferController:
     def _advance(self, s):
         now = s.simulation_time
         if self.phase == 'observe':
+            # RESTOCK_TRANSFER_MODE=live_pose runs the HONEST place: its preplace/place/retreat are
+            # seeded-KDL joint-space moves whose IK can land in the ur_wrist_2-vs-ur_forearm self-collision
+            # branch and jam (audit transfer-preplace-wrist-branch-jam; warm2 preplace w1 2.08/w2 -1.02 ->
+            # 1.3 rad track fault -> host e-stop). The ONLY thing that keeps those goals in the clear wrist
+            # branch is the wrist_guard (RESTOCK_TRANSFER_CARRY=wrist_guard). live_pose fixes the PICK reach
+            # but does nothing for the PLACE branch, so live_pose WITHOUT the guard silently runs the
+            # jam-prone planner and dies as a generic 'arm command heartbeat lost' e-stop (rank 5 masking).
+            # Fail fast with a named reason at the first transfer step instead of falling back to it.
+            if self._live_pose_transfer() and WRIST_GUARD not in self.transfer_carry:
+                return self._fail('live_pose transfer requires RESTOCK_TRANSFER_CARRY=wrist_guard: '
+                                  'the preplace/place KDL IK jams the ur_wrist_2-vs-forearm self-collision '
+                                  'branch without it (audit transfer-preplace-wrist-branch-jam)')
             matches = [o for o in s.observations if o.location == self.source
                        and o.sku == self.job['sku'] and o.family == 'sealed_box'
                        and type(o.quantity) is int and o.quantity == 1 and math.isfinite(o.confidence)
