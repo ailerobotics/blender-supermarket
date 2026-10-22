@@ -47,14 +47,27 @@ SHELF = (-3.05, 6.0, math.pi)              # unchanged: TRANSFER/VERIFY identica
 CART_PARKING = (-9.0, 16.0, math.pi)       # unchanged: RETURN identical to demo-004
 HOME = (-5.73, 16.0, 0.0)                  # unchanged
 
-# demo-005 outbound: ONE gentle arc from the dock pose into the aisle to the shelf -- no
-# reorientation loop (the robot already faces the tow direction) and no in-place spin. Heading
-# rotates monotonically south->west over ~0.93 m min radius; y strictly decreases (no doubling
-# back); the arc bulges east only to x=-1.66 (within demo-004's proven-navigable aisle) and
-# ends with the towed cart straightened directly behind the base, so TRANSFER reads clean.
+# OUTBOUND: tow the coupled train from the dock, THROUGH THE BACKROOM DOOR, into the aisle
+# to the shelf -- no reorientation loop (the robot already faces the tow direction) and no
+# in-place spin. The sales/backroom dividing wall is at y=11.125 (store_environment.py:
+# Wall_back_{west,east}); the ONLY gap is the service portal `sales_backroom_portal` centred
+# at x=-3.875 with a 2.5 m clear opening (x in [-5.125, -2.625], jambs just outside). The
+# earlier demo-005 arc hugged x~-1.7 the whole descent, so it crossed the wall line at
+# x~-2.06 -- i.e. straight THROUGH the solid east wall, ~0.6 m past the door edge. This path
+# dips west to the portal column (base holds x~-3.70 so BOTH the base disk and the trailed
+# cart cross the opening near its centre -- base at x=-3.70, cart at x=-3.58), holds the
+# column south of the wall long enough for the cart to clear it aligned, then returns east and
+# runs straight down to rejoin demo-005's proven westward pull-through into the shelf. The
+# TRANSFER pose (SHELF) and the shelf approach arc are unchanged. Invariants (proved on CPU by
+# tests/test_door_path.py): y strictly decreases (no doubling back), no reverse, min turn
+# radius ~0.93 m (== demo-005's), peak cart articulation 53.2 deg (< the 55 deg budget and
+# below demo-005's 55.2 deg), and every base/cart footprint along the path clears the wall and
+# both jambs (>= 0.12 m) with zero intersection.
 OUTBOUND_WAYPOINTS = [LANE_OUT_START,
-    (-1.95, 10.3, -1.42), (-1.7, 8.2, -1.30), (-1.66, 7.2, -1.45),
-    (-1.73, 6.55, -1.80), (-2.05, 6.15, -2.3), (-2.55, 6.02, -2.85), SHELF]
+    (-3.15, 12.162, -1.95), (-3.70, 11.55, -1.68), (-3.70, 11.125, -1.60),
+    (-3.70, 10.0, -1.57), (-2.68, 9.30, -1.45), (-1.66, 9.10, -1.33),
+    (-1.66, 8.20, -1.44), (-1.70, 7.0, -1.60), (-1.78, 6.55, -1.80),
+    (-2.05, 6.15, -2.3), (-2.60, 6.02, -2.85), SHELF]
 
 # PR154 return tow lane (base centreline): shelf -> cart parking spot.
 RETURN_WAYPOINTS = [SHELF,
