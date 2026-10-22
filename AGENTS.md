@@ -228,6 +228,20 @@ repo's `scenes/`, `export/` or `renders/`.
   feedback) are unchanged + regression-locked. CPU tests `twin/tests/test_sim_robust_watchdogs.py`;
   inventory + integration-lane env switches `data/sim-robust-watchdogs-simtime-v1/report.md`. See the
   `freshness-sim-clock-not-wall` principle.
+- **Teardown robustness (record-first + ordered teardown)**: a run that ends on a per-op failure
+  must still leave `mission.json` and exit without a core dump. `SimulationApp.close()` can hard-exit
+  in the renderer shutdown, so the launcher (`run_mobile_restock.run`) writes `mission.json` BEFORE
+  any Isaac/ROS teardown on every exit path (the `except` + the top of the middle `finally`, via
+  `twin.restock.shutdown.write_mission_record`), then runs an ordered teardown
+  (`shutdown.ordered_teardown`: `close_feeds → encode_walkthrough → release_render → close_app`, each
+  best-effort) so RTX render products (`Bundle.release_render`) + camera feeds are released before the
+  app close. Unconditional robustness, no new switch keys; successful runs are byte-identical apart
+  from the earlier record write. CPU: `twin/tests/test_restock_shutdown.py`. **Sharp edge:** the
+  original armcam crash was a NATIVE SIGSEGV mid-`world.step` under 12 GB VRAM OOM (py-spy), NOT at
+  `app.close()` — the mission never reached a Python terminal, so no `finally` can help it; that run
+  additionally needs the per-op failure to TERMINATE before OOM (PR 215 collision + the
+  `mission-vram-ceiling-12gb` lane). Report + bounded GPU proof:
+  `data/sim-robust-teardown-crash-v1/report.md`, `docs/examples/teardown-crash-proof-fragment.json`.
 - **Mission tail** (transfer → verify → uncouple return → end): the uncouple happens in RETURN at
   `cart_parking`, AFTER transfer + verify (tow → brake/pin → uncouple → back away → home uncoupled).
   CPU dry-run through the real BT/`Mission`/`RuntimeAdapter`: `scripts/check_mission_tail.py`
