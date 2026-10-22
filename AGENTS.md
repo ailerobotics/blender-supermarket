@@ -298,7 +298,13 @@ repo's `scenes/`, `export/` or `renders/`.
   park->transfer handover; `stop_after` ends the run after a stage (`mission.bounded_stages`). Same keys
   as `run_mobile_restock.py --start-at/--start-staging/--stop-after`. Such runs are labelled in
   mission.json and by a burned-in walkthrough caption. RUNBOOK §11-bench; proof
-  `scripts/check_transfer_bench_staging.py`.
+  `scripts/check_transfer_bench_staging.py`. **Sharp edge: two sim clocks.** The shortcut's settle
+  `world.step`s run before the first mission tick, so Isaac `/clock` (station acks, `collision_time`,
+  the host node clock) leads the mission packet clock by a CONSTANT offset: 0.05 s cold, 0.55 s
+  `couple`, 1.55 s `transfer`. A host check comparing `/clock` with a packet stamp sees that offset as
+  age (the fm476 "slow render 0.55 s" and both bench1 transfer failures). Staged starts fix it via
+  `restock/staged_start.py` (`Sensors.clock_offset`, default on; plus the first-manipulation settle
+  hold `staged_start_settle_s`). Any new cross-clock host check must subtract `clock_offset`.
 - **Uncouple-at-parking-spot on return** (opt-in, default-off): `return` tows the cart home coupled
   unless `config['uncouple_on_return']` + a `cart_parking` mission pose are set, when it tows the cart
   to the parking spot, brakes it, releases the tow coupling via `MobileController.uncouple(obs)` (new,

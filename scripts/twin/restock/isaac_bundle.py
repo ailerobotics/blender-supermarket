@@ -340,6 +340,7 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
     plan = plan_bundle(manifest, scenario, config)
     output = Path(output)
     from .ground_truth_verify import ground_truth_place_actions
+    from .staged_start import staged_clock_sync, staged_settle_seconds
 
     # Opt-in recorded start staging (config['start_staging'], start_at='transfer' only): the physical
     # build spawns the robot + cart at the recorded park->transfer handover instead of the scenario's
@@ -400,7 +401,19 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              # opt-in, collect) stage evidence -- labelled source='ground_truth'. Derived
                              # from config['transfer_ground_truth'].enabled / collect_ground_truth_place_
                              # evidence; absent => () => byte-identical.
-                             ground_truth_place_actions=ground_truth_place_actions(config))
+                             ground_truth_place_actions=ground_truth_place_actions(config),
+                             # Staged start (start_at set, not collect): hold the first manipulation
+                             # dispatch until the sim settled (config['staged_start_settle_s'], default
+                             # 20 s); 0.0 on a cold run => no hold, byte-identical. See staged_start.py.
+                             staged_settle_s=staged_settle_seconds(config))
+    if staged_clock_sync(config):
+        # Staged start: the shortcut's settle steps leave /clock a constant offset ahead of the packet
+        # clock; stamp it on every host sensor packet so the host freshness checks measure true age
+        # (config['staged_start_clock_sync'], default true on a staged start; never on a cold run).
+        enabled = getattr(manipulation, 'set_clock_sync', None)
+        accepted = bool(enabled(True)) if callable(enabled) else False
+        print(f'STAGED_CLOCK_SYNC {"enabled" if accepted else "UNAVAILABLE (runtime has no hook)"} '
+              f'start_at={config.get("start_at")}', flush=True)
 
     from .ground_truth_verify import stage_modes as _stage_modes
     adapter.stage_modes = _stage_modes(config)   # vr1: '[ground truth]' step labels; {} => none

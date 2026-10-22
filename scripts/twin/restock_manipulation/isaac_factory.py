@@ -361,6 +361,11 @@ class HostManipulationRuntime:
         # (the run-310 failure: the station stayed active through the drive and faulted -> emergency stop).
         return self._runtime.pause_station(simulation_time)
 
+    def set_clock_sync(self, enabled=True):
+        # Staged-start clock sync (twin.restock.staged_start): delegate to the inner runtime, which
+        # stamps the host packets -- a wrapper-only setter would be a silent no-op (run-310 family).
+        return self._runtime.set_clock_sync(enabled)
+
     def set_base_repositioned(self):
         # fm400: the base arrived at place_approach. Delegate so the inner runtime latches it onto the
         # published sensor packet, carrying arrival across the ROS boundary to the host controller's

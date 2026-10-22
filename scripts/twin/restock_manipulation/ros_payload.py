@@ -86,7 +86,7 @@ class RosPayloadSync:
         def _diag(gate):
             import os
             if os.environ.get('PAYLOAD_SYNC_DIAG', '1') != '0':
-                age = None if s is None else (now - s.feedback_time)
+                age = None if s is None else (now - s.feedback_time - float(getattr(s, 'clock_offset', 0.0)))
                 print('PAYLOAD_SYNC_DIAG gate=%s held=%s s_contact=%s age=%s max_age=%s now=%.4f '
                       'scene_ready=%s attach_ready=%s'
                       % (gate, held, (None if s is None else s.contact), age,
@@ -95,8 +95,13 @@ class RosPayloadSync:
                          (self.attach.server_is_ready() if self.attach is not None else None)),
                       flush=True)
             return False
+        # Staged-start clock sync (twin.restock.staged_start): feedback_time is on the packet clock, which
+        # a start-phase shortcut leaves a constant clock_offset behind this node's /clock (1.55 s on
+        # start_at=transfer -- past the 1.5 s max_age); remove it so the gate measures true age. 0.0 on
+        # every cold run => byte-identical.
+        offset = 0.0 if s is None else float(getattr(s, 'clock_offset', 0.0))
         if (s is None or c is None or s.contact != held
-                or not -RENDER_LEAD_S <= now-s.feedback_time <= c.max_age):
+                or not -RENDER_LEAD_S <= now-s.feedback_time-offset <= c.max_age):
             return _diag('precondition')
         if not self.scene.service_is_ready():
             return _diag('scene_service')

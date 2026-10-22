@@ -10,6 +10,7 @@ from dataclasses import replace
 from twin.restock_manipulation import ground_truth_collect as gtc
 from twin.restock_manipulation.types import Result
 from .native_channel import StationAckStreamStalled
+from .staged_start import sync_packet_clock
 
 
 class RosManipulationRuntime:
@@ -39,6 +40,11 @@ class RosManipulationRuntime:
         # fm400: set True by the Isaac adapter at place_approach arrival; stamped onto the published
         # sensor packet so the HOST controller's TRANSIT gate (a separate process) resumes to preplace.
         self._base_repositioned = False
+        # Staged-start clock sync (twin.restock.staged_start, set by the bundle on a start_at run):
+        # stamp each host packet with the exact /clock - packet-clock offset of its tick. False => the
+        # raw packet (byte-identical).
+        self.clock_sync = False
+        self._clock_sync_logged = None
 
     def start(self, operation, job):
         if operation not in ('collect','transfer'):
@@ -110,6 +116,20 @@ class RosManipulationRuntime:
             # the dt-accumulated mission clock lagged /tf and silently dropped every lookup (no ESDF).
             sc = getattr(self.station, 'stage_clock', None) if self.station is not None else None
             self.sensing_bridge.publish(sc() if sc is not None else simulation_time)
+
+    def set_clock_sync(self, enabled=True):
+        """Staged-start clock sync: when enabled, every published sensor packet carries the exact
+        /clock - packet-clock offset and a packet-clock collision_time (staged_start.sync_packet_clock).
+        Needs the station's stage_clock (the /clock this tick); without it the packet stays raw."""
+        self.clock_sync = bool(enabled)
+
+    def _clock_offset(self, simulation_time):
+        """/clock (the station's stage_clock, refreshed by the port this tick) minus the packet clock,
+        or None when no stage clock is wired (then the packet is published raw)."""
+        sc = getattr(self.station, 'stage_clock', None) if self.station is not None else None
+        if sc is None:
+            return None
+        return float(sc()) - float(simulation_time)
 
     def set_base_repositioned(self):
         """fm400: the Isaac adapter has driven the carried carton to place_approach. Latch it so the next
@@ -202,6 +222,17 @@ class RosManipulationRuntime:
                     raise ValueError('production manipulation requires sensor provenance')
                 if self._base_repositioned and not packet.base_repositioned:
                     packet = replace(packet, base_repositioned=True)   # fm400: carry arrival to the host
+                if self.clock_sync:
+                    offset = self._clock_offset(simulation_time)
+                    if offset is not None:
+                        packet = sync_packet_clock(packet, offset)
+                        if (self._clock_sync_logged is None
+                                or abs(offset - self._clock_sync_logged) > 1e-3):
+                            self._clock_sync_logged = offset
+                            print('STAGED_CLOCK_SYNC op=%s clock_offset=%.4f (host /clock - packet clock) '
+                                  'collision_time=%.4f (packet clock) stamp=%.4f' % (
+                                      self.operation, offset, packet.collision_time,
+                                      packet.simulation_time), flush=True)
                 self.graph.publish_sensors(packet)
                 self.last_sensor_time = stamp
             if self.station is not None:

@@ -1244,11 +1244,18 @@ class RosTransferBridge:
             # a stamp up to render_lead ahead is fresh (strictly MORE current data -- safe); a genuinely
             # STALE stamp (age > max_age) or a wildly-future one (> render_lead) still rejects. Carry the
             # measured delta into the reason so a residual trip names its magnitude.
-            _delta = now - sensors.simulation_time
+            # Staged-start clock sync: a start-phase shortcut leaves /clock a constant clock_offset
+            # ahead of the packet clock (twin.restock.staged_start); remove it so this measures the
+            # packet's true age. 0.0 (every cold run / sync off) => byte-identical.
+            _offset = float(sensors.clock_offset)
+            if not math.isfinite(_offset):
+                raise ValueError('packet clock_offset must be finite')
+            _delta = now - sensors.simulation_time - _offset
             if not -self.controller.render_lead <= _delta <= self.controller.max_age:
                 raise ValueError('packet simulation timestamp stale or future '
-                                 '(now-stamp=%.3f, lead=%.3f, max_age=%.3f)'
-                                 % (_delta, self.controller.render_lead, self.controller.max_age))
+                                 '(now-stamp=%.3f, lead=%.3f, max_age=%.3f%s)'
+                                 % (_delta, self.controller.render_lead, self.controller.max_age,
+                                    ', clock_offset=%.3f' % _offset if _offset else ''))
             dt = .01 if self.last_sim is None else sensors.simulation_time - self.last_sim
             self.last_sim = sensors.simulation_time
             self._emit(self.controller.step(dt, sensors))
