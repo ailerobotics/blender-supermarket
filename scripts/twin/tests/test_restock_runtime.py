@@ -132,6 +132,59 @@ class RuntimeTests(unittest.TestCase):
             RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True,
                            nav_stuck_wall_s=-1.0)
 
+    def test_fresh_nav_leg_restarts_the_no_base_progress_budget_return_rebegin(self):
+        # warm7 return re-begin: the uncouple-return tow (navigate) begins only AFTER the long,
+        # legitimately-stationary park+transfer+verify phases. The fm425 no-base-progress WALL timer
+        # is advanced ONLY inside navigate (_nav_stuck_check), so that non-navigate wall-time must NOT
+        # be charged against the return tow's very first tick -- else it trips before the controller
+        # finishes its planning_stop -> route_ready sequence and fails the stage, and each StageRetry
+        # re-begin (which also runs through the same start) re-fails instantly (the 'per-tick re-begin',
+        # elapsed=0.02, route never persisted). A fresh leg start() restarts the budget from this leg.
+        clock = [0.0]
+        adapter = self._stuck_adapter(nav_stuck_wall_s=120.0, clock=clock)   # starts 'outbound'
+        adapter._step(.1)                      # wall 0: baseline set at this leg's start pose
+        clock[0] = 207.0                       # a long stationary non-navigate phase elapses (wall)
+        adapter.start('outbound', self.job)    # a fresh leg (stage begin / StageRetry re-begin)
+        r = adapter._step(.1)                  # first tick of the fresh leg, at wall 207
+        self.assertEqual(r.status, 'running')  # NOT failed: the prior phase's wall is not charged here
+        self.assertEqual(r.reason, 'lane_blocked')
+        clock[0] = 330.0                       # now THIS leg is genuinely stuck past its own budget
+        r = adapter._step(.1)
+        self.assertEqual(r.status, 'failed')   # the fresh budget still fails fast when truly stuck
+        self.assertIn('no base progress', r.reason)
+
+    def test_return_tow_leg_does_not_inherit_stuck_budget_from_transfer(self):
+        # Faithful warm7 shape driven through the REAL return start/_step path: an earlier navigate leg
+        # (outbound) sets the no-base-progress baseline, then a long WALL interval passes with the base
+        # legitimately parked for the transfer (NO navigate ticks advance the timer), then the
+        # uncouple-return's first navigate leg (coupled tow to the cart parking spot) begins. Its
+        # planning ticks must stay RUNNING -- the transfer's wall seconds are not charged against them.
+        clock = [0.0]
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='running', linear=0., angular=0.,
+                                            reason='planning_stop'),
+                      cancel=lambda: None)
+        ticks = [0]
+        def advance(dt):
+            i = ticks[0]; ticks[0] += 1
+            return replace(self.p, observation_id=f'f{i}', simulation_time=(i + 1) * .1,
+                           coupled=True, parked=True, odometry=NS(pose=(2.0, -1.0, 1.57)))
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['cart_parking'] = [2.0, -1.0, 1.57]
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, uncouple_on_return=True,
+                                 wall_clock=lambda: clock[0], nav_stuck_wall_s=120.0)
+        adapter.start('outbound', self.job)    # an earlier navigate leg
+        adapter._step(.1)                      # wall 0: baseline set
+        clock[0] = 207.0                       # long stationary transfer (no navigate ticks) elapses
+        adapter.start('return', self.job)      # begins the tow->cart_parking navigate leg
+        for _ in range(5):                     # several planning ticks; base not yet moving
+            r = adapter.step(.1)
+            self.assertEqual(r.status, 'running')   # never tripped by the inherited transfer wall-time
+        self.assertEqual(nav_goals[-1], ((2.0, -1.0, 1.57), True))  # coupled tow leg was dispatched
+
     def test_collect_drives_to_place_approach_between_pick_and_place(self):
         # fm390: when the arm reaches TRANSIT (carry fold done) and a place_approach pose is configured,
         # the adapter drives the base there (carton carried), re-warms WITHOUT re-dispatching the grasp,
