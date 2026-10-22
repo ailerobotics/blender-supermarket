@@ -220,7 +220,7 @@ _JUMP_MAX = 0.35                  # max joint change per continuation step (rad)
 def plan_transfer(ik, q_start, carton_base, goal_centre_base, goal_yaw_base, *, dims, wall=3,
                   contact_margin=0.00275, standoff=0.15, lift=0.03, clear=0.15, extract_margin=0.06,
                   time_scale=1.0, wrist_guard=True, wrist1_cap=DEFAULT_WRIST1_CAP,
-                  wrist2_min=DEFAULT_WRIST2_MIN):
+                  wrist2_min=DEFAULT_WRIST2_MIN, place_approach='above', insert_lift=0.015):
     """Keyframes for the scripted pick (carton pose ``carton_base``, 4x4 in ur_base_link) and place (carton
     centre ``goal_centre_base`` at yaw ``goal_yaw_base``). The carton and the target are symmetric under a
     180 deg yaw: the representatives that minimise the worst grip-station reach are used (live_pose's
@@ -235,7 +235,20 @@ def plan_transfer(ik, q_start, carton_base, goal_centre_base, goal_yaw_base, *, 
     branch -- without it the scripted executor pick picks the ur_gripper-vs-ur_forearm self-colliding branch
     (wrist_1 ~1.37, wrist_2 ~-1.27) and the host trajectory executor faults on the >1.3 rad tracking error
     (warm5, 2026-10-22). The place half already resolves clear; the guard carries the PICK half onto it too
-    via the continuation IK seeded from the clear ``reach_high``."""
+    via the continuation IK seeded from the clear ``reach_high``.
+
+    ``place_approach`` (default ``'above'``, byte-identical): the carton is lowered onto the target from
+    ``clear`` above it -- right for the open backroom bay, but under a shelf board (the sales-floor endcap
+    slot G3_back_s2 has only ~0.25 m to the s3 board) that descent drives the carton through the board.
+    ``'front'`` (opt-in, RESTOCK_SCRIPTED_TRANSFER_PLACE=front) keeps the keyframe names and moves the
+    pre-place pose IN FRONT of the slot -- the carton just outside it along the gripped wall's outward
+    normal, ``insert_lift`` above its final height -- reached by a straight TCP line (a joint-space swing
+    there overshoots the turning carton's corners into the upper board's front edge), so ``place`` becomes a
+    level slide into the slot. That line is not continuation-IK feasible on the mission arm, so the plan is
+    task-space only (``ik_complete`` False): built for the still arm (warm8's mode), where the carton follows
+    the planned tool path; an ``executor`` arm falls back to still, as for any plan without a joint path."""
+    if place_approach not in PLACE_MODES:
+        raise ValueError(f'place_approach {place_approach!r} unknown (known: {", ".join(PLACE_MODES)})')
     guard = (wrist1_cap, wrist2_min) if wrist_guard else None
     q_start = np.asarray(q_start, float)
     c0 = carton_base[:3, 3]
@@ -270,8 +283,16 @@ def plan_transfer(ik, q_start, carton_base, goal_centre_base, goal_yaw_base, *, 
               Keyframe('extract', _shift(lifted, (out0[0] * depth, out0[1] * depth, 0.)), 2.5 * s, True,
                        line=True)]
     retreat = _shift(place_tcp, (out1[0] * standoff, out1[1] * standoff, 0.))
-    tail = [Keyframe('above_place', up(place_tcp, clear), 4.0 * s, True),
-            Keyframe('place', place_tcp, 2.0 * s, True, line=True),
+    if place_approach == PLACE_FRONT:
+        # slide in level, insert_lift above the slot (clear of its front ticket rail); the release sets the
+        # carton exactly on the target, as in every mode
+        pre_place = up(_shift(place_tcp, (out1[0] * depth, out1[1] * depth, 0.)), insert_lift)
+        place_at = up(place_tcp, insert_lift)
+        choice['place_approach'] = PLACE_FRONT
+    else:
+        pre_place, place_at = up(place_tcp, clear), place_tcp
+    tail = [Keyframe('above_place', pre_place, 4.0 * s, True, line=place_approach == PLACE_FRONT),
+            Keyframe('place', place_at, 2.0 * s, True, line=True),
             Keyframe('retreat', retreat, 1.5 * s, False, line=True),
             Keyframe('retreat_high', up(retreat, clear), 1.0 * s, False, line=True)]
     prev_q, prev_T, ik_complete = q_start, ik.fk(q_start), True
@@ -490,6 +511,60 @@ def _sample_q(samples, t):
 ARM_STILL, ARM_EXECUTOR = 'still', 'executor'
 ARM_MODES = (ARM_STILL, ARM_EXECUTOR)
 ARM_ENV = 'RESTOCK_SCRIPTED_TRANSFER_ARM'
+# Place approach (plan_transfer ``place_approach``): 'above' = the default top-down descent onto the bay;
+# 'front' = opt-in slide-in under an upper shelf board (the sales-floor endcap slot G3_back_s2).
+PLACE_ABOVE, PLACE_FRONT = 'above', 'front'
+PLACE_MODES = (PLACE_ABOVE, PLACE_FRONT)
+PLACE_ENV = 'RESTOCK_SCRIPTED_TRANSFER_PLACE'
+PLACE_LABEL = 'transfer_place=front_insert'
+PLACE_CAPTION = 'TRANSFER PLACE: scripted front insert into the shelf slot (under the upper board)'
+PLACE_NOTE = (' TRANSFER_PLACE=front_insert: the scripted carton path slides into the shelf slot from in '
+              'front of it (straight line under the upper board) instead of descending from above.')
+
+
+def scripted_place_approach(environ=None):
+    """``above`` (default) or ``front``: env RESTOCK_SCRIPTED_TRANSFER_PLACE. Unknown => ValueError (fail loud
+    at boot). Only consulted when RESTOCK_TRANSFER_MODE=scripted builds the scripted transfer."""
+    env = os.environ if environ is None else environ
+    raw = env.get(PLACE_ENV) or PLACE_ABOVE
+    value = str(raw).strip().lower()
+    if value not in PLACE_MODES:
+        raise ValueError(f'{PLACE_ENV}={raw!r}: unknown scripted-transfer place approach '
+                         f'(known: {", ".join(PLACE_MODES)})')
+    return value
+
+
+def _front_place_active(environ=None):
+    try:
+        return transfer_mode(environ) == SCRIPTED and scripted_place_approach(environ) == PLACE_FRONT
+    except ValueError:
+        return False
+
+
+def place_caption(base=None, environ=None):
+    """The walkthrough caption with the front-insert place named (scripted mode + PLACE=front only);
+    otherwise ``base`` unchanged (byte-identical)."""
+    if not _front_place_active(environ) or (base and PLACE_CAPTION in base):
+        return base
+    return f'{base} | {PLACE_CAPTION}' if base else PLACE_CAPTION
+
+
+def stamp_place_summary(summary, environ=None):
+    """Record the front-insert place in a mission.json summary dict (in place; returned): ``transfer_place_mode``
+    + the ``transfer_place=front_insert`` workaround + note + caption. Off => untouched (byte-identical)."""
+    if not _front_place_active(environ):
+        return summary
+    summary['transfer_place_mode'] = 'front_insert'
+    workarounds = summary.setdefault('workarounds', [])
+    if PLACE_LABEL not in workarounds:
+        workarounds.append(PLACE_LABEL)
+    note = summary.get('note') or ''
+    if PLACE_NOTE not in note:
+        summary['note'] = note + PLACE_NOTE
+    summary['walkthrough_caption'] = place_caption(summary.get('walkthrough_caption'), environ)
+    return summary
+
+
 EXECUTOR_START_TOL = 0.05     # validate_trajectory: first waypoint vs measured joints (rad)
 EXECUTOR_SETTLE_S = 60.0      # sim seconds past a segment's end for the executor's terminal settle
 
@@ -511,8 +586,9 @@ class ScriptedTransfer:
 
     def __init__(self, driver, *, ik, target_xyz_world, target_yaw_world=0.0, dims, location, sku,
                  quantity=1, wall=3, contact_margin=0.00275, standoff=0.15, time_scale=1.0,
-                 drop_gap=0.002, xy_tol=0.25, z_tol=0.12, arm=None):
+                 drop_gap=0.002, xy_tol=0.25, z_tol=0.12, arm=None, place_approach=PLACE_ABOVE):
         self.driver, self.ik, self.arm = driver, ik, arm
+        self.place_approach = place_approach
         self.target_xyz_world = tuple(float(v) for v in target_xyz_world)
         self.target_yaw_world = float(target_yaw_world)
         self.dims = tuple(float(v) for v in dims)
@@ -544,7 +620,7 @@ class ScriptedTransfer:
         goal_yaw_base = self.target_yaw_world - T_yaw(self.base_world)
         self.plan = plan_transfer(self.ik, d.arm_joint_positions(), carton_base, goal_base, goal_yaw_base,
                                   dims=self.dims, wall=self.wall, contact_margin=self.contact_margin,
-                                  standoff=self.standoff)
+                                  standoff=self.standoff, place_approach=self.place_approach)
         self.goal_world = self.base_world @ self.plan.carton_goal_base
         self.t, self.state, self.carried, self.released = 0.0, 'running', False, False
         self.offset = self.plan.grasp_offset
@@ -967,6 +1043,7 @@ def build_scripted_transfer(*, assembly, config, scenario, output=None, environ=
                                 else _mission_urdf(config))
     ik = ArmIK(urdf)
     arm_mode = scripted_arm_mode(config, env)
+    place_approach = scripted_place_approach(env)
     arm = None
     if arm_mode == ARM_EXECUTOR:
         md = config.get('masked_depth') or {}
@@ -989,10 +1066,12 @@ def build_scripted_transfer(*, assembly, config, scenario, output=None, environ=
         contact_margin=float(unit.get('tcp_surface_offset_m', 0.00275)),
         standoff=float(opts.get('standoff', 0.15)),
         time_scale=float(opts.get('time_scale', env.get('RESTOCK_SCRIPTED_TRANSFER_TIME_SCALE', 1.0))),
-        arm=arm)
+        arm=arm, place_approach=place_approach)
     print('TRANSFER_MODE scripted: transfer stage = scripted %s + kinematic carton path to the ground-truth '
-          'target %s (urdf=%s)' % ('arm (host executor)' if arm is not None else 'carton path, arm still',
-                                   tuple(target[:3]), urdf), flush=True)
+          'target %s%s (urdf=%s)' % ('arm (host executor)' if arm is not None else 'carton path, arm still',
+                                     tuple(target[:3]),
+                                     '' if place_approach == PLACE_ABOVE else ' place=front (slide-in)', urdf),
+          flush=True)
     return runner
 
 

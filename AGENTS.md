@@ -216,7 +216,10 @@ repo's `scenes/`, `export/` or `renders/`.
   error (warm5). A mid-transfer executor refusal FAILS FAST with a named reason + a keep-alive hold (never
   the silent `still` degrade that starves the arm-command heartbeat). Offline proof (incl. the sphere model
   + warm5 host-validation replay): `data/sim-video-executor-arm-v1/report.md`,
-  `tests/test_restock_scripted_transfer.py`.
+  `tests/test_restock_scripted_transfer.py`. Shelf-slot place (sales-floor endcap G3_back_s2, s3 board
+  0.25 m above): `RESTOCK_SCRIPTED_TRANSFER_PLACE=front` (env, scripted only, default off) slides the carton
+  in under the board instead of descending through it — task-space plan, still arm only; staging keys +
+  CPU proof `scripts/check_front_transfer_staging.py`, `data/sim-video-story-sources-v1/report.md`.
 - **Rollwagen cage clearance** (sim-only workaround, RUNTIME config `cage_collision: "filtered"`, default
   off; `restock/cage_collision.py`): a FilteredPairsAPI on the carton against the 50 cage colliders (deck,
   upper shelf and drawbar still collide; rays and cuMotion untouched), labelled in mission.json and the
@@ -518,6 +521,9 @@ repo's `scenes/`, `export/` or `renders/`.
   Spec + ranges: `data/sim-video-compile-v1/compile-demo-006.json` (ranges from
   `data/sim-video-stage-audit-v1/stage_sources.json`); design + the demo-006 stage→source table:
   `data/sim-video-compile-v1/report.md`. CPU tests: `scripts/twin/demo/tests/test_stitch.py`.
+  **No real run has ever reached the sales floor** (every nav-trace stays in the backroom, y ≥ 13.75): the
+  front place and the coupled tow back into the warehouse exist only in choreographed demo-005 — cut
+  ranges + faults in `data/sim-video-story-sources-v1/story_sources.json`.
 
 ## Maintaining this file
 
