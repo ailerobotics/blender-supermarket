@@ -19,6 +19,14 @@ like ``RESTOCK_TRANSFER_MODE``. An unknown flag RAISES at boot instead of silent
   wrist_3 + pi), which reaches the SAME tool pose in the clear branch (CPU: the warm2 preplace pose solves
   at wrist_1 -0.50, wrist_2 +1.02). No clear solution => the move fails honestly ('IK outside the carry
   wrist region') instead of driving the arm into the stop. Collect is never affected.
+
+``weld`` -- name (and guarantee) what holds the carton during the transfer carry. warm2's carton was held by
+  the labelled SIM_ATTACH_FALLBACK fixed-joint weld (runtime config ``sim_attach_fallback``), the same
+  captain-approved pattern collect uses (answer #1): it forms at the <=0.5 mm flush grasp contact with
+  suction on, holds through status flickers, and releases when the gripper opens at the place pose; the
+  native suction never sealed (gripped_n=0 throughout). The flag records ``transfer_attach: weld`` in
+  mission.json + the caption, and turns the weld path on if the runtime config left it off (logged), so a
+  video can never present the weld as suction physics.
 """
 from __future__ import annotations
 
@@ -27,14 +35,18 @@ import os
 
 ENV = 'RESTOCK_TRANSFER_CARRY'
 WRIST_GUARD = 'wrist_guard'
-FLAGS = (WRIST_GUARD,)
+WELD = 'weld'
+FLAGS = (WRIST_GUARD, WELD)
 DESCRIPTIONS = {
     WRIST_GUARD: ('transfer place moves (preplace/place/retreat) keep the arm IK in the clear wrist branch '
                   '(wrist_1 <= carry cap, wrist_2 >= carry min; wrist-flipped re-seed) so the carry never '
                   'drives into the ur_wrist_2-vs-forearm self-collision stop'),
+    WELD: ('the transfer carton is held by the SIM fixed-joint weld (SIM_ATTACH_FALLBACK, the captain-approved '
+           'collect pattern) from the grasp contact to the release at the place pose, not native suction physics'),
 }
 CAPTIONS = {
     WRIST_GUARD: 'TRANSFER CARRY: wrist-guarded IK (clear wrist branch)',
+    WELD: 'TRANSFER CARRY: weld attach (sim fixed joint), not suction',
 }
 # The bench-proven clear carry region (fm403, data/sim-restock-armbench-v1): wrist_1 <= ~0.65 AND wrist_2
 # positive. Used only when the host config leaves carry_wrist1_cap / carry_wrist2_min unset.
@@ -57,6 +69,22 @@ def carry_flags(environ=None):
     if unknown:
         raise ValueError(f'{ENV}={raw!r}: unknown transfer carry flag(s) {unknown} (known: {", ".join(FLAGS)})')
     return flags
+
+
+def weld_attach(config, environ=None):
+    """The ``sim_attach_fallback`` value for the mission's gripper contact: the runtime config's flag, or True
+    when RESTOCK_TRANSFER_CARRY carries ``weld`` (logged when that turns an unset/false config on). One weld
+    path for both stages -- the same NativePanelContact holds collect and transfer -- exactly as the config
+    flag already does."""
+    configured = bool((config or {}).get('sim_attach_fallback', False))
+    try:
+        weld = WELD in carry_flags(environ)
+    except ValueError:
+        weld = False          # an invalid flag list fails loudly at the controller / summary, not here
+    if weld and not configured:
+        print('TRANSFER_CARRY weld: enabling the SIM_ATTACH_FALLBACK weld (runtime config sim_attach_fallback '
+              'was off)', flush=True)
+    return configured or weld
 
 
 def wrap_angle(value):
@@ -94,6 +122,8 @@ def stamp_summary(summary, environ=None):
         return summary
     ordered = [f for f in FLAGS if f in flags]
     summary['transfer_carry'] = ordered
+    if WELD in flags:
+        summary['transfer_attach'] = 'weld'
     workarounds = summary.setdefault('workarounds', [])
     note = summary.get('note') or ''
     for flag in ordered:

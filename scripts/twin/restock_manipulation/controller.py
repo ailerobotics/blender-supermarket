@@ -7,7 +7,7 @@ from ..restock_camera.freshness import require_fresh
 
 from . import ground_truth_collect as gtc
 from .fit import axis_fits
-from .transfer_carry import (DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN, GUARDED_PHASES, WRIST_GUARD,
+from .transfer_carry import (DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN, GUARDED_PHASES, WELD, WRIST_GUARD,
                              carry_flags)
 from .transfer_mode import LIVE_POSE, near_face_poses, transfer_mode
 from .types import MotionPort, ProductProfile, Result, Sensors
@@ -895,14 +895,20 @@ class TransferController:
                       % (tuple(round(v, 3) for v in source.pose[:3]), tuple(round(v, 3) for v in target.pose[:3]),
                          self.near_face, {k: round(math.dist(v[:3], (0, 0, 0)), 3)
                                           for k, v in self.poses.items()}), flush=True)
-            guard = self._transfer_wrist_guard()
-            if guard is not None:
-                # Label the carry workaround honestly in the evidence + console (mission.json records it).
-                self.evidence.append({'source': 'transfer_carry', 'transfer_carry': sorted(self.transfer_carry),
-                                      'wrist_guard': {'wrist1_cap': guard[0], 'wrist2_min': guard[1],
-                                                      'phases': list(GUARDED_PHASES)}})
-                print('TRANSFER_CARRY wrist_guard active: %s KDL goals must keep wrist_1<=%.2f, wrist_2>=%.2f '
-                      '(wrist-flipped re-seed)' % ('/'.join(GUARDED_PHASES), guard[0], guard[1]), flush=True)
+            if self.transfer_carry and getattr(self, 'operation', None) == 'transfer':
+                # Label the carry workarounds honestly in the evidence + console (mission.json records them).
+                label = {'source': 'transfer_carry', 'transfer_carry': sorted(self.transfer_carry)}
+                guard = self._transfer_wrist_guard()
+                if guard is not None:
+                    label['wrist_guard'] = {'wrist1_cap': guard[0], 'wrist2_min': guard[1],
+                                            'phases': list(GUARDED_PHASES)}
+                    print('TRANSFER_CARRY wrist_guard active: %s KDL goals must keep wrist_1<=%.2f, wrist_2>=%.2f '
+                          '(wrist-flipped re-seed)' % ('/'.join(GUARDED_PHASES), guard[0], guard[1]), flush=True)
+                if WELD in self.transfer_carry:
+                    label['transfer_attach'] = 'weld'
+                    print('TRANSFER_CARRY weld: the carton is held by the SIM fixed-joint weld from the grasp '
+                          'contact to the release at the place pose (transfer_attach=weld)', flush=True)
+                self.evidence.append(label)
             self._transition('approach')
         if self.phase in self.poses:
             # OBSERVE-THEN-EXECUTE lock (firstmate 2026-10-15, key approach-sensing-occlusion): once

@@ -1059,8 +1059,11 @@ wrist-flipped twin, else failing the move before any motion. It fixes the warm2 
 wrist_1 2.08 / wrist_2 −1.02 → pinned at the `ur_wrist_2`-vs-forearm stop → trajectory-host tracking
 fault → 'host emergency stop'). Activation: `TRANSFER_CARRY wrist_guard active` + `WRIST_GUARD
 accept|reject` (host stack), `transfer_carry` in `HOST_EFFECTIVE_CONFIG`, mission.json
-`transfer_carry`/`workarounds` and the burned-in caption. Unset ⇒ byte-identical. Design:
-`scripts/twin/restock_manipulation/transfer_carry.py`. CPU tests, then the replay on a recorded run:
+`transfer_carry`/`workarounds` and the burned-in caption. Unset ⇒ byte-identical. Add `,weld`
+(`RESTOCK_TRANSFER_CARRY=wrist_guard,weld`) to name what holds the carton: the SIM_ATTACH_FALLBACK
+fixed-joint weld (grasp contact → release at the place pose; the native suction never seals) —
+mission.json `transfer_attach: weld` + caption, and it turns the weld on if `sim_attach_fallback` was off.
+Design: `scripts/twin/restock_manipulation/transfer_carry.py`. CPU tests, then the replay on a recorded run:
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_transfer_carry.py -q

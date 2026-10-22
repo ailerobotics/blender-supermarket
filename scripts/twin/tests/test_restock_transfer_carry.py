@@ -31,6 +31,11 @@ def test_flags_off_by_default_and_parse():
     assert tc.carry_flags({tc.ENV: ' Wrist_Guard , '}) == {tc.WRIST_GUARD}
 
 
+def test_weld_flag_parses_alone_and_with_the_guard():
+    assert tc.carry_flags({tc.ENV: 'weld'}) == {tc.WELD}
+    assert tc.carry_flags({tc.ENV: 'wrist_guard,weld'}) == {tc.WRIST_GUARD, tc.WELD}
+
+
 def test_unknown_flag_raises_loudly():
     with pytest.raises(ValueError, match='unknown transfer carry flag'):
         tc.carry_flags({tc.ENV: 'wrist_guard,tilt_bound'})
@@ -50,6 +55,28 @@ def test_stamp_summary_records_flag_workaround_note_and_caption_once():
     assert summary['workarounds'] == ['transfer_mode=live_pose', 'transfer_carry=wrist_guard']
     assert summary['note'].count('TRANSFER_CARRY=wrist_guard') == 1
     assert summary['walkthrough_caption'] == 'BENCH RUN | ' + tc.CAPTIONS[tc.WRIST_GUARD]
+
+
+def test_weld_flag_records_transfer_attach_and_both_captions_in_flag_order():
+    env = {tc.ENV: 'weld,wrist_guard'}
+    summary = tc.stamp_summary({'walkthrough_caption': 'BENCH'}, environ=env)
+    assert summary['transfer_carry'] == ['wrist_guard', 'weld']          # FLAGS order, not env order
+    assert summary['transfer_attach'] == 'weld'
+    assert 'transfer_carry=weld' in summary['workarounds'] and 'TRANSFER_CARRY=weld' in summary['note']
+    assert summary['walkthrough_caption'] == ('BENCH | ' + tc.CAPTIONS[tc.WRIST_GUARD] + ' | '
+                                              + tc.CAPTIONS[tc.WELD])
+    assert 'transfer_attach' not in tc.stamp_summary({}, environ={tc.ENV: 'wrist_guard'})
+
+
+def test_weld_attach_keeps_the_config_flag_and_turns_it_on_for_weld(capsys):
+    assert tc.weld_attach({'sim_attach_fallback': True}, environ={}) is True
+    assert tc.weld_attach({}, environ={}) is False                       # off => config value, unchanged
+    assert tc.weld_attach({'sim_attach_fallback': False}, environ={tc.ENV: 'wrist_guard'}) is False
+    assert tc.weld_attach({}, environ={tc.ENV: 'weld'}) is True
+    assert 'enabling the SIM_ATTACH_FALLBACK weld' in capsys.readouterr().out
+    assert tc.weld_attach({'sim_attach_fallback': True}, environ={tc.ENV: 'weld'}) is True
+    assert capsys.readouterr().out == ''                                  # already on => no log
+    assert tc.weld_attach({}, environ={tc.ENV: 'bogus'}) is False         # invalid fails loudly elsewhere
 
 
 def test_invalid_value_is_recorded_not_hidden():
@@ -153,6 +180,13 @@ def test_flag_off_keeps_begin_byte_identical(monkeypatch):
                        carry_wrist1_cap=0.65, carry_wrist2_min=0.0)
     _issue(c, 'retreat')
     assert not [e for e in c.evidence if e.get('source') == 'transfer_carry']
+
+
+def test_weld_only_labels_the_transfer_and_never_passes_a_guard(monkeypatch):
+    c, m = _controller('transfer', monkeypatch, flag='weld', motion_cls=FixtureMotion)
+    _issue(c, 'retreat')                     # plain FixtureMotion: a wrist_guard kwarg would TypeError
+    labels = [e for e in c.evidence if e.get('source') == 'transfer_carry']
+    assert labels == [{'source': 'transfer_carry', 'transfer_carry': ['weld'], 'transfer_attach': 'weld'}]
 
 
 def test_collect_is_never_guarded(monkeypatch):
