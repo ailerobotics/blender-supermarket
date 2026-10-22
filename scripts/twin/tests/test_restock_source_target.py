@@ -4,7 +4,8 @@ from types import SimpleNamespace as NS
 import numpy as np
 import pytest
 
-from scripts.twin.restock_camera.source_target import build_source_target_provider, SourceTarget
+from scripts.twin.restock_camera.source_target import (
+    build_source_target_provider, build_collect_source_evidence, SourceTarget)
 from scripts.twin.restock_manipulation.types import Sensors, Observation
 
 
@@ -71,6 +72,119 @@ def test_provider_ignores_observations_at_other_locations():
     adapter, _ = _adapter([_carton(location='rollwagen')], evidence=[_evidence()])
     provider = build_source_target_provider(adapter, motion=NS(), contact=NS())
     assert provider(2.) is None
+
+
+# --- render-suspension (sensing gate) hold on the collect path -----------------
+
+def _gated_adapter(observations, *, render_suspended, occluded, camera_id='source',
+                   valid_until_steady=None):
+    """A duck-typed source adapter modelling the gate: under suspension capture serves a held
+    republish whose observation stamp is STALE (the frozen frame), whose evidence is occluded, and
+    which carries a fresh motion-clock ``valid_until_steady`` (the held acquisition-to-use deadline)."""
+    ev = _evidence()
+    ev['registration_occluded'] = occluded
+    packet = Sensors(2., tuple(observations), None, True, False, 2., 2., (0.,)*6, (), 2.,
+                     valid_until_steady)
+    return NS(capture=lambda now, s, d, m, c: packet, evidence=(ev,), camera_id=camera_id,
+              render_suspended=render_suspended)
+
+
+def test_provider_holds_with_a_fresh_motion_completion_stamp_under_suspension():
+    # The frozen frame's observation stamp is stale (2.0) while the tick is far ahead (now=12.0):
+    # the provider must stamp the held pick with `now` so the consumer's live-freshness gate passes,
+    # flag it occluded, and keep the held pose. This is the run-131 fix.
+    adapter = _gated_adapter([_carton()], render_suspended=True, occluded=True)
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(12.0)
+    assert target.stamp == 12.0 and target.occluded is True        # fresh motion-completion stamp
+    assert target.pose_station == (-.42,4.9,.81,0.,0.,.38,.92)      # the held pick pose
+    assert target.provenance['registration_occluded'] is True
+    # the isaac_factory consumer freshness gate (-0.02 <= now - stamp <= 0.5) now passes
+    assert -0.02 <= 12.0 - target.stamp <= 0.5
+
+
+def test_provider_stamp_is_the_frozen_observation_stamp_without_the_fix_would_starve():
+    # Same held packet, but if the provider used the observation stamp (the old behaviour) the gate
+    # would reject: now - 2.0 = 10 > 0.5. The test documents the gap the fix closes.
+    assert not (-0.02 <= 12.0 - 2.0 <= 0.5)
+
+
+def test_provider_carries_the_held_acquisition_deadline_under_suspension():
+    # run-140: the contact/grasp suction guard withholds the gripper until a fresh valid_until_steady
+    # is present. The held capture produces one (sim clock, window-bounded); the provider must carry
+    # it so the host collect packet can satisfy the guard. Without this it is dropped -> zero gripper.
+    adapter = _gated_adapter([_carton()], render_suspended=True, occluded=True,
+                             valid_until_steady=21.0)
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(12.0)
+    assert target.valid_until_steady == 21.0            # the held sim-clock deadline, carried through
+
+
+def test_provider_drops_the_deadline_when_not_suspended_byte_identical():
+    # Gate off / not suspended: the collect target carries no deadline (as before the gate).
+    adapter = _gated_adapter([_carton()], render_suspended=False, occluded=False,
+                             valid_until_steady=21.0)
+    assert build_source_target_provider(adapter, motion=NS(), contact=NS())(2.0).valid_until_steady is None
+    plain, _ = _adapter([_carton()])
+    assert build_source_target_provider(plain, motion=NS(), contact=NS())(2.).valid_until_steady is None
+
+
+def test_provider_is_byte_identical_when_not_suspended_even_if_occluded():
+    # Gate off / not suspended: even a PR 80 rendered-occluded frame (evidence occluded, but the
+    # frame is freshly rendered so its observation stamp is fresh) keeps the measuring-frame stamp
+    # and occluded=False on the target -- unchanged from before the gate.
+    adapter = _gated_adapter([_carton()], render_suspended=False, occluded=True)
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(2.0)
+    assert target.stamp == 2.0 and target.occluded is False
+    # an adapter with no render_suspended attribute at all behaves the same (duck-typed default).
+    plain, _ = _adapter([_carton()])
+    assert build_source_target_provider(plain, motion=NS(), contact=NS())(2.).occluded is False
+
+
+# --- fm449 clean-source evidence (collect observe->reach gate) -----------------
+
+def test_clean_flag_true_on_a_fresh_non_occluded_source_capture():
+    # A plain rendered sensed carton: a synchronized frame WITH a decoded label, support not held.
+    adapter, _ = _adapter([_carton()])
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(2.)
+    assert target.clean is True
+
+
+def test_clean_flag_false_under_render_suspension_held_republish():
+    # A suspended republish (render suspended, held registration) is never a clean committed capture.
+    adapter = _gated_adapter([_carton()], render_suspended=True, occluded=True)
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(12.0)
+    assert target.occluded is True and target.clean is False
+
+
+def test_clean_flag_false_on_a_held_or_seeded_occluded_registration():
+    # Not suspended, but the source support registration is occluded/held (registration_occluded True):
+    # the decoded label stands on a held/seeded prior, so it must NOT read as a clean capture. (fm449 d)
+    adapter = _gated_adapter([_carton()], render_suspended=False, occluded=True)
+    target = build_source_target_provider(adapter, motion=NS(), contact=NS())(2.0)
+    assert target.occluded is False and target.clean is False
+
+
+def test_build_collect_source_evidence_true_only_on_a_clean_capture():
+    clean_adapter, _ = _adapter([_carton()])
+    gate = build_collect_source_evidence(build_source_target_provider(clean_adapter, motion=NS(), contact=NS()))
+    assert gate(2.) is True
+
+
+def test_build_collect_source_evidence_false_on_held_seeded_prior():
+    held = _gated_adapter([_carton()], render_suspended=False, occluded=True)
+    gate = build_collect_source_evidence(build_source_target_provider(held, motion=NS(), contact=NS()))
+    assert gate(2.0) is False                                 # fm449 (d): a held/seeded prior does not count
+
+
+def test_build_collect_source_evidence_false_when_no_unit_is_sensed():
+    empty, _ = _adapter([])
+    gate = build_collect_source_evidence(build_source_target_provider(empty, motion=NS(), contact=NS()))
+    assert gate(2.) is False                                  # no decoded label => no clean evidence
+
+
+def test_build_collect_source_evidence_swallows_capture_failures_as_not_clean():
+    def boom(now):
+        raise ValueError('decode/freshness refusal')
+    assert build_collect_source_evidence(boom)(2.) is False   # a swallowed failure is not-clean, never raises
 
 
 # --- build_sensing wiring -----------------------------------------------------

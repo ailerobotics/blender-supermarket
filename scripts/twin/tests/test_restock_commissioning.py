@@ -146,6 +146,39 @@ def test_apply_baselines_attaches_tracker_so_mission_capture_validates(tmp_path)
     assert result.slots[0].free_dimensions[2] == 0                # foreground seen, not empty
 
 
+def test_commissioned_geometry_carries_camera_from_support(tmp_path):
+    # Option B (fm443): calibrate persists the world-constant camera<-support pose so the hold()
+    # prior can be seeded at boot (the collect-under-occlusion fix).
+    _, records, _ = commissioned_dir(tmp_path)
+    g = records[0].geometry
+    assert g.camera_from_support is not None
+    assert np.asarray(g.camera_from_support).shape == (4, 4)
+
+
+def test_apply_baselines_seeds_a_holdable_prior_from_the_commissioned_pose(tmp_path):
+    # Option B: after attach the tracker has a hold()-able prior (self.good) BEFORE any clean observe
+    # prepare(), so collect under the 300 s occlusion window no longer raises 'no established support
+    # registration'. Seeded base_from_camera=I and registration.base_from_support=camera_from_support
+    # make hold()'s re-expression base_from_support = live_bfc @ camera_from_support exact.
+    from dataclasses import replace
+    from scripts.twin.restock_camera.sensed import RegisteredSupport
+    directory, _, (k, camera, *_rest) = commissioned_dir(tmp_path)
+    loaded = C.load_baselines(directory)
+    boot = context(k, camera)
+    C.apply_baselines(boot, loaded, required_locations=['backstock_00'])
+    tracker = boot.slots[0].tracker
+    assert tracker.good is not None
+    view, now0 = tracker.good
+    assert now0 == float('inf')
+    assert np.allclose(np.asarray(view.base_from_camera), np.eye(4))
+    assert np.allclose(np.asarray(view.registration.base_from_support),
+                       np.asarray(tracker.geometry.camera_from_support))
+    # A legacy baseline without the pose leaves the prior unseeded (byte-identical clean-establish).
+    legacy = RegisteredSupport(replace(loaded['backstock_00'].geometry, camera_from_support=None))
+    C._seed_tracker_good(legacy)
+    assert legacy.good is None
+
+
 # --- commissioning freshness bound (deterministic, no real decode wall time) --
 
 def test_commission_uses_its_own_freshness_bound_not_the_live_half_second(tmp_path):
@@ -229,6 +262,64 @@ def test_run_commissioning_covers_all_three_mission_stations_incl_cart(tmp_path)
     assert loaded['rollwagen'].geometry.camera_id == 'cart'
     manifest = json.loads((tmp_path / C.MANIFEST).read_text())
     assert manifest['provenance']['rollwagen']['capture_pose'] == [-5.73,16,0]
+
+
+def _three_station_contexts():
+    """Three live per-camera contexts (source/cart/shelf) + a capture(ctx, now) helper."""
+    frames = {cid: empty_frame() for cid in ('source', 'cart', 'shelf')}
+    station_of = {'source': 'backstock_00', 'cart': 'rollwagen', 'shelf': 'G3_back_s2'}
+    ctxs, by_ctx = [], {}
+    for cid, (k, cam, _, support, witness, frame) in frames.items():
+        ctx = context(k, cam, location=station_of[cid], camera_id=cid)
+        ctxs.append(ctx); by_ctx[id(ctx)] = (station_of[cid], support, witness, frame)
+
+    def capture_at(now):
+        def capture(ctx):
+            station, support, witness, frame = by_ctx[id(ctx)]
+            frame = dict(frame, rendering_frame=int(now * 60) + 7, rendering_time=float(now))
+            return dict(frame=frame, now=float(now), empty_polygons={station: (support, witness)})
+        return capture
+    return ctxs, capture_at
+
+
+def test_recommission_in_session_refreshes_all_three_and_reattaches(tmp_path):
+    """The warm-session refresh step re-commissions every required station in-session through the
+    UNCHANGED gates, re-persists a FRESH baseline (new sim-clock stamp) and re-attaches it to the
+    live slots, so a warm re-run reads the refreshed baseline rather than bypassing the guard."""
+    ctxs, capture_at = _three_station_contexts()
+    required = {'backstock_00', 'rollwagen', 'G3_back_s2'}
+    # boot commission at sim now=1, then an in-session re-commission at a LATER sim now=50.
+    C.run_commissioning(ctxs, capture_at(1.), dataset_dir=tmp_path)
+    before = json.loads((tmp_path / 'G3_back_s2.json').read_text())['geometry']['baseline_stamp']
+
+    refreshed = C.recommission_in_session(ctxs, capture_at(50.), dataset_dir=tmp_path,
+                                          required_locations=required)
+    assert set(refreshed) == required
+    for ctx in ctxs:                                   # re-attached to every live slot
+        assert all(slot.tracker is not None for slot in ctx.slots)
+    after = json.loads((tmp_path / 'G3_back_s2.json').read_text())['geometry']['baseline_stamp']
+    assert after == 50. and before == 1.               # the baseline stamp was refreshed forward
+    assert set(C.load_baselines(tmp_path)) == required  # union manifest still carries all three
+
+
+def test_recommission_in_session_refuses_a_required_station_it_cannot_refresh(tmp_path):
+    """A required station the live contexts do not cover RAISES (the warm loop stops, no bypass)."""
+    ctxs, capture_at = _three_station_contexts()
+    with pytest.raises(C.CommissioningBaselineMissing, match='did not refresh required station'):
+        C.recommission_in_session(ctxs, capture_at(5.), dataset_dir=tmp_path,
+                                  required_locations={'backstock_00', 'rollwagen', 'G3_back_s2', 'absent_bin'})
+
+
+def test_recommission_in_session_propagates_a_gate_failure_instead_of_bypassing(tmp_path):
+    """If a station's fresh empty frame does not pass the production commission() gates, the refusal
+    propagates out of the refresh step -- the warm loop never runs on an unvalidated baseline."""
+    class _Refusing:
+        slots = []
+        def commission(self, *a, **k):
+            raise ValueError('support marker metric fit/normal is uncertain')
+    with pytest.raises(ValueError, match='metric fit'):
+        C.recommission_in_session([_Refusing()], lambda ctx: dict(frame={}, now=5., empty_polygons={}),
+                                  dataset_dir=tmp_path, required_locations={'backstock_00'})
 
 
 def test_commissioning_and_loader_cover_the_cart_rollwagen_station(tmp_path):
@@ -337,6 +428,92 @@ def test_cli_plan_refuses_a_station_the_design_does_not_cover():
     from scripts import run_restock_commissioning as cli
     with pytest.raises(ValueError, match='no support in the camera design maps to station'):
         cli.commissioning_plan(_design_config(), _scenario(), stations=['nonexistent_bin'])
+
+
+def test_cli_execute_forwards_render_scale_to_the_renderer_and_the_persisted_baseline(tmp_path, monkeypatch):
+    """The resolved --render-preset scale must reach BOTH the renderer hook (so it renders/projects
+    at that scale) and run_commissioning (so the baseline records it). Without this, a `fast` mission
+    renders 0.6 while the baseline comes out full-res and the boot-time _check_match refuses it."""
+    import importlib, sys
+    from pathlib import Path
+    from types import SimpleNamespace as NS
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))       # scripts/ (for the `twin` pkg)
+    from scripts import run_restock_commissioning as cli
+    C = importlib.import_module('twin.restock_camera.commissioning')   # the module _execute imports
+    seen = {}
+
+    def fake_hook(*, scenario, camera_config, output, render_scale):
+        seen['hook_scale'] = render_scale
+        return {'contexts': ['ctx'], 'capture': 'cap'}
+
+    def fake_run(contexts, capture, *, dataset_dir, lifetime_s, render_scale):
+        seen['commission_scale'] = render_scale
+        return [NS(station='backstock_00', provenance=lambda: {'station': 'backstock_00'})]
+
+    monkeypatch.setattr(cli, '_resolve', lambda spec: fake_hook)
+    monkeypatch.setattr(C, 'run_commissioning', fake_run)
+    args = NS(sources='mod:fn', output=tmp_path, lifetime_s=600., render_scale=0.6)
+    report = cli._execute(args, {'cameras': {}}, {}, ['backstock_00'])
+    assert seen == {'hook_scale': 0.6, 'commission_scale': 0.6}
+    assert report['stations']['backstock_00'] == {'station': 'backstock_00'}
+    assert json.loads((tmp_path / 'commissioning-report.json').read_text())['stations']
+
+
+def test_cli_execute_defaults_to_full_scale_when_no_preset(tmp_path, monkeypatch):
+    import importlib, sys
+    from pathlib import Path
+    from types import SimpleNamespace as NS
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from scripts import run_restock_commissioning as cli
+    C = importlib.import_module('twin.restock_camera.commissioning')
+    seen = {}
+    monkeypatch.setattr(cli, '_resolve',
+                        lambda spec: (lambda **kw: seen.update(hook_scale=kw['render_scale'])
+                                      or {'contexts': [], 'capture': 'cap'}))
+    monkeypatch.setattr(C, 'run_commissioning',
+                        lambda *a, render_scale, **kw: seen.update(commission_scale=render_scale) or [])
+    args = NS(sources='mod:fn', output=tmp_path, lifetime_s=600., render_scale=1.0)
+    cli._execute(args, {'cameras': {}}, {}, [])
+    assert seen == {'hook_scale': 1.0, 'commission_scale': 1.0}
+
+
+def test_gpu_wrapper_assembles_per_station_baselines_into_one_union_manifest(tmp_path):
+    """The guarded launcher commissions one station per boot, then its assembly step copies each
+    per-station child's baseline into the shared dir and rebuilds ONE union manifest covering
+    every mission station, so a single commissioning_dir carries source + cart + shelf."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))       # scripts/ (for twin + the launcher)
+    from scripts import run_restock_commissioning_gpu as gpu
+
+    src_dir, _, _ = commissioned_dir(tmp_path / 'src', location='backstock_00')
+    cart_dir, _, _ = commissioned_dir(tmp_path / 'cart', location='rollwagen')
+    shelf_dir, _, _ = commissioned_dir(tmp_path / 'shelf', location='G3_back_s2')
+    per_station = {'backstock_00': src_dir, 'rollwagen': cart_dir, 'G3_back_s2': shelf_dir}
+    final = tmp_path / 'baselines'
+
+    manifest = gpu.assemble_baselines(per_station, final, ['backstock_00', 'rollwagen', 'G3_back_s2'])
+    assert set(manifest['stations']) == {'backstock_00', 'rollwagen', 'G3_back_s2'}
+    # Loadable by the mission's loader from the shared dir (each station's json copied in).
+    loaded = C.load_baselines(final)
+    assert set(loaded) == {'backstock_00', 'rollwagen', 'G3_back_s2'}
+    for station in ('backstock_00', 'rollwagen', 'G3_back_s2'):
+        assert (final / f'{station}.json').is_file()
+        assert (final / f'{station}.npz').is_file()           # raw-frame audit sidecar carried too
+
+
+def test_gpu_wrapper_assembly_refuses_a_station_with_no_baseline(tmp_path):
+    """A requested station whose child produced no baseline is refused, never fabricated."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from scripts import run_restock_commissioning_gpu as gpu
+
+    src_dir, _, _ = commissioned_dir(tmp_path / 'src', location='backstock_00')
+    (tmp_path / 'empty').mkdir()
+    with pytest.raises(RuntimeError, match='no baseline for station'):
+        gpu.assemble_baselines({'backstock_00': src_dir, 'rollwagen': tmp_path / 'empty'},
+                               tmp_path / 'baselines', ['backstock_00', 'rollwagen'])
 
 
 def _commission_both(tmp_path):

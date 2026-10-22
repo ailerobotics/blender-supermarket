@@ -1,0 +1,9 @@
+{
+  "__doc__": "Fragment to MERGE into a mission runtime-config (e.g. the integration lane's mission-runtime-cc.json / mission-runtime-couple.json / the run-320 full-scope config) to make the behaviour tree the mission RUN DRIVER, and (optionally) to uncouple the cart at a parking spot on return. (1) 'bt': true selects the tree -- it drives all seven stages as subtrees of explicit position-first leaves (navigate -> perceive -> manipulate), byte-identical to the sequential state machine (see docs/restock_bt.md); set 'bt': false (or omit) to keep the sequential Mission.tick fallback, unchanged. (2) 'uncouple_on_return': true + mission_poses.cart_parking makes 'return' tow the cart to its parking spot, brake it, release the coupling (mobile.uncouple), optionally back away (cart_parking_backaway) and drive home empty, instead of towing it home coupled. The cart_parking / cart_parking_backaway poses and the coupled lane to them are owned by the sim-restock-nav-lanes-v1 lane -- the (x, y, yaw) values below are a CLEARLY-NAMED PLACEHOLDER; replace them with the lane's announced parking-spot pose. Default off (no cart_parking) => byte-identical tow-home return.",
+  "bt": true,
+  "uncouple_on_return": true,
+  "mission_poses": {
+    "cart_parking": [2.0, -1.0, 1.5708],
+    "cart_parking_backaway": [3.0, -1.0, 1.5708]
+  }
+}

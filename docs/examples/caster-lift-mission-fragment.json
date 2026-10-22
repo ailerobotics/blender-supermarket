@@ -1,0 +1,11 @@
+{
+  "_comment": "fm435 caster_lift_m enablement. The mission imports the mobile base from the manifest's generated URDF, so the lift is baked into that URDF at build time (build_mobile_assets.py --config), NOT a runtime config flag. To use lifted casters: (1) regenerate the mobile asset with the spec override below, then (2) point the mission's mobile_manifest at the regenerated manifest. caster_lift_m=0.0 (default/absent) => legacy co-planar contacts, byte-identical.",
+  "build_step": {
+    "command": "python scripts/build_mobile_assets.py --source-urdf $SOURCE_URDF --package-root /opt/ros/jazzy/share --package-root $SHELFBOT_PACKAGE --output-dir $TASK_OUTPUT --config caster-lift-spec.json",
+    "caster-lift-spec.json": { "caster_lift_m": 0.005 }
+  },
+  "mission_runtime_patch": {
+    "mobile_manifest": "$TASK_OUTPUT/mobile_manifest.json"
+  },
+  "evidence": "Uncoupled base-drive bench at real mu=1.0: straight tracking 0.097 (co-planar) -> 0.988 (lift 5mm); arc v 0.985, arc omega 0.851, within_tol true. data/mobile-restock-v2/report.md 2026-10-21."
+}

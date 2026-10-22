@@ -28,6 +28,59 @@ class NavigationTests(unittest.TestCase):
         self.assertTrue(grid.plan((-3,0),(3,0),self.fp.radius(False)))
         self.assertFalse(grid.plan((-3,0),(3,0),self.fp.radius(True)))
 
+    def test_static_drive_ignores_dynamic_obstacles(self):
+        # fm396 (B): the trusted static reposition leg plans + gates against the STATIC map only, so a live
+        # scan obstacle on the path (the carry-fold self-return ring) cannot block it; every other leg
+        # (static_drive off, default) still stops for the same obstacle.
+        ring = tuple((math.cos(math.radians(a)) * 0.78, math.sin(math.radians(a)) * 0.78)
+                     for a in range(0, 360, 6))        # a 0.78 m ring around the base -- blocks normally
+        c = self.controller(); c.start((3, 0, 0), False)           # default: live obstacles honoured
+        od, obs = self.inputs(obstacles=ring)
+        self.assertEqual(c.step(0.1, od, obs).velocity, (0, 0))    # boxed in by the ring -> no motion
+        c2 = self.controller(); c2.start((3, 0, 0), False, static_drive=True)
+        r = c2.step(0.1, *self.inputs(obstacles=ring))
+        self.assertNotEqual(r.velocity, (0, 0))                    # static-only: the ring is ignored, it drives
+        self.assertEqual(r.reason, 'tracking')
+
+    def test_static_drive_off_is_byte_identical(self):
+        # Absent static_drive the controller is unchanged (defaults to live obstacles).
+        c = self.controller(); c.start((3, 0, 0), False)
+        self.assertFalse(c.static_drive)
+
+    def test_reposition_arrival_needs_relaxed_yaw_tol_fm406(self):
+        # fm406 (run-313): at place_approach the base parks ~0.078 rad short of the goal yaw -- right at
+        # the 0.08 default -- so arrival never latches and it sits at the goal until a watchdog e-stops
+        # (sat ~44 s). A relaxed per-goal yaw tolerance lets the achievable park declare arrived_stopped.
+        goal = (0.5, 0.0, 0.10)                           # 0.10 rad yaw: > 0.08 default, < 0.12 relaxed
+        od, obs = self.inputs(pose=(0.5, 0.0, 0.0))        # AT the goal xy, stopped (lin/ang default 0)
+        c = self.controller(); c.start(goal, False)                       # default yaw tol 0.08
+        self.assertNotEqual(c.step(0.1, od, obs).reason, 'arrived_stopped')   # 0.10 > 0.08 -> not arrived
+        c2 = self.controller(); c2.start(goal, False, arrival_yaw_tol=0.12)   # fm406 relaxed
+        self.assertEqual(c2.step(0.1, od, obs).reason, 'arrived_stopped')     # 0.10 <= 0.12 -> arrived
+
+    def test_arrival_yaw_tol_default_byte_identical_fm406(self):
+        c = self.controller(); c.start((0.5, 0, 0), False)
+        self.assertEqual(c.arrival_yaw_tol, 0.08)         # unset => the original 0.08 (byte-identical)
+        with self.assertRaises(ValueError):
+            self.controller().start((0.5, 0, 0), False, arrival_yaw_tol=-1.0)  # positive-only
+
+    def test_static_drive_obstacle_stop_uses_footprint_radius_not_braking_disk(self):
+        # fm396/run-308: the braking inflation (stop_distance = stale_after*speed) made obstacle_stop trip
+        # though the footprint radius clears it. On the trusted static leg obstacle_stop uses the footprint
+        # RADIUS only; a NORMAL leg still stops on the forward braking capsule. The obstacle is placed
+        # AHEAD (within the forward braking reach but outside the footprint) so the direction-aware zone
+        # still stops the normal leg here.
+        r = self.fp.radius(False) + 0.05                  # 0.55 (radius + default 0.05 position uncertainty)
+        d = r + 0.20                                      # live obstacle 0.75 m AHEAD: inside braking reach, outside footprint
+        od = Odometry((0, 0, 0), 0.1, source='test_fixture')
+        obs = Observation(0.1, ((d, 0.0),), False, True, source='test_fixture', coverage_radius=10)
+        normal = Controller(self.grid, self.fp, allow_test_fixtures=True, max_speed=0.8, stale_after=1.0)
+        normal.start((3, 0, 0), False)
+        self.assertEqual(normal.gate_velocity(0.1, od, obs, 0.8, 0.0).reason, 'obstacle_stop')
+        trusted = Controller(self.grid, self.fp, allow_test_fixtures=True, max_speed=0.8, stale_after=1.0)
+        trusted.start((3, 0, 0), False, static_drive=True)                # radius-only, ignores live obstacles
+        self.assertEqual(trusted.gate_velocity(0.1, od, obs, 0.8, 0.0).reason, 'tracking')
+
     def test_cart_rear_and_swing_obstacle(self):
         c=self.controller(); c.start((3,0,0),True)
         od,obs=self.inputs(coupled=True,obstacles=((-1.4,0),))
@@ -87,6 +140,18 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(c.step(0.1,moving,ob).reason,'settling_at_goal')
         self.assertEqual(c.step(0.1,*self.inputs(od.pose,0.3)).status,'succeeded')
 
+    def test_tight_arrival_tolerance_delays_goal_success(self):
+        # A base 0.06 m from the goal (aligned, stopped) arrives with the default 0.08 m tol, but
+        # NOT with a tight 0.03 m tol (the on-axis couple standoff) -- it keeps closing instead.
+        grid=GridMap((-6,-6,6,6),resolution=0.25)
+        od,obs=self.inputs(pose=(0.06,0,0))  # 0.06 m short of goal (0,0,0), aligned, stopped
+        loose=self.controller(grid=grid); loose.start((0,0,0),False)
+        self.assertEqual(loose.step(0.1,od,obs,now=0.1).status,'succeeded')
+        tight=self.controller(grid=grid); tight.start((0,0,0),False,arrival_xy_tol=0.03)
+        self.assertEqual(tight.step(0.1,od,obs,now=0.1).status,'running')  # still closing
+        with self.assertRaises(ValueError):
+            self.controller(grid=grid).start((0,0,0),False,arrival_xy_tol=0.0)
+
     def test_reference_closed_loop_arrival(self):
         c=self.controller(); c.start((2,1,0.4),False)
         pose=(0.,0.,0.); v=w=0.
@@ -114,6 +179,66 @@ class NavigationTests(unittest.TestCase):
         od=Odometry((0,0,0),0.1,linear=0.7,source='test_fixture')
         _,obs=self.inputs(obstacles=((1.2,0),))
         self.assertEqual(c.gate_velocity(0.1,od,obs,0,0).reason,'obstacle_stop')
+
+    def test_directional_zone_clears_rear_obstacle_still_stops_ahead(self):
+        # ds-007 / run-319b shape: the robot at (2,0,0) facing +x driving toward a dock, the backstock
+        # staging support sensed 0.60 m directly BEHIND it (rear hemisphere of a no-reverse base).
+        # radius(False)=0.50 + 0.05 unc = 0.55; at full speed stop=0.153 so the LEGACY omnidirectional
+        # disk 0.703 engulfs the rear return -> obstacle_stop. The direction-aware zone (default) checks
+        # the footprint all around (never shrunk) plus the braking extension only AHEAD, so the rear
+        # obstacle a forward-only base can never reach does NOT trip, while the same return AHEAD does.
+        fp=Footprint(0.45,0.5,1.0,margin=0.05)  # radius(False)=0.50, +0.05 unc = 0.55
+        rear=self.inputs(obstacles=((1.40,0.0),))[1]   # 0.60 m BEHIND the robot at (2,0)
+        ahead=self.inputs(obstacles=((2.60,0.0),))[1]  # 0.60 m AHEAD (within radius+stop=0.703, outside footprint)
+        od=Odometry((2,0,0),0.1,source='test_fixture')
+        base=self.controller(fp=fp); base.start((3,0,0),False)
+        self.assertEqual(base.gate_velocity(0.1,od,rear,0.25,0.0).reason,'tracking')       # rear: no trip
+        self.assertEqual(base.gate_velocity(0.1,od,ahead,0.25,0.0).reason,'obstacle_stop') # ahead: still stops
+        # The legacy omnidirectional disk (directional_zone=False) DOES trip on the rear return.
+        legacy=self.controller(fp=fp,directional_zone=False); legacy.start((3,0,0),False)
+        self.assertEqual(legacy.gate_velocity(0.1,od,rear,0.25,0.0).reason,'obstacle_stop')
+
+    def test_docking_cap_still_shrinks_forward_braking_reach(self):
+        # The dock speed cap is orthogonal to the direction-aware zone: it shrinks the FORWARD braking
+        # reach near a dock. An obstacle AHEAD inside the full-speed capsule but beyond the capped
+        # capsule stops at full speed and clears under the cap; the footprint is UNCHANGED.
+        from twin.navigation import DockingApproach
+        fp=Footprint(0.45,0.5,1.0,margin=0.05)  # radius(False)=0.50, +0.05 unc = 0.55
+        dock=DockingApproach(goal=(3,0,0),speed=0.05,approach_distance=1.5)
+        _,obs=self.inputs(obstacles=((2.60,0.0),))  # 0.60 m AHEAD of the robot at (2,0)
+        od=Odometry((2,0,0),0.1,source='test_fixture')
+        base=self.controller(fp=fp); base.start((3,0,0),False)
+        self.assertEqual(base.gate_velocity(0.1,od,obs,0.25,0.0).reason,'obstacle_stop')
+        capped=self.controller(fp=fp,docking=dock); capped.start((3,0,0),False)
+        self.assertEqual(capped.gate_velocity(0.1,od,obs,0.25,0.0).reason,'tracking')
+        self.assertTrue(capped._docking_active)
+        # The cap binds only to the configured dock goal: a different goal never engages it.
+        other=self.controller(fp=fp,docking=dock); other.start((2,3,0),False)
+        self.assertFalse(other._docking_active)
+        self.assertEqual(other.gate_velocity(0.1,od,obs,0.25,0.0).reason,'obstacle_stop')
+
+    def test_docking_cap_does_not_shrink_the_body_footprint(self):
+        # An obstacle inside the bare footprint still stops, even under the dock cap:
+        # the cap never masks geometry, it only shortens the forward braking reach.
+        from twin.navigation import DockingApproach
+        fp=Footprint(0.45,0.5,1.0,margin=0.05)  # radius(False)=0.50, +0.05 unc = 0.55
+        dock=DockingApproach(goal=(3,0,0),speed=0.01,approach_distance=1.5)
+        _,obs=self.inputs(obstacles=((2.40,0.0),))  # 0.40 m ahead < 0.55 footprint radius
+        od=Odometry((2,0,0),0.1,source='test_fixture')
+        c=self.controller(fp=fp,docking=dock); c.start((3,0,0),False)
+        self.assertTrue(c._docking_active)
+        self.assertEqual(c.gate_velocity(0.1,od,obs,0.25,0.0).reason,'obstacle_stop')
+
+    def test_docking_cap_caps_the_commanded_linear_speed(self):
+        from twin.navigation import DockingApproach
+        dock=DockingApproach(goal=(3,0,0),speed=0.06,approach_distance=1.5)
+        _,obs=self.inputs()
+        c=self.controller(docking=dock); c.start((3,0,0),False)
+        near=Odometry((2,0,0),0.1,source='test_fixture')  # 1.0 m from the dock goal
+        self.assertAlmostEqual(c.gate_velocity(0.1,near,obs,0.25,0.0).linear,0.06)
+        # Outside the approach zone the cap is inert (full commanded speed passes).
+        far=Odometry((0,0,0),0.1,source='test_fixture')  # 3.0 m from the dock goal
+        self.assertAlmostEqual(c.gate_velocity(0.1,far,obs,0.25,0.0).linear,c.max_speed)
 
     def test_wheel_odometry_straight_arc_and_time(self):
         wheel=WheelOdometry(0.1,0.5)
@@ -173,6 +298,52 @@ class NavigationTests(unittest.TestCase):
             result=runtime.step(0.1,(0,0),None,now=now,coupled=False,arm_transport=True)
             self.assertEqual(result.velocity,(0,0))
         self.assertEqual(result.status,'failed')
+
+    def test_carry_drive_relaxes_arm_transport_gate_fm431(self):
+        # fm431 (B1) / run-325 cold TRANSIT: the mid-collect reposition drives the base while the arm
+        # CARRIES the carton (arm_transport=False), so by default the nav refuses every drive with
+        # 'arm_not_in_transport'. carry_drive (set only on the reposition leg) relaxes THAT gate; every
+        # other input check is untouched. Default off => the empty-gripper gate holds (byte-identical).
+        odom = Odometry((0, 0, 0), 0.1, 0.0, 0.0, 'test_fixture', 0.05)
+        obs = Observation(0.1, (), False, False, source='test_fixture', coverage_radius=10)  # arm_transport=False
+        c = self.controller()
+        c.start((2, 0, 0), False)
+        self.assertEqual(c.step(0.1, odom, obs, now=0.1).reason, 'arm_not_in_transport')
+        c2 = self.controller()
+        c2.start((2, 0, 0), False, carry_drive=True)
+        self.assertNotEqual(c2.step(0.1, odom, obs, now=0.1).reason, 'arm_not_in_transport')
+        # a fresh start WITHOUT carry_drive resets the relaxation (not latched)
+        c2.start((2, 0, 0), False)
+        self.assertEqual(c2.step(0.1, odom, obs, now=0.1).reason, 'arm_not_in_transport')
+
+    def test_carry_drive_still_stops_for_obstacle_in_carry_envelope_fm432(self):
+        # fm432 precondition: carry_drive relaxes ONLY the arm-transport gate, NOT the collision footprint.
+        # The carry fold envelope (CPU-verified 0.62 m, isaac_port transport.contains) is WITHIN the base
+        # footprint radius (transport_radius 0.65 + margin 0.05 = 0.70), so the nav already covers the
+        # carried carton. The reposition drives static_drive => the obstacle check runs against the STATIC
+        # MAP footprint (not the lidar), so the carton lidar self-mask cannot remove an obstacle from the
+        # collision footprint: an obstacle the carried carton would hit still stops the drive.
+        fp = Footprint(0.65, 0.62, 1.0, margin=0.05)        # the mission base footprint
+        self.assertAlmostEqual(fp.radius(False), 0.70)
+        self.assertLess(0.62, fp.radius(False))             # footprint already includes the carry envelope
+        odom = Odometry((0, 0, 0), 0.1, 0.0, 0.0, 'test_fixture', 0.05)
+        obs = Observation(0.1, (), False, False, source='test_fixture', coverage_radius=10)  # arm_transport False, EMPTY lidar
+        # a static box ~0.55 m ahead -- inside the 0.62 carry envelope, hence inside the 0.70 footprint.
+        # carry_drive relaxed arm_transport; static_drive => the STATIC-MAP footprint still sees the box,
+        # so the drive STOPS (does not advance) -- the collision footprint covers the carried carton.
+        grid = GridMap((-6, -6, 6, 6), [(0.50, -0.06, 0.60, 0.06)], 0.1)
+        c = Controller(grid, fp, allow_test_fixtures=True)
+        c.start((2, 0, 0), False, carry_drive=True, static_drive=True)
+        stopped = c.step(0.1, odom, obs, now=0.1)
+        self.assertEqual(stopped.velocity, (0, 0))
+        self.assertIn(stopped.reason, ('obstacle_stop', 'blocked_no_route'))
+        # baseline: with a CLEAR static map the same carry_drive leg advances (so the stop above is the box,
+        # not carry_drive itself refusing).
+        c2 = Controller(GridMap((-6, -6, 6, 6), (), 0.1), fp, allow_test_fixtures=True)
+        c2.start((2, 0, 0), False, carry_drive=True, static_drive=True)
+        moving = c2.step(0.1, odom, obs, now=0.1)
+        self.assertEqual(moving.reason, 'tracking')
+        self.assertGreater(moving.velocity[0], 0.0)
 
     def test_ros_domain_guard(self):
         with patch.dict('os.environ',{'ROS_DOMAIN_ID':'42','ROS_LOCALHOST_ONLY':'1'}):

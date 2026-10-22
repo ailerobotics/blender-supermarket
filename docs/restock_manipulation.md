@@ -2,7 +2,7 @@
 
 `scripts/twin/restock_manipulation/` provides the manipulation lane for mobile
 restocking. It boots no simulator and opens no hardware driver. CPU checks and
-ROS environment commands are in [RUNBOOK §12](../RUNBOOK.md#12-mobile-restock-manipulation-cpu).
+ROS environment commands are in [RUNBOOK §13](../RUNBOOK.md#13-mobile-restock-manipulation-cpu).
 
 ## Supported operation and evidence boundary
 
@@ -113,13 +113,23 @@ pad, exceeding the 120 mm overhead room. The shelf runtime must set
 `grasp_mode='side'` and pass per-location wall indices (0=-X, 1=-Y, 2=+X, 3=+Y).
 For a 600 mm width × 400 mm depth case, wall 1/3 presents the 600 mm face.
 
-`author_native_gripper` authors four disabled attachment joints at the CAD panel,
-with empty `body1` relationships and finite force/torque limits. The native Isaac
-plugin alone chooses contact bodies and closes joints. `NativePanelContact.read`
-requires all four seal points to report one body, otherwise it releases a partial
-seal. There is no fallback fixed joint, target-pose lookup or transform parenting.
-This is a native simulation approximation of panel suction, not proof of vacuum
-performance or real hardware control. Native GPU latch/break behavior is pending.
+`author_native_gripper` authors four attachment joints at the CAD panel the way the
+installed Isaac surface-gripper plugin (`isaacsim.robot.surface_gripper`) requires, so
+the plugin can form the latch — the plugin never creates or enables the joints itself,
+it only fetches the already-instantiated runtime PhysX joint and reconfigures it. Each
+seal is therefore an **enabled** maximal-coordinate (`excludeFromArticulation`) D6 joint
+with `body0` = the panel, an **empty** `body1` (the plugin records the gripped body on
+the gripper's own `grippedObjects` relationship, never on a per-seal `body1`) and both
+local poses authored; the shear/tilt axes are locked and the forward/suction axis is a
+small `0..maxGripDistance` compliant stroke with a drive; a positive `clearanceOffset`
+and `retryInterval` are required (a disabled joint is never instantiated — the symptom
+was the plugin logging `has no joint at attachment point` and never latching; a zero
+retry abandons the close in the same step). `NativePanelContact.read` confirms the latch
+from the plugin's authoritative signals — gripper status `Closed` holding exactly one
+object — and releases any partial grab; there is no fallback fixed joint, target-pose
+lookup or transform parenting. This is a native simulation approximation of panel
+suction, not proof of vacuum performance or real hardware control. The native latch is
+verified by an isolated guarded GPU test (`data/surface-gripper-latch-v1`).
 
 The complete local adapter is `isaac_runtime.CadRestockRuntime`:
 
@@ -209,12 +219,51 @@ object (`IsaacMeasuredFeedback(articulation)`) whose `collision_time` is an actu
 
 `ros_host` runs in separate host Jazzy Python and instantiates the existing
 `RosMotionPort`, `RosTransferBridge`, controller and CAD wall policy using
-`ros_host_config.json`. RUNBOOK §12 has the exact launch. Sensor/job/status JSON
+`ros_host_config.json`. RUNBOOK §13 has the exact launch. Sensor/job/status JSON
 is unchanged except status adds monotonic `sequence` and `job_id` for stale-message
 filtering. Native contact feedback is in `Sensors`; returned gripper controls call
 the native seal. `/restock_sim/manipulation/stop` is Bool and must latch arm hold
 and inhibit further trajectory commands until explicit recovery. Lost host
 heartbeat also latches hold. Never release a held unit as a watchdog fallback.
+
+**Contact wall-budget fail-fast** (`RESTOCK_CONTACT_STUCK_WALL_S`, opt-in, default `0` = off): the
+contact descent terminates on measured contact (`Sensors.contact` = native grippedObjects OR the
+`SIM_ATTACH_FALLBACK` weld, which welds at the measured ≤0.5 mm pad-to-carton gap), creeping
+`CONTACT_STEP` toward the carton between freeze-settles. In run-322 cold the native suction never
+latched and the weld never formed, so the creep held with `contact=False` and the arm-command stream
+lapsed into the opaque 90 s host transport heartbeat watchdog (`arm command heartbeat lost`, no named
+cause). The phase's own `phase_timeout` is **sim-clock**, so under render pacing the WALL heartbeat trips
+first. When set, the controller fails the contact phase fast with a named reason once no contact
+progress (entering contact / a `CONTACT_STEP` advance) occurs for this many WALL seconds — below the
+heartbeat backstop — so a stuck contact ends the attempt legibly instead of burning the GPU wall cap.
+CPU tests: `tests/test_restock_manipulation.py`.
+
+**Collision-stale pause keep-alive + wall budget** (`RESTOCK_COLLISION_PAUSE_WALL_S`, opt-in, default
+`0` = off ⇒ the legacy empty-control pause, byte-identical): the fm419(a) `COLLISION_STALE_PAUSE` holds
+the post-attach lift while the (held) carton's collision stamp is briefly stale — the benign weld/ESDF
+re-incorporation lag (run-323: `collision_dt` 0.52→0.65 s). The legacy pause returned EMPTY controls — a
+SILENT hold that, under render pacing, starved the 90 s host arm-command heartbeat watchdog before the
+sim-clock `collision_stale_tol_s` could trip. When set, the pause (1) re-commands a HOLD at the CURRENT
+measured joints each tick (stationary — the goal IS the measured pose, so the arm never advances the held
+move into the stale collision world) so the arm-command stream stays alive and the heartbeat is fed, and
+(2) fails fast with a named reason once the pause persists beyond this WALL budget (below the 90 s
+backstop). CPU tests: `tests/test_restock_manipulation.py`.
+
+**Post-attach collision-stamp lag — two opt-in mitigations (fm430 (2a), both default-off ⇒ byte-identical):**
+diagnosis — right after the `SIM_ATTACH` weld the host `object_attachment` clears the carton voxels and
+the parked mapper must re-incorporate at the new state, but under render pacing the next nvblox ESDF
+integration stamp lags `now` by ~0.5–0.8 s (run-323 `collision_dt` 0.52→0.65, progressive), so the
+controller's 0.5 s collision freshness trips through the lift and the fm419(a) pause holds.
+(1) **Host ESDF re-integration kick** — `RESTOCK_ESDF_POSTATTACH_KICK` makes `restock_host/incorporation_ack.py`
+(the nvblox `get_esdf_and_gradient` poll node) subscribe to `/manipulation/status` and, on the phase
+rising into `lift` (post-weld), DROP any in-flight pre-attach ESDF request and issue a fresh one so the
+post-attach integration lands ~a cycle sooner instead of waiting out the old request (≤ 2 s). Pure
+`IncorporationAckState.note_manip_phase`/`consume_kick` sequencing, unit-tested in `tests/test_restock_host.py`.
+(2) **Controller held-lift collision grace** — `RESTOCK_LIFT_COLLISION_GRACE_WALL_S` lets ONLY the
+post-attach lift to the fixed, bench-proven clear-region `carry_lift_shape` (which does NOT depend on the
+live collision world) RIDE THROUGH a stale collision stamp (proceed, not pause) for a bounded WALL grace,
+then FAIL FAST with a named reason. Scoped to held + phase `lift` + `carry_lift_shape` set +
+collision-SOLE staleness (every other invariant field must be good). CPU tests: `tests/test_restock_manipulation.py`.
 
 Integration's existing Isaac ROS graphs supply `/clock`, registered RGB-D, current
 TF and joint-state/controller transport. Host-side MoveIt/cuMotion provides the

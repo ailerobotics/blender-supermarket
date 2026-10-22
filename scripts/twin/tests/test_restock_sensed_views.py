@@ -146,11 +146,34 @@ def test_commissioning_provenance_survives_only_explicit_persistent_clock():
     assert view.geometry.baseline_session_id == 'commission'
     assert view.geometry.baseline_acquired_steady == 1000.
     assert view.clearance is None
+    # Provenance/anti-rewind still refuse a different acquisition domain or a rewound clock.
     for changed in (replace(current.evidence,steady_domain='other-process'),
-                    replace(current.evidence,acquired_steady=999.),
-                    replace(current.evidence,acquired_steady=1601.)):
+                    replace(current.evidence,acquired_steady=999.)):
         with pytest.raises(ValueError):
             RegisteredSupport(g).prepare(depth,k,camera,replace(current,evidence=changed),None,now=.1,parked=True)
+    # The lifetime is now SIM-clocked: a large WALL acquisition gap (render pacing) at small sim
+    # `now` no longer expires the baseline, while a large sim `now` (> lifetime_s) does.
+    wall_paced = replace(current.evidence,acquired_steady=1_000_000.)   # ~11 days wall after commission
+    RegisteredSupport(g).prepare(depth,k,camera,replace(current,evidence=wall_paced),None,now=.1,parked=True)
+    aged = replace(current.evidence,stamp=699.9,transform_stamp=699.9)  # fresh frame at mission sim 700 s
+    with pytest.raises(ValueError,match='expired'):
+        RegisteredSupport(g).prepare(depth,k,camera,replace(current,evidence=aged),None,now=700.,parked=True)
+
+
+def test_baseline_lifetime_optional_wall_cap_for_the_real_rig():
+    # age_at exposes an opt-in acquisition-clock (wall) cap for the REAL RIG, where wall == sim and
+    # the commission->deployment gap IS real drift time; left None under render pacing (sim governs).
+    k,camera,depth,support,witness,a,b = fixture()
+    reg = registration(k,camera,depth,a,b,stamp=90.,frame_id=100)
+    reg = replace(reg,evidence=replace(reg.evidence,session_id='commission',
+                  steady_domain='process-boot-uuid',acquired_steady=1000.))
+    g = calibrate_rigid_support(depth,support,witness,k,camera,reg,
+        required_xy=(.62,.42),calibration_id='immutable-empty',now=90.,parked=True)
+    fresh = replace(reg.evidence,session_id='mission',acquired_steady=1500.,stamp=.1,transform_stamp=.1)
+    assert g.age_at(fresh, .1) == pytest.approx(.1)                 # sim-clocked: small sim age, ok
+    g.age_at(fresh, .1, wall_lifetime_s=600.)                       # 500 s wall gap <= 600 cap: ok
+    with pytest.raises(ValueError,match='expired'):                 # 500 s wall gap > 400 cap (real rig)
+        g.age_at(fresh, .1, wall_lifetime_s=400.)
 
 
 def test_lifetime_covers_measured_mission_but_keeps_live_freshness():

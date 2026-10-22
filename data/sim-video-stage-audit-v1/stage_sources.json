@@ -1,0 +1,222 @@
+{
+ "schema": "stage_sources/v2",
+ "mission_root": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission",
+ "generated": "2026-10-22",
+ "note": "Per-stage ranked source runs for the compiled demo-006 video (lead: sim-video-compile-v1). Frame indices are into <run>/mission-frames/*.png; sim_t in seconds. v2 adds visual-audit faults (OpenCV frame grids). NO frame-recorded run ever reached collect_succeeded. warm8 is the only COMPLETE cycle (visually clean, no wall clips) but shortcut collect, scripted still-arm transfer, ground-truth verify.",
+ "stages": {
+  "collect": {
+   "clean_source": false,
+   "needs": "A REAL run where the carton is picked off the warehouse shelf and set on the rollwagen and collect_succeeded. None exists with recorded frames: every real-collect run fails mid-pick (host e-stop / collision / arm-heartbeat-lost / station-ack-stall). Compilation must re-run collect, or stitch a partial pick + mask the failure.",
+   "sources": [
+    {
+     "run": "run-326",
+     "frame_start": 0,
+     "frame_end": 400,
+     "sim_t_start": null,
+     "sim_t_end": null,
+     "faults": [
+      "run FAILS later (arm command heartbeat lost); carton is NEVER cleanly deposited in the rollwagen",
+      "after ~#420 the base destabilizes/drifts and the view becomes chaotic \u2014 unusable past the pick"
+     ],
+     "score": 0.45,
+     "why": "USABLE PICK partial only: arm reaches the warehouse shelf and grasps the carton off it (#160-240), swings it down (#320-400). The deposit-onto-rollwagen the captain wants does not exist cleanly in any run."
+    },
+    {
+     "run": "run-325",
+     "frame_start": 0,
+     "frame_end": 400,
+     "sim_t_start": null,
+     "sim_t_end": null,
+     "faults": [
+      "FAILS mid-collect (arm-heartbeat-lost); no clean deposit"
+     ],
+     "score": 0.4,
+     "why": "alternate pick partial (770 fr total)"
+    },
+    {
+     "run": "run-322",
+     "frame_start": 0,
+     "frame_end": 400,
+     "sim_t_start": null,
+     "sim_t_end": null,
+     "faults": [
+      "FAILS mid-collect (arm-heartbeat-lost); no clean deposit"
+     ],
+     "score": 0.39,
+     "why": "alternate pick partial (782 fr total)"
+    }
+   ]
+  },
+  "couple": {
+   "clean_source": true,
+   "sources": [
+    {
+     "run": "warm8",
+     "frame_start": 0,
+     "frame_end": 126,
+     "sim_t_start": 0.0,
+     "sim_t_end": 43.58,
+     "faults": [],
+     "score": 0.9,
+     "why": "warm8 real couple, drive\u2192dock\u2192attach, coupled=true; only COMPLETE cycle"
+    }
+   ],
+   "visual_audit": "warm8 top-down: clean, no wall/shelf clip, no pose jumps; carton tracks with cart"
+  },
+  "outbound": {
+   "clean_source": false,
+   "needs": "Door passage. warm8 outbound drives the BACKROOM-BAY route (straight east from the dock), it does NOT pass through the door; the choreographed demos clip THROUGH the wall. The real planner needs a ~360 degree loop at the portal, so no run cleanly drives through the door. For the video a pre-planned door pass must be authored/re-run as a separate clip.",
+   "sources": [
+    {
+     "run": "warm8",
+     "frame_start": 126,
+     "frame_end": 164,
+     "sim_t_start": 43.58,
+     "sim_t_end": 56.07,
+     "faults": [
+      "route is backroom-bay, not the door"
+     ],
+     "score": 0.6,
+     "why": "only clean real outbound drive (no wall clip), but wrong route vs captain's door ask"
+    }
+   ],
+   "visual_audit": "warm8 outbound (126-164) is a clean straight backroom-bay drive, no clip. demo-004/005 outbound CLIPS THROUGH the backroom wall (see demo faults) \u2014 do NOT use the demos for outbound."
+  },
+  "park": {
+   "clean_source": true,
+   "sources": [
+    {
+     "run": "warm8",
+     "frame_start": 164,
+     "frame_end": 164,
+     "sim_t_start": 56.07,
+     "sim_t_end": 56.08,
+     "faults": [
+      "instantaneous state transition (1 frame) \u2014 not a visual beat"
+     ],
+     "score": 0.5,
+     "why": "warm8 park succeeded; effectively a 1-frame transition, fold into outbound/transfer"
+    }
+   ],
+   "visual_audit": "warm8 top-down: clean, no wall/shelf clip, no pose jumps; carton tracks with cart"
+  },
+  "transfer": {
+   "clean_source": true,
+   "sources": [
+    {
+     "run": "warm8",
+     "frame_start": 164,
+     "frame_end": 223,
+     "sim_t_start": 56.08,
+     "sim_t_end": 75.82,
+     "faults": [
+      "SCRIPTED still-arm transfer (not cuMotion-planned, SIM weld attach), not a physics grasp"
+     ],
+     "score": 0.7,
+     "why": "warm8 scripted transfer places carton at bay target; only complete transfer with frames"
+    },
+    {
+     "run": "warm7",
+     "frame_start": 164,
+     "frame_end": 238,
+     "sim_t_start": 56.18,
+     "sim_t_end": 80.72,
+     "faults": [
+      "run later FAILED at return",
+      "scripted transfer"
+     ],
+     "score": 0.6,
+     "why": "warm7 transfer succeeded (75 fr) then return failed"
+    }
+   ],
+   "visual_audit": "warm8 transfer (164-223): carton lifts from cart and is set at the bay target; arm is scripted/still-ish, no shelf penetration seen in top-down. Carton visible on floor target by #250."
+  },
+  "verify": {
+   "clean_source": true,
+   "sources": [
+    {
+     "run": "warm8",
+     "frame_start": 223,
+     "frame_end": 223,
+     "sim_t_start": 75.82,
+     "sim_t_end": 75.85,
+     "faults": [
+      "GROUND-TRUTH verify, instantaneous (1 frame), not a perception verify"
+     ],
+     "score": 0.5,
+     "why": "warm8 verify succeeded via ground truth; 1-frame transition"
+    }
+   ]
+  },
+  "return": {
+   "clean_source": true,
+   "sources": [
+    {
+     "run": "warm8",
+     "frame_start": 223,
+     "frame_end": 358,
+     "sim_t_start": 75.85,
+     "sim_t_end": 120.73,
+     "faults": [],
+     "score": 0.85,
+     "why": "warm8 real return home, 136 frames; only run with a succeeded return + frames (warm3/warm7 return FAILED)"
+    }
+   ],
+   "visual_audit": "warm8 top-down: clean, no wall/shelf clip, no pose jumps; carton tracks with cart"
+  }
+ },
+ "demo_audit": {
+  "demo-005": {
+   "total_frames": 2040,
+   "has_decision_panel": true,
+   "faults": [
+    {
+     "stage": "collect/start",
+     "frames": [
+      0,
+      60
+     ],
+     "fault": "video STARTS already placing the carton into the rollwagen (no pick-from-shelf shown) \u2014 captain wants this replaced with a real warehouse-shelf pick"
+    },
+    {
+     "stage": "outbound",
+     "frames": [
+      820,
+      900
+     ],
+     "fault": "robot/camera CLIPS THROUGH the backroom wall (whiteout at ~#840-880); backroom shelves before, shop-floor aisle after \u2014 passes through the wall instead of the door"
+    }
+   ],
+   "verdict": "DO NOT use for collect-start or outbound; downstream shop-floor/transfer framing is choreographed, not a real run"
+  },
+  "demo-004": {
+   "total_frames": 2040,
+   "has_decision_panel": true,
+   "faults": [
+    {
+     "stage": "collect/start",
+     "frames": [
+      0,
+      60
+     ],
+     "fault": "also starts at carton placement, no pick-from-shelf"
+    },
+    {
+     "stage": "outbound",
+     "frames": [
+      650,
+      850
+     ],
+     "fault": "same wall clip-through (whiteout ~#680-850)"
+    }
+   ],
+   "verdict": "same family as demo-005; same two faults"
+  },
+  "warm8": {
+   "total_frames": 360,
+   "has_decision_panel": false,
+   "faults": [],
+   "verdict": "visually CLEAN across couple/outbound/park/transfer/verify/return; no wall or shelf clipping, no teleports, carton tracks the cart. Collect was shortcut (not shown)."
+  }
+ }
+}

@@ -30,6 +30,7 @@ ROS; it is exercised by integration inside the live app, never by CPU tests.
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
 
 from .scenario import environment_grid
@@ -71,17 +72,141 @@ def _build_spec(nav):
     return MobileSpec(**spec_cfg)
 
 
+def _build_docking(nav):
+    """Build the opt-in dock-approach speed cap from `navigation.docking`.
+
+    Returns None when the key is absent (default-off, byte-identical run). The config
+    object maps onto DockingApproach fields; it caps the commanded speed near a named
+    dock goal (e.g. the cart hitch-meet pose at couple) so the braking disk shrinks
+    honestly without touching the footprint, any margin, or the real-rig defaults.
+    """
+    cfg = nav.get('docking')
+    if cfg is None:
+        return None
+    if not isinstance(cfg, dict):
+        raise ValueError('navigation.docking must be an object')
+    from .core import DockingApproach
+    try:
+        goal = tuple(float(v) for v in cfg['goal'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError('navigation.docking needs goal (x, y, yaw)') from exc
+    extra = {k: float(cfg[k]) for k in ('goal_tolerance',) if k in cfg}
+    try:
+        speed = float(cfg['speed'])
+        approach_distance = float(cfg['approach_distance'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError('navigation.docking needs speed and approach_distance') from exc
+    return DockingApproach(goal=goal, speed=speed,
+                           approach_distance=approach_distance, **extra)
+
+
+# fm386: the SIM-clock nav bounds (couple/outbound/park). stale_after is the per-frame sensor-staleness
+# (now-odom/obs stamp > stale_after -> 'stale_sensing'); on a render-paced tow/dock the stamp can lag
+# past the tight 0.3 s default -- the sibling of the 1.0 s /sensors watchdog that tripped at retreat.
+# blocked_timeout / goal_timeout are the no-progress / overall SIM-clock caps. Each SIM-only env-
+# overridable; the env WINS over a config value (never shadowed -- the run-290 lesson); unset => the
+# config value or the SensorNavigation ctor default, byte-identical. (max_speed/max_angular/
+# brake_acceleration are NOT time bounds -> config-only, untouched.)
+_NAV_SIM_BOUNDS = {'stale_after': ('RESTOCK_NAV_STALE_AFTER_S', 0.05, 30.0),
+                   'blocked_timeout': ('RESTOCK_NAV_BLOCKED_TIMEOUT_S', 1.0, 600.0),
+                   'goal_timeout': ('RESTOCK_NAV_GOAL_TIMEOUT_S', 10.0, 1800.0)}
+
+
+def _nav_sim_env(var, lo, hi):
+    """Clamped sim-clock bound from the env, or None when unset/malformed (=> caller keeps config/default)."""
+    try:
+        return max(lo, min(hi, float(os.environ[var])))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _strict_bool(nav, key):
+    """A default-off boolean switch; refuse a non-boolean (e.g. the string "false") rather than coerce."""
+    value = nav.get(key, False)
+    if not isinstance(value, bool):
+        raise ValueError(f'navigation.{key} must be a boolean')
+    return value
+
+
 def _controller_kwargs(nav):
     kwargs = {}
-    if 'goal_timeout' in nav:
-        kwargs['goal_timeout'] = nav['goal_timeout']
-    for limit in ('max_speed', 'max_angular', 'brake_acceleration', 'stale_after'):
+    for limit in ('goal_timeout', 'blocked_timeout', 'max_speed', 'max_angular',
+                  'brake_acceleration', 'stale_after'):
         if limit in nav:
+            # `blocked_timeout` is the avoidance patience: how long the base will
+            # stop and wait on a blocked aisle (e.g. a crossing shopper) before
+            # giving up the goal. Raising it lets the mission wait out a transient
+            # dynamic block and resume rather than fail. Default is unchanged.
             kwargs[limit] = nav[limit]
+    # fm386: SIM-clock bound env overrides win over config/default (unset => unchanged, byte-identical).
+    for limit, (var, lo, hi) in _NAV_SIM_BOUNDS.items():
+        override = _nav_sim_env(var, lo, hi)
+        if override is not None:
+            kwargs[limit] = override
+    docking = _build_docking(nav)
+    if docking is not None:
+        kwargs['docking'] = docking
+    # Direction-aware braking zone (default on). Explicit False restores the legacy
+    # omnidirectional stop disk; the footprint radius/margins are identical either way.
+    if 'directional_zone' in nav:
+        if not isinstance(nav['directional_zone'], bool):
+            raise ValueError('navigation.directional_zone must be a boolean')
+        kwargs['directional_zone'] = nav['directional_zone']
+    # fm482: opt-in arrival XY hysteresis for the uncoupled reference legs (the couple standoff
+    # dither). Absent/0 => the legacy per-tick arrival test (byte-identical). See core.Controller.
+    if 'arrival_xy_hysteresis_m' in nav:
+        value = nav['arrival_xy_hysteresis_m']
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError('navigation.arrival_xy_hysteresis_m must be a number of metres')
+        kwargs['arrival_xy_hysteresis'] = float(value)
     # Production never accepts fixtures: the knob is intentionally not exposed.
     if nav.get('allow_test_fixtures'):
         raise ValueError('allow_test_fixtures is forbidden in a production bundle')
     return kwargs
+
+
+def _build_lane_graph(nav, grid, spec):
+    """Build + expand the opt-in authored tow lanes from `navigation.tow_lanes`.
+
+    Returns None when the key is absent (default-off, byte-identical run: coupled drives
+    free-plan as before). When present, every lane is expanded ONCE against the static
+    navigation map here, at build time (never under the per-tick budget); a lane that cannot
+    be realised raises, so a broken lane fails the build rather than the mission.
+    """
+    cfg = nav.get('tow_lanes')
+    if cfg is None:
+        return None
+    from .lanes import TowLaneGraph
+    from .articulated import ArticulatedMap
+    graph = TowLaneGraph.from_config(cfg)
+    if graph is None or not graph.lanes:
+        return None
+    build = nav.get('tow_lane_build', {})
+    if not isinstance(build, dict):
+        raise ValueError('navigation.tow_lane_build must be an object')
+    kw = {}
+    if 'build_margin' in build:
+        kw['build_margin'] = float(build['build_margin'])
+    if 'build_timeout' in build:
+        kw['build_timeout'] = float(build['build_timeout'])
+    graph.expand_all(ArticulatedMap(grid, spec), **kw)
+    return graph
+
+
+def _build_dynamic_layer(nav):
+    """Build the opt-in moving-obstacle layer from `navigation.dynamic_obstacles`.
+
+    Returns None when the key is absent (default-off, byte-identical run). The
+    config object maps directly onto DynamicObstacleConfig fields; the caller
+    supplies detections per frame from the detection topic or scenario.
+    """
+    cfg = nav.get('dynamic_obstacles')
+    if cfg is None:
+        return None
+    if not isinstance(cfg, dict):
+        raise ValueError('navigation.dynamic_obstacles must be an object')
+    from .dynamic import DynamicObstacleLayer, DynamicObstacleConfig
+    return DynamicObstacleLayer(DynamicObstacleConfig(**cfg))
 
 
 def _build_sensor(controller, grid, nav):
@@ -105,7 +230,8 @@ def _build_sensor(controller, grid, nav):
     if 'localizer_max_error' in cfg:
         localizer_kwargs['max_error'] = float(cfg['localizer_max_error'])
     localizer = MapLocalizer(grid, initial_map_pose, **localizer_kwargs)
-    return SensorNavigation(controller, wheels, localizer)
+    return SensorNavigation(controller, wheels, localizer,
+                            dynamic_layer=_build_dynamic_layer(nav))
 
 
 def _build_nav2(controller, grid, output, nav, adapter_cls):
@@ -192,7 +318,35 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
     spec = _build_spec(nav)
     controller = ArticulatedController(grid, spec,
                                        require_temporal_map=bool(nav.get('require_temporal_map', False)),
+                                       planner_timeout=nav.get('planner_timeout_s'),
+                                       lane_graph=_build_lane_graph(nav, grid, spec),
+                                       lane_static_tol=float(nav.get('tow_lane_static_tol_m', 0.0)),
+                                       lane_trust_static=bool(nav.get('tow_lane_trust_static', False)),
+                                       lane_reacquire_along_route=bool(nav.get('tow_lane_reacquire_along_route', False)),
+                                       lane_cart_yaw_tol=float(nav.get('tow_lane_cart_yaw_tol', 0.20)),
+                                       lane_curve_speed_floor=float(nav.get('tow_lane_curve_speed_floor', 0.25)),
+                                       lane_max_curvature=(float(nav['tow_lane_max_curvature'])
+                                                           if 'tow_lane_max_curvature' in nav else None),
+                                       lane_coast_refusals=bool(nav.get('tow_lane_coast_refusals', False)),
+                                       lane_trust_unknown=bool(nav.get('tow_lane_trust_unknown', False)),
+                                       measured_turn_fault_s=nav.get('measured_turn_fault_s'),
+                                       lane_track_tol=float(nav.get('tow_lane_track_tol_m', 0.25)),
+                                       lane_track_envelope=bool(nav.get('tow_lane_track_envelope', False)),
+                                       lane_cart_yaw_rebase=bool(nav.get('tow_lane_cart_yaw_rebase', False)),
+                                       coupled_creep_escape=_strict_bool(nav, 'coupled_creep_escape'),
+                                       coupled_creep_floor=float(nav.get('coupled_creep_floor_mps', 0.03)),
+                                       coupled_progress_escape=_strict_bool(nav, 'coupled_progress_escape'),
+                                       coupled_progress_min_m=float(nav.get('coupled_progress_min_m', 0.05)),
+                                       coupled_progress_escape_s=float(nav.get('coupled_progress_escape_s', 3.0)),
+                                       coupled_progress_fault_s=float(nav.get('coupled_progress_fault_s', 8.0)),
                                        **_controller_kwargs(nav))
+
+    if 'dynamic_obstacles' in nav and mode != 'sensor':
+        # The in-process layer is folded into the sensor route's Observation. The
+        # Nav2 route takes moving obstacles through its ROS costmap obstacle/nvblox
+        # layer instead, so refuse rather than silently ignore the config here.
+        raise ValueError('navigation.dynamic_obstacles applies only to nav_mode "sensor"; '
+                         'the nav2 route uses its ROS costmap obstacle/nvblox layer')
 
     if mode == 'reference':
         built = controller

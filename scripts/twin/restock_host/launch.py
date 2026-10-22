@@ -20,6 +20,15 @@ def description(config):
     if plan['static_errors']:
         raise ValueError('; '.join(plan['static_errors']))
     robot = plan['robot']
+    # Optional second nvblox depth feed: the body-mounted mast camera (camera_1), so a carried
+    # carton occluding the wrist (camera_0) no longer freezes the ESDF. Off by default: the
+    # whole feed below is skipped and the mapper stays single-camera. See
+    # twin.restock_camera.mast_depth and docs/restock_camera.md.
+    mast_enabled = bool(plan.get('mast_depth', {}).get('enabled'))
+    mast = None
+    if mast_enabled:
+        from twin.restock_camera.mast_depth import nvblox_feed
+        mast = nvblox_feed()
 
     def params(package, relative):
         return yaml.safe_load((Path(share(package)) / relative).read_text())['/**']['ros__parameters']
@@ -38,9 +47,17 @@ def description(config):
     xrdf = yaml.safe_load(Path(robot['xrdf']).read_text())
     limits = {j: {'has_acceleration_limits': True, 'max_acceleration': float(a)}
               for j, a in zip(JOINTS, xrdf['cspace']['acceleration_limits'])}
+    # Respawn move_group on death instead of tearing the whole host stack down. An intermittent
+    # SIGABRT double-free in the cuMotion result handling (run-266/268: crash right after a SUCCESSFUL
+    # plan) killed move_group, whose OnProcessExit shutdown guard then SIGINT'd the entire stack and
+    # cost a whole 20-30 min GPU run. move_group holds no mid-plan state the mission needs (the
+    # trajectory host owns execution/settle), so a respawn re-advertises the action servers and the
+    # mission's planning client re-sends the same goal (ros_adapter _handle_server_crash). The short
+    # delay lets the old process fully release its endpoints before the replacement binds them.
+    # move_group is deliberately NOT in the shutdown-guard set below (see `guarded`).
     moveit = Node(
         package='moveit_ros_move_group', executable='move_group', namespace=NS,
-        name='move_group', output='screen', parameters=[{
+        name='move_group', output='screen', respawn=True, respawn_delay=3.0, parameters=[{
             **common, 'robot_description': Path(robot['urdf']).read_text(),
             'robot_description_semantic': Path(robot['srdf']).read_text(),
             'robot_description_kinematics': {'ur_manipulator': {
@@ -51,6 +68,25 @@ def description(config):
             'default_planning_pipeline': 'isaac_ros_cumotion',
             'isaac_ros_cumotion': pipeline,
             'allow_trajectory_execution': True,
+            # Disable MoveIt's WALL-clock execution-duration monitor: it cancels a trajectory that
+            # the controller does not finish within ~expected_sim_duration*scaling WALL seconds, but
+            # under render pacing the simulator executes each sim-second over many wall-seconds, so a
+            # healthy render-paced grasp (17.6 s sim) is false-cancelled ('Controller is taking too
+            # long ... Stopping trajectory' -> TIMED_OUT, run-111). trajectory_host owns sim-clocked
+            # completion/tracking/settle, and the mission bounds each stage on the sim clock, so this
+            # wall monitor is redundant here. Render-pacing watchdog (standing authority 212).
+            # fm356 (2): raise the start-state validation tolerance to 0.05 rad, SIM-ONLY (this launch
+            # is the sim host; the real rig uses the moveit_controllers.yaml default 0.01). Under render
+            # pacing a joint can hold a small steady tracking residual at a move's end (e.g. the carton-
+            # loaded extend), so the NEXT move's planned start deviates from the measured state: MoveIt's
+            # trajectory_execution_manager then rejects it ('start point deviates ... more than 0.01 at
+            # ur_shoulder_pan_joint' -> ABORTED, run-280 retreat). run-282: the gravity-loaded elbow
+            # drifts ~0.065 rad over the ~218 s render-paced plan->validate window of the empty-handed
+            # retreat, exceeding 0.05 -> raised to 0.15 (still far below a real mis-seed; the retreat is
+            # a +x back-out so a looser start is low-risk). The pan undershoot is handled by the preplace
+            # 0.2 goal relax, not here.
+            'trajectory_execution': {'execution_duration_monitoring': False,
+                                     'allowed_start_tolerance': 0.15},
             'moveit_manage_controllers': False,
             'moveit_controller_manager': 'moveit_simple_controller_manager/MoveItSimpleControllerManager',
             'moveit_simple_controller_manager': {
@@ -65,7 +101,27 @@ def description(config):
               read_esdf_world=True, update_esdf_on_request=True,
               esdf_service_name=NS + '/nvblox_node/get_esdf_and_gradient',
               joint_states_topic=NS + '/joint_states', enable_cuda_mps=False,
+              # Densify the emitted trajectory. MoveIt's ValidateSolution FCL-checks the LINEARLY
+              # interpolated path between cuMotion's output points; at the stock 0.05 s those chords
+              # cut across the curved reach and FCL finds the gripper plate (surface_plate_1) clipping
+              # base_link on SOME plan seeds (recurring INVALID_MOTION_PLAN: run-122/129), while the
+              # base collision buffer alone is seed-insufficient. 0.02 s makes the output hug the true
+              # (collision-checked) path so the densified validation agrees. Measured NOT to cost wall:
+              # run-123 (0.02) and run-126 (0.05) both hit the contact descent's backstop at the same
+              # 1200 s -- the descent length, not the output sampling, drives wall (the sensing gate
+              # addresses that). Paired with the base buffer for belt-and-braces seed robustness.
+              interpolation_dt=0.02,
               static_planning_scene_service_name=NS + '/publish_static_planning_scene')
+    # Diagnostic-only, env-gated (default off): publish the planner's SELF-collision spheres on
+    # cumotion/self_collision_spheres (world spheres are already on by default). After the carton is
+    # attached (object_attachment adds an 'attached_object' link to the shared mobile_cad geometry),
+    # this proves on a live GPU run whether the attached carton actually enters curobo's self-collision
+    # set -- the open question behind the tuck fold driving the carton into ur_upper_arm while cuMotion
+    # reports the plan collision-free (run-249/250), and the acceptance signal for the attached_object
+    # self-collision-sphere declaration this lane ships (the run-256 "mask will not be added" warning
+    # must be gone and the attached_object spheres must appear on the topic). Inert otherwise.
+    if os.environ.get('RESTOCK_SELFCOLL_DIAG'):
+        cp['publish_self_collision_spheres'] = True
 
     def component(package, plugin, name, parameters, remappings=()):
         return ComposableNode(package=package, plugin=plugin, name=name,
@@ -80,7 +136,8 @@ def description(config):
     world = {**common, 'global_frame': FRAME, 'map_clearing_frame_id': FRAME,
              'esdf_slice_bounds_visualization_attachment_frame_id': FRAME,
              'workspace_height_bounds_visualization_attachment_frame_id': FRAME,
-             'use_depth': True, 'use_color': False, 'use_lidar': False, 'num_cameras': 1,
+             'use_depth': True, 'use_color': False, 'use_lidar': False,
+             'num_cameras': 2 if mast_enabled else 1,
              'input_qos': 'SENSOR_DATA',
              'update_esdf_rate_hz': 0.0, 'static_mapper.workspace_bounds_type': 'bounding_box'}
     # nvblox's own input-queue-drop / per-message-delay counters to the stack log (see
@@ -93,11 +150,18 @@ def description(config):
     for key, val in zip(('min_corner_x_m', 'min_corner_y_m', 'min_height_m',
                          'max_corner_x_m', 'max_corner_y_m', 'max_height_m'), lo + hi):
         world['static_mapper.workspace_bounds_' + key] = float(val)
+    nvblox_remaps = [('camera_0/depth/image', NS + '/world_depth'),
+                     ('camera_0/depth/camera_info', NS + '/camera/masked_depth/camera_info')]
+    if mast_enabled:
+        # camera_1 is the mast feed: the second object_segmenter (below) republishes the
+        # mast rig+carton-masked depth on world_depth_mast with camera_info taken straight
+        # from the mast masked-depth stream (same pattern as camera_0).
+        nvblox_remaps += [('camera_1/depth/image', NS + '/' + mast['world_depth']),
+                          ('camera_1/depth/camera_info', NS + '/' + mast['masked_depth_info'])]
     nvblox_node = component('nvblox_ros', 'nvblox::NvbloxNode', 'nvblox_node', [
         str(Path(share('nvblox_examples_bringup')) / 'config/nvblox/nvblox_base.yaml'),
         str(Path(share('isaac_ros_manipulation_bringup')) / 'config/nvblox/nvblox_manipulator_base.yaml'),
-        world], [('camera_0/depth/image', NS + '/world_depth'),
-                 ('camera_0/depth/camera_info', NS + '/camera/masked_depth/camera_info')])
+        world], nvblox_remaps)
     # Load order matters: composable nodes load sequentially in one container, and the
     # CumotionPlanner constructor blocks waiting for the nvblox get_esdf_and_gradient
     # service, so the mapper must load BEFORE the planner or the whole container
@@ -144,11 +208,56 @@ def description(config):
         + (['--log-level', 'debug'] if nvblox_diag else []),
         additional_env={'PYTHONPATH': plan['shelfbot_root'] + os.pathsep + os.environ.get('PYTHONPATH', '')},
         output='screen')
-    processes = [moveit, container, masker]
-    # Losing mapping/masking must not leave an apparently healthy planner behind.
+    # Host manipulation bridge (ros_host / RosTransferBridge): the ONLY node that consumes
+    # /restock_sim/manipulation/job + /sensors, drives the move_group/cuMotion action servers
+    # launched above, and publishes /restock_sim/manipulation/status -- the reply the Isaac-side
+    # IsaacRosGraph waits for. Without it the first manip job gets no status and dies on the Isaac
+    # 5 s process/status watchdog. The verified {profiles, walls} fixture is the manipulation
+    # lane's ros_host_config.json (walls cover source/cart/target so no regrasp); urdf, shelfbot
+    # root and the mobile manifest come from the validated plan (integration_host_arguments).
+    ros_host_config = Path(__file__).resolve().parents[1] / 'restock_manipulation' / 'ros_host_config.json'
+    manipulation = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock_manipulation.ros_host',
+        '--config', str(ros_host_config), *plan['integration_host_arguments']],
+        additional_env={'PYTHONPATH': plan['shelfbot_root'] + os.pathsep + os.environ.get('PYTHONPATH', '')},
+        output='screen')
+    # Simulation FollowJointTrajectory executor (twin.restock.trajectory_host): MoveIt above is
+    # configured with MoveItSimpleControllerManager pointing at arm_controller/follow_joint_trajectory
+    # (resolved in NS to /restock_sim/arm_controller/follow_joint_trajectory), but nothing advertised
+    # that action server, so ExecuteTrajectory ABORTED with "action server not connected" and the host
+    # emergency-stopped after the grasp plan succeeded (run-85). The host must launch this server itself,
+    # in the same launch overlay + domain-88 FastDDS env, so move_group discovers it; integration must
+    # NOT launch it separately (a second domain/DDS pin would not be discovered). It never plans -- it
+    # interpolates move_group's plan, subscribing measured /restock_sim/joint_states and publishing
+    # /restock_sim/arm_joint_command (the articulation command Isaac drives the UR10 with). --urdf is the
+    # same generated CAD urdf the plan validates (host.json["urdf"]); it reads arm joint limits only.
+    trajectory = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock.trajectory_host',
+        '--urdf', robot['urdf']], output='screen')
+    processes = [moveit, container, masker, manipulation, trajectory]
+    # Losing mapping/masking must not leave an apparently healthy planner behind -- these exits DO tear
+    # the stack down. move_group is excluded: it respawns (above), so its (recoverable) crash must not
+    # propagate SIGINT to the rest of the stack; propagating it is exactly the run-266/268 whole-run
+    # loss this lane fixes. The other components stay genuinely fatal (host-lifecycle lane territory).
+    guarded = [container, masker, manipulation, trajectory]
+    if mast_enabled:
+        # Second segmenter for the mast feed: subscribes the mast rig-masked depth, masks the
+        # same grasp target out of it, and republishes world_depth_mast for nvblox camera_1.
+        # Identical node/parameters to the wrist masker above, only the topics differ. Guarded
+        # like the wrist masker: losing a masking feed must tear the stack down, not leave a
+        # planner reading a half-stale ESDF.
+        mast_masker = ExecuteProcess(cmd=[sys.executable, '-m', 'shelfbot.perception.object_segmenter',
+            '--ros-args', '-r', '__ns:=' + NS,
+            '-p', 'use_sim_time:=true', '-p', 'depth_in_topic:=' + NS + '/' + mast['masked_depth'],
+            '-p', 'depth_out_topic:=' + NS + '/' + mast['world_depth'],
+            '-p', 'bbox_topic:=' + NS + '/target_bbox', '-p', 'bbox_timeout_s:=0.5',
+            '-p', 'bbox_padding_px:=0']
+            + (['--log-level', 'debug'] if nvblox_diag else []),
+            additional_env={'PYTHONPATH': plan['shelfbot_root'] + os.pathsep + os.environ.get('PYTHONPATH', '')},
+            output='screen')
+        processes.append(mast_masker)
+        guarded.append(mast_masker)
     guards = [RegisterEventHandler(OnProcessExit(target_action=process,
               on_exit=[EmitEvent(event=Shutdown(reason='restock host component exited'))]))
-              for process in processes]
+              for process in guarded]
     # Host-published nvblox mapper-incorporation acknowledgement. nvblox runs
     # update_esdf_rate_hz 0.0 (on-request only), so this node's ESDF service poll is what
     # integrates pending masked depth, and it publishes the real NVIDIA incorporation

@@ -141,6 +141,31 @@ class GateDriveTests(unittest.TestCase):
                             linear_cmd=-0.1)
         self.assertEqual(result.reason, 'reverse_or_invalid_command')
 
+    def test_lane_trust_unknown_waives_coverage_but_observed_obstacle_still_stops(self):
+        # fm439: reference nav_mode uses THIS CoverageField path; a ~90 deg authored-lane turn the base
+        # cannot pre-observe refuses 'insufficient_sensor_coverage' (the run-328b outbound stall at the
+        # first southward turn). On a static-validated authored lane, lane_trust_unknown waives the
+        # UNOBSERVED-forward refusal -- but an OBSERVED obstacle ahead STILL stops the tow.
+        blind = _scan(lambda b: abs(b) <= math.radians(120)
+                      and not (math.radians(-12) <= b <= math.radians(12)))
+        self.assertEqual(self._gate(True, blind).reason, 'insufficient_sensor_coverage')  # default refuses
+        c = ArticulatedController(GridMap((-10, -10, 10, 10)), lane_trust_unknown=True)
+        c.start((4., 0., 0.), True)
+        c._active_lane = object()                      # simulate following a validated authored lane
+        self.assertEqual(c.gate_velocity(0.1, _odom(), _observe(blind, True), 0.25, 0.0).reason,
+                         'tracking')                   # unobserved-forward refusal waived
+        ranges, unknown = [], []
+        for i in range(BEAMS):
+            b = _bearing(i)
+            if abs(b) <= math.radians(120):
+                ranges.append(0.85 if abs(b) <= math.radians(3) else RANGE_MAX)  # observed obstacle ahead
+                unknown.append(False)
+            else:
+                ranges.append(math.nan); unknown.append(True)
+        obstacle = Scan(0.1, tuple(ranges), -math.pi, INC, RANGE_MAX, unknown=tuple(unknown))
+        self.assertEqual(c.gate_velocity(0.1, _odom(), _observe(obstacle, True), 0.25, 0.0).reason,
+                         'obstacle_stop')              # a genuine obstacle STILL stops the tow
+
     def test_observed_forward_obstacle_is_obstacle_stop_not_coverage(self):
         # A real return ahead is observed (not blind): coverage passes, obstacle gate stops.
         ranges, unknown = [], []

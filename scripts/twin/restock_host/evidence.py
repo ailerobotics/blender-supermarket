@@ -77,7 +77,8 @@ def validate_evidence(config):
     from .generate_assets import build_assets
     reconstructed, _ = build_assets(inputs['urdf'], inputs['manifest'], inputs['shelfbot_root'],
         pitch=report['pitch_m'], min_pitch=report['min_pitch_m'],
-        acceleration=report['planner_acceleration_rad_s2'], jerk=report['planner_jerk_rad_s3'])
+        acceleration=report['planner_acceleration_rad_s2'], jerk=report['planner_jerk_rad_s3'],
+        collision_buffer=report.get('collision_buffers_m') or None)
     # Exact for every discrete value (counts, exclusions, verdict, hashes); env-dependent
     # float noise (~1e-17) is tolerated so the check reproduces under both the mission
     # runtime (env_isaaclab) and system Python. A real coverage change still fails.

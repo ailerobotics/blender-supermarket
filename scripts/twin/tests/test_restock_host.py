@@ -164,6 +164,7 @@ class HostTests(unittest.TestCase):
         # collision spheres. Build a robot with an extra continuous base chain and check.
         import yaml
         from twin.restock_host.generate_assets import generate
+        from twin.urdf_probe import parse_urdf
         d = Path(self.temp.name) / 'wheeled'
         d.mkdir()
         links = ['base_link', 'arm_mount', FRAME, 'suction_cups', 'gripper_pad_tcp',
@@ -192,6 +193,55 @@ class HostTests(unittest.TestCase):
         self.assertNotIn('caster_roll', xrdf['default_joint_positions'])
         # The pruned base links are still covered by collision spheres.
         self.assertTrue(xrdf['geometry']['mobile_cad']['spheres'].get('caster_wheel'))
+        # The attached carton (added at runtime as link 'attached_object') must NOT be registered as a
+        # cuMotion self-collision frame (firstmate sim-restock-planner-obstacles-v1, decision A1): no
+        # add_frame modifier, no collision.buffer_distance slot, no self_collision.ignore row. Making
+        # it a planner collision body (PR #139's add_frame) made the carry UNPLANNABLE (run-261: a
+        # just-picked carton is born in collision with the source-shelf ESDF); without the frame its
+        # runtime spheres stay orphaned and dropped, exactly as in the plannable run-260. The arm-vs-arm
+        # carry stop is handled at the IK layer by the integration lane's caps, not the sphere model.
+        from twin.restock_host.world_obstacles import (resolve_self_collision_masks,
+                                                        simulate_object_attachment_reload)
+        add_frames = {m['add_frame']['frame_name']: m['add_frame']
+                      for m in xrdf['modifiers'] if isinstance(m, dict) and 'add_frame' in m}
+        self.assertNotIn('attached_object', add_frames)
+        self.assertNotIn('attached_object', xrdf['collision'].get('buffer_distance', {}))
+        self.assertNotIn('attached_object', xrdf['self_collision']['ignore'])
+        self.assertNotIn('attached_object', xrdf['geometry']['mobile_cad']['spheres'])
+        # Exercise the SAME reload code path the node runs (UpdateRobotDescriptionWithSpheres: write
+        # the carton spheres under geometry.spheres.attached_object, reload) and model cuMotion's mask
+        # resolution. Because attached_object is NOT an add_frame kinematic frame, the reloaded carton
+        # spheres are orphaned and every attached_object mask is SKIPPED -- the invisible-carton state
+        # that let run-260 plan. (This is the deliberate A1 behaviour, not the run-256/259 bug.)
+        urdf_links = set(parse_urdf(str(d / 'robot.urdf')).links)
+        reloaded = simulate_object_attachment_reload(xrdf)
+        masks = resolve_self_collision_masks(reloaded, urdf_links)
+        self.assertEqual([p for p in masks['resolved'] if 'attached_object' in p], [],
+                         'attached_object must not enter the self-collision set (A1: carton invisible)')
+
+    def test_attached_object_excluded_from_static_model_and_overlap_gate(self):
+        # The carried carton (attached_object) is dynamic (added at runtime) and, per decision A1, is
+        # NOT a cuMotion collision frame -- so at generation it must NOT appear in the geometry, the
+        # arm/body sphere_count, the covered-links model, or the static transport self-overlap gate.
+        import yaml
+        from twin.restock_host.generate_assets import build_assets
+        source_urdf = Path(self.config['mobile_manifest']).parent / 'robot.urdf'
+        report, artifacts = build_assets(source_urdf, self.config['mobile_manifest'],
+                                         self.config['shelfbot_root'])
+        xrdf = yaml.safe_load(artifacts['mobile.xrdf'])
+        geom = xrdf['geometry']['mobile_cad']['spheres']
+        self.assertNotIn('attached_object', geom)
+        self.assertNotIn('attached_object', report['covered_links'])
+        self.assertEqual(report['attached_object_registration'], 'none')
+        # Not a planner collision frame: no add_frame modifier, no self-collision / buffer slot.
+        self.assertNotIn('attached_object', [m.get('add_frame', {}).get('frame_name')
+                                             for m in xrdf['modifiers'] if isinstance(m, dict)])
+        self.assertNotIn('attached_object', xrdf['self_collision']['ignore'])
+        self.assertNotIn('buffer_distance', xrdf['collision'])
+        # sphere_count is exactly the emitted (arm/body) geometry: no attached_object contribution.
+        self.assertEqual(report['sphere_count'], sum(len(v) for v in geom.values()))
+        self.assertTrue(report['transport_collision_check_passed'])
+        self.assertEqual(report['transport_sphere_overlaps'], [])
 
     def test_asset_report_tolerates_env_float_noise_but_not_real_change(self):
         # The recompute is numerically env-dependent (scipy qhull/KDTree): a float
@@ -232,7 +282,47 @@ class HostTests(unittest.TestCase):
         result = dependencies()
         self.assertEqual(result['errors'], [])
         launch = description(self.config)
-        self.assertEqual(len(launch.entities), 6)
+        # guards (one OnProcessExit shutdown guard per process) + processes + ack:
+        # processes = [moveit, container, masker, manipulation, trajectory] = 5.
+        self.assertEqual(len(launch.entities), 2 * 5 + 1)
+
+    def test_mast_depth_off_by_default_single_feed(self):
+        # Absent or disabled mast_depth: the plan reports a single nvblox feed and carries no
+        # mast contract -- the single-feed default is unchanged.
+        for cfg in (self.config, self.config | {'mast_depth': {'enabled': False}}):
+            plan = launch_plan(cfg)
+            self.assertFalse(plan['mast_depth']['enabled'])
+            self.assertFalse(any('mast' in req for req in plan['required_external']))
+
+    def test_mast_depth_switch_adds_second_feed_contract(self):
+        from twin.restock_camera.mast_depth import nvblox_feed
+        feed = nvblox_feed()
+        plan = launch_plan(self.config | {'mast_depth': {'enabled': True}})
+        self.assertTrue(plan['mast_depth']['enabled'])
+        mast_reqs = [req for req in plan['required_external'] if 'mast_depth on' in req]
+        self.assertEqual(len(mast_reqs), 1)
+        # The Isaac-side contract names the mast masked-depth topic and frame the host wires
+        # to nvblox camera_1, and states the carton is masked as a rig-instance subtree.
+        self.assertIn(feed['masked_depth'], mast_reqs[0])
+        self.assertIn(feed['frame_id'], mast_reqs[0])
+        self.assertIn('camera_1', mast_reqs[0])
+        self.assertIn('carton', mast_reqs[0])
+
+    def test_reject_malformed_mast_depth(self):
+        for bad in ({'enabled': 'yes'}, {'on': True}, [], {'enabled': True, 'extra': 1}):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'mast_depth'):
+                launch_plan(self.config | {'mast_depth': bad})
+
+    @unittest.skipUnless(os.environ.get('RESTOCK_HOST_VALIDATE_INSTALLED') == '1',
+                         'explicit CPU-only installed-image validation')
+    def test_installed_mast_depth_adds_second_segmenter(self):
+        # With the switch on, the launch gains exactly one extra process (the mast segmenter)
+        # and its shutdown guard; off, it is the single-feed default (same baseline count).
+        from twin.restock_host.launch import description
+        self.assertEqual(dependencies()['errors'], [])
+        baseline = description(self.config)
+        enabled = description(self.config | {'mast_depth': {'enabled': True}})
+        self.assertEqual(len(enabled.entities), len(baseline.entities) + 2)
 
     def test_graph_requires_exact_types_and_all_servers(self):
         services = [(NS + '/' + k, [v]) for k, v in ENDPOINTS.items() if '/srv/' in v]
@@ -291,6 +381,33 @@ class IncorporationAckTest(unittest.TestCase):
         # stale incorporation (now - collision_time > 0.5) -> withheld, matching the
         # mission's 0 <= now - collision_time <= 0.5 freshness gate.
         self.assertEqual(st.snapshot(10.9, endpoints_ready=True, process_alive=True)['collision_time'], -1.)
+
+    def test_postattach_esdf_kick_arms_on_phase_into_lift_fm430(self):
+        # fm430 (2a): the post-attach ESDF re-integration kick arms once on the mission phase rising INTO
+        # 'lift' (the move right after the grasp->weld), so the tick drops any in-flight pre-attach request
+        # and integrates the post-attach ESDF a cycle sooner. Pure sequencing (ROS glue is separate).
+        st, _ = self.prepared()
+        st.kick_enabled = True
+        self.assertFalse(st.note_manip_phase('grasp'))        # not lift -> no arm
+        self.assertFalse(st.consume_kick())
+        self.assertTrue(st.note_manip_phase('lift'))          # rising into lift -> arm
+        self.assertTrue(st.consume_kick())                    # consumed once
+        self.assertFalse(st.consume_kick())                   # one-shot
+        self.assertFalse(st.note_manip_phase('lift'))         # steady lift -> no re-arm
+        self.assertFalse(st.note_manip_phase('preplace'))     # off lift -> no arm
+        self.assertTrue(st.note_manip_phase('lift'))          # rising into lift again -> re-arms
+
+    def test_postattach_esdf_kick_default_off_never_arms_fm430(self):
+        st, _ = self.prepared()
+        self.assertFalse(st.kick_enabled)                     # default off (env unset)
+        self.assertFalse(st.note_manip_phase('lift'))
+        self.assertFalse(st.consume_kick())
+
+    def test_postattach_esdf_kick_inactive_epoch_never_arms_fm430(self):
+        st, _ = self.state()                                  # NOT prepared -> inactive
+        st.kick_enabled = True
+        self.assertFalse(st.note_manip_phase('lift'))         # no active parked epoch -> no arm
+        self.assertFalse(st.consume_kick())
 
     def test_acknowledgement_monotonic_and_epoch_scoped(self):
         st, _ = self.prepared()
@@ -352,6 +469,86 @@ class IncorporationAckTest(unittest.TestCase):
         self.assertEqual(snap['state'], 'failed')
         self.assertEqual(snap['reason'], 'parked heartbeat lost: wall gap 3.40 s')
 
+    def test_stopped_station_does_not_fault_across_a_long_gap_run309_replay(self):
+        # fm399 (1) run-309 replay at the host-ack level: the host tick() publishes emergency stop on
+        # every tick that state.fault is set, and an ACTIVE parked epoch faults on the 0.5 s sim gap
+        # the instant it stops being heartbeat-ed -- which is what spammed /manipulation/stop through
+        # the ~190 s-sim / ~1400 s-wall reposition drive. The fix CLEANLY STOPS the station before the
+        # drive: a stopped (idle) epoch must NOT fault across that same long gap, so NO emergency stop.
+        st, clock = self.prepared()
+        st.acknowledge(10.2, 1)
+        st.accept(dict(action='stop', epoch=1, sequence=1, stamp=10.3, parked=True), 10.3)
+        clock[0] = 100.0 + 1400.0   # ~1400 s WALL later
+        snap = st.snapshot(10.3 + 190.0, endpoints_ready=True, process_alive=True)  # ~190 s SIM later
+        self.assertEqual(snap['state'], 'idle')          # idle, NOT failed -> tick() publishes no stop
+        self.assertEqual(snap['reason'], '')
+        # Contrast: an ACTIVE un-heartbeat-ed epoch DOES fault across the same gap (the run-309 trigger).
+        st2, _ = self.prepared()
+        st2.acknowledge(10.2, 1)
+        self.assertEqual(st2.snapshot(10.3 + 190.0, endpoints_ready=True,
+                                      process_alive=True)['state'], 'failed')
+
+    def test_default_gap_budgets_are_byte_identical(self):
+        # fm399 (2): unset env => the documented real-rig contract (0.5 s sim / 3.0 s wall).
+        st, _ = self.state()
+        self.assertEqual(st.sim_gap_s, .5)
+        self.assertEqual(st.wall_gap_s, 3.)
+
+    def test_sim_only_env_widens_gap_budgets_to_survive_render_paced_transit(self):
+        # fm399 (2): a widened sim-gap budget lets a long render-paced reposition/re-incorporation
+        # window pass without a spurious re-fault, while a dead host (process_alive False) is still
+        # caught immediately. Clamped to the floor so it can never go BELOW the real-rig contract.
+        from twin.restock_host.incorporation_ack import IncorporationAckState
+        with patch.dict(os.environ, {'RESTOCK_STATION_SIM_GAP_S': '30',
+                                           'RESTOCK_STATION_WALL_GAP_S': '45'}):
+            st = IncorporationAckState(wall_clock=lambda: 100.0)
+        self.assertEqual(st.sim_gap_s, 30.)
+        self.assertEqual(st.wall_gap_s, 45.)
+        st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=10.0, parked=True,
+                       camera_frame='restock_camera_collect'), 10.0)
+        st.acknowledge(10.2, 1)
+        # A 5 s sim gap that WOULD fault under the 0.5 s default is tolerated here.
+        snap = st.snapshot(15.2, endpoints_ready=True, process_alive=True)
+        self.assertNotEqual(snap['state'], 'failed')
+        # A dead host is still caught regardless of the widened gap budgets.
+        self.assertEqual(st.snapshot(15.3, endpoints_ready=True, process_alive=False)['state'], 'failed')
+
+    def test_gap_budgets_clamped_to_real_rig_floor(self):
+        # fm399 (2): a value below the real-rig contract is clamped up, never weakening the guard.
+        from twin.restock_host.incorporation_ack import IncorporationAckState
+        with patch.dict(os.environ, {'RESTOCK_STATION_SIM_GAP_S': '0.01',
+                                           'RESTOCK_STATION_WALL_GAP_S': '0.1'}):
+            st = IncorporationAckState(wall_clock=lambda: 100.0)
+        self.assertEqual(st.sim_gap_s, .5)
+        self.assertEqual(st.wall_gap_s, 3.)
+
+    def test_fault_recovers_on_fresh_parked_epoch_bounded(self):
+        from twin.restock_host.incorporation_ack import _MAX_RECOVERIES
+        st, _ = self.prepared()  # epoch 1 at sim 10.0
+        st.acknowledge(10.2, 1)
+        # Lost process -> fault; a heartbeat against the dead epoch is still refused.
+        self.assertEqual(st.snapshot(10.3, endpoints_ready=True, process_alive=False)['state'], 'failed')
+        with self.assertRaisesRegex(RuntimeError, 'explicit recovery'):
+            st.accept(dict(action='heartbeat', epoch=1, sequence=2, stamp=10.4, parked=True), 10.4)
+        # A fresh measured parked epoch recovers the ack instead of rejecting it forever (ds-015).
+        self.assertEqual(st.accept(dict(action='prepare', epoch=2, sequence=0, stamp=11.0,
+                                        parked=True, camera_frame='restock_camera_transfer'), 11.0), 'prepare')
+        self.assertIsNone(st.fault)
+        self.assertEqual(st.recoveries, 1)
+        self.assertEqual(st.snapshot(11.1, endpoints_ready=True, process_alive=True)['state'], 'warming')
+        # Recovery is bounded: once the budget is spent a persistently broken mapper surfaces honestly.
+        ep = 2
+        while st.recoveries < _MAX_RECOVERIES:
+            ep += 1
+            self.assertEqual(st.snapshot(float(ep) - 0.5 + 10, endpoints_ready=True,
+                                         process_alive=False)['state'], 'failed')
+            st.accept(dict(action='prepare', epoch=ep, sequence=0, stamp=float(ep) + 10,
+                           parked=True, camera_frame='restock_camera_transfer'), float(ep) + 10)
+        self.assertEqual(st.snapshot(float(ep) + 9.6, endpoints_ready=True, process_alive=False)['state'], 'failed')
+        with self.assertRaisesRegex(RuntimeError, 'recovery budget exhausted'):
+            st.accept(dict(action='prepare', epoch=ep + 1, sequence=0, stamp=float(ep) + 11,
+                           parked=True, camera_frame='restock_camera_transfer'), float(ep) + 11)
+
     def test_invalid_commands_rejected(self):
         st, _ = self.state()
         for bad in [dict(action='prepare', epoch=1, sequence=0, stamp=10.0, parked=True,
@@ -361,6 +558,190 @@ class IncorporationAckTest(unittest.TestCase):
                          camera_frame='restock_camera_collect')]:  # stale stamp vs now
             with self.assertRaises((ValueError, RuntimeError)):
                 st.accept(bad, 10.0)
+
+
+class RosHostLaunchWiring(unittest.TestCase):
+    """The mission host stack must launch ros_host (the manipulation bridge) so
+    /restock_sim/manipulation/status is published; without it every manip job dies on the
+    Isaac 5 s process/status watchdog. Verifies the launch wires ros_host with the verified
+    {profiles, walls} fixture + the plan's integration_host_arguments, and the fixture is usable."""
+
+    def test_launch_wires_ros_host_with_fixture_and_plan_args(self):
+        src = (Path(__file__).resolve().parents[1]
+               / 'restock_host' / 'launch.py').read_text()
+        self.assertIn('twin.restock_manipulation.ros_host', src)
+        self.assertIn('ros_host_config.json', src)
+        self.assertIn("*plan['integration_host_arguments']", src)
+        # It must be a shutdown-guarded process (in `processes`), not an auxiliary like the ack.
+        self.assertIn('masker, manipulation, trajectory]', src)
+
+    def test_launch_wires_follow_joint_trajectory_executor(self):
+        # MoveIt is configured with a MoveItSimpleControllerManager pointing at
+        # arm_controller/follow_joint_trajectory; the host must also LAUNCH that action
+        # server, or ExecuteTrajectory aborts "action server not connected" after a
+        # successful grasp plan and the host emergency-stops (run-85). The executor is the
+        # host-owned twin.restock.trajectory_host, launched with the plan's generated urdf.
+        src = (Path(__file__).resolve().parents[1]
+               / 'restock_host' / 'launch.py').read_text()
+        self.assertIn('twin.restock.trajectory_host', src)
+        self.assertIn("'--urdf', robot['urdf']", src)
+        # The plan lists it as a host-launched node, and no longer as a purely external one.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = launch_plan(fixture(tmp))
+        self.assertIn('twin.restock.trajectory_host', plan['nodes'])
+
+    def test_move_group_respawns_and_is_excluded_from_teardown_guard_fm404(self):
+        # fm404 B-lite: a move_group SIGABRT (run-266/268/312) must RESPAWN, not tear the host stack
+        # down. The move_group Node declares respawn=True + a respawn delay, and move_group is NOT in the
+        # OnProcessExit shutdown-guard set (whose exits EmitEvent Shutdown), so its recoverable crash does
+        # not SIGINT the rest of the stack; the other components stay genuinely fatal.
+        src = (Path(__file__).resolve().parents[1] / 'restock_host' / 'launch.py').read_text()
+        self.assertRegex(src, r"name='move_group'[^\n]*respawn=True")      # move_group respawns
+        self.assertRegex(src, r"respawn_delay=[0-9.]+")                    # with a delay
+        guarded_line = next(l for l in src.splitlines() if l.strip().startswith('guarded ='))
+        self.assertNotIn('moveit', guarded_line)                          # move_group excluded from teardown
+        for comp in ('container', 'masker', 'manipulation', 'trajectory'):
+            self.assertIn(comp, guarded_line)                             # the genuinely-fatal set stays
+        # The OnProcessExit guards are built over `guarded` (not all processes), so move_group's exit
+        # does NOT EmitEvent Shutdown -- it respawns instead.
+        self.assertRegex(src, r"for process in guarded")
+
+    def test_ros_host_config_fixture_is_usable(self):
+        from twin.restock_manipulation.types import ProductProfile
+        cfg = json.loads((Path(__file__).resolve().parents[1]
+                          / 'restock_manipulation' / 'ros_host_config.json').read_text())
+        # pose_goal selects cuMotion task-space (pose) planning over joint-space; it is an
+        # optional bool the host reads via config.get('pose_goal', False). arm_max_speed is the
+        # SIM execution-profile joint-speed gate (rad/s) the host reads via config.get, raised above
+        # the conservative real-rig default so the render-paced grasp completes in the wall budget.
+        # The base keys plus the SIM render-pacing / cart-place profile knobs added across firstmate
+        # 282..296 (all optional, host reads via config.get; real-rig defaults in code): the cart-place
+        # policy + staged body-clear swing + pan/tuck shapes, the wall-window relaxations
+        # (payload ack, plan cap) and the base-as-self-collision gate.
+        self.assertEqual(set(cfg), {'profiles', 'walls', 'pose_goal', 'contact_straight_line',
+                                    'contact_overpress_step_m', 'contact_overpress_cap_m',
+                                    'arm_max_speed', 'startup_grace_seconds',
+                                    'sim_cart_place_policy', 'payload_ack_wall_s', 'staged_cart_swing',
+                                    'cart_pan_joint0', 'cart_tuck_shape', 'plan_wall_cap_s',
+                                    'base_collision_object', 'reposition_before_place',
+                                    # Cart-cage open-face place (host-config keys read by ros_host). run-279
+                                    # dropped world_obstacles (the real beside-cart interleaves the arm, so a
+                                    # solid obstacle breaks planning) and added the wrist_1-safe fixed
+                                    # cage_preplace_shape (begin_joint_goal preplace below the self-collision stop).
+                                    'cart_cage_place', 'cage_axis', 'cage_mouth_standoff',
+                                    'cage_insert_gap', 'cage_preplace_shape',
+                                    # fm402/fm403: the loaded-lift self-collision guards -- MUST be present
+                                    # (the preflight baseline enforces them). carry_wrist1_cap + the
+                                    # clear-region joint goal carry_lift_shape + the wrist_2 lower bound
+                                    # keep the lift off the wrist_2-vs-forearm stop (runs 300d/305/311).
+                                    'carry_wrist1_cap', 'carry_lift_shape', 'carry_wrist2_min',
+                                    # fm410: physics grasp-confirm (lift-probe carton-tracking) threshold --
+                                    # also preflight-baseline-enforced so it can never silently de-activate
+                                    # back to the camera-dependent confirm that stalled run-316.
+                                    'grasp_track_m',
+                                    # fm449: gate the collect observe->reach on a clean source frame + decoded
+                                    # label at park (Sensors.collect_source_clean, set Isaac-side). Optional,
+                                    # host reads via config.get; default False => byte-identical.
+                                    'require_collect_source_evidence',
+                                    # fm461 (demo fallback): the controller accepts a GROUND-TRUTH bay transfer
+                                    # target + ground-truth verify when the shelf is not camera-commissioned.
+                                    # Inert without a ground-truth provider (runtime sensing); default path unchanged.
+                                    'transfer_ground_truth'})
+        self.assertIsInstance(cfg['carry_wrist1_cap'], (int, float))
+        self.assertLessEqual(cfg['carry_wrist1_cap'], 0.65)   # at/below the wrist_2-vs-forearm stop
+        self.assertEqual(len(cfg['carry_lift_shape']), 6)     # full 6-joint clear-region lift goal
+        self.assertLessEqual(cfg['carry_lift_shape'][3], 0.65)  # wrist_1 at/below the stop
+        self.assertGreaterEqual(cfg['carry_lift_shape'][4], 0.0)  # wrist_2 on the clear (positive) side
+        self.assertIsInstance(cfg['carry_wrist2_min'], (int, float))
+        self.assertIsInstance(cfg['grasp_track_m'], (int, float))
+        self.assertGreater(cfg['grasp_track_m'], 0.0)         # a positive rise threshold (metres)
+        self.assertGreaterEqual(cfg['carry_wrist2_min'], 0.0)  # wrist_2 lower bound on the clear side
+        for k in ('sim_cart_place_policy', 'staged_cart_swing', 'base_collision_object', 'cart_cage_place',
+                  'reposition_before_place'):
+            self.assertIsInstance(cfg[k], bool)
+        for k in ('payload_ack_wall_s', 'cart_pan_joint0', 'plan_wall_cap_s'):
+            self.assertIsInstance(cfg[k], (int, float))
+        self.assertEqual(len(cfg['cart_tuck_shape']), 5)   # arm joints 1-5 of the high carry pose
+        self.assertEqual(len(cfg['cage_preplace_shape']), 6)  # full 6-joint begin_joint_goal preplace target
+        self.assertLessEqual(cfg['cage_preplace_shape'][3], 0.65)  # wrist_1 at/below the self-collision stop
+        self.assertIsInstance(cfg['pose_goal'], bool)
+        # contact_straight_line opts the contact descent into the host-executor straight-line path
+        # (bypassing the collision planner for that move only); optional bool read via config.get.
+        self.assertIsInstance(cfg['contact_straight_line'], bool)
+        # The sim contact-feedback descent steps the pad toward the carton by step_m (bounded by cap_m)
+        # until the seal latches, for ~0 mm contact (the SurfaceGripper seals only on contact); the real
+        # rig leaves both 0 and uses a single collision-planned move. Non-negative floats, step <= cap.
+        for k in ('contact_overpress_step_m', 'contact_overpress_cap_m'):
+            self.assertIsInstance(cfg[k], (int, float))
+            self.assertGreaterEqual(cfg[k], 0)
+        self.assertLessEqual(cfg['contact_overpress_step_m'], cfg['contact_overpress_cap_m'])
+        self.assertIsInstance(cfg['arm_max_speed'], (int, float))
+        self.assertGreater(cfg['arm_max_speed'], 0)
+        # Startup grace (first-frame wall window) is widened for render pacing; a positive float.
+        self.assertIsInstance(cfg['startup_grace_seconds'], (int, float))
+        self.assertGreater(cfg['startup_grace_seconds'], 0)
+        # Every profile constructs; walls cover source (backstock_00), cart (rollwagen) and
+        # target (G3_back_s2) so WallCartonPolicy.build never raises on a missing location.
+        self.assertTrue({p['sku']: ProductProfile(**p) for p in cfg['profiles']})
+        for location in ('backstock_00', 'rollwagen', 'G3_back_s2'):
+            self.assertIn(location, cfg['walls'])
+
+
+class IncorporationAckLivenessOrderingTest(unittest.TestCase):
+    """sim-robust-collect-place-v1: the host tick() now publishes the station liveness ack BEFORE its
+    ESDF-service maintenance, so a cuMotion replan storm saturating the shared get_esdf_and_gradient
+    during a long place press cannot delay the heartbeat (collectsrc 30 s station-heartbeat gap). The
+    reorder is correct iff these pure-state invariants hold: the liveness snapshot is computable WITHOUT
+    a fresh integration, a stale/contended ESDF leaves a LIVE (non-failed) heartbeat, and readiness
+    still advances ONLY through a real integration -- so a genuinely dead host is never masked."""
+
+    def prepared(self):
+        from twin.restock_host.incorporation_ack import IncorporationAckState
+        clock = [100.0]
+        st = IncorporationAckState(wall_clock=lambda: clock[0])
+        self.assertEqual(st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=10.0,
+                                        parked=True, camera_frame='restock_camera_collect'), 10.0), 'prepare')
+        return st, clock
+
+    def test_liveness_heartbeat_without_any_integration(self):
+        # No ESDF result consumed yet (the maintenance runs AFTER publish): the snapshot is still a live,
+        # fresh-stamped heartbeat -- active, warming, not failed -- so the mission keeps seeing the host.
+        st, _ = self.prepared()
+        snap = st.snapshot(10.1, endpoints_ready=True, process_alive=True)
+        self.assertEqual(snap['state'], 'warming')
+        self.assertEqual(snap['reason'], '')
+        self.assertAlmostEqual(snap['stamp'], 10.1)      # advancing stamp == a live heartbeat
+        self.assertEqual(snap['collision_time'], -1.)    # but readiness withheld (no real integration)
+
+    def test_stale_integration_keeps_heartbeat_but_not_ready(self):
+        # A planner-contended ESDF means the last integration is now stale (> 0.5 s old). Readiness drops
+        # (collision_time withheld) but the station STILL heartbeats (not failed): the press does not
+        # starve liveness. Heartbeat gaps (sim/wall) stay within budget here, so no fault.
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        st.accept(dict(action='heartbeat', epoch=1, sequence=1, stamp=10.9, parked=True), 10.9)
+        snap = st.snapshot(11.0, endpoints_ready=True, process_alive=True)   # now - collision_time = 0.8 > 0.5
+        self.assertNotEqual(snap['state'], 'failed')     # heartbeat alive through a stale/contended ESDF
+        self.assertEqual(snap['state'], 'warming')
+        self.assertEqual(snap['collision_time'], -1.)    # not ready: the stale integration is withheld
+
+    def test_readiness_only_from_a_real_fresh_integration(self):
+        # No faking: ready requires a real integration stamp strictly after parked_since AND fresh.
+        st, _ = self.prepared()
+        snap = st.snapshot(10.1, endpoints_ready=True, process_alive=True)
+        self.assertNotEqual(snap['state'], 'ready')
+        st.acknowledge(10.2, 1)
+        snap = st.snapshot(10.3, endpoints_ready=True, process_alive=True)
+        self.assertEqual(snap['state'], 'ready')
+        self.assertAlmostEqual(snap['collision_time'], 10.2)
+
+    def test_dead_process_still_goes_silent_not_masked(self):
+        # The reorder must not mask a real death: process_alive False still faults 'station process lost'.
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        snap = st.snapshot(10.3, endpoints_ready=True, process_alive=False)
+        self.assertEqual(snap['state'], 'failed')
+        self.assertEqual(snap['reason'], 'station process lost')
 
 
 if __name__ == '__main__':

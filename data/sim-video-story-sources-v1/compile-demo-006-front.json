@@ -1,0 +1,119 @@
+{
+  "_comment": "PROPOSAL from sim-video-story-sources-v1 (the compile lane owns compile-demo-006.json): demo-006 with the supermarket-FRONT place. Back half is ONE continuous source (demo-005 f900-1800: arrive at the sales-floor endcap, park, transfer to slot G3_back_s2, verify, coupled tow back to the warehouse + park), so its seams are hard cuts in one scene. CUTS: demo-005 wall clip f830-885 (outbound starts at f900), tilted carry f1231-1311 (transfer jumps from the level lift at f1230 to the seated carton at f1312), the uncouple f1830+ (return ends f1800). Front half unchanged (collect-src-001, warm8 couple + interim backroom drive; door-src-001 pending). Upgrade path for a clean (uncut) front place: RESTOCK_SCRIPTED_TRANSFER_PLACE=front render, see data/sim-video-story-sources-v1/report.md.",
+  "mission_root": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission",
+  "title": "demo-006-front",
+  "fps": 15,
+  "xfade_frames": 8,
+  "segments": [
+    {
+      "stage": "collect",
+      "source": "collect-src-001",
+      "kind": "real",
+      "frame_start": 0,
+      "frame_end": 112,
+      "caption": "Pick the carton off the warehouse shelf",
+      "labels": [
+        "real pick (collect-src-001); cut at the clean grasp, before the lift tilts the carton"
+      ]
+    },
+    {
+      "stage": "couple",
+      "source": "warm8",
+      "kind": "real",
+      "frame_start": 0,
+      "frame_end": 126
+    },
+    {
+      "stage": "outbound",
+      "source": "warm8",
+      "kind": "real",
+      "frame_start": 126,
+      "frame_end": 164,
+      "labels": [
+        "INTERIM: clean backroom drive (no wall clip); door/front pass pending (door-src-001)"
+      ]
+    },
+    {
+      "stage": "outbound",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 900,
+      "frame_end": 1109,
+      "stride": 2,
+      "band": true,
+      "title": "Tow the rollwagen to the supermarket front",
+      "caption": "Robot + rollwagen arrive at the sales-floor shelf (endcap G3_back)",
+      "labels": [
+        "choreographed demo-005 aisle arrival, AFTER its wall clip (f830-885 cut)"
+      ]
+    },
+    {
+      "stage": "park",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1110,
+      "frame_end": 1169,
+      "stride": 2,
+      "band": true,
+      "title": "Park at the shelf",
+      "caption": "Stationarize at the sales-floor shelf",
+      "labels": [
+        "choreographed demo-005 park"
+      ]
+    },
+    {
+      "stage": "transfer",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1170,
+      "frame_end": 1230,
+      "band": true,
+      "title": "Place on the supermarket shelf",
+      "caption": "Reach into the rollwagen and lift the carton",
+      "labels": [
+        "choreographed demo-005 transfer; cut at the level lift, before the carton tilts"
+      ]
+    },
+    {
+      "stage": "transfer",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1312,
+      "frame_end": 1364,
+      "band": true,
+      "title": "Place on the supermarket shelf",
+      "caption": "Carton placed in shelf slot G3_back_s2; arm stows",
+      "labels": [
+        "choreographed demo-005; tilted carry f1231-1311 CUT (jump cut)"
+      ]
+    },
+    {
+      "stage": "verify",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1365,
+      "frame_end": 1424,
+      "stride": 2,
+      "band": true,
+      "title": "Verify",
+      "caption": "Placed on target, qty 1",
+      "labels": [
+        "choreographed demo-005 verify"
+      ]
+    },
+    {
+      "stage": "return",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1425,
+      "frame_end": 1800,
+      "stride": 3,
+      "band": true,
+      "title": "Return to the warehouse",
+      "caption": "Tow the rollwagen back to the warehouse and park (still coupled)",
+      "labels": [
+        "coupled tow back + park (demo-005); cut before the uncouple"
+      ]
+    }
+  ]
+}

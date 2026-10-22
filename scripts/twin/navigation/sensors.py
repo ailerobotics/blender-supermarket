@@ -5,6 +5,7 @@ only to generate ranges. Its world pose never enters the localization output.
 """
 from dataclasses import dataclass
 import math
+import os
 from .core import Odometry, Observation, CoverageField, wrap
 
 
@@ -162,14 +163,38 @@ class IsaacRangeSensor:
     Heights are WORLD Z values; they are not offsets from the lidar_frame.
     """
     def __init__(self,get_sensor_pose,*,heights=(0.15,0.5,1.0),beams=360,range_max=10.0,
-                 sensor_to_base=(0.0,0.0,0.0),self_paths=(),query=None):
+                 sensor_to_base=(0.0,0.0,0.0),self_paths=(),coupled_self_paths=(),query=None,
+                 carry_self_radius=0.0):
         if query is None:
             from omni.physx import get_physx_scene_query_interface
             query=get_physx_scene_query_interface()
         self.query=query
         self.self_paths=tuple(p.rstrip('/') for p in self_paths)
+        # Extra self subtrees active ONLY while a cart is coupled (the towed cart root + children).
+        # The caller toggles `self.coupled` each tick from the measured latch state; a decoupled
+        # cart is a real obstacle, so its returns are masked as self only when coupled is True.
+        self.coupled_self_paths=tuple(p.rstrip('/') for p in coupled_self_paths)
+        self.coupled=False
+        # The cart is also NOT a navigation hazard while the PARKED robot is placing a carton onto it
+        # during collect: it is the work target the robot deliberately stands beside (run-217 tripped
+        # obstacle_stop because the reachable cart sits inside the base footprint disk). The caller sets
+        # this True only during the parked collect/place; it masks the SAME coupled_self_paths as self
+        # WITHOUT asserting `coupled` -- so the footprint stays the uncoupled base radius (no swept-train
+        # envelope) and no coupling is implied. Decoupled + not placing => the cart is a real obstacle.
+        self.workspace_self=False
+        # fm393 carry self-mask (sim-only, real-rig posture: the carried load is masked by its OWN
+        # near-field geometry, never by ignoring the scan). While `carry_active` (set by the caller only
+        # during the mid-collect reposition carry), a return CLOSER than `carry_self_radius` is treated as
+        # self (the carry-fold arm/carton forms a dense ~0.78 m ring just outside the 0.75 m footprint --
+        # run-304 -- that boxes the planner in). Returns BEYOND the radius stay real obstacles, so genuine
+        # avoidance is intact. 0.0 (default) or carry_active False => no masking => byte-identical.
+        if not (math.isfinite(carry_self_radius) and carry_self_radius>=0):
+            raise ValueError('carry_self_radius must be finite and non-negative')
+        self.carry_self_radius=float(carry_self_radius)
+        self.carry_active=False
         if any(not p.startswith('/') or p=='/' or not p or '//' in p or
-               any(s in ('.','..') for s in p.split('/')) for p in self.self_paths):
+               any(s in ('.','..') for s in p.split('/'))
+               for p in self.self_paths+self.coupled_self_paths):
             raise ValueError('self paths must be explicit absolute USD subtrees')
         if (type(beams) is not int or beams<3 or not heights or
                 not all(math.isfinite(z) for z in heights) or
@@ -179,10 +204,14 @@ class IsaacRangeSensor:
         self.heights,self.beams,self.range_max=heights,beams,range_max
         self.sensor_to_base=Scan(0,(),0,1,range_max,sensor_to_base=sensor_to_base).sensor_to_base
 
+    def _active_self_paths(self):
+        return self.self_paths+(self.coupled_self_paths
+                                if (self.coupled or self.workspace_self) else ())
+
     def _self_hit(self,hit):
         return any(path==root or path.startswith(root+'/')
                    for path in (hit.get('collision',''),hit.get('rigidBody',''))
-                   if isinstance(path,str) for root in self.self_paths)
+                   if isinstance(path,str) for root in self._active_self_paths())
 
     def read(self,stamp):
         x,y,yaw=self.get_pose()
@@ -190,6 +219,13 @@ class IsaacRangeSensor:
             raise ValueError('invalid range sensor pose or timestamp')
         ranges=[];unknown=[];external=[]
         increment=2*math.pi/self.beams
+        # fm396 mask instrumentation (RESTOCK_NAV_DIAG, byte-identical off): count hits the carry mask
+        # removed and SAMPLE the near-field (0.3-1.5 m) non-self hit prim paths + distances, so a run
+        # records FOR FREE why the carry mask was (in)active -- carry_active state, how many hits it
+        # masked, and WHAT the ~0.78 m ring actually is (self subtree vs carton vs environment).
+        _diag = bool(os.environ.get('RESTOCK_NAV_DIAG'))
+        carry_masked = 0
+        near_hits = []   # (round(distance,3), prim_path) for non-self hits in the ring band
         for i in range(self.beams):
             angle=yaw-math.pi+i*increment
             best=self.range_max
@@ -200,14 +236,29 @@ class IsaacRangeSensor:
                     distance=float(hit['distance'])
                     if not math.isfinite(distance) or not 0<=distance<=self.range_max:
                         raise ValueError('invalid closest-hit distance')
-                    if self._self_hit(hit):
+                    self_hit=self._self_hit(hit)
+                    carry_hit=(not self_hit) and self.carry_active and distance<self.carry_self_radius
+                    if self_hit or carry_hit:
                         hidden=True
+                        if carry_hit:
+                            carry_masked+=1
                     else:
                         best=min(best,max(0.001,distance))
+                    if _diag and (not self_hit) and 0.3<=distance<=1.5 and len(near_hits)<10:
+                        near_hits.append((round(distance,3),
+                                          hit.get('rigidBody') or hit.get('collision') or '?'))
             unknown.append(hidden)
             ranges.append(math.nan if hidden else best)
             if hidden and best<self.range_max:
                 external.append((i,best))
+        if _diag:
+            self._range_diag_n=getattr(self,'_range_diag_n',0)+1
+            if self._range_diag_n%60==1:
+                obstacle_beams=sum(1 for r in ranges if math.isfinite(r) and 0<r<self.range_max)+len(external)
+                print('RANGE_DIAG carry_active=%s carry_self_radius=%.2f carry_masked_hits=%d '
+                      'obstacle_beams=%d near_nonself_hits=%s'
+                      % (self.carry_active, self.carry_self_radius, carry_masked, obstacle_beams,
+                         near_hits[:8]), flush=True)
         return Scan(stamp,tuple(ranges),-math.pi,increment,self.range_max,
                     sensor_to_base=self.sensor_to_base,unknown=tuple(unknown),
                     external_returns=tuple(external))

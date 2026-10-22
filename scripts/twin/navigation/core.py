@@ -7,6 +7,7 @@ access to narrow aisles for a simple conservative swept-clearance guarantee.
 from dataclasses import dataclass
 import heapq
 import math
+import os
 
 
 def wrap(a):
@@ -34,6 +35,40 @@ class Footprint:
     def radius(self, coupled):
         return max(self.base_radius, self.hitch_offset +
                    self.cart_hitch_to_farthest_corner if coupled else 0) + self.margin
+
+
+@dataclass(frozen=True)
+class DockingApproach:
+    """Config for the final-metre dock approach (e.g. seating the cart hitch at couple).
+
+    Within `approach_distance` of the dock `goal`, the controller caps the commanded
+    linear speed to `speed`. A slower command genuinely shortens the braking distance
+    (`stop_distance` is a real function of speed), so the forward braking capsule — and
+    the omnidirectional stop disk that bounds it — shrink honestly; the footprint radius
+    and every safety margin are UNCHANGED. This lets a no-reverse base dock beside static
+    geometry that sits in its *rear* hemisphere (which it can never drive into) without
+    the full-speed braking reach spuriously tripping `obstacle_stop`. It does NOT mask any
+    obstacle and does NOT widen a tolerance. Engaged only for a goal matching `goal`
+    within `goal_tolerance`; absent from config -> None -> disabled (run byte-identical,
+    real-rig defaults untouched).
+    """
+    goal: tuple  # (x, y, yaw) map pose of the dock this applies to
+    speed: float  # commanded linear-speed cap inside the approach zone (m/s)
+    approach_distance: float  # engage within this range of the dock goal (m)
+    goal_tolerance: float = 0.25  # XY match radius binding the active goal to this dock
+
+    def __post_init__(self):
+        if len(self.goal) != 3 or not all(math.isfinite(v) for v in self.goal):
+            raise ValueError('docking goal must be finite (x, y, yaw)')
+        if not (math.isfinite(self.speed) and self.speed > 0):
+            raise ValueError('docking speed must be positive')
+        if not (math.isfinite(self.approach_distance) and self.approach_distance > 0):
+            raise ValueError('docking approach_distance must be positive')
+        if not (math.isfinite(self.goal_tolerance) and self.goal_tolerance >= 0):
+            raise ValueError('docking goal_tolerance must be non-negative')
+
+    def matches(self, goal):
+        return math.dist(goal[:2], self.goal[:2]) <= self.goal_tolerance
 
 
 @dataclass(frozen=True)
@@ -293,7 +328,8 @@ class Controller:
     """
     def __init__(self, grid, footprint, *, max_speed=0.25, max_angular=0.35,
                  brake_acceleration=0.4, stale_after=0.3, blocked_timeout=8.0,
-                 goal_timeout=180.0, allow_test_fixtures=False):
+                 goal_timeout=180.0, allow_test_fixtures=False, docking=None,
+                 directional_zone=True, arrival_xy_hysteresis=0.0):
         self.grid, self.footprint = grid, footprint
         self.max_speed, self.max_angular = max_speed, max_angular
         self.brake_acceleration, self.stale_after = brake_acceleration, stale_after
@@ -301,18 +337,98 @@ class Controller:
         if not all(math.isfinite(v) and v > 0 for v in (max_speed,max_angular,
                    brake_acceleration,stale_after,blocked_timeout,goal_timeout)):
             raise ValueError('invalid controller limits')
+        if docking is not None and not isinstance(docking, DockingApproach):
+            raise ValueError('docking must be a DockingApproach or None')
+        # Direction-aware braking zone (default on): the circular footprint is checked all
+        # around (never shrunk) and the braking-distance extension is applied ONLY along the
+        # commanded forward motion (a capsule down the heading), so a no-reverse base never
+        # trips obstacle_stop on static geometry in its rear hemisphere it can never drive
+        # into. Set False to restore the legacy omnidirectional stop disk (radius+stop in all
+        # directions). The footprint radius and every margin are identical either way; the
+        # toggle only governs whether the braking inflation is omnidirectional or forward-only.
+        self.directional_zone = bool(directional_zone)
         self.allow_test_fixtures = allow_test_fixtures
+        # Optional config-driven dock-approach speed cap; None -> disabled (unchanged run).
+        self.docking = docking
         self.goal = None
         self.coupled = False
         self.path = []
         self.elapsed = self.blocked = 0.0
         self.terminal = None
+        self._docking_active = False
+        self.arrival_xy_tol = 0.08
+        self.arrival_yaw_tol = 0.08
+        # fm396 (B): SIM-only TRUSTED STATIC drive for the mid-collect reposition legs. When set, the route
+        # + the obstacle_stop/coverage gates use the STATIC map only (empty live-scan obstacles): the short
+        # reposition in front of the parked cart is geometrically proven clear against the static map AND
+        # the base/cart footprint (scripts/check_place_approach_nav.py), but the live lidar is polluted by
+        # the carry-fold self-geometry (a ~0.78 m ring just outside the 0.75 m footprint -> no route;
+        # run-304/307) that the per-tick carry mask did not clear live. Default False => every other leg
+        # keeps full live-scan obstacle avoidance (byte-identical). Set only on the uncoupled reposition legs.
+        self.static_drive = False
+        # fm431 (B1) / run-325 cold TRANSIT: the mid-collect reposition drives the base to place_approach
+        # while the arm CARRIES the carton (a stable braked carry fold, NOT the empty stow posture), so
+        # obs.arm_transport is False and the nav refuses every drive with 'arm_not_in_transport' -> the
+        # reposition never moves and the held arm starves the heartbeat. carry_drive relaxes ONLY that
+        # arm-transport gate for the reposition leg (the carried load is in the verified braked carry and
+        # already lidar self-masked via carry_self_radius); every other gate (coverage, obstacle, swept
+        # envelope, coupling, articulation) is untouched. Default False => the empty-gripper gate holds
+        # (byte-identical). Set only on the uncoupled reposition legs, and SAFE only when the arm is in
+        # the stable carry -- the in-sim drive + no-drop validation is a GPU check (run-326).
+        self.carry_drive = False
+        # fm482 (sim-video-couple-speed): arrival XY HYSTERESIS (navigation.arrival_xy_hysteresis_m).
+        # Without it the arrival test is a bare `xy <= arrival_xy_tol` on every tick, so a base that
+        # crosses the tolerance circle and then turns in place to the goal yaw is pushed back OUT by
+        # the rotation itself (a real diff base does not pivot about its measured centre: ~2.8 cm/rad,
+        # run-356) -> the drive branch turns it back toward the goal POINT -> it re-enters -> turns to
+        # the goal YAW again: a limit cycle at the circle. Warm runs 347-356 swept ~39 rad of yaw for a
+        # net 1.0 rad at the couple standoff (xy ~0.050 vs tol 0.050), 162 s sim / ~680 s wall per run.
+        # With hysteresis > 0 the XY capture LATCHES once inside arrival_xy_tol and only releases past
+        # arrival_xy_tol + hysteresis (the Nav2 stateful goal-checker pattern), so the rotate-to-yaw and
+        # settle run to completion. Arrival still requires yaw within tolerance, stopped, and a clear
+        # gate. 0.0 (default) => the legacy per-tick test (byte-identical).
+        if not (math.isfinite(arrival_xy_hysteresis) and 0.0 <= arrival_xy_hysteresis <= 0.5):
+            raise ValueError('arrival_xy_hysteresis must be in [0, 0.5] m')
+        self.arrival_xy_hysteresis = float(arrival_xy_hysteresis)
+        self._xy_latched = False
+        self.strict_xy_arrival = False   # set per-leg by start(); grasp-critical tolerance-aware arrival
 
-    def start(self, goal, coupled):
+    def start(self, goal, coupled, *, arrival_xy_tol=None, arrival_yaw_tol=None, static_drive=False,
+              carry_drive=False, strict_xy_arrival=False):
+        self.static_drive = bool(static_drive)
+        self.carry_drive = bool(carry_drive)
+        # Tolerance-aware final approach (default off => byte-identical). With the XY hysteresis latch
+        # on (arrival_xy_hysteresis > 0, added for the couple standoff dither, fm482) the base declares
+        # arrived_stopped as soon as the latch is set and the yaw aligns -- which, because the latch only
+        # RELEASES past arrival_xy_tol + hysteresis, lets 'arrived' fire while the TRUE xy sits up to one
+        # hysteresis band OUTSIDE arrival_xy_tol (cold collect: xy 0.169 declared arrived against a 0.150
+        # tol while the base crept out during the rotate-in-place). A grasp-critical leg (the collect
+        # source approach) must instead be within the real xy tolerance before the grasp begins, so when
+        # strict_xy_arrival is set the latch cannot by itself declare arrival outside arrival_xy_tol -- the
+        # base keeps closing the residual XY (bounded by goal_timeout) until the TRUE distance is in tol.
+        # No-op when the hysteresis latch is off (the bare xy <= arrival_xy_tol test is already strict).
+        self.strict_xy_arrival = bool(strict_xy_arrival)
+        self._xy_latched = False
         if len(goal) != 3 or not all(math.isfinite(v) for v in goal):
             raise ValueError('goal must be finite map [x,y,yaw]')
+        if arrival_xy_tol is not None and (not math.isfinite(arrival_xy_tol) or arrival_xy_tol <= 0):
+            raise ValueError('arrival_xy_tol must be positive')
+        if arrival_yaw_tol is not None and (not math.isfinite(arrival_yaw_tol) or arrival_yaw_tol <= 0):
+            raise ValueError('arrival_yaw_tol must be positive')
         self.goal, self.coupled = tuple(goal), bool(coupled)
         self.path, self.elapsed, self.blocked, self.terminal = [], 0.0, 0.0, None
+        # Per-goal XY arrival tolerance (default 0.08 m); a tighter value is used for the on-axis
+        # couple standoff so the fine-dock insert starts close to the cart axis.
+        self.arrival_xy_tol = 0.08 if arrival_xy_tol is None else float(arrival_xy_tol)
+        # fm406: per-goal YAW arrival tolerance (default 0.08 rad). The fm390 reposition goal
+        # place_approach is only a STANDOFF in front of the cart mouth (the deck target re-registers in
+        # the new base frame, with the reach gate as the safety net), and the slow static-drive + soft
+        # base settle ~0.078 rad / ~0.076 m short -- right at the 0.08 default, so arrival never cleanly
+        # latches and the base sits at the goal until a watchdog e-stops (run-313 sat ~44 s). A relaxed
+        # reposition tolerance lets the achievable park declare arrived_stopped -> advance to place.
+        self.arrival_yaw_tol = 0.08 if arrival_yaw_tol is None else float(arrival_yaw_tol)
+        # Engage the dock-approach cap only for the goal the config binds it to.
+        self._docking_active = self.docking is not None and self.docking.matches(self.goal)
 
     def cancel(self):
         self.terminal = Result(status='failed', reason='cancelled')
@@ -336,7 +452,7 @@ class Controller:
                 return 'unsupported_observation_source'
         if obs.coupled != self.coupled:
             return 'coupling_changed'
-        if not obs.arm_transport:
+        if not obs.arm_transport and not self.carry_drive:
             return 'arm_not_in_transport'
         if self.coupled and abs(obs.articulation) >= self.footprint.max_articulation:
             return 'articulation_limit'
@@ -350,6 +466,12 @@ class Controller:
         if not all(math.isfinite(v) for v in (linear,angular)) or linear < 0:
             return Result(reason='reverse_or_invalid_command')
         v = min(linear,self.max_speed)
+        # Final-metre dock approach: cap the commanded speed near the dock goal so the
+        # braking distance (and the stop disk below) shrink honestly. Footprint and
+        # margins are untouched; this never masks an obstacle.
+        if (self._docking_active and self.goal is not None
+                and math.dist(odom.pose[:2],self.goal[:2]) <= self.docking.approach_distance):
+            v = min(v,self.docking.speed)
         w = max(-self.max_angular,min(angular,self.max_angular))
         if self.coupled and abs(w)*self.footprint.min_turn_radius > v+1e-9:
             return Result(reason='turn_radius')
@@ -357,12 +479,51 @@ class Controller:
         speed = max(v,abs(odom.linear))
         stop_distance = speed*self.stale_after + speed*speed/(2*self.brake_acceleration)
         radius = self.footprint.radius(self.coupled)+odom.position_uncertainty
-        if not self._coverage_ok(odom, obs, radius, stop_distance, v, w):
+        # fm396 (B): the trusted static reposition leg drives against the static map only -- the carry-fold
+        # self-geometry pollutes the live scan (coverage + a phantom near-footprint ring the per-tick mask
+        # did not clear), so skip the live coverage certification and use empty live obstacles for the
+        # braking-disk stop check. Every other leg keeps the full live coverage + obstacle_stop.
+        dyn = () if self.static_drive else obs.obstacles
+        if not self.static_drive and not self._coverage_ok(odom, obs, radius, stop_distance, v, w):
             return Result(reason='insufficient_sensor_coverage')
-        # A disk expanded by stopping travel contains every possible braking arc.
-        if not self.grid.free(odom.pose,radius+stop_distance,obs.obstacles):
+        # fm396 (B)/run-308: on the trusted static reposition the braking inflation (stop_distance =
+        # stale_after*speed, with the 3 s render-paced stale_after) overlapped the SOURCE SUPPORT 0.86 m
+        # away and tripped obstacle_stop though the footprint radius clears it and the plan routes clear
+        # against the static map. There the braking lookahead is dropped entirely (footprint RADIUS only).
+        # Otherwise the braking zone bounds every possible braking arc: direction-aware (a forward capsule
+        # down the heading) when self.directional_zone, else the legacy omnidirectional disk.
+        brake = 0.0 if self.static_drive else stop_distance
+        if not self._braking_zone_free(odom.pose, radius, brake, dyn):
             return Result(reason='obstacle_stop')
         return Result(v,w,reason='tracking')
+
+    def _braking_zone_free(self, pose, radius, brake, dyn):
+        """Is the braking zone clear of `dyn` obstacles and the static map?
+
+        The circular footprint (`radius`, which circumscribes the whole train) is ALWAYS
+        checked all around and is never shrunk -- any obstacle inside the body stops the
+        robot regardless of heading. The braking-distance extension `brake` is then added:
+
+        - directional (`self.directional_zone`, default): only along the forward motion -- the
+          footprint disk swept `brake` metres down the heading (a capsule). `brake` is derived
+          from the forward speed `max(commanded, measured)`, so a stop / rotate-in-place command
+          with no residual forward motion has `brake == 0` and only the all-around footprint is
+          checked (the circular footprint sweeps onto itself under rotation). A no-reverse base
+          can never drive into geometry behind it, so a rear obstacle outside the footprint does
+          NOT trip; an obstacle the same distance AHEAD (within the capsule) still does. A base
+          still physically coasting forward (measured speed > 0) while commanded to stop keeps
+          the forward capsule, because that travel is real.
+        - legacy omnidirectional: `brake` is added in every direction (radius+brake disk),
+          catching the rear hemisphere a forward-only base can never reach.
+        """
+        if not self.grid.free(pose, radius, dyn):
+            return False  # footprint (all around, never shrunk)
+        if brake <= 1e-9:
+            return True
+        if not self.directional_zone:
+            return self.grid.free(pose, radius + brake, dyn)
+        nose = (pose[0] + brake * math.cos(pose[2]), pose[1] + brake * math.sin(pose[2]))
+        return self.grid.segment_free(pose, nose, radius, dyn)
 
     def _coverage_ok(self, odom, obs, radius, stop_distance, v, w):
         """Circular-footprint coverage for a plain differential base (overridden by the
@@ -391,9 +552,48 @@ class Controller:
             return self.terminal
         pose, obs = odometry.pose, observations
         radius = self.footprint.radius(self.coupled)+odometry.position_uncertainty
-        if math.dist(pose[:2],self.goal[:2]) <= 0.08:
+        # fm406 diag (RESTOCK_NAV_DIAG, byte-identical off): why the reposition never latches arrival --
+        # the nav's OWN measured xy/yaw error vs the active tolerances + the stop velocities, logged when
+        # near the goal (runs 313/314 pinned the base ~0.08-0.12 m short with nav 'tracking' forever and
+        # 0 settling_at_goal). Reveals whether the tol is effective at runtime and whether odom sees a
+        # larger error than the ground-truth nav-trace. Throttled.
+        if os.environ.get('RESTOCK_NAV_DIAG'):
+            _xy = math.dist(pose[:2], self.goal[:2])
+            if _xy < 0.4:
+                self._adiag = getattr(self, '_adiag', 0) + 1
+                if self._adiag % 20 == 1:
+                    # fm407 pin-cause: also report the gate's verdict at a ZERO command (obstacle_stop /
+                    # coverage vs tracking) and the heading error to the goal -- so a stall at the goal is
+                    # attributable to the nav gate (footprint vs cart on the static map), a non-'tracking'
+                    # gate, or simply the odom xy reading > tol (else-branch, no arrival branch entered).
+                    _gate = self.gate_velocity(now, odometry, obs, 0.0, 0.0)
+                    print('NAV_ARRIVAL_DIAG xy=%.4f xy_tol=%.3f yaw_err=%.4f yaw_tol=%.3f lin=%.4f ang=%.4f '
+                          'gate0=%r in_xy=%s pose=%s goal=%s'
+                          % (_xy, self.arrival_xy_tol, abs(wrap(self.goal[2]-pose[2])), self.arrival_yaw_tol,
+                             odometry.linear, odometry.angular, _gate.reason, _xy <= self.arrival_xy_tol,
+                             tuple(round(c,3) for c in pose), tuple(round(c,3) for c in self.goal))
+                          + (' latched=%s' % self._xy_latched if self.arrival_xy_hysteresis > 0 else ''),
+                          flush=True)
+        xy = math.dist(pose[:2],self.goal[:2])
+        if self.arrival_xy_hysteresis > 0:
+            # fm482: latch the XY capture; release only past tol + hysteresis (see __init__).
+            if xy <= self.arrival_xy_tol:
+                self._xy_latched = True
+            elif xy > self.arrival_xy_tol + self.arrival_xy_hysteresis:
+                self._xy_latched = False
+            in_xy = self._xy_latched
+            if self.strict_xy_arrival:
+                # Tolerance-aware final approach: the latch keeps the base from re-driving while it
+                # finishes the yaw rotation, but a grasp-critical leg must not DECLARE arrival until the
+                # TRUE xy is within tol -- so drop the latch's in_xy here whenever the base has crept
+                # back outside arrival_xy_tol (it keeps closing the residual instead of latching 'arrived'
+                # up to one hysteresis band out).
+                in_xy = in_xy and xy <= self.arrival_xy_tol
+        else:
+            in_xy = xy <= self.arrival_xy_tol
+        if in_xy:
             error = wrap(self.goal[2]-pose[2])
-            if abs(error) <= 0.08:
+            if abs(error) <= self.arrival_yaw_tol:
                 if abs(odometry.linear) > 0.02 or abs(odometry.angular) > 0.03:
                     return Result(reason='settling_at_goal')
                 clear = self.gate_velocity(now,odometry,obs,0.0,0.0)
@@ -404,11 +604,32 @@ class Controller:
             result = self.gate_velocity(now,odometry,obs,0.0,2*error)
         else:
             # Replan with current observations whenever any remaining segment is blocked.
+            # fm396 (B): the trusted static reposition leg plans against the static map only (empty live
+            # obstacles) -- the short, proven-clear reposition must not be blocked by the carry-fold
+            # self-return ring in the live scan (run-304/307). Every other leg uses the live obstacles.
+            dyn = () if self.static_drive else obs.obstacles
             points = [pose[:2]]+self.path
-            if not self.path or any(not self.grid.segment_free(a,b,radius,obs.obstacles)
+            if not self.path or any(not self.grid.segment_free(a,b,radius,dyn)
                                    for a,b in zip(points,points[1:])):
-                self.path = self.grid.plan(pose,self.goal,radius,obs.obstacles)
+                self.path = self.grid.plan(pose,self.goal,radius,dyn)
             if not self.path:
+                # fm390 diagnostic (RESTOCK_NAV_DIAG, byte-identical off): why the plan is empty -- is the
+                # START boxed in, the GOAL blocked, or the straight line crossed? Prints free(start)/
+                # free(goal), the dynamic-obstacle count, the nearest few to the base, and how many sit
+                # inside the footprint disk at start/goal. Throttled.
+                if os.environ.get('RESTOCK_NAV_DIAG'):
+                    self._ndiag = getattr(self, '_ndiag', 0) + 1
+                    if self._ndiag % 20 == 1:
+                        ob = obs.obstacles
+                        d_start = sorted(math.hypot(pose[0]-q[0], pose[1]-q[1]) for q in ob)[:5]
+                        in_s = sum(1 for q in ob if math.hypot(pose[0]-q[0], pose[1]-q[1]) <= radius)
+                        in_g = sum(1 for q in ob if math.hypot(self.goal[0]-q[0], self.goal[1]-q[1]) <= radius)
+                        print('NAV_DIAG blocked_no_route goal=%s pose=%s r=%.3f free_start=%s free_goal=%s '
+                              'seg_free=%s n_obs=%d near5=%s in_start=%d in_goal=%d'
+                              % (tuple(round(c, 2) for c in self.goal), tuple(round(c, 2) for c in pose),
+                                 radius, self.grid.free(pose, radius, ob), self.grid.free(self.goal, radius, ob),
+                                 self.grid.segment_free(pose, self.goal, radius, ob), len(ob),
+                                 [round(d, 3) for d in d_start], in_s, in_g), flush=True)
                 return self._wait(dt,'blocked_no_route')
             while len(self.path) > 1 and math.dist(pose[:2],self.path[0]) < 0.10:
                 self.path.pop(0)

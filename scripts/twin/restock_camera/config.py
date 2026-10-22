@@ -11,9 +11,19 @@ import numpy as np
 from .geometry import (Intrinsics, look_at, pose_matrix, usd_camera_transform,
                        project, transform_points, rigid)
 from .lights import camera_lamp
+from .wrist_camera import wrist_camera_design
 
 
-def camera_config(scenario, manifest):
+def camera_config(scenario, manifest, *, mast_depth=False):
+    """Fixed station camera + QR support design (``source``/``cart``/``shelf``).
+
+    ``mast_depth`` (default False) adds the body-mounted mast depth camera that feeds the
+    nvblox obstacle map as a second feed while a carton is carried (see
+    :mod:`twin.restock_camera.mast_depth`); it has no QR support (``role`` ``nvblox_depth``),
+    is parented to ``robot_base`` and carries its own collision housing/bracket. When False the
+    output is byte-for-byte the historical design: existing cameras and the single-feed default
+    are unchanged unless the integration lane regenerates with the switch on.
+    """
     staging,unit = scenario['initial_staging'],scenario['handling_unit']
     if (unit['local_wall'] != 3 or unit['grasp_mode'] != 'side'
             or not np.allclose(unit['dimensions_m'],[.6,.4,.16])
@@ -77,24 +87,29 @@ def camera_config(scenario, manifest):
 
     camera('source','map',source+[0,.20,.85],source+[0,0,.08],k_source)
     camera('cart','cart_chassis',deck+[0,-.02,.655],deck+[0,0,.075],k_cart)
-    # Shelf camera: same realisable aisle bracket height as before, but y-centred on
-    # the marker pair (the old +.30 y offset grazed the far marker at 63.8 deg and
-    # 3.65 px/module). Centred, both markers reach ~13 px/module at ~35 deg while the
-    # carton-top label plane and full support stay framed. The camera must stay just
-    # below the next shelf tier (~0.97 m) to see under it to the carton top; a top-down
-    # view is impossible (the tier is ~0.24 m above the support).
-    # Shipped pose B: pure -6.75 deg tilt. The native sweep had both B and the steeper
-    # pose A (-9 deg tilt + -1 deg yaw + 4 cm eye-raise) decoding both shelf markers 6/6
-    # with FixedTileQR (~0.31 s); A scored a slightly higher raster-noise margin, BUT its
-    # 4 cm eye-raise lifts the lens to z=1.00 m, ABOVE the ~0.97 m shelf tier, so the tier
-    # occludes the carton top and support and the station-visibility audit collapses to
-    # 0/0/0 -- it blinds the restock-sensing job for a marginal decode gain. B keeps the
-    # lens under the tier: station visibility stays 81/81/25 AND both markers decode 6/6.
-    # The yaw_world_z_deg / eye_dz_m levers on camera() (default 0, exercised by A) are
-    # retained so future candidates can use them; the station-visibility test gate guards
-    # against a future pose silently trading restock sensing for marker margin again.
-    camera('shelf','map',shelf+[-.50,0,.23],shelf+[-.18,0,-.05],k_shelf,
-           roll_world_x_deg=-6.75)
+    # Shelf camera: same realisable aisle bracket height and -6.75 deg tilt as before, plus
+    # a small +4 deg world-Z YAW. The mirror-positioned pair the camera lane shipped decoded
+    # only with the far marker's grid flipped 180 deg, which 180-rolled that marker's decoded
+    # corner order and made register_marker's rigid support-plane fit uncertain
+    # (sensed.py:158/167 -- normal tilt / residual > 2 mm). This repositions the pair
+    # (asymmetric about the camera's world-Y, see support() below) and yaws the aim so the
+    # far marker is viewed much more steeply (~23 deg incidence vs ~55 deg before), which
+    # drops its perspective shear enough that the production FixedTileQR reads BOTH markers at
+    # the SAME mounted orientation (grid_rot_quarters 0 for both, no per-marker flip). Then
+    # register_marker pairs each marker's TL,TR,BR,BL to one model consistently and the fit is
+    # well-conditioned. The camera must stay just below the next shelf tier (~0.97 m) to see
+    # under it to the carton top; a top-down view is impossible (the tier is ~0.24 m above the
+    # support). The lens stays at z=0.96 (< tier): the station-visibility audit
+    # (test_shelf_camera_sees_under_the_tier...) still sees the whole carton-top + support
+    # under the tier at this yaw. Both-decode proven on the production decoder over the
+    # faithful raster (test_shelf_markers...decodes) and on the native commissioning render.
+    # See data/sim-restock-stations-v1/report.md.
+    camera('shelf','map',shelf+[-.50,0,.23],shelf+[-.18,-.023,-.05],k_shelf,
+           roll_world_x_deg=-6.75,yaw_world_z_deg=4.)
+    # Eye-in-hand wrist collision/masked-depth camera (frame restock_camera_wrist on ur_tool0).
+    # Not a station QR camera (no support) and not decode-grade; it rides the tool so the arm's
+    # side-grasp workspace is always in its depth. See twin.restock_camera.wrist_camera.
+    cameras['wrist'] = wrist_camera_design()
     solid('source_mast','map',source+[0,.44,.15],[.03,.03,1.50])
     solid('source_boom','map',source+[0,.32,.88],[.03,.27,.025])
     solid('source_marker_tab','map',source+[0,.30,-.0015],[.72,.16,.003])
@@ -116,13 +131,31 @@ def camera_config(scenario, manifest):
     # plan_restock_lighting.py ray-tests emitter->marker against both housings, the
     # shelf tiers and products in the rendered store; keep both rays clear if retuned.
     shelf_lamp_emitter = shelf+[-.50,0,.17]
-    shelf_marker_centroid = shelf+[-.42,0,0]
+    shelf_marker_centroid = shelf+[-.42,-.046,0]   # centroid of the same-side marker pair (y=4.78)
     shelf_lamp_body = shelf+[-.55,0,.33]
     lamps.append(camera_lamp('shelf','map',shelf_lamp_emitter,kind_type='disk',
                              aim_at=shelf_marker_centroid,radius=.06,power_w=8.))
     solid('shelf_lamp_housing','map',shelf_lamp_body,[.04,.04,.03])
+    # Camera-mounted coaxial lamp for the cart (rollwagen) deck, mirroring the shelf lamp.
+    # The deck markers sit on the LOWER deck, recessed under the cart's own UPPER shelf
+    # (chassis z=.72, underside ~.9075) which blocks the overhead store light, so the bare
+    # native render left the deck dark (marker whites ~126/255) and the cage cast directional
+    # shadows that clipped one marker's finder pattern (support:cart:0 would not decode while
+    # support:cart:1 did). An aimed DISK lamp co-located with the cart lens, emission pointed
+    # at the deck marker centroid, lights exactly what the camera sees FROM THE LENS DIRECTION,
+    # so it fills the cage shadow (no occluder on the clear lens->marker sightline) and raises
+    # contrast. Sized (power_w=63) so each deck marker's lamp illuminance (~4940 lux at scale 1)
+    # matches the shelf lamp's proven-decode level on the recessed shelf markers (4937 lux) --
+    # scale-free, both share intensity_scale. Housing stays +x/above the lens, out of the frustum
+    # and off the emitter->marker rays. Collision geometry.
+    cart_lamp_emitter = deck+[-.05,-.02,.575]
+    cart_marker_centroid = deck+[-.38,0,0]
+    cart_lamp_body = deck+[.05,-.02,.645]
+    lamps.append(camera_lamp('cart','cart_chassis',cart_lamp_emitter,kind_type='disk',
+                             aim_at=cart_marker_centroid,radius=.06,power_w=63.))
+    solid('cart_lamp_housing','cart_chassis',cart_lamp_body,[.04,.04,.03])
 
-    def support(name,parent,center,yaw,marker_centers,witness_center,witness_size):
+    def support(name,parent,center,yaw,marker_centers,witness_center,witness_size,required_xy=(.62,.42)):
         pose = pose_matrix([*marker_centers[0][:2],yaw],marker_centers[0][2])
         markers = []
         for index,point in enumerate(marker_centers):
@@ -131,23 +164,158 @@ def camera_config(scenario, manifest):
                 substrate_thickness_m=.0002))
         auxiliary = np.linalg.inv(pose) @ np.r_[marker_centers[1],1]
         supports[name] = dict(id=name,parent=parent,revision='bolted-pair-v2',
-            camera_id=name,required_xy_m=[.62,.42],nominal_center=list(center),yaw=yaw,
+            camera_id=name,required_xy_m=list(required_xy),nominal_center=list(center),yaw=yaw,
             markers=markers,auxiliary_offset_xy=auxiliary[:2].tolist(),
             witness_design=dict(center=list(witness_center),size_xy=list(witness_size),yaw=0.),
             warning='nominal geometry is design only; select support/witness quads from empty RGB-D')
 
     support('source','map',source,np.pi,[source+[-.30,.30,0],source+[.30,.30,0]],
             source+[0,.30,0],[.18,.06])
+    # Cart support: the required_xy is tightened to .54x.34 (from the default .62x.42) because
+    # the cart's LOWER deck is ringed by its cage: the vertical cage-wall posts have ~34 mm bases
+    # that poke into a full .62x.42 support polygon at its +/-y edges, and the +x edge reaches the
+    # back cage wall -- the dense support-plane gate (sensed.py `_flat_patch`, ptp<=6 mm) then
+    # refuses it ("support patch is tilted, occupied or occluded"), even though the deck itself is
+    # flat to 0.1 mm. .54x.34 is the clean flat deck interior the camera sees between the cage
+    # posts; it still covers the carton core (handling unit .6x.4 sits on the physically flat deck,
+    # the cage posts clear it). The witness patch stays on the flat lip by the markers.
     support('cart','cart_chassis',deck,-np.pi/2,[deck+[-.38,-.22,0],deck+[-.38,.22,0]],
-            deck+[-.38,0,0],[.06,.18])
-    support('shelf','map',shelf,0.,[shelf+[-.42,-.14,0],shelf+[-.42,.14,0]],
-            shelf+[-.42,0,0],[.06,.14])
+            deck+[-.38,0,0],[.06,.18],required_xy=(.54,.34))
+    # Shelf support: a repositioned marker pair on the shelf's exposed front lip (x=-3.47, in
+    # front of the carton footprint whose front edge is ~x=-3.35), both mounted at the SAME
+    # orientation (no per-marker grid flip). The pair is asymmetric about the camera world-Y
+    # (y=4.68 and 4.88, centroid 4.78) so marker 1 sits near the camera-Y line and is viewed
+    # steeply (~23 deg) -- low enough shear that the production FixedTileQR decodes it without
+    # the 180 deg grid flip the old mirror pair needed (that flip 180-rolled its corner order
+    # and corrupted register_marker's fit). The 0.20 m Y auxiliary offset exceeds the
+    # 2*side_m=0.12 m minimum; both markers stay on the shelf board (y in [4.57,5.05]).
+    # Shelf support required_xy tightened to .58x.36 (from .62x.42): under the grazing
+    # under-tier view the full .42 y-extent reaches the shelf-board side edges (the dense
+    # support-plane gate reads them as tilted/structured) and a ~0.5-module geometry seam in
+    # the deep slot drops a tiny patch of depth to infinity; .58x.36 is the clean flat slot
+    # interior the camera sees between those edges (verified passing sensed.py `_flat_patch`
+    # on the real shelf depth frame). The carton still lands on the flat shelf; the witness
+    # patch stays on the front lip by the markers.
+    # Witness sits on the front lip in the gap BETWEEN the two markers (y=4.78) and in front of
+    # the tightened support (whose front edge is now at x=-3.34): the dense-witness gate requires
+    # the witness polygon be disjoint from the support polygon in image space, and on the same
+    # flat plane (verified passing sensed.py `calibrate_rigid_support` on the real shelf frame).
+    support('shelf','map',shelf,0.,[shelf+[-.42,-.146,0],shelf+[-.42,.054,0]],
+            shelf+[-.37,-.046,0],[.06,.12],required_xy=(.58,.36))
+    # Approach-occlusion / render-suspension hold window (sim seconds), emitted ONCE into the design
+    # so the SINGLE design builder feeds every consumer: the mission regenerates this design in
+    # build_sensing_sources and rendered_context reads design['occlusion_window_s'] for EVERY support
+    # camera (the collect source_target wraps that same per-camera adapter, so one value governs both
+    # the station /sensors capture and the collect path). Sourced from the mission scenario so the
+    # sim can size it to the render-paced gated reach (approach+contact+grasp+lift ~30-50 s sim)
+    # without changing the real-rig default; None disables the tolerance (strict). The baseline
+    # lifetime ceiling (<=900 s) and the held contradiction gate still bound it.
+    occlusion_window_s = scenario.get('occlusion_window_s', 20.0)
+    if occlusion_window_s is not None and (not np.isfinite(occlusion_window_s)
+                                           or occlusion_window_s < 0 or occlusion_window_s > 900):
+        raise ValueError('scenario occlusion_window_s must be None or a finite 0..900 s sim duration')
+    if mast_depth:
+        # Body-mounted RealSense-class depth camera on the robot mast: nvblox's second feed
+        # (camera_1) so a carried carton occluding the wrist (camera_0) no longer freezes the
+        # ESDF. No QR support; parented to robot_base; its housing/bracket are collision
+        # geometry the arm/cart planning must see. Single-sourced from twin.restock_camera.mast_depth.
+        from .mast_depth import mast_camera_entry
+        mast_camera,mast_solids = mast_camera_entry()
+        cameras[mast_camera['id']] = mast_camera
+        solids.extend(mast_solids)
     return dict(schema='restock-camera-design.v2',evidence='geometric_design_not_sensor_capture',
                 runtime_ready=False,cameras=cameras,solids=solids,supports=supports,lamps=lamps,
                 cart_chassis_height_m=.20,required_depth_error_bound_m=.0002,
+                render_presets=render_presets(),occlusion_window_s=occlusion_window_s,
                 limitations=['Depth error bound must be established for the real renderer/sensor; not assumed.',
                              'Full-link/mount collision and visibility report must be checked before use.',
                              'No commissioning pixels or inventory are provided by this config.'])
+
+
+#: Design-support names whose cameras carry QR markers that MUST decode (registration +
+#: handling-unit identity). Every one is decode-grade and is pinned to render_scale 1.0 by the
+#: presets; the resolution step-down applies only to the non-decode cameras (mapper/nav/arm).
+DECODE_SUPPORTS = ('source', 'shelf', 'cart')
+
+
+def render_presets():
+    """Sensing-camera render presets that trade per-frame render cost against fidelity, for the
+    integration runtime to opt into per run (``--render-preset``). The whole-store RTX render of
+    the sensing camera dominates the mission wall time (measured 1.7-3.5 s per full-res capture,
+    ~1:70 sim:wall); a faster preset is the lever to make Isaac iteration quicker.
+
+    ``full`` (default) renders every camera at 1.0. ``fast`` cuts per-frame render cost on the
+    NON-decode cameras only (mapper/nav RGB-D, arm eye-in-hand masked-depth) and keeps every
+    QR-decode support camera (``DECODE_SUPPORTS``) at full resolution, because the resolution
+    step-down does NOT survive a native RTX render for the decode-grade markers.
+
+    **Native decode floor** (measured on the native commissioning frames; camera-lane
+    ``native-floor-preset-handoff``):
+
+    - The source support marker is a version-1 QR (21 modules). At ``render_scale`` 1.0 it renders
+      at ~7.1 px/module and decodes cleanly (run-73). At a NATIVE 0.6 render it is ~4.3 px/module
+      and the commission FAILED to decode either source marker in 240 converged frames (run-72:
+      "no converged frame cleanly decoded source markers ... in 240 frames").
+    - A 0.6 *resample* of the native 1.0 frame decodes fine at that same ~4.3 px/module (51/51,
+      PR 82's CPU parity) -- but a native low-resolution RTX render is ~4.4x softer than the
+      resample (Laplacian variance 9.6 vs 42.2; DLSS upsamples from a sub-minimal internal
+      resolution and aliases the thin modules), so the resample parity did NOT hold natively.
+    - The native floor therefore sits in (4.3, 7.1] px/module, i.e. a decode camera is safe only at
+      scale (0.6, 1.0], and 1.0 is the only natively proven point. So ``fast`` pins all
+      ``DECODE_SUPPORTS`` to 1.0 and does not gamble a sub-1.0 decode camera.
+
+    ``fast`` cuts cost with three levers, none of which touches a decode camera:
+
+    - ``render_scale`` (0.6): the default product scale for the NON-support cameras (mapper/nav/arm).
+      ``full_res_supports`` names the decode support cameras pinned to 1.0; the mission maps these
+      design-support names to its own locations and passes them to ``build_sensing_sources`` as
+      ``full_res_locations``, and commission runs each decode station at 1.0 too -- so the baseline
+      scale equals the mission render scale for that camera and ``commissioning._check_match`` stays
+      satisfied at 1.0 (the cross-scale boot guard stays consistent).
+    - ``render_products``: the sensing capture reads only ``rgb`` + ``distance_to_image_plane``;
+      every other annotator (semantic, instance, motion, bbox) is pure render cost and is dropped.
+    - ``rtx_samples_per_pixel``: fewer path-tracing samples cut cost roughly linearly; the QR quiet
+      zone tolerates the added noise. The exact count is the integration renderer's; this is the
+      relative hint.
+
+    The resolution-adaptive decoder tile grid (``qr.FixedTileQR(render_scale=...)`` /
+    ``tile_origins``) remains the mechanism a reduced-resolution decode needs and is kept intact for
+    any camera a future native run proves safe below 1.0; it does not by itself lift the native
+    px/module floor. The speedup under ``fast`` comes from the non-decode render cost, which the
+    native lane measures.
+    """
+    read = ['rgb', 'distance_to_image_plane']
+    return {
+        'full': dict(render_scale=1.0, full_res_supports=DECODE_SUPPORTS, render_products=read,
+                     rtx_samples_per_pixel='default',
+                     description='decode-grade reference; every camera at 1.0 (default).'),
+        'fast': dict(render_scale=0.6, full_res_supports=DECODE_SUPPORTS, render_products=read,
+                     rtx_samples_per_pixel='reduced',
+                     description='0.6 on the non-decode cameras (mapper/nav/arm) only; every '
+                                 'QR-decode support camera (source, shelf, cart) stays at 1.0 '
+                                 '(native px/module floor), plus minimal products and reduced '
+                                 'sampling; opt in per run.'),
+    }
+
+
+def preset_render_scale(name):
+    """Resolve a render-preset name to its NON-decode ``render_scale`` (mapper/nav/arm product
+    scale). The QR-decode support cameras (``DECODE_SUPPORTS``) are NOT scaled by this -- they are
+    pinned to 1.0 in both commission and mission (native px/module floor; see ``render_presets``),
+    so a decode baseline and the decode mission render share one scale (1.0) and
+    ``commissioning._check_match`` stays satisfied."""
+    presets = render_presets()
+    if name not in presets:
+        raise ValueError(f'unknown render preset {name!r}; choose one of {sorted(presets)}')
+    return float(presets[name]['render_scale'])
+
+
+def preset_full_res_supports(name):
+    """The decode-grade support names a preset pins to render_scale 1.0 (``DECODE_SUPPORTS``)."""
+    presets = render_presets()
+    if name not in presets:
+        raise ValueError(f'unknown render preset {name!r}; choose one of {sorted(presets)}')
+    return tuple(presets[name]['full_res_supports'])
 
 
 def marker_module_grid(sku):
@@ -309,6 +477,12 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
         UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
     paths = {}
     for name,item in config['cameras'].items():
+        # Robot-mounted cameras (e.g. the eye-in-hand wrist camera, parent restock_camera_wrist) are
+        # authored on the MOBILE ROBOT asset (twin.mobile_assets.author_wrist_camera), not into the
+        # store/cart stage this function populates. Skip any camera whose parent is not a supplied
+        # store/cart frame.
+        if item['parent'] not in parent_paths:
+            continue
         camera = UsdGeom.Camera.Define(stage,path(item['parent'],name))
         transform(camera.GetPrim(),usd_camera_transform(item['parent_from_optical']))
         k = Intrinsics(**item['intrinsics'])
@@ -371,15 +545,18 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
                 edge = np.linalg.norm(np.roll(corners.reshape(4,2),-1,axis=0)-corners.reshape(4,2),axis=1)
                 half = marker['side_m']*pixels.shape[0]/edge.mean()/2
                 grid = marker_module_grid(marker['id'])
-                if index == 1:
-                    # The paired shelf markers are mirror-positioned about the camera's
-                    # optical axis, so they render under opposite perspective shear. cv2's
-                    # finder-pattern locator reads the near marker's shear but not the far
-                    # one's, so the far marker (index 1) would not decode while index 0 did.
-                    # A QR is decode-invariant under a 180 deg in-plane rotation, so spinning
-                    # only the far grid (identical footprint, same SKU) reorients its finder
-                    # patterns into the shear cv2 reads. Mount this fiducial rotated 180 deg.
-                    grid = np.rot90(grid, 2)
+                # Per-marker in-plane grid rotation is a DESIGN INPUT (`grid_rot_quarters`,
+                # units of 90 deg), not a hardcoded index special-case. A QR is decode-invariant
+                # under any 90 deg in-plane rotation, so the mounted rotation only reorients the
+                # finder patterns relative to the view's perspective shear. The two shelf markers
+                # are now a same-side (non-mirror) pair viewed under the SAME readable shear, so
+                # both decode at the SAME mounted rotation -- which `register_marker`'s rigid fit
+                # requires (it pairs each marker's TL,TR,BR,BL to one model, so a per-marker flip
+                # would 180-roll one marker's decoded corners and corrupt the fit). See the
+                # support() shelf layout and data/sim-restock-stations-v1/report.md.
+                rot = int(marker.get('grid_rot_quarters', 0)) % 4
+                if rot:
+                    grid = np.rot90(grid, rot)
                 white_quad,black_quads = marker_geometry_quads(grid,half)
                 white = quad_mesh(base,[white_quad],.0002,marker['parent_from_marker'])
                 # Passive diffuse white (NO emissive): the lamp lights the support now, and

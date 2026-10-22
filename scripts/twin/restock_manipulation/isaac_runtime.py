@@ -1,4 +1,6 @@
 """Assembly for integration's booted Isaac loop. No independent GPU launch."""
+import time
+from ..restock_camera.freshness import require_fresh
 from .cad_tool import inspect_tool, NativePanelContact
 from .controller import TransferController
 from .isaac_motion import build_cad_planner, IsaacCadMotion
@@ -77,6 +79,8 @@ class CadRestockRuntime:
                 elapsed = dt if self.last_sensor_stamp < 0 else simulation_time-self.last_sensor_stamp
                 self.latest = c.step(elapsed, packet)
                 self.last_sensor_stamp = simulation_time
+                if packet.valid_until_steady is not None and self.latest.status!='failed':
+                    require_fresh(packet.valid_until_steady,time.monotonic)
                 for command in self.latest.controls:
                     if command['kind'] == 'gripper':
                         self.contact.command(command['enabled'])

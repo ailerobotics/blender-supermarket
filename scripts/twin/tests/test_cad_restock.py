@@ -5,7 +5,8 @@ from types import SimpleNamespace as NS
 import numpy as np
 import pytest
 
-from scripts.twin.restock_manipulation.cad_tool import CadTool, ARM_JOINTS, TINE_JOINTS, author_native_gripper
+from scripts.twin.restock_manipulation.cad_tool import (CadTool, ARM_JOINTS, TINE_JOINTS,
+    author_native_gripper, SIM_MAX_GRIP_DISTANCE, REAL_MAX_GRIP_DISTANCE)
 from scripts.twin.restock_manipulation.isaac_motion import IsaacCadMotion
 from scripts.twin.restock_manipulation.types import ProductProfile, Observation
 
@@ -44,12 +45,32 @@ def test_native_authoring_never_selects_or_moves_payload():
     grip = stage.GetPrimAtPath(path)
     points = grip.GetRelationship('isaac:attachmentPoints').GetTargets()
     assert len(points) == 4 and grip.GetTypeName() == 'IsaacSurfaceGripper'
+    # retryInterval must span the slow (time-dilated) contact descent: the mission enables suction
+    # ONCE at descent start, so a short window expires before the seals reach the carton and never
+    # re-commands (the run-145 in-mission no-latch). 0 abandons the close in-step.
+    assert grip.GetAttribute('isaac:retryInterval').Get() >= 1000.
     for p in points:
         joint = UsdPhysics.Joint(stage.GetPrimAtPath(p))
+        # body1 stays EMPTY (the gripper never pre-selects a payload); the plugin records the
+        # grip on its own grippedObjects relationship, so a world-frame localPos1 is authored.
         assert not joint.GetBody1Rel().GetTargets()
-        assert joint.GetJointEnabledAttr().Get() is False
+        assert joint.GetLocalPos1Attr().Get() is not None
+        # The seal joint must be ENABLED, else PhysX never instantiates it and the plugin logs
+        # "has no joint at attachment point" and never latches (data/surface-gripper-latch-v1).
+        assert joint.GetJointEnabledAttr().Get() is True
         assert joint.GetLocalPos0Attr().Get()[2] == pytest.approx(.272034)
         assert joint.GetExcludeFromArticulationAttr().Get()
+        # Cup standoff scales with the gate so the widened gap actually seals (.5*max_gap).
+        assert joint.GetPrim().GetAttribute('isaac:clearanceOffset').Get() == pytest.approx(.5 * SIM_MAX_GRIP_DISTANCE)
+        # Shear/tilt locked, forward/suction axis a compliant stroke (not a rigid weld) that also
+        # scales with the gate (.8*max_gap); widening the gate alone does not seal.
+        tz = UsdPhysics.LimitAPI(joint.GetPrim(), 'transZ')
+        assert tz.GetLowAttr().Get() == pytest.approx(0.) and tz.GetHighAttr().Get() == pytest.approx(.8 * SIM_MAX_GRIP_DISTANCE)
+        tx = UsdPhysics.LimitAPI(joint.GetPrim(), 'transX')
+        assert tx.GetLowAttr().Get() > tx.GetHighAttr().Get()
+    # Sim fidelity relaxation (real-rig reach untouched): the gate is the widened window.
+    assert SIM_MAX_GRIP_DISTANCE > REAL_MAX_GRIP_DISTANCE
+    assert grip.GetAttribute('isaac:maxGripDistance').Get() == pytest.approx(SIM_MAX_GRIP_DISTANCE)
     assert stage.GetPrimAtPath('/Payload').GetAttribute('xformOp:translate').Get() == before
     with pytest.raises(ValueError, match='overwrite'):
         author_native_gripper(stage, tool=tool_fixture(), tool0_path='/Robot/Wrist/Tool0',
@@ -182,8 +203,9 @@ def test_rendered_qr_and_depth_are_actual_inputs(monkeypatch):
         return isaac_sensors.CameraContext(transform,now,'park1',
             (isaac_sensors.SlotView.from_support('rollwagen',view,np.ones(depth.shape,bool)),),True)
     profile = ProductProfile('carton',(.3,.2,.1),(1,0,0,0), tcp_surface_offset=.0025)
+    clock=[100.]
     sensor = isaac_sensors.IsaacCartonSensors(camera, pose_bridge_root='fixture-only',
-        profiles={'carton':profile}, context_provider=context)
+        profiles={'carton':profile}, context_provider=context,steady_clock=lambda:clock[0])
     motion = NS(parked=lambda:True, joint_positions=lambda:(0.,)*6,
                 collision_time=2., observe_source=lambda o:None)
     packet = sensor.capture(2.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
@@ -192,8 +214,12 @@ def test_rendered_qr_and_depth_are_actual_inputs(monkeypatch):
     assert packet.observations[0].pose[2] == pytest.approx(.3)
     assert not packet.target.clear and packet.target.free_dimensions[2] == 0
     assert sensor.sensed_target_bboxes[0]['source'] == 'sensor_pose_registered_catalog_volume'
-    with pytest.raises(ValueError, match='monotonic|new synchronized'):
-        sensor.capture(2.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
+    # Stride-paced re-presentation of this exact fresh frame (same id/stamp/pixels, still inside the
+    # 0.5 s window) is CONSUMED, not refused: the decoded observation is reused and the context
+    # provider / tracker is not re-run (so no monotonic-prepare refusal). A genuinely new or stale
+    # frame below still takes the full path and the freshness gate still fires (see run 6).
+    reused = sensor.capture(2.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
+    assert len(reused.observations) == 1 and reused.observations[0].sku == 'carton'
     # Remove identity pixels: no SKU appears from known scene/profile metadata.
     frame['rendering_frame'] = 3
     frame['rendering_time'] = motion.collision_time = 3.
@@ -211,19 +237,109 @@ def test_rendered_qr_and_depth_are_actual_inputs(monkeypatch):
     sensor.profiles = {}
     with pytest.raises(ValueError,match='unknown or undecoded'):
         sensor.capture(5.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
+    # Native acquisition expires while registration/clearance processing runs,
+    # although the caller's simulation `now` remains fixed.
+    frame.update(rendering_frame=6,rendering_time=6.,rgb=np.full_like(rgb,255),
+                 acquired_steady=100.,steady_domain='fixture-process')
+    motion.collision_time=6.
+    def delayed_context(frame,now):
+        result=context(frame,now)
+        clock[0]+=.501
+        return result
+    sensor.context_provider=delayed_context
+    with pytest.raises(ValueError,match='freshness expired'):
+        sensor.capture(6.,'rollwagen','rollwagen',motion,NS(read=lambda:False))
+    assert sensor.evidence==() and sensor.sensed_target_bboxes==()
 
 
-def test_native_partial_latch_releases_without_weld_fallback():
+def test_native_read_is_pure_observer_keyed_on_gripped_objects():
+    # read() is a PURE OBSERVER that never mutates the gripper, and it keys the hold on the
+    # plugin's grippedObjects list (exactly one attached body), not on status==Closed. Measured
+    # natively (data/sim-restock-stations-v1 contactgap sweep): a prior version open_gripper()-ed
+    # any object seen while status != Closed, aborting the normal Closing->Closed seal on every
+    # poll of the slow contact descent (the gripper-seal-fail blocker); and the plugin's status
+    # flickers Closing<->Closed tick to tick even while the carton is provably gripped and the pad
+    # is frozen, so keying on Closed flickered False and would false-trip the lost-grasp gate.
     from scripts.twin.restock_manipulation.cad_tool import NativePanelContact
-    adapter = NativePanelContact.__new__(NativePanelContact)
-    adapter.path, adapter.points, adapter.closed_status = '/Grip', ['a','b','c','d'], 'closed'
-    opened = []
-    adapter.api = NS(get_gripper_status=lambda p:'closed', get_gripped_objects=lambda p:['/Box'],
-                     open_gripper=lambda p:opened.append(p))
-    joint = lambda p:NS(GetRelationship=lambda n:NS(GetTargets=lambda:['/Box'] if p != 'd' else []),
-                       GetAttribute=lambda n:NS(Get=lambda:True))
-    adapter.stage = NS(GetPrimAtPath=joint)
-    assert adapter.read() is False and opened == ['/Grip']
+    def adapter(status, objects):
+        a = NativePanelContact.__new__(NativePanelContact)
+        a.path, a.closed_status, a.open_status, a.opened = '/Grip', 'closed', 'open', []
+        a.api = NS(get_gripper_status=lambda p: status, get_gripped_objects=lambda p: objects,
+                   open_gripper=lambda p: a.opened.append(p))
+        return a
+    # One attached body while the gripper is closing OR closed is a genuine hold (both lift the
+    # carton natively); read() reports held and never touches the gripper.
+    for held in (adapter('closed', ['/Box']), adapter('closing', ['/Box'])):
+        assert held.read() is True and held.opened == []
+    # A multi-object grab is ambiguous (not held); a released gripper still listing a stale object
+    # is not held (status Open guard). Neither mutates the gripper.
+    for other in (adapter('closed', ['/Box', '/Other']), adapter('open', ['/Box']), adapter('open', [])):
+        assert other.read() is False and other.opened == []
+
+
+def test_attach_fallback_weld_is_a_shared_stage_fact_read_by_any_instance():
+    # run-213: the mission welds on the IsaacPort NativePanelContact but /sensors is read off the
+    # build_sensing instance -- a SEPARATE object wrapping the same gripper. Keying held on this
+    # instance's own _fallback_body made the capture miss a weld authored on its sibling, so s.contact
+    # stayed False ~7 s after a persisting weld and the contact phase cap-faulted. read() now ALSO
+    # honours the shared USD FixedJoint at <gripper>/sim_attach_fallback, so any observer of the
+    # gripper reports the hold -- while the native (no-fallback) path stays a pure per-instance observer.
+    from scripts.twin.restock_manipulation.cad_tool import NativePanelContact
+    joint = '/Grip/sim_attach_fallback'
+    def sibling(fallback, has_joint):
+        a = NativePanelContact.__new__(NativePanelContact)
+        a.path, a.open_status = '/Grip', 'open'
+        a.api = NS(get_gripper_status=lambda p: 'open', get_gripped_objects=lambda p: [])
+        a._fallback_body, a._sim_attach_fallback = None, fallback
+        a.stage = NS(GetPrimAtPath=lambda p, present=has_joint: (object() if (p == joint and present) else None))
+        return a
+    # Fallback on + the shared weld prim present: held, even though THIS instance never welded
+    # (_fallback_body is None) and the native gripper is Open with nothing gripped.
+    assert sibling(fallback=True, has_joint=True).read() is True
+    # Fallback on but no weld authored yet: not held (no fabricated hold).
+    assert sibling(fallback=True, has_joint=False).read() is False
+    # Fallback OFF (real rig / default): the shared prim is ignored -- the native path is untouched.
+    assert sibling(fallback=False, has_joint=True).read() is False
+
+
+def test_seal_probe_measures_status_grip_and_geometry():
+    # The seal diagnostic (firstmate key gripper-seal-fail) must surface the plugin's measured
+    # state -- status, gripped-object count + paths, and the seal geometry -- so an in-mission
+    # no-latch has a number. probe() keys off the plugin api for status/grip (always present) and
+    # computes each seal's live world pose + the suction-axis direction from the authored joints;
+    # the raycast gap is best-effort and degrades to an error string without a live PhysX scene.
+    Usd = pytest.importorskip('pxr.Usd')
+    from pxr import UsdGeom, UsdPhysics
+    from scripts.twin.restock_manipulation.cad_tool import NativePanelContact, SIM_MAX_GRIP_DISTANCE
+    stage = Usd.Stage.CreateInMemory()
+    body = UsdGeom.Xform.Define(stage, '/Robot/Wrist').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(body)
+    UsdGeom.Xform.Define(stage, '/Robot/Wrist/Tool0')
+    path = author_native_gripper(stage, tool=tool_fixture(), tool0_path='/Robot/Wrist/Tool0',
+                                 body_path='/Robot/Wrist', gripper_path='/Robot/Grip')
+    grip = stage.GetPrimAtPath(path)
+    c = NativePanelContact.__new__(NativePanelContact)
+    c.stage, c.path, c._diag = stage, path, False
+    c.enabled = True
+    c.points = list(grip.GetRelationship('isaac:attachmentPoints').GetTargets())
+    c.max_gap = float(grip.GetAttribute('isaac:maxGripDistance').Get())
+    c.api = NS(get_gripper_status=lambda p: 'StatusClosing',
+               get_gripped_objects=lambda p: ['/World/Carton', '/World/Neighbor'])
+    info = c.probe()
+    # Plugin-sourced facts are always present and exact.
+    assert info['status'] == 'StatusClosing'
+    assert info['gripped_n'] == 2 and info['gripped'] == ['/World/Carton', '/World/Neighbor']
+    assert info['enabled'] is True
+    assert c.max_gap == pytest.approx(SIM_MAX_GRIP_DISTANCE)
+    # Four seal world poses and a unit suction-axis direction are computed from the authored joints.
+    assert len(info['seals_world']) == 4 and all(len(s) == 3 for s in info['seals_world'])
+    assert len(info['forward_world']) == 3
+    # With an identity-rotation pad the suction axis is body +Z (world up), i.e. 180 deg from down.
+    assert info['forward_world'] == pytest.approx([0., 0., 1.], abs=1e-6)
+    assert info['tilt_deg_from_down'] == pytest.approx(180., abs=1e-3)
+    # No live PhysX scene in a CPU test: the gap raycast degrades to a recorded error, never a crash.
+    assert 'raycast_err' in info and 'min_gap_mm' not in info
+    assert c.last_probe is info
 
 
 def test_new_obstacle_map_stops_rejected_active_plan():
@@ -286,3 +402,89 @@ def test_wall_policy_uses_current_station_poses_and_rejects_oversized_case():
     with pytest.raises(ValueError,match='three dimensions'):
         policy.build(source,replace(target,free_dimensions=(.5,.45,.28)),profile)
     assert source.unit_kind == 'handling_unit' and source.retail_quantity is None
+
+
+def test_sim_cart_place_policy_offsets_place_standoff_toward_the_robot():
+    # firstmate 282 opt 3 (sim-only): keep the wall policy's PICK + place pose/orientation, but
+    # re-chain preplace/retreat to offset TOWARD the robot (ur_base_link origin) instead of the wall
+    # policy's outward standoff, so the cart place is cuMotion-reachable. Fake wall policy returns a
+    # place 1.2 m out on +x with a far (outward) preplace/retreat; the sim policy must keep the pick
+    # + place and pull preplace/retreat back toward the origin.
+    from scripts.twin.restock_manipulation.wall_policy import SimCartPlacePolicy
+    base = {'approach': (0.0, 1.1, 0.4, .5, .5, .5, .5), 'contact': (0.0, 1.1, 0.26, .5, .5, .5, .5),
+            'lift': (0.0, 1.1, 0.4, .5, .5, .5, .5), 'place': (1.2, 0.0, 0.5, -.707, 0., 0., -.707),
+            'preplace': (1.5, 0.0, 0.53, -.707, 0., 0., -.707), 'retreat': (1.5, 0.0, 0.5, -.707, 0., 0., -.707)}
+    wall = NS(build=lambda s, t, p: dict(base))
+    policy = SimCartPlacePolicy(wall, lift=.03)
+    prof = ProductProfile('case', (.6, .4, .16), (.5, .5, .5, .5), tcp_surface_offset=.0025,
+                          grasp_mode='side', approach=.18)
+    plan = policy.build(None, None, prof)
+    # pick poses preserved from the wall policy
+    assert plan['approach'] == base['approach'] and plan['lift'] == base['lift']
+    # place POSITION preserved; orientation SAGITTAL-MIRRORED (x,z negated) so the wrist reaches -y
+    mq = (0.707, 0.0, 0.0, -0.707)          # mirror of base place quat (-.707,0,0,-.707)
+    assert plan['place'][:3] == base['place'][:3]
+    assert plan['place'][3:] == mq
+    # retreat pulled 0.18 m TOWARD the origin along +x (place x 1.2 -> 1.02), z == place z, mirrored quat
+    assert plan['retreat'][0] == pytest.approx(1.02) and plan['retreat'][1] == pytest.approx(0.0)
+    assert plan['retreat'][2] == pytest.approx(plan['place'][2])
+    assert plan['retreat'][3:] == mq
+    # preplace == retreat + lift up; both far UNDER the outward wall standoff (1.5 -> 1.02)
+    assert plan['preplace'][0] == pytest.approx(1.02)
+    assert plan['preplace'][2] == pytest.approx(plan['retreat'][2] + .03)
+    assert plan['preplace'][3:] == mq
+
+
+def test_sim_attach_fallback_gating_default_off_and_contact_gated():
+    """The labelled sim attach-fallback (firstmate run-202) must be a no-op by default, must weld ONLY
+    on a measured near-zero flush contact with suction on, must prefer the native latch, and must
+    release on suction off. The weld itself needs USD; here we stub it to test the gating on CPU."""
+    pytest.importorskip('pxr')   # fm388 carry/release collision-toggle imports pxr -> run under usd-core
+    from scripts.twin.restock_manipulation.cad_tool import (NativePanelContact, SIM_ATTACH_CONTACT_MM,
+                                                            SIM_ATTACH_FLUSH_DEG)
+    def bridge(*, enabled, fallback, gripped=(), status=None, probe=None):
+        a = NativePanelContact.__new__(NativePanelContact)
+        a.path, a.closed_status, a.open_status = '/Grip', 'closed', 'open'
+        # The fallback reads suction from the shared plugin STATUS (!= Open), not self.enabled; default
+        # the status from the suction intent unless a case sets it explicitly.
+        if status is None:
+            status = 'closed' if enabled else 'open'
+        a.enabled, a._sim_attach_fallback = enabled, fallback
+        a._fallback_body = a._fallback_joint = None
+        a.last_probe = probe
+        a.probe = lambda: probe          # fallback probes fresh each tick; stub it on CPU
+        a.api = NS(get_gripper_status=lambda p: status, get_gripped_objects=lambda p: list(gripped))
+        a._welds, a._releases = [], []
+        a._fallback_weld = lambda body: (a._welds.append(body),
+                                         setattr(a, '_fallback_body', body), setattr(a, '_fallback_joint', '/Grip/j'))
+        return a
+    contact = {'min_gap_mm': 0.1, 'pad_vs_surface_deg': 0.2,
+               'raycast': [['/World/Carton', 0.1]] * 4}
+    # default OFF -> never ready, never welds even at perfect contact
+    a = bridge(enabled=True, fallback=False, probe=contact)
+    assert a.sim_attach_contact_ready() is False
+    a.sim_attach_weld(); assert a._welds == []
+    # ON + suction on + measured <=0.5 mm flush contact -> ready; weld attaches the contacted carton
+    a = bridge(enabled=True, fallback=True, probe=contact)
+    assert a.sim_attach_contact_ready() is True
+    a.sim_attach_weld(); assert a._welds == ['/World/Carton'] and a.read() is True
+    # ON but the gap is outside the contact gate -> not ready
+    far = dict(contact, min_gap_mm=SIM_ATTACH_CONTACT_MM + 1.0)
+    a = bridge(enabled=True, fallback=True, probe=far)
+    assert a.sim_attach_contact_ready() is False
+    # ON but the pad is not flush -> not ready
+    tilt = dict(contact, pad_vs_surface_deg=SIM_ATTACH_FLUSH_DEG + 1.0)
+    a = bridge(enabled=True, fallback=True, probe=tilt)
+    assert a.sim_attach_contact_ready() is False
+    # ON, already natively latched -> prefer the plugin, not ready
+    a = bridge(enabled=True, fallback=True, gripped=['/World/Carton'], status='closed', probe=contact)
+    assert a.sim_attach_contact_ready() is False and a._welds == []
+    # suction off -> not ready and releases an existing weld
+    a = bridge(enabled=False, fallback=True, probe=contact)
+    a._fallback_body, a._fallback_joint = '/World/Carton', '/Grip/j'
+    # Release now also restores the carton/tool colliders (fm388 collision-toggle); stub the stage reads
+    # it makes (no CollisionAPI prims on CPU -> a no-op toggle) so the weld-joint removal path is exercised.
+    a.stage = NS(RemovePrim=lambda p: a._releases.append(p),
+                 GetPrimAtPath=lambda p: None, Traverse=lambda: [])
+    assert a.sim_attach_contact_ready() is False
+    assert a._fallback_body is None and a._releases == ['/Grip/j']

@@ -180,6 +180,22 @@ class TemporalTests(unittest.TestCase):
         self.gate.slice=self.snapshot
         self.assertEqual(self.check(TrainState(7,0,0,0)),'outside_navigation_map')
 
+    def test_trust_unknown_passes_unknown_but_still_stops_on_occupied(self):
+        # fm437: on a static-validated authored lane, trust_unknown lets the swept sweep pass UNOBSERVED
+        # (unknown) cells (run-327b's outbound first-turn 'unknown_navigation_cell'), but a POSITIVE
+        # (occupied) return STILL stops the tow. Reproduces the live refusal + proves the fix + the safety.
+        def check(trust):
+            return self.gate.check_train([TrainState(0,0,0,0)],MobileSpec(),.10,self.clock[0],
+                                         trust_unknown=trust)
+        for unknown_value in (-1000.,math.nan):             # sentinel and non-finite both are 'unknown'
+            self.gate.slice=replace(self.snapshot,distances=(unknown_value,)*(240*160))
+            self.assertEqual(check(False),'unknown_navigation_cell')   # legacy: unknown blocks
+            self.assertEqual(check(True),'')                           # trusted: unknown is free
+        for occupied_value in (0.,-.1):                     # a genuine positive obstacle return
+            self.gate.slice=replace(self.snapshot,distances=(occupied_value,)*(240*160))
+            self.assertEqual(check(False),'occupied_navigation_cell')
+            self.assertEqual(check(True),'occupied_navigation_cell')   # trust_unknown NEVER waives occupied
+
     def test_independent_cart_sweep_and_interior_unknown(self):
         aligned=TrainState(0,0,0,0);turned=TrainState(0,0,0,1.)
         # Search a few cart-side cells to obtain a geometric counterexample,

@@ -7,7 +7,7 @@
     "note": "Spawn clearance is the planar (XY) distance from the pedestal spot to the nearest fixture/product/wall footprint, from a 0.05 m occupancy grid; walls bound the domain (a wall ring's bbox would fill the floor) with a 0.30 m edge margin."
   },
   "facts": {
-    "store_usd": "/home/manishsaini/workspaces/blender-supermarket/export/supermarket.usdc",
+    "store_usd": "~/workspaces/blender-supermarket/export/supermarket.usdc",
     "up_axis": "Z",
     "meters_per_unit": 1.0,
     "default_prim": "/Supermarket",

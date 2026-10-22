@@ -148,7 +148,37 @@ class SelfSensingTests(unittest.TestCase):
     def test_invalid_self_roots_and_mask_rejected(self):
         for path in ('/','relative','/Robot/../Other'):
             with self.assertRaises(ValueError):sensor(BoxQuery([]),self_paths=(path,))
+            with self.assertRaises(ValueError):           # coupled_self_paths validated identically
+                IsaacRangeSensor(lambda:(0,0,0),query=BoxQuery([]),self_paths=('/Robot',),
+                                 coupled_self_paths=(path,))
         with self.assertRaises(ValueError):Scan(0,(1,2,3),0,1,10,unknown=(True,))
+
+    def test_coupled_cart_is_self_only_while_coupled(self):
+        # The towed cart root is rig self-geometry ONLY while coupled: masked UNKNOWN when coupled
+        # (no phantom rear obstacle), a real obstacle when decoupled. The port toggles `.coupled`.
+        state=TrainState(-2.971786,5.992829,-3.096399,-2.294942)
+        cart_boxes=[b for b in rig_boxes(state) if b[0].startswith('/Cart/')]
+        robot,_=state.bodies(MobileSpec());x,y=robot.point(.46)
+        def make():
+            return IsaacRangeSensor(lambda:(x,y,state.yaw),query=BoxQuery(cart_boxes),
+                                    self_paths=('/Robot',),coupled_self_paths=('/Cart',),
+                                    sensor_to_base=(.46,0,0),heights=(1.,))
+        decoupled=make()
+        self.assertFalse(decoupled.coupled)               # default: cart NOT self
+        scan_d=decoupled.read(.1)
+        self.assertGreater(len(scan_d.points(state.pose)),0)   # cart read as a real obstacle
+        self.assertEqual(sum(scan_d.unknown),0)
+        coupled=make();coupled.coupled=True
+        scan_c=coupled.read(.1)
+        self.assertEqual(scan_c.points(state.pose),())         # cart masked -> no phantom obstacle
+        self.assertGreater(sum(scan_c.unknown),0)
+        # workspace_self masks the SAME cart paths while the parked robot places onto it in collect,
+        # WITHOUT asserting coupling (run-217 obstacle_stop fix). Decoupled + workspace => cart is self.
+        ws=make();ws.workspace_self=True
+        self.assertFalse(ws.coupled)                           # not coupled: footprint stays uncoupled
+        scan_w=ws.read(.1)
+        self.assertEqual(scan_w.points(state.pose),())         # cart masked as work target
+        self.assertGreater(sum(scan_w.unknown),0)
 
     def test_cart_identity_tracks_independent_articulation(self):
         state=TrainState(-2.971786,5.992829,-3.096399,-2.294942)
@@ -165,6 +195,34 @@ class SelfSensingTests(unittest.TestCase):
             local_y=-dx*math.sin(cart.yaw)+dy*math.cos(cart.yaw)
             self.assertLessEqual(abs(local_x),MobileSpec().cart_length/2+1e-8)
             self.assertLessEqual(abs(local_y),MobileSpec().cart_width/2+1e-8)
+
+
+class CarrySelfMaskTests(unittest.TestCase):
+    """fm393: while carrying, near-field returns (the carry-fold arm/carton ring) are masked as self;
+    returns beyond the radius stay real obstacles. Off (radius 0 or carry_active False) => byte-identical."""
+    def _sensor(self, boxes, carry_self_radius):
+        # lidar at origin facing +x (yaw 0); heights pick the box's z=0.78.
+        return IsaacRangeSensor(lambda: (0.0, 0.0, 0.0), query=BoxQuery(boxes),
+                                self_paths=('/Robot',), heights=(0.78,), beams=8,
+                                carry_self_radius=carry_self_radius)
+
+    def test_near_ring_masked_only_while_carrying(self):
+        ring = [('/Store/clutter', (0.78, 0.0, 0.78), (0.05, 0.05, 0.1), 0.0)]  # non-self, 0.78 m ahead
+        # carry OFF (byte-identical): the near return is a real obstacle point
+        s_off = self._sensor(ring, 0.0); s_off.carry_active = True   # radius 0 => no masking even if active
+        self.assertGreater(len(s_off.read(.1).points((0, 0, 0))), 0)
+        s_default = self._sensor(ring, 0.85)                          # radius set but carry_active False
+        self.assertGreater(len(s_default.read(.1).points((0, 0, 0))), 0)
+        # carry ON with the radius: the 0.78 m ring return is masked (unknown), no obstacle point
+        s_on = self._sensor(ring, 0.85); s_on.carry_active = True
+        scan = s_on.read(.1)
+        self.assertEqual(scan.points((0, 0, 0)), ())
+        self.assertGreater(sum(scan.unknown), 0)
+
+    def test_far_obstacle_survives_carry_mask(self):
+        far = [('/Store/shelf', (1.20, 0.0, 0.78), (0.05, 0.05, 0.1), 0.0)]      # 1.2 m > 0.85 m radius
+        s = self._sensor(far, 0.85); s.carry_active = True
+        self.assertGreater(len(s.read(.1).points((0, 0, 0))), 0)                 # real avoidance intact
 
 
 if __name__=='__main__':unittest.main()

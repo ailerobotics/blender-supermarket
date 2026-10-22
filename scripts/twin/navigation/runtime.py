@@ -10,25 +10,38 @@ class SensorNavigation:
     The initial map pose belongs to MapLocalizer's declared deployment prior.
     Exceptions stop motion; a stale last-good pose is never reused as fresh data.
     """
-    def __init__(self,controller,wheel_odometry,localizer):
+    def __init__(self,controller,wheel_odometry,localizer,*,dynamic_layer=None):
         self.controller=controller
         self.wheels=wheel_odometry
         self.localizer=localizer
+        # Optional moving-obstacle layer (DynamicObstacleLayer). When attached AND
+        # the caller passes detections, its predicted swept cells are unioned into
+        # the sensed observation before gating. Absent -> the observation is
+        # untouched and the mission run is byte-identical.
+        self.dynamic_layer=dynamic_layer
         self.last_localized=None
 
-    def start(self,goal,coupled,*,goal_articulation=None):
-        # Forward the per-goal articulation tolerance to the inner controller so the
-        # NavigationBridge start(goal, coupled, goal_articulation=) contract holds.
-        if goal_articulation is None:
-            self.controller.start(goal,coupled)
-        else:
-            self.controller.start(goal,coupled,goal_articulation=goal_articulation)
+    def start(self,goal,coupled,*,goal_articulation=None,static_drive=False,carry_drive=False,
+              strict_xy_arrival=False):
+        # Forward the per-goal articulation tolerance + the reposition-leg drive flags + the grasp-critical
+        # strict XY arrival to the inner controller so the NavigationBridge start(..., static_drive=,
+        # carry_drive=, strict_xy_arrival=) contract holds.
+        kw={}
+        if goal_articulation is not None:
+            kw['goal_articulation']=goal_articulation
+        if static_drive:
+            kw['static_drive']=True
+        if carry_drive:
+            kw['carry_drive']=True
+        if strict_xy_arrival:
+            kw['strict_xy_arrival']=True
+        self.controller.start(goal,coupled,**kw)
 
     def cancel(self):
         return self.controller.cancel()
 
     def step(self,dt,wheel_angles,scan,*,now,coupled,arm_transport,articulation=0.0,
-             observed_space=None,temporal_map=None):
+             observed_space=None,temporal_map=None,detections=None):
         if self.controller.terminal:
             return self.controller.terminal
         try:
@@ -36,6 +49,12 @@ class SensorNavigation:
             localized=self.localizer.update(raw,scan)
             sensed=observation(scan,localized,coupled=coupled,
                                arm_transport=arm_transport,articulation=articulation)
+            # Fold tracked moving obstacles into the sensed returns (add-only: the
+            # layer never clears a raw return). Skipped entirely when no layer is
+            # attached or no detections are supplied, keeping the run byte-identical.
+            if self.dynamic_layer is not None and detections is not None:
+                self.dynamic_layer.update(detections,now)
+                sensed=self.dynamic_layer.apply(sensed)
             if observed_space is not None:
                 sensed=replace(sensed,observed_space=observed_space)
             if temporal_map is not None:

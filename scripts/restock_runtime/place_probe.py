@@ -97,6 +97,12 @@ def main():
     robot_xml = ET.parse(config['urdf']).getroot()
     movable = [j.get('name') for j in robot_xml.findall('joint') if j.get('type') != 'fixed']
     all_pos = [float(manifest.get(n, 0.0) or 0.0) for n in movable]
+    arm_idx = [movable.index(j) for j in JOINTS]   # positions of the 6 arm joints in `movable`
+
+    def set_arm(q):
+        """Set the published measured arm config (the stow start must match measured joints)."""
+        for i, v in zip(arm_idx, q):
+            all_pos[i] = float(v)
 
     rsp = subprocess.Popen(
         ['ros2', 'run', 'robot_state_publisher', 'robot_state_publisher', '--ros-args',
@@ -445,6 +451,57 @@ def main():
                 break
         log('place_plan_done', **{k: rec['place_plan'].get(k) for k in
             ('ik_reachable', 'planned', 'points', 'error_code')})
+
+        # ================= piece (2): VERIFY / RETURN =================
+        # ---- F. RELEASE: detach the carton (the controller's release phase) ----
+        # Reverse of the attach: MoveIt ApplyPlanningScene REMOVE of the attached object + the
+        # cuMotion AttachObject action with attach_object=False. Acknowledged = scene success +
+        # AttachObject SUCCEEDED; after this the carton is no longer in the robot collision body.
+        rec['release'] = {}
+        if rec['attach'].get('acknowledged'):
+            detached = AttachedCollisionObject()
+            detached.link_name = TCP
+            detached.object.id = 'restock_carried_unit'
+            detached.object.header.frame_id = FRAME
+            detached.object.operation = CollisionObject.REMOVE
+            req = ApplyPlanningScene.Request()
+            req.scene.is_diff = True
+            req.scene.robot_state.is_diff = True
+            req.scene.robot_state.attached_collision_objects = [detached]
+            sresp = wait_future(scene_cli.call_async(req), 10.0, beat=True)
+            rec['release']['scene_success'] = bool(sresp and sresp.success)
+            goal = AttachObject.Goal()
+            goal.attach_object = False
+            gh = wait_future(attach_cli.send_goal_async(goal), 10.0, beat=True)
+            if gh is not None and gh.accepted:
+                res = wait_future(gh.get_result_async(), 15.0, beat=True)
+                rec['release']['detach_status'] = None if res is None else int(res.status)
+                rec['release']['acknowledged'] = bool(res is not None and res.status == 4
+                                                      and rec['release'].get('scene_success'))
+            else:
+                rec['release']['acknowledged'] = False
+                rec['release']['reason'] = 'detach goal not accepted'
+        else:
+            rec['release']['acknowledged'] = False
+            rec['release']['reason'] = 'nothing attached to release'
+        log('release_done', **{k: rec['release'].get(k) for k in
+            ('scene_success', 'detach_status', 'acknowledged')})
+
+        # ---- G. RETURN-TO-TRANSPORT (stow): collision-planned joint goal back to transport ----
+        # The controller's 'stow' phase: RosMotionPort.begin_joint_goal(transport_joints), planned
+        # FROM the measured off-transport (post-retreat) config back TO transport. cuMotion requires
+        # the plan start to match the measured joints, so publish the lifted config as joint_states
+        # first, let it settle, then plan to transport against the shelf ESDF (carton released).
+        lifted = [q + 0.1 for q in transport]
+        set_arm(lifted)
+        pump(1.0, depth=True)
+        rec['return_to_transport'] = plan_joint_goal(transport, 'return-to-transport (stow)',
+                                                     start_q=lifted)
+        set_arm(transport)
+        log('return_done', **{k: rec['return_to_transport'].get(k) for k in
+            ('planned', 'points', 'error_code')})
+        rec['PASS_return'] = bool(rec['release'].get('acknowledged')
+                                  and rec['return_to_transport'].get('planned'))
 
         rec['PASS'] = bool(rec['nodes']['all_present'] and not rec['endpoints']['services_missing']
                            and not rec['endpoints']['actions_missing'] and rec['station']['ack_ready']

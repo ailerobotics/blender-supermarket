@@ -1,0 +1,41 @@
+{
+  "schema": "storevision.restock.job_plan/v1",
+  "generated_at": "2026-10-17T21:06:08+00:00",
+  "store_config": "demo-freshmart",
+  "sku": "juice_orange",
+  "quantity": 1,
+  "source": {
+    "location": "backstock_00",
+    "xyz": [
+      -5.73,
+      17.1,
+      0.6
+    ]
+  },
+  "destination": {
+    "shelf_id": "G3_back",
+    "slot_id": "G3_back_s2",
+    "slot_pose": {
+      "x": -3.05,
+      "y": 5.0200000000000005,
+      "z": 0.45,
+      "yaw": 0.0
+    }
+  },
+  "priority": 10.0,
+  "provenance": {
+    "planner": "storevision.restock",
+    "task_id": "restock-one",
+    "mission_id": "restock-one",
+    "robot_id": "ur10-tray-01",
+    "task_kind": "low_stock",
+    "est_total_s": 83.1,
+    "tray_mode": true,
+    "approval": {
+      "state": "approved",
+      "required": false,
+      "by": "policy:auto",
+      "policy": "auto_approve"
+    }
+  }
+}

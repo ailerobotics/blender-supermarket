@@ -45,6 +45,9 @@ __pycache__/
 .venv-usd/
 .venv/
 
+# Reproducible CPU report embeds; source/evidence/generator remain versioned.
+/data/mobile-restock-v2/report.html
+
 # Throwaway venv for the offline scenario-generator tests + dataset validator:
 #   uv venv --python 3.12 .venv-scenarios && uv pip install --python .venv-scenarios numpy pillow pytest
 .venv-scenarios/
@@ -54,3 +57,7 @@ __pycache__/
 # scripts/scenarios/tests/fixtures/ is deliberately NOT ignored.
 /datasets/
 /store-scenarios/
+
+# Task-owned CPU venv for the behaviour-tree layer tests (scripts/twin/restock/bt):
+#   python3 -m venv .venv-bt && .venv-bt/bin/pip install py_trees
+.venv-bt/

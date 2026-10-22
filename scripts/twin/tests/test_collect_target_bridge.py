@@ -1,0 +1,237 @@
+"""CollectTargetBridge: fixed-source target -> host Sensors packet + reprojected arm box.
+
+The Isaac-only live arm pose read (`_arm_base_from_camera`) is stubbed; everything else
+(freshness/parked gates, packet construction, bbox reprojection) is exercised on CPU.
+"""
+import numpy as np
+import pytest
+
+import math
+from scripts.twin.restock_manipulation.isaac_factory import (
+    CollectTargetBridge, survive_collect_occlusion, base_parked_by_displacement,
+    _ArticulationParked, hold_last_good_collision)
+from scripts.twin.restock_manipulation.types import ProductProfile
+from scripts.twin.restock_camera.source_target import SourceTarget
+
+
+class NS:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def _bridge(provider):
+    cam = NS(get_current_frame=lambda: {'distance_to_image_plane': np.zeros((540, 960))},
+             get_intrinsics_matrix=lambda: np.array([[1500., 0, 480.], [0, 1500., 270.], [0, 0, 1.]]))
+    b = CollectTargetBridge(stage=None, arm_camera=cam, arm_camera_path='/arm', base_path='/base',
+                            profiles={'juice_orange': ProductProfile(sku='juice_orange',
+                                      dimensions=(.6, .4, .16), tcp_quaternion=(0., 0., 0., 1.))},
+                            motion=NS(parked=lambda: True, collision_time=9.0), contact=NS(read=lambda: False),
+                            joints=lambda: (0.,) * 6, source_location='backstock_00')
+    b._arm_base_from_camera = lambda: np.eye(4)      # stub the Isaac XformCache read
+    b.provider = provider
+    return b
+
+
+def _target(stamp=1.0, valid_until_steady=None):
+    return SourceTarget(sku='juice_orange', pose_station=(0., 0., 1.5, 0., 0., 0., 1.),
+                        stamp=stamp, provenance={'camera_id': 'source', 'source': 'sensor'},
+                        valid_until_steady=valid_until_steady)
+
+
+def test_sensed_target_produces_a_sensor_packet_and_reprojected_box():
+    b = _bridge(lambda now: _target(stamp=now))
+    packet = b.capture(1.0, 'backstock_00', 'rollwagen')
+    assert packet is not None
+    assert len(packet.observations) == 1
+    obs = packet.observations[0]
+    assert obs.source == 'sensor' and obs.sku == 'juice_orange' and obs.location == 'backstock_00'
+    assert obs.frame == 'ur_base_link'
+    assert packet.target is None and packet.parked is True
+    # the reprojected arm box is published at the collect location
+    assert len(b.sensed_target_bboxes) == 1
+    box = b.sensed_target_bboxes[0]
+    assert box['location'] == 'backstock_00' and len(box['roi']) == 4
+
+
+def test_held_acquisition_deadline_is_threaded_onto_the_host_packet():
+    # Under the sensing gate the held source target carries a fresh sim-clock valid_until_steady;
+    # the bridge must put it on the host Sensors so the contact/grasp suction guard can fire (run-140).
+    b = _bridge(lambda now: _target(stamp=now, valid_until_steady=now + 18.5))
+    packet = b.capture(1.0, 'backstock_00', 'rollwagen')
+    assert packet is not None and packet.valid_until_steady == 1.0 + 18.5
+    # Not suspended (no deadline on the target): the host packet carries none -- byte-identical.
+    b2 = _bridge(lambda now: _target(stamp=now))
+    assert b2.capture(1.0, 'backstock_00', 'rollwagen').valid_until_steady is None
+
+
+def test_ground_truth_collect_capture_stamps_the_acquisition_deadline():
+    # fm488 (cold collect-only failure): the GROUND-TRUTH collect path has no camera framing the pick to
+    # thread a source deadline, so _capture_ground_truth_collect must itself stamp a non-None sim-clock
+    # valid_until_steady (now + window) on EVERY packet -- pre-grasp and after the carton is held. Else the
+    # contact gripper command is refused 'missing acquisition deadline for gripper command' (isaac_ros_graph)
+    # and the collect aborts before the arm moves. This pins the stamp at the SOURCE (the controller guard in
+    # test_restock_manipulation feeds a synthetic fresh deadline, so it cannot catch a revert here).
+    from scripts.twin.restock_manipulation.types import Target
+    b = _bridge(lambda now: None)
+    b.collect_ground_truth = True                      # RESTOCK_COLLECT_GROUND_TRUTH path (source != cart)
+    b._ground_truth_target = lambda now: NS(sku='juice_orange', pose_station=(0., 0., 1.5, 0., 0., 0., 1.))
+    b._reproject = lambda target: None
+    b._map_pose_to_base = lambda pose: tuple(float(v) for v in pose)   # pxr-agnostic (GPU-only map->base yaw)
+    b._cart_target = lambda now, src: Target(observation_id='cart', source='ground_truth',
+                                             simulation_time=now, location='rollwagen',
+                                             pose=(0., 0., 1.0, 0., 0., 0., 1.), clear=True,
+                                             free_dimensions=(.6, .4, .16), frame='ur_base_link')
+    b._carton_center_station = lambda: None
+    b._carton_attached = lambda: False                 # pre-grasp: the carton is not yet held (contact moment)
+    pre = b.capture(5.0, 'backstock_00', 'rollwagen')  # dispatches to _capture_ground_truth_collect
+    assert pre is not None and pre.valid_until_steady == 5.0 + 300.0
+    b._carton_attached = lambda: True                  # after the grasp (no source obs, target still alive)
+    b._gt_carton_held = True
+    post = b.capture(9.0, 'backstock_00', 'rollwagen')
+    assert post is not None and post.observations == () and post.valid_until_steady == 9.0 + 300.0
+
+
+def test_transfer_capture_stamps_the_acquisition_deadline():
+    # fm488: the transfer place has the same no-camera-framing-the-pick gap at CONTACT; _capture_transfer
+    # must stamp valid_until_steady=now+window so the gripper command is not refused by isaac_ros_graph.
+    from scripts.twin.restock_manipulation.types import Target  # noqa: F401 (symmetry with the collect guard)
+    b = _bridge(lambda now: None)
+    b.cart_placement = {'location': 'rollwagen'}
+    b.shelf_provider = lambda now: NS(pose_station=(0., 0., 1.0, 0., 0., 0., 1.), stamp=now,
+                                      location='G3_back_s2', clear=True, free_dimensions=(.6, .4, .16),
+                                      provenance={'camera_id': 'shelf', 'source': 'ground_truth'})
+    b._cart_pose_station = lambda: ((0., 0., 1.0), 0.0)
+    b._carton_center_station = lambda: None
+    pkt = b.capture(5.0, 'rollwagen', 'G3_back_s2')     # source == cart location -> _capture_transfer
+    assert pkt is not None and pkt.valid_until_steady == 5.0 + 300.0
+
+
+def test_none_when_nothing_sensed():
+    b = _bridge(lambda now: None)
+    assert b.capture(1.0, 'backstock_00', 'rollwagen') is None
+    assert b.sensed_target_bboxes == ()
+
+
+def test_stale_capture_is_rejected():
+    b = _bridge(lambda now: _target(stamp=0.0))   # now-stamp = 1.0 > 0.5
+    assert b.capture(1.0, 'backstock_00', 'rollwagen') is None
+
+
+def test_not_parked_is_rejected():
+    b = _bridge(lambda now: _target(stamp=now))
+    b.motion = NS(parked=lambda: False)
+    assert b.capture(1.0, 'backstock_00', 'rollwagen') is None
+
+
+def test_no_provider_is_none():
+    b = _bridge(None)
+    assert b.capture(1.0, 'backstock_00', 'rollwagen') is None
+
+
+# ---- fm410 (run-316): source-occlusion survival once the carton is attached ----
+
+def test_survive_collect_occlusion_truth_table_fm410():
+    assert survive_collect_occlusion(True, True, True) is True
+    assert survive_collect_occlusion(False, True, True) is False   # disabled => never survives (byte-identical)
+    assert survive_collect_occlusion(True, False, True) is False   # not attached => pre-grasp, source still required
+    assert survive_collect_occlusion(True, True, False) is False   # base moving => a real fault, never survived
+
+
+def test_occluded_capture_survives_when_attached_and_parked_fm410(monkeypatch):
+    # The source provider is occluded (returns None) but the carton is attached (native grip) and the base
+    # parked -> emit an honest arm-feedback packet (empty source observations, LIVE contact, no fabricated
+    # acquisition deadline) instead of nulling /sensors and freezing the controller mid-grasp/lift (run-316).
+    monkeypatch.setenv('RESTOCK_COLLECT_SURVIVE_OCCLUSION', '1')
+    b = _bridge(lambda now: None)
+    b.contact = NS(read=lambda: True)                    # attached (native grippedObjects)
+    packet = b.capture(2.0, 'backstock_00', 'rollwagen')
+    assert packet is not None
+    assert packet.observations == ()                     # no fresh source localisation is claimed
+    assert packet.target is None
+    assert packet.parked is True and packet.contact is True
+    assert packet.valid_until_steady is None             # no source acquisition this frame -> no deadline
+    assert packet.simulation_time == 2.0
+
+
+def test_occluded_capture_stays_none_when_not_attached_fm410(monkeypatch):
+    # Pre-grasp occlusion (carton NOT attached): the source is still required for localisation -> None.
+    monkeypatch.setenv('RESTOCK_COLLECT_SURVIVE_OCCLUSION', '1')
+    b = _bridge(lambda now: None)
+    b.contact = NS(read=lambda: False)                   # not attached; stage=None => no weld prim either
+    assert b.capture(2.0, 'backstock_00', 'rollwagen') is None
+
+
+def test_occluded_capture_not_survived_when_base_moving_fm410(monkeypatch):
+    monkeypatch.setenv('RESTOCK_COLLECT_SURVIVE_OCCLUSION', '1')
+    b = _bridge(lambda now: None)
+    b.contact = NS(read=lambda: True)
+    b.motion = NS(parked=lambda: False, collision_time=9.0)
+    assert b.capture(2.0, 'backstock_00', 'rollwagen') is None   # moving base is a fault, never survived
+
+
+def test_occlusion_survival_off_by_default_is_byte_identical_fm410(monkeypatch):
+    # Flag unset => the occluded capture returns None exactly as before even with the carton attached.
+    monkeypatch.delenv('RESTOCK_COLLECT_SURVIVE_OCCLUSION', raising=False)
+    b = _bridge(lambda now: None)
+    b.contact = NS(read=lambda: True)
+    assert b.capture(2.0, 'backstock_00', 'rollwagen') is None
+
+
+# ---- fm411 (run-317): base parked by DISPLACEMENT, not TGS instantaneous velocity ----
+
+def test_base_parked_by_displacement_basic_fm411():
+    assert base_parked_by_displacement([]) is True                       # no samples yet -> parked
+    assert base_parked_by_displacement([(1.0, 2.0, 0.5)]) is True        # <2 samples -> parked
+    assert base_parked_by_displacement([(1.0, 2.0, 0.5), (1.0, 2.0, 0.5)]) is True   # frozen
+    # tiny jitter within tol -> parked (this is the run-317 case: base brake-held, pose ~constant,
+    # while the TGS velocity SPIKED -- velocity is no longer an input, so it cannot trip)
+    assert base_parked_by_displacement([(0.0, 0.0, 0.0), (0.001, 0.0005, 0.002), (0.0, 0.0, 0.0)]) is True
+    # a driving base accumulates displacement past tol -> not parked
+    assert base_parked_by_displacement([(0.0, 0.0, 0.0), (0.02, 0.0, 0.0)]) is False
+    assert base_parked_by_displacement([(0.0, 0.0, 0.0), (0.0, 0.0, 0.1)]) is False   # yaw drive
+    # non-finite reading is a real fault, never silently parked
+    assert base_parked_by_displacement([(0.0, 0.0, 0.0), (float('nan'), 0.0, 0.0)]) is False
+
+
+def test_base_parked_yaw_wrap_at_pi_fm411():
+    # The collect base sits at yaw ~= pi. Tiny jitter straddling the +/-pi branch must still read PARKED
+    # (a raw max-min would be ~2*pi and falsely non-parked -- the yaw-wrap is the whole point here).
+    poses = [(0.0, 0.0, math.pi - 0.001), (0.0, 0.0, -math.pi + 0.001), (0.0, 0.0, math.pi - 0.0005)]
+    assert base_parked_by_displacement(poses) is True
+    # a genuine ~0.1 rad swing near pi is still caught as not parked
+    assert base_parked_by_displacement([(0.0, 0.0, math.pi - 0.001), (0.0, 0.0, math.pi - 0.11)]) is False
+
+
+def test_articulation_parked_ignores_velocity_spike_fm411():
+    # _ArticulationParked no longer reads get_linear_velocity: a frozen pose reads parked even if the
+    # solver reports a wild velocity (the run-317 brake-transition spike). get_world_pose is wxyz.
+    robot = NS(get_world_pose=lambda: ((1.5, 2.5, 0.0), (0.0, 0.0, 0.0, 1.0)),   # yaw ~= pi (wxyz w=0,z=1)
+               get_linear_velocity=lambda: (9.9, 9.9, 9.9),                       # huge -- must be ignored
+               get_angular_velocity=lambda: (9.9, 9.9, 9.9))
+    p = _ArticulationParked(robot)
+    for _ in range(5):
+        assert p.parked() is True            # frozen pose -> parked despite the velocity spike
+    # now move the base pose past tol -> not parked
+    robot.get_world_pose = lambda: ((1.6, 2.5, 0.0), (0.0, 0.0, 0.0, 1.0))
+    # it takes the moved sample entering the window; once present, the spread exceeds tol
+    saw_false = any(p.parked() is False for _ in range(3))
+    assert saw_false
+
+
+# ---- fm415 (run-319): never emit collision_time=-1; hold last-good through the weld re-incorporation ----
+
+def test_hold_last_good_collision_truth_table_fm415():
+    assert hold_last_good_collision(5.0, None) == (5.0, 5.0)     # first real read: pass + remember
+    assert hold_last_good_collision(6.0, 5.0) == (6.0, 6.0)      # real read: update
+    assert hold_last_good_collision(-1.0, 5.0) == (5.0, 5.0)     # -1 mirror gap: hold last-good
+    assert hold_last_good_collision(-1.0, None) == (-1.0, None)  # no last-good yet (early): pass -1 honestly
+
+
+def test_bridge_collision_time_holds_last_good_over_minus1_fm415():
+    b = _bridge(lambda now: None)
+    b.motion = NS(parked=lambda: True, collision_time=30.5)
+    assert b._collision_time() == 30.5                 # real read remembered
+    b.motion.collision_time = -1.0                      # the weld-tick mirror gap (run-319)
+    assert b._collision_time() == 30.5                 # held last-good -- NEVER emits -1 to the controller
+    b.motion.collision_time = 31.0
+    assert b._collision_time() == 31.0                 # fresh read resumes

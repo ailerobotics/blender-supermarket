@@ -1,0 +1,202 @@
+{
+ "schema": "story_sources/v1",
+ "mission_root": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission",
+ "generated": "2026-10-22",
+ "lane": "sim-video-story-sources-v1",
+ "note": "The two story segments demo-006 lacked. Frame indices are into the source's frame sequence (choreo: demo-NNN/decision_log.json frames == walkthrough.mp4 frames; 15 fps). No REAL run ever towed onto the sales floor: all 371 run dirs with a nav-trace keep the base at y >= 13.75 (backroom = y >= 11.25), so both segments exist only in the choreographed demo-004/005.",
+ "segments": {
+  "return_to_warehouse": {
+   "clean_source": true,
+   "best": {
+    "run": "demo-005",
+    "kind": "choreo",
+    "frame_start": 1425,
+    "frame_end": 1829,
+    "shows": "robot + rollwagen COUPLED the whole way: 14.5 m tow from the sales-floor endcap G3_back (-3.04, 6.05) north through the backroom door at x=-3.88 (portal centre, no wall clip), west across the backroom to cart parking (-9.00, 16.02), brake = parked in the warehouse",
+    "optional_tail": {
+     "frame_start": 1830,
+     "frame_end": 1874,
+     "shows": "uncouple AT cart parking, inside the warehouse, at the very end"
+    },
+    "cut": [
+     {
+      "frames": [
+       1875,
+       2039
+      ],
+      "why": "back-away + drive home ALONE (robot leaves the cart)"
+     }
+    ],
+    "faults": [
+     "choreographed (scripted kinematic poses), not a physics tow -- label it"
+    ],
+    "adopted": "PR #189 uses frames 1425-1800 stride 3 (ends parked, still coupled)"
+   },
+   "backup": {
+    "run": "demo-004",
+    "kind": "choreo",
+    "frame_start": 1425,
+    "frame_end": 1829,
+    "faults": [
+     "same route; cart-yaw glitch after its uncouple (#1920) -- cut by #1874",
+     "its transfer camera swings (not usable for transfer)"
+    ]
+   },
+   "rejected": [
+    {
+     "run": "warm8",
+     "frames": [
+      223,
+      358
+     ],
+     "why": "uncouples 5 s into return (sim 81.3) right at the backroom bay; robot drives home alone = the mid-way unlatch"
+    },
+    {
+     "run": "warm11",
+     "frames": [
+      223,
+      358
+     ],
+     "why": "same as warm8 (uncouple at sim 81.2)"
+    },
+    {
+     "run": "warm3/warm7",
+     "why": "return failed (planning_stop, no base progress)"
+    }
+   ]
+  },
+  "place_at_front": {
+   "clean_source": false,
+   "best": {
+    "run": "demo-005",
+    "kind": "choreo",
+    "keep": [
+     {
+      "frames": [
+       1110,
+       1169
+      ],
+      "shows": "park/stationarize at the sales-floor endcap G3_back"
+     },
+     {
+      "frames": [
+       1170,
+       1230
+      ],
+      "shows": "perceive slot; arm reaches into the rollwagen, grasps, lifts the carton LEVEL"
+     },
+     {
+      "frames": [
+       1312,
+       1364
+      ],
+      "shows": "carton seated in shelf slot G3_back_s2 (target -3.05, 4.826, 0.81); arm stows"
+     },
+     {
+      "frames": [
+       1365,
+       1424
+      ],
+      "shows": "verify: placed on target, qty 1 (panel)"
+     }
+    ],
+    "cut": [
+     {
+      "frames": [
+       1231,
+       1311
+      ],
+      "why": "carton spins 180 deg in yaw and pitches on the IK pad, then is pushed SLANTED through the s3 products into the slot. Cause (scripts/twin/demo): the pad is IK'd to the carton CENTRE (scene_reader._arm_config) and the carton yaw lerps cart-yaw(pi)->0 (choreography._carton_pose), so each physics step shoves the box"
+     }
+    ],
+    "faults": [
+     "jump cut at 1230->1312 (carry not shown)",
+     "placed carton is mostly occluded by the upper shelves in the top-down view",
+     "choreographed, not a physics grasp -- label it"
+    ]
+   },
+   "arrival_bridge": {
+    "run": "demo-005",
+    "kind": "choreo",
+    "frame_start": 900,
+    "frame_end": 1109,
+    "shows": "coupled tow down the sales-floor aisle into the endcap, carton riding in the cage",
+    "cut": [
+     {
+      "frames": [
+       830,
+       885
+      ],
+      "why": "outbound wall clip-through (whiteout) -- start at 900"
+     }
+    ]
+   },
+   "rejected": [
+    {
+     "run": "demo-004",
+     "frames": [
+      1170,
+      1364
+     ],
+     "why": "camera swings + same carton tilt"
+    },
+    {
+     "run": "warm8",
+     "frames": [
+      164,
+      223
+     ],
+     "why": "backroom bay (not the sales floor); still arm, floating carton"
+    }
+   ],
+   "render_spec": {
+    "why": "a clean, uncut front place exists nowhere; one short GPU run (integration lane) produces it",
+    "tool": "scripts/run_mobile_restock.py (the warm8 mission recipe, unchanged otherwise)",
+    "env": {
+     "RESTOCK_TRANSFER_MODE": "scripted",
+     "RESTOCK_TRANSFER_CARRY": "wrist_guard,weld (as warm8)",
+     "RESTOCK_SCRIPTED_TRANSFER_PLACE": "front (NEW, this PR; default off)",
+     "RESTOCK_SCRIPTED_TRANSFER_ARM": "unset (= still, warm8's mode; front plans are task-space only)"
+    },
+    "runtime_config_keys": {
+     "start_at": "transfer",
+     "start_staging": {
+      "preset": "recorded_bay_park",
+      "robot_base_pose": [
+       -2.971,
+       6.0,
+       3.1403
+      ]
+     },
+     "stop_after": "verify",
+     "transfer_ground_truth": {
+      "enabled": true,
+      "target": [
+       -3.05,
+       4.826,
+       0.73
+      ],
+      "location": "G3_back_s2"
+     },
+     "verify_ground_truth": {
+      "enabled": true,
+      "bay": {
+       "center_xy": [
+        -3.05,
+        4.826
+       ],
+       "size_xy": [
+        0.7,
+        0.5
+       ],
+       "top_z": 0.73
+      }
+     }
+    },
+    "camera": "the mission's own base-parented top-down chase camera = warm8 framing (no change)",
+    "expected_gpu_minutes": "~10 (warm8: transfer stage 170 s wall, whole couple->return run 11 min incl. boot)",
+    "cpu_proof": "python3 scripts/check_front_transfer_staging.py -> PASS (place=front: 0 board hits, tilt 0.00 deg, exact landing; place=above: 265 hits through the s3 board + products)"
+   }
+  }
+ }
+}

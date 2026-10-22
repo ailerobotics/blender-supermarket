@@ -369,7 +369,7 @@ class TemporalMap:
         completion=steady-self.completed_steady if self.completed_steady is not None else 0.
         return max(self.measured_latency,now-ack.stamp,steady-ack.steady_stamp,completion,0.)
 
-    def check_train(self,states,spec,uncertainty,now):
+    def check_train(self,states,spec,uncertainty,now,*,trust_unknown=False):
         reason=self.readiness(now)
         if reason:return reason
         if not states:return 'missing_stopping_sweep'
@@ -382,11 +382,16 @@ class TemporalMap:
             curvature=abs(wrap(a.yaw-b.yaw))/ds if ds>1e-9 else 0.
             pad=ds*ds*(curvature+1/spec.cart_hitch_x)/8+.001
             polygon=swept_envelope(pair,spec,margin=.05+uncertainty+pad)
-            reason=self.check_polygon(polygon)
+            reason=self.check_polygon(polygon,trust_unknown=trust_unknown)
             if reason:return reason
         return self.readiness(now)
 
-    def check_polygon(self,polygon):
+    def check_polygon(self,polygon,*,trust_unknown=False):
+        """`trust_unknown` (fm437): on a static-validated authored tow lane, do NOT refuse UNOBSERVED
+        (unknown) cells in the swept polygon -- the static map proved that corridor clear at lane build
+        and the live re-validation (trust_static) confirmed no new static return intrudes, so an unmapped
+        cell there is known-free, not a hazard. A POSITIVE (occupied) ESDF return STILL refuses, so a
+        genuinely new obstacle keeps stopping the tow. Default False => legacy (unknown blocks)."""
         snapshot=self.slice
         if snapshot is None:return 'missing_navigation_map'
         res=snapshot.resolution;ox,oy=snapshot.origin
@@ -411,10 +416,12 @@ class TemporalMap:
             self.last_missing=tuple(map(int,indices[outside][0]));return 'outside_navigation_map'
         distances=snapshot._array[indices[:,1],indices[:,0]]
         unknown=~np.isfinite(distances)|(distances==snapshot.unknown)
-        if unknown.any():
+        if unknown.any() and not trust_unknown:
             self.last_missing=tuple(map(int,indices[unknown][0]));return 'unknown_navigation_cell'
         # Cover the complete map cell, not only its ESDF sample centre.
         occupied=distances<=res/math.sqrt(2)
+        if trust_unknown:
+            occupied=occupied&~unknown   # a trusted unknown cell is FREE, never counted as occupied
         if occupied.any():
             self.last_missing=tuple(map(int,indices[occupied][0]));return 'occupied_navigation_cell'
         self.last_missing=None

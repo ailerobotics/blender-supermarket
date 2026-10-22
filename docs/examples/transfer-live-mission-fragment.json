@@ -1,0 +1,18 @@
+{
+  "_comment": "Bounded TRANSFER-ONLY validation of the HONEST (non-scripted) live transfer: the arm picks the carton from its live pose on the cart upper shelf and places it on the bay for real. Hand this to the integration lane (twin-robot-in-store-boot-v1) for one bounded GPU proof scheduled through /tmp/aile-gpu.lock. The run is STAGED at the recorded bay park (no couple/outbound/park) and STOPS after verify, so it exercises only transfer+verify on the GPU. The two switches below are ENV VARS (RESTOCK_TRANSFER_MODE / RESTOCK_TRANSFER_CARRY), read by BOTH mission processes (Isaac capture AND host controller) -- they are NOT runtime-config keys (the run-277 split trap). The runtime-config keys are the staging + the wrist-guard clear-region bounds; merge them into the mission runtime config (owned by the integration lane; do not edit the ~/datasets configs from a worker PR).",
+  "_bounded_command": "RESTOCK_TRANSFER_MODE=live_pose RESTOCK_TRANSFER_CARRY=wrist_guard python3 scripts/run_mobile_restock.py --start-at transfer --start-staging recorded_bay_park --stop-after verify",
+  "_env": {
+    "RESTOCK_TRANSFER_MODE": "live_pose",
+    "RESTOCK_TRANSFER_CARRY": "wrist_guard",
+    "_note": "live_pose REQUIRES wrist_guard: live_pose fixes only the PICK reach; the preplace/place/retreat stay seeded-KDL. Without wrist_guard the controller now FAILS FAST at observe ('live_pose transfer requires RESTOCK_TRANSFER_CARRY=wrist_guard ...') instead of silently driving into the ur_wrist_2-vs-forearm self-collision jam (audit transfer-preplace-wrist-branch-jam). Add ',weld' to RESTOCK_TRANSFER_CARRY to label the SIM fixed-joint attach in mission.json + caption."
+  },
+  "start_at": "transfer",
+  "start_staging": "recorded_bay_park",
+  "stop_after": "verify",
+  "carry_wrist1_cap": 0.65,
+  "carry_wrist2_min": 0.0,
+  "transfer_ground_truth": true,
+  "_runtime_keys_note": "start_at/start_staging/stop_after bound the run to transfer+verify (mission.bounded_stages; fails closed before any boot). carry_wrist1_cap/carry_wrist2_min are the bench-proven clear wrist region the wrist_guard holds the place-half KDL goals in (the repo ros_host_config.json already defaults these to 0.65 / 0.0; config_preflight requires them present as HOST keys). transfer_ground_truth=true accepts the authored bay target for the GT verify destination when the shelf is not camera-commissioned (labelled source='ground_truth', never misrepresented as a measurement).",
+  "_pass_criteria": "PASS = the live transfer reaches 'verify' with status succeeded, mission.json records transfer_mode=live_pose + transfer_carry=['wrist_guard'], the console shows 'TRANSFER_MODE live_pose observe' + 'TRANSFER_CARRY wrist_guard active' and NO 'REACH_ENVELOPE_FAIL' / no 1.3 rad tracking fault / no 'host emergency stop' at preplace. FAIL = any of those, or a named fail-fast reason (report the reason verbatim).",
+  "_cpu_proof": "scripts/twin/tests/test_restock_transfer_live_pose.py (reach + near-face + the live-pose/wrist-guard fail-fast coupling) and scripts/twin/tests/test_restock_transfer_carry.py; run with PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH="
+}

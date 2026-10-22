@@ -14,7 +14,8 @@ integration/GPU-owned and supplied by a `--sources module:function` hook (this s
 imports no Isaac/ROS); the choreography here only commissions and persists. A station the
 hook does not cover is refused, never fabricated.
 
-The hook is called `sources(scenario=..., camera_config=..., output=...)` and must return
+The hook is called `sources(scenario=..., camera_config=..., output=..., render_scale=...)` (the
+resolved `--render-preset`/`--render-scale`; the hook renders and projects at it) and must return
 `{'contexts': [RenderedSupportContext, ...], 'capture': capture}` where `capture(context)`
 returns `{'frame', 'now', 'empty_polygons', 'capture_poses'?, 'raw_frames'?}` (see
 `twin.restock_camera.commissioning.run_commissioning`).
@@ -22,6 +23,7 @@ returns `{'frame', 'now', 'empty_polygons', 'capture_poses'?, 'raw_frames'?}` (s
 import argparse
 import importlib
 import json
+import sys
 from pathlib import Path
 
 # The three mission stations that need an empty-support baseline, matching the
@@ -103,10 +105,15 @@ def commissioning_plan(camera_config, scenario, *, stations, locations=None, lif
 
 def _execute(args, camera_config, scenario, stations):
     from twin.restock_camera import commissioning as C
-    sources = _resolve(args.sources)(scenario=scenario, camera_config=camera_config, output=args.output)
+    # The resolved render scale drives BOTH the renderer hook (so the station camera renders, and
+    # its empty polygons project, at this scale) AND the persisted baseline's record, so a `fast`
+    # baseline carries the scaled intrinsics the `fast` mission matches at boot (_check_match).
+    sources = _resolve(args.sources)(scenario=scenario, camera_config=camera_config, output=args.output,
+                                     render_scale=args.render_scale)
     contexts = sources['contexts'] if isinstance(sources, dict) else sources.contexts
     capture = sources['capture'] if isinstance(sources, dict) else sources.capture
-    records = C.run_commissioning(contexts, capture, dataset_dir=args.output, lifetime_s=args.lifetime_s)
+    records = C.run_commissioning(contexts, capture, dataset_dir=args.output, lifetime_s=args.lifetime_s,
+                                  render_scale=args.render_scale)
     by_station = {r.station: r for r in records}
     missing = [s for s in stations if s not in by_station]
     if missing:
@@ -130,10 +137,26 @@ def main():
     parser.add_argument('--lifetime-s', type=float, default=600.)
     parser.add_argument('--render-scale', type=float, default=1.0,
                         help='render-product scale to commission/plan at (intrinsics scale with it)')
+    parser.add_argument('--render-preset', choices=('full', 'fast'),
+                        help='opt into a sensing render preset (full|fast); resolves --render-scale '
+                             '(fast=0.6). Use the SAME preset for the mission so the baseline matches.')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--plan', action='store_true', help='print the commissioning plan (default; CPU, no capture)')
     mode.add_argument('--execute', action='store_true', help='run the choreography and persist baselines')
     args = parser.parse_args()
+    if args.render_preset:                        # one opt-in flag, shared with the mission
+        # Commissioning only ever commissions decode-grade support stations (source/shelf/cart),
+        # which MUST render at 1.0: a native sub-1.0 source render does not decode (run-72), and the
+        # mission pins these cameras to 1.0 too, so the baseline stays full-res and _check_match
+        # stays satisfied at 1.0. The preset's reduced render_scale is for the mission's NON-decode
+        # cameras only, so --render-preset never lowers the commission scale below 1.0.
+        from twin.restock_camera.config import preset_render_scale
+        if preset_render_scale(args.render_preset) < 1.0 and args.render_scale == 1.0:
+            print(f"note: --render-preset {args.render_preset!r} does not reduce the commission "
+                  "scale; decode-grade support baselines are always commissioned at 1.0 "
+                  "(native px/module floor).", file=sys.stderr)
+        # Leave args.render_scale at its default/explicit value (1.0 unless --render-scale was given
+        # for a deliberate experiment, which build_sources then refuses for a decode station).
     try:
         camera_config = json.loads(args.camera_config.read_text())
         scenario = json.loads(args.scenario.read_text())

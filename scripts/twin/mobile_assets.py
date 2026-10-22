@@ -10,6 +10,8 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from .mobile import MobileSpec
+from .restock_camera.wrist_camera import (
+    WRIST_FRAME, WRIST_PARENT_LINK, WRIST_MOUNT_XYZ, wrist_usd_camera_transform)
 
 
 def _element(parent, tag, **attrs):
@@ -99,8 +101,10 @@ def build_mobile_urdf(source, output, spec=MobileSpec()):
         _joint(root, f'{label}_caster_swivel', 'base_link', f'{label}_caster_fork',
                (x, 0, 0.145-spec.base_z), 'continuous')
         _link(root, f'{label}_caster_wheel', 0.5, radius=0.065, length=0.035)
+        # Raise the caster wheel by spec.caster_lift_m so its ground contact sits that far ABOVE the
+        # drive-wheel plane (0.0 => co-planar, legacy). The fork never touches ground either way.
         _joint(root, f'{label}_caster_roll', f'{label}_caster_fork', f'{label}_caster_wheel',
-               (-0.025, 0, -0.08), 'continuous', '0 1 0')
+               (-0.025, 0, -0.08 + spec.caster_lift_m), 'continuous', '0 1 0')
     # Drawbar: back edge -.50 to hitch -.62, below the deck.
     _link(root, 'hitch', 1, (abs(spec.hitch_x)-spec.length/2, 0.06, 0.04))
     hitch = root.find("link[@name='hitch']")
@@ -108,10 +112,24 @@ def build_mobile_urdf(source, output, spec=MobileSpec()):
         hitch.find(f'{tag}/origin').set('xyz', f'{(abs(spec.hitch_x)-spec.length/2)/2} 0 0')
     _element(hitch.find('inertial'), 'origin', xyz=f'{(abs(spec.hitch_x)-spec.length/2)/2} 0 0')
     _joint(root, 'hitch_joint', 'base_link', 'hitch', (spec.hitch_x, 0, spec.hitch_z-spec.base_z))
-    for name, xyz in [('lidar_frame', (0.46, 0, 0.15)),
+    # Mount the 2D nav scanner just beyond the chassis front edge (length/2), not behind
+    # it: a scanner recessed inside its own bumper self-occludes the forward braking sweep
+    # at the low scan height. 2 cm clear of the front face keeps it inside the padded
+    # transport footprint (transport_radius) while giving an unobstructed forward view.
+    lidar_x = spec.length/2 + 0.02
+    assert lidar_x <= spec.transport_radius, 'lidar front mount must stay inside the transport footprint'
+    for name, xyz in [('lidar_frame', (lidar_x, 0, 0.15)),
                       ('front_camera_frame', (0.46, 0, 0.35)), ('imu_frame', (0, 0, 0))]:
         _element(root, 'link', name=name)
         _joint(root, f'{name}_joint', 'base_link', name, xyz)
+    # Eye-in-hand wrist RGB-D collision camera frame, rigidly on the UR tool flange so the arm's
+    # side-grasp workspace is always in its depth (see twin.restock_camera.wrist_camera). The joint
+    # is a pure mount offset (identity rotation); the optical rotation lives in the camera design's
+    # parent_from_optical and the authored USD Camera prim.
+    if root.find(f"link[@name='{WRIST_PARENT_LINK}']") is None:
+        raise ValueError(f'source UR chain is missing {WRIST_PARENT_LINK!r} for the wrist camera mount')
+    _element(root, 'link', name=WRIST_FRAME)
+    _joint(root, f'{WRIST_FRAME}_joint', WRIST_PARENT_LINK, WRIST_FRAME, WRIST_MOUNT_XYZ)
     # Reject disconnected unexpected source structure before writing.
     links = {x.get('name') for x in root.findall('link')}
     children = [j.find('child').get('link') for j in root.findall('joint')]
@@ -138,6 +156,35 @@ def transport_positions(source):
         if joint.get('type') == 'prismatic':
             positions[joint.get('name')] = float(joint.find('limit').get('lower'))
     return positions
+
+
+def author_wrist_camera(stage, frame_prim_path, intrinsics=None, name='wrist_camera'):
+    """Author the eye-in-hand wrist ``Camera`` prim under the ``restock_camera_wrist`` frame prim.
+
+    ``frame_prim_path`` is the imported-URDF prim of the wrist frame (e.g.
+    ``/MobileRobot/.../restock_camera_wrist``). The optical transform (USD -Z view, +Y up) comes from
+    :func:`wrist_camera.wrist_usd_camera_transform`; the pinhole aperture encodes the collision
+    intrinsics' field of view. Integration's ``native_cameras`` adopts this prim as the collision
+    camera. CPU-safe: only ``pxr`` is imported here, nothing boots.
+    """
+    import math as _math
+    from pxr import UsdGeom, Gf
+    from .restock_camera.wrist_camera import wrist_camera_intrinsics, WRIST_HFOV_DEG
+    if not stage.GetPrimAtPath(frame_prim_path):
+        raise ValueError(f'wrist frame prim not found: {frame_prim_path}')
+    k = intrinsics or wrist_camera_intrinsics()
+    camera_path = f'{frame_prim_path}/{name}'
+    if stage.GetPrimAtPath(camera_path):
+        raise ValueError(f'wrist camera already authored: {camera_path}')
+    cam = UsdGeom.Camera.Define(stage, camera_path)
+    cam.AddTransformOp().Set(Gf.Matrix4d(*[v for row in wrist_usd_camera_transform() for v in row]))
+    focal = 18.0
+    horizontal_aperture = 2 * focal * _math.tan(_math.radians(WRIST_HFOV_DEG) / 2.)
+    cam.CreateFocalLengthAttr(focal)
+    cam.CreateHorizontalApertureAttr(horizontal_aperture)
+    cam.CreateVerticalApertureAttr(horizontal_aperture * k.height / k.width)
+    cam.CreateClippingRangeAttr(Gf.Vec2f(float(k.near), float(k.far)))
+    return camera_path
 
 
 def _usd_box(stage, path, size, xyz, color=(0.6, 0.63, 0.66)):

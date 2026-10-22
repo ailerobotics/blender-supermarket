@@ -1,0 +1,449 @@
+"""Isaac-side rig-masked depth bridge for the host nvblox consumer.
+
+Option B for the manipulation collision world: instead of the host `robot_segmenter`
+node masking the robot out of the depth stream (which currently fails to load on a
+duplicate NITROS subscription), publish a depth image from the Isaac side with the
+robot/cart (the "rig") self-pixels already invalidated, using the per-frame instance-ID
+segmentation the mission already captures (`add_instance_id_segmentation_to_frame`).
+nvblox then integrates only non-rig returns, so the ESDF/planning scene is built without
+the robot carving itself into the obstacle set.
+
+The masking core (`rig_instance_ids`, `mask_rig_depth`, `parse_instance_frame`,
+`select_target_bbox`) is pure NumPy and CPU-tested. Publishing uses OmniGraph ROS2 nodes
+(`ArmDepthOmniGraphBridge`), NOT rclpy: an rclpy Node created inside the Isaac SimulationApp
+aborts (rcl_interfaces parameter_event typesupport assert) because the isaacsim.ros2.bridge
+extension and full rclpy load conflicting ROS2 middleware. The OmniGraph path mirrors
+`isaac_ros_graph.py` / `native_cameras.py` / `native_transport.py` (the proven in-app
+pattern). The bridge is wired only when the runtime-config opts in (`masked_depth` block).
+
+Contract with the host worker (host PR#50):
+  depth topic : /restock_sim/camera/masked_depth        sensor_msgs/Image, 32FC1, metres
+  info  topic : /restock_sim/camera/masked_depth/camera_info   sensor_msgs/CameraInfo
+  bbox  topic : /restock_sim/target_bbox                 std_msgs/Float32MultiArray [u1,v1,u2,v2]
+  frame_id    : restock_camera_arm (optical frame, added to native_transport's /tf tree)
+  invalid     : 0.0 (nvblox treats 0 / non-finite depth as no-return)
+  domain      : 88 (the mission's isolated ROS domain)
+  stamp       : mission sim time; masked_depth + bbox published on one acquisition stamp,
+                TF (restock_camera_arm -> ur_base_link) published every physics tick by
+                native_transport's ROS2PublishTransformTree + /clock.
+"""
+from __future__ import annotations
+
+import math
+
+import numpy as np
+
+INVALID_DEPTH = 0.0  # nvblox no-return sentinel
+
+# USD camera looks down -Z with +Y up; the ROS optical frame looks +Z with +Y down.
+# Converting a point from the optical frame to the USD-camera frame flips Y and Z.
+_USDCAM_FROM_OPTICAL = np.diag([1.0, -1.0, -1.0, 1.0])
+
+
+def mat_to_quat_xyzw(rotation):
+    """3x3 rotation matrix (column convention, p' = R @ p) -> (x, y, z, w) quaternion."""
+    r = np.asarray(rotation, float)
+    trace = r[0, 0] + r[1, 1] + r[2, 2]
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        w, x, y, z = 0.25 * s, (r[2, 1]-r[1, 2])/s, (r[0, 2]-r[2, 0])/s, (r[1, 0]-r[0, 1])/s
+    elif r[0, 0] > r[1, 1] and r[0, 0] > r[2, 2]:
+        s = math.sqrt(1.0 + r[0, 0] - r[1, 1] - r[2, 2]) * 2.0
+        w, x, y, z = (r[2, 1]-r[1, 2])/s, 0.25 * s, (r[0, 1]+r[1, 0])/s, (r[0, 2]+r[2, 0])/s
+    elif r[1, 1] > r[2, 2]:
+        s = math.sqrt(1.0 + r[1, 1] - r[0, 0] - r[2, 2]) * 2.0
+        w, x, y, z = (r[0, 2]-r[2, 0])/s, (r[0, 1]+r[1, 0])/s, 0.25 * s, (r[1, 2]+r[2, 1])/s
+    else:
+        s = math.sqrt(1.0 + r[2, 2] - r[0, 0] - r[1, 1]) * 2.0
+        w, x, y, z = (r[1, 0]-r[0, 1])/s, (r[0, 2]+r[2, 0])/s, (r[1, 2]+r[2, 1])/s, 0.25 * s
+    return (x, y, z, w)
+
+
+def base_from_optical_transform(cam_world_col, base_world_col):
+    """Pose of the camera OPTICAL frame in ur_base_link as (translation xyz, quat xyzw).
+
+    Both inputs are 4x4 local-to-world matrices in COLUMN convention (p_world = M @ p_local).
+    The USD camera's world matrix is converted to the ROS optical frame, then expressed in
+    the base frame. This is the per-frame TF the host nvblox needs for the moving eye-in-hand
+    camera; isolating the convention math here keeps it unit-tested off the live stage.
+    """
+    cam = np.asarray(cam_world_col, float)
+    base = np.asarray(base_world_col, float)
+    optical_world = cam @ _USDCAM_FROM_OPTICAL
+    base_from_opt = np.linalg.inv(base) @ optical_world
+    return tuple(base_from_opt[:3, 3]), mat_to_quat_xyzw(base_from_opt[:3, :3])
+
+
+def ros_time(seconds):
+    """builtin_interfaces/Time for a (sim) seconds float; lazy import for CPU tests."""
+    from builtin_interfaces.msg import Time
+    sec = int(seconds)
+    return Time(sec=sec, nanosec=int(round((float(seconds) - sec) * 1e9)))
+
+
+def parse_instance_frame(frame):
+    """Extract (id_image, {instance_id: prim_path}) from an Isaac instance-ID seg frame.
+
+    Accepts the `instance_id_segmentation` entry produced with colorize=False: a dict with
+    an integer-id `data` image and an `info.idToLabels` map from stringified id to prim
+    path (values may already be plain path strings or small dicts). Returns the id image as
+    a 2-D int array and a normalized {int id: str path} mapping.
+    """
+    seg = frame.get('instance_id_segmentation') if isinstance(frame, dict) else None
+    if not isinstance(seg, dict):
+        raise ValueError('frame lacks instance_id_segmentation (enable it on the camera)')
+    data = seg.get('data')
+    ids = np.asarray(data)
+    if ids.ndim != 2 or ids.size == 0:
+        raise ValueError('instance_id_segmentation data must be a non-empty 2-D id image')
+    info = seg.get('info') or {}
+    raw = info.get('idToLabels') or info.get('idToSemantics') or {}
+    if not isinstance(raw, dict):
+        raise ValueError('instance_id_segmentation info.idToLabels must be a mapping')
+    mapping = {}
+    for key, value in raw.items():
+        try:
+            ik = int(key)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict):
+            # Some Isaac builds wrap the path, e.g. {'class': '/World/...'}.
+            value = value.get('class') or value.get('instanceId') or next(
+                (v for v in value.values() if isinstance(v, str)), '')
+        mapping[ik] = str(value)
+    return ids, mapping
+
+
+def rig_instance_ids(id_to_path, rig_prefixes):
+    """Instance IDs whose prim path lies under any rig (robot/cart) prefix.
+
+    An empty or missing path (e.g. BACKGROUND, UNLABELLED) is never a rig id, so free space
+    and the environment are preserved. Matching is exact-prefix on the USD path so a sibling
+    like `/World/robot_dock` does not match the `/World/robot` rig unless a trailing `/`
+    (or exact equality) confirms containment.
+    """
+    prefixes = tuple(p for p in rig_prefixes if p)
+    if not prefixes:
+        raise ValueError('at least one rig prim prefix is required')
+    ids = set()
+    for ident, path in id_to_path.items():
+        if not path:
+            continue
+        for prefix in prefixes:
+            if path == prefix or path.startswith(prefix.rstrip('/') + '/'):
+                ids.add(int(ident))
+                break
+    return ids
+
+
+def mask_rig_depth(depth, instance_ids, rig_ids, *, invalid=INVALID_DEPTH):
+    """Return a depth copy with rig pixels (and non-finite returns) set to `invalid`.
+
+    `depth` is HxW metres; `instance_ids` is the matching HxW id image; `rig_ids` is the set
+    of instance IDs to invalidate. Non-finite or non-positive depths are also invalidated so
+    the consumer never integrates a spurious return. Shapes must match exactly.
+    """
+    depth = np.asarray(depth, dtype=np.float32)
+    ids = np.asarray(instance_ids)
+    if depth.ndim != 2 or depth.shape != ids.shape:
+        raise ValueError('depth and instance-id images must share a 2-D shape')
+    out = depth.copy()
+    bad = ~np.isfinite(out) | (out <= 0.0)
+    if rig_ids:
+        bad |= np.isin(ids, np.asarray(sorted(rig_ids)))
+    out[bad] = float(invalid)
+    return out
+
+def bbox_payload(bbox):
+    """Validate and flatten one grasp-target bbox to [u1, v1, u2, v2] floats.
+
+    `bbox` is the target's axis-aligned image box as (u1, v1, u2, v2) pixel corners with
+    u1<u2 and v1<v2 (the shelfbot object_segmenter masks this rectangle out of the depth so
+    cuMotion can plan a path into the grasp target).
+    """
+    box = [float(v) for v in bbox]
+    if len(box) != 4 or not all(np.isfinite(box)):
+        raise ValueError('target bbox must be four finite pixel values [u1,v1,u2,v2]')
+    u1, v1, u2, v2 = box
+    if not (u2 > u1 and v2 > v1):
+        raise ValueError('target bbox must have u1<u2 and v1<v2')
+    return box
+
+
+def select_target_bbox(sensed_bboxes, target_location, previous):
+    """Pure pick of the grasp-target roi to publish, caching the last good one.
+
+    `sensed_bboxes` are dicts with 'roi' and 'location' (from IsaacCartonSensors). Prefer the
+    entry at `target_location`; fall back to the first available. Returns the roi tuple, or
+    `previous` when perception produced none this frame (republished so the host's 0.5 s bbox
+    freshness never lapses while the static target is momentarily unobserved).
+    """
+    boxes = list(sensed_bboxes or ())
+    matched = [b for b in boxes if target_location is None or b.get('location') == target_location]
+    pick = matched or boxes
+    if pick:
+        return tuple(pick[0]['roi'])
+    return previous
+
+
+def masked_depth_from_frame(frame, rig_prefixes, id_cache, *, invalid=INVALID_DEPTH):
+    """(masked HxW float32 depth, refreshed id_cache). Pure; shared by the bridge and tests.
+
+    `id_cache` is a (id_to_path_obj, frozenset rig_ids) tuple reused across frames (Isaac
+    keeps the id->path dict object stable while the scene graph is), so rig IDs resolve once.
+    """
+    depth = frame.get('distance_to_image_plane')
+    if depth is None:
+        depth = frame.get('depth')
+    if depth is None:
+        raise ValueError('frame carries no depth (distance_to_image_plane)')
+    ids, id_to_path = parse_instance_frame(frame)
+    # Key the cache on the raw seg-info object (stable across frames while the scene graph is),
+    # since parse_instance_frame rebuilds a fresh normalized mapping each call.
+    raw = frame['instance_id_segmentation'].get('info')
+    if raw is None or raw is not id_cache[0]:
+        id_cache = (raw, frozenset(rig_instance_ids(id_to_path, rig_prefixes)))
+    masked = mask_rig_depth(depth, ids, id_cache[1], invalid=invalid)
+    return masked, id_cache
+
+
+def _serve_topic_args(topics):
+    """CLI suffix for ``masked_depth_ipc.serve``'s optional per-feed topic overrides.
+
+    ``None`` (the wrist) => ``''`` so the spawned command is byte-identical to the legacy wrist
+    invocation. A dict ``{'depth','info','bbox'}`` appends ``' <depth> <info> <bbox>'`` (a falsy
+    ``bbox`` becomes the literal ``none``, which disables the bbox publisher in ``serve``).
+    """
+    if not topics:
+        return ''
+    return " {depth} {info} {bbox}".format(depth=topics['depth'], info=topics['info'],
+                                           bbox=topics.get('bbox') or 'none')
+
+
+def _default_socket_path(frame_id, pid=None):
+    """Per-FEED Unix-socket path for the masked-depth publisher subprocess.
+
+    Keyed on BOTH the Isaac pid AND the camera ``frame_id``: the wrist (camera_0,
+    ``restock_camera_arm``) and the opt-in mast (camera_1, ``restock_camera_mast``) run as TWO
+    publisher subprocesses in the SAME Isaac process, so a pid-only name collided (both defaulted
+    to ``/tmp/restock_maskdepth_<pid>.sock``). ``serve`` unlinks its socket path on bind and again
+    on exit, so a shared name let one feed clobber its sibling's socket. frame_ids are
+    filesystem-safe tokens (no path separators), so this is a stable per-feed name.
+    """
+    import os
+    return f'/tmp/restock_maskdepth_{os.getpid() if pid is None else pid}_{frame_id}.sock'
+
+
+class ArmDepthSubprocessBridge:
+    """Ship arm masked-depth frames to the out-of-Isaac rclpy publisher subprocess.
+
+    Built only inside the guarded app (lazy pxr). On construction it (1) creates an optical
+    child prim `restock_camera_arm` under the arm camera and hands it to native_transport's
+    existing ROS2PublishTransformTree (so ur_base_link -> restock_camera_arm + /clock publish
+    every physics tick), and (2) spawns `masked_depth_ipc.serve` under the host overlay ROS
+    env (domain 88) and connects a Unix socket to it. `publish(now)` reads one arm-camera
+    frame, masks the rig self-pixels, and ships (stamp, frame_id, w, h, K, bbox, depth) to the
+    subprocess, which publishes masked_depth + camera_info + target_bbox on that one stamp.
+
+    `sensors` exposes `sensed_target_bboxes`; set `target_location` per operation.
+    """
+
+    def __init__(self, *, camera, camera_path, stage, transport, sensors, rig_prefixes,
+                 runtime_env, python='python3', frame_id='restock_camera_arm', domain=88,
+                 invalid=INVALID_DEPTH, socket_path=None, idle_timeout_s=1800.0, topics=None,
+                 max_restarts=20, restart_connect_timeout_s=20.0,
+                 send_buffer_bytes=8 << 20, send_timeout_s=10.0):
+        from pxr import UsdGeom, Gf
+        self.camera, self.sensors = camera, sensors
+        self.rig_prefixes = tuple(rig_prefixes)
+        if not self.rig_prefixes:
+            raise ValueError('rig_prefixes required to identify robot/cart self-returns')
+        self.frame_id, self.invalid = frame_id, float(invalid)
+        self.target_location = None
+        self._id_cache = (None, frozenset())
+        self._bbox = None
+
+        # Optical child prim (ROS +Z forward / +Y down) under the USD camera (-Z / +Y up),
+        # handed to the existing TF tree.
+        optical_path = camera_path + '/' + frame_id
+        if not stage.GetPrimAtPath(optical_path):
+            xf = UsdGeom.Xform.Define(stage, optical_path)
+            xf.AddTransformOp().Set(Gf.Matrix4d(1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1))
+        transport.add_frames([optical_path])
+
+        # Spawn the out-of-Isaac rclpy publisher under the host overlay env + domain 88, SUPERVISED:
+        # a writer exit that is NOT a close() (a crash / broken pipe) is detected on the next publish
+        # and the subprocess + writer are respawned (bounded) so the host nvblox/station-ack stream
+        # never starves into StationAckStreamStalled. The spawn is factored into _spawn_publisher so
+        # the supervisor can call it again verbatim; the socket path is unlinked+rebound by serve()
+        # on each (re)launch, so a respawn reconnects on the SAME per-feed path.
+        import os
+        from .masked_depth_ipc import SubprocessSupervisor
+        self._socket_path = socket_path or _default_socket_path(frame_id)
+        ipc_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'masked_depth_ipc.py')
+        # Match the host nodes' DDS config EXACTLY (twin.restock_host.config.isolated_environment):
+        # rmw_fastrtps_cpp + UDPv4-only builtin transport + SKIP_DEFAULT_XML + localhost-only, and
+        # strip any DDS profile/discovery-server overrides. The host forces UDPv4 (no shared memory);
+        # a subprocess on the default SHM+UDP transport discovers the topics but never delivers data
+        # to nvblox (run-37/38). Export AFTER sourcing the overlay so these win.
+        self._command = (f'set +u; source {runtime_env}; '
+                   f'export ROS_DOMAIN_ID={int(domain)} ROS_LOCALHOST_ONLY=1 ROS_STATIC_PEERS= '
+                   f'ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST RMW_IMPLEMENTATION=rmw_fastrtps_cpp '
+                   f'FASTDDS_BUILTIN_TRANSPORTS=UDPv4 SKIP_DEFAULT_XML=1; '
+                   f'unset FASTRTPS_DEFAULT_PROFILES_FILE FASTDDS_DEFAULT_PROFILES_FILE '
+                   f'ROS_DISCOVERY_SERVER CYCLONEDDS_URI RMW_FASTRTPS_USE_QOS_FROM_XML; '
+                   f'exec {python} {ipc_script} serve {self._socket_path} {float(idle_timeout_s)}'
+                   f'{_serve_topic_args(topics)}')
+        # Spawn under a CLEAN base env, NOT the Isaac process env: Isaac loads its own bundled
+        # ("internal") jazzy rclpy/rmw and sets AMENT/PYTHONPATH/LD_LIBRARY_PATH to it; inheriting
+        # that and sourcing the host /opt/ros jazzy overlay on top mixes two ROS middlewares, so
+        # the subprocess's DDS publishers never reach the host (the no-GPU smoke worked precisely
+        # because it ran in a clean shell). Hand the overlay source a minimal env to build from.
+        self._clean_env = {k: os.environ[k] for k in ('HOME', 'USER', 'LOGNAME', 'TERM', 'DISPLAY')
+                           if k in os.environ}
+        self._clean_env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        self._restart_connect_timeout_s = float(restart_connect_timeout_s)
+        self._send_buffer_bytes = send_buffer_bytes
+        self._send_timeout_s = send_timeout_s
+        feed = 'camera_1_mast' if 'mast' in str(frame_id) else 'camera_0_arm'
+        self._supervisor = SubprocessSupervisor(self._spawn_publisher, feed=feed,
+                                                max_restarts=int(max_restarts))
+
+    def _spawn_publisher(self):
+        """(re)launch the out-of-Isaac publisher subprocess + connect a bounded writer.
+
+        Called once at construction and again by :class:`SubprocessSupervisor` on a restart; the
+        serve() subprocess unlinks+rebinds the per-feed socket, so the fresh writer reconnects on
+        the same path. Returns ``(proc, writer)`` for the supervisor to own."""
+        import subprocess
+        from .masked_depth_ipc import FrameWriter
+        proc = subprocess.Popen(['bash', '-c', self._command], env=self._clean_env)
+        writer = FrameWriter(self._socket_path, connect_timeout_s=self._restart_connect_timeout_s,
+                             send_buffer_bytes=self._send_buffer_bytes,
+                             send_timeout_s=self._send_timeout_s)
+        return proc, writer
+
+    @property
+    def _proc(self):
+        """The live publisher subprocess (tracks the supervisor's current one across restarts)."""
+        return self._supervisor.proc
+
+    def publish(self, now):
+        import numpy as np
+        self._calls = getattr(self, '_calls', 0) + 1
+        frame = self.camera.get_current_frame()
+        # The camera's depth + instance-ID annotators are not populated on the very first
+        # renders after initialize(); skip those frames rather than crash (the mission reaches
+        # the arm camera many ticks in, so it never saw this, but the focused probe does).
+        no_depth = not isinstance(frame, dict) or frame.get('distance_to_image_plane') is None
+        no_seg = (not isinstance(frame, dict) or not isinstance(frame.get('instance_id_segmentation'), dict)
+                  or frame['instance_id_segmentation'].get('data') is None)
+        if self._calls % 30 == 1:                        # lightweight diagnostic (grep BRIDGE_STATS)
+            rt = frame.get('rendering_time') if isinstance(frame, dict) else None
+            print(f'BRIDGE_STATS calls={self._calls} no_depth={no_depth} no_seg={no_seg} '
+                  f'published={getattr(self, "_published", 0)} now={now} rendering_time={rt}', flush=True)
+        if no_depth or no_seg:
+            return None
+        # Stamp with the caller's host clock (world.current_time, the SAME source the /tf relay uses),
+        # NOT the frame's rendering_time: tf2 never extrapolates forward, so the depth stamp must
+        # equal the /tf stamp for that tick or nvblox silently drops the frame (no ESDF integration).
+        stamp_s = float(now)
+        masked, self._id_cache = masked_depth_from_frame(
+            frame, self.rig_prefixes, self._id_cache, invalid=self.invalid)
+        height, width = masked.shape
+        k = np.asarray(self.camera.get_intrinsics_matrix(), float).reshape(3, 3).ravel().tolist()
+        self._bbox = select_target_bbox(
+            getattr(self.sensors, 'sensed_target_bboxes', ()), self.target_location, self._bbox)
+        # ONE shared float->(sec,nanosec) helper for the depth stamp AND every relayed /tf, /clock,
+        # /joint_states stamp: tf2 accepts an exact-newest match at NANOSECOND resolution, so the
+        # depth and the TF for a tick must convert the identical world.current_time float identically
+        # -- a truncate-vs-round or float32 difference would land the depth 1 ns after the newest TF
+        # and nvblox would refuse it as future extrapolation forever (persistent non-integration).
+        from .control_ipc import _secs_to_time
+        sec, nsec = _secs_to_time(stamp_s)
+        header = {'stamp_sec': sec, 'stamp_nsec': nsec,
+                  'frame_id': self.frame_id, 'width': int(width), 'height': int(height),
+                  'k': k, 'bbox': list(self._bbox) if self._bbox is not None else None}
+        # Ship through the supervisor: a publisher that died since the last tick (a crash, not our
+        # close()) is respawned here before the send, so the feed self-heals instead of starving
+        # the station ack stream. On a clean close() the supervisor refuses (mission is tearing down).
+        self._supervisor.send(header, np.ascontiguousarray(masked, dtype='<f4').tobytes())
+        self._published = getattr(self, '_published', 0) + 1
+        return stamp_s
+
+    def close(self):
+        # fm463 lifecycle instrumentation: a masked-depth publisher death freezes the station, so name
+        # EXACTLY who closed which feed and when. The caller stack names the trigger (stop() / a stage
+        # teardown / a sensing rebuild); the feed tags camera_0 (arm) vs camera_1 (mast); the returncode
+        # is the subprocess exit code (negative => killed by signal -N). A publisher that dies WITHOUT a
+        # matching MASKED_DEPTH_BRIDGE_CLOSE line died on its own (crash/timeout), not from a close().
+        import traceback as _tb, time as _t
+        feed = 'camera_1_mast' if 'mast' in str(self.frame_id) else 'camera_0_arm'
+        caller = ''.join(_tb.format_stack()[-7:-1])
+        print('MASKED_DEPTH_BRIDGE_CLOSE feed=%s frame_id=%s wall=%.3f pid=%s alive=%s restarts=%s\n'
+              '  caller:\n%s'
+              % (feed, self.frame_id, _t.time(), getattr(self._proc, 'pid', None),
+                 self._supervisor.poll() is None, self._supervisor.restarts, caller), flush=True)
+        # Latch the supervisor closed (no restart after a deliberate teardown) and terminate the
+        # live subprocess + writer.
+        self._supervisor.close()
+        print('MASKED_DEPTH_BRIDGE_CLOSED feed=%s returncode=%s (negative=killed by signal)'
+              % (feed, self._supervisor.returncode), flush=True)
+
+
+def _rig_root(path):
+    """Top-level USD prim of a path, e.g. '/mobile_ur10_rollwagen/ur_base_link' -> '/mobile_ur10_rollwagen'."""
+    parts = str(path).strip('/').split('/')
+    return '/' + parts[0] if parts and parts[0] else str(path)
+
+
+def mast_sim_topics(namespace='/restock_sim'):
+    """Full ROS topic names the mast (camera_1) masked-depth publisher uses (pure; no Isaac).
+
+    The design/host single-sources the NS-relative names from
+    :func:`twin.restock_camera.mast_depth.nvblox_feed`; this joins them to the mission namespace
+    (``/restock_sim``) the host launch (``restock_host.launch``) subscribes on. ``bbox`` is ``None``:
+    the mast segmenter reuses the shared ``/restock_sim/target_bbox`` the wrist already publishes.
+    """
+    from twin.restock_camera.mast_depth import nvblox_feed
+    feed = nvblox_feed()
+    ns = namespace.rstrip('/')
+    return {'depth': ns + '/' + feed['masked_depth'],
+            'info': ns + '/' + feed['masked_depth_info'], 'bbox': None}
+
+
+def build_mast_depth_bridge(*, stage, assembly, design, settings,
+                            gripper_path='/RestockPanelGripper', _initialize=None, _bridge_cls=None):
+    """Author the mast depth camera prim + wire its masked-depth/info publisher (nvblox camera_1).
+
+    Mirrors ``restock_manipulation.isaac_factory._build_masked_depth_bridge`` for the wrist
+    (camera_0), but the mast camera (camera_1) is body-mounted on ``robot_base`` and authored here
+    from the design's ``mast`` entry (:func:`native_cameras.initialize_mast_camera`). Rig prefixes
+    (robot + cart + gripper subtrees whose self-pixels are invalidated -- INCLUDING the carried
+    carton, which rides the rig as an instance subtree) match the wrist. The feed publishes only
+    masked_depth + camera_info on frame ``restock_camera_mast``; the grasp-target bbox stays the
+    single shared ``/restock_sim/target_bbox`` the wrist publishes, so ``sensors=None`` (no bbox).
+    Returns the bridge, or ``None`` when the design carries no mast camera (mast depth disabled) --
+    so a disabled mast authors no prim, allocates no render product and spawns no publisher.
+
+    ``_initialize``/``_bridge_cls`` are the camera-authoring + publisher-construction seams (default
+    to the real Isaac authoring + :class:`ArmDepthSubprocessBridge`); CPU tests inject fakes so the
+    wiring (prefixes, topics, frame, sensors) is exercised without authoring a prim or spawning the
+    out-of-Isaac publisher subprocess.
+    """
+    initialize = _initialize
+    if initialize is None:
+        from .native_cameras import initialize_mast_camera as initialize
+    built = initialize(stage, design, assembly.paths['ur_base_link'])
+    if built is None:
+        return None
+    camera, camera_path, frame_id = built
+    cart_root = assembly.evidence['composition']['assets']['cart']['root']
+    prefixes = settings.get('rig_prefixes') or tuple(dict.fromkeys(
+        [_rig_root(assembly.paths['articulation']), _rig_root(cart_root), gripper_path]))
+    bridge_cls = _bridge_cls or ArmDepthSubprocessBridge
+    return bridge_cls(
+        camera=camera, camera_path=camera_path, stage=stage, transport=assembly.transport,
+        sensors=None, rig_prefixes=prefixes, frame_id=frame_id,
+        domain=int(settings.get('domain', 88)), runtime_env=settings['runtime_env'],
+        python=settings.get('python', 'python3'), topics=mast_sim_topics())

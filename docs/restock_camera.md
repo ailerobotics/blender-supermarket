@@ -192,12 +192,19 @@ bounded QR tile grid (hence decode latency) is unaffected — it is resolution-b
 not marker-size-bound. Pixel size and incidence are necessary, never sufficient,
 for decoding; lighting and contrast are separate (see Store light rig below).
 
-The shelf view is re-aimed to target+(-.50,0,.23), looking at target+(-.18,0,-.05):
-y-centred on the marker pair (the earlier +.30 y offset grazed the far marker at
-63.8° / 3.65 px·module⁻¹). Both shelf markers now reach ~13 px·module⁻¹ at ~35°
-while the carton-top label plane and full support stay framed. The camera stays just
-below the next shelf tier (~0.97 m) to see under it to the carton top; a top-down
-view is impossible because that tier is ~0.24 m above the support. Source and cart
+The shelf view sits at target+(-.50,0,.23) (lens z=0.96, below the ~0.97 m tier) with a
+-6.75° world-X tilt and a small **+4° world-Z yaw**, aiming at target+(-.18,-.023,-.05).
+The two shelf markers are a **non-mirror pair** on the front lip (y=4.68 and 4.88,
+asymmetric about the camera's y=4.826) mounted at the **same orientation** (no per-marker
+grid flip). The earlier design centred a mirror pair and flipped the far marker's grid
+180° so cv2 could read its mirror-shear — but that flip 180°-rolled the far marker's
+decoded corner order and made `register_marker`'s shared-model fit report the support
+plane as non-horizontal (`sim-restock-stations-v1`). The repositioned pair + yaw views the
+far marker much more steeply (~23° incidence vs ~55°), so the production FixedTileQR
+decodes **both** markers at one orientation and the fit pairs corners consistently. The
+per-marker grid rotation is now a design input (`grid_rot_quarters`, default 0). The camera
+stays just below the next shelf tier (~0.97 m) to see under it to the carton top; a
+top-down view is impossible because that tier is ~0.24 m above the support. Source and cart
 optical poses are unchanged. The source adds a rigid coplanar marker/witness tab
 behind the existing table; cart markers and witness occupy its exposed left strip;
 shelf markers use the exposed left strip of the actual shelf. These additions remain
@@ -278,6 +285,16 @@ one `intensity_scale` drives lamp and fixtures together and the marker/source il
 ratio is scale-free. The emitter and its collidable `shelf_lamp_housing` are in the
 camera-config (`config['lamps']`, `config['solids']`) and must be in navigation/planning.
 
+The **cart deck carries the same kind of coaxial lamp** (`config['lamps']` id `cart`, on
+`cart_chassis`, collidable `cart_lamp_housing`). The deck markers sit on the cart's LOWER
+deck, recessed under its own UPPER shelf (chassis z≈0.72), which blocks the overhead store
+light: the bare native render left them at ~126/255 and the cage cast directional shadows
+that kept `support:cart:0` from decoding. The cart `DiskLight` is co-located with the lens
+and aimed at the deck marker centroid, so it fills the cage shadow on the clear
+lens→marker sightline and lifts the deck; it is sized (`power_w=63`) so each marker's lamp
+illuminance matches the shelf lamp's proven-decode level (scale-free). See
+`data/sim-restock-stations-v1/report.md`.
+
 `scripts/plan_restock_lighting.py` is the offline CPU proof: per station it ray-tests
 near-overhead fixture line of sight, **casts emitter→marker rays against the camera
 housing, lamp housing, shelf tiers and products** (`lamp_marker_occlusion`; a blocked
@@ -285,8 +302,8 @@ ray contributes zero lamp light), and estimates per-marker illuminance (lux, sca
 anchored to the measured source decode. **Run `--store` against the restock composition
 (`side-scenario-v2.usda`), not the raw realism `supermarket.usdc`**: the raw store still
 stocks the restock target with product, which the restock composition — and the actual
-rendered stage — remove (verified identical to the capture's `smoke.usda`). Source and
-cart markers are `overhead_direct`; the shelf is `camera_lamp_lit` with
+rendered stage — remove (verified identical to the capture's `smoke.usda`). Source markers
+are `overhead_direct`; the cart and shelf are `camera_lamp_lit` (coaxial deck/slot lamps) with
 `lamp_reaches_all_markers` true — its markers receive ~4× the illuminance the (decoding)
 source markers get, so at whatever `intensity_scale` integration tunes for the source
 whites to reach ~180/255, the shelf whites reach it too. Line of sight and illuminance
@@ -469,3 +486,72 @@ Focused tests live in `scripts/twin/tests/test_restock_camera.py`; they use anal
 depth fixtures labelled as CPU tests. No fixtures establish sensor or physics
 success. The task's exact-input visibility JSON and report are handed to
 integration separately; final recorded demonstration remains integration-owned.
+
+# Acquisition-to-use integration gate
+
+`restock_camera/freshness.py` keeps the 500 ms acquisition deadline across
+processing. Native frames carry their original monotonic acquisition timestamp;
+registration, commissioning, carton sensing and sequential station aggregation
+read a fresh clock after their work. They refuse expired evidence even while
+simulation time is paused. CPU functional pixel fixtures use explicit fake clocks;
+they do not establish native latency.
+
+`Sensors.valid_until_steady` carries the earliest deadline through the same-host
+ROS handoff. The transfer controller rechecks it before motion starts; native
+gripper dispatch also refuses an expired queued command. The host and native
+process must share the workstation monotonic clock. This is not a cross-machine
+clock synchronization protocol. Runtime remains UNCOMMISSIONED until held-out
+native acquisition, all processing, mapping and actuator handoff pass the limit.
+
+## Mast depth camera — nvblox obstacle map while a carton is carried
+
+`scripts/twin/restock_camera/mast_depth.py` designs a second depth feed for the nvblox
+obstacle map. The eye-in-hand **wrist** camera is nvblox's only collision/depth feed
+(`restock_host/launch.py`, `num_cameras: 1`, `camera_0` ← masked `world_depth`); from grasp
+on, the carried carton fills the wrist frame, the masked depth stream stops and the ESDF
+freezes at the place re-park (integration finding B'). The `mast` camera is a RealSense
+D435-class depth camera (848×480, 87° HFOV, 0.3–6.0 m) fixed to `base_link` high on the mast
+(`MAST_MOUNT_XYZ`), pitched down over the arm's working side, so a carton held at the gripper
+cannot fill its frame. It feeds nvblox as **`camera_1`** alongside the wrist, with the SAME
+masking applied: the per-pixel instance-ID rig self mask (the attached carton is a rig-instance
+subtree, removed like any rig pixel) plus the `object_segmenter` grasp-target mask.
+
+- **Switch (default off).** Host config `mast_depth: {enabled: true}` (`restock_host/config.py`,
+  `restock_host/launch.py`) turns on the second feed: `num_cameras: 2`, a second
+  `object_segmenter` republishing the mast rig+carton-masked depth on `world_depth_mast`, and
+  `camera_1` remapped to it. Off (absent / `false`) the launch is byte-for-byte the single-feed
+  default; `camera_config(scenario, manifest, mast_depth=True)` adds the `mast` camera
+  (parent `robot_base`, `role: nvblox_depth`, no QR support) and its collision housing/bracket,
+  and `camera_config(...)` without the flag is unchanged. The integration lane flips the switch
+  and authors the prim + the Isaac-side masked-depth publisher for `restock_camera_mast`
+  (`mast_depth.nvblox_feed()` names the topics/frame; the host `required_external` states the
+  contract).
+- **Offline proof (`scripts/plan_restock_more_cameras.py`, `test_restock_mast_depth.py`).** At
+  the carry / place-re-park / transfer geometry the mast sees the place region and the arm-sweep
+  approach while the carton is held, whereas the wrist is fully blocked; a finite-resolution
+  voxel replay (`observed_space.ObservedSpace`) stays fresh and keeps integrating across the
+  held-carton window (ESDF updates every tick) while the carton-filled wrist contributes
+  nothing. Masked carton pixels neither clear free space nor assert an obstacle. These are
+  geometric design predictions, not rendered RGB-D.
+
+## Cold-collect grasp confirmation (run-327/328) — named cause
+
+Cold runs fail at **collect**: the fixed `source` camera capture cycles `missing, moving,
+stale or unsynchronized camera evidence` → `no new synchronized rendered camera frame` → `no
+established support registration to hold under occlusion`, never succeeding, and the manip
+reports `no initial sensor frame` → `arm command heartbeat lost`. This is **not** a
+camera-placement problem (so no confirmation camera is added — "as few cameras as the evidence
+needs"):
+
+`scripts/plan_restock_more_cameras.py` / `test_restock_mast_depth.py` prove geometrically that
+the overhead `source` lens keeps a clear, in-FOV sightline to **both support markers and the
+witness** (at y≈17.4, directly under the lens) both at the parked collect pose and through a
+conservative south-approaching grasp arm and pre-weld press; only the carton *top* is
+transiently blocked by the press. So a clean cold registration frame is available at park. The
+failure is the absence of an **established** registration to hold through the occlusion the
+scenario itself declares (`occlusion_window_s`): the collect provider never seeds the hold
+before the arm enters that window. The fix is collect-provider/orchestrator **sequencing**
+(establish at park before reach, or seed the hold from the commissioned baseline) — owned by
+the integration/manipulation lane. (`render_scale 0.375` on a decode-grade source camera is a
+secondary suspect to rule out — small markers decode worse at reduced resolution; this is a
+render-config choice, also integration-owned, not a new camera.)

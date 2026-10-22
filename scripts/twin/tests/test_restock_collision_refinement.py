@@ -193,6 +193,36 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(launch_plan(self.config)['static_errors'])
 
 
+class CollisionBufferTests(unittest.TestCase):
+    def _inputs(self, directory):
+        fixture(directory)  # writes robot.urdf + mobile.json (base_link carries a 0.005 m sphere)
+        return Path(directory) / 'robot.urdf', Path(directory) / 'mobile.json', Path(directory)
+
+    def test_base_buffer_inflates_only_named_link_and_replays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            urdf, manifest, root = self._inputs(directory)
+            buffed, art = build_assets(urdf, manifest, root, collision_buffer={'base_link': 0.02})
+            spheres0 = yaml.safe_load(art['mobile.xrdf'])['geometry']['mobile_cad']['spheres']
+            baseline0 = yaml.safe_load(build_assets(urdf, manifest, root)[1]['mobile.xrdf']
+                                       )['geometry']['mobile_cad']['spheres']
+            # base_link radii rise by exactly the buffer; a non-buffered link is untouched
+            self.assertTrue(np.allclose([s['radius'] for s in spheres0['base_link']],
+                                        np.array([s['radius'] for s in baseline0['base_link']]) + 0.02))
+            self.assertTrue(np.allclose([s['radius'] for s in spheres0['link0']],
+                                        [s['radius'] for s in baseline0['link0']]))
+            self.assertEqual(buffed['collision_buffers_m'], {'base_link': 0.02})
+            # deterministic: the same buffer reproduces byte-identical artifacts (evidence replay)
+            self.assertEqual(hashlib.sha256(art['mobile.xrdf'].encode()).hexdigest(),
+                             hashlib.sha256(build_assets(urdf, manifest, root,
+                                 collision_buffer={'base_link': 0.02})[1]['mobile.xrdf'].encode()).hexdigest())
+
+    def test_buffer_out_of_range_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            urdf, manifest, root = self._inputs(directory)
+            with self.assertRaisesRegex(ValueError, 'collision buffer'):
+                build_assets(urdf, manifest, root, collision_buffer={'base_link': 0.5})
+
+
 @unittest.skipUnless(os.environ.get('RESTOCK_HOST_ACTUAL_CAD') == '1', 'explicit actual local CAD regression')
 class ActualCadTests(unittest.TestCase):
     def test_recorded_mobile_cad_transport(self):

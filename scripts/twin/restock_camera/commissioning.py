@@ -27,7 +27,8 @@ from pathlib import Path
 import numpy as np
 
 from .geometry import Intrinsics
-from .sensed import SupportGeometry, RegisteredSupport
+from .sensed import (SupportGeometry, RegisteredSupport, SupportView,
+                     MarkerRegistration, FrameEvidence)
 
 SCHEMA = 'restock-commissioning-baseline.v1'
 MANIFEST = 'commissioning-manifest.json'
@@ -68,6 +69,10 @@ def geometry_from_json(data):
     fields['intrinsics'] = Intrinsics(**intr) if isinstance(intr, dict) else intr
     for key in _TUPLE_GEOMETRY_FIELDS:
         fields[key] = _tuples(fields[key])
+    # Legacy baselines predate camera_from_support -> absent key stays None (dataclass default, no
+    # seed); a persisted matrix restores to nested tuples like the other geometry matrices (Option B).
+    cfs = fields.get('camera_from_support')
+    fields['camera_from_support'] = None if cfs is None else _tuples(cfs)
     # baseline_acquired_steady stays None or float; frame_id must survive as int.
     fields['baseline_frame_id'] = int(fields['baseline_frame_id'])
     return SupportGeometry(**fields)
@@ -266,6 +271,46 @@ def run_commissioning(contexts, capture, *, dataset_dir, lifetime_s=600., commis
     return records
 
 
+def recommission_in_session(contexts, capture, *, dataset_dir, required_locations,
+                            lifetime_s=600., commissioning_freshness_s=5., render_scale=1.):
+    """Refresh every required station baseline INSIDE a live session (a warm-session re-run step).
+
+    The warm-session loop (`run_mobile_restock.run_warm_session`) re-runs the mission in one live
+    Isaac session; its opt-in `config['warm_reset']` provider re-seats the scene and re-validates the
+    baseline, and MUST NOT bypass the lifetime guard. When the re-seated baseline would be refused
+    (expired on the sim clock, or session/acquisition-clock unbound), this is the provider's refresh
+    step: with the stations re-seated EMPTY, re-capture each live context's empty-support frame and
+    re-commission through the UNCHANGED production `commission()` gates (markers decode, metric fit,
+    flat plane), re-persist the fresh baseline (new sim-clock stamp + acquisition under the context's
+    own clock/session, so a correctly sim-clock-rebased re-run reads age ~0), and RE-ATTACH the
+    refreshed geometry to the live slots. A station whose fresh frame does not commission — or any
+    required station the contexts do not cover — RAISES, so the warm loop stops instead of running on
+    a stale/absent baseline. Pure commissioning choreography (no Isaac/USD); the caller owns the live
+    World reset, camera capture and sim-clock rebase.
+
+    `contexts`/`capture` are the live per-camera `RenderedSupportContext`s and the caller's
+    empty-frame capture, exactly the `run_commissioning` contract. `required_locations` is the set of
+    mission stations (e.g. `backstock_00`, `rollwagen`, `G3_back_s2`) that MUST refresh. Returns
+    `{station: BaselineRecord}` for the refreshed stations.
+    """
+    required = set(required_locations)
+    if not required:
+        raise ValueError('recommission_in_session requires at least one required station')
+    records = run_commissioning(contexts, capture, dataset_dir=dataset_dir, lifetime_s=lifetime_s,
+                                commissioning_freshness_s=commissioning_freshness_s,
+                                render_scale=render_scale)
+    by_station = {r.station: r for r in records}
+    missing = required - set(by_station)
+    if missing:
+        raise CommissioningBaselineMissing(
+            f'in-session re-commission did not refresh required station(s): {sorted(missing)} '
+            f'(refreshed: {sorted(by_station)})')
+    # Re-validate + re-attach from the authoritative persisted records so the next warm attempt reads
+    # the fresh baseline (apply_to_contexts also runs _check_match: support/camera must still match).
+    apply_to_contexts(contexts, by_station, required_locations=required)
+    return {s: by_station[s] for s in required}
+
+
 def load_baselines(dataset_dir):
     """Load every commissioned baseline under ``dataset_dir`` as ``{station: BaselineRecord}``.
 
@@ -317,6 +362,33 @@ def _check_match(context, slot, geometry):
             f'{geometry.camera_id!r}/{geometry.camera_revision!r}, not {context.camera_id!r}/{context.camera_revision!r}')
 
 
+def _seed_tracker_good(tracker):
+    """Seed RegisteredSupport.good from the commissioned pose so hold() can re-express the baseline
+    through the LIVE base_from_camera before any clean observe prepare() runs (Option B / fm443).
+
+    camera_from_support is world-constant (fixed source camera + fixed support, base parked). Seeding
+    base_from_camera=I and registration.base_from_support=camera_from_support makes hold()'s
+    re-expression exact: camera_from_support = inv(I) @ cfs, then base_from_support = bfc_live @ cfs.
+    good_now=inf makes the window-lost check a no-op so the real staleness bound is age_at (baseline
+    lifetime); a later clean prepare() overwrites this with a finite (view, now). Legacy baselines
+    without camera_from_support are left unseeded (byte-identical clean-establish fallback). hold() still
+    requires a live FrameEvidence within occlusion_window_s -- this only removes the clean-prepare + good
+    prerequisite, not the synchronized-frame requirement."""
+    g = tracker.geometry
+    cfs = getattr(g, 'camera_from_support', None)
+    if cfs is None:
+        return
+    base_from_support = tuple(tuple(r) for r in cfs)
+    identity = tuple(tuple(r) for r in np.eye(4))
+    ev = FrameEvidence(g.camera_id, g.baseline_frame_id, g.baseline_stamp, g.baseline_stamp,
+                       'commissioned', g.camera_revision, g.baseline_session_id,
+                       g.steady_domain, g.baseline_acquired_steady)
+    reg = MarkerRegistration(g.marker_id, g.support_id, g.revision, base_from_support,
+                             0.0, 0.0, ev, (g.marker_id,), g.marker_layout_id)
+    view = SupportView(g, reg, None, (), 0.0, (0., 0., 0.), 0.0, 0.0, '', identity, occluded=True)
+    tracker.good = (view, float('inf'))
+
+
 def apply_baselines(context, records, *, required_locations=None):
     """Attach commissioned baselines to a context's slots by station; refuse any missing.
 
@@ -340,6 +412,7 @@ def apply_baselines(context, records, *, required_locations=None):
                 f'commission it before the mission (available: {sorted(records)})')
         _check_match(context, slot, record.geometry)
         slot.tracker = RegisteredSupport(record.geometry)
+        _seed_tracker_good(slot.tracker)         # Option B: hold()-able commissioned prior
         slot.decode_roi = record.decode_roi      # restore the ROI-bounded decode region
         attached.append(slot.location)
     missing = required - set(attached)
@@ -366,6 +439,7 @@ def apply_to_contexts(context_providers, records, *, required_locations=None):
                 continue
             _check_match(context, slot, record.geometry)
             slot.tracker = RegisteredSupport(record.geometry)
+            _seed_tracker_good(slot.tracker)         # Option B: hold()-able commissioned prior
             slot.decode_roi = record.decode_roi      # restore the ROI-bounded decode region
             attached.append(slot.location)
     if required_locations is not None:

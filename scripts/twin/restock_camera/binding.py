@@ -6,7 +6,7 @@ import numpy as np
 from .sensed import (FrameEvidence, register_marker, calibrate_rigid_support,
                      RegisteredSupport)
 from .freshness import frame_deadline, require_fresh
-from .qr import FixedTileQR
+from .qr import FixedTileQR, FrameQR, rgb_digest
 
 
 @dataclass
@@ -36,14 +36,27 @@ class RenderedSupportContext:
     """
     def __init__(self, *, camera_id, intrinsics, slots, measure_context,
                  clearance_for_slot, depth_error_m, camera_revision, clock_context=None,
-                 steady_clock=time.monotonic):
+                 steady_clock=time.monotonic, occlusion_window_s=None,
+                 occlusion_contradiction_m=.05, occlusion_contradiction_rad=.17, render_scale=1.0):
         self.steady_clock = steady_clock
         self.camera_id,self.intrinsics = camera_id,intrinsics
         self.slots = tuple(slots)
         self.measure_context,self.clearance_for_slot = measure_context,clearance_for_slot
         self.depth_error_m,self.camera_revision = depth_error_m,camera_revision
         self.clock_context = clock_context
-        self.decoder = FixedTileQR(camera_id)
+        # Approach-occlusion tolerance (None = strict). When the reaching arm occludes the FIXED
+        # camera's view of the support it grasps toward, the live __call__ holds the last clean
+        # registration (flagged occluded) up to this window instead of refusing and starving the
+        # sensor-stream watchdog. commission()/observe stay strict (full footprint required).
+        if occlusion_window_s is not None and (not np.isfinite(occlusion_window_s) or occlusion_window_s < 0):
+            raise ValueError('occlusion_window_s must be None or a finite non-negative duration')
+        self.occlusion_window_s = occlusion_window_s
+        self.occlusion_contradiction_m = occlusion_contradiction_m
+        self.occlusion_contradiction_rad = occlusion_contradiction_rad
+        # Scale the decoder tile grid with the sensing render resolution (a fast render preset steps
+        # it down): the intrinsics are already scaled by the same factor, so the tiles follow the
+        # markers and decode stays reliable at reduced resolution (see qr.tile_origins).
+        self.decoder = FixedTileQR(camera_id, render_scale=render_scale)
         self.qr_observation = None
         if len({slot.location for slot in slots}) != len(slots):
             raise ValueError('duplicate support location')
@@ -62,7 +75,16 @@ class RenderedSupportContext:
         return (float(boxes[:,0].min()), float(boxes[:,1].min()),
                 float(boxes[:,2].max()), float(boxes[:,3].max()))
 
-    def _registrations(self, frame, now):
+    def _registrations(self, frame, now, *, allow_occlusion=False):
+        """Decode support markers and register each slot against this depth.
+
+        ``allow_occlusion`` (the live __call__ path, never commission/observe): a slot whose marker
+        is not decoded, whose marker is too occluded to register, OR a frame the production decoder
+        cannot read at all (unreadable/conflicting/replayed-re-presentation/over-budget as the
+        reaching arm occludes the support) yields ``None`` instead of aborting — __call__ then holds
+        that slot's last clean registration, and this frame carries an EMPTY held QR (no fresh
+        detections). Strict (default) keeps the historical 'no geometry fallback' / decode refusal so
+        commissioning/observe require full visibility."""
         self.qr_observation = None
         transform,tf_stamp,epoch,parked = self.measure_context(frame,now)
         clock = ('default','',None) if self.clock_context is None else self.clock_context(frame,now)
@@ -73,19 +95,36 @@ class RenderedSupportContext:
         depth = np.asarray(frame['distance_to_image_plane'],float)
         if rgb.shape[:2] != (self.intrinsics.height,self.intrinsics.width) or depth.shape != rgb.shape[:2]:
             raise ValueError('unregistered marker RGB-D')
-        qr = self.decoder.decode(rgb,evidence,now=now,parked=parked,roi=self._decode_roi())
+        try:
+            qr = self.decoder.decode(rgb,evidence,now=now,parked=parked,roi=self._decode_roi())
+        except ValueError:
+            if not allow_occlusion:
+                raise
+            # Decode could not read a clean frame under occlusion: present an empty held QR for this
+            # frame (every slot then holds its last clean registration) so /sensors keeps publishing
+            # the occluded flag through the reach, instead of aborting and starving the watchdog.
+            qr = FrameQR(evidence, tuple(rgb.shape), rgb_digest(rgb), (), (), 0., 0)
         decoded = {item.text:np.asarray(item.corners) for item in qr.detections}
         registrations = []
         for slot in self.slots:
             if slot.marker_id not in decoded or slot.auxiliary_id and slot.auxiliary_id not in decoded:
+                if allow_occlusion:
+                    registrations.append(None)   # marker fully occluded this frame; hold downstream
+                    continue
                 raise ValueError('fresh support marker(s) not decoded; no geometry fallback')
             extra = {} if not slot.auxiliary_id else dict(auxiliary_pixels=decoded[slot.auxiliary_id],
                 auxiliary_id=slot.auxiliary_id,decoded_auxiliary_id=slot.auxiliary_id,
                 auxiliary_offset_xy=slot.auxiliary_offset_xy)
-            registrations.append(register_marker(depth,decoded[slot.marker_id],self.intrinsics,transform,
-                marker_id=slot.marker_id,decoded_id=slot.marker_id,support_id=slot.support_id,
-                revision=slot.revision,side_m=slot.marker_side_m,evidence=evidence,now=now,
-                parked=parked,depth_error_m=self.depth_error_m,**extra))
+            try:
+                registrations.append(register_marker(depth,decoded[slot.marker_id],self.intrinsics,transform,
+                    marker_id=slot.marker_id,decoded_id=slot.marker_id,support_id=slot.support_id,
+                    revision=slot.revision,side_m=slot.marker_side_m,evidence=evidence,now=now,
+                    parked=parked,depth_error_m=self.depth_error_m,**extra))
+            except ValueError:
+                if allow_occlusion:
+                    registrations.append(None)   # marker partially occluded (corner depth/fit); hold
+                    continue
+                raise
         self.qr_observation = qr
         return transform,evidence,parked,depth,registrations
 
@@ -129,19 +168,33 @@ class RenderedSupportContext:
 
     def __call__(self, frame, now):
         from ..restock_manipulation.isaac_sensors import CameraContext, SlotView
-        transform,e,parked,depth,registrations = self._registrations(frame,now)
+        allow = self.occlusion_window_s is not None
+        transform,e,parked,depth,registrations = self._registrations(frame,now,allow_occlusion=allow)
         views = []
         for slot,registration in zip(self.slots,registrations):
             if slot.tracker is None:
                 raise ValueError('observed empty commissioning baseline is required')
-            view = slot.tracker.prepare(depth,self.intrinsics,transform,registration,None,now=now,parked=parked)
+            if registration is not None:
+                # prepare itself holds the last clean registration if the footprint/witness is
+                # occluded (occlusion_window_s set); a present registration also feeds its
+                # contradiction check against the held pose.
+                view = slot.tracker.prepare(depth,self.intrinsics,transform,registration,None,now=now,parked=parked,
+                    occlusion_window_s=self.occlusion_window_s,contradiction_m=self.occlusion_contradiction_m,
+                    contradiction_rad=self.occlusion_contradiction_rad)
+            else:
+                # Marker fully occluded this frame: no current registration to contradict; hold on
+                # the window alone (refuses past it, or if no clean view was ever established).
+                view = slot.tracker.hold(depth,self.intrinsics,transform,e,now=now,parked=parked,
+                    occlusion_window_s=self.occlusion_window_s,current_registration=None,
+                    contradiction_m=self.occlusion_contradiction_m,contradiction_rad=self.occlusion_contradiction_rad)
             clearance = self.clearance_for_slot(slot.location,view,frame,now)
             if clearance is not None:
                 clearance.validate(now,e,view.geometry)
                 view = replace(view,clearance=clearance)
             views.append(SlotView.from_support(slot.location,view,slot.label_mask))
         return CameraContext(transform,e.transform_stamp,e.epoch,tuple(views),parked,
-                             e.session_id,e.steady_domain,e.acquired_steady,self.qr_observation)
+                             e.session_id,e.steady_domain,e.acquired_steady,self.qr_observation,
+                             self.occlusion_window_s)
 
     def invalidate(self, reason):
         for slot in self.slots:
@@ -151,22 +204,54 @@ class RenderedSupportContext:
 
 class StationSensors:
     """Aggregate distinct assigned cameras; no camera implicitly covers the mapper."""
-    def __init__(self, *, cameras, profiles, pose_bridge_root, context_providers, location_cameras):
+    def __init__(self, *, cameras, profiles, pose_bridge_root, context_providers, location_cameras,
+                 steady_clock=time.monotonic, wall_backstop_s=60., wall_clock=time.monotonic,
+                 execution_gate=False):
         from ..restock_manipulation.isaac_sensors import IsaacCartonSensors
         self.location_cameras = dict(location_cameras)
+        self.steady_clock = steady_clock
+        self.wall_backstop_s, self.wall_clock = wall_backstop_s, wall_clock
         if (not cameras or set(cameras) != set(context_providers)
                 or any(camera not in cameras for camera in self.location_cameras.values())):
             raise ValueError('camera/location/context binding is incomplete')
         self.adapters = {key:IsaacCartonSensors(camera,pose_bridge_root=pose_bridge_root,
-            profiles=profiles,camera_id=key,context_provider=context_providers[key])
+            profiles=profiles,camera_id=key,context_provider=context_providers[key],
+            steady_clock=steady_clock,wall_backstop_s=wall_backstop_s,wall_clock=wall_clock,
+            execution_gate=execution_gate)
             for key,camera in cameras.items()}
         self.sensed_target_bboxes = ()
         self.evidence = ()
 
+    def set_render_suspended(self, suspended):
+        """Fan the opt-in sensing gate (render-suspend) to every per-camera adapter. Integration
+        toggles this each tick from the controller phase; a no-op when the gate is off."""
+        for adapter in self.adapters.values():
+            adapter.set_render_suspended(suspended)
+
+    def release_source(self):
+        """fm384 phase-aware collect capture (sim-only, opt-in): after grasp the SOURCE pick
+        observations are no longer needed (the carton is held; later collect moves are joint goals and
+        PLACE reads the destination/cart view). From here the capture renders the DESTINATION camera
+        ONLY -- the single target already comes from the destination (capture() returns
+        targets.get(destination); the source camera never provides it), and the destination renders a
+        REAL fresh frame so require_fresh is honoured end to end. The caller then destroys the source
+        render product to free its VRAM before the release peak. NO held/fabricated source packet.
+        Idempotent; inert unless called (so StationSensors is byte-identical until the integration flips
+        this at grasp-confirm behind RESTOCK_PHASE_AWARE_COLLECT_CAPTURE)."""
+        self._source_released = True
+
     def capture(self, now, source, destination, motion, contact):
         from ..restock_manipulation.types import Sensors
         self.sensed_target_bboxes,self.evidence = (),()
-        selected = sorted({self.location_cameras[source],self.location_cameras[destination]})
+        wall_started = self.wall_clock()
+        # Default: render BOTH the source (pick observations) and destination (target) cameras. After
+        # release_source() (post-grasp, opt-in): destination camera ONLY -- source observations are no
+        # longer read and its render product is freed. The target + freshness still come from the real
+        # destination render, so every integrity check below holds unchanged.
+        if getattr(self, '_source_released', False):
+            selected = sorted({self.location_cameras[destination]})
+        else:
+            selected = sorted({self.location_cameras[source],self.location_cameras[destination]})
         packets = []
         for camera_id in selected:
             adapter = self.adapters[camera_id]
@@ -179,9 +264,17 @@ class StationSensors:
             raise ValueError('destination requires one current calibrated camera view')
         if max(p.scan_time for p in packets)-min(p.scan_time for p in packets) > .05:
             raise ValueError('station cameras are not synchronized')
+        # Sequential per-camera processing must not refresh the earliest acquisition deadline: hold
+        # every camera's capture to the minimum valid_until_steady, re-checked against the shared
+        # steady clock now that all cameras have been processed (evidence/bboxes stay empty on expiry).
+        deadlines = [p.valid_until_steady for p in packets if p.valid_until_steady is not None]
+        if deadlines:
+            require_fresh(min(deadlines), self.steady_clock, wall_started=wall_started,
+                          wall_backstop_s=self.wall_backstop_s, wall_clock=self.wall_clock)
         self.sensed_target_bboxes = tuple(box for key in selected for box in self.adapters[key].sensed_target_bboxes)
         self.evidence = tuple(item for key in selected for item in self.adapters[key].evidence)
         return Sensors(now,tuple(o for p in packets for o in p.observations),targets[0],
             all(p.parked for p in packets),packets[0].contact,min(p.feedback_time for p in packets),
             min(p.collision_time for p in packets),packets[0].joint_positions,
-            tuple(location for p in packets for location in p.scanned_locations),min(p.scan_time for p in packets))
+            tuple(location for p in packets for location in p.scanned_locations),min(p.scan_time for p in packets),
+            min(deadlines) if deadlines else None)

@@ -23,6 +23,10 @@ class MobileSpec:
     wheel_radius: float = 0.16
     wheel_track: float = 0.70
     wheel_width: float = 0.08
+    # Recess the passive casters this far ABOVE the drive-wheel ground plane so the two drive wheels
+    # become the deterministic primary weight-bearing contacts (a real caster-stabilised diff-drive
+    # keeps casters lightly loaded). 0.0 => all four contacts co-planar (legacy, byte-identical).
+    caster_lift_m: float = 0.0
     max_speed: float = 0.35
     max_yaw_rate: float = 0.35
     max_wheel_speed: float = 4.0
@@ -40,8 +44,10 @@ class MobileSpec:
 
     def __post_init__(self):
         for key, value in asdict(self).items():
-            if not math.isfinite(value) or (key != 'hitch_x' and value <= 0):
+            if not math.isfinite(value) or (key not in ('hitch_x', 'caster_lift_m') and value <= 0):
                 raise ValueError(f'invalid {key}: {value}')
+        if not 0.0 <= self.caster_lift_m <= 0.03:
+            raise ValueError(f'caster_lift_m must be in [0, 0.03] m: {self.caster_lift_m}')
         if self.width + self.wheel_width > self.wheel_track:
             raise ValueError('drive wheels intersect chassis; increase track or reduce width')
         if self.length < 0.5 or self.cart_length < 0.4 or self.cart_width < 0.3 or self.cart_height < 1.0:

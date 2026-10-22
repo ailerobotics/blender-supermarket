@@ -1,0 +1,23 @@
+# Verbatim lines from read-only run evidence (datasets/twin-robot-in-store-boot-v1/mission), for the
+# staged-start clock-skew replay in test_restock_staged_start.py. Section headers name the source log.
+## run-330.console.log (cold run, no shortcut)
+CLOCK_DIAG tick=1 stage_time=0.0167 world_current_time=0.0667 wall=0.10
+## run-356.console.log (start_at=couple)
+CLOCK_DIAG tick=1 stage_time=0.0167 world_current_time=0.5667 wall=0.12
+## bench1.console.log (start_at=transfer, recorded_bay_park)
+START_PHASE_SHORTCUT applied start_at=transfer skipped=['collect', 'couple', 'outbound', 'park'] carton_pos=(-3.169, 15.2516, 1.0125) carton_quat_wxyz=(0.7066, 0.0, 0.0, -0.7076) coupled=True
+CLOCK_DIAG tick=1 stage_time=0.0167 world_current_time=1.5667 wall=0.15
+STATION_STATS tick=1 now=0.017 stage_stamp=1.5666667483747005 collision_time=-1.0 ready=False snapshot=None
+STATION_STATS tick=11 now=0.183 stage_stamp=1.7333334237337112 collision_time=-1.0 ready=False snapshot=None
+CLOCK_DIAG tick=21 stage_time=0.3500 world_current_time=1.9000 wall=5.15
+STATION_STATS tick=21 now=0.350 stage_stamp=1.900000099092722 collision_time=-1.0 ready=False snapshot={'epoch': 1, 'sequence': 1, 'stamp': 1.850000096, 'state': 'warming', 'reason': '', 'collision_time': -1.0, 'parked_since': 1.6666667588055133, 'camera_frame': 'restock_camera_arm'}
+STATION_STATS tick=31 now=0.517 stage_stamp=2.0666667744517326 collision_time=-1.0 ready=False snapshot={'epoch': 1, 'sequence': 3, 'stamp': 2.050000106, 'state': 'warming', 'reason': '', 'collision_time': -1.0, 'parked_since': 1.6666667588055133, 'camera_frame': 'restock_camera_arm'}
+MANIP_START operation=transfer
+PUBLISH_SENSORS contact=False stamp=0.6166666666666667
+MANIP_HOST_FAILED op=transfer phase='failed' reason='base moving or stale/missing feedback/collision world [collision_dt=-1.3333(band [-0.5,3.0])]'
+CLOCK_DIAG tick=41 stage_time=0.6833 world_current_time=2.2333 wall=14.94
+STATION_STATS tick=41 now=0.683 stage_stamp=2.2333334498107433 collision_time=-1.0 ready=False snapshot={'epoch': 1, 'sequence': 5, 'stamp': 2.1500001120000003, 'state': 'ready', 'reason': '', 'collision_time': 1.9500001020000002, 'parked_since': 1.6666667588055133, 'camera_frame': 'restock_camera_arm'}
+STATION_STATS tick=51 now=0.850 stage_stamp=2.400000125169754 collision_time=-1.0 ready=False snapshot={'epoch': 1, 'sequence': 5, 'stamp': 2.1500001120000003, 'state': 'ready', 'reason': '', 'collision_time': 1.9500001020000002, 'parked_since': 1.6666667588055133, 'camera_frame': 'restock_camera_arm'}
+CLOCK_DIAG tick=61 stage_time=1.0167 world_current_time=2.5667 wall=18.19
+STATION_STATS tick=61 now=1.017 stage_stamp=2.5666668005287647 collision_time=-1.0 ready=False snapshot={'epoch': 1, 'sequence': 5, 'stamp': 2.1500001120000003, 'state': 'ready', 'reason': '', 'collision_time': 1.9500001020000002, 'parked_since': 1.6666667588055133, 'camera_frame': 'restock_camera_arm'}
+STATION_STATS tick=71 now=1.183 stage_stamp=2.7333334758877754 collision_time=-1.0 ready=False snapshot={'epoch': 1, 'sequence': 5, 'stamp': 2.1500001120000003, 'state': 'ready', 'reason': '', 'collision_time': 1.9500001020000002, 'parked_since': 1.6666667588055133, 'camera_frame': 'restock_camera_arm'}

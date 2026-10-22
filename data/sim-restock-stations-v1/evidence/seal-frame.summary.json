@@ -1,0 +1,137 @@
+{
+  "recipes": {
+    "top_flat": {
+      "status": "passed",
+      "latched": true,
+      "latch_step": 1,
+      "mode": "top",
+      "pad_yaw_deg": 0.0,
+      "carton_yaw_deg": 0.0,
+      "pad_vs_surface_deg": 0.0,
+      "final_status": "GripperStatus.Closed",
+      "gripped": [
+        "/World/Carton"
+      ],
+      "gripped_n": 1,
+      "min_gap_mm": 0.0,
+      "forward_world": [
+        0.0,
+        -0.0,
+        -1.0
+      ],
+      "face_normal_world": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "reason": null,
+      "exit": 0
+    },
+    "side_flat": {
+      "status": "passed",
+      "latched": true,
+      "latch_step": 1,
+      "mode": "side",
+      "pad_yaw_deg": 0.0,
+      "carton_yaw_deg": 0.0,
+      "pad_vs_surface_deg": 0.0,
+      "final_status": "GripperStatus.Closed",
+      "gripped": [
+        "/World/Carton"
+      ],
+      "gripped_n": 1,
+      "min_gap_mm": 0.0,
+      "forward_world": [
+        -0.0,
+        -1.0,
+        -0.0
+      ],
+      "face_normal_world": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "reason": null,
+      "exit": 0
+    },
+    "side_pad4": {
+      "status": "failed",
+      "latched": false,
+      "latch_step": null,
+      "mode": "side",
+      "pad_yaw_deg": 4.0,
+      "carton_yaw_deg": 0.0,
+      "pad_vs_surface_deg": 4.002,
+      "final_status": "GripperStatus.Closing",
+      "gripped": [],
+      "gripped_n": 0,
+      "min_gap_mm": 0.0,
+      "forward_world": [
+        0.0698,
+        -0.9976,
+        -0.0
+      ],
+      "face_normal_world": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "reason": null,
+      "exit": -11
+    },
+    "side_both4": {
+      "status": "passed",
+      "latched": true,
+      "latch_step": 1,
+      "mode": "side",
+      "pad_yaw_deg": 4.0,
+      "carton_yaw_deg": 4.0,
+      "pad_vs_surface_deg": 0.002,
+      "final_status": "GripperStatus.Closed",
+      "gripped": [
+        "/World/Carton"
+      ],
+      "gripped_n": 1,
+      "min_gap_mm": 0.0,
+      "forward_world": [
+        0.0698,
+        -0.9976,
+        -0.0
+      ],
+      "face_normal_world": [
+        -0.0698,
+        0.9976,
+        0.0
+      ],
+      "reason": null,
+      "exit": 0
+    },
+    "side_both8": {
+      "status": "passed",
+      "latched": true,
+      "latch_step": 1,
+      "mode": "side",
+      "pad_yaw_deg": 8.0,
+      "carton_yaw_deg": 8.0,
+      "pad_vs_surface_deg": 0.0,
+      "final_status": "GripperStatus.Closed",
+      "gripped": [
+        "/World/Carton"
+      ],
+      "gripped_n": 1,
+      "min_gap_mm": 0.0,
+      "forward_world": [
+        0.1392,
+        -0.9903,
+        0.0
+      ],
+      "face_normal_world": [
+        -0.1392,
+        0.9903,
+        0.0
+      ],
+      "reason": null,
+      "exit": 0
+    }
+  }
+}

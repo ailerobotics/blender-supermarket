@@ -48,8 +48,10 @@ def _sources(monkeypatch, *, target_location='shelf'):
 def test_factory_returns_capture_and_recording_camera(monkeypatch):
     assembly, packets, calls, motion, contact = _sources(monkeypatch)
     sensing = build_sensing(app=None, assembly=assembly, plan=None, config={}, output=None)
-    assert set(sensing) == {'capture', 'recording_camera'}
+    # 'set_render_suspended' is the opt-in sensing-gate seam (a no-op when the gate config is unset).
+    assert set(sensing) == {'capture', 'recording_camera', 'set_render_suspended'}
     assert sensing['recording_camera'] == 'mission-cam'
+    assert callable(sensing['set_render_suspended'])
     result = sensing['capture'](2., 'rollwagen', 'shelf')
     # Aggregated across the two assigned cameras; the closure forwards motion + contact.
     assert result.target is packets['shelf'].target

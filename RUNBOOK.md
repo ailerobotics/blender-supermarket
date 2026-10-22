@@ -38,8 +38,8 @@ python3 scripts/gen_labels.py        # PIL labels, price tags, signs     -> asse
 # headless full build (≈4 s) from the base file that holds the Poly Haven materials + HDRI:
 blender -b scenes/supermarket_base.blend --python scripts/build_supermarket.py -- --all --save scenes/supermarket.blend
 # or rebuild inside the running GUI through MCP, stage by stage:
-uv run --with mcp scripts/mcpcall.py execute_blender_code '{"code":"import sys,importlib; sys.path.insert(0,\"/home/manishsaini/workspaces/blender-supermarket/scripts\"); import build_supermarket as B; importlib.reload(B); B.build([\"clear\",\"structure\",\"library\",\"gondolas\"])"}'
-uv run --with mcp scripts/mcpcall.py execute_blender_code '{"code":"import sys; sys.path.insert(0,\"/home/manishsaini/workspaces/blender-supermarket/scripts\"); import build_supermarket as B; B.build([\"walls\",\"chillers\",\"front\",\"produce\",\"signage\",\"lighting\",\"cameras\",\"render\"], save=\"/home/manishsaini/workspaces/blender-supermarket/scenes/supermarket.blend\")"}'
+uv run --with mcp scripts/mcpcall.py execute_blender_code '{"code":"import sys,importlib; sys.path.insert(0,\"~/workspaces/blender-supermarket/scripts\"); import build_supermarket as B; importlib.reload(B); B.build([\"clear\",\"structure\",\"library\",\"gondolas\"])"}'
+uv run --with mcp scripts/mcpcall.py execute_blender_code '{"code":"import sys; sys.path.insert(0,\"~/workspaces/blender-supermarket/scripts\"); import build_supermarket as B; B.build([\"walls\",\"chillers\",\"front\",\"produce\",\"signage\",\"lighting\",\"cameras\",\"render\"], save=\"~/workspaces/blender-supermarket/scenes/supermarket.blend\")"}'
 ```
 Stages: `clear structure library gondolas walls chillers front produce signage lighting cameras render`. Products = `scripts/catalog.py` (93 SKUs, fictional brands, real dimensions).
 
@@ -280,7 +280,7 @@ to `/tmp`), so a failed run is safe to discard. Capture the stderr + `nvidia-smi
 nothing, and re-run the offline `--author-offline` to confirm the *stage* is still sane before
 blaming the composer — a boot/OOM failure is an Isaac/VRAM problem, not a composition one.
 
-## 11. Mobile restock navigation (CPU checks and isolated Nav2)
+## 12. Mobile restock navigation (CPU checks and isolated Nav2)
 
 Contracts, footprint limits and unverified simulator links:
 [docs/restock_navigation.md](docs/restock_navigation.md). No command here boots
@@ -291,6 +291,44 @@ Isaac or commands a physical robot. The integration runner owns the simulator.
 python3 -m unittest discover -s scripts/twin/tests -p test_navigation.py -v
 python3 -m unittest discover -s scripts/twin/tests -p test_articulated_navigation.py -v
 python3 -m unittest discover -s scripts/twin/tests -p test_navigation_corridor.py -v
+
+# Moving-obstacle layer + deterministic dynamic-obstacle scenario + closed-loop
+# evidence (all CPU, no Blender/Isaac/GPU; see docs/restock_navigation.md).
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest \
+  scripts/twin/tests/test_navigation_dynamic.py \
+  scripts/twin/tests/test_navigation_dynamic_wiring.py \
+  scripts/twin/tests/test_navigation_dynamic_scenario.py \
+  scripts/twin/tests/test_navigation_dynamic_evidence.py -q
+
+# Self-asserting evidence run: person (stop/wait/resume/arrive), box (honest
+# give-up on a permanently blocked aisle), cart (coupled re-plan AROUND it).
+# Writes trace.jsonl, run.json and top-down PNG frames OUTSIDE git; exit 1 on
+# any failed verdict. --scenario person|box|cart|all  --out DIR.
+python3 scripts/run_dynobs_evidence.py --out ~/datasets/sim-restock-dynobs-v1
+
+# Mission detection-feed wiring (opt-in): byte-identical off, deterministic scripted
+# detections reusing the humans person asset, bundle resolution. No ROS/GPU/USD.
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest \
+  scripts/twin/tests/test_navigation_mission_source.py -q
+# To exercise it in-sim, MERGE docs/examples/dynobs-mission-fragment.json into a mission
+# runtime-config and run the mission (integration-owned boot: GPU priority + station
+# commissioning + host-stack). See docs/restock_navigation.md "Mission detection feed".
+
+# Couple speed + coupled outbound stall (fm482): replays the recorded warm runs' nav-trace.jsonl and
+# drives the REAL controller + fine-dock servo closed-loop. Switches: navigation.arrival_xy_hysteresis_m,
+# navigation.coupled_creep_escape (docs/examples/couple-speed-mission-fragment.json). Exit 0 = PASS.
+PYTHONPATH=scripts python3 scripts/check_couple_speed.py --environment "$ENVIRONMENT_MANIFEST" \
+  --scenario "$MISSION_SCENARIO" --runtime-config "$MISSION_RUNTIME_CONFIG" \
+  --runs-dir "$MISSION_RUNS_DIR" --runs 347 348b 349 350 351 352 353 354 355 356
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest scripts/twin/tests/test_couple_speed.py -q
+
+# Coupled outbound no-progress stall (sim-robust-outbound-drive-v1): measures the longest no-net-progress
+# window per recorded warm run in BOTH clocks and reports when the SIM-clock monitor
+# (navigation.coupled_progress_escape, docs/examples/outbound-progress-mission-fragment.json) fires. The
+# stalled runs must fire, the clean runs must stay silent. Exit 0 = PASS.
+PYTHONPATH=scripts python3 scripts/check_outbound_progress.py --runs-dir "$MISSION_RUNS_DIR" \
+  --stalled warm9 warm10 --clean warm8 warm11
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest scripts/twin/tests/test_articulated_navigation.py -q
 
 # Optional host-Python Jazzy overlay, extracted only into task-owned storage.
 # Uses existing trusted apt indexes; no sudo, package install, or service restart.
@@ -499,79 +537,293 @@ the collider classifier. All solid service fixtures use the existing static
 structure/fixture collision groups. Labels/styles are illustrative, not an exact
 scan or an assertion of REWE store dimensions.
 
-## 11. Mobile restock navigation (CPU checks and isolated Nav2)
+## 11. Mobile restocking mission (CPU integration checkpoint)
 
-Contracts, footprint limits and unverified simulator links:
-[docs/restock_navigation.md](docs/restock_navigation.md). No command here boots
-Isaac or commands a physical robot. The integration runner owns the simulator.
+The mission/inventory core is independent of Isaac and ROS. Its fixtures test
+transactional stock state, evidence checks and fail-stop requests; they are not
+an autonomous robot demonstration. Current limitations and GPU diagnosis:
+[data/mobile-restock-v2/report.md](data/mobile-restock-v2/report.md).
 
 ```bash
-# Deterministic CPU fixtures; no ROS/GPU required.
-python3 -m unittest discover -s scripts/twin/tests -p test_navigation.py -v
-python3 -m unittest discover -s scripts/twin/tests -p test_articulated_navigation.py -v
-
-# Optional host-Python Jazzy overlay, extracted only into task-owned storage.
-# Uses existing trusted apt indexes; no sudo, package install, or service restart.
-python3 scripts/setup_restock_nav2.py --output "$TASK_OUTPUT/nav2"
-source "$TASK_OUTPUT/nav2/env.sh"
-
-# Reproduce full-margin planning and feedback on the actual exported static map.
-# This is a TEST_FIXTURE controller check, not an Isaac/PhysX demonstration.
-python3 scripts/check_restock_navigation.py --environment "$ENVIRONMENT_MANIFEST" \
-  --output "$TASK_OUTPUT/navigation-proof"
-
-# In one isolated ROS shell, start the articulated FollowPath configuration.
-python3 scripts/run_restock_nav2.py --environment "$ENVIRONMENT_MANIFEST" \
-  --articulated --output "$TASK_OUTPUT/nav2-map" --launch
-
-# In another shell with the same task-owned env.sh sourced, run the sensor bridge.
-# The pose is a declared deployment prior, supplied by the integration scenario.
-python3 scripts/run_articulated_nav2_bridge.py --environment "$ENVIRONMENT_MANIFEST" \
-  --initial-pose "$INITIAL_X" "$INITIAL_Y" "$INITIAL_YAW"
-
-# ROS-message handoff tests, after sourcing the task-owned Jazzy overlay.
-python3 -m unittest discover -s scripts/twin/tests -p test_nav2_handoff.py -v
-
-# With a compatible Jazzy/Nav2 environment already available, generate map/config.
-# scenario.json supplies bounds, obstacles, resolution and the measured footprint.
-# OUTPUT must be a task-owned scratch directory, outside scenes/export/renders.
-python3 scripts/run_restock_nav2.py --scenario scenario.json --output "$OUTPUT"
-
-# Start only the ROS navigation nodes; domain 88 must be reserved for this task.
-ROS_DOMAIN_ID=88 ROS_LOCALHOST_ONLY=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
-  python3 scripts/run_restock_nav2.py --scenario scenario.json --output "$OUTPUT" --launch
+python3 -m unittest discover -s scripts/twin/tests -p test_restock_mission.py -v
+python3 -m unittest discover -s scripts/twin/tests -p test_restock_runtime.py -v
 ```
 
-Example **test-fixture** scenario schema (replace all dimensions with scene/rig
-measurements before runtime):
+Runtime adapters implement `start(action, job)`, `step(dt) -> Result`, `stop()`
+from `scripts/twin/restock/mission.py`. Mission time starts at zero, so adapters
+must express evidence timestamps relative to that origin. Production rejects
+fixture and ground-truth provenance. `runtime.py` wires the controller ports;
+`run_mobile_restock.sh` performs CPU checks unless `--execute` is explicit.
+A reviewed simulator bundle factory providing actual sensors, controls, stage
+construction and recording is still required; no mock fallback is installed.
 
-```json
-{
-  "bounds": [-6, -6, 6, 6],
-  "obstacles": [[2, 2, 3, 3]],
-  "resolution": 0.2,
-  "footprint": {
-    "base_radius": 0.6,
-    "hitch_offset": 0.5,
-    "cart_hitch_to_farthest_corner": 1.2,
-    "margin": 0.1,
-    "min_turn_radius": 1.0,
-    "max_articulation": 1.1
-  }
-}
+The default preflight is CPU-only and never probes the GPU. Supply the environment
+worker's final manifest; the checked-in scenario retains an explicit runtime
+readiness gate. The articulated route check must use the actual 0.10 m or larger
+localization uncertainty; earlier 0.02 m fixture evidence is insufficient.
+
+```bash
+bash scripts/run_mobile_restock.sh --manifest "$ENVIRONMENT_MANIFEST" \
+  --scenario scripts/restock_scenario.json
 ```
 
-Feed real wheel encoder and range samples through the adapter described in the
-navigation document. Never connect raw Nav2 `cmd_vel` to the base: the adapter
-returns the gated command. Missing Nav2 packages are a prerequisite failure;
-this script intentionally does not install/upgrade shared ROS or Isaac.
-For an integration scenario with staging support, add `--scenario "$RESTOCK_SCENARIO"`
-to `check_restock_navigation.py` and `--integration-scenario "$RESTOCK_SCENARIO"`
-to both `run_restock_nav2.py` and `run_articulated_nav2_bridge.py`.
-This includes the support obstacle and checks the scenario’s actual chassis goal;
-a successful environment-only route does not certify a different scenario.
+### 11-bench. Warm start at transfer (dev bench, opt-in)
 
-## 12. Mobile restock manipulation (CPU)
+To iterate transfer -> verify -> return without paying couple/outbound/park, set in the
+mission runtime-config: `"start_at": "transfer"` and `"start_staging": "recorded_bay_park"`
+(`twin/restock/shortcut.py`). The build spawns the robot at the recorded park->transfer
+handover of the gentle bay route (runs 351/353/354/356), the rollwagen coupled behind it on
+the hitch, and the carton resting on the cart's upper shelf (`initial_staging.cart_support_z_world`)
+at `initial_staging.cart_load_center_body_xy` -- the spot the warm couple shortcut uses, decided by a
+live-pose reach check (the deck is collision-tight over the hitch);
+`start_staging` may also be an object overriding `robot_base_pose`, `articulation`,
+`carton_load_center_body_xy`, `carton_support_z_world`. mission.json records `start_at`,
+`start_staging_mode` and the staged poses; the walkthrough carries a burned-in BENCH caption.
+Absent `start_staging` => byte-identical.
+
+Targeted test (`"stop_after": "<stage>"`, or `run_mobile_restock.py --stop-after <stage>`;
+`--start-at` / `--start-staging` likewise override the keys above): the mission ends right after
+that stage (`mission.bounded_stages` cuts `stages`), e.g. collect-only = `--stop-after collect`,
+couple->park = `--start-at couple --stop-after park`, transfer->verify =
+`--start-at transfer --start-staging recorded_bay_park --stop-after verify`. mission.json records
+`stop_after`, `stages_driven`, `not_run` (its `complete` covers only the stages driven) and the
+walkthrough caption names the stages NOT RUN. CPU proof against the raw run files:
+
+```bash
+python3 scripts/check_transfer_bench_staging.py --runs 351 353 354 356
+python3 -m pytest -q scripts/twin/tests/test_restock_transfer_bench.py
+```
+
+**Staged-start clock + settle** (`twin/restock/staged_start.py`; engaged only when `start_at` is set and
+is not `collect`, so a cold run is byte-identical): the shortcut's settle `world.step`s run before the
+first mission tick, so Isaac `/clock` leads the packet clock by a constant 0.55 s (`couple`) / 1.55 s
+(`transfer`), against 0.05 s cold. `"staged_start_clock_sync"` (default `true`) stamps that offset on
+every host sensor packet (`Sensors.clock_offset`, collision_time moved into the packet clock), so the
+host packet- and collision-freshness checks measure true age and the default
+`RESTOCK_SENSOR_MAX_AGE_S` bound holds. `"staged_start_settle_s"` (default `20`, `0` = off) holds the
+first manipulation dispatch until the mission has run that much sim time with the station ack +
+collision stamps steady for 2 s, bounded at +60 s. Console: `STAGED_CLOCK_SYNC`, `STAGED_SETTLE_HOLD
+released reason=...`; mission.json: `staged_start_mode`. CPU replay of bench1 (both failures
+reproduced on the legacy packet, both cleared when synced):
+
+```bash
+python3 -m pytest -q scripts/twin/tests/test_restock_staged_start.py
+```
+
+### 11a. Demand-driven mission job (store-vision plan, CPU, opt-in)
+
+The mission job is normally the one hardcoded in `scripts/restock_scenario.json`.
+`--job-from <export.json>` instead substitutes an approved store-vision restock
+plan item (schema `storevision.restock.job_plan/v1`). It is opt-in and default-off:
+absent, the job is byte-identical to today's. The mapping
+(`twin.restock.job_from_plan`) validates the plan's SKU and destination slot
+against `scripts/planogram.json` (via `scenarios.catalog_geom`), normalising the
+store-vision gondola-side slot id (`G3_R_b0_s1`) to the planogram id (`G3R_b0_s1`),
+and **refuses** an unknown slot, an unknown SKU, or a slot that does not stock that
+SKU. Resolve + print the mapped job without booting the simulator:
+
+```bash
+PYTHONPATH=scripts python3 scripts/run_mobile_restock.py \
+  --manifest "$ENVIRONMENT_MANIFEST" --scenario scripts/restock_scenario.json \
+  --job-from scripts/restock_job_plan.example.json --dry-run-job
+```
+
+Produce an export from store-vision (read-only; run with store-vision's venv),
+selecting the planner/approval policy (firstmate default: gate off = `auto_approve`):
+
+```bash
+"$STORE_VISION/.venv/bin/python" scripts/integrations/export_restock_job.py \
+  --store-vision-src "$STORE_VISION/src" \
+  --config "$STORE_VISION/configs/demo-freshmart.yaml" \
+  --sku juice_orange --slot G3_back_s2 --source-bin backstock_00 \
+  --approval-policy auto_approve --out scripts/restock_job_plan.example.json
+```
+
+A live `--execute` run adds `--job-from` to the same command; the runtime-config
+scenario guard accepts the identical substitution and the fixed source/shelf camera
+targets follow the resolved job. The mission `verify` stage remains the stock-commit
+source of truth. CPU tests: `test_restock_job_from_plan.py`.
+
+The host arm executor runs in ROS host Python after sourcing the task-owned
+overlay. Launch only with the authorized domain-88 simulator session. It consumes
+planned trajectories, publishes stamped joint-drive targets, and checks measured
+feedback; it never commands physical hardware or writes joint state:
+
+```bash
+ROS_DOMAIN_ID=88 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST ROS_LOCALHOST_ONLY=1 \
+  PYTHONPATH=scripts python3 -m twin.restock.trajectory_host --urdf "$MOBILE_URDF"
+```
+
+Endpoint: `/restock_sim/arm_controller/follow_joint_trajectory`. Bounds are
+0.15 rad/s, 0.5 rad/s², 0.15 rad tracking error and 0.01 rad terminal error with
+measured speed at most 0.02 rad/s. Plans require explicit waypoint velocities,
+zero-time rest starts and rest ends. Faults/cancellation latch stop; recovery
+requires reconciliation and restarting the task-owned executor.
+
+The integration station supervisor is a separate host-Python process, started
+only by the guarded runtime after GPU release. It listens on
+`/restock_sim/station/command` and publishes `/restock_sim/station/status`.
+`prepare`, `heartbeat` and `stop` carry monotonic parked epochs, sequence numbers
+and simulation timestamps. Each new station starts a fresh task-owned host
+planner/mapper session; stale/moving parking or process failure latches stop.
+Readiness requires exact ROS endpoints and the real NVIDIA ESDF incorporated-depth
+timestamp. The command is:
+
+```bash
+python3 -m twin.restock.station_host --config "$HOST_CONFIG" --output "$NEW_STATION_LOGS"
+```
+
+`restock.native_cameras` authors camera mounts and collision boxes from supplied
+calibration, acquires RGB plus registered depth, and switches one native ROS
+mapper stream at parked epochs. It reads actual OpenCV lens parameters because
+Isaac5.1's aperture-based `get_intrinsics_matrix` assumes a centred principal
+point. These runtime APIs have CPU contract tests but no rendered/DDS proof yet.
+Version-matched interfaces: [Camera API](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/py/source/extensions/isaacsim.sensors.camera/docs/index.html)
+and [native ROS camera helper](https://docs.isaacsim.omniverse.nvidia.com/5.1.0/py/source/extensions/isaacsim.ros2.bridge/docs/ogn/OgnROS2CameraHelper.html).
+
+After a complete simulator bundle exists and preflight is green, `--execute`
+requires `--factory module:function` and a **new** `--output` scratch directory.
+Use `RESTOCK_PYTHON` for the installed Isaac Python interpreter. The bundle receives
+`app`, `manifest`, `scenario`, `config`, `output` and returns `adapter` plus `close()`; it owns
+actual sensor acquisition, controller setup and recording. `--runtime-config`
+supplies exact host/CAD/camera paths, checked before any GPU acquisition or run
+directory creation; its scenario must match the mission scenario.
+`recording.Recorder`
+accepts real rendered RGB with unique render IDs and strictly increasing acquisition
+timestamps; its H.264 encoder uses a caller-supplied local ffmpeg executable.
+Variable frame intervals are preserved with a microsecond container timebase and
+verified by decoding every presentation timestamp. Frames are never interpolated
+or duplicated; cached acquisition IDs must be skipped by the capture caller.
+No ready bundle is currently
+shipped. The wrapper caps wall time at 20 minutes. GPU guard defaults stay intact;
+`--heavy-threshold-mb 2500` is the existing explicit whispr opt-in, never `--force`.
+
+The independent `scripts/run_restock_render_smoke.py --help` command validates
+native RTX RGB-D acquisition and H.264 under a 300-second cap. Supply a verified
+matching NVIDIA runtime with `--nvidia-runtime`, installed interpreter with
+`--isaac-python`, `--ffmpeg` and a new `--output`. Its process-local aliases cover
+Kit's unversioned NVML/CUDA requests without changing system libraries. Optional
+`--runtime-config CONFIG --view source` composes a full-store **static optical
+bench** with actual robot/cart CAD and physical camera mounts. This bench disables
+dynamics at initial composition and is not evidence of robot motion or autonomy.
+It preserves same-acquisition depth and instance-ID path mappings for verification;
+those IDs may only identify known rig self pixels, never product inventory.
+
+`--humans-only --runtime-config CONFIG` is the opt-in human-safety bench
+(`twin.humans.gpu_bench`, sim-restock-humans-v1): it reuses that static store bench,
+authors scripted people (`twin.humans`) crossing the robot down the candidate
+camera's axis, and every frame teleports them, renders the camera, and runs the
+EXPLICIT ground-truth detection + reaction so a run shows CLEAR→SLOW→STOP and the
+return-to-CLEAR resume (base speed + arm hold in `reaction-trace.jsonl`,
+`reaction-summary.json`, frames + `humans-bench.mp4`). It is ground-truth evidence,
+NOT a neural-detector measurement (the detector needs the fleet model on the same
+GPU — mission-wiring follow-up) and NOT a mission. The `CONFIG` carries the mission's
+store/scenario/manifest/camera paths plus a `humans` block (`detection.source:
+ground_truth`, `humans_bench_view`). One queued, guarded command (blocks on
+`/tmp/aile-gpu.lock` up to 1 h, ≤15 min once held, heavy-threshold 2500, cleans only
+its own `fastrtps_*`): `scripts/run_humans_gpu_bench.sh`. The GPU guard's `isolation()`
+pins the session to `ROS_DOMAIN_ID=88` (not weakened); the bench runs no ROS node. Lowest GPU
+priority: it waits for the lock the mission lanes hold. CPU logic (crossing synthesis,
+detection/reaction driving) is tested in `scripts/twin/humans/tests/test_gpu_bench.py`.
+
+CPU assembled preview (URDF collision geometry, **not** a physics screenshot):
+
+```bash
+blender -b --factory-startup --python scripts/preview_mobile_restock.py -- \
+  --manifest "$TASK_OUTPUT/mobile_manifest.json" \
+  --package-root /opt/ros/jazzy/share --package-root "$SHELFBOT_PACKAGE" \
+  --output "$TASK_OUTPUT/mobile-preview.png"
+python3 scripts/build_restock_report.py --manifest "$ENVIRONMENT_MANIFEST" \
+  --narrative data/mobile-restock-v2/report.md \
+  --evidence data/mobile-restock-v2/evidence.json --output "$REPORT_HTML" \
+  --image "Static mobile collision preview=$TASK_OUTPUT/mobile-preview.png"
+```
+
+Repeat `--image 'Caption=PNG path'` to embed actual before/after environment
+renders. The resulting HTML includes all images, CSS and map geometry inline.
+Generated HTML is a cheap CPU artifact kept outside git; report source, evidence
+summary and generator are versioned. No MP4 exists until actual runtime capture.
+
+
+Actual-URDF reach check (NumPy/SciPy environment, CPU only). This solves six
+contact/approach endpoints but does **not** certify collision-free access:
+
+```bash
+python scripts/check_restock_reach.py --mobile-manifest "$TASK_OUTPUT/mobile_manifest.json" \
+  --scenario scripts/restock_scenario.json --output "$TASK_OUTPUT/reach-check.json"
+```
+
+The current G3 endcap candidate has a measured gripper/upper-shelf obstruction;
+see the report. A successful IK exit code must not be presented as task viability.
+# CPU side-contact candidate audit
+
+`scripts/restock_scenario.json` defines carton face/yaws and robot/cart poses.
+`scripts/check_restock_reach.py` checks the actual mobile URDF at source, cart,
+and shelf contact/approach/lift/preplace poses. Its JSON binds the scenario and
+URDF hashes. `scripts/check_restock_sweep.py` consumes that JSON with `--reach`,
+plus `--mobile-manifest`, `--scenario`, `--store`, repeated `--package-root`, and
+`--output`. Use the composed initial-scenario USD as the store input.
+
+The sweep is a conservative rejection test for joint-linear candidate segments,
+including all link collision geometry and a rigidly carried handling unit.
+Disconnected shelf-frame solids retain their openings. Bounds include at most
+2 mm of between-sample displacement. An overlap requires investigation; a clear
+result would still leave self collision, transit paths, actual planned trajectory,
+sensor perception and contact physics unverified. This command never boots Isaac.
+
+`restock.scene.author_initial_scenario` authors the shallow handling unit and
+support and deactivates only exact-slot product prims in the output layer before
+physics. It preserves fixtures, price tags and the input store. It refuses repeat
+authoring and does not create runtime motion or inventory observations.
+
+### 11b. Smart post-restock verification (CPU, read-only, opt-in)
+
+`scripts/run_smart_verify.py` is an ADDITIONAL planogram/realogram compliance
+report layered on top of the mission `verify` stage. It NEVER changes the
+mission's stock-commit gate (the `verify` stage stays the source of truth); it
+turns "one SKU landed" into "the destination slot now matches the planogram, or
+here are the residual reset jobs that would make it". Pure CPU, no Isaac/ROS/
+Blender. Evidence basis is labelled honestly on every slot verdict:
+`mission_verify_sensor` (only the landed unit was scanned — default),
+`bookkeeping` (committed DB counts — a belief), or `full_shelf_sensor` (an
+out-of-band labelled shelf view, e.g. a store-vision `realogram` export).
+
+```bash
+# default: a finished run's mission.json, verdict for the job's destination slot
+python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json
+
+# bookkeeping basis + residual reset jobs in the sim-smart-job-feed-v1 shape
+python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json \
+  --inventory "$RUN"/inventory.sqlite --source-bin backstock_00 \
+  --out "$RUN"/smart-verify.json --job-feed-out "$RUN"/reset-jobs.json
+
+# advisory cross-check through store-vision's read-only planoreset.verify
+python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json --storevision
+```
+
+Residual reset jobs are emitted in the `sim-smart-job-feed-v1` `--job-from`
+contract (`{sku, quantity, source_bin, shelf_id, slot, priority, kind,
+provenance}`; `kind` is `restock` for a shortfall or `remove` for a
+misplaced/overstocked SKU) so Lane 1's job feed can close the loop. The
+store-vision cross-check runs store-vision's real `planoreset.verify`
+read-only; it degrades to `{"available": false, "reason": ...}` when store-vision
+(or a transitive dep such as pydantic) is not importable — the built-in diff
+stays authoritative. Run it inside store-vision's own venv for full
+`planoreset.deviation` event emission.
+
+The same report is produced automatically at the end of a guarded mission run
+behind `run_mobile_restock.py --smart-verify` (writes `smart-verify.json` +
+`reset-jobs.json` into the run output; `--smart-verify-storevision` adds the
+cross-check, `--smart-verify-policy` picks the quantity policy). Absent
+`--smart-verify` the run is byte-identical. CPU tests:
+
+```bash
+cd scripts && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest twin/tests/test_smart_verify.py -q
+```
+
+Write-up: [data/sim-smart-verify-v1/report.md](data/sim-smart-verify-v1/report.md).
+
+## 13. Mobile restock manipulation (CPU)
 
 Contracts, dependencies and limits: [restock manipulation](docs/restock_manipulation.md).
 No simulator is started by these tests:
@@ -616,7 +868,8 @@ the repository root, after sourcing the task's MoveIt/cuMotion ROS overlay:
 ```bash
 python3 -m scripts.twin.restock_manipulation.ros_host \
   --config scripts/twin/restock_manipulation/ros_host_config.json \
-  --urdf "$ROBOT_URDF" --shelfbot-root "$SHELFBOT_ROOT"
+  --urdf "$ROBOT_URDF" --shelfbot-root "$SHELFBOT_ROOT" \
+  --mobile-manifest "$MOBILE_MANIFEST"
 ```
 
 This launches domain-88 clients/controller only. Integration enables
@@ -698,6 +951,37 @@ loader and refusal live in `twin.restock_camera.commissioning`. CPU tests (no Is
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_commissioning.py -q
 ```
 
+**Guarded native run — all three stations in one boot window.** `scripts/run_restock_commissioning_gpu.py`
+holds one `/tmp/aile-gpu.lock` session and loops the commissioning CLI once per `--station` (the
+renderer `twin.restock.commissioning_sources` commissions one station per Isaac boot), then assembles
+every per-station baseline into the shared `<output>/baselines` dir and rebuilds the union manifest —
+so one `commissioning_dir` carries `backstock_00` + `rollwagen` + `G3_back_s2` for the full
+collect→transfer→couple→tow→park mission, produced in one session (session-bound, within the
+lifetime). Pass all three stations:
+
+```bash
+PYTHONPATH=scripts ROS_DOMAIN_ID=88 ROS_LOCALHOST_ONLY=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+python3 scripts/run_restock_commissioning_gpu.py --output "$CRUN" \
+  --isaac-python "$ISAAC" --nvidia-runtime "$RT" \
+  --camera-config "$CAMERA_CONFIG" --scenario "$SCENARIO" --bench-config "$BENCH" \
+  --station backstock_00 --station rollwagen --station G3_back_s2 \
+  --heavy-threshold-mb 2500 --wall-cap-s 900 --lifetime-s 900
+```
+
+**`$CAMERA_CONFIG` MUST be regenerated from the current design first.** It is a *generated* artifact
+of `restock_camera.config`, shared by the commissioning bench (`twin.restock.view_scene` authors the
+markers from it) AND the mission, so the two must use the same file. A stale file silently feeds the
+OLD geometry into commissioning — e.g. the pre-fix `.62×.42` cart support overshoots the cart rails,
+so the sampled empty-deck patch catches the raised rails and the production `_flat_patch` gate refuses
+it as "tilted, occupied or occluded" (the current design insets the cart to `.54×.34` and the shelf to
+`.58×.36`, and re-aims the shelf camera). Regenerate it before commissioning and point the mission at
+the same file:
+
+```bash
+PYTHONPATH=scripts python3 scripts/write_restock_camera_config.py \
+  --scenario "$SCENARIO" --manifest "$MOBILE_MANIFEST" --output "$CAMERA_CONFIG"
+```
+
 A reduced render-product resolution MUST carry matching intrinsics:
 `geometry.scale_intrinsics(k, render_scale)` scales the pixel grid + focal/principal together
 (centred pinhole), and `sensing.rendered_context(render_scale=...)` applies it so the context,
@@ -706,6 +990,19 @@ at the mission's scale (`run_restock_commissioning.py --render-scale`; recorded 
 Decode degrades with scale (small markers: the fixed-source QR falls below the ~3 px/module cv2
 floor at ≤0.5), so a decode-grade camera stays near full resolution — see
 `data/sim-restock-camera-v2/render-scale-report.md`.
+
+**Warm-session in-session re-commission.** For a warm-session re-run (`run_mobile_restock.py
+--warm-attempts N`, PR 111), the opt-in `config['warm_reset']` provider re-seats the scene +
+re-validates the baseline and must NOT bypass the lifetime guard. When the re-seated baseline would
+be refused (expired on the sim clock / session unbound), the provider's refresh step is
+`commissioning.recommission_in_session(contexts, capture, dataset_dir=…, required_locations={…})`: with
+the stations re-seated EMPTY, it re-captures each live station camera's empty-support frame and
+re-commissions all required stations (source + cart + shelf) through the UNCHANGED production
+`commission()` gates, re-persists the fresh baseline (new sim-clock stamp) and re-attaches it to the
+live slots. A station whose fresh frame fails the gates — or a required station the contexts don't
+cover — raises, so the warm loop stops rather than running on a stale baseline. The provider owns the
+live World reset, camera capture and sim-clock rebase; this is the station re-commission choreography
+it plugs in. CPU-tested in `test_restock_commissioning.py`.
 
 ### 13b. Collect pick target from the fixed source camera
 
@@ -741,6 +1038,55 @@ resolution (9.9 / 11.9 px/module, unoccluded) and the baseline covers `G3_back_s
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_shelf_target.py -q
+```
+
+### 13d. Ground-truth collect (labelled SIM demo workaround, default off)
+
+`RESTOCK_COLLECT_GROUND_TRUTH=1` in the mission run env (read by the Isaac process AND the host
+manipulation stack) serves the collect pick from the simulated pose of the controlled carton asset
+(`/RestockScenario/HandlingUnit`) instead of the fixed source camera, and places the carton at the
+warm `start_at` shortcut's slot (scenario `initial_staging`: rollwagen upper shelf, cart body
+(+0.18, 0), yaw −90° cart-relative; `RESTOCK_PLACE_ON_DECK` is not used for this place). The pick is
+labelled `source='ground_truth'` and the run records `collect_mode: ground_truth` in mission.json and
+the walkthrough caption; `verify` stays the stock-commit gate. Unset ⇒ byte-identical. Design + why:
+`scripts/twin/restock_manipulation/ground_truth_collect.py`. CPU tests, then a replay of the
+production bridge on RECORDED run stages (camera-vs-ground-truth delta + policy reach gate):
+
+```bash
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_collect_ground_truth.py -q
+PYTHONPATH=scripts .venv-usd/bin/python scripts/check_collect_ground_truth.py ~/datasets/twin-robot-in-store-boot-v1/mission/run-343
+```
+
+### 13e. Transfer carry wrist guard (labelled SIM workaround, default off)
+
+`RESTOCK_TRANSFER_CARRY=wrist_guard` in the mission run env (read by the host manipulation stack AND the
+Isaac process, like `RESTOCK_TRANSFER_MODE`) makes every TRANSFER seeded-KDL joint-space move (preplace,
+place, retreat) land in the clear carry wrist region — wrist_1 ≤ `carry_wrist1_cap`, wrist_2 ≥
+`carry_wrist2_min` (host config; 0.65 / 0.0 if unset) — re-seeding a colliding solution from its
+wrist-flipped twin, else failing the move before any motion. It fixes the warm2 preplace jam (KDL chose
+wrist_1 2.08 / wrist_2 −1.02 → pinned at the `ur_wrist_2`-vs-forearm stop → trajectory-host tracking
+fault → 'host emergency stop'). Activation: `TRANSFER_CARRY wrist_guard active` + `WRIST_GUARD
+accept|reject` (host stack), `transfer_carry` in `HOST_EFFECTIVE_CONFIG`, mission.json
+`transfer_carry`/`workarounds` and the burned-in caption. Unset ⇒ byte-identical. Add `,weld`
+(`RESTOCK_TRANSFER_CARRY=wrist_guard,weld`) to name what holds the carton: the SIM_ATTACH_FALLBACK
+fixed-joint weld (grasp contact → release at the place pose; the native suction never seals) —
+mission.json `transfer_attach: weld` + caption, and it turns the weld on if `sim_attach_fallback` was off.
+Design: `scripts/twin/restock_manipulation/transfer_carry.py`. CPU tests, then the replay on a recorded run:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_restock_transfer_carry.py -q
+python3 scripts/check_transfer_carry_replay.py ~/datasets/twin-robot-in-store-boot-v1/mission/warm2   # exit 0 = prevented
+```
+
+**`RESTOCK_TRANSFER_MODE=live_pose` REQUIRES `wrist_guard`.** `live_pose` fixes only the PICK reach; its
+preplace/place/retreat stay seeded-KDL. A live-pose transfer with the guard OFF now FAILS FAST at observe
+('live_pose transfer requires RESTOCK_TRANSFER_CARRY=wrist_guard …') instead of silently running the jam.
+The bounded TRANSFER-ONLY GPU validation config (staged at the recorded bay park, stop after verify) is
+`docs/examples/transfer-live-mission-fragment.json` — env + command + runtime keys + PASS/FAIL criteria:
+
+```bash
+RESTOCK_TRANSFER_MODE=live_pose RESTOCK_TRANSFER_CARRY=wrist_guard \
+  python3 scripts/run_mobile_restock.py --start-at transfer --start-staging recorded_bay_park --stop-after verify
 ```
 
 ## 14. Controlled static-scene navigation mapper commissioning
@@ -827,3 +1173,189 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= .venv-scenarios/bin/python -m pytes
 .venv-scenarios/bin/python -c "import sys;sys.path[:0]=['scripts','scripts/scenarios'];\
 import dataset,os;print(dataset.validate_dataset(os.path.expanduser('~/datasets/store-scenarios'),'depletion_G1R'))"
 ```
+
+## 16. Arm-carry bench — diagnose/sweep the carton-carry fold (CPU tests + guarded GPU)
+
+Boots Isaac ONCE, welds the carton at the tool via the mission's own `SIM_ATTACH_FALLBACK`
+weld, brakes the base in the airborne-carry yaw-lock state, and runs many carry-fold trials
+(tuck → pan → …) in seconds each. Drives the REAL `ArmCommandGate` + the REAL
+`trajectory_host` Plan/tracking/settle gates. Honest differences from the live mission:
+analytic planning path + in-process executor loop (no ROS relay). Design + metrics:
+`data/sim-restock-armbench-v1/report.md`.
+
+CPU tests (no GPU):
+```
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_arm_carry_bench.py -q
+```
+
+Guarded GPU (short session; integration lane holds `/tmp/aile-gpu.lock` priority). Trial-1
+contact diagnosis (name the obstacle the fold hits) then the carry-pose clearance sweep:
+```
+RESTOCK_PYTHON=~/miniforge3/envs/env_isaaclab/bin/python \
+RESTOCK_NVIDIA_RUNTIME=~/datasets/twin-robot-in-store-boot-v1/gpu-runtime-578/root \
+  scripts/run_arm_carry_bench.sh \
+    --runtime-config ~/datasets/twin-robot-in-store-boot-v1/mission/mission-runtime-cc-collect.json \
+    --output <scratch>/armbench --diagnose --expect reproduce --heavy-threshold-mb 2500 \
+    --lift-joints <6 measured lift joints>     # then --pose-sweep for the clearing shape
+```
+The bench holds the GPU lock + 4 GiB RAM watchdog inside Python and bounds its own wall cap
+(`RESTOCK_WALL_CAP`, default 800 s). Never `--force`; never stop Blender/whispr.
+
+## 17. Fleet dashboard — watch the mission + store (CPU, read-only, opt-in)
+
+A phone-first, read-only panel that merges the live Isaac restocking mission with
+store-vision store state. Standalone CPU server; never imported or launched by the
+mission, so a mission run is byte-identical whether or not it is up. No GPU. Design +
+contract: [docs/fleet_dashboard.md](docs/fleet_dashboard.md).
+
+Print the aggregated status once and exit (the dry-run transcript):
+```
+PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py --dry-run
+```
+
+Serve read-only on the tailnet (binds `<DASHBOARD_HOST>:8794`; `8787/8790/8791/8793` taken):
+```
+PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py
+# -> http://<DASHBOARD_HOST>:8794/
+```
+
+With the store overlay + the opt-in phone trigger queue (default off):
+```
+PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py \
+    --store-state /path/to/store-state.json \
+    --enable-trigger --requests-dir /tmp/fleet-dashboard-requests
+```
+The behaviour-tree panel needs no flag: it auto-discovers the per-run `bt_snapshot.json`
+that `sim-restock-bt-v1` writes into the run directory, so it lights up on the first
+bt-enabled run (`--bt <path>` overrides with an explicit snapshot file).
+It reads the upstream watch page (`--upstream`, default `http://<DASHBOARD_HOST>:8787`) and
+the mission run directories (`--run-root`, default
+`~/datasets/twin-robot-in-store-boot-v1/mission`); it never writes a run,
+never boots Isaac, and degrades gracefully when the upstream is down. `--enable-trigger`
+requires `--requests-dir`; without it `POST /trigger` returns `403`.
+
+CPU tests (no GPU; `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` dodges the box's ROS pytest plugins):
+```
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  python3 -m pytest scripts/twin/tests/test_fleet_dashboard.py -q
+```
+## 18. Arm MPC follow-and-avoid bench — reactive cuRobo arm (CPU tests + guarded GPU)
+
+**EVALUATION-ONLY, simulation-only.** cuRobo V2 (Apache-2.0) Model-Predictive-Control
+reactive follow-and-avoid for the mission arm, benched against the representative store
+restock-aisle colliders + a moving-person proxy. MPC's collision avoidance is a SOFT
+optimiser cost, **NOT a certified safety function** — the single motion authority stays the
+merged human-safety gate (RUN/SLOW/STOP/BACKSTOP) and the measured joint-window guard, reused
+verbatim from the `plan-mpc-curobo-v1` prototype's `ros_bridge`. Opt-in everywhere
+(`--arm-mpc` on `compose_robot_in_store.py` only annotates the dry-run plan; the composed
+stage and the mission cuMotion arm path are byte-identical when it is absent). Design +
+numbers: `data/sim-arm-mpc-avoid-v1/report.md`; `docs/arm_mpc_avoid.md`.
+
+CPU tests (no GPU, no ROS — the bench is ROS-free):
+```
+PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_arm_mpc_bench.py -q
+```
+
+Guarded GPU (reuses the existing `fm-plan-mpc-curobo-v1` container — do NOT rebuild the arm
+stack; no Isaac boot, cuRobo MPC is pure cuRobo + torch, ~0.22 GB VRAM). The runner takes
+`/tmp/aile-gpu.lock` NON-BLOCKING (exits 3 if the integration lane holds it — re-run when
+free), hard-refuses beside live Blender, checks VRAM headroom (never `--force`), and caps the
+wall clock at ≤ 15 min:
+```
+PYTHONPATH=scripts python3 scripts/run_arm_mpc_bench.py \
+    --scenario all --steps 300 \
+    --out <scratch>/arm_mpc_bench/metrics.json
+#   mounts: this repo (ro) + ~/ur10/mpc_curobo (ro, the gate) + ~/workspaces/shelfbot_newgripper
+#   (ro, the mission arm's shelfbot_curobo.yml) + the out dir (rw). ROS domain 107 if ever wired.
+```
+Scenarios: `follow` (sweep, shelves present), `person` (proxy walks the aisle), `blocked`
+(proxy parked on the path), `unreachable` (target across the aisle). Per scenario it records
+control rate, warm solve ms, est. process VRAM, steady tracking error, min obstacle + person
+clearance, joint-window violations, and — against the LIVE MPC stream — the gate behaviour
+(RUN forwards, STOP holds with zero travel, resume to the freshest command).
+
+## 19. Route alerts — the robot as a mobile store sensor (CPU tests + CPU evidence)
+
+Opt-in (`--route-alerts`, default off): run the read-only store-vision spill / obstruction
+detectors over the drive camera while navigating, publish `robot.route_alert.*` events +
+staff tasks, and feed obstruction footprints to navigation through the dynobs costmap
+layer. Absent ⇒ byte-identical mission. Design + per-detector GPU/CPU path:
+[docs/route_alerts.md](docs/route_alerts.md); write-up `data/sim-route-alerts-v1/report.md`.
+
+CPU tests. The pure-logic tests (config, costmap/dynobs seam, mission-hook wiring) run
+under system python; the full-runner integration tests need store-vision, so run them
+under its venv (python3.11; has numpy/opencv/pydantic + store-vision installed):
+```
+# pure-logic (anywhere):
+PYTHONPATH=scripts python3 -m pytest scripts/twin/route_alerts/tests/test_config.py \
+    scripts/twin/route_alerts/tests/test_costmap.py \
+    scripts/twin/route_alerts/tests/test_mission.py -q
+# all tests incl. store-vision integration (unittest; the venv has no pytest):
+PYTHONPATH=scripts ~/firstmate/projects/store-vision/.venv/bin/python \
+    -m unittest discover -s scripts/twin/route_alerts/tests -p 'test_*.py'
+```
+
+CPU evidence (no Blender/Isaac/GPU). Seeds a spill + an aisle obstruction (+ a moving
+shopper) into store-vision synthetic aisle frames, drives the REAL runner (detect: spill +
+obstruction + aisle-blocked + robot events + staff tasks + people-masked), then drives the
+REAL coupled controller through the REAL dynobs layer so it stops for and re-routes around
+the detected obstruction. Self-asserting (exit 1 on any failure); artifacts outside git:
+```
+PYTHONPATH=scripts ~/firstmate/projects/store-vision/.venv/bin/python \
+    scripts/run_route_alerts_evidence.py --out ~/datasets/sim-route-alerts-v1
+```
+
+Guarded GPU (optional, for the open-vocab paths / a live mission run). Add
+`--route-alerts` (or `--route-alerts-config PATH`) to `scripts/run_mobile_restock.py`
+(§11). Use this lane's `ROS_DOMAIN_ID=108`, `ROS_LOCALHOST_ONLY=1`; take `/tmp/aile-gpu.lock`
+only when free (the integration lane holds it across its commission+mission sequence) and
+keep sessions short. Live people-masking requires `config["agents_factory"]` (the humans
+lane's detections) — without it the hook refuses to analyse (GDPR-by-design).
+
+Live in-Isaac smoke (proves detection through the identical runner on real RTX frames, no
+mobile floor camera needed). Two phases: (1) render a seeded obstruction (the render-smoke
+default static-cube-on-floor bench, a fixed calibrated RGB-D camera) under the blocking GPU
+lock — `flock -w 3600 /tmp/aile-gpu.lock env AILE_GPU_LOCK_INHERITED=1 ROS_DOMAIN_ID=108
+ROS_LOCALHOST_ONLY=1 PYTHONPATH=scripts <env_isaaclab python> scripts/run_restock_render_smoke.py
+--output <scratch>/render --ffmpeg <ffmpeg> --isaac-python <env_isaaclab python> --nvidia-runtime
+<gpu-runtime-578/root> --heavy-threshold-mb 2500` (render-smoke's own guards: ≥8 GiB free VRAM,
+300 s cap); then (2) run the identical runner over the captured frames on CPU — `PYTHONPATH=scripts
+<store-vision .venv python> scripts/run_route_alerts_smoke.py --render <scratch>/render --out
+<scratch>/detect` (asserts obstruction.detected + a dynobs Detection). Write-up +
+"on-the-route" follow-up (a mobile RGB-D route camera): `data/sim-route-alerts-v1/report.md`.
+
+## 20. Demo cut + run checker — the captain's walkthrough video (CPU, read-only on the run)
+
+Assemble the demo cut of a finished mission run (title card, a caption per stage for all seven
+stages, the mission.json workaround labels on screen, slow stretches time-lapsed, closing result
+card) and check the run before sending it. Neither needs the GPU; both only READ the run dir.
+```
+FFMPEG=<env_isaaclab>/lib/python3.11/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2
+python3 scripts/check_walkthrough_run.py <run-dir> [--json check.json]     # exit 0 = PASS/WARN
+python3 scripts/make_walkthrough_cut.py <run-dir> --ffmpeg "$FFMPEG" [--out X.mp4]
+#   default output <run-dir>/walkthrough-demo.mp4 (+ .cut.json edit list); refuses to overwrite
+```
+The checker proves the carton rode on the rollwagen (couple/outbound/park) and landed on the bay
+top from the recorded poses when the run set `RESTOCK_TRACE_POSES=1` (carton + cart pose + Isaac
+stage time per nav-trace row; off by default, observation only), else by frame analysis of the
+overhead chase frames (labelled as such). Tests: `PYTHONPATH=scripts PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+python3 -m pytest scripts/twin/demo/tests/test_walkthrough_cut.py -q` (set `FFMPEG` for the encode test).
+
+## 21. Mission tail dry-run — transfer succeeded → verify → uncouple return → mission end (CPU)
+
+Drive the mission TAIL through the real behaviour tree, `Mission`, `RuntimeAdapter`, fm461
+`TransferController` verify phase and the ground-truth verifier against a kinematic bay world
+(stubbed sim/nav/manipulation), then (with `--environment`) the uncoupled home leg with the real
+navigation controller + an emulated lidar on the static map. Run it on the runtime config before a
+GPU run that should reach the tail; exit 0 = no FAIL row.
+```
+M=~/datasets/twin-robot-in-store-boot-v1/mission
+PYTHONPATH=scripts:$M/bt-pythonpath python3 scripts/check_mission_tail.py \
+    --runtime-config $M/mission-runtime-couple.json --scenario $M/mission-scenario.json \
+    [--environment <navigation.environment_path> --camera-config $M/camera-config-bay.json]
+```
+Settings the tail needs (merge `docs/examples/mission-tail-fragment.json`): `verify_ground_truth`
+(labelled `verify_mode=ground_truth`, default off), the spec `mission_poses.home` and the
+`cart_parking_backaway` waypoint. The uncouple happens in RETURN at `cart_parking`, after transfer +
+verify at `shelf_approach`. Tests: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=scripts:<bt-pythonpath>
+python3 -m pytest scripts/twin/tests/test_restock_mission_tail.py -q`.

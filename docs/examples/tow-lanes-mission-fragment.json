@@ -1,0 +1,75 @@
+{
+  "_comment": "Opt-in authored tow lanes + cart parking spot for the COUPLED restock drives. Merge the 'navigation.tow_lanes'/'navigation.directional_zone' keys into the mission runtime-config's navigation block, and the 'mission_poses.cart_parking' pose into mission_poses (the integration/bt-driver lane wires the return nav goal + uncouple step on that key). Absent => coupled drives free-plan exactly as before (byte-identical) and the braking gate uses the direction-aware zone by default. Poses are map-frame [x, y, yaw] in metres/radians; yaw PI = facing -x (west), 0 = facing +x (east). Waypoints are the authored centreline the expanded trajectory must pass through (asserted at build time). goal_articulation is the lane's achievable terminal cart articulation and governs arrival when the lane is active.",
+  "mission_poses": {
+    "cart_parking": [
+      -9.0,
+      16.0,
+      3.141592653589793
+    ]
+  },
+  "navigation": {
+    "directional_zone": true,
+    "tow_lanes": [
+      {
+        "name": "outbound_dock_to_shelf",
+        "start": [
+          -4.46,
+          15.25,
+          0.0
+        ],
+        "start_cart_yaw": 0.0,
+        "goal": [
+          -3.05,
+          6.0,
+          3.141592653589793
+        ],
+        "goal_articulation": 0.9,
+        "start_tol_cart_yaw": 0.35,
+        "waypoints": [
+          [
+            -3.87,
+            13.4,
+            -1.5707963267948966
+          ]
+        ],
+        "route_through_waypoints": true
+      },
+      {
+        "name": "return_shelf_to_cart_parking",
+        "start": [
+          -3.05,
+          6.0,
+          3.141592653589793
+        ],
+        "start_cart_yaw": 3.141592653589793,
+        "goal": [
+          -9.0,
+          16.0,
+          3.141592653589793
+        ],
+        "goal_articulation": 0.2,
+        "start_tol_cart_yaw": 0.35,
+        "waypoints": [
+          [
+            -3.87,
+            9.5,
+            1.5707963267948966
+          ]
+        ],
+        "route_through_waypoints": true
+      }
+    ],
+    "tow_lane_trust_static": true,
+    "tow_lane_coast_refusals": true,
+    "tow_lane_trust_unknown": true,
+    "tow_lane_reacquire_along_route": true,
+    "tow_lane_track_tol_m": 0.35,
+    "tow_lane_track_envelope": true,
+    "tow_lane_cart_yaw_rebase": true,
+    "tow_lane_cart_yaw_tol": 0.3,
+    "tow_lane_curve_speed_floor": 0.55,
+    "measured_turn_fault_s": 20.0
+  },
+  "_fm437_note": "tow_lane_trust_unknown (default off): on a static-validated authored lane, trust UNOBSERVED temporal-map cells in the swept envelope as free (the static map proved that corridor clear); a POSITIVE/occupied return still stops the tow. Unblocks the run-327b outbound stall at the first southward turn ('unknown_navigation_cell' over the unmapped sector south of the dock corridor).",
+  "_fm454_note": "fm454 (option b): both tow lanes set route_through_waypoints=true and carry ONE sparse via-pose at the doorway (outbound [-3.87,13.4,-pi/2] south-aligned north of the throat; return [-3.87,9.5,+pi/2] north-aligned south of the throat). expand() then routes the train THROUGH that via as an ordered sub-goal: it reorients in the OPEN floor to an aligned pose feeding the doorway corridor, and the corridor route supplies the STRAIGHT lead-in through the throat so the towed cart lines up behind the base (articulation decays to ~0) BEFORE the goal turn -- replacing the free-plan reorientation that held the cart at steady-state articulation 0.80 through a full loop. route_through_waypoints absent/false => free-plan-and-validate, byte-identical to the historical lane."
+}

@@ -1,0 +1,16 @@
+{
+  "_comment": "vr1 (sim-video-verify-return-v1): MERGE into the mission runtime-config (mission-runtime-couple.json) for the backroom-bay demo tail (transfer succeeded -> verify -> uncouple-at-parking return -> mission end). verify_ground_truth is a labelled demo workaround, default OFF: the mission verify stage reads the handling-unit pose from the stage against the authored bay top instead of the (uncommissioned) bay shelf camera; mission.json records verify_mode=ground_truth and the verify step labels carry '[ground truth]'. The transfer's fm461 ground-truth place check is accepted as transfer evidence whenever the EXISTING transfer_ground_truth.enabled is true (transfer_verify_mode=ground_truth; no new key). The two mission_poses are plain config: home = the spec home (about (-3.9, 14.0) on tow-corner/alt-route.png; the old home = pickup (-5.73, 16) is not reachable uncoupled from the parking spot), and the back-away waypoint drives the base clear of the parked cart before the turn (without it the braking capsule clips the cart and the leg ends obstacle_stop_timeout). Proof: scripts/check_mission_tail.py (+ --environment for the real-controller home leg); RUNBOOK section 21.",
+  "verify_ground_truth": {"enabled": true},
+  "mission_poses": {
+    "home": [-3.9, 14.0, 3.14159],
+    "cart_parking_backaway": [-0.6, 13.8, 3.14159]
+  },
+  "_optional_lidar_sensor_yaw_fix": {
+    "_comment": "The lidar yaw-0 fix is now ON BY DEFAULT (sim-restock-lidar-yaw-fix-eval): the lidar_frame is a fixed rpy-0 child of base_link, so the correct Scan.sensor_to_base YAW is 0, never the URDF z (0.15 m mount height). The legacy wiring read that z as an 8.59 deg yaw, rotating every return and smearing a wall 3 m ahead down to 2.25 m (0.75 m proud) -- the sole source of the tow-lane 'proud phantom' returns (warm8/warm11 replay: fixed 0 returns > 0.12 m from any mapped AABB vs ~12k legacy) and the capsule-vs-planner deadlock. Omit this key to get the fix. Set it false ONLY to reproduce a pre-fix recorded run. Decision + CPU proof: data/sim-restock-lidar-yaw-fix-eval/report.md; proof scripts/check_lidar_yaw_fix.py.",
+    "lidar_sensor_yaw_fix": false
+  },
+  "_optional_retire_trust_static_waiver": {
+    "_comment": "With the yaw fix the phantom class that FORCED navigation.tow_lane_trust_static (run-321b/322b lane_blocked) is gone: the fixed cloud validates warm8's outbound lane with trust_static OFF (CPU proof: scripts/check_lidar_yaw_fix.py check_waivers). REMOVE tow_lane_trust_static from the runtime config once the bounded GPU run (fix on, trust_static off) confirms no residual unmapped-static block. KEEP tow_lane_static_tol_m (the small proud tolerance still covers finer-than-AABB geometry) and tow_lane_trust_unknown (the coverage waiver for the turn-in-place self-occlusion, fm437/fm439 -- a sensing-geometry deadlock the yaw fix does NOT address).",
+    "navigation": {"tow_lane_trust_static": false}
+  }
+}

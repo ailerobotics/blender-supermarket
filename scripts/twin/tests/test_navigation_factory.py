@@ -92,6 +92,116 @@ class FactoryDispatchTests(unittest.TestCase):
         self.assertTrue(obj.require_temporal_map)
         self.assertAlmostEqual(obj.spec.cart_width, 0.72)
 
+    def test_docking_absent_leaves_controller_unchanged(self):
+        self.assertIsNone(_build('reference').docking)
+
+    def test_planner_timeout_absent_is_default_30s(self):
+        # Absent navigation.planner_timeout_s => the coupled planner keeps its 30 s default budget.
+        self.assertEqual(_build('reference').planner.timeout, 30.0)
+
+    def test_planner_timeout_flows_through(self):
+        # Config-driven coupled-plan wall budget: a loaded host can be given more time so the full
+        # search is not starved into 'planning_timeout' (a compute budget, not a collision tolerance).
+        self.assertEqual(_build('reference', planner_timeout_s=120.0).planner.timeout, 120.0)
+
+    def test_planner_timeout_rejects_nonpositive(self):
+        with self.assertRaises(ValueError):
+            _build('reference', planner_timeout_s=0)
+
+    def test_docking_block_flows_through(self):
+        obj = _build('reference', docking={'goal': [-4.46, 15.25, 0.0], 'speed': 0.08,
+                                           'approach_distance': 1.5, 'goal_tolerance': 0.3})
+        self.assertIsNotNone(obj.docking)
+        self.assertEqual(obj.docking.goal, (-4.46, 15.25, 0.0))
+        self.assertAlmostEqual(obj.docking.speed, 0.08)
+        self.assertAlmostEqual(obj.docking.approach_distance, 1.5)
+        self.assertAlmostEqual(obj.docking.goal_tolerance, 0.3)
+
+    def test_docking_requires_goal_and_fields(self):
+        for bad in ({'speed': 0.08, 'approach_distance': 1.5},
+                    {'goal': [-4.46, 15.25, 0.0], 'approach_distance': 1.5},
+                    {'goal': [-4.46, 15.25, 0.0], 'speed': 0.08},
+                    [1, 2, 3]):
+            with self.assertRaises(ValueError):
+                _build('reference', docking=bad)
+
+    def test_directional_zone_default_on_and_config_toggle(self):
+        self.assertTrue(_build('reference').directional_zone)                 # default on
+        self.assertFalse(_build('reference', directional_zone=False).directional_zone)
+        self.assertTrue(_build('reference', directional_zone=True).directional_zone)
+
+    def test_directional_zone_rejects_non_bool(self):
+        with self.assertRaises(ValueError):
+            _build('reference', directional_zone='yes')
+
+    def test_tow_lanes_absent_leaves_no_lane_graph(self):
+        self.assertIsNone(_build('reference').lane_graph)
+
+    def test_tow_lanes_built_and_expanded(self):
+        # A straight coupled lane through the open centre of the fixture grid expands at build time.
+        lane = {'name': 'demo', 'start': [-3, 0, 0], 'goal': [3, 0, 0],
+                'start_cart_yaw': 0.0, 'goal_articulation': 0.3, 'waypoints': [[0, 0, 0]]}
+        obj = _build('reference', tow_lanes=[lane])
+        self.assertIsNotNone(obj.lane_graph)
+        self.assertEqual([ln.name for ln in obj.lane_graph.lanes], ['demo'])
+        self.assertIsNotNone(obj.lane_graph.lanes[0].route)                   # expanded at build
+        self.assertIs(obj.lane_graph.resolve_goal((3.0, 0.0, 0.0)), obj.lane_graph.lanes[0])
+
+    def test_tow_lane_that_cannot_expand_fails_the_build(self):
+        # A lane whose start sits inside a wall cannot be realised -> the build raises (fail-closed).
+        lane = {'name': 'in_wall', 'start': [5.9, 0, 0], 'goal': [3, 0, 0],
+                'start_cart_yaw': 0.0, 'goal_articulation': 0.3}
+        with self.assertRaises(ValueError):
+            _build('reference', tow_lanes=[lane])
+
+    def test_tow_lane_static_tol_flows_through(self):
+        self.assertEqual(_build('reference').lane_static_tol, 0.0)             # default off
+        self.assertAlmostEqual(_build('reference', tow_lane_static_tol_m=0.12).lane_static_tol, 0.12)
+
+    def test_tow_lane_trust_static_flows_through(self):
+        self.assertFalse(_build('reference').lane_trust_static)               # default off
+        self.assertTrue(_build('reference', tow_lane_trust_static=True).lane_trust_static)
+
+    def test_tow_lane_reacquire_along_route_flows_through(self):
+        self.assertFalse(_build('reference').lane_reacquire_along_route)      # default off
+        self.assertTrue(_build('reference', tow_lane_reacquire_along_route=True).lane_reacquire_along_route)
+
+    def test_coupled_tracking_knobs_flow_through(self):
+        c = _build('reference')
+        self.assertAlmostEqual(c.lane_cart_yaw_tol, 0.20)                     # defaults
+        self.assertAlmostEqual(c.lane_curve_speed_floor, 0.25)
+        self.assertAlmostEqual(c.lane_max_curvature, 1.0 / 1.5)
+        c2 = _build('reference', tow_lane_cart_yaw_tol=0.30,
+                    tow_lane_curve_speed_floor=0.15, tow_lane_max_curvature=0.4)
+        self.assertAlmostEqual(c2.lane_cart_yaw_tol, 0.30)
+        self.assertAlmostEqual(c2.lane_curve_speed_floor, 0.15)
+        self.assertAlmostEqual(c2.lane_max_curvature, 0.4)
+
+    def test_tow_lane_coast_refusals_flows_through(self):
+        self.assertFalse(_build('reference').lane_coast_refusals)             # default off
+        self.assertTrue(_build('reference', tow_lane_coast_refusals=True).lane_coast_refusals)
+
+    def test_tow_lane_trust_unknown_flows_through(self):
+        self.assertFalse(_build('reference').lane_trust_unknown)              # default off
+        self.assertTrue(_build('reference', tow_lane_trust_unknown=True).lane_trust_unknown)
+
+    def test_coupled_progress_escape_flows_through(self):
+        c = _build('reference')
+        self.assertFalse(c.coupled_progress_escape)                          # default off
+        self.assertAlmostEqual(c.coupled_progress_min_m, 0.05)               # defaults
+        self.assertAlmostEqual(c.coupled_progress_escape_s, 3.0)
+        self.assertAlmostEqual(c.coupled_progress_fault_s, 8.0)
+        c2 = _build('reference', coupled_progress_escape=True, coupled_progress_min_m=0.08,
+                    coupled_progress_escape_s=2.0, coupled_progress_fault_s=6.0)
+        self.assertTrue(c2.coupled_progress_escape)
+        self.assertAlmostEqual(c2.coupled_progress_min_m, 0.08)
+        self.assertAlmostEqual(c2.coupled_progress_escape_s, 2.0)
+        self.assertAlmostEqual(c2.coupled_progress_fault_s, 6.0)
+
+    def test_coupled_progress_escape_rejects_non_bool(self):
+        with self.assertRaises(ValueError):
+            _build('reference', coupled_progress_escape='true')              # _strict_bool
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

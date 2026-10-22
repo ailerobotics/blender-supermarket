@@ -1,0 +1,78 @@
+# human_safety configuration — RESTOCK-MISSION SIM variant.
+#
+# Runs the fleet human-safety detector (cams/human_safety, the rig detector's CUDA
+# path) against the restock mission's native Isaac camera ROS stream. This file ONLY
+# re-points the camera topics/frames and selects the compute device; the `safety:`
+# block below is a VERBATIM copy of the fleet
+# ur10-setup/cams/human_safety/params/human_safety.yaml — no zone radius, score
+# threshold, dwell or budget is changed. tests/test_detector_sim_config.py asserts
+# the safety block is byte-for-byte identical to the fleet config, so a result can
+# never be flattered by loosening a safety number here.
+#
+# Topics: twin/restock/native_cameras.py (CameraRosStream) publishes the selected
+# camera's RGB/depth/CameraInfo on /restock_sim/camera/{rgb,depth,camera_info} with
+# frame_id restock_camera_<name> on ROS_DOMAIN_ID 88. The detector consumes them as
+# the single "wrist" (eye-in-hand) role; add base/nav roles here as the mission
+# publishes more camera streams. The base<-optical TF for restock_camera_wrist is
+# published by the mission (authored on the robot asset), so the camera contributes
+# a 3-D position, not presence-only.
+
+base_frame: base_link
+ground_z: 0.0
+height_prior: 1.7
+detector: keypoint_rcnn
+device: cuda            # GPU detector (captain preference 2026-10-17); run wrapper may override to cpu
+score_thresh: 0.6
+fusion_rate: 15.0
+viz_rate: 6.0
+
+frame_processing:
+  mode: per_camera
+  schedule_rate: 15.0
+  fp16: false
+  scheduler:
+    enabled: false
+    t_max: 0.4
+    busy_min_period: 0.0667
+    motion_threshold: 0.02
+    near_margin: 0.5
+    downscale: 8
+    max_batch: 8
+
+cameras:
+  # Eye-in-hand wrist camera published on the shared mission camera stream.
+  - role: wrist
+    color_topic: /restock_sim/camera/rgb
+    info_topic:  /restock_sim/camera/camera_info
+    depth_topic: /restock_sim/camera/depth
+    depth_info_topic: /restock_sim/camera/camera_info
+    has_depth: true
+    optical_frame: restock_camera_wrist
+    max_rate: 15.0
+    min_range: 0.1
+    max_range: 8.0
+    pose_source: tf
+
+safety:
+  reach_radius: 1.30      # UR10 reach; envelope = cylinder of this radius about base z
+  stop_radius: 0.70       # PROTECTIVE ring: reach+this = 2.0 m of base (human-safety-s1 §3, PROVISIONAL)
+  # Estimator margin ADDED to the STOP TRIGGER only (never to the protective ring
+  # above). The zone commands STOP at reach+stop_radius+stop_margin = 2.25 m of
+  # base, ~0.25 m earlier than the 2.0 m protective ring, to cover the nearest-point
+  # estimator's measured over-statement on the Isaac after-run test (median +0.19 m
+  # / +0.25 m residual, reported FARTHER than truth). Without it STOP engages ~0.93 s
+  # late vs the 0.70 s reaction budget. PROVISIONAL: shrink toward 0 only if a
+  # real-rig-validated estimator improvement lands. See data/human-safety-stop-margin-v1.
+  stop_margin: 0.25
+  slow_radius: 2.00       # SLOW ring (any person present also forces >= SLOW)  PROVISIONAL
+  hysteresis: 0.30        # extra clearance to de-escalate (anti-chatter)
+  min_clear_dwell: 2.0    # must be clear this long before leaving STOP
+  frame_age_budget: 0.5   # frame age over this but still answering -> SLOW
+  detector_stall_timeout: 1.5   # no fresh frame this long / no status -> STOP
+  reaction_time_budget: 0.7     # img->state latency over this -> STOP (fault 5)
+  lost_close_margin: 0.30
+  lost_hold_time: 3.0     # hold STOP this long after losing a close track
+  presence_floor_slow: true
+  slow_on_any_person: true   # small cell: any confirmed person present -> >= SLOW
+  nearest_filter_window: 5   # zone reacts to the nearest credible body point; speckle-reject window
+  nearest_filter_reject: 1   # drop this many closest samples as possible single-frame speckle

@@ -1,0 +1,76 @@
+{
+  "_comment": "demo-008 = demo-007 with the OUTBOUND replaced by door-src-001 (coupled robot+rollwagen leaving the backroom THROUGH the service door, base x=-3.70 / cart x=-3.58 at the portal, then on to the store shelf). door-src-001 is a choreo source re-composited from its raw scene-frames/ + decision_log.json so the panel/timers stay continuous. All other stages identical to demo-007: collect=collect-src-002 f0-323, couple=warm8, park/transfer/verify=demo-005 store-shelf place, return=demo-005 1425-1822. Continuous panel/timers, cross-fades at source seams.",
+  "mission_root": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission",
+  "title": "demo-008",
+  "fps": 15,
+  "xfade_frames": 8,
+  "segments": [
+    {
+      "stage": "collect",
+      "source": "collect-src-002",
+      "kind": "real",
+      "frame_start": 0,
+      "frame_end": 323,
+      "stride": 2,
+      "caption": "Pick the carton off the warehouse shelf and carry it to the rollwagen"
+    },
+    {
+      "stage": "couple",
+      "source": "warm8",
+      "kind": "real",
+      "frame_start": 0,
+      "frame_end": 126
+    },
+    {
+      "stage": "outbound",
+      "source": "door-src-001",
+      "kind": "choreo",
+      "frame_start": 0,
+      "frame_end": 279,
+      "stride": 3,
+      "band": true,
+      "caption": "Tow the coupled rollwagen out through the service door toward the store"
+    },
+    {
+      "stage": "park",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1110,
+      "frame_end": 1169,
+      "stride": 2,
+      "band": true,
+      "caption": "Park the rollwagen at the store shelf"
+    },
+    {
+      "stage": "transfer",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1170,
+      "frame_end": 1364,
+      "stride": 2,
+      "band": true,
+      "caption": "Arm moves the carton from the rollwagen onto the store shelf"
+    },
+    {
+      "stage": "verify",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1365,
+      "frame_end": 1424,
+      "stride": 2,
+      "band": true,
+      "caption": "Confirm the carton is on the store shelf; commit the stock"
+    },
+    {
+      "stage": "return",
+      "source": "demo-005",
+      "kind": "choreo",
+      "frame_start": 1425,
+      "frame_end": 1822,
+      "stride": 3,
+      "band": true,
+      "title": "Return to the warehouse",
+      "caption": "Tow the rollwagen back through the door to the warehouse and park (still coupled)"
+    }
+  ]
+}

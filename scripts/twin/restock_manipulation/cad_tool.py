@@ -6,6 +6,7 @@ It does not select a payload by path, set body1, or move any product transform.
 """
 from dataclasses import dataclass
 import math
+import os
 
 import numpy as np
 
@@ -81,18 +82,110 @@ def inspect_tool(urdf_path):
                    envelope_pad_max=tuple(relative.max(axis=0)))
 
 
+# Physical suction reach of the real CAD cup (mm-class); the real rig seals within this. UNTOUCHED.
+REAL_MAX_GRIP_DISTANCE = .005
+# SIM FIDELITY RELAXATION (the real value above is untouched): the simulated arm cannot settle the
+# pad within 5 mm under gravity (soft drives sag ~0.5 rad; see data/surface-gripper-latch-v1), so the
+# NATIVE sim suction gate is widened to this so a residual approach gap (~1-2 cm) and a few degrees of
+# pad tilt still latch. Native-sim-only: the physical approach clearance (validate_profile
+# tcp_surface_offset 2.5-3 mm, panel size, envelope) is unchanged.
+#
+# Value proven by the isolated GPU latch probe (largest window that still seals reliably on a flat
+# approach + the tilt it tolerates).
+SIM_MAX_GRIP_DISTANCE = .020
+
+# Sim attach-FALLBACK gates (firstmate run-202; default OFF). A clearly labelled explicit FixedJoint
+# weld, used ONLY if the stations lane proves the native SurfaceGripper cannot attach from the arm
+# ARTICULATION link (runs 191-202: pad reached a MEASURED 0 mm flush contact with suction on and
+# gripper_force_limit raised, yet the plugin never welded, while the isolated kinematic-carrier harness
+# welds at 0 mm). It is the same joint the plugin would make, created only on a MEASURED near-zero seal
+# gap + flush pad with suction on, and released on suction off -- never a fabricated hold.
+SIM_ATTACH_CONTACT_MM = 0.5
+SIM_ATTACH_FLUSH_DEG = 2.0
+# fm395 (B): a formed fallback weld must survive a TRANSIENT Open status flicker (the gripper command is
+# applied on a different NativePanelContact instance than IsaacPort ticks, so this instance sees the
+# plugin status with a cross-instance lag, and the plugin status itself flickers). Release a HELD weld
+# only after this many CONSECUTIVE Open readings -- a SUSTAINED Open = a real suction-off. The commanded
+# release path (command(enabled=False)) still releases immediately, so this only debounces the
+# cross-instance backstop. Env-overridable; a single flicker (run-306: a one-tick weld torn down) no
+# longer detaches the carton mid-grasp/lift.
+try:
+    SIM_ATTACH_OPEN_RELEASE_TICKS = max(1, min(600, int(os.environ.get('RESTOCK_SIM_ATTACH_OPEN_RELEASE_TICKS', 15))))
+except (TypeError, ValueError):
+    SIM_ATTACH_OPEN_RELEASE_TICKS = 15
+
+
+def _release_held_on_open(held, open_streak, release_ticks):
+    """fm395 (B): given a plugin status reading of Open, should the sim fallback weld be released?
+
+    With NO weld held there is nothing to lose, so Open always skips (release is a no-op). With a weld
+    HELD, release only on SUSTAINED Open (``open_streak >= release_ticks``) -- a transient flicker holds
+    the weld. Pure/CPU-testable; the caller owns the streak counter and the actual PhysX release."""
+    return (not held) or open_streak >= release_ticks
+
+
 def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
-                           max_gap=.005, force_limit=30.):
+                           max_gap=SIM_MAX_GRIP_DISTANCE, force_limit=30.,
+                           clearance_offset=None, retry_interval=1e6, stroke_limit=None):
     """Author BEFORE physics starts, on the task's composed output stage only.
 
     body_path must name the actual rigid body carrying the CAD panel (importers
     may merge fixed links). tool0_path supplies that link's robot-frame transform.
-    Native runtime owns all body1 relationships; they start EMPTY and disabled.
+    Native runtime owns the gripped body; the seals start with an EMPTY body1 and
+    the plugin records the contact on the gripper's grippedObjects relationship.
     Four sample points lie inside the actual panel. Missing any seal is a miss.
+
+    Each seal is authored exactly the way Isaac's installed surface-gripper plugin
+    (isaacsim.robot.surface_gripper) and its own authored example require, verified
+    natively (data/surface-gripper-latch-v1): an ENABLED maximal-coordinate D6 joint
+    (the plugin never creates or enables the joint itself -- it only fetches the
+    already-instantiated runtime PhysX joint; a disabled joint is never instantiated,
+    which is why the gripper logged "has no joint at attachment point" and never
+    latched). body0 is the panel; body1 is empty (world) with both local poses
+    authored; the shear/tilt axes are locked and the approach axis (local +Z, the
+    forward/suction axis) is a 0..max_gap compliant stroke with a drive; a positive
+    clearanceOffset places the suction plane off the panel face.
+
+    max_gap is the native sim suction gate (maxGripDistance). It defaults to
+    SIM_MAX_GRIP_DISTANCE -- a sim fidelity relaxation of the real mm-class cup reach so
+    the simulated arm, which cannot settle the pad within 5 mm under gravity, still
+    latches a residual approach gap. Crucially the gap only seals if the compliant
+    suction-axis stroke AND the cup standoff (clearanceOffset) scale WITH the gate
+    (stroke_limit = .8*max_gap, clearance_offset = .5*max_gap by default); widening
+    maxGripDistance alone does NOT seal -- proven natively. Native-sim-only; the physical
+    approach clearance (validate_profile) is unchanged. The latch distance and tilt
+    tolerance at this gate are proven by the isolated GPU latch probe
+    (data/surface-gripper-latch-v1).
+
+    retryInterval is the window the plugin keeps *attempting* the seal after a single
+    close command before giving up to Open. The mission enables suction ONCE at the
+    start of the contact descent (controller.py `contact` phase) and expects the
+    gripper to latch the instant its seals reach the carton; that descent is slow
+    (time-dilation 0.05 -- run-145's prior collect move alone took ~185 s), so a short
+    window (retryInterval 1 s) expires long before the seals arrive and the gripper is
+    never re-commanded -> no latch (the run-145 in-mission failure). The default is
+    therefore large: keep attempting across the whole descent and latch when the seals
+    enter range; the mission stage watchdog bounds the overall attempt, and `release`
+    (open_gripper) ends it. Verified natively (data/surface-gripper-latch-v1): with the
+    panel enabled far (15 mm) and descended slowly, retryInterval 1 never latches but a
+    large retryInterval latches at ~4.9 mm as the seals reach the 5 mm window.
+    (retryInterval 0 abandons the close in the same step.)
     """
     from pxr import Gf, Sdf, UsdGeom, UsdPhysics
-    if not 0 < max_gap <= .005 or not math.isfinite(force_limit) or force_limit <= 0:
+    # The sealable gap scales only if the compliant stroke AND the cup standoff scale WITH the
+    # detection gate: widening maxGripDistance alone does NOT seal (proven natively,
+    # data/surface-gripper-latch-v1). The ratios below are the proven window (gate 20 -> stroke 16,
+    # clearance 10 seals at 19.9 mm; gate 10 -> 8/5 at 9.9 mm). Callers may override per seal.
+    if stroke_limit is None:
+        stroke_limit = .8 * max_gap
+    if clearance_offset is None:
+        clearance_offset = .5 * max_gap
+    if not 0 < max_gap <= SIM_MAX_GRIP_DISTANCE or not math.isfinite(force_limit) or force_limit <= 0:
         raise ValueError('invalid seal distance/force')
+    if not 0 < clearance_offset <= max_gap or not math.isfinite(retry_interval) or retry_interval <= 0:
+        raise ValueError('invalid seal clearance/retry')
+    if not 0 < stroke_limit <= SIM_MAX_GRIP_DISTANCE:
+        raise ValueError('invalid seal stroke')
     body, tool0 = stage.GetPrimAtPath(body_path), stage.GetPrimAtPath(tool0_path)
     if not body or not body.HasAPI(UsdPhysics.RigidBodyAPI) or not tool0:
         raise ValueError('actual gripper rigid body and tool0 prim are required')
@@ -104,9 +197,12 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
                                 cache.GetLocalToWorldTransform(body).GetInverse()).T
     body_from_pad = body_from_tool0 @ tool.tool0_from_pad
     rotation = Gf.Matrix3d(*body_from_pad[:3, :3].T.ravel().tolist()).ExtractRotation().GetQuat()
+    # body1 is empty (world), so each seal's localPos1/localRot1 is authored in world space
+    # (body0_world * seal_in_body0) so the enabled joint rests exactly satisfied at spawn.
+    body_world = cache.GetLocalToWorldTransform(body)
     grip = stage.DefinePrim(gripper_path, 'IsaacSurfaceGripper')
     for name, value in (('maxGripDistance', max_gap), ('coaxialForceLimit', force_limit),
-                        ('shearForceLimit', force_limit), ('retryInterval', 0.)):
+                        ('shearForceLimit', force_limit), ('retryInterval', retry_interval)):
         grip.CreateAttribute('isaac:' + name, Sdf.ValueTypeNames.Float, False).Set(value)
     grip.CreateAttribute('isaac:status', Sdf.ValueTypeNames.Token, False).Set('Open')
     grip.CreateRelationship('isaac:grippedObjects', False)
@@ -117,40 +213,108 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
         prim = joint.GetPrim()
         prim.AddAppliedSchema('IsaacAttachmentPointAPI')
         prim.CreateAttribute('isaac:forwardAxis', Sdf.ValueTypeNames.Token, False).Set('Z')
-        prim.CreateAttribute('isaac:clearanceOffset', Sdf.ValueTypeNames.Float, False).Set(0.)
+        prim.CreateAttribute('isaac:clearanceOffset', Sdf.ValueTypeNames.Float, False).Set(clearance_offset)
         sample = np.array([x * (tool.panel_size[0]/2 - .015),
                            y * (tool.panel_size[1]/2 - .015), 0., 1.])
         pos = body_from_pad @ sample
+        local0 = Gf.Matrix4d(1.)
+        local0.SetRotateOnly(rotation)
+        local0.SetTranslateOnly(Gf.Vec3d(*pos[:3]))
+        world = local0 * body_world  # seal pose in world == body1 (empty) frame
+        rot1 = world.ExtractRotation().GetQuat()
         joint.CreateBody0Rel().SetTargets([Sdf.Path(body_path)])
         joint.CreateBody1Rel().SetTargets([])
         joint.CreateLocalPos0Attr(Gf.Vec3f(*pos[:3]))
         joint.CreateLocalRot0Attr(Gf.Quatf(float(rotation.GetReal()), Gf.Vec3f(rotation.GetImaginary())))
-        joint.CreateJointEnabledAttr(False)
+        joint.CreateLocalPos1Attr(Gf.Vec3f(*world.ExtractTranslation()))
+        joint.CreateLocalRot1Attr(Gf.Quatf(float(rot1.GetReal()), Gf.Vec3f(rot1.GetImaginary())))
+        joint.CreateJointEnabledAttr(True)
         joint.CreateExcludeFromArticulationAttr(True)
         joint.CreateBreakForceAttr(force_limit)
         joint.CreateBreakTorqueAttr(force_limit * .05)
-        for axis in ('transX', 'transY', 'transZ', 'rotX', 'rotY', 'rotZ'):
+        # Lock shear/tilt; the forward/suction axis (+Z) is a compliant stroke with a drive (below)
+        # so the plugin can seal onto an object inside max_gap (an all-axes weld never grips). The
+        # plugin seals only on a near-perpendicular approach (~1-2 deg); compliant/driven rotation
+        # does NOT widen that (proven natively, data/surface-gripper-latch-v1), so rotation stays
+        # locked and the arm must present the pad roughly flat.
+        #
+        # That ~2 deg tolerance is SURFACE-RELATIVE, not world-frame: it is the angle between the
+        # pad forward axis and the gripped FACE normal, so a flush pad latches at ANY carton yaw
+        # (measured: a pad held flush to a 4 deg / 8 deg-yawed carton seals; a pad 4 deg off a flat
+        # face does not -- data/sim-restock-stations-v1 report `gripper-seal-align`,
+        # evidence/probe_seal_frame.py). The gate is already keyed to the gripped surface; the plugin
+        # exposes NO angle attribute, so this floor cannot be widened from here. A seal therefore
+        # needs the pad presented within ~2 deg of the TRUE face -- an accurate grasp ORIENTATION
+        # (observation/pose policy), NOT a change in this authoring.
+        for axis in ('transX', 'transY', 'rotX', 'rotY', 'rotZ'):
             limit = UsdPhysics.LimitAPI.Apply(prim, axis)
             limit.CreateLowAttr(1.)
-            limit.CreateHighAttr(-1.)  # lock; native gripper may tune at latch
+            limit.CreateHighAttr(-1.)  # low > high == locked
+        stroke = UsdPhysics.LimitAPI.Apply(prim, 'transZ')
+        stroke.CreateLowAttr(0.)
+        stroke.CreateHighAttr(stroke_limit)
+        drive = UsdPhysics.DriveAPI.Apply(prim, 'transZ')
+        drive.CreateStiffnessAttr(5000.)
+        drive.CreateDampingAttr(100.)
         paths.append(Sdf.Path(path))
     grip.CreateRelationship('isaac:attachmentPoints', False).SetTargets(paths)
+    # Firstmate run-197 fix (seal self-hit): Isaac's SurfaceGripper evaluates the FIRST raycast hit per
+    # attachment point. The real robot's suction_cups link carries a 25.6 mm panel collision box that the
+    # seal ray hits FIRST at 0 mm -- a non-dynamic, same-articulation body, never a valid grip target --
+    # so grippedObjects stays empty however flush the carton sits 0.2 mm behind it (runs 193-195 measured
+    # exactly this). Disable the panel collider on the SIM gripper body so the first seal hit is the
+    # carton. Sim-only: the real rig drives the URDF through ros2_control (this native authoring never
+    # runs there), and cuMotion plans on the XRDF sphere model, NOT this PhysX collider, so approach
+    # collision-avoidance is unaffected. The grip itself is suction within maxGripDistance, not contact.
+    # The importer references each link's collider under <link>/collisions with instanceable=True, so
+    # the CollisionAPI box is an INSTANCE PROXY -- Usd.PrimRange skips it and it cannot be edited until
+    # the collisions subtree is de-instanced (the same pattern physics_setup uses for the wheels). So
+    # de-instance first, THEN disable the collider.
+    from pxr import Usd
+    for child in body.GetChildren():
+        if child.IsInstanceable():
+            child.SetInstanceable(False)
+    disabled = 0
+    for p in Usd.PrimRange(body):
+        if p.HasAPI(UsdPhysics.CollisionAPI):
+            UsdPhysics.CollisionAPI(p).CreateCollisionEnabledAttr().Set(False)
+            disabled += 1
+    print('NATIVE_GRIPPER panel colliders disabled on %s: %d' % (body_path, disabled), flush=True)
     return gripper_path
 
 
 class NativePanelContact:
     """Native contact/latch feedback only; zero fallback welds or object poses."""
-    def __init__(self, stage, gripper_path):
+    def __init__(self, stage, gripper_path, *, diagnostic=None, sim_attach_fallback=False):
         import isaacsim.robot.surface_gripper._surface_gripper as surface_gripper
         self.stage, self.path = stage, gripper_path
+        # Labelled sim attach-fallback, default OFF (see SIM_ATTACH_CONTACT_MM). _fallback_body holds the
+        # welded carton path while attached; _fallback_joint is the explicit FixedJoint prim path.
+        self._sim_attach_fallback = bool(sim_attach_fallback)
+        self._fallback_body = None
+        self._open_streak = 0   # fm395 (B): consecutive Open-status readings, for the weld-release debounce
+        self._fallback_joint = None
         self.api = surface_gripper.acquire_surface_gripper_interface()
         self.api.set_write_to_usd(True)
         self.closed_status = surface_gripper.GripperStatus.Closed
+        self.open_status = surface_gripper.GripperStatus.Open
         prim = stage.GetPrimAtPath(gripper_path)
         self.points = list(prim.GetRelationship('isaac:attachmentPoints').GetTargets())
         if len(self.points) != 4:
             raise ValueError('CAD panel requires all four authored seal samples')
         self.enabled = False
+        # Seal-diagnostic state (firstmate key gripper-seal-fail). The mission reaches the
+        # grasp but the plugin never reports Closed + one object; with no logged gripper state
+        # the failure had no number. read()/command() emit a throttled measured probe (gripper
+        # status Open/Closing/Closed, gripped-object count + paths, each seal's live world pose,
+        # the suction-axis world direction + flatness vs world-down, and a PhysX raycast gap to
+        # the nearest body along that axis). Pure instrumentation: the probe never feeds the latch
+        # decision in read(). Disable the logging with RESTOCK_SEAL_DIAG=0.
+        self.max_gap = float(prim.GetAttribute('isaac:maxGripDistance').Get() or SIM_MAX_GRIP_DISTANCE)
+        self.last_probe = None
+        self._diag = diagnostic if diagnostic is not None else os.environ.get('RESTOCK_SEAL_DIAG', '1') != '0'
+        self._diag_n = 0
+        self._diag_prev = None
 
     def command(self, enabled):
         self.enabled = bool(enabled)
@@ -158,18 +322,314 @@ class NativePanelContact:
             self.api.close_gripper(self.path)
         else:
             self.api.open_gripper(self.path)
+            self._release_fallback()      # suction off releases any labelled sim weld
+        if getattr(self, '_diag', False):
+            self._emit('command:%s' % ('close' if self.enabled else 'open'), force=True)
+
+    def sim_attach_contact_ready(self):
+        """Labelled SIM attach-fallback DETECT step, DEFAULT OFF (see SIM_ATTACH_CONTACT_MM). Returns
+        True when a weld SHOULD form: the fallback is enabled, suction is on, nothing is yet held, and a
+        FRESH probe shows a measured <=0.5 mm flush contact on a hit body (stored for sim_attach_weld).
+        The caller (IsaacPort) then FREEZES the arm to a stationary settle and calls sim_attach_weld, so
+        the weld snaps no moving link and does not pivot the base (firstmate run-209).
+
+        Gates on the PLUGIN's shared status (!= Open), not this instance's self.enabled: the gripper
+        command is applied on a DIFFERENT NativePanelContact instance than the one IsaacPort ticks, but
+        both wrap the same gripper path (run-207). Probes FRESH, not self.last_probe, because the pad
+        crosses the ~0 mm window only briefly and last_probe only refreshes on the sensing stride."""
+        self._pending_body = None
+        if not self._sim_attach_fallback:
+            return False
+        self._fb_n = getattr(self, '_fb_n', 0) + 1
+        if self.api.get_gripper_status(self.path) == self.open_status:
+            # fm395 (B): hold a formed weld through a TRANSIENT Open flicker; release only on sustained Open.
+            self._open_streak += 1
+            if _release_held_on_open(self._fallback_body is not None, self._open_streak,
+                                     SIM_ATTACH_OPEN_RELEASE_TICKS):
+                if self._fb_n % 120 == 1:
+                    print('SIM_ATTACH_DIAG skip=suction_off', flush=True)
+                self._release_fallback()
+            elif self._fb_n % 120 == 1:
+                print('SIM_ATTACH_DIAG open_flicker streak=%d (holding weld)' % self._open_streak, flush=True)
+            return False
+        self._open_streak = 0
+        if self._fallback_body is not None or self.read():   # already held (weld or native) -- prefer it
+            return False
+        info = self.probe()
+        gap, pvs = info.get('min_gap_mm'), info.get('pad_vs_surface_deg')
+        hits = [h[0] for h in (info.get('raycast') or []) if h and h[0]]
+        if (gap is None or gap > SIM_ATTACH_CONTACT_MM or pvs is None
+                or pvs > SIM_ATTACH_FLUSH_DEG or not hits):
+            if self._fb_n % 30 == 1 or (gap is not None and gap <= SIM_ATTACH_CONTACT_MM):
+                print('SIM_ATTACH_DIAG skip gap_mm=%s pad_vs_surface_deg=%s hits=%s'
+                      % (gap, pvs, hits), flush=True)
+            return False
+        self._pending_body, self._pending_gap, self._pending_pvs = hits[0], gap, pvs
+        return True
+
+    def sim_attach_weld(self):
+        """Create the labelled weld to the body stored by sim_attach_contact_ready. The caller calls
+        this only AFTER freezing the arm to a stationary settle, so no impulse. No-op if nothing is
+        pending or something is already held."""
+        if (not self._sim_attach_fallback or self._fallback_body is not None
+                or not getattr(self, '_pending_body', None)):
+            return
+        body = self._pending_body
+        self._fallback_weld(body)
+        print('SIM_ATTACH_FALLBACK attach body=%s gap_mm=%s pad_vs_surface_deg=%s'
+              % (body, getattr(self, '_pending_gap', None), getattr(self, '_pending_pvs', None)),
+              flush=True)
+        self._pending_body = None
+
+    def _fallback_weld(self, body_path):
+        from pxr import UsdPhysics, UsdGeom, Gf, Sdf
+        joint_path = self.path + '/sim_attach_fallback'
+        first = UsdPhysics.Joint(self.stage.GetPrimAtPath(self.points[0]))
+        gripper_body = first.GetBody0Rel().GetTargets()[0]
+        # Author the FixedJoint anchors at the CURRENT relative pose so it is SATISFIED at creation --
+        # zero correction, zero impulse. Default anchors (0,0) coincide the gripper-body origin with the
+        # carton origin (~0.6 m apart), yanking them together: that impulse pivoted/translated the base
+        # and oscillated the arm against the brake (runs 208-212). localPos0/Rot0 (on the gripper body) =
+        # the carton's pose in the gripper-body frame; localPos1/Rot1 = the carton origin (identity).
+        cache = UsdGeom.XformCache()
+        g = cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(gripper_body))
+        b = cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(body_path))
+        rel = b * g.GetInverse()                     # carton local -> gripper-body local
+        t, q = rel.ExtractTranslation(), rel.ExtractRotationQuat()
+        joint = UsdPhysics.FixedJoint.Define(self.stage, joint_path)
+        joint.CreateBody0Rel().SetTargets([gripper_body])
+        joint.CreateBody1Rel().SetTargets([Sdf.Path(body_path)])
+        joint.CreateLocalPos0Attr(Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])))
+        joint.CreateLocalRot0Attr(Gf.Quatf(float(q.GetReal()), Gf.Vec3f(*[float(v) for v in q.GetImaginary()])))
+        joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
+        joint.CreateLocalRot1Attr(Gf.Quatf(1.0))
+        self._fallback_joint, self._fallback_body = joint_path, body_path
+        # fm318: disable the welded carton's colliders so it cannot fight the weld against the tool-side
+        # links (wrist_2/wrist_3/suction) during the folded carry; restored at release (_release_fallback).
+        self._set_carton_collision(body_path, False)
+
+    def _set_carton_collision(self, body_path, enabled):
+        # fm318: the SIM_ATTACH_FALLBACK FixedJoint only disables collision between the two JOINTED
+        # bodies (gripper-body + carton), so the welded carton's geometry still collides in PhysX with
+        # the tool-side links (wrist_2/wrist_3/suction) -- and the PLANNER ignores exactly those pairs
+        # (vendor ignore list), so a folded carry pose presses the carton into them and the solver fights
+        # the weld at ANY drive gain (the whole-wrist-cluster oscillation of runs 254-258, gain-
+        # independent). While welded the carton is rigidly held by the joint and needs no collision at
+        # all, so toggle its colliders OFF on weld and back ON at release (so the placement drop onto the
+        # cart still makes contact). CollisionEnabled is a runtime-reliable toggle (cart_diagnostic).
+        from pxr import UsdPhysics, Usd
+        # fm320: the bench weld-reaction probe proved the fight is the TOOL geometry (cube /
+        # surface_plates / suction_cups) colliding with the forearm/upper_arm/wrist as the fold closes
+        # (42.7 kN tool-vs-arm contact; the NO-CARTON trial also stalled) -- NOT the carton alone, and
+        # those self-pairs are on the vendor planner ignore list so cuMotion never avoids them. So while
+        # the carton is welded (held rigidly by the joint, needs no collision), disable BOTH the carton
+        # colliders AND the tool-side gripper colliders; restore on release (next grasp + the cart drop).
+        tool_side = ('suction_cups', 'cube_without_surface_plates', 'surface_plate_1',
+                     'surface_plate_2', 'surface_plate_3', 'surface_plate_4',
+                     'surface_plate_5', 'surface_plate_6')
+        targets = set()
+        prim = self.stage.GetPrimAtPath(body_path)
+        if prim:
+            for p in Usd.PrimRange(prim):
+                if p.HasAPI(UsdPhysics.CollisionAPI):
+                    targets.add(p.GetPath())
+        for p in self.stage.Traverse():
+            if p.HasAPI(UsdPhysics.CollisionAPI) and any(('/' + t) in str(p.GetPath()) for t in tool_side):
+                targets.add(p.GetPath())
+        for path in targets:
+            UsdPhysics.CollisionAPI(self.stage.GetPrimAtPath(path)).CreateCollisionEnabledAttr(bool(enabled))
+        print('SIM_ATTACH_FALLBACK carry collision %s on %d collider(s) (carton + tool-side) body=%s'
+              % ('ENABLED' if enabled else 'DISABLED', len(targets), body_path), flush=True)
+
+    def _release_fallback(self):
+        if getattr(self, '_fallback_joint', None) is not None:
+            body = getattr(self, '_fallback_body', None)
+            if body is not None:
+                self._set_carton_collision(body, True)   # restore for the cart drop
+            self.stage.RemovePrim(self._fallback_joint)
+            # fm379 mitigation 3: SIM-ONLY opt-in -- for a proof run, keep the released carton KINEMATIC
+            # at the release pose instead of letting it become a FREE DYNAMIC body. This avoids adding a
+            # new dynamic body to PhysX / the RTX acceleration structure at release (the hypothesised
+            # +2.68 GB rebuild trigger). The carton stays visually placed; it does not settle physically.
+            # Unset => the carton is free dynamic exactly as before (byte-identical).
+            if body is not None and os.environ.get('RESTOCK_RELEASE_KINEMATIC'):
+                from pxr import UsdPhysics
+                prim = self.stage.GetPrimAtPath(body)
+                if prim and prim.IsValid():
+                    rb = (UsdPhysics.RigidBodyAPI(prim) if prim.HasAPI(UsdPhysics.RigidBodyAPI)
+                          else UsdPhysics.RigidBodyAPI.Apply(prim))
+                    rb.CreateKinematicEnabledAttr(True)
+                    print('SIM_ATTACH_FALLBACK release KINEMATIC body=%s (proof-run, no dynamic add)'
+                          % body, flush=True)
+            print('SIM_ATTACH_FALLBACK release body=%s' % body, flush=True)
+        self._fallback_joint = self._fallback_body = None
 
     def read(self):
+        # PURE OBSERVER of the installed plugin's latch (the plugin manages the PhysX joint
+        # directly and never writes a per-seal body1 back to USD, verified natively,
+        # data/surface-gripper-latch-v1). A latch is confirmed by the plugin's grippedObjects
+        # list holding EXACTLY ONE body; read() never mutates the gripper.
+        #
+        # Two measured facts (data/sim-restock-stations-v1 contactgap sweep) shaped this:
+        #  1) read() must not open the gripper. An earlier version called open_gripper() whenever
+        #     it sampled an object while the status was not yet Closed ("a partial grab"); the
+        #     normal Closing->Closed suction transition reports its object BEFORE reaching Closed,
+        #     so that abort tore the seal down on every poll of the slow, time-dilated contact
+        #     descent and it never completed (the gripper-seal-fail blocker: s.contact False every
+        #     run). Removing the abort let every recipe seal and lift the carton ~60 mm.
+        #  2) the hold is keyed on grippedObjects, NOT on status==Closed. With the carton provably
+        #     gripped (grippedObjects==['/World/Carton'] every step) and the pad frozen, the
+        #     plugin's STATUS still flickers Closing<->Closed tick to tick; keying on Closed made
+        #     read() flicker False and would false-trip the controller's per-tick lost-grasp gate.
+        #     grippedObjects holding one body is the stable physical-attachment signal (it lifts
+        #     the carton in both Closing and Closed); status is used only to exclude Open.
+        #
+        # The hold safety property is preserved without mutating state: a partial (multi-object)
+        # or released grab is reported not-held (returns False) -- no fabricated hold, no weld.
         objects = set(map(str, self.api.get_gripped_objects(self.path) or []))
-        complete = self.api.get_gripper_status(self.path) == self.closed_status and len(objects) == 1
-        for path in self.points:
-            joint = self.stage.GetPrimAtPath(path)
-            attached = set(map(str, joint.GetRelationship('physics:body1').GetTargets()))
-            complete = complete and attached == objects and bool(joint.GetAttribute('physics:jointEnabled').Get())
-        # A partial native seal is explicitly released, never reported as held.
-        if objects and not complete:
-            self.api.open_gripper(self.path)
-        return bool(complete)
+        held = len(objects) == 1 and self.api.get_gripper_status(self.path) != self.open_status
+        # The labelled sim attach-fallback (default OFF) is an explicit measured-contact weld -- a real
+        # physical hold, not a fabricated one -- so when present it is a genuine held state. The weld is a
+        # single USD FixedJoint authored at <gripper>/sim_attach_fallback, a SHARED stage fact: the camera
+        # lane (build_sensing) and the manip runtime (isaac_factory) each hold a SEPARATE NativePanelContact
+        # wrapping the same gripper, and the mission welds on the IsaacPort instance while /sensors is read
+        # off the build_sensing instance. Keying the held signal on this instance's _fallback_body alone
+        # made the capture miss a weld authored on a sibling (run-213: s.contact stayed False ~7 s after a
+        # persisting weld), so ALSO honour the shared stage joint -- any observer of the gripper sees it.
+        welded = (getattr(self, '_fallback_body', None) is not None
+                  or (getattr(self, '_sim_attach_fallback', False) and getattr(self, 'stage', None) is not None
+                      and bool(self.stage.GetPrimAtPath(self.path + '/sim_attach_fallback'))))
+        held = held or welded
+        if getattr(self, '_diag', False):
+            self._emit('read')
+        return bool(held)
+
+    def probe(self):
+        """Measured seal state for diagnostics/harness; never consumed by the latch contract.
+
+        Returns a JSON-safe dict: gripper status token, gripped-object paths + count, the
+        enabled command flag, each seal's live world position, the suction-axis world
+        direction and its tilt from world-down, and a PhysX raycast gap (mm) to the nearest
+        body along that axis from each seal. Geometry is best-effort (guarded); status and
+        gripped count come straight from the plugin and are always present.
+        """
+        info = {'enabled': self.enabled}
+        try:
+            info['status'] = str(self.api.get_gripper_status(self.path))
+        except Exception as exc:
+            info['status'] = 'ERR:%s' % exc
+        try:
+            objs = [str(x) for x in (self.api.get_gripped_objects(self.path) or [])]
+        except Exception as exc:
+            objs, info['gripped_err'] = [], str(exc)
+        info['gripped'], info['gripped_n'] = objs, len(objs)
+        try:
+            info.update(self._seal_geometry())
+        except Exception as exc:
+            info['geom_err'] = '%s: %s' % (type(exc).__name__, exc)
+        self.last_probe = info
+        return info
+
+    def _seal_geometry(self):
+        from pxr import Gf, UsdGeom, UsdPhysics
+        cache = UsdGeom.XformCache()
+        first = UsdPhysics.Joint(self.stage.GetPrimAtPath(self.points[0]))
+        body0 = self.stage.GetPrimAtPath(first.GetBody0Rel().GetTargets()[0])
+        body0_world = cache.GetLocalToWorldTransform(body0)
+        seals, fwds = [], []
+        for p in self.points:
+            j = UsdPhysics.Joint(self.stage.GetPrimAtPath(p))
+            lp, lr = j.GetLocalPos0Attr().Get(), j.GetLocalRot0Attr().Get()
+            m = Gf.Matrix4d(1.)
+            m.SetRotateOnly(Gf.Quatd(lr.GetReal(), Gf.Vec3d(*lr.GetImaginary())))
+            m.SetTranslateOnly(Gf.Vec3d(*lp))
+            world = m * body0_world
+            wp = world.ExtractTranslation()
+            fz = world.TransformDir(Gf.Vec3d(0, 0, 1))
+            fz = np.array([fz[0], fz[1], fz[2]], float)
+            fz /= (np.linalg.norm(fz) or 1.)
+            seals.append([float(wp[0]), float(wp[1]), float(wp[2])])
+            fwds.append(fz)
+        fwd = np.mean(fwds, axis=0)
+        fwd /= (np.linalg.norm(fwd) or 1.)
+        flat = math.degrees(math.acos(max(-1., min(1., float(np.dot(fwd, (0, 0, -1.)))))))
+        out = {'seals_world': [[round(c, 4) for c in s] for s in seals],
+               'forward_world': [round(float(c), 4) for c in fwd],
+               'tilt_deg_from_down': round(flat, 3)}
+        try:
+            from omni.physx import get_physx_scene_query_interface
+            sq = get_physx_scene_query_interface()
+            hits, reach = [], self.max_gap * 5. + .05
+            # The seal attachment points sit inside the gripper's own suction_cups collider, so a plain
+            # raycast_closest self-hits that body at ~0 mm and masks the true seal->carton gap. Skip hits
+            # on the gripper's own body (body0 subtree) by advancing the origin just past each self-hit,
+            # so the reported gap is to the first EXTERNAL body (the carton or a neighbour).
+            self_prefix = str(body0.GetPath())
+            fwd_t = tuple(float(c) for c in fwd)
+            face_normals = []
+            for s in seals:
+                origin, remaining, hit = list(map(float, s)), reach, None
+                for _ in range(6):
+                    h = sq.raycast_closest(tuple(origin), fwd_t, remaining)
+                    if not (h and h.get('hit')):
+                        break
+                    coll, dist = h.get('collision'), float(h['distance'])
+                    if not str(coll).startswith(self_prefix):
+                        hit = [coll, round(dist * 1000., 2)]
+                        n = h.get('normal')
+                        if n is not None:
+                            face_normals.append(np.array([float(n[0]), float(n[1]), float(n[2])]))
+                        break
+                    step = dist + .001           # 1 mm past the self-hit, keep casting forward
+                    origin = [origin[k] + fwd_t[k] * step for k in range(3)]
+                    remaining -= step
+                    if remaining <= 0:
+                        break
+                hits.append(hit if hit else [None, None])
+            out['raycast'] = hits
+            d = [h[1] for h in hits if h[1] is not None]
+            out['min_gap_mm'] = min(d) if d else None
+            # The native seal gate is SURFACE-RELATIVE (~2 deg of the TRUE contacted face normal, not
+            # world +Y): report the pad-forward vs the measured hit-face normal so a no-latch at a
+            # world-aligned pad reveals a residual pad-vs-true-face orientation error (the run-177 class).
+            if face_normals:
+                fn = np.mean(face_normals, axis=0)
+                fn /= (np.linalg.norm(fn) or 1.)
+                # pad forward pushes INTO the face, so compare fwd to the inward (negated) face normal.
+                cosang = max(-1., min(1., float(np.dot(fwd, -fn))))
+                out['pad_vs_surface_deg'] = round(math.degrees(math.acos(cosang)), 3)
+                out['face_normal_world'] = [round(float(c), 4) for c in fn]
+        except Exception as exc:
+            out['raycast_err'] = '%s: %s' % (type(exc).__name__, exc)
+        return out
+
+    def _emit(self, label, force=False):
+        self._diag_n += 1
+        info = self.probe()
+        # Key on the gripped-object count and the measured gap, NOT the raw status: the plugin's
+        # status flickers Closing<->Closed every few ticks even while holding (measured), so keying
+        # on it would flood the whole hold/tow. Log on a command, on a grip-count/gap change, else
+        # a sparse heartbeat. The current status is still printed in every line.
+        key = (info['gripped_n'], info.get('min_gap_mm'))
+        if force or key != self._diag_prev or self._diag_n % 30 == 1:
+            self._diag_prev = key
+            # raycast holds [hit_prim_path, gap_mm] per seal: log the distinct hit bodies so a
+            # no-latch at gap 0 reveals WHETHER the seal is touching the grippable dynamic handling
+            # unit or a static neighbour/support (a SurfaceGripper cannot seal a static body).
+            hits = info.get('raycast')
+            hit_bodies = sorted({h[0] for h in hits if h and h[0]}) if hits else None
+            # inst/fb localise the attach-fallback propagation blocker (run-213): the capture that
+            # feeds the controller's s.contact calls read() on ONE instance; sim_attach_weld sets
+            # _fallback_body on the instance IsaacPort ticks. If read() logs fb=False while the port's
+            # probe logs fb=True (different inst=), the capture reads a DIFFERENT NativePanelContact
+            # than the weld mutates -- which is exactly why s.contact stayed False 7 s after the weld.
+            print('SEAL_DIAG %s inst=%04x fb=%s status=%s gripped_n=%d gripped=%s enabled=%s min_gap_mm=%s '
+                  'tilt_deg=%s forward=%s pad_vs_surface_deg=%s face_normal=%s hit_bodies=%s'
+                  % (label, id(self) & 0xffff, getattr(self, '_fallback_body', None) is not None,
+                     info.get('status'), info['gripped_n'], info['gripped'], info['enabled'],
+                     info.get('min_gap_mm'), info.get('tilt_deg_from_down'), info.get('forward_world'),
+                     info.get('pad_vs_surface_deg'), info.get('face_normal_world'), hit_bodies),
+                  flush=True)
 
 
 def prepare_cad_gripper(stage, *, robot_root, urdf_path):

@@ -1,0 +1,982 @@
+"""Contract tests with explicit fixtures; no Isaac/ROS/GPU imports."""
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace as NS
+import sys
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from twin.restock.runtime import Packet, RuntimeAdapter, NavigationBridge, ManipulationBridge
+from twin.restock_manipulation.types import Result as ManipResult
+from twin.restock.inventory import Job
+from twin.restock.scenario import validate
+from twin.restock import guard
+
+
+class RuntimeTests(unittest.TestCase):
+    def test_owned_camera_runtime_receives_clock_and_does_not_repeat_gripper_command(self):
+        from dataclasses import dataclass
+        @dataclass(frozen=True)
+        class Reply:
+            controls: tuple = ({'kind':'gripper','enabled':True},)
+        calls=[]
+        runtime=NS(controller=NS(cart_location='rollwagen'),
+                   step=lambda dt,stamp,parked=None:(calls.append((dt,stamp,parked)) or Reply()),
+                   start=lambda op,job:None,
+                   motion=NS(stop=lambda:calls.append('stop')))
+        bridge=ManipulationBridge(runtime,owns_sensor_io=True)
+        result=bridge.step(.1,NS(simulation_time=4.2,parked=True))
+        self.assertEqual(calls,[(.1,4.2,True)])
+        self.assertEqual(result.controls,())
+        bridge.stop()
+        self.assertEqual(calls[-1],'stop')
+
+    def setUp(self):
+        self.stops = []
+        self.commands = []
+        self.p = Packet('frame-1', 'test_fixture', .1, None, None, None, None,
+                        True, False, 0., True)
+        self.port = NS(advance=lambda dt: self.p, controls=lambda c:None,
+                       stop=lambda:self.stops.append('port'))
+        self.nav = NS(start=lambda goal,coupled,**kw:None,
+                      step=lambda dt,p:NS(status='succeeded',linear=0.,angular=0.,reason=''),
+                      cancel=lambda:self.stops.append('nav'))
+        self.mobile = NS(park=lambda:self.stops.append('base'),
+                         hold=lambda:self.stops.append('hold'),   # stationary base parking brake
+                         release=lambda:None,
+                         command=lambda *a,**k:self.commands.append(a),
+                         attach=lambda obs:None, coupling_state=lambda o:{'healthy':True})
+        self.manip = NS(start=lambda a,j:None,cart_location='rollwagen',
+                        step=lambda dt,s:NS(status='running',reason='',controls=()))
+        poses = {k:[0,0,0] for k in ('home','pickup','cart_dock','shelf_approach')}
+        self.adapter = RuntimeAdapter(self.nav,self.mobile,self.manip,self.port,poses,fixture_mode=True)
+        self.job = Job('j','milk',1,'back','shelf')
+
+    def _stuck_adapter(self, *, nav_stuck_wall_s, clock, moving=False, cycling=False):
+        """An outbound navigate adapter whose nav never completes. reason='lane_blocked' by default;
+        with cycling=True it ALTERNATES lane_not_acquired<->replan_changed_observations (the run-323b
+        frozen cycle) to prove the no-progress fail-fast is reason-agnostic."""
+        pose = {'p': (1.0, 2.0, 0.5)}
+        ticks = [0]
+        reasons = ['lane_not_acquired', 'replan_changed_observations']
+        def advance(dt):
+            ticks[0] += 1
+            if moving:                                   # base makes real progress each tick
+                pose['p'] = (pose['p'][0] + 0.5, pose['p'][1], pose['p'][2])
+            return replace(self.p, observation_id=f'f-{ticks[0]}', simulation_time=ticks[0]*.1,
+                           odometry=NS(pose=pose['p']))
+        def nav_step(dt, p):
+            reason = reasons[ticks[0] % 2] if cycling else 'lane_blocked'
+            return NS(status='running', linear=0., angular=0., reason=reason)
+        port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        nav = NS(start=lambda g, c, **k: None, step=nav_step, cancel=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        adapter = RuntimeAdapter(nav, self.mobile, self.manip, port, poses, fixture_mode=True,
+                                 wall_clock=lambda: clock[0], nav_stuck_wall_s=nav_stuck_wall_s)
+        adapter.start('outbound', self.job)
+        return adapter
+
+    def test_nav_stuck_wall_fail_fast_fm425(self):
+        # fm425 (c) / run-322b: the coupled OUTBOUND tow sat on reason='lane_blocked' for ~50 min WALL and
+        # the SIM-clock caps never fired under render pacing. A WALL budget now fails the stage fast with
+        # the named reason, instead of burning the whole GPU wall cap.
+        clock = [0.0]
+        adapter = self._stuck_adapter(nav_stuck_wall_s=5.0, clock=clock)
+        r = adapter._step(.1)                            # wall 0: start the no-progress timer
+        self.assertEqual((r.status, r.reason), ('running', 'lane_blocked'))
+        clock[0] = 4.0
+        self.assertEqual(adapter._step(.1).status, 'running')
+        clock[0] = 6.0                                   # past the 5 s budget, no base progress
+        r = adapter._step(.1)
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('no base progress', r.reason)
+        self.assertIn('lane_blocked', r.reason)          # names the current reason
+
+    def test_nav_stuck_resets_on_base_progress_fm425(self):
+        # A tow that is actually MOVING (base pose advancing) never trips the stuck budget, even past it.
+        clock = [0.0]
+        adapter = self._stuck_adapter(nav_stuck_wall_s=5.0, clock=clock, moving=True)
+        adapter._step(.1)
+        clock[0] = 100.0
+        for _ in range(5):
+            self.assertEqual(adapter._step(.1).status, 'running')
+
+    def test_nav_stuck_catches_cycling_reasons_no_progress_fm427(self):
+        # fm427 (C) / run-323b: the outbound froze while ALTERNATING lane_not_acquired<->replan_changed_
+        # observations; the earlier reason-keyed check reset on every reason change and never fired. The
+        # no-base-progress check is reason-agnostic -> it still fails fast, naming the current reason.
+        clock = [0.0]
+        adapter = self._stuck_adapter(nav_stuck_wall_s=5.0, clock=clock, cycling=True)
+        r = adapter._step(.1); self.assertEqual(r.status, 'running')   # start the no-progress timer
+        for _ in range(3):
+            clock[0] += 2.0
+            r = adapter._step(.1)
+            if r.status == 'failed':
+                break
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('no base progress', r.reason)
+        self.assertIn('last reason', r.reason)   # names whichever reason was current when it tripped
+
+    def test_nav_stuck_default_off_is_byte_identical_fm425(self):
+        # nav_stuck_wall_s == 0 => the WALL fail-fast is inert (byte-identical); the stage stays running.
+        clock = [0.0]
+        adapter = self._stuck_adapter(nav_stuck_wall_s=0.0, clock=clock)
+        adapter._step(.1)
+        clock[0] = 10_000.0
+        self.assertEqual(adapter._step(.1).status, 'running')
+
+    def test_nav_stuck_wall_rejects_invalid(self):
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        with self.assertRaises(ValueError):
+            RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True,
+                           nav_stuck_wall_s=-1.0)
+
+    def test_fresh_nav_leg_restarts_the_no_base_progress_budget_return_rebegin(self):
+        # warm7 return re-begin: the uncouple-return tow (navigate) begins only AFTER the long,
+        # legitimately-stationary park+transfer+verify phases. The fm425 no-base-progress WALL timer
+        # is advanced ONLY inside navigate (_nav_stuck_check), so that non-navigate wall-time must NOT
+        # be charged against the return tow's very first tick -- else it trips before the controller
+        # finishes its planning_stop -> route_ready sequence and fails the stage, and each StageRetry
+        # re-begin (which also runs through the same start) re-fails instantly (the 'per-tick re-begin',
+        # elapsed=0.02, route never persisted). A fresh leg start() restarts the budget from this leg.
+        clock = [0.0]
+        adapter = self._stuck_adapter(nav_stuck_wall_s=120.0, clock=clock)   # starts 'outbound'
+        adapter._step(.1)                      # wall 0: baseline set at this leg's start pose
+        clock[0] = 207.0                       # a long stationary non-navigate phase elapses (wall)
+        adapter.start('outbound', self.job)    # a fresh leg (stage begin / StageRetry re-begin)
+        r = adapter._step(.1)                  # first tick of the fresh leg, at wall 207
+        self.assertEqual(r.status, 'running')  # NOT failed: the prior phase's wall is not charged here
+        self.assertEqual(r.reason, 'lane_blocked')
+        clock[0] = 330.0                       # now THIS leg is genuinely stuck past its own budget
+        r = adapter._step(.1)
+        self.assertEqual(r.status, 'failed')   # the fresh budget still fails fast when truly stuck
+        self.assertIn('no base progress', r.reason)
+
+    def test_return_tow_leg_does_not_inherit_stuck_budget_from_transfer(self):
+        # Faithful warm7 shape driven through the REAL return start/_step path: an earlier navigate leg
+        # (outbound) sets the no-base-progress baseline, then a long WALL interval passes with the base
+        # legitimately parked for the transfer (NO navigate ticks advance the timer), then the
+        # uncouple-return's first navigate leg (coupled tow to the cart parking spot) begins. Its
+        # planning ticks must stay RUNNING -- the transfer's wall seconds are not charged against them.
+        clock = [0.0]
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='running', linear=0., angular=0.,
+                                            reason='planning_stop'),
+                      cancel=lambda: None)
+        ticks = [0]
+        def advance(dt):
+            i = ticks[0]; ticks[0] += 1
+            return replace(self.p, observation_id=f'f{i}', simulation_time=(i + 1) * .1,
+                           coupled=True, parked=True, odometry=NS(pose=(2.0, -1.0, 1.57)))
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['cart_parking'] = [2.0, -1.0, 1.57]
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, uncouple_on_return=True,
+                                 wall_clock=lambda: clock[0], nav_stuck_wall_s=120.0)
+        adapter.start('outbound', self.job)    # an earlier navigate leg
+        adapter._step(.1)                      # wall 0: baseline set
+        clock[0] = 207.0                       # long stationary transfer (no navigate ticks) elapses
+        adapter.start('return', self.job)      # begins the tow->cart_parking navigate leg
+        for _ in range(5):                     # several planning ticks; base not yet moving
+            r = adapter.step(.1)
+            self.assertEqual(r.status, 'running')   # never tripped by the inherited transfer wall-time
+        self.assertEqual(nav_goals[-1], ((2.0, -1.0, 1.57), True))  # coupled tow leg was dispatched
+
+    def test_collect_source_leg_requests_tolerance_aware_strict_arrival(self):
+        # sim-robust-collect-arrival-v1: the grasp-critical collect source park must request
+        # strict_xy_arrival so the pick never begins with the base declared 'arrived' outside the true xy
+        # tolerance (cold collect declared arrived at xy 0.169 vs a 0.150 tol under the hysteresis latch).
+        # The free outbound drive must NOT request it.
+        seen = []
+        self.nav = NS(start=lambda goal, coupled, **kw: seen.append((tuple(goal), coupled, kw)),
+                      step=lambda dt, p: NS(status='running', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        self.assertTrue(seen and seen[-1][2].get('strict_xy_arrival') is True)
+        seen.clear()
+        adapter.start('outbound', self.job)
+        self.assertTrue(seen and 'strict_xy_arrival' not in seen[-1][2])
+
+    def test_collect_drives_to_place_approach_between_pick_and_place(self):
+        # fm390: when the arm reaches TRANSIT (carry fold done) and a place_approach pose is configured,
+        # the adapter drives the base there (carton carried), re-warms WITHOUT re-dispatching the grasp,
+        # then resumes the paused arm to place. Sequence: navigate(pickup) -> warm -> execute(transit) ->
+        # navigate(place_approach) -> rewarm -> execute(place) -> loaded.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append(tuple(goal)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        ticks = [0]            # fresh packet each tick: unique obs id + sim_time tracking adapter.time
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+
+        class M:   # the raw controller the adapter wraps in a ManipulationBridge; base_repositioned is
+            cart_location = 'rollwagen'              # the attr the bridge sets (real TransferController contract)
+            def __init__(s): s.started = []; s.base_repositioned = False
+            def start(s, a, j): s.started.append(a)
+            def warm(s, dt, p): return True
+            def step(s, dt, p):
+                if not s.base_repositioned:
+                    return NS(status='running', reason='', controls=(), phase='transit')
+                return NS(status='succeeded', reason='', controls=(), phase='place',
+                          evidence=({'source': 'test_fixture', 'sku': 'milk', 'location': 'rollwagen',
+                                     'quantity': 1, 'observation_id': 'o', 'simulation_time': .1},))
+        manip = M()
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach'] = [-4.5, 15.25, 3.14159]
+        adapter = RuntimeAdapter(self.nav, self.mobile, manip, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        phases = []
+        for _ in range(8):
+            r = adapter._step(.1)
+            phases.append(adapter.phase)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence.get('loaded'))
+        self.assertEqual(manip.started, ['collect'])          # grasp dispatched ONCE (rewarm must not re-start)
+        self.assertEqual(nav_goals, [(0, 0, 0), (-4.5, 15.25, 3.14159)])  # pickup then place_approach
+        self.assertIn('rewarm', phases)                        # re-warmed at place_approach
+
+    def test_reposition_handshake_end_to_end_across_host_boundary_fm400(self):
+        # fm400 end-to-end replay of the whole reposition handshake at the adapter level, modelling the
+        # host round-trip: station STOP at drive-start -> base drives -> arrival -> set_base_repositioned
+        # -> the (host-process) controller resumes TRANSIT->place ONLY after arrival was carried -> load.
+        events = []
+        class HostLike:   # a sensor-owning manip that models the separate-process host controller
+            cart_location = 'rollwagen'
+            def __init__(s): s._flagged = False; s._resumed = False
+            def start(s, a, j): events.append('start')
+            def warm(s, t, parked=None): return True                 # re-warm ready (fresh ESDF)
+            def pause_station(s, t): events.append('pause_station')   # clean stop at drive-start
+            def set_base_repositioned(s): s._flagged = True; events.append('set_base_repositioned')
+            def step(s, dt, t, parked=None):
+                if s._flagged:                                        # arrival carried on the packet
+                    s._resumed = True
+                if s._resumed:
+                    return ManipResult('succeeded', 'place', evidence=(
+                        {'source': 'test_fixture', 'sku': 'milk', 'location': 'rollwagen',
+                         'quantity': 1, 'observation_id': 'o', 'simulation_time': .1},))
+                return ManipResult('running', 'transit')              # HOLD in transit until arrival
+        manip = ManipulationBridge(HostLike(), owns_sensor_io=True)
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append(tuple(goal)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach'] = [-4.5, 15.25, 3.14159]
+        adapter = RuntimeAdapter(self.nav, self.mobile, manip, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        r = None
+        for _ in range(10):
+            r = adapter._step(.1)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence.get('loaded'))
+        # pause_station fired at drive-start, BEFORE arrival was signalled; the manip resumed only after.
+        self.assertIn('pause_station', events)
+        self.assertIn('set_base_repositioned', events)
+        self.assertLess(events.index('pause_station'), events.index('set_base_repositioned'))
+
+    def test_reposition_rewarm_fails_honestly_without_a_fresh_collision_map(self):
+        # fm399 (1): the place_approach re-warm must NOT place on a stale map. When no fresh ESDF is
+        # re-incorporated at the new pose (warm never ready), the re-warm FAILS honestly after its
+        # bound -- it never force-proceeds to execute(place) like the pre-grasp warm does.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append(tuple(goal)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+
+        class Owned:   # sensor-owning runtime: the bridge delegates warm()/step() to it
+            cart_location = 'rollwagen'
+            def __init__(s): s.base_repositioned = False
+            def start(s, a, j): pass
+            def warm(s, t, parked=None): return not s.base_repositioned  # pre-grasp ready; re-warm NEVER ready
+            def repark_station(s, t): pass
+            def step(s, dt, t, parked=None):
+                return ManipResult('running', 'transit')
+        manip = ManipulationBridge(Owned(), owns_sensor_io=True)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach'] = [-4.5, 15.25, 3.14159]
+        adapter = RuntimeAdapter(self.nav, self.mobile, manip, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        phases, result = [], None
+        with patch('twin.restock.runtime._REWARM_MAX_TICKS', 4):
+            for _ in range(60):
+                r = adapter._step(.1)
+                phases.append(adapter.phase)
+                if r.status in ('succeeded', 'failed'):
+                    result = r
+                    break
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, 'failed')
+        self.assertIn('fresh collision map', result.reason)
+        self.assertIn('rewarm', phases)
+        self.assertNotIn('execute', phases[phases.index('rewarm'):])  # never reached place on a stale map
+
+    def test_reposition_pauses_station_at_drive_start_before_navigate(self):
+        # fm399 (1): a moving base invalidates the parked mapper and the host spams emergency-stop
+        # while a parked station is un-heartbeat-ed (run-309). The adapter must CLEANLY stop the
+        # station at the START of the reposition drive -- while still parked, BEFORE navigate -- so it
+        # goes idle (not faulted). It is re-begun fresh in the place_approach re-warm.
+        pauses = []
+        class Owned:   # a sensor-owning runtime exposing pause_station (RosManipulationRuntime contract)
+            cart_location = 'rollwagen'
+            def __init__(s): s.base_repositioned = False
+            def start(s, a, j): pass
+            def warm(s, t, parked=None): return True
+            def pause_station(s, t): pauses.append((t, s.base_repositioned))
+            def step(s, dt, t, parked=None):
+                return ManipResult('running', 'transit')
+        owned = Owned()
+        bridge = ManipulationBridge(owned, owns_sensor_io=True)
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append(tuple(goal)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach'] = [-4.5, 15.25, 3.14159]
+        adapter = RuntimeAdapter(self.nav, self.mobile, bridge, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        for _ in range(8):
+            adapter._step(.1)
+            if adapter.phase == 'rewarm':
+                break
+        self.assertEqual(len(pauses), 1)                       # paused exactly once
+        self.assertFalse(pauses[0][1])                         # paused while NOT yet repositioned (at drive start)
+        self.assertTrue(owned.base_repositioned)               # arm told to resume on arrival
+
+    def test_pause_station_resets_runtime_for_fresh_epoch(self):
+        # fm399 (1): RosManipulationRuntime.pause_station stops the active epoch, clears
+        # collision_time and arms a fresh begin() on the next pump.
+        from twin.restock.ros_manipulation import RosManipulationRuntime
+        stops = []
+        station = NS(stop=lambda: stops.append('stop'))
+        feedback = NS(collision_time=42.0)
+        rt = RosManipulationRuntime(NS(), lambda *a: None, prepare_station=lambda *a: None,
+                                    station=station, feedback=feedback)
+        rt._station_started = True
+        rt.pause_station(99.0)
+        self.assertEqual(stops, ['stop'])
+        self.assertEqual(feedback.collision_time, -1.)
+        self.assertFalse(rt._station_started)
+
+    def test_collect_reposition_stages_via_east_waypoint(self):
+        # fm390 nav proof #2: a direct diagonal to place_approach clips the parked cart, so the base must
+        # stage EAST first. With a staging waypoint (place_approach_stage, else couple_approach) the
+        # reposition drives pickup -> stage -> place_approach, and base_repositioned is set ONLY at the
+        # final goal (the staging waypoint must not resume the arm).
+        nav_goals = []
+        nav_kw = []
+        repositioned_at = []
+        self.nav = NS(start=lambda goal, coupled, **kw: (nav_goals.append(tuple(goal)), nav_kw.append(kw)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+
+        class M:
+            cart_location = 'rollwagen'
+            def __init__(s): s.started = []; s.base_repositioned = False
+            def start(s, a, j): s.started.append(a)
+            def warm(s, dt, p): return True
+            def step(s, dt, p):
+                if not s.base_repositioned:
+                    return NS(status='running', reason='', controls=(), phase='transit')
+                return NS(status='succeeded', reason='', controls=(), phase='place',
+                          evidence=({'source': 'test_fixture', 'sku': 'milk', 'location': 'rollwagen',
+                                     'quantity': 1, 'observation_id': 'o', 'simulation_time': .1},))
+        manip = M()
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach_stage'] = [-4.5, 16.0, 0.0]
+        poses['place_approach'] = [-4.5, 15.25, 3.14159]
+        adapter = RuntimeAdapter(self.nav, self.mobile, manip, self.port, poses, fixture_mode=True)
+        adapter.start('collect', self.job)
+        for _ in range(10):
+            # the arm must NOT be resumed until the final goal: assert base stays un-repositioned
+            # while the staging goal is still the active reposition target
+            r = adapter._step(.1)
+            repositioned_at.append((tuple(nav_goals[-1]) if nav_goals else None, manip.base_repositioned))
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertEqual(nav_goals,
+                         [(0, 0, 0), (-4.5, 16.0, 0.0), (-4.5, 15.25, 3.14159)])  # pickup -> stage -> mouth
+        # base_repositioned never set while the staging waypoint was the latest goal
+        self.assertFalse(any(rep for goal, rep in repositioned_at if goal == (-4.5, 16.0, 0.0)))
+        # fm396 (B): the pickup->pickup nav (goal 0) is a normal drive; BOTH reposition legs (stage + mouth)
+        # are trusted-static drives (static_drive=True), so the carry-fold self-return ring cannot block them.
+        self.assertEqual(nav_kw[0].get('static_drive'), None)         # the initial drive is NOT static
+        self.assertTrue(nav_kw[1].get('static_drive'))                # pickup -> stage
+        self.assertTrue(nav_kw[2].get('static_drive'))                # stage -> place_approach
+        # fm406: both reposition legs relax the arrival tolerance -- place_approach is a standoff (the
+        # deck re-registers in the new frame), so the achievable park (run-313 settled ~0.076m/0.078rad
+        # short, right at the 0.08 default) declares arrived_stopped instead of sitting until a watchdog.
+        for leg in (nav_kw[1], nav_kw[2]):
+            self.assertEqual(leg.get('arrival_xy_tol'), 0.15)
+            self.assertEqual(leg.get('arrival_yaw_tol'), 0.20)
+
+    def test_coupling_needs_later_observation(self):
+        self.adapter.start('couple',self.job)
+        self.assertEqual(self.adapter.step(.1).status,'running')
+        self.p = replace(self.p,observation_id='frame-2',simulation_time=.2,coupled=True)
+        result = self.adapter.step(.1)
+        self.assertEqual(result.status,'succeeded')
+        self.assertTrue(result.evidence['coupled'])
+
+    def test_couple_commits_through_attach_parked_blip_fm419(self):
+        # fm419 (b) / run-320b: after fine-dock seated (20 mm / 2.16 deg), creating the drawbar joint
+        # SNAPS the cart onto the hitch and briefly makes parked=False for a tick. The couple stage must
+        # NOT fail 'base moved during stationary operation' at that attach -- that failure is what made the
+        # mission STEP_RETRY re-begin couple into the approach nav (started coupled=False) against an
+        # already-coupled cart, which then looped 'coupling_changed' to coupling_changed_timeout. A
+        # successful latch (coupled + healthy) declares couple DONE even across the attach parked blip.
+        self.adapter.start('couple', self.job)
+        self.assertEqual(self.adapter.step(.1).status, 'running')          # navigate -> execute -> attach
+        # the attach snaps the cart: parked=False this tick, coupling not yet confirmed -> STILL running,
+        # NOT failed (pre-fm419 the shared stationary guard returned 'base moved during stationary operation')
+        self.p = replace(self.p, observation_id='frame-2', simulation_time=.2, parked=False, coupled=False)
+        r = self.adapter.step(.1)
+        self.assertEqual(r.status, 'running', r.reason)
+        self.assertNotIn('base moved', r.reason)
+        # coupling becomes healthy while the base is still settling (parked=False) -> couple DONE
+        self.p = replace(self.p, observation_id='frame-3', simulation_time=.3, parked=False, coupled=True)
+        r2 = self.adapter.step(.1)
+        self.assertEqual(r2.status, 'succeeded')
+        self.assertTrue(r2.evidence['coupled'])
+
+    def test_non_couple_stationary_guard_still_fails_on_base_motion_fm419(self):
+        # The parked-guard relaxation is scoped to couple ONLY: a park/transfer/verify stage with a base
+        # that is not parked during stationary manipulation still fails honestly (guard intact).
+        self.adapter.start('park', self.job)
+        self.p = replace(self.p, observation_id='frame-2', parked=False)   # sim_time .1 matches adapter time
+        r = self.adapter.step(.1)
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('base moved during stationary operation', r.reason)
+
+    def test_return_default_tows_cart_home_coupled(self):
+        # Default (uncouple_on_return off): return navigates straight to home as a COUPLED tow and
+        # succeeds with home=True -- byte-identical legacy behaviour.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        self.p = replace(self.p, coupled=True, parked=True)
+        self.port = NS(advance=lambda dt: self.p, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True)
+        adapter.start('return', self.job)
+        r = adapter.step(.1)
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence['home'])
+        self.assertEqual(nav_goals, [((0, 0, 0), True)])   # single coupled tow to home
+
+    def test_return_uncouples_at_parking_spot_then_drives_home_empty(self):
+        # Captain 2026-10-20 "robot should uncouple at the parking spot": with uncouple_on_return on
+        # and a cart_parking pose, return tows the cart to the parking spot (coupled), brakes it,
+        # releases the coupling, backs away and drives home EMPTY. Position-first, step by step.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        events = []
+        state_uncoupled = {'joint_present': False, 'requested_attached': False, 'healthy': False}
+        self.mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None,
+                         command=lambda *a, **k: self.commands.append(a),
+                         hold_cart_pin=lambda: events.append('brake'),
+                         uncouple=lambda obs: (events.append('uncouple'), state_uncoupled)[1],
+                         attach=lambda obs: None, coupling_state=lambda o: {'healthy': True})
+        # coupled is True while towing + braking + at uncouple-dispatch; goes False once released.
+        coupled_seq = [True, True, True, False, False, False, False, False]
+        ticks = [0]
+        def advance(dt):
+            i = ticks[0]; ticks[0] += 1
+            return replace(self.p, observation_id=f'f{i}', simulation_time=(i + 1) * .1,
+                           coupled=coupled_seq[min(i, len(coupled_seq) - 1)], parked=True)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['cart_parking'] = [2.0, -1.0, 1.57]
+        poses['cart_parking_backaway'] = [3.0, -1.0, 1.57]
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, uncouple_on_return=True)
+        adapter.start('return', self.job)
+        r = None
+        for _ in range(12):
+            r = adapter.step(.1)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence['home'])
+        # The sequence: brake the cart, then release the coupling -- in that order.
+        self.assertEqual(events, ['brake', 'uncouple'])
+        # Nav legs: coupled tow to the parking spot, then uncoupled back-away and uncoupled drive home.
+        self.assertEqual(nav_goals, [((2.0, -1.0, 1.57), True),    # tow to parking spot, coupled
+                                     ((3.0, -1.0, 1.57), False),   # back away, uncoupled
+                                     ((0, 0, 0), False)])          # home, empty
+
+    def test_return_uncouple_without_backaway_drives_straight_home(self):
+        # No cart_parking_backaway waypoint: after uncouple the robot drives straight home, empty.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        state_uncoupled = {'joint_present': False, 'requested_attached': False, 'healthy': False}
+        self.mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None,
+                         command=lambda *a, **k: None, hold_cart_pin=lambda: None,
+                         uncouple=lambda obs: state_uncoupled,
+                         attach=lambda obs: None, coupling_state=lambda o: {'healthy': True})
+        coupled_seq = [True, True, True, False, False, False]
+        ticks = [0]
+        def advance(dt):
+            i = ticks[0]; ticks[0] += 1
+            return replace(self.p, observation_id=f'f{i}', simulation_time=(i + 1) * .1,
+                           coupled=coupled_seq[min(i, len(coupled_seq) - 1)], parked=True)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['cart_parking'] = [2.0, -1.0, 1.57]
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, uncouple_on_return=True)
+        adapter.start('return', self.job)
+        r = None
+        for _ in range(12):
+            r = adapter.step(.1)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence['home'])
+        self.assertEqual(nav_goals, [((2.0, -1.0, 1.57), True), ((0, 0, 0), False)])
+
+    def test_couple_runs_fine_dock_servo_before_attach(self):
+        # With a fine_dock servo attached, couple must creep (commanding the base) until the
+        # servo reports 'ready', THEN attach -- not attach straight off the nav arrival.
+        from twin.restock.fine_dock import FineDockResult
+        seq = ['creeping', 'creeping', 'ready']
+        fd_calls = []
+        fine = NS(start=lambda now: fd_calls.append('start'),
+                  step=lambda dock, now: (fd_calls.append('step') or
+                      FineDockResult(seq.pop(0), 0.02, 0.01, 0.01, 0.0, 'x')))
+        attached = []
+        events = []
+        mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None,
+                    command=lambda *a, **k: self.commands.append(a),
+                    hold_cart_pin=lambda: events.append('pin'),
+                    attach=lambda obs: (attached.append(obs), events.append('attach')),
+                    coupling_state=lambda o: {'healthy': True})
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        adapter = RuntimeAdapter(self.nav, mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, fine_dock=fine,
+                                 hold_cart_through_couple=True)
+        adapter.start('couple', self.job)
+        self.assertEqual(events, ['pin'])  # cart pinned at couple start, before any base drive
+        # Nav succeeds this tick -> servo starts (no attach yet).
+        r = adapter.step(.1)
+        self.assertEqual(r.status, 'running'); self.assertIn('fine-dock', r.reason)
+        self.assertEqual(fd_calls, ['start']); self.assertEqual(attached, [])
+        # Two creeping ticks command the base and still do not attach.
+        for i in range(2):
+            self.p = replace(self.p, observation_id=f'f{i}', simulation_time=.2 + i * .1)
+            r = adapter.step(.1)
+            self.assertEqual(r.status, 'running'); self.assertEqual(attached, [])
+        self.assertTrue(self.commands)  # the servo drove the base
+        # 'ready' -> hand over to attach this same tick.
+        self.p = replace(self.p, observation_id='fr', simulation_time=.4)
+        r = adapter.step(.1)
+        self.assertEqual(r.status, 'running'); self.assertEqual(len(attached), 1)
+        # Post-attach observation shows coupled+healthy -> succeeded.
+        self.p = replace(self.p, observation_id='fc', simulation_time=.5, coupled=True)
+        self.assertEqual(adapter.step(.1).status, 'succeeded')
+
+    def _couple_seq_harness(self, poses_extra, *, couple_static_drive=False):
+        from twin.restock.fine_dock import FineDockResult
+        starts = []
+        nav = NS(start=lambda goal, coupled, **kw: starts.append((tuple(goal), kw)),
+                 step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                 cancel=lambda: None)
+        fine = NS(start=lambda now: None,
+                  step=lambda dock, now: FineDockResult('ready', 0., 0., 0.01, 0.0, 'ok'))
+        attached = []
+        mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None,
+                    command=lambda *a, **k: None, hold_cart_pin=lambda: None,
+                    attach=lambda obs: attached.append(obs), coupling_state=lambda o: {'healthy': True})
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'shelf_approach')}
+        poses['cart_dock'] = [-4.46, 15.25, 0.0]
+        poses.update(poses_extra)
+        adapter = RuntimeAdapter(nav, mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, fine_dock=fine, hold_cart_through_couple=True,
+                                 couple_static_drive=couple_static_drive)
+        return adapter, starts, attached
+
+    def test_couple_navigates_approach_then_cart_dock_without_standoff(self):
+        # couple_approach but no standoff: approach -> cart_dock -> fine-dock (back-compat).
+        adapter, starts, attached = self._couple_seq_harness({'couple_approach': [-4.46, 16.2, 0.0]})
+        adapter.start('couple', self.job)
+        self.assertEqual(starts[-1][0], (-4.46, 16.2, 0.0))        # approach first
+        r = adapter.step(.1)
+        self.assertEqual(starts[-1][0], (-4.46, 15.25, 0.0))       # then cart_dock
+        self.assertIn('advancing', r.reason); self.assertEqual(attached, [])
+        self.p = replace(self.p, observation_id='f2', simulation_time=.2)
+        r = adapter.step(.1); self.assertIn('fine-dock', r.reason)  # dock reached -> fine-dock
+        self.p = replace(self.p, observation_id='f3', simulation_time=.3)
+        self.assertEqual(adapter.step(.1).status, 'running'); self.assertEqual(len(attached), 1)
+
+    def test_couple_navigates_approach_then_standoff_with_tight_arrival(self):
+        # couple_approach + couple_standoff: approach -> standoff (TIGHT arrival) -> fine-dock insert.
+        adapter, starts, attached = self._couple_seq_harness(
+            {'couple_approach': [-4.46, 16.0, 0.0], 'couple_standoff': [-4.06, 15.25, 0.0]})
+        adapter.start('couple', self.job)
+        self.assertEqual(starts[-1][0], (-4.46, 16.0, 0.0)); self.assertEqual(starts[-1][1], {})
+        r = adapter.step(.1)
+        self.assertEqual(starts[-1][0], (-4.06, 15.25, 0.0))       # standoff next
+        self.assertEqual(starts[-1][1], {'arrival_xy_tol': 0.05})  # with a TIGHT arrival
+        self.assertIn('advancing', r.reason); self.assertEqual(attached, [])
+        self.p = replace(self.p, observation_id='f2', simulation_time=.2)
+        r = adapter.step(.1); self.assertIn('insert', r.reason)    # standoff reached -> fine-dock insert
+        self.p = replace(self.p, observation_id='f3', simulation_time=.3)
+        self.assertEqual(adapter.step(.1).status, 'running'); self.assertEqual(len(attached), 1)
+
+    def test_couple_static_drive_routes_legs_against_static_map(self):
+        # couple_static_drive=True: BOTH couple nav legs are trusted-static drives so the thin live
+        # margin at the backstock Support cannot false-block the leg from the shortcut start pose.
+        adapter, starts, attached = self._couple_seq_harness(
+            {'couple_approach': [-4.46, 16.0, 0.0], 'couple_standoff': [-4.06, 15.25, 0.0]},
+            couple_static_drive=True)
+        adapter.start('couple', self.job)
+        self.assertEqual(starts[-1][0], (-4.46, 16.0, 0.0))        # approach first
+        self.assertTrue(starts[-1][1].get('static_drive'))        # ... as a static drive
+        r = adapter.step(.1)
+        self.assertEqual(starts[-1][0], (-4.06, 15.25, 0.0))       # standoff next
+        self.assertTrue(starts[-1][1].get('static_drive'))        # ... also static
+        self.assertEqual(starts[-1][1].get('arrival_xy_tol'), 0.05)  # keeping the TIGHT arrival
+        self.assertIn('advancing', r.reason)
+
+    def test_couple_static_drive_default_off_is_byte_identical(self):
+        # Default (flag absent): couple legs carry NO static_drive -> unchanged live-scan avoidance.
+        adapter, starts, _ = self._couple_seq_harness(
+            {'couple_approach': [-4.46, 16.0, 0.0], 'couple_standoff': [-4.06, 15.25, 0.0]})
+        adapter.start('couple', self.job)
+        self.assertIsNone(starts[-1][1].get('static_drive'))      # approach: live avoidance
+        adapter.step(.1)
+        self.assertIsNone(starts[-1][1].get('static_drive'))      # standoff: live avoidance
+
+    def test_couple_without_fine_dock_attaches_directly(self):
+        # Absent servo: unchanged legacy path (attach straight off the parked nav arrival).
+        self.adapter.start('couple', self.job)
+        self.assertEqual(self.adapter.step(.1).status, 'running')  # attach happened this tick
+        self.p = replace(self.p, observation_id='frame-2', simulation_time=.2, coupled=True)
+        self.assertEqual(self.adapter.step(.1).status, 'succeeded')
+
+    def test_stale_packet_stops_every_adapter(self):
+        self.adapter.start('outbound',self.job)
+        self.p = replace(self.p,simulation_time=-2.)
+        self.assertEqual(self.adapter.step(.1).status,'failed')
+        self.assertIn('nav',self.stops)
+        self.assertIn('port',self.stops)
+        self.assertEqual(self.commands,[])
+
+    def test_fixture_rejected_in_production(self):
+        self.adapter.fixture_mode = False
+        self.adapter.start('collect',self.job)
+        self.assertEqual(self.adapter.step(.1).status,'failed')
+
+    def test_stop_attempts_all_ports_on_exception(self):
+        def broken():
+            raise RuntimeError('base stop failure')
+        self.mobile.park = broken
+        with self.assertRaisesRegex(RuntimeError,'base stop failure'):
+            self.adapter.stop()
+        self.assertEqual(self.stops,['nav','port'])
+
+    def test_return_requires_measured_cart(self):
+        self.adapter.start('return',self.job)
+        self.assertEqual(self.adapter.step(.1).status,'failed')
+
+    def test_arrival_rejects_wrong_cart_alignment_even_if_navigation_says_success(self):
+        self.adapter.goal_articulation={'outbound':.1}
+        self.nav.start=lambda *a,**kw:None
+        self.p=replace(self.p,coupled=True,articulation=.8)
+        self.adapter.start('outbound',self.job)
+        result=self.adapter.step(.1)
+        self.assertEqual(result.status,'failed')
+        self.assertIn('articulation',result.reason)
+
+    def test_sensor_navigation_gets_encoder_scan_clock_and_latch_measurements(self):
+        calls=[]
+        controller=NS(step=lambda *a,**kw:calls.append((a,kw)))
+        packet=replace(self.p,odometry=(.1,.2),navigation='scan',coupled=True)
+        NavigationBridge(controller,sensor_navigation=True).step(.1,packet)
+        self.assertEqual(calls[0][0],(.1,(.1,.2),'scan'))
+        self.assertEqual(calls[0][1]['articulation'],0.)
+        self.assertTrue(calls[0][1]['coupled'])
+
+    def test_navigation_bridge_passes_absolute_mission_clock(self):
+        calls=[]
+        bridge=NavigationBridge(NS(step=lambda *a,**kw:calls.append(kw)))
+        bridge.step(.1,self.p)
+        self.assertEqual(calls,[{'now':.1}])
+
+    def test_verify_does_not_invent_observation(self):
+        self.adapter.start('verify',self.job)
+        self.assertEqual(self.adapter.step(.1).status,'running')
+
+    def test_transfer_warms_station_before_dispatching_the_place_grasp(self):
+        # Mirror the collect warm-up: transfer must not dispatch the place grasp until the shelf
+        # station's collision map is warm (fresh collision_time), so the first observe does not
+        # race a cold nvblox incorporation against the phase timeout.
+        from dataclasses import dataclass
+        @dataclass(frozen=True)
+        class Reply:
+            status: str = 'running'
+            reason: str = ''
+            controls: tuple = ()
+            evidence: tuple = ()
+        events, ready = [], {'v': False}
+        controller = NS(cart_location='rollwagen',
+                        warm=lambda sim, parked=None: (events.append(('warm', parked)) or ready['v']),
+                        start=lambda op, job: events.append(('start', op)),
+                        step=lambda dt, sim, parked=None: (events.append(('step',)) or Reply()),
+                        stop=lambda: None)
+        manip = ManipulationBridge(controller, owns_sensor_io=True)
+        poses = {k:[0,0,0] for k in ('home','pickup','cart_dock','shelf_approach')}
+        adapter = RuntimeAdapter(self.nav, self.mobile, manip, self.port, poses, fixture_mode=True)
+        adapter.start('transfer', self.job)
+        self.assertEqual(adapter.phase, 'warm')                 # warm up, do not execute yet
+        self.assertNotIn(('start', 'transfer'), events)         # grasp NOT dispatched on start
+        r = adapter.step(.1)                                    # station not ready -> keep warming
+        self.assertEqual(r.status, 'running')
+        self.assertTrue(any(e[0] == 'warm' for e in events))
+        self.assertNotIn(('start', 'transfer'), events)
+        ready['v'] = True
+        self.p = replace(self.p, observation_id='frame-2', simulation_time=.2)
+        adapter.step(.1)                                        # warm -> dispatch the place grasp
+        self.assertIn(('start', 'transfer'), events)
+        self.assertEqual(adapter.phase, 'execute')
+
+
+class ScenarioTests(unittest.TestCase):
+    def test_environment_order_is_converted_and_unsafe_portal_rejected(self):
+        manifest=dict(frame='map',units='metres',up_axis='Z',ground_truth_only=True,
+            backroom_stocks=[dict(id='back',sku='milk')],
+            stocking_stations=[dict(slots=[dict(id='shelf',sku_ids=['milk'])])],
+            static_obstacles=[{'id':'wall'}],map_bounds=[-13,13,-11,19],
+            portal={'clear_width':1.3})
+        scenario=dict(job=dict(job_id='j',sku='milk',quantity=1,source_bin='back',shelf_id='shelf'),
+            inventory_unit='sealed_handling_unit',dynamic_stock_ready=True,
+            initial_inventory=[dict(location='back',sku='milk',quantity=1)],
+            navigation_model='articulated')
+        result=validate(manifest,scenario)
+        self.assertEqual(result['navigation_bounds'],[-13,-11,13,19])
+        self.assertFalse(result['ok'])
+        self.assertIn('aligned articulated envelope cannot fit backroom portal',result['errors'])
+        manifest['portal']['clear_width']=2.5
+        self.assertTrue(validate(manifest,scenario)['ok'])
+        self.assertFalse(validate(manifest,scenario)['route_verified'])
+
+
+class GuardTests(unittest.TestCase):
+    def test_wrong_ros_domain_refused_without_probe(self):
+        with patch.dict('os.environ',{'ROS_DOMAIN_ID':'42'}):
+            with self.assertRaisesRegex(RuntimeError,'ROS_DOMAIN_ID'):
+                guard.isolation()
+
+    def test_protected_blender_prevents_gpu_query(self):
+        with patch.object(guard,'isolation'), patch('builtins.open',unittest.mock.mock_open()), \
+             patch.object(guard.fcntl,'flock'), patch.object(guard,'protected_blender',return_value=True), \
+             patch.object(guard,'query_and_assess') as gpu:
+            with self.assertRaisesRegex(RuntimeError,'Blender'):
+                with guard.gpu_slot():
+                    self.fail('must not yield')
+            gpu.assert_not_called()
+
+    def test_low_ram_prevents_gpu_query(self):
+        with patch.object(guard,'isolation'), patch('builtins.open',unittest.mock.mock_open()), \
+             patch.object(guard.fcntl,'flock'), patch.object(guard,'protected_blender',return_value=False), \
+             patch.object(guard,'available_ram_mb',return_value=100), \
+             patch.object(guard,'query_and_assess') as gpu:
+            with self.assertRaisesRegex(RuntimeError,'12 GiB'):
+                with guard.gpu_slot():
+                    self.fail('must not yield')
+            gpu.assert_not_called()
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class LaunchTests(unittest.TestCase):
+    def test_guard_refusal_records_failure_without_importing_factory(self):
+        import tempfile
+        import json
+        from run_mobile_restock import run
+        with tempfile.TemporaryDirectory() as tmp:
+            output=Path(tmp)/'new-run'
+            args=NS(factory='must_not_import:factory',output=output,heavy_threshold_mb=1500,
+                    runtime_config=Path(tmp)/'config.json')
+            scenario={'job':dict(job_id='j',sku='milk',quantity=1,source_bin='back',shelf_id='shelf'),
+                      'initial_inventory':[dict(location='back',sku='milk',quantity=1)]}
+            scenario_path=Path(tmp)/'scenario.json'
+            scenario_path.write_text(json.dumps(scenario))
+            args.runtime_config.write_text(json.dumps({'scenario':str(scenario_path)}))
+            ready=patch('preflight_mobile_restock.check',return_value={'files_ready':True})
+            with ready, patch('run_mobile_restock.gpu_slot',side_effect=RuntimeError('test guard refusal')):
+                with self.assertRaisesRegex(RuntimeError,'test guard refusal'):
+                    run(args,{},scenario)
+            import json
+            record=json.loads((output/'mission.json').read_text())
+            self.assertEqual(record['state'],'failed')
+            self.assertEqual(record['events'],[])
+            self.assertNotIn('must_not_import',sys.modules)
+            with patch('preflight_mobile_restock.check',return_value={'files_ready':True}):
+                with self.assertRaises(FileExistsError):
+                    run(args,{},scenario)
+
+    def test_missing_runtime_inputs_prevent_run_state_and_gpu_probe(self):
+        import tempfile
+        from run_mobile_restock import run
+        with tempfile.TemporaryDirectory() as tmp:
+            config=Path(tmp)/'config.json'
+            config.write_text('{}')
+            args=NS(factory='must_not_import:factory',output=Path(tmp)/'run',runtime_config=config)
+            with patch('run_mobile_restock.gpu_slot') as gpu:
+                with self.assertRaisesRegex(ValueError,'runtime inputs unresolved'):
+                    run(args,{}, {})
+                gpu.assert_not_called()
+            self.assertFalse(args.output.exists())
+
+    def test_schema2_uses_robot_dock_not_cart_pose(self):
+        from twin.restock.scenario import poses_for_job
+        manifest=dict(poses=dict(pickup=[1,2,0],robot_dock=[1,2,0],cart_dock=[-.27,2,0]),
+                      pose_bodies=dict(pickup='robot_base',robot_dock='robot_base',cart_dock='cart_body'),
+                      stocking_stations=[dict(pose=[3,4,0],pose_body='robot_base',slots=[dict(id='shelf')])])
+        poses=poses_for_job(manifest,Job('j','milk',1,'back','shelf'))
+        self.assertEqual(poses['cart_dock'],[1,2,0])
+        self.assertNotEqual(poses['cart_dock'],manifest['poses']['cart_dock'])
+
+
+
+class StallGuardTests(unittest.TestCase):
+    """Fail-fast: a stalled collect/transfer reach reaches terminal in seconds (sim-clock
+    window) instead of spinning 'running' until the slower host sensor-stream watchdog."""
+
+    def _packet(self, obs, t):
+        return Packet(obs, 'test_fixture', t, None, None, None, None, True, False, 0., True)
+
+    def _sensing_controller(self, *, phase='observe', advance_sensor):
+        from twin.restock_manipulation.types import Result as MResult
+        controller = NS(cart_location='rollwagen', last_sensor_time=-1.,
+                        start=lambda a, j: None, warm=lambda sim, parked=None: True,
+                        stop=lambda: None)
+
+        def step(dt, sim, parked=None):
+            if advance_sensor:
+                controller.last_sensor_time = sim   # a fresh /sensors frame accepted this tick
+            return MResult('running', phase, '', (), ())
+        controller.step = step
+        return controller
+
+    def _collect_adapter(self, controller, *, stall_window_s=20.):
+        manip = ManipulationBridge(controller, owns_sensor_io=True)
+        nav = NS(start=lambda *a, **k: None, cancel=lambda: None)
+        mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None)
+        self._pkt = [self._packet('reach-0', 0.)]
+        port = NS(advance=lambda dt: self._pkt[0], controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        adapter = RuntimeAdapter(nav, mobile, manip, port, poses,
+                                 fixture_mode=True, stall_window_s=stall_window_s)
+        adapter.start('collect', Job('j', 'milk', 1, 'back', 'shelf'))
+        adapter.phase, adapter.action = 'execute', 'collect'   # drive the reach branch directly
+        adapter._reach_start = None
+        return adapter, port
+
+    def _drive(self, adapter, steps, dt=.1):
+        t = adapter.time
+        for i in range(steps):
+            t = round(t + dt, 6)
+            self._pkt[0] = self._packet(f'reach-{i}', t)
+            result = adapter.step(dt)
+            if result.status != 'running':
+                return result, i
+        return result, steps
+
+    def test_fails_fast_when_sensors_stall_in_observe(self):
+        adapter, _ = self._collect_adapter(self._sensing_controller(advance_sensor=False))
+        result, i = self._drive(adapter, steps=400)             # 20 s window / 0.1 ~ step 200
+        self.assertEqual(result.status, 'failed')
+        self.assertIn('stall', result.reason)
+        self.assertTrue(190 < i < 230, i)                       # fails just past the 20 s window
+
+    def test_keeps_running_while_sensors_flow(self):
+        adapter, _ = self._collect_adapter(self._sensing_controller(advance_sensor=True))
+        result, i = self._drive(adapter, steps=400)
+        self.assertEqual(result.status, 'running')
+        self.assertEqual(i, 400)
+
+    def test_collect_freshness_checked_on_sim_clock_not_wall(self):
+        # fm346 / freshness-sim-clock-not-wall (run-272 regression guard): the collect/transfer reach
+        # re-checks p.manipulation.valid_until_steady -- a SIM-clock deadline -- and MUST use the sim
+        # clock (packet.simulation_time), never wall time.monotonic. Before the fix the adapter passed
+        # time.monotonic (a different epoch, seconds-since-boot), so the check tripped the instant the
+        # place first set valid_until_steady with a passing status. Case A proves a sim-FRESH deadline
+        # passes even though wall is far ahead (a revert to the wall clock would fail this); Case B
+        # proves a sim-STALE deadline still fails fast with the freshness reason.
+        adapter, _ = self._collect_adapter(self._sensing_controller(advance_sensor=True))
+        t = round(adapter.time + .1, 6)
+        self._pkt[0] = Packet('fresh-a', 'test_fixture', t, None, None, None,
+                              NS(valid_until_steady=t + 1.0), True, False, 0., True)
+        self.assertEqual(adapter.step(.1).status, 'running')   # sim-fresh -> passes (wall is huge)
+        t = round(adapter.time + .1, 6)
+        self._pkt[0] = Packet('stale-b', 'test_fixture', t, None, None, None,
+                              NS(valid_until_steady=t - 1.0), True, False, 0., True)
+        r = adapter.step(.1)                                   # sim-stale -> fails fast
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('freshness', r.reason)
+
+    def test_scoped_to_observe_and_approach(self):
+        # contact/lift (arm grasping) is out of scope; host watchdog backstops it.
+        adapter, _ = self._collect_adapter(self._sensing_controller(phase='contact', advance_sensor=False))
+        result, i = self._drive(adapter, steps=400)
+        self.assertEqual(result.status, 'running')
+        self.assertEqual(i, 400)
+
+    def test_inactive_without_a_sensing_controller(self):
+        controller = NS(cart_location='rollwagen', start=lambda a, j: None,
+                        warm=lambda sim, parked=None: True, stop=lambda: None,
+                        step=lambda dt, sim, parked=None: __import__(
+                            'twin.restock_manipulation.types', fromlist=['Result']
+                        ).Result('running', 'observe', '', (), ()))
+        adapter, _ = self._collect_adapter(controller)
+        result, i = self._drive(adapter, steps=300)
+        self.assertEqual(result.status, 'running')
+        self.assertEqual(i, 300)
+
+    def test_window_none_disables_the_guard(self):
+        adapter, _ = self._collect_adapter(self._sensing_controller(advance_sensor=False),
+                                           stall_window_s=None)
+        result, i = self._drive(adapter, steps=300)
+        self.assertEqual(result.status, 'running')
+        self.assertEqual(i, 300)

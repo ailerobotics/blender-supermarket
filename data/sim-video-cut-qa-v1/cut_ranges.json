@@ -1,0 +1,1646 @@
+{
+ "schema": "cut_ranges/v1",
+ "mission_root": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission",
+ "fps_out": 15,
+ "margin_s": 0.5,
+ "margin_frames": 8,
+ "stall_s": 2.0,
+ "frame_index": "0-based index into <source>/mission-frames/frames.json (real) or <source>/decision_log.json frames (choreo; = walkthrough.mp4 frame)",
+ "keep_semantics": "keep = ordered inclusive [start, end] frame pieces of ONE source+stage; consecutive pieces are seamless splices (only stall dead-air removed); primary = the single contiguous clean range they come from",
+ "sources": {
+  "collect-src-001": {
+   "kind": "real",
+   "n_frames": 329,
+   "clock_offset_s": 0.05,
+   "stages": {
+    "collect": {
+     "stage_span": [
+      0,
+      328
+     ],
+     "usable": true,
+     "keep": [
+      [
+       0,
+       34
+      ],
+      [
+       78,
+       112
+      ]
+     ],
+     "primary": [
+      0,
+      112
+     ],
+     "first_fault": {
+      "kind": "carton_tilt",
+      "frame": 120,
+      "end": 328,
+      "detail": "carton rolls off level during the lift: a side face first shows as a thin strip at #116 (~5 deg), ~10 deg by #120 (sim 40.7 s), pentagon outline by #134, held on edge (~90 deg) by #154 and stays tilted through the carry; the captain's 'tilted the box in a very wrong way'",
+      "channel": "visual",
+      "evidence": "1:1 crops #96-#128 every 2-4 frames (level top face through #112, right side face visible from #116, ~8 px strip at #120) and #126-#148; the compile lane independently judged the onset ~f120"
+     },
+     "cuts": [
+      {
+       "start": 35,
+       "end": 77,
+       "reason": "stall #27-85 (3.9 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.832"
+      },
+      {
+       "start": 113,
+       "end": 328,
+       "reason": "carton_tilt at #120-328 (visual: carton rolls off level during the lift: a side face first shows as a thin strip at #116 (~5 deg), ~10 deg by #120 (sim 40.7 s), pentagon outline by #134, held on edge (~90 deg) by #154 and stays tilted through the carry; the captain's 'tilted the box in a very wrong way'); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "carton_tilt",
+       "frame": 120,
+       "end": 328,
+       "detail": "carton rolls off level during the lift: a side face first shows as a thin strip at #116 (~5 deg), ~10 deg by #120 (sim 40.7 s), pentagon outline by #134, held on edge (~90 deg) by #154 and stays tilted through the carry; the captain's 'tilted the box in a very wrong way'",
+       "channel": "visual",
+       "evidence": "1:1 crops #96-#128 every 2-4 frames (level top face through #112, right side face visible from #116, ~8 px strip at #120) and #126-#148; the compile lane independently judged the onset ~f120"
+      },
+      {
+       "kind": "image_jump",
+       "frame": 165,
+       "end": 165,
+       "detail": "mean |delta| 7.8 vs local 0.4: hard visual jump",
+       "channel": "image"
+      }
+     ],
+     "stalls": [
+      [
+       27,
+       85
+      ]
+     ],
+     "sim_t": [
+      0.55,
+      109.98
+     ]
+    }
+   },
+   "note": "cold GT-collect carve: approach, grasp (weld #89), lift off the warehouse shelf. NO place onto the rollwagen exists in this source."
+  },
+  "warm11": {
+   "kind": "real",
+   "n_frames": 359,
+   "clock_offset_s": 0.55,
+   "stages": {
+    "couple": {
+     "stage_span": [
+      0,
+      128
+     ],
+     "usable": true,
+     "keep": [
+      [
+       0,
+       128
+      ]
+     ],
+     "primary": [
+      0,
+      128
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      0.98,
+      43.65
+     ]
+    },
+    "outbound": {
+     "stage_span": [
+      129,
+      164
+     ],
+     "usable": true,
+     "keep": [
+      [
+       129,
+       164
+      ]
+     ],
+     "primary": [
+      129,
+      164
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      43.98,
+      55.65
+     ]
+    },
+    "park": {
+     "stage_span": [
+      165,
+      165
+     ],
+     "usable": true,
+     "keep": [
+      [
+       165,
+       165
+      ]
+     ],
+     "primary": [
+      165,
+      165
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      55.98,
+      55.98
+     ]
+    },
+    "transfer": {
+     "stage_span": [
+      166,
+      224
+     ],
+     "usable": false,
+     "keep": [],
+     "primary": null,
+     "first_fault": {
+      "kind": "carton_floating",
+      "frame": 168,
+      "end": 223,
+      "detail": "SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried",
+      "channel": "pose"
+     },
+     "cuts": [
+      {
+       "start": 166,
+       "end": 224,
+       "reason": "no clean stretch of >= 1 s: carton_floating at #168-223 (pose: SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "carton_floating",
+       "frame": 168,
+       "end": 223,
+       "detail": "SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      56.25,
+      75.58
+     ]
+    },
+    "return": {
+     "stage_span": [
+      225,
+      358
+     ],
+     "usable": true,
+     "keep": [
+      [
+       225,
+       233
+      ]
+     ],
+     "primary": [
+      225,
+      233
+     ],
+     "first_fault": {
+      "kind": "unlatch",
+      "frame": 241,
+      "end": 241,
+      "detail": "measured coupling drops: the robot unlatches the rollwagen and drives on alone",
+      "channel": "pose"
+     },
+     "cuts": [
+      {
+       "start": 234,
+       "end": 358,
+       "reason": "unlatch at #241 (pose: measured coupling drops: the robot unlatches the rollwagen and drives on alone); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "unlatch",
+       "frame": 241,
+       "end": 241,
+       "detail": "measured coupling drops: the robot unlatches the rollwagen and drives on alone",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      75.98,
+      120.32
+     ]
+    }
+   },
+   "note": "backroom-bay route. transfer is SCRIPTED (carton floats out of the cage to the bay while the arm stays still) and the return unlatches the rollwagen at the bay (#241) and drives home ALONE: only 225-232 of the return is coupled."
+  },
+  "warm8": {
+   "kind": "real",
+   "n_frames": 360,
+   "clock_offset_s": 0.55,
+   "stages": {
+    "couple": {
+     "stage_span": [
+      0,
+      127
+     ],
+     "usable": true,
+     "keep": [
+      [
+       0,
+       127
+      ]
+     ],
+     "primary": [
+      0,
+      127
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      0.98,
+      43.32
+     ]
+    },
+    "outbound": {
+     "stage_span": [
+      128,
+      165
+     ],
+     "usable": true,
+     "keep": [
+      [
+       128,
+       165
+      ]
+     ],
+     "primary": [
+      128,
+      165
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      43.65,
+      55.98
+     ]
+    },
+    "transfer": {
+     "stage_span": [
+      166,
+      224
+     ],
+     "usable": false,
+     "keep": [],
+     "primary": null,
+     "first_fault": {
+      "kind": "carton_floating",
+      "frame": 169,
+      "end": 223,
+      "detail": "SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried",
+      "channel": "pose"
+     },
+     "cuts": [
+      {
+       "start": 166,
+       "end": 224,
+       "reason": "no clean stretch of >= 1 s: carton_floating at #169-223 (pose: SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "carton_floating",
+       "frame": 169,
+       "end": 223,
+       "detail": "SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      56.25,
+      75.58
+     ]
+    },
+    "return": {
+     "stage_span": [
+      225,
+      359
+     ],
+     "usable": true,
+     "keep": [
+      [
+       225,
+       233
+      ]
+     ],
+     "primary": [
+      225,
+      233
+     ],
+     "first_fault": {
+      "kind": "unlatch",
+      "frame": 241,
+      "end": 241,
+      "detail": "measured coupling drops: the robot unlatches the rollwagen and drives on alone",
+      "channel": "pose"
+     },
+     "cuts": [
+      {
+       "start": 234,
+       "end": 359,
+       "reason": "unlatch at #241 (pose: measured coupling drops: the robot unlatches the rollwagen and drives on alone); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "unlatch",
+       "frame": 241,
+       "end": 241,
+       "detail": "measured coupling drops: the robot unlatches the rollwagen and drives on alone",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      75.98,
+      120.65
+     ]
+    }
+   },
+   "note": "same choreography as warm11 (backroom-bay route, scripted floating transfer, unlatch at the bay #241)."
+  },
+  "demo-005": {
+   "kind": "choreo",
+   "n_frames": 2040,
+   "clock_offset_s": 0.0,
+   "stages": {
+    "collect": {
+     "stage_span": [
+      0,
+      509
+     ],
+     "usable": true,
+     "keep": [
+      [
+       10,
+       61
+      ],
+      [
+       83,
+       457
+      ]
+     ],
+     "primary": [
+      10,
+      457
+     ],
+     "first_fault": {
+      "kind": "image_jump",
+      "frame": 1,
+      "end": 2,
+      "detail": "mean |delta| 33.2 vs local 2.3: hard visual jump",
+      "channel": "image"
+     },
+     "cuts": [
+      {
+       "start": 0,
+       "end": 9,
+       "reason": "image_jump at #1-2 (image: mean |delta| 33.2 vs local 2.3: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
+      },
+      {
+       "start": 62,
+       "end": 82,
+       "reason": "stall #54-90 (2.5 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.591"
+      },
+      {
+       "start": 458,
+       "end": 509,
+       "reason": "position_jump at #465 (pose: carton moved 0.26 m in one frame (0.07 s): teleport); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "image_jump",
+       "frame": 1,
+       "end": 2,
+       "detail": "mean |delta| 33.2 vs local 2.3: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "position_jump",
+       "frame": 465,
+       "end": 465,
+       "detail": "carton moved 0.26 m in one frame (0.07 s): teleport",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [
+      [
+       54,
+       90
+      ]
+     ],
+     "sim_t": [
+      0.0,
+      33.93
+     ]
+    },
+    "couple": {
+     "stage_span": [
+      510,
+      689
+     ],
+     "usable": true,
+     "keep": [
+      [
+       510,
+       637
+      ]
+     ],
+     "primary": [
+      510,
+      637
+     ],
+     "first_fault": {
+      "kind": "carton_floating",
+      "frame": 645,
+      "end": 645,
+      "detail": "carton moved 8.0 cm with the gripper pad away and not riding the cart",
+      "channel": "pose"
+     },
+     "cuts": [
+      {
+       "start": 638,
+       "end": 689,
+       "reason": "carton_floating at #645 (pose: carton moved 8.0 cm with the gripper pad away and not riding the cart); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "carton_floating",
+       "frame": 645,
+       "end": 645,
+       "detail": "carton moved 8.0 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      34.0,
+      45.93
+     ]
+    },
+    "outbound": {
+     "stage_span": [
+      690,
+      1109
+     ],
+     "usable": true,
+     "keep": [
+      [
+       690,
+       788
+      ]
+     ],
+     "primary": [
+      690,
+      788
+     ],
+     "first_fault": {
+      "kind": "image_jump",
+      "frame": 796,
+      "end": 796,
+      "detail": "mean |delta| 34.7 vs local 4.9: hard visual jump",
+      "channel": "image"
+     },
+     "cuts": [
+      {
+       "start": 789,
+       "end": 1109,
+       "reason": "image_jump at #796 (image: mean |delta| 34.7 vs local 4.9: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "image_jump",
+       "frame": 796,
+       "end": 796,
+       "detail": "mean |delta| 34.7 vs local 4.9: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 809,
+       "end": 810,
+       "detail": "carton moved 2.3 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "position_jump",
+       "frame": 809,
+       "end": 809,
+       "detail": "base moved 0.23 m in one frame (0.07 s): teleport",
+       "channel": "pose"
+      },
+      {
+       "kind": "image_jump",
+       "frame": 810,
+       "end": 811,
+       "detail": "mean |delta| 26.3 vs local 4.4: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "whiteout",
+       "frame": 810,
+       "end": 810,
+       "detail": "frame mean 251: camera inside geometry (wall clip)",
+       "channel": "image"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 812,
+       "end": 813,
+       "detail": "carton moved 2.4 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "clip",
+       "frame": 820,
+       "end": 900,
+       "detail": "outbound wall clip-through per the stage audit (whiteout ~#840-880); the detectors here independently flag #796-829 (image jumps, base teleport 0.23 m/frame, whiteout #810)",
+       "channel": "visual",
+       "evidence": "stage-audit v2 OpenCV frame grid + cut_qa image/pose channels"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 825,
+       "end": 829,
+       "detail": "carton moved 2.5 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "image_jump",
+       "frame": 825,
+       "end": 825,
+       "detail": "mean |delta| 28.2 vs local 6.5: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "image_jump",
+       "frame": 827,
+       "end": 827,
+       "detail": "mean |delta| 43.8 vs local 4.8: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "whiteout",
+       "frame": 827,
+       "end": 856,
+       "detail": "frame mean 246: camera inside geometry (wall clip)",
+       "channel": "image"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 832,
+       "end": 832,
+       "detail": "carton moved 2.6 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 834,
+       "end": 835,
+       "detail": "carton moved 2.6 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 837,
+       "end": 837,
+       "detail": "carton moved 2.6 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 843,
+       "end": 845,
+       "detail": "carton moved 2.7 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 849,
+       "end": 851,
+       "detail": "carton moved 2.7 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 854,
+       "end": 857,
+       "detail": "carton moved 2.7 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 860,
+       "end": 865,
+       "detail": "carton moved 2.8 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 867,
+       "end": 867,
+       "detail": "carton moved 2.3 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 871,
+       "end": 877,
+       "detail": "carton moved 15.5 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 879,
+       "end": 879,
+       "detail": "carton moved 0.5 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 881,
+       "end": 881,
+       "detail": "carton moved 6.0 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 883,
+       "end": 888,
+       "detail": "carton moved 4.6 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 891,
+       "end": 894,
+       "detail": "carton moved 3.1 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 896,
+       "end": 897,
+       "detail": "carton moved 3.1 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 899,
+       "end": 900,
+       "detail": "carton moved 3.0 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 903,
+       "end": 906,
+       "detail": "carton moved 8.0 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 909,
+       "end": 909,
+       "detail": "carton moved 2.2 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 926,
+       "end": 926,
+       "detail": "carton moved 2.8 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      46.0,
+      73.93
+     ]
+    },
+    "park": {
+     "stage_span": [
+      1110,
+      1169
+     ],
+     "usable": true,
+     "keep": [
+      [
+       1110,
+       1169
+      ]
+     ],
+     "primary": [
+      1110,
+      1169
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      74.0,
+      77.93
+     ]
+    },
+    "transfer": {
+     "stage_span": [
+      1170,
+      1364
+     ],
+     "usable": true,
+     "keep": [
+      [
+       1170,
+       1364
+      ]
+     ],
+     "primary": [
+      1170,
+      1364
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      78.0,
+      90.93
+     ]
+    },
+    "verify": {
+     "stage_span": [
+      1365,
+      1424
+     ],
+     "usable": true,
+     "keep": [
+      [
+       1365,
+       1424
+      ]
+     ],
+     "primary": [
+      1365,
+      1424
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      91.0,
+      94.93
+     ]
+    },
+    "return": {
+     "stage_span": [
+      1425,
+      2039
+     ],
+     "usable": true,
+     "keep": [
+      [
+       1425,
+       1822
+      ]
+     ],
+     "primary": [
+      1425,
+      1822
+     ],
+     "first_fault": {
+      "kind": "unlatch",
+      "frame": 1830,
+      "end": 1830,
+      "detail": "panel runs the uncouple step",
+      "channel": "pose"
+     },
+     "cuts": [
+      {
+       "start": 1823,
+       "end": 2039,
+       "reason": "unlatch at #1830 (pose: panel runs the uncouple step); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "unlatch",
+       "frame": 1830,
+       "end": 1830,
+       "detail": "panel runs the uncouple step",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      95.0,
+      135.93
+     ]
+    }
+   },
+   "note": "choreographed; tells the captain's story end to end on the store route (place on the store shelf, coupled return into the warehouse through the door). Faults: outbound clips through the backroom wall (#796-829); couple has an 8 cm carton snap at #645; collect STARTS with the carton being set into the rollwagen (no shelf pick) per the stage audit."
+  },
+  "demo-004": {
+   "kind": "choreo",
+   "n_frames": 2040,
+   "clock_offset_s": 0.0,
+   "stages": {
+    "collect": {
+     "stage_span": [
+      0,
+      509
+     ],
+     "usable": true,
+     "keep": [
+      [
+       9,
+       50
+      ]
+     ],
+     "primary": [
+      9,
+      50
+     ],
+     "first_fault": {
+      "kind": "image_jump",
+      "frame": 1,
+      "end": 1,
+      "detail": "mean |delta| 17.9 vs local 2.9: hard visual jump",
+      "channel": "image"
+     },
+     "cuts": [
+      {
+       "start": 0,
+       "end": 8,
+       "reason": "image_jump at #1 (image: mean |delta| 17.9 vs local 2.9: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
+      },
+      {
+       "start": 51,
+       "end": 509,
+       "reason": "image_jump at #58 (image: mean |delta| 9.4 vs local 2.1: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "image_jump",
+       "frame": 1,
+       "end": 1,
+       "detail": "mean |delta| 17.9 vs local 2.9: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "image_jump",
+       "frame": 58,
+       "end": 58,
+       "detail": "mean |delta| 9.4 vs local 2.1: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "image_jump",
+       "frame": 80,
+       "end": 80,
+       "detail": "mean |delta| 8.4 vs local 1.3: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 168,
+       "end": 184,
+       "detail": "carton moved 2.1 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 189,
+       "end": 190,
+       "detail": "carton moved 5.3 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      0.0,
+      33.93
+     ]
+    },
+    "couple": {
+     "stage_span": [
+      510,
+      689
+     ],
+     "usable": true,
+     "keep": [
+      [
+       510,
+       637
+      ]
+     ],
+     "primary": [
+      510,
+      637
+     ],
+     "first_fault": {
+      "kind": "carton_floating",
+      "frame": 645,
+      "end": 645,
+      "detail": "carton moved 8.0 cm with the gripper pad away and not riding the cart",
+      "channel": "pose"
+     },
+     "cuts": [
+      {
+       "start": 638,
+       "end": 689,
+       "reason": "carton_floating at #645 (pose: carton moved 8.0 cm with the gripper pad away and not riding the cart); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "carton_floating",
+       "frame": 645,
+       "end": 645,
+       "detail": "carton moved 8.0 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "clip",
+       "frame": 680,
+       "end": 850,
+       "detail": "outbound wall clip-through per the stage audit (data/sim-video-stage-audit-v1/stage_sources.json demo_audit: whiteout ~#680-850); NOT reproduced by the whiteout/jump detectors here (frame mean <= 224) and inconclusive by eye (#850 cage against the portal wall) -- kept as a conservative cut",
+       "channel": "visual",
+       "evidence": "stage-audit v2 OpenCV frame grid"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      34.0,
+      45.93
+     ]
+    },
+    "outbound": {
+     "stage_span": [
+      690,
+      1109
+     ],
+     "usable": true,
+     "keep": [
+      [
+       858,
+       904
+      ]
+     ],
+     "primary": [
+      858,
+      904
+     ],
+     "first_fault": {
+      "kind": "clip",
+      "frame": 680,
+      "end": 850,
+      "detail": "outbound wall clip-through per the stage audit (data/sim-video-stage-audit-v1/stage_sources.json demo_audit: whiteout ~#680-850); NOT reproduced by the whiteout/jump detectors here (frame mean <= 224) and inconclusive by eye (#850 cage against the portal wall) -- kept as a conservative cut",
+      "channel": "visual",
+      "evidence": "stage-audit v2 OpenCV frame grid"
+     },
+     "cuts": [
+      {
+       "start": 690,
+       "end": 857,
+       "reason": "clip at #680-850 (visual: outbound wall clip-through per the stage audit (data/sim-video-stage-audit-v1/stage_sources.json demo_audit: whiteout ~#680-850); NOT reproduced by the whiteout/jump detectors here (frame mean <= 224) and inconclusive by eye (#850 cage against the portal wall) -- kept as a conservative cut); range ends/starts 8 frames (>= 0.5 s of output) after it"
+      },
+      {
+       "start": 905,
+       "end": 1109,
+       "reason": "carton_floating at #912 (pose: carton moved 2.6 cm with the gripper pad away and not riding the cart); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "clip",
+       "frame": 680,
+       "end": 850,
+       "detail": "outbound wall clip-through per the stage audit (data/sim-video-stage-audit-v1/stage_sources.json demo_audit: whiteout ~#680-850); NOT reproduced by the whiteout/jump detectors here (frame mean <= 224) and inconclusive by eye (#850 cage against the portal wall) -- kept as a conservative cut",
+       "channel": "visual",
+       "evidence": "stage-audit v2 OpenCV frame grid"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 912,
+       "end": 912,
+       "detail": "carton moved 2.6 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      },
+      {
+       "kind": "carton_floating",
+       "frame": 1095,
+       "end": 1095,
+       "detail": "carton moved 16.9 cm with the gripper pad away and not riding the cart",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      46.0,
+      73.93
+     ]
+    },
+    "park": {
+     "stage_span": [
+      1110,
+      1169
+     ],
+     "usable": true,
+     "keep": [
+      [
+       1110,
+       1169
+      ]
+     ],
+     "primary": [
+      1110,
+      1169
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      74.0,
+      77.93
+     ]
+    },
+    "transfer": {
+     "stage_span": [
+      1170,
+      1364
+     ],
+     "usable": true,
+     "keep": [
+      [
+       1179,
+       1273
+      ]
+     ],
+     "primary": [
+      1179,
+      1273
+     ],
+     "first_fault": {
+      "kind": "image_jump",
+      "frame": 1171,
+      "end": 1171,
+      "detail": "mean |delta| 27.1 vs local 5.7: hard visual jump",
+      "channel": "image"
+     },
+     "cuts": [
+      {
+       "start": 1170,
+       "end": 1178,
+       "reason": "image_jump at #1171 (image: mean |delta| 27.1 vs local 5.7: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
+      },
+      {
+       "start": 1274,
+       "end": 1364,
+       "reason": "position_jump at #1281 (pose: carton moved 0.24 m in one frame (0.07 s): teleport); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "image_jump",
+       "frame": 1171,
+       "end": 1171,
+       "detail": "mean |delta| 27.1 vs local 5.7: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "position_jump",
+       "frame": 1281,
+       "end": 1281,
+       "detail": "carton moved 0.24 m in one frame (0.07 s): teleport",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      78.0,
+      90.93
+     ]
+    },
+    "verify": {
+     "stage_span": [
+      1365,
+      1424
+     ],
+     "usable": true,
+     "keep": [
+      [
+       1365,
+       1424
+      ]
+     ],
+     "primary": [
+      1365,
+      1424
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      91.0,
+      94.93
+     ]
+    },
+    "return": {
+     "stage_span": [
+      1425,
+      2039
+     ],
+     "usable": true,
+     "keep": [
+      [
+       1425,
+       1822
+      ]
+     ],
+     "primary": [
+      1425,
+      1822
+     ],
+     "first_fault": {
+      "kind": "unlatch",
+      "frame": 1830,
+      "end": 1830,
+      "detail": "panel runs the uncouple step",
+      "channel": "pose"
+     },
+     "cuts": [
+      {
+       "start": 1823,
+       "end": 2039,
+       "reason": "unlatch at #1830 (pose: panel runs the uncouple step); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "unlatch",
+       "frame": 1830,
+       "end": 1830,
+       "detail": "panel runs the uncouple step",
+       "channel": "pose"
+      },
+      {
+       "kind": "position_jump",
+       "frame": 1912,
+       "end": 1922,
+       "detail": "cart yaw jumped 76 deg in one frame",
+       "channel": "pose"
+      },
+      {
+       "kind": "position_jump",
+       "frame": 1924,
+       "end": 1924,
+       "detail": "cart moved 0.20 m in one frame (0.07 s): teleport",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      95.0,
+      135.93
+     ]
+    }
+   },
+   "note": "same family as demo-005 with more glitches (collect jumps #58/#80, transfer carton teleport #1281, cart yaw jump in the post-uncouple tail)."
+  },
+  "door-src-001": {
+   "missing": true
+  },
+  "run-326": {
+   "kind": "real",
+   "n_frames": 824,
+   "clock_offset_s": 0.0,
+   "stages": {
+    "collect": {
+     "stage_span": [
+      0,
+      823
+     ],
+     "usable": true,
+     "keep": [
+      [
+       11,
+       46
+      ],
+      [
+       63,
+       78
+      ],
+      [
+       129,
+       194
+      ],
+      [
+       211,
+       211
+      ]
+     ],
+     "primary": [
+      11,
+      211
+     ],
+     "first_fault": {
+      "kind": "image_jump",
+      "frame": 2,
+      "end": 3,
+      "detail": "mean |delta| 33.8 vs local 0.7: hard visual jump",
+      "channel": "image"
+     },
+     "cuts": [
+      {
+       "start": 0,
+       "end": 10,
+       "reason": "image_jump at #2-3 (image: mean |delta| 33.8 vs local 0.7: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
+      },
+      {
+       "start": 47,
+       "end": 62,
+       "reason": "stall #39-70 (2.1 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.646"
+      },
+      {
+       "start": 79,
+       "end": 128,
+       "reason": "stall #71-136 (4.4 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.818"
+      },
+      {
+       "start": 195,
+       "end": 210,
+       "reason": "stall #187-218 (2.1 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.473"
+      },
+      {
+       "start": 212,
+       "end": 823,
+       "reason": "image_jump at #219 (image: mean |delta| 10.1 vs local 0.5: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "image_jump",
+       "frame": 2,
+       "end": 3,
+       "detail": "mean |delta| 33.8 vs local 0.7: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "image_jump",
+       "frame": 219,
+       "end": 219,
+       "detail": "mean |delta| 10.1 vs local 0.5: hard visual jump",
+       "channel": "image"
+      }
+     ],
+     "stalls": [
+      [
+       39,
+       70
+      ],
+      [
+       71,
+       136
+      ],
+      [
+       187,
+       218
+      ],
+      [
+       787,
+       823
+      ]
+     ],
+     "sim_t": [
+      0.7,
+      275.03
+     ]
+    }
+   }
+  },
+  "run-325": {
+   "kind": "real",
+   "n_frames": 770,
+   "clock_offset_s": 0.0,
+   "stages": {
+    "collect": {
+     "stage_span": [
+      0,
+      769
+     ],
+     "usable": true,
+     "keep": [
+      [
+       11,
+       47
+      ],
+      [
+       65,
+       80
+      ],
+      [
+       108,
+       209
+      ]
+     ],
+     "primary": [
+      11,
+      209
+     ],
+     "first_fault": {
+      "kind": "image_jump",
+      "frame": 2,
+      "end": 3,
+      "detail": "mean |delta| 33.9 vs local 0.7: hard visual jump",
+      "channel": "image"
+     },
+     "cuts": [
+      {
+       "start": 0,
+       "end": 10,
+       "reason": "image_jump at #2-3 (image: mean |delta| 33.9 vs local 0.7: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
+      },
+      {
+       "start": 48,
+       "end": 64,
+       "reason": "stall #40-72 (2.2 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.69"
+      },
+      {
+       "start": 81,
+       "end": 107,
+       "reason": "stall #73-115 (2.9 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.557"
+      },
+      {
+       "start": 210,
+       "end": 769,
+       "reason": "image_jump at #217-218 (image: mean |delta| 34.4 vs local 0.8: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "image_jump",
+       "frame": 2,
+       "end": 3,
+       "detail": "mean |delta| 33.9 vs local 0.7: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "image_jump",
+       "frame": 217,
+       "end": 218,
+       "detail": "mean |delta| 34.4 vs local 0.8: hard visual jump",
+       "channel": "image"
+      }
+     ],
+     "stalls": [
+      [
+       40,
+       72
+      ],
+      [
+       73,
+       115
+      ],
+      [
+       733,
+       769
+      ]
+     ],
+     "sim_t": [
+      0.7,
+      257.03
+     ]
+    }
+   }
+  },
+  "run-322": {
+   "kind": "real",
+   "n_frames": 782,
+   "clock_offset_s": 0.0,
+   "stages": {
+    "collect": {
+     "stage_span": [
+      0,
+      781
+     ],
+     "usable": true,
+     "keep": [
+      [
+       11,
+       46
+      ],
+      [
+       63,
+       78
+      ],
+      [
+       124,
+       206
+      ]
+     ],
+     "primary": [
+      11,
+      206
+     ],
+     "first_fault": {
+      "kind": "image_jump",
+      "frame": 2,
+      "end": 3,
+      "detail": "mean |delta| 32.8 vs local 0.7: hard visual jump",
+      "channel": "image"
+     },
+     "cuts": [
+      {
+       "start": 0,
+       "end": 10,
+       "reason": "image_jump at #2-3 (image: mean |delta| 32.8 vs local 0.7: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
+      },
+      {
+       "start": 47,
+       "end": 62,
+       "reason": "stall #39-70 (2.1 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.655"
+      },
+      {
+       "start": 79,
+       "end": 123,
+       "reason": "stall #71-131 (4.1 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.804"
+      },
+      {
+       "start": 207,
+       "end": 781,
+       "reason": "image_jump at #214 (image: mean |delta| 11.0 vs local 0.6: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "image_jump",
+       "frame": 2,
+       "end": 3,
+       "detail": "mean |delta| 32.8 vs local 0.7: hard visual jump",
+       "channel": "image"
+      },
+      {
+       "kind": "image_jump",
+       "frame": 214,
+       "end": 214,
+       "detail": "mean |delta| 11.0 vs local 0.6: hard visual jump",
+       "channel": "image"
+      }
+     ],
+     "stalls": [
+      [
+       39,
+       70
+      ],
+      [
+       71,
+       131
+      ],
+      [
+       745,
+       781
+      ]
+     ],
+     "sim_t": [
+      0.7,
+      261.03
+     ]
+    }
+   }
+  },
+  "warm7": {
+   "kind": "real",
+   "n_frames": 240,
+   "clock_offset_s": 0.55,
+   "stages": {
+    "couple": {
+     "stage_span": [
+      0,
+      127
+     ],
+     "usable": true,
+     "keep": [
+      [
+       0,
+       127
+      ]
+     ],
+     "primary": [
+      0,
+      127
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      0.98,
+      43.32
+     ]
+    },
+    "outbound": {
+     "stage_span": [
+      128,
+      165
+     ],
+     "usable": true,
+     "keep": [
+      [
+       128,
+       165
+      ]
+     ],
+     "primary": [
+      128,
+      165
+     ],
+     "first_fault": null,
+     "cuts": [],
+     "faults": [],
+     "stalls": [],
+     "sim_t": [
+      43.65,
+      55.98
+     ]
+    },
+    "transfer": {
+     "stage_span": [
+      166,
+      239
+     ],
+     "usable": false,
+     "keep": [],
+     "primary": null,
+     "first_fault": {
+      "kind": "carton_floating",
+      "frame": 169,
+      "end": 238,
+      "detail": "SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried",
+      "channel": "pose"
+     },
+     "cuts": [
+      {
+       "start": 166,
+       "end": 239,
+       "reason": "no clean stretch of >= 1 s: carton_floating at #169-238 (pose: SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried); range ends/starts 8 frames (>= 0.5 s of output) before it"
+      }
+     ],
+     "faults": [
+      {
+       "kind": "carton_floating",
+       "frame": 169,
+       "end": 238,
+       "detail": "SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried",
+       "channel": "pose"
+      }
+     ],
+     "stalls": [],
+     "sim_t": [
+      56.25,
+      80.65
+     ]
+    }
+   }
+  }
+ },
+ "generated": "2026-10-22"
+}
