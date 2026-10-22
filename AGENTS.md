@@ -112,6 +112,21 @@ repo's `scenes/`, `export/` or `renders/`.
   wrist-guard clear-branch re-seed extended to the collect place/retreat pose-IK). CPU proof
   `tests/test_restock_cart_place_goal.py`; targets + reach margins `data/sim-robust-cart-place-goal-v1/`
   (`station-contract.md`, `report.md`); GPU fragment `docs/examples/cart-place-goal-mission-fragment.json`.
+  **Place-on-cart descent/release completion** (opt-in, default-off ⇒ byte-identical): with the goal fix
+  above active, collect2 reached the UPRIGHT preplace and the place-descent trajectory itself SUCCEEDED,
+  but the mission stationary guard (`runtime.py` `not p.parked`) aborted the stage mid-descent — the
+  extended carton-loaded arm's reaction shoves the YAW-LOCK-ONLY braked base ~4 cm in translation
+  (isaac_port leaves translation free while a carton is welded), flipping the 0.25 s windowed `parked`
+  flag False for a few ticks → `'base moved during stationary operation'`; the carton stayed held and the
+  arm never stowed → re-begins failed `arm_not_in_transport_timeout`. Fix (two keys): RUNTIME
+  `collect_place_base_settle_m` tolerates a BOUNDED base excursion from the place_approach anchor through
+  the loaded place phases (the shove re-settles and is far inside the 0.25 m place-verify xy tol) so
+  place→release→stow completes, failing with a NAMED reason only beyond the bound; HOST
+  `release_detach_timeout_s` (SIM-clock) fails the RELEASE fast with a named reason if the SIM_ATTACH weld
+  doesn't detach, instead of carrying the carton back up on stow or stalling to `phase_timeout`. CPU proof
+  `tests/test_restock_runtime.py` (`test_loaded_place_*`) + `tests/test_restock_manipulation.py`
+  (`test_release_*`, `test_collect_place_runs_descent_release_stow_*`); GPU fragment
+  `docs/examples/cart-place-descent-mission-fragment.json`; write-up `data/sim-robust-cart-place-descent-v1/`.
   **Honest-collect robustness** (opt-in, default-off ⇒ byte-identical): the grasp-critical collect
   source park uses a tolerance-aware arrival (`navigation` `strict_xy_arrival`, set automatically on the
   collect leg — never declares `arrived` outside the true xy tol even under the fm482 hysteresis latch),

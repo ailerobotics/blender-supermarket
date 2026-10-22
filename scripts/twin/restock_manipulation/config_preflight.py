@@ -62,6 +62,8 @@ KEY_CONSUMER = {
     'arm_max_speed': HOST,
     'plan_wall_cap_s': HOST,
     'grasp_track_m': HOST,        # fm410: lift-probe carton-tracking physics confirm threshold (m)
+    # sim-robust-cart-place-descent-v1: SIM-clock release-detach budget; ros_host -> TransferController
+    'release_detach_timeout_s': HOST,
     # --- RUNTIME config (isaac_bundle / isaac_port / physics_setup) ---
     'phase_drive': RUNTIME,
     'arm_stiffness_abs': RUNTIME,
@@ -79,6 +81,9 @@ KEY_CONSUMER = {
     'collect_observe_force_render_ticks': RUNTIME,   # fm452: COLD force-render window; isaac_bundle reads it
     'cage_collision': RUNTIME,   # sim-only carton-vs-cage contact filter; physics_setup -> scene.build reads it
     'sim_speed': RUNTIME,        # sim-video-speedup-v1 speed profile; isaac_bundle/isaac_port + bt view read it
+    # sim-robust-cart-place-descent-v1: bounded base-settle tolerance for the loaded collect place;
+    # isaac_bundle builds the RuntimeAdapter with it (orchestrate process), NOT ros_host.
+    'collect_place_base_settle_m': RUNTIME,
 }
 
 # fm402: cap/limit keys the controller reads OPTIONALLY (config.get with a silent default). These are

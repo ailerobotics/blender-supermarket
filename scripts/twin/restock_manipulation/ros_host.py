@@ -201,6 +201,11 @@ def main():
         # key still overrides, and setting it to 0 disables (byte-identical pre-fix). Clamped to <=
         # phase_timeout in the controller.
         grasp_press_timeout_s=float(config.get('grasp_press_timeout_s', _default_grasp_press_timeout_s())),
+        # sim-robust-cart-place-descent-v1: SIM-clock release-detach budget (SIM seconds). After the place
+        # descent, fail fast with a NAMED reason if the SIM_ATTACH weld / suction does not let go within
+        # this long of the gripper-open command, instead of carrying the carton back up on retreat/stow or
+        # stalling to the coarse phase_timeout. Absent/0 => off (rely on phase_timeout, byte-identical).
+        release_detach_timeout_s=float(config.get('release_detach_timeout_s', 0.0)),
         # fm449 (run-332 cold collect): gate the observe->reach on a clean synchronized source frame + decoded
         # label at park (the Isaac-side verdict rides Sensors.collect_source_clean). Absent/False => the gate
         # never arms => byte-identical. No injected provider on the host path; the gate reads the packet field.
@@ -273,6 +278,8 @@ def main():
         # grep proves they activated in the host that consumes them (host-vs-runtime-config-split trap).
         'collect_place_preplace_shape': controller.collect_place_preplace_shape,
         'collect_place_wrist_guard': controller.collect_place_wrist_guard,
+        # sim-robust-cart-place-descent-v1: effective SIM-clock release-detach budget (0 = off)
+        'release_detach_timeout_s': controller.release_detach_timeout_s,
         'reposition_before_place': controller.reposition_before_place,
         'transfer_mode': controller.transfer_mode,   # env RESTOCK_TRANSFER_MODE (None = off)
         'transfer_carry': sorted(controller.transfer_carry),   # env RESTOCK_TRANSFER_CARRY ([] = off)
