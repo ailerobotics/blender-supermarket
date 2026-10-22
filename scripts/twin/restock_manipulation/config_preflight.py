@@ -45,6 +45,7 @@ KEY_CONSUMER = {
     # sim-robust-cart-place-goal-v1: non-cage collect place-on-cart goal guards (ros_host -> TransferController)
     'collect_place_preplace_shape': HOST,   # fixed UPRIGHT clear-region preplace joint shape (begin_joint_goal)
     'collect_place_wrist_guard': HOST,       # clear-branch wrist-guard extended to the collect place/retreat pose-IK
+    'collect_place_straight_line': HOST,     # route the collect deck place+retreat collision-off straight-line (attached-carton self-collision)
     'cart_pan_joint0': HOST,
     'cart_tuck_shape': HOST,
     'base_collision_object': HOST,

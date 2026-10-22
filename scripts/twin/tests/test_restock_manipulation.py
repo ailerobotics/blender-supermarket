@@ -34,6 +34,10 @@ class FixtureMotion:
         # collect_place_wrist_guard / transfer_carry); recorded for assertions when a test needs them.
         self.begin_extra = getattr(self, 'begin_extra', [])
         self.begin_extra.append(dict(_extra))
+        # sim-robust-collect-place-straightline-v1: record the collision-off straight-line flag per begin()
+        # (cart-cage / live_pose / collect-deck place route place+retreat through begin(straight_line=True)).
+        self.straight_lines = getattr(self, 'straight_lines', [])
+        self.straight_lines.append(bool(straight_line))
         self.moves.append(pose)
         self.joint_space_moves = getattr(self, 'joint_space_moves', [])
         self.joint_space_moves.append(joint_space)
@@ -871,6 +875,107 @@ def test_reposition_full_place_path_reaches_verify():
         extra = {'joint_positions': stow} if c.phase == 'stow' else {}  # stow confirms transport feedback
         r = c.step(.1, packet(c, t0 + i * .1, contact=contact, **extra))
         assert r.status != 'failed', (c.phase, r.reason)
+    assert c.phase == 'verify'
+
+
+# -- sim-robust-collect-place-straightline-v1: collision-off straight-line collect deck place (collect4) ----
+#
+# collect4 (data/sim-robust-collect-place-straightline-v1/report.md): the honest cold collect reached the
+# upright preplace (PR #209) + the host planned the place descent (PR #213), but the place config on the
+# cart deck is rejected by cuMotion as an attached-object SELF-collision -- the held carton is a 34-sphere
+# attached_object NOT self-collision-ignored against the forearm/wrist/upper-arm, so the set-down fold
+# brings it within the self-collision margin ('Invalid c-space position: self collision detected', 0 world
+# collisions) EVEN THOUGH the bare arm + PR #209 wrist-guard are clear there. The cart deck is not a
+# cuMotion world object for this run. The fix ports the cart-cage / live_pose (PR #215) mechanism: route
+# the place descent + empty retreat as the collision-off straight-line seeded insert (begin(straight_line=
+# True)); the preplace standoff stays collision-aware. Opt-in collect_place_straight_line; off => identical.
+
+_SL_STOW = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+_SL_TUCK = (-2.3, 1.0, 2.1066, 0.8, -1.2545)
+_SL_PREPLACE_SHAPE = (0.093, -1.91, 2.014, -0.103, 1.664, 0.0)   # collect4's upright clear-region shape
+
+
+def _collect_place_controller(straight_line):
+    return make_controller('collect', transport_joints=_SL_STOW, staged_cart_swing=True,
+                           cart_pan_joint0=-0.8605, cart_tuck_shape=_SL_TUCK,
+                           reposition_before_place=True,
+                           collect_place_preplace_shape=_SL_PREPLACE_SHAPE,
+                           collect_place_wrist_guard=True,
+                           collect_place_straight_line=straight_line)
+
+
+def _drive_collect_place(c, m):
+    """Drive the collect reposition place to verify (as test_reposition_full_place_path_reaches_verify),
+    returning {phase_that_issued_a_begin_move: straight_line_flag} and the ordered phase sequence."""
+    by_phase, seq, n, t0 = {}, [], 0, 1.0
+    for i in range(140):
+        if c.phase == 'verify':
+            break
+        if not seq or seq[-1] != c.phase:
+            seq.append(c.phase)
+        if c.phase == 'transit':
+            c.base_repositioned = True                       # the adapter drove the base to place_approach
+        contact = c.held or (c.phase == 'grasp' and c.issued)
+        if c.phase == 'release' and c.issued:
+            contact = False
+        extra = {'joint_positions': _SL_STOW} if c.phase == 'stow' else {}
+        phase_before = c.phase
+        r = c.step(.1, packet(c, t0 + i * .1, contact=contact, **extra))
+        assert r.status != 'failed', (phase_before, r.reason)
+        if len(m.moves) > n:                                 # a begin() pose-move was issued this step
+            by_phase[phase_before] = m.straight_lines[-1]
+            n = len(m.moves)
+    assert c.phase == 'verify', c.phase
+    return by_phase, seq
+
+
+def test_collect_deck_place_predicate_is_scoped():
+    # _collect_deck_place: on only for a NON-cage COLLECT with the key set; off for the key default, for a
+    # cage run, and for a transfer (so transfer / live_pose / scripted-still are untouched).
+    c, _ = _collect_place_controller(straight_line=True)
+    assert c._collect_deck_place() is True
+    c, _ = _collect_place_controller(straight_line=False)      # key default off
+    assert c._collect_deck_place() is False
+    c, _ = _collect_place_controller(straight_line=True)
+    c.cart_cage_place = True                                   # a cage run routes place via the cage insert
+    assert c._collect_deck_place() is False
+    c, m = make_controller('transfer', collect_place_straight_line=True)
+    assert c._collect_deck_place() is False                   # never a transfer
+
+
+def test_collect_deck_place_routes_place_and_retreat_straight_line():
+    # With collect_place_straight_line the deck place descent + empty retreat route collision-off
+    # straight-line; the PREPLACE stays collision-aware (a fixed joint goal here) and the free-space pick
+    # approach stays collision-aware; release -> retreat -> stow -> verify still follow.
+    c, m = _collect_place_controller(straight_line=True)
+    by_phase, seq = _drive_collect_place(c, m)
+    assert by_phase.get('place') is True                      # place descent onto the deck: collision-off
+    assert by_phase.get('retreat') is True                    # empty-handed lift back: collision-off
+    # ONLY place + retreat route straight-line; every other begin() pose-move (the free-space pick
+    # approach/contact/lift) stays collision-aware.
+    assert {p for p, straight in by_phase.items() if straight} == {'place', 'retreat'}, by_phase
+    # the preplace is a fixed collision-aware joint goal (begin_joint_goal), never a begin() pose-move
+    assert 'preplace' not in by_phase
+    assert _SL_PREPLACE_SHAPE in [g for g, _m, _s in m.stows]
+    # the full place-side sequence completed through release/retreat/stow to verify
+    for p in ('preplace', 'place', 'release', 'retreat', 'stow'):
+        assert p in seq, (p, seq)
+    assert c.phase == 'verify'
+
+
+def test_collect_deck_place_straight_line_default_off_is_byte_identical():
+    # Default off: the deck place + retreat stay collision-aware joint-space moves (NO straight-line insert),
+    # and the collect_place_wrist_guard is carried on the place/retreat begin() exactly as before.
+    c, m = _collect_place_controller(straight_line=False)
+    assert c.collect_place_straight_line is False
+    by_phase, seq = _drive_collect_place(c, m)
+    assert by_phase.get('place') is False                     # collision-aware place (baseline)
+    assert by_phase.get('retreat') is False                   # collision-aware retreat (baseline)
+    assert not any(m.straight_lines)                          # nothing routed straight-line
+    # the wrist-guard is still applied to the collision-aware place pose-IK (PR #209 behaviour unchanged)
+    place_extra = [e for pose, e in zip(m.moves, m.begin_extra)
+                   if pose == c.poses['place']]
+    assert place_extra and all('wrist_guard' in e for e in place_extra)
     assert c.phase == 'verify'
 
 

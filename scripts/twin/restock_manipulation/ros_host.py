@@ -186,6 +186,13 @@ def main():
         # collect place/retreat pose-IK (clear-branch re-seed). Both absent/False => byte-identical.
         collect_place_preplace_shape=config.get('collect_place_preplace_shape'),
         collect_place_wrist_guard=bool(config.get('collect_place_wrist_guard', False)),
+        # sim-robust-collect-place-straightline-v1 (collect4): route the NON-cage collect deck PLACE
+        # descent + empty RETREAT collision-off straight-line (begin(straight_line=True), the cart-cage /
+        # live_pose place mechanism). The held carton is a cuMotion attached_object (34-sphere cuboid), and
+        # the set-down fold brings it within the attached-object self-collision margin, so a collision-aware
+        # plan to the place config is rejected ('self collision detected') even though the bare arm + wrist
+        # guard are clear. The preplace standoff stays collision-aware. Absent/False => byte-identical.
+        collect_place_straight_line=bool(config.get('collect_place_straight_line', False)),
         # fm390: drive the base in front of the rollwagen mouth between the carry fold and the place
         # (lift->tuck->TRANSIT->[base nav]->preplace), instead of the arm-only cage insert. Absent =>
         # byte-identical. Mutually exclusive in practice with cart_cage_place (base nav replaces it).
@@ -278,6 +285,8 @@ def main():
         # grep proves they activated in the host that consumes them (host-vs-runtime-config-split trap).
         'collect_place_preplace_shape': controller.collect_place_preplace_shape,
         'collect_place_wrist_guard': controller.collect_place_wrist_guard,
+        # sim-robust-collect-place-straightline-v1: collect deck place/retreat routed collision-off (False = off)
+        'collect_place_straight_line': controller.collect_place_straight_line,
         # sim-robust-cart-place-descent-v1: effective SIM-clock release-detach budget (0 = off)
         'release_detach_timeout_s': controller.release_detach_timeout_s,
         'reposition_before_place': controller.reposition_before_place,
