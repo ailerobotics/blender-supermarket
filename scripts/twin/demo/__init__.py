@@ -25,4 +25,10 @@ Modules:
 * :mod:`twin.demo.compositor`  -- composite scene view + panel and encode the mp4.
 * :mod:`twin.demo.scene_reader`-- read prim world poses from the live Isaac stage (GPU only).
 * :mod:`twin.demo.run_demo_gpu`-- the guarded GPU capture entry (flock + VRAM guard).
+
+The REAL mission's demo cut (not choreographed; CPU, run dir read-only):
+
+* :mod:`twin.demo.run_evidence`   -- read a mission run dir (events, nav-trace, frames, labels).
+* :mod:`twin.demo.run_check`      -- pass/fail checks (stages, success, carton on cart / on bay).
+* :mod:`twin.demo.walkthrough_cut`-- title/stage/closing cards + captions + time-lapse -> mp4.
 """

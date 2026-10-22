@@ -630,6 +630,11 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # torn down => byte-identical. The cart camera + nav/nvblox + walkthrough recorder are untouched.
         stage_scoped_teardown=(assembly.sensing_sources.get('stage_scoped_teardown')
                                if os.environ.get('RESTOCK_STAGE_SCOPED_SENSING') else None),
+        # Demo-cut evidence: RESTOCK_TRACE_POSES=1 adds the carton + cart world poses (and Isaac stage
+        # time) to nav-trace.jsonl so scripts/check_walkthrough_run.py can prove the carton rode on the
+        # rollwagen and landed on the bay. Observation only; unset => None => byte-identical trace.
+        trace_carton_path=(assembly.evidence['composition']['stock']
+                           if os.environ.get('RESTOCK_TRACE_POSES') == '1' else None),
         # fm384 phase-aware collect capture: at grasp-confirm, switch the capture to destination-only
         # (real fresh cart render) + destroy the source render product. None unless the knob is set.
         release_source_capture=(sensing.get('release_source_capture')
