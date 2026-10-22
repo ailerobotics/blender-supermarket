@@ -539,6 +539,33 @@ class RosMotionPort:
         rt.joint_trajectory = jt
         return rt
 
+    def _begin_straight_line_execute(self, q):
+        """Dispatch a collision-OFF 2-point rest-to-rest smoothstep from the measured start to the
+        explicit joint config ``q`` straight through the host executor -- no cuMotion plan, so a
+        self-colliding start/endpoint is never rejected. Shared by the straight-line pose descent
+        (``q`` = the collision-off pose IK, _nearest_to-branched) and the straight-line JOINT escape
+        (begin_joint_goal(straight_line=True); ``q`` = an explicit clear-branch target, e.g. the collect
+        deck RETREAT backing the empty gripper off the drooped place config -- forearm within the
+        gripper-cube sphere margin -- to the fixed upright standoff that a collision-AWARE plan would
+        reject at its self-colliding start). Sets the move state (execute_accept, or await_settle when a
+        live arm state is wired); the caller returns its own status."""
+        from moveit_msgs.action import ExecuteTrajectory
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory = self._straight_line_goal(q)
+        validate_trajectory(goal.trajectory.joint_trajectory, self.start, self.limits)
+        end = goal.trajectory.joint_trajectory.points[-1].time_from_start
+        duration = end.sec + end.nanosec * 1e-9
+        # Execution is sim-paced, exactly like the cuMotion plan path: bound on the NODE/SIM clock.
+        # fm367: the sim budget (duration + settle margin) is MOVE_SIM_DEADLINE_SCALE-scaled.
+        self.deadline_clock = self._sim_now
+        self.deadline = self._sim_now() + sim_execute_budget(duration)
+        if self._live_arm_state is None:
+            self._send(self.execute, goal, 'execute_accept')
+        else:                                   # fm357: settle + re-seed before dispatch
+            self._pending_exec = goal.trajectory
+            self._settle_wait_start = self._sim_now()   # fm369: start the settle sub-budget clock
+            self.state = 'await_settle'
+
     def _send_ik(self, seed):
         from moveit_msgs.srv import GetPositionIK
         req = GetPositionIK.Request()
@@ -673,8 +700,19 @@ class RosMotionPort:
         future.add_done_callback(accepted)
         self.future, self.state = future, state
 
-    def begin_joint_goal(self, goal_joints, measured_joints, slow=False, goal_tol=None):
-        """Collision-planned arm stow; never an unchecked joint command."""
+    def begin_joint_goal(self, goal_joints, measured_joints, slow=False, goal_tol=None,
+                         straight_line=False):
+        """Collision-planned arm stow; never an unchecked joint command.
+
+        ``straight_line=True`` (sim-robust-collect-stow-branch-v1): dispatch the move as the collision-OFF
+        2-point rest-to-rest smoothstep to ``goal_joints`` straight through the host executor instead of a
+        cuMotion plan -- the SAME mechanism as the straight-line pose descent (begin(straight_line=True)),
+        but to an EXPLICIT clear-branch joint target rather than a pose IK. Used only for the collect deck
+        RETREAT, whose collision-off place/retreat pose-IK otherwise branches into a self-colliding fold
+        (forearm inside the gripper-cube sphere margin) that makes cuMotion reject the next collision-aware
+        move at its start (INVALID_INITIAL_CSPACE_POSITION). Because the target is an explicit clear joint
+        config the planner is not consulted, so the self-colliding start is never rejected; the arm reaches a
+        known-clear standoff from which the tuck/stow plans cleanly."""
         from moveit_msgs.action import MoveGroup
         from moveit_msgs.msg import Constraints, JointConstraint
         if self.state not in ('idle','succeeded','failed'):
@@ -709,8 +747,17 @@ class RosMotionPort:
         self._plan_goal=None
         self._plan_dispatches=0            # total cuMotion plan dispatches this move (PLAN_TOTAL_ATTEMPTS_CAP)
         self._plan_goal_joint_space=True   # a fixed joint-constraint goal -> tighter same-goal re-plan budget
-        self._straight_line=False
+        self._straight_line=bool(straight_line)
         self._plan_started_wall=time.monotonic()
+        if straight_line:
+            # Collision-OFF straight-line JOINT escape: a 2-point rest-to-rest smoothstep to the explicit
+            # clear-branch target, bypassing cuMotion's start-state self-collision check. No _plan_goal
+            # (nothing to re-plan); _send (via the dispatch helper) increments the generation.
+            self.generation+=1
+            self.handle=None
+            self._plan_goal=None
+            self._begin_straight_line_execute(tuple(float(v) for v in goal_joints))
+            return
         goal=MoveGroup.Goal()
         req=goal.request
         req.group_name=self.group
@@ -1085,22 +1132,7 @@ class RosMotionPort:
                 q = self._nearest_to(q, self.start)
                 if q is None:
                     raise ValueError('contact IK outside joint limits')
-                from moveit_msgs.action import ExecuteTrajectory
-                goal = ExecuteTrajectory.Goal()
-                goal.trajectory = self._straight_line_goal(q)
-                validate_trajectory(goal.trajectory.joint_trajectory, self.start, self.limits)
-                end = goal.trajectory.joint_trajectory.points[-1].time_from_start
-                duration = end.sec + end.nanosec * 1e-9
-                # Execution is sim-paced, exactly like the cuMotion plan path: bound on the NODE/SIM clock.
-                # fm367: the sim budget (duration + settle margin) is MOVE_SIM_DEADLINE_SCALE-scaled.
-                self.deadline_clock = self._sim_now
-                self.deadline = self._sim_now() + sim_execute_budget(duration)
-                if self._live_arm_state is None:
-                    self._send(self.execute, goal, 'execute_accept')
-                else:                                   # fm357: settle + re-seed before dispatch
-                    self._pending_exec = goal.trajectory
-                    self._settle_wait_start = self._sim_now()   # fm369: start the settle sub-budget clock
-                    self.state = 'await_settle'
+                self._begin_straight_line_execute(q)
                 return 'running'
             # fm347 (3): the cart PLACE moves (near_start) branch to the config NEAREST the measured pan
             # start, so shoulder_pan stays on the pan branch (no ~3.9 rad flip to the stow-nominal
