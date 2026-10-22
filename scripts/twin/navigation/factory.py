@@ -335,6 +335,10 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
                                        lane_cart_yaw_rebase=bool(nav.get('tow_lane_cart_yaw_rebase', False)),
                                        coupled_creep_escape=_strict_bool(nav, 'coupled_creep_escape'),
                                        coupled_creep_floor=float(nav.get('coupled_creep_floor_mps', 0.03)),
+                                       coupled_progress_escape=_strict_bool(nav, 'coupled_progress_escape'),
+                                       coupled_progress_min_m=float(nav.get('coupled_progress_min_m', 0.05)),
+                                       coupled_progress_escape_s=float(nav.get('coupled_progress_escape_s', 3.0)),
+                                       coupled_progress_fault_s=float(nav.get('coupled_progress_fault_s', 8.0)),
                                        **_controller_kwargs(nav))
 
     if 'dynamic_obstacles' in nav and mode != 'sensor':

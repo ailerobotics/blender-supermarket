@@ -1,0 +1,13 @@
+{
+  "_comment": "sim-robust-outbound-drive-v1: MERGE into the mission runtime-config. All keys default-off (absent => byte-identical). coupled_progress_escape adds a SIM-CLOCK commanded-vs-measured NET-progress monitor to the coupled ArticulatedController: while the base commands forward but has not moved >= coupled_progress_min_m from its anchor for coupled_progress_escape_s SIM seconds it forces the committed creep (arc clamped to the 1.5 m min turn radius), and after coupled_progress_fault_s SIM seconds of no net progress it FAULTS 'coupled_no_progress' so the stage StageRetry-replans -- in a few SIM seconds, before (and on the correct clock for) the 120 s WALL no-base-progress budget in restock.runtime. This catches the warm9/warm10 outbound pin (base jittering in place while reason='tracking', frozen ~14 s SIM = ~285 s WALL under ~20x render pacing) that coupled_creep_escape (noise-band trigger) and measured_turn_fault_s (turn-radius coasts only) both miss. Keep coupled_creep_escape ON alongside it (complementary: the noise-band creep + the net-progress escalate/fault). Offline proof on the recorded runs: scripts/check_outbound_progress.py; the REAL-controller stall+recovery CPU proof: tests/test_articulated_navigation.py.",
+  "navigation": {
+    "coupled_progress_escape": true,
+    "coupled_progress_min_m": 0.05,
+    "coupled_progress_escape_s": 3.0,
+    "coupled_progress_fault_s": 8.0,
+
+    "coupled_creep_escape": true,
+    "coupled_creep_floor_mps": 0.03
+  },
+  "_drive_fidelity_note": "The UNCOUPLED base-drive-fidelity lever is caster_lift_m: the fm434 bench (dataset base-drive-bench-*) measured straight_v_ratio 0.097 (co-planar, caster_lift_m=0) -> 0.988 (caster_lift_m=0.005, within 15% tol); traction/solver/dt levers did not help. The warm runs already set 0.005, which fixes the uncoupled crawl; coupled_progress_escape covers the residual COUPLED limit cycle. If the GPU proof still shows a coupled traction deficit, raising navigation.mobile_spec.caster_lift_m toward its 0.03 cap is the physics lever to try next (bench it uncoupled first)."
+}
