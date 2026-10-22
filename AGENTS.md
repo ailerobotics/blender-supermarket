@@ -273,8 +273,15 @@ repo's `scenes/`, `export/` or `renders/`.
   `wrist_guard` does not apply to it — it carries a `plan_transfer(wrist_guard=True)` default that forces
   the PICK half onto the same clear branch (reusing `transfer_carry.in_clear_region`/`wrist_flip_seed`),
   else the pick seeds the gripper-vs-forearm self-collision and the host faults on the >1.3 rad tracking
-  error (warm5). A mid-transfer executor refusal FAILS FAST with a named reason + a keep-alive hold (never
-  the silent `still` degrade that starves the arm-command heartbeat). Offline proof (incl. the sphere model
+  error (warm5). **Sharp edge:** `in_clear_region` WRAPS wrist_1, so a far +2π IK branch (raw ~+4.1, wraps
+  to −2.16 ≤ cap) reads "clear" yet makes the joint sweep UP through the ~0.69 stop (execretest jam) —
+  `_solve_seeded` now re-expresses the commanded wrist_1 to the equivalent in-limit branch ≤ cap
+  (`transfer_carry.clear_branch`; identical TCP, so the still carton path is byte-identical), and the plan
+  carries `wrist1_within_cap()` so the executor FAILS FAST (`begin`→`_step_executor`) with a named reason
+  when no clear branch exists, never streaming the self-colliding trajectory. The `live_pose` pick does NOT
+  share this (cuMotion plans it under a hard `ur_wrist_1 ≤ cap` goal constraint). Bounded GPU proof fragment:
+  `docs/examples/transfer-executor-mission-fragment.json`. A mid-transfer executor refusal FAILS FAST with a
+  named reason + a keep-alive hold (never the silent `still` degrade that starves the arm-command heartbeat). Offline proof (incl. the sphere model
   + warm5 host-validation replay): `data/sim-video-executor-arm-v1/report.md`,
   `tests/test_restock_scripted_transfer.py`. **Sharp edge (execution-clock anchor):** `trajectory_host`
   anchors a goal's trajectory time origin to the FIRST post-install `/joint_states` stamp
