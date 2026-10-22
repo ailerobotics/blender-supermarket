@@ -192,7 +192,16 @@ repo's `scenes/`, `export/` or `renders/`.
   net-progress monitor `navigation.coupled_progress_escape` (escalate→fault `coupled_no_progress`→replan in
   sim-seconds); see docs/restock_navigation.md, `scripts/check_outbound_progress.py`,
   `docs/examples/outbound-progress-mission-fragment.json`. Uncoupled drive-fidelity lever = `caster_lift_m`
-  (fm434 bench `base-drive-bench-*`: 0.097→0.988). **Lidar sensor-frame yaw (vr1, now FIXED default-on):**
+  (fm434 bench `base-drive-bench-*`: 0.097→0.988). **The residual coupled stall is drive-authority, NOT
+  geometry** (sim-robust-coupled-traction-v1): outbound_dock_to_bay is a STRAIGHT y=15.25 pull (the portal
+  is at y=11.125 — the x≈−3.875 coincidence is a red herring), every recorded robot+cart footprint is
+  clear of the 806-obstacle map and the real controller follows the lane to goal KINEMATICALLY, so the
+  stall is PhysX re-breakaway-from-rest (warm8/warm11 pass only with entry momentum). Fix = raise BOTH
+  `caster_lift_m`→0.03 AND `wheel_drive.max_force`→200 (at 80 N·m the per-wheel torque cap 1000 N binds
+  below μ·N_drive, so caster lift ALONE can't help — the budget shows the sign; GPU bench is truth).
+  One-command CPU proof + acceptance gate (`--gpu-run` grades a new trace) `scripts/check_tow_traction.py`;
+  pure core `scripts/twin/traction.py`; bounded GPU config + build steps
+  `docs/examples/coupled-traction-fragment.json`; write-up `data/sim-robust-coupled-traction-v1/report.md`. **Lidar sensor-frame yaw (vr1, now FIXED default-on):**
   `Scan.sensor_to_base` is (x, y, YAW) but the legacy `isaac_bundle` wiring passed the lidar URDF origin
   (x, y, z) — the `lidar_frame` is a fixed rpy-0 child of base_link, so its z (0.15 m) is a mount height,
   NOT a yaw; reading it as yaw rotated every return 8.59° and was the sole source of the tow-lane
