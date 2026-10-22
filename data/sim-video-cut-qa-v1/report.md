@@ -24,7 +24,7 @@ show**. The compile lane does the stitching.
 
 ## Rules (`scripts/twin/demo/cut_qa.py`)
 
-- An ending fault at frame f ends the usable range **8 frames (0.5 s of 15 fps output) before f**.
+- An ending fault at frame f ends the usable range at **f − 8** (8 frames ≥ 0.5 s of 15 fps output).
   A fault window at the start of a stage pushes the start past it instead.
 - The **TERMINAL** faults are `carton_tilt` and `unlatch`. After one of them, nothing else in that
   stage is shown, because the carton stays tilted and the robot drives on alone.
@@ -45,29 +45,29 @@ show**. The compile lane does the stitching.
 
 | source | stage | span | keep | first fault |
 |---|---|---|---|---|
-| **collect-src-001** | collect | 0–328 | **0–34 + 78–125** | carton_tilt #134 (2nd face visible; ~90° by #154) |
-| **warm11** | return | 225–358 | **225–232** | unlatch #241 (cart unlatched at the bay, robot drives home ALONE) |
+| **collect-src-001** | collect | 0–328 | **0–34 + 78–112** | carton_tilt #120 (side face from #116 ≈5°, ≈10° by #120, ~90° by #154) |
+| **warm11** | return | 225–358 | **225–233** | unlatch #241 (cart unlatched at the bay, robot drives home ALONE) |
 | warm11 / warm8 | couple | 0–128 / 0–127 | whole | — |
 | warm11 / warm8 | outbound | 129–164 / 128–165 | whole | — (backroom-bay route, not the door) |
 | warm11 / warm8 / warm7 | transfer | 166–224 (warm7 –239) | ✗ | carton_floating #168/169 (scripted carton path, arm still) |
-| warm8 | return | 225–359 | 225–232 | unlatch #241 |
+| warm8 | return | 225–359 | 225–233 | unlatch #241 |
 | **demo-005** | park | 1110–1169 | whole | — |
 | **demo-005** | transfer | 1170–1364 | **whole** (pad-held place on the store shelf) | — |
 | **demo-005** | verify | 1365–1424 | whole | — |
-| **demo-005** | return | 1425–2039 | **1425–1821** (coupled, through the door into the warehouse) | unlatch #1830 |
-| demo-005 | outbound | 690–1109 | 690–787 | image_jump #796 → wall clip (#796–829 detected; audit #820–900) |
-| demo-005 | couple | 510–689 | 510–636 | 8 cm carton snap #645 |
-| demo-005 | collect | 0–509 | 11–61 + 83–456 | image_jump #1; carton teleport #465 (and the audit: it starts with the carton being set INTO the rollwagen, no shelf pick) |
-| demo-004 | return | 1425–2039 | 1425–1821 | unlatch #1830 |
-| demo-004 | transfer | 1170–1364 | 1180–1272 | image_jump #1171; carton teleport #1281 |
-| demo-004 | outbound | 690–1109 | 859–903 | audit wall clip #680–850 (not reproduced here, kept conservatively) |
+| **demo-005** | return | 1425–2039 | **1425–1822** (coupled, through the door into the warehouse) | unlatch #1830 |
+| demo-005 | outbound | 690–1109 | 690–788 | image_jump #796 → wall clip (#796–829 detected; audit #820–900) |
+| demo-005 | couple | 510–689 | 510–637 | 8 cm carton snap #645 |
+| demo-005 | collect | 0–509 | 10–61 + 83–457 | image_jump #1; carton teleport #465 (and the audit: it starts with the carton being set INTO the rollwagen, no shelf pick) |
+| demo-004 | return | 1425–2039 | 1425–1822 | unlatch #1830 |
+| demo-004 | transfer | 1170–1364 | 1179–1273 | image_jump #1171; carton teleport #1281 |
+| demo-004 | outbound | 690–1109 | 858–904 | audit wall clip #680–850 (not reproduced here, kept conservatively) |
 | run-326 / 325 / 322 | collect | 0–823 / 769 / 781 | about 12–210 in 3 pieces | image_jump #2; partial picks, superseded by collect-src-001 |
 | door-src-001 | — | — | not rendered yet | — |
 
 Checked against the current demo-006 table (16:42 build), 3 violations:
 
-- **collect** collect-src-001 0–112 clears the tilt but keeps the 3.9 s static grasp hold. Use
-  `0–34` + `78–112` instead.
+- **collect** collect-src-001 0–112 ends exactly 0.5 s before the tilt but keeps the 3.9 s static
+  grasp hold (#27–85). Use `0–34` + `78–112` instead.
 - **transfer** warm8 164–223 is the floating scripted transfer. Use demo-005 1170–1364.
 - **verify** warm8 223 falls within 0.5 s of the floating carton's last motion. Use demo-005
   1365–1424.

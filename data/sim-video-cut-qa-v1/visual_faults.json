@@ -4,10 +4,10 @@
   "collect-src-001": [
    {
     "kind": "carton_tilt",
-    "frame": 134,
+    "frame": 120,
     "end": 328,
-    "detail": "carton leaves level after the lift: a 2nd carton face shows from #134 (sim 45.9 s), ~45 deg by #146, held on edge (~90 deg) by #154 and stays tilted through the carry to the rollwagen; the captain's 'tilted the box in a very wrong way'",
-    "evidence": "crops #126-#148 every 2 frames: level top face through #132, pentagon outline (side face) from #134"
+    "detail": "carton rolls off level during the lift: a side face first shows as a thin strip at #116 (~5 deg), ~10 deg by #120 (sim 40.7 s), pentagon outline by #134, held on edge (~90 deg) by #154 and stays tilted through the carry; the captain's 'tilted the box in a very wrong way'",
+    "evidence": "1:1 crops #96-#128 every 2-4 frames (level top face through #112, right side face visible from #116, ~8 px strip at #120) and #126-#148; the compile lane independently judged the onset ~f120"
    }
   ],
   "demo-004": [

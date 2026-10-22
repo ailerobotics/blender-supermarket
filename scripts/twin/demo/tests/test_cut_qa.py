@@ -53,7 +53,7 @@ def test_unlatch_is_terminal_and_cut_half_a_second_before(tmp_path):
     s = rec['stages']['return']
     f = s['first_fault']
     assert f['kind'] == 'unlatch' and 49 <= f['frame'] <= 51
-    assert s['keep'] == [[0, f['frame'] - Q.MARGIN_FRAMES - 1]]       # nothing after the unlatch
+    assert s['keep'] == [[0, f['frame'] - Q.MARGIN_FRAMES]]       # nothing after the unlatch
     assert all(c['reason'] for c in s['cuts'])
 
 
@@ -63,7 +63,7 @@ def test_teleport_is_a_position_jump(tmp_path):
     kinds = {f['kind'] for f in rec['stages']['return']['faults']}
     assert 'position_jump' in kinds
     keep = rec['stages']['return']['keep']
-    assert keep and keep[0][1] < 40 - Q.MARGIN_FRAMES
+    assert keep and keep[0][1] <= 40 - Q.MARGIN_FRAMES
 
 
 def test_stall_is_spliced_not_ended(tmp_path):
@@ -80,13 +80,13 @@ def test_stall_is_spliced_not_ended(tmp_path):
 def test_leading_fault_moves_the_start():
     faults = [{'kind': 'image_jump', 'frame': 2, 'end': 2, 'detail': '', 'channel': 'image'}]
     primary, keep, _, _ = Q.stage_ranges((0, 100), faults, [])
-    assert primary == [2 + Q.MARGIN_FRAMES + 1, 100] and keep == [primary]
+    assert primary == [2 + Q.MARGIN_FRAMES, 100] and keep == [primary]
 
 
 def test_checker_spec_and_ranges():
     chk = _checker()
     cr = {'margin_frames': 8, 'sources': {'s': {'n_frames': 100, 'stages': {
-        'collect': {'stage_span': [0, 59], 'keep': [[0, 20], [40, 50]], 'faults': [
+        'collect': {'stage_span': [0, 59], 'keep': [[0, 20], [40, 51]], 'faults': [
             {'kind': 'carton_tilt', 'frame': 59, 'end': 99, 'detail': 'tilt'}],
             'cuts': [{'start': 21, 'end': 39, 'reason': 'stall'}, {'start': 51, 'end': 59, 'reason': 'tilt'}]},
         'couple': {'stage_span': [60, 99], 'keep': [], 'faults': [], 'cuts': []}}}}}
@@ -95,5 +95,5 @@ def test_checker_spec_and_ranges():
     assert chk.check_spec(cr, ok) == []
     over = {'segments': [{'stage': 'collect', 'source': 's', 'frame_start': 0, 'frame_end': 45}]}
     assert chk.check_spec(cr, over) and 'stall' in chk.check_spec(cr, over)[0]
-    cr['sources']['s']['stages']['collect']['keep'].append([55, 58])     # inside the tilt margin
+    cr['sources']['s']['stages']['collect']['keep'].append([52, 52])     # 7 frames before the tilt
     assert any('within 8 frames' in b for b in chk.check_ranges(cr))

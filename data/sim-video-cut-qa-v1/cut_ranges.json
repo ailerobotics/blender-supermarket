@@ -26,20 +26,20 @@
       ],
       [
        78,
-       125
+       112
       ]
      ],
      "primary": [
       0,
-      125
+      112
      ],
      "first_fault": {
       "kind": "carton_tilt",
-      "frame": 134,
+      "frame": 120,
       "end": 328,
-      "detail": "carton leaves level after the lift: a 2nd carton face shows from #134 (sim 45.9 s), ~45 deg by #146, held on edge (~90 deg) by #154 and stays tilted through the carry to the rollwagen; the captain's 'tilted the box in a very wrong way'",
+      "detail": "carton rolls off level during the lift: a side face first shows as a thin strip at #116 (~5 deg), ~10 deg by #120 (sim 40.7 s), pentagon outline by #134, held on edge (~90 deg) by #154 and stays tilted through the carry; the captain's 'tilted the box in a very wrong way'",
       "channel": "visual",
-      "evidence": "crops #126-#148 every 2 frames: level top face through #132, pentagon outline (side face) from #134"
+      "evidence": "1:1 crops #96-#128 every 2-4 frames (level top face through #112, right side face visible from #116, ~8 px strip at #120) and #126-#148; the compile lane independently judged the onset ~f120"
      },
      "cuts": [
       {
@@ -48,19 +48,19 @@
        "reason": "stall #27-85 (3.9 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.832"
       },
       {
-       "start": 126,
+       "start": 113,
        "end": 328,
-       "reason": "carton_tilt at #134-328 (visual: carton leaves level after the lift: a 2nd carton face shows from #134 (sim 45.9 s), ~45 deg by #146, held on edge (~90 deg) by #154 and stays tilted through the carry to the rollwagen; the captain's 'tilted the box in a very wrong way'); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "carton_tilt at #120-328 (visual: carton rolls off level during the lift: a side face first shows as a thin strip at #116 (~5 deg), ~10 deg by #120 (sim 40.7 s), pentagon outline by #134, held on edge (~90 deg) by #154 and stays tilted through the carry; the captain's 'tilted the box in a very wrong way'); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
       {
        "kind": "carton_tilt",
-       "frame": 134,
+       "frame": 120,
        "end": 328,
-       "detail": "carton leaves level after the lift: a 2nd carton face shows from #134 (sim 45.9 s), ~45 deg by #146, held on edge (~90 deg) by #154 and stays tilted through the carry to the rollwagen; the captain's 'tilted the box in a very wrong way'",
+       "detail": "carton rolls off level during the lift: a side face first shows as a thin strip at #116 (~5 deg), ~10 deg by #120 (sim 40.7 s), pentagon outline by #134, held on edge (~90 deg) by #154 and stays tilted through the carry; the captain's 'tilted the box in a very wrong way'",
        "channel": "visual",
-       "evidence": "crops #126-#148 every 2 frames: level top face through #132, pentagon outline (side face) from #134"
+       "evidence": "1:1 crops #96-#128 every 2-4 frames (level top face through #112, right side face visible from #116, ~8 px strip at #120) and #126-#148; the compile lane independently judged the onset ~f120"
       },
       {
        "kind": "image_jump",
@@ -183,7 +183,7 @@
       {
        "start": 166,
        "end": 224,
-       "reason": "no clean stretch of >= 1 s: carton_floating at #168-223 (pose: SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "no clean stretch of >= 1 s: carton_floating at #168-223 (pose: SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -210,12 +210,12 @@
      "keep": [
       [
        225,
-       232
+       233
       ]
      ],
      "primary": [
       225,
-      232
+      233
      ],
      "first_fault": {
       "kind": "unlatch",
@@ -226,9 +226,9 @@
      },
      "cuts": [
       {
-       "start": 233,
+       "start": 234,
        "end": 358,
-       "reason": "unlatch at #241 (pose: measured coupling drops: the robot unlatches the rollwagen and drives on alone); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "unlatch at #241 (pose: measured coupling drops: the robot unlatches the rollwagen and drives on alone); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -323,7 +323,7 @@
       {
        "start": 166,
        "end": 224,
-       "reason": "no clean stretch of >= 1 s: carton_floating at #169-223 (pose: SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "no clean stretch of >= 1 s: carton_floating at #169-223 (pose: SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -350,12 +350,12 @@
      "keep": [
       [
        225,
-       232
+       233
       ]
      ],
      "primary": [
       225,
-      232
+      233
      ],
      "first_fault": {
       "kind": "unlatch",
@@ -366,9 +366,9 @@
      },
      "cuts": [
       {
-       "start": 233,
+       "start": 234,
        "end": 359,
-       "reason": "unlatch at #241 (pose: measured coupling drops: the robot unlatches the rollwagen and drives on alone); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "unlatch at #241 (pose: measured coupling drops: the robot unlatches the rollwagen and drives on alone); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -402,17 +402,17 @@
      "usable": true,
      "keep": [
       [
-       11,
+       10,
        61
       ],
       [
        83,
-       456
+       457
       ]
      ],
      "primary": [
-      11,
-      456
+      10,
+      457
      ],
      "first_fault": {
       "kind": "image_jump",
@@ -424,8 +424,8 @@
      "cuts": [
       {
        "start": 0,
-       "end": 10,
-       "reason": "image_jump at #1-2 (image: mean |delta| 33.2 vs local 2.3: hard visual jump); range ends/starts 8 frames (0.5 s of output) after it"
+       "end": 9,
+       "reason": "image_jump at #1-2 (image: mean |delta| 33.2 vs local 2.3: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
       },
       {
        "start": 62,
@@ -433,9 +433,9 @@
        "reason": "stall #54-90 (2.5 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.591"
       },
       {
-       "start": 457,
+       "start": 458,
        "end": 509,
-       "reason": "position_jump at #465 (pose: carton moved 0.26 m in one frame (0.07 s): teleport); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "position_jump at #465 (pose: carton moved 0.26 m in one frame (0.07 s): teleport); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -474,12 +474,12 @@
      "keep": [
       [
        510,
-       636
+       637
       ]
      ],
      "primary": [
       510,
-      636
+      637
      ],
      "first_fault": {
       "kind": "carton_floating",
@@ -490,9 +490,9 @@
      },
      "cuts": [
       {
-       "start": 637,
+       "start": 638,
        "end": 689,
-       "reason": "carton_floating at #645 (pose: carton moved 8.0 cm with the gripper pad away and not riding the cart); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "carton_floating at #645 (pose: carton moved 8.0 cm with the gripper pad away and not riding the cart); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -519,12 +519,12 @@
      "keep": [
       [
        690,
-       787
+       788
       ]
      ],
      "primary": [
       690,
-      787
+      788
      ],
      "first_fault": {
       "kind": "image_jump",
@@ -535,9 +535,9 @@
      },
      "cuts": [
       {
-       "start": 788,
+       "start": 789,
        "end": 1109,
-       "reason": "image_jump at #796 (image: mean |delta| 34.7 vs local 4.9: hard visual jump); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "image_jump at #796 (image: mean |delta| 34.7 vs local 4.9: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -836,12 +836,12 @@
      "keep": [
       [
        1425,
-       1821
+       1822
       ]
      ],
      "primary": [
       1425,
-      1821
+      1822
      ],
      "first_fault": {
       "kind": "unlatch",
@@ -852,9 +852,9 @@
      },
      "cuts": [
       {
-       "start": 1822,
+       "start": 1823,
        "end": 2039,
-       "reason": "unlatch at #1830 (pose: panel runs the uncouple step); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "unlatch at #1830 (pose: panel runs the uncouple step); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -888,13 +888,13 @@
      "usable": true,
      "keep": [
       [
-       10,
-       49
+       9,
+       50
       ]
      ],
      "primary": [
-      10,
-      49
+      9,
+      50
      ],
      "first_fault": {
       "kind": "image_jump",
@@ -906,13 +906,13 @@
      "cuts": [
       {
        "start": 0,
-       "end": 9,
-       "reason": "image_jump at #1 (image: mean |delta| 17.9 vs local 2.9: hard visual jump); range ends/starts 8 frames (0.5 s of output) after it"
+       "end": 8,
+       "reason": "image_jump at #1 (image: mean |delta| 17.9 vs local 2.9: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
       },
       {
-       "start": 50,
+       "start": 51,
        "end": 509,
-       "reason": "image_jump at #58 (image: mean |delta| 9.4 vs local 2.1: hard visual jump); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "image_jump at #58 (image: mean |delta| 9.4 vs local 2.1: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -967,12 +967,12 @@
      "keep": [
       [
        510,
-       636
+       637
       ]
      ],
      "primary": [
       510,
-      636
+      637
      ],
      "first_fault": {
       "kind": "carton_floating",
@@ -983,9 +983,9 @@
      },
      "cuts": [
       {
-       "start": 637,
+       "start": 638,
        "end": 689,
-       "reason": "carton_floating at #645 (pose: carton moved 8.0 cm with the gripper pad away and not riding the cart); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "carton_floating at #645 (pose: carton moved 8.0 cm with the gripper pad away and not riding the cart); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -1019,13 +1019,13 @@
      "usable": true,
      "keep": [
       [
-       859,
-       903
+       858,
+       904
       ]
      ],
      "primary": [
-      859,
-      903
+      858,
+      904
      ],
      "first_fault": {
       "kind": "clip",
@@ -1038,13 +1038,13 @@
      "cuts": [
       {
        "start": 690,
-       "end": 858,
-       "reason": "clip at #680-850 (visual: outbound wall clip-through per the stage audit (data/sim-video-stage-audit-v1/stage_sources.json demo_audit: whiteout ~#680-850); NOT reproduced by the whiteout/jump detectors here (frame mean <= 224) and inconclusive by eye (#850 cage against the portal wall) -- kept as a conservative cut); range ends/starts 8 frames (0.5 s of output) after it"
+       "end": 857,
+       "reason": "clip at #680-850 (visual: outbound wall clip-through per the stage audit (data/sim-video-stage-audit-v1/stage_sources.json demo_audit: whiteout ~#680-850); NOT reproduced by the whiteout/jump detectors here (frame mean <= 224) and inconclusive by eye (#850 cage against the portal wall) -- kept as a conservative cut); range ends/starts 8 frames (>= 0.5 s of output) after it"
       },
       {
-       "start": 904,
+       "start": 905,
        "end": 1109,
-       "reason": "carton_floating at #912 (pose: carton moved 2.6 cm with the gripper pad away and not riding the cart); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "carton_floating at #912 (pose: carton moved 2.6 cm with the gripper pad away and not riding the cart); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -1110,13 +1110,13 @@
      "usable": true,
      "keep": [
       [
-       1180,
-       1272
+       1179,
+       1273
       ]
      ],
      "primary": [
-      1180,
-      1272
+      1179,
+      1273
      ],
      "first_fault": {
       "kind": "image_jump",
@@ -1128,13 +1128,13 @@
      "cuts": [
       {
        "start": 1170,
-       "end": 1179,
-       "reason": "image_jump at #1171 (image: mean |delta| 27.1 vs local 5.7: hard visual jump); range ends/starts 8 frames (0.5 s of output) after it"
+       "end": 1178,
+       "reason": "image_jump at #1171 (image: mean |delta| 27.1 vs local 5.7: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
       },
       {
-       "start": 1273,
+       "start": 1274,
        "end": 1364,
-       "reason": "position_jump at #1281 (pose: carton moved 0.24 m in one frame (0.07 s): teleport); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "position_jump at #1281 (pose: carton moved 0.24 m in one frame (0.07 s): teleport); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -1193,12 +1193,12 @@
      "keep": [
       [
        1425,
-       1821
+       1822
       ]
      ],
      "primary": [
       1425,
-      1821
+      1822
      ],
      "first_fault": {
       "kind": "unlatch",
@@ -1209,9 +1209,9 @@
      },
      "cuts": [
       {
-       "start": 1822,
+       "start": 1823,
        "end": 2039,
-       "reason": "unlatch at #1830 (pose: panel runs the uncouple step); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "unlatch at #1830 (pose: panel runs the uncouple step); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -1262,7 +1262,7 @@
      "usable": true,
      "keep": [
       [
-       12,
+       11,
        46
       ],
       [
@@ -1271,12 +1271,16 @@
       ],
       [
        129,
-       210
+       194
+      ],
+      [
+       211,
+       211
       ]
      ],
      "primary": [
-      12,
-      210
+      11,
+      211
      ],
      "first_fault": {
       "kind": "image_jump",
@@ -1288,8 +1292,8 @@
      "cuts": [
       {
        "start": 0,
-       "end": 11,
-       "reason": "image_jump at #2-3 (image: mean |delta| 33.8 vs local 0.7: hard visual jump); range ends/starts 8 frames (0.5 s of output) after it"
+       "end": 10,
+       "reason": "image_jump at #2-3 (image: mean |delta| 33.8 vs local 0.7: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
       },
       {
        "start": 47,
@@ -1302,9 +1306,14 @@
        "reason": "stall #71-136 (4.4 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.818"
       },
       {
-       "start": 211,
+       "start": 195,
+       "end": 210,
+       "reason": "stall #187-218 (2.1 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.473"
+      },
+      {
+       "start": 212,
        "end": 823,
-       "reason": "image_jump at #219 (image: mean |delta| 10.1 vs local 0.5: hard visual jump); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "image_jump at #219 (image: mean |delta| 10.1 vs local 0.5: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -1361,7 +1370,7 @@
      "usable": true,
      "keep": [
       [
-       12,
+       11,
        47
       ],
       [
@@ -1370,12 +1379,12 @@
       ],
       [
        108,
-       208
+       209
       ]
      ],
      "primary": [
-      12,
-      208
+      11,
+      209
      ],
      "first_fault": {
       "kind": "image_jump",
@@ -1387,8 +1396,8 @@
      "cuts": [
       {
        "start": 0,
-       "end": 11,
-       "reason": "image_jump at #2-3 (image: mean |delta| 33.9 vs local 0.7: hard visual jump); range ends/starts 8 frames (0.5 s of output) after it"
+       "end": 10,
+       "reason": "image_jump at #2-3 (image: mean |delta| 33.9 vs local 0.7: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
       },
       {
        "start": 48,
@@ -1401,9 +1410,9 @@
        "reason": "stall #73-115 (2.9 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.557"
       },
       {
-       "start": 209,
+       "start": 210,
        "end": 769,
-       "reason": "image_jump at #217-218 (image: mean |delta| 34.4 vs local 0.8: hard visual jump); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "image_jump at #217-218 (image: mean |delta| 34.4 vs local 0.8: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -1456,7 +1465,7 @@
      "usable": true,
      "keep": [
       [
-       12,
+       11,
        46
       ],
       [
@@ -1465,12 +1474,12 @@
       ],
       [
        124,
-       205
+       206
       ]
      ],
      "primary": [
-      12,
-      205
+      11,
+      206
      ],
      "first_fault": {
       "kind": "image_jump",
@@ -1482,8 +1491,8 @@
      "cuts": [
       {
        "start": 0,
-       "end": 11,
-       "reason": "image_jump at #2-3 (image: mean |delta| 32.8 vs local 0.7: hard visual jump); range ends/starts 8 frames (0.5 s of output) after it"
+       "end": 10,
+       "reason": "image_jump at #2-3 (image: mean |delta| 32.8 vs local 0.7: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) after it"
       },
       {
        "start": 47,
@@ -1496,9 +1505,9 @@
        "reason": "stall #71-131 (4.1 s of output with no visible motion) spliced to 2x0.5 s; join mean|delta|=0.804"
       },
       {
-       "start": 206,
+       "start": 207,
        "end": 781,
-       "reason": "image_jump at #214 (image: mean |delta| 11.0 vs local 0.6: hard visual jump); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "image_jump at #214 (image: mean |delta| 11.0 vs local 0.6: hard visual jump); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [
@@ -1612,7 +1621,7 @@
       {
        "start": 166,
        "end": 239,
-       "reason": "no clean stretch of >= 1 s: carton_floating at #169-238 (pose: SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried); range ends/starts 8 frames (0.5 s of output) before it"
+       "reason": "no clean stretch of >= 1 s: carton_floating at #169-238 (pose: SCRIPTED transfer (mission transfer_mode=scripted): the carton slides out of the cage and swings to the target on a scripted path while the arm stays still -- floating, not carried); range ends/starts 8 frames (>= 0.5 s of output) before it"
       }
      ],
      "faults": [

@@ -404,14 +404,15 @@ def stall_splices(stalls, thumbs, span):
 def stage_ranges(span, faults, drops, *, min_frames=FPS_OUT):
     """Clean keep intervals inside ``span`` given ending faults and stall drops.
 
-    Every ending fault window [f, e] (dilated by MARGIN_FRAMES each side) is excluded. The PRIMARY
+    Every ending fault window [f, e] is excluded together with the MARGIN_FRAMES - 1 frames on each side,
+    so the last kept frame before a fault is f - MARGIN_FRAMES (0.53 s of output at 15 fps). The PRIMARY
     keep is the first clean interval of at least ``min_frames`` (1 s); a fault window at the stage start
     pushes it past the fault. Stall drops split the interval into seamless splices."""
     lo, hi = span
     bad = []
-    for f in faults:
+    for f in faults:                  # a kept frame stays >= MARGIN_FRAMES (0.5 s) away from every fault frame
         if f['kind'] in ENDING and f['end'] >= lo and f['frame'] <= hi:
-            bad.append((f['frame'] - MARGIN_FRAMES, f['end'] + MARGIN_FRAMES, f))
+            bad.append((f['frame'] - MARGIN_FRAMES + 1, f['end'] + MARGIN_FRAMES - 1, f))
     bad.sort(key=lambda x: x[0])
     clean, cur = [], lo
     for a, b, _ in bad:
@@ -503,7 +504,7 @@ def _why(bad, a, b, *, lead):
     where = f"#{f['frame']}" + (f"-{f['end']}" if f['end'] != f['frame'] else '')
     edge = 'after' if lead else 'before'
     return (f"{f['kind']} at {where} ({f['channel']}: {f['detail']}); range ends/starts {MARGIN_FRAMES} frames "
-            f"({MARGIN_S} s of output) {edge} it")
+            f"(>= {MARGIN_S} s of output) {edge} it")
 
 
 def build(mission_root, sources, visual_faults=None, notes=None):

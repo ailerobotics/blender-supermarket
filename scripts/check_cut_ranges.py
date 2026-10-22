@@ -5,7 +5,7 @@
         [--spec data/sim-video-compile-v1/compile-demo-006.json]
 
 Always validates cut_ranges.json itself (every keep piece inside its stage span and source, ordered,
-no keep frame inside a fault window dilated by the 0.5 s margin, every cut carries a reason). With
+no keep frame closer than the 0.5 s margin (8 frames) to a fault, every cut carries a reason). With
 ``--spec``, also checks every compile segment: its [frame_start, frame_end] must lie inside ONE keep
 piece of the same source + stage. Exit 0 = clean, 1 = a violation (each printed), 2 = bad input.
 """
@@ -36,7 +36,7 @@ def check_ranges(cr):
                     bad.append(f'{name}/{stage}: keep pieces overlap or are out of order at [{a},{b}]')
                 prev = b
                 for f in s.get('faults', []):
-                    if f['kind'] in ENDING and a <= f['end'] + margin and f['frame'] - margin <= b:
+                    if f['kind'] in ENDING and a < f['end'] + margin and f['frame'] - margin < b:
                         bad.append(f"{name}/{stage}: keep [{a},{b}] within {margin} frames of fault "
                                    f"{f['kind']} #{f['frame']}-{f['end']}")
             for c in s.get('cuts', []):
