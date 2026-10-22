@@ -360,3 +360,11 @@ def test_port_tick_profile_line(tmp_path, capsys):
     assert 'TICK_PROFILE action=park' in out
     for section in ('step=', 'lidar=', 'trace=', 'ratio='):
         assert section in out
+
+
+def test_sim_speed_is_a_registered_runtime_key_for_the_activation_preflight():
+    # The orchestrator can `--require sim_speed` so a host/runtime config mis-placement fails the boot.
+    from twin.restock_manipulation.config_preflight import KEY_CONSUMER, RUNTIME, check_activation
+    assert KEY_CONSUMER['sim_speed'] == RUNTIME
+    assert check_activation({}, {'sim_speed': {'profile': 'max'}}, ['sim_speed']) == []
+    assert 'MIS-PLACED' in check_activation({'sim_speed': {'profile': 'max'}}, {}, ['sim_speed'])[0]
