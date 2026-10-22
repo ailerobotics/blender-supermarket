@@ -440,10 +440,15 @@ def run(args, manifest, scenario):
                     # Per-stage timeout (default 120 s). The couple stage's rounded approach
                     # (couple_approach waypoint + slow dock-approach cap) travels farther than a
                     # direct dock run, so it may need more than the default; config-settable.
+                    # vr1: the labelled ground-truth demo workarounds (transfer_ground_truth /
+                    # verify_ground_truth) need the Mission to accept their honestly-labelled
+                    # 'ground_truth' evidence source; () when none is configured => byte-identical.
+                    from twin.restock.ground_truth_verify import mission_ground_truth_sources
                     return Mission(db, Job(**scenario['job']), bundle.adapter,
                                    stages=config.get('stages'), start_at=config.get('start_at'),
                                    timeout_s=float(config.get('stage_timeout_s', 120.)),
-                                   fit_preflight=fit_verdict)
+                                   fit_preflight=fit_verdict,
+                                   ground_truth_sources=mission_ground_truth_sources(config))
                 def run_once():
                     """One full mission attempt against the live bundle; returns (mission, summary)
                     and persists mission.json. Unchanged from the single-run behaviour -- the warm
@@ -471,6 +476,9 @@ def run(args, manifest, scenario):
                         m.fail('simulation step budget exceeded')
                     s = {'state': m.state, 'reason': m.reason, 'physics_verified': False,
                          'note': 'Mission success alone does not verify video, contacts or autonomy.'}
+                    # vr1: record the labelled demo workarounds (verify_mode etc.); {} => unchanged.
+                    from twin.restock.ground_truth_verify import mission_modes
+                    s.update(mission_modes(config))
                     if fit_verdict is not None:
                         s['fit_preflight'] = fit_verdict.event()
                     # Flag a start-phase shortcut run so mission.json cannot be read as a full,

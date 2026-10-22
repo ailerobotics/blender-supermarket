@@ -339,6 +339,7 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
     """
     plan = plan_bundle(manifest, scenario, config)
     output = Path(output)
+    from .ground_truth_verify import ground_truth_place_actions
 
     # Opt-in recorded start staging (config['start_staging'], start_at='transfer' only): the physical
     # build spawns the robot + cart at the recorded park->transfer handover instead of the scenario's
@@ -394,7 +395,15 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              couple_static_drive=bool(config.get('couple_static_drive')),
                              uncouple_on_return=bool(config.get('uncouple_on_return')),
                              carry_reposition_drive=bool(config.get('carry_reposition_drive')),
-                             couple_standoff_tolerance=config.get('couple_standoff_tolerance'))
+                             couple_standoff_tolerance=config.get('couple_standoff_tolerance'),
+                             # vr1: accept the fm461 ground-truth place check as the transfer (and,
+                             # opt-in, collect) stage evidence -- labelled source='ground_truth'. Derived
+                             # from config['transfer_ground_truth'].enabled / collect_ground_truth_place_
+                             # evidence; absent => () => byte-identical.
+                             ground_truth_place_actions=ground_truth_place_actions(config))
+
+    from .ground_truth_verify import stage_modes as _stage_modes
+    adapter.stage_modes = _stage_modes(config)   # vr1: '[ground truth]' step labels; {} => none
 
     # Opt-in warm-session reset provider (dev iteration): config['warm_reset'] names a
     # lane-owned builder `module:function` called once here with the live scene; it returns the
@@ -551,9 +560,19 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     _carry_self_radius = float(config.get('carry_self_radius_m', 0.0))
     print('CARRY_SELF_MASK carry_self_radius_m=%.3f (0 => off; masks near-field self only while carrying)'
           % _carry_self_radius, flush=True)
+    # vr1 FINDING (lidar yaw): Scan.sensor_to_base is (x, y, YAW) but the URDF origin is (x, y, Z) =
+    # (0.52, 0, 0.15), so the legacy wiring below reconstructs every live return 0.15 rad (8.6 deg) off its
+    # cast bearing -- a wall 3 m ahead reads as points spread over x 2.25..3.70 (CPU proof:
+    # scripts/check_mission_tail.py lidar check). The rays are cast at the base yaw (_lidar_pose), so the
+    # correct offset yaw is 0. config['lidar_sensor_yaw_fix'] = true uses (x, y, 0.0); absent/false keeps
+    # the legacy (x, y, z) tuple byte-identical, because couple/outbound were tuned live against it.
+    _lidar_to_base = ((_lidar_xyz[0], _lidar_xyz[1], 0.0) if config.get('lidar_sensor_yaw_fix')
+                      else _lidar_xyz)
+    print('LIDAR_SENSOR_TO_BASE %s (lidar_sensor_yaw_fix=%s)'
+          % (tuple(round(v, 3) for v in _lidar_to_base), bool(config.get('lidar_sensor_yaw_fix'))), flush=True)
     range_sensor = IsaacRangeSensor(
         get_sensor_pose=lambda: _lidar_pose(assembly.robot_body, _lidar_xyz[0], _lidar_xyz[1]),
-        sensor_to_base=_lidar_xyz, self_paths=(robot_root,), coupled_self_paths=cart_self_paths,
+        sensor_to_base=_lidar_to_base, self_paths=(robot_root,), coupled_self_paths=cart_self_paths,
         carry_self_radius=_carry_self_radius)
     # fm376: no walkthrough render product (recording_camera None) => no Recorder; the port then
     # self-disables the record cadence and the walkthrough is composed offline from sensing frames.
@@ -566,7 +585,19 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     recorder = (Recorder(output / 'mission-frames', fps=plan.recording_fps,
                          caption=ground_truth_collect.join_caption(walkthrough_caption(config), config))
                 if recording_camera is not None else None)
-    verifier = InventoryVerifier(capture, source=plan.verification_source)
+    # vr1 (labelled demo workaround, default OFF): config['verify_ground_truth'].enabled swaps the
+    # camera InventoryVerifier for the SIM GROUND-TRUTH verifier (handling-unit pose vs the authored bay
+    # top), because the bay's shelf camera is not commissioned and the camera verifier could never
+    # confirm. Same begin/stop/__call__ contract; evidence labelled source/verify_mode 'ground_truth'.
+    from .ground_truth_verify import from_config as _gt_verifier_from_config
+    verifier = _gt_verifier_from_config(
+        config, scenario, _stage_unit_pose_reader(assembly.stage, assembly.evidence['composition']['stock']),
+        read_contact=assembly.contact.read, source=plan.verification_source)
+    if verifier is None:
+        verifier = InventoryVerifier(capture, source=plan.verification_source)
+    else:
+        print('GROUND_TRUTH_VERIFY_MODE mission verify = sim ground truth (vr1, labelled; NOT camera) '
+              'tolerances=%s' % (verifier.tolerances(),), flush=True)
 
     def on_action(action, job):
         if action == 'verify':
@@ -653,6 +684,35 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         closers = closers + (_mast_bridge.close,)
     return {'navigation': navigation, 'mobile': assembly.mobile, 'manipulation': manipulation,
             'port': port, 'closers': closers, 'recording': recording}
+
+
+def _stage_unit_pose_reader(stage, prim_path):
+    """vr1: ``read() -> (x, y, z, tilt_rad)`` WORLD centre + tilt-from-level of the handling-unit prim
+    (controlled-asset ground truth for the labelled ground-truth verify only), or None when absent. Same
+    approach as the factory's place-verify read: one XformCache per call, the unit-local centre offset
+    cached from the first bound (rigid body)."""
+    import math
+    state = {'local_center': None}
+
+    def read():
+        import numpy as np
+        from pxr import Usd, UsdGeom
+        unit = stage.GetPrimAtPath(prim_path)
+        if not unit:
+            return None
+        Tu = np.asarray(UsdGeom.XformCache().GetLocalToWorldTransform(unit)).T
+        if state['local_center'] is None:
+            bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+            rng = bbox.ComputeWorldBound(unit).ComputeAlignedRange()
+            mn, mx = rng.GetMin(), rng.GetMax()
+            wc = np.array([(mn[0] + mx[0]) / 2.0, (mn[1] + mx[1]) / 2.0, (mn[2] + mx[2]) / 2.0, 1.0])
+            state['local_center'] = np.linalg.inv(Tu) @ wc
+        w = Tu @ state['local_center']
+        R = Tu[:3, :3]
+        zaxis = R[:, 2] / max(1e-9, float(np.linalg.norm(R[:, 2])))
+        tilt = math.acos(max(-1.0, min(1.0, float(zaxis[2]))))
+        return (float(w[0]), float(w[1]), float(w[2]), tilt)
+    return read
 
 
 def _base_pose(body):

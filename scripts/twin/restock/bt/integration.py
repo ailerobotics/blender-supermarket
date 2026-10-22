@@ -97,6 +97,10 @@ def run_once_bt(db, scenario, bundle, config, output_dir, *, mission_factory, is
             shutdown()
 
     summary.setdefault('note', '')
+    # vr1: record the labelled demo workarounds (verify_mode / transfer_verify_mode / return_mode) in
+    # mission.json so a ground-truth verify can never be read as a camera one; {} => unchanged summary.
+    from ..ground_truth_verify import mission_modes
+    summary.update(mission_modes(config))
     if mission.shortcut is not None:
         summary['note'] += (' START-PHASE SHORTCUT: stages ' + ', '.join(mission.shortcut['skipped'])
                             + ' were synthesized (robot pose, braked base, carton attach), not '

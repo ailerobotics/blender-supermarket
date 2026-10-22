@@ -47,9 +47,32 @@ _SENSOR_STALL_WINDOW_S = 20.
 # collect-gt: manip stages whose final controller evidence may be the fm389 ground-truth place check
 # (RESTOCK_VERIFY_PLACE), converted to labelled ground_truth stage evidence -- only while
 # RESTOCK_COLLECT_GROUND_TRUTH is on (unset => the pre-existing 'transfer evidence mismatch', byte-identical).
-# 'transfer' hits the same mismatch under fm461 ground-truth verify; it is the integration lane's to add
-# here AND to mission._GT_EVIDENCE_STAGES.
+# 'transfer' hits the same mismatch under fm461 ground-truth verify: handled, config-gated, by vr1's
+# RuntimeAdapter(ground_truth_place_actions=('transfer',)) (transfer_ground_truth.enabled) + Mission opt-in.
 _GT_PLACE_EVIDENCE_STAGES = ('collect',)
+
+# vr1: bounded settle wait (sim seconds) before releasing the tow coupling at the cart parking spot.
+# Coupler.detach REFUSES a moving/stale train (any base/cart speed or yaw rate > 0.02), and the cart pin
+# engaged one tick earlier can leave a sub-second transient, so the uncouple waits for a measured
+# stationary, parked train instead of failing the whole return stage on the first unsettled tick. A
+# train that never settles inside this window still fails with a NAMED reason (never forced).
+_UNCOUPLE_SETTLE_MAX_S = 30.
+_UNCOUPLE_SPEED_TOL = 0.02          # == mobile.Coupler._stationary threshold (m/s and rad/s)
+
+
+def _train_stationary(docking):
+    """Mirror of ``twin.mobile.Coupler._stationary`` for the uncouple pre-check: fresh observation and
+    every base/cart speed + yaw rate <= 0.02. ``None`` (a fixture packet without docking kinematics)
+    returns True so the mobile adapter itself stays the authority (it re-checks and may refuse)."""
+    if docking is None:
+        return True
+    try:
+        vals = (docking.robot_speed, docking.cart_speed, docking.robot_yaw_rate, docking.cart_yaw_rate)
+        age = docking.age
+    except AttributeError:
+        return True
+    return (all(math.isfinite(v) for v in (*vals, age)) and 0 <= age <= 0.1
+            and max(abs(v) for v in vals) <= _UNCOUPLE_SPEED_TOL)
 
 
 @dataclass(frozen=True)
@@ -198,7 +221,8 @@ class RuntimeAdapter:
                  stall_window_s=_SENSOR_STALL_WINDOW_S, route_alerts=None, fine_dock=None,
                  hold_cart_through_couple=False, couple_static_drive=False,
                  uncouple_on_return=False, wall_clock=time.monotonic, nav_stuck_wall_s=None,
-                 carry_reposition_drive=False, couple_standoff_tolerance=None):
+                 carry_reposition_drive=False, couple_standoff_tolerance=None,
+                 ground_truth_place_actions=()):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         # fm482 (config['couple_standoff_tolerance'], default None => xy 0.05 m + the nav default yaw
         # 0.08 rad, byte-identical): the arrival tolerance of the on-axis couple STANDOFF leg. The
@@ -216,6 +240,21 @@ class RuntimeAdapter:
                                        and math.isfinite(tol[key]) and 0 < tol[key] <= cap):
                     raise ValueError(f'couple_standoff_tolerance.{key} must be in (0, {cap}]')
             self.couple_standoff_tolerance = {k: float(v) for k, v in tol.items()}
+        # vr1 (labelled sim workaround, default OFF): the stages whose FINAL manipulation evidence may be
+        # the controller's ground-truth place check (fm461 'ground_truth_place_check', the sim-measured
+        # carton pose vs the bay/deck target) instead of a camera observation. Without this the very first
+        # live transfer that SUCCEEDS on the fm461 ground-truth verify is rejected here as 'transfer evidence
+        # mismatch' (that evidence carries no sku/quantity and is not 'sensor'), the BT retries a transfer the
+        # host refuses to re-begin, and the mission aborts. When listed, the stage succeeds with evidence
+        # honestly tagged source='ground_truth' + verify_mode (never 'sensor'); the Mission must opt in to
+        # that source (Mission(ground_truth_sources=...)). () (default) => byte-identical.
+        self.ground_truth_place_actions = frozenset(ground_truth_place_actions or ())
+        if not self.ground_truth_place_actions <= {'transfer'}:
+            # collect's ground-truth place evidence is collect-gt's env-gated path below (gtc), not this one
+            raise ValueError('ground_truth_place_actions must be a subset of {transfer}')
+        # vr1: per-stage labelled evidence mode ({'verify': 'ground_truth', ...}) for the behaviour-tree
+        # step labels / walkthrough captions; the bundle fills it from the runtime config. {} => no tags.
+        self.stage_modes = {}
         # fm431 (B1) / run-325 cold TRANSIT: relax the nav arm-transport gate on the mid-collect
         # reposition legs so the base can drive to place_approach while the arm CARRIES the carton (the
         # stable braked carry, already lidar self-masked). False (default) => the empty-gripper gate
@@ -229,6 +268,13 @@ class RuntimeAdapter:
         # EMPTY. False (default) => the legacy tow-home return, byte-identical. See _uncouple_return +
         # the return legs in start()/_step(), and data/mobile-restock-v2 for the deferred-item history.
         self.uncouple_on_return = bool(uncouple_on_return)
+        # vr1: True once THIS mission released the tow coupling at the parking spot (the cart is left
+        # parked + pinned). A re-begun return (BT StageRetry / fm363 STEP_RETRY) must then resume the EMPTY
+        # drive home -- re-towing a cart that is no longer coupled can only loop 'coupling_changed' to the
+        # blocked timeout. Also lets a re-begin release a cart pin left by an interrupted brake leg.
+        self._cart_left_parked = False
+        self._cart_pinned_for_uncouple = False
+        self._uncouple_wait_s = 0.0
         # Set in start(); declared here so the opt-in behaviour-tree layer can tell at tree-build time
         # (before any stage begins) that this adapter exposes per-stage phases (vs a plain fixture).
         self.phase = None
@@ -319,6 +365,11 @@ class RuntimeAdapter:
         self.last_packet_id = None
 
     def start(self, action, job):
+        if action != 'return':
+            # vr1: the uncouple memory spans only consecutive (re-)begins of THIS mission's return; any
+            # other stage beginning (a new / warm-session attempt re-couples the cart) clears it.
+            self._cart_left_parked = False
+            self._cart_pinned_for_uncouple = False
         self.mobile.park()
         if hasattr(self.port,'begin_action'):
             self.port.begin_action(action,job)
@@ -351,7 +402,20 @@ class RuntimeAdapter:
                 # cannot shove the free cart; attach() releases it once coupled.
                 self.mobile.hold_cart_pin()
         elif action in ('collect', 'outbound', 'return'):
-            if action == 'return' and self._uncouple_return():
+            if action == 'return' and self._uncouple_return() and self._cart_left_parked:
+                # vr1: a RE-BEGUN return after this mission already uncoupled (BT StageRetry / fm363
+                # STEP_RETRY of a failed home leg): the cart is parked + pinned and NOT coupled, so resume
+                # the empty drive home from the live pose instead of re-towing a cart that is gone.
+                self.nav.start(self.poses['home'], False)
+                self.phase = 'navigate'
+                self._return_leg = 'home'
+            elif action == 'return' and self._uncouple_return():
+                self._uncouple_wait_s = 0.0
+                if self._cart_pinned_for_uncouple and hasattr(self.mobile, 'release_cart_brake'):
+                    # vr1: an interrupted brake/uncouple leg left the STILL-COUPLED cart world-pinned; free
+                    # it so the re-begun coupled tow is not dragging a pinned cart (re-pinned at 'brake').
+                    self.mobile.release_cart_brake(force=True)
+                    self._cart_pinned_for_uncouple = False
                 # Uncouple-at-parking-spot return: tow the cart to its parking spot FIRST (still
                 # coupled), then brake it, release the coupling and drive home empty. The first leg is a
                 # coupled tow, so it keeps the return goal-articulation tolerance.
@@ -723,39 +787,18 @@ class RuntimeAdapter:
             if p.coupled and state['healthy']:
                 return Result('succeeded', self._evidence(p, coupled=True, **self._nav_workarounds('couple')))
             return Result('running', reason='awaiting healthy physical coupling')
+        if self.action == 'return' and self._uncouple_return():
+            # vr1: handled ABOVE the stationary parked-guard, mirroring couple's fm419(b): the brake pin
+            # and the hitch release are EXPECTED to perturb the train for a tick or two, so an unsettled
+            # tick WAITS (the base is held, nothing is commanded) instead of failing the whole stage -- a
+            # failure here is unrecoverable once the coupling is released (see _cart_left_parked).
+            return self._step_return_uncouple(p, dt)
         if not p.parked:
             return Result('failed', reason='base moved during stationary operation')
         if self.action == 'park':
             if not p.coupled:
                 return Result('failed', reason='cart lost before transfer')
             return Result('succeeded', self._evidence(p, stationary=True))
-        if self.action == 'return' and self._uncouple_return():
-            # Uncouple-at-parking-spot execute legs: brake the parked cart, then release the tow
-            # coupling, each a distinct observable step so the behaviour tree shows them in series.
-            if self._return_leg == 'brake':
-                self.mobile.hold_cart_pin()   # pin the parked cart to the world before releasing the joint
-                self._return_leg = 'uncouple'
-                return Result('running', reason='cart braked at parking spot; releasing coupling next')
-            if self._return_leg == 'uncouple':
-                state = self.mobile.uncouple(p.docking)   # release the tow coupling (once)
-                if state.get('joint_present'):
-                    return Result('failed', reason='uncouple failed: tow coupling still present')
-                self._return_leg = 'uncouple_wait'
-                return Result('running', reason='coupling released; awaiting measured uncoupled observation')
-            if self._return_leg == 'uncouple_wait':
-                if p.coupled:
-                    return Result('running', reason='awaiting measured uncoupled observation')
-                backaway = self.poses.get('cart_parking_backaway')
-                if backaway is not None:
-                    self.nav.start(backaway, False)   # reverse clear of the parked cart, uncoupled
-                    self.phase = 'navigate'
-                    self._return_leg = 'cart_parking_backaway'
-                    return Result('running', reason='uncoupled; backing away from the parked cart')
-                self.nav.start(self.poses['home'], False)   # no back-away waypoint: drive home empty
-                self.phase = 'navigate'
-                self._return_leg = 'home'
-                return Result('running', reason='uncoupled; driving home empty')
-            raise RuntimeError(f'invalid return leg at execute: {self._return_leg!r}')
         if self.action in ('collect', 'transfer'):
             r = self.manip.step(dt, p)
             self._last_manip_phase = getattr(r, 'phase', None)  # feeds next tick's port.gate()
@@ -814,6 +857,10 @@ class RuntimeAdapter:
                     raise ValueError('transfer returned no observation evidence')
                 last = r.evidence[-1]
                 expected = self.job.shelf_id if self.action == 'transfer' else self.manip.cart_location
+                key = 'released' if self.action == 'transfer' else 'loaded'
+                ground_truth = self._ground_truth_place_evidence(last, expected, p, key)
+                if ground_truth is not None:
+                    return Result('succeeded', ground_truth)
                 final_sources = sources
                 if (gtc.enabled() and self.action in _GT_PLACE_EVIDENCE_STAGES and isinstance(last, dict)
                         and last.get('source') == gtc.PLACE_CHECK):
@@ -827,7 +874,6 @@ class RuntimeAdapter:
                 if (last.get('source') not in final_sources or last.get('sku') != self.job.sku or
                         last.get('location') != expected or last.get('quantity') != self.job.quantity):
                     raise ValueError('transfer evidence mismatch')
-                key = 'released' if self.action == 'transfer' else 'loaded'
                 # Keep the actual final observation identity and clock.
                 return Result('succeeded', dict(last, **{key: True}))
             return Result(r.status, reason=r.reason)
@@ -837,6 +883,79 @@ class RuntimeAdapter:
                 return Result('running', reason='awaiting independent inventory observation')
             return Result('succeeded', evidence)
         raise RuntimeError('invalid runtime phase')
+
+    def _ground_truth_place_evidence(self, last, expected, p, key):
+        """vr1: the stage evidence for a manipulation that succeeded on the fm461 GROUND-TRUTH place
+        check, or None when not applicable (action not opted in, or the final evidence is a camera
+        observation -> the unchanged sensor path). The evidence is stamped by THIS accepting packet (its
+        observation id + clock, so the mission's freshness gate measures the acceptance, not the host's
+        reply lag) and is honestly labelled source='ground_truth' + the controller's verify_mode, with the
+        raw place check kept verbatim -- never relabelled 'sensor'."""
+        if self.action not in self.ground_truth_place_actions:
+            return None
+        if not isinstance(last, dict) or last.get('source') != gtc.PLACE_CHECK:
+            return None
+        if last.get('location') != expected:
+            raise ValueError(f'ground-truth place check location mismatch: '
+                             f'{last.get("location")!r} != {expected!r}')
+        return {'observation_id': f'ground_truth:{self.action}:{p.observation_id}',
+                'source': gtc.SOURCE, 'ground_truth': True, 'simulation_time': p.simulation_time,
+                'sku': self.job.sku, 'quantity': self.job.quantity, 'location': expected,
+                'verify_mode': last.get('verify_mode') or 'ground_truth',
+                'ground_truth_place_check': dict(last), key: True}
+
+    def _step_return_uncouple(self, p, dt):
+        """Uncouple-at-parking-spot execute legs (brake the parked cart, release the tow coupling, then
+        start the empty drive home), each a distinct observable step so the behaviour tree shows them in
+        series. vr1: an unsettled train WAITS (bounded) rather than failing -- see the caller."""
+        if self._return_leg == 'brake':
+            if not p.parked:
+                self._uncouple_wait_s += dt
+                if self._uncouple_wait_s > _UNCOUPLE_SETTLE_MAX_S:
+                    return Result('failed', reason=f'cart brake refused: base not parked for '
+                                                   f'{self._uncouple_wait_s:.1f}s at the cart parking spot')
+                return Result('running', reason='waiting for measured parking before braking the cart')
+            self.mobile.hold_cart_pin()   # pin the parked cart to the world before releasing the joint
+            self._cart_pinned_for_uncouple = True
+            self._uncouple_wait_s = 0.0
+            self._return_leg = 'uncouple'
+            return Result('running', reason='cart braked at parking spot; releasing coupling next')
+        if self._return_leg == 'uncouple':
+            if not (p.parked and _train_stationary(p.docking)):
+                self._uncouple_wait_s += dt
+                if self._uncouple_wait_s > _UNCOUPLE_SETTLE_MAX_S:
+                    return Result('failed', reason=f'uncouple refused: train not stationary/parked for '
+                                                   f'{self._uncouple_wait_s:.1f}s at the cart parking spot')
+                return Result('running', reason='waiting for a stationary train before releasing the coupling')
+            try:
+                state = self.mobile.uncouple(p.docking)   # release the tow coupling (once)
+            except ValueError as exc:
+                # Coupler.detach refuses a stale/moving observation BEFORE removing the joint (state is
+                # unchanged), so retrying on a later, settled tick is safe; bounded like the settle wait.
+                self._uncouple_wait_s += dt
+                if self._uncouple_wait_s > _UNCOUPLE_SETTLE_MAX_S:
+                    return Result('failed', reason=f'uncouple refused: {exc}')
+                return Result('running', reason=f'uncouple deferred ({exc}); retrying on a settled tick')
+            if state.get('joint_present'):
+                return Result('failed', reason='uncouple failed: tow coupling still present')
+            self._cart_left_parked = True
+            self._cart_pinned_for_uncouple = False   # the pin is now the parked cart's own brake (kept)
+            self._return_leg = 'uncouple_wait'
+            return Result('running', reason='coupling released; awaiting measured uncoupled observation')
+        if self._return_leg == 'uncouple_wait':
+            if p.coupled:
+                return Result('running', reason='awaiting measured uncoupled observation')
+            backaway = self.poses.get('cart_parking_backaway')
+            if backaway is not None:
+                self.nav.start(backaway, False)   # pull clear of the parked cart, uncoupled
+                self.phase = 'navigate'
+                self._return_leg = 'cart_parking_backaway'
+                return Result('running', reason='uncoupled; backing away from the parked cart')
+            self.nav.start(self.poses['home'], False)   # no back-away waypoint: drive home empty
+            self.phase = 'navigate'
+            self._return_leg = 'home'
+            return Result('running', reason='uncoupled; driving home empty')
+        raise RuntimeError(f'invalid return leg at execute: {self._return_leg!r}')
 
     def step(self, dt):
         try:
