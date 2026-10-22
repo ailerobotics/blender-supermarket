@@ -542,11 +542,30 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # station baselines were commissioned under; _check_match is geometric so a brighter mission still
     # matches); absent => None => byte-identical (no rig authored, pre-fm465 behaviour).
     _light_rig_scale = config.get('light_intensity_scale')
+    # vr1: the stage-scoped sensing teardown (RESTOCK_STAGE_SCOPED_SENSING) frees the "unused" shelf
+    # camera at the pick lift -- but a camera-mode transfer or the verify-stage InventoryVerifier reads
+    # it AFTER that, so destroying it left the post-place verify reading an expired prim. Keep it alive
+    # whenever an executed stage still reads it; collect-only / fully ground-truth missions free it
+    # (byte-identical). Derived from config only, so it is inert unless the teardown is also wired.
+    from .mission import bounded_stages as _bounded_stages
+    from .sensing_sources import shelf_camera_needed as _shelf_camera_needed
+    from . import ground_truth_verify as _ground_truth_verify
+    _active_stages = _bounded_stages(config.get('stages'), config.get('stop_after'), config.get('start_at'))
+    _start_at = config.get('start_at')
+    if _start_at and _start_at in _active_stages:
+        _active_stages = _active_stages[_active_stages.index(_start_at):]
+    _transfer_gt_block = config.get('transfer_ground_truth')
+    _transfer_gt = bool(_transfer_gt_block.get('enabled') if isinstance(_transfer_gt_block, dict)
+                        else _transfer_gt_block)
+    _keep_shelf_camera = _shelf_camera_needed(
+        _active_stages, transfer_ground_truth=_transfer_gt,
+        verify_ground_truth=_ground_truth_verify.config_block(config) is not None)
     assembly.sensing_sources = build_sensing_sources(
         assembly=assembly, scenario=scenario, manifest=mobile_manifest,
         manip_runtime=manipulation.controller, pose_bridge_root=config['pose_bridge_root'],
         render_scale=float(config.get('render_scale', 1.0)),
         full_res_locations=_decode_locations, light_rig_scale=_light_rig_scale,
+        keep_shelf_camera=_keep_shelf_camera,
         mast_depth=_mast_enabled, mast_depth_settings=_mast_settings)
     sensing = sensing_factory(app=app, assembly=assembly, plan=plan, config=config, output=output)
     capture = sensing['capture']

@@ -50,7 +50,7 @@ def _all_true_mask(design, camera_id):
 def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_bridge_root,
                           render_scale=1.0, full_res_locations=(), clearance_for_slot=None,
                           mast_depth=False, mast_depth_settings=None, light_rig_scale=None,
-                          _rig_builder=None, _mast_bridge_builder=None):
+                          keep_shelf_camera=False, _rig_builder=None, _mast_bridge_builder=None):
     """Assemble the sensing_sources mapping. Pure wiring; the rig is built behind the seam.
 
     pose_bridge_root is the FILESYSTEM root of the tray-perception pose bridge
@@ -135,16 +135,15 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
         NOT touch the SOURCE camera: run-300b showed the collect capture HOLDS source through the whole
         cart-swing (destroying it mid-collect starved /sensors -> sensor-stream watchdog). source stays
         resident; shelf alone (~0.95 GB freed before the peak) keeps the peak under the card. cart + nav
-        + source untouched; fail-safe (never raises)."""
-        from .native_cameras import destroy_camera_render_product
-        freed = []
-        for cid in _unused_sensing_camera_ids(design):
-            cam = cameras.get(cid)
-            if cam is not None:
-                destroy_camera_render_product(cam, getattr(assembly, 'stage', None))
-                freed.append(cid)
-        print('STAGE_SCOPED_SENSING torn down: %s' % (freed or 'none'), flush=True)
-        return freed
+        + source untouched; fail-safe (never raises).
+
+        vr1: ``keep_shelf_camera`` EXCLUDES the shelf camera when a later active stage still reads it
+        (a camera-mode transfer target/verify, or the verify-stage ``InventoryVerifier`` re-scan of the
+        shelf slot). Destroying it then left the post-place verify reading an expired prim
+        (``RuntimeError: Accessed invalid expired 'Camera' prim``). Collect-only / ground-truth-verify
+        missions never read it (``keep_shelf_camera`` False) => byte-identical."""
+        return _run_stage_scoped_teardown(design, cameras, keep_shelf_camera,
+                                          stage=getattr(assembly, 'stage', None))
 
     return {
         'cameras': cameras,
@@ -181,6 +180,50 @@ def _unused_sensing_camera_ids(design):
     shelf_cam = shelf['camera_id']
     others = {s['camera_id'] for n, s in supports.items() if n != 'shelf'}
     return () if shelf_cam in others else (shelf_cam,)
+
+
+def shelf_camera_needed(active_stages, *, transfer_ground_truth=False, verify_ground_truth=False):
+    """vr1 (pure): True when a mission stage that RUNS still reads the fixed ``shelf`` station camera,
+    so the fm381 stage-scoped teardown must NOT destroy it at the pick lift.
+
+    The camera-mode ``transfer`` stage reads it for the slot target + post-place verification; the
+    ``verify`` stage's ``InventoryVerifier`` re-scans the shelf slot (``job.shelf_id``). The
+    ground-truth transfer/verify workarounds read the authored bay pose / the handling-unit pose
+    (never the camera), so they do not need it -- a collect-only or fully ground-truth mission
+    returns False and the teardown stays byte-identical."""
+    stages = set(active_stages or ())
+    if 'transfer' in stages and not transfer_ground_truth:
+        return True
+    if 'verify' in stages and not verify_ground_truth:
+        return True
+    return False
+
+
+def _run_stage_scoped_teardown(design, cameras, keep_shelf_camera, *, destroy=None, stage=None):
+    """Pure-ish core of ``stage_scoped_teardown`` (CPU-testable): DESTROY the ``_unused_sensing_camera_ids``
+    render products, EXCEPT the shelf camera when ``keep_shelf_camera`` is set (a later active stage still
+    reads it). ``destroy`` defaults to ``native_cameras.destroy_camera_render_product``; a test injects a
+    recorder. Fail-safe is the destroy fn's own contract; this never raises for a skipped/absent camera."""
+    if destroy is None:
+        from .native_cameras import destroy_camera_render_product as destroy
+    unused = _unused_sensing_camera_ids(design)
+    keep = set()
+    if keep_shelf_camera:
+        shelf = design.get('supports', {}).get('shelf')
+        if shelf:
+            keep.add(shelf['camera_id'])
+    freed = []
+    for cid in unused:
+        if cid in keep:
+            continue
+        cam = cameras.get(cid)
+        if cam is not None:
+            destroy(cam, stage)
+            freed.append(cid)
+    kept = sorted(keep & set(unused))
+    print('STAGE_SCOPED_SENSING torn down: %s%s' % (
+        freed or 'none', (' (kept for a later stage: %s)' % kept) if kept else ''), flush=True)
+    return freed
 
 
 def _stage_scoped_teardown_camera_ids(design):

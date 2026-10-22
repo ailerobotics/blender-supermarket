@@ -481,6 +481,15 @@ repo's `scenes/`, `export/` or `renders/`.
   masked-depth bridge stamps frames with the publishing tick's sim time, so a pre-pause buffer would
   reach nvblox as current. The unrendered 40–72 ms tick caps the sim near 0.3×. Replay estimator
   `scripts/twin/tools/estimate_sim_speed.py`; guard audit `~/firstmate/data/sim-video-speedup-v1/report.md`.
+  **Stage-scoped teardown vs a later camera reader** (`RESTOCK_STAGE_SCOPED_SENSING`): the fm381
+  teardown DESTROYS (not pauses) the "unused" shelf camera at the pick lift to free VRAM, but a
+  camera-mode transfer or the verify-stage `InventoryVerifier` reads the shelf camera AFTER that →
+  the post-place verify read an expired prim (`Accessed invalid expired 'Camera' prim`). The teardown
+  now keeps the shelf camera alive whenever `sensing_sources.shelf_camera_needed(active_stages, ...)`
+  says an executed stage still reads it (`isaac_bundle` computes `keep_shelf_camera` from the config);
+  collect-only / ground-truth-verify missions free it unchanged. A destroyed-then-read camera now
+  raises the named `native_cameras.CameraRenderProductReleased`, not Isaac's raw expired-prim trace.
+  Report: `data/sim-robust-verify-camera-prim-v1/report.md`.
 - **Arm-carry bench** (`scripts/twin/tools/arm_carry_bench.py` + guarded GPU runner
   `scripts/run_arm_carry_bench.py`): boots Isaac ONCE, welds the carton at the tool via the
   mission's own `SIM_ATTACH_FALLBACK` weld, brakes the base in the airborne-carry yaw-lock
