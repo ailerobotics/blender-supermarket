@@ -270,6 +270,16 @@ repo's `scenes/`, `export/` or `renders/`.
 - Git delivery: the repository now has an `origin` remote; follow the current
   task delivery contract rather than the former local-only assumption.
 - Mobile UR10/cart assets and control interfaces: [docs/mobile_robot_rollwagen.md](docs/mobile_robot_rollwagen.md), commands in RUNBOOK §9. The generated mobile URDF replaces the fixed pedestal; import with a free base. CPU FK/schema checks do not establish PhysX towing stability.
+- **Mission scene visuals** (`scripts/twin/restock/visuals.py`): a config-switched,
+  VISUAL-ONLY material pass run inside `restock/scene.build` (so only the mission path,
+  not the commissioning `view_scene`). Binds a UR10 palette (silver link tubes, UR-blue
+  joint caps, dark housings) onto the imported arm link prims, a neutral grey to the mobile
+  base, galvanised steel + blue plastic to the rollwagen, and re-tones the backroom concrete/
+  walls via read-only overrides on the sublayered store. Top-level runtime key `visuals`,
+  **DEFAULT OFF** (absent ⇒ byte-identical plain look; opt a run in with `true`/`{"enabled":true}`/
+  `"on"`); example `docs/examples/visuals-mission-fragment.json`. It never touches
+  geometry/colliders/physics/joints/cameras/lights or the carton QR + decode markers, so the
+  sensing/decode suites are unchanged. CPU proof: `tests/test_restock_visuals.py`.
 - **Service environment**: `scripts/store_environment.py` adds the connected backroom;
   RUNBOOK §10 documents scratch builds, CPU geometry checks and the semantic/static-map
   manifest. Source cases are static visual stock; scenario composition owns dynamic

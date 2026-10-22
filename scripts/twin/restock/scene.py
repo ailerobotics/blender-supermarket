@@ -40,9 +40,11 @@ def promote_stock(stage, path, sku, mass_kg):
 
 
 def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
-          stock_mass_kg, spec=MobileSpec(), scenario=None, cage_collision=None):
+          stock_mass_kg, spec=MobileSpec(), scenario=None, cage_collision=None,
+          visuals=None):
     from pxr import Gf, UsdGeom, UsdPhysics, Usd
     from . import cage_collision as _cage
+    from . import visuals as _visuals
     # Validate the opt-in sim-only cage filter mode BEFORE creating the output (unknown value => refuse).
     cage_mode = _cage.mode({_cage.KEY: cage_collision})
     store, robot_usd, output = map(lambda x: Path(x).resolve(), (store, robot_usd, output))
@@ -76,6 +78,9 @@ def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
     stock = initial['stock'] if initial else promote_stock(stage,stock_path,sku,stock_mass_kg)
     # Opt-in SIM-ONLY workaround (restock.cage_collision): carton-vs-cage contacts filtered; None => off.
     cage = _cage.author_filter(stage,stock,assets['cart']['body']) if cage_mode else None
+    # Config-switched visual-only material pass (restock.visuals; DEFAULT OFF => byte-identical). Visual
+    # materials only -- never geometry/colliders/physics/QR/markers. A run opts in with config['visuals'].
+    vis = _visuals.apply(stage, assets, root) if _visuals.enabled(visuals) else None
     stage.GetRootLayer().Save()
     if any(hashlib.sha256(p.read_bytes()).hexdigest()!=digest for p,digest in hashes.items()):
         raise RuntimeError('input USD layer changed during composition')
@@ -85,6 +90,8 @@ def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
                   input_sha256={str(p):digest for p,digest in hashes.items()})
     if cage is not None:
         result['cage_collision'] = cage
+    if vis is not None:
+        result['visuals'] = vis
     return result
 
 

@@ -1,0 +1,24 @@
+{
+  "_comment": "Config-switched, visual-only material pass for the restock Isaac scene (scripts/twin/restock/visuals.py). The mission RUNTIME config (the Isaac process that composes the stage) reads the top-level 'visuals' key. It is DEFAULT OFF: with the key absent the scene composes byte-identically to today's plain look, so merging this changes nothing until a run opts in. To ENABLE the new look (UR10 palette, neutral-grey mobile base, galvanised-steel rollwagen with a blue plastic base plate, sealed-concrete backroom) add the 'visuals' block below to the run's runtime config. Visual materials ONLY: no geometry, collider, physics, mass, joint, camera, light, QR label, or decode marker is created or changed, so the carton QR and station-camera decode are byte-for-byte unaffected.",
+  "visuals": {
+    "enabled": true
+  },
+  "_on_off_forms": "Enable: \"visuals\": true  |  \"visuals\": {\"enabled\": true}  |  \"visuals\": \"on\". Disabled (default): omit the key, or \"visuals\": false | {\"enabled\": false} | \"off\".",
+  "_palette_srgb_hex": {
+    "ur_link_tubes_silver": "#C7CACC",
+    "ur_joint_caps_blue": "#3D7AB8",
+    "ur_joint_housing_dark": "#53565A",
+    "gripper_tool_steel": "#6A6E72",
+    "mobile_base_grey": "#8A8D90",
+    "wheels_casters_bumpers_dark": "#2E3134",
+    "hitch_drawbar_steel": "#3A3D40",
+    "rollwagen_galvanised_mesh_frame": "#9DA3A8",
+    "rollwagen_plastic_base_plate_blue": "#1E57A0",
+    "rollwagen_casters_dark": "#26282B"
+  },
+  "_env_retone_linear": {
+    "FX_concrete_backroom_floor": [0.32, 0.335, 0.355],
+    "FX_ceiling_backroom_walls": [0.82, 0.80, 0.74]
+  },
+  "_note": "UR values follow Universal Robots' own scheme (grey-aluminium housings RAL 9007, light-aluminium link tubes, light-blue joint caps). sRGB hex is converted to linear at author time for the UsdPreviewSurface diffuseColor; the backroom floor/wall re-tone is authored as DIRECT linear (matching the store's own Blender-exported convention) and only overrides the backroom materials in the composed output layer -- the sublayered store file stays read-only. Boot log line: 'VISUALS enabled=.. bound=.. env_retoned=..'."
+}
