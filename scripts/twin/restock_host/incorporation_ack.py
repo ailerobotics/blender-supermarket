@@ -221,6 +221,18 @@ def main():
     state = IncorporationAckState()
     publisher = node.create_publisher(String, NS + '/station/status', 10)
     stop = node.create_publisher(Bool, NS + '/manipulation/stop', 10)
+    # sim-robust-transfer-start-estop-v1: the global /manipulation/stop wire is a bare Bool the Isaac
+    # side LATCHES permanently, and this station-liveness node does NOT set /manipulation/status, so a
+    # stop published here surfaced to the mission as a BARE 'host emergency stop' with no cause (the
+    # coldlivefull transfer-start e-stop: a 'parked heartbeat lost: wall gap' fault during the between-
+    # ops nav gap). Name EVERY publication in host-stack.log so a bare op-start e-stop can always be
+    # traced to its trigger. Throttled to the first of each distinct reason (tick republishes at 20 Hz).
+    _last_estop_reason = [None]
+    def estop(reason, *, site):
+        if reason != _last_estop_reason[0]:
+            _last_estop_reason[0] = reason
+            print('STATION_ESTOP_PUBLISH site=%s reason=%r' % (site, reason), flush=True)
+        stop.publish(Bool(data=True))
     service = node.create_client(EsdfAndGradients, NS + '/nvblox_node/get_esdf_and_gradient')
     pending = None
     pending_epoch = None
@@ -259,7 +271,7 @@ def main():
             node.get_logger().info(
                 f'station command rejected: {exc}; now={n:.3f} stamp={stamp}')
             state.fault = str(exc)
-            stop.publish(Bool(data=True))
+            estop(f'station command rejected: {exc}', site='command')
 
     def tick():
         nonlocal pending, pending_epoch, pending_wall, last_discovery, endpoints_ready, diag_left
@@ -299,7 +311,7 @@ def main():
             # live ack node implies the planner/mapper processes are still alive.
             result = state.snapshot(stamp, endpoints_ready=endpoints_ready, process_alive=True)
             if state.fault:
-                stop.publish(Bool(data=True))
+                estop(state.fault, site='tick')
             publisher.publish(String(data=json.dumps(result, allow_nan=False)))
             # Mapper maintenance AFTER the liveness publish: graph discovery (endpoints_ready, used by the
             # NEXT snapshot) and issuing/cancelling the get_esdf_and_gradient request -- the parts that
@@ -341,7 +353,7 @@ def main():
                     pending_wall = time.monotonic()
         except Exception as exc:
             state.fault = str(exc)
-            stop.publish(Bool(data=True))
+            estop(f'tick exception: {exc}', site='tick-exception')
 
     def manip_status(message):
         # fm430 (2a): arm the post-attach ESDF kick on the mission phase rising into 'lift' (post-weld).
