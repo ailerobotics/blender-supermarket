@@ -327,7 +327,17 @@ repo's `scenes/`, `export/` or `renders/`.
   and the east-facing `home` reorientation-loop return is replaced by the west-facing
   `mission_poses.cart_parking` `[-9,16,π]`); uncoupled drives unchanged. Example fragment
   `docs/examples/tow-lanes-mission-fragment.json`; offline proof `scripts/check_tow_lanes.py`;
-  design in `data/sim-restock-nav-lanes-v1/report.md`. **Couple speed / outbound stall** (fm482, both
+  design in `data/sim-restock-nav-lanes-v1/report.md`. **Outbound lane acquires from the actual couple
+  seat** (sim-robust-outbound-lane-start-v1, opt-in default-off): the improved crosstrack couple seats
+  the base a VARIABLE distance off the fixed authored dock start (coldlivewin +0.5 m north → the lane
+  never acquired, froze to the 120 s nav-stuck). Per-lane `lead_in_max_m` synthesises a bounded, swept-
+  validated forward pure-pursuit COUPLED merge from the measured seat ONTO the centreline (a lead-in to
+  the EXACT start is NOT viable — a forward-only train 0.5 m lateral off a flat lane free-plans a ~12 m
+  loop), and `navigation.tow_lane_acquire_timeout_s` fails a genuinely non-acquirable lane by NAME in a
+  few sim seconds (`lane_not_acquired_timeout`/`lane_leadin_unreachable_timeout`) not the 120 s WALL
+  budget; re-centre the authored start to the seat-distribution middle so the lead-in absorbs the spread.
+  Example `docs/examples/outbound-lane-leadin-fragment.json`; design `data/sim-robust-outbound-lane-start-v1/report.md`.
+  **Couple speed / outbound stall** (fm482, both
   opt-in): `navigation.arrival_xy_hysteresis_m` stops the couple-standoff arrival dither (~700 s wall per
   warm run) and `navigation.coupled_creep_escape` stops the outbound `measured_turn_radius` noise
   livelock; offline proof on the recorded runs `scripts/check_couple_speed.py`. A LATER residual outbound
