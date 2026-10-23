@@ -339,6 +339,11 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
                                        coupled_progress_min_m=float(nav.get('coupled_progress_min_m', 0.05)),
                                        coupled_progress_escape_s=float(nav.get('coupled_progress_escape_s', 3.0)),
                                        coupled_progress_fault_s=float(nav.get('coupled_progress_fault_s', 8.0)),
+                                       coupled_progress_recovery=_strict_bool(nav, 'coupled_progress_recovery'),
+                                       coupled_breakaway_speed_mps=float(nav.get('coupled_breakaway_speed_mps', 0.18)),
+                                       coupled_breakaway_window_s=float(nav.get('coupled_breakaway_window_s', 2.0)),
+                                       coupled_breakaway_pulse_s=float(nav.get('coupled_breakaway_pulse_s', 0.5)),
+                                       coupled_breakaway_attempts=int(nav.get('coupled_breakaway_attempts', 3)),
                                        **_controller_kwargs(nav))
 
     if 'dynamic_obstacles' in nav and mode != 'sensor':

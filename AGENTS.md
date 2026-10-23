@@ -356,7 +356,14 @@ repo's `scenes/`, `export/` or `renders/`.
   below μ·N_drive, so caster lift ALONE can't help — the budget shows the sign; GPU bench is truth).
   One-command CPU proof + acceptance gate (`--gpu-run` grades a new trace) `scripts/check_tow_traction.py`;
   pure core `scripts/twin/traction.py`; bounded GPU config + build steps
-  `docs/examples/coupled-traction-fragment.json`; write-up `data/sim-robust-coupled-traction-v1/report.md`. **Lidar sensor-frame yaw (vr1, now FIXED default-on):**
+  `docs/examples/coupled-traction-fragment.json`; write-up `data/sim-robust-coupled-traction-v1/report.md`. **Complementary recovery** (sim-robust-outbound-stall-recovery-v1):
+  opt-in `navigation.coupled_progress_recovery` turns the `coupled_progress_escape` fault into a BOUNDED
+  break-away maneuver (continuous pulsed committed-forward surge, `coupled_breakaway_*` keys; reverse is
+  clamped off for a coupled train so it rocks forward, not back — `MobileController.command` already
+  force-releases every brake each drive tick, so `parked=True` is a readout not a stale brake) that re-tows
+  a bounded number of times before failing `coupled_no_progress` by name; default-off ⇒ byte-identical.
+  Example `docs/examples/outbound-stall-recovery-mission-fragment.json`, write-up
+  `data/sim-robust-outbound-stall-recovery-v1/report.md`. **Lidar sensor-frame yaw (vr1, now FIXED default-on):**
   `Scan.sensor_to_base` is (x, y, YAW) but the legacy `isaac_bundle` wiring passed the lidar URDF origin
   (x, y, z) — the `lidar_frame` is a fixed rpy-0 child of base_link, so its z (0.15 m) is a mount height,
   NOT a yaw; reading it as yaw rotated every return 8.59° and was the sole source of the tow-lane

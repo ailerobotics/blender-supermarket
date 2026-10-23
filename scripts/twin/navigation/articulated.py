@@ -486,7 +486,10 @@ class ArticulatedController(Controller):
                  lane_track_envelope=False, lane_cart_yaw_rebase=False,
                  coupled_creep_escape=False, coupled_creep_floor=0.03,
                  coupled_progress_escape=False, coupled_progress_min_m=0.05,
-                 coupled_progress_escape_s=3.0, coupled_progress_fault_s=8.0, **kwargs):
+                 coupled_progress_escape_s=3.0, coupled_progress_fault_s=8.0,
+                 coupled_progress_recovery=False, coupled_breakaway_speed_mps=0.18,
+                 coupled_breakaway_window_s=2.0, coupled_breakaway_pulse_s=0.5,
+                 coupled_breakaway_attempts=3, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm481/fm482 (navigation.coupled_creep_escape, default off => byte-identical): the coupled
         # measured-curvature brake divides odom.angular by odom.linear, and at a near-stationary crawl that
@@ -536,6 +539,50 @@ class ArticulatedController(Controller):
         self._prog_stuck_s=0.0        # SIM seconds the base has sat below coupled_progress_min_m
         self._force_progress_creep=False   # set per-tick: force the committed creep this gate call
         self.progress_escapes=0       # ticks the no-progress monitor forced a creep
+        # fm-sim-robust-outbound-stall-recovery (navigation.coupled_progress_recovery, default off =>
+        # byte-identical to the fm-sim-robust-outbound escape->fault ladder above): a BOUNDED break-away
+        # RECOVERY maneuver that runs between the no-progress ESCALATION and the terminal FAULT, so a
+        # coupled tow that fails to break away from rest at the portal throat (coldlivefull outbound:
+        # NAV_STEP cycled measured_turn_radius<->tracking with parked=True, the base jittering in place
+        # with ~0 NET displacement) gets REAL re-tow attempts instead of the single weak 0.03 m/s creep +
+        # immediate fail. Root cause it addresses (our own code): a measured_turn_radius COAST tick returns
+        # _wait(...) == velocity (0,0), so the stuck tow thrashes stop<->forward every few ticks and never
+        # sustains drive effort to overcome the coupled static resistance from rest; the forced creep
+        # (fm-sim-robust-outbound) only engages after escape_s and is a static-crawl 0.03 m/s floor, too
+        # weak for a re-break-away under the live_pose load. The recovery holds a CONTINUOUS, STRONGER,
+        # PULSED committed-forward command (coupled_breakaway_speed_mps, square-wave surged every
+        # coupled_breakaway_pulse_s to "rock" the contact) for up to coupled_breakaway_attempts windows of
+        # coupled_breakaway_window_s SIM seconds each; the instant net displacement from a window's anchor
+        # reaches coupled_progress_min_m the break-away SUCCEEDED (resume normal tracking); if every attempt
+        # elapses with no net progress, FAULT 'coupled_no_progress' terminal (same name/StageRetry contract
+        # as the escape-only path). NOTE on "back off a few cm": reverse towing is deliberately clamped off
+        # for a coupled train (mobile.wheel_targets: coupled v>=0), so the recovery uses a forward
+        # surge/relax PULSE (the implementable, safety-preserving break-away rock) rather than a reverse
+        # back-off. All brakes are already force-released every drive tick in MobileController.command, so no
+        # stale park/cart brake can hold the base -- the stall is the physics break-away itself.
+        self.coupled_progress_recovery=bool(coupled_progress_recovery)
+        if not (isinstance(coupled_breakaway_speed_mps,(int,float)) and not isinstance(coupled_breakaway_speed_mps,bool)
+                and math.isfinite(coupled_breakaway_speed_mps) and 0.0<float(coupled_breakaway_speed_mps)<=1.0):
+            raise ValueError('coupled_breakaway_speed_mps must be a finite number in (0, 1.0] m/s')
+        for _nm,_v,_hi in (('coupled_breakaway_window_s',coupled_breakaway_window_s,60.0),
+                           ('coupled_breakaway_pulse_s',coupled_breakaway_pulse_s,10.0)):
+            if not (isinstance(_v,(int,float)) and not isinstance(_v,bool)
+                    and math.isfinite(_v) and 0.0<float(_v)<=_hi):
+                raise ValueError(f'{_nm} must be a finite number in (0, {_hi:g}]')
+        if not (isinstance(coupled_breakaway_attempts,int) and not isinstance(coupled_breakaway_attempts,bool)
+                and 1<=coupled_breakaway_attempts<=20):
+            raise ValueError('coupled_breakaway_attempts must be an int in [1, 20]')
+        self.coupled_breakaway_speed=float(coupled_breakaway_speed_mps)
+        self.coupled_breakaway_window_s=float(coupled_breakaway_window_s)
+        self.coupled_breakaway_pulse_s=float(coupled_breakaway_pulse_s)
+        self.coupled_breakaway_attempts=int(coupled_breakaway_attempts)
+        self._recovery_active=False       # inside a break-away recovery window sequence
+        self._recovery_attempt=0          # 0-based index of the current break-away attempt window
+        self._recovery_window_start=None  # sim time the current attempt window began
+        self._recovery_anchor=None        # (x, y) base pose at the current window's start
+        self._breakaway_cmd=None          # per-tick committed forward speed override for gate_velocity
+        self.breakaway_recoveries=0       # recovery sequences entered
+        self.breakaway_successes=0        # recovery sequences that broke the base free
         # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
         # swept train envelope as free (the static map proved that corridor clear), so the base is not
         # frozen at an unmapped turn (run-327b: outbound drove 4.87 m then 'unknown_navigation_cell' at the
@@ -695,6 +742,11 @@ class ArticulatedController(Controller):
         self._prog_last_now=None
         self._prog_stuck_s=0.0
         self._force_progress_creep=False
+        self._recovery_active=False                        # fresh goal -> no break-away recovery in flight
+        self._recovery_attempt=0
+        self._recovery_window_start=None
+        self._recovery_anchor=None
+        self._breakaway_cmd=None
         self.goal_articulation=self.spec.max_articulation if goal_articulation is None else goal_articulation
         # Resolve the authored tow lane for this COUPLED goal (if any). Uncoupled drives never use a
         # lane. Pose acquirability + live-obstacle swept validation are checked when the route is built.
@@ -957,7 +1009,16 @@ class ArticulatedController(Controller):
         # tow that is pinned with velocity SPIKES outside the band still keeps a clean forward command
         # instead of thrashing to a measured-curvature STOP. Only forces where there IS a forward command.
         escape=escape or (self._force_progress_creep and v>1e-6)
-        if escape:
+        # fm-sim-robust-outbound-stall-recovery: a committed break-away surge REPLACES the command with a
+        # clean continuous forward (the recovery pulse), bypassing the measured_turn_radius coast that
+        # returns v=0 and re-rests the stuck tow. Obstacle/coverage/map safety below is UNCHANGED -- a real
+        # positive obstacle, a coverage gap or a stale map still refuses the surge.
+        breakaway=self._breakaway_cmd is not None
+        if breakaway:
+            v=min(self.max_speed,max(1e-3,self._breakaway_cmd))
+            wmax=v/self.footprint.min_turn_radius
+            w=max(-wmax,min(w,wmax))
+        elif escape:
             v=max(v,min(self.coupled_creep_floor,self.max_speed))
             wmax=v/self.footprint.min_turn_radius
             w=max(-wmax,min(w,wmax))
@@ -981,11 +1042,12 @@ class ArticulatedController(Controller):
             return Result(reason='obstacle_stop')
         # During a command change braking follows measured curvature, too.
         if abs(odom.linear)>0.02:
-            if escape:
-                measured_k=k        # noise-band ratio is not an arc: brake along the clamped command
-                self.creep_escapes+=1
-                if self._force_progress_creep:
-                    self.progress_escapes+=1
+            if escape or breakaway:
+                measured_k=k        # committed command: brake along the clamped command, not the noise arc
+                if escape:
+                    self.creep_escapes+=1
+                    if self._force_progress_creep:
+                        self.progress_escapes+=1
             else:
                 measured_k=odom.angular/odom.linear
                 if abs(measured_k)>1/1.5+0.03:
@@ -1014,6 +1076,7 @@ class ArticulatedController(Controller):
         self.elapsed+=dt
         now=self.elapsed if now is None else now
         self._force_progress_creep=False   # fm-sim-robust-outbound: set only by the net-progress monitor
+        self._breakaway_cmd=None           # fm-outbound-recovery: set only by the break-away recovery below
         reason=self._inputs(now,odometry,observations)
         if reason:
             return self._wait(dt,reason)
@@ -1152,10 +1215,55 @@ class ArticulatedController(Controller):
             else:
                 self._prog_stuck_s=max(0.0,now-self._prog_anchor[0])   # SIM seconds pinned below min_m
             self._prog_last_now=now
-            if self._prog_stuck_s>=self.coupled_progress_fault_s:
-                self.terminal=Result(status='failed',reason='coupled_no_progress')
-                return self.terminal
-            self._force_progress_creep=self._prog_stuck_s>=self.coupled_progress_escape_s
+            if self.coupled_progress_recovery:
+                # fm-sim-robust-outbound-stall-recovery: a BOUNDED break-away maneuver replaces the
+                # escape->fault timing. Once the base has been pinned below min_m for escape_s SIM seconds,
+                # run up to coupled_breakaway_attempts windows of coupled_breakaway_window_s SIM seconds,
+                # each commanding a CONTINUOUS pulsed committed-forward surge (set _breakaway_cmd; consumed
+                # by gate_velocity) so the tow sustains drive effort instead of the stop<->forward thrash.
+                # A window that nets >= min_m displacement resets _prog_stuck_s above (<escape_s) and ends
+                # the recovery (broke free); exhausting every attempt faults 'coupled_no_progress' terminal.
+                if self._prog_stuck_s>=self.coupled_progress_escape_s:
+                    if not self._recovery_active:
+                        self._recovery_active=True
+                        self._recovery_attempt=0
+                        self._recovery_window_start=now
+                        self._recovery_anchor=(state.x,state.y)
+                        self.breakaway_recoveries+=1
+                        print('NAV_BREAKAWAY enter attempt=0 at=(%.3f,%.3f) stuck=%.2fs'
+                              % (state.x,state.y,self._prog_stuck_s), flush=True)
+                    elif now-self._recovery_window_start>=self.coupled_breakaway_window_s:
+                        # window elapsed with < min_m net progress (progress would have reset _prog_stuck_s)
+                        self._recovery_attempt+=1
+                        if self._recovery_attempt>=self.coupled_breakaway_attempts:
+                            self.terminal=Result(status='failed',reason='coupled_no_progress')
+                            print('NAV_BREAKAWAY exhausted attempts=%d -> coupled_no_progress'
+                                  % self._recovery_attempt, flush=True)
+                            return self.terminal
+                        self._recovery_window_start=now
+                        self._recovery_anchor=(state.x,state.y)
+                        print('NAV_BREAKAWAY next attempt=%d at=(%.3f,%.3f)'
+                              % (self._recovery_attempt,state.x,state.y), flush=True)
+                    # pulse the committed forward speed (square wave) to rock the stuck contact; reverse is
+                    # clamped off for a coupled train (wheel_targets), so the low phase is a relaxed forward.
+                    hi=(int((now-self._recovery_window_start)/self.coupled_breakaway_pulse_s)%2)==0
+                    self._breakaway_cmd=(self.coupled_breakaway_speed if hi
+                                         else self.coupled_breakaway_speed*0.4)
+                elif self._recovery_active:
+                    # Stuck cleared while a recovery was in flight: broke free iff real net displacement
+                    # (not a legitimate-wait gap) accrued from the active window's anchor.
+                    moved=(self._recovery_anchor is not None
+                           and math.hypot(state.x-self._recovery_anchor[0],
+                                          state.y-self._recovery_anchor[1])>=self.coupled_progress_min_m)
+                    self._recovery_active=False
+                    if moved:
+                        self.breakaway_successes+=1
+                        print('NAV_BREAKAWAY success: base broke free', flush=True)
+            else:
+                if self._prog_stuck_s>=self.coupled_progress_fault_s:
+                    self.terminal=Result(status='failed',reason='coupled_no_progress')
+                    return self.terminal
+                self._force_progress_creep=self._prog_stuck_s>=self.coupled_progress_escape_s
         result=self.gate_velocity(now,odom,obs,v,v*curvature)
         if result.reason!='tracking':
             # A transient measured-curvature trip (the base is momentarily under commanded

@@ -366,6 +366,109 @@ class ArticulatedTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ArticulatedController(self.world.grid,allow_test_fixtures=True,**kw)
 
+    # --- fm-sim-robust-outbound-stall-recovery: bounded break-away recovery -----------------------------
+
+    def _recovery_controller(self, **over):
+        kw=dict(coupled_progress_escape=True, coupled_progress_recovery=True,
+                coupled_progress_min_m=0.05, coupled_progress_escape_s=0.5, coupled_progress_fault_s=1.0,
+                coupled_breakaway_speed_mps=0.18, coupled_breakaway_window_s=1.0,
+                coupled_breakaway_pulse_s=0.2, coupled_breakaway_attempts=3)
+        kw.update(over)
+        return ArticulatedController(self.world.grid, allow_test_fixtures=True, **kw)
+
+    def test_coupled_breakaway_recovery_breaks_a_stuck_tow_free(self):
+        # The coldlivefull outbound: a coupled tow pinned (jittering in place, ~0 net displacement) while
+        # commanding forward. With recovery ON, the monitor ENTERS a break-away maneuver (a continuous
+        # pulsed committed forward) rather than the single weak creep + fail. Here the surge breaks the base
+        # free (the fixture lets it move once the surge commands), so the stage recovers: it never faults and
+        # a break-away success is recorded.
+        c=self._recovery_controller()
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        v=w=0.0; freed=False; out=[]
+        for i in range(300):
+            now+=.05
+            rv=(v if freed else self._JITTER_RV[i%len(self._JITTER_RV)])
+            rw=(w if freed else self._JITTER_RW[i%len(self._JITTER_RW)])
+            od=Odometry(state.pose,now,rv,rw,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            out.append((r.status,r.reason))
+            v,w=r.velocity
+            if r.status!='running':
+                break
+            if c._recovery_active:
+                freed=True          # the surge is now commanding -> let the base start to move
+            if freed:
+                state=advance(state,v*.05,w/v if v else 0,self.spec)
+        self.assertGreaterEqual(c.breakaway_recoveries,1)          # a recovery was entered
+        self.assertGreaterEqual(c.breakaway_successes,1)           # it broke the base free
+        self.assertFalse(any(reason=='coupled_no_progress' for _,reason in out))  # never faulted
+        self.assertFalse(c._recovery_active)                       # recovery cleared on break-away
+
+    def test_coupled_breakaway_commands_continuous_pulsed_forward(self):
+        # The maneuver's substance: while recovering, EVERY commanded velocity is a forward surge (> 0) --
+        # never the v=0 stop that the measured_turn_radius coast returns and that re-rests the stuck tow --
+        # and it PULSES between the high and the relaxed (0.4x) level to rock the contact.
+        c=self._recovery_controller(coupled_breakaway_attempts=5)   # keep recovering long enough to sample
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        surges=[]
+        for i in range(120):
+            now+=.05
+            rv=self._JITTER_RV[i%len(self._JITTER_RV)]
+            rw=self._JITTER_RW[i%len(self._JITTER_RW)]
+            od=Odometry(state.pose,now,rv,rw,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            if c._recovery_active and r.reason=='tracking':
+                surges.append(r.velocity[0])
+            if r.status!='running':
+                break
+        self.assertTrue(surges)
+        self.assertTrue(all(s>0 for s in surges))                  # no v=0 stop-go thrash during recovery
+        hi=0.18; lo=0.18*0.4
+        self.assertTrue(any(abs(s-hi)<1e-6 for s in surges))       # the high pulse level appears
+        self.assertTrue(any(abs(s-lo)<1e-6 for s in surges))       # the relaxed pulse level appears
+
+    def test_coupled_breakaway_exhausts_attempts_then_faults_by_name(self):
+        # A base that never breaks free: the recovery runs a BOUNDED number of attempt windows then FAULTS
+        # 'coupled_no_progress' (same name/StageRetry contract), fast on the SIM clock -- not the 120 s WALL
+        # nav-stuck. The bound is escape_s + attempts * window_s.
+        c=self._recovery_controller()
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        out,now,_=self._drive_frozen_jitter(c,state,now,ticks=400)
+        self.assertEqual(out[-1],('failed','coupled_no_progress'))
+        self.assertEqual(c.breakaway_recoveries,1)
+        self.assertEqual(c.breakaway_successes,0)
+        # bounded: 0.5 s to enter + 3 windows x 1.0 s = 3.5 s SIM / 0.05 dt ~= 70 ticks (+ small slack)
+        self.assertLessEqual(len(out),80)
+
+    def test_coupled_breakaway_recovery_off_is_byte_identical(self):
+        # Recovery OFF (default): the escalate->fault ladder is unchanged and the break-away counters stay 0.
+        c=ArticulatedController(self.world.grid,allow_test_fixtures=True,
+                                coupled_progress_escape=True,coupled_progress_min_m=0.05,
+                                coupled_progress_escape_s=0.5,coupled_progress_fault_s=1.0)
+        self.assertFalse(c.coupled_progress_recovery)
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        out,now,_=self._drive_frozen_jitter(c,state,now,ticks=60)
+        self.assertEqual(out[-1],('failed','coupled_no_progress'))
+        self.assertGreater(c.progress_escapes,0)          # the legacy forced creep still ran
+        self.assertEqual(c.breakaway_recoveries,0)        # recovery never engaged
+        self.assertEqual(c.breakaway_successes,0)
+
+    def test_coupled_breakaway_rejects_invalid_params(self):
+        for kw in (dict(coupled_breakaway_speed_mps=0.0), dict(coupled_breakaway_speed_mps=-1.0),
+                   dict(coupled_breakaway_speed_mps=1.5), dict(coupled_breakaway_speed_mps=float('nan')),
+                   dict(coupled_breakaway_window_s=0.0), dict(coupled_breakaway_pulse_s=0.0),
+                   dict(coupled_breakaway_attempts=0), dict(coupled_breakaway_attempts=21),
+                   dict(coupled_breakaway_attempts=2.5), dict(coupled_breakaway_speed_mps=True),
+                   dict(coupled_breakaway_attempts=True)):
+            with self.assertRaises(ValueError):
+                ArticulatedController(self.world.grid,allow_test_fixtures=True,**kw)
+
     def test_seed_rejects_teleport(self):
         from twin.navigation.articulated import Route
         a=TrainState(0,0,0,0)
