@@ -149,6 +149,16 @@ def _plan_attempts_exhausted(plan_dispatches):
     return plan_dispatches >= PLAN_TOTAL_ATTEMPTS_CAP
 
 
+# sim-robust-movegroup-respawn-v1: the port states in which a plan/execute request is in flight at
+# move_group (or its trajectory host). A planning-scene MUTATION (attach/detach via update_payload)
+# issued in any of these would race move_group's in-flight planning request -- the data-race class
+# that corrupts move_group's heap ("malloc(): unaligned tcache chunk detected", coldlive/run-266). The
+# single-threaded controller already serialises them (grasp/release run strictly BETWEEN moves, so the
+# port is 'succeeded'/'idle'/'failed' then); this names the invariant so a future concurrent caller
+# fails loudly on CPU instead of silently at GPU time. 'idle'/'succeeded'/'failed'/'ik' are NOT in flight.
+_PLAN_IN_FLIGHT_STATES = ('plan_accept', 'plan_result', 'execute_accept', 'execute_result', 'await_settle')
+
+
 def _should_crash_retry(crash_retries, has_plan_goal):
     """After a move_group PROCESS crash (its action server vanished mid-move, run-266/268), re-send the
     SAME plan goal to the respawned server up to MOVE_GROUP_CRASH_RETRY_MAX times. Distinct from
@@ -327,6 +337,12 @@ class RosMotionPort:
             raise ValueError('stow_config must be six in-limit joint values')
         self.stow = tuple(float(q) for q in stow_config) if stow_config is not None else None
         self.payload_sync, self.emergency_stop = payload_sync, emergency_stop
+        # sim-robust-movegroup-respawn-v1: authoritative mirror of the carton attachment last established
+        # through update_payload (the ProductProfile when restock_carried_unit is attached, else None).
+        # A respawned move_group starts with a fresh planning scene that no longer holds the carton, so a
+        # crash-retry re-sends this attach BEFORE resending the plan (_resync_scene_after_respawn). None on
+        # every no-carry move => the resync is a no-op and the no-crash path is byte-identical.
+        self._attached_profile = None
         self.ik = node.create_client(GetPositionIK, namespace + '/compute_ik')
         self.plan = ActionClient(node, MoveGroup, namespace + '/move_action')
         self.execute = ActionClient(node, ExecuteTrajectory, namespace + '/execute_trajectory')
@@ -955,12 +971,36 @@ class RosMotionPort:
             self.deadline_clock = time.monotonic
             self.deadline = time.monotonic() + self.timeout
             self._plan_started_wall = time.monotonic()
+            self._resync_scene_after_respawn()   # re-attach the carried carton to the fresh scene FIRST
             print('MOVE_GROUP_CRASH_RETRY resending plan goal after respawn (retry %d/%d)'
                   % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
             self._reanchor_plan_goal_to_live()
             self._send(self.plan, self._plan_goal, 'plan_accept')
             return 'running'
         return None
+
+    def _resync_scene_after_respawn(self):
+        """sim-robust-movegroup-respawn-v1: before re-sending a plan goal to a RESPAWNED move_group,
+        restore its planning scene from the authoritative object_attachment state. A respawned move_group
+        starts with a FRESH planning scene that no longer holds restock_carried_unit, so a plan resent
+        without this ignores the attached carton and plans straight through it (the coldlive respawn
+        landed between the grasp attach and the detach). When the port's mirror says a carton is held
+        (``_attached_profile`` set via a successful update_payload), re-issue the attach so the carton is
+        back in both MoveIt's and cuMotion's scene BEFORE any plan is resent. No-op when nothing is held
+        => the no-carry crash-retry (and the whole no-crash path) is byte-identical. Best-effort and
+        logged: a failed re-attach does not abort the retry here (the resent plan's own start-state
+        self-collision / result validation still gates correctness), but it is reported loudly."""
+        profile = getattr(self, '_attached_profile', None)
+        if profile is None:
+            return
+        try:
+            ok = self.payload_sync(True, profile) is True
+        except Exception as exc:                                # re-attach raised -> report, do not mask
+            print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit raised after respawn: %r'
+                  % (exc,), flush=True)
+            return
+        print('MOVE_GROUP_CRASH_RETRY re-attached restock_carried_unit to the respawned move_group '
+              'planning scene before resend (ok=%s)' % ok, flush=True)
 
     def _reanchor_plan_goal_to_live(self):
         """fm405: before re-sending a plan goal to a RESPAWNED move_group, re-anchor its request
@@ -1056,6 +1096,7 @@ class RosMotionPort:
                 self.deadline_clock = time.monotonic
                 self.deadline = time.monotonic() + self.timeout
                 self._plan_started_wall = time.monotonic()
+                self._resync_scene_after_respawn()   # re-attach the carried carton to the fresh scene FIRST
                 print('MOVE_GROUP_CRASH_RETRY plan-result wall-deadline (likely move_group crash+respawn '
                       'between polls); resending plan goal (retry %d/%d)'
                       % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
@@ -1264,7 +1305,19 @@ class RosMotionPort:
     def update_payload(self, held, profile):
         # Must update BOTH MoveIt and cuMotion collision attachment, not PhysX
         # teleport/parenting. The simulator separately supplies physical contact.
-        return self.payload_sync(held, profile) is True
+        # sim-robust-movegroup-respawn-v1: a scene mutation must never overlap an in-flight plan/execute
+        # (that race corrupts move_group's heap). The single-threaded controller already issues attach/
+        # detach strictly BETWEEN moves, so this guard is inert on the real path; it fails a future
+        # concurrent caller loudly on CPU instead of silently at GPU time.
+        if getattr(self, 'state', 'idle') in _PLAN_IN_FLIGHT_STATES:
+            raise RuntimeError('planning-scene mutation issued while a plan/execute is in flight '
+                               '(state=%s)' % self.state)
+        ok = self.payload_sync(held, profile) is True
+        if ok:
+            # Mirror the authoritative object_attachment state so a move_group respawn can restore it
+            # before resending a plan (no behavioural change; the return value is unchanged).
+            self._attached_profile = profile if held else None
+        return ok
 
 
 def sensors_from_json(value):
