@@ -53,6 +53,39 @@ EXECUTE_WALL_BACKSTOP_S = 1800.0
 GOAL_POSITION_TOL = 0.01
 GOAL_VELOCITY_TOL = 0.70
 GOAL_SETTLE_MARGIN_S = 20.0  # < EXECUTE_SETTLE 25 so GOAL_MISS prints terminal per-joint first
+
+# --- Terminal settle: accept a bounded, DECAYING residual oscillation as a named success ----------
+# The instantaneous terminal gate (pos<=tol AND vel<=vel_tol at ONE sample) can never fire for a
+# residual limit-cycle whose phase-space orbit does not fit the (pos,vel) box at a single instant:
+# when the ringing joint passes its target (pos~0) its velocity is at the orbit peak, and when it is
+# slow (a turning point) its position error is at the orbit amplitude. coldwin2 (2026-10-23) died
+# exactly here -- the welded-carton collect-place left ur_wrist_3 ringing at 0.72 rad/s (barely over
+# the 0.70 vel tol) at a 3.4 mm-accurate pose for the whole 30 s settle window, so PATH_TOLERANCE_
+# VIOLATED aborted a place whose carton was welded on the deck within tolerance. coldlivewin passed
+# the identical place (the ring damped there). ROOT CAUSE (CPU-confirmed): the linear position drive
+# is heavily OVERDAMPED (zeta=kd/(2*sqrt(kp*I))=7-33 for any plausible carton inertia about wrist_3),
+# so it does NOT ring in the linear regime; but the PD effort SATURATES -- at v=0.72 it wants
+# kp*err+kd*v=6330 Nm against the 400 Nm cap (16x), and the damping term alone exceeds the cap for any
+# v>0.05 rad/s -- so under a terminal disturbance (the welded carton's reaction / PhysX weld+deck
+# contact) the realised damping is bang-bang and a residual limit cycle can persist, decaying only
+# intermittently. Retuning gains is contraindicated (raising kd worsens saturation; lowering it wrecks
+# the tracking envelope the stiffening fixed), and the commanded terminal velocity is already 0, so
+# neither a gain change nor a terminal brake is the lever. The lever is the ACCEPTANCE criterion: a
+# damped-but-nonzero wrist at a tight pose IS a successful place; a SUSTAINED (non-decaying) or
+# DIVERGING ring is not. The envelope gate integrates the terminal samples and settles only when the
+# position stayed within goal_pos_tol across the recent window AND the velocity-peak envelope is
+# DECAYING below a bounded ceiling -- position is NEVER loosened, and a sustained/diverging/unbounded
+# arm still fails by name. SETTLE_ENVELOPE=0 restores the legacy instantaneous-only gate byte-for-byte.
+SETTLE_ENVELOPE = os.environ.get('RESTOCK_SETTLE_ENVELOPE', '1').lower() not in ('0', 'false', 'off', 'no')
+SETTLE_MIN_WINDOW_S = max(0.5, min(15.0, float(os.environ.get('RESTOCK_SETTLE_MIN_WINDOW_S', 3.0))))
+SETTLE_MIN_SAMPLES = max(4, int(float(os.environ.get('RESTOCK_SETTLE_MIN_SAMPLES', 8))))
+# recent velocity-peak must be <= DECAY_RATIO * the earliest peak to count as decaying (not a limit cycle)
+SETTLE_DECAY_RATIO = max(0.1, min(0.95, float(os.environ.get('RESTOCK_SETTLE_DECAY_RATIO', 0.6))))
+# ...and <= ACCEPT_VEL rad/s (bounded residual). Clamped at/above the instantaneous vel tol so the
+# envelope never settles something the instantaneous gate would reject on a tighter velocity.
+SETTLE_ACCEPT_VEL = max(GOAL_VELOCITY_TOL, min(3.0, float(os.environ.get('RESTOCK_SETTLE_ACCEPT_VEL', 1.0))))
+# recent peak above DIVERGE_RATIO * the earlier peak (and above the vel tol) = instability: fail early.
+SETTLE_DIVERGE_RATIO = max(1.05, min(5.0, float(os.environ.get('RESTOCK_SETTLE_DIVERGE_RATIO', 1.25))))
 # fm367: SIM-ONLY multiplier on the terminal-settle budget (same env + default as the host's
 # EXECUTE_SETTLE_MARGIN_S scale). 1.0 => byte-identical; the sim profile sets 1.5. The base ordering
 # GOAL_SETTLE_MARGIN_S (20) < EXECUTE_SETTLE_MARGIN_S (25) is preserved under a common scale (20*s <
@@ -349,6 +382,70 @@ def _handle_live(handle):
         return False
 
 
+def _envelope_peaks(samples):
+    """Over a time-ordered ``(t, pos_err, vel_mag)`` sample list, split at the TIME midpoint and
+    return ``(early_vel_peak, recent_vel_peak, recent_pos_peak)``. The position peak is taken over the
+    RECENT half only: a residual that has decayed TO a tight pose may have arrived there through an
+    early over-tolerance transient, which is not the terminal pose we gate on. Degenerate splits (all
+    samples on one side) fall back to the whole list / the last sample so the function is total. Pure."""
+    t0, t1 = samples[0][0], samples[-1][0]
+    mid = 0.5 * (t0 + t1)
+    early_v = [s[2] for s in samples if s[0] <= mid] or [s[2] for s in samples]
+    recent = [s for s in samples if s[0] > mid] or [samples[-1]]
+    recent_v = [s[2] for s in recent]
+    recent_p = [s[1] for s in recent]
+    return max(early_v), max(recent_v), max(recent_p)
+
+
+def settle_decision(samples, *, pos_tol, vel_tol, final=False,
+                    min_window_s=SETTLE_MIN_WINDOW_S, min_samples=SETTLE_MIN_SAMPLES,
+                    decay_ratio=SETTLE_DECAY_RATIO, accept_vel=SETTLE_ACCEPT_VEL,
+                    diverge_ratio=SETTLE_DIVERGE_RATIO):
+    """Classify the terminal settle of a residual oscillation from its measured-sample stream. Pure.
+
+    ``samples`` is a time-ordered list of ``(t_sim, pos_err, vel_mag)`` collected once per DISTINCT
+    measured-feedback sample AFTER the trajectory reached its planned end (``pos_err`` = max |q-goal|
+    over the arm joints, ``vel_mag`` = max |velocity|). Returns ``(verdict, reason)``:
+
+    * ``('settled', reason)``  -- the position stayed within ``pos_tol`` across the recent window AND
+      the velocity-peak envelope is DECAYING below ``accept_vel`` (a damped-but-nonzero wrist at a
+      tight pose = a successful place). ``pos_tol`` is NEVER loosened here.
+    * ``('diverging', reason)`` -- the recent velocity peak exceeds the earlier peak by
+      ``diverge_ratio`` AND is itself over ``vel_tol`` (instability) -- fail by name, may fire early.
+    * ``('miss', reason)``     -- ONLY when ``final`` (the caller's settle budget expired) and not
+      settled: the reason NAMES why (pose not bounded / sustained limit cycle / decaying-but-slow).
+    * ``('pending', None)``    -- not enough window/samples yet, or bounded-and-decreasing but not yet
+      below the accept ceiling: keep observing until the settle budget expires.
+
+    The instantaneous fast path (``pos_err<=pos_tol and vel_mag<=vel_tol`` at one sample) is the
+    caller's concern and fires first, so for a crisply-settling move this is never consulted and the
+    outcome is byte-identical to the legacy gate."""
+    enough = len(samples) >= min_samples and (samples[-1][0] - samples[0][0]) >= min_window_s
+    if not enough and not final:
+        return ('pending', None)
+    early_v, recent_v, recent_p = _envelope_peaks(samples)
+    pos_bounded = recent_p <= pos_tol
+    decaying = recent_v <= early_v * decay_ratio
+    diverging = recent_v > early_v * diverge_ratio and recent_v > vel_tol
+    if diverging and enough:
+        return ('diverging', f'terminal velocity envelope diverging: recent peak {recent_v:.3f} > '
+                             f'{diverge_ratio:.2f}x earlier {early_v:.3f} rad/s (instability)')
+    if pos_bounded and decaying and recent_v <= accept_vel:
+        return ('settled', f'decaying residual oscillation at tight pose: pos_peak {recent_p:.4f} <= '
+                           f'{pos_tol:.3f} rad, velocity envelope {early_v:.3f}->{recent_v:.3f} rad/s '
+                           f'decaying below {accept_vel:.2f}')
+    if not final:
+        return ('pending', None)
+    if not pos_bounded:
+        return ('miss', f'pose not bounded within settle window: position peak {recent_p:.4f} > goal '
+                        f'tol {pos_tol:.3f} rad (oscillation amplitude exceeds tolerance)')
+    if not decaying:
+        return ('miss', f'sustained residual oscillation (limit cycle, not damping): velocity envelope '
+                        f'{early_v:.3f}->{recent_v:.3f} rad/s over the settle window')
+    return ('miss', f'decaying but not converged within settle window: velocity envelope {early_v:.3f}'
+                    f'->{recent_v:.3f} rad/s (recent peak above accept ceiling {accept_vel:.2f})')
+
+
 class Plan:
     def __init__(self, trajectory, measured, limits, max_speed=.15, max_acceleration=.5):
         validate_trajectory(trajectory, measured, limits)
@@ -442,6 +539,11 @@ def main():
                start_install=None,   # sim /clock at execute install; start is anchored to the first
                # post-install feedback stamp (anchored_start), so this only records the anchor_lag.
                miss_count=0,miss_stamp=None,contact=False,
+               # Terminal-settle accumulator: (t_sim, pos_err, vel_mag) per DISTINCT post-plan-end
+               # feedback sample, for the decaying-oscillation envelope gate (settle_decision). Reset
+               # per goal in execute(). settle_stamp dedups the 0.01 s wall loop re-reading one frame;
+               # settle_log throttles the TRAJ_HOST_SETTLE trace so a future run is reconstructable.
+               settle_samples=[],settle_stamp=None,settle_log=None,
                # fm345 (c): terminal goal-gate position tolerance, default tight (GOAL_POSITION_TOL).
                # The controller latches a WIDER value on the carton-loaded PLACE extend via the
                # goal_position_tol side-channel topic (the FJT goal_tolerance is unreachable through
@@ -670,6 +772,7 @@ def main():
                 state['miss_count'],state['miss_stamp']=0,None   # fresh debounce window per trajectory
                 state['contact']=False                           # arm the contact gate fresh per goal
                 state['active_handle']=handle   # so goal() can tell a LIVE goal from a stale active flag
+                state['settle_samples'],state['settle_stamp'],state['settle_log']=[],None,None
             wall_backstop=time.monotonic()+EXECUTE_WALL_BACKSTOP_S
             while rclpy.ok():
                 with lock:
@@ -748,24 +851,82 @@ def main():
                             handle.succeed()
                             result.error_code=result.SUCCESSFUL
                             return result
-                        if elapsed>plan.times[-1]+goal_settle_budget():   # fm367: sim-scaled settle window
+                        settle_elapsed=elapsed-plan.times[-1]
+                        if SETTLE_ENVELOPE:
+                            # The instantaneous gate above cannot fire for a residual limit-cycle whose
+                            # phase-space orbit never fits the (pos,vel) box at one instant (coldwin2's
+                            # ur_wrist_3 ring). Accumulate the terminal samples (deduped on the feedback
+                            # stamp -- the 0.01 s wall loop re-reads one frame many times) and let the
+                            # envelope gate settle a bounded DECAYING oscillation at a tight pose, or
+                            # fail a sustained/diverging/unbounded one BY NAME. Position is not loosened.
+                            stamp=measured[0]
+                            if stamp!=state['settle_stamp']:
+                                state['settle_stamp']=stamp
+                                state['settle_samples'].append((stamp,pos_err,vel_mag))
+                                if state['settle_log'] is None or stamp-state['settle_log']>=1.0:
+                                    state['settle_log']=stamp
+                                    print(f'TRAJ_HOST_SETTLE settle={settle_elapsed:.2f} pos_err={pos_err:.4f} '
+                                          f'vel={vel_mag:.4f} n={len(state["settle_samples"])} '
+                                          f'per_joint_vel={np.array2string(measured[2],precision=4,separator=",")} '
+                                          f'per_joint_err={np.array2string(measured[1]-plan.end,precision=4,separator=",")}',
+                                          flush=True)
+                            verdict,reason=settle_decision(state['settle_samples'],
+                                pos_tol=state['goal_pos_tol'],vel_tol=GOAL_VELOCITY_TOL,final=False)
+                            if verdict=='settled':
+                                print(f'TRAJ_HOST_GOAL_SETTLE {reason} (settle={settle_elapsed:.2f}s)',flush=True)
+                                state['target']=plan.end.copy()
+                                state['plan']=None
+                                handle.succeed()
+                                result.error_code=result.SUCCESSFUL
+                                return result
+                            if verdict=='diverging':
+                                perr=measured[1]-plan.end
+                                print(f'TRAJ_HOST_GOAL_MISS pos_err={pos_err:.4f} vel={vel_mag:.4f} '
+                                      f'sim_age={now()-measured[0]:.3f} settle={settle_elapsed:.2f} '
+                                      f'per_joint_err={np.array2string(perr,precision=4,separator=",")} '
+                                      f'per_joint_vel={np.array2string(measured[2],precision=4,separator=",")} '
+                                      f'meas_q={np.array2string(measured[1],precision=4,separator=",")} '
+                                      f'goal_q={np.array2string(plan.end,precision=4,separator=",")}',
+                                      flush=True)
+                                raise RuntimeError(reason)
+                        if settle_elapsed>goal_settle_budget():   # fm367: sim-scaled settle window
                             # Diagnostic: the exact terminal error so a miss is attributable (settle
                             # tolerance vs a genuine tracking error) without another blind run.
                             perr=measured[1]-plan.end
                             print(f'TRAJ_HOST_GOAL_MISS pos_err={pos_err:.4f} vel={vel_mag:.4f} '
-                                  f'sim_age={now()-measured[0]:.3f} settle={elapsed-plan.times[-1]:.2f} '
+                                  f'sim_age={now()-measured[0]:.3f} settle={settle_elapsed:.2f} '
                                   f'per_joint_err={np.array2string(perr,precision=4,separator=",")} '
                                   f'per_joint_vel={np.array2string(measured[2],precision=4,separator=",")} '
                                   f'meas_q={np.array2string(measured[1],precision=4,separator=",")} '
                                   f'goal_q={np.array2string(plan.end,precision=4,separator=",")}',
                                   flush=True)
-                            # Name WHY instead of the generic miss: a single frozen joint far from goal while
-                            # the others reached it is the scripted pick jamming short of the carton (a
-                            # physical block, not a gravity sag the FF chase assumed). sim-robust-executor-
-                            # shoulder-drive-v1. surface (gap/flush) enriches the reason when a side-channel
-                            # feeds it; absent => joint-only naming, which is authoritative for the executor.
-                            raise RuntimeError(classify_goal_miss(
-                                perr, measured[2], state['goal_pos_tol'], surface=state['pick_surface']))
+                            # Compose two complementary terminal-miss namings at budget expiry:
+                            #  - classify_goal_miss (sim-robust-executor-shoulder-drive-v1) names a
+                            #    POSITION miss: exactly one joint frozen far from goal = the scripted pick
+                            #    jamming short of the carton (joint-only, authoritative); else generic.
+                            #  - the settle envelope (sim-robust-place-wrist3-settle-v1) first gives a
+                            #    bounded DECAYING residual oscillation at a tight pose a chance to SETTLE
+                            #    (a successful place), then names a sustained/diverging/unbounded ring.
+                            # Order: envelope-settle (success) wins; else a SPECIFIC pick-block reason
+                            # from classify_goal_miss; else the envelope's (more specific) settle reason;
+                            # else the generic. SETTLE_ENVELOPE=0 => pure classify_goal_miss (upstream).
+                            miss_reason=classify_goal_miss(
+                                perr, measured[2], state['goal_pos_tol'], surface=state['pick_surface'])
+                            if SETTLE_ENVELOPE:
+                                verdict,reason=settle_decision(state['settle_samples'],
+                                    pos_tol=state['goal_pos_tol'],vel_tol=GOAL_VELOCITY_TOL,final=True)
+                                if verdict=='settled':   # only crossed the accept bar on the final sample
+                                    print(f'TRAJ_HOST_GOAL_SETTLE {reason} (settle={settle_elapsed:.2f}s)',flush=True)
+                                    state['target']=plan.end.copy()
+                                    state['plan']=None
+                                    handle.succeed()
+                                    result.error_code=result.SUCCESSFUL
+                                    return result
+                                # A specific pick-block diagnosis is authoritative; otherwise the envelope's
+                                # settle reason is more specific than the generic position miss.
+                                if miss_reason==_GOAL_MISS_GENERIC:
+                                    raise RuntimeError(reason)
+                            raise RuntimeError(miss_reason)
                 time.sleep(.01)
             raise RuntimeError('executor shutdown')
         except Exception as exc:
