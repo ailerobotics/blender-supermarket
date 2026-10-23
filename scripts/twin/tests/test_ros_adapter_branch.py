@@ -9,6 +9,7 @@ node: the port is built via __new__ and only the pure branch helpers are exercis
 import math
 from pathlib import Path
 import sys
+import time
 from types import SimpleNamespace as S
 import unittest
 
@@ -325,18 +326,25 @@ class MoveGroupCrashRetry(unittest.TestCase):
 
     def test_deadline_crash_retry_covers_respawn_between_polls_fm404(self):
         # fm404 B-lite (run-312): a move_group SIGABRT that RESPAWNS between polls is invisible to
-        # _handle_server_crash (server ready again), so the lost plan request hangs to its WALL deadline.
-        # A wall plan-result deadline with a stored goal + budget must re-send (crash-retry), not fail.
+        # _handle_server_crash (server ready again), so the lost plan request hangs to its deadline.
+        # A plan deadline with a stored goal + budget AND POSITIVE DEATH EVIDENCE (the move_group action
+        # server GONE) must re-send (crash-retry), not fail. sim-robust-plan-deadline-pacing-v1: the
+        # server-ready gate is new -- a wall plan deadline on a LIVE-but-slow server is NOT a crash.
         from twin.restock_manipulation.ros_adapter import (
             _should_deadline_crash_retry as R, MOVE_GROUP_CRASH_RETRY_MAX)
-        self.assertTrue(R('wall', 'plan_result', True, 0))
-        self.assertTrue(R('wall', 'plan_accept', True, MOVE_GROUP_CRASH_RETRY_MAX - 1))
+        # server GONE (not ready) -> a wall plan deadline re-sends as a crash-retry.
+        self.assertTrue(R('wall', 'plan_result', True, 0, server_ready=False))
+        self.assertTrue(R('wall', 'plan_accept', True, MOVE_GROUP_CRASH_RETRY_MAX - 1, server_ready=False))
+        # sim-robust-plan-deadline-pacing-v1 (coldlive4): a LIVE server (ready) that is merely render-paced
+        # slow is NEVER a crash, even on a wall deadline -- the heuristic must not burn the crash budget.
+        self.assertFalse(R('wall', 'plan_result', True, 0, server_ready=True))
+        self.assertFalse(R('wall', 'plan_result', True, 0))                   # default server_ready=True
         # NOT this case: sim-clock (render pacing), execute state, no goal, or budget exhausted.
-        self.assertFalse(R('sim', 'plan_result', True, 0))
-        self.assertFalse(R('wall', 'execute_result', True, 0))
-        self.assertFalse(R('wall', 'await_settle', True, 0))
-        self.assertFalse(R('wall', 'plan_result', False, 0))
-        self.assertFalse(R('wall', 'plan_result', True, MOVE_GROUP_CRASH_RETRY_MAX))
+        self.assertFalse(R('sim', 'plan_result', True, 0, server_ready=False))
+        self.assertFalse(R('wall', 'execute_result', True, 0, server_ready=False))
+        self.assertFalse(R('wall', 'await_settle', True, 0, server_ready=False))
+        self.assertFalse(R('wall', 'plan_result', False, 0, server_ready=False))
+        self.assertFalse(R('wall', 'plan_result', True, MOVE_GROUP_CRASH_RETRY_MAX, server_ready=False))
 
     def test_crash_resend_reanchors_plan_start_to_live_state_fm405(self):
         # fm405: a crash MID-MOVE must resume from the LIVE pose -- re-anchor the plan goal's start_state
@@ -369,10 +377,14 @@ class MoveGroupCrashRetry(unittest.TestCase):
         p.handle = object()
         p._plan_goal = plan_goal
         p._server_crash_retries = crash_retries
+        p._op_crash_retries = 0
         p._awaiting_server_respawn = awaiting
         p._replan_attempts = 5
         p.plan = _FakePlan(ready)
         p.execute = _FakePlan(ready)
+        # sim-robust-plan-deadline-pacing-v1: the crash-retry re-send now arms the planning deadline on the
+        # SIM clock (_arm_plan_deadline -> self._sim_now), so the __new__-built port needs a sim clock stub.
+        p._sim_now = lambda: 0.0
         return p
 
     def test_live_server_is_inert(self):
@@ -466,15 +478,20 @@ class MoveGroupCrashRetry(unittest.TestCase):
             p.velocity_scale = 0.05
             p.generation, p.timeout = 3, 25.0
             p._publish_goal_tol = lambda tol: None
+            p._sim_now = lambda: 0.0   # sim-robust-plan-deadline-pacing-v1: begin_joint_goal arms the sim deadline
             shape = (0.0, -1.5, 1.5, 0.65, 0.8, -1.25)   # a carry_lift_shape-like 6-joint goal
             measured = (0.0, -1.57, 1.57, -1.57, -1.57, 0.0)
             p.begin_joint_goal(shape, measured)
             self.assertIsNotNone(p._plan_goal)                       # stored...
             self.assertIs(p._plan_goal, p.plan.sent[-1])             # ...and it is the goal actually sent
             self.assertEqual(p.state, 'plan_accept')
-            # The decisive consequence: a wall plan_result deadline now re-sends instead of failing.
+            # The decisive consequence: a stored goal makes the deadline crash-retry reachable -- but only
+            # with POSITIVE death evidence (the move_group server GONE). sim-robust-plan-deadline-pacing-v1:
+            # a live-but-slow server (ready) is NOT a crash, so the re-send fires only when server_ready=False.
             self.assertTrue(R('wall', 'plan_result', p._plan_goal is not None,
-                              getattr(p, '_server_crash_retries', 0)))
+                              getattr(p, '_server_crash_retries', 0), server_ready=False))
+            self.assertFalse(R('wall', 'plan_result', p._plan_goal is not None,
+                               getattr(p, '_server_crash_retries', 0), server_ready=True))
             self.assertTrue(_t and MOVE_GROUP_CRASH_RETRY_MAX and math)  # keep imports referenced
         finally:
             for k, v in saved.items():
@@ -505,6 +522,7 @@ class MoveGroupRespawnSceneResync(unittest.TestCase):
         p._replan_attempts = 5
         p._attached_profile = attached
         p._live_arm_state = None            # real-rig-style: _reanchor is a no-op
+        p._sim_now = lambda: 0.0            # sim-robust-plan-deadline-pacing-v1: the re-send arms the sim deadline
         p.plan = _FakePlan(ready)
         p.execute = _FakePlan(ready)
 
@@ -645,6 +663,7 @@ class MoveGroupDeathDuringOpRoutesToRetry(unittest.TestCase):
         p._awaiting_server_respawn = False
         p._replan_attempts = 5
         p._last_fault_sim_deadline = False
+        p._sim_now = lambda: 0.0            # sim-robust-plan-deadline-pacing-v1: the respawn re-send arms the sim deadline
         p.plan = _FakePlan(ready)
         p.execute = _FakePlan(ready)
         p._estops = []
@@ -801,6 +820,7 @@ class MoveGroupSecondDeathAndExecution(unittest.TestCase):
         p._last_fault_sim_deadline = False
         p._attached_profile = attached
         p._live_arm_state = None
+        p._sim_now = lambda: 0.0            # sim-robust-plan-deadline-pacing-v1: the re-plan re-send arms the sim deadline
         p.plan = _FakePlan(plan_ready)
         p.execute = _FakePlan(execute_ready)
         p._estops = []
@@ -952,3 +972,104 @@ class MoveGroupSecondDeathAndExecution(unittest.TestCase):
             raise RuntimeError('attach server gone')
         p.payload_sync = _boom
         self.assertFalse(p._resync_scene_after_respawn())   # raised -> not restored, reported, swallowed
+
+
+class PlanDeadlineOnSimClockPacing(unittest.TestCase):
+    """sim-robust-plan-deadline-pacing-v1: the PLANNING-phase per-move deadline is on the SIM clock, so a
+    render-paced slow-but-alive plan is never mis-read as a move_group crash (coldlive4: a wall plan-accept
+    deadline fired ~0.03-0.10 s over under the live_pose arm-feed render pacing, with ZERO actual move_group
+    deaths, and the crash-retry heuristic burned its whole budget -> host e-stop). Exercised on a __new__
+    port with a FAKE wall/sim clock pair (no ROS node, no GPU) and the public pure helpers."""
+
+    class _Clock:
+        """A wall/sim clock pair: wall advances ``pace`` x faster than sim (render pacing)."""
+        def __init__(self, pace):
+            self.sim = 0.0
+            self.wall = 0.0
+            self.pace = pace
+        def advance_sim(self, ds):
+            self.sim += ds
+            self.wall += ds * self.pace
+
+    def _port(self, clock, server_ready=True):
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state = 'plan_accept'
+        p.timeout = 25.0                       # the legacy WALL deadline budget
+        p._plan_goal = 'GOAL'
+        p._server_crash_retries = 0
+        p._op_crash_retries = 0
+        p._sim_now = lambda: clock.sim
+        p.plan = _FakePlan(server_ready)
+        p.execute = _FakePlan(server_ready)
+        return p
+
+    @staticmethod
+    def _deadline_fired(p):
+        """The exact predicate _poll() checks: deadline_clock() > deadline."""
+        return p.deadline_clock() > p.deadline
+
+    def test_arm_plan_deadline_uses_the_sim_clock(self):
+        from twin.restock_manipulation.ros_adapter import PLAN_SIM_DEADLINE_S
+        clock = self._Clock(pace=3.0)
+        p = self._port(clock)
+        p._arm_plan_deadline()
+        self.assertIs(p.deadline_clock, p._sim_now)                 # SIM clock, not time.monotonic
+        self.assertAlmostEqual(p.deadline, clock.sim + PLAN_SIM_DEADLINE_S)
+
+    def test_slow_plan_under_3x_pacing_does_not_trip(self):
+        # A slow-but-alive plan: delivery takes 12 sim-s. At 3x pacing that is 36 WALL-s -- PAST the legacy
+        # 25 s WALL deadline (which would have false-tripped the crash-retry), but WELL under the sim budget.
+        from twin.restock_manipulation.ros_adapter import (
+            PLAN_SIM_DEADLINE_S, _should_deadline_crash_retry as R)
+        self.assertGreater(PLAN_SIM_DEADLINE_S, 12.0)               # the default tolerates this slow plan
+        clock = self._Clock(pace=3.0)
+        p = self._port(clock, server_ready=True)                   # move_group ALIVE, just render-paced slow
+        p._arm_plan_deadline()
+        clock.advance_sim(12.0)                                    # 12 sim-s == 36 wall-s of slow delivery
+        self.assertGreater(clock.wall, p.timeout)                  # the OLD wall deadline would have fired...
+        self.assertFalse(self._deadline_fired(p))                  # ...but the SIM deadline has NOT
+        # And even if a deadline did fire with the server alive, it is NOT a crash (positive-death gate):
+        self.assertFalse(R('sim', 'plan_accept', True, 0, server_ready=True))
+
+    def test_hung_planner_fails_by_name_after_the_bounded_sim_budget(self):
+        # A genuinely hung planner delivers NO result; the simulator keeps stepping, so the SIM deadline
+        # fires after the bounded budget. It is a SIM-clock miss (deadline_clock is _sim_now) -> flagged as
+        # a render-pacing transient the controller re-issues (bounded MOVE_DEADLINE_RETRY) then e-stops
+        # honestly -- NEVER a crash-retry (the server is alive).
+        from twin.restock_manipulation.ros_adapter import (
+            PLAN_SIM_DEADLINE_S, _should_deadline_crash_retry as R)
+        clock = self._Clock(pace=3.0)
+        p = self._port(clock, server_ready=True)
+        p._arm_plan_deadline()
+        clock.advance_sim(PLAN_SIM_DEADLINE_S + 1.0)               # sim advances past the budget, no result
+        self.assertTrue(self._deadline_fired(p))                   # the bounded sim budget fires
+        # The fired deadline is on the SIM clock (deadline_clock is _sim_now, not time.monotonic), so _poll
+        # reads _clock='sim' -> a render-pacing transient the controller re-issues (bounded), NEVER a crash.
+        self.assertIsNot(p.deadline_clock, time.monotonic)
+        self.assertFalse(R('sim', 'plan_accept', True, 0, server_ready=True))
+
+    def test_real_death_recovers_with_positive_evidence(self):
+        # A REAL move_group death: the action server VANISHES (server_is_ready False). _handle_server_crash
+        # holds the move open for the respawn (positive death evidence), and the wall-deadline crash-retry
+        # heuristic is permitted ONLY with that same evidence (server gone).
+        from twin.restock_manipulation.ros_adapter import _should_deadline_crash_retry as R
+        clock = self._Clock(pace=3.0)
+        p = self._port(clock, server_ready=False)                  # move_group gone
+        self.assertEqual(p._handle_server_crash(), 'running')      # held for respawn, not failed
+        self.assertTrue(p._awaiting_server_respawn)
+        self.assertTrue(R('wall', 'plan_accept', True, 0, server_ready=False))   # death evidence -> crash-retry allowed
+
+    def test_normal_path_is_byte_identical(self):
+        # The no-crash healthy path: a plan that delivers within the sim budget with the server alive never
+        # fires the deadline and is never a crash-retry -- unchanged from before this lane.
+        from twin.restock_manipulation.ros_adapter import _should_deadline_crash_retry as R
+        clock = self._Clock(pace=3.0)
+        p = self._port(clock, server_ready=True)
+        p._arm_plan_deadline()
+        clock.advance_sim(1.5)                                     # healthy plan delivers in ~1-2 sim-s
+        self.assertFalse(self._deadline_fired(p))
+        self.assertFalse(R('wall', 'plan_accept', True, 0, server_ready=True))
+
+
+if __name__ == '__main__':
+    unittest.main()

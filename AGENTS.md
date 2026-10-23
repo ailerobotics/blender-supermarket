@@ -106,6 +106,16 @@ repo's `scenes/`, `export/` or `renders/`.
   `stop()`), because the global `/manipulation/stop` latches PERMANENTLY in the Isaac host
   (`isaac_ros_graph.check_health` → `'host emergency stop'`) and killed the run before the retry (fm225
   estopretry). CPU: `tests/test_ros_adapter_branch.py`; write-ups `data/sim-robust-movegroup-*/report.md`.
+  **Sharp edge (planning deadline is SIM, not WALL):** the PLANNING-phase per-move deadline
+  (`ik`/`plan_accept`/`plan_result`, `RosMotionPort._arm_plan_deadline`, `RESTOCK_PLAN_SIM_DEADLINE_S`
+  default 30 sim-s) is on the SIM clock, NOT the legacy ~25 s WALL `self.timeout`. Under the `live_pose`
+  `masked_depth` arm feed (a 2nd full-res render, ~16-30x wall/sim) the starved host executor could not
+  service the plan-ACCEPT callback within 25 s WALL though move_group was alive, so the WALL deadline
+  false-tripped `_should_deadline_crash_retry` — which read the slow plan as a crash and burned the whole
+  crash-retry budget with ZERO deaths → e-stop (coldlive4). The crash-retry now also requires POSITIVE
+  death evidence (`server_ready=False`, the move_group action server gone). The WALL genuine-process-HANG
+  backstop stays `planning_wall_exceeded`/`PLAN_TOTAL_WALL_CAP_S` (unchanged). Write-up + bounded GPU proof:
+  `data/sim-robust-plan-deadline-pacing-v1/report.md`, `docs/examples/plan-deadline-pacing-collect-fragment.json`.
   **Place-on-cart GPU/heartbeat bound**: an unplannable cart-place goal (self-colliding IK branch,
   `'Invalid c-space position: self collision detected'`) used to churn the full `REPLAN_MAX`
   same-goal replans and OOM the 12 GB card (`cumotion::FatalException`, `cuda_array.cu`) / starve the
