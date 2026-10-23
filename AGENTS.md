@@ -312,7 +312,15 @@ repo's `scenes/`, `export/` or `renders/`.
   wrong clock — creep-escape/`measured_turn_fault` both miss it) is caught by the opt-in SIM-clock
   net-progress monitor `navigation.coupled_progress_escape` (escalate→fault `coupled_no_progress`→replan in
   sim-seconds); see docs/restock_navigation.md, `scripts/check_outbound_progress.py`,
-  `docs/examples/outbound-progress-mission-fragment.json`. Uncoupled drive-fidelity lever = `caster_lift_m`
+  `docs/examples/outbound-progress-mission-fragment.json`. **Couple fine-dock limit cycle**
+  (`fine_dock.approach_mode`, opt-in, default `'hitch_jacobian'` ⇒ byte-identical): the legacy creep has a
+  degenerate zero-command equilibrium LINE (`lat = gain_yaw·|hitch_x|/gain_lin·yaw_err`, one ω for both
+  lateral-hitch AND yaw), so the couple approach can land OUTSIDE the latch box and freeze — coldlivefinal
+  stuck ~26 mm/~4.8° (yaw > 4° tol) for the whole 30 s cap while the still-arm coldhonest landed ~2.7°
+  (inside) and latched. `'crosstrack'` servos the rear hitch (leading point of the reverse approach →
+  stable minimum-phase) onto the cart axis, holding back until aligned then seating straight in.
+  Example `docs/examples/couple-fine-dock-crosstrack-fragment.json`; design + recorded evidence
+  `data/sim-robust-couple-fine-dock-v1/report.md`. Uncoupled drive-fidelity lever = `caster_lift_m`
   (fm434 bench `base-drive-bench-*`: 0.097→0.988). **The residual coupled stall is drive-authority, NOT
   geometry** (sim-robust-coupled-traction-v1): outbound_dock_to_bay is a STRAIGHT y=15.25 pull (the portal
   is at y=11.125 — the x≈−3.875 coincidence is a red herring), every recorded robot+cart footprint is
