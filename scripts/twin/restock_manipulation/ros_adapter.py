@@ -13,6 +13,9 @@ import time
 import xml.etree.ElementTree as ET
 
 from .types import Observation, Sensors, Target
+# sim-robust-host-timers-audit-fix-v1: the shared pace-aware liveness predicate (SIM primary + WALL
+# backstop). pace_watchdog is a leaf pure-arithmetic module (no ROS/Isaac), so this is safe at import.
+from ..restock.pace_watchdog import is_dead as pace_is_dead
 
 from .cad_tool import ARM_JOINTS
 
@@ -95,9 +98,30 @@ PLAN_TOTAL_WALL_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_PLAN_W
 # ~sim 24 s. A sim-clock budget tolerates a render-paced slow-but-alive plan (little SIM time passes under
 # any realistic pacing -- healthy planning consumes ~1-2 sim-s) while a genuinely hung planner still fails
 # after this bounded SIM budget (and the controller's bounded MOVE_DEADLINE_RETRY then e-stops honestly).
-# The genuine-process-HANG catch on the WALL side stays the separate planning_wall_exceeded (PLAN_TOTAL_
-# WALL_CAP_S) backstop, untouched. Env-overridable; clamped. freshness-on-sim-clock (not wall).
+# Env-overridable; clamped. freshness-on-sim-clock (not wall).
 PLAN_SIM_DEADLINE_S = max(5.0, min(600.0, float(os.environ.get('RESTOCK_PLAN_SIM_DEADLINE_S', 30.0))))
+# sim-robust-host-timers-audit-fix-v1: the TOTAL-move planning budget (across every ik/plan dispatch,
+# re-plan and IK seed for ONE move) -- the last wall timer in the planning path. coldlive sample-4
+# e-stopped BARE at the live_pose place-descent because planning_wall_exceeded / PLAN_TOTAL_WALL_CAP_S
+# tripped at 120 s WALL while the cuMotion plan future had NOT resolved (future_done=False): the 2nd
+# full-res masked_depth arm feed render-starved the planner, so ~4-8 SIM seconds had passed -- the plan
+# was alive-but-starved, NOT hung. PR 228 put the PER-DISPATCH deadline on the sim clock but explicitly
+# left THIS total cap on the wall; it is the remaining false-trip. Measure the total-move planning budget
+# on the SIM/node clock with THIS budget, exactly as PLAN_SIM_DEADLINE_S: a render-paced slow-but-alive
+# plan passes little SIM time and is tolerated; a genuinely hung planner (sim advancing, plan never
+# returning) still exhausts it. Default = the historical PLAN_TOTAL_WALL_CAP_S default, so on the real
+# rig (sim == wall) the move still fails at 22 s -- byte-identical. Env-overridable; clamped.
+PLAN_TOTAL_SIM_CAP_S = max(5.0, min(600.0,
+                                    float(os.environ.get('RESTOCK_PLAN_TOTAL_SIM_CAP_S', PLAN_TOTAL_WALL_CAP_S))))
+# The WALL leg of the total-planning budget is now ONLY a frozen-sim backstop (positive evidence: a frozen
+# sim clock can never advance the SIM leg above, so without it a wholly-stalled simulator would hang the
+# move forever). It must NEVER pre-empt the SIM budget for an alive-but-render-starved planner, so it is
+# derived GENEROUS -- the larger of the configured PLAN_TOTAL_WALL_CAP_S and the SIM budget scaled by the
+# worst expected wall-to-sim pacing (above the measured 16-30x of the live_pose arm feed). On the real rig
+# (sim == wall) the SIM budget fires first at 22 s, so this large wall value is inert and the no-pacing
+# path is byte-identical. See plan_total_wall_backstop(). Env-overridable; clamped.
+PLAN_WALL_BACKSTOP_PACING_FACTOR = max(1.0, min(500.0,
+                                               float(os.environ.get('RESTOCK_PLAN_WALL_BACKSTOP_PACING_FACTOR', 50.0))))
 # Hard COUNT cap on the TOTAL cuMotion plan dispatches for a single move (same-goal re-plans AND IK-seed
 # fallbacks AND crash-retry re-sends). The 12 GB GPU (the always-on whispr service holds ~2.2 GB) OOMs
 # cuMotion (FatalException, cuda_array.cu) after ~13 back-to-back plans against an unplannable place goal:
@@ -116,6 +140,13 @@ PLAN_TOTAL_ATTEMPTS_CAP = max(2, min(64, int(os.environ.get('RESTOCK_PLAN_ATTEMP
 SENSOR_STREAM_WALL_BACKSTOP_S = max(5.0, min(600.0, float(os.environ.get('RESTOCK_SENSOR_STREAM_WALL_BACKSTOP_S', 30.0))))
 # fm366: RosTransferBridge startup-grace wall bound (ros_host passes config, default 5 s). Sim-only env.
 STARTUP_GRACE_S = max(1.0, min(120.0, float(os.environ.get('RESTOCK_STARTUP_GRACE_S', 5.0))))
+# sim-robust-host-timers-audit-fix-v1: the first-frame "no initial sensor frame" grace is now SIM-primary
+# too. The warm-up + first ESDF render produce no /sensors frame, but Isaac still steps /clock, so a
+# render-paced startup (the fm465 light rig slows the full-res source render) stretched the wall gap and
+# forced RESTOCK_STARTUP_GRACE_S up to 120. A SIM budget scales with pacing automatically; the WALL leg
+# is a derived-generous frozen-sim backstop (frozen /clock can never advance the SIM leg). Default =
+# STARTUP_GRACE_S, so real rig (sim == wall) fires at 5 s -- byte-identical. Env-overridable; clamped.
+STARTUP_GRACE_SIM_S = max(1.0, min(600.0, float(os.environ.get('RESTOCK_STARTUP_GRACE_SIM_S', STARTUP_GRACE_S))))
 # fm385/run-300c: the host /sensors PER-FRAME bound, in SIM/node seconds. During a long render-paced
 # move (e.g. retreat) the collect capture holds (motion-completion feedback stale) and emits no fresh
 # station snapshot; a 1 s SIM bound then trips mid-retreat even with the render alive and no OOM (run-300c
@@ -170,6 +201,35 @@ def _plan_attempts_exhausted(plan_dispatches):
     bounded before the 12 GB card OOMs and before the shared ESDF service is starved into a station-
     heartbeat gap. Pure for CPU testing."""
     return plan_dispatches >= PLAN_TOTAL_ATTEMPTS_CAP
+
+
+def frozen_sim_wall_backstop(sim_budget_s, wall_floor_s, pacing_factor=None):
+    """sim-robust-host-timers-audit-fix-v1: the canonical frozen-sim WALL backstop for ANY sim-primary
+    budget. Large enough never to pre-empt the SIM budget (``sim_budget_s``) for an alive-but-render-
+    starved producer -- the SIM budget scaled by the worst expected wall-to-sim pacing -- but at least the
+    caller's ``wall_floor_s`` so a config can only ever WIDEN it, never tighten below the historical value.
+    On the real rig (sim == wall) the SIM budget fires first, so the returned (large) wall value is inert
+    and the no-pacing path is byte-identical. Shared by the planning budget and the first-frame startup
+    grace. Pure for CPU testing."""
+    factor = PLAN_WALL_BACKSTOP_PACING_FACTOR if pacing_factor is None else float(pacing_factor)
+    return max(float(wall_floor_s), float(sim_budget_s) * factor)
+
+
+def plan_total_wall_backstop(sim_cap_s, wall_cap_s, pacing_factor=None):
+    """The planning budget's frozen-sim WALL backstop -- a thin, named alias for frozen_sim_wall_backstop
+    (kept for the planning call sites and their CPU tests). Pure for CPU testing."""
+    return frozen_sim_wall_backstop(sim_cap_s, wall_cap_s, pacing_factor)
+
+
+def planning_budget_dead(sim_elapsed, wall_elapsed, sim_cap_s, wall_backstop_s):
+    """sim-robust-host-timers-audit-fix-v1: True when a single move's TOTAL planning budget is exhausted.
+    The SIM leg (``sim_elapsed`` > ``sim_cap_s``) is the primary bound: an advancing sim clock proves the
+    simulator is alive, so a plan that has still not resolved after that much SIM time is genuinely hung,
+    not merely render-slow. The WALL leg (``wall_elapsed`` > ``wall_backstop_s``) only catches a FROZEN
+    sim, whose stalled clock can never advance the SIM leg. Reuses the shared pace-aware predicate
+    (mode='either'): fire on EITHER leg. Pure for CPU testing (no clock, no ROS)."""
+    return pace_is_dead(sim_elapsed=sim_elapsed, wall_elapsed=wall_elapsed,
+                        sim_budget=sim_cap_s, wall_backstop=wall_backstop_s, mode='either')
 
 
 # sim-robust-movegroup-respawn-v1: the port states in which a plan/execute request is in flight at
@@ -357,6 +417,15 @@ class RosMotionPort:
         # render-pacing wall-window relaxations.
         # fm363: env WINS over the ros_host config value (run-290 shadow fix).
         self.plan_wall_cap_s = env_wins('RESTOCK_PLAN_WALL_CAP_S', plan_wall_cap_s, PLAN_TOTAL_WALL_CAP_S)
+        # sim-robust-host-timers-audit-fix-v1: the total-move planning budget is now SIM-primary. The SIM
+        # cap is the real bound; the configured wall cap becomes the frozen-sim backstop, derived GENEROUS
+        # so it can never pre-empt the SIM leg for a render-starved-but-alive planner (coldlive sample-4).
+        # Both SIM-ONLY env wins; default = real-rig (plan_total_sim_cap_s defaults to the wall cap, so
+        # sim == wall fails at the historical 22 s -> byte-identical). _plan_started_sim anchors the budget
+        # at MOVE start, exactly like _plan_started_wall.
+        self.plan_total_sim_cap_s = env_wins('RESTOCK_PLAN_TOTAL_SIM_CAP_S', None, PLAN_TOTAL_SIM_CAP_S)
+        self.plan_wall_backstop_s = plan_total_wall_backstop(self.plan_total_sim_cap_s, self.plan_wall_cap_s)
+        self._plan_started_sim = None
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
             raise RuntimeError('node must use domain 88 and simulation clock')
         if namespace != '/restock_sim':
@@ -514,6 +583,7 @@ class RosMotionPort:
         # sets it True when it builds the joint-constraint goal. The pose path below keeps it False.
         self._plan_goal_joint_space = False
         self._plan_started_wall = time.monotonic()   # total planning-wall cap anchor (see PLAN_TOTAL_WALL_CAP_S)
+        self._plan_started_sim = self._sim_now()      # total planning SIM-budget anchor (PLAN_TOTAL_SIM_CAP_S)
         # Straight-line contact descent (firstmate run-191). The contact move is BY DEFINITION a short
         # straight descent INTO the target carton, so a collision planner that still holds the carton
         # (and its support face) as obstacles rejects it near contact (INVALID_MOTION_PLAN) whenever the
@@ -871,6 +941,7 @@ class RosMotionPort:
         self._plan_goal_joint_space=True   # a fixed joint-constraint goal -> tighter same-goal re-plan budget
         self._straight_line=bool(straight_line)
         self._plan_started_wall=time.monotonic()
+        self._plan_started_sim=self._sim_now()        # total planning SIM-budget anchor (PLAN_TOTAL_SIM_CAP_S)
         if straight_line:
             # Collision-OFF straight-line JOINT escape: a 2-point rest-to-rest smoothstep to the explicit
             # clear-branch target, bypassing cuMotion's start-state self-collision check. No _plan_goal
@@ -960,11 +1031,21 @@ class RosMotionPort:
         if getattr(self, 'state', None) in self._DRAIN_STATES:
             self.poll()
 
+    def _planning_elapsed(self):
+        """(sim_elapsed, wall_elapsed) seconds since THIS move's planning started, for the total-move
+        planning budget. sim_elapsed is None until a move has anchored a sim start (CPU tests of the
+        legacy wall-only path can omit it); the wall leg then still bounds a frozen sim. Read-only."""
+        wall_elapsed = time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
+        sim_start = getattr(self, '_plan_started_sim', None)
+        sim_elapsed = None if sim_start is None else self._sim_now() - sim_start
+        return sim_elapsed, wall_elapsed
+
     def plan_wall_diag(self):
-        """One-line state snapshot for the plan-cap fire (firstmate 290/292, run-237): distinguishes a
-        result DELIVERED-but-not-consumed (future done -> the fix should have caught it) from one
-        NOT-delivered in the cap (future not done -> move_group succeeded but the action result never
-        reached the port). Read-only."""
+        """One-line state snapshot for the plan-budget fire (firstmate 290/292, run-237; coldlive4):
+        distinguishes a result DELIVERED-but-not-consumed (future done -> the fix should have caught it)
+        from one NOT-delivered in the cap (future not done -> move_group succeeded but the action result
+        never reached the port), and names BOTH budget legs so a sim-leg fire (hung planner) is told
+        apart from a wall-backstop fire (frozen sim). Read-only."""
         f = getattr(self, 'future', None)
         done = bool(f is not None and f.done())
         status = None
@@ -974,31 +1055,64 @@ class RosMotionPort:
                 status = getattr(r, 'status', None)
             except Exception as exc:
                 status = 'raised:%r' % exc
-        elapsed = time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
-        return ('PLAN_WALL_DIAG state=%s future_done=%s result_status=%s elapsed=%.2f replans=%s'
-                % (getattr(self, 'state', None), done, status, elapsed,
-                   getattr(self, '_replan_attempts', None)))
+        sim_elapsed, wall_elapsed = self._planning_elapsed()
+        return ('PLAN_WALL_DIAG state=%s future_done=%s result_status=%s elapsed=%.2f replans=%s '
+                'sim_elapsed=%s sim_cap=%.1f wall_backstop=%.1f leg=%s'
+                % (getattr(self, 'state', None), done, status, wall_elapsed,
+                   getattr(self, '_replan_attempts', None),
+                   'n/a' if sim_elapsed is None else '%.2f' % sim_elapsed,
+                   getattr(self, 'plan_total_sim_cap_s', PLAN_TOTAL_SIM_CAP_S),
+                   getattr(self, 'plan_wall_backstop_s',
+                           plan_total_wall_backstop(PLAN_TOTAL_SIM_CAP_S, PLAN_TOTAL_WALL_CAP_S)),
+                   self.planning_budget_leg()))
+
+    def planning_budget_leg(self):
+        """Which leg of the total-move planning budget is exhausted: 'sim' (primary: an advancing sim
+        proves a hung-not-slow planner), 'wall' (frozen-sim backstop), or None. Read-only."""
+        sim_elapsed, wall_elapsed = self._planning_elapsed()
+        sim_cap = getattr(self, 'plan_total_sim_cap_s', PLAN_TOTAL_SIM_CAP_S)
+        wall_backstop = getattr(self, 'plan_wall_backstop_s',
+                                plan_total_wall_backstop(PLAN_TOTAL_SIM_CAP_S, PLAN_TOTAL_WALL_CAP_S))
+        if sim_elapsed is not None and sim_elapsed > sim_cap:
+            return 'sim'
+        if wall_elapsed > wall_backstop:
+            return 'wall'
+        return None
 
     def planning_wall_exceeded(self):
-        """True once a single move has spent more than the total planning-wall cap in a PLANNING
-        phase (ik / plan request / plan result) WITHOUT a usable result yet. Read-only (no state
-        advance): the bridge watchdog checks it on its own 0.1 s timer so a planning hang surfaces as
-        a motion failure within the cap EVEN WHEN /sensors has stalled and poll() is no longer being
-        driven (run-220: the preplace PLANNING_FAILED was masked by the 30 s /sensors wall backstop
-        because poll() stopped being called). A SUCCEEDED plan result already delivered but not yet
-        consumed by the sensor-paced poll() does NOT count as exhausted (firstmate 290; run-234
-        false-tripped on a plan move_group had already completed). Execution phases are excluded -- a
-        render-paced execute legitimately runs long."""
+        """True once a single move's TOTAL planning budget is exhausted in a PLANNING phase (ik / plan
+        request / plan result) WITHOUT a usable result yet. Read-only (no state advance): the bridge
+        watchdog checks it on its own 0.1 s timer so a planning hang surfaces as a motion failure EVEN
+        WHEN /sensors has stalled and poll() is no longer being driven (run-220: the preplace
+        PLANNING_FAILED was masked by the 30 s /sensors wall backstop because poll() stopped being
+        called). A SUCCEEDED plan result already delivered but not yet consumed by the sensor-paced
+        poll() does NOT count as exhausted (firstmate 290; run-234 false-tripped on a plan move_group
+        had already completed). Execution phases are excluded -- a render-paced execute legitimately
+        runs long.
+
+        sim-robust-host-timers-audit-fix-v1: the budget is now SIM-primary (``plan_total_sim_cap_s``)
+        with the configured wall cap as a derived-generous FROZEN-SIM backstop (``plan_wall_backstop_s``),
+        reusing pace_watchdog.is_dead(mode='either'). coldlive sample-4 e-stopped bare here: the pure-wall
+        cap (120 s env) tripped while the plan future had not resolved under the live_pose arm-feed render
+        pacing (only ~4-8 SIM s had passed -- alive-but-starved, not hung). The SIM leg tolerates a
+        render-paced plan; a genuinely hung planner (sim advancing, plan never returning) still exhausts
+        it; a frozen sim (SIM leg can never advance) is caught by the wall backstop. Real rig (sim == wall)
+        fires at the historical 22 s via the SIM leg -> byte-identical."""
         # sim-robust-movegroup-estop-retry-v1: while the move is HELD for a move_group respawn
         # (_awaiting_server_respawn), the dedicated RESPAWN_WAIT_CAP_S bounds the wait -- the stale
-        # per-move _plan_started_wall would otherwise let this bridge-watchdog cap fire and e-stop the
-        # recovery mid-hold. Suspend it for the respawn wait only (a genuine planning hang has no
-        # awaiting flag set, so it is unaffected). Hardens the pre-existing _handle_server_crash hold too.
-        return (self.state in ('ik', 'plan_accept', 'plan_result')
-                and not getattr(self, '_awaiting_server_respawn', False)
-                and not self._pending_plan_success()
-                and time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
-                > getattr(self, 'plan_wall_cap_s', PLAN_TOTAL_WALL_CAP_S))
+        # per-move anchors would otherwise let this bridge-watchdog cap fire and e-stop the recovery
+        # mid-hold. Suspend it for the respawn wait only (a genuine planning hang has no awaiting flag
+        # set, so it is unaffected). Hardens the pre-existing _handle_server_crash hold too.
+        if (self.state not in ('ik', 'plan_accept', 'plan_result')
+                or getattr(self, '_awaiting_server_respawn', False)
+                or self._pending_plan_success()):
+            return False
+        sim_elapsed, wall_elapsed = self._planning_elapsed()
+        return planning_budget_dead(
+            sim_elapsed, wall_elapsed,
+            getattr(self, 'plan_total_sim_cap_s', PLAN_TOTAL_SIM_CAP_S),
+            getattr(self, 'plan_wall_backstop_s',
+                    plan_total_wall_backstop(PLAN_TOTAL_SIM_CAP_S, PLAN_TOTAL_WALL_CAP_S)))
 
     def failed_result_pending(self):
         """True when an EXECUTE action RESULT has arrived FAILED (status != SUCCEEDED) but poll() has
@@ -1101,6 +1215,7 @@ class RosMotionPort:
             self.generation += 1
             self._arm_plan_deadline()   # sim-clock planning deadline on the re-sent plan (render-pacing tolerant)
             self._plan_started_wall = time.monotonic()
+            self._plan_started_sim = self._sim_now()   # fresh total planning SIM budget after respawn
             self._resync_scene_after_respawn()   # re-attach the carried carton to the fresh scene FIRST
             print('MOVE_GROUP_CRASH_RETRY resending plan goal after respawn (retry %d/%d, op %d/%d)'
                   % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX,
@@ -1208,6 +1323,11 @@ class RosMotionPort:
             # fm367: a port RAISE is a collision/plan-rejection/crash fault, never a sim-deadline miss ->
             # clear the flag so the controller's deadline retry does not fire (fail-fast preserved).
             self._last_fault_sim_deadline = False
+            # sim-robust-host-timers-audit-fix-v1 (named trigger): this stop() publishes the global
+            # emergency stop, which the Isaac side surfaces to the mission as a BARE 'host emergency stop'
+            # (the stop wire carries no reason). Log the port-side cause here so host-stack.log ALWAYS
+            # names the trigger (state + exception) before the stop -- sample-4 had none.
+            print('PORT_FAULT_ESTOP state=%s exc=%r' % (getattr(self, 'state', None), exc), flush=True)
             self.stop()
             return 'failed'
 
@@ -1298,6 +1418,7 @@ class RosMotionPort:
                 self.generation += 1
                 self._arm_plan_deadline()   # sim-clock planning deadline on the re-sent plan (render-pacing tolerant)
                 self._plan_started_wall = time.monotonic()
+                self._plan_started_sim = self._sim_now()   # fresh total planning SIM budget after respawn
                 self._resync_scene_after_respawn()   # re-attach the carried carton to the fresh scene FIRST
                 print('MOVE_GROUP_CRASH_RETRY plan-result wall-deadline (likely move_group crash+respawn '
                       'between polls); resending plan goal (retry %d/%d, op %d/%d)'
@@ -1424,9 +1545,12 @@ class RosMotionPort:
                 # seed-variant base/plate collision (INVALID_MOTION_PLAN, ~half of seeds) into a
                 # near-certain pass. Then fall back to the next IK seed (a wrapped-branch self-collision
                 # needs a different c-space target), then fail.
-                # Fail fast: once the cumulative planning wall time for this move crosses the cap, stop
-                # retrying (seed/replan) and surface a clean motion failure before the /sensors backstop.
-                if time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic()) > getattr(self, 'plan_wall_cap_s', PLAN_TOTAL_WALL_CAP_S):
+                # Fail fast: once the cumulative planning budget for this move is exhausted, stop retrying
+                # (seed/replan) and surface a clean motion failure before the /sensors backstop. sim-robust-
+                # host-timers-audit-fix-v1: SIM-primary + frozen-sim wall backstop (same predicate as
+                # planning_wall_exceeded), so a render-paced re-plan storm is bounded on the sim clock, not
+                # cut off by the pure wall cap that false-tripped coldlive sample-4.
+                if self.planning_wall_exceeded():
                     raise RuntimeError('planning failed (exhausted within wall cap)')
                 # Hard GPU backstop: once this move has dispatched PLAN_TOTAL_ATTEMPTS_CAP cuMotion plans,
                 # stop -- an unplannable goal (e.g. a self-colliding cart-place branch) would otherwise churn
@@ -1648,6 +1772,12 @@ class RosTransferBridge:
         # weakening the moving-arm protection (before the first frame the arm has acted on nothing).
         self.watchdog_seconds = env_wins('RESTOCK_SENSOR_WATCHDOG_S', watchdog_seconds, SENSOR_WATCHDOG_S)
         self.startup_grace_seconds = env_wins('RESTOCK_STARTUP_GRACE_S', startup_grace_seconds, STARTUP_GRACE_S)
+        # sim-robust-host-timers-audit-fix-v1: SIM-primary first-frame grace + derived-generous frozen-sim
+        # WALL backstop. Default sim grace = the wall grace, so real rig (sim == wall) fires at the same 5 s.
+        self.startup_grace_sim_seconds = env_wins('RESTOCK_STARTUP_GRACE_SIM_S', None, STARTUP_GRACE_SIM_S)
+        self.startup_grace_wall_backstop_s = frozen_sim_wall_backstop(
+            self.startup_grace_sim_seconds, self.startup_grace_seconds)
+        self.job_start_sim = None
         self.wall_backstop_seconds = wall_backstop_seconds
         # fm490: WALL budget for the TRANSIT sensing-pause (reposition carry-drive); both /sensors bounds
         # are suspended across the pause, this is the only backstop then. Reset each time transit begins.
@@ -1678,6 +1808,7 @@ class RosTransferBridge:
             self.last_packet_sim = None
             self.first_frame = False
             self.job_start_wall = time.monotonic()
+            self.job_start_sim = self.node.get_clock().now().nanoseconds * 1e-9
             self.last_packet_wall = time.monotonic()
         except (ValueError, KeyError, TypeError) as exc:
             self.status.publish(self.String(data=json.dumps({'status': 'rejected', 'reason': str(exc)})))
@@ -1778,10 +1909,21 @@ class RosTransferBridge:
         self._transit_pause_start_wall = None
         if not self.first_frame:
             # No /sensors yet: the looser startup grace (not the 1 s per-frame bound) applies, so a
-            # warm-up + cold first ESDF has time to produce the first frame. Stays in WALL time; a
-            # job that never produces a frame still hard-stops with a distinct reason.
-            if self.job_start_wall is not None and wall_now - self.job_start_wall > self.startup_grace_seconds:
-                self._emit(self.controller._fail('no initial sensor frame'))
+            # warm-up + cold first ESDF has time to produce the first frame. sim-robust-host-timers-audit-
+            # fix-v1: SIM-primary grace (scales with render pacing: the fm465 light rig slows the first
+            # full-res frame) with a derived-generous frozen-sim WALL backstop (a job that never produces a
+            # frame AND never advances /clock still hard-stops). Real rig (sim == wall) fires at the same 5 s.
+            if self.job_start_sim is None:
+                return
+            sim_gap = self.node.get_clock().now().nanoseconds * 1e-9 - self.job_start_sim
+            wall_gap = wall_now - self.job_start_wall if self.job_start_wall is not None else 0.0
+            if pace_is_dead(sim_elapsed=sim_gap, wall_elapsed=wall_gap,
+                            sim_budget=self.startup_grace_sim_seconds,
+                            wall_backstop=self.startup_grace_wall_backstop_s, mode='either'):
+                self._emit(self.controller._fail(
+                    'no initial sensor frame (sim_gap=%.1fs > %.1fs or wall_gap=%.0fs > %.0fs)'
+                    % (sim_gap, self.startup_grace_sim_seconds, wall_gap,
+                       self.startup_grace_wall_backstop_s)))
             return
         # Per-frame bound in NODE-CLOCK (sim) time: on real hardware sim == wall so the 1 s
         # semantics are unchanged, and under a render-paced /clock it does not false-trip on the

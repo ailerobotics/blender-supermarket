@@ -643,6 +643,13 @@ class TransferController:
                       None if status=='failed' else getattr(self,'valid_until_steady',None))
 
     def _fail(self, reason):
+        # sim-robust-host-timers-audit-fix-v1 (named trigger): motion.stop() publishes the global
+        # emergency stop, which the Isaac side reports to the mission as a BARE 'host emergency stop'
+        # (the stop wire carries no reason). Log the NAMED host-side cause here so host-stack.log can
+        # ALWAYS be traced to a distinct trigger -- which watchdog / deadline / freshness / gate fired --
+        # before the stop (coldlive sample-4 had no such line, only the PLAN_WALL_DIAG hint). Cheap, one
+        # line per fault, at the single controller fault chokepoint. Logs the ACTIVE phase (pre-fail).
+        print('HOST_FAULT_ESTOP phase=%s reason=%r' % (self.phase, reason), flush=True)
         self.reason, self.phase = reason, 'failed'
         try:
             self.motion.stop()
