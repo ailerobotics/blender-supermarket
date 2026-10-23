@@ -484,6 +484,122 @@ class MoveGroupCrashRetry(unittest.TestCase):
                     sys.modules[k] = v
 
 
+class MoveGroupRespawnSceneResync(unittest.TestCase):
+    """sim-robust-movegroup-respawn-v1: a respawned move_group starts with a FRESH planning scene that no
+    longer holds restock_carried_unit (the coldlive crash landed between the grasp attach and the detach),
+    so a crash-retry must RE-ATTACH the carried carton from the authoritative object_attachment state
+    BEFORE it resends the plan goal -- otherwise the resent plan ignores the attached carton and plans
+    through it. Also pins the serialization invariant: a scene mutation (update_payload) must never be
+    issued while a plan/execute is in flight."""
+
+    @staticmethod
+    def _port(state='plan_result', ready=True, plan_goal='GOAL', attached=None, order=None):
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state = state
+        p.timeout = 25.0
+        p.generation = 7
+        p.handle = object()
+        p._plan_goal = plan_goal
+        p._server_crash_retries = 0
+        p._awaiting_server_respawn = False
+        p._replan_attempts = 5
+        p._attached_profile = attached
+        p._live_arm_state = None            # real-rig-style: _reanchor is a no-op
+        p.plan = _FakePlan(ready)
+        p.execute = _FakePlan(ready)
+
+        def _payload(held, profile):
+            if order is not None:
+                order.append(('attach', held, profile))
+            return True
+        p.payload_sync = _payload
+        # record plan re-sends in the same order list so the ordering is provable
+        if order is not None:
+            real_send = p.plan.send_goal_async
+            def _send(goal):
+                order.append(('plan_send', goal))
+                return real_send(goal)
+            p.plan.send_goal_async = _send
+        return p
+
+    def test_respawn_mid_carry_reattaches_before_resending_plan(self):
+        order = []
+        p = self._port(ready=False, attached='PROFILE', order=order)
+        p._handle_server_crash()                       # notice the crash, start awaiting respawn
+        p.plan.ready = p.execute.ready = True          # move_group respawned
+        self.assertEqual(p._handle_server_crash(), 'running')
+        self.assertEqual(p.plan.sent, ['GOAL'])        # the SAME plan goal was resent
+        # Decisive ordering: the carton was re-attached BEFORE the plan was resent.
+        self.assertEqual([o[0] for o in order], ['attach', 'plan_send'])
+        self.assertEqual(order[0], ('attach', True, 'PROFILE'))
+
+    def test_respawn_without_carry_does_not_reattach_byte_identical(self):
+        order = []
+        p = self._port(ready=False, attached=None, order=order)
+        p._handle_server_crash()
+        p.plan.ready = p.execute.ready = True
+        self.assertEqual(p._handle_server_crash(), 'running')
+        self.assertEqual(p.plan.sent, ['GOAL'])
+        self.assertEqual([o[0] for o in order], ['plan_send'])   # no attach when nothing is held
+
+    def test_resync_helper_reattaches_held_carton(self):
+        order = []
+        p = self._port(attached='PROFILE', order=order)
+        p._resync_scene_after_respawn()
+        self.assertEqual(order, [('attach', True, 'PROFILE')])
+
+    def test_resync_helper_noop_when_nothing_held(self):
+        order = []
+        p = self._port(attached=None, order=order)
+        p._resync_scene_after_respawn()
+        self.assertEqual(order, [])
+
+    def test_resync_helper_does_not_mask_a_reattach_raise(self):
+        p = self._port(attached='PROFILE')
+        def _boom(held, profile):
+            raise RuntimeError('attach server gone')
+        p.payload_sync = _boom
+        p._resync_scene_after_respawn()                # logged, swallowed: the resent plan still gates
+        # (no exception propagates out of the crash-retry resync)
+
+    def test_update_payload_tracks_authoritative_attachment_state(self):
+        prof = S(sku='x', dimensions=(0.1, 0.1, 0.1))   # profile is carried opaquely by the port
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state = 'succeeded'
+        p._attached_profile = None
+        p.payload_sync = lambda held, profile: True
+        self.assertTrue(p.update_payload(True, prof))
+        self.assertIs(p._attached_profile, prof)        # mirror set on a confirmed attach
+        self.assertTrue(p.update_payload(False, prof))
+        self.assertIsNone(p._attached_profile)          # cleared on detach
+
+    def test_update_payload_failed_attach_leaves_mirror_untouched(self):
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state = 'succeeded'
+        p._attached_profile = None
+        p.payload_sync = lambda held, profile: False    # attach not acknowledged
+        self.assertFalse(p.update_payload(True, 'PROFILE'))
+        self.assertIsNone(p._attached_profile)          # not mirrored unless the attach succeeded
+
+    def test_update_payload_refuses_mutation_during_in_flight_plan(self):
+        from twin.restock_manipulation.ros_adapter import _PLAN_IN_FLIGHT_STATES
+        for st in _PLAN_IN_FLIGHT_STATES:
+            p = RosMotionPort.__new__(RosMotionPort)
+            p.state = st
+            p._attached_profile = None
+            p.payload_sync = lambda held, profile: True
+            with self.assertRaises(RuntimeError, msg=st):
+                p.update_payload(True, 'PROFILE')
+
+    def test_update_payload_allowed_between_moves(self):
+        for st in ('idle', 'succeeded', 'failed', 'ik'):
+            p = RosMotionPort.__new__(RosMotionPort)
+            p.state = st
+            p._attached_profile = None
+            p.payload_sync = lambda held, profile: True
+            self.assertTrue(p.update_payload(True, 'PROFILE'), st)   # never raises between moves
+
+
 class Drain(unittest.TestCase):
     """drain() advances the PLANNING state machine off the independent watchdog tick (firstmate 290
     option b / run-237), so a move_group result is consumed within 0.1 s of arrival regardless of the

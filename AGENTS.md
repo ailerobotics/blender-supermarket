@@ -111,6 +111,21 @@ repo's `scenes/`, `export/` or `renders/`.
   WALL arm-command heartbeat (runs 321/327). Design + bounded collect-only validation config
   (`--stop-after collect`, no GT): `data/sim-robust-collect-arrival-v1/report.md`,
   `docs/examples/collect-only-validation-fragment.json`.
+  **move_group SIGABRT crash + respawn scene re-sync**: the intermittent `move_group` `exit code -6`
+  (`malloc(): unaligned tcache chunk detected`) during manipulation is UPSTREAM heap corruption in the
+  `moveit_ros_move_group`+cuMotion-plugin binary (crashes handling a planning request concurrent with
+  nvblox ESDF updates), NOT a repo concurrent scene mutation — the single-threaded controller issues
+  attach/detach strictly BETWEEN moves — and NOT patchable; it is distinct from the
+  `cumotion::FatalException` OOM / >1024-sphere CONTAINER death (that's `component_container_mt-2`, capped
+  by `PLAN_TOTAL_ATTEMPTS_CAP` + the sphere model). `launch.py` respawns move_group and
+  `ros_adapter.RosMotionPort` re-sends the plan (`MOVE_GROUP_CRASH_RETRY`), but a respawned move_group's
+  FRESH planning scene drops `restock_carried_unit`. Fix (always-on, no-op when nothing held ⇒
+  byte-identical): `RosMotionPort` mirrors the attach state in `_attached_profile` (set via
+  `update_payload`) and `_resync_scene_after_respawn()` re-attaches the carton BEFORE either resend site
+  resends the plan; `update_payload` now also raises if called in a `_PLAN_IN_FLIGHT_STATES` state
+  (serialization invariant, inert on the real path). PR #223 handled only the detach tolerating the lost
+  object. Report + bounded GPU proof: `data/sim-robust-movegroup-respawn-v1/report.md`,
+  `docs/examples/movegroup-respawn-collect-fragment.json`.
 - **Tray/slot fit preflight** (opt-in, default-off): `restock/fit_preflight.py` refuses a
   handling unit that will not fit the destination slot BEFORE reserving stock or booting
   Isaac, instead of failing opaquely at place. `fit = ok | wont_fit | unknown` from a
