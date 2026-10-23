@@ -428,6 +428,16 @@ class RosMotionPort:
         self._goal_tol_pub = node.create_publisher(
             Float64, namespace + '/arm_controller/goal_position_tol',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        # sim-robust-pick-plan-rejection-v1: op-start re-arm. The trajectory_host latches a fault until
+        # process restart; a latched fault from a previous op then SILENTLY rejects the next move's goal
+        # (bricking the arm against the controller's own bounded retries). Publish a reset at the start
+        # of every move so the host clears a latched fault (+ a stale active flag) before the goal
+        # arrives (mirrors PR 210's gate re-arm). A no-op on the host when there is no fault, so the
+        # normal path is byte-identical. VOLATILE (not latched): a restarted host must not replay an old
+        # reset; begin()/begin_joint_goal() publish a fresh one each move, well before planning finishes.
+        from std_msgs.msg import Bool as _Bool
+        self._reset_pub = node.create_publisher(_Bool, namespace + '/arm_controller/reset', 10)
+        self._exec_abort_reason = None   # distinct reason for the last ExecuteTrajectory abort (take_*)
         # Deadlines: IK/planning are compute-bound -> WALL clock. Trajectory EXECUTION is paced by the
         # simulator: under render pacing executing D sim-seconds takes far more WALL time, so a wall
         # execution deadline false-fails a healthy grasp (run-93). The execute deadline is therefore
@@ -443,6 +453,26 @@ class RosMotionPort:
         from std_msgs.msg import Float64
         tol = GOAL_POSITION_TOL_DEFAULT if goal_tol is None else float(goal_tol)
         self._goal_tol_pub.publish(Float64(data=tol))
+
+    def _publish_reset(self):
+        """sim-robust-pick-plan-rejection-v1: op-start re-arm signal to the trajectory_host (clears a
+        latched fault + a stale active flag so the next move's goal is not silently rejected). Published
+        at the start of every move; a no-op on the host when there is no fault. Best-effort: a missing
+        publisher (older fixtures) must never break a move."""
+        pub = getattr(self, '_reset_pub', None)
+        if pub is None:
+            return
+        from std_msgs.msg import Bool
+        pub.publish(Bool(data=True))
+
+    def take_exec_abort_reason(self):
+        """Return and clear the DISTINCT reason the last ExecuteTrajectory aborted (a downstream
+        arm_controller goal rejection or execution fault), or None if the last 'failed' poll was not an
+        execute abort (e.g. a planning collision). The controller uses it so a rejected/aborted goal is
+        not mislabelled 'collision planning or execution failed' (seconddeath 2026-10-23)."""
+        reason = getattr(self, '_exec_abort_reason', None)
+        self._exec_abort_reason = None
+        return reason
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
               wrist2_min=None, slow=False, goal_tol=None, near_start=False, wrist_guard=None):
@@ -463,6 +493,8 @@ class RosMotionPort:
         # both reset to the full-speed / tight-tolerance default on every non-place move.
         self._move_speed_scale = 0.5 if slow else 1.0
         self._publish_goal_tol(goal_tol)
+        self._publish_reset()            # op-start re-arm: clear any latched trajectory_host fault
+        self._exec_abort_reason = None   # fresh execute-abort reason per move
         # fm347 (3): pan<->preplace IK-branch consistency. The joint-space IK below normally unwraps to
         # the branch nearest the STOW nominal (_nearest_branch), which let the cart PLACE pose flip
         # shoulder_pan to a far branch (run-273: pan left j0 at -1.822 but preplace solved ~2.09 -> a
@@ -821,6 +853,8 @@ class RosMotionPort:
         # reached the shape, no mid-track-miss), so the tight terminal gate rejected an otherwise-arrived
         # pose. The straight-line insert (place) re-solves to the SENSED place, correcting the offset.
         self._publish_goal_tol(goal_tol)
+        self._publish_reset()            # op-start re-arm: clear any latched trajectory_host fault
+        self._exec_abort_reason = None   # fresh execute-abort reason per move
         self._near_start = False   # fm347 (3): begin_joint_goal moves use their own goal, never the near_start IK branch
         self._wrist_guard = None   # transfer_carry: a fixed joint goal has no IK branch to guard
         # Reset the planning anchors for THIS move, exactly as begin() does (firstmate 292 / run-238):
@@ -1459,6 +1493,16 @@ class RosMotionPort:
                 self.state = 'await_settle'
         elif self.state == 'execute_result':
             if result.status != 4 or result.result.error_code.val != 1:
+                # A downstream arm_controller (trajectory_host) goal REJECTION and a mid-trajectory
+                # execution FAULT both abort ExecuteTrajectory (CONTROL_FAILED); NEITHER is a planning
+                # collision. Record a distinct reason pointing at the host log (where trajectory_host now
+                # logs the precise cause: TRAJ_HOST_GOAL_REJECT for a rejection, TRAJ_HOST_FAULT for a
+                # fault) so the mission does not mislabel it 'collision planning or execution failed'
+                # (seconddeath 2026-10-23: a first-goal startup-race rejection surfaced as that string).
+                _code = getattr(getattr(result.result, 'error_code', None), 'val', None)
+                self._exec_abort_reason = (
+                    'arm controller aborted trajectory (goal rejected or execution fault, moveit_err=%s; '
+                    'see host-stack.log TRAJ_HOST_GOAL_REJECT/TRAJ_HOST_FAULT)' % (_code,))
                 raise RuntimeError('execution failed')
             self.state = 'succeeded'
         return 'succeeded' if self.state == 'succeeded' else 'running'

@@ -394,3 +394,69 @@ def test_executor_exit_is_honest_and_bounded_tolerant():
     act, reason = executor_exit_action(raised_exc=None, prior_fault=None,
                                        context_ok=True, transient_budget=0)
     assert act == 'stop' and 'without shutdown or tracking fault' in reason
+
+
+def test_reject_reason_names_each_race_and_accepts_when_clear():
+    # sim-robust-pick-plan-rejection-v1: the goal callback must never reject SILENTLY. reject_reason
+    # names which of the three startup/timing conditions fired (so seconddeath's feedback-None race is
+    # attributable in host-stack.log instead of surfacing as 'collision planning or execution failed').
+    from twin.restock.trajectory_host import reject_reason
+    # all clear -> accept (None)
+    assert reject_reason(None, False, True) is None
+    # the actual seconddeath cause: first goal arrived before the first /joint_states sample
+    r = reject_reason(None, False, False)
+    assert r is not None and 'feedback' in r and 'race' in r
+    # a previous goal still executing
+    r = reject_reason(None, True, True)
+    assert r is not None and 'previous goal' in r
+    # a latched fault wins over everything and carries the cause
+    r = reject_reason('trajectory tracking error 1.6 exceeds 1.3 rad', True, False)
+    assert r is not None and 'fault latched' in r and 'tracking error' in r
+
+
+def test_active_is_stale_only_when_handle_terminated():
+    # (c) a NEW goal must not be rejected on a dead active flag (a prior handle that aborted/canceled
+    # without execute()'s finally clearing active), but a LIVE goal's flag must be respected.
+    from twin.restock.trajectory_host import active_is_stale
+    assert active_is_stale(True, False) is True      # active set, handle terminated -> stale, clear it
+    assert active_is_stale(True, True) is False       # active set, handle live -> genuine, keep it
+    assert active_is_stale(False, False) is False     # not active -> nothing to clear
+    assert active_is_stale(False, True) is False
+
+
+def test_reset_clears_rearms_latched_fault_never_a_live_goal():
+    # (d) op-start re-arm (PR 210 parity): a reset clears a LATCHED fault + a STALE active flag, but
+    # NEVER a live execution, and is a no-op when there is nothing to clear (byte-identical normal path).
+    from twin.restock.trajectory_host import reset_clears
+    assert reset_clears(None, False, False) == (False, False)          # fault-free, idle -> no-op
+    assert reset_clears('feedback lost', False, False) == (True, False)  # re-arm a latched fault
+    assert reset_clears('feedback lost', True, False) == (True, True)    # + clear a stale active flag
+    assert reset_clears(None, True, True) == (False, False)              # live goal, no fault -> untouched
+    assert reset_clears('x', True, True) == (True, False)                # fault cleared; live active kept
+
+
+def test_handle_live_tolerates_none_and_duck_types():
+    from twin.restock.trajectory_host import _handle_live
+    from types import SimpleNamespace as NS
+    assert _handle_live(None) is False
+    assert _handle_live(NS(is_active=True)) is True
+    assert _handle_live(NS(is_active=False)) is False
+
+    class _Raises:
+        @property
+        def is_active(self):
+            raise RuntimeError('torn down')
+    assert _handle_live(_Raises()) is False   # a torn-down handle reports not-live, never raises
+
+
+def test_first_feedback_grace_default_and_env_override(monkeypatch):
+    from twin.restock import trajectory_host
+    import importlib
+    monkeypatch.delenv('RESTOCK_FIRST_FEEDBACK_GRACE_S', raising=False)
+    assert trajectory_host.first_feedback_grace_s() == 8.0   # bounded default waits out the race
+    monkeypatch.setenv('RESTOCK_FIRST_FEEDBACK_GRACE_S', '0')
+    assert trajectory_host.first_feedback_grace_s() == 0.0   # 0 => legacy immediate decision
+    monkeypatch.setenv('RESTOCK_FIRST_FEEDBACK_GRACE_S', '999')
+    assert trajectory_host.first_feedback_grace_s() == 60.0  # clamped sane
+    monkeypatch.setenv('RESTOCK_FIRST_FEEDBACK_GRACE_S', '-5')
+    assert trajectory_host.first_feedback_grace_s() == 0.0
