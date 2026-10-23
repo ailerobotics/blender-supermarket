@@ -207,10 +207,15 @@ def parse_manipulation_config(config, job_sku):
         if not isinstance(runtime_env, str) or not runtime_env:
             raise ValueError('masked_depth.runtime_env (host overlay env.sh for the rclpy '
                              'publisher subprocess) is required when enabled')
+        # Opt-in render economy for the arm feed (sim-robust-arm-feed-economy-v1). Absent/empty =>
+        # inactive => native-resolution camera + publish every tick => byte-identical. Validated here
+        # (pure policy) so a typo refuses the boot; applied at the camera + the bridge below.
+        from twin.restock.masked_depth_economy import from_block as _economy_from_block
+        economy = _economy_from_block(md.get('economy'))
         masked_depth = {'enabled': True, 'rig_prefixes': tuple(prefixes),
                         'frame_id': str(md.get('frame_id', 'restock_camera_arm')),
                         'domain': int(md.get('domain', 88)), 'runtime_env': runtime_env,
-                        'python': str(md.get('python', 'python3'))}
+                        'python': str(md.get('python', 'python3')), 'economy': economy}
     collect_source_location = config.get('collect_source_location', '')
     if collect_source_location and not isinstance(collect_source_location, str):
         raise ValueError('collect_source_location must be a mission-location string')
@@ -1058,6 +1063,16 @@ def _build_runtime(*, app, assembly, params, output):
         cam_xform = Gf.Matrix4d(*[float(v) for row in mount.usd_transform_op for v in row])
         k = collision_camera_intrinsics()
         resolution = (k.width, k.height)
+        # sim-robust-arm-feed-economy-v1: render the masked-depth product at economy resolution. The
+        # APERTURES below are set from the native k, so the camera's intrinsics (and the published
+        # camera_info K) scale with the resolution and the field of view / reprojection is preserved.
+        _economy = params.masked_depth.get('economy') if params.masked_depth else None
+        if _economy is not None and _economy.resolution_scale != 1.0:
+            from twin.restock.masked_depth_economy import scaled_resolution
+            resolution = scaled_resolution(k.width, k.height, _economy.resolution_scale)
+            print('MASKED_DEPTH_ECONOMY arm camera resolution %sx%s -> %sx%s (scale=%g)'
+                  % (k.width, k.height, resolution[0], resolution[1], _economy.resolution_scale),
+                  flush=True)
     else:
         cam_xform = Gf.Matrix4d(0, -1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 0, 0, 1)
         k = None
@@ -1222,12 +1237,16 @@ def _build_masked_depth_bridge(*, stage, camera, camera_path, gripper_path,
         cart_root = assembly.evidence['composition']['assets']['cart']['root']
         prefixes = tuple(dict.fromkeys(
             [_rig_root(assembly.paths['articulation']), _rig_root(cart_root), gripper_path]))
+    economy = settings.get('economy')
+    if economy is not None and economy.active:
+        print(economy.describe(), flush=True)
     return ArmDepthSubprocessBridge(
         camera=camera, camera_path=camera_path, stage=stage, transport=assembly.transport,
         sensors=sensors, rig_prefixes=prefixes,
         frame_id=settings.get('frame_id', 'restock_camera_arm'),
         domain=int(settings.get('domain', 88)),
-        runtime_env=settings['runtime_env'], python=settings.get('python', 'python3'))
+        runtime_env=settings['runtime_env'], python=settings.get('python', 'python3'),
+        publish_interval_s=economy.publish_interval_s if economy is not None else None)
 
 
 def create(*, app, assembly, plan, config, output, _builder=None):
