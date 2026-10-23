@@ -345,6 +345,7 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
                                        coupled_breakaway_pulse_s=float(nav.get('coupled_breakaway_pulse_s', 0.5)),
                                        coupled_breakaway_attempts=int(nav.get('coupled_breakaway_attempts', 3)),
                                        lane_acquire_timeout_s=float(nav.get('tow_lane_acquire_timeout_s', 0.0)),
+                                       tow_lane_goal_stop=bool(nav.get('tow_lane_goal_stop', False)),
                                        **_controller_kwargs(nav))
 
     if 'dynamic_obstacles' in nav and mode != 'sensor':
