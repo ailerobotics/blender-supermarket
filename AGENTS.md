@@ -93,6 +93,19 @@ repo's `scenes/`, `export/` or `renders/`.
   `_capture_transfer` stamp `now + 300` themselves (fm488). Pinned by
   `tests/test_collect_target_bridge.py`. Cold GT-collect proof + switch keys:
   `data/sim-video-collect-arm-v1/report.md`.
+  **move_group SIGABRT (`exit -6`, heap corruption) recovery** (`ros_adapter.py` `RosMotionPort`,
+  default-on, no switch key): the upstream move_group dies intermittently mid-op; `poll()` holds the arm,
+  waits for the launch respawn, re-syncs the planning scene (re-attach the carried carton) and re-plans
+  from the live pose instead of e-stopping. Covers a death during PLANNING (`_handle_server_crash` /
+  `_should_deadline_crash_retry`) AND during trajectory EXECUTION (`_server_action_for_state` watches
+  move_group, not just the trajectory host, in execute states); the per-move crash budget
+  (`MOVE_GROUP_CRASH_RETRY_MAX`) resets each move and a per-op cap (`MOVE_GROUP_CRASH_RETRY_OP_MAX`,
+  `reset_crash_budget` at `controller.start`) bounds a storm, so a SECOND death in a later step still
+  recovers. **Sharp edge:** a SIM-clock move-deadline miss is a render-pacing transient the controller
+  RE-ISSUES (`MOVE_DEADLINE_RETRY`) — `poll()` must NOT fire `emergency_stop()` on it (`_fail_hold`, not
+  `stop()`), because the global `/manipulation/stop` latches PERMANENTLY in the Isaac host
+  (`isaac_ros_graph.check_health` → `'host emergency stop'`) and killed the run before the retry (fm225
+  estopretry). CPU: `tests/test_ros_adapter_branch.py`; write-ups `data/sim-robust-movegroup-*/report.md`.
   **Place-on-cart GPU/heartbeat bound**: an unplannable cart-place goal (self-colliding IK branch,
   `'Invalid c-space position: self collision detected'`) used to churn the full `REPLAN_MAX`
   same-goal replans and OOM the 12 GB card (`cumotion::FatalException`, `cuda_array.cu`) / starve the
