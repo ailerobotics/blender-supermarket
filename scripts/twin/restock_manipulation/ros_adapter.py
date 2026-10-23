@@ -180,6 +180,23 @@ def _should_deadline_crash_retry(clock, state, has_plan_goal, crash_retries):
             and bool(has_plan_goal) and crash_retries < MOVE_GROUP_CRASH_RETRY_MAX)
 
 
+def _should_recover_from_poll_fault(server_ready, has_plan_goal, crash_retries, is_respawn_timeout):
+    """sim-robust-movegroup-estop-retry-v1: an upstream move_group PROCESS death ("malloc(): unaligned
+    tcache chunk detected", exit -6, coldlive) that strikes mid-op can surface as a RAISE inside _poll --
+    a result future that errored on the lost server, an ABORTED result with no payload
+    (``result.result.error_code`` -> AttributeError), or a service failure -- NOT as the clean server-down
+    poll (_handle_server_crash) or the wall-deadline hang (_should_deadline_crash_retry). That raise used
+    to go straight to stop() -> emergency_stop() (the global 'host emergency stop'), ending the whole run
+    even though the launch RESPAWNS move_group and the plan is re-sendable. Route it through the SAME
+    bounded respawn + scene re-sync + retry instead -- but ONLY when it looks like a recoverable death:
+    the action server is GONE (``not server_ready``; a server that is still READY delivered a GENUINE
+    rejection/validation fault we must surface honestly, not mask as a crash), it is NOT the respawn-wait
+    cap timeout (``is_respawn_timeout`` -- that IS the 'respawn never came' escalation), and a stored plan
+    goal + crash-retry budget remain. Pure for CPU testing."""
+    return (not server_ready and not is_respawn_timeout
+            and _should_crash_retry(crash_retries, has_plan_goal))
+
+
 def planner_velocity_scale(urdf, *, command_limit=.15, scale_cap=.05):
     """Keep planner URDF-scaled speeds below the simulator's absolute gate.
 
@@ -884,7 +901,13 @@ class RosMotionPort:
         consumed by the sensor-paced poll() does NOT count as exhausted (firstmate 290; run-234
         false-tripped on a plan move_group had already completed). Execution phases are excluded -- a
         render-paced execute legitimately runs long."""
+        # sim-robust-movegroup-estop-retry-v1: while the move is HELD for a move_group respawn
+        # (_awaiting_server_respawn), the dedicated RESPAWN_WAIT_CAP_S bounds the wait -- the stale
+        # per-move _plan_started_wall would otherwise let this bridge-watchdog cap fire and e-stop the
+        # recovery mid-hold. Suspend it for the respawn wait only (a genuine planning hang has no
+        # awaiting flag set, so it is unaffected). Hardens the pre-existing _handle_server_crash hold too.
         return (self.state in ('ik', 'plan_accept', 'plan_result')
+                and not getattr(self, '_awaiting_server_respawn', False)
                 and not self._pending_plan_success()
                 and time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
                 > getattr(self, 'plan_wall_cap_s', PLAN_TOTAL_WALL_CAP_S))
@@ -1049,12 +1072,61 @@ class RosMotionPort:
     def poll(self):
         try:
             return self._poll()
-        except Exception:
+        except Exception as exc:
+            # sim-robust-movegroup-estop-retry-v1: a RAISE here can be an upstream move_group PROCESS death
+            # that struck mid-op (a lost-server result future, an ABORTED result with no payload, a service
+            # failure) rather than a genuine fault. When the action server for the current state is GONE and
+            # crash-retry budget remains, HOLD the move open for the launch's respawn + PR 224 scene re-sync
+            # + a bounded re-send (_recover_movegroup_death_or_none) instead of e-stopping -- the arm keeps
+            # its last commanded pose and the weld stays intact. A live server (genuine rejection) or an
+            # exhausted budget / absent goal returns None and falls through to the honest e-stop below.
+            recovered = self._recover_movegroup_death_or_none(exc)
+            if recovered is not None:
+                return recovered
             # fm367: a port RAISE is a collision/plan-rejection/crash fault, never a sim-deadline miss ->
             # clear the flag so the controller's deadline retry does not fire (fail-fast preserved).
             self._last_fault_sim_deadline = False
             self.stop()
             return 'failed'
+
+    def _recover_movegroup_death_or_none(self, exc):
+        """sim-robust-movegroup-estop-retry-v1: decide whether a raise caught in poll() is a RECOVERABLE
+        move_group process death (hold for respawn, return 'running') or a genuine fault (return None ->
+        poll() e-stops honestly). A move_group death is distinguished from a planning rejection by the
+        action server for the CURRENT state having VANISHED (server_is_ready() False) -- a live server
+        that delivered a rejection/validation fault is NOT a crash and must surface. When recoverable,
+        arm the respawn-wait so the NEXT poll()'s _handle_server_crash waits for the respawn, re-attaches
+        the carried carton to the fresh planning scene (PR 224) and re-sends the SAME plan goal; the
+        emergency stop fires only once the crash-retry budget is spent or the respawn never comes (the
+        RESPAWN_WAIT_CAP_S 'did not respawn' raise -- never masked here). No GPU/ROS: reads only the
+        action client's readiness and the port's own retry state."""
+        try:
+            server = self._server_action_for_state()
+        except AttributeError:
+            return None          # a port without its action clients cannot be in a recoverable crash
+        if server is None:
+            return None                                  # not a server-interaction state -> genuine fault
+        is_respawn_timeout = isinstance(exc, RuntimeError) and 'did not respawn' in str(exc)
+        if not _should_recover_from_poll_fault(
+                server.server_is_ready(), getattr(self, '_plan_goal', None) is not None,
+                getattr(self, '_server_crash_retries', 0), is_respawn_timeout):
+            return None                                  # live server / budget spent / no goal -> e-stop
+        # Recoverable upstream death: hold the move open WITHOUT emergency_stop. Arm _handle_server_crash
+        # for the next poll (it owns the respawn wait + re-sync + re-send); invalidate any late callback
+        # from the dead goal and reset the deadline so the hold is bounded by RESPAWN_WAIT_CAP_S, not the
+        # stale per-move deadline. The retry is COUNTED when _handle_server_crash resends after respawn.
+        self._awaiting_server_respawn = True
+        self._respawn_wait_started = time.monotonic()
+        self.handle = None
+        self.generation += 1
+        self.deadline_clock = time.monotonic
+        self.deadline = time.monotonic() + self.timeout
+        self._last_fault_sim_deadline = False
+        print('MOVE_GROUP_CRASH_RETRY state=%s op-phase fault (%s: %s); move_group action server gone -> '
+              'holding for respawn + scene re-sync instead of e-stop (retry %d/%d)'
+              % (self.state, type(exc).__name__, str(exc)[:80],
+                 getattr(self, '_server_crash_retries', 0) + 1, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
+        return 'running'
 
     def _poll(self):
         from moveit_msgs.action import MoveGroup, ExecuteTrajectory
