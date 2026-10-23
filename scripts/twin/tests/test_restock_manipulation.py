@@ -2070,3 +2070,32 @@ def test_release_with_budget_off_does_not_fast_fail_a_stuck_weld():
         assert r.status == 'running', r.reason
         tt += .1
     assert c.phase == 'release'
+
+
+def test_release_detach_acked_transitions_to_retreat():
+    """sim-robust-release-detach-ack-v1 (mission-visible contract): once the sim release drops contact,
+    the controller requests the payload detach (motion.update_payload(False)); when it is ACKNOWLEDGED
+    the collect advances to retreat. With the detach-scene tolerance (ros_payload.detach_scene_gate) the
+    host acks whether or not move_group lost the attached object to a crash+respawn, so this holds under
+    both the coldhonest (feed off) and the coldlive (live_pose + arm masked-depth feed) configurations --
+    the controller sees the same acknowledged detach in both."""
+    c, m = make_controller()
+    t = run_to(c, 'release')
+    c.step(.1, packet(c, t, contact=True))                 # release not issued -> issue gripper disable
+    r = c.step(.1, packet(c, t + .1, contact=False))       # contact dropped -> detach requested + acked
+    assert r.status != 'failed', r.reason
+    assert c.phase == 'retreat'
+    assert m.payloads[-1] is False                         # a DETACH (held=False) was requested
+
+
+def test_release_detach_not_acknowledged_fails_by_name():
+    """A genuinely unacknowledged detach (the authoritative object_attachment action does not succeed;
+    here the fixture reports update_payload False) must still FAIL FAST with the named reason -- the
+    scene tolerance must never silently swallow a real detach failure."""
+    c, m = make_controller()
+    t = run_to(c, 'release')
+    c.step(.1, packet(c, t, contact=True))                 # issue gripper disable
+    m.attach_ok = False                                    # the detach is NOT acknowledged
+    r = c.step(.1, packet(c, t + .1, contact=False))
+    assert r.status == 'failed'
+    assert r.reason == 'payload collision detachment not acknowledged'
