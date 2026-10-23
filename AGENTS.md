@@ -128,6 +128,20 @@ repo's `scenes/`, `export/` or `renders/`.
   switch keys: **`docs/host_timers_audit.md`**; CPU pacing proof `scripts/twin/restock/host_pacing_harness.py`
   + `tests/test_host_timers_pacing.py` (1x/16x/30x); bounded GPU proof
   `docs/examples/host-timers-pacing-proof-fragment.json`.
+  **The global `/manipulation/stop` wire has publishers BEYOND the motion controller** — the station-liveness
+  nodes (`restock_host/incorporation_ack.py`, `restock/station_host.py`) and `restock/trajectory_host.py` —
+  and they set NO `/manipulation/status`, so PR 231's naming did not cover them: a stop from them surfaced as
+  a BARE `'host emergency stop'`. It latches PERMANENTLY on the Isaac OmniGraph subscriber (nothing publishes
+  `False`). The full-chain transfer-START e-stop (sim-robust-transfer-start-estop-v1, coldlivefull): the
+  collect station, left active through the couple→outbound→park nav gap (base moving, no parked heartbeat),
+  tripped its wall-gap liveness guard → bare stop → latched; transfer's fresh `prepare` RECOVERED the host
+  fault but could not un-latch the Isaac wire → transfer's first `check_health` read stale True. Fix: those
+  publishers now print `STATION_ESTOP_PUBLISH`/`HOST_EXIT_ESTOP_PUBLISH`; `_host_fault_suffix` hints at the
+  host-stack trigger when no controller fault matches; and `IsaacRosGraph.start()` RE-DERIVES the stop wire
+  per op (`_clear_stale_global_stop`) so each op begins like a fresh staged-start graph (a genuine ongoing
+  stop re-arms next tick; fresh-graph/staged-start path byte-identical, no new keys). Follow-up: stop the
+  station on op completion before towing away (the fm399 `pause_station` pattern) to avoid the spurious stop.
+  Write-up `data/sim-robust-transfer-start-estop-v1/report.md`; CPU proof `tests/test_restock_native_stop.py`.
   **Place-on-cart GPU/heartbeat bound**: an unplannable cart-place goal (self-colliding IK branch,
   `'Invalid c-space position: self collision detected'`) used to churn the full `REPLAN_MAX`
   same-goal replans and OOM the 12 GB card (`cumotion::FatalException`, `cuda_array.cu`) / starve the

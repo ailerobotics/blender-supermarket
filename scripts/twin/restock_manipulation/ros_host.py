@@ -299,6 +299,11 @@ def main():
     try:
         rclpy.spin(node)
     finally:
+        # sim-robust-transfer-start-estop-v1: motion.stop() here publishes the global /manipulation/stop
+        # (emergency_stop) on process exit. The Isaac side latches that bare Bool, so a host restart would
+        # surface to a later op as a bare 'host emergency stop'. Name the publication so host-stack.log
+        # always carries the trigger (PR 231 named only the in-op controller/port fault paths).
+        print('HOST_EXIT_ESTOP_PUBLISH reason=%r' % 'motion host process exiting', flush=True)
         motion.stop()
         payload.close()
         node.destroy_node()

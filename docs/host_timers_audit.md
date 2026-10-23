@@ -44,6 +44,37 @@ stop publication:
 | controller fault chokepoint | `HOST_FAULT_ESTOP phase=<p> reason=<r>` | `restock_manipulation/controller.py` `_fail` |
 | port poll() raise → stop() | `PORT_FAULT_ESTOP state=<s> exc=<e>` | `restock_manipulation/ros_adapter.py` `RosMotionPort.poll` |
 | planning-budget fire | `PLAN_WALL_DIAG … leg=sim|wall` | `ros_adapter.py` `plan_wall_diag` / `_watchdog` |
+| station-liveness stop (incorporation-ack) | `STATION_ESTOP_PUBLISH site=<command\|tick\|tick-exception> reason=<r>` | `restock_host/incorporation_ack.py` |
+| station-supervisor stop | `STATION_ESTOP_PUBLISH site=<command\|tick\|tick-exception\|process-exit> reason=<r>` | `restock/station_host.py` |
+| trajectory-host stop | `TRAJ_HOST_FAULT <reason>` (pre-existing) | `restock/trajectory_host.py` `fault` |
+| motion-host process exit | `HOST_EXIT_ESTOP_PUBLISH reason=<r>` | `restock_manipulation/ros_host.py` `finally` |
+
+**sim-robust-transfer-start-estop-v1 (the full-chain transfer-START e-stop).** PR 231's naming + the
+Isaac-side `_host_fault_suffix` covered only the MOTION controller/port (they set a failed
+`/manipulation/status`). But the **station-liveness** guard (`incorporation_ack`/`station_host`) and the
+**trajectory host** also publish the shared global `/manipulation/stop`, with NO `/manipulation/status`,
+so a stop from them surfaced as a **bare** `"host emergency stop"` with no cause. coldlivefull died this
+way: `incorporation_ack` tripped its **wall-gap liveness guard** (`parked heartbeat lost: wall gap
+30.64 s`) during the collect→couple→outbound→park nav gap (the station stayed active while the mission
+drove away and could not parked-heartbeat it), published the bare stop, which **latched permanently** on
+the Isaac OmniGraph subscriber (nothing publishes `False`). The station then **recovered** at transfer's
+fresh `prepare` (host-stack.log `station recovered: epoch=3 from='parked heartbeat lost: wall gap 30.64 s'`)
+— but that could not un-latch the Isaac wire, so transfer's first `check_health` read the stale True. The
+staged start (`start_at=transfer`) never hit it: it begins with a FRESH graph.
+
+Two changes close it: (1) the named `STATION_ESTOP_PUBLISH` / `HOST_EXIT_ESTOP_PUBLISH` triggers above, plus
+`_host_fault_suffix` now appends a hint (`see the named trigger in host-stack.log`) whenever
+`/manipulation/status` carries no matching controller fault, so no op-start stop is ever bare-with-no-
+direction; (2) `IsaacRosGraph.start()` **re-derives the global-stop wire per op** (`_clear_stale_global_stop`):
+a stop latched True AT a new op's start is a stale carry-over (a genuine op-fatal stop during the prior op
+would have failed the mission before a new op began), so it is cleared — the full chain now begins each op
+like a fresh staged-start graph. A genuinely ongoing stop is re-taken by the ROS2Subscriber on the next
+tick, so `check_health` still fires within the op (now named). No new switch keys; the fresh-graph path
+(every collect op start, every staged start) does no write and is byte-identical. Root sequencing note: the
+station should ideally be stopped (→ idle, not faulted) when a manip op completes before the mission tows
+away — the fm399 `pause_station` pattern applied to the between-ops nav — which would stop the spurious
+stop being published at all; the op-start re-derivation is the localized, test-anchored fix for this lane.
+CPU proof: `scripts/twin/tests/test_restock_native_stop.py`.
 
 ## Timer table
 
