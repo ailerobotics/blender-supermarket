@@ -85,6 +85,19 @@ RESPAWN_WAIT_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_RESPAWN_W
 # fast. Legit stochastic retries succeed in ~1 s each and never approach this.
 MOVE_WALL_TIMEOUT_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_MOVE_WALL_TIMEOUT_S', 25.0))))  # fm362: the ik/plan-accept WALL deadline default
 PLAN_TOTAL_WALL_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_PLAN_WALL_CAP_S', 22.0))))  # fm362 sim-only env widen
+# sim-robust-plan-deadline-pacing-v1: the PLANNING-phase per-move deadline (ik / plan_accept / plan_result)
+# is measured on the SIM/node clock with THIS budget, not the WALL MOVE_WALL_TIMEOUT_S above. coldlive4
+# (fully-honest live_pose, which enables the masked_depth ARM FEED -- a 2nd full-res render) stretched
+# wall time to ~16x per sim-second overall and ~30x during collect, so the plan ACCEPT/RESULT callback was
+# not serviced within the ~25 s WALL deadline even though the plan was healthy and barely a sim-second had
+# passed: the WALL deadline then false-tripped the move_group crash+respawn heuristic (a slow plan read as
+# a crash) and burned the whole crash-retry budget with ZERO actual move_group deaths -> host e-stop at
+# ~sim 24 s. A sim-clock budget tolerates a render-paced slow-but-alive plan (little SIM time passes under
+# any realistic pacing -- healthy planning consumes ~1-2 sim-s) while a genuinely hung planner still fails
+# after this bounded SIM budget (and the controller's bounded MOVE_DEADLINE_RETRY then e-stops honestly).
+# The genuine-process-HANG catch on the WALL side stays the separate planning_wall_exceeded (PLAN_TOTAL_
+# WALL_CAP_S) backstop, untouched. Env-overridable; clamped. freshness-on-sim-clock (not wall).
+PLAN_SIM_DEADLINE_S = max(5.0, min(600.0, float(os.environ.get('RESTOCK_PLAN_SIM_DEADLINE_S', 30.0))))
 # Hard COUNT cap on the TOTAL cuMotion plan dispatches for a single move (same-goal re-plans AND IK-seed
 # fallbacks AND crash-retry re-sends). The 12 GB GPU (the always-on whispr service holds ~2.2 GB) OOMs
 # cuMotion (FatalException, cuda_array.cu) after ~13 back-to-back plans against an unplannable place goal:
@@ -179,14 +192,23 @@ def _should_crash_retry(crash_retries, has_plan_goal):
     return has_plan_goal and crash_retries < MOVE_GROUP_CRASH_RETRY_MAX
 
 
-def _should_deadline_crash_retry(clock, state, has_plan_goal, crash_retries):
+def _should_deadline_crash_retry(clock, state, has_plan_goal, crash_retries, server_ready=True):
     """fm404 B-lite: a move_group SIGABRT+respawn that completes BETWEEN poll()s is invisible to
-    _should_crash_retry (the server reads ready again), so the lost plan request hangs until its WALL
-    deadline and the host e-stops (run-312). When a WALL deadline fires while WAITING FOR A PLAN RESULT
-    with a stored goal and budget left, re-send the plan as a bounded crash-retry instead of failing --
-    a genuinely slow/stuck planner still exhausts the budget and fails honestly. Execute-state and
-    SIM-clock (render-pacing) deadlines are NOT this case. Pure for CPU testing."""
-    return (clock == 'wall' and state in ('plan_accept', 'plan_result')
+    _should_crash_retry (the server reads ready again), so the lost plan request hangs until its deadline
+    and the host e-stops (run-312). When a deadline fires while WAITING FOR A PLAN RESULT with a stored
+    goal and budget left AND the server has VANISHED, re-send the plan as a bounded crash-retry instead of
+    failing.
+
+    sim-robust-plan-deadline-pacing-v1: require POSITIVE evidence of a death (``not server_ready`` -- the
+    move_group action server has GONE) before treating a fired deadline as a crash. coldlive4 showed the
+    cost of guessing: the plan-accept deadline (then WALL, ~25 s) fired a few 10 ms over under the live_pose
+    arm-feed render pacing while move_group was ALIVE and merely slow to be serviced, and this heuristic
+    read each miss as a crash+respawn -- burning the whole crash-retry budget with ZERO actual deaths ->
+    host e-stop. The planning deadline is now the SIM clock (a render-paced slow plan waits and this path
+    is not reached), so this stays a belt-and-braces catch for a crash+respawn that completed between polls
+    (run-312) -- and only ever fires with the server actually gone, never on a live-but-slow planner.
+    Execute-state deadlines are NOT this case. Pure for CPU testing."""
+    return (clock == 'wall' and state in ('plan_accept', 'plan_result') and not server_ready
             and bool(has_plan_goal) and crash_retries < MOVE_GROUP_CRASH_RETRY_MAX)
 
 
@@ -481,8 +503,7 @@ class RosMotionPort:
             self.handle = None
             self._plan_goal = self._pose_plan_goal(pose, joints, wrist1_cap=wrist1_cap, wrist2_min=wrist2_min)
             self._send(self.plan, self._plan_goal, 'plan_accept')
-            self.deadline_clock = time.monotonic
-            self.deadline = time.monotonic() + self.timeout
+            self._arm_plan_deadline()   # sim-clock planning deadline (render-pacing tolerant)
             return
         if self._straight_line:
             # Seed IK from the measured approach config only -- the arm is already at the pose just above
@@ -621,6 +642,19 @@ class RosMotionPort:
             self._settle_wait_start = self._sim_now()   # fm369: start the settle sub-budget clock
             self.state = 'await_settle'
 
+    def _arm_plan_deadline(self):
+        """sim-robust-plan-deadline-pacing-v1: arm the PLANNING-phase (ik / plan_accept / plan_result)
+        per-move deadline on the SIM/node clock with the PLAN_SIM_DEADLINE_S budget, replacing the WALL
+        ``self.timeout`` that false-tripped under the live_pose arm-feed render pacing (coldlive4: the
+        plan-accept WALL deadline fired a few 10 ms over and was mis-read as a move_group crash+respawn,
+        exhausting the crash-retry budget with zero deaths). A render-paced slow-but-alive plan passes
+        little SIM time, so it is tolerated and NEVER read as a crash; a genuinely hung planner still fails
+        after this bounded sim budget (and the WALL planning_wall_exceeded / PLAN_TOTAL_WALL_CAP_S backstop
+        is untouched). Used at every site that puts the port into an active planning wait (begin pose-goal,
+        _send_ik, begin_joint_goal, the plan-reject re-plan, and the post-respawn crash-retry re-sends)."""
+        self.deadline_clock = self._sim_now
+        self.deadline = self._sim_now() + PLAN_SIM_DEADLINE_S
+
     def _send_ik(self, seed):
         from moveit_msgs.srv import GetPositionIK
         req = GetPositionIK.Request()
@@ -641,8 +675,7 @@ class RosMotionPort:
         self.generation += 1
         self.handle = None
         self.future, self.state = self.ik.call_async(req), 'ik'
-        self.deadline_clock = time.monotonic
-        self.deadline = time.monotonic() + self.timeout
+        self._arm_plan_deadline()   # sim-clock planning deadline (the IK service response is render-paced too)
 
     def _next_seed(self):
         """Advance to the next IK seed; returns True if one was dispatched, False if exhausted."""
@@ -847,8 +880,7 @@ class RosMotionPort:
         self._plan_goal=goal
         self.generation+=1
         self.handle=None
-        self.deadline_clock=time.monotonic
-        self.deadline=time.monotonic()+self.timeout
+        self._arm_plan_deadline()   # sim-clock planning deadline (render-pacing tolerant)
         self._send(self.plan,goal,'plan_accept')
 
     def _pending_plan_success(self):
@@ -1033,8 +1065,7 @@ class RosMotionPort:
             self._replan_attempts = 0
             self.handle = None
             self.generation += 1
-            self.deadline_clock = time.monotonic
-            self.deadline = time.monotonic() + self.timeout
+            self._arm_plan_deadline()   # sim-clock planning deadline on the re-sent plan (render-pacing tolerant)
             self._plan_started_wall = time.monotonic()
             self._resync_scene_after_respawn()   # re-attach the carried carton to the fresh scene FIRST
             print('MOVE_GROUP_CRASH_RETRY resending plan goal after respawn (retry %d/%d, op %d/%d)'
@@ -1200,24 +1231,30 @@ class RosMotionPort:
         if self.deadline_clock() > self.deadline:
             # fm362 evidence: this is the ONLY path that returns 'failed' (-> 'collision planning or
             # execution failed'), and it is silent. run-289's retreat died here with move_group all
-            # SUCCEEDED, so name the fired deadline: which clock (wall MOVE_WALL_TIMEOUT / sim settle),
-            # the overrun, and the state, so a wall-gate trip is unambiguous next run.
+            # SUCCEEDED, so name the fired deadline: which clock (sim-robust-plan-deadline-pacing-v1: the
+            # planning phases ik/plan_accept/plan_result and execution/settle are now all on the SIM clock;
+            # a 'wall' fire is the respawn-hold bound only), the overrun, and the state.
             _clock = 'wall' if self.deadline_clock is time.monotonic else 'sim'
             print('MOVE_DEADLINE_FAULT clock=%s over=%.2fs state=%s straight=%s'
                   % (_clock, self.deadline_clock() - self.deadline, self.state,
                      getattr(self, '_straight_line', False)), flush=True)
-            # fm404 B-lite: a WALL deadline while WAITING FOR A PLAN RESULT can be a move_group
-            # SIGABRT+respawn that completed BETWEEN polls -- _handle_server_crash above only fires while
-            # the server is DOWN, so a crash that respawned before the next poll leaves the lost plan
-            # request hanging until this wall deadline (run-312: move_group died pid 1937157 -> respawned
-            # pid 2066726, but the lost plan's wall deadline then e-stopped the host). Re-send the SAME
-            # plan goal to the (now-respawned) server as a BOUNDED crash-retry instead of failing; a
-            # genuinely stuck/slow planner still exhausts MOVE_GROUP_CRASH_RETRY_MAX and fails honestly.
-            # The post-respawn plan result is re-anchored to the live measured start by the validate path
-            # below (fm368), so a start-drift during the crash gap does not reject it. plan states only
-            # (execute is the trajectory host, not move_group).
+            # fm404 B-lite: a deadline while WAITING FOR A PLAN RESULT can be a move_group SIGABRT+respawn
+            # that completed BETWEEN polls -- _handle_server_crash above only fires while the server is
+            # DOWN, so a crash that respawned before the next poll leaves the lost plan request hanging
+            # until this deadline (run-312: move_group died pid 1937157 -> respawned pid 2066726, but the
+            # lost plan's deadline then e-stopped the host). Re-send the SAME plan goal to the (now-
+            # respawned) server as a BOUNDED crash-retry instead of failing.
+            # sim-robust-plan-deadline-pacing-v1: the planning deadline is now the SIM clock (a render-paced
+            # slow-but-alive plan waits), and this crash-retry requires POSITIVE death evidence -- the
+            # move_group action server GONE (``not self.plan.server_is_ready()``). coldlive4 proved the old
+            # guess (any wall plan-deadline -> crash) burned the crash-retry budget on a healthy-but-slow
+            # plan (0 deaths) -> e-stop. _handle_server_crash above has already held/recovered if the server
+            # is down, so this stays a belt-and-braces catch and fires only with the server actually gone.
+            # The re-sent plan result is re-anchored to the live measured start by the validate path below
+            # (fm368), so a start-drift during the crash gap does not reject it. plan states only.
             if (_should_deadline_crash_retry(_clock, self.state, self._plan_goal is not None,
-                                             getattr(self, '_server_crash_retries', 0))
+                                             getattr(self, '_server_crash_retries', 0),
+                                             server_ready=self.plan.server_is_ready())
                     and _op_crash_budget_ok(getattr(self, '_op_crash_retries', 0))):
                 self._server_crash_retries = getattr(self, '_server_crash_retries', 0) + 1
                 self._op_crash_retries = getattr(self, '_op_crash_retries', 0) + 1
@@ -1225,8 +1262,7 @@ class RosMotionPort:
                 self._awaiting_server_respawn = False
                 self.handle = None
                 self.generation += 1
-                self.deadline_clock = time.monotonic
-                self.deadline = time.monotonic() + self.timeout
+                self._arm_plan_deadline()   # sim-clock planning deadline on the re-sent plan (render-pacing tolerant)
                 self._plan_started_wall = time.monotonic()
                 self._resync_scene_after_respawn()   # re-attach the carried carton to the fresh scene FIRST
                 print('MOVE_GROUP_CRASH_RETRY plan-result wall-deadline (likely move_group crash+respawn '
@@ -1369,8 +1405,7 @@ class RosMotionPort:
                 if _should_replan(self._replan_attempts, getattr(self, '_plan_goal', None) is not None,
                                   getattr(self, '_plan_goal_joint_space', False)):
                     self._replan_attempts += 1
-                    self.deadline_clock = time.monotonic
-                    self.deadline = time.monotonic() + self.timeout   # fresh planning budget per retry
+                    self._arm_plan_deadline()   # fresh sim-clock planning budget per retry (render-pacing tolerant)
                     self._send(self.plan, self._plan_goal, 'plan_accept')
                     return 'running'
                 if getattr(self, '_seeds', None) and self._next_seed():
