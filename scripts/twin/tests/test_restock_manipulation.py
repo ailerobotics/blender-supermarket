@@ -2099,3 +2099,25 @@ def test_release_detach_not_acknowledged_fails_by_name():
     r = c.step(.1, packet(c, t + .1, contact=False))
     assert r.status == 'failed'
     assert r.reason == 'payload collision detachment not acknowledged'
+
+
+def test_start_resets_the_port_per_op_crash_budget():
+    """sim-robust-movegroup-second-death-v1: controller.start() clears the port's TOTAL per-op move_group
+    crash-retry budget so a fresh operation gets the full cap (the per-move budget already resets in
+    begin/begin_joint_goal). Guarded by getattr, so a motion stub without the method is byte-identical."""
+    motion = FixtureMotion()
+    calls = []
+    motion.reset_crash_budget = lambda: calls.append(True)
+    c = TransferController(motion, {'sku-box': PROFILE}, fixture_mode=True)
+    c.start('transfer', JOB)
+    assert calls == [True]                                  # reset called exactly once at op start
+
+
+def test_start_tolerates_a_motion_without_reset_crash_budget():
+    """The FixtureMotion has no reset_crash_budget; start() must not raise (byte-identical to the legacy
+    path for any motion that predates the per-op budget)."""
+    motion = FixtureMotion()
+    assert not hasattr(motion, 'reset_crash_budget')
+    c = TransferController(motion, {'sku-box': PROFILE}, fixture_mode=True)
+    c.start('transfer', JOB)                                # no AttributeError
+    assert c.phase == 'observe'

@@ -764,3 +764,191 @@ class MoveGroupDeathDuringOpRoutesToRetry(unittest.TestCase):
         self.assertEqual(p.poll(), 'succeeded')
         self.assertEqual(p._estops, [])
         self.assertFalse(p._awaiting_server_respawn)
+
+
+class MoveGroupSecondDeathAndExecution(unittest.TestCase):
+    """sim-robust-movegroup-second-death-v1. The estopretry proof run recovered a NATURAL move_group death
+    during the collect pick (PR 225) but a SECOND, hand-injected death during the STOW still ended the run
+    MANIP_HOST_FAILED 'host emergency stop'. Two gaps, both pinned here:
+
+    (1) DEATH DURING EXECUTION. move_group's SIGABRT can strike while a trajectory is EXECUTING -- but the
+        EXECUTE action server is the trajectory host, which does NOT die with move_group, so watching only
+        it was blind to a move_group death mid-execution. Now the port watches move_group (self.plan) during
+        an execute state too: a death there holds the arm for the respawn, re-syncs the scene, and re-plans
+        the move from the live measured pose (resume). A straight-line execute (no _plan_goal, bypasses
+        move_group) is unaffected -- byte-identical.
+    (2) THE REAL estopretry e-stop. The stow RETREAT hit a SIM-clock move deadline (over 0.01 s, a render-
+        pacing transient the controller re-issues via MOVE_DEADLINE_RETRY), but poll() called stop() ->
+        emergency_stop() -- the mission-FATAL global stop -- BEFORE the retry re-issued. A SIM-clock miss now
+        HOLDS without the global stop (_fail_hold); only a WALL miss / exhausted retry e-stops.
+    Plus: a per-OP crash-retry cap (per-move budget already resets, so a death in a LATER step recovers; the
+    cap bounds a storm across moves), and a TRUTHFUL re-attach report (ok=False now says FAILED, not
+    're-attached ...')."""
+
+    @staticmethod
+    def _port(state='execute_result', plan_ready=False, execute_ready=True, plan_goal='GOAL',
+              crash_retries=0, op_crash_retries=0, attached=None):
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state = state
+        p.timeout = 25.0
+        p.generation = 7
+        p.handle = None
+        p._plan_goal = plan_goal
+        p._server_crash_retries = crash_retries
+        p._op_crash_retries = op_crash_retries
+        p._awaiting_server_respawn = False
+        p._replan_attempts = 5
+        p._last_fault_sim_deadline = False
+        p._attached_profile = attached
+        p._live_arm_state = None
+        p.plan = _FakePlan(plan_ready)
+        p.execute = _FakePlan(execute_ready)
+        p._estops = []
+        p.emergency_stop = lambda: p._estops.append(True)
+        p.payload_sync = lambda held, profile: True
+        return p
+
+    # --- (1) move_group death DURING trajectory execution -----------------------------------------
+    def test_server_action_watches_movegroup_during_execution(self):
+        # Execute state, trajectory host ALIVE, move_group GONE -> the crash-relevant server is move_group.
+        for state in ('execute_accept', 'execute_result'):
+            p = self._port(state=state, plan_ready=False, execute_ready=True)
+            self.assertIs(p._server_action_for_state(), p.plan, state)
+
+    def test_normal_execution_still_watches_trajectory_host_byte_identical(self):
+        # move_group ALIVE during an execute -> unchanged: the watched server is the trajectory host.
+        for state in ('execute_accept', 'execute_result'):
+            p = self._port(state=state, plan_ready=True, execute_ready=True)
+            self.assertIs(p._server_action_for_state(), p.execute, state)
+            self.assertIsNone(p._handle_server_crash(), state)   # both alive -> inert
+            self.assertEqual(p.plan.sent, [], state)
+
+    def test_execution_death_at_pick_descent_stow_holds_then_replans(self):
+        # The pick reach, the descent and the collect STOW all execute a cuMotion-planned trajectory, so a
+        # move_group death during their EXECUTION must recover like one during planning: hold, respawn,
+        # re-plan the move from the live pose (plan -> execute resumes the segment). execute_accept and
+        # execute_result stand in for the execution phase of each of those moves.
+        for label, state in (('pick', 'execute_accept'), ('descent', 'execute_result'),
+                             ('stow', 'execute_result')):
+            p = self._port(state=state, plan_ready=False, execute_ready=True)
+            self.assertEqual(p._handle_server_crash(), 'running', label)   # move_group gone -> hold
+            self.assertTrue(p._awaiting_server_respawn, label)
+            self.assertEqual(p.plan.sent, [], label)                       # nothing re-sent while down
+            p.plan.ready = True                                            # move_group respawned
+            self.assertEqual(p._handle_server_crash(), 'running', label)
+            self.assertEqual(p.plan.sent, ['GOAL'], label)                 # re-PLAN the move (resume)
+            self.assertEqual(p.state, 'plan_accept', label)                # back into the plan handshake
+            self.assertEqual(p._estops, [], label)                         # never e-stopped
+
+    def test_execution_death_during_straight_line_is_not_a_crash(self):
+        # A straight-line execute stores no _plan_goal (it bypasses move_group), so a move_group death there
+        # is irrelevant: fall through to the normal path, do NOT hijack it as a crash recovery.
+        p = self._port(state='execute_result', plan_ready=False, execute_ready=True, plan_goal=None)
+        self.assertIs(p._server_action_for_state(), p.execute)   # traj host (alive) -> inert
+        self.assertIsNone(p._handle_server_crash())
+
+    def test_execution_death_poll_raise_holds_without_estop(self):
+        # A move_group death during execution that surfaces as a RAISE in _poll (lost-server result future)
+        # routes through _recover_movegroup_death_or_none too: hold, no global stop.
+        p = self._port(state='execute_result', plan_ready=False, execute_ready=True)
+        p._poll = lambda: (_ for _ in ()).throw(RuntimeError('result raised: server connection lost'))
+        self.assertEqual(p.poll(), 'running')
+        self.assertEqual(p._estops, [])
+        self.assertTrue(p._awaiting_server_respawn)
+
+    # --- (2) a SIM-clock deadline miss must not fire the mission-fatal emergency stop ---------------
+    def test_sim_deadline_holds_without_global_stop(self):
+        # The estopretry root cause: a SIM-clock move-deadline miss is a render-pacing transient the
+        # controller re-issues (MOVE_DEADLINE_RETRY). It must HOLD (cancel + keep the pose) WITHOUT the
+        # global emergency stop, else the mission dies before the retry.
+        p = self._port(state='execute_result')
+        p.handle = None
+        p._deadline_fail('sim')
+        self.assertEqual(p.state, 'failed')          # move failed so the controller re-issues
+        self.assertEqual(p._estops, [])              # ...but the mission-fatal global stop never fired
+
+    def test_wall_deadline_still_emergency_stops(self):
+        # A WALL miss is a genuine hang / planner fail-fast and keeps the immediate emergency stop.
+        p = self._port(state='plan_result')
+        p._deadline_fail('wall')
+        self.assertEqual(p.state, 'failed')
+        self.assertEqual(p._estops, [True])
+
+    def test_fail_hold_cancels_goal_and_bumps_generation_without_estop(self):
+        p = self._port(state='execute_result')
+        cancelled = []
+        p.handle = S(cancel_goal_async=lambda: cancelled.append(True))
+        gen = p.generation
+        p._fail_hold()
+        self.assertEqual(p.state, 'failed')
+        self.assertEqual(cancelled, [True])          # the in-flight goal is cancelled, like stop()...
+        self.assertEqual(p.generation, gen + 1)      # ...and late callbacks invalidated...
+        self.assertEqual(p._estops, [])              # ...but NO emergency stop
+
+    # --- two deaths in one op, per-move reset + per-op bound ---------------------------------------
+    def test_two_deaths_in_one_op_both_recover(self):
+        # Death #1 during the pick execution, then (after the controller re-issues the NEXT move, which
+        # resets the per-move budget) death #2 during the stow execution -- both recover; the per-op total
+        # counts both.
+        p = self._port(state='execute_result', plan_ready=False, execute_ready=True)
+        # death #1
+        self.assertEqual(p._handle_server_crash(), 'running')
+        p.plan.ready = True
+        self.assertEqual(p._handle_server_crash(), 'running')
+        self.assertEqual(p._server_crash_retries, 1)
+        self.assertEqual(p._op_crash_retries, 1)
+        # the controller re-issues the next move -> per-move budget resets (begin/begin_joint_goal), the
+        # per-op total persists; simulate that reset:
+        p._server_crash_retries = 0
+        p._awaiting_server_respawn = False
+        p.state = 'execute_result'
+        p.plan.ready = False
+        # death #2 in the later step
+        self.assertEqual(p._handle_server_crash(), 'running')
+        p.plan.ready = True
+        self.assertEqual(p._handle_server_crash(), 'running')
+        self.assertEqual(p._server_crash_retries, 1)     # fresh per-move budget was available
+        self.assertEqual(p._op_crash_retries, 2)         # ...and the per-op total counted both deaths
+        self.assertEqual(p._estops, [])
+
+    def test_per_op_cap_bounds_a_crash_storm_across_moves(self):
+        from twin.restock_manipulation.ros_adapter import (
+            MOVE_GROUP_CRASH_RETRY_OP_MAX, _op_crash_budget_ok)
+        self.assertTrue(_op_crash_budget_ok(MOVE_GROUP_CRASH_RETRY_OP_MAX - 1))
+        self.assertFalse(_op_crash_budget_ok(MOVE_GROUP_CRASH_RETRY_OP_MAX))
+        # At the per-op cap, a fresh-per-move budget is NOT enough: the recovery falls through to e-stop.
+        p = self._port(state='plan_result', plan_ready=False, crash_retries=0,
+                       op_crash_retries=MOVE_GROUP_CRASH_RETRY_OP_MAX)
+        self.assertIsNone(p._handle_server_crash())      # per-op budget spent -> normal failure path
+        self.assertEqual(p.plan.sent, [])
+
+    def test_reset_crash_budget_clears_both_counters(self):
+        p = self._port(crash_retries=2, op_crash_retries=5)
+        p.reset_crash_budget()
+        self.assertEqual(p._op_crash_retries, 0)
+        self.assertEqual(p._server_crash_retries, 0)
+
+    # --- truthful re-attach report -----------------------------------------------------------------
+    def test_resync_returns_true_on_success(self):
+        p = self._port(attached='PROFILE')
+        p.payload_sync = lambda held, profile: True
+        self.assertTrue(p._resync_scene_after_respawn())
+
+    def test_resync_returns_true_when_nothing_held(self):
+        p = self._port(attached=None)
+        self.assertTrue(p._resync_scene_after_respawn())   # no-op scene is consistent
+
+    def test_resync_reports_failure_truthfully_when_payload_not_ok(self):
+        # The estopretry 'ok=False' re-attach: payload_sync returns not-ok at its sensor precondition gate,
+        # so the carton is NOT in the respawned scene. The helper must report that as a FAILURE, not claim
+        # it 're-attached'.
+        p = self._port(attached='PROFILE')
+        p.payload_sync = lambda held, profile: False
+        self.assertFalse(p._resync_scene_after_respawn())
+
+    def test_resync_returns_false_on_reattach_raise(self):
+        p = self._port(attached='PROFILE')
+        def _boom(held, profile):
+            raise RuntimeError('attach server gone')
+        p.payload_sync = _boom
+        self.assertFalse(p._resync_scene_after_respawn())   # raised -> not restored, reported, swallowed

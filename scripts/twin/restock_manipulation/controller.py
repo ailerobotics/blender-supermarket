@@ -553,6 +553,12 @@ class TransferController:
         self.last_time = None
         self.evidence, self.reason = [], ''
         self.issued = False
+        # sim-robust-movegroup-second-death-v1: clear the port's TOTAL per-op move_group crash-retry budget
+        # so a fresh operation gets the full cap (the per-move budget already resets in begin/begin_joint_goal).
+        # Guarded for a motion stub without the method (byte-identical when absent).
+        _reset_crash_budget = getattr(self.motion, 'reset_crash_budget', None)
+        if callable(_reset_crash_budget):
+            _reset_crash_budget()
         self._contact_suction = False   # suction enabled once during the contact descent (grasp latch)
         self._contact_waits = 0         # bounded grace ticks awaiting a fresh acquisition deadline
         self._contact_step = 0.0        # cumulative contact-feedback over-press travel (m); see __init__

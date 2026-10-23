@@ -61,6 +61,16 @@ WRIST_FLIP_MAX = 3
 # a stage into a logged retry instead of a lost 20-30 min GPU run. Distinct from REPLAN_MAX, which
 # reacts to a DELIVERED plan rejection; here no result is ever delivered because the server died.
 MOVE_GROUP_CRASH_RETRY_MAX = 3
+# sim-robust-movegroup-second-death-v1: MOVE_GROUP_CRASH_RETRY_MAX is reset to a FRESH budget at the
+# start of every MOVE (begin/begin_joint_goal), so a move_group death in a LATER step of the same op
+# recovers even after an earlier step already used its retries (estopretry: the natural death during
+# the collect pick used retry 1/3, then the injected death during the stow needed its own fresh budget).
+# This TOTAL per-op cap bounds a pathological crash STORM across many moves of one op so the per-move
+# reset cannot become an unbounded retry loop. Generous (covers several independent deaths per op);
+# RESTOCK_MOVE_GROUP_CRASH_RETRY_OP_MAX overrides.
+MOVE_GROUP_CRASH_RETRY_OP_MAX = max(
+    MOVE_GROUP_CRASH_RETRY_MAX,
+    int(os.environ.get('RESTOCK_MOVE_GROUP_CRASH_RETRY_OP_MAX', 6)))
 # Wall cap on how long a single crash-retry holds the move open waiting for move_group to respawn and
 # re-advertise its action servers. The launch respawns with a short delay and the CumotionPlanner
 # plugin re-init blocks on the (still-live) nvblox ESDF service, so a healthy respawn re-advertises in
@@ -195,6 +205,15 @@ def _should_recover_from_poll_fault(server_ready, has_plan_goal, crash_retries, 
     goal + crash-retry budget remain. Pure for CPU testing."""
     return (not server_ready and not is_respawn_timeout
             and _should_crash_retry(crash_retries, has_plan_goal))
+
+
+def _op_crash_budget_ok(op_crash_retries):
+    """sim-robust-movegroup-second-death-v1: the TOTAL per-OP crash-retry cap. MOVE_GROUP_CRASH_RETRY_MAX
+    is reset to a fresh budget per MOVE (begin/begin_joint_goal), so a move_group death in a LATER step of
+    the same op recovers even after an earlier step spent its retries; this bounds the SUM across every
+    move of one op so the per-move reset can never become an unbounded crash-retry storm. Reset per op by
+    reset_crash_budget() (controller.start). Pure for CPU testing."""
+    return op_crash_retries < MOVE_GROUP_CRASH_RETRY_OP_MAX
 
 
 def planner_velocity_scale(urdf, *, command_limit=.15, scale_cap=.05):
@@ -360,6 +379,9 @@ class RosMotionPort:
         # crash-retry re-sends this attach BEFORE resending the plan (_resync_scene_after_respawn). None on
         # every no-carry move => the resync is a no-op and the no-crash path is byte-identical.
         self._attached_profile = None
+        # sim-robust-movegroup-second-death-v1: TOTAL crash-retries this OP (sum across all its moves).
+        # _server_crash_retries resets per move; this bounds the whole op (reset_crash_budget at op start).
+        self._op_crash_retries = 0
         self.ik = node.create_client(GetPositionIK, namespace + '/compute_ik')
         self.plan = ActionClient(node, MoveGroup, namespace + '/move_action')
         self.execute = ActionClient(node, ExecuteTrajectory, namespace + '/execute_trajectory')
@@ -943,12 +965,29 @@ class RosMotionPort:
         self.state, self.handle, self.future = 'idle', None, None
 
     def _server_action_for_state(self):
-        """The MoveGroup/ExecuteTrajectory action client whose server must be live for the current
-        state, or None outside a planning/execution state. Used to notice a move_group PROCESS crash
-        (the server vanishes) distinctly from a slow-but-alive server."""
+        """The action client whose server DEATH we recover for the current state, or None outside a
+        planning/execution state. Plan states -> move_group (self.plan). Execute states -> normally the
+        trajectory host (self.execute), BUT self.plan when MOVE_GROUP is the process that died mid-
+        EXECUTION: a cuMotion-planned move (stored ``_plan_goal``) whose trajectory host is still alive
+        while move_group's own action server has vanished.
+
+        sim-robust-movegroup-second-death-v1: the intermittent upstream move_group SIGABRT (exit -6) can
+        strike while a trajectory is EXECUTING, not only mid-plan (estopretry: the injected death landed
+        during the collect STOW). The trajectory host does NOT die with move_group, so watching only
+        self.execute during an execute state was blind to it -- the death was never routed through the
+        bounded respawn + scene re-sync + re-plan recovery. Switching to self.plan here makes
+        _handle_server_crash / _recover_movegroup_death_or_none hold the arm at its last commanded pose,
+        wait for the respawn, re-sync the scene and RE-PLAN the move from the live measured pose (which
+        resumes the remaining segment). A straight-line execute has ``_plan_goal is None`` (it bypasses
+        move_group entirely), so it correctly falls through to self.execute -- a move_group death is
+        irrelevant to it. A normal execute (move_group alive) keeps self.execute => byte-identical."""
         if self.state in ('plan_accept', 'plan_result'):
             return self.plan
         if self.state in ('execute_accept', 'execute_result'):
+            if (getattr(self, '_plan_goal', None) is not None
+                    and self.execute.server_is_ready()        # trajectory host still alive
+                    and not self.plan.server_is_ready()):     # move_group gone -> death during execution
+                return self.plan
             return self.execute
         return None
 
@@ -964,9 +1003,11 @@ class RosMotionPort:
             return None
         if not server.server_is_ready():
             # Server down: crashed, or in the respawn gap. Keep the move alive for the respawn only if
-            # we have a goal to re-send and crash-retry budget remains.
-            if not _should_crash_retry(getattr(self, '_server_crash_retries', 0),
-                                       getattr(self, '_plan_goal', None) is not None):
+            # we have a goal to re-send and BOTH the per-move AND the total per-op crash-retry budget remain
+            # (sim-robust-movegroup-second-death-v1: the per-op cap bounds a crash storm across moves).
+            if not (_should_crash_retry(getattr(self, '_server_crash_retries', 0),
+                                        getattr(self, '_plan_goal', None) is not None)
+                    and _op_crash_budget_ok(getattr(self, '_op_crash_retries', 0))):
                 return None                     # no goal / budget spent -> normal failure path owns it
             now = time.monotonic()
             if not getattr(self, '_awaiting_server_respawn', False):
@@ -988,6 +1029,7 @@ class RosMotionPort:
             # the per-move planning anchors for a full fresh budget; count the crash retry.
             self._awaiting_server_respawn = False
             self._server_crash_retries = getattr(self, '_server_crash_retries', 0) + 1
+            self._op_crash_retries = getattr(self, '_op_crash_retries', 0) + 1
             self._replan_attempts = 0
             self.handle = None
             self.generation += 1
@@ -995,8 +1037,9 @@ class RosMotionPort:
             self.deadline = time.monotonic() + self.timeout
             self._plan_started_wall = time.monotonic()
             self._resync_scene_after_respawn()   # re-attach the carried carton to the fresh scene FIRST
-            print('MOVE_GROUP_CRASH_RETRY resending plan goal after respawn (retry %d/%d)'
-                  % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
+            print('MOVE_GROUP_CRASH_RETRY resending plan goal after respawn (retry %d/%d, op %d/%d)'
+                  % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX,
+                     self._op_crash_retries, MOVE_GROUP_CRASH_RETRY_OP_MAX), flush=True)
             self._reanchor_plan_goal_to_live()
             self._send(self.plan, self._plan_goal, 'plan_accept')
             return 'running'
@@ -1012,18 +1055,32 @@ class RosMotionPort:
         back in both MoveIt's and cuMotion's scene BEFORE any plan is resent. No-op when nothing is held
         => the no-carry crash-retry (and the whole no-crash path) is byte-identical. Best-effort and
         logged: a failed re-attach does not abort the retry here (the resent plan's own start-state
-        self-collision / result validation still gates correctness), but it is reported loudly."""
+        self-collision / result validation still gates correctness), but it is reported TRUTHFULLY.
+
+        Returns True when the carton is (or was already) restored to the scene -- including the no-carry
+        no-op -- and False when a re-attach was NEEDED but the payload_sync call reported not-ok (the
+        carton is NOT in the respawned scene). sim-robust-movegroup-second-death-v1: the previous log said
+        're-attached ... (ok=False)' even on FAILURE, which read as success; payload_sync returns False at
+        its own sensor precondition gate (a stale or !contact packet at the respawn moment -- estopretry),
+        so the carton was silently absent from the resent plan's scene. Report the failure as a failure."""
         profile = getattr(self, '_attached_profile', None)
         if profile is None:
-            return
+            return True                                         # nothing held -> scene already consistent
         try:
             ok = self.payload_sync(True, profile) is True
         except Exception as exc:                                # re-attach raised -> report, do not mask
-            print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit raised after respawn: %r'
-                  % (exc,), flush=True)
-            return
-        print('MOVE_GROUP_CRASH_RETRY re-attached restock_carried_unit to the respawned move_group '
-              'planning scene before resend (ok=%s)' % ok, flush=True)
+            print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit RAISED after respawn (carton '
+                  'NOT restored to the respawned planning scene): %r' % (exc,), flush=True)
+            return False
+        if ok:
+            print('MOVE_GROUP_CRASH_RETRY re-attached restock_carried_unit to the respawned move_group '
+                  'planning scene before resend', flush=True)
+        else:
+            print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit FAILED after respawn '
+                  '(payload_sync returned not-ok -> carton NOT in the respawned planning scene; the resend '
+                  'will plan WITHOUT it). Likely a stale/!contact sensor packet at the respawn moment -- '
+                  'see PAYLOAD_SYNC_DIAG for the failing gate.', flush=True)
+        return ok
 
     def _reanchor_plan_goal_to_live(self):
         """fm405: before re-sending a plan goal to a RESPAWNED move_group, re-anchor its request
@@ -1107,9 +1164,10 @@ class RosMotionPort:
         if server is None:
             return None                                  # not a server-interaction state -> genuine fault
         is_respawn_timeout = isinstance(exc, RuntimeError) and 'did not respawn' in str(exc)
-        if not _should_recover_from_poll_fault(
-                server.server_is_ready(), getattr(self, '_plan_goal', None) is not None,
-                getattr(self, '_server_crash_retries', 0), is_respawn_timeout):
+        if not (_should_recover_from_poll_fault(
+                    server.server_is_ready(), getattr(self, '_plan_goal', None) is not None,
+                    getattr(self, '_server_crash_retries', 0), is_respawn_timeout)
+                and _op_crash_budget_ok(getattr(self, '_op_crash_retries', 0))):
             return None                                  # live server / budget spent / no goal -> e-stop
         # Recoverable upstream death: hold the move open WITHOUT emergency_stop. Arm _handle_server_crash
         # for the next poll (it owns the respawn wait + re-sync + re-send); invalidate any late callback
@@ -1158,9 +1216,11 @@ class RosMotionPort:
             # The post-respawn plan result is re-anchored to the live measured start by the validate path
             # below (fm368), so a start-drift during the crash gap does not reject it. plan states only
             # (execute is the trajectory host, not move_group).
-            if _should_deadline_crash_retry(_clock, self.state, self._plan_goal is not None,
-                                            getattr(self, '_server_crash_retries', 0)):
+            if (_should_deadline_crash_retry(_clock, self.state, self._plan_goal is not None,
+                                             getattr(self, '_server_crash_retries', 0))
+                    and _op_crash_budget_ok(getattr(self, '_op_crash_retries', 0))):
                 self._server_crash_retries = getattr(self, '_server_crash_retries', 0) + 1
+                self._op_crash_retries = getattr(self, '_op_crash_retries', 0) + 1
                 self._replan_attempts = 0
                 self._awaiting_server_respawn = False
                 self.handle = None
@@ -1170,8 +1230,9 @@ class RosMotionPort:
                 self._plan_started_wall = time.monotonic()
                 self._resync_scene_after_respawn()   # re-attach the carried carton to the fresh scene FIRST
                 print('MOVE_GROUP_CRASH_RETRY plan-result wall-deadline (likely move_group crash+respawn '
-                      'between polls); resending plan goal (retry %d/%d)'
-                      % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
+                      'between polls); resending plan goal (retry %d/%d, op %d/%d)'
+                      % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX,
+                         self._op_crash_retries, MOVE_GROUP_CRASH_RETRY_OP_MAX), flush=True)
                 self._reanchor_plan_goal_to_live()   # fm405: re-plan from live state (resume mid-descent)
                 self._send(self.plan, self._plan_goal, 'plan_accept')
                 return 'running'
@@ -1179,7 +1240,7 @@ class RosMotionPort:
             # controller can re-issue the SAME move with a fresh deadline (bounded). A WALL miss is the
             # wall sweep's job and the planner's fail-fast -- do NOT flag it for the deadline retry.
             self._last_fault_sim_deadline = (_clock == 'sim')
-            self.stop()
+            self._deadline_fail(_clock)
             return 'failed'
         # fm357: before dispatching ExecuteTrajectory, hold until the arm is settled, then re-seed the
         # first waypoint to the live measured state. This state has NO pending future (the plan already
@@ -1373,6 +1434,43 @@ class RosMotionPort:
             self.handle.cancel_goal_async()
         self.state = 'failed'
         self.emergency_stop()  # immediate task-owned simulator joint hold
+
+    def _fail_hold(self):
+        """sim-robust-movegroup-second-death-v1: fail the current move to 'failed' WITHOUT publishing the
+        mission-fatal global emergency stop. Used for a retriable SIM-clock deadline miss the controller
+        re-issues (MOVE_DEADLINE_RETRY, fm367): cancel the in-flight goal and invalidate any late callback
+        exactly like stop(), but leave the arm holding its last commanded pose (the simulator drive) and do
+        NOT fire emergency_stop -- the global /manipulation/stop latches PERMANENTLY in the Isaac host
+        (check_health sets faulted=True), so firing it on a transient killed the whole run before the
+        retry could re-issue. If the controller's deadline-retry budget is spent it calls _fail() ->
+        motion.stop(), which fires the honest emergency stop then. Byte-identical halt state (state=failed,
+        goal cancelled, generation bumped) minus the global stop."""
+        self.generation += 1
+        if self.handle is not None:
+            self.handle.cancel_goal_async()
+        self.state = 'failed'
+
+    def _deadline_fail(self, clock):
+        """sim-robust-movegroup-second-death-v1: halt on a FIRED move deadline. A WALL miss is a genuine
+        hang / planner fail-fast -> stop() (the immediate, mission-FATAL global emergency stop). A SIM-clock
+        miss is a render-pacing transient the controller RE-ISSUES (MOVE_DEADLINE_RETRY, fm367) -> _fail_hold()
+        (cancel the goal + hold the commanded pose, NO global stop). The global /manipulation/stop latches
+        PERMANENTLY in the Isaac host (check_health -> 'host emergency stop'), so firing it on a SIM-deadline
+        transient killed the whole run BEFORE the controller's next-tick retry could re-issue (estopretry:
+        the collect STOW retreat over=0.01 s). When the controller's deadline-retry budget is spent it calls
+        _fail() -> motion.stop(), which fires the honest emergency stop then. CPU-testable (no ROS/GPU)."""
+        if clock == 'sim':
+            self._fail_hold()
+        else:
+            self.stop()
+
+    def reset_crash_budget(self):
+        """sim-robust-movegroup-second-death-v1: reset the TOTAL per-OP move_group crash-retry budget.
+        Called by the controller at the start of each operation (controller.start). The per-MOVE budget
+        (_server_crash_retries) is reset by begin/begin_joint_goal; this clears the per-op SUM so a fresh
+        op gets the full MOVE_GROUP_CRASH_RETRY_OP_MAX. Inert/safe on a port built without __init__."""
+        self._op_crash_retries = 0
+        self._server_crash_retries = 0
 
     def update_payload(self, held, profile):
         # Must update BOTH MoveIt and cuMotion collision attachment, not PhysX
