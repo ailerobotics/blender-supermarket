@@ -689,6 +689,23 @@ class TransferController:
         self.issued = False   # re-plan + re-execute this move next tick
         return self._result()
 
+    def _planner_crash_failfast_or_none(self):
+        """sim-robust-collect-stow-stall-v1: when the motion port reports a terminal move_group planner
+        crash/hang (last_fault_was_planner_unrecoverable -- a sim-clock PLANNING deadline whose bounded
+        crash re-sends were exhausted because the planner did not respawn), FAIL the op FAST with a NAMED
+        cause instead of looping our own move retries (MOVE_DEADLINE_RETRY / STAGED_MOVE_RETRY) to the
+        per-phase timeout. coldliveapproach: the post-release collect STOW consumed the full 120-sim-s
+        phase timeout re-sending plans to a crashed-and-not-respawned move_group, reported only as the
+        opaque 'phase timeout: stow'. Returns a terminal _fail Result, or None when the port has no such
+        fault (then the caller keeps its normal retry path -- byte-identical). Checked before the sim-
+        deadline / staged retries so the terminal planner fault always wins."""
+        probe = getattr(self.motion, 'last_fault_was_planner_unrecoverable', None)
+        if callable(probe) and probe():
+            return self._fail('%s aborted: the move_group planner crashed or hung (a plan goal was never '
+                              'accepted / no plan returned within the sim planning budget) and did not '
+                              'respawn -- failing fast' % self.phase)
+        return None
+
     def retry_or_fail_move(self, reason):
         """fm387: a motion fault surfaced by the host-stack WATCHDOG (goal-tolerance / track-miss /
         watchdog-drain -- ros_adapter failed_result_pending()/drain()) fires on its 0.1 s timer OUTSIDE
@@ -1251,6 +1268,11 @@ class TransferController:
                 # still fails fast.
                 return self._raised_move_exc(exc, staged=False)
             if outcome == 'failed':
+                # sim-robust-collect-stow-stall-v1: a terminal move_group planner crash/hang fails fast with
+                # a named cause BEFORE the sim-deadline retry (which would re-send to the dead planner).
+                crash = self._planner_crash_failfast_or_none()
+                if crash is not None:
+                    return crash
                 # fm367: a SIM-clock move/settle deadline miss (the port flags it; a collision/plan
                 # rejection raises -> flag False) is a render-pacing transient, so re-issue the SAME
                 # move with a fresh deadline up to the deadline-retry max before failing the phase.
@@ -1362,6 +1384,11 @@ class TransferController:
                 # below on the same budget; a genuine collision/invalid outcome still fails fast.
                 return self._raised_move_exc(exc, staged=True)
             if outcome == 'failed':
+                # sim-robust-collect-stow-stall-v1: a terminal move_group planner crash/hang fails fast with
+                # a named cause before the staged retry (which would re-send to the dead planner).
+                crash = self._planner_crash_failfast_or_none()
+                if crash is not None:
+                    return crash
                 # fm358 guard: a staged move failed once at the plan->execute handoff (run-283 pan) after
                 # a normal plan -- a transient. Re-issue (fresh plan + deadline + budget) up to the
                 # staged-move retry max before failing the stage. Does NOT loosen any tolerance.
@@ -1491,6 +1518,13 @@ class TransferController:
                 # returned 'failed' below still fails fast as a collision.
                 return self._raised_move_exc(exc, staged=True)
             if outcome == 'failed':
+                # sim-robust-collect-stow-stall-v1: a terminal move_group planner crash/hang fails fast with
+                # a named cause before the staged retry. This is the coldliveapproach failure: the stow plan
+                # goal was never accepted (move_group SIGABRT-hung, no respawn), so re-sending it only
+                # consumed the per-phase timeout -- fail fast named instead.
+                crash = self._planner_crash_failfast_or_none()
+                if crash is not None:
+                    return crash
                 # fm389/run-300e: a returned 'failed' at STOW was hard-failed here, UNLIKE the other staged
                 # moves (tuck/pan/retreat_tuck) which bounded-retry a returned 'failed' (fm358). run-300e
                 # reached stow (deepest ever -- lift/place/release/retreat all cleared) and the stochastic
