@@ -490,7 +490,7 @@ class ArticulatedController(Controller):
                  coupled_progress_recovery=False, coupled_breakaway_speed_mps=0.18,
                  coupled_breakaway_window_s=2.0, coupled_breakaway_pulse_s=0.5,
                  coupled_breakaway_attempts=3,
-                 lane_acquire_timeout_s=0.0, **kwargs):
+                 lane_acquire_timeout_s=0.0, tow_lane_goal_stop=False, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm481/fm482 (navigation.coupled_creep_escape, default off => byte-identical): the coupled
         # measured-curvature brake divides odom.angular by odom.linear, and at a near-stationary crawl that
@@ -719,6 +719,27 @@ class ArticulatedController(Controller):
         self.lane_acquire_timeout_s=float(lane_acquire_timeout_s)
         self._acquire_fail_s=0.0        # contiguous SIM seconds the active lane has been unacquired
         self._acquire_fail_pose=None    # base pose at the start of the current no-progress window
+        # fm-sim-robust-outbound-leadin-overshoot (navigation.tow_lane_goal_stop, default off =>
+        # byte-identical): make the COUPLED authored-lane goal arrival SEAT-INDEPENDENT, so the tow
+        # stops AT its goal instead of overshooting a ball it can never hit. A coupled tow tracks its
+        # lane with a steady-state LATERAL offset (coldwin3: the lead-in's descending final segment +
+        # the base's steering lag left it riding ~0.09 m NORTH of the centreline), but the arrival
+        # capture was a HARDCODED 0.08 m / 0.08 rad ball -- SMALLER than that physical offset. So the
+        # train reached the goal x at 0.09 m lateral (just outside 0.08), never latched, and a
+        # forward-only (no-reverse) train sailed 0.3 m past the goal into lane_leadin_unreachable
+        # (the lead-in rebuilt from past-the-goal rolls further away forever). The authored lane ALREADY
+        # declares its ACHIEVABLE arrival band -- goal_tol_xy (0.30) / goal_tol_yaw -- so when this is on
+        # AND an authored lane is active: (1) the coupled arrival capture uses the lane's goal_tol_xy /
+        # goal_tol_yaw (not 0.08), so the observed ~0.09 m offset latches; (2) the follower decelerates
+        # by REMAINING ROUTE distance (not Euclidean distance-to-goal, which a laterally-offset base
+        # never drives to zero) so it comes to rest AT the route end and the 0.03 m/s floor is dropped
+        # there -- the train stops before/at the goal and NEVER passes it (a coupled train cannot
+        # reverse); and (3) a seat left genuinely PAST the goal (beyond the route end, forward-only
+        # unreachable) fails FAST by name (lane_leadin_past_goal) instead of churning to the acquire
+        # timeout. The authored goal_tol IS the arrival contract; a seat whose residual offset exceeds it
+        # still refuses (the author's achievable band is the authority). Off => the legacy hardcoded 0.08
+        # ball + Euclidean speed profile, byte-identical.
+        self.tow_lane_goal_stop=bool(tow_lane_goal_stop)
         # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
         # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
         # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
@@ -886,6 +907,20 @@ class ArticulatedController(Controller):
                     li=self._rebase_cart_yaw(li,state,world)
                     li.reason='validated_lane_leadin'
                 return li
+            # fm-sim-robust-outbound-leadin-overshoot: a seat left genuinely PAST the goal (beyond the
+            # route end, the base pointing away so a forward-only train can never return) is provably
+            # unrecoverable -- fail FAST by name NOW instead of churning the empty route to the acquire
+            # timeout. Detect it from the route end: the base is past the last route point AND displaced
+            # from the goal in the route's own travel direction. Gated on tow_lane_goal_stop => off is
+            # byte-identical (the legacy lane_leadin_unreachable + acquire-timeout path).
+            if (self.tow_lane_goal_stop and lane.lead_in_max_m>0 and lane.route is not None
+                    and lane.route.states and self._past_route_end(state,lane.route)):
+                self.terminal=Result(status='failed',reason='lane_leadin_past_goal')
+                if _NAV_PLAN_DIAG:
+                    print('NAV_PLAN_DIAG lane_leadin_past_goal lane=%s pose=%s goal=%s'
+                          % (lane.name,tuple(round(c,3) for c in state.pose),
+                             tuple(round(c,3) for c in self.goal)),flush=True)
+                return Route([],[],'lane_leadin_past_goal')
             return Route([],[],'lane_leadin_unreachable' if lane.lead_in_max_m>0 else 'lane_not_acquired')
         checked=planner.validate_seed(lane.route,lane.start_state(),self.goal,dyn,
                                       max(.02,uncertainty),self.goal_articulation)
@@ -910,6 +945,22 @@ class ArticulatedController(Controller):
         if self.lane_cart_yaw_rebase:
             checked=self._rebase_cart_yaw(checked,state,world)
         return checked
+
+    def _past_route_end(self,state,route):
+        """True iff the base has overshot the route's final point in the route's own travel direction.
+
+        A coupled tow cannot reverse, so a base beyond the end heading can never drive back onto the
+        route -- this is the provably-unrecoverable past-goal case the goal-stop fast-fail names."""
+        st=route.states
+        end=st[-1]
+        hx,hy=(math.cos(end.yaw),math.sin(end.yaw))
+        if len(st)>=2:
+            dx,dy=end.x-st[-2].x,end.y-st[-2].y
+            if math.hypot(dx,dy)>1e-9:
+                hx,hy=dx,dy
+        hn=math.hypot(hx,hy) or 1.0
+        proj=((state.x-end.x)*hx+(state.y-end.y)*hy)/hn
+        return proj>0.05
 
     def _acquire_watchdog(self,dt,reason,odom):
         """fm-sim-robust-outbound: fail a persistently NON-ACQUIRED authored lane by name, FAST.
@@ -1165,12 +1216,29 @@ class ArticulatedController(Controller):
         odom,obs=odometry,observations
         state=TrainState(*odom.pose,wrap(odom.pose[2]-obs.articulation))
         distance=math.dist(odom.pose[:2],self.goal[:2])
-        if (distance<0.08 and abs(wrap(odom.pose[2]-self.goal[2]))<0.08
-                and abs(obs.articulation)<self.goal_articulation):
+        # fm-sim-robust-outbound-leadin-overshoot: on an active authored lane with goal-stop enabled,
+        # the arrival capture is the lane's ACHIEVABLE goal_tol (goal_tol_xy/goal_tol_yaw), not the
+        # hardcoded 0.08 -- a coupled tow rides a lateral offset larger than 0.08 m and could never
+        # latch the tight ball. Off / no active lane => the legacy 0.08 ball (byte-identical).
+        if self.tow_lane_goal_stop and self._active_lane is not None:
+            arr_xy,arr_yaw=self._active_lane.goal_tol_xy,self._active_lane.goal_tol_yaw
+        else:
+            arr_xy=arr_yaw=0.08
+        in_ball=(distance<arr_xy and abs(wrap(odom.pose[2]-self.goal[2]))<arr_yaw
+                 and abs(obs.articulation)<self.goal_articulation)
+        moving=abs(odom.linear)>0.02 or abs(odom.angular)>0.03
+        # fm-sim-robust-outbound-leadin-overshoot: with goal-stop active and the base STILL MOVING
+        # inside the (wide) goal ball but with route left to run, do NOT slam a (0,0) stop at the ball
+        # EDGE (that halts the tow ~goal_tol_xy short of the goal); fall through to the route-follow,
+        # which decelerates by remaining-route distance and coasts the train to rest AT the route end,
+        # where the next tick latches here. Legacy (goal-stop off) always enters the block => byte-identical.
+        decel_follow=(self.tow_lane_goal_stop and self._active_lane is not None
+                      and self.route is not None and self.route.states)
+        if in_ball and not (decel_follow and moving):
             stopped=self.gate_velocity(now,odom,obs,0.0,0.0)
             if stopped.reason!='tracking':
                 return self._wait(dt,stopped.reason)
-            if abs(odom.linear)>0.02 or abs(odom.angular)>0.03:
+            if moving:
                 return Result(reason='settling_at_goal')
             self.terminal=Result(status='succeeded',reason='arrived_stopped')
             return self.terminal
@@ -1207,11 +1275,15 @@ class ArticulatedController(Controller):
             if self.route.states:
                 self._acquire_fail_s=0.0; self._acquire_fail_pose=None   # lane acquired -> fresh window
                 return Result(reason='route_ready')
+            if self.terminal is not None:        # _plan_lane named a terminal fast-fail (past-goal)
+                return self.terminal
             term=self._acquire_watchdog(dt,self.route.reason,odom)
             if term is not None:
                 return term
             return Result(reason=self.route.reason)
         if not self.route.states:
+            if self.terminal is not None:        # _plan_lane named a terminal fast-fail (past-goal)
+                return self.terminal
             term=self._acquire_watchdog(dt,self.route.reason,odom)
             if term is not None:
                 return term
@@ -1277,6 +1349,20 @@ class ArticulatedController(Controller):
         # lane_track_envelope (the same opt-in as the position-aware tol); off => unchanged.
         if self.lane_track_envelope and slack is not None:
             v=min(v,max(0.05,(slack-0.05)/1.5))
+        # fm-sim-robust-outbound-leadin-overshoot: decelerate to a true stop AT the route end so a
+        # forward-only coupled tow halts at its goal instead of coasting past it (it cannot reverse).
+        # The remaining distance is measured ALONG THE ROUTE from the nearest route point to the end --
+        # NOT the Euclidean distance-to-goal, which a laterally-offset base (coldwin3: ~0.09 m north)
+        # never drives to zero, so a Euclidean brake would keep commanding speed as the base slid past
+        # the goal x. v <= sqrt(2 * brake_acceleration * remaining) brakes within the reachable
+        # distance, and near the end the 0.03 m/s floor above is OVERRIDDEN (min, not max) so the train
+        # can actually come to rest. The arrival capture (lane goal_tol, above) latches once stopped
+        # within the achievable ball. Gated on tow_lane_goal_stop + an active lane => off is byte-identical.
+        if self.tow_lane_goal_stop and self._active_lane is not None and self.route.states:
+            st=self.route.states
+            remaining=sum(math.dist(st[i].pose[:2],st[i+1].pose[:2])
+                          for i in range(self.index,len(st)-1))
+            v=min(v,math.sqrt(2.0*self.brake_acceleration*max(0.0,remaining)))
         # fm-sim-robust-outbound: SIM-clock net-progress monitor (default off => byte-identical). We are
         # about to command a forward v (>=0.03) along the route; measure whether the base has actually
         # MOVED >= coupled_progress_min_m from its anchor. Keyed on NET displacement + the SIM clock, so

@@ -434,10 +434,28 @@ mission nav-stuck). Two per-lane/controller keys fix it:
   (`lane_not_acquired_timeout` / `lane_blocked_timeout` / `lane_leadin_unreachable_timeout`) in a few sim
   seconds — pace-immune, not the 120 s WALL nav-stuck. A seat beyond the lane's absorbable band fails
   fast and legibly instead of freezing.
+- **`navigation.tow_lane_goal_stop`** (default `false` = off ⇒ byte-identical): make the coupled
+  authored-lane goal arrival SEAT-INDEPENDENT. A coupled tow tracks its lane with a steady-state LATERAL
+  offset (run `coldwin3`: ~0.09 m north off the lead-in's descending final segment), but the legacy
+  coupled arrival capture was a HARDCODED 0.08 m / 0.08 rad ball — SMALLER than that offset — so the
+  train reached the goal x just outside it, never latched, and a forward-only train sailed ~0.3 m PAST
+  the goal into `lane_leadin_unreachable` (irrecoverable — it cannot reverse). When ON **and** an authored
+  lane is active: (1) the coupled arrival uses the lane's declared ACHIEVABLE band `goal_tol_xy` /
+  `goal_tol_yaw` (not 0.08), so the lateral offset latches; (2) the follower decelerates by
+  REMAINING-ROUTE distance (not Euclidean distance-to-goal, which a laterally-offset base never drives to
+  zero) and drops the 0.03 m/s floor at the route end, so it stops AT the goal and NEVER passes it; (3) a
+  seat left genuinely PAST the goal fails FAST by name `lane_leadin_past_goal` instead of churning to
+  `tow_lane_acquire_timeout_s`. **Do NOT instead widen `start_tol_xy`** to force a direct acquire of an
+  off-centreline seat — CPU-proven to bypass the lead-in and churn `stop_replan_tracking_error` to a
+  `goal_timeout` unless `tow_lane_track_tol_m` is also raised; the lead-in is the correct merge mechanism.
 
-Example config: `docs/examples/outbound-lane-leadin-fragment.json`. CPU tests:
+Example config: `docs/examples/outbound-lane-leadin-fragment.json` (lead-in + fast-fail) and
+`docs/examples/outbound-leadin-overshoot-fragment.json` (adds `tow_lane_goal_stop`). CPU tests:
 `tests/test_navigation_lanes.py::OutboundLeadInAndFastFailTests` (both recorded seats arrive; the
-unreachable seat fails fast by name). GPU proof is the integration lane's (real store obstacles + PhysX).
+unreachable seat fails fast by name) and `::TowLaneGoalStopTests` (overshoot reproduction + arrival from
+every recorded seat, 0.5 m-beyond-band + past-goal fast-fails). Design + the coldwin3 reconstruction:
+`data/sim-robust-outbound-leadin-overshoot-v1/report.md`. GPU proof is the integration lane's (real store
+obstacles + PhysX).
 
 **Coupled-tow tracking knobs** (fm429, all default to the prior hardcoded values ⇒ byte-identical):
 `navigation.tow_lane_cart_yaw_tol` (default 0.20 rad) — the `stop_replan_tracking_error` cart-yaw
