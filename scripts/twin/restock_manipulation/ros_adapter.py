@@ -80,6 +80,21 @@ MOVE_GROUP_CRASH_RETRY_OP_MAX = max(
 # a few seconds; this generous bound makes an UNRECOVERABLE crash (respawn exhausted, or the launch
 # itself down) surface as a clean motion failure instead of an unbounded hold.
 RESPAWN_WAIT_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_RESPAWN_WAIT_CAP_S', 45.0))))  # fm362
+# sim-robust-collect-stow-stall-v1: bounded re-sends of a PLANNING goal when a SIM-clock planning deadline
+# fires -- positive evidence the move_group action server is DEAD or HUNG. PR 228 moved every planning-phase
+# deadline to the SIM clock; its own rationale is that healthy planning consumes only ~1-2 sim-s, so a plan
+# still unaccepted/unresolved after the FULL sim planning budget is genuinely hung, not render-slow. The old
+# move_group-crash recoveries do NOT catch it: a SIGABRT-hung move_group keeps server_is_ready()==True (no
+# clean DDS deregistration), so _handle_server_crash (gated on not-ready) stays inert, and
+# _should_deadline_crash_retry is gated on clock=='wall' -- now unreachable because planning is always
+# sim-clock. coldliveapproach: move_group malloc_consolidate SIGABRT'd at the retreat_tuck->stow boundary and
+# did NOT respawn; the stow goal was never accepted, plan_accept hit the sim deadline every 30 sim-s, and the
+# controller looped STAGED_MOVE_RETRY to the 120-sim-s phase timeout with an opaque reason. We re-send the
+# plan this many times (so a genuine crash+respawn whose server stale-reads ready still recovers), then the
+# port flags a NAMED planner-unrecoverable fault the controller fails fast on. Default 1 => one recovery
+# re-send then fail (2 x PLAN_SIM_DEADLINE_S of sim time, well under a per-phase timeout); 0 => fail on the
+# first sim planning deadline. A healthy run never reaches a sim planning deadline, so this is inert there.
+PLAN_ACCEPT_CRASH_RETRY_MAX = max(0, min(5, int(os.environ.get('RESTOCK_PLAN_ACCEPT_CRASH_RETRY_MAX', 1))))
 # Fail FAST on a persistently-failing plan (firstmate run-216/279): an IK-infeasible goal churns the
 # 12 replans + every seed, each resetting a fresh per-attempt deadline, so the move could retry well
 # past the host's 30 s /sensors wall backstop -- which then fired as the mission reason instead of a
@@ -473,6 +488,12 @@ class RosMotionPort:
         # sim-robust-movegroup-second-death-v1: TOTAL crash-retries this OP (sum across all its moves).
         # _server_crash_retries resets per move; this bounds the whole op (reset_crash_budget at op start).
         self._op_crash_retries = 0
+        # sim-robust-collect-stow-stall-v1: per-move count of sim-clock planning-deadline crash re-sends
+        # (PLAN_ACCEPT_CRASH_RETRY_MAX), and the terminal flag set once they are exhausted -- a move_group
+        # that crashed/hung and did not respawn. The controller reads the flag after a 'failed' poll to
+        # fail fast with a NAMED cause instead of looping its own move retries to the per-phase timeout.
+        self._plan_accept_crash_retries = 0
+        self._planner_unrecoverable = False
         self.ik = node.create_client(GetPositionIK, namespace + '/compute_ik')
         self.plan = ActionClient(node, MoveGroup, namespace + '/move_action')
         self.execute = ActionClient(node, ExecuteTrajectory, namespace + '/execute_trajectory')
@@ -574,6 +595,8 @@ class RosMotionPort:
         self._last_fault_sim_deadline = False   # fm367: fresh deadline-fault signal per move
         self._replan_attempts = 0          # fresh-seed re-plan budget for this move (see REPLAN_MAX)
         self._server_crash_retries = 0     # move_group-respawn re-send budget (see MOVE_GROUP_CRASH_RETRY_MAX)
+        self._plan_accept_crash_retries = 0   # sim-robust-collect-stow-stall-v1: sim-planning-deadline re-sends
+        self._planner_unrecoverable = False   # sim-robust-collect-stow-stall-v1: fresh terminal flag per move
         self._awaiting_server_respawn = False  # True while holding the move open for a respawned move_group
         self._plan_goal = None             # the MoveGroup goal to re-send on a plan rejection
         self._plan_dispatches = 0          # total cuMotion plan dispatches this move (see PLAN_TOTAL_ATTEMPTS_CAP)
@@ -935,6 +958,8 @@ class RosMotionPort:
         self._last_fault_sim_deadline=False   # fm367: fresh deadline-fault signal per move
         self._replan_attempts=0
         self._server_crash_retries=0
+        self._plan_accept_crash_retries=0   # sim-robust-collect-stow-stall-v1: sim-planning-deadline re-sends
+        self._planner_unrecoverable=False   # sim-robust-collect-stow-stall-v1: fresh terminal flag per move
         self._awaiting_server_respawn=False
         self._plan_goal=None
         self._plan_dispatches=0            # total cuMotion plan dispatches this move (PLAN_TOTAL_ATTEMPTS_CAP)
@@ -1306,6 +1331,15 @@ class RosMotionPort:
         a wall-clock miss. Cleared at the start of every move (begin/begin_joint_goal)."""
         return bool(getattr(self, '_last_fault_sim_deadline', False))
 
+    def last_fault_was_planner_unrecoverable(self):
+        """sim-robust-collect-stow-stall-v1: True iff the most recent 'failed' poll was a sim-clock PLANNING
+        deadline whose bounded crash re-sends (PLAN_ACCEPT_CRASH_RETRY_MAX) were exhausted -- positive
+        evidence the move_group planner crashed or hung and did not respawn. The controller reads it after a
+        'failed' poll to fail the op FAST with a NAMED cause instead of looping its own move retries to the
+        per-phase timeout. Takes precedence over last_fault_was_sim_deadline (which is cleared in this case).
+        Cleared at the start of every move (begin/begin_joint_goal)."""
+        return bool(getattr(self, '_planner_unrecoverable', False))
+
     def poll(self):
         try:
             return self._poll()
@@ -1427,6 +1461,51 @@ class RosMotionPort:
                 self._reanchor_plan_goal_to_live()   # fm405: re-plan from live state (resume mid-descent)
                 self._send(self.plan, self._plan_goal, 'plan_accept')
                 return 'running'
+            # sim-robust-collect-stow-stall-v1: a SIM-clock PLANNING-state deadline (plan_accept/plan_result)
+            # is positive evidence move_group is DEAD/HUNG, not merely render-slow -- PR 228 set this deadline
+            # on the SIM clock precisely because healthy planning consumes only ~1-2 sim-s, so the full
+            # sim budget elapsing with the goal never accepted / the plan never returned is a hang. The
+            # recoveries above miss it: a SIGABRT-hung move_group keeps server_is_ready()==True (no clean DDS
+            # deregistration), so _handle_server_crash stays inert and _should_deadline_crash_retry (gated on
+            # clock=='wall') is unreachable now planning is always sim-clock. coldliveapproach: the stow
+            # plan goal was never accepted, plan_accept hit this deadline every 30 sim-s, and the controller
+            # looped STAGED_MOVE_RETRY to the 120-sim-s phase timeout with an opaque reason. Re-send the plan
+            # a bounded number of times (so a genuine crash+respawn whose server stale-reads ready still
+            # recovers -- the fm404 belt-and-braces, now reachable on the sim clock), then flag the move_group
+            # planner UNRECOVERABLE so the controller fails fast with a NAMED cause. Scoped to a planning
+            # state with a stored goal + per-op crash budget; execute/await_settle and goal-less
+            # straight-line moves fall through to the existing sim-deadline hold (byte-identical). A healthy
+            # run never reaches a sim planning deadline, so the passing path is byte-identical.
+            if (_clock == 'sim' and self.state in ('plan_accept', 'plan_result')
+                    and self._plan_goal is not None):
+                if (getattr(self, '_plan_accept_crash_retries', 0) < PLAN_ACCEPT_CRASH_RETRY_MAX
+                        and _op_crash_budget_ok(getattr(self, '_op_crash_retries', 0))):
+                    self._plan_accept_crash_retries = getattr(self, '_plan_accept_crash_retries', 0) + 1
+                    self._op_crash_retries = getattr(self, '_op_crash_retries', 0) + 1
+                    self._replan_attempts = 0
+                    self._awaiting_server_respawn = False
+                    self.handle = None
+                    self.generation += 1
+                    self._arm_plan_deadline()   # fresh sim-clock planning budget on the re-sent plan
+                    self._plan_started_wall = time.monotonic()
+                    self._plan_started_sim = self._sim_now()
+                    self._resync_scene_after_respawn()   # re-attach any carried carton to a respawned scene
+                    print('MOVE_GROUP_CRASH_RETRY plan %s sim-deadline (goal/plan not serviced within the '
+                          'sim planning budget; likely move_group crash/hang); resending plan goal '
+                          '(retry %d/%d, op %d/%d)'
+                          % (self.state, self._plan_accept_crash_retries, PLAN_ACCEPT_CRASH_RETRY_MAX,
+                             self._op_crash_retries, MOVE_GROUP_CRASH_RETRY_OP_MAX), flush=True)
+                    self._reanchor_plan_goal_to_live()
+                    self._send(self.plan, self._plan_goal, 'plan_accept')
+                    return 'running'
+                self._planner_unrecoverable = True
+                self._last_fault_sim_deadline = False   # terminal: the controller must NOT deadline-retry
+                print('PLANNER_UNRECOVERABLE state=%s: the move_group planner did not accept/return a plan '
+                      'across %d sim-deadline crash re-sends (%g sim-s each); it crashed or hung and did not '
+                      'respawn -- failing fast' % (self.state, PLAN_ACCEPT_CRASH_RETRY_MAX, PLAN_SIM_DEADLINE_S),
+                      flush=True)
+                self._deadline_fail('sim')   # hold (no global stop); the controller's _fail() stops honestly
+                return 'failed'
             # fm367: a SIM-clock miss is a render-pacing transient (not a collision), so flag it so the
             # controller can re-issue the SAME move with a fresh deadline (bounded). A WALL miss is the
             # wall sweep's job and the planner's fail-fast -- do NOT flag it for the deadline retry.
@@ -1674,6 +1753,8 @@ class RosMotionPort:
         op gets the full MOVE_GROUP_CRASH_RETRY_OP_MAX. Inert/safe on a port built without __init__."""
         self._op_crash_retries = 0
         self._server_crash_retries = 0
+        self._plan_accept_crash_retries = 0   # sim-robust-collect-stow-stall-v1
+        self._planner_unrecoverable = False   # sim-robust-collect-stow-stall-v1
 
     def update_payload(self, held, profile):
         # Must update BOTH MoveIt and cuMotion collision attachment, not PhysX
