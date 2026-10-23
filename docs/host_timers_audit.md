@@ -110,10 +110,59 @@ would have failed the mission before a new op began), so it is cleared — the f
 like a fresh staged-start graph. A genuinely ongoing stop is re-taken by the ROS2Subscriber on the next
 tick, so `check_health` still fires within the op (now named). No new switch keys; the fresh-graph path
 (every collect op start, every staged start) does no write and is byte-identical. Root sequencing note: the
-station should ideally be stopped (→ idle, not faulted) when a manip op completes before the mission tows
-away — the fm399 `pause_station` pattern applied to the between-ops nav — which would stop the spurious
-stop being published at all; the op-start re-derivation is the localized, test-anchored fix for this lane.
+station should ideally be stopped/paused (→ idle/paused, not faulted) when a manip op completes before the
+mission tows away — the fm399 `pause_station` pattern applied to the between-ops nav — which would stop the
+spurious stop being published at all; the op-start re-derivation is the localized, test-anchored fix for this
+lane. **That root sequencing fix is now implemented (sim-robust-station-pause-on-transfer-v1, below).**
 CPU proof: `scripts/twin/tests/test_restock_native_stop.py`.
+
+## coldwin2 transfer e-stop: the far parked station's SIM-gap trip, fixed at the root (pause-on-transfer)
+
+coldwin2 attempt-2 (run dir `~/datasets/twin-robot-in-store-boot-v1/mission/coldwin2-fail2/`, PR #238 head,
+full live_pose) cleared **collect → couple → OUTBOUND** (PR 238 validated in-sim) and then e-stopped at the
+transfer stage. The host-stack trigger was `STATION_ESTOP_PUBLISH site=tick reason="parked heartbeat lost:
+sim gap 30.05 s"` — now on the **SIM** leg (PR 237 made the parked-heartbeat SIM-primary; the coldliverecovery
+`wall gap 30.75 s` was the same class on the other leg). The parked **collect/backstock** station was left
+ACTIVE after the collect op and was NOT heartbeat-ed through the whole `couple → outbound → park → transfer-
+warm` span; its SIM gap reached 30.05 s, 0.05 s over the 30 s `RESTOCK_STATION_SIM_GAP_S` budget, so it
+published the global `/manipulation/stop`. The station **recovered one tick later** (`station recovered:
+epoch=3 … recoveries=1/3`) — proving it was alive — but the bare stop had **latched** on the Isaac wire, and
+the transfer died (the arm, held by the latched stop, lost its command heartbeat). A duration/pace false trip
+of a live-but-idle far station, not a death. The htsim proof never saw it: its STAGED transfer (`start_at=
+transfer`) reaches transfer with no far parked collect station accruing a gap. A `RESTOCK_STATION_SIM_GAP_S`
+30→60 widen would clear the borderline but is tuning, not the fix.
+
+**Fix (sim-robust-station-pause-on-transfer-v1), two parts.**
+
+1. **Pause the parked station when a manip op completes and the mission tows away (the root sequencing fix).**
+`RuntimeAdapter.start('couple')` — the first between-ops nav after collect — calls
+`manip.pause_station(…, suspend_only=True)`, which sends the station an explicit **`pause`** command (vs the
+reposition's `stop`). The host-side liveness watchdog is now **explicitly paused-aware**: a paused active epoch
+(`IncorporationAckState.paused` / `StationState.paused`, state `'paused'`) skips the heartbeat-gap check
+entirely, so it publishes **no stop** for ANY op length at ANY pacing, while an in-use (active, not paused)
+station still faults by name on a real gap. The epoch is kept (not torn down like `stop`→idle); the next op
+re-prepares a fresh epoch, which clears the pause. `StationClient.pause()` stamps the command fresh off the
+stage clock (a stage-boundary call) and frees the client to re-prepare; it falls back to `stop()` for a station
+predating the capability. No-op when no station was prepared (a `start_at=couple/transfer` staged start skips
+collect) or for a runtime without sensor I/O ⇒ **staged-start and scripted paths byte-identical**. No new
+switch keys — the fix is default-on so the capstone (`RESTOCK_STATION_SIM_GAP_S` back at 30) exercises it.
+
+2. **Release the Isaac stop wire mid-op when the station recovers within budget (belt-and-suspenders).** PR 235
+only re-derives the wire at a NEW op's START; a stop that fires mid-op (`site=tick`) and whose station recovers
+one tick later was never released for the CURRENT op. `incorporation_ack` now arms a one-shot
+`consume_release()` on a within-budget recovery and publishes `Bool(False)` on `/manipulation/stop`
+(`STATION_ESTOP_RELEASE site=recovery`) — a new message the Isaac ROS2Subscriber takes, un-latching the wire;
+a genuinely ongoing stop re-arms True on the next faulted tick, so this only ever clears a now-recovered stale
+latch. With part 1 the trip no longer fires in the fixed flow; part 2 ensures a borderline trip from any
+other path cannot kill a live op.
+
+CPU proof: `simulate_far_station_paused` in `host_pacing_harness.py` drives the real `IncorporationAckState`
+with a `pause` through a 300 s SIM far op at 1×/16×/30× (`FarStationPausedUnderPacing` in
+`test_host_timers_pacing.py`): a paused station survives (no stop, ~9000 s WALL at 30×) while a station left
+active trips by name on the SIM leg. State-level guards: `test_restock_host.py` /
+`test_restock_station.py` (paused accrues no gap over 300 s, pause cleared by fresh prepare/stop, recovery arms
+the release one-shot), `test_restock_station.py` (`StationClient.pause` sends `pause` + frees the client),
+`test_restock_runtime.py` (couple-start pause wiring).
 
 ## Timer table
 
@@ -187,6 +236,8 @@ earlier), `converted` (this lane), `wall-backstop` (kept wall by design — boun
 | `sim_gap_s` (env `RESTOCK_STATION_SIM_GAP_S`, default 0.5) | parked-heartbeat SIM freshness gap (`now - last_heartbeat`) | SIM | sim-clocked — PRIMARY liveness bound (the real bound) |
 | `wall_gap_s` (env `RESTOCK_STATION_WALL_GAP_S`, default 3) | now the wall FLOOR feeding the derived frozen-sim backstop (role change; a widen only widens the backstop) | WALL (backstop floor) | **converted** (sim-robust-station-heartbeat-simclock-v1; coldliverecovery `wall gap 30.75 s` fix) |
 | `wall_backstop_s` = `frozen_sim_wall_backstop(sim_gap_s, wall_gap_s)` | frozen-sim parked-heartbeat backstop (= sim gap × 50, floored) | **SIM**+WALL (`is_dead` mode='either') | **converted**; derived generous, only catches a FROZEN sim |
+| `paused` (action `pause`) | SUSPEND the liveness gap while the base tows away to a far op (no op uses the station) | n/a (gate) | **new** (sim-robust-station-pause-on-transfer-v1); a paused active epoch skips the gap ⇒ no stop; cleared by `stop`/fresh `prepare` |
+| `_release_wire_pending` (`consume_release`) | one-shot Isaac stop-wire release on a within-budget recovery | n/a (event) | **new**; publishes `Bool(False)` (`STATION_ESTOP_RELEASE`) so a borderline mid-op trip cannot stay latched |
 | `process_alive` (launch OnProcessExit) | stack-death liveness | n/a (event) | event (positive death; not a clock) |
 | `incorporated_time` `max_age` (0.5) / `now - stamp` | ESDF integration staleness reject | SIM | sim-clocked — both `now` and the ESDF header stamp ride `/clock` (verified, unchanged) |
 | in-flight ESDF request cancel (`time.monotonic() - pending_wall > 2`) | drop a non-responding `get_esdf_and_gradient` request + retry | WALL | request-retry cadence (reissues; never faults/stops) — benign |
@@ -198,6 +249,7 @@ earlier), `converted` (this lane), `wall-backstop` (kept wall by design — boun
 |---|---|---|---|
 | `_SIM_HEARTBEAT_GAP_S` (0.5) | parked-heartbeat SIM freshness gap | SIM | sim-clocked — PRIMARY (+ `process_alive`) |
 | `_WALL_HEARTBEAT_BACKSTOP_S` (15) → `_WALL_HEARTBEAT_BACKSTOP_DERIVED_S` (25) | frozen-sim wall backstop | **SIM**+WALL (`is_dead` mode='either') | **converted** (flat 15 → derived 25; combined message byte-identical) |
+| `paused` (action `pause`) | SUSPEND the liveness gap while the base tows away to a far op | n/a (gate) | **new** (sim-robust-station-pause-on-transfer-v1; parity with `IncorporationAckState.paused`) |
 | `STATION_PENDING_WALL_S` (env, default 2) in `station_host.py` | in-flight ESDF request cancel + retry | WALL | request-retry cadence (reissues; benign) — same class as incorporation-ack's |
 
 ### `restock_manipulation/ros_payload.py` (payload / attach handshake)

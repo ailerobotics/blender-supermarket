@@ -83,6 +83,10 @@ class StationState:
         self.wall_heartbeat=wall_clock()
         self.collision_time=-1.
         self.active=False
+        # sim-robust-station-pause-on-transfer-v1: an ACTIVE epoch whose liveness watchdog is explicitly
+        # SUSPENDED while the base tows away to a far op and no op heartbeats this station. A paused station
+        # keeps its epoch but accrues no gap and publishes no stop (mirror of IncorporationAckState.paused).
+        self.paused=False
         self.fault=None
         self.camera_frame=None
         # Bounded recovery bookkeeping (requirement: fault-recoverable station).
@@ -125,7 +129,8 @@ class StationState:
             self.epoch,self.parked_since,self.camera_frame=epoch,stamp,frame
             self.active=True
             self.collision_time=-1.
-        elif action in ('heartbeat','stop'):
+            self.paused=False            # a fresh epoch is live, never carrying a prior pause
+        elif action in ('heartbeat','stop','pause'):
             if epoch!=self.epoch or not self.active:
                 raise ValueError('station command has no active matching epoch')
             if action=='heartbeat' and command.get('parked') is not True:
@@ -133,6 +138,11 @@ class StationState:
             if action=='stop':
                 self.active=False
                 self.collision_time=-1.
+                self.paused=False
+            elif action=='pause':
+                # sim-robust-station-pause-on-transfer-v1: suspend the liveness watchdog (keep the epoch)
+                # while the base tows away; the next op re-prepares a fresh epoch. See snapshot().
+                self.paused=True
         else:
             raise ValueError('unsupported station action')
         self.sequence=seq
@@ -156,15 +166,19 @@ class StationState:
         # floored at _WALL_HEARTBEAT_BACKSTOP_S), routed with the SIM gap through the shared pace predicate
         # (mode='either'), so it no longer false-trips while the sim-clock gap + process_alive remain the
         # real guards. See freshness-sim-clock-not-wall and sim-robust-station-heartbeat-simclock-v1.
-        if self.active and (not process_alive
+        # sim-robust-station-pause-on-transfer-v1: an explicitly PAUSED station is known idle-but-alive, not
+        # a death -- skip the liveness gap so it publishes no stop through a long far op; an in-use (active,
+        # not paused) station still faults on a real gap.
+        if self.active and not self.paused and (not process_alive
                             or pace_is_dead(sim_elapsed=now-self.last_heartbeat,
                                             wall_elapsed=self.wall_clock()-self.wall_heartbeat,
                                             sim_budget=_SIM_HEARTBEAT_GAP_S,
                                             wall_backstop=_WALL_HEARTBEAT_BACKSTOP_DERIVED_S, mode='either')):
             self.fault='station process or parked heartbeat lost'
-        ready=(self.active and not self.fault and endpoints_ready
+        ready=(self.active and not self.fault and not self.paused and endpoints_ready
                and 0<=now-self.collision_time<=.5 and self.collision_time>self.parked_since)
         return dict(epoch=self.epoch,sequence=self.sequence,stamp=now,
-            state='failed' if self.fault else ('ready' if ready else ('warming' if self.active else 'idle')),
+            state=('failed' if self.fault else 'paused' if self.paused
+                   else 'ready' if ready else 'warming' if self.active else 'idle'),
             reason=self.fault or '',collision_time=self.collision_time if ready else -1.,
             parked_since=self.parked_since,camera_frame=self.camera_frame)

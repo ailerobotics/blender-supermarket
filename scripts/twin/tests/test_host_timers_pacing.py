@@ -12,6 +12,7 @@ from unittest import mock
 
 from twin.restock.host_pacing_harness import (
     FakeClockPair, simulate_sim_primary_budget, simulate_station_heartbeat,
+    simulate_far_station_paused,
 )
 from twin.restock_manipulation import ros_adapter
 from twin.restock_manipulation.ros_adapter import (
@@ -206,6 +207,44 @@ class StationHeartbeatUnderPacing(unittest.TestCase):
         self.assertEqual(r['outcome'], 'tripped_sim', r)
         self.assertAlmostEqual(r['sim'], r['wall'], places=6)
         self.assertLessEqual(abs(r['sim'] - 0.5), 0.1, r)
+
+
+class FarStationPausedUnderPacing(unittest.TestCase):
+    """sim-robust-station-pause-on-transfer-v1: the parked-station SIM-primary budget alone STILL trips a
+    station left ACTIVE through a long far op (coldwin2: the collect station un-heartbeat-ed through the whole
+    couple->outbound->park->transfer span hit a 30.05 s SIM gap, 0.05 s over the 30 s budget). The fix PAUSES
+    that station before towing away; a PAUSED station must accrue no gap and publish no stop for ANY op length
+    at ANY pacing, while a station left in use still trips by name. Drives the REAL IncorporationAckState."""
+
+    # The bounded GPU proof's budgets: SIM gap 30 s, WALL floor 30 (default, NOT the 120 s quick-lever).
+    SIM_GAP, WALL_FLOOR = 30.0, 30.0
+    FAR_OP_SIM = 300.0                 # a 300 s SIM far op -- 10x the 30 s gap budget (requirement 2)
+
+    def test_paused_station_accrues_no_gap_over_a_300s_far_op(self):
+        # The exact coldwin2 shape generalised: at 1x/16x/30x a PAUSED station survives a 300 s SIM far op
+        # (stretched to 300 x pacing WALL s) without ever publishing a stop.
+        for pacing in PACINGS:
+            r = simulate_far_station_paused(pacing=pacing, sim_gap_budget=self.SIM_GAP,
+                                            wall_floor=self.WALL_FLOOR, far_op_sim=self.FAR_OP_SIM)
+            self.assertEqual(r['outcome'], 'survived', (pacing, r))
+            self.assertEqual(r['state'], 'paused', (pacing, r))
+            self.assertEqual(r['reason'], '', (pacing, r))
+        # And at 30x it really did burn >9000 s WALL across the far op -- far past the 30 s flat wall and the
+        # 30 s SIM gap budget -- yet never tripped because it was paused.
+        r30 = simulate_far_station_paused(pacing=30.0, sim_gap_budget=self.SIM_GAP,
+                                          wall_floor=self.WALL_FLOOR, far_op_sim=self.FAR_OP_SIM)
+        self.assertGreaterEqual(r30['wall'], 9000.0, r30)       # 300 s SIM x 30x -> ~9000 s WALL, never tripped
+
+    def test_in_use_station_left_active_still_trips_by_name(self):
+        # The pre-fix contrast (pause=False): a station left ACTIVE through the far op still trips on the SIM
+        # leg, bounded at ~the 30 s budget, named -- so the fix suppresses ONLY the paused case, never a real
+        # death of an in-use station.
+        for pacing in PACINGS:
+            r = simulate_far_station_paused(pacing=pacing, sim_gap_budget=self.SIM_GAP,
+                                            wall_floor=self.WALL_FLOOR, far_op_sim=self.FAR_OP_SIM, pause=False)
+            self.assertEqual(r['outcome'], 'tripped_sim', (pacing, r))
+            self.assertIn('parked heartbeat lost: sim gap', r['reason'], (pacing, r))
+            self.assertLessEqual(r['sim'], self.SIM_GAP + 1.0, (pacing, r))
 
 
 if __name__ == '__main__':

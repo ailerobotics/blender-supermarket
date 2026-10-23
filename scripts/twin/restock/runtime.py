@@ -235,15 +235,15 @@ class ManipulationBridge:
             return True
         return False
 
-    def pause_station(self, simulation_time):
-        """fm399 (1): cleanly STOP the parked station at the START of the reposition drive, while the
-        base is still parked (so the 'stop' is accepted -> idle, NOT faulted). A moving base
-        invalidates the parked mapper, and the host spams emergency-stop while a parked station is
-        faulted/un-heartbeat-ed (the run-309 failure); an idle station publishes no stop. The station
-        is re-begun fresh at place_approach in the re-warm. No-op for a runtime that does not own
-        sensor I/O (byte-identical)."""
+    def pause_station(self, simulation_time, *, suspend_only=False):
+        """fm399 (1): cleanly suspend the parked station while the base is about to leave it, so the host
+        spams no emergency-stop while it cannot be heartbeat-ed (the run-309 failure). suspend_only=False
+        (default, byte-identical): STOP (-> host idle) at the mid-collect reposition drive-start; re-begun
+        fresh at place_approach. suspend_only=True (sim-robust-station-pause-on-transfer-v1): PAUSE (-> host
+        'paused', epoch kept) when a manip op completes and the mission tows AWAY to a far op; the next op
+        re-prepares fresh. No-op for a runtime that does not own sensor I/O (byte-identical)."""
         if self.owns_sensor_io and hasattr(self.controller, 'pause_station'):
-            self.controller.pause_station(simulation_time)
+            self.controller.pause_station(simulation_time, suspend_only=suspend_only)
 
 
 class RuntimeAdapter:
@@ -506,6 +506,18 @@ class RuntimeAdapter:
         self._reposition_seq_i = 0
         self._place_base_anchor = None     # re-armed at the place_approach re-park (sim-robust-cart-place-descent-v1)
         if action == 'couple':
+            # sim-robust-station-pause-on-transfer-v1: the collect op is COMPLETE and the base is about to tow
+            # AWAY to the far transfer op. No op heartbeats the parked collect/backstock station across the
+            # whole couple -> outbound -> park -> transfer-warm span, so without a pause its host-side liveness
+            # watchdog accrues a heartbeat gap and false-trips the global /manipulation/stop on this idle-but-
+            # ALIVE station (coldwin2: transfer sim gap 30.05 s, 0.05 s over budget -> the station recovered
+            # one tick later, proving it was alive). Apply the fm399 pause_station pattern to the between-ops
+            # nav: SUSPEND the station NOW, while still parked, so the 'pause' lands (host state 'paused', NOT
+            # faulted -> no emergency stop); the transfer warm re-prepares a FRESH epoch at the bay. No-op when
+            # no station was prepared (a start_at=couple/transfer staged start skips collect) or for a runtime
+            # without sensor I/O (byte-identical). See docs/host_timers_audit.md.
+            if hasattr(self.manip, 'pause_station'):
+                self.manip.pause_station(self.time, suspend_only=True)
             # Couple nav runs an in-order sequence of waypoints ending at the ON-AXIS standoff,
             # then the fine-dock servo inserts STRAIGHT along the cart axis to the drawbar:
             #   couple_approach (round the pinned cart, east of it) -> couple_standoff (on the cart

@@ -108,10 +108,22 @@ class IncorporationAckState:
         self.wall_heartbeat = wall_clock()
         self.collision_time = -1.
         self.active = False
+        # sim-robust-station-pause-on-transfer-v1: an ACTIVE epoch whose liveness watchdog is explicitly
+        # SUSPENDED because no op is using the station while the base tows away to a FAR op (collect done
+        # -> couple/outbound/park/transfer). A paused station keeps its epoch (it is NOT torn down like a
+        # 'stop'->idle) but accrues NO heartbeat gap and publishes NO stop, so a long far op cannot false-
+        # trip the global stop on this idle-but-ALIVE station (coldwin2 transfer sim gap 30.05 s). Cleared
+        # by 'stop' (idle) and by a fresh 'prepare' (new epoch). See snapshot().
+        self.paused = False
         self.fault = None
         self.camera_frame = None
         self.recoveries = 0
         self.recovered_from = None
+        # sim-robust-station-pause-on-transfer-v1: one-shot flag (consume_release, mirroring consume_kick)
+        # armed when a fault is RECOVERED within budget. The node drops it to publish a Bool(False) RELEASE
+        # on the latched Isaac /manipulation/stop wire mid-op, so a borderline trip during a far op does not
+        # leave the wire latched True (coldwin2) once the station proves alive again.
+        self._release_wire_pending = False
 
     def accept(self, command, now):
         recovering = False
@@ -141,10 +153,12 @@ class IncorporationAckState:
                 self.recovered_from = self.fault
                 self.fault = None
                 self.recoveries += 1
+                self._release_wire_pending = True   # arm the mid-op Isaac stop-wire release
             self.epoch, self.parked_since, self.camera_frame = epoch, stamp, frame
             self.active = True
             self.collision_time = -1.
-        elif action in ('heartbeat', 'stop'):
+            self.paused = False          # a fresh epoch is live, never carrying a prior pause
+        elif action in ('heartbeat', 'stop', 'pause'):
             if epoch != self.epoch or not self.active:
                 raise ValueError('station command has no active matching epoch')
             if action == 'heartbeat' and command.get('parked') is not True:
@@ -152,6 +166,13 @@ class IncorporationAckState:
             if action == 'stop':
                 self.active = False
                 self.collision_time = -1.
+                self.paused = False
+            elif action == 'pause':
+                # sim-robust-station-pause-on-transfer-v1: SUSPEND the parked-heartbeat liveness while the
+                # base tows away and no op heartbeats this station. The epoch stays active (state 'paused',
+                # not 'idle'); snapshot() publishes NO stop while paused. The next op re-prepares a fresh
+                # epoch at its own pose (begin()), which clears paused above.
+                self.paused = True
         else:
             raise ValueError('unsupported station action')
         self.sequence = seq
@@ -179,6 +200,15 @@ class IncorporationAckState:
         self._kick_pending = False
         return k
 
+    def consume_release(self):
+        """sim-robust-station-pause-on-transfer-v1: pop the one-shot stop-wire RELEASE arm (True at most once
+        per within-budget recovery). The node publishes a Bool(False) on the latched Isaac /manipulation/stop
+        wire so a borderline parked-heartbeat trip during a far op does not survive the station's own recovery
+        and kill the live op (extends PR 235's op-START re-derive with a MID-op release)."""
+        r = self._release_wire_pending
+        self._release_wire_pending = False
+        return r
+
     def acknowledge(self, stamp, epoch):
         if (not self.active or epoch != self.epoch or not math.isfinite(stamp)
                 or stamp <= self.parked_since or stamp < self.collision_time):
@@ -194,7 +224,10 @@ class IncorporationAckState:
         # slow-but-alive station (16-30x wall-to-sim) never trips it. Shared pace predicate, mode='either'
         # (sim OR wall), matching the manipulation-host timers. The first-tripped reason is frozen (a fault
         # is terminal until explicit recovery).
-        if self.active and not self.fault:
+        # sim-robust-station-pause-on-transfer-v1: an explicitly PAUSED station is a known idle-but-alive
+        # state, NOT a death -- skip the liveness gap entirely so it publishes no stop no matter how long
+        # the far op runs. An in-use (active, not paused) station still faults by name on a real gap.
+        if self.active and not self.fault and not self.paused:
             sim_gap = now - self.last_heartbeat
             wall_gap = self.wall_clock() - self.wall_heartbeat
             if not process_alive:
@@ -203,10 +236,11 @@ class IncorporationAckState:
                               wall_backstop=self.wall_backstop_s, mode='either'):
                 self.fault = (f'parked heartbeat lost: sim gap {sim_gap:.2f} s' if sim_gap > self.sim_gap_s
                               else f'parked heartbeat lost: wall gap {wall_gap:.2f} s')
-        ready = (self.active and not self.fault and endpoints_ready
+        ready = (self.active and not self.fault and not self.paused and endpoints_ready
                  and 0 <= now - self.collision_time <= .5 and self.collision_time > self.parked_since)
         return dict(epoch=self.epoch, sequence=self.sequence, stamp=now,
-                    state='failed' if self.fault else ('ready' if ready else ('warming' if self.active else 'idle')),
+                    state=('failed' if self.fault else 'paused' if self.paused
+                           else 'ready' if ready else 'warming' if self.active else 'idle'),
                     reason=self.fault or '', collision_time=self.collision_time if ready else -1.,
                     parked_since=self.parked_since, camera_frame=self.camera_frame)
 
@@ -251,6 +285,21 @@ def main():
             _last_estop_reason[0] = reason
             print('STATION_ESTOP_PUBLISH site=%s reason=%r' % (site, reason), flush=True)
         stop.publish(Bool(data=True))
+
+    def release(reason, *, site):
+        # sim-robust-station-pause-on-transfer-v1: un-latch the bare-Bool Isaac /manipulation/stop wire the
+        # moment the station RECOVERS within its budget, so a borderline parked-heartbeat trip during a long
+        # far op (the collect station through the live_pose transfer) does not leave the wire latched True
+        # and kill the live op. PR 235 (IsaacRosGraph._clear_stale_global_stop) only re-derives the wire at
+        # a NEW op's START; a stop that fires mid-op (site=tick) and whose station recovers one tick later
+        # was never released for the CURRENT op (coldwin2: 'station recovered' one tick after the trip, but
+        # the transfer still e-stopped on the latched wire). Publishing False is a NEW message the Isaac
+        # ROS2Subscriber takes (overwriting outputs:data to False); a GENUINELY ongoing stop re-arms True on
+        # the next faulted tick, so this only ever clears a now-recovered stale latch. Resets the estop
+        # reason-throttle so a later distinct trip re-publishes + re-prints.
+        _last_estop_reason[0] = None
+        print('STATION_ESTOP_RELEASE site=%s reason=%r' % (site, reason), flush=True)
+        stop.publish(Bool(data=False))
     service = node.create_client(EsdfAndGradients, NS + '/nvblox_node/get_esdf_and_gradient')
     pending = None
     pending_epoch = None
@@ -281,6 +330,11 @@ def main():
                 node.get_logger().info(
                     f'station recovered: epoch={state.epoch} from={prior_fault!r} '
                     f'recoveries={state.recoveries}/{_MAX_RECOVERIES}')
+            # sim-robust-station-pause-on-transfer-v1: the station recovered within budget -> RELEASE the
+            # latched Isaac stop wire mid-op so a borderline trip during the far op does not kill the live
+            # op once the station proves alive again (one-shot, armed by accept()).
+            if state.consume_release():
+                release(f'station recovered from {prior_fault}', site='recovery')
         except Exception as exc:
             # Make a rejected command (bad epoch/sequence/timestamp, lost parked flag,
             # unparseable JSON) visible in host-stack.log with its ValueError text and the
