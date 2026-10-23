@@ -646,7 +646,18 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     # fm461 (demo fallback): the controller accepts a GROUND-TRUTH bay transfer
                                     # target + ground-truth verify when the shelf is not camera-commissioned.
                                     # Inert without a ground-truth provider (runtime sensing); default path unchanged.
-                                    'transfer_ground_truth'})
+                                    'transfer_ground_truth',
+                                    # The validated collect-stack place keys (PR 209/211/217), activated by
+                                    # default here after coldhonest + collect6 proved them together: the
+                                    # upright clear-branch preplace shape + wrist guard, the sim-clock
+                                    # release-detach budget, and the collision-off straight-line deck place.
+                                    'collect_place_preplace_shape', 'collect_place_wrist_guard',
+                                    'release_detach_timeout_s', 'collect_place_straight_line'})
+        self.assertEqual(len(cfg['collect_place_preplace_shape']), 6)   # full 6-joint upright preplace shape
+        self.assertLessEqual(cfg['collect_place_preplace_shape'][3], 0.65)  # wrist_1 at/below the stop
+        self.assertIsInstance(cfg['collect_place_wrist_guard'], bool)
+        self.assertIsInstance(cfg['collect_place_straight_line'], bool)
+        self.assertGreater(cfg['release_detach_timeout_s'], 0.0)        # a positive sim-seconds budget
         self.assertIsInstance(cfg['carry_wrist1_cap'], (int, float))
         self.assertLessEqual(cfg['carry_wrist1_cap'], 0.65)   # at/below the wrist_2-vs-forearm stop
         self.assertEqual(len(cfg['carry_lift_shape']), 6)     # full 6-joint clear-region lift goal
