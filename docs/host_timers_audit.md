@@ -33,6 +33,45 @@ backstop). The e-stop is no longer reportable bare: `controller._fail` now logs 
 reason=... phase=...` and the port logs `PORT_FAULT_ESTOP state=... exc=...` before any stop publication,
 and `PLAN_WALL_DIAG` now names which budget leg fired (`leg=sim|wall`).
 
+## coldliverecovery station e-stop: the parked-heartbeat WALL gap, the timer PR 231 missed
+
+coldliverecovery (run dir `~/datasets/twin-robot-in-store-boot-v1/mission/coldliverecovery/`, PR #236 head,
+full live_pose, `masked_depth.economy`) got the furthest yet: collect → couple → outbound (coupled) all
+cleared and the transfer started clean (`STALE_OP_START_STOP_CLEARED op=transfer`, PR #235) and ran **9**
+live_pose captures. It then e-stopped mid-transfer: `MANIP_HOST_FAILED op=transfer` whose named trigger was
+host-stack `STATION_ESTOP_PUBLISH site=tick reason="parked heartbeat lost: wall gap 30.75 s"`, preceded by
+`restock_incorporation_ack: incorp reject: ESDF absent/stale`. The source is the **parked-station heartbeat
+WALL guard** in `restock_host/incorporation_ack.py` `IncorporationAckState.snapshot` — a FLAT wall bound
+(`RESTOCK_STATION_WALL_GAP_S`, the validator's env = 30 s) checked independently of the SIM gap. Under the
+live_pose transfer's render pacing the mission ran a multi-capture manip op without heart-beating the parked
+station; the SIM gap stayed within the 30 s budget while WALL stretched to 30.75 s, so only the WALL leg
+tripped, the station published the global `/manipulation/stop`, it re-latched on the Isaac wire, and the
+transfer e-stopped. `incorporation_ack.py` already commented this exact edge from the earlier `coldlivefull`
+run. **PR 231 converted the motion/payload/startup timers but never listed this station timer** (the timer
+table below had a `native_channel.py` StationClient section but no `incorporation_ack.py` row).
+
+**Measured pacing (coldliverecovery host-stack.log):** the ESDF-reject lines carry both the ROS wall stamp
+and the sim `now=`. Over the collect→early-transfer span (line 6994 → 15285): Δwall 640.2 s / Δsim 75.45 s =
+**≈8.5× wall-to-sim average**; a local transfer-window sample (lines 15285→15321): Δwall 1.99 s / Δsim
+0.40 s = **≈5×**; consistent with the documented 16–30× worst-case live_pose economy. At those ratios the
+30.75 s WALL gap corresponds to a SIM gap of only ~2–6 s — far under the 30 s SIM budget — which is exactly
+why the SIM leg was healthy and only the pace-unsafe WALL leg fired.
+
+**Fix (sim-robust-station-heartbeat-simclock-v1).** The parked-heartbeat guard is now SIM-primary with a
+DERIVED frozen-sim WALL backstop, the identical shape PR 231 shipped: the SIM gap (`now - last_heartbeat`,
+both node `/clock`) is the real liveness bound (`RESTOCK_STATION_SIM_GAP_S`, still the real bound), and
+`RESTOCK_STATION_WALL_GAP_S` becomes the wall FLOOR feeding `pace_watchdog.frozen_sim_wall_backstop(sim_gap,
+floor)` (= sim gap × 50, floored), evaluated with the SIM gap through the shared
+`pace_watchdog.is_dead(mode='either')`. The derivation formula moved to the leaf `pace_watchdog` module
+(`ros_adapter.frozen_sim_wall_backstop` now delegates there, byte-identical), so the station guard and the
+manipulation-host timers share one predicate. The same conversion was applied to the station-supervisor
+twin `restock/station.py` `StationState.snapshot` (its flat 15 s wall backstop → derived 25 s; message
+byte-identical). The ESDF-incorporation staleness reject (`preflight.incorporated_time`, `now - stamp >
+max_age`) was already SIM-clock (both the node `now` and the ESDF header stamp ride `/clock`) — verified, not
+changed. On the real rig (sim == wall) the SIM leg fires first, so the wall value is inert and the no-pacing
+path is byte-identical. CPU proof extends `host_pacing_harness.py` / `test_host_timers_pacing.py` to the real
+`IncorporationAckState.snapshot` at 1×/16×/30× (`simulate_station_heartbeat`).
+
 ## Named-trigger instrumentation (so a bare emergency stop can never recur)
 
 The Isaac-side stop wire is a bare `Bool`, so the mission can only ever report `"host emergency stop"` with
@@ -141,6 +180,26 @@ earlier), `converted` (this lane), `wall-backstop` (kept wall by design — boun
 | `_HEARTBEAT_UNAVAILABLE_S` (env `RESTOCK_HEARTBEAT_UNAVAILABLE_S`, default 10) | no-reply hard catch | WALL (backstop) | wall-backstop — paired with the SIM-stage primary above; **default 10 s is real-rig-tight, MUST be widened under pacing** (set in the proof fragment). Left unchanged: load-bearing for the parking gate, no evidence of false-trip in coldlive 1–4 |
 | `_HEARTBEAT_WALL_S` (0.3) | heartbeat SEND cadence (not a liveness bound) | WALL | cadence (a send rate, not a timeout) |
 
+### `restock_host/incorporation_ack.py` (IncorporationAckState — host-stack parked-station heartbeat / ESDF ack)
+
+| symbol / env | bounds | clock | status |
+|---|---|---|---|
+| `sim_gap_s` (env `RESTOCK_STATION_SIM_GAP_S`, default 0.5) | parked-heartbeat SIM freshness gap (`now - last_heartbeat`) | SIM | sim-clocked — PRIMARY liveness bound (the real bound) |
+| `wall_gap_s` (env `RESTOCK_STATION_WALL_GAP_S`, default 3) | now the wall FLOOR feeding the derived frozen-sim backstop (role change; a widen only widens the backstop) | WALL (backstop floor) | **converted** (sim-robust-station-heartbeat-simclock-v1; coldliverecovery `wall gap 30.75 s` fix) |
+| `wall_backstop_s` = `frozen_sim_wall_backstop(sim_gap_s, wall_gap_s)` | frozen-sim parked-heartbeat backstop (= sim gap × 50, floored) | **SIM**+WALL (`is_dead` mode='either') | **converted**; derived generous, only catches a FROZEN sim |
+| `process_alive` (launch OnProcessExit) | stack-death liveness | n/a (event) | event (positive death; not a clock) |
+| `incorporated_time` `max_age` (0.5) / `now - stamp` | ESDF integration staleness reject | SIM | sim-clocked — both `now` and the ESDF header stamp ride `/clock` (verified, unchanged) |
+| in-flight ESDF request cancel (`time.monotonic() - pending_wall > 2`) | drop a non-responding `get_esdf_and_gradient` request + retry | WALL | request-retry cadence (reissues; never faults/stops) — benign |
+| graph discovery (`time.monotonic() - last_discovery > .5`) | endpoint rediscovery cadence | WALL | cadence (a poll rate, not a timeout) |
+
+### `restock/station.py` (StationState — station-supervisor parked-heartbeat twin)
+
+| symbol | bounds | clock | status |
+|---|---|---|---|
+| `_SIM_HEARTBEAT_GAP_S` (0.5) | parked-heartbeat SIM freshness gap | SIM | sim-clocked — PRIMARY (+ `process_alive`) |
+| `_WALL_HEARTBEAT_BACKSTOP_S` (15) → `_WALL_HEARTBEAT_BACKSTOP_DERIVED_S` (25) | frozen-sim wall backstop | **SIM**+WALL (`is_dead` mode='either') | **converted** (flat 15 → derived 25; combined message byte-identical) |
+| `STATION_PENDING_WALL_S` (env, default 2) in `station_host.py` | in-flight ESDF request cancel + retry | WALL | request-retry cadence (reissues; benign) — same class as incorporation-ack's |
+
 ### `restock_manipulation/ros_payload.py` (payload / attach handshake)
 
 | symbol / env | bounds | clock | status |
@@ -179,6 +238,8 @@ earlier), `converted` (this lane), `wall-backstop` (kept wall by design — boun
 | `RESTOCK_STARTUP_GRACE_SIM_S` | = `STARTUP_GRACE_S` (5) | first-frame SIM grace (new) |
 | `RESTOCK_PAYLOAD_ACK_SIM_S` | = `payload_ack_wall_s` | attach-ack SIM budget (new) |
 | `RESTOCK_HEARTBEAT_UNAVAILABLE_S` | 10 | station no-reply wall backstop — widen under pacing |
+| `RESTOCK_STATION_SIM_GAP_S` | 0.5 | parked-station heartbeat SIM freshness bound (the real liveness bound; widen for the live_pose transfer manip gap) |
+| `RESTOCK_STATION_WALL_GAP_S` | 3 | parked-station heartbeat wall FLOOR → derived frozen-sim backstop (role change; a widen only widens the backstop — the 120 s quick-lever is no longer needed) |
 
 ## CPU proof
 
@@ -189,3 +250,12 @@ asserts: no false-trip of a healthy producer at any pacing (incl. the exact cold
 genuine hang caught on the SIM leg in bounded SIM time, a frozen sim caught on the WALL backstop, and
 byte-identical 1x behaviour. The updated `test_ros_adapter_watchdog.py` / `test_ros_adapter_branch.py`
 carry the per-timer regression guards.
+
+**Station heartbeat (sim-robust-station-heartbeat-simclock-v1).** `simulate_station_heartbeat` drives the
+REAL `IncorporationAckState.snapshot` against the same fake clock pair; `StationHeartbeatUnderPacing` in
+`test_host_timers_pacing.py` asserts at 1×/16×/30×: a healthy station whose manip gap stretches past the flat
+30 s wall (the coldliverecovery shape) NEVER false-stops, a dead station is caught on the SIM leg in bounded
+SIM time, a frozen sim is caught on the derived WALL backstop, and 1× default budgets are byte-identical.
+`test_restock_host.py` / `test_restock_station.py` carry the per-state regression guards (the derived backstop
+value, no false-trip at a 3.4 s render-paced gap, the frozen-sim catch at the derived backstop, and the
+proof-config `sim=30 / wall=30 → backstop 1500 s` shape on the exact 30.75 s gap).

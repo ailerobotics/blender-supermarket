@@ -12,6 +12,12 @@ at 30x (coldlive sample-4); a sim-primary one tolerates it while still catching 
 This module drives those SHIPPED predicates (``frozen_sim_wall_backstop`` from the host adapter and
 ``pace_watchdog.is_dead``) against a fake wall/sim clock pair at configurable pacing, so the whole family
 is provable on CPU in milliseconds -- no ROS, no Isaac, no GPU. It is pure: no real clock, no I/O.
+
+sim-robust-station-heartbeat-simclock-v1 extends it to the PARKED-STATION heartbeat guard: the same
+SIM-primary + frozen-sim-wall-backstop shape lives in ``restock_host.incorporation_ack.IncorporationAckState.
+snapshot`` (the host-stack parked-heartbeat liveness that e-stopped coldliverecovery at ``wall gap 30.75 s``
+while the sim gap was healthy). ``simulate_station_heartbeat`` drives that SHIPPED state object against the
+same fake clock pair, so the station timer is proven on CPU alongside the manipulation-host timers.
 """
 
 from twin.restock_manipulation.ros_adapter import frozen_sim_wall_backstop
@@ -69,3 +75,49 @@ def simulate_sim_primary_budget(*, pacing, sim_budget, wall_floor, producer_sim_
             return {'outcome': leg, 'wall': clock.wall, 'sim': clock.sim, 'wall_backstop': wall_backstop}
         clock.advance(dwall)
     raise AssertionError('neither completed nor tripped within max_wall -- unbounded wait is a bug')
+
+
+def simulate_station_heartbeat(*, pacing, sim_gap_budget, wall_floor, no_heartbeat_sim,
+                               frozen=False, dwall=0.05, max_wall=200000.0):
+    """Drive the SHIPPED parked-station heartbeat guard to its outcome under ``pacing``.
+
+    Exercises the REAL ``restock_host.incorporation_ack.IncorporationAckState.snapshot`` (SIM-primary gap +
+    derived frozen-sim WALL backstop, via ``pace_watchdog.is_dead(mode='either')``) against the fake clock
+    pair. A parked station is prepared + stamped once, then the mission runs ONE manipulation op lasting
+    ``no_heartbeat_sim`` SIM seconds during which it sends NO station heartbeat (the live_pose transfer's
+    multi-capture gap). Under ``pacing`` wall-per-sim that gap stretches to ``no_heartbeat_sim x pacing``
+    WALL seconds -- the stretch that false-tripped the OLD flat wall guard. ``frozen`` holds the sim clock
+    still for the whole op (a dead simulator) so only the WALL backstop can catch it.
+
+    The guard's budgets are set to (``sim_gap_budget``, ``wall_floor``) directly on the shipped state object
+    and its ``wall_backstop_s`` is re-derived with the shipped ``frozen_sim_wall_backstop`` -- the same
+    derivation ``__init__`` runs, driven here without env mutation so the harness stays pure.
+
+    Returns a dict: outcome in {'survived','tripped_sim','tripped_wall'} with the wall/sim readings and the
+    guard's reason. 'survived' == the guard did NOT fault across the whole healthy op (no false stop).
+    Raises if nothing happens within ``max_wall`` (an unbounded wait would itself be a bug)."""
+    from twin.restock_host.incorporation_ack import IncorporationAckState
+    clock = FakeClockPair(pacing=pacing, frozen=False)
+    st = IncorporationAckState(wall_clock=lambda: clock.wall)
+    st.sim_gap_s = float(sim_gap_budget)
+    st.wall_gap_s = float(wall_floor)
+    st.wall_backstop_s = frozen_sim_wall_backstop(sim_gap_budget, wall_floor)
+    # Prepare the parked epoch at sim 0 (sets last_heartbeat = 0 sim, wall_heartbeat = 0 wall). The gap
+    # guard runs on an active epoch whether or not an ESDF ack has landed, so no acknowledge() is needed.
+    st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=0.0, parked=True,
+                   camera_frame='restock_camera_transfer'), 0.0)
+    clock.frozen = bool(frozen)                       # the op begins; a frozen sim stalls /clock here
+    op_start_sim = clock.sim
+    while clock.wall <= max_wall:
+        snap = st.snapshot(clock.sim, endpoints_ready=True, process_alive=True)
+        if snap['state'] == 'failed':
+            leg = 'tripped_sim' if 'sim gap' in snap['reason'] else 'tripped_wall'
+            return {'outcome': leg, 'wall': clock.wall, 'sim': clock.sim, 'reason': snap['reason'],
+                    'wall_backstop': st.wall_backstop_s}
+        # A healthy op completes after no_heartbeat_sim SIM seconds (a frozen sim never gets here and must
+        # be caught by the WALL backstop instead).
+        if not frozen and (clock.sim - op_start_sim) >= no_heartbeat_sim:
+            return {'outcome': 'survived', 'wall': clock.wall, 'sim': clock.sim, 'reason': '',
+                    'wall_backstop': st.wall_backstop_s}
+        clock.advance(dwall)
+    raise AssertionError('station guard neither survived nor tripped within max_wall -- unbounded wait')

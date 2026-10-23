@@ -128,6 +128,16 @@ repo's `scenes/`, `export/` or `renders/`.
   switch keys: **`docs/host_timers_audit.md`**; CPU pacing proof `scripts/twin/restock/host_pacing_harness.py`
   + `tests/test_host_timers_pacing.py` (1x/16x/30x); bounded GPU proof
   `docs/examples/host-timers-pacing-proof-fragment.json`.
+  That audit missed the **parked-STATION heartbeat** (`restock_host/incorporation_ack.py`
+  `IncorporationAckState.snapshot` + its `restock/station.py` `StationState` twin): a flat wall-gap guard
+  (`RESTOCK_STATION_WALL_GAP_S`) e-stopped coldliverecovery mid-live_pose-transfer at `STATION_ESTOP_PUBLISH …
+  'parked heartbeat lost: wall gap 30.75 s'` while the SIM gap was healthy. sim-robust-station-heartbeat-simclock-v1
+  converted it to the SAME shape: `RESTOCK_STATION_SIM_GAP_S` is the real bound; `RESTOCK_STATION_WALL_GAP_S` is
+  now only the floor feeding the derived `pace_watchdog.frozen_sim_wall_backstop` (the formula moved to the leaf
+  `pace_watchdog`; `ros_adapter.frozen_sim_wall_backstop` delegates there). The ESDF staleness reject
+  (`preflight.incorporated_time`) was already sim-clock. Proof fragment
+  `docs/examples/station-heartbeat-simclock-proof-fragment.json`; write-up
+  `data/sim-robust-station-heartbeat-simclock-v1/report.md`.
   **The global `/manipulation/stop` wire has publishers BEYOND the motion controller** — the station-liveness
   nodes (`restock_host/incorporation_ack.py`, `restock/station_host.py`) and `restock/trajectory_host.py` —
   and they set NO `/manipulation/status`, so PR 231's naming did not cover them: a stop from them surfaced as

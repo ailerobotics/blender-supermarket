@@ -16,6 +16,7 @@ from .types import Observation, Sensors, Target
 # sim-robust-host-timers-audit-fix-v1: the shared pace-aware liveness predicate (SIM primary + WALL
 # backstop). pace_watchdog is a leaf pure-arithmetic module (no ROS/Isaac), so this is safe at import.
 from ..restock.pace_watchdog import is_dead as pace_is_dead
+from ..restock.pace_watchdog import frozen_sim_wall_backstop as _frozen_sim_wall_backstop
 
 from .cad_tool import ARM_JOINTS
 
@@ -225,9 +226,11 @@ def frozen_sim_wall_backstop(sim_budget_s, wall_floor_s, pacing_factor=None):
     caller's ``wall_floor_s`` so a config can only ever WIDEN it, never tighten below the historical value.
     On the real rig (sim == wall) the SIM budget fires first, so the returned (large) wall value is inert
     and the no-pacing path is byte-identical. Shared by the planning budget and the first-frame startup
-    grace. Pure for CPU testing."""
+    grace. The formula now lives in the leaf ``pace_watchdog`` module (shared with the parked-station
+    heartbeat guards); this wrapper keeps the planning family's env-tunable factor default. Pure for CPU
+    testing."""
     factor = PLAN_WALL_BACKSTOP_PACING_FACTOR if pacing_factor is None else float(pacing_factor)
-    return max(float(wall_floor_s), float(sim_budget_s) * factor)
+    return _frozen_sim_wall_backstop(sim_budget_s, wall_floor_s, factor)
 
 
 def plan_total_wall_backstop(sim_cap_s, wall_cap_s, pacing_factor=None):
