@@ -443,6 +443,26 @@ repo's `scenes/`, `export/` or `renders/`.
   robot gravity + held carton via `gravity_ff_effort`/`build_payload_gravity`) stays available, default off ⇒
   byte-identical, but it does NOT close this miss; `tests/test_restock_shoulder_sag_ff.py` now asserts the
   honest "not gravity sag" balance (PR218's fitted `J*Kp≈10 Nm/rad` reproduction was removed).
+- **trajectory_host goal-acceptance never silent** (`trajectory_host.py`): `goal()` used to
+  `GoalResponse.REJECT` SILENTLY on a latched fault, an already-active goal, or no feedback yet — and
+  move_group then aborts the ExecuteTrajectory so the mission surfaced the misleading
+  `collision planning or execution failed` (NOT a planning collision). seconddeath's first-collect
+  failure was the **feedback-None startup race**: the first goal arrived before the executor's first
+  `/joint_states` callback fired (render pacing spaces frames seconds apart WALL). Now every reject logs
+  `TRAJ_HOST_GOAL_REJECT <reason> (fault/active/feedback/grace)`; `goal()` WAITS a bounded WALL grace
+  (`RESTOCK_FIRST_FEEDBACK_GRACE_S`, default 8 s; 0=legacy) for the first feedback before deciding
+  (zero delay when feedback is already present ⇒ byte-identical); a stale `active` flag from a
+  terminated handle is cleared; and a `/restock_sim/arm_controller/reset` (auto-published by
+  `ros_adapter` `begin`/`begin_joint_goal`) re-arms a LATCHED fault at op start (PR 210 parity — the
+  host's permanent latch otherwise bricks the arm against the mission's bounded retries; never clears a
+  live goal, no-op when fault-free). The mission names a rejected/aborted goal distinctly via
+  `take_exec_abort_reason` instead of the generic collision string. Pure helpers (`reject_reason`,
+  `active_is_stale`, `reset_clears`, `first_feedback_grace_s`) + CPU tests in
+  `tests/test_restock_trajectory_host.py`. Design + the SEPARATE latent move_group collision-mesh
+  URL defect (bare absolute `.stl` paths need `file://`; report-only — enabling move_group arm
+  collision geometry may tighten FCL `ValidateSolution`, GPU-validate before fixing):
+  `data/sim-robust-pick-plan-rejection-v1/report.md`, proof
+  `docs/examples/pick-plan-rejection-proof-fragment.json`.
 - **Rollwagen cage clearance** (sim-only workaround, RUNTIME config `cage_collision: "filtered"`, default
   off; `restock/cage_collision.py`): a FilteredPairsAPI on the carton against the 50 cage colliders (deck,
   upper shelf and drawbar still collide; rays and cuMotion untouched), labelled in mission.json and the

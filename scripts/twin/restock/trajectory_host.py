@@ -285,6 +285,70 @@ def tracking_fault(track_err, miss_count, *, tol=TRACKING_TOL, debounce=TRACKING
     return track_err > hard or miss_count >= debounce
 
 
+# --- Goal-acceptance race fixes (sim-robust-pick-plan-rejection-v1) ---------------------------------
+# The FollowJointTrajectory goal() callback used to return GoalResponse.REJECT SILENTLY on three
+# startup/timing conditions -- a latched fault, an already-active goal, or no feedback yet -- and on a
+# Plan ValueError. seconddeath (2026-10-23): under the live_pose + arm-feed load move_group forwarded
+# the very FIRST collect goal in the wall-gap after this executor's /joint_states subscription was ready
+# but before its first sample callback fired (render pacing spaces frames seconds apart in WALL time
+# though <0.1 s in SIM), so state['feedback'] was still None and the goal was rejected with NO log line.
+# move_group aborted the ExecuteTrajectory, the mission surfaced the misleading
+# 'collision planning or execution failed', and across StageRetry the arm never moved -> arm-command
+# heartbeat lost. The helpers below make every reject reasoned + logged and let a goal that arrives a
+# few ticks early WAIT (bounded) for the first feedback instead of being rejected.
+
+def first_feedback_grace_s():
+    """Bounded WALL grace the goal callback waits for the FIRST measured feedback before rejecting a
+    goal as feedback-None. The window is the gap between the /joint_states subscription going ready and
+    the first sample arriving, which under render pacing is a few WALL seconds (frames ~1.7-3.5 s apart
+    WALL though <0.1 s SIM). A goal that arrives WITH feedback already present breaks out on the first
+    poll with zero added delay, so the normal path is byte-identical. 0 => legacy immediate decision.
+    Env override (sim-only executor), clamped sane."""
+    return max(0.0, min(60.0, float(os.environ.get('RESTOCK_FIRST_FEEDBACK_GRACE_S', 8.0))))
+
+
+def reject_reason(fault, active, feedback_present):
+    """Named reason a FollowJointTrajectory goal is rejected given the executor state, or None if the
+    goal should be ACCEPTED (all clear). Pure + importable so each race is CPU-testable and the reject is
+    never silent -- goal() logs this string (TRAJ_HOST_GOAL_REJECT). Order matters: a latched fault wins
+    over an active goal, which wins over missing feedback."""
+    if fault is not None:
+        return 'executor fault latched: %s' % (fault,)
+    if active:
+        return 'a previous goal is still executing'
+    if not feedback_present:
+        return 'no measured joint feedback received yet (startup/first-feedback race)'
+    return None
+
+
+def active_is_stale(active, handle_live):
+    """True if the active flag is set but its goal handle has terminated, so a NEW goal must not be
+    rejected on a dead flag (a handle that aborted/canceled without execute()'s finally clearing active).
+    ``handle_live`` is whether the stored goal handle still reports active. Pure."""
+    return bool(active) and not handle_live
+
+
+def reset_clears(fault, active, handle_live):
+    """What an explicit op-start reset clears on the executor, as ``(clear_fault, clear_active)``. It
+    re-arms a LATCHED fault for the new operation (consistent with PR 210's ArmCommandGate.resume at the
+    shortcut handoff -- the host's permanent latch otherwise bricks the arm against the mission's own
+    bounded move retries) and clears a STALE active flag, but NEVER a LIVE execution's active flag (that
+    would abandon a running goal). A no-op (False, False) when there is nothing to clear, so a reset
+    published on the normal (fault-free) path is byte-identical. Pure."""
+    return (fault is not None, active_is_stale(active, handle_live))
+
+
+def _handle_live(handle):
+    """True if a stored goal handle is still executing (so clearing its active flag would abandon a live
+    goal). Tolerates a None / duck-typed handle; rclpy ServerGoalHandle exposes ``is_active``."""
+    if handle is None:
+        return False
+    try:
+        return bool(handle.is_active)
+    except Exception:
+        return False
+
+
 class Plan:
     def __init__(self, trajectory, measured, limits, max_speed=.15, max_acceleration=.5):
         validate_trajectory(trajectory, measured, limits)
@@ -373,7 +437,8 @@ def main():
     if node.context.get_domain_id()!=88:
         raise RuntimeError('trajectory executor requires simulation domain 88')
     lock=threading.RLock()
-    state=dict(feedback=None,received=0.,fault=None,active=False,target=None,plan=None,start=None,
+    state=dict(feedback=None,received=0.,fault=None,active=False,active_handle=None,target=None,
+               plan=None,start=None,
                start_install=None,   # sim /clock at execute install; start is anchored to the first
                # post-install feedback stamp (anchored_start), so this only records the anchor_lag.
                miss_count=0,miss_stamp=None,contact=False,
@@ -530,8 +595,29 @@ def main():
             command.publish(msg)
 
     def goal(request):
+        # Bounded first-feedback grace, THEN decide under the lock. Release the lock while waiting so the
+        # feedback callback (another MultiThreadedExecutor thread) can latch state['feedback']; a goal
+        # that already has feedback breaks out on the first poll with zero added delay (byte-identical
+        # normal path). This removes the seconddeath silent feedback-None reject of a valid first goal.
+        grace=first_feedback_grace_s()
+        wait_deadline=time.monotonic()+grace
+        while True:
+            with lock:
+                if active_is_stale(state['active'],_handle_live(state['active_handle'])):
+                    state['active']=False   # a prior handle terminated without clearing the flag
+                if state['feedback'] is not None or state['fault'] is not None or state['active']:
+                    break
+            if time.monotonic()>=wait_deadline:
+                break
+            time.sleep(.01)
         with lock:
-            if state['fault'] or state['active'] or state['feedback'] is None:
+            reason=reject_reason(state['fault'],state['active'],state['feedback'] is not None)
+            if reason is not None:
+                # Never silent: log the reason + the exact state that caused it so a startup race
+                # (widen the grace) is told apart from a genuine latched fault or a live goal.
+                print('TRAJ_HOST_GOAL_REJECT %s (fault=%r active=%s feedback=%s grace=%.2fs)'
+                      % (reason,state['fault'],state['active'],
+                         'set' if state['feedback'] is not None else 'none',grace),flush=True)
                 return GoalResponse.REJECT
             try:
                 if request.multi_dof_trajectory.points:
@@ -564,7 +650,8 @@ def main():
                     print(f'TRAJ_HOST_PLAN dump skipped: {_exc!r}',flush=True)
                 state['active']=True
                 return GoalResponse.ACCEPT
-            except ValueError:
+            except ValueError as exc:
+                print('TRAJ_HOST_GOAL_REJECT plan rejected at goal: %s' % (exc,),flush=True)
                 return GoalResponse.REJECT
 
     def execute(handle):
@@ -582,6 +669,7 @@ def main():
                 state['plan'],state['start'],state['start_install']=plan,None,now()
                 state['miss_count'],state['miss_stamp']=0,None   # fresh debounce window per trajectory
                 state['contact']=False                           # arm the contact gate fresh per goal
+                state['active_handle']=handle   # so goal() can tell a LIVE goal from a stale active flag
             wall_backstop=time.monotonic()+EXECUTE_WALL_BACKSTOP_S
             while rclpy.ok():
                 with lock:
@@ -718,8 +806,31 @@ def main():
             val=None
         with lock:
             state['pick_surface']=val
+    def reset_signal(msg):
+        # Op-start re-arm (sim-robust-pick-plan-rejection-v1): the controller publishes this at the start
+        # of a move so a LATCHED fault from a previous op does not permanently brick the arm against the
+        # mission's own bounded move retries (consistent with PR 210's ArmCommandGate.resume). Clears a
+        # latched fault + a STALE active flag only; NEVER a live execution (reset_clears guards that), so
+        # a reset on the normal fault-free path is a no-op (byte-identical). The host still re-validates
+        # every goal, so a genuinely broken trajectory faults again immediately.
+        if not msg.data:
+            return
+        with lock:
+            clear_fault,clear_active=reset_clears(
+                state['fault'],state['active'],_handle_live(state['active_handle']))
+            if clear_fault or clear_active:
+                print('TRAJ_HOST_RESET op-start re-arm: clear_fault=%s clear_active=%s prior_fault=%r'
+                      % (clear_fault,clear_active,state['fault']),flush=True)
+            if clear_fault:
+                state['fault']=None
+                state['plan']=None
+                state['start']=None
+                state['miss_count'],state['miss_stamp']=0,None
+            if clear_active:
+                state['active']=False
     node.create_subscription(JointState,'/restock_sim/joint_states',feedback,10,callback_group=group)
     node.create_subscription(Bool,'/restock_sim/arm_contact',contact_signal,10,callback_group=group)
+    node.create_subscription(Bool,'/restock_sim/arm_controller/reset',reset_signal,10,callback_group=group)
     # TRANSIENT_LOCAL (latched) so the latest controller-set tolerance is delivered even though this
     # executor subscribes after the controller's publisher is created (fm345 (c)).
     from rclpy.qos import QoSProfile, DurabilityPolicy

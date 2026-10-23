@@ -1256,7 +1256,12 @@ class TransferController:
                           (self.phase, self._move_deadline_retries, self._move_deadline_retry_max), flush=True)
                     self.issued = False   # re-issue this move (fresh deadline) next tick
                     return self._result()
-                return self._fail('collision planning or execution failed')
+                # A rejected/aborted ExecuteTrajectory (trajectory_host goal rejection or execution
+                # fault) is NOT a planning collision: surface the port's distinct reason when it has one
+                # (sim-robust-pick-plan-rejection-v1), else the generic collision/plan-rejection string.
+                _take = getattr(self.motion, 'take_exec_abort_reason', None)
+                _distinct = _take() if callable(_take) else None
+                return self._fail(_distinct or 'collision planning or execution failed')
             if outcome not in ('running', 'succeeded'):
                 return self._fail('invalid motion outcome')
             if outcome == 'succeeded':

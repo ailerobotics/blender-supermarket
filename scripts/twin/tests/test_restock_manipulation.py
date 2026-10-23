@@ -66,6 +66,14 @@ class FixtureMotion:
     def last_fault_was_sim_deadline(self):
         return self.sim_deadline_fault
 
+    def take_exec_abort_reason(self):
+        # sim-robust-pick-plan-rejection-v1: distinct reason for the last ExecuteTrajectory abort
+        # (a trajectory_host goal rejection / execution fault). Default None => the controller keeps the
+        # generic 'collision planning or execution failed' (existing tests unchanged).
+        r = getattr(self, 'exec_abort_reason', None)
+        self.exec_abort_reason = None
+        return r
+
     def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None, straight_line=False):
         self.stows.append((goal,measured,slow))
         # sim-robust-collect-stow-branch-v1: record every begin_joint_goal with its collision-off
@@ -1908,6 +1916,22 @@ def test_fm372_collision_returned_failed_still_hard_fails_general():
     r = c.step(.1, packet(c, tp))
     assert r.status == 'failed'
     assert c.reason == 'collision planning or execution failed'
+
+
+def test_rejected_goal_surfaces_distinct_reason_not_collision():
+    # sim-robust-pick-plan-rejection-v1: a RETURNED 'failed' that came from a trajectory_host goal
+    # rejection / execution abort (not a planning collision) must surface the port's DISTINCT reason,
+    # so seconddeath's first-goal startup-race rejection is no longer mislabelled a planning collision.
+    c, m = _staged_controller()
+    tp = _issue_move(c, m, 'retreat')
+    m.outcome, m.sim_deadline_fault = 'failed', False
+    m.exec_abort_reason = ('arm controller aborted trajectory (goal rejected or execution fault, '
+                           'moveit_err=-4; see host-stack.log TRAJ_HOST_GOAL_REJECT/TRAJ_HOST_FAULT)')
+    r = c.step(.1, packet(c, tp))
+    assert r.status == 'failed'
+    assert c.reason != 'collision planning or execution failed'
+    assert 'arm controller aborted trajectory' in c.reason and 'TRAJ_HOST_GOAL_REJECT' in c.reason
+    assert m.take_exec_abort_reason() is None   # consumed exactly once
 
 
 def test_fm372_sim_deadline_returned_failed_retries_general():
