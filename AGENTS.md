@@ -113,9 +113,21 @@ repo's `scenes/`, `export/` or `renders/`.
   service the plan-ACCEPT callback within 25 s WALL though move_group was alive, so the WALL deadline
   false-tripped `_should_deadline_crash_retry` — which read the slow plan as a crash and burned the whole
   crash-retry budget with ZERO deaths → e-stop (coldlive4). The crash-retry now also requires POSITIVE
-  death evidence (`server_ready=False`, the move_group action server gone). The WALL genuine-process-HANG
-  backstop stays `planning_wall_exceeded`/`PLAN_TOTAL_WALL_CAP_S` (unchanged). Write-up + bounded GPU proof:
+  death evidence (`server_ready=False`, the move_group action server gone). Write-up + bounded GPU proof:
   `data/sim-robust-plan-deadline-pacing-v1/report.md`, `docs/examples/plan-deadline-pacing-collect-fragment.json`.
+  **Sharp edge (the TOTAL planning budget is SIM too, not WALL — fixes the LAST pace-unsafe host timer):**
+  `planning_wall_exceeded`/`PLAN_TOTAL_WALL_CAP_S` was the one planning timer PR 228 left on the wall; it
+  tripped BARE at the live_pose place descent (coldlive sample-4: `PLAN_WALL_DIAG … future_done=False
+  elapsed=120.10`, only ~4-8 SIM s passed) — a render-starved-but-alive plan read as a hang. It is now
+  SIM-primary (`RESTOCK_PLAN_TOTAL_SIM_CAP_S`, default 22 sim-s) with a derived-generous frozen-sim WALL
+  backstop (`frozen_sim_wall_backstop`, never pre-empts the sim leg); `RESTOCK_PLAN_WALL_CAP_S` is now only
+  the backstop FLOOR (a stale sim-widen is harmless). The first-frame startup grace (`RESTOCK_STARTUP_GRACE_SIM_S`)
+  and the payload/attach ack (`ros_payload._wait`, `RESTOCK_PAYLOAD_ACK_SIM_S`) got the same treatment.
+  Every host e-stop now prints a NAMED trigger first (`HOST_FAULT_ESTOP`/`PORT_FAULT_ESTOP`; `PLAN_WALL_DIAG`
+  names `leg=sim|wall`) so a bare `'host emergency stop'` can never recur. Full timer classification +
+  switch keys: **`docs/host_timers_audit.md`**; CPU pacing proof `scripts/twin/restock/host_pacing_harness.py`
+  + `tests/test_host_timers_pacing.py` (1x/16x/30x); bounded GPU proof
+  `docs/examples/host-timers-pacing-proof-fragment.json`.
   **Place-on-cart GPU/heartbeat bound**: an unplannable cart-place goal (self-colliding IK branch,
   `'Invalid c-space position: self collision detected'`) used to churn the full `REPLAN_MAX`
   same-goal replans and OOM the 12 GB card (`cumotion::FatalException`, `cuda_array.cu`) / starve the

@@ -147,7 +147,34 @@ class IsaacRosGraph:
             self.hold()
             self.faulted = True
             self.active = False
-            raise RuntimeError('host emergency stop')
+            # sim-robust-host-timers-audit-fix-v1: the stop WIRE is a bare Bool, so the mission historically
+            # recorded only 'host emergency stop' with no cause (coldlive sample-4). The host also publishes
+            # the NAMED fault reason on /manipulation/status; peek the latest (idempotent read, host-relay
+            # path only) and append it so the mission reports WHICH host trigger fired, not a bare stop. Best
+            # effort: if the failed status has not yet been relayed when the wire reads True, fall back to the
+            # bare string (host-stack.log still carries HOST_FAULT_ESTOP/PORT_FAULT_ESTOP).
+            raise RuntimeError('host emergency stop' + self._host_fault_suffix())
+
+    def _host_fault_suffix(self):
+        """' (host fault: <reason>)' from the latest failed /manipulation/status, or '' if unavailable.
+        Read-only; never raises (a stop must still surface even if the peek fails)."""
+        try:
+            host_control = getattr(self, 'host_control', None)
+            if host_control is None:
+                return ''
+            raw = host_control.read(TOPICS['status'])
+            if not raw:
+                return ''
+            result = json.loads(raw)
+            reason = result.get('reason')
+            # Only THIS job's failed status (a lingering failed status from a prior, recovered op must
+            # not mislabel the current stop).
+            if (result.get('status') == 'failed' and reason
+                    and result.get('job_id') == getattr(self, 'job_id', None)):
+                return ' (host fault: %s)' % reason
+        except Exception:
+            pass
+        return ''
 
     def _status_fault(self, reason):
         self.hold()
