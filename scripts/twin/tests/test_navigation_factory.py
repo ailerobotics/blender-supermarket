@@ -202,6 +202,26 @@ class FactoryDispatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _build('reference', coupled_progress_escape='true')              # _strict_bool
 
+    def test_coupled_breakaway_recovery_flows_through(self):
+        c = _build('reference')
+        self.assertFalse(c.coupled_progress_recovery)                        # default off
+        self.assertAlmostEqual(c.coupled_breakaway_speed, 0.18)             # defaults
+        self.assertAlmostEqual(c.coupled_breakaway_window_s, 2.0)
+        self.assertAlmostEqual(c.coupled_breakaway_pulse_s, 0.5)
+        self.assertEqual(c.coupled_breakaway_attempts, 3)
+        c2 = _build('reference', coupled_progress_recovery=True, coupled_breakaway_speed_mps=0.22,
+                    coupled_breakaway_window_s=2.5, coupled_breakaway_pulse_s=0.4,
+                    coupled_breakaway_attempts=4)
+        self.assertTrue(c2.coupled_progress_recovery)
+        self.assertAlmostEqual(c2.coupled_breakaway_speed, 0.22)
+        self.assertAlmostEqual(c2.coupled_breakaway_window_s, 2.5)
+        self.assertAlmostEqual(c2.coupled_breakaway_pulse_s, 0.4)
+        self.assertEqual(c2.coupled_breakaway_attempts, 4)
+
+    def test_coupled_progress_recovery_rejects_non_bool(self):
+        with self.assertRaises(ValueError):
+            _build('reference', coupled_progress_recovery='true')            # _strict_bool
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

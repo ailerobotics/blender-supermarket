@@ -485,6 +485,32 @@ escalate/fault recovery) `tests/test_articulated_navigation.py`. The UNCOUPLED d
 the crawl is `mobile_spec.caster_lift_m` (fm434 bench `base-drive-bench-*`: 0.097→0.988 at 0.005 m); the
 warm runs already set it, so this monitor covers the residual **coupled** limit cycle.
 
+**Coupled break-away stall recovery** (`navigation.coupled_progress_recovery`, opt-in, default `false` ⇒
+byte-identical to the escalate→fault ladder above; sim-robust-outbound-stall-recovery-v1;
+`coupled_breakaway_speed_mps` 0.18, `coupled_breakaway_window_s` 2.0, `coupled_breakaway_pulse_s` 0.5,
+`coupled_breakaway_attempts` 3). The coldlivefull outbound showed the coupled tow **fail to break away from
+rest** at the portal throat (NAV_STEP cycled `measured_turn_radius`↔`tracking` with `parked=True`, the base
+jittering in place with ~0 net displacement) — a non-deterministic re-break-away deficit. Two own-code
+contributors: a `measured_turn_radius` **coast** tick returns a `(0,0)` command (`_wait`), so a stuck tow
+**thrashes stop↔forward** every few ticks and never sustains drive effort, and the forced creep only engages
+after `escape_s` and is a weak 0.03 m/s static crawl. With recovery on, once the base has been pinned for
+`coupled_progress_escape_s` SIM seconds the controller runs a **bounded break-away maneuver** instead of the
+single creep-then-fail: up to `coupled_breakaway_attempts` windows of `coupled_breakaway_window_s` SIM
+seconds, each commanding a **continuous pulsed committed-forward surge** (`coupled_breakaway_speed_mps`,
+square-waved every `coupled_breakaway_pulse_s` between the high level and a relaxed 0.4× to **rock** the
+contact). The surge **bypasses** the `measured_turn_radius` coast (so the command is never a v=0 stop) while
+the obstacle/coverage/map safety gates stay **unchanged** — a real obstacle still stops the surge. The
+instant net displacement reaches `coupled_progress_min_m` the break-away **succeeded** and normal tracking
+resumes; exhausting every attempt **faults `coupled_no_progress`** (same name + StageRetry contract), fast
+on the SIM clock. **Reverse** towing is clamped off for a coupled train (`mobile.wheel_targets`: coupled
+`v≥0`), so the maneuver is a forward surge/relax pulse, **not** a reverse back-off; and all brakes are
+already force-released every drive tick in `MobileController.command`, so no stale park/cart brake can hold
+the base. Example `docs/examples/outbound-stall-recovery-mission-fragment.json`; CPU tests (REAL controller:
+stall → break-away success, attempt exhaustion → named fault, continuous-forward, off-is-byte-identical)
+`tests/test_articulated_navigation.py` (`test_coupled_breakaway_*`). It makes the stall **rarer** and
+**fail-fast-by-name** when it cannot recover; the underlying coupled traction asset levers (caster lift,
+drive force) remain owned by sim-robust-coupled-traction-v1 (PR 207).
+
 **Wall-clock stuck-stage fail-fast** (`RESTOCK_NAV_STUCK_WALL_S`, opt-in, default `0` = off): the nav
 `blocked_timeout`/`goal_timeout` are **sim-clock** caps, which under render pacing (sim advances far
 slower than wall) cannot fire — run-322b's outbound sat on `lane_blocked` for ~50 min WALL and only the
