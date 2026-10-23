@@ -694,6 +694,16 @@ repo's `scenes/`, `export/` or `renders/`.
   collect-only / ground-truth-verify missions free it unchanged. A destroyed-then-read camera now
   raises the named `native_cameras.CameraRenderProductReleased`, not Isaac's raw expired-prim trace.
   Report: `data/sim-robust-verify-camera-prim-v1/report.md`.
+- **Arm masked-depth feed economy** (opt-in, default-off): `masked_depth.economy`
+  (`restock/masked_depth_economy.py`) lowers the live_pose arm feed's render/per-tick cost —
+  `resolution_scale` (scales the arm camera product; apertures unchanged ⇒ K scales ⇒ FOV/reprojection
+  preserved; quantization held under half an ESDF voxel at the recorded distances) and `publish_interval_s`
+  (SIM-clock rate cap on `ArmDepthSubprocessBridge.publish`, skip-never-stale, validated below the 0.5 s
+  nvblox window). Absent ⇒ byte-identical. NOT the dominant pacing lever — the shared render cadence
+  (`record_stride`/`sensing_stride`/`sim_speed`) is; coldhonest completed the cold cycle WITH the arm feed
+  by widening those (measured: arm-on vs arm-off pace identically during collect). Example
+  `docs/examples/masked-depth-economy-mission-fragment.json`; CPU `tests/test_masked_depth_economy.py`;
+  measurement + design `data/sim-robust-arm-feed-economy-v1/report.md`.
 - **Arm-carry bench** (`scripts/twin/tools/arm_carry_bench.py` + guarded GPU runner
   `scripts/run_arm_carry_bench.py`): boots Isaac ONCE, welds the carton at the tool via the
   mission's own `SIM_ATTACH_FALLBACK` weld, brakes the base in the airborne-carry yaw-lock

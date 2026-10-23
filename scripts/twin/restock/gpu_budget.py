@@ -101,6 +101,7 @@ def feeds_from_config(config):
     Reads ``masked_depth`` (the arm feed, camera_0) and ``mast_depth`` (camera_1, opt-in). A feed's
     resolution comes from its ``resolution: [w, h]`` when set, else the reference arm resolution.
     A feed is counted only when its block opts in (``enabled``). Pure dict reader (no Isaac)."""
+    from .masked_depth_economy import from_block as _economy_from_block, scaled_resolution
     feeds = []
     for key in ('masked_depth', 'mast_depth'):
         block = config.get(key) or {}
@@ -108,9 +109,13 @@ def feeds_from_config(config):
             continue
         res = block.get('resolution')
         if res and isinstance(res, (list, tuple)) and len(res) == 2:
-            feeds.append((int(res[0]), int(res[1])))
+            w, h = int(res[0]), int(res[1])
         else:
-            feeds.append((_REFERENCE_FEED_WIDTH, _REFERENCE_FEED_HEIGHT))
+            w, h = _REFERENCE_FEED_WIDTH, _REFERENCE_FEED_HEIGHT
+        # sim-robust-arm-feed-economy-v1: a feed's economy resolution_scale shrinks the per-pixel VRAM
+        # term (fm373: resolution is a small VRAM lever, but reflect it so the gate is self-consistent).
+        scale = _economy_from_block(block.get('economy')).resolution_scale
+        feeds.append(scaled_resolution(w, h, scale) if scale != 1.0 else (w, h))
     return feeds
 
 

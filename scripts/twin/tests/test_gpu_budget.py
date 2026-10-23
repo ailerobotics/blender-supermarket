@@ -52,6 +52,15 @@ def test_feeds_from_config_skips_disabled_and_absent():
     assert g.feeds_from_config({'mast_depth': {'enabled': True}}) == [(1280, 720)]
 
 
+def test_feeds_from_config_applies_economy_resolution_scale():
+    # An economy resolution_scale shrinks the counted feed resolution (self-consistent with the camera).
+    cfg = {'masked_depth': {'enabled': True, 'economy': {'resolution_scale': 0.5}}}
+    assert g.feeds_from_config(cfg) == [(640, 360)]
+    # publish_interval_s alone (no scale) leaves the resolution at the default.
+    cfg2 = {'masked_depth': {'enabled': True, 'economy': {'publish_interval_s': 0.1}}}
+    assert g.feeds_from_config(cfg2) == [(1280, 720)]
+
+
 def test_feed_requires_positive_resolution():
     with pytest.raises(ValueError):
         g.feed_mib(0, 720)
