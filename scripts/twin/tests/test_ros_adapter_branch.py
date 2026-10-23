@@ -229,18 +229,30 @@ class FailedResultPending(unittest.TestCase):
 class PlanningWallExceeded(unittest.TestCase):
     """planning_wall_exceeded() must NOT fire when move_group has already delivered a SUCCESSFUL plan
     result that the /sensors-paced poll() has not consumed yet (firstmate 290 / run-234 false trip),
-    while still catching a genuine hang (future not done) or an exhausted failure within the cap."""
-    import math as _math
-    from twin.restock_manipulation.ros_adapter import PLAN_TOTAL_WALL_CAP_S as _CAP
+    while still catching a genuine hang (future not done) or an exhausted failure within the budget.
 
-    @staticmethod
-    def _port(state, future, elapsed, cap=None):
+    sim-robust-host-timers-audit-fix-v1: the total-move planning budget is now SIM-primary (the
+    ``plan_total_sim_cap_s`` leg) with a derived-generous FROZEN-SIM WALL backstop (``plan_wall_backstop_s``),
+    replacing the pure-wall cap that false-tripped coldlive sample-4 (120 s wall, ~4-8 sim-s). The fixture
+    drives the sim and wall legs independently."""
+    _SIM_CAP = 22.0
+    _WALL_BACKSTOP = 1100.0
+
+    @classmethod
+    def _port(cls, state, future, *, sim_elapsed=None, wall_elapsed=0.0,
+              sim_cap=None, wall_backstop=None):
         import time
         p = RosMotionPort.__new__(RosMotionPort)
         p.state, p.future = state, future
-        p._plan_started_wall = time.monotonic() - elapsed
-        if cap is not None:
-            p.plan_wall_cap_s = cap
+        p.plan_total_sim_cap_s = cls._SIM_CAP if sim_cap is None else sim_cap
+        p.plan_wall_backstop_s = cls._WALL_BACKSTOP if wall_backstop is None else wall_backstop
+        p._plan_started_wall = time.monotonic() - wall_elapsed
+        if sim_elapsed is None:          # no sim clock wired (frozen/unseeded) -> only the wall backstop
+            p._plan_started_sim = None
+            p._sim_now = lambda: 0.0
+        else:
+            p._plan_started_sim = 0.0
+            p._sim_now = lambda: sim_elapsed
         return p
 
     class _PlanF:
@@ -256,33 +268,50 @@ class PlanningWallExceeded(unittest.TestCase):
             return type('G', (), {'status': self._status, 'result': res})()
 
     def test_delivered_success_pending_consume_does_not_exhaust(self):
-        over = self._CAP + 5
-        self.assertFalse(self._port('plan_result', self._PlanF(True, status=4, err=1), over)
-                         .planning_wall_exceeded())
+        self.assertFalse(self._port('plan_result', self._PlanF(True, status=4, err=1),
+                                    sim_elapsed=self._SIM_CAP + 5).planning_wall_exceeded())
 
-    def test_hang_without_result_exhausts_past_cap(self):
-        over = self._CAP + 5
-        self.assertTrue(self._port('plan_result', self._PlanF(False), over).planning_wall_exceeded())
+    def test_hang_without_result_exhausts_past_sim_cap(self):
+        self.assertTrue(self._port('plan_result', self._PlanF(False),
+                                   sim_elapsed=self._SIM_CAP + 5).planning_wall_exceeded())
 
-    def test_delivered_failed_result_exhausts_past_cap(self):
-        over = self._CAP + 5
-        self.assertTrue(self._port('plan_result', self._PlanF(True, status=6, err=1), over)
-                        .planning_wall_exceeded())      # aborted plan delivered -> surface it (run-220)
+    def test_delivered_failed_result_exhausts_past_sim_cap(self):
+        self.assertTrue(self._port('plan_result', self._PlanF(True, status=6, err=1),
+                                   sim_elapsed=self._SIM_CAP + 5).planning_wall_exceeded())  # run-220
 
-    def test_within_cap_never_exhausts(self):
-        self.assertFalse(self._port('plan_result', self._PlanF(False), self._CAP - 5)
-                         .planning_wall_exceeded())
+    def test_within_sim_cap_never_exhausts(self):
+        self.assertFalse(self._port('plan_result', self._PlanF(False),
+                                    sim_elapsed=self._SIM_CAP - 5).planning_wall_exceeded())
 
     def test_execute_phase_is_excluded(self):
-        over = self._CAP + 5
-        self.assertFalse(self._port('execute_result', self._PlanF(False), over).planning_wall_exceeded())
+        self.assertFalse(self._port('execute_result', self._PlanF(False),
+                                    sim_elapsed=self._SIM_CAP + 5).planning_wall_exceeded())
+
+    def test_render_paced_slow_but_alive_plan_does_not_trip(self):
+        # coldlive sample-4 REGRESSION GUARD: a render-starved-but-alive plan burns huge WALL time
+        # (120 s+) while only a few SIM seconds pass. Under the OLD pure-wall cap this e-stopped bare;
+        # the SIM-primary budget must tolerate it -- wall well under the generous backstop, sim under cap.
+        self.assertFalse(self._port('plan_result', self._PlanF(False),
+                                    sim_elapsed=6.0, wall_elapsed=120.0).planning_wall_exceeded())
+
+    def test_wall_backstop_catches_frozen_sim(self):
+        # A FROZEN sim never advances the sim leg (sim_elapsed stuck/None), so the generous WALL
+        # backstop is the only thing that can hard-stop a wholly-stalled simulator.
+        self.assertTrue(self._port('plan_result', self._PlanF(False),
+                                   sim_elapsed=None, wall_elapsed=self._WALL_BACKSTOP + 5)
+                        .planning_wall_exceeded())
+        self.assertTrue(self._port('plan_result', self._PlanF(False),
+                                   sim_elapsed=1.0, wall_elapsed=self._WALL_BACKSTOP + 5)
+                        .planning_wall_exceeded())
 
     def test_sim_configurable_cap_defers_the_fire(self):
-        # firstmate 293: the sim profile raises the cap to 60 s (result-delivery latency), so an
-        # in-flight plan at 30 s -- which would exhaust at the 22 s default -- is still within budget.
-        self.assertTrue(self._port('plan_result', self._PlanF(False), 30).planning_wall_exceeded())
-        self.assertFalse(self._port('plan_result', self._PlanF(False), 30, cap=60.0).planning_wall_exceeded())
-        self.assertTrue(self._port('plan_result', self._PlanF(False), 65, cap=60.0).planning_wall_exceeded())
+        # The SIM budget is the real bound: a plan 30 sim-s in exhausts the 22 s default but is within a
+        # widened 60 s cap; 65 sim-s exhausts even that.
+        self.assertTrue(self._port('plan_result', self._PlanF(False), sim_elapsed=30).planning_wall_exceeded())
+        self.assertFalse(self._port('plan_result', self._PlanF(False), sim_elapsed=30, sim_cap=60.0)
+                         .planning_wall_exceeded())
+        self.assertTrue(self._port('plan_result', self._PlanF(False), sim_elapsed=65, sim_cap=60.0)
+                        .planning_wall_exceeded())
 
 
 class _FakeFuture:
@@ -765,12 +794,16 @@ class MoveGroupDeathDuringOpRoutesToRetry(unittest.TestCase):
 
     def test_planning_wall_cap_suspended_during_respawn_wait(self):
         # While HELD for a respawn the dedicated RESPAWN_WAIT_CAP_S bounds the wait; the stale per-move
-        # _plan_started_wall must NOT let the bridge-watchdog planning-wall cap fire and e-stop the hold.
+        # anchors must NOT let the bridge-watchdog planning budget fire and e-stop the hold.
+        # sim-robust-host-timers-audit-fix-v1: drive the SIM leg (the primary) past its cap.
         import time
-        from twin.restock_manipulation.ros_adapter import PLAN_TOTAL_WALL_CAP_S
         p = self._port(state='plan_result', ready=False)
         p.future = None
-        p._plan_started_wall = time.monotonic() - (PLAN_TOTAL_WALL_CAP_S + 10)
+        p.plan_total_sim_cap_s = 22.0
+        p.plan_wall_backstop_s = 1100.0
+        p._plan_started_sim = 0.0
+        p._sim_now = lambda: 27.0                                # 27 sim-s > 22 s cap -> a genuine hang
+        p._plan_started_wall = time.monotonic()
         self.assertTrue(p.planning_wall_exceeded())              # a genuine hang still exhausts...
         p._awaiting_server_respawn = True
         self.assertFalse(p.planning_wall_exceeded())             # ...but a respawn hold is suspended

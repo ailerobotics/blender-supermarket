@@ -5,11 +5,23 @@ Sensors before attach; loss of seal prevents a collision attachment request.
 """
 import os
 import threading
+import time
 import numpy as np
+
+from ..restock.pace_watchdog import is_dead as pace_is_dead
+from .ros_adapter import frozen_sim_wall_backstop
 
 # fm366: payload grasp/detach ack WALL timeout. ros_host passes config['payload_ack_wall_s'] (sim 15);
 # the sim-only env WINS over it when set (default None => the passed value, byte-identical real-rig).
 PAYLOAD_ACK_WALL_S = os.environ.get('RESTOCK_PAYLOAD_ACK_WALL_S')
+# sim-robust-host-timers-audit-fix-v1: the attach/detach ack budget is now SIM-primary. The
+# object_attachment / ApplyPlanningScene handshake runs in a separate container and is compute-bound, but
+# under the live_pose masked_depth arm feed the host is busy rendering between spins, so a pure WALL
+# timeout can mis-read a live-but-render-slow ack as dead. The SIM budget (an advancing /clock proves the
+# ack process is hung, not slow) is the real bound; a generous frozen-sim WALL backstop still hard-stops a
+# wholly-stalled sim. Default = the wall ack budget so real rig (sim == wall) fails at the same time ->
+# byte-identical. Env RESTOCK_PAYLOAD_ACK_SIM_S (None => mirror the wall budget). See frozen_sim_wall_backstop.
+PAYLOAD_ACK_SIM_S = os.environ.get('RESTOCK_PAYLOAD_ACK_SIM_S')
 
 # Sim-clock lead tolerance (run-221): the gripper_pad_tcp /tf (and the Sensors feedback) are stamped
 # with Isaac's world.current_time, which can lead the payload node's relayed /clock by up to ~1
@@ -97,6 +109,10 @@ class RosPayloadSync:
         from moveit_msgs.srv import ApplyPlanningScene
         self.ack_wall_s = (max(1.0, min(120.0, float(PAYLOAD_ACK_WALL_S)))
                            if PAYLOAD_ACK_WALL_S is not None else float(ack_wall_s))
+        # sim-robust-host-timers-audit-fix-v1: the SIM-primary ack budget (default = the wall budget, so
+        # real rig is byte-identical). The WALL leg becomes a generous frozen-sim backstop in _wait().
+        self.ack_sim_s = (max(1.0, min(600.0, float(PAYLOAD_ACK_SIM_S)))
+                          if PAYLOAD_ACK_SIM_S is not None else float(self.ack_wall_s))
         # Tolerate an unsuccessful move_group scene REMOVE on DETACH (see detach_scene_gate). Default on;
         # RESTOCK_DETACH_SCENE_TOLERANT=0 reproduces the legacy single-shot fail-fast of a pre-fix run.
         self.detach_scene_tolerant = resolve_detach_scene_tolerant(
@@ -113,16 +129,38 @@ class RosPayloadSync:
         self.thread = threading.Thread(target=self.executor.spin,daemon=True)
         self.thread.start()
 
-    def _wait(self, future, timeout=None):
-        # WALL timeout on a host ROS service/action future. Real-rig default 1 s (fast move_group);
-        # under the sim's render-paced stepping the host is busy rendering between spins, so the sim
-        # profile widens it (ack_wall_s, >= 3x worst case) to avoid a false grasp-time timeout.
+    def _sim_now(self):
+        """The node/sim clock (use_sim_time) in seconds. Advances with Isaac's /clock; under render
+        pacing it runs far behind wall."""
+        return self.node.get_clock().now().nanoseconds * 1e-9
+
+    def _wait(self, future, timeout=None, sim_budget=None):
+        # sim-robust-host-timers-audit-fix-v1: SIM-primary ack budget + frozen-sim WALL backstop on a host
+        # ROS service/action future, replacing the pure-WALL event.wait() that false-tripped a live-but-
+        # render-slow ack under the live_pose masked_depth arm feed. Poll the future in small wall slices
+        # and fail only when the SIM budget is exhausted (an advancing /clock proves the ack process is
+        # hung, not slow) OR the generous frozen-sim WALL backstop is exceeded. Real rig (sim == wall)
+        # fails at the same ``timeout`` -> byte-identical. ``timeout`` is the wall value historically used;
+        # ``sim_budget`` defaults to it (or to self.ack_sim_s for the default ack path).
         if timeout is None:
-            timeout = self.ack_wall_s
+            timeout, sim_budget = self.ack_wall_s, (self.ack_sim_s if sim_budget is None else sim_budget)
+        if sim_budget is None:
+            sim_budget = float(timeout)
+        wall_backstop = frozen_sim_wall_backstop(sim_budget, timeout)
         event = threading.Event()
-        future.add_done_callback(lambda _:event.set())
-        if not event.wait(timeout):
-            raise TimeoutError('payload acknowledgement deadline exceeded')
+        future.add_done_callback(lambda _: event.set())
+        sim0, wall0 = self._sim_now(), time.monotonic()
+        # Slice the wait so both clocks are sampled; the slice is bounded by the wall value so the real-rig
+        # path still returns promptly. A frozen sim leaves sim_elapsed at ~0 -> only the wall backstop fires.
+        slice_s = max(0.05, min(0.5, float(timeout)))
+        while not event.wait(slice_s):
+            sim_elapsed = self._sim_now() - sim0
+            wall_elapsed = time.monotonic() - wall0
+            if pace_is_dead(sim_elapsed=sim_elapsed, wall_elapsed=wall_elapsed,
+                            sim_budget=sim_budget, wall_backstop=wall_backstop, mode='either'):
+                raise TimeoutError(
+                    'payload acknowledgement deadline exceeded (sim=%.1fs/%.1fs, wall=%.0fs/%.0fs)'
+                    % (sim_elapsed, sim_budget, wall_elapsed, wall_backstop))
         return future.result()
 
     def __call__(self, held, profile):
