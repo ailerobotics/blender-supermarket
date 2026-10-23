@@ -320,7 +320,19 @@ repo's `scenes/`, `export/` or `renders/`.
   (inside) and latched. `'crosstrack'` servos the rear hitch (leading point of the reverse approach →
   stable minimum-phase) onto the cart axis, holding back until aligned then seating straight in.
   Example `docs/examples/couple-fine-dock-crosstrack-fragment.json`; design + recorded evidence
-  `data/sim-robust-couple-fine-dock-v1/report.md`. Uncoupled drive-fidelity lever = `caster_lift_m`
+  `data/sim-robust-couple-fine-dock-v1/report.md`. **Couple APPROACH landing consistency**
+  (`couple_cart_relative` runtime block + `fine_dock.progress_cap`, both opt-in, default off ⇒
+  byte-identical): PR 232 fixed the servo but the ENTRY stayed variable — the authored `couple_standoff`
+  is a FIXED map pose (yaw 0) while the pinned cart's MEASURED yaw varies run to run (coldlivefinal
+  −1.6°, coupledock +19.2°), so the base lands aligned to the MAP not the CART and the fine-dock enters
+  25–470 mm / 8–27° off (the `nav-trace` `cart` row is `[x,y,yaw_deg,z]` — yaw is the DEGREES field, not
+  the z). Fix: navigate the standoff leg to `fine_dock.standoff_from_cart(measured cart)` (on-axis, base
+  yaw = cart yaw, hitch held `standoff_offset_m` back), gate entry on the cart-relative cross-track + yaw
+  (re-approach a fresh cart-measured standoff when outside, bounded `max_reapproach`; fail honestly when
+  exhausted), and `progress_cap` replaces the blunt 30 s `time_cap_s` (keep docking while the residual
+  improves, hard `progress_max_time_cap_s`, fast-fail `progress_patience_s`). CPU proof
+  `scripts/check_couple_approach.py`; example `docs/examples/couple-approach-mission-fragment.json`;
+  design `data/sim-robust-couple-approach-v1/report.md`. Uncoupled drive-fidelity lever = `caster_lift_m`
   (fm434 bench `base-drive-bench-*`: 0.097→0.988). **The residual coupled stall is drive-authority, NOT
   geometry** (sim-robust-coupled-traction-v1): outbound_dock_to_bay is a STRAIGHT y=15.25 pull (the portal
   is at y=11.125 — the x≈−3.875 coincidence is a red herring), every recorded robot+cart footprint is

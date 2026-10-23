@@ -254,6 +254,7 @@ class RuntimeAdapter:
                  uncouple_on_return=False, wall_clock=time.monotonic, nav_stuck_wall_s=None,
                  nav_stuck_sim_s=None,
                  carry_reposition_drive=False, couple_standoff_tolerance=None,
+                 couple_cart_relative=None,
                  ground_truth_place_actions=(), staged_settle_s=0.0,
                  collect_place_base_settle_m=None):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
@@ -278,6 +279,43 @@ class RuntimeAdapter:
                                        and math.isfinite(tol[key]) and 0 < tol[key] <= cap):
                     raise ValueError(f'couple_standoff_tolerance.{key} must be in (0, {cap}]')
             self.couple_standoff_tolerance = {k: float(v) for k, v in tol.items()}
+        # sim-robust-couple-approach-v1 (opt-in, default None => byte-identical): land the couple STANDOFF
+        # against the MEASURED cart instead of the stale fixed map pose. The authored couple_standoff
+        # carries yaw 0, but the pinned cart's measured yaw varies run to run (coldlivefinal -1.6deg,
+        # coupledock +19.2deg), so the base arrives aligned to the MAP, not the CART -- an 8-27deg yaw /
+        # 25-470mm hitch residual the fine-dock creep cannot null (it lands on its cross-vs-yaw
+        # equilibrium). When set, the couple standoff leg navigates to fine_dock.standoff_from_cart(cart)
+        # (on the cart axis, base yaw = measured cart yaw, hitch held back by standoff_offset_m), and on
+        # arrival the cart-relative residual is checked tight in cross-track + yaw: inside the capture
+        # region => hand to fine-dock from an aligned pose; outside => a bounded cart-measured re-approach;
+        # exhausted => fail honestly with the residual. Requires a couple_standoff pose + DockObservation.
+        self.couple_cart_relative = None
+        if couple_cart_relative is not None:
+            cr = dict(couple_cart_relative)
+            # capture_cross_m/_yaw_rad gate ENTRY to the fine-dock (the fine-dock still closes to the
+            # latch); they are sized to admit any LEGAL standoff arrival without a spurious re-approach.
+            # The worst legal hitch cross-track is arrival_xy_tol + |hitch_x|*arrival_yaw_tol ~ 0.10 m
+            # (the fine-dock converges from it in <14 s, verified offline), so 0.11 m clears it.
+            defaults = {'standoff_offset_m': 0.40, 'capture_cross_m': 0.11, 'capture_yaw_rad': 0.10,
+                        'max_reapproach': 3, 'arrival_xy_tol': 0.05, 'arrival_yaw_tol': 0.08}
+            unknown = set(cr) - set(defaults)
+            if unknown:
+                raise ValueError(f'couple_cart_relative: unknown keys {sorted(unknown)}')
+            merged = {**defaults, **cr}
+            caps = {'standoff_offset_m': (0.05, 1.0), 'capture_cross_m': (0.0, 0.15),
+                    'capture_yaw_rad': (0.0, 0.35), 'arrival_xy_tol': (0.0, 0.15),
+                    'arrival_yaw_tol': (0.0, 0.35)}
+            for key, (lo, hi) in caps.items():
+                v = merged[key]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) \
+                        or not lo < v <= hi:
+                    raise ValueError(f'couple_cart_relative.{key} must be in ({lo}, {hi}]')
+            mr = merged['max_reapproach']
+            if isinstance(mr, bool) or not isinstance(mr, int) or not 0 <= mr <= 10:
+                raise ValueError('couple_cart_relative.max_reapproach must be an int in [0, 10]')
+            self.couple_cart_relative = {k: (int(v) if k == 'max_reapproach' else float(v))
+                                         for k, v in merged.items()}
+        self._couple_reapproach_n = 0   # bounded cart-measured re-approaches this couple stage
         # vr1 (labelled sim workaround, default OFF): the stages whose FINAL manipulation evidence may be
         # the controller's ground-truth place check (fm461 'ground_truth_place_check', the sim-measured
         # carton pose vs the bay/deck target) instead of a camera observation. Without this the very first
@@ -478,6 +516,7 @@ class RuntimeAdapter:
             self._couple_seq = (['couple_approach'] if 'couple_approach' in self.poses else [])
             self._couple_seq.append('couple_standoff' if 'couple_standoff' in self.poses else 'cart_dock')
             self._couple_seq_i = 0
+            self._couple_reapproach_n = 0   # fresh bounded re-approach budget for this couple attempt
             self._couple_nav_goal = self._couple_seq[0]
             self._start_couple_nav(self._couple_nav_goal)
             self.phase = 'navigate'
@@ -554,6 +593,50 @@ class RuntimeAdapter:
             kw['static_drive'] = True
         self._start_nav_leg(self.poses[goal_name], False, **kw)
 
+    def _fine_dock_spec(self):
+        """MobileSpec the couple geometry is expressed in: the fine-dock's own spec when present."""
+        from twin.mobile import MobileSpec
+        spec = getattr(self.fine_dock, 'spec', None)
+        return spec if spec is not None else MobileSpec()
+
+    def _start_cart_relative_standoff(self, p):
+        """Navigate the couple standoff leg to a pose on the MEASURED cart axis (not the stale map pose).
+
+        ``fine_dock.standoff_from_cart`` seats the base on the measured cart's hitch axis (base yaw =
+        cart yaw, rear hitch held ``standoff_offset_m`` back), so the fine-dock insert starts aligned
+        regardless of where the pinned cart settled. The arrival tolerance is tight in xy + yaw so the
+        cart-relative residual check passes on arrival by construction."""
+        from twin.restock.fine_dock import standoff_from_cart
+        cr = self.couple_cart_relative
+        cart = p.docking.cart
+        pose = standoff_from_cart(cart, cr['standoff_offset_m'], self._fine_dock_spec())
+        kw = {'arrival_xy_tol': cr['arrival_xy_tol'], 'arrival_yaw_tol': cr['arrival_yaw_tol']}
+        if self.couple_static_drive:
+            kw['static_drive'] = True
+        self._couple_standoff_pose = pose
+        self._start_nav_leg(pose, False, **kw)
+
+    def _couple_capture_decision(self, p):
+        """At the cart-relative standoff arrival: 'enter' | 'reapproach' | 'fail'.
+
+        The capture gate is the OFF-AXIS alignment measured against the cart -- |cross-track| and |yaw|
+        -- the pair that decides whether the fine-dock creep can converge (the along-axis hitch offset is
+        the deliberate standoff hold-back the servo creeps in, not a miss). Inside the region => enter the
+        fine-dock from an aligned pose; outside with re-approaches left => re-approach the cart-measured
+        standoff; outside with none left => fail honestly with the residual (never loosen the latch)."""
+        from twin.restock.fine_dock import cart_relative_residuals
+        cr = self.couple_cart_relative
+        hm, cross, yr = cart_relative_residuals(p.docking, self._fine_dock_spec())
+        if abs(cross) <= cr['capture_cross_m'] and abs(yr) <= cr['capture_yaw_rad']:
+            return 'enter'
+        self._couple_capture_reason = (
+            f'couple standoff outside capture after {self._couple_reapproach_n} re-approach(es): '
+            f'hitch={hm*1000:.1f}mm cross={cross*1000:.1f}mm yaw={math.degrees(yr):.2f}deg '
+            f'(capture cross<={cr["capture_cross_m"]*1000:.0f}mm yaw<={math.degrees(cr["capture_yaw_rad"]):.1f}deg)')
+        if self._couple_reapproach_n < cr['max_reapproach']:
+            return 'reapproach'
+        return 'fail'
+
     def _uncouple_return(self):
         """True when the return stage leaves the cart parked and drives home empty, instead of towing
         it home coupled: opted in via config (``uncouple_on_return``) AND a ``cart_parking`` pose is
@@ -602,6 +685,13 @@ class RuntimeAdapter:
                 parts.append('standoff tol ' + ' / '.join(
                     f'{k[:-2] if k.endswith("_m") else k[:-4]} {v:g}{" m" if k.endswith("_m") else " rad"}'
                     for k, v in sorted(tol.items())))
+            if self.couple_cart_relative is not None:
+                cr = self.couple_cart_relative
+                re = f' (+{self._couple_reapproach_n} re-approach)' if self._couple_reapproach_n else ''
+                parts.append(f'cart-relative standoff offset {cr["standoff_offset_m"]:g} m{re}')
+            fd = getattr(self.fine_dock, 'config', None)
+            if fd is not None and getattr(fd, 'progress_cap', False):
+                parts.append(f'fine-dock progress cap {fd.progress_max_time_cap_s:g} s')
             return {'couple_arrival_mode': '; '.join(parts)} if parts else {}
         if action == 'outbound' and getattr(nav, 'coupled_creep_escape', False):
             ticks = int(getattr(nav, 'creep_escapes', 0))
@@ -854,16 +944,40 @@ class RuntimeAdapter:
                 # Reached a couple nav waypoint; advance to the next (ending at the standoff).
                 self._couple_seq_i += 1
                 self._couple_nav_goal = self._couple_seq[self._couple_seq_i]
-                self._start_couple_nav(self._couple_nav_goal)
+                # sim-robust-couple-approach-v1: when cart-relative couple is on, the final standoff leg
+                # targets the MEASURED cart axis (see _start_cart_relative_standoff) instead of the stale
+                # fixed map pose, so the fine-dock starts aligned to wherever the pinned cart settled.
+                if (self.couple_cart_relative is not None and self._couple_nav_goal == 'couple_standoff'
+                        and getattr(p, 'docking', None) is not None):
+                    self._start_cart_relative_standoff(p)
+                else:
+                    self._start_couple_nav(self._couple_nav_goal)
                 self.phase = 'navigate'
                 return Result('running', reason=f'couple nav advancing to {self._couple_nav_goal}')
-            if self.action == 'couple' and self.fine_dock is not None:
-                # At the on-axis standoff (or cart_dock when no standoff): insert the rear hitch
-                # STRAIGHT along the cart axis onto the measured drawbar before attach. Motion only.
-                self.fine_dock.start(self.time)
-                self._fdn = 0
-                self.phase = 'fine_dock'
-                return Result('running', reason='nav at standoff; starting fine-dock insert')
+            if self.action == 'couple':
+                # sim-robust-couple-approach-v1: cart-relative standoff arrival gate. Measure the hitch's
+                # alignment to the MEASURED cart (cross-track + yaw) and either enter the fine-dock from an
+                # aligned pose, re-approach a fresh cart-measured standoff (bounded), or fail honestly.
+                if (self.couple_cart_relative is not None and getattr(p, 'docking', None) is not None):
+                    decision = self._couple_capture_decision(p)
+                    if decision == 'reapproach':
+                        self._couple_reapproach_n += 1
+                        self._start_cart_relative_standoff(p)
+                        self.phase = 'navigate'
+                        return Result('running',
+                                      reason=f'couple standoff outside capture; re-approaching cart-measured '
+                                             f'standoff ({self._couple_reapproach_n})')
+                    if decision == 'fail':
+                        self.mobile.park()
+                        return Result('failed', reason=self._couple_capture_reason)
+                    # 'enter' => fall through to the fine-dock insert / direct attach.
+                if self.fine_dock is not None:
+                    # At the on-axis standoff (or cart_dock when no standoff): insert the rear hitch
+                    # STRAIGHT along the cart axis onto the measured drawbar before attach. Motion only.
+                    self.fine_dock.start(self.time)
+                    self._fdn = 0
+                    self.phase = 'fine_dock'
+                    return Result('running', reason='nav at standoff; starting fine-dock insert')
             self.phase = 'execute'
         if self.phase == 'scripted':
             self.mobile.hold()   # stationary manipulation: brake the base

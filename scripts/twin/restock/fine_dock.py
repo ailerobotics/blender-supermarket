@@ -72,6 +72,19 @@ class FineDockConfig:
     ct_gain_yaw: float = 1.5        # heading-error gain (base yaw vs cart yaw) -> steer
     ct_align_hold_m: float = 3.0    # hold-back distance per unit (|cross|+0.3|yaw|): align BEFORE seating
     ct_min_creep: float = 0.015     # minimum along-axis creep while unseated (beats the drive floor)
+    # --- OPTIONAL progress-based cap (default off => the fixed ``time_cap_s`` above, byte-identical) ---
+    # ``time_cap_s`` is a blunt fixed deadline: coupledock's cross-track creep was CONVERGING monotonically
+    # (469 -> 88 mm at ~13 mm/s) and the fixed 30 s cut it off mid-approach, while coldlivefinal's limit
+    # cycle (stuck ~26 mm / ~4.8°) burned the full 30 s before failing. ``progress_cap`` replaces the fixed
+    # deadline with: keep creeping while the measured residual keeps IMPROVING (the hitch-equivalent metric
+    # ``hitch + |yaw|*|hitch_x|`` drops by >= ``progress_min_improve_m`` within the last
+    # ``progress_patience_s`` SIM seconds), bounded by a hard total ``progress_max_time_cap_s``. A genuine
+    # monotone approach runs to the latch; a limit cycle fails FAST (at the patience window, not the hard
+    # cap) with its live residual. SIM-clock throughout (``freshness-sim-clock-not-wall``).
+    progress_cap: bool = False
+    progress_patience_s: float = 12.0
+    progress_min_improve_m: float = 0.002
+    progress_max_time_cap_s: float = 120.0
 
     def __post_init__(self):
         vals = (self.creep_speed, self.creep_yaw_rate, self.gain_lin, self.gain_yaw,
@@ -91,6 +104,12 @@ class FineDockConfig:
                 raise ValueError('fine_dock crosstrack gains must be finite and positive')
             if self.ct_min_creep >= self.creep_speed:
                 raise ValueError('fine_dock ct_min_creep must be < creep_speed')
+        if self.progress_cap:
+            pc = (self.progress_patience_s, self.progress_min_improve_m, self.progress_max_time_cap_s)
+            if not all(math.isfinite(v) and v > 0 for v in pc):
+                raise ValueError('fine_dock progress_cap values must be finite and positive')
+            if self.progress_max_time_cap_s < self.time_cap_s:
+                raise ValueError('fine_dock progress_max_time_cap_s must be >= time_cap_s')
 
 
 @dataclass(frozen=True)
@@ -117,6 +136,40 @@ def target_base(cart, spec=MobileSpec()):
             by - spec.hitch_x * math.sin(cart.yaw), cart.yaw)
 
 
+def standoff_from_cart(cart, offset_m, spec=MobileSpec()):
+    """Base pose (x, y, yaw) ON the measured cart's hitch axis, ``offset_m`` short of seating.
+
+    This is the fix for the couple approach landing the base against a STALE map-frame standoff:
+    the authored couple_standoff carries a FIXED yaw (0 rad), but the pinned cart's measured yaw
+    varies run to run (coldlivefinal -1.6°, coupledock +19.2°), so navigating to the fixed pose
+    leaves the base misaligned to the real cart by that difference -- a residual the fine-dock creep
+    cannot null (it lands on the ``ct_gain_cross*cross == ct_gain_yaw*yaw_err`` equilibrium). Seating
+    the standoff on the MEASURED cart axis (base yaw = cart yaw, rear hitch held ``offset_m`` back along
+    the axis so the servo creeps STRAIGHT in) makes the fine-dock start from a consistent, on-axis,
+    yaw-aligned pose regardless of where the cart settled. ``offset_m`` > 0 holds the hitch back on the
+    base side of the drawbar. Pure geometry; the physical attach + latch tolerances are unchanged."""
+    if not (math.isfinite(offset_m) and offset_m > 0):
+        raise ValueError('standoff_from_cart offset_m must be finite and positive')
+    tbx, tby, tyaw = target_base(cart, spec)
+    return (tbx + offset_m * math.cos(cart.yaw), tby + offset_m * math.sin(cart.yaw), tyaw)
+
+
+def cart_relative_residuals(dock, spec=MobileSpec()):
+    """Rear-hitch alignment to the measured cart axis: (hitch_m, cross_m, yaw_rad).
+
+    ``cross`` is the signed offset of the rear hitch from the cart's drawbar axis and ``yaw`` the
+    base-vs-cart heading error -- the two the standoff must get small so the fine-dock enters near the
+    latch box (``hitch`` includes the deliberate along-axis standoff offset, so it is NOT the capture
+    gate). Shares ``residuals``' hitch definition exactly."""
+    hm, yr = residuals(dock, spec)
+    cy = dock.cart.yaw
+    nx, ny = -math.sin(cy), math.cos(cy)
+    hx, hy = dock.robot.point(spec.hitch_x)
+    dbx, dby = dock.cart.point(spec.cart_hitch_x)
+    cross = (hx - dbx) * nx + (hy - dby) * ny
+    return hm, cross, yr
+
+
 class FineDock:
     """Translation-dominant inverse-hitch-Jacobian creep onto the measured cart drawbar."""
 
@@ -125,11 +178,43 @@ class FineDock:
             raise ValueError('config must be a FineDockConfig')
         self.config, self.spec = config, spec
         self.t0 = None
+        self._best_metric = float('inf')   # progress_cap: best (lowest) hitch-equivalent metric seen
+        self._best_t = None                # and the sim time it was last improved
 
     def start(self, now):
         if not math.isfinite(now):
             raise ValueError('fine_dock start needs a finite clock')
         self.t0 = float(now)
+        self._best_metric = float('inf')
+        self._best_t = float(now)
+
+    def _cap_failure(self, hm, yr, now):
+        """The time-cap verdict: a FineDockResult('failed', ...) when the bound is hit, else None.
+
+        Default (``progress_cap`` off): the fixed ``time_cap_s`` deadline, byte-identical. With
+        ``progress_cap`` on: track the hitch-equivalent metric ``hitch + |yaw|*|hitch_x|`` (a yaw error
+        shows up as the hitch displacement its lever arm causes); keep going while it keeps dropping,
+        and fail at the patience window (a limit cycle) or the hard total cap (a genuinely too-slow
+        approach), reporting the live residual either way. SIM-clock (``now``) throughout."""
+        cfg = self.config
+        if not cfg.progress_cap:
+            if now - self.t0 > cfg.time_cap_s:
+                return FineDockResult('failed', 0.0, 0.0, hm, yr,
+                                      reason=f'fine_dock time cap {cfg.time_cap_s:g}s: residual '
+                                             f'hitch={hm*1000:.1f}mm yaw={math.degrees(yr):.2f}deg')
+            return None
+        metric = hm + abs(yr) * abs(self.spec.hitch_x)
+        if metric <= self._best_metric - cfg.progress_min_improve_m:
+            self._best_metric, self._best_t = metric, now
+        if now - self.t0 > cfg.progress_max_time_cap_s:
+            return FineDockResult('failed', 0.0, 0.0, hm, yr,
+                                  reason=f'fine_dock progress cap {cfg.progress_max_time_cap_s:g}s: residual '
+                                         f'hitch={hm*1000:.1f}mm yaw={math.degrees(yr):.2f}deg')
+        if now - self._best_t > cfg.progress_patience_s:
+            return FineDockResult('failed', 0.0, 0.0, hm, yr,
+                                  reason=f'fine_dock no progress for {cfg.progress_patience_s:g}s: residual '
+                                         f'hitch={hm*1000:.1f}mm yaw={math.degrees(yr):.2f}deg')
+        return None
 
     def _stationary(self, dock):
         vals = (dock.robot_speed, dock.cart_speed, dock.robot_yaw_rate, dock.cart_yaw_rate)
@@ -148,10 +233,9 @@ class FineDock:
         if within and self._stationary(dock):
             return FineDockResult('ready', 0.0, 0.0, hm, yr,
                                   reason='seated within attach tolerance, stopped')
-        if now - self.t0 > cfg.time_cap_s:
-            return FineDockResult('failed', 0.0, 0.0, hm, yr,
-                                  reason=f'fine_dock time cap {cfg.time_cap_s:g}s: residual '
-                                         f'hitch={hm*1000:.1f}mm yaw={math.degrees(yr):.2f}deg')
+        capped = self._cap_failure(hm, yr, now)
+        if capped is not None:
+            return capped
         if within:
             # Close enough but still moving: brake and let it settle (no new creep command).
             return FineDockResult('creeping', 0.0, 0.0, hm, yr, reason='settling within tolerance')
