@@ -84,6 +84,24 @@ def test_classify_survives_garbled_surface_without_crashing():
         assert 'pick physically blocked' in reason
 
 
+def _ring(t_end, *, amp0, omega, sigma, dt=0.1):
+    """A residual-oscillation terminal-sample stream ``(t, pos_err, vel_mag)`` for the settle gate.
+
+    A single ringing joint at ``pos(t)=A(t) sin(omega t)``, ``A(t)=amp0 e^{-sigma t}`` (``sigma>0``
+    decaying, ``0`` sustained, ``<0`` diverging); ``pos_err=|pos|`` and ``vel_mag=|pos'|``. A pure
+    sinusoid NEVER has |pos| and |vel| both near zero at one instant (pos~0 at a zero crossing is where
+    |vel| peaks), so the instantaneous both-small terminal gate cannot fire for such a ring -- the
+    coldwin2 ur_wrist_3 case the envelope gate exists to resolve."""
+    out, t = [], 0.0
+    while t <= t_end + 1e-9:
+        A = amp0 * np.exp(-sigma * t)
+        pos = abs(A * np.sin(omega * t))
+        vel = abs(A * (omega * np.cos(omega * t) - sigma * np.sin(omega * t)))
+        out.append((t, pos, vel))
+        t += dt
+    return out
+
+
 def trajectory(end=.1,duration=2.,velocity=0.):
     def point(q,v,t):
         return NS(positions=[q]*6,velocities=[v]*6,effort=[],
@@ -460,3 +478,113 @@ def test_first_feedback_grace_default_and_env_override(monkeypatch):
     assert trajectory_host.first_feedback_grace_s() == 60.0  # clamped sane
     monkeypatch.setenv('RESTOCK_FIRST_FEEDBACK_GRACE_S', '-5')
     assert trajectory_host.first_feedback_grace_s() == 0.0
+
+
+def test_settle_envelope_accepts_bounded_decaying_oscillation_by_name():
+    # coldwin2 (2026-10-23): the welded-carton collect-place left ur_wrist_3 ringing at 0.72 rad/s at a
+    # 3.4 mm-accurate pose for the whole 30 s settle window; the instantaneous both-small gate can NEVER
+    # fire for such a ring (pos~0 only at the velocity peak), so PATH_TOLERANCE_VIOLATED aborted a place
+    # whose carton was on the deck within tolerance. A DECAYING ring whose amplitude falls BELOW the
+    # position tolerance and whose velocity envelope decays IS a successful place -- accepted by name.
+    from twin.restock.trajectory_host import settle_decision
+    # amplitude starts above tol (orbit too big for the box early) and decays well below it; vel peak
+    # starts ~1.0 rad/s (never both-small with pos) and decays.
+    s = _ring(10.0, amp0=0.20, omega=5.0, sigma=0.35)
+    verdict, reason = settle_decision(s, pos_tol=0.12, vel_tol=0.70, final=True)
+    assert verdict == 'settled', reason
+    assert 'decaying' in reason and 'tight pose' in reason
+
+
+def test_settle_envelope_fails_sustained_limit_cycle_by_name():
+    # A non-decaying (sustained) ring is NOT a settle: effort-saturation limit cycle that never damps.
+    # With amplitude above the position tolerance it is also never within the pose box -- fail by name,
+    # never silently accepted. (This is coldwin2 IF its wrist_3 ring did not decay within the window.)
+    from twin.restock.trajectory_host import settle_decision
+    s = _ring(30.0, amp0=0.20, omega=5.0, sigma=0.0)   # constant amplitude 0.20 > 0.12 tol
+    verdict, reason = settle_decision(s, pos_tol=0.12, vel_tol=0.70, final=True)
+    assert verdict == 'miss'
+    assert 'not bounded' in reason or 'sustained' in reason
+
+
+def test_settle_envelope_fails_bounded_but_sustained_by_name():
+    # A ring that stays WITHIN the position box but whose velocity envelope never decays is still a
+    # limit cycle, not a settle -- named "sustained", not accepted. (Amplitude 0.08 < 0.12 tol, flat.)
+    from twin.restock.trajectory_host import settle_decision
+    s = _ring(30.0, amp0=0.08, omega=9.0, sigma=0.0)
+    verdict, reason = settle_decision(s, pos_tol=0.12, vel_tol=0.70, final=True)
+    assert verdict == 'miss' and 'sustained' in reason
+
+
+def test_settle_envelope_fails_diverging_by_name_and_early():
+    # A growing oscillation (instability) must fail by name, and may fail BEFORE the settle budget ends
+    # (final=False) rather than wait the full window.
+    from twin.restock.trajectory_host import settle_decision
+    s = _ring(12.0, amp0=0.05, omega=6.0, sigma=-0.15)   # amplitude grows
+    verdict, reason = settle_decision(s, pos_tol=0.12, vel_tol=0.70, final=False)
+    assert verdict == 'diverging' and 'diverging' in reason
+
+
+def test_settle_envelope_is_pending_until_enough_window():
+    # The gate must not settle (or fault) on a lucky early dip: with too few samples / too short a
+    # window it returns 'pending' and keeps observing.
+    from twin.restock.trajectory_host import settle_decision, SETTLE_MIN_SAMPLES, SETTLE_MIN_WINDOW_S
+    short = _ring(SETTLE_MIN_WINDOW_S * 0.3, amp0=0.20, omega=5.0, sigma=0.35, dt=0.1)
+    assert len(short) < SETTLE_MIN_SAMPLES or (short[-1][0] - short[0][0]) < SETTLE_MIN_WINDOW_S
+    assert settle_decision(short, pos_tol=0.12, vel_tol=0.70, final=False) == ('pending', None)
+
+
+def test_settle_envelope_matches_coldwin2_orbit_never_fits_box():
+    # Reconstruct the coldwin2 phase-space fact: while the orbit amplitude stays ABOVE the position tol
+    # (wrist_3 swung > the 0.12 rad box for the whole 30 s window -- the only way the instantaneous gate
+    # never fired over ~300 samples), NO single sample has both pos_err<=tol AND vel_mag<=vel_tol, so the
+    # instantaneous gate is structurally unable to pass OR fail it with a reason -- the envelope gate is
+    # the only path that classifies it (here: a sustained limit cycle, failed by name, not silently).
+    from twin.restock.trajectory_host import settle_decision
+    pos_tol, vel_tol = 0.12, 0.70
+    s = _ring(30.0, amp0=0.20, omega=5.0, sigma=0.0)   # sustained, amplitude 0.20 > 0.12 the whole time
+    assert not any(p <= pos_tol and v <= vel_tol for _, p, v in s), \
+        'instantaneous gate should be unable to fire for an above-tol ring'
+    verdict, reason = settle_decision(s, pos_tol=pos_tol, vel_tol=vel_tol, final=True)
+    assert verdict == 'miss' and ('not bounded' in reason or 'sustained' in reason)
+
+    # And once such a ring DECAYS below the box, the envelope accepts it as a settled place by name.
+    decaying = _ring(12.0, amp0=0.20, omega=5.0, sigma=0.35)
+    assert settle_decision(decaying, pos_tol=pos_tol, vel_tol=vel_tol, final=True)[0] == 'settled'
+
+
+def test_settle_accept_vel_never_below_instantaneous_tol():
+    # The envelope accept ceiling is clamped at/above the instantaneous velocity tol, so the envelope
+    # can never settle a residual the instantaneous gate would reject on a tighter velocity bound.
+    from twin.restock.trajectory_host import SETTLE_ACCEPT_VEL, GOAL_VELOCITY_TOL
+    assert SETTLE_ACCEPT_VEL >= GOAL_VELOCITY_TOL
+
+
+def test_settle_position_tolerance_is_not_loosened():
+    # Explicit guard on the deliverable constraint: a decaying ring whose amplitude never falls below
+    # the position tolerance is NOT accepted (position is never loosened), even though it is decaying.
+    from twin.restock.trajectory_host import settle_decision
+    # decays slowly; stays above 0.12 for the whole 8 s window (amp 0.20 -> 0.20*e^{-0.05*8}=0.134)
+    s = _ring(8.0, amp0=0.20, omega=5.0, sigma=0.05)
+    assert max(p for _, p, _ in s[len(s)//2:]) > 0.12   # recent half still swings past the 0.12 box
+    verdict, reason = settle_decision(s, pos_tol=0.12, vel_tol=0.70, final=True)
+    assert verdict == 'miss' and 'not bounded' in reason
+
+
+def test_settle_envelope_switch_is_backward_compatible():
+    # RESTOCK_SETTLE_ENVELOPE defaults ON; =0/false/off/no disables it, restoring the legacy
+    # instantaneous-only terminal gate (the execute() budget-expiry branch then raises the unchanged
+    # 'measured goal tolerance not reached'). Lock the switch parsing so the opt-out stays stable.
+    import importlib, os
+    import twin.restock.trajectory_host as th
+    try:
+        for val, expected in (('0', False), ('false', False), ('OFF', False), ('no', False),
+                              ('1', True), ('true', True), ('', True)):
+            os.environ['RESTOCK_SETTLE_ENVELOPE'] = val
+            importlib.reload(th)
+            assert th.SETTLE_ENVELOPE is expected, (val, th.SETTLE_ENVELOPE)
+        os.environ.pop('RESTOCK_SETTLE_ENVELOPE', None)
+        importlib.reload(th)
+        assert th.SETTLE_ENVELOPE is True   # absent => default ON
+    finally:
+        os.environ.pop('RESTOCK_SETTLE_ENVELOPE', None)
+        importlib.reload(th)
