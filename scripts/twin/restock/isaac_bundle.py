@@ -427,6 +427,11 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              uncouple_on_return=bool(config.get('uncouple_on_return')),
                              carry_reposition_drive=bool(config.get('carry_reposition_drive')),
                              couple_standoff_tolerance=config.get('couple_standoff_tolerance'),
+                             # sim-robust-couple-approach-v1: land the couple standoff on the MEASURED
+                             # cart axis (+ bounded re-approach) so the fine-dock starts aligned to the
+                             # pinned cart's actual yaw, not the stale fixed map pose. Absent => the
+                             # authored fixed standoff (byte-identical).
+                             couple_cart_relative=config.get('couple_cart_relative'),
                              # vr1: accept the fm461 ground-truth place check as the transfer (and,
                              # opt-in, collect) stage evidence -- labelled source='ground_truth'. Derived
                              # from config['transfer_ground_truth'].enabled / collect_ground_truth_place_
