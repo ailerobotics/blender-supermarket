@@ -459,15 +459,31 @@ class IncorporationAckTest(unittest.TestCase):
         self.assertNotEqual(snap['state'], 'failed')
         self.assertEqual(snap['reason'], '')
 
-    def test_fault_names_wall_heartbeat_gap_with_value(self):
+    def test_wall_gap_backstop_is_derived_generous_not_the_flat_floor(self):
+        # sim-robust-station-heartbeat-simclock-v1: the wall leg is now the DERIVED frozen-sim backstop
+        # (sim_gap_s 0.5 x 50 = 25 s, floored at RESTOCK_STATION_WALL_GAP_S=3), NOT the flat 3 s floor.
+        st, _ = self.state()
+        self.assertEqual(st.wall_backstop_s, 25.0)
+
+    def test_render_paced_wall_gap_no_longer_false_trips(self):
         st, clock = self.prepared()
         st.acknowledge(10.2, 1)
-        # A genuinely hung client (no tick completes) exceeds the 3 s wall guard while the
-        # sim gap stays within 0.5 s, so the wall-heartbeat condition trips, named with value.
+        # A 3.40 s wall gap with a healthy (frozen) sim gap once faulted on the old flat 3 s wall guard.
+        # Under the derived 25 s frozen-sim backstop it no longer does -- a render-slow station is alive.
         clock[0] = 103.4
         snap = st.snapshot(10.2, endpoints_ready=True, process_alive=True)
+        self.assertNotEqual(snap['state'], 'failed')
+        self.assertEqual(snap['reason'], '')
+
+    def test_fault_names_wall_heartbeat_gap_at_derived_backstop(self):
+        st, clock = self.prepared()
+        st.acknowledge(10.2, 1)
+        # A genuinely FROZEN sim (sim gap stays within 0.5 s while wall runs on) is still caught once the
+        # derived 25 s wall backstop trips, named with its measured value.
+        clock[0] = 125.5   # wall gap 25.50 s from the prepare wall (100.0)
+        snap = st.snapshot(10.2, endpoints_ready=True, process_alive=True)
         self.assertEqual(snap['state'], 'failed')
-        self.assertEqual(snap['reason'], 'parked heartbeat lost: wall gap 3.40 s')
+        self.assertEqual(snap['reason'], 'parked heartbeat lost: wall gap 25.50 s')
 
     def test_stopped_station_does_not_fault_across_a_long_gap_run309_replay(self):
         # fm399 (1) run-309 replay at the host-ack level: the host tick() publishes emergency stop on
@@ -489,10 +505,31 @@ class IncorporationAckTest(unittest.TestCase):
                                       process_alive=True)['state'], 'failed')
 
     def test_default_gap_budgets_are_byte_identical(self):
-        # fm399 (2): unset env => the documented real-rig contract (0.5 s sim / 3.0 s wall).
+        # fm399 (2): unset env => the documented real-rig contract (0.5 s sim; 3.0 s wall FLOOR).
+        # sim-robust-station-heartbeat-simclock-v1: wall_gap_s is now the floor feeding the derived backstop.
         st, _ = self.state()
         self.assertEqual(st.sim_gap_s, .5)
         self.assertEqual(st.wall_gap_s, 3.)
+        self.assertEqual(st.wall_backstop_s, 25.0)   # max(3, 0.5 x 50): derived, inert on the real rig
+
+    def test_proof_config_widened_sim_bound_makes_wall_backstop_huge(self):
+        # The bounded GPU proof sets RESTOCK_STATION_SIM_GAP_S=30 (the real sim bound for the live_pose
+        # transfer manip gap) and leaves RESTOCK_STATION_WALL_GAP_S at the validator's 30. The wall leg
+        # then derives to max(30, 30 x 50) = 1500 s, so coldliverecovery's 30.75 s render-paced wall gap
+        # can never trip it; the 30 s SIM bound is the real guard. No 120 s wall widen needed.
+        from twin.restock_host.incorporation_ack import IncorporationAckState
+        with patch.dict(os.environ, {'RESTOCK_STATION_SIM_GAP_S': '30',
+                                     'RESTOCK_STATION_WALL_GAP_S': '30'}):
+            st = IncorporationAckState(wall_clock=lambda: 100.0)
+        self.assertEqual(st.sim_gap_s, 30.)
+        self.assertEqual(st.wall_backstop_s, 1500.0)
+        st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=10.0, parked=True,
+                       camera_frame='restock_camera_transfer'), 10.0)
+        st.acknowledge(10.2, 1)
+        # The exact coldliverecovery shape: 30.75 s WALL gap, sim gap a healthy ~2 s -> NOT failed.
+        st.wall_clock = lambda: 130.75
+        snap = st.snapshot(12.0, endpoints_ready=True, process_alive=True)
+        self.assertNotEqual(snap['state'], 'failed')
 
     def test_sim_only_env_widens_gap_budgets_to_survive_render_paced_transit(self):
         # fm399 (2): a widened sim-gap budget lets a long render-paced reposition/re-incorporation

@@ -24,16 +24,17 @@ The epoch/acknowledgement state machine below is a self-contained copy of the pa
 mapper lifecycle contract (the integration lane keeps the mirror-side copy); the two
 agree on the JSON wire fields, not on a shared import.
 
-Heartbeat liveness has two independent guards (``snapshot``): a 0.5 s **sim-time** gap
-(``now - last_heartbeat``) and a 3.0 s **wall-clock** gap since the last accepted command
-(``wall_clock() - wall_heartbeat``). The two measure different failures. The sim guard is
-the parked-mapper freshness contract and rides the render-paced ``/clock``, so it stays at
-0.5 s. The wall guard is a pure liveness check that does NOT stretch with ``/clock``: the
-mission client is render-paced and its single render tick during the first capture takes up
-to ~2 s of wall time, during which it cannot heartbeat (it is blocked inside the tick) --
-run-72 faulted on the old 1.0 s wall guard with ``wall gap 1.85 s``. The wall guard is 3.0 s
-so a normal render-paced client survives a ~2 s capture tick while a genuinely hung client
-(no tick completes) is still caught within 3 s.
+Heartbeat liveness is **SIM-clock primary** (``snapshot``): the ``sim_gap_s`` bound on the sim-time gap
+(``now - last_heartbeat``, both on the render-paced ``/clock``) is the parked-mapper freshness contract --
+an advancing sim clock proves the simulator is alive, so a parked station un-heartbeat-ed for that much
+SIM time is genuinely lost. The **wall-clock** gap (``wall_clock() - wall_heartbeat``) is only a bounded
+backstop for a FROZEN sim, whose stalled ``/clock`` can never advance the SIM leg; it fires at the DERIVED
+``wall_backstop_s`` (``frozen_sim_wall_backstop(sim_gap_s, wall_floor)`` = sim budget x 50, floored at
+``RESTOCK_STATION_WALL_GAP_S``), far above the worst 16-30x live_pose render pacing, so a render-slow-but-
+alive station never false-trips (coldliverecovery e-stopped at ``wall gap 30.75 s`` while the sim gap was
+healthy -- the last pace-unsafe parked-heartbeat timer). Both legs feed the shared ``pace_watchdog.is_dead``
+(mode='either'), the same predicate the manipulation-host planning/startup/ack budgets use. On the real rig
+(sim == wall) the SIM leg fires first, so the wall value is inert and the no-pacing path is byte-identical.
 
 Each ``tick`` publishes the liveness ack BEFORE its mapper maintenance (graph discovery + a fresh
 ``get_esdf_and_gradient`` request), so a cuMotion replan storm saturating that shared service during
@@ -46,6 +47,12 @@ import json
 import math
 import os
 import time
+
+# sim-robust-station-heartbeat-simclock-v1: the shared pace-aware liveness predicate and the derived
+# frozen-sim WALL backstop (the same leaf used by the manipulation-host planning/startup/ack budgets).
+# pace_watchdog is a leaf pure-arithmetic module (no ROS/Isaac/clock/I-O), so this is safe at import --
+# the parked-station heartbeat now runs on the SIM clock with only a frozen-sim WALL backstop.
+from ..restock.pace_watchdog import is_dead as pace_is_dead, frozen_sim_wall_backstop
 
 # Bounded fault recovery, mirroring restock.station.StationState: a fresh measured parked epoch
 # ('prepare') clears a latched fault so the mission client's re-prepare recovers the ack instead of
@@ -71,8 +78,16 @@ class IncorporationAckState:
         # (the documented real-rig contract) => byte-identical. Clamped; a dead host is still caught.
         self.sim_gap_s = (max(.5, min(600., float(os.environ['RESTOCK_STATION_SIM_GAP_S'])))
                           if 'RESTOCK_STATION_SIM_GAP_S' in os.environ else .5)
+        # sim-robust-station-heartbeat-simclock-v1: RESTOCK_STATION_WALL_GAP_S is now the wall FLOOR feeding
+        # the DERIVED frozen-sim backstop (role change; a widen only ever widens the backstop, byte-compat).
+        # The SIM gap is the primary liveness bound: under the live_pose transfer's render pacing (measured
+        # 16-30x wall-to-sim) the mission legitimately goes several SIM seconds without heart-beating the
+        # parked station while it runs a multi-capture manip op, stretching WALL far past a flat wall cap --
+        # coldliverecovery e-stopped at 'wall gap 30.75 s' with the sim gap healthy. The wall leg now only
+        # catches a FROZEN sim (sim_gap_s x 50 > the worst pacing), never a render-slow-but-alive station.
         self.wall_gap_s = (max(3., min(600., float(os.environ['RESTOCK_STATION_WALL_GAP_S'])))
                            if 'RESTOCK_STATION_WALL_GAP_S' in os.environ else 3.)
+        self.wall_backstop_s = frozen_sim_wall_backstop(self.sim_gap_s, self.wall_gap_s)
         # fm430 (2a): post-attach ESDF re-integration KICK (opt-in, default off => byte-identical). After
         # the SIM_ATTACH weld the host object_attachment clears the carton voxels and the parked mapper
         # must re-incorporate at the new state, but under render pacing the next ESDF integration stamp
@@ -171,20 +186,23 @@ class IncorporationAckState:
         self.collision_time = stamp
 
     def snapshot(self, now, *, endpoints_ready, process_alive):
-        # Name the tripped liveness condition with its measured value so a mission failure
-        # says which one fired. The sim guard stays 0.5 s; the wall guard is 3.0 s (see the
-        # module docstring -- a render-paced client stalls its heartbeat up to ~2 s per
-        # capture tick, and 3 s still catches a genuinely hung client). The first-tripped
-        # reason is frozen (a fault is terminal until explicit recovery).
+        # Name the tripped liveness condition with its measured value so a mission failure says which one
+        # fired. The SIM gap (now - last_heartbeat, both on the node /clock) is the PRIMARY bound: an
+        # advancing sim clock proves the simulator is alive, so a parked station un-heartbeat-ed for that
+        # much SIM time is genuinely lost. The WALL gap only backstops a FROZEN sim (whose stalled /clock
+        # can never advance the SIM leg) at the derived ``wall_backstop_s`` -- large enough that a render-
+        # slow-but-alive station (16-30x wall-to-sim) never trips it. Shared pace predicate, mode='either'
+        # (sim OR wall), matching the manipulation-host timers. The first-tripped reason is frozen (a fault
+        # is terminal until explicit recovery).
         if self.active and not self.fault:
             sim_gap = now - self.last_heartbeat
             wall_gap = self.wall_clock() - self.wall_heartbeat
             if not process_alive:
                 self.fault = 'station process lost'
-            elif sim_gap > self.sim_gap_s:
-                self.fault = f'parked heartbeat lost: sim gap {sim_gap:.2f} s'
-            elif wall_gap > self.wall_gap_s:
-                self.fault = f'parked heartbeat lost: wall gap {wall_gap:.2f} s'
+            elif pace_is_dead(sim_elapsed=sim_gap, wall_elapsed=wall_gap, sim_budget=self.sim_gap_s,
+                              wall_backstop=self.wall_backstop_s, mode='either'):
+                self.fault = (f'parked heartbeat lost: sim gap {sim_gap:.2f} s' if sim_gap > self.sim_gap_s
+                              else f'parked heartbeat lost: wall gap {wall_gap:.2f} s')
         ready = (self.active and not self.fault and endpoints_ready
                  and 0 <= now - self.collision_time <= .5 and self.collision_time > self.parked_since)
         return dict(epoch=self.epoch, sequence=self.sequence, stamp=now,

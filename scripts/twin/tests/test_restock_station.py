@@ -52,13 +52,22 @@ def test_process_death_and_sim_heartbeat_fail_closed():
 def test_wall_backstop_tolerates_render_pacing_but_catches_frozen_sim():
     # The wall-clock check is only a loose backstop for a FROZEN sim clock; a render-paced tick
     # (~1 s wall) must NOT false-trip it (regression: ds-011/013 faulted the transfer warm here).
+    # sim-robust-station-heartbeat-simclock-v1: the wall leg is now the DERIVED frozen-sim backstop
+    # (0.5 sim x 50 = 25 s, floored at 15 s), so even a many-second render-paced wall gap with a frozen
+    # sim clock is tolerated until the backstop; a genuinely frozen sim is still caught once it trips.
+    from twin.restock.station import _WALL_HEARTBEAT_BACKSTOP_DERIVED_S
+    assert _WALL_HEARTBEAT_BACKSTOP_DERIVED_S == 25.0   # max(15, 0.5 x 50)
     wall=[0.]
     state=StationState(wall_clock=lambda:wall[0])
     state.accept(message(),1.)
     wall[0]=1.1
     assert state.snapshot(1.1,endpoints_ready=True,process_alive=True)['state']=='warming'
-    # A genuinely frozen sim clock (sim time not advancing) is still caught once the wall backstop trips.
+    # A render-slow-but-alive station: a 20 s wall gap at a FROZEN sim (sim time not advancing) no longer
+    # false-trips -- it sits below the 25 s derived backstop.
     wall[0]=20.
+    assert state.snapshot(1.1,endpoints_ready=True,process_alive=True)['state']=='warming'
+    # A genuinely frozen sim clock is still caught once the derived wall backstop trips.
+    wall[0]=26.
     assert state.snapshot(1.1,endpoints_ready=True,process_alive=True)['state']=='failed'
 
 
