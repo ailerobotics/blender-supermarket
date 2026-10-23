@@ -392,7 +392,13 @@ repo's `scenes/`, `export/` or `renders/`.
   seconds between accept and first feedback (transfer1: ~11 s, with `fb_age=0` proving same-clock, not a
   stale frame), and the old `start=now()` charged that as trajectory progress and e-stopped the still-parked
   arm on the first sample (misdiagnosed as the warm5 wrist self-collision). Applies to EVERY mission arm
-  move. `begin()` reports+bounds the IK-plan latency (`RESTOCK_SCRIPTED_TRANSFER_IK_BUDGET_S`, default 120 s,
+  move. **The execute loop's own clock is pace-aware too (`execute_clock`, fm-sim-robust-trajectory-clock-load):**
+  because `start` is a measured-feedback stamp that can LEAD the node `/clock` by up to `FEEDBACK_RENDER_LEAD_S`
+  under render pacing, the first post-anchor `now()-start` can read slightly negative — the same delivery race
+  `feedback_fresh`/`reference_time` absorb. The old hard `elapsed<0` fired `TRAJ_HOST_FAULT trajectory
+  clock/timeout failure` (twice) on a VALID 2-point plan under the heavy live_pose load (coldlive sample 2,
+  anchor_lag 0.017 s); it now clamps a within-lead negative to the start pose, failing by name only on a
+  genuine regression (`trajectory clock regression`) or the frozen-sim WALL backstop. `begin()` reports+bounds the IK-plan latency (`RESTOCK_SCRIPTED_TRANSFER_IK_BUDGET_S`, default 120 s,
   loud-not-fatal). Proof + GPU re-run config: `~/firstmate/data/sim-robust-executor-clock-v1/report.md`,
   `tests/test_restock_trajectory_host.py`. Shelf-slot place (sales-floor endcap G3_back_s2, s3 board
   0.25 m above): `RESTOCK_SCRIPTED_TRANSFER_PLACE=front` (env, scripted only, default off) slides the carton

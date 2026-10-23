@@ -267,6 +267,107 @@ def test_two_clock_offset_is_absorbed_by_feedback_anchor():
     assert reference_time(60.0, 50.0) == 10.0
 
 
+def _coldlive2_collect_plan():
+    """The exact 2-point collect plan from coldlive sample 2 (2026-10-23 host-stack.log TRAJ_HOST_PLAN):
+    a near-stationary ~0.005 rad nudge over 2.0 s, trivially inside every executor limit. Reordered from
+    the logged joint_names (elbow, shoulder_lift, shoulder_pan, wrist_1, wrist_2, wrist_3) into ARM_JOINTS.
+    Zero end-velocity (the dump logs positions only); the point of the test is the CLOCK, not the shape."""
+    log_names = ['ur_elbow_joint', 'ur_shoulder_lift_joint', 'ur_shoulder_pan_joint',
+                 'ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_joint']
+    p0 = [2.1921, -1.3433, 1.1623, -0.8487, 1.1631, 0.0]
+    p1 = [2.1864, -1.3391, 1.1646, -0.8472, 1.1654, 0.0]
+    order = [log_names.index(n) for n in ARM_JOINTS]
+    start = np.asarray(p0, float)[order]
+    def point(q, t):
+        return NS(positions=list(q), velocities=[0.0] * 6, effort=[],
+                  time_from_start=NS(sec=int(t), nanosec=round((t - int(t)) * 1e9)))
+    traj = NS(joint_names=list(log_names), points=[point(p0, 0.0), point(p1, 2.0)])
+    # measured joints are supplied in ARM_JOINTS order (the executor reorders the trajectory to match)
+    return Plan(traj, start, [(-2 * np.pi, 2 * np.pi)] * 6, max_speed=.3, max_acceleration=1.0), start
+
+
+def test_coldlive2_two_point_plan_is_valid():
+    # The collect plan that faulted was VALID: a tiny 2-point nudge well inside the executor's limits.
+    # If Plan() accepts it, the 'trajectory clock/timeout failure' was NOT a plan-validity or zero-/
+    # sub-period-duration problem -- it was purely the execute-loop clock check (test below).
+    plan, start = _coldlive2_collect_plan()
+    assert plan.times == [0.0, 2.0]                       # 2 s, far above one control period
+    assert np.allclose(plan.sample(0.0)[0], start)        # t=0 = the measured start pose
+    assert np.allclose(plan.sample(2.0)[1], 0.0)          # ends at rest
+
+
+def test_execute_clock_tolerates_subtick_feedback_lead_coldlive2():
+    # coldlive sample 2 reproduction: start is anchored to a measured-feedback stamp (26.533) that LEADS
+    # the node /clock (install 26.5167) by anchor_lag 0.017 s -- the /clock-vs-/joint_states render-pacing
+    # delivery race. The next execute-loop now() still reads ~26.516, so now()-start = -0.017 < 0. The old
+    # hard ``elapsed<0`` fired 'trajectory clock/timeout failure' twice on a valid plan; execute_clock must
+    # clamp this sub-tick lead to the start pose (0.0) with NO fault.
+    from twin.restock.trajectory_host import execute_clock, FEEDBACK_RENDER_LEAD_S
+    start = 26.533
+    wall_now, wall_backstop = 1000.0, 1e9               # nowhere near the wall backstop
+    elapsed, fault = execute_clock(26.516 - start, wall_now, wall_backstop)
+    assert fault is None
+    assert elapsed == 0.0                                # held at the start pose, not a crash/fault
+    # the whole tolerated band, right up to the render-lead bound
+    e, f = execute_clock(-FEEDBACK_RENDER_LEAD_S + 1e-9, wall_now, wall_backstop)
+    assert f is None and e == 0.0
+
+
+def test_execute_clock_normal_forward_is_identity():
+    # The healthy case stays byte-identical: a normal forward elapsed is returned unchanged with no fault,
+    # so the tracking/terminal logic below is unaffected for every trajectory that already worked.
+    from twin.restock.trajectory_host import execute_clock
+    for e in (0.0, 0.005, 1.0, 2.0, 123.4):
+        elapsed, fault = execute_clock(e, wall_now=10.0, wall_backstop=1e9)
+        assert fault is None and elapsed == e
+
+
+def test_execute_clock_faults_genuine_regression_by_name():
+    # A real backward sim clock (beyond the render-lead band) is still a hard fault -- a stale/future frame
+    # could never have anchored start past the lead (feedback_fresh refuses it), so anything past -lead is
+    # a genuine regression, failed BY NAME (distinct from the wall timeout) so the cause stays legible.
+    from twin.restock.trajectory_host import execute_clock, FEEDBACK_RENDER_LEAD_S
+    elapsed, fault = execute_clock(-FEEDBACK_RENDER_LEAD_S - 0.05, wall_now=10.0, wall_backstop=1e9)
+    assert elapsed is None and fault == 'trajectory clock regression'
+
+
+def test_execute_clock_wall_backstop_still_times_out():
+    # The frozen/hung-sim WALL backstop is unchanged: past it we still fault 'trajectory clock/timeout
+    # failure' even for an otherwise-fine forward elapsed, and it takes precedence over a stale elapsed so
+    # a genuinely stuck loop reports the timeout rather than the regression.
+    from twin.restock.trajectory_host import execute_clock, FEEDBACK_RENDER_LEAD_S
+    elapsed, fault = execute_clock(1.0, wall_now=100.0, wall_backstop=99.0)
+    assert elapsed is None and fault == 'trajectory clock/timeout failure'
+    # wall timeout wins over a simultaneously-negative elapsed
+    elapsed, fault = execute_clock(-FEEDBACK_RENDER_LEAD_S - 1.0, wall_now=100.0, wall_backstop=99.0)
+    assert elapsed is None and fault == 'trajectory clock/timeout failure'
+
+
+def test_execute_clock_stalled_sim_frame_holds_without_fault():
+    # A single stalled sim frame under the live_pose feeds (now() does not advance for a tick, so elapsed
+    # sits flat at the anchored start or a hair before it) must HOLD the start pose, not fault -- only a
+    # genuinely frozen sim that runs past the wall backstop fails. Mirrors feedback_fresh's stall handling.
+    from twin.restock.trajectory_host import execute_clock
+    # frame stalled exactly at the anchor (elapsed 0) and a sub-tick before it: both hold, no fault
+    for e in (0.0, -0.01, -0.1):
+        elapsed, fault = execute_clock(e, wall_now=50.0, wall_backstop=1e9)
+        assert fault is None and elapsed == max(0.0, e)
+
+
+def test_execute_clock_lead_bound_matches_feedback_freshness():
+    # Invariant the whole fix rests on: the clamp bound is EXACTLY feedback_fresh's render lead, so a
+    # feedback frame leading now() by more than the bound is refused upstream (never anchors start) and a
+    # within-bound negative elapsed can only be the delivery race -- the clamp can never mask a regression.
+    from twin.restock.trajectory_host import execute_clock, feedback_fresh, FEEDBACK_RENDER_LEAD_S
+    lead = FEEDBACK_RENDER_LEAD_S
+    # a frame that would produce elapsed just past -lead is exactly the frame feedback_fresh rejects
+    assert not feedback_fresh(-lead - 0.01)
+    assert execute_clock(-lead - 0.01, 0.0, 1e9)[1] == 'trajectory clock regression'
+    # a frame within the lead is fresh upstream and clamped (not faulted) here
+    assert feedback_fresh(-lead + 1e-9)
+    assert execute_clock(-lead + 1e-9, 0.0, 1e9) == (0.0, None)
+
+
 def test_executor_exit_is_honest_and_bounded_tolerant():
     # run-266: executor.spin() returned mid-move under render pacing with no tracking fault, and the
     # generic fault('executor stopped') emergency-stopped a healthy grasp while hiding the cause.
