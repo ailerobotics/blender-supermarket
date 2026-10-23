@@ -181,6 +181,10 @@ class FactoryDispatchTests(unittest.TestCase):
         self.assertFalse(_build('reference').lane_coast_refusals)             # default off
         self.assertTrue(_build('reference', tow_lane_coast_refusals=True).lane_coast_refusals)
 
+    def test_tow_lane_acquire_timeout_flows_through(self):
+        self.assertEqual(_build('reference').lane_acquire_timeout_s, 0.0)     # default off
+        self.assertAlmostEqual(_build('reference', tow_lane_acquire_timeout_s=8.0).lane_acquire_timeout_s, 8.0)
+
     def test_tow_lane_trust_unknown_flows_through(self):
         self.assertFalse(_build('reference').lane_trust_unknown)              # default off
         self.assertTrue(_build('reference', tow_lane_trust_unknown=True).lane_trust_unknown)

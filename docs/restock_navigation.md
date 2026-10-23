@@ -414,6 +414,31 @@ point) is still rejected. Staged `true`. (The measured run-323b post-couple base
 start-only acquire check, not a bad start pose, so no pre-lane alignment leg or tolerance widening was
 needed.) CPU tests: `tests/test_navigation_lanes.py`; offline proof `check_tow_lanes.check_reacquire_along_route`.
 
+**Acquire from wherever the couple seats the base — lead-in + named fast-fail** (fm-sim-robust-outbound,
+`data/sim-robust-outbound-lane-start-v1`, all opt-in / default-off ⇒ byte-identical). The improved
+crosstrack couple (PR232/233) seats the base a VARIABLE distance off the authored dock start (run
+`coldlivewin`: +0.5 m north of `outbound_dock_to_bay.start` y=15.25; `coldliverecovery`: at it), and the
+fixed start + default acquire tol then deadlocked the outbound (`lane_not_acquired` churning to the 120 s
+mission nav-stuck). Two per-lane/controller keys fix it:
+- **`lead_in_max_m`** (per-lane, default 0 = off): when the base seats OFF the fine centreline,
+  `TowLane.build_lead_in` rolls a bounded forward pure-pursuit COUPLED merge (curvature capped at the
+  physical min turn radius, every step swept-validated against the live map via `world.valid`) ONTO the
+  authored centreline and splices the authored tail to the goal, returning a route whose FIRST state is
+  the measured seat — so the follower acquires from exactly where it is. A hand-authored lead-in to the
+  exact start is NOT viable: a forward-only train 0.5 m lateral off a flat lane free-plans a ~12 m loop
+  (the report has the numbers); the closed-loop lateral merge is the kinematically sane bridge, and a
+  2.46 m flat lane absorbs ~±0.25 m — so re-centre the authored start to the seat-distribution middle
+  (y≈15.5) and the lead-in covers the residual. `lead_in_fine_xy`/`lead_in_lookahead` tune the merge.
+- **`navigation.tow_lane_acquire_timeout_s`** (default 0 = off): accrues contiguous SIM seconds the
+  active lane stays unacquired with no base progress and, past the budget, FAILS the leg by name
+  (`lane_not_acquired_timeout` / `lane_blocked_timeout` / `lane_leadin_unreachable_timeout`) in a few sim
+  seconds — pace-immune, not the 120 s WALL nav-stuck. A seat beyond the lane's absorbable band fails
+  fast and legibly instead of freezing.
+
+Example config: `docs/examples/outbound-lane-leadin-fragment.json`. CPU tests:
+`tests/test_navigation_lanes.py::OutboundLeadInAndFastFailTests` (both recorded seats arrive; the
+unreachable seat fails fast by name). GPU proof is the integration lane's (real store obstacles + PhysX).
+
 **Coupled-tow tracking knobs** (fm429, all default to the prior hardcoded values ⇒ byte-identical):
 `navigation.tow_lane_cart_yaw_tol` (default 0.20 rad) — the `stop_replan_tracking_error` cart-yaw
 replan tolerance; `navigation.tow_lane_curve_speed_floor` (default 0.25) — the curve-slowdown speed

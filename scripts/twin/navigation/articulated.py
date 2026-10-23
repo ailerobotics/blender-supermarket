@@ -489,7 +489,8 @@ class ArticulatedController(Controller):
                  coupled_progress_escape_s=3.0, coupled_progress_fault_s=8.0,
                  coupled_progress_recovery=False, coupled_breakaway_speed_mps=0.18,
                  coupled_breakaway_window_s=2.0, coupled_breakaway_pulse_s=0.5,
-                 coupled_breakaway_attempts=3, **kwargs):
+                 coupled_breakaway_attempts=3,
+                 lane_acquire_timeout_s=0.0, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm481/fm482 (navigation.coupled_creep_escape, default off => byte-identical): the coupled
         # measured-curvature brake divides odom.angular by odom.linear, and at a near-stationary crawl that
@@ -702,6 +703,22 @@ class ArticulatedController(Controller):
         # is re-checked against the swept envelope and only used if clear (a genuinely departed cart still
         # trips). Off (default) => the authored profile (byte-identical). Proven: check_cart_yaw_rebase_envelope.
         self.lane_cart_yaw_rebase=bool(lane_cart_yaw_rebase)
+        # fm-sim-robust-outbound: fail a NON-ACQUIRED authored lane by name FAST instead of churning
+        # until the 120 s mission nav-stuck WALL budget. When the active lane yields an empty route
+        # (lane_not_acquired / lane_blocked / lane_leadin_unreachable) the base COMMANDS nothing, so no
+        # progress is made; but the empty route cycles reason=lane_not_acquired <-> replan_changed_
+        # observations under the jittery live cloud, which never reaches the base `_wait` 8 s
+        # blocked_timeout (coldlivewin: ~120 s WALL frozen before the external nav-stuck fired). This
+        # SIM-clock accumulator keys on contiguous no-base-progress ticks with the active lane
+        # unacquired and, past `lane_acquire_timeout_s` SIM seconds, FAILS the leg terminal with the
+        # specific reason + '_timeout' -- a named, pace-immune fail in a few sim seconds. Reset on any
+        # base progress or a non-empty route. 0 (default) => off => the legacy churn (byte-identical).
+        if not (isinstance(lane_acquire_timeout_s,(int,float)) and math.isfinite(lane_acquire_timeout_s)
+                and lane_acquire_timeout_s>=0.0):
+            raise ValueError('lane_acquire_timeout_s must be a finite number of seconds >= 0')
+        self.lane_acquire_timeout_s=float(lane_acquire_timeout_s)
+        self._acquire_fail_s=0.0        # contiguous SIM seconds the active lane has been unacquired
+        self._acquire_fail_pose=None    # base pose at the start of the current no-progress window
         # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
         # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
         # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
@@ -747,6 +764,8 @@ class ArticulatedController(Controller):
         self._recovery_window_start=None
         self._recovery_anchor=None
         self._breakaway_cmd=None
+        self._acquire_fail_s=0.0                           # fresh goal -> fresh lane-acquire window
+        self._acquire_fail_pose=None
         self.goal_articulation=self.spec.max_articulation if goal_articulation is None else goal_articulation
         # Resolve the authored tow lane for this COUPLED goal (if any). Uncoupled drives never use a
         # lane. Pose acquirability + live-obstacle swept validation are checked when the route is built.
@@ -794,6 +813,24 @@ class ArticulatedController(Controller):
         else:
             world=self.world
             planner=self.planner
+        # Re-validate the authored lane against the LIVE obstacle cloud. When the opt-in proud
+        # tolerance is set, discount live returns within that distance of KNOWN static geometry
+        # (proud returns of the shelf/support the lane hugs) so they cannot false-block the lane;
+        # genuinely new returns in open space are kept and still block. OFF (0.0) => the full live
+        # cloud, byte-identical. Computed before the acquire so the lead-in fallback shares the same
+        # (discounted) cloud it validates the authored route against.
+        dyn=obs.obstacles
+        discounted=0
+        if self.lane_trust_static:
+            # Trust the static map the lane was build-validated against: validate the authored route
+            # against static geometry ALONE. The live braking gate (gate_velocity) is untouched and
+            # still stops the tow for a genuinely new obstacle ahead.
+            dyn=()
+            discounted=len(obs.obstacles)
+        elif self.lane_static_tol>0 and dyn:
+            kept=tuple((x,y) for (x,y) in dyn if not world.near_static(x,y,self.lane_static_tol))
+            discounted=len(dyn)-len(kept)
+            dyn=kept
         if self.lane_cart_yaw_rebase:
             # fm452(A): the FOLLOW tracks the re-based cart_yaw (zeroed at the base's aligned entry, then
             # growing as the cart lags the sharpening turn -- see `_rebase_cart_yaw`), so the ACQUIRE must
@@ -816,6 +853,7 @@ class ArticulatedController(Controller):
             rebased=self._rebase_cart_yaw(lane.route,state,world)
             near=min(rebased.states,key=lambda s:math.hypot(s.x-state.x,s.y-state.y)) if rebased.states else None
             cart_ok=near is not None and abs(wrap(near.cart_yaw-state.cart_yaw))<=self.lane_cart_yaw_tol
+            acquired=bool(xy_ok and cart_ok)
             if _NAV_PLAN_DIAG:
                 print('NAV_PLAN_DIAG acquire(rebase) lane=%s xy_ok=%s cart_ok=%s pose=%s lane_start=%s '
                       'cart_yaw=%.3f near_cart_yaw=%s cart_tol=%.3f reacquire=%s'
@@ -823,34 +861,32 @@ class ArticulatedController(Controller):
                          tuple(round(c,3) for c in lane.start),state.cart_yaw,
                          (round(near.cart_yaw,3) if near is not None else None),
                          self.lane_cart_yaw_tol,self.lane_reacquire_along_route),flush=True)
-            if not (xy_ok and cart_ok):
-                return Route([],[],'lane_not_acquired')
         else:
-            acq=lane.acquirable(state.pose,state.cart_yaw,along_route=self.lane_reacquire_along_route)
+            acquired=lane.acquirable(state.pose,state.cart_yaw,along_route=self.lane_reacquire_along_route)
             if _NAV_PLAN_DIAG:
                 print('NAV_PLAN_DIAG acquire lane=%s acquirable=%s pose=%s lane_start=%s cart_yaw=%.3f reacquire=%s'
-                      % (lane.name,acq,tuple(round(c,3) for c in state.pose),
+                      % (lane.name,acquired,tuple(round(c,3) for c in state.pose),
                          tuple(round(c,3) for c in lane.start),state.cart_yaw,self.lane_reacquire_along_route),
                       flush=True)
-            if not acq:
-                return Route([],[],'lane_not_acquired')
-        # Re-validate the authored lane against the LIVE obstacle cloud. When the opt-in proud
-        # tolerance is set, discount live returns within that distance of KNOWN static geometry
-        # (proud returns of the shelf/support the lane hugs) so they cannot false-block the lane;
-        # genuinely new returns in open space are kept and still block. OFF (0.0) => the full live
-        # cloud, byte-identical.
-        dyn=obs.obstacles
-        discounted=0
-        if self.lane_trust_static:
-            # Trust the static map the lane was build-validated against: validate the authored route
-            # against static geometry ALONE. The live braking gate (gate_velocity) is untouched and
-            # still stops the tow for a genuinely new obstacle ahead.
-            dyn=()
-            discounted=len(obs.obstacles)
-        elif self.lane_static_tol>0 and dyn:
-            kept=tuple((x,y) for (x,y) in dyn if not world.near_static(x,y,self.lane_static_tol))
-            discounted=len(dyn)-len(kept)
-            dyn=kept
+        if not acquired:
+            # fm-sim-robust-outbound (option c): the base seated OFF the fine centreline. If a lead-in is
+            # authorised, synthesise a bounded swept-validated coupled merge from the seat ONTO the lane and
+            # follow a path that STARTS where the base actually is; the follower then acquires trivially.
+            # A seat beyond the band the lane can absorb returns None -> a distinct NAMED reason so the
+            # acquire watchdog fails the leg fast instead of leaving it to the 120 s mission nav-stuck.
+            li=(lane.build_lead_in(state,world,self.spec,dyn,max(.02,uncertainty))
+                if lane.lead_in_max_m>0 else None)
+            if li is not None and li.states:
+                if _NAV_PLAN_DIAG:
+                    print('NAV_PLAN_DIAG lane_leadin lane=%s states=%d from_pose=%s converges_to_goal=%s'
+                          % (lane.name,len(li.states),tuple(round(c,3) for c in state.pose),
+                             tuple(round(c,3) for c in li.states[-1].pose)),flush=True)
+                li.reason='validated_lane_leadin'
+                if self.lane_cart_yaw_rebase:
+                    li=self._rebase_cart_yaw(li,state,world)
+                    li.reason='validated_lane_leadin'
+                return li
+            return Route([],[],'lane_leadin_unreachable' if lane.lead_in_max_m>0 else 'lane_not_acquired')
         checked=planner.validate_seed(lane.route,lane.start_state(),self.goal,dyn,
                                       max(.02,uncertainty),self.goal_articulation)
         if not checked.states:
@@ -874,6 +910,43 @@ class ArticulatedController(Controller):
         if self.lane_cart_yaw_rebase:
             checked=self._rebase_cart_yaw(checked,state,world)
         return checked
+
+    def _acquire_watchdog(self,dt,reason,odom):
+        """fm-sim-robust-outbound: fail a persistently NON-ACQUIRED authored lane by name, FAST.
+
+        The empty-route churn (lane_not_acquired/lane_blocked/lane_leadin_unreachable cycling with
+        replan_changed_observations as the live cloud jitters) commands the base nothing and never
+        reaches the base `_wait` 8 s blocked_timeout, so a genuine acquisition deadlock otherwise sits
+        until the external 120 s mission nav-stuck WALL budget (coldlivewin). This accrues the
+        CONTIGUOUS SIM seconds the active lane has stayed unacquired with NO base progress and, past
+        `lane_acquire_timeout_s`, sets a terminal failed Result naming the specific reason + '_timeout'
+        -- a pace-immune fail in a few sim seconds. Any base progress (the lead-in acquired and the
+        train is moving) or a non-empty route re-anchors the window. Off (timeout <= 0) or no active
+        lane => never fails (byte-identical)."""
+        if (self.lane_acquire_timeout_s<=0 or self._active_lane is None
+                or reason not in ('lane_not_acquired','lane_blocked','lane_leadin_unreachable')):
+            self._acquire_fail_s=0.0
+            self._acquire_fail_pose=None
+            return None
+        pose=getattr(odom,'pose',None)
+        progressed=False
+        if pose is not None and self._acquire_fail_pose is not None:
+            dyaw=wrap(pose[2]-self._acquire_fail_pose[2])
+            progressed=(math.hypot(pose[0]-self._acquire_fail_pose[0],
+                                   pose[1]-self._acquire_fail_pose[1])>0.02 or abs(dyaw)>math.radians(1.0))
+        if self._acquire_fail_pose is None or progressed:
+            self._acquire_fail_pose=pose
+            self._acquire_fail_s=0.0
+            return None
+        self._acquire_fail_s+=dt
+        if self._acquire_fail_s>=self.lane_acquire_timeout_s:
+            self.terminal=Result(status='failed',reason=reason+'_timeout')
+            if _NAV_PLAN_DIAG:
+                print('NAV_PLAN_DIAG lane_acquire_timeout lane=%s reason=%r sim_s=%.2f pose=%s'
+                      % (self._active_lane.name,reason,self._acquire_fail_s,
+                         tuple(round(c,3) for c in pose) if pose else None),flush=True)
+            return self.terminal
+        return None
 
     def _rebase_cart_yaw(self,route,state,world):
         """fm451: re-base the expected cart_yaw to the base's ACTUAL (aligned) entry. From the nearest route
@@ -1131,8 +1204,17 @@ class ArticulatedController(Controller):
                          tuple(round(c,3) for c in self.goal),
                          (round(state.x,3),round(state.y,3),round(state.yaw,3),round(state.cart_yaw,3))),
                       flush=True)
-            return Result(reason='route_ready' if self.route.states else self.route.reason)
+            if self.route.states:
+                self._acquire_fail_s=0.0; self._acquire_fail_pose=None   # lane acquired -> fresh window
+                return Result(reason='route_ready')
+            term=self._acquire_watchdog(dt,self.route.reason,odom)
+            if term is not None:
+                return term
+            return Result(reason=self.route.reason)
         if not self.route.states:
+            term=self._acquire_watchdog(dt,self.route.reason,odom)
+            if term is not None:
+                return term
             if (obs.obstacles!=self.planned_obstacles or
                     (obs.temporal_map is not None and obs.temporal_map.slice is not self.planned_map)):
                 self.route=None
