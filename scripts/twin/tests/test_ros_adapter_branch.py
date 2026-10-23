@@ -621,3 +621,146 @@ class Drain(unittest.TestCase):
         for st in ('execute_accept', 'execute_result', 'idle', 'succeeded', 'failed'):
             p = self._port(st); p.drain()
             self.assertEqual(p._polls, 0, st)
+
+
+class MoveGroupDeathDuringOpRoutesToRetry(unittest.TestCase):
+    """sim-robust-movegroup-estop-retry-v1: an upstream move_group PROCESS death (SIGABRT heap corruption,
+    coldlive: exit -6 'malloc(): unaligned tcache chunk detected') that strikes mid-op can surface as a
+    RAISE inside _poll (a lost-server result future, an ABORTED result with no payload, a service failure)
+    rather than the clean server-down poll or the wall-deadline hang the existing crash-retry already
+    covers. That raise used to go straight to stop() -> emergency_stop() (the global 'host emergency
+    stop'), ending the run even though the launch respawns move_group. These pin that such a raise now
+    HOLDS for the respawn + scene re-sync + a bounded re-send instead of e-stopping, while a genuine
+    rejection (server still alive) and the no-crash path stay byte-identical."""
+
+    @staticmethod
+    def _port(state='plan_result', ready=True, plan_goal='GOAL', crash_retries=0):
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state = state
+        p.timeout = 25.0
+        p.generation = 7
+        p.handle = None                 # stop() only cancels a live handle; keep None for the e-stop tests
+        p._plan_goal = plan_goal
+        p._server_crash_retries = crash_retries
+        p._awaiting_server_respawn = False
+        p._replan_attempts = 5
+        p._last_fault_sim_deadline = False
+        p.plan = _FakePlan(ready)
+        p.execute = _FakePlan(ready)
+        p._estops = []
+        p.emergency_stop = lambda: p._estops.append(True)
+        return p
+
+    def _poll_raising(self, p, exc):
+        """Drive the real poll() wrapper with a _poll that raises ``exc`` (the move_group-death raise)."""
+        p._poll = lambda: (_ for _ in ()).throw(exc)
+        return p.poll()
+
+    # --- pure helper truth table -------------------------------------------------------------------
+    def test_pure_helper_recovers_only_a_gone_server_with_goal_and_budget(self):
+        from twin.restock_manipulation.ros_adapter import (
+            _should_recover_from_poll_fault as R, MOVE_GROUP_CRASH_RETRY_MAX)
+        self.assertTrue(R(server_ready=False, has_plan_goal=True, crash_retries=0, is_respawn_timeout=False))
+        self.assertTrue(R(False, True, MOVE_GROUP_CRASH_RETRY_MAX - 1, False))
+        # A LIVE server delivered a genuine rejection -> surface it, do not mask as a crash.
+        self.assertFalse(R(server_ready=True, has_plan_goal=True, crash_retries=0, is_respawn_timeout=False))
+        # No stored goal (straight-line contact descent) / budget spent / respawn-cap timeout -> escalate.
+        self.assertFalse(R(False, False, 0, False))
+        self.assertFalse(R(False, True, MOVE_GROUP_CRASH_RETRY_MAX, False))
+        self.assertFalse(R(False, True, 0, True))
+
+    # --- poll() routing ----------------------------------------------------------------------------
+    def test_death_raise_with_server_gone_holds_without_estop(self):
+        p = self._port(state='plan_result', ready=False)
+        out = self._poll_raising(p, AttributeError("'NoneType' object has no attribute 'error_code'"))
+        self.assertEqual(out, 'running')               # held for the respawn, NOT failed
+        self.assertEqual(p._estops, [])                # the global emergency stop never fired
+        self.assertTrue(p._awaiting_server_respawn)    # _handle_server_crash takes over next poll
+        self.assertEqual(p.state, 'plan_result')       # state preserved so the same goal re-sends
+
+    def test_death_raise_at_each_op_move_recovers(self):
+        # A death during any stored-goal op move -- the pick reach, the descent plan, the release-retreat
+        # and the collect stow (coldlive) are all MoveGroup plan / ExecuteTrajectory states -- holds for
+        # the respawn instead of e-stopping. (pick=plan_accept reach, descent=plan_result, retreat=
+        # execute_accept, stow=execute_result are representative of the four server-interaction states.)
+        for state in ('plan_accept', 'plan_result', 'execute_accept', 'execute_result'):
+            p = self._port(state=state, ready=False)
+            out = self._poll_raising(p, RuntimeError('result raised: server connection lost'))
+            self.assertEqual(out, 'running', state)
+            self.assertEqual(p._estops, [], state)
+            self.assertTrue(p._awaiting_server_respawn, state)
+
+    def test_genuine_rejection_with_live_server_still_estops(self):
+        # Server ALIVE -> the raise is a real planning/validation fault (IK failed, planning failed,
+        # invalid trajectory): surface it honestly via stop() -> emergency_stop, byte-identical.
+        p = self._port(state='plan_result', ready=True)
+        out = self._poll_raising(p, RuntimeError('planning failed'))
+        self.assertEqual(out, 'failed')
+        self.assertEqual(p._estops, [True])            # genuine fault still e-stops
+        self.assertFalse(p._awaiting_server_respawn)
+
+    def test_straight_line_descent_without_goal_estops(self):
+        # The contact straight-line descent stores NO _plan_goal, so a death there has nothing to re-send
+        # -> the normal e-stop path owns it (byte-identical with the pre-fix behaviour).
+        p = self._port(state='plan_result', ready=False, plan_goal=None)
+        out = self._poll_raising(p, RuntimeError('result raised'))
+        self.assertEqual(out, 'failed')
+        self.assertEqual(p._estops, [True])
+
+    def test_retry_bound_exhausts_to_estop(self):
+        from twin.restock_manipulation.ros_adapter import MOVE_GROUP_CRASH_RETRY_MAX
+        p = self._port(state='plan_result', ready=False, crash_retries=MOVE_GROUP_CRASH_RETRY_MAX)
+        out = self._poll_raising(p, RuntimeError('result raised'))
+        self.assertEqual(out, 'failed')                # budget spent -> escalate with the honest fault
+        self.assertEqual(p._estops, [True])
+
+    def test_respawn_timeout_raise_is_never_masked(self):
+        # The RESPAWN_WAIT_CAP_S 'did not respawn' raise IS the 'respawn never came' escalation -- it must
+        # e-stop, not loop back into another hold.
+        p = self._port(state='plan_result', ready=False)
+        out = self._poll_raising(p, RuntimeError('move_group did not respawn within 45s'))
+        self.assertEqual(out, 'failed')
+        self.assertEqual(p._estops, [True])
+
+    def test_non_server_state_raise_estops(self):
+        # Outside a plan/execute state (e.g. the IK service state) a raise is a genuine fault.
+        for state in ('ik', 'idle', 'succeeded', 'failed'):
+            p = self._port(state=state, ready=False)
+            out = self._poll_raising(p, RuntimeError('IK failed'))
+            self.assertEqual(out, 'failed', state)
+            self.assertEqual(p._estops, [True], state)
+
+    def test_recovery_hands_off_to_handle_server_crash(self):
+        # After the hold, the NEXT poll()'s _handle_server_crash owns the respawn wait + re-send: once the
+        # server is back it re-sends the SAME goal and counts the retry (no emergency stop in between).
+        p = self._port(state='plan_result', ready=False)
+        self._poll_raising(p, RuntimeError('result raised'))     # hold
+        self.assertEqual(p.plan.sent, [])
+        p._attached_profile = None                               # no carry -> resync is a no-op
+        p._live_arm_state = None
+        p.plan.ready = p.execute.ready = True                    # move_group respawned
+        self.assertEqual(p._handle_server_crash(), 'running')
+        self.assertEqual(p.plan.sent, ['GOAL'])                  # same goal re-sent
+        self.assertEqual(p._server_crash_retries, 1)             # retry counted once
+        self.assertEqual(p._estops, [])
+
+    def test_planning_wall_cap_suspended_during_respawn_wait(self):
+        # While HELD for a respawn the dedicated RESPAWN_WAIT_CAP_S bounds the wait; the stale per-move
+        # _plan_started_wall must NOT let the bridge-watchdog planning-wall cap fire and e-stop the hold.
+        import time
+        from twin.restock_manipulation.ros_adapter import PLAN_TOTAL_WALL_CAP_S
+        p = self._port(state='plan_result', ready=False)
+        p.future = None
+        p._plan_started_wall = time.monotonic() - (PLAN_TOTAL_WALL_CAP_S + 10)
+        self.assertTrue(p.planning_wall_exceeded())              # a genuine hang still exhausts...
+        p._awaiting_server_respawn = True
+        self.assertFalse(p.planning_wall_exceeded())             # ...but a respawn hold is suspended
+
+    def test_no_crash_path_does_not_touch_recovery(self):
+        # The no-crash path never raises in poll(), so _recover_movegroup_death_or_none is never reached
+        # and emergency_stop never fires: a clean _poll returning 'succeeded' is byte-identical.
+        p = self._port(state='plan_result', ready=True)
+        p._poll = lambda: 'succeeded'
+        self.assertEqual(p.poll(), 'succeeded')
+        self.assertEqual(p._estops, [])
+        self.assertFalse(p._awaiting_server_respawn)

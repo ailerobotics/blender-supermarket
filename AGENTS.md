@@ -165,6 +165,20 @@ repo's `scenes/`, `export/` or `renders/`.
   (serialization invariant, inert on the real path). PR #223 handled only the detach tolerating the lost
   object. Report + bounded GPU proof: `data/sim-robust-movegroup-respawn-v1/report.md`,
   `docs/examples/movegroup-respawn-collect-fragment.json`.
+  **A mid-op death must RETRY, not e-stop** (sim-robust-movegroup-estop-retry-v1): the respawn recovery
+  above only fires from the server-down poll (`_handle_server_crash`) and the plan-result wall-deadline
+  (`_should_deadline_crash_retry`). A death that strikes mid-replan (coldlive: the collect STOW) can
+  instead surface as a RAISE inside `_poll` (a lost-server result future, an ABORTED result whose
+  `result.result` is `None`, a service failure), which `poll()`'s generic handler sent straight to
+  `stop()`→`emergency_stop()` (terminal `host emergency stop`, arm heartbeat lost) — no retry. Fix
+  (always-on, byte-identical no-crash path): `poll()` routes the caught raise through
+  `_recover_movegroup_death_or_none`, which HOLDS the move (arm keeps its last pose, weld intact) for the
+  respawn+re-sync+resend ONLY when the action server for the current state is GONE and crash-retry budget
+  remains; a LIVE server (genuine rejection) / spent budget / the `'did not respawn'` escalation still
+  e-stops honestly (pure discriminator `_should_recover_from_poll_fault`). `planning_wall_exceeded()` is
+  suspended while `_awaiting_server_respawn`. Report + bounded GPU proof (collect-only, `kill -ABRT` the
+  move_group pid at the stow — integration-owned): `data/sim-robust-movegroup-estop-retry-v1/report.md`,
+  `docs/examples/movegroup-estop-retry-collect-fragment.json`.
 - **Tray/slot fit preflight** (opt-in, default-off): `restock/fit_preflight.py` refuses a
   handling unit that will not fit the destination slot BEFORE reserving stock or booting
   Isaac, instead of failing opaquely at place. `fit = ok | wont_fit | unknown` from a
