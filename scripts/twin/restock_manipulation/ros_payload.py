@@ -19,6 +19,59 @@ PAYLOAD_ACK_WALL_S = os.environ.get('RESTOCK_PAYLOAD_ACK_WALL_S')
 # /sensors integrity check (ros_manipulation) already allow, so the gate no longer flickers.
 RENDER_LEAD_S = 0.02
 
+# ROS action GoalStatus.STATUS_SUCCEEDED. The object_attachment AttachObject action is the AUTHORITATIVE
+# planner-collision attach/detach (it updates the robot description / cuMotion collision spheres the
+# planner actually uses); the handshake is acknowledged iff it reports this status.
+ATTACH_ACTION_SUCCEEDED = 4
+
+# fm (sim-robust-release-detach-ack-v1): the collect RELEASE detach is a two-step host handshake -- a
+# move_group ApplyPlanningScene diff (remove the MoveIt attached_collision_object + its world copy),
+# THEN the AUTHORITATIVE object_attachment AttachObject detach (clears the cuMotion collision spheres
+# the planner actually uses, in a SEPARATE container). move_group has an intermittent SIGABRT double-free
+# in cuMotion result handling (run-266/268) and is launched respawn=True. If it crashes+respawns BETWEEN
+# the grasp attach and the release detach -- coldlive did (live_pose + the arm masked-depth feed loaded
+# the host container enough to trip it; coldhonest, feed off, never crashed) -- the respawned move_group
+# starts with a FRESH scene that never held restock_carried_unit, so the detach's REMOVE returns
+# success=False and the single-shot handshake aborted the whole collect (gate=scene_apply_unsuccessful,
+# coldlive). But an unsuccessful REMOVE means there is NOTHING to remove: the scene is ALREADY in the
+# post-detach state, and the object_attachment node survives the crash, so the detach must PROCEED to
+# that authoritative action rather than abort. A successful REMOVE (coldhonest) never enters this branch
+# => byte-identical. Default on; RESTOCK_DETACH_SCENE_TOLERANT=0 restores the legacy fail-fast.
+DETACH_SCENE_TOLERANT_DEFAULT = True
+
+
+def detach_scene_gate(held, scene_ok, tolerant):
+    """Decide whether the attach/detach handshake may PROCEED past the move_group ApplyPlanningScene step
+    to the authoritative AttachObject action, and name the gate for diagnostics. Pure for CPU testing.
+
+    Returns (proceed, note):
+      * scene_ok True                           -> (True,  None)   normal path, no note
+      * DETACH (held False) + tolerant + ~ok    -> (True,  'scene_apply_unsuccessful_detach_tolerated')
+      * ATTACH (held True) ~ok, or tolerance off -> (False, 'scene_apply_unsuccessful')
+
+    An ATTACH must NEVER tolerate an unsuccessful scene apply: the object has to be ADDED to the planning
+    scene before the lift is planned. A DETACH may, because the authoritative detach is the AttachObject
+    action and an unsuccessful REMOVE means the scene is already in the post-detach state."""
+    if scene_ok:
+        return True, None
+    if not held and tolerant:
+        return True, 'scene_apply_unsuccessful_detach_tolerated'
+    return False, 'scene_apply_unsuccessful'
+
+
+def attach_acked(status):
+    """The object_attachment AttachObject action is the authoritative attach/detach ack: acknowledged iff
+    it reports SUCCEEDED. Pure, shared by RosPayloadSync.__call__ and the CPU test."""
+    return status == ATTACH_ACTION_SUCCEEDED
+
+
+def resolve_detach_scene_tolerant(env_value):
+    """RESTOCK_DETACH_SCENE_TOLERANT -> bool. Unset => the default-on module policy; any set value except
+    '0' => on; '0' => off (reproduce the legacy single-shot fail-fast). Pure for CPU testing."""
+    if env_value is None:
+        return DETACH_SCENE_TOLERANT_DEFAULT
+    return env_value != '0'
+
 
 def relative_pose(base_object, base_tcp):
     """Convert measured object centre from arm base to current measured TCP."""
@@ -44,6 +97,10 @@ class RosPayloadSync:
         from moveit_msgs.srv import ApplyPlanningScene
         self.ack_wall_s = (max(1.0, min(120.0, float(PAYLOAD_ACK_WALL_S)))
                            if PAYLOAD_ACK_WALL_S is not None else float(ack_wall_s))
+        # Tolerate an unsuccessful move_group scene REMOVE on DETACH (see detach_scene_gate). Default on;
+        # RESTOCK_DETACH_SCENE_TOLERANT=0 reproduces the legacy single-shot fail-fast of a pre-fix run.
+        self.detach_scene_tolerant = resolve_detach_scene_tolerant(
+            os.environ.get('RESTOCK_DETACH_SCENE_TOLERANT'))
         self.node = rclpy.create_node('restock_payload',namespace='/restock_sim',
                        parameter_overrides=[Parameter('use_sim_time',value=True)])
         self.tf = Buffer()
@@ -161,8 +218,15 @@ class RosPayloadSync:
             world_remove.header.frame_id = 'ur_base_link'
             world_remove.operation = CollisionObject.REMOVE
             request.scene.world.collision_objects = [world_remove]
-        if not self._wait(self.scene.call_async(request)).success:
-            return _diag('scene_apply_unsuccessful')
+        scene_ok = bool(self._wait(self.scene.call_async(request)).success)
+        proceed, note = detach_scene_gate(held, scene_ok, self.detach_scene_tolerant)
+        if not proceed:
+            return _diag(note)
+        if note is not None:
+            # Tolerated DETACH: the move_group scene REMOVE was a no-op (nothing to remove -- a
+            # respawned/clean scene), so LOG the gate and continue to the authoritative object_attachment
+            # detach below, which decides the ack. _diag only prints (returns False, ignored here).
+            _diag(note)
         pending = self.attach.send_goal_async(goal)
         try:
             accepted = self._wait(pending)
@@ -180,7 +244,7 @@ class RosPayloadSync:
         except TimeoutError:
             accepted.cancel_goal_async()
             raise
-        if result.status != 4:
+        if not attach_acked(result.status):
             return _diag('attach_result_status=%s' % result.status)
         return True
 

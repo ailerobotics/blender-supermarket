@@ -574,6 +574,19 @@ repo's `scenes/`, `export/` or `renders/`.
   Sharp edge: `collect1`/`collectsrc` grasps actually SUCCEED — both runs fail later at the PLACE-on-cart
   step (sibling `sim-robust-collect-place-v1`), not at the grasp. Write-up:
   `data/sim-robust-weld-attach-v1/report.md`.
+- **Collect release-detach ack is two-step; tolerate a lost move_group scene** (`restock_manipulation/ros_payload.py`):
+  the detach does a move_group `ApplyPlanningScene` REMOVE **then** the AUTHORITATIVE object_attachment
+  `AttachObject` detach (clears the cuMotion spheres the planner uses, separate container). move_group is
+  `respawn=True` and has an intermittent SIGABRT double-free (run-266/268); if it crashes+respawns BETWEEN
+  the grasp attach and the release detach (coldlive: live_pose + the arm masked-depth feed loaded it enough
+  to trip it; coldhonest never crashed), the fresh scene never held `restock_carried_unit` so the REMOVE
+  returns `success=False` and the single-shot handshake used to abort the whole collect
+  (`gate=scene_apply_unsuccessful` → `payload collision detachment not acknowledged`). `detach_scene_gate`
+  (default on; `RESTOCK_DETACH_SCENE_TOLERANT=0` reproduces the abort) treats an unsuccessful REMOVE on a
+  DETACH as already-removed and PROCEEDS to the authoritative action, which decides the ack; an ATTACH, or
+  a genuinely failing authoritative detach, still fails fast by name. A successful REMOVE (coldhonest) is
+  byte-identical. CPU proof `tests/test_restock_detach_ack.py` + the release-phase contract in
+  `tests/test_restock_manipulation.py`; bounded GPU proof `docs/examples/collect-release-detach-ack-fragment.json`.
 - **Dev-loop tooling for the Isaac mobile-restock lane** lives in `scripts/twin/tools/`
   (CPU, no GPU): `profile_mission_run.py` breaks a recorded run's wall clock into
   boot/commissioning/collect-observe/approach-reach/per-frame-render/ROS-idle/shutdown from
