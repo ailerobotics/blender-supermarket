@@ -255,7 +255,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(s): s._flagged = False; s._resumed = False
             def start(s, a, j): events.append('start')
             def warm(s, t, parked=None): return True                 # re-warm ready (fresh ESDF)
-            def pause_station(s, t): events.append('pause_station')   # clean stop at drive-start
+            def pause_station(s, t, *, suspend_only=False): events.append('pause_station')   # clean stop at drive-start
             def set_base_repositioned(s): s._flagged = True; events.append('set_base_repositioned')
             def step(s, dt, t, parked=None):
                 if s._flagged:                                        # arrival carried on the packet
@@ -343,7 +343,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(s): s.base_repositioned = False
             def start(s, a, j): pass
             def warm(s, t, parked=None): return True
-            def pause_station(s, t): pauses.append((t, s.base_repositioned))
+            def pause_station(s, t, *, suspend_only=False): pauses.append((t, s.base_repositioned, suspend_only))
             def step(s, dt, t, parked=None):
                 return ManipResult('running', 'transit')
         owned = Owned()

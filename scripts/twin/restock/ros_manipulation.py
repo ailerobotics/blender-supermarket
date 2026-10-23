@@ -138,18 +138,33 @@ class RosManipulationRuntime:
         in-process self.base_repositioned)."""
         self._base_repositioned = True
 
-    def pause_station(self, simulation_time):
-        """fm399 (1): cleanly stop the current parked epoch at the START of the reposition drive, while
-        still parked. A moving base invalidates the parked mapper, and the host faults + spams
-        emergency-stop the instant a parked station stops being heartbeat-ed (run-309). Sending the
-        'stop' while parked lands it as 'idle' (NOT faulted), so the host publishes no emergency stop
-        during the drive. Clearing collision_time + _station_started makes the next _pump (the
-        place_approach re-warm) begin() a FRESH epoch at the new pose; its ESDF re-incorporates there
-        and the incorporation-ack parked_since gate only lets collision_time (hence ready) advance with
-        that fresh integration."""
+    def pause_station(self, simulation_time, *, suspend_only=False):
+        """fm399 (1): cleanly suspend the current parked epoch while the base is about to LEAVE the station,
+        so the host publishes no emergency stop while it cannot be heartbeat-ed. A moving/absent base
+        invalidates the parked mapper, and the host faults + spams emergency-stop the instant a parked
+        station stops being heartbeat-ed (run-309).
+
+        ``suspend_only=False`` (default, byte-identical): STOP the epoch (-> host 'idle') at the START of the
+        mid-collect reposition drive. The base drives a short way to place_approach, a NEW pose, so a fresh
+        epoch there is exactly right.
+
+        ``suspend_only=True`` (sim-robust-station-pause-on-transfer-v1): PAUSE the epoch (-> host 'paused',
+        epoch kept) when a manip op is COMPLETE and the mission is about to tow AWAY to a far op (collect done
+        -> couple/outbound/park/transfer). No op heartbeats this station across that long tow, so without a
+        pause the host accrues a gap and false-trips the global stop on this idle-but-alive station (coldwin2
+        transfer sim gap 30.05 s). 'pause' suspends the liveness watchdog while keeping the epoch; the next op
+        re-prepares a fresh epoch. ``StationClient.pause`` falls back to ``stop()`` semantics for a station
+        that predates this capability.
+
+        Either way, clearing collision_time + _station_started makes the next _pump begin() a FRESH epoch at
+        the new pose; its ESDF re-incorporates there and the incorporation-ack parked_since gate only lets
+        collision_time (hence ready) advance with that fresh integration."""
         if self.station is not None:
             try:
-                self.station.stop()
+                if suspend_only and hasattr(self.station, 'pause'):
+                    self.station.pause()
+                else:
+                    self.station.stop()
             except Exception:
                 pass            # already idle/down -> begin() still re-opens a fresh epoch cleanly
             if self.feedback is not None:

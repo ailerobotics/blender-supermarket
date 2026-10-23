@@ -361,11 +361,13 @@ class HostManipulationRuntime:
     def stop(self):
         return self._runtime.stop()
 
-    def pause_station(self, simulation_time):
-        # fm399/fm400: cleanly stop the parked station at reposition drive-start. This wrapper is what
-        # the mission's ManipulationBridge probes with hasattr -- delegate so it is NOT a silent no-op
-        # (the run-310 failure: the station stayed active through the drive and faulted -> emergency stop).
-        return self._runtime.pause_station(simulation_time)
+    def pause_station(self, simulation_time, *, suspend_only=False):
+        # fm399/fm400: cleanly suspend the parked station when the base is about to leave it. This wrapper is
+        # what the mission's ManipulationBridge probes with hasattr -- delegate (incl. the suspend_only kwarg)
+        # so it is NOT a silent no-op (the run-310 failure: the station stayed active through the drive and
+        # faulted -> emergency stop). suspend_only=True (sim-robust-station-pause-on-transfer-v1) is the
+        # between-ops tow-away pause; default False keeps the reposition stop byte-identical.
+        return self._runtime.pause_station(simulation_time, suspend_only=suspend_only)
 
     def set_clock_sync(self, enabled=True):
         # Staged-start clock sync (twin.restock.staged_start): delegate to the inner runtime, which

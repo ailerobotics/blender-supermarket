@@ -586,11 +586,74 @@ class IncorporationAckTest(unittest.TestCase):
             st.accept(dict(action='prepare', epoch=ep + 1, sequence=0, stamp=float(ep) + 11,
                            parked=True, camera_frame='restock_camera_transfer'), float(ep) + 11)
 
+    def test_paused_station_accrues_no_gap_over_a_300s_far_op_coldwin2(self):
+        # sim-robust-station-pause-on-transfer-v1 (the coldwin2 transfer trip): the collect station is left
+        # un-heartbeat-ed through the whole couple->outbound->park->transfer far op. PAUSE it before towing
+        # away: a paused epoch must NOT fault across a 300 s SIM / long-WALL gap, so tick() publishes no stop.
+        st, clock = self.prepared()  # epoch 1, parked at sim 10.0, wall 100.0
+        st.acknowledge(10.2, 1)
+        self.assertEqual(st.accept(dict(action='pause', epoch=1, sequence=1, stamp=10.3, parked=True), 10.3),
+                         'pause')
+        self.assertTrue(st.paused and st.active)                 # suspended, epoch KEPT (not idle)
+        clock[0] = 100.0 + 9000.0                                # ~9000 s WALL later (30x of 300 s SIM)
+        snap = st.snapshot(10.3 + 300.0, endpoints_ready=True, process_alive=True)  # 300 s SIM later
+        self.assertEqual(snap['state'], 'paused')                # paused, NOT failed -> tick() publishes no stop
+        self.assertEqual(snap['reason'], '')
+        self.assertEqual(snap['collision_time'], -1.)            # a paused station is never 'ready'
+        # Contrast: the SAME epoch left ACTIVE (not paused) DOES fault across the gap (the coldwin2 trigger).
+        st2, _ = self.prepared()
+        st2.acknowledge(10.2, 1)
+        self.assertEqual(st2.snapshot(10.3 + 300.0, endpoints_ready=True,
+                                      process_alive=True)['state'], 'failed')
+
+    def test_fresh_prepare_clears_a_pause_and_reopens_the_epoch(self):
+        # The next op re-prepares a FRESH epoch at its own pose; that must clear the pause and warm from cold.
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        st.accept(dict(action='pause', epoch=1, sequence=1, stamp=10.3, parked=True), 10.3)
+        self.assertTrue(st.paused)
+        st.accept(dict(action='prepare', epoch=2, sequence=0, stamp=11.0, parked=True,
+                       camera_frame='restock_camera_transfer'), 11.0)
+        self.assertFalse(st.paused)
+        self.assertEqual(st.collision_time, -1.)                 # fresh epoch re-earns its ack
+        self.assertEqual(st.snapshot(11.1, endpoints_ready=True, process_alive=True)['state'], 'warming')
+
+    def test_stop_clears_a_pause_to_idle(self):
+        st, _ = self.prepared()
+        st.accept(dict(action='pause', epoch=1, sequence=1, stamp=10.3, parked=True), 10.3)
+        st.accept(dict(action='stop', epoch=1, sequence=2, stamp=10.4, parked=True), 10.4)
+        self.assertFalse(st.paused or st.active)
+        self.assertEqual(st.snapshot(10.5, endpoints_ready=True, process_alive=True)['state'], 'idle')
+
+    def test_pause_requires_active_matching_epoch(self):
+        st, _ = self.state()                                     # no active epoch
+        with self.assertRaises(ValueError):
+            st.accept(dict(action='pause', epoch=1, sequence=0, stamp=10.0, parked=True), 10.0)
+
+    def test_recovery_within_budget_arms_the_stop_wire_release_mid_op(self):
+        # sim-robust-station-pause-on-transfer-v1 (requirement 1c / the coldwin2 latched-wire kill): when a
+        # borderline trip DID fire mid-op and the station then RECOVERS within budget, the node must RELEASE
+        # the latched Isaac stop wire for the CURRENT op (consume_release armed by the recovery prepare), so
+        # PR 235's op-START re-derive is extended with a mid-op release. No release is armed on the ordinary
+        # paths (fresh prepare, heartbeat, pause).
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        self.assertFalse(st.consume_release())                   # a clean prepare arms nothing
+        # A borderline trip faults the station mid far op...
+        self.assertEqual(st.snapshot(10.3, endpoints_ready=True, process_alive=False)['state'], 'failed')
+        # ...the mission re-prepares a fresh epoch; the station recovers WITHIN budget and arms the release.
+        st.accept(dict(action='prepare', epoch=2, sequence=0, stamp=11.0, parked=True,
+                       camera_frame='restock_camera_transfer'), 11.0)
+        self.assertEqual(st.recoveries, 1)
+        self.assertTrue(st.consume_release())                    # release armed -> node publishes Bool(False)
+        self.assertFalse(st.consume_release())                   # one-shot
+
     def test_invalid_commands_rejected(self):
         st, _ = self.state()
         for bad in [dict(action='prepare', epoch=1, sequence=0, stamp=10.0, parked=True,
                          camera_frame='wrong_frame'),          # uncalibrated camera frame
                     dict(action='heartbeat', epoch=1, sequence=0, stamp=10.0, parked=True),  # no active epoch
+                    dict(action='pause', epoch=1, sequence=0, stamp=10.0, parked=True),  # no active epoch
                     dict(action='prepare', epoch=1, sequence=0, stamp=9.0, parked=True,
                          camera_frame='restock_camera_collect')]:  # stale stamp vs now
             with self.assertRaises((ValueError, RuntimeError)):

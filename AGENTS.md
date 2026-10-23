@@ -149,9 +149,23 @@ repo's `scenes/`, `export/` or `renders/`.
   publishers now print `STATION_ESTOP_PUBLISH`/`HOST_EXIT_ESTOP_PUBLISH`; `_host_fault_suffix` hints at the
   host-stack trigger when no controller fault matches; and `IsaacRosGraph.start()` RE-DERIVES the stop wire
   per op (`_clear_stale_global_stop`) so each op begins like a fresh staged-start graph (a genuine ongoing
-  stop re-arms next tick; fresh-graph/staged-start path byte-identical, no new keys). Follow-up: stop the
-  station on op completion before towing away (the fm399 `pause_station` pattern) to avoid the spurious stop.
+  stop re-arms next tick; fresh-graph/staged-start path byte-identical, no new keys).
   Write-up `data/sim-robust-transfer-start-estop-v1/report.md`; CPU proof `tests/test_restock_native_stop.py`.
+  **Pause the parked station on op completion before towing away (sim-robust-station-pause-on-transfer-v1).**
+  The root sequencing fix for the above, after PR 237 moved the parked-heartbeat SIM-primary: coldwin2
+  e-stopped the live_pose TRANSFER because the collect station, left ACTIVE through the whole
+  couple→outbound→park→transfer-warm span, hit a 30.05 s SIM gap (0.05 s over the 30 s budget) and published
+  the global stop, which latched even though the station recovered one tick later. `RuntimeAdapter.start('couple')`
+  now calls `manip.pause_station(…, suspend_only=True)` → `StationClient.pause()` sends an explicit **`pause`**
+  command; the host watchdog is **paused-aware** (`IncorporationAckState.paused` + `StationState` twin, state
+  `'paused'`): a paused active epoch publishes NO stop for any op length/pacing, while an in-use station still
+  faults by name. The next op re-prepares a fresh epoch (clears the pause). Belt-and-suspenders: a within-budget
+  recovery now RELEASES the latched Isaac wire mid-op (`incorporation_ack` publishes `Bool(False)`,
+  `STATION_ESTOP_RELEASE`; extends PR 235's op-START re-derive). Default-on, no new keys; staged-start/scripted
+  byte-identical. Bounded GPU proof = the full capstone (`mission-runtime-capstone238.json`, `orchestrate-coldwin2.sh`)
+  with `RESTOCK_STATION_SIM_GAP_S=30` (NOT the 60 s quick-lever). Write-up
+  `data/sim-robust-station-pause-on-transfer-v1/report.md`; CPU proof `tests/test_host_timers_pacing.py`
+  (`simulate_far_station_paused`), `test_restock_host.py`, `test_restock_station.py`.
   **Place-on-cart GPU/heartbeat bound**: an unplannable cart-place goal (self-colliding IK branch,
   `'Invalid c-space position: self collision detected'`) used to churn the full `REPLAN_MAX`
   same-goal replans and OOM the 12 GB card (`cumotion::FatalException`, `cuda_array.cu`) / starve the

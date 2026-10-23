@@ -18,6 +18,13 @@ SIM-primary + frozen-sim-wall-backstop shape lives in ``restock_host.incorporati
 snapshot`` (the host-stack parked-heartbeat liveness that e-stopped coldliverecovery at ``wall gap 30.75 s``
 while the sim gap was healthy). ``simulate_station_heartbeat`` drives that SHIPPED state object against the
 same fake clock pair, so the station timer is proven on CPU alongside the manipulation-host timers.
+
+sim-robust-station-pause-on-transfer-v1 adds the FAR-STATION scenario (``simulate_far_station_paused``): the
+parked-heartbeat guard's SIM-primary budget alone STILL trips a station left active through a long far op
+(coldwin2: the collect station un-heartbeat-ed through the whole couple->outbound->park->transfer span hit a
+30.05 s SIM gap, 0.05 s over the 30 s budget). The fix PAUSES that station before towing away; a paused
+station must accrue NO gap and publish NO stop for ANY op length at ANY pacing. This harness drives the same
+SHIPPED ``IncorporationAckState`` with an explicit ``pause`` command, proving it on CPU.
 """
 
 from twin.restock_manipulation.ros_adapter import frozen_sim_wall_backstop
@@ -121,3 +128,45 @@ def simulate_station_heartbeat(*, pacing, sim_gap_budget, wall_floor, no_heartbe
                     'wall_backstop': st.wall_backstop_s}
         clock.advance(dwall)
     raise AssertionError('station guard neither survived nor tripped within max_wall -- unbounded wait')
+
+
+def simulate_far_station_paused(*, pacing, sim_gap_budget, wall_floor, far_op_sim, pause=True,
+                                dwall=0.5, max_wall=2000000.0):
+    """Drive the SHIPPED parked-station heartbeat guard with the station PAUSED for a long FAR op.
+
+    Models sim-robust-station-pause-on-transfer-v1: the mission completes the collect op, PAUSES the parked
+    collect/backstock station (one ``pause`` command, accepted while still parked), then tows AWAY and runs a
+    long FAR op (couple -> outbound -> park -> transfer) lasting ``far_op_sim`` SIM seconds during which the
+    station gets NO heartbeat. A PAUSED station must accrue no gap and publish no stop no matter how long the
+    far op runs -- even stretched to ``far_op_sim x pacing`` WALL seconds. Set ``pause=False`` to model the
+    pre-fix behaviour (station left ACTIVE through the far op), which must still trip on the SIM leg (the
+    coldwin2 30.05 s gap) -- the contrast that proves the pause is what prevents the false stop.
+
+    Drives the REAL ``restock_host.incorporation_ack.IncorporationAckState`` (budgets set directly on the
+    shipped object; ``wall_backstop_s`` re-derived with the shipped ``frozen_sim_wall_backstop``) against the
+    fake clock pair. Returns a dict: outcome in {'survived','tripped_sim','tripped_wall'} with the final
+    wall/sim readings, the guard's reason and its published state. Raises on an unbounded wait."""
+    from twin.restock_host.incorporation_ack import IncorporationAckState
+    clock = FakeClockPair(pacing=pacing, frozen=False)
+    st = IncorporationAckState(wall_clock=lambda: clock.wall)
+    st.sim_gap_s = float(sim_gap_budget)
+    st.wall_gap_s = float(wall_floor)
+    st.wall_backstop_s = frozen_sim_wall_backstop(sim_gap_budget, wall_floor)
+    st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=0.0, parked=True,
+                   camera_frame='restock_camera_collect'), 0.0)
+    if pause:
+        # The collect op completes; the mission SUSPENDS the station before towing away (stamp fresh off the
+        # stage clock, exactly as StationClient.pause does). The host state becomes 'paused'.
+        st.accept(dict(action='pause', epoch=1, sequence=1, stamp=clock.sim, parked=True), clock.sim)
+    op_start_sim = clock.sim
+    while clock.wall <= max_wall:
+        snap = st.snapshot(clock.sim, endpoints_ready=True, process_alive=True)
+        if snap['state'] == 'failed':
+            leg = 'tripped_sim' if 'sim gap' in snap['reason'] else 'tripped_wall'
+            return {'outcome': leg, 'wall': clock.wall, 'sim': clock.sim, 'reason': snap['reason'],
+                    'state': snap['state']}
+        if (clock.sim - op_start_sim) >= far_op_sim:
+            return {'outcome': 'survived', 'wall': clock.wall, 'sim': clock.sim, 'reason': snap['reason'],
+                    'state': snap['state']}
+        clock.advance(dwall)
+    raise AssertionError('far-station guard neither survived nor tripped within max_wall -- unbounded wait')
