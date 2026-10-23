@@ -305,6 +305,24 @@ rig carries its own, more conservative tuning). CPU tests: `tests/test_restock_f
 `tests/test_restock_runtime.py` (couple nav→fine_dock→attach handover + cart pin at start /
 release at attach).
 
+**Cross-track terminal mode** (`approach_mode: 'crosstrack'`, opt-in; default `'hitch_jacobian'` ⇒
+byte-identical). The legacy translation-dominant law has a degenerate zero-command equilibrium **line**
+— wherever `lat = (gain_yaw·|hitch_x|/gain_lin)·yaw_err`, the single `ω` cancels (lateral vs yaw) with
+NEITHER hitch nor yaw seated. The couple approach lands on it at whatever yaw the standoff cross-track
+implies: `coldlivefinal` (real live_pose collect) landed at ~4.8° yaw / ~26 mm — just outside the 4° /
+20 mm latch box — and limit-cycled the full 30 s cap (`FINE_DOCK_DIAG`, run dir
+`twin-robot-in-store-boot-v1/mission/coldlivefinal`), while the still-arm `coldhonest` landed at ~2.7°
+(inside) and latched. `'crosstrack'` (`fine_dock._crosstrack`) instead servos the **rear hitch** — the
+LEADING point of the reverse approach, so steering it onto the cart axis is a stable minimum-phase
+cross-track problem whose only equilibrium is the seated pose. It drives the hitch along the cart axis
+to the drawbar (`ct_gain_approach`), holding back a distance `ct_align_hold_m·(|cross|+0.3|yaw|)` until
+cross-track + heading null (`ct_gain_cross`, `ct_gain_yaw`), with a `ct_min_creep` floor so the base
+keeps moving (steering stays live). Still motion-only; latch tolerances + the physical `attach` are
+unchanged. Example: `docs/examples/couple-fine-dock-crosstrack-fragment.json`; design + the recorded
+limit-cycle evidence: `data/sim-robust-couple-fine-dock-v1/report.md`. CPU tests cover the recorded
+`coldlivefinal`/`coldhonest` standoffs (converge+latch where the legacy law stalls under a drive
+dead-band), the degenerate-equilibrium property, and the byte-identical default.
+
 ### Pre-planned tow lanes for coupled drives (opt-in, default-off)
 
 Free hybrid-A* planning of the long, wide coupled robot+cart train is where the tow stalls: the

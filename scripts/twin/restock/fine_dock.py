@@ -26,6 +26,12 @@ so the cart stays pinned while the base creeps). The physical latch in ``mobile.
 by the coupling-joint side. Config-driven and default-off: absent ``config['fine_dock']`` ⇒ no
 servo ⇒ the couple stage attaches directly, byte-identical. The sim and real-rig creep/gain/
 tolerance values live in SEPARATE config blocks.
+
+The default creep is the translation-dominant inverse-hitch-Jacobian law above. An OPT-IN
+``approach_mode: 'crosstrack'`` (default ``'hitch_jacobian'`` ⇒ byte-identical) swaps it for a
+cross-track servo of the rear hitch onto the cart axis (``_crosstrack``), which removes the legacy
+law's degenerate zero-command equilibrium LINE -- the coldlivefinal couple failure, where the creep
+limit-cycled at ~26 mm / ~4.8° yaw (just outside the 4° yaw tol) and never latched.
 """
 from __future__ import annotations
 
@@ -55,6 +61,17 @@ class FineDockConfig:
     yaw_tol_rad: float          # and |yaw residual| <= this (must be < 5°)
     settle_speed: float         # measured speeds/yaw-rates <= this => stationary (for 'ready')
     time_cap_s: float           # bounded; past this the servo fails with the live residuals
+    # --- OPTIONAL terminal-docking mode (default 'hitch_jacobian' == the legacy law, byte-identical) ---
+    # 'crosstrack' swaps the creep command for a cross-track servo on the cart axis (see _crosstrack):
+    # it removes the legacy law's degenerate zero-command equilibrium line (``lat = (gain_yaw*|hitch_x|/
+    # gain_lin)*yaw_err``, where ``w==0`` while NEITHER hitch nor yaw is seated -- the coldlivefinal
+    # limit cycle at ~26 mm / ~4.8°). The extra ``ct_*`` gains are only read in that mode.
+    approach_mode: str = 'hitch_jacobian'
+    ct_gain_approach: float = 2.0   # P gain: along-axis distance -> reverse creep toward the drawbar
+    ct_gain_cross: float = 8.0      # cross-track gain: hitch off the cart axis -> steer
+    ct_gain_yaw: float = 1.5        # heading-error gain (base yaw vs cart yaw) -> steer
+    ct_align_hold_m: float = 3.0    # hold-back distance per unit (|cross|+0.3|yaw|): align BEFORE seating
+    ct_min_creep: float = 0.015     # minimum along-axis creep while unseated (beats the drive floor)
 
     def __post_init__(self):
         vals = (self.creep_speed, self.creep_yaw_rate, self.gain_lin, self.gain_yaw,
@@ -65,6 +82,15 @@ class FineDockConfig:
             raise ValueError(f'fine_dock hitch_tol_m must be < attach {_ATTACH_HITCH_M} m')
         if self.yaw_tol_rad >= _ATTACH_YAW_RAD:
             raise ValueError(f'fine_dock yaw_tol_rad must be < attach {math.degrees(_ATTACH_YAW_RAD):.0f}°')
+        if self.approach_mode not in ('hitch_jacobian', 'crosstrack'):
+            raise ValueError("fine_dock approach_mode must be 'hitch_jacobian' or 'crosstrack'")
+        if self.approach_mode == 'crosstrack':
+            ct = (self.ct_gain_approach, self.ct_gain_cross, self.ct_gain_yaw,
+                  self.ct_align_hold_m, self.ct_min_creep)
+            if not all(math.isfinite(v) and v > 0 for v in ct):
+                raise ValueError('fine_dock crosstrack gains must be finite and positive')
+            if self.ct_min_creep >= self.creep_speed:
+                raise ValueError('fine_dock ct_min_creep must be < creep_speed')
 
 
 @dataclass(frozen=True)
@@ -130,6 +156,10 @@ class FineDock:
             # Close enough but still moving: brake and let it settle (no new creep command).
             return FineDockResult('creeping', 0.0, 0.0, hm, yr, reason='settling within tolerance')
 
+        if cfg.approach_mode == 'crosstrack':
+            v, w, reason = self._crosstrack(dock, hm)
+            return FineDockResult('creeping', v, w, hm, yr, reason=reason)
+
         # Inverse-hitch-Jacobian proportional creep toward the measured drawbar.
         b, hx_spec = dock.robot, self.spec.hitch_x
         hx, hy = b.point(hx_spec)
@@ -143,6 +173,48 @@ class FineDock:
                 min(cfg.creep_yaw_rate, -(cfg.gain_lin / hx_spec) * lat - cfg.gain_yaw * yaw_err))
         return FineDockResult('creeping', v, w, hm, yr,
                               reason=f'creep hitch={hm*1000:.0f}mm yaw={math.degrees(yaw_err):.1f}deg')
+
+    def _crosstrack(self, dock, hm):
+        """Cross-track servo of the REAR HITCH onto the cart's drawbar axis (opt-in approach mode).
+
+        The legacy inverse-hitch-Jacobian law folds the lateral-hitch and yaw corrections into one
+        ``w``; wherever ``lat = (gain_yaw*|hitch_x|/gain_lin)*yaw_err`` the two cancel (``w==0``) with
+        NEITHER seated -- a whole equilibrium LINE outside the latch box. The approach lands on it at
+        whatever yaw the standoff cross-track implies; coldlivefinal landed at ~4.8° (> the 4° yaw tol,
+        hitch ~26 mm) and the creep could not null the last mm/degree (FINE_DOCK limit cycle).
+
+        Here the rear hitch is the LEADING point of the reverse approach, so steering it onto the cart
+        axis is a stable (minimum-phase) trailer-free cross-track problem -- forward motion provides the
+        steering authority, so the only equilibrium is the seated pose:
+
+            along = (hitch - drawbar) . cart_axis      # +ahead of the drawbar on the base side
+            cross = (hitch - drawbar) . cart_normal    # signed offset from the axis
+            v = -ct_gain_approach * (along - along_sp)  # reverse toward the drawbar, held back while
+                                                        #   mis-aligned so cross/yaw null BEFORE seating
+            w =  ct_gain_cross * cross - ct_gain_yaw * yaw_err
+
+        ``along_sp = min(along, ct_align_hold_m*(|cross|+0.3|yaw_err|))`` keeps the hitch a touch short of
+        the drawbar until it is on the axis and aligned, then finishes in; a ``ct_min_creep`` floor keeps
+        the base moving (so steering stays live) until the residual check latches. Pure motion -- the
+        latch tolerances and the physical attach are unchanged.
+        """
+        cfg, spec = self.config, self.spec
+        cy = dock.cart.yaw
+        ux, uy = math.cos(cy), math.sin(cy)               # cart hitch axis (forward)
+        nx, ny = -math.sin(cy), math.cos(cy)              # cart axis normal
+        dbx, dby = dock.cart.point(spec.cart_hitch_x)     # drawbar (world)
+        hx, hy = dock.robot.point(spec.hitch_x)           # rear hitch (world)
+        along = (hx - dbx) * ux + (hy - dby) * uy
+        cross = (hx - dbx) * nx + (hy - dby) * ny
+        yaw_err = wrap(dock.robot.yaw - cy)
+        along_sp = min(along, cfg.ct_align_hold_m * (abs(cross) + 0.3 * abs(yaw_err)))
+        v = max(-cfg.creep_speed, min(cfg.creep_speed, -cfg.ct_gain_approach * (along - along_sp)))
+        if abs(v) < cfg.ct_min_creep and along > 0.003:   # keep creeping in so steering stays effective
+            v = -cfg.ct_min_creep
+        w = max(-cfg.creep_yaw_rate,
+                min(cfg.creep_yaw_rate, cfg.ct_gain_cross * cross - cfg.ct_gain_yaw * yaw_err))
+        return v, w, (f'crosstrack hitch={hm*1000:.0f}mm cross={cross*1000:.0f}mm '
+                      f'yaw={math.degrees(yaw_err):.1f}deg')
 
 
 def build(config, spec=None):
