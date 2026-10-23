@@ -169,6 +169,41 @@ def reference_time(feedback_stamp, start):
     return max(0.0, feedback_stamp - start)
 
 
+def execute_clock(elapsed, wall_now, wall_backstop, *, lead=FEEDBACK_RENDER_LEAD_S):
+    """Resolve the trajectory-EXECUTION clock against the measured-feedback-anchored origin. Pure.
+
+    ``elapsed`` = now() - anchored_start, where the anchored ``start`` is a MEASURED-FEEDBACK stamp (see
+    anchored_start). Under render pacing that stamp can LEAD the node /clock by up to ``lead`` sim seconds
+    -- the identical sub-tick /clock-vs-/joint_states delivery race feedback_fresh/reference_time already
+    absorb -- so the first execute-loop ``now()`` read right after anchoring can yield a small NEGATIVE
+    ``elapsed`` that is the trajectory start pose, NOT a sim-clock regression. The bound is exact: a
+    feedback frame leading now() by more than ``lead`` is refused as stale by feedback_fresh and never
+    anchors ``start`` (gap = now-stamp >= -lead there), so ``start - now`` <= ``lead`` by construction and
+    a within-``lead`` negative elapsed can only be this race.
+
+    coldlive sample 2 (2026-10-23, live_pose full-chain capstone) faulted exactly here: ``TRAJ_HOST_START
+    anchored start=26.533 install=26.516668 anchor_lag=0.017s`` then two immediate ``TRAJ_HOST_FAULT
+    trajectory clock/timeout failure`` on a VALID 2-point plan -- the next now() still read ~26.516, so the
+    old hard ``elapsed<0`` fired. Four earlier trajectories in the same run passed only because their first
+    post-anchor now() happened to have caught up; under the heavy live_pose load the /clock relay lags more.
+
+    Returns ``(clamped_elapsed, fault_reason)``:
+
+    * sub-tick negative lead (``-lead <= elapsed < 0``) -> ``(0.0, None)``: hold the start pose, no fault.
+    * normal forward clock -> ``(elapsed, None)``.
+    * genuine sim-clock regression (``elapsed < -lead``) -> ``(None, 'trajectory clock regression')``.
+    * frozen/hung-sim WALL backstop (``wall_now > wall_backstop``) -> ``(None, 'trajectory clock/timeout
+      failure')`` (unchanged; a genuinely stuck loop still fails by name).
+
+    The wall backstop is checked first so a stuck sim that also reads a stale elapsed still reports the
+    timeout, not the regression."""
+    if wall_now > wall_backstop:
+        return (None, 'trajectory clock/timeout failure')
+    if elapsed < -lead:
+        return (None, 'trajectory clock regression')
+    return (max(0.0, elapsed), None)
+
+
 def tracking_fault(track_err, miss_count, *, tol=TRACKING_TOL, debounce=TRACKING_DEBOUNCE,
                    hard=TRACKING_HARD_TOL):
     """Decide whether a command-vs-measured tracking error should emergency-stop the mission.
@@ -500,13 +535,17 @@ def main():
                     continue
                 with lock:
                     started=state['start']         # only ever transitions None -> set (monotonic)
-                    elapsed=now()-started
-                    # Sim-clock regression is a hard fault; the WALL bound is only a frozen/hung-sim
-                    # backstop (see EXECUTE_WALL_BACKSTOP_S). Under render pacing a healthy grasp advances
-                    # ``elapsed`` normally while taking many wall seconds per sim second, so it never
-                    # approaches the backstop. Terminal completion/overrun is on the sim clock below.
-                    if elapsed<0 or time.monotonic()>wall_backstop:
-                        fault('trajectory clock/timeout failure')
+                    # A sub-tick NEGATIVE elapsed is the /clock-vs-feedback render-lead race (start is a
+                    # measured-feedback stamp that can lead the node /clock by <=FEEDBACK_RENDER_LEAD_S --
+                    # coldlive sample 2 anchor_lag 0.017 s), NOT a regression: execute_clock clamps it to
+                    # the start pose (sample(0)) instead of hard-faulting. A GENUINE regression beyond the
+                    # render lead, and the frozen/hung-sim WALL backstop (EXECUTE_WALL_BACKSTOP_S), both
+                    # still fault by name. Under render pacing a healthy grasp advances ``elapsed`` normally
+                    # while taking many wall seconds per sim second, so it never approaches the backstop.
+                    # Terminal completion/overrun is on the sim clock below.
+                    elapsed,clock_fault=execute_clock(now()-started,time.monotonic(),wall_backstop)
+                    if clock_fault is not None:
+                        fault(clock_fault)
                     if state['fault']:
                         raise RuntimeError(state['fault'])
                     if state['contact']:
