@@ -101,7 +101,19 @@ def feeds_from_config(config):
     Reads ``masked_depth`` (the arm feed, camera_0) and ``mast_depth`` (camera_1, opt-in). A feed's
     resolution comes from its ``resolution: [w, h]`` when set, else the reference arm resolution.
     A feed is counted only when its block opts in (``enabled``). Pure dict reader (no Isaac)."""
-    from .masked_depth_economy import from_block as _economy_from_block, scaled_resolution
+    try:
+        from .masked_depth_economy import from_block as _economy_from_block, scaled_resolution
+    except ImportError:
+        # Run by file path (``python3 .../gpu_budget.py``) there is no parent package, so the
+        # relative import fails; put the ``scripts/`` root on sys.path and import absolutely. The
+        # ``-m twin.restock.gpu_budget`` path keeps the relative import and never reaches here.
+        import sys as _sys
+        from pathlib import Path as _Path
+        _scripts_root = str(_Path(__file__).resolve().parents[2])
+        if _scripts_root not in _sys.path:
+            _sys.path.insert(0, _scripts_root)
+        from twin.restock.masked_depth_economy import (  # type: ignore[no-redef]
+            from_block as _economy_from_block, scaled_resolution)
     feeds = []
     for key in ('masked_depth', 'mast_depth'):
         block = config.get(key) or {}
