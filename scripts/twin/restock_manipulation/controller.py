@@ -704,6 +704,16 @@ class TransferController:
             return self._fail('%s aborted: the move_group planner crashed or hung (a plan goal was never '
                               'accepted / no plan returned within the sim planning budget) and did not '
                               'respawn -- failing fast' % self.phase)
+        # sim-robust-movegroup-double-death-v1 (gap 1, coldwin4): the carried carton could not be re-attached
+        # to the respawned move_group's planning scene within the bounded sim budget. The carton is NOT in
+        # the scene, so re-planning would plan straight through it -- fail the op BY NAME rather than resend
+        # carton-less (the coldwin4 recovery gap). Checked beside the planner-crash fast-fail; no such fault
+        # on a healthy or no-carry recovery -> None (byte-identical).
+        reattach = getattr(self.motion, 'last_fault_was_reattach_failure', None)
+        if callable(reattach) and reattach():
+            return self._fail('%s aborted: the carried carton could not be re-attached to the respawned '
+                              'move_group planning scene within the re-attach budget -- failing fast rather '
+                              'than planning without the carton' % self.phase)
         return None
 
     def retry_or_fail_move(self, reason):

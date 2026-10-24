@@ -647,6 +647,163 @@ class MoveGroupRespawnSceneResync(unittest.TestCase):
             self.assertTrue(p.update_payload(True, 'PROFILE'), st)   # never raises between moves
 
 
+class MoveGroupDoubleDeathRecovery(unittest.TestCase):
+    """sim-robust-movegroup-double-death-v1 (coldwin4): two recovery gaps a move_group death during collect
+    exposed, beyond the single-death recovery.
+
+    GAP 1 -- the post-respawn carton RE-ATTACH must not trust a SINGLE payload_sync at the respawn instant.
+    coldwin4 PAYLOAD_SYNC_DIAG showed held=True s_contact=True fresh and both servers ready, yet the freshly
+    respawned move_group REJECTED the attach goal (it had not finished re-initialising) and the recovery then
+    proceeded CARTON-LESS (the resend planned through the held carton). Retry the attach bounded on the SIM
+    clock (spanning poll()s so the node clock advances and the respawned server finishes init) and NEVER
+    resend without the carton -- fail the op BY NAME if it never succeeds.
+
+    GAP 2 -- a MID-OP respawn+reseed leaves the pre-crash FollowJointTrajectory goal LIVE on the executor,
+    so the reseeded resend's new goal is rejected 'a previous goal is still executing' -> execution failed ->
+    the stale goal tracking-faults at 1.314 rad -> e-stop. The crash-retry resend force-clears it via the
+    /arm_controller/abort_active signal BEFORE resending (PR 229's op-start reset never clears a LIVE goal)."""
+
+    @staticmethod
+    def _port(*, attached='PROFILE', payload=None, sim=None, state='execute_result'):
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state = state
+        p.timeout = 25.0
+        p.generation = 7
+        p.handle = None
+        p._plan_goal = 'GOAL'
+        p._server_crash_retries = 0
+        p._op_crash_retries = 0
+        p._awaiting_server_respawn = False
+        p._replan_attempts = 5
+        p._attached_profile = attached
+        p._reattach_active = False
+        p._reattach_started_sim = 0.0
+        p._reattach_failed = False
+        p._last_fault_sim_deadline = False
+        p._live_arm_state = None            # real-rig-style: _reanchor is a no-op
+        p._plan_dispatches = 0
+        p._sim_now = sim if sim is not None else (lambda: 0.0)
+        p._estops = []
+        p.emergency_stop = lambda: p._estops.append(True)
+        p.plan = _FakePlan(True)
+        p.execute = _FakePlan(True)
+        p.payload_sync = payload if payload is not None else (lambda held, profile: True)
+        # Record the gap-2 abort_active signal without the std_msgs ROS message (unavailable on CPU); the
+        # separate plumbing test proves _publish_abort_active publishes Bool(data=True) to a real pub.
+        p.aborts = []
+        p._publish_abort_active = lambda: p.aborts.append('abort_active')
+        return p
+
+    # ---- GAP 1: bounded sim-clock re-attach; never resend carton-less -----------------------------
+    def test_reattach_retries_on_the_sim_clock_then_resends_when_accepted(self):
+        t = [0.0]
+        attempts = {'n': 0}
+        def payload(held, profile):
+            attempts['n'] += 1
+            return attempts['n'] >= 3            # the respawned planner rejects twice, accepts on the 3rd
+        p = self._port(payload=payload, sim=lambda: t[0])
+        p._begin_post_respawn_recovery()         # starts the re-attach; first attempt rejected
+        self.assertTrue(p._reattach_active)
+        self.assertEqual(p.plan.sent, [])        # NOT resent carton-less
+        t[0] = 1.0
+        p._step_reattach()                       # 2nd attempt rejected -> still deferred
+        self.assertTrue(p._reattach_active)
+        self.assertEqual(p.plan.sent, [])
+        t[0] = 2.0
+        p._step_reattach()                       # 3rd attempt ACCEPTED -> re-attached, now resend
+        self.assertFalse(p._reattach_active)
+        self.assertFalse(p._reattach_failed)
+        self.assertEqual(p.plan.sent, ['GOAL'])  # resent only ONCE the carton was back in the scene
+        self.assertEqual(attempts['n'], 3)
+
+    def test_reattach_fails_op_by_name_when_the_respawned_planner_never_accepts(self):
+        from twin.restock_manipulation.ros_adapter import REATTACH_SIM_BUDGET_S
+        t = [0.0]
+        p = self._port(payload=lambda held, profile: False, sim=lambda: t[0])
+        p._begin_post_respawn_recovery()
+        self.assertTrue(p._reattach_active)
+        t[0] = REATTACH_SIM_BUDGET_S + 1.0       # sim budget exhausted
+        p._step_reattach()
+        self.assertFalse(p._reattach_active)
+        self.assertTrue(p._reattach_failed)
+        self.assertTrue(p.last_fault_was_reattach_failure())
+        self.assertFalse(p.last_fault_was_sim_deadline())   # terminal: the controller must NOT retry it
+        self.assertEqual(p.state, 'failed')
+        self.assertEqual(p.plan.sent, [])                    # NEVER resent carton-less
+        self.assertEqual(p._estops, [])                      # _fail_hold (no global stop); _fail() stops honestly
+
+    def test_reattach_noop_and_immediate_resend_when_nothing_held(self):
+        p = self._port(attached=None)
+        p._begin_post_respawn_recovery()
+        self.assertFalse(p._reattach_active)
+        self.assertEqual(p.plan.sent, ['GOAL'])              # no-carry resend is immediate (byte-identical)
+
+    def test_handle_server_crash_defers_resend_until_carton_reattached(self):
+        # The full respawn-back path: a held carton + a transiently-rejecting respawned planner does NOT
+        # resend until the re-attach succeeds across polls, and the crash retry is counted.
+        attempts = {'n': 0}
+        def payload(held, profile):
+            attempts['n'] += 1
+            return attempts['n'] >= 2
+        p = self._port(payload=payload, state='plan_result')
+        p._awaiting_server_respawn = True
+        self.assertEqual(p._handle_server_crash(), 'running')
+        self.assertTrue(p._reattach_active)
+        self.assertEqual(p.plan.sent, [])                    # deferred, never carton-less
+        self.assertEqual(p._server_crash_retries, 1)         # the retry was counted at respawn detect
+        p._step_reattach()                                   # 2nd attempt accepts -> resend
+        self.assertFalse(p._reattach_active)
+        self.assertEqual(p.plan.sent, ['GOAL'])
+
+    # ---- GAP 2: force-clear the crash-abandoned live trajectory_host goal before resending ---------
+    def test_crash_retry_publishes_abort_active_before_resending(self):
+        # Every crash-retry resend (carry or not, mid-plan or mid-execute = pick/descent/stow) force-clears a
+        # crash-abandoned LIVE executor goal first, so the reseeded resend is accepted (coldwin4 death 2).
+        for attached in ('PROFILE', None):
+            for state in ('plan_result', 'execute_result'):
+                p = self._port(attached=attached, state=state)
+                p._awaiting_server_respawn = True
+                p._handle_server_crash()
+                self.assertEqual(p.aborts, ['abort_active'], (attached, state))
+                self.assertEqual(p.plan.sent, ['GOAL'], (attached, state))   # re-attach ok -> resend
+
+    def test_two_deaths_in_one_op_each_recover_and_accrue_the_op_budget(self):
+        # PR 227 per-op budget: the per-MOVE retry resets each move (begin/begin_joint_goal), but the per-OP
+        # total accrues across moves. Each death's respawn re-attaches + force-clears the stale goal + resends.
+        p = self._port(attached='PROFILE', state='execute_result')
+        p._awaiting_server_respawn = True
+        p._handle_server_crash()                                   # death 1 (e.g. the pick)
+        self.assertEqual((p._server_crash_retries, p._op_crash_retries), (1, 1))
+        self.assertEqual(p.plan.sent, ['GOAL'])
+        p._server_crash_retries = 0                                # per-move reset at the next move's begin()
+        p._awaiting_server_respawn = True
+        p.state = 'execute_result'
+        p._handle_server_crash()                                   # death 2 (e.g. the stow) in the SAME op
+        self.assertEqual(p._op_crash_retries, 2)                   # op total accrues across moves
+        self.assertEqual(p.aborts, ['abort_active', 'abort_active'])
+
+    def test_publish_abort_active_sends_bool_true_and_tolerates_a_missing_publisher(self):
+        import types as _types
+        fake = _types.ModuleType('std_msgs')
+        fakemsg = _types.ModuleType('std_msgs.msg')
+        fakemsg.Bool = lambda data: S(data=data)
+        saved = {k: sys.modules.get(k) for k in ('std_msgs', 'std_msgs.msg')}
+        sys.modules['std_msgs'], sys.modules['std_msgs.msg'] = fake, fakemsg
+        try:
+            p = RosMotionPort.__new__(RosMotionPort)
+            rec = []
+            p._abort_active_pub = S(publish=lambda m: rec.append(m.data))
+            p._publish_abort_active()
+            self.assertEqual(rec, [True])                          # forces the host to clear the stale goal
+            RosMotionPort.__new__(RosMotionPort)._publish_abort_active()   # no publisher -> no-op, no raise
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+
+
 class Drain(unittest.TestCase):
     """drain() advances the PLANNING state machine off the independent watchdog tick (firstmate 290
     option b / run-237), so a move_group result is consumed within 0.1 s of arrival regardless of the

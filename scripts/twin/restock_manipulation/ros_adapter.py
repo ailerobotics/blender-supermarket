@@ -96,6 +96,17 @@ RESPAWN_WAIT_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_RESPAWN_W
 # re-send then fail (2 x PLAN_SIM_DEADLINE_S of sim time, well under a per-phase timeout); 0 => fail on the
 # first sim planning deadline. A healthy run never reaches a sim planning deadline, so this is inert there.
 PLAN_ACCEPT_CRASH_RETRY_MAX = max(0, min(5, int(os.environ.get('RESTOCK_PLAN_ACCEPT_CRASH_RETRY_MAX', 1))))
+# sim-robust-movegroup-double-death-v1 (gap 1, coldwin4): bounded SIM-clock budget for the post-respawn
+# carton RE-ATTACH. A freshly respawned move_group starts with a FRESH planning scene that no longer holds
+# restock_carried_unit, so the crash-retry must re-attach it before resending the plan. coldwin4 proved the
+# single-shot re-attach is not enough: PAYLOAD_SYNC_DIAG at the respawn showed held=True s_contact=True
+# age=0.067 scene_ready=True attach_ready=True, yet the attach goal was REJECTED (gate=attach_goal_rejected)
+# because the respawned object_attachment/move_group had not finished re-initialising -- and the recovery
+# then proceeded CARTON-LESS (the resend planned through the held carton). Retry the attach, bounded on the
+# SIM clock (spanning poll()s so the node /clock advances and the respawned server finishes init), and NEVER
+# resend without the carton: fail the op BY NAME if it never succeeds. Healthy (no-crash) runs never re-attach
+# so this is inert there. Env-overridable; clamped. Generous but well under the 120 s phase timeout.
+REATTACH_SIM_BUDGET_S = max(1.0, min(600.0, float(os.environ.get('RESTOCK_REATTACH_SIM_BUDGET_S', 30.0))))
 # Fail FAST on a persistently-failing plan (firstmate run-216/279): an IK-infeasible goal churns the
 # 12 replans + every seed, each resetting a fresh per-attempt deadline, so the move could retry well
 # past the host's 30 s /sensors wall backstop -- which then fired as the mission reason instead of a
@@ -497,6 +508,15 @@ class RosMotionPort:
         # fail fast with a NAMED cause instead of looping its own move retries to the per-phase timeout.
         self._plan_accept_crash_retries = 0
         self._planner_unrecoverable = False
+        # sim-robust-movegroup-double-death-v1 (gap 1, coldwin4): bounded post-respawn carton re-attach
+        # state. _reattach_active is True while retrying the attach against a freshly respawned move_group
+        # (spanning poll()s so the node /clock advances and the respawned server finishes init);
+        # _reattach_started_sim anchors the SIM-clock budget (REATTACH_SIM_BUDGET_S); _reattach_failed is
+        # the terminal flag the controller reads to FAIL the op BY NAME (the carton could not be restored
+        # to the planning scene -- never plan through it). Reset per move + at op start (reset_crash_budget).
+        self._reattach_active = False
+        self._reattach_started_sim = 0.0
+        self._reattach_failed = False
         self.ik = node.create_client(GetPositionIK, namespace + '/compute_ik')
         self.plan = ActionClient(node, MoveGroup, namespace + '/move_action')
         self.execute = ActionClient(node, ExecuteTrajectory, namespace + '/execute_trajectory')
@@ -530,6 +550,15 @@ class RosMotionPort:
         # reset; begin()/begin_joint_goal() publish a fresh one each move, well before planning finishes.
         from std_msgs.msg import Bool as _Bool
         self._reset_pub = node.create_publisher(_Bool, namespace + '/arm_controller/reset', 10)
+        # sim-robust-movegroup-double-death-v1 (gap 2, coldwin4): a FORCE-abort signal to the trajectory_host
+        # for a MID-OP move_group respawn+reseed. The op-start reset (_reset_pub) deliberately NEVER clears a
+        # LIVE active goal (reset_clears guards that). But move_group crashes mid-EXECUTION leaving its
+        # FollowJointTrajectory goal still live on the executor, so the reseeded resend's ExecuteTrajectory is
+        # rejected 'a previous goal is still executing' (coldwin4 death 2) -> execution failed -> the stale
+        # goal tracking-faults at 1.314 rad -> e-stop. This stronger signal forces the crash-abandoned LIVE
+        # goal to abort + clears the fault so the resend is ACCEPTED. Published ONLY on a crash-retry resend;
+        # the no-crash path never publishes it => byte-identical. VOLATILE (a restarted host must not replay it).
+        self._abort_active_pub = node.create_publisher(_Bool, namespace + '/arm_controller/abort_active', 10)
         self._exec_abort_reason = None   # distinct reason for the last ExecuteTrajectory abort (take_*)
         # Deadlines: IK/planning are compute-bound -> WALL clock. Trajectory EXECUTION is paced by the
         # simulator: under render pacing executing D sim-seconds takes far more WALL time, so a wall
@@ -553,6 +582,19 @@ class RosMotionPort:
         at the start of every move; a no-op on the host when there is no fault. Best-effort: a missing
         publisher (older fixtures) must never break a move."""
         pub = getattr(self, '_reset_pub', None)
+        if pub is None:
+            return
+        from std_msgs.msg import Bool
+        pub.publish(Bool(data=True))
+
+    def _publish_abort_active(self):
+        """sim-robust-movegroup-double-death-v1 (gap 2): force the trajectory_host to abort any LIVE active
+        goal + clear its fault on a MID-OP move_group respawn+reseed. move_group crashes mid-execution with
+        its FollowJointTrajectory goal still live on the executor, so the reseeded resend would be rejected
+        'a previous goal is still executing' (PR 229's op-start reset never clears a live goal). Published
+        only on a crash-retry resend; a no-op on the host when nothing is active (byte-identical no-crash
+        path). Best-effort: a missing publisher (older fixtures) must never break the recovery."""
+        pub = getattr(self, '_abort_active_pub', None)
         if pub is None:
             return
         from std_msgs.msg import Bool
@@ -600,6 +642,8 @@ class RosMotionPort:
         self._server_crash_retries = 0     # move_group-respawn re-send budget (see MOVE_GROUP_CRASH_RETRY_MAX)
         self._plan_accept_crash_retries = 0   # sim-robust-collect-stow-stall-v1: sim-planning-deadline re-sends
         self._planner_unrecoverable = False   # sim-robust-collect-stow-stall-v1: fresh terminal flag per move
+        self._reattach_active = False         # sim-robust-movegroup-double-death-v1 (gap 1): no re-attach in flight
+        self._reattach_failed = False         # gap 1: fresh terminal re-attach-failure flag per move
         self._awaiting_server_respawn = False  # True while holding the move open for a respawned move_group
         self._plan_goal = None             # the MoveGroup goal to re-send on a plan rejection
         self._plan_dispatches = 0          # total cuMotion plan dispatches this move (see PLAN_TOTAL_ATTEMPTS_CAP)
@@ -963,6 +1007,8 @@ class RosMotionPort:
         self._server_crash_retries=0
         self._plan_accept_crash_retries=0   # sim-robust-collect-stow-stall-v1: sim-planning-deadline re-sends
         self._planner_unrecoverable=False   # sim-robust-collect-stow-stall-v1: fresh terminal flag per move
+        self._reattach_active=False         # sim-robust-movegroup-double-death-v1 (gap 1): no re-attach in flight
+        self._reattach_failed=False         # gap 1: fresh terminal re-attach-failure flag per move
         self._awaiting_server_respawn=False
         self._plan_goal=None
         self._plan_dispatches=0            # total cuMotion plan dispatches this move (PLAN_TOTAL_ATTEMPTS_CAP)
@@ -1241,17 +1287,66 @@ class RosMotionPort:
             self._replan_attempts = 0
             self.handle = None
             self.generation += 1
-            self._arm_plan_deadline()   # sim-clock planning deadline on the re-sent plan (render-pacing tolerant)
-            self._plan_started_wall = time.monotonic()
-            self._plan_started_sim = self._sim_now()   # fresh total planning SIM budget after respawn
-            self._resync_scene_after_respawn()   # re-attach the carried carton to the fresh scene FIRST
             print('MOVE_GROUP_CRASH_RETRY resending plan goal after respawn (retry %d/%d, op %d/%d)'
                   % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX,
                      self._op_crash_retries, MOVE_GROUP_CRASH_RETRY_OP_MAX), flush=True)
-            self._reanchor_plan_goal_to_live()
-            self._send(self.plan, self._plan_goal, 'plan_accept')
+            # gap 2: force-clear a crash-abandoned LIVE trajectory_host goal; gap 1: re-attach the carried
+            # carton (bounded on the sim clock) BEFORE resending, and resend only once it is back. The plan
+            # deadline/anchors are armed at the actual resend (in _resend_plan_after_respawn), not here, so a
+            # bounded re-attach that spans polls does not eat the new plan's budget.
+            self._begin_post_respawn_recovery()
             return 'running'
         return None
+
+    def _begin_post_respawn_recovery(self):
+        """sim-robust-movegroup-double-death-v1: drive the post-respawn recovery for a crash-retry resend.
+        (gap 2) Force the trajectory_host to abort a crash-abandoned LIVE FollowJointTrajectory goal so the
+        reseeded resend is accepted. (gap 1) When a carton is held, re-attach it to the respawned planning
+        scene BEFORE resending the plan, retried bounded on the sim clock (spanning poll()s); never resend
+        carton-less. With nothing held the plan is resent immediately (byte-identical no-carry path)."""
+        self._publish_abort_active()   # gap 2: clear a crash-abandoned live goal + fault on the executor
+        if getattr(self, '_attached_profile', None) is None:
+            self._resend_plan_after_respawn()   # nothing held -> resend now (no-carry, byte-identical)
+            return
+        self._reattach_active = True
+        self._reattach_started_sim = self._sim_now()
+        self._step_reattach()   # try once now; _step_reattach resends on success, or defers across polls
+
+    def _resend_plan_after_respawn(self):
+        """sim-robust-movegroup-double-death-v1: (re-)dispatch the stored plan goal to the respawned
+        move_group after the recovery (gap 1 re-attach + gap 2 executor clear) has completed. Arms a FRESH
+        sim-clock planning deadline + total-planning anchors AT THE ACTUAL RESEND (so a bounded re-attach
+        that spanned several polls does not charge its sim time against the new plan's budget), re-anchors
+        the request start to the live measured joints (fm405), and sends. Shared by every resend site."""
+        self._arm_plan_deadline()   # sim-clock planning deadline on the re-sent plan (render-pacing tolerant)
+        self._plan_started_wall = time.monotonic()
+        self._plan_started_sim = self._sim_now()   # fresh total planning SIM budget after respawn
+        self._reanchor_plan_goal_to_live()         # fm405: re-plan from live state (resume mid-descent)
+        self._send(self.plan, self._plan_goal, 'plan_accept')
+
+    def _step_reattach(self):
+        """sim-robust-movegroup-double-death-v1 (gap 1): one poll-step of the bounded post-respawn carton
+        re-attach. Retries the attach against the freshly respawned move_group until it ACCEPTS (coldwin4:
+        the respawned planner transiently rejected the attach despite valid held/contact/fresh state and
+        ready servers), then resends the plan. Bounded on the SIM clock -- called once per poll() so the
+        node /clock advances and the respawned attach server finishes init between attempts. On budget
+        exhaustion the op FAILS BY NAME (_reattach_failed) rather than planning without the carton: the
+        carton is not in the scene, so a resend would plan straight through it. _fail_hold (no global stop)
+        lets the controller surface the named reason honestly."""
+        if self._resync_scene_after_respawn():   # one attach attempt (also True when nothing is held)
+            self._reattach_active = False
+            self._resend_plan_after_respawn()
+            return
+        waited = self._sim_now() - getattr(self, '_reattach_started_sim', self._sim_now())
+        if waited > REATTACH_SIM_BUDGET_S:
+            self._reattach_active = False
+            self._reattach_failed = True
+            self._last_fault_sim_deadline = False   # terminal: the controller must NOT deadline-retry this
+            print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit NEVER SUCCEEDED within %.0fs sim '
+                  '(the respawned move_group kept rejecting the attach -- see PAYLOAD_SYNC_DIAG); failing the '
+                  'op rather than planning without the carton' % REATTACH_SIM_BUDGET_S, flush=True)
+            self._deadline_fail('sim')   # hold (no global stop); the controller _fail()s with a named reason
+        # else: still re-attaching -> stay _reattach_active and retry on the next poll()
 
     def _resync_scene_after_respawn(self):
         """sim-robust-movegroup-respawn-v1: before re-sending a plan goal to a RESPAWNED move_group,
@@ -1266,11 +1361,13 @@ class RosMotionPort:
         self-collision / result validation still gates correctness), but it is reported TRUTHFULLY.
 
         Returns True when the carton is (or was already) restored to the scene -- including the no-carry
-        no-op -- and False when a re-attach was NEEDED but the payload_sync call reported not-ok (the
-        carton is NOT in the respawned scene). sim-robust-movegroup-second-death-v1: the previous log said
-        're-attached ... (ok=False)' even on FAILURE, which read as success; payload_sync returns False at
-        its own sensor precondition gate (a stale or !contact packet at the respawn moment -- estopretry),
-        so the carton was silently absent from the resent plan's scene. Report the failure as a failure."""
+        no-op -- and False when a re-attach was NEEDED but the payload_sync call reported not-ok (the carton
+        is NOT YET in the respawned scene). sim-robust-movegroup-double-death-v1 (gap 1, coldwin4): this is a
+        SINGLE attach attempt; the caller (_step_reattach) RETRIES it bounded on the sim clock and never
+        resends the plan carton-less, failing the op BY NAME if the attach never succeeds. The false here is
+        not "a stale packet" -- coldwin4 showed valid held/contact/fresh state and ready servers, yet the
+        freshly respawned planner rejected the attach goal (gate=attach_goal_rejected) until it finished
+        re-initialising. Report the not-yet-acknowledged attach truthfully; a raise is swallowed to False."""
         profile = getattr(self, '_attached_profile', None)
         if profile is None:
             return True                                         # nothing held -> scene already consistent
@@ -1284,10 +1381,14 @@ class RosMotionPort:
             print('MOVE_GROUP_CRASH_RETRY re-attached restock_carried_unit to the respawned move_group '
                   'planning scene before resend', flush=True)
         else:
-            print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit FAILED after respawn '
-                  '(payload_sync returned not-ok -> carton NOT in the respawned planning scene; the resend '
-                  'will plan WITHOUT it). Likely a stale/!contact sensor packet at the respawn moment -- '
-                  'see PAYLOAD_SYNC_DIAG for the failing gate.', flush=True)
+            # sim-robust-movegroup-double-death-v1 (gap 1): the respawned move_group rejected the attach
+            # (coldwin4: gate=attach_goal_rejected despite held=True/contact=True/fresh/servers-ready -- the
+            # respawned planner had not finished re-initialising). The caller (_step_reattach) RETRIES this
+            # bounded on the sim clock and NEVER resends carton-less; see PAYLOAD_SYNC_DIAG for the gate.
+            print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit not yet acknowledged by the '
+                  'respawned move_group (payload_sync returned not-ok -> carton NOT yet in the respawned '
+                  'planning scene; will retry bounded on the sim clock, never plan without it). '
+                  'See PAYLOAD_SYNC_DIAG for the failing gate.', flush=True)
         return ok
 
     def _reanchor_plan_goal_to_live(self):
@@ -1342,6 +1443,15 @@ class RosMotionPort:
         per-phase timeout. Takes precedence over last_fault_was_sim_deadline (which is cleared in this case).
         Cleared at the start of every move (begin/begin_joint_goal)."""
         return bool(getattr(self, '_planner_unrecoverable', False))
+
+    def last_fault_was_reattach_failure(self):
+        """sim-robust-movegroup-double-death-v1 (gap 1): True iff the most recent 'failed' poll was a terminal
+        post-respawn carton RE-ATTACH failure -- the freshly respawned move_group never acknowledged the
+        attach of restock_carried_unit within REATTACH_SIM_BUDGET_S. The controller reads it after a 'failed'
+        poll to fail the op FAST with a NAMED cause: the carton is NOT in the respawned planning scene, so a
+        resend would plan straight through it. Takes precedence over last_fault_was_sim_deadline (cleared in
+        this case). Cleared at the start of every move (begin/begin_joint_goal)."""
+        return bool(getattr(self, '_reattach_failed', False))
 
     def poll(self):
         try:
@@ -1413,6 +1523,14 @@ class RosMotionPort:
         from moveit_msgs.msg import Constraints, JointConstraint
         if self.state in ('succeeded', 'failed'):
             return self.state
+        # sim-robust-movegroup-double-death-v1 (gap 1): a bounded post-respawn carton re-attach is in
+        # progress (the respawned move_group transiently rejected the attach). Step it HERE, before the
+        # crash/deadline checks -- spanning poll()s so the node /clock advances and the respawned attach
+        # server finishes init -- until the carton is re-attached (then the plan is resent) or the sim
+        # budget is exhausted (then the op fails BY NAME, never carton-less). Inert when not re-attaching.
+        if getattr(self, '_reattach_active', False):
+            self._step_reattach()
+            return 'failed' if self.state == 'failed' else 'running'
         # A move_group SIGABRT (double-free in cuMotion result handling, run-266/268) makes its action
         # server vanish mid-move. Checked BEFORE the deadline so the move is held open for the launch's
         # respawn and re-sent, rather than timing out to 'failed'. Inert when the server is live.
@@ -1453,16 +1571,13 @@ class RosMotionPort:
                 self._awaiting_server_respawn = False
                 self.handle = None
                 self.generation += 1
-                self._arm_plan_deadline()   # sim-clock planning deadline on the re-sent plan (render-pacing tolerant)
-                self._plan_started_wall = time.monotonic()
-                self._plan_started_sim = self._sim_now()   # fresh total planning SIM budget after respawn
-                self._resync_scene_after_respawn()   # re-attach the carried carton to the fresh scene FIRST
                 print('MOVE_GROUP_CRASH_RETRY plan-result wall-deadline (likely move_group crash+respawn '
                       'between polls); resending plan goal (retry %d/%d, op %d/%d)'
                       % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX,
                          self._op_crash_retries, MOVE_GROUP_CRASH_RETRY_OP_MAX), flush=True)
-                self._reanchor_plan_goal_to_live()   # fm405: re-plan from live state (resume mid-descent)
-                self._send(self.plan, self._plan_goal, 'plan_accept')
+                # gap 1/2: clear a crash-abandoned live executor goal + re-attach the carton (bounded on the
+                # sim clock) before resending. The plan deadline/anchors are armed at the actual resend.
+                self._begin_post_respawn_recovery()
                 return 'running'
             # sim-robust-collect-stow-stall-v1: a SIM-clock PLANNING-state deadline (plan_accept/plan_result)
             # is positive evidence move_group is DEAD/HUNG, not merely render-slow -- PR 228 set this deadline
@@ -1489,17 +1604,14 @@ class RosMotionPort:
                     self._awaiting_server_respawn = False
                     self.handle = None
                     self.generation += 1
-                    self._arm_plan_deadline()   # fresh sim-clock planning budget on the re-sent plan
-                    self._plan_started_wall = time.monotonic()
-                    self._plan_started_sim = self._sim_now()
-                    self._resync_scene_after_respawn()   # re-attach any carried carton to a respawned scene
                     print('MOVE_GROUP_CRASH_RETRY plan %s sim-deadline (goal/plan not serviced within the '
                           'sim planning budget; likely move_group crash/hang); resending plan goal '
                           '(retry %d/%d, op %d/%d)'
                           % (self.state, self._plan_accept_crash_retries, PLAN_ACCEPT_CRASH_RETRY_MAX,
                              self._op_crash_retries, MOVE_GROUP_CRASH_RETRY_OP_MAX), flush=True)
-                    self._reanchor_plan_goal_to_live()
-                    self._send(self.plan, self._plan_goal, 'plan_accept')
+                    # gap 1/2: clear a crash-abandoned live executor goal + re-attach the carton (bounded on
+                    # the sim clock) before resending. The plan deadline/anchors are armed at the resend.
+                    self._begin_post_respawn_recovery()
                     return 'running'
                 self._planner_unrecoverable = True
                 self._last_fault_sim_deadline = False   # terminal: the controller must NOT deadline-retry
@@ -1758,6 +1870,8 @@ class RosMotionPort:
         self._server_crash_retries = 0
         self._plan_accept_crash_retries = 0   # sim-robust-collect-stow-stall-v1
         self._planner_unrecoverable = False   # sim-robust-collect-stow-stall-v1
+        self._reattach_active = False         # sim-robust-movegroup-double-death-v1 (gap 1)
+        self._reattach_failed = False         # sim-robust-movegroup-double-death-v1 (gap 1)
 
     def update_payload(self, held, profile):
         # Must update BOTH MoveIt and cuMotion collision attachment, not PhysX

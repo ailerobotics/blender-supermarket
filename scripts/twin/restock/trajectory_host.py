@@ -371,6 +371,19 @@ def reset_clears(fault, active, handle_live):
     return (fault is not None, active_is_stale(active, handle_live))
 
 
+def abort_active_clears(active, handle_live, fault):
+    """sim-robust-movegroup-double-death-v1 (gap 2): what an ``/arm_controller/abort_active`` signal does to
+    the executor, as ``(request_abort, clear_fault)``. On a MID-OP move_group respawn+reseed the controller
+    forces a crash-abandoned LIVE goal to terminate so the reseeded resend is ACCEPTED, where PR 229's
+    op-start reset deliberately will not (``reset_clears`` never touches a live goal). This REQUESTS the live
+    goal's own execute() loop to self-abort (only when a goal is active AND its handle is still live) and
+    clears a latched fault so the resend is not rejected on an old fault. A stale/absent active goal needs no
+    abort (``active_is_stale`` already clears it in goal()); a fault-free idle executor is a no-op
+    ``(False, False)`` so an abort_active published with nothing to clear is byte-identical. Pure for CPU
+    testing."""
+    return (bool(active) and bool(handle_live), fault is not None)
+
+
 def _handle_live(handle):
     """True if a stored goal handle is still executing (so clearing its active flag would abandon a live
     goal). Tolerates a None / duck-typed handle; rclpy ServerGoalHandle exposes ``is_active``."""
@@ -553,7 +566,15 @@ def main():
                # from the optional pick_surface side-channel; None until a publisher feeds it. Only ENRICHES
                # a 'pick physically blocked' goal-miss reason with the measured numbers (never changes the
                # classification), so absent => byte-identical behaviour with joint-only naming.
-               pick_surface=None)
+               pick_surface=None,
+               # sim-robust-movegroup-double-death-v1 (gap 2): a mid-op move_group respawn+reseed. move_group
+               # crashes mid-EXECUTION leaving its FollowJointTrajectory goal LIVE on this executor, so the
+               # reseeded resend's new goal would be rejected 'a previous goal is still executing'. The
+               # controller publishes /arm_controller/abort_active on the crash-retry resend; the goal's own
+               # execute() loop sees this flag and self-terminates (handle.abort(), NO fault latched -- a
+               # crash-abandoned goal is not a tracking failure) so active clears and the resend is accepted.
+               # None on the no-crash path => byte-identical.
+               abort_requested=False)
     group=ReentrantCallbackGroup()
     command=node.create_publisher(JointState,'/restock_sim/arm_joint_command',10)
     stop=node.create_publisher(Bool,'/restock_sim/manipulation/stop',10)
@@ -771,6 +792,7 @@ def main():
                 state['plan'],state['start'],state['start_install']=plan,None,now()
                 state['miss_count'],state['miss_stamp']=0,None   # fresh debounce window per trajectory
                 state['contact']=False                           # arm the contact gate fresh per goal
+                state['abort_requested']=False  # gap 2: a fresh goal clears any stale crash-abort request
                 state['active_handle']=handle   # so goal() can tell a LIVE goal from a stale active flag
                 state['settle_samples'],state['settle_stamp'],state['settle_log']=[],None,None
             wall_backstop=time.monotonic()+EXECUTE_WALL_BACKSTOP_S
@@ -781,6 +803,20 @@ def main():
                         handle.canceled()
                         result.error_code=result.PATH_TOLERANCE_VIOLATED
                         result.error_string=state['fault']
+                        return result
+                    if state['abort_requested']:
+                        # gap 2 (sim-robust-movegroup-double-death-v1): a mid-op move_group respawn+reseed.
+                        # This goal is the crash-abandoned pre-respawn trajectory; the controller asked (via
+                        # /arm_controller/abort_active) to terminate it so the reseeded resend is accepted.
+                        # Abort WITHOUT latching a fault (a crash-abandoned goal is not a tracking failure --
+                        # a fault would then reject the resend) and clear the request; the finally clears
+                        # active so goal() accepts the new goal.
+                        state['abort_requested']=False
+                        print('TRAJ_HOST_ABORT_ACTIVE superseded by crash-retry resend (mid-op respawn+reseed)',
+                              flush=True)
+                        handle.abort()
+                        result.error_code=result.PATH_TOLERANCE_VIOLATED
+                        result.error_string='superseded by crash-retry resend'
                         return result
                     if state['fault']:
                         raise RuntimeError(state['fault'])
@@ -989,9 +1025,34 @@ def main():
                 state['miss_count'],state['miss_stamp']=0,None
             if clear_active:
                 state['active']=False
+    def abort_active_signal(msg):
+        # Mid-op crash-retry resend (sim-robust-movegroup-double-death-v1, gap 2): see abort_active_clears.
+        # move_group crashed mid-execution leaving its FollowJointTrajectory goal LIVE here, so the reseeded
+        # resend's new goal would be rejected 'a previous goal is still executing' (coldwin4 death 2). FORCE
+        # the crash-abandoned live goal to self-terminate (its execute() loop consumes abort_requested, calls
+        # handle.abort() with NO fault latched, and clears active in its finally) and clear any latched fault
+        # so the resend is accepted. Only published on a crash-retry resend; the normal path never sends it,
+        # so this is a no-op (byte-identical) there. A stale active flag is still cleared by active_is_stale.
+        if not msg.data:
+            return
+        with lock:
+            request_abort,clear_fault=abort_active_clears(
+                state['active'],_handle_live(state['active_handle']),state['fault'])
+            if request_abort or clear_fault:
+                print('TRAJ_HOST_ABORT_ACTIVE request: abort_live=%s clear_fault=%s prior_fault=%r active=%s'
+                      % (request_abort,clear_fault,state['fault'],state['active']),flush=True)
+            if request_abort:
+                state['abort_requested']=True
+            if clear_fault:
+                state['fault']=None
+                state['plan']=None
+                state['start']=None
+                state['miss_count'],state['miss_stamp']=0,None
     node.create_subscription(JointState,'/restock_sim/joint_states',feedback,10,callback_group=group)
     node.create_subscription(Bool,'/restock_sim/arm_contact',contact_signal,10,callback_group=group)
     node.create_subscription(Bool,'/restock_sim/arm_controller/reset',reset_signal,10,callback_group=group)
+    node.create_subscription(Bool,'/restock_sim/arm_controller/abort_active',abort_active_signal,10,
+                             callback_group=group)
     # TRANSIENT_LOCAL (latched) so the latest controller-set tolerance is delivered even though this
     # executor subscribes after the controller's publisher is created (fm345 (c)).
     from rclpy.qos import QoSProfile, DurabilityPolicy
