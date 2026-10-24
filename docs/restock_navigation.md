@@ -305,6 +305,24 @@ rig carries its own, more conservative tuning). CPU tests: `tests/test_restock_f
 `tests/test_restock_runtime.py` (couple nav→fine_dock→attach handover + cart pin at start /
 release at attach).
 
+**Cross-track terminal mode** (`approach_mode: 'crosstrack'`, opt-in; default `'hitch_jacobian'` ⇒
+byte-identical). The legacy translation-dominant law has a degenerate zero-command equilibrium **line**
+— wherever `lat = (gain_yaw·|hitch_x|/gain_lin)·yaw_err`, the single `ω` cancels (lateral vs yaw) with
+NEITHER hitch nor yaw seated. The couple approach lands on it at whatever yaw the standoff cross-track
+implies: `coldlivefinal` (real live_pose collect) landed at ~4.8° yaw / ~26 mm — just outside the 4° /
+20 mm latch box — and limit-cycled the full 30 s cap (`FINE_DOCK_DIAG`, run dir
+`twin-robot-in-store-boot-v1/mission/coldlivefinal`), while the still-arm `coldhonest` landed at ~2.7°
+(inside) and latched. `'crosstrack'` (`fine_dock._crosstrack`) instead servos the **rear hitch** — the
+LEADING point of the reverse approach, so steering it onto the cart axis is a stable minimum-phase
+cross-track problem whose only equilibrium is the seated pose. It drives the hitch along the cart axis
+to the drawbar (`ct_gain_approach`), holding back a distance `ct_align_hold_m·(|cross|+0.3|yaw|)` until
+cross-track + heading null (`ct_gain_cross`, `ct_gain_yaw`), with a `ct_min_creep` floor so the base
+keeps moving (steering stays live). Still motion-only; latch tolerances + the physical `attach` are
+unchanged. Example: `docs/examples/couple-fine-dock-crosstrack-fragment.json`; design + the recorded
+limit-cycle evidence: `data/sim-robust-couple-fine-dock-v1/report.md`. CPU tests cover the recorded
+`coldlivefinal`/`coldhonest` standoffs (converge+latch where the legacy law stalls under a drive
+dead-band), the degenerate-equilibrium property, and the byte-identical default.
+
 ### Pre-planned tow lanes for coupled drives (opt-in, default-off)
 
 Free hybrid-A* planning of the long, wide coupled robot+cart train is where the tow stalls: the
@@ -396,6 +414,49 @@ point) is still rejected. Staged `true`. (The measured run-323b post-couple base
 start-only acquire check, not a bad start pose, so no pre-lane alignment leg or tolerance widening was
 needed.) CPU tests: `tests/test_navigation_lanes.py`; offline proof `check_tow_lanes.check_reacquire_along_route`.
 
+**Acquire from wherever the couple seats the base — lead-in + named fast-fail** (fm-sim-robust-outbound,
+`data/sim-robust-outbound-lane-start-v1`, all opt-in / default-off ⇒ byte-identical). The improved
+crosstrack couple (PR232/233) seats the base a VARIABLE distance off the authored dock start (run
+`coldlivewin`: +0.5 m north of `outbound_dock_to_bay.start` y=15.25; `coldliverecovery`: at it), and the
+fixed start + default acquire tol then deadlocked the outbound (`lane_not_acquired` churning to the 120 s
+mission nav-stuck). Two per-lane/controller keys fix it:
+- **`lead_in_max_m`** (per-lane, default 0 = off): when the base seats OFF the fine centreline,
+  `TowLane.build_lead_in` rolls a bounded forward pure-pursuit COUPLED merge (curvature capped at the
+  physical min turn radius, every step swept-validated against the live map via `world.valid`) ONTO the
+  authored centreline and splices the authored tail to the goal, returning a route whose FIRST state is
+  the measured seat — so the follower acquires from exactly where it is. A hand-authored lead-in to the
+  exact start is NOT viable: a forward-only train 0.5 m lateral off a flat lane free-plans a ~12 m loop
+  (the report has the numbers); the closed-loop lateral merge is the kinematically sane bridge, and a
+  2.46 m flat lane absorbs ~±0.25 m — so re-centre the authored start to the seat-distribution middle
+  (y≈15.5) and the lead-in covers the residual. `lead_in_fine_xy`/`lead_in_lookahead` tune the merge.
+- **`navigation.tow_lane_acquire_timeout_s`** (default 0 = off): accrues contiguous SIM seconds the
+  active lane stays unacquired with no base progress and, past the budget, FAILS the leg by name
+  (`lane_not_acquired_timeout` / `lane_blocked_timeout` / `lane_leadin_unreachable_timeout`) in a few sim
+  seconds — pace-immune, not the 120 s WALL nav-stuck. A seat beyond the lane's absorbable band fails
+  fast and legibly instead of freezing.
+- **`navigation.tow_lane_goal_stop`** (default `false` = off ⇒ byte-identical): make the coupled
+  authored-lane goal arrival SEAT-INDEPENDENT. A coupled tow tracks its lane with a steady-state LATERAL
+  offset (run `coldwin3`: ~0.09 m north off the lead-in's descending final segment), but the legacy
+  coupled arrival capture was a HARDCODED 0.08 m / 0.08 rad ball — SMALLER than that offset — so the
+  train reached the goal x just outside it, never latched, and a forward-only train sailed ~0.3 m PAST
+  the goal into `lane_leadin_unreachable` (irrecoverable — it cannot reverse). When ON **and** an authored
+  lane is active: (1) the coupled arrival uses the lane's declared ACHIEVABLE band `goal_tol_xy` /
+  `goal_tol_yaw` (not 0.08), so the lateral offset latches; (2) the follower decelerates by
+  REMAINING-ROUTE distance (not Euclidean distance-to-goal, which a laterally-offset base never drives to
+  zero) and drops the 0.03 m/s floor at the route end, so it stops AT the goal and NEVER passes it; (3) a
+  seat left genuinely PAST the goal fails FAST by name `lane_leadin_past_goal` instead of churning to
+  `tow_lane_acquire_timeout_s`. **Do NOT instead widen `start_tol_xy`** to force a direct acquire of an
+  off-centreline seat — CPU-proven to bypass the lead-in and churn `stop_replan_tracking_error` to a
+  `goal_timeout` unless `tow_lane_track_tol_m` is also raised; the lead-in is the correct merge mechanism.
+
+Example config: `docs/examples/outbound-lane-leadin-fragment.json` (lead-in + fast-fail) and
+`docs/examples/outbound-leadin-overshoot-fragment.json` (adds `tow_lane_goal_stop`). CPU tests:
+`tests/test_navigation_lanes.py::OutboundLeadInAndFastFailTests` (both recorded seats arrive; the
+unreachable seat fails fast by name) and `::TowLaneGoalStopTests` (overshoot reproduction + arrival from
+every recorded seat, 0.5 m-beyond-band + past-goal fast-fails). Design + the coldwin3 reconstruction:
+`data/sim-robust-outbound-leadin-overshoot-v1/report.md`. GPU proof is the integration lane's (real store
+obstacles + PhysX).
+
 **Coupled-tow tracking knobs** (fm429, all default to the prior hardcoded values ⇒ byte-identical):
 `navigation.tow_lane_cart_yaw_tol` (default 0.20 rad) — the `stop_replan_tracking_error` cart-yaw
 replan tolerance; `navigation.tow_lane_curve_speed_floor` (default 0.25) — the curve-slowdown speed
@@ -466,6 +527,77 @@ re-anchors well within the window, so no false trip. Example:
 escalate/fault recovery) `tests/test_articulated_navigation.py`. The UNCOUPLED drive-fidelity lever behind
 the crawl is `mobile_spec.caster_lift_m` (fm434 bench `base-drive-bench-*`: 0.097→0.988 at 0.005 m); the
 warm runs already set it, so this monitor covers the residual **coupled** limit cycle.
+
+**Coupled break-away stall recovery** (`navigation.coupled_progress_recovery`, opt-in, default `false` ⇒
+byte-identical to the escalate→fault ladder above; sim-robust-outbound-stall-recovery-v1;
+`coupled_breakaway_speed_mps` 0.18, `coupled_breakaway_window_s` 2.0, `coupled_breakaway_pulse_s` 0.5,
+`coupled_breakaway_attempts` 3). The coldlivefull outbound showed the coupled tow **fail to break away from
+rest** at the portal throat (NAV_STEP cycled `measured_turn_radius`↔`tracking` with `parked=True`, the base
+jittering in place with ~0 net displacement) — a non-deterministic re-break-away deficit. Two own-code
+contributors: a `measured_turn_radius` **coast** tick returns a `(0,0)` command (`_wait`), so a stuck tow
+**thrashes stop↔forward** every few ticks and never sustains drive effort, and the forced creep only engages
+after `escape_s` and is a weak 0.03 m/s static crawl. With recovery on, once the base has been pinned for
+`coupled_progress_escape_s` SIM seconds the controller runs a **bounded break-away maneuver** instead of the
+single creep-then-fail: up to `coupled_breakaway_attempts` windows of `coupled_breakaway_window_s` SIM
+seconds, each commanding a **continuous pulsed committed-forward surge** (`coupled_breakaway_speed_mps`,
+square-waved every `coupled_breakaway_pulse_s` between the high level and a relaxed 0.4× to **rock** the
+contact). The surge **bypasses** the `measured_turn_radius` coast (so the command is never a v=0 stop) while
+the obstacle/coverage/map safety gates stay **unchanged** — a real obstacle still stops the surge. The
+instant net displacement reaches `coupled_progress_min_m` the break-away **succeeded** and normal tracking
+resumes; exhausting every attempt **faults `coupled_no_progress`** (same name + StageRetry contract), fast
+on the SIM clock. **Reverse** towing is clamped off for a coupled train (`mobile.wheel_targets`: coupled
+`v≥0`), so the maneuver is a forward surge/relax pulse, **not** a reverse back-off; and all brakes are
+already force-released every drive tick in `MobileController.command`, so no stale park/cart brake can hold
+the base. Example `docs/examples/outbound-stall-recovery-mission-fragment.json`; CPU tests (REAL controller:
+stall → break-away success, attempt exhaustion → named fault, continuous-forward, off-is-byte-identical)
+`tests/test_articulated_navigation.py` (`test_coupled_breakaway_*`). It makes the stall **rarer** and
+**fail-fast-by-name** when it cannot recover; the underlying coupled traction asset levers (caster lift,
+drive force) remain owned by sim-robust-coupled-traction-v1 (PR 207).
+
+**Reinforced break-away ROCK** (`navigation.coupled_breakaway_rock`, opt-in, default `false` ⇒ byte-identical
+to the forward-only pulse above; requires `coupled_progress_recovery`; `coupled_breakaway_launch_mps` 0.30;
+sim-robust-coupled-breakaway-from-rest-v1). coldwin9 collected + coupled clean, then pinned at the throat
+(x≈−3.93) with the base yawed **~5° off the lane axis** — a base+cart envelope **catches the throat lip** and
+stops dead while still commanding forward (a physical wedge, not a gate refusal). The forward-only pulse
+**cannot free a forward wedge**: nine surges over the three BT re-begins netted zero advance
+(`NAV_BREAKAWAY exhausted ×3`). coldwin7/8 passed by crossing the throat while still rolling, near-axis-aligned,
+before a heading error accumulated in the slow from-rest creep (all three enter at ~0.4 m/s and dip to
+near-rest at the plan-wait — the discriminator is the **yaw drift**, not momentum at the latch). Because a
+coupled train cannot reverse (`mobile.wheel_targets` `v≥0`; `gate_velocity` rejects `linear<0`), the rock uses
+the only authority it has: the recovery surge becomes an **elevated forward launch** (`coupled_breakaway_launch_mps`,
+clamped to `max_speed` — more momentum + drive force, and a higher coupled steering cap `wmax=v/1.5`) with the
+corrective turn **saturated to ±wmax** toward the route heading on the hi pulse phase, to **rotate the
+yaw-wedged base back into alignment** and swivel the casters free; the lo phase relaxes to rock the contact.
+PR 201's monitor and the bounded `coupled_breakaway_attempts` → `coupled_no_progress` fault stay the backstop.
+Example `docs/examples/coupled-breakaway-rock-mission-fragment.json`; CPU proofs
+`tests/test_articulated_navigation.py` (`test_breakaway_rock_*`) and `tests/test_coupled_breakaway_rock.py`
+(real coldwin7/coldwin9 recorded-trace replay + the shipped `coupled_tow_margin` gate); write-up
+`data/sim-robust-coupled-breakaway-from-rest-v1/report.md`. If a GPU proof shows the forward rock still cannot
+free a hard wedge, the next lever is a bounded **reverse** back-off during recovery — owner sign-off required
+to relax the coupled-reverse interlock.
+
+**Pre-throat heading hold** (`navigation.coupled_heading_hold`, opt-in, default `false` ⇒ byte-identical;
+sim-robust-outbound-throat-yaw-align-v1). The UPSTREAM fix for the throat wedge: keep the coupled base
+**aligned to the lane axis before it reaches the portal throat** so it never enters yawed (the rock above is
+the after-the-wedge backstop). From five recorded outbound tows: coldwin7/coldwin8/rock1 crossed the throat
+at **−0.2…+0.3°** of the east travel axis and threaded; coldwin9/coldwin10 drifted CCW during the slow
+from-rest creep after the couple→outbound plan-wait dip (coldwin9 −1.7°→**+4.9°**, coldwin10 +1.2°→**+2.2°**)
+and wedged — coldwin10 at only +2.2°, so the wedge margin is **~2°**. The lane follower's lateral term chases
+the authored centreline and *commands* the CCW rotation, and at the crawl the coupled steering cap
+`wmax=v/1.5` collapses to ~0.03 rad/s (vs ~0.12 for the passing runs) so nothing arrests it; the throat is
+**invisible to the nav static map** (footprint valid at every base yaw −8…+6°, slack 0.8 m), so the wedge is a
+PhysX door-frame contact (`gate_velocity` returns `tracking`, never `obstacle_stop`) and the drift on the lane
+itself is the only usable trigger. When ON, on a **straight** authored segment (`|route curvature| ≤
+heading_hold_straight_kappa`, default 0.08 1/m) once the base drifts more than `heading_hold_bound_deg`
+(default 1.0°) to the CCW/lip side of the lane **goal (travel) heading**, the follower command is overridden:
+hold a fixed forward creep `heading_hold_creep_mps` (default 0.14 — restores `wmax=creep/1.5≈0.093 rad/s`
+regardless of the collapsed speed schedule AND caps the forward speed so a misaligned base **slows and aligns
+before entering the throat**) and **saturate the corrective turn** toward the axis. **One-sided** (a base on
+the safe/south side is never force-turned) and **forward-only** (`v≥0`, the coupled-reverse interlock
+honoured); skipped while the break-away owns the command. PR 201's monitor, PR 236's bound and PR 250's rock
+stay the untouched backstop. Example `docs/examples/outbound-heading-hold-mission-fragment.json`; CPU proof
+`tests/test_outbound_heading_hold.py` (real coldwin7/rock1/coldwin9/coldwin10 recorded-creep replay) + factory
+wiring `tests/test_navigation_factory.py`; write-up `data/sim-robust-outbound-throat-yaw-align-v1/report.md`.
 
 **Wall-clock stuck-stage fail-fast** (`RESTOCK_NAV_STUCK_WALL_S`, opt-in, default `0` = off): the nav
 `blocked_timeout`/`goal_timeout` are **sim-clock** caps, which under render pacing (sim advances far

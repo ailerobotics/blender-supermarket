@@ -115,6 +115,10 @@ class IsaacRosGraph:
     def start(self, operation, job):
         if self.active or self.faulted:
             raise RuntimeError('transfer active or explicit fault recovery required')
+        # sim-robust-transfer-start-estop-v1: re-derive the global-stop wire at the start of a NEW op,
+        # exactly as a fresh (staged-start) graph begins -- AFTER the explicit-recovery guard above (a
+        # genuine in-op fault still demands explicit recovery). See _clear_stale_global_stop.
+        self._clear_stale_global_stop(operation)
         self._publish('job', json.dumps({'operation':operation,'job':job},allow_nan=False))
         self.active = True
         self.job_id = job['job_id']
@@ -133,6 +137,45 @@ class IsaacRosGraph:
                   flush=True)
         self._publish('sensors',json.dumps(asdict(sensors),allow_nan=False))
 
+    def _clear_stale_global_stop(self, operation):
+        """sim-robust-transfer-start-estop-v1: re-derive the latched global-stop wire at a NEW op start.
+
+        The global ``/manipulation/stop`` wire LATCHES permanently on this OmniGraph subscriber --
+        nothing ever publishes ``False`` (every emergency_stop publishes ``Bool(data=True)``), and
+        check_health sets ``self.faulted`` once it reads True. A BARE stop published by a STATION-
+        liveness guard (``restock_host.incorporation_ack`` / ``restock.station_host``) or the trajectory
+        host DURING the between-ops nav gap (couple -> outbound -> park, when the manipulation state
+        machine is NOT polling, so check_health never consumes it) therefore survives into the NEXT op's
+        first poll -- even after that station RECOVERS at this op's fresh ``prepare``. The full chain then
+        e-stops at transfer's MANIP_START with a bare 'host emergency stop' and no host-controller fault
+        (coldlivefull: host-stack.log 'station recovered: epoch=3 from="parked heartbeat lost: wall gap
+        30.64 s"'). PR 231's named triggers + _host_fault_suffix only cover the MOTION controller/port
+        (HOST_FAULT_ESTOP / PORT_FAULT_ESTOP on ``/manipulation/status``), so a station/trajectory stop
+        reports bare. The STAGED start (start_at=transfer) never hits this: it begins with a FRESH graph
+        whose stop wire was never True.
+
+        Mirror that fresh-graph start. Called AFTER start()'s explicit-recovery guard, so a genuine in-op
+        fault (``self.faulted`` latched by a check_health raise during the PRIOR op) still demands explicit
+        recovery -- this only ever sees ``faulted == False``. In coldlivefull that is exactly the case: the
+        nav stages did not poll check_health, so the stale stop never latched ``faulted``; it simply sat on
+        the wire until transfer's first poll. A stop latched True AT op start is therefore a stale carry-
+        over (a genuine op-FATAL stop during the PRIOR op would have failed the mission before a new op's
+        start()), so clear it -- write the SAME Controller.attribute check_health reads. A genuinely
+        ONGOING stop is re-taken by the ROS2Subscriber on the very next tick (it overwrites outputs:data
+        only when it takes a NEW message, so a cleared-but-not-republished wire stays False), so
+        check_health still fires WITHIN this op -- now with a named host-stack.log trigger (the
+        *_ESTOP_PUBLISH lines added in this lane) and the _host_fault_suffix hint below. A fresh graph
+        (stop wire already False) => no write, no log => byte-identical (collect op start; every staged
+        start). ``self.faulted`` is re-cleared defensively (a no-op given the guard above)."""
+        attr = self.og.Controller.attribute(self.root + '/stop/wire.outputs:data')
+        if attr.get():
+            attr.set(False)
+            self.faulted = False
+            print('STALE_OP_START_STOP_CLEARED op=%s (global /manipulation/stop was latched True at op '
+                  'start from a station-liveness/trajectory stop during the between-ops nav gap, now '
+                  'recovered; cleared so the new op begins like a fresh staged start -- a genuine ongoing '
+                  'stop re-arms on the next tick)' % operation, flush=True)
+
     def check_health(self):
         """Check global stop every physics tick without consuming job replies.
 
@@ -147,7 +190,43 @@ class IsaacRosGraph:
             self.hold()
             self.faulted = True
             self.active = False
-            raise RuntimeError('host emergency stop')
+            # sim-robust-host-timers-audit-fix-v1: the stop WIRE is a bare Bool, so the mission historically
+            # recorded only 'host emergency stop' with no cause (coldlive sample-4). The host also publishes
+            # the NAMED fault reason on /manipulation/status; peek the latest (idempotent read, host-relay
+            # path only) and append it so the mission reports WHICH host trigger fired, not a bare stop. Best
+            # effort: if the failed status has not yet been relayed when the wire reads True, fall back to the
+            # bare string (host-stack.log still carries HOST_FAULT_ESTOP/PORT_FAULT_ESTOP).
+            raise RuntimeError('host emergency stop' + self._host_fault_suffix())
+
+    # sim-robust-transfer-start-estop-v1: when /manipulation/status carries no matching MOTION-controller
+    # fault, the stop came from a non-controller publisher (a station-liveness guard or the trajectory
+    # host). Those do NOT set /manipulation/status, so the suffix would be bare; instead point the reader
+    # at the named host-stack.log trigger so no op-start stop is ever reported with zero direction.
+    _NON_CONTROLLER_STOP_HINT = (' (no matching host-controller fault on /manipulation/status: a station-'
+                                 'liveness/trajectory stop, or a controller fault whose status has not yet '
+                                 'relayed -- see the named trigger in host-stack.log: HOST_FAULT_ESTOP / '
+                                 'PORT_FAULT_ESTOP / *_ESTOP_PUBLISH)')
+
+    def _host_fault_suffix(self):
+        """' (host fault: <reason>)' from the latest failed /manipulation/status; else a hint pointing at
+        the named host-stack.log trigger for a station/trajectory stop. Read-only; never raises (a stop
+        must still surface even if the peek fails)."""
+        try:
+            host_control = getattr(self, 'host_control', None)
+            if host_control is None:
+                return ''
+            raw = host_control.read(TOPICS['status'])
+            if raw:
+                result = json.loads(raw)
+                reason = result.get('reason')
+                # Only THIS job's failed status (a lingering failed status from a prior, recovered op must
+                # not mislabel the current stop).
+                if (result.get('status') == 'failed' and reason
+                        and result.get('job_id') == getattr(self, 'job_id', None)):
+                    return ' (host fault: %s)' % reason
+        except Exception:
+            return ''
+        return self._NON_CONTROLLER_STOP_HINT
 
     def _status_fault(self, reason):
         self.hold()
@@ -230,11 +309,24 @@ class IsaacRosGraph:
                     return self._status_fault('host process/status wall backstop')
         return result
 
-    def close(self):
+    def close(self, *, close_control=True):
+        """Hold the held payload sealed and fault the graph. ``close_control`` gates tearing down the
+        out-of-Isaac control publisher subprocess (``host_control``).
+
+        That subprocess is a SHARED, STATION-level resource: it both PUBLISHES job/sensors to the host
+        AND forwards the host->Isaac return topics -- including ``/restock_sim/station/status``, which the
+        StationClient reads for its parked-mapper ack. Terminating it on a PER-OP manipulation failure
+        (``ros_manipulation.stop(close_sensing=False)``) killed the station/status forwarding mid-transfer:
+        the StationClient's reader thread hit EOF, kept reading the LAST ack stamp forever, and the
+        frozen-stamp watchdog raised ``StationAckStreamStalled`` -- masking the true stage reason
+        (``collision planning or execution failed``; armcam/transfer2/bench1 all froze at ~sim 31 s this
+        way). Like the masked-depth feed (``close_sensing``), the relay is a per-mission resource: keep it
+        alive across a per-op failure so the ack stays fresh and the true reason surfaces; tear it down
+        exactly once, at the genuine mission teardown (``close_control=True``, the default)."""
         self.hold()  # leave any physically held payload sealed
         self.active = False
         self.faulted = True
-        if self.host_control is not None:
+        if close_control and self.host_control is not None:
             try:
                 self.host_control.close()  # terminate the out-of-Isaac control publisher subprocess
             except Exception:

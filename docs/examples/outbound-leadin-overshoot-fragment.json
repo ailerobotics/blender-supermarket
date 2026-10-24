@@ -1,0 +1,28 @@
+{
+  "_comment": "fm-sim-robust-outbound-leadin-overshoot: make the COUPLED outbound tow ARRIVE at its goal from ANY couple seat in the observed band, with NO overshoot, independent of where the couple seats the base. Merge navigation.tow_lane_goal_stop into the mission runtime-config's navigation block, ON TOP of the sim-robust-outbound-lane-start-v1 keys (lead_in_max_m / tow_lane_acquire_timeout_s / the re-centred lane start + tow_lane_reacquire_along_route + tow_lane_cart_yaw_rebase). The mission runtime configs live OUTSIDE this repo (integration-lane owned) -- this is the capability fragment. Opt-in / default-off byte-identical.",
+  "navigation": {
+    "tow_lanes": [
+      {
+        "name": "outbound_dock_to_bay",
+        "start": [-4.46, 15.5, 0.0],
+        "start_cart_yaw": 0.0,
+        "goal": [-2.0, 15.25, 0.0],
+        "goal_articulation": 0.3,
+        "goal_tol_xy": 0.30,
+        "goal_tol_yaw": 0.26,
+        "start_tol_cart_yaw": 0.35,
+        "lead_in_max_m": 3.0,
+        "lead_in_fine_xy": 0.10,
+        "lead_in_lookahead": 0.8
+      }
+    ],
+    "tow_lane_reacquire_along_route": true,
+    "tow_lane_cart_yaw_rebase": true,
+    "tow_lane_cart_yaw_tol": 0.35,
+    "tow_lane_acquire_timeout_s": 8.0,
+    "tow_lane_goal_stop": true
+  },
+  "_goal_stop_note": "tow_lane_goal_stop 0/absent => OFF => the legacy coupled arrival (a HARDCODED 0.08 m / 0.08 rad ball + the Euclidean distance*0.5 speed profile), byte-identical. When ON AND an authored lane is active: (1) the coupled goal arrival capture uses the LANE'S declared achievable band -- goal_tol_xy (0.30) / goal_tol_yaw (0.26), not 0.08 -- so a tow riding a lateral offset larger than 0.08 m (coldwin3: ~0.09 m north off the lead-in's descending final segment) LATCHES instead of sailing past; (2) the follower decelerates by REMAINING-ROUTE distance (not Euclidean distance-to-goal, which a laterally-offset base never drives to zero) and drops the 0.03 m/s floor at the route end, so it comes to rest AT the goal and NEVER passes it (a coupled train cannot reverse); (3) a seat left genuinely PAST the goal (beyond the route end, forward-only unrecoverable) fails FAST by name 'lane_leadin_past_goal' instead of churning to tow_lane_acquire_timeout_s. The authored goal_tol IS the arrival contract -- confirm the integration's mission-next-stage (the return/uncouple at cart_parking) tolerates an arrival anywhere in that band.",
+  "_goal_tol_note": "goal_tol_xy / goal_tol_yaw are the lane's ACHIEVABLE arrival band and now govern the coupled arrival latch when goal-stop is on. 0.30 m absorbs the observed ~0.09 m steady-state lateral tow offset with wide margin. If the integration later measures a larger offset, widen goal_tol_xy to cover it (the author's band is the authority -- a residual offset that EXCEEDS it still refuses, correctly).",
+  "_start_tol_note": "Do NOT widen start_tol_xy to force a direct acquire of an off-centreline seat: CPU-proven (data/sim-robust-outbound-leadin-overshoot-v1/report.md) that start_tol_xy=0.6 with the default tow_lane_track_tol_m=0.25 makes the south seat acquire the AUTHORED route directly, immediately trip stop_replan_tracking_error on the 0.27 m offset, and churn to goal_timeout. The lead-in (lead_in_max_m) is the correct merge mechanism for an off-centreline seat -- it keeps the tracked error ~0. If a wider direct-acquire margin is ever wanted, raise tow_lane_track_tol_m to match the offset (only within the swept-envelope lateral slack)."
+}

@@ -1,0 +1,50 @@
+{
+  "_comment": "fm-sim-robust-outbound: make the COUPLED outbound tow lane acquire from WHEREVER the improved crosstrack couple (PR232/233) actually seats the base, instead of deadlocking at a fixed authored dock start. Merge these keys into the mission runtime-config's navigation block (the configs live outside this repo, integration-lane owned -- this is the capability fragment). Three coordinated pieces, all opt-in / default-off byte-identical: (1) per-lane lead_in_max_m -- a bounded, swept-validated closed-loop MERGE from the measured seat onto the authored centreline so the follower acquires from off-centreline; (2) tow_lane_acquire_timeout_s -- fail a genuinely non-acquirable lane by NAME in a few sim seconds instead of churning to the 120 s mission nav-stuck WALL budget; (3) a re-centred lane start at the seat-distribution MIDDLE (y~15.5) so BOTH recorded seats (coldlivewin +0.5 m north at 15.75, coldliverecovery at 15.26) are within +-0.25 m -- the band a 2.46 m flat lane can absorb for a forward-only min-1.5 m-radius train. See data/sim-robust-outbound-lane-start-v1/report.md for the kinematic basis (a hand-authored lead-in to the exact start free-plans a ~12 m loop and is NOT viable).",
+  "navigation": {
+    "tow_lanes": [
+      {
+        "name": "outbound_dock_to_bay",
+        "start": [
+          -4.46,
+          15.5,
+          0.0
+        ],
+        "start_cart_yaw": 0.0,
+        "goal": [
+          -2.0,
+          15.25,
+          0.0
+        ],
+        "goal_articulation": 0.3,
+        "start_tol_cart_yaw": 0.35,
+        "lead_in_max_m": 3.0,
+        "lead_in_fine_xy": 0.10,
+        "lead_in_lookahead": 0.8
+      },
+      {
+        "name": "return_bay_to_parking",
+        "start": [
+          -2.0,
+          15.25,
+          0.0
+        ],
+        "start_cart_yaw": 0.0,
+        "goal": [
+          -1.2,
+          15.25,
+          0.0
+        ],
+        "goal_articulation": 0.2,
+        "start_tol_cart_yaw": 0.35,
+        "lead_in_max_m": 2.0
+      }
+    ],
+    "tow_lane_reacquire_along_route": true,
+    "tow_lane_cart_yaw_rebase": true,
+    "tow_lane_cart_yaw_tol": 0.35,
+    "tow_lane_acquire_timeout_s": 8.0
+  },
+  "_lead_in_note": "lead_in_max_m 0 (default) => OFF => the lane acquires ONLY at the fixed authored start (byte-identical). When > 0 and the measured base seats OFF the fine centreline, build_lead_in rolls a forward pure-pursuit coupled merge (curvature capped at the physical min turn radius, every step swept-validated against the live map) ONTO the centreline and splices the authored tail to the goal, returning a route whose first state IS the seat -- so the follower acquires trivially from exactly where the couple left it. A seat beyond the band the lane can absorb returns no merge -> reason 'lane_leadin_unreachable' -> tow_lane_acquire_timeout_s fails the leg by name (not the 120 s nav-stuck).",
+  "_recentre_note": "The authored start y is re-centred from 15.25 to 15.5 (the middle of the measured couple seat distribution 15.26..15.75). On an open-grid CPU drive this lets BOTH recorded seats arrive_stopped (coldlivewin ~30 s, coldliverecovery ~14 s sim). The integration lane owns the exact value: pick the centre of the current couple's measured seat spread and confirm the re-centred lane still EXPANDS clear against the real static map (store obstacles, not the open-grid probe). If the couple's seat distribution later shifts, re-centre the start again -- the lead-in absorbs the residual spread around it.",
+  "_timeout_note": "tow_lane_acquire_timeout_s 0 (default) => OFF => the legacy empty-route churn (byte-identical). When > 0 the controller accrues contiguous SIM seconds the active lane stays unacquired with NO base progress and, past the budget, fails terminal with the specific reason + '_timeout' (lane_not_acquired_timeout / lane_blocked_timeout / lane_leadin_unreachable_timeout) -- pace-immune and named, so a future couple-geometry change that moves the seat out of band fails fast and legibly instead of silently freezing."
+}

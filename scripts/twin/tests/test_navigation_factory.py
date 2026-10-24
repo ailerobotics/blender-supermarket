@@ -181,6 +181,10 @@ class FactoryDispatchTests(unittest.TestCase):
         self.assertFalse(_build('reference').lane_coast_refusals)             # default off
         self.assertTrue(_build('reference', tow_lane_coast_refusals=True).lane_coast_refusals)
 
+    def test_tow_lane_acquire_timeout_flows_through(self):
+        self.assertEqual(_build('reference').lane_acquire_timeout_s, 0.0)     # default off
+        self.assertAlmostEqual(_build('reference', tow_lane_acquire_timeout_s=8.0).lane_acquire_timeout_s, 8.0)
+
     def test_tow_lane_trust_unknown_flows_through(self):
         self.assertFalse(_build('reference').lane_trust_unknown)              # default off
         self.assertTrue(_build('reference', tow_lane_trust_unknown=True).lane_trust_unknown)
@@ -201,6 +205,43 @@ class FactoryDispatchTests(unittest.TestCase):
     def test_coupled_progress_escape_rejects_non_bool(self):
         with self.assertRaises(ValueError):
             _build('reference', coupled_progress_escape='true')              # _strict_bool
+
+    def test_coupled_breakaway_recovery_flows_through(self):
+        c = _build('reference')
+        self.assertFalse(c.coupled_progress_recovery)                        # default off
+        self.assertAlmostEqual(c.coupled_breakaway_speed, 0.18)             # defaults
+        self.assertAlmostEqual(c.coupled_breakaway_window_s, 2.0)
+        self.assertAlmostEqual(c.coupled_breakaway_pulse_s, 0.5)
+        self.assertEqual(c.coupled_breakaway_attempts, 3)
+        c2 = _build('reference', coupled_progress_recovery=True, coupled_breakaway_speed_mps=0.22,
+                    coupled_breakaway_window_s=2.5, coupled_breakaway_pulse_s=0.4,
+                    coupled_breakaway_attempts=4)
+        self.assertTrue(c2.coupled_progress_recovery)
+        self.assertAlmostEqual(c2.coupled_breakaway_speed, 0.22)
+        self.assertAlmostEqual(c2.coupled_breakaway_window_s, 2.5)
+        self.assertAlmostEqual(c2.coupled_breakaway_pulse_s, 0.4)
+        self.assertEqual(c2.coupled_breakaway_attempts, 4)
+
+    def test_coupled_progress_recovery_rejects_non_bool(self):
+        with self.assertRaises(ValueError):
+            _build('reference', coupled_progress_recovery='true')            # _strict_bool
+
+    def test_coupled_heading_hold_flows_through(self):
+        c = _build('reference')
+        self.assertFalse(c.coupled_heading_hold)                             # default off
+        self.assertAlmostEqual(c.heading_hold_bound, math.radians(1.0))      # defaults
+        self.assertAlmostEqual(c.heading_hold_creep, 0.14)
+        self.assertAlmostEqual(c.heading_hold_straight_kappa, 0.08)
+        c2 = _build('reference', coupled_heading_hold=True, heading_hold_bound_deg=1.5,
+                    heading_hold_creep_mps=0.16, heading_hold_straight_kappa=0.06)
+        self.assertTrue(c2.coupled_heading_hold)
+        self.assertAlmostEqual(c2.heading_hold_bound, math.radians(1.5))
+        self.assertAlmostEqual(c2.heading_hold_creep, 0.16)
+        self.assertAlmostEqual(c2.heading_hold_straight_kappa, 0.06)
+
+    def test_coupled_heading_hold_rejects_non_bool(self):
+        with self.assertRaises(ValueError):
+            _build('reference', coupled_heading_hold='true')                 # _strict_bool
 
 
 class FailClosedTests(unittest.TestCase):

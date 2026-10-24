@@ -53,6 +53,39 @@ EXECUTE_WALL_BACKSTOP_S = 1800.0
 GOAL_POSITION_TOL = 0.01
 GOAL_VELOCITY_TOL = 0.70
 GOAL_SETTLE_MARGIN_S = 20.0  # < EXECUTE_SETTLE 25 so GOAL_MISS prints terminal per-joint first
+
+# --- Terminal settle: accept a bounded, DECAYING residual oscillation as a named success ----------
+# The instantaneous terminal gate (pos<=tol AND vel<=vel_tol at ONE sample) can never fire for a
+# residual limit-cycle whose phase-space orbit does not fit the (pos,vel) box at a single instant:
+# when the ringing joint passes its target (pos~0) its velocity is at the orbit peak, and when it is
+# slow (a turning point) its position error is at the orbit amplitude. coldwin2 (2026-10-23) died
+# exactly here -- the welded-carton collect-place left ur_wrist_3 ringing at 0.72 rad/s (barely over
+# the 0.70 vel tol) at a 3.4 mm-accurate pose for the whole 30 s settle window, so PATH_TOLERANCE_
+# VIOLATED aborted a place whose carton was welded on the deck within tolerance. coldlivewin passed
+# the identical place (the ring damped there). ROOT CAUSE (CPU-confirmed): the linear position drive
+# is heavily OVERDAMPED (zeta=kd/(2*sqrt(kp*I))=7-33 for any plausible carton inertia about wrist_3),
+# so it does NOT ring in the linear regime; but the PD effort SATURATES -- at v=0.72 it wants
+# kp*err+kd*v=6330 Nm against the 400 Nm cap (16x), and the damping term alone exceeds the cap for any
+# v>0.05 rad/s -- so under a terminal disturbance (the welded carton's reaction / PhysX weld+deck
+# contact) the realised damping is bang-bang and a residual limit cycle can persist, decaying only
+# intermittently. Retuning gains is contraindicated (raising kd worsens saturation; lowering it wrecks
+# the tracking envelope the stiffening fixed), and the commanded terminal velocity is already 0, so
+# neither a gain change nor a terminal brake is the lever. The lever is the ACCEPTANCE criterion: a
+# damped-but-nonzero wrist at a tight pose IS a successful place; a SUSTAINED (non-decaying) or
+# DIVERGING ring is not. The envelope gate integrates the terminal samples and settles only when the
+# position stayed within goal_pos_tol across the recent window AND the velocity-peak envelope is
+# DECAYING below a bounded ceiling -- position is NEVER loosened, and a sustained/diverging/unbounded
+# arm still fails by name. SETTLE_ENVELOPE=0 restores the legacy instantaneous-only gate byte-for-byte.
+SETTLE_ENVELOPE = os.environ.get('RESTOCK_SETTLE_ENVELOPE', '1').lower() not in ('0', 'false', 'off', 'no')
+SETTLE_MIN_WINDOW_S = max(0.5, min(15.0, float(os.environ.get('RESTOCK_SETTLE_MIN_WINDOW_S', 3.0))))
+SETTLE_MIN_SAMPLES = max(4, int(float(os.environ.get('RESTOCK_SETTLE_MIN_SAMPLES', 8))))
+# recent velocity-peak must be <= DECAY_RATIO * the earliest peak to count as decaying (not a limit cycle)
+SETTLE_DECAY_RATIO = max(0.1, min(0.95, float(os.environ.get('RESTOCK_SETTLE_DECAY_RATIO', 0.6))))
+# ...and <= ACCEPT_VEL rad/s (bounded residual). Clamped at/above the instantaneous vel tol so the
+# envelope never settles something the instantaneous gate would reject on a tighter velocity.
+SETTLE_ACCEPT_VEL = max(GOAL_VELOCITY_TOL, min(3.0, float(os.environ.get('RESTOCK_SETTLE_ACCEPT_VEL', 1.0))))
+# recent peak above DIVERGE_RATIO * the earlier peak (and above the vel tol) = instability: fail early.
+SETTLE_DIVERGE_RATIO = max(1.05, min(5.0, float(os.environ.get('RESTOCK_SETTLE_DIVERGE_RATIO', 1.25))))
 # fm367: SIM-ONLY multiplier on the terminal-settle budget (same env + default as the host's
 # EXECUTE_SETTLE_MARGIN_S scale). 1.0 => byte-identical; the sim profile sets 1.5. The base ordering
 # GOAL_SETTLE_MARGIN_S (20) < EXECUTE_SETTLE_MARGIN_S (25) is preserved under a common scale (20*s <
@@ -126,6 +159,73 @@ def executor_exit_action(*, raised_exc, prior_fault, context_ok, transient_budge
     return ('retry', None)
 
 
+def goal_reached(sim_age, pos_err, vel_mag, pos_tol, *, sim_age_tol=0.2, vel_tol=GOAL_VELOCITY_TOL):
+    """Terminal goal-settle predicate (pure/CPU-testable): the move has reached its goal iff the latest
+    measured feedback is SIM-fresh (``sim_age<=sim_age_tol``), every joint is within the position
+    tolerance (``pos_err`` is the max |measured-goal| across joints) and the arm has settled below the
+    velocity tolerance. Freshness is sim-clocked only (no wall term) so render pacing never false-fails a
+    settled grasp. ``pos_tol`` stays tight (grasp precision) and is NOT loosened for the loaded pick: the
+    executor LOADED-pick shoulder_lift miss is NOT a gravity sag a feedforward or a wider tolerance could
+    close -- it is a physical block (the scripted side-grip pick jams short of the carton); see
+    classify_goal_miss and sim-robust-executor-shoulder-drive-v1."""
+    return sim_age <= sim_age_tol and pos_err <= pos_tol and vel_mag <= vel_tol
+
+
+# Named goal-miss classification (sim-robust-executor-shoulder-drive-v1). A terminal settle failure used to
+# raise a GENERIC "measured goal tolerance not reached", which hid WHY and was repeatedly misread as a
+# gravity sag (the FF chase of PR 205->210->214->218). The executor LOADED pick's ur_shoulder_lift settles
+# ~0.10 rad short with the other five joints at the goal (~1e-5 rad) and the blocked joint FROZEN (vel~0),
+# because the scripted side-grip pick physically jams ~40 mm short of the carton -- an unmodeled collision
+# in the pick descent, NOT a gravity sag. Proof (CPU, data/sim-robust-executor-shoulder-drive-v1): the true
+# gravity on shoulder_lift at the stall pose is ~125 Nm, far under the 400 Nm drive force limit, so the drive
+# has ample authority and the miss is feedforward-INDEPENDENT (0.098 off vs 0.100 on) -- the signature of a
+# kinematic/contact block, not a torque balance. classify_goal_miss turns that joint signature into a named
+# 'pick physically blocked' fault so the real cause is attributable without another blind run. Pure/CPU-
+# testable. A genuine multi-joint miss, a joint only marginally past tol, or a still-moving joint stays
+# GENERIC (so a real tracking/settle edge is never mislabelled a blocked pick).
+GOAL_MISS_FAR_RAD = 0.03            # a single joint this far past tol is a gross miss, not settle/track noise
+GOAL_MISS_FROZEN_VEL = 0.05         # the blocked joint has settled against the block (rad/s)
+_GOAL_MISS_GENERIC = 'measured goal tolerance not reached'
+
+
+def classify_goal_miss(per_joint_err, per_joint_vel, pos_tol, *, joint_names=ARM_JOINTS,
+                       surface=None, far_rad=GOAL_MISS_FAR_RAD, frozen_vel=GOAL_MISS_FROZEN_VEL):
+    """Classify a terminal goal miss into a NAMED fault reason (pure/CPU-testable), returned as a string.
+
+    Returns a 'pick physically blocked' reason iff the miss is EXACTLY ONE joint far from goal
+    (``|err|>pos_tol`` and ``|err|>=far_rad``) that has FROZEN (``|vel|<=frozen_vel``) while every other
+    joint reached the goal (``|err|<=pos_tol``) -- the host-visible signature of the scripted side-grip pick
+    jamming short of the carton. The planned goal IS the contact pose, so a joint frozen far short means the
+    tool is far from the planned contact: joint evidence alone is authoritative for the executor. ``surface``
+    (``gap_mm, flush_deg``), when a sim/controller side-channel supplies the measured gripper->target gap and
+    flush angle, ENRICHES the reason with those numbers (it never flips the classification -- the joints
+    decide; a missing/garbled reading just omits the mm/deg). Any other miss stays the GENERIC reason, so a
+    real multi-joint tracking error or a tolerance-edge settle is never mislabelled a blocked pick."""
+    try:
+        err = np.asarray(per_joint_err, float)
+        vel = np.asarray(per_joint_vel, float)
+        over = [i for i in range(len(err)) if abs(err[i]) > pos_tol]
+        if len(over) != 1:
+            return _GOAL_MISS_GENERIC
+        j = over[0]
+        if not (abs(err[j]) >= far_rad and abs(vel[j]) <= frozen_vel):
+            return _GOAL_MISS_GENERIC
+        name = joint_names[j] if j < len(joint_names) else 'joint[%d]' % j
+        surf = ' (gripper->surface reading unavailable to the executor)'
+        if surface is not None:
+            try:
+                gap_mm, flush_deg = float(surface[0]), float(surface[1])
+                if math.isfinite(gap_mm) and math.isfinite(flush_deg):
+                    surf = (' gripper %.1f mm / %.1f deg from the target surface '
+                            '(grasp weld gate <=3 mm / <=2 deg)' % (gap_mm, flush_deg))
+            except (TypeError, ValueError, IndexError):
+                pass
+        return ('pick physically blocked: %s frozen %.4f rad short of goal while the other joints reached '
+                'it;%s -- pick geometry infeasible from this pose, not gravity sag' % (name, abs(err[j]), surf))
+    except Exception:
+        return _GOAL_MISS_GENERIC
+
+
 def feedback_fresh(gap):
     """A relayed joint-feedback frame is fresh if now()-stamp (sim) is within a sub-tick negative
     lead (the /clock-vs-/joint_states delivery-order race) and the forward staleness bound."""
@@ -169,6 +269,41 @@ def reference_time(feedback_stamp, start):
     return max(0.0, feedback_stamp - start)
 
 
+def execute_clock(elapsed, wall_now, wall_backstop, *, lead=FEEDBACK_RENDER_LEAD_S):
+    """Resolve the trajectory-EXECUTION clock against the measured-feedback-anchored origin. Pure.
+
+    ``elapsed`` = now() - anchored_start, where the anchored ``start`` is a MEASURED-FEEDBACK stamp (see
+    anchored_start). Under render pacing that stamp can LEAD the node /clock by up to ``lead`` sim seconds
+    -- the identical sub-tick /clock-vs-/joint_states delivery race feedback_fresh/reference_time already
+    absorb -- so the first execute-loop ``now()`` read right after anchoring can yield a small NEGATIVE
+    ``elapsed`` that is the trajectory start pose, NOT a sim-clock regression. The bound is exact: a
+    feedback frame leading now() by more than ``lead`` is refused as stale by feedback_fresh and never
+    anchors ``start`` (gap = now-stamp >= -lead there), so ``start - now`` <= ``lead`` by construction and
+    a within-``lead`` negative elapsed can only be this race.
+
+    coldlive sample 2 (2026-10-23, live_pose full-chain capstone) faulted exactly here: ``TRAJ_HOST_START
+    anchored start=26.533 install=26.516668 anchor_lag=0.017s`` then two immediate ``TRAJ_HOST_FAULT
+    trajectory clock/timeout failure`` on a VALID 2-point plan -- the next now() still read ~26.516, so the
+    old hard ``elapsed<0`` fired. Four earlier trajectories in the same run passed only because their first
+    post-anchor now() happened to have caught up; under the heavy live_pose load the /clock relay lags more.
+
+    Returns ``(clamped_elapsed, fault_reason)``:
+
+    * sub-tick negative lead (``-lead <= elapsed < 0``) -> ``(0.0, None)``: hold the start pose, no fault.
+    * normal forward clock -> ``(elapsed, None)``.
+    * genuine sim-clock regression (``elapsed < -lead``) -> ``(None, 'trajectory clock regression')``.
+    * frozen/hung-sim WALL backstop (``wall_now > wall_backstop``) -> ``(None, 'trajectory clock/timeout
+      failure')`` (unchanged; a genuinely stuck loop still fails by name).
+
+    The wall backstop is checked first so a stuck sim that also reads a stale elapsed still reports the
+    timeout, not the regression."""
+    if wall_now > wall_backstop:
+        return (None, 'trajectory clock/timeout failure')
+    if elapsed < -lead:
+        return (None, 'trajectory clock regression')
+    return (max(0.0, elapsed), None)
+
+
 def tracking_fault(track_err, miss_count, *, tol=TRACKING_TOL, debounce=TRACKING_DEBOUNCE,
                    hard=TRACKING_HARD_TOL):
     """Decide whether a command-vs-measured tracking error should emergency-stop the mission.
@@ -181,6 +316,147 @@ def tracking_fault(track_err, miss_count, *, tol=TRACKING_TOL, debounce=TRACKING
     if track_err <= tol:
         return False
     return track_err > hard or miss_count >= debounce
+
+
+# --- Goal-acceptance race fixes (sim-robust-pick-plan-rejection-v1) ---------------------------------
+# The FollowJointTrajectory goal() callback used to return GoalResponse.REJECT SILENTLY on three
+# startup/timing conditions -- a latched fault, an already-active goal, or no feedback yet -- and on a
+# Plan ValueError. seconddeath (2026-10-23): under the live_pose + arm-feed load move_group forwarded
+# the very FIRST collect goal in the wall-gap after this executor's /joint_states subscription was ready
+# but before its first sample callback fired (render pacing spaces frames seconds apart in WALL time
+# though <0.1 s in SIM), so state['feedback'] was still None and the goal was rejected with NO log line.
+# move_group aborted the ExecuteTrajectory, the mission surfaced the misleading
+# 'collision planning or execution failed', and across StageRetry the arm never moved -> arm-command
+# heartbeat lost. The helpers below make every reject reasoned + logged and let a goal that arrives a
+# few ticks early WAIT (bounded) for the first feedback instead of being rejected.
+
+def first_feedback_grace_s():
+    """Bounded WALL grace the goal callback waits for the FIRST measured feedback before rejecting a
+    goal as feedback-None. The window is the gap between the /joint_states subscription going ready and
+    the first sample arriving, which under render pacing is a few WALL seconds (frames ~1.7-3.5 s apart
+    WALL though <0.1 s SIM). A goal that arrives WITH feedback already present breaks out on the first
+    poll with zero added delay, so the normal path is byte-identical. 0 => legacy immediate decision.
+    Env override (sim-only executor), clamped sane."""
+    return max(0.0, min(60.0, float(os.environ.get('RESTOCK_FIRST_FEEDBACK_GRACE_S', 8.0))))
+
+
+def reject_reason(fault, active, feedback_present):
+    """Named reason a FollowJointTrajectory goal is rejected given the executor state, or None if the
+    goal should be ACCEPTED (all clear). Pure + importable so each race is CPU-testable and the reject is
+    never silent -- goal() logs this string (TRAJ_HOST_GOAL_REJECT). Order matters: a latched fault wins
+    over an active goal, which wins over missing feedback."""
+    if fault is not None:
+        return 'executor fault latched: %s' % (fault,)
+    if active:
+        return 'a previous goal is still executing'
+    if not feedback_present:
+        return 'no measured joint feedback received yet (startup/first-feedback race)'
+    return None
+
+
+def active_is_stale(active, handle_live):
+    """True if the active flag is set but its goal handle has terminated, so a NEW goal must not be
+    rejected on a dead flag (a handle that aborted/canceled without execute()'s finally clearing active).
+    ``handle_live`` is whether the stored goal handle still reports active. Pure."""
+    return bool(active) and not handle_live
+
+
+def reset_clears(fault, active, handle_live):
+    """What an explicit op-start reset clears on the executor, as ``(clear_fault, clear_active)``. It
+    re-arms a LATCHED fault for the new operation (consistent with PR 210's ArmCommandGate.resume at the
+    shortcut handoff -- the host's permanent latch otherwise bricks the arm against the mission's own
+    bounded move retries) and clears a STALE active flag, but NEVER a LIVE execution's active flag (that
+    would abandon a running goal). A no-op (False, False) when there is nothing to clear, so a reset
+    published on the normal (fault-free) path is byte-identical. Pure."""
+    return (fault is not None, active_is_stale(active, handle_live))
+
+
+def abort_active_clears(active, handle_live, fault):
+    """sim-robust-movegroup-double-death-v1 (gap 2): what an ``/arm_controller/abort_active`` signal does to
+    the executor, as ``(request_abort, clear_fault)``. On a MID-OP move_group respawn+reseed the controller
+    forces a crash-abandoned LIVE goal to terminate so the reseeded resend is ACCEPTED, where PR 229's
+    op-start reset deliberately will not (``reset_clears`` never touches a live goal). This REQUESTS the live
+    goal's own execute() loop to self-abort (only when a goal is active AND its handle is still live) and
+    clears a latched fault so the resend is not rejected on an old fault. A stale/absent active goal needs no
+    abort (``active_is_stale`` already clears it in goal()); a fault-free idle executor is a no-op
+    ``(False, False)`` so an abort_active published with nothing to clear is byte-identical. Pure for CPU
+    testing."""
+    return (bool(active) and bool(handle_live), fault is not None)
+
+
+def _handle_live(handle):
+    """True if a stored goal handle is still executing (so clearing its active flag would abandon a live
+    goal). Tolerates a None / duck-typed handle; rclpy ServerGoalHandle exposes ``is_active``."""
+    if handle is None:
+        return False
+    try:
+        return bool(handle.is_active)
+    except Exception:
+        return False
+
+
+def _envelope_peaks(samples):
+    """Over a time-ordered ``(t, pos_err, vel_mag)`` sample list, split at the TIME midpoint and
+    return ``(early_vel_peak, recent_vel_peak, recent_pos_peak)``. The position peak is taken over the
+    RECENT half only: a residual that has decayed TO a tight pose may have arrived there through an
+    early over-tolerance transient, which is not the terminal pose we gate on. Degenerate splits (all
+    samples on one side) fall back to the whole list / the last sample so the function is total. Pure."""
+    t0, t1 = samples[0][0], samples[-1][0]
+    mid = 0.5 * (t0 + t1)
+    early_v = [s[2] for s in samples if s[0] <= mid] or [s[2] for s in samples]
+    recent = [s for s in samples if s[0] > mid] or [samples[-1]]
+    recent_v = [s[2] for s in recent]
+    recent_p = [s[1] for s in recent]
+    return max(early_v), max(recent_v), max(recent_p)
+
+
+def settle_decision(samples, *, pos_tol, vel_tol, final=False,
+                    min_window_s=SETTLE_MIN_WINDOW_S, min_samples=SETTLE_MIN_SAMPLES,
+                    decay_ratio=SETTLE_DECAY_RATIO, accept_vel=SETTLE_ACCEPT_VEL,
+                    diverge_ratio=SETTLE_DIVERGE_RATIO):
+    """Classify the terminal settle of a residual oscillation from its measured-sample stream. Pure.
+
+    ``samples`` is a time-ordered list of ``(t_sim, pos_err, vel_mag)`` collected once per DISTINCT
+    measured-feedback sample AFTER the trajectory reached its planned end (``pos_err`` = max |q-goal|
+    over the arm joints, ``vel_mag`` = max |velocity|). Returns ``(verdict, reason)``:
+
+    * ``('settled', reason)``  -- the position stayed within ``pos_tol`` across the recent window AND
+      the velocity-peak envelope is DECAYING below ``accept_vel`` (a damped-but-nonzero wrist at a
+      tight pose = a successful place). ``pos_tol`` is NEVER loosened here.
+    * ``('diverging', reason)`` -- the recent velocity peak exceeds the earlier peak by
+      ``diverge_ratio`` AND is itself over ``vel_tol`` (instability) -- fail by name, may fire early.
+    * ``('miss', reason)``     -- ONLY when ``final`` (the caller's settle budget expired) and not
+      settled: the reason NAMES why (pose not bounded / sustained limit cycle / decaying-but-slow).
+    * ``('pending', None)``    -- not enough window/samples yet, or bounded-and-decreasing but not yet
+      below the accept ceiling: keep observing until the settle budget expires.
+
+    The instantaneous fast path (``pos_err<=pos_tol and vel_mag<=vel_tol`` at one sample) is the
+    caller's concern and fires first, so for a crisply-settling move this is never consulted and the
+    outcome is byte-identical to the legacy gate."""
+    enough = len(samples) >= min_samples and (samples[-1][0] - samples[0][0]) >= min_window_s
+    if not enough and not final:
+        return ('pending', None)
+    early_v, recent_v, recent_p = _envelope_peaks(samples)
+    pos_bounded = recent_p <= pos_tol
+    decaying = recent_v <= early_v * decay_ratio
+    diverging = recent_v > early_v * diverge_ratio and recent_v > vel_tol
+    if diverging and enough:
+        return ('diverging', f'terminal velocity envelope diverging: recent peak {recent_v:.3f} > '
+                             f'{diverge_ratio:.2f}x earlier {early_v:.3f} rad/s (instability)')
+    if pos_bounded and decaying and recent_v <= accept_vel:
+        return ('settled', f'decaying residual oscillation at tight pose: pos_peak {recent_p:.4f} <= '
+                           f'{pos_tol:.3f} rad, velocity envelope {early_v:.3f}->{recent_v:.3f} rad/s '
+                           f'decaying below {accept_vel:.2f}')
+    if not final:
+        return ('pending', None)
+    if not pos_bounded:
+        return ('miss', f'pose not bounded within settle window: position peak {recent_p:.4f} > goal '
+                        f'tol {pos_tol:.3f} rad (oscillation amplitude exceeds tolerance)')
+    if not decaying:
+        return ('miss', f'sustained residual oscillation (limit cycle, not damping): velocity envelope '
+                        f'{early_v:.3f}->{recent_v:.3f} rad/s over the settle window')
+    return ('miss', f'decaying but not converged within settle window: velocity envelope {early_v:.3f}'
+                    f'->{recent_v:.3f} rad/s (recent peak above accept ceiling {accept_vel:.2f})')
 
 
 class Plan:
@@ -271,15 +547,34 @@ def main():
     if node.context.get_domain_id()!=88:
         raise RuntimeError('trajectory executor requires simulation domain 88')
     lock=threading.RLock()
-    state=dict(feedback=None,received=0.,fault=None,active=False,target=None,plan=None,start=None,
+    state=dict(feedback=None,received=0.,fault=None,active=False,active_handle=None,target=None,
+               plan=None,start=None,
                start_install=None,   # sim /clock at execute install; start is anchored to the first
                # post-install feedback stamp (anchored_start), so this only records the anchor_lag.
                miss_count=0,miss_stamp=None,contact=False,
+               # Terminal-settle accumulator: (t_sim, pos_err, vel_mag) per DISTINCT post-plan-end
+               # feedback sample, for the decaying-oscillation envelope gate (settle_decision). Reset
+               # per goal in execute(). settle_stamp dedups the 0.01 s wall loop re-reading one frame;
+               # settle_log throttles the TRAJ_HOST_SETTLE trace so a future run is reconstructable.
+               settle_samples=[],settle_stamp=None,settle_log=None,
                # fm345 (c): terminal goal-gate position tolerance, default tight (GOAL_POSITION_TOL).
                # The controller latches a WIDER value on the carton-loaded PLACE extend via the
                # goal_position_tol side-channel topic (the FJT goal_tolerance is unreachable through
                # MoveIt's ExecuteTrajectory) and resets it to the default on every other move.
-               goal_pos_tol=GOAL_POSITION_TOL)
+               goal_pos_tol=GOAL_POSITION_TOL,
+               # sim-robust-executor-shoulder-drive-v1: latest measured gripper->target (gap_mm, flush_deg)
+               # from the optional pick_surface side-channel; None until a publisher feeds it. Only ENRICHES
+               # a 'pick physically blocked' goal-miss reason with the measured numbers (never changes the
+               # classification), so absent => byte-identical behaviour with joint-only naming.
+               pick_surface=None,
+               # sim-robust-movegroup-double-death-v1 (gap 2): a mid-op move_group respawn+reseed. move_group
+               # crashes mid-EXECUTION leaving its FollowJointTrajectory goal LIVE on this executor, so the
+               # reseeded resend's new goal would be rejected 'a previous goal is still executing'. The
+               # controller publishes /arm_controller/abort_active on the crash-retry resend; the goal's own
+               # execute() loop sees this flag and self-terminates (handle.abort(), NO fault latched -- a
+               # crash-abandoned goal is not a tracking failure) so active clears and the resend is accepted.
+               # None on the no-crash path => byte-identical.
+               abort_requested=False)
     group=ReentrantCallbackGroup()
     command=node.create_publisher(JointState,'/restock_sim/arm_joint_command',10)
     stop=node.create_publisher(Bool,'/restock_sim/manipulation/stop',10)
@@ -423,8 +718,29 @@ def main():
             command.publish(msg)
 
     def goal(request):
+        # Bounded first-feedback grace, THEN decide under the lock. Release the lock while waiting so the
+        # feedback callback (another MultiThreadedExecutor thread) can latch state['feedback']; a goal
+        # that already has feedback breaks out on the first poll with zero added delay (byte-identical
+        # normal path). This removes the seconddeath silent feedback-None reject of a valid first goal.
+        grace=first_feedback_grace_s()
+        wait_deadline=time.monotonic()+grace
+        while True:
+            with lock:
+                if active_is_stale(state['active'],_handle_live(state['active_handle'])):
+                    state['active']=False   # a prior handle terminated without clearing the flag
+                if state['feedback'] is not None or state['fault'] is not None or state['active']:
+                    break
+            if time.monotonic()>=wait_deadline:
+                break
+            time.sleep(.01)
         with lock:
-            if state['fault'] or state['active'] or state['feedback'] is None:
+            reason=reject_reason(state['fault'],state['active'],state['feedback'] is not None)
+            if reason is not None:
+                # Never silent: log the reason + the exact state that caused it so a startup race
+                # (widen the grace) is told apart from a genuine latched fault or a live goal.
+                print('TRAJ_HOST_GOAL_REJECT %s (fault=%r active=%s feedback=%s grace=%.2fs)'
+                      % (reason,state['fault'],state['active'],
+                         'set' if state['feedback'] is not None else 'none',grace),flush=True)
                 return GoalResponse.REJECT
             try:
                 if request.multi_dof_trajectory.points:
@@ -457,7 +773,8 @@ def main():
                     print(f'TRAJ_HOST_PLAN dump skipped: {_exc!r}',flush=True)
                 state['active']=True
                 return GoalResponse.ACCEPT
-            except ValueError:
+            except ValueError as exc:
+                print('TRAJ_HOST_GOAL_REJECT plan rejected at goal: %s' % (exc,),flush=True)
                 return GoalResponse.REJECT
 
     def execute(handle):
@@ -475,6 +792,9 @@ def main():
                 state['plan'],state['start'],state['start_install']=plan,None,now()
                 state['miss_count'],state['miss_stamp']=0,None   # fresh debounce window per trajectory
                 state['contact']=False                           # arm the contact gate fresh per goal
+                state['abort_requested']=False  # gap 2: a fresh goal clears any stale crash-abort request
+                state['active_handle']=handle   # so goal() can tell a LIVE goal from a stale active flag
+                state['settle_samples'],state['settle_stamp'],state['settle_log']=[],None,None
             wall_backstop=time.monotonic()+EXECUTE_WALL_BACKSTOP_S
             while rclpy.ok():
                 with lock:
@@ -483,6 +803,20 @@ def main():
                         handle.canceled()
                         result.error_code=result.PATH_TOLERANCE_VIOLATED
                         result.error_string=state['fault']
+                        return result
+                    if state['abort_requested']:
+                        # gap 2 (sim-robust-movegroup-double-death-v1): a mid-op move_group respawn+reseed.
+                        # This goal is the crash-abandoned pre-respawn trajectory; the controller asked (via
+                        # /arm_controller/abort_active) to terminate it so the reseeded resend is accepted.
+                        # Abort WITHOUT latching a fault (a crash-abandoned goal is not a tracking failure --
+                        # a fault would then reject the resend) and clear the request; the finally clears
+                        # active so goal() accepts the new goal.
+                        state['abort_requested']=False
+                        print('TRAJ_HOST_ABORT_ACTIVE superseded by crash-retry resend (mid-op respawn+reseed)',
+                              flush=True)
+                        handle.abort()
+                        result.error_code=result.PATH_TOLERANCE_VIOLATED
+                        result.error_string='superseded by crash-retry resend'
                         return result
                     if state['fault']:
                         raise RuntimeError(state['fault'])
@@ -500,13 +834,17 @@ def main():
                     continue
                 with lock:
                     started=state['start']         # only ever transitions None -> set (monotonic)
-                    elapsed=now()-started
-                    # Sim-clock regression is a hard fault; the WALL bound is only a frozen/hung-sim
-                    # backstop (see EXECUTE_WALL_BACKSTOP_S). Under render pacing a healthy grasp advances
-                    # ``elapsed`` normally while taking many wall seconds per sim second, so it never
-                    # approaches the backstop. Terminal completion/overrun is on the sim clock below.
-                    if elapsed<0 or time.monotonic()>wall_backstop:
-                        fault('trajectory clock/timeout failure')
+                    # A sub-tick NEGATIVE elapsed is the /clock-vs-feedback render-lead race (start is a
+                    # measured-feedback stamp that can lead the node /clock by <=FEEDBACK_RENDER_LEAD_S --
+                    # coldlive sample 2 anchor_lag 0.017 s), NOT a regression: execute_clock clamps it to
+                    # the start pose (sample(0)) instead of hard-faulting. A GENUINE regression beyond the
+                    # render lead, and the frozen/hung-sim WALL backstop (EXECUTE_WALL_BACKSTOP_S), both
+                    # still fault by name. Under render pacing a healthy grasp advances ``elapsed`` normally
+                    # while taking many wall seconds per sim second, so it never approaches the backstop.
+                    # Terminal completion/overrun is on the sim clock below.
+                    elapsed,clock_fault=execute_clock(now()-started,time.monotonic(),wall_backstop)
+                    if clock_fault is not None:
+                        fault(clock_fault)
                     if state['fault']:
                         raise RuntimeError(state['fault'])
                     if state['contact']:
@@ -543,24 +881,88 @@ def main():
                         # though <=0.1 s SIM apart (run-106 reached the trajectory end with the arm at
                         # the goal, then faulted on the wall term). The feedback-staleness watchdog
                         # (tick(), 30 s wall backstop) still hard-stops a genuinely frozen sim.
-                        if now()-measured[0]<=.2 and pos_err<=state['goal_pos_tol'] and vel_mag<=GOAL_VELOCITY_TOL:
+                        if goal_reached(now()-measured[0],pos_err,vel_mag,state['goal_pos_tol']):
                             state['target']=plan.end.copy()
                             state['plan']=None
                             handle.succeed()
                             result.error_code=result.SUCCESSFUL
                             return result
-                        if elapsed>plan.times[-1]+goal_settle_budget():   # fm367: sim-scaled settle window
+                        settle_elapsed=elapsed-plan.times[-1]
+                        if SETTLE_ENVELOPE:
+                            # The instantaneous gate above cannot fire for a residual limit-cycle whose
+                            # phase-space orbit never fits the (pos,vel) box at one instant (coldwin2's
+                            # ur_wrist_3 ring). Accumulate the terminal samples (deduped on the feedback
+                            # stamp -- the 0.01 s wall loop re-reads one frame many times) and let the
+                            # envelope gate settle a bounded DECAYING oscillation at a tight pose, or
+                            # fail a sustained/diverging/unbounded one BY NAME. Position is not loosened.
+                            stamp=measured[0]
+                            if stamp!=state['settle_stamp']:
+                                state['settle_stamp']=stamp
+                                state['settle_samples'].append((stamp,pos_err,vel_mag))
+                                if state['settle_log'] is None or stamp-state['settle_log']>=1.0:
+                                    state['settle_log']=stamp
+                                    print(f'TRAJ_HOST_SETTLE settle={settle_elapsed:.2f} pos_err={pos_err:.4f} '
+                                          f'vel={vel_mag:.4f} n={len(state["settle_samples"])} '
+                                          f'per_joint_vel={np.array2string(measured[2],precision=4,separator=",")} '
+                                          f'per_joint_err={np.array2string(measured[1]-plan.end,precision=4,separator=",")}',
+                                          flush=True)
+                            verdict,reason=settle_decision(state['settle_samples'],
+                                pos_tol=state['goal_pos_tol'],vel_tol=GOAL_VELOCITY_TOL,final=False)
+                            if verdict=='settled':
+                                print(f'TRAJ_HOST_GOAL_SETTLE {reason} (settle={settle_elapsed:.2f}s)',flush=True)
+                                state['target']=plan.end.copy()
+                                state['plan']=None
+                                handle.succeed()
+                                result.error_code=result.SUCCESSFUL
+                                return result
+                            if verdict=='diverging':
+                                perr=measured[1]-plan.end
+                                print(f'TRAJ_HOST_GOAL_MISS pos_err={pos_err:.4f} vel={vel_mag:.4f} '
+                                      f'sim_age={now()-measured[0]:.3f} settle={settle_elapsed:.2f} '
+                                      f'per_joint_err={np.array2string(perr,precision=4,separator=",")} '
+                                      f'per_joint_vel={np.array2string(measured[2],precision=4,separator=",")} '
+                                      f'meas_q={np.array2string(measured[1],precision=4,separator=",")} '
+                                      f'goal_q={np.array2string(plan.end,precision=4,separator=",")}',
+                                      flush=True)
+                                raise RuntimeError(reason)
+                        if settle_elapsed>goal_settle_budget():   # fm367: sim-scaled settle window
                             # Diagnostic: the exact terminal error so a miss is attributable (settle
                             # tolerance vs a genuine tracking error) without another blind run.
                             perr=measured[1]-plan.end
                             print(f'TRAJ_HOST_GOAL_MISS pos_err={pos_err:.4f} vel={vel_mag:.4f} '
-                                  f'sim_age={now()-measured[0]:.3f} settle={elapsed-plan.times[-1]:.2f} '
+                                  f'sim_age={now()-measured[0]:.3f} settle={settle_elapsed:.2f} '
                                   f'per_joint_err={np.array2string(perr,precision=4,separator=",")} '
                                   f'per_joint_vel={np.array2string(measured[2],precision=4,separator=",")} '
                                   f'meas_q={np.array2string(measured[1],precision=4,separator=",")} '
                                   f'goal_q={np.array2string(plan.end,precision=4,separator=",")}',
                                   flush=True)
-                            raise RuntimeError('measured goal tolerance not reached')
+                            # Compose two complementary terminal-miss namings at budget expiry:
+                            #  - classify_goal_miss (sim-robust-executor-shoulder-drive-v1) names a
+                            #    POSITION miss: exactly one joint frozen far from goal = the scripted pick
+                            #    jamming short of the carton (joint-only, authoritative); else generic.
+                            #  - the settle envelope (sim-robust-place-wrist3-settle-v1) first gives a
+                            #    bounded DECAYING residual oscillation at a tight pose a chance to SETTLE
+                            #    (a successful place), then names a sustained/diverging/unbounded ring.
+                            # Order: envelope-settle (success) wins; else a SPECIFIC pick-block reason
+                            # from classify_goal_miss; else the envelope's (more specific) settle reason;
+                            # else the generic. SETTLE_ENVELOPE=0 => pure classify_goal_miss (upstream).
+                            miss_reason=classify_goal_miss(
+                                perr, measured[2], state['goal_pos_tol'], surface=state['pick_surface'])
+                            if SETTLE_ENVELOPE:
+                                verdict,reason=settle_decision(state['settle_samples'],
+                                    pos_tol=state['goal_pos_tol'],vel_tol=GOAL_VELOCITY_TOL,final=True)
+                                if verdict=='settled':   # only crossed the accept bar on the final sample
+                                    print(f'TRAJ_HOST_GOAL_SETTLE {reason} (settle={settle_elapsed:.2f}s)',flush=True)
+                                    state['target']=plan.end.copy()
+                                    state['plan']=None
+                                    handle.succeed()
+                                    result.error_code=result.SUCCESSFUL
+                                    return result
+                                # A specific pick-block diagnosis is authoritative; otherwise the envelope's
+                                # settle reason is more specific than the generic position miss.
+                                if miss_reason==_GOAL_MISS_GENERIC:
+                                    raise RuntimeError(reason)
+                            raise RuntimeError(miss_reason)
                 time.sleep(.01)
             raise RuntimeError('executor shutdown')
         except Exception as exc:
@@ -588,13 +990,80 @@ def main():
         # (the controller never widens it for the grasp).
         with lock:
             state['goal_pos_tol']=min(0.2,max(GOAL_POSITION_TOL,float(msg.data)))
+    def pick_surface_signal(msg):
+        # sim-robust-executor-shoulder-drive-v1: optional measured gripper->target surface reading
+        # [gap_mm, flush_deg] from the sim contact observer, used ONLY to enrich a 'pick physically blocked'
+        # goal-miss reason with the measured numbers. Absent/garbled => state stays None and the named
+        # reason is joint-only; it never changes the classification, so a run without this feed is
+        # byte-identical. Two finite values required.
+        try:
+            d=list(msg.data)
+            val=(float(d[0]),float(d[1])) if len(d)>=2 else None
+        except (TypeError,ValueError,IndexError):
+            val=None
+        with lock:
+            state['pick_surface']=val
+    def reset_signal(msg):
+        # Op-start re-arm (sim-robust-pick-plan-rejection-v1): the controller publishes this at the start
+        # of a move so a LATCHED fault from a previous op does not permanently brick the arm against the
+        # mission's own bounded move retries (consistent with PR 210's ArmCommandGate.resume). Clears a
+        # latched fault + a STALE active flag only; NEVER a live execution (reset_clears guards that), so
+        # a reset on the normal fault-free path is a no-op (byte-identical). The host still re-validates
+        # every goal, so a genuinely broken trajectory faults again immediately.
+        if not msg.data:
+            return
+        with lock:
+            clear_fault,clear_active=reset_clears(
+                state['fault'],state['active'],_handle_live(state['active_handle']))
+            if clear_fault or clear_active:
+                print('TRAJ_HOST_RESET op-start re-arm: clear_fault=%s clear_active=%s prior_fault=%r'
+                      % (clear_fault,clear_active,state['fault']),flush=True)
+            if clear_fault:
+                state['fault']=None
+                state['plan']=None
+                state['start']=None
+                state['miss_count'],state['miss_stamp']=0,None
+            if clear_active:
+                state['active']=False
+    def abort_active_signal(msg):
+        # Mid-op crash-retry resend (sim-robust-movegroup-double-death-v1, gap 2): see abort_active_clears.
+        # move_group crashed mid-execution leaving its FollowJointTrajectory goal LIVE here, so the reseeded
+        # resend's new goal would be rejected 'a previous goal is still executing' (coldwin4 death 2). FORCE
+        # the crash-abandoned live goal to self-terminate (its execute() loop consumes abort_requested, calls
+        # handle.abort() with NO fault latched, and clears active in its finally) and clear any latched fault
+        # so the resend is accepted. Only published on a crash-retry resend; the normal path never sends it,
+        # so this is a no-op (byte-identical) there. A stale active flag is still cleared by active_is_stale.
+        if not msg.data:
+            return
+        with lock:
+            request_abort,clear_fault=abort_active_clears(
+                state['active'],_handle_live(state['active_handle']),state['fault'])
+            if request_abort or clear_fault:
+                print('TRAJ_HOST_ABORT_ACTIVE request: abort_live=%s clear_fault=%s prior_fault=%r active=%s'
+                      % (request_abort,clear_fault,state['fault'],state['active']),flush=True)
+            if request_abort:
+                state['abort_requested']=True
+            if clear_fault:
+                state['fault']=None
+                state['plan']=None
+                state['start']=None
+                state['miss_count'],state['miss_stamp']=0,None
     node.create_subscription(JointState,'/restock_sim/joint_states',feedback,10,callback_group=group)
     node.create_subscription(Bool,'/restock_sim/arm_contact',contact_signal,10,callback_group=group)
+    node.create_subscription(Bool,'/restock_sim/arm_controller/reset',reset_signal,10,callback_group=group)
+    node.create_subscription(Bool,'/restock_sim/arm_controller/abort_active',abort_active_signal,10,
+                             callback_group=group)
     # TRANSIENT_LOCAL (latched) so the latest controller-set tolerance is delivered even though this
     # executor subscribes after the controller's publisher is created (fm345 (c)).
     from rclpy.qos import QoSProfile, DurabilityPolicy
-    from std_msgs.msg import Float64
+    from std_msgs.msg import Float64, Float64MultiArray
     node.create_subscription(Float64,'/restock_sim/arm_controller/goal_position_tol',goal_tol_signal,
+                             QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL),
+                             callback_group=group)
+    # Optional gripper->target surface feed (gap_mm, flush_deg); latched so the latest reading is delivered.
+    # No publisher today => the named goal-miss reason falls back to joint-only (the integration lane can
+    # wire the sim contact observer's SEAL_DIAG gap/flush onto this topic for the GPU proof).
+    node.create_subscription(Float64MultiArray,'/restock_sim/arm_controller/pick_surface',pick_surface_signal,
                              QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL),
                              callback_group=group)
     node.create_timer(.02,tick,callback_group=group)
@@ -630,7 +1099,15 @@ def main():
     finally:
         with lock:
             if not state['fault']:
-                fault('executor stopped')   # honest last-resort marker if nothing truer recorded
+                # sim-robust-pick-wrist-guard-cspace-fix-v1: a SIGINT from a shutdown-guard component
+                # death (e.g. the cuMotion container's FatalException CUDA OOM) tears the context down
+                # with no tracking fault, so the generic 'executor stopped' used to mask the real cause.
+                # If the launch guard recorded the dying component in the marker, fault with THAT named
+                # reason instead; absent/clean run => the unchanged generic marker.
+                from twin.restock_host.host_guard_exit import (
+                    MARKER_ENV, guard_exit_fault_reason, read_guard_exit)
+                marker = read_guard_exit(os.environ.get(MARKER_ENV))
+                fault(guard_exit_fault_reason(marker, 'executor stopped'))
         server.destroy()
         executor.shutdown()
         node.destroy_node()

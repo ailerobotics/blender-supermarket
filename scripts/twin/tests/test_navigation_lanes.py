@@ -473,5 +473,329 @@ class LaneCoupledTrackingKnobsTests(unittest.TestCase):
             self.assertEqual(c.route is not None, expect_route_kept)   # coast keeps the lane; legacy drops it
 
 
+class OutboundLeadInAndFastFailTests(unittest.TestCase):
+    """fm-sim-robust-outbound: the improved crosstrack couple (PR232/233) seats the base a VARIABLE
+    distance off the authored outbound dock start -- run coldlivewin landed +0.5 m north of y=15.25
+    (pose (-4.584,15.746,0.363)) while coldliverecovery landed essentially AT it ((-4.464,15.262,-0.013)).
+    The fixed authored start + default xy acquire tol then deadlocked the outbound: the lane never
+    acquired, no route was produced, and the base froze until the 120 s mission nav-stuck WALL budget.
+
+    A hand-authored lead-in to the EXACT start is not viable here -- a forward-only train 0.5 m lateral
+    off a flat lane free-plans a ~12 m loop (confirmed on CPU) -- so the fix is a bounded, swept-validated
+    closed-loop MERGE from the measured seat onto the authored centreline (`build_lead_in`), plus a named
+    fast-fail (`lane_acquire_timeout_s`) for a seat beyond the band the lane can absorb. The lane start is
+    re-centred to the seat distribution so BOTH recorded seats are within +-0.25 m and absorbable.
+
+    Deterministic open-grid fixtures -- never evidence of a physics run. The real store adds obstacles and
+    PhysX cart dynamics; the integration-lane GPU proof owns that (data/sim-robust-outbound-lane-start-v1)."""
+
+    # The recorded post-couple seats (base pose + cart_yaw) from the twin-robot-in-store-boot-v1 runs.
+    SEATS = {'coldlivewin': (-4.584, 15.746, 0.363, 0.362),       # +0.5 m north of y=15.25
+             'coldliverecovery': (-4.464, 15.262, -0.013, -0.013),  # essentially at the authored dock
+             'coldwin2attempt2': (-4.471, 15.311, 0.0, 0.0),      # in-band, acquired + arrived cleanly
+             'coldwin3': (-4.487, 15.227, -0.03, -0.031)}         # 0.27 m SOUTH -> the lead-in overshoot run
+
+    def setUp(self):
+        self.spec = MobileSpec()
+        self.grid = GridMap((-12, 8, 4, 22), (), 0.20)      # open backroom/dock corridor
+        self.goal = (-2.0, 15.25, 0.0)
+
+    def _lane(self, start_y=15.5, lead_in_max_m=3.0):
+        lane = TowLane('outbound_dock_to_bay', [-4.46, start_y, 0.0], list(self.goal),
+                       start_cart_yaw=0.0, goal_articulation=0.3, start_tol_cart_yaw=0.35,
+                       lead_in_max_m=lead_in_max_m)
+        graph = TowLaneGraph([lane]).expand_all(ArticulatedMap(self.grid, self.spec))
+        return lane, graph
+
+    def _controller(self, graph, **kw):
+        base = dict(allow_test_fixtures=True, goal_timeout=600.0, blocked_timeout=40.0,
+                    lane_graph=graph, lane_reacquire_along_route=True)
+        base.update(kw)
+        return ArticulatedController(self.grid, self.spec, **base)
+
+    def _drive(self, c, seat, ticks=8000):
+        c.start(self.goal, True)
+        pose = seat[:3]; cart_yaw = seat[3]; v = w = 0.0; dt = 0.1
+        for t in range(ticks):
+            now = (t + 1) * dt
+            art = math.atan2(math.sin(pose[2] - cart_yaw), math.cos(pose[2] - cart_yaw))
+            od = Odometry(pose, now, abs(v), w, 'test_fixture', 0.05)
+            obs = Observation(now, (), True, True, art, 'test_fixture', 10.0)
+            r = c.step(dt, od, obs, now=now)
+            if r.status in ('succeeded', 'failed'):
+                return r, round(now, 2)
+            v, w = r.linear, r.angular
+            th = pose[2] + w * dt
+            ns = advance(TrainState(pose[0], pose[1], pose[2], cart_yaw),
+                         v * dt, (w / v if abs(v) > 1e-6 else 0.0), self.spec)
+            pose = (pose[0] + v * dt * math.cos(th), pose[1] + v * dt * math.sin(th), th)
+            cart_yaw = ns.cart_yaw
+        return r, round(now, 2)
+
+    def _drive_lagged(self, c, seat, ticks=8000, tau=0.9):
+        """Closed-loop drive with a first-order steering/velocity LAG on the base.
+
+        A real coupled base cannot achieve a commanded yaw-rate / speed instantly (steering inertia +
+        the towed cart's resistance). The exact-integration `_drive` nulls the lead-in's residual lateral
+        offset perfectly; the LAG reproduces the coldwin3 regime where the base rides a steady-state
+        lateral offset down the lead-in's descending final segment (recorded ~0.09 m NORTH) and so reaches
+        the goal x OUTSIDE the hardcoded 0.08 m arrival ball. This is a steering-inertia model, NOT a
+        physics simulation -- its role is to put the real arrival/approach logic under a realistic lateral
+        offset. `tau` is the lag time-constant in seconds (0 => `_drive`)."""
+        c.start(self.goal, True)
+        pose = seat[:3]; cart_yaw = seat[3]; v = w = 0.0; dt = 0.1; v_act = w_act = 0.0
+        maxx = -1e9
+        for t in range(ticks):
+            now = (t + 1) * dt
+            art = math.atan2(math.sin(pose[2] - cart_yaw), math.cos(pose[2] - cart_yaw))
+            od = Odometry(pose, now, abs(v_act), w_act, 'test_fixture', 0.05)
+            obs = Observation(now, (), True, True, art, 'test_fixture', 10.0)
+            r = c.step(dt, od, obs, now=now)
+            maxx = max(maxx, pose[0])
+            if r.status in ('succeeded', 'failed'):
+                return r, round(now, 2), round(maxx, 3)
+            v, w = r.linear, r.angular
+            a = dt / (tau + dt) if tau > 0 else 1.0
+            v_act += (v - v_act) * a; w_act += (w - w_act) * a
+            th = pose[2] + w_act * dt
+            ns = advance(TrainState(pose[0], pose[1], pose[2], cart_yaw),
+                         v_act * dt, (w_act / v_act if abs(v_act) > 1e-6 else 0.0), self.spec)
+            pose = (pose[0] + v_act * dt * math.cos(th), pose[1] + v_act * dt * math.sin(th), th)
+            cart_yaw = ns.cart_yaw
+        return r, round(now, 2), round(maxx, 3)
+
+    # ---- build_lead_in geometry ----
+    def test_build_lead_in_bridges_each_recorded_seat(self):
+        lane, _ = self._lane()
+        world = ArticulatedMap(self.grid, self.spec)
+        for name, seat in self.SEATS.items():
+            route = lane.build_lead_in(TrainState(*seat), world, self.spec)
+            self.assertIsNotNone(route, f'{name}: lead-in should bridge the seat')
+            # the spliced route STARTS at the measured seat (so the follower acquires trivially) ...
+            self.assertAlmostEqual(route.states[0].x, seat[0], places=6)
+            self.assertAlmostEqual(route.states[0].y, seat[1], places=6)
+            # ... and ENDS at the authored goal (the authored tail is spliced on).
+            self.assertLess(math.dist(route.states[-1].pose[:2], self.goal[:2]), 0.05)
+            self.assertEqual(len(route.curvatures), len(route.states) - 1)
+
+    def test_build_lead_in_none_when_seat_beyond_band(self):
+        lane, _ = self._lane(lead_in_max_m=0.3)            # 0.3 m cannot bridge the 0.5 m north seat
+        world = ArticulatedMap(self.grid, self.spec)
+        self.assertIsNone(lane.build_lead_in(TrainState(*self.SEATS['coldlivewin']), world, self.spec))
+
+    def test_build_lead_in_off_by_default_returns_none(self):
+        lane, _ = self._lane(lead_in_max_m=0.0)            # default off
+        world = ArticulatedMap(self.grid, self.spec)
+        self.assertIsNone(lane.build_lead_in(TrainState(*self.SEATS['coldlivewin']), world, self.spec))
+
+    # ---- plan_observed_route verdicts ----
+    def test_plan_route_uses_leadin_for_drifted_seat_authored_for_on_start(self):
+        lane, graph = self._lane()
+        c = self._controller(graph, lane_cart_yaw_rebase=True, lane_cart_yaw_tol=0.35)
+        c.start(self.goal, True)
+        clear = Observation(0.1, (), True, True, 0.0, 'test_fixture', 10.0)
+        drifted = c.plan_observed_route(TrainState(*self.SEATS['coldlivewin']), clear, 0.05)
+        self.assertEqual(drifted.reason, 'validated_lane_leadin')
+        on_start = c.plan_observed_route(TrainState(-4.46, 15.5, 0.0, 0.0), clear, 0.05)
+        self.assertEqual(on_start.reason, 'validated_lane')     # at the authored start: no lead-in needed
+
+    # ---- full closed-loop drive arrives from every recorded seat (re-centred example config) ----
+    def test_outbound_arrives_from_every_recorded_seat(self):
+        lane, graph = self._lane()
+        for name, seat in self.SEATS.items():
+            c = self._controller(graph, lane_cart_yaw_rebase=True, lane_cart_yaw_tol=0.35,
+                                 lane_acquire_timeout_s=8.0)
+            r, t = self._drive(c, seat)
+            self.assertEqual(r.status, 'succeeded', f'{name}: {r.reason} @ {t}s')
+            self.assertEqual(r.reason, 'arrived_stopped')
+
+    # ---- fast named failure instead of the 120 s nav-stuck churn ----
+    def test_unacquired_lane_fails_fast_by_name(self):
+        lane, graph = self._lane(lead_in_max_m=0.0)         # lead-in off -> lane_not_acquired churn
+        c = self._controller(graph, lane_acquire_timeout_s=5.0)
+        r, t = self._drive(c, self.SEATS['coldlivewin'])
+        self.assertEqual(r.status, 'failed')
+        self.assertEqual(r.reason, 'lane_not_acquired_timeout')
+        self.assertLessEqual(t, 6.0)                        # a few sim seconds, not 120 s
+
+    def test_leadin_unreachable_fails_fast_by_name(self):
+        lane, graph = self._lane(lead_in_max_m=0.3)         # too short to bridge -> named unreachable
+        c = self._controller(graph, lane_acquire_timeout_s=5.0)
+        r, t = self._drive(c, self.SEATS['coldlivewin'])
+        self.assertEqual(r.status, 'failed')
+        self.assertEqual(r.reason, 'lane_leadin_unreachable_timeout')
+        self.assertLessEqual(t, 6.0)
+
+    def test_acquire_timeout_off_is_byte_identical_churn(self):
+        # timeout 0 + lead-in off => the legacy empty-route churn, never a terminal acquire failure.
+        lane, graph = self._lane(lead_in_max_m=0.0)
+        c = self._controller(graph, lane_acquire_timeout_s=0.0)
+        r, t = self._drive(c, self.SEATS['coldlivewin'], ticks=300)
+        self.assertNotEqual(r.status, 'succeeded')
+        self.assertNotIn('_timeout', r.reason or '')        # no fast-fail fired
+
+    def test_acquire_timeout_validation(self):
+        _, graph = self._lane()
+        with self.assertRaises(ValueError):
+            ArticulatedController(self.grid, self.spec, allow_test_fixtures=True,
+                                  lane_graph=graph, lane_acquire_timeout_s=-1.0)
+
+
+class TowLaneGoalStopTests(unittest.TestCase):
+    """fm-sim-robust-outbound-leadin-overshoot: the coupled outbound tow must ARRIVE at its goal from
+    any couple seat in the observed band and beyond, with NO overshoot, independent of where the couple
+    seats the base.
+
+    coldwin3 (2026-10-24): the couple seated the base 0.27 m SOUTH of the re-centred lane start; the
+    lead-in bridged it onto the centreline, but the follower rode a ~0.09 m lateral (north) offset down
+    the lead-in's descending final segment and so reached the goal x 0.09 m off -- just OUTSIDE the
+    HARDCODED 0.08 m arrival ball. The forward-only (no-reverse) train then sailed 0.3 m PAST the goal
+    into lane_leadin_unreachable, and the lead-in rebuilt from past-the-goal rolled further away forever
+    until the acquire timeout fired (lane_leadin_unreachable_timeout). The authored lane ALREADY declares
+    its achievable arrival band (goal_tol_xy=0.30); the follower ignored it. `tow_lane_goal_stop` makes
+    the coupled arrival use that band, decelerate to rest at the route end (never passing the goal), and
+    fast-fail a seat left genuinely past the goal.
+
+    Deterministic open-grid fixtures -- never evidence of a physics run. The steering-LAG drive is a
+    first-order inertia model (see `_drive_lagged`), not a simulator; the integration-lane GPU proof owns
+    the real PhysX cart dynamics (data/sim-robust-outbound-leadin-overshoot-v1)."""
+
+    SEATS = OutboundLeadInAndFastFailTests.SEATS
+
+    def setUp(self):
+        self.spec = MobileSpec()
+        self.grid = GridMap((-12, 8, 4, 22), (), 0.20)
+        self.goal = (-2.0, 15.25, 0.0)
+
+    _lane = OutboundLeadInAndFastFailTests._lane
+    _drive = OutboundLeadInAndFastFailTests._drive
+    _drive_lagged = OutboundLeadInAndFastFailTests._drive_lagged
+
+    def _controller(self, graph, goal_stop):
+        return ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, goal_timeout=600.0,
+                                     blocked_timeout=40.0, lane_graph=graph, lane_reacquire_along_route=True,
+                                     lane_cart_yaw_rebase=True, lane_cart_yaw_tol=0.35,
+                                     lane_acquire_timeout_s=8.0, tow_lane_goal_stop=goal_stop)
+
+    # ---- the overshoot: a lateral offset > 0.08 m at the goal x ----
+    def test_offset_at_goal_not_arrived_without_goal_stop(self):
+        # A coupled base AT the goal x, STOPPED, but 0.12 m laterally off (within the lane's declared
+        # goal_tol_xy=0.30 but outside the legacy hardcoded 0.08 ball): the legacy arrival never fires.
+        _, graph = self._lane()
+        c = self._controller(graph, goal_stop=False)
+        c.start(self.goal, True)
+        off = (self.goal[0], self.goal[1] + 0.12, 0.0)     # 0.12 m north of the exact goal, aligned, stopped
+        od = Odometry(off, 0.1, 0.0, 0.0, 'test_fixture', 0.05)
+        obs = Observation(0.1, (), True, True, 0.0, 'test_fixture', 10.0)
+        r = c.step(0.1, od, obs, now=0.1)
+        self.assertNotEqual(r.reason, 'arrived_stopped')   # 0.12 > 0.08 -> never latches
+
+    def test_offset_at_goal_arrives_with_goal_stop(self):
+        _, graph = self._lane()
+        c = self._controller(graph, goal_stop=True)
+        c.start(self.goal, True)
+        off = (self.goal[0], self.goal[1] + 0.12, 0.0)
+        od = Odometry(off, 0.1, 0.0, 0.0, 'test_fixture', 0.05)
+        obs = Observation(0.1, (), True, True, 0.0, 'test_fixture', 10.0)
+        r = c.step(0.1, od, obs, now=0.1)
+        self.assertEqual(r.status, 'succeeded')            # 0.12 < goal_tol_xy 0.30 -> arrives
+        self.assertEqual(r.reason, 'arrived_stopped')
+
+    # ---- closed-loop: the lagged follower overshoots without the fix, arrives with it ----
+    def test_lagged_follower_overshoots_and_fails_without_goal_stop(self):
+        # Under steering lag the follower rides a lateral offset to the goal and, missing the 0.08 ball,
+        # sails PAST the goal (a forward-only train can't recover) -> the recorded failure reason.
+        _, graph = self._lane()
+        c = self._controller(graph, goal_stop=False)
+        r, t, maxx = self._drive_lagged(c, self.SEATS['coldwin3'], tau=1.5)
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('unreachable', r.reason)             # lane_leadin_unreachable[_timeout]
+        self.assertGreater(maxx, self.goal[0])             # overshot: drove east past the goal x
+
+    def test_lagged_follower_arrives_from_every_seat_with_goal_stop(self):
+        for name, seat in self.SEATS.items():
+            _, graph = self._lane()
+            c = self._controller(graph, goal_stop=True)
+            r, t, maxx = self._drive_lagged(c, seat, tau=1.5)
+            self.assertEqual(r.status, 'succeeded', f'{name}: {r.reason} @ {t}s')
+            self.assertEqual(r.reason, 'arrived_stopped')
+            # arrived within the authored achievable band, never sailing irrecoverably past the goal
+            self.assertLess(maxx, self.goal[0] + self._lane()[0].goal_tol_xy, f'{name}: overshot to {maxx}')
+
+    # ---- seat-independence across the band and 0.5 m beyond it ----
+    def test_arrives_from_all_recorded_seats_with_goal_stop(self):
+        for name, seat in self.SEATS.items():
+            _, graph = self._lane()
+            c = self._controller(graph, goal_stop=True)
+            r, t = self._drive(c, seat)
+            self.assertEqual(r.status, 'succeeded', f'{name}: {r.reason} @ {t}s')
+            self.assertEqual(r.reason, 'arrived_stopped')
+
+    def test_seat_half_metre_beyond_band_fails_fast_by_name(self):
+        # The re-centred lane start is y=15.5; the lead-in absorbs ~+-0.5 m. A seat 0.5 m BEYOND that
+        # band (14.5 south / 16.5 north) is unabsorbable and must fail FAST by name, not churn to the
+        # 120 s mission nav-stuck WALL budget.
+        for y in (14.5, 16.5):
+            _, graph = self._lane()
+            c = self._controller(graph, goal_stop=True)
+            r, t = self._drive(c, (-4.46, y, 0.0, 0.0))
+            self.assertEqual(r.status, 'failed', f'y={y}: {r.reason}')
+            self.assertIn('_timeout', r.reason or '', f'y={y}: {r.reason}')
+            self.assertLessEqual(t, 10.0, f'y={y}: {t}s -- a few sim seconds, not 120 s')
+
+    # ---- a seat left PAST the goal fails IMMEDIATELY by name (forward-only unrecoverable) ----
+    def test_past_goal_seat_fast_fails_by_name_with_goal_stop(self):
+        _, graph = self._lane()
+        c = self._controller(graph, goal_stop=True)
+        r, t = self._drive(c, (-1.5, 15.25, 0.0, 0.0))     # 0.5 m EAST of the goal, facing east
+        self.assertEqual(r.status, 'failed')
+        self.assertEqual(r.reason, 'lane_leadin_past_goal')
+        self.assertLessEqual(t, 1.0)                       # NOW, not after the 8 s acquire timeout
+
+    def test_past_goal_without_goal_stop_is_legacy_timeout(self):
+        _, graph = self._lane()
+        c = self._controller(graph, goal_stop=False)
+        r, t = self._drive(c, (-1.5, 15.25, 0.0, 0.0))
+        self.assertEqual(r.status, 'failed')
+        self.assertEqual(r.reason, 'lane_leadin_unreachable_timeout')   # legacy named path, unchanged
+
+    # ---- backward compatibility ----
+    def test_goal_stop_off_uses_legacy_008_ball(self):
+        # Default off: a base 0.12 m off the goal does NOT arrive (legacy 0.08 ball) -- byte-identical.
+        _, graph = self._lane()
+        c = self._controller(graph, goal_stop=False)
+        c.start(self.goal, True)
+        near = (self.goal[0], self.goal[1] + 0.05, 0.0)    # 0.05 m off: inside 0.08 -> legacy arrives
+        od = Odometry(near, 0.1, 0.0, 0.0, 'test_fixture', 0.05)
+        obs = Observation(0.1, (), True, True, 0.0, 'test_fixture', 10.0)
+        self.assertEqual(c.step(0.1, od, obs, now=0.1).reason, 'arrived_stopped')
+
+    def test_goal_stop_default_is_off(self):
+        _, graph = self._lane()
+        c = ArticulatedController(self.grid, self.spec, allow_test_fixtures=True, lane_graph=graph)
+        self.assertFalse(c.tow_lane_goal_stop)
+
+
+class TowLaneLeadInConfigTests(unittest.TestCase):
+    def test_from_config_round_trips_lead_in_keys(self):
+        lane = TowLane.from_config({'name': 'L', 'start': [-4, 0, 0], 'goal': [4, 0, 0],
+                                    'lead_in_max_m': 2.5, 'lead_in_fine_xy': 0.12,
+                                    'lead_in_lookahead': 0.9})
+        self.assertAlmostEqual(lane.lead_in_max_m, 2.5)
+        self.assertAlmostEqual(lane.lead_in_fine_xy, 0.12)
+        self.assertAlmostEqual(lane.lead_in_lookahead, 0.9)
+
+    def test_defaults_are_off_and_backward_compatible(self):
+        lane = TowLane.from_config({'name': 'L', 'start': [-4, 0, 0], 'goal': [4, 0, 0]})
+        self.assertEqual(lane.lead_in_max_m, 0.0)           # off by default => never synthesised
+
+    def test_rejects_bad_lead_in_values(self):
+        for bad in ({'lead_in_max_m': -1.0}, {'lead_in_fine_xy': 0.0}, {'lead_in_lookahead': -0.5}):
+            cfg = {'name': 'L', 'start': [-4, 0, 0], 'goal': [4, 0, 0]}
+            cfg.update(bad)
+            with self.assertRaises(ValueError):
+                TowLane.from_config(cfg)
+
+
 if __name__ == '__main__':
     unittest.main()

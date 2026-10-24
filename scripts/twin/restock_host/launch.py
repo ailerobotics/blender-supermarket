@@ -1,9 +1,13 @@
 """Explicit launch of installed components, never vendor hardware launch files."""
+import json
 from pathlib import Path
 import os
 import sys
 
 from .config import FRAME, JOINTS, NS, launch_plan
+from .host_guard_exit import MARKER_ENV, clean_line, guard_exit_reason, write_guard_exit
+from .mesh_uri import normalize_mesh_uris
+from .movegroup_respawn import RespawnSupervisor
 
 
 def description(config):
@@ -11,7 +15,7 @@ def description(config):
     from ament_index_python.packages import get_package_share_directory as share
     from launch import LaunchDescription
     from launch.actions import ExecuteProcess, EmitEvent, RegisterEventHandler
-    from launch.event_handlers import OnProcessExit
+    from launch.event_handlers import OnProcessExit, OnProcessIO
     from launch.events import Shutdown
     from launch_ros.actions import Node, ComposableNodeContainer
     from launch_ros.descriptions import ComposableNode
@@ -20,6 +24,19 @@ def description(config):
     if plan['static_errors']:
         raise ValueError('; '.join(plan['static_errors']))
     robot = plan['robot']
+    # The HOST config (restock_manipulation/ros_host_config.json) -- the same file the manip
+    # bridge below reads -- also carries the opt-in robustness switches (config_preflight HOST
+    # keys). We load it once here so move_group's robot_description can honour moveit_mesh_uris.
+    ros_host_config = Path(__file__).resolve().parents[1] / 'restock_manipulation' / 'ros_host_config.json'
+    host_cfg = json.loads(ros_host_config.read_text())
+    # Opt-in (default off): rewrite the resolved URDF's bare absolute <mesh> paths to file://
+    # URIs so move_group's resource_retriever actually loads the arm link collision/visual
+    # geometry instead of logging "URL rejected: No host part in the URL" and running FCL
+    # ValidateSolution against empty link geometry. Off => robot_description is the file verbatim
+    # (byte-identical). See restock_host.mesh_uri and sim-robust-movegroup-collision-meshes-v1.
+    robot_description = Path(robot['urdf']).read_text()
+    if host_cfg.get('moveit_mesh_uris'):
+        robot_description = normalize_mesh_uris(robot_description)
     # Optional second nvblox depth feed: the body-mounted mast camera (camera_1), so a carried
     # carton occluding the wrist (camera_0) no longer freezes the ESDF. Off by default: the
     # whole feed below is skipped and the mapper stays single-camera. See
@@ -55,10 +72,20 @@ def description(config):
     # mission's planning client re-sends the same goal (ros_adapter _handle_server_crash). The short
     # delay lets the old process fully release its endpoints before the replacement binds them.
     # move_group is deliberately NOT in the shutdown-guard set below (see `guarded`).
+    #
+    # sim-robust-movegroup-respawn-reliability-v1: the respawn is now BOUNDED (respawn_max_retries,
+    # was the launch default -1 = infinite) and OBSERVABLE -- an OnProcessExit handler (below) logs
+    # each respawn and the give-up BY NAME with the attempt count. ROS 2 launch respawn fires only on
+    # a real process EXIT, so it recovers a clean SIGABRT (exit -6: dblproof, coldwin7) but NOT a
+    # move_group that HANGS in glibc's abort path (coldliveapproach); the hang and the exhausted-budget
+    # give-up are both owned by the client RESPAWN_WAIT_CAP fast-fail (ros_adapter, PR 234/242). The
+    # handler is observe-only (no respawn/kill, no second Shutdown), so launch stays the sole respawner.
+    mg_respawn = plan['movegroup_respawn']
     moveit = Node(
         package='moveit_ros_move_group', executable='move_group', namespace=NS,
-        name='move_group', output='screen', respawn=True, respawn_delay=3.0, parameters=[{
-            **common, 'robot_description': Path(robot['urdf']).read_text(),
+        name='move_group', output='screen', respawn=True,
+        respawn_delay=mg_respawn['delay'], respawn_max_retries=mg_respawn['max_retries'], parameters=[{
+            **common, 'robot_description': robot_description,
             'robot_description_semantic': Path(robot['srdf']).read_text(),
             'robot_description_kinematics': {'ur_manipulator': {
                 'kinematics_solver': 'kdl_kinematics_plugin/KDLKinematicsPlugin',
@@ -215,7 +242,7 @@ def description(config):
     # 5 s process/status watchdog. The verified {profiles, walls} fixture is the manipulation
     # lane's ros_host_config.json (walls cover source/cart/target so no regrasp); urdf, shelfbot
     # root and the mobile manifest come from the validated plan (integration_host_arguments).
-    ros_host_config = Path(__file__).resolve().parents[1] / 'restock_manipulation' / 'ros_host_config.json'
+    # ros_host_config is loaded once at the top of this function (shared with moveit_mesh_uris).
     manipulation = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock_manipulation.ros_host',
         '--config', str(ros_host_config), *plan['integration_host_arguments']],
         additional_env={'PYTHONPATH': plan['shelfbot_root'] + os.pathsep + os.environ.get('PYTHONPATH', '')},
@@ -230,8 +257,17 @@ def description(config):
     # interpolates move_group's plan, subscribing measured /restock_sim/joint_states and publishing
     # /restock_sim/arm_joint_command (the articulation command Isaac drives the UR10 with). --urdf is the
     # same generated CAD urdf the plan validates (host.json["urdf"]); it reads arm joint limits only.
+    # sim-robust-pick-wrist-guard-cspace-fix-v1: a per-launch marker path the shutdown-guard handler
+    # writes the dying component (name, exit code, last error line) into, so the trajectory executor's
+    # last-resort fault NAMES the container death (e.g. the cumotion::FatalException CUDA OOM) instead of
+    # the bare 'executor stopped'. Shared in-process with the guard closure below; passed to the executor
+    # via env. An already-set value (orchestrator-chosen) is honoured.
+    import tempfile
+    guard_marker = os.environ.get(MARKER_ENV) or os.path.join(
+        tempfile.gettempdir(), 'restock_host_guard_exit.%d.json' % os.getpid())
     trajectory = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock.trajectory_host',
-        '--urdf', robot['urdf']], output='screen')
+        '--urdf', robot['urdf']], output='screen',
+        additional_env={MARKER_ENV: guard_marker})
     processes = [moveit, container, masker, manipulation, trajectory]
     # Losing mapping/masking must not leave an apparently healthy planner behind -- these exits DO tear
     # the stack down. move_group is excluded: it respawns (above), so its (recoverable) crash must not
@@ -255,9 +291,37 @@ def description(config):
             output='screen')
         processes.append(mast_masker)
         guarded.append(mast_masker)
-    guards = [RegisterEventHandler(OnProcessExit(target_action=process,
-              on_exit=[EmitEvent(event=Shutdown(reason='restock host component exited'))]))
+    # sim-robust-pick-wrist-guard-cspace-fix-v1: name the shutdown-guard death. Keep each guarded
+    # process's LAST stderr/stdout line (an OnProcessIO ring of one), and on its exit write the marker
+    # (process name + returncode + that last line) BEFORE emitting the Shutdown -- the write is
+    # synchronous in the launch process, so it lands before the SIGINT reaches the trajectory executor's
+    # last-resort finally. The Shutdown reason is now named too (was 'restock host component exited').
+    # Behaviour is otherwise unchanged: the stack still tears down on any guarded exit.
+    last_lines = {}
+
+    def _io_recorder(process):
+        def _on_io(event):
+            line = clean_line(getattr(event, 'text', b''))
+            if line:
+                last_lines[id(process)] = line
+        return _on_io
+
+    def _guard_exit(process):
+        def _on_exit(event, _context):
+            name = getattr(event, 'process_name', None) or 'restock host component'
+            rc = getattr(event, 'returncode', None)
+            last = last_lines.get(id(process))
+            write_guard_exit(guard_marker, name, rc, last)
+            reason = guard_exit_reason(name, rc, last)
+            print('HOST_GUARD_EXIT %s' % reason, flush=True)
+            return [EmitEvent(event=Shutdown(reason=reason))]
+        return _on_exit
+
+    guards = [RegisterEventHandler(OnProcessExit(target_action=process, on_exit=_guard_exit(process)))
               for process in guarded]
+    guards += [RegisterEventHandler(OnProcessIO(
+        target_action=process, on_stderr=_io_recorder(process), on_stdout=_io_recorder(process)))
+        for process in guarded]
     # Host-published nvblox mapper-incorporation acknowledgement. nvblox runs
     # update_esdf_rate_hz 0.0 (on-request only), so this node's ESDF service poll is what
     # integrates pending masked depth, and it publishes the real NVIDIA incorporation
@@ -269,4 +333,11 @@ def description(config):
     ack = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock_host.incorporation_ack',
         '--workspace-min', *(str(v) for v in plan['workspace_min']),
         '--workspace-max', *(str(v) for v in plan['workspace_max'])], output='screen')
-    return LaunchDescription(guards + processes + [ack])
+    # Observe-only move_group respawn logger: NOT a shutdown guard and NOT a respawner -- it logs
+    # each respawn / the give-up BY NAME with the attempt count (so the double-death proof is
+    # greppable) and returns no launch actions, leaving ROS 2 launch the sole respawner. The
+    # give-up leaves move_group dead; the client RESPAWN_WAIT_CAP (ros_adapter) names the stage fail.
+    respawn_log = RegisterEventHandler(OnProcessExit(target_action=moveit,
+        on_exit=RespawnSupervisor(mg_respawn['max_retries'], mg_respawn['delay'],
+                                  lambda line: print(line, flush=True)).on_exit))
+    return LaunchDescription(guards + [respawn_log] + processes + [ack])

@@ -1,0 +1,58 @@
+{
+  "_comment": "sim-robust-coupled-traction-v1: the bounded GPU proof config for the coupled outbound tow. The outbound_dock_to_bay tow stalled at x~=-3.93 (outbound1/warm9/warm10) NOT on geometry -- the lane is a straight y=15.25 pull, clear of the 797-obstacle static map at every recorded footprint, and the real controller follows it to goal in the kinematic model -- but on a PhysX drive-authority deficit: the coupled base cannot re-break-away from a near-stop, collapses into the measured_turn_radius low-speed latch, and faults coupled_no_progress (PR 201, working as designed). warm8/warm11 passed only by carrying entry momentum across the same spot. FIX = raise the drive-wheel normal force (caster lift) and drive force so the base re-accelerates from rest. Every key here is opt-in and backward compatible; absent => the prior behaviour byte-identical. The progress monitor (coupled_progress_escape) stays ON.",
+  "_integration_lane_steps": [
+    "1. Regenerate the mobile assets at caster_lift_m=0.03 (offline, NO GPU): python3 scripts/build_mobile_assets.py --source-urdf <shelfbot_gripper_isaac.urdf> --output-dir ~/datasets/twin-robot-in-store-boot-v1/mobile-casterlift030 --package-root <ros_share> --package-root ~/workspaces/shelfbot_newgripper --config <(echo '{\"caster_lift_m\": 0.03}'). This bakes the deeper caster recess into mobile_ur10.urdf + mobile_manifest.json; measure_transport still proves the home COM support margin on CPU.",
+    "2. Point the mission runtime config's 'mobile_manifest' at that new mobile_manifest.json, and merge the top-level 'wheel_drive'/'wheel_friction' keys and the 'navigation' switches below into the mission runtime config (do NOT hand-edit ~/datasets configs via this worker; the integration lane owns them).",
+    "3. Run the bounded couple+outbound proof on the warm8 lanes: run_mobile_restock.py --start-at couple --stop-after outbound (the exact outbound1 recipe), serialized through /tmp/aile-gpu.lock, HEAVY_MB=2500 if whispr holds VRAM, never --force.",
+    "4. Feed the run's nav-trace.jsonl to scripts/check_tow_traction.py --gpu-run <run-dir>: PASS iff the coupled outbound reaches the goal with no multi-second pin (the same gate warm8/warm11 clear)."
+  ],
+  "wheel_friction": 1.0,
+  "wheel_drive": {
+    "max_force": 200.0,
+    "damping": 100.0
+  },
+  "_wheel_drive_note": "config['wheel_drive'] feeds MobileController(drive_max_force, drive_damping) (physics_setup.assemble). Default None => 80 N.m / 100. BOTH physical levers are needed, not caster lift alone: the quasi-static budget (twin/traction.static_traction_budget) shows that at 80 N.m the per-wheel drive torque cap (2*80/0.16 = 1000 N available) BINDS below the friction limit even at wheel_friction 1.0 -- so raising caster lift alone cannot exceed it. Raising max_force 80 -> 200 N.m lifts the cap to 2500 N, unbinding it so caster lift's higher mu*N_drive then applies and the force-type velocity drive commands full torque through the re-breakaway transient instead of saturating. damping unchanged. Efficacy is the GPU bench.",
+  "_caster_lift_note": "caster_lift_m lives in the mobile_manifest spec (baked into the URDF at build), not here -- see _integration_lane_steps step 1. 0.005 (the stuck runs) fixed the UNCOUPLED crawl (tracking 0.097 -> 0.988) but the heavier coupled re-breakaway still starves; 0.03 (the MobileSpec cap) fully unloads the fore/aft casters so ~all robot weight bears on the two drive wheels, maximising mu*N_drive. Clamp is enforced by MobileSpec.__post_init__ ([0, 0.03]).",
+  "navigation": {
+    "coupled_progress_escape": true,
+    "coupled_progress_min_m": 0.05,
+    "coupled_progress_escape_s": 3.0,
+    "coupled_progress_fault_s": 8.0,
+    "coupled_creep_escape": true,
+    "coupled_creep_floor_mps": 0.03,
+    "tow_lane_trust_static": true,
+    "tow_lane_static_tol_m": 0.12,
+    "tow_lane_reacquire_along_route": true,
+    "tow_lane_coast_refusals": true,
+    "tow_lane_trust_unknown": true,
+    "tow_lane_track_tol_m": 0.3,
+    "tow_lane_track_envelope": true,
+    "tow_lane_cart_yaw_rebase": true,
+    "tow_lane_cart_yaw_tol": 0.3,
+    "arrival_xy_hysteresis_m": 0.03,
+    "directional_zone": true,
+    "tow_lanes": [
+      {
+        "name": "outbound_dock_to_bay",
+        "start": [-4.46, 15.25, 0.0],
+        "start_cart_yaw": 0.0,
+        "goal": [-2.0, 15.25, 0.0],
+        "goal_articulation": 0.3,
+        "start_tol_cart_yaw": 0.35
+      },
+      {
+        "name": "return_bay_to_parking",
+        "start": [-2.0, 15.25, 0.0],
+        "start_cart_yaw": 0.0,
+        "goal": [-1.2, 15.25, 0.0],
+        "goal_articulation": 0.2,
+        "start_tol_cart_yaw": 0.35
+      }
+    ]
+  },
+  "_traction_budget": {
+    "_comment": "Inputs for the quasi-static lever-direction budget (scripts/twin/traction.static_traction_budget). The CPU proof asserts the recommended config strictly dominates the stuck config in margin; absolute margin is not an efficacy claim (the real failure is dynamic re-breakaway, GPU-only).",
+    "stuck": {"wheel_friction": 1.0, "caster_lift_m": 0.005, "drive_max_force_nm": 80.0},
+    "recommended": {"wheel_friction": 1.0, "caster_lift_m": 0.03, "drive_max_force_nm": 200.0}
+  }
+}

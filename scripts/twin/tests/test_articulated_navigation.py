@@ -366,6 +366,212 @@ class ArticulatedTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ArticulatedController(self.world.grid,allow_test_fixtures=True,**kw)
 
+    # --- fm-sim-robust-outbound-stall-recovery: bounded break-away recovery -----------------------------
+
+    def _recovery_controller(self, **over):
+        kw=dict(coupled_progress_escape=True, coupled_progress_recovery=True,
+                coupled_progress_min_m=0.05, coupled_progress_escape_s=0.5, coupled_progress_fault_s=1.0,
+                coupled_breakaway_speed_mps=0.18, coupled_breakaway_window_s=1.0,
+                coupled_breakaway_pulse_s=0.2, coupled_breakaway_attempts=3)
+        kw.update(over)
+        return ArticulatedController(self.world.grid, allow_test_fixtures=True, **kw)
+
+    def test_coupled_breakaway_recovery_breaks_a_stuck_tow_free(self):
+        # The coldlivefull outbound: a coupled tow pinned (jittering in place, ~0 net displacement) while
+        # commanding forward. With recovery ON, the monitor ENTERS a break-away maneuver (a continuous
+        # pulsed committed forward) rather than the single weak creep + fail. Here the surge breaks the base
+        # free (the fixture lets it move once the surge commands), so the stage recovers: it never faults and
+        # a break-away success is recorded.
+        c=self._recovery_controller()
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        v=w=0.0; freed=False; out=[]
+        for i in range(300):
+            now+=.05
+            rv=(v if freed else self._JITTER_RV[i%len(self._JITTER_RV)])
+            rw=(w if freed else self._JITTER_RW[i%len(self._JITTER_RW)])
+            od=Odometry(state.pose,now,rv,rw,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            out.append((r.status,r.reason))
+            v,w=r.velocity
+            if r.status!='running':
+                break
+            if c._recovery_active:
+                freed=True          # the surge is now commanding -> let the base start to move
+            if freed:
+                state=advance(state,v*.05,w/v if v else 0,self.spec)
+        self.assertGreaterEqual(c.breakaway_recoveries,1)          # a recovery was entered
+        self.assertGreaterEqual(c.breakaway_successes,1)           # it broke the base free
+        self.assertFalse(any(reason=='coupled_no_progress' for _,reason in out))  # never faulted
+        self.assertFalse(c._recovery_active)                       # recovery cleared on break-away
+
+    def test_coupled_breakaway_commands_continuous_pulsed_forward(self):
+        # The maneuver's substance: while recovering, EVERY commanded velocity is a forward surge (> 0) --
+        # never the v=0 stop that the measured_turn_radius coast returns and that re-rests the stuck tow --
+        # and it PULSES between the high and the relaxed (0.4x) level to rock the contact.
+        c=self._recovery_controller(coupled_breakaway_attempts=5)   # keep recovering long enough to sample
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        surges=[]
+        for i in range(120):
+            now+=.05
+            rv=self._JITTER_RV[i%len(self._JITTER_RV)]
+            rw=self._JITTER_RW[i%len(self._JITTER_RW)]
+            od=Odometry(state.pose,now,rv,rw,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            if c._recovery_active and r.reason=='tracking':
+                surges.append(r.velocity[0])
+            if r.status!='running':
+                break
+        self.assertTrue(surges)
+        self.assertTrue(all(s>0 for s in surges))                  # no v=0 stop-go thrash during recovery
+        hi=0.18; lo=0.18*0.4
+        self.assertTrue(any(abs(s-hi)<1e-6 for s in surges))       # the high pulse level appears
+        self.assertTrue(any(abs(s-lo)<1e-6 for s in surges))       # the relaxed pulse level appears
+
+    def test_coupled_breakaway_exhausts_attempts_then_faults_by_name(self):
+        # A base that never breaks free: the recovery runs a BOUNDED number of attempt windows then FAULTS
+        # 'coupled_no_progress' (same name/StageRetry contract), fast on the SIM clock -- not the 120 s WALL
+        # nav-stuck. The bound is escape_s + attempts * window_s.
+        c=self._recovery_controller()
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        out,now,_=self._drive_frozen_jitter(c,state,now,ticks=400)
+        self.assertEqual(out[-1],('failed','coupled_no_progress'))
+        self.assertEqual(c.breakaway_recoveries,1)
+        self.assertEqual(c.breakaway_successes,0)
+        # bounded: 0.5 s to enter + 3 windows x 1.0 s = 3.5 s SIM / 0.05 dt ~= 70 ticks (+ small slack)
+        self.assertLessEqual(len(out),80)
+
+    def test_coupled_breakaway_recovery_off_is_byte_identical(self):
+        # Recovery OFF (default): the escalate->fault ladder is unchanged and the break-away counters stay 0.
+        c=ArticulatedController(self.world.grid,allow_test_fixtures=True,
+                                coupled_progress_escape=True,coupled_progress_min_m=0.05,
+                                coupled_progress_escape_s=0.5,coupled_progress_fault_s=1.0)
+        self.assertFalse(c.coupled_progress_recovery)
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        out,now,_=self._drive_frozen_jitter(c,state,now,ticks=60)
+        self.assertEqual(out[-1],('failed','coupled_no_progress'))
+        self.assertGreater(c.progress_escapes,0)          # the legacy forced creep still ran
+        self.assertEqual(c.breakaway_recoveries,0)        # recovery never engaged
+        self.assertEqual(c.breakaway_successes,0)
+
+    # --- fm-sim-robust-coupled-breakaway-from-rest: the opt-in reinforced break-away ROCK -------------
+
+    def _rock_controller(self, **over):
+        kw=dict(coupled_progress_escape=True, coupled_progress_recovery=True,
+                coupled_breakaway_rock=True,
+                coupled_progress_min_m=0.05, coupled_progress_escape_s=0.5, coupled_progress_fault_s=1.0,
+                coupled_breakaway_speed_mps=0.18, coupled_breakaway_launch_mps=0.24,
+                coupled_breakaway_window_s=1.0, coupled_breakaway_pulse_s=0.2, coupled_breakaway_attempts=5)
+        kw.update(over)
+        return ArticulatedController(self.world.grid, allow_test_fixtures=True, **kw)
+
+    def test_breakaway_rock_requires_recovery_and_valid_launch(self):
+        # The rock shapes the break-away recovery, so it must have one (fail loud, never a silent no-op),
+        # and its launch surge must be an ELEVATED speed (>= the base break-away speed) and in (0, 1] m/s.
+        with self.assertRaises(ValueError):   # rock without recovery
+            ArticulatedController(self.world.grid, allow_test_fixtures=True,
+                                  coupled_breakaway_rock=True, coupled_progress_recovery=False)
+        with self.assertRaises(ValueError):   # launch below the base speed
+            self._rock_controller(coupled_breakaway_speed_mps=0.30, coupled_breakaway_launch_mps=0.24)
+        for bad in (0.0, 1.5, float('nan'), True):
+            with self.assertRaises(ValueError):
+                self._rock_controller(coupled_breakaway_launch_mps=bad)
+
+    def test_breakaway_rock_off_is_byte_identical(self):
+        # Default (rock off): the recovery pulse is PR 236's -- the base speed 0.18 / 0.4x, and the turn is
+        # never saturated. Same frozen-jitter signature, same counters, _breakaway_turn stays False.
+        c=self._recovery_controller()
+        self.assertFalse(c.coupled_breakaway_rock)
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        surges=[]; turns=[]
+        for i in range(120):
+            now+=.05
+            rv=self._JITTER_RV[i%len(self._JITTER_RV)]; rw=self._JITTER_RW[i%len(self._JITTER_RW)]
+            od=Odometry(state.pose,now,rv,rw,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            if c._recovery_active and r.reason=='tracking':
+                surges.append(r.velocity[0]); turns.append(c._breakaway_turn)
+            if r.status!='running': break
+        self.assertTrue(surges)
+        self.assertTrue(any(abs(s-0.18)<1e-6 for s in surges))        # legacy high level
+        self.assertTrue(any(abs(s-0.18*0.4)<1e-6 for s in surges))    # legacy relaxed level
+        self.assertFalse(any(s>0.18+1e-6 for s in surges))            # never the elevated launch
+        self.assertFalse(any(turns))                                  # turn never saturated when rock off
+
+    def test_breakaway_rock_commands_elevated_launch_surge(self):
+        # Rock on: the recovery surge is the ELEVATED launch speed (0.24) / 0.4x -- more momentum + drive
+        # force than the 0.18 base pulse -- while still pulsing to rock the contact.
+        c=self._rock_controller()
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        surges=[]
+        for i in range(120):
+            now+=.05
+            rv=self._JITTER_RV[i%len(self._JITTER_RV)]; rw=self._JITTER_RW[i%len(self._JITTER_RW)]
+            od=Odometry(state.pose,now,rv,rw,'test_fixture',.02)
+            obs=Observation(now,(),True,True,state.articulation,'test_fixture',10)
+            r=c.step(.05,od,obs,now=now)
+            if c._recovery_active and r.reason=='tracking':
+                surges.append(r.velocity[0])
+            if r.status!='running': break
+        self.assertTrue(surges)
+        self.assertTrue(all(s>0 for s in surges))                     # no v=0 stop-go thrash
+        self.assertTrue(any(abs(s-0.24)<1e-6 for s in surges))        # the elevated launch level appears
+        self.assertTrue(any(abs(s-0.24*0.4)<1e-6 for s in surges))    # the relaxed launch level appears
+        self.assertLessEqual(max(surges), c.max_speed+1e-9)           # bounded by max_speed (effort bound)
+
+    def test_breakaway_rock_saturates_corrective_turn_bounded(self):
+        # On the hi pulse (_breakaway_turn) the commanded turn saturates to the full +-wmax=v/R in the
+        # follower's corrective direction, to rotate a yaw-wedged base toward the lane; off the hi pulse
+        # (or rock off) it is the clamped tracking turn. The turn is bounded by the coupled cap v/1.5.
+        c=self._rock_controller()
+        c.start((5,0,0),True)
+        od=Odometry((0,0,0),0.1,0.0,0.0,'test_fixture',0.05)
+        obs=Observation(0.1,(),True,True,0.0,'test_fixture',10.0)
+        # hi phase, small positive corrective tracking w -> saturates to +wmax
+        c._breakaway_cmd=0.24; c._breakaway_turn=True
+        r=c.gate_velocity(0.1,od,obs,0.24,0.03)
+        self.assertEqual(r.reason,'tracking')
+        v,w=r.velocity
+        self.assertAlmostEqual(w, v/1.5, places=6)
+        # hi phase, negative corrective w -> saturates to -wmax
+        c._breakaway_cmd=0.24; c._breakaway_turn=True
+        r=c.gate_velocity(0.1,od,obs,0.24,-0.03)
+        self.assertAlmostEqual(r.velocity[1], -r.velocity[0]/1.5, places=6)
+        # lo phase (no saturation): a small w passes through clamped, not amplified
+        c._breakaway_cmd=0.24*0.4; c._breakaway_turn=False
+        r=c.gate_velocity(0.1,od,obs,0.24*0.4,0.03)
+        self.assertAlmostEqual(r.velocity[1], 0.03, places=6)
+
+    def test_breakaway_rock_still_bounded_and_faults_by_name(self):
+        # The rock does not weaken the backstop: a base that never breaks free still exhausts the SAME
+        # bounded coupled_breakaway_attempts windows and faults 'coupled_no_progress' fast on the sim clock.
+        c=self._rock_controller(coupled_breakaway_attempts=3)
+        c.start((5,3,0),True)
+        state,now=self._reach_tracking(c)
+        out,now,_=self._drive_frozen_jitter(c,state,now,ticks=400)
+        self.assertEqual(out[-1],('failed','coupled_no_progress'))
+        self.assertEqual(c.breakaway_recoveries,1)
+        self.assertEqual(c.breakaway_successes,0)
+        self.assertLessEqual(len(out),80)              # 0.5 s enter + 3 x 1.0 s windows ~= 70 ticks
+
+    def test_coupled_breakaway_rejects_invalid_params(self):
+        for kw in (dict(coupled_breakaway_speed_mps=0.0), dict(coupled_breakaway_speed_mps=-1.0),
+                   dict(coupled_breakaway_speed_mps=1.5), dict(coupled_breakaway_speed_mps=float('nan')),
+                   dict(coupled_breakaway_window_s=0.0), dict(coupled_breakaway_pulse_s=0.0),
+                   dict(coupled_breakaway_attempts=0), dict(coupled_breakaway_attempts=21),
+                   dict(coupled_breakaway_attempts=2.5), dict(coupled_breakaway_speed_mps=True),
+                   dict(coupled_breakaway_attempts=True)):
+            with self.assertRaises(ValueError):
+                ArticulatedController(self.world.grid,allow_test_fixtures=True,**kw)
+
     def test_seed_rejects_teleport(self):
         from twin.navigation.articulated import Route
         a=TrainState(0,0,0,0)

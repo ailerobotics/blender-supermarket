@@ -486,7 +486,14 @@ class ArticulatedController(Controller):
                  lane_track_envelope=False, lane_cart_yaw_rebase=False,
                  coupled_creep_escape=False, coupled_creep_floor=0.03,
                  coupled_progress_escape=False, coupled_progress_min_m=0.05,
-                 coupled_progress_escape_s=3.0, coupled_progress_fault_s=8.0, **kwargs):
+                 coupled_progress_escape_s=3.0, coupled_progress_fault_s=8.0,
+                 coupled_progress_recovery=False, coupled_breakaway_speed_mps=0.18,
+                 coupled_breakaway_window_s=2.0, coupled_breakaway_pulse_s=0.5,
+                 coupled_breakaway_attempts=3,
+                 coupled_breakaway_rock=False, coupled_breakaway_launch_mps=0.30,
+                 lane_acquire_timeout_s=0.0, tow_lane_goal_stop=False,
+                 coupled_heading_hold=False, heading_hold_bound_deg=1.0,
+                 heading_hold_creep_mps=0.14, heading_hold_straight_kappa=0.08, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm481/fm482 (navigation.coupled_creep_escape, default off => byte-identical): the coupled
         # measured-curvature brake divides odom.angular by odom.linear, and at a near-stationary crawl that
@@ -536,6 +543,117 @@ class ArticulatedController(Controller):
         self._prog_stuck_s=0.0        # SIM seconds the base has sat below coupled_progress_min_m
         self._force_progress_creep=False   # set per-tick: force the committed creep this gate call
         self.progress_escapes=0       # ticks the no-progress monitor forced a creep
+        # fm-sim-robust-outbound-stall-recovery (navigation.coupled_progress_recovery, default off =>
+        # byte-identical to the fm-sim-robust-outbound escape->fault ladder above): a BOUNDED break-away
+        # RECOVERY maneuver that runs between the no-progress ESCALATION and the terminal FAULT, so a
+        # coupled tow that fails to break away from rest at the portal throat (coldlivefull outbound:
+        # NAV_STEP cycled measured_turn_radius<->tracking with parked=True, the base jittering in place
+        # with ~0 NET displacement) gets REAL re-tow attempts instead of the single weak 0.03 m/s creep +
+        # immediate fail. Root cause it addresses (our own code): a measured_turn_radius COAST tick returns
+        # _wait(...) == velocity (0,0), so the stuck tow thrashes stop<->forward every few ticks and never
+        # sustains drive effort to overcome the coupled static resistance from rest; the forced creep
+        # (fm-sim-robust-outbound) only engages after escape_s and is a static-crawl 0.03 m/s floor, too
+        # weak for a re-break-away under the live_pose load. The recovery holds a CONTINUOUS, STRONGER,
+        # PULSED committed-forward command (coupled_breakaway_speed_mps, square-wave surged every
+        # coupled_breakaway_pulse_s to "rock" the contact) for up to coupled_breakaway_attempts windows of
+        # coupled_breakaway_window_s SIM seconds each; the instant net displacement from a window's anchor
+        # reaches coupled_progress_min_m the break-away SUCCEEDED (resume normal tracking); if every attempt
+        # elapses with no net progress, FAULT 'coupled_no_progress' terminal (same name/StageRetry contract
+        # as the escape-only path). NOTE on "back off a few cm": reverse towing is deliberately clamped off
+        # for a coupled train (mobile.wheel_targets: coupled v>=0), so the recovery uses a forward
+        # surge/relax PULSE (the implementable, safety-preserving break-away rock) rather than a reverse
+        # back-off. All brakes are already force-released every drive tick in MobileController.command, so no
+        # stale park/cart brake can hold the base -- the stall is the physics break-away itself.
+        self.coupled_progress_recovery=bool(coupled_progress_recovery)
+        if not (isinstance(coupled_breakaway_speed_mps,(int,float)) and not isinstance(coupled_breakaway_speed_mps,bool)
+                and math.isfinite(coupled_breakaway_speed_mps) and 0.0<float(coupled_breakaway_speed_mps)<=1.0):
+            raise ValueError('coupled_breakaway_speed_mps must be a finite number in (0, 1.0] m/s')
+        for _nm,_v,_hi in (('coupled_breakaway_window_s',coupled_breakaway_window_s,60.0),
+                           ('coupled_breakaway_pulse_s',coupled_breakaway_pulse_s,10.0)):
+            if not (isinstance(_v,(int,float)) and not isinstance(_v,bool)
+                    and math.isfinite(_v) and 0.0<float(_v)<=_hi):
+                raise ValueError(f'{_nm} must be a finite number in (0, {_hi:g}]')
+        if not (isinstance(coupled_breakaway_attempts,int) and not isinstance(coupled_breakaway_attempts,bool)
+                and 1<=coupled_breakaway_attempts<=20):
+            raise ValueError('coupled_breakaway_attempts must be an int in [1, 20]')
+        self.coupled_breakaway_speed=float(coupled_breakaway_speed_mps)
+        self.coupled_breakaway_window_s=float(coupled_breakaway_window_s)
+        self.coupled_breakaway_pulse_s=float(coupled_breakaway_pulse_s)
+        self.coupled_breakaway_attempts=int(coupled_breakaway_attempts)
+        self._recovery_active=False       # inside a break-away recovery window sequence
+        self._recovery_attempt=0          # 0-based index of the current break-away attempt window
+        self._recovery_window_start=None  # sim time the current attempt window began
+        self._recovery_anchor=None        # (x, y) base pose at the current window's start
+        self._breakaway_cmd=None          # per-tick committed forward speed override for gate_velocity
+        self._breakaway_turn=False        # per-tick: saturate the corrective turn (rock hi phase)
+        self.breakaway_recoveries=0       # recovery sequences entered
+        self.breakaway_successes=0        # recovery sequences that broke the base free
+        # fm-sim-robust-coupled-breakaway-from-rest (navigation.coupled_breakaway_rock, default off =>
+        # byte-identical): coldwin9 outbound pinned at the sales_backroom_portal throat (x=-3.93) with the
+        # base yawed ~5 deg off the lane axis -- a base+cart envelope catches the throat lip and the base
+        # stops dead while still COMMANDING forward (a physical wedge, not a gate refusal). PR 236's
+        # forward-only break-away pulse (0.18 m/s) cannot free a forward wedge: nine surges over the three
+        # BT re-begins netted zero advance, so each re-begin from rest repeats the same push-into-the-lip.
+        # A coupled train cannot reverse (mobile.wheel_targets clamps v>=0 by a deliberate bring-up
+        # interlock; gate_velocity rejects linear<0), so the rock uses the only authority it has -- a
+        # STRONGER forward LAUNCH surge (coupled_breakaway_launch_mps, clamped to max_speed at the gate: more
+        # momentum + drive force, and a higher coupled steering cap wmax=v/1.5) with the corrective turn
+        # SATURATED to the full +-wmax toward the route heading on the hi pulse phase, to rotate the
+        # yaw-wedged base back toward alignment and swivel the casters free; the lo phase relaxes to "rock"
+        # the contact. It replaces ONLY what the break-away pulse commands -- the PR 201 net-progress monitor
+        # and PR 236's bounded coupled_breakaway_attempts windows (then fault 'coupled_no_progress') are the
+        # untouched backstop. Requires coupled_progress_recovery (fail loud, never a silent no-op).
+        self.coupled_breakaway_rock=bool(coupled_breakaway_rock)
+        if not (isinstance(coupled_breakaway_launch_mps,(int,float)) and not isinstance(coupled_breakaway_launch_mps,bool)
+                and math.isfinite(coupled_breakaway_launch_mps) and 0.0<float(coupled_breakaway_launch_mps)<=1.0):
+            raise ValueError('coupled_breakaway_launch_mps must be a finite number in (0, 1.0] m/s')
+        self.coupled_breakaway_launch=float(coupled_breakaway_launch_mps)
+        if self.coupled_breakaway_rock:
+            if not self.coupled_progress_recovery:
+                raise ValueError('coupled_breakaway_rock requires coupled_progress_recovery '
+                                 '(the rock shapes the break-away recovery; without it it is a no-op)')
+            if self.coupled_breakaway_launch<self.coupled_breakaway_speed:
+                raise ValueError('coupled_breakaway_launch_mps must be >= coupled_breakaway_speed_mps '
+                                 '(the launch surge is an ELEVATED break-away speed)')
+        # fm-sim-robust-outbound-throat-yaw-align (navigation.coupled_heading_hold, default off =>
+        # byte-identical): keep the coupled base ALIGNED to the lane axis during the slow from-rest creep so
+        # the base+cart envelope never enters the sales_backroom_portal throat (x~=-3.875) yawed and wedges on
+        # the lip. coldwin9/coldwin10 outbound drifted CCW off the east travel axis during the crawl right
+        # after the couple->outbound plan-wait dip (coldwin9: exits the dip at -1.7 deg, creeps at ~0.11 m/s,
+        # drifts monotonically to +4.9 deg at the throat; coldwin10: carries +1.2 deg into the throat at
+        # +2.2 deg) and wedged (reached_goal=False); coldwin7/coldwin8/rock1 held within +-1.2 deg of east
+        # (cross the throat at -0.2..+0.3 deg) and threaded. The follower's pure-pursuit law WANTS to correct
+        # the drift, but the coupled steering cap wmax = v/1.5 collapses at the crawl (failing runs: mean cap
+        # ~0.03 rad/s vs ~0.12 for the passing runs), so the correction is throttled to near zero. The throat
+        # is INVISIBLE to the nav static map (footprint valid at every base yaw -8..+6 deg; slack 0.8 m), so
+        # the wedge is a PhysX contact on door-frame geometry finer than the AABB map (the gate returns
+        # 'tracking', never 'obstacle_stop') and a slack-triggered pre-throat guard is impossible -- the
+        # trigger is the CCW yaw drift on the lane itself. When ON, the coupled follower, on a STRAIGHT
+        # authored segment, once the base has drifted more than `heading_hold_bound` to the CCW/throat-lip
+        # (wedge) side of the lane goal (travel) heading: (1) holds a fixed modest forward creep
+        # `heading_hold_creep_mps` -- restoring a steering authority wmax = creep/1.5 that does NOT depend on
+        # the (collapsed) tracking speed schedule AND capping the forward speed so a misaligned base slows and
+        # corrects rather than accelerating into the throat; and (2) SATURATES the corrective turn toward the
+        # axis (curvature = -1/min_turn_radius, the coupled cap, swept-checked by the unchanged gate). It is
+        # ONE-SIDED (a base on the safe CW/south side is never force-turned -- that would push it toward the
+        # lip) and FORWARD-only (v>0 always; the coupled-reverse interlock is honoured). Because the
+        # correction rate (~5 deg/s at the creep) dominates the measured drift (~0.4 deg/s), the base reaches
+        # the throat aligned and never pins, so PR 201's net-progress monitor / PR 236's bound / PR 250's rock
+        # stay dormant as the untouched backstop. Off => the legacy follower, byte-identical.
+        self.coupled_heading_hold=bool(coupled_heading_hold)
+        if not (isinstance(heading_hold_bound_deg,(int,float)) and not isinstance(heading_hold_bound_deg,bool)
+                and math.isfinite(heading_hold_bound_deg) and 0.0<float(heading_hold_bound_deg)<=45.0):
+            raise ValueError('heading_hold_bound_deg must be a finite number of degrees in (0, 45]')
+        if not (isinstance(heading_hold_creep_mps,(int,float)) and not isinstance(heading_hold_creep_mps,bool)
+                and math.isfinite(heading_hold_creep_mps) and 0.0<float(heading_hold_creep_mps)<=1.0):
+            raise ValueError('heading_hold_creep_mps must be a finite number in (0, 1.0] m/s')
+        if not (isinstance(heading_hold_straight_kappa,(int,float)) and not isinstance(heading_hold_straight_kappa,bool)
+                and math.isfinite(heading_hold_straight_kappa) and 0.0<float(heading_hold_straight_kappa)<=1.0):
+            raise ValueError('heading_hold_straight_kappa must be a finite curvature in (0, 1] 1/m')
+        self.heading_hold_bound=math.radians(float(heading_hold_bound_deg))
+        self.heading_hold_creep=float(heading_hold_creep_mps)
+        self.heading_hold_straight_kappa=float(heading_hold_straight_kappa)
+        self.heading_holds=0                               # ticks the heading hold overrode the follower
         # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
         # swept train envelope as free (the static map proved that corridor clear), so the base is not
         # frozen at an unmapped turn (run-327b: outbound drove 4.87 m then 'unknown_navigation_cell' at the
@@ -655,6 +773,43 @@ class ArticulatedController(Controller):
         # is re-checked against the swept envelope and only used if clear (a genuinely departed cart still
         # trips). Off (default) => the authored profile (byte-identical). Proven: check_cart_yaw_rebase_envelope.
         self.lane_cart_yaw_rebase=bool(lane_cart_yaw_rebase)
+        # fm-sim-robust-outbound: fail a NON-ACQUIRED authored lane by name FAST instead of churning
+        # until the 120 s mission nav-stuck WALL budget. When the active lane yields an empty route
+        # (lane_not_acquired / lane_blocked / lane_leadin_unreachable) the base COMMANDS nothing, so no
+        # progress is made; but the empty route cycles reason=lane_not_acquired <-> replan_changed_
+        # observations under the jittery live cloud, which never reaches the base `_wait` 8 s
+        # blocked_timeout (coldlivewin: ~120 s WALL frozen before the external nav-stuck fired). This
+        # SIM-clock accumulator keys on contiguous no-base-progress ticks with the active lane
+        # unacquired and, past `lane_acquire_timeout_s` SIM seconds, FAILS the leg terminal with the
+        # specific reason + '_timeout' -- a named, pace-immune fail in a few sim seconds. Reset on any
+        # base progress or a non-empty route. 0 (default) => off => the legacy churn (byte-identical).
+        if not (isinstance(lane_acquire_timeout_s,(int,float)) and math.isfinite(lane_acquire_timeout_s)
+                and lane_acquire_timeout_s>=0.0):
+            raise ValueError('lane_acquire_timeout_s must be a finite number of seconds >= 0')
+        self.lane_acquire_timeout_s=float(lane_acquire_timeout_s)
+        self._acquire_fail_s=0.0        # contiguous SIM seconds the active lane has been unacquired
+        self._acquire_fail_pose=None    # base pose at the start of the current no-progress window
+        # fm-sim-robust-outbound-leadin-overshoot (navigation.tow_lane_goal_stop, default off =>
+        # byte-identical): make the COUPLED authored-lane goal arrival SEAT-INDEPENDENT, so the tow
+        # stops AT its goal instead of overshooting a ball it can never hit. A coupled tow tracks its
+        # lane with a steady-state LATERAL offset (coldwin3: the lead-in's descending final segment +
+        # the base's steering lag left it riding ~0.09 m NORTH of the centreline), but the arrival
+        # capture was a HARDCODED 0.08 m / 0.08 rad ball -- SMALLER than that physical offset. So the
+        # train reached the goal x at 0.09 m lateral (just outside 0.08), never latched, and a
+        # forward-only (no-reverse) train sailed 0.3 m past the goal into lane_leadin_unreachable
+        # (the lead-in rebuilt from past-the-goal rolls further away forever). The authored lane ALREADY
+        # declares its ACHIEVABLE arrival band -- goal_tol_xy (0.30) / goal_tol_yaw -- so when this is on
+        # AND an authored lane is active: (1) the coupled arrival capture uses the lane's goal_tol_xy /
+        # goal_tol_yaw (not 0.08), so the observed ~0.09 m offset latches; (2) the follower decelerates
+        # by REMAINING ROUTE distance (not Euclidean distance-to-goal, which a laterally-offset base
+        # never drives to zero) so it comes to rest AT the route end and the 0.03 m/s floor is dropped
+        # there -- the train stops before/at the goal and NEVER passes it (a coupled train cannot
+        # reverse); and (3) a seat left genuinely PAST the goal (beyond the route end, forward-only
+        # unreachable) fails FAST by name (lane_leadin_past_goal) instead of churning to the acquire
+        # timeout. The authored goal_tol IS the arrival contract; a seat whose residual offset exceeds it
+        # still refuses (the author's achievable band is the authority). Off => the legacy hardcoded 0.08
+        # ball + Euclidean speed profile, byte-identical.
+        self.tow_lane_goal_stop=bool(tow_lane_goal_stop)
         # Authored pre-planned tow lanes (TowLaneGraph) for COUPLED drives. None => every coupled
         # drive free-plans exactly as before (byte-identical). When set, a coupled drive whose goal
         # matches a lane follows that lane's validated trajectory and NEVER free-searches (so a
@@ -695,6 +850,14 @@ class ArticulatedController(Controller):
         self._prog_last_now=None
         self._prog_stuck_s=0.0
         self._force_progress_creep=False
+        self._recovery_active=False                        # fresh goal -> no break-away recovery in flight
+        self._recovery_attempt=0
+        self._recovery_window_start=None
+        self._recovery_anchor=None
+        self._breakaway_cmd=None
+        self._breakaway_turn=False
+        self._acquire_fail_s=0.0                           # fresh goal -> fresh lane-acquire window
+        self._acquire_fail_pose=None
         self.goal_articulation=self.spec.max_articulation if goal_articulation is None else goal_articulation
         # Resolve the authored tow lane for this COUPLED goal (if any). Uncoupled drives never use a
         # lane. Pose acquirability + live-obstacle swept validation are checked when the route is built.
@@ -742,6 +905,24 @@ class ArticulatedController(Controller):
         else:
             world=self.world
             planner=self.planner
+        # Re-validate the authored lane against the LIVE obstacle cloud. When the opt-in proud
+        # tolerance is set, discount live returns within that distance of KNOWN static geometry
+        # (proud returns of the shelf/support the lane hugs) so they cannot false-block the lane;
+        # genuinely new returns in open space are kept and still block. OFF (0.0) => the full live
+        # cloud, byte-identical. Computed before the acquire so the lead-in fallback shares the same
+        # (discounted) cloud it validates the authored route against.
+        dyn=obs.obstacles
+        discounted=0
+        if self.lane_trust_static:
+            # Trust the static map the lane was build-validated against: validate the authored route
+            # against static geometry ALONE. The live braking gate (gate_velocity) is untouched and
+            # still stops the tow for a genuinely new obstacle ahead.
+            dyn=()
+            discounted=len(obs.obstacles)
+        elif self.lane_static_tol>0 and dyn:
+            kept=tuple((x,y) for (x,y) in dyn if not world.near_static(x,y,self.lane_static_tol))
+            discounted=len(dyn)-len(kept)
+            dyn=kept
         if self.lane_cart_yaw_rebase:
             # fm452(A): the FOLLOW tracks the re-based cart_yaw (zeroed at the base's aligned entry, then
             # growing as the cart lags the sharpening turn -- see `_rebase_cart_yaw`), so the ACQUIRE must
@@ -764,6 +945,7 @@ class ArticulatedController(Controller):
             rebased=self._rebase_cart_yaw(lane.route,state,world)
             near=min(rebased.states,key=lambda s:math.hypot(s.x-state.x,s.y-state.y)) if rebased.states else None
             cart_ok=near is not None and abs(wrap(near.cart_yaw-state.cart_yaw))<=self.lane_cart_yaw_tol
+            acquired=bool(xy_ok and cart_ok)
             if _NAV_PLAN_DIAG:
                 print('NAV_PLAN_DIAG acquire(rebase) lane=%s xy_ok=%s cart_ok=%s pose=%s lane_start=%s '
                       'cart_yaw=%.3f near_cart_yaw=%s cart_tol=%.3f reacquire=%s'
@@ -771,34 +953,46 @@ class ArticulatedController(Controller):
                          tuple(round(c,3) for c in lane.start),state.cart_yaw,
                          (round(near.cart_yaw,3) if near is not None else None),
                          self.lane_cart_yaw_tol,self.lane_reacquire_along_route),flush=True)
-            if not (xy_ok and cart_ok):
-                return Route([],[],'lane_not_acquired')
         else:
-            acq=lane.acquirable(state.pose,state.cart_yaw,along_route=self.lane_reacquire_along_route)
+            acquired=lane.acquirable(state.pose,state.cart_yaw,along_route=self.lane_reacquire_along_route)
             if _NAV_PLAN_DIAG:
                 print('NAV_PLAN_DIAG acquire lane=%s acquirable=%s pose=%s lane_start=%s cart_yaw=%.3f reacquire=%s'
-                      % (lane.name,acq,tuple(round(c,3) for c in state.pose),
+                      % (lane.name,acquired,tuple(round(c,3) for c in state.pose),
                          tuple(round(c,3) for c in lane.start),state.cart_yaw,self.lane_reacquire_along_route),
                       flush=True)
-            if not acq:
-                return Route([],[],'lane_not_acquired')
-        # Re-validate the authored lane against the LIVE obstacle cloud. When the opt-in proud
-        # tolerance is set, discount live returns within that distance of KNOWN static geometry
-        # (proud returns of the shelf/support the lane hugs) so they cannot false-block the lane;
-        # genuinely new returns in open space are kept and still block. OFF (0.0) => the full live
-        # cloud, byte-identical.
-        dyn=obs.obstacles
-        discounted=0
-        if self.lane_trust_static:
-            # Trust the static map the lane was build-validated against: validate the authored route
-            # against static geometry ALONE. The live braking gate (gate_velocity) is untouched and
-            # still stops the tow for a genuinely new obstacle ahead.
-            dyn=()
-            discounted=len(obs.obstacles)
-        elif self.lane_static_tol>0 and dyn:
-            kept=tuple((x,y) for (x,y) in dyn if not world.near_static(x,y,self.lane_static_tol))
-            discounted=len(dyn)-len(kept)
-            dyn=kept
+        if not acquired:
+            # fm-sim-robust-outbound (option c): the base seated OFF the fine centreline. If a lead-in is
+            # authorised, synthesise a bounded swept-validated coupled merge from the seat ONTO the lane and
+            # follow a path that STARTS where the base actually is; the follower then acquires trivially.
+            # A seat beyond the band the lane can absorb returns None -> a distinct NAMED reason so the
+            # acquire watchdog fails the leg fast instead of leaving it to the 120 s mission nav-stuck.
+            li=(lane.build_lead_in(state,world,self.spec,dyn,max(.02,uncertainty))
+                if lane.lead_in_max_m>0 else None)
+            if li is not None and li.states:
+                if _NAV_PLAN_DIAG:
+                    print('NAV_PLAN_DIAG lane_leadin lane=%s states=%d from_pose=%s converges_to_goal=%s'
+                          % (lane.name,len(li.states),tuple(round(c,3) for c in state.pose),
+                             tuple(round(c,3) for c in li.states[-1].pose)),flush=True)
+                li.reason='validated_lane_leadin'
+                if self.lane_cart_yaw_rebase:
+                    li=self._rebase_cart_yaw(li,state,world)
+                    li.reason='validated_lane_leadin'
+                return li
+            # fm-sim-robust-outbound-leadin-overshoot: a seat left genuinely PAST the goal (beyond the
+            # route end, the base pointing away so a forward-only train can never return) is provably
+            # unrecoverable -- fail FAST by name NOW instead of churning the empty route to the acquire
+            # timeout. Detect it from the route end: the base is past the last route point AND displaced
+            # from the goal in the route's own travel direction. Gated on tow_lane_goal_stop => off is
+            # byte-identical (the legacy lane_leadin_unreachable + acquire-timeout path).
+            if (self.tow_lane_goal_stop and lane.lead_in_max_m>0 and lane.route is not None
+                    and lane.route.states and self._past_route_end(state,lane.route)):
+                self.terminal=Result(status='failed',reason='lane_leadin_past_goal')
+                if _NAV_PLAN_DIAG:
+                    print('NAV_PLAN_DIAG lane_leadin_past_goal lane=%s pose=%s goal=%s'
+                          % (lane.name,tuple(round(c,3) for c in state.pose),
+                             tuple(round(c,3) for c in self.goal)),flush=True)
+                return Route([],[],'lane_leadin_past_goal')
+            return Route([],[],'lane_leadin_unreachable' if lane.lead_in_max_m>0 else 'lane_not_acquired')
         checked=planner.validate_seed(lane.route,lane.start_state(),self.goal,dyn,
                                       max(.02,uncertainty),self.goal_articulation)
         if not checked.states:
@@ -822,6 +1016,59 @@ class ArticulatedController(Controller):
         if self.lane_cart_yaw_rebase:
             checked=self._rebase_cart_yaw(checked,state,world)
         return checked
+
+    def _past_route_end(self,state,route):
+        """True iff the base has overshot the route's final point in the route's own travel direction.
+
+        A coupled tow cannot reverse, so a base beyond the end heading can never drive back onto the
+        route -- this is the provably-unrecoverable past-goal case the goal-stop fast-fail names."""
+        st=route.states
+        end=st[-1]
+        hx,hy=(math.cos(end.yaw),math.sin(end.yaw))
+        if len(st)>=2:
+            dx,dy=end.x-st[-2].x,end.y-st[-2].y
+            if math.hypot(dx,dy)>1e-9:
+                hx,hy=dx,dy
+        hn=math.hypot(hx,hy) or 1.0
+        proj=((state.x-end.x)*hx+(state.y-end.y)*hy)/hn
+        return proj>0.05
+
+    def _acquire_watchdog(self,dt,reason,odom):
+        """fm-sim-robust-outbound: fail a persistently NON-ACQUIRED authored lane by name, FAST.
+
+        The empty-route churn (lane_not_acquired/lane_blocked/lane_leadin_unreachable cycling with
+        replan_changed_observations as the live cloud jitters) commands the base nothing and never
+        reaches the base `_wait` 8 s blocked_timeout, so a genuine acquisition deadlock otherwise sits
+        until the external 120 s mission nav-stuck WALL budget (coldlivewin). This accrues the
+        CONTIGUOUS SIM seconds the active lane has stayed unacquired with NO base progress and, past
+        `lane_acquire_timeout_s`, sets a terminal failed Result naming the specific reason + '_timeout'
+        -- a pace-immune fail in a few sim seconds. Any base progress (the lead-in acquired and the
+        train is moving) or a non-empty route re-anchors the window. Off (timeout <= 0) or no active
+        lane => never fails (byte-identical)."""
+        if (self.lane_acquire_timeout_s<=0 or self._active_lane is None
+                or reason not in ('lane_not_acquired','lane_blocked','lane_leadin_unreachable')):
+            self._acquire_fail_s=0.0
+            self._acquire_fail_pose=None
+            return None
+        pose=getattr(odom,'pose',None)
+        progressed=False
+        if pose is not None and self._acquire_fail_pose is not None:
+            dyaw=wrap(pose[2]-self._acquire_fail_pose[2])
+            progressed=(math.hypot(pose[0]-self._acquire_fail_pose[0],
+                                   pose[1]-self._acquire_fail_pose[1])>0.02 or abs(dyaw)>math.radians(1.0))
+        if self._acquire_fail_pose is None or progressed:
+            self._acquire_fail_pose=pose
+            self._acquire_fail_s=0.0
+            return None
+        self._acquire_fail_s+=dt
+        if self._acquire_fail_s>=self.lane_acquire_timeout_s:
+            self.terminal=Result(status='failed',reason=reason+'_timeout')
+            if _NAV_PLAN_DIAG:
+                print('NAV_PLAN_DIAG lane_acquire_timeout lane=%s reason=%r sim_s=%.2f pose=%s'
+                      % (self._active_lane.name,reason,self._acquire_fail_s,
+                         tuple(round(c,3) for c in pose) if pose else None),flush=True)
+            return self.terminal
+        return None
 
     def _rebase_cart_yaw(self,route,state,world):
         """fm451: re-base the expected cart_yaw to the base's ACTUAL (aligned) entry. From the nearest route
@@ -957,7 +1204,23 @@ class ArticulatedController(Controller):
         # tow that is pinned with velocity SPIKES outside the band still keeps a clean forward command
         # instead of thrashing to a measured-curvature STOP. Only forces where there IS a forward command.
         escape=escape or (self._force_progress_creep and v>1e-6)
-        if escape:
+        # fm-sim-robust-outbound-stall-recovery: a committed break-away surge REPLACES the command with a
+        # clean continuous forward (the recovery pulse), bypassing the measured_turn_radius coast that
+        # returns v=0 and re-rests the stuck tow. Obstacle/coverage/map safety below is UNCHANGED -- a real
+        # positive obstacle, a coverage gap or a stale map still refuses the surge.
+        breakaway=self._breakaway_cmd is not None
+        if breakaway:
+            v=min(self.max_speed,max(1e-3,self._breakaway_cmd))
+            wmax=v/self.footprint.min_turn_radius
+            if self._breakaway_turn and w!=0.0:
+                # fm-breakaway-rock hi phase: saturate the corrective turn to the full +-wmax in the
+                # follower's tracking direction (toward the route heading), to rotate a yaw-wedged base
+                # back into alignment with the lane. Bounded by the coupled cap wmax=v/R; still swept-
+                # checked by the braking rollout below exactly as any other commanded (v, w).
+                w=wmax if w>0 else -wmax
+            else:
+                w=max(-wmax,min(w,wmax))
+        elif escape:
             v=max(v,min(self.coupled_creep_floor,self.max_speed))
             wmax=v/self.footprint.min_turn_radius
             w=max(-wmax,min(w,wmax))
@@ -981,11 +1244,12 @@ class ArticulatedController(Controller):
             return Result(reason='obstacle_stop')
         # During a command change braking follows measured curvature, too.
         if abs(odom.linear)>0.02:
-            if escape:
-                measured_k=k        # noise-band ratio is not an arc: brake along the clamped command
-                self.creep_escapes+=1
-                if self._force_progress_creep:
-                    self.progress_escapes+=1
+            if escape or breakaway:
+                measured_k=k        # committed command: brake along the clamped command, not the noise arc
+                if escape:
+                    self.creep_escapes+=1
+                    if self._force_progress_creep:
+                        self.progress_escapes+=1
             else:
                 measured_k=odom.angular/odom.linear
                 if abs(measured_k)>1/1.5+0.03:
@@ -1014,6 +1278,8 @@ class ArticulatedController(Controller):
         self.elapsed+=dt
         now=self.elapsed if now is None else now
         self._force_progress_creep=False   # fm-sim-robust-outbound: set only by the net-progress monitor
+        self._breakaway_cmd=None           # fm-outbound-recovery: set only by the break-away recovery below
+        self._breakaway_turn=False         # fm-breakaway-rock: saturate the corrective turn (hi phase only)
         reason=self._inputs(now,odometry,observations)
         if reason:
             return self._wait(dt,reason)
@@ -1029,12 +1295,29 @@ class ArticulatedController(Controller):
         odom,obs=odometry,observations
         state=TrainState(*odom.pose,wrap(odom.pose[2]-obs.articulation))
         distance=math.dist(odom.pose[:2],self.goal[:2])
-        if (distance<0.08 and abs(wrap(odom.pose[2]-self.goal[2]))<0.08
-                and abs(obs.articulation)<self.goal_articulation):
+        # fm-sim-robust-outbound-leadin-overshoot: on an active authored lane with goal-stop enabled,
+        # the arrival capture is the lane's ACHIEVABLE goal_tol (goal_tol_xy/goal_tol_yaw), not the
+        # hardcoded 0.08 -- a coupled tow rides a lateral offset larger than 0.08 m and could never
+        # latch the tight ball. Off / no active lane => the legacy 0.08 ball (byte-identical).
+        if self.tow_lane_goal_stop and self._active_lane is not None:
+            arr_xy,arr_yaw=self._active_lane.goal_tol_xy,self._active_lane.goal_tol_yaw
+        else:
+            arr_xy=arr_yaw=0.08
+        in_ball=(distance<arr_xy and abs(wrap(odom.pose[2]-self.goal[2]))<arr_yaw
+                 and abs(obs.articulation)<self.goal_articulation)
+        moving=abs(odom.linear)>0.02 or abs(odom.angular)>0.03
+        # fm-sim-robust-outbound-leadin-overshoot: with goal-stop active and the base STILL MOVING
+        # inside the (wide) goal ball but with route left to run, do NOT slam a (0,0) stop at the ball
+        # EDGE (that halts the tow ~goal_tol_xy short of the goal); fall through to the route-follow,
+        # which decelerates by remaining-route distance and coasts the train to rest AT the route end,
+        # where the next tick latches here. Legacy (goal-stop off) always enters the block => byte-identical.
+        decel_follow=(self.tow_lane_goal_stop and self._active_lane is not None
+                      and self.route is not None and self.route.states)
+        if in_ball and not (decel_follow and moving):
             stopped=self.gate_velocity(now,odom,obs,0.0,0.0)
             if stopped.reason!='tracking':
                 return self._wait(dt,stopped.reason)
-            if abs(odom.linear)>0.02 or abs(odom.angular)>0.03:
+            if moving:
                 return Result(reason='settling_at_goal')
             self.terminal=Result(status='succeeded',reason='arrived_stopped')
             return self.terminal
@@ -1068,8 +1351,21 @@ class ArticulatedController(Controller):
                          tuple(round(c,3) for c in self.goal),
                          (round(state.x,3),round(state.y,3),round(state.yaw,3),round(state.cart_yaw,3))),
                       flush=True)
-            return Result(reason='route_ready' if self.route.states else self.route.reason)
+            if self.route.states:
+                self._acquire_fail_s=0.0; self._acquire_fail_pose=None   # lane acquired -> fresh window
+                return Result(reason='route_ready')
+            if self.terminal is not None:        # _plan_lane named a terminal fast-fail (past-goal)
+                return self.terminal
+            term=self._acquire_watchdog(dt,self.route.reason,odom)
+            if term is not None:
+                return term
+            return Result(reason=self.route.reason)
         if not self.route.states:
+            if self.terminal is not None:        # _plan_lane named a terminal fast-fail (past-goal)
+                return self.terminal
+            term=self._acquire_watchdog(dt,self.route.reason,odom)
+            if term is not None:
+                return term
             if (obs.obstacles!=self.planned_obstacles or
                     (obs.temporal_map is not None and obs.temporal_map.slice is not self.planned_map)):
                 self.route=None
@@ -1132,6 +1428,20 @@ class ArticulatedController(Controller):
         # lane_track_envelope (the same opt-in as the position-aware tol); off => unchanged.
         if self.lane_track_envelope and slack is not None:
             v=min(v,max(0.05,(slack-0.05)/1.5))
+        # fm-sim-robust-outbound-leadin-overshoot: decelerate to a true stop AT the route end so a
+        # forward-only coupled tow halts at its goal instead of coasting past it (it cannot reverse).
+        # The remaining distance is measured ALONG THE ROUTE from the nearest route point to the end --
+        # NOT the Euclidean distance-to-goal, which a laterally-offset base (coldwin3: ~0.09 m north)
+        # never drives to zero, so a Euclidean brake would keep commanding speed as the base slid past
+        # the goal x. v <= sqrt(2 * brake_acceleration * remaining) brakes within the reachable
+        # distance, and near the end the 0.03 m/s floor above is OVERRIDDEN (min, not max) so the train
+        # can actually come to rest. The arrival capture (lane goal_tol, above) latches once stopped
+        # within the achievable ball. Gated on tow_lane_goal_stop + an active lane => off is byte-identical.
+        if self.tow_lane_goal_stop and self._active_lane is not None and self.route.states:
+            st=self.route.states
+            remaining=sum(math.dist(st[i].pose[:2],st[i+1].pose[:2])
+                          for i in range(self.index,len(st)-1))
+            v=min(v,math.sqrt(2.0*self.brake_acceleration*max(0.0,remaining)))
         # fm-sim-robust-outbound: SIM-clock net-progress monitor (default off => byte-identical). We are
         # about to command a forward v (>=0.03) along the route; measure whether the base has actually
         # MOVED >= coupled_progress_min_m from its anchor. Keyed on NET displacement + the SIM clock, so
@@ -1152,10 +1462,84 @@ class ArticulatedController(Controller):
             else:
                 self._prog_stuck_s=max(0.0,now-self._prog_anchor[0])   # SIM seconds pinned below min_m
             self._prog_last_now=now
-            if self._prog_stuck_s>=self.coupled_progress_fault_s:
-                self.terminal=Result(status='failed',reason='coupled_no_progress')
-                return self.terminal
-            self._force_progress_creep=self._prog_stuck_s>=self.coupled_progress_escape_s
+            if self.coupled_progress_recovery:
+                # fm-sim-robust-outbound-stall-recovery: a BOUNDED break-away maneuver replaces the
+                # escape->fault timing. Once the base has been pinned below min_m for escape_s SIM seconds,
+                # run up to coupled_breakaway_attempts windows of coupled_breakaway_window_s SIM seconds,
+                # each commanding a CONTINUOUS pulsed committed-forward surge (set _breakaway_cmd; consumed
+                # by gate_velocity) so the tow sustains drive effort instead of the stop<->forward thrash.
+                # A window that nets >= min_m displacement resets _prog_stuck_s above (<escape_s) and ends
+                # the recovery (broke free); exhausting every attempt faults 'coupled_no_progress' terminal.
+                if self._prog_stuck_s>=self.coupled_progress_escape_s:
+                    if not self._recovery_active:
+                        self._recovery_active=True
+                        self._recovery_attempt=0
+                        self._recovery_window_start=now
+                        self._recovery_anchor=(state.x,state.y)
+                        self.breakaway_recoveries+=1
+                        print('NAV_BREAKAWAY enter attempt=0 at=(%.3f,%.3f) stuck=%.2fs rock=%d'
+                              % (state.x,state.y,self._prog_stuck_s,int(self.coupled_breakaway_rock)),
+                              flush=True)
+                    elif now-self._recovery_window_start>=self.coupled_breakaway_window_s:
+                        # window elapsed with < min_m net progress (progress would have reset _prog_stuck_s)
+                        self._recovery_attempt+=1
+                        if self._recovery_attempt>=self.coupled_breakaway_attempts:
+                            self.terminal=Result(status='failed',reason='coupled_no_progress')
+                            print('NAV_BREAKAWAY exhausted attempts=%d -> coupled_no_progress'
+                                  % self._recovery_attempt, flush=True)
+                            return self.terminal
+                        self._recovery_window_start=now
+                        self._recovery_anchor=(state.x,state.y)
+                        print('NAV_BREAKAWAY next attempt=%d at=(%.3f,%.3f)'
+                              % (self._recovery_attempt,state.x,state.y), flush=True)
+                    # pulse the committed forward speed (square wave) to rock the stuck contact; reverse is
+                    # clamped off for a coupled train (wheel_targets), so the low phase is a relaxed forward.
+                    hi=(int((now-self._recovery_window_start)/self.coupled_breakaway_pulse_s)%2)==0
+                    if self.coupled_breakaway_rock:
+                        # fm-breakaway-rock: a STRONGER forward launch surge (more momentum + drive force,
+                        # and a higher steering cap wmax=v/R) with the corrective turn SATURATED on the hi
+                        # phase (via _breakaway_turn) to rotate a yaw-wedged base back toward the lane
+                        # heading; the lo phase relaxes (0.4x, straight clamp) to rock the contact.
+                        self._breakaway_cmd=(self.coupled_breakaway_launch if hi
+                                             else self.coupled_breakaway_launch*0.4)
+                        self._breakaway_turn=hi
+                    else:
+                        self._breakaway_cmd=(self.coupled_breakaway_speed if hi
+                                             else self.coupled_breakaway_speed*0.4)
+                elif self._recovery_active:
+                    # Stuck cleared while a recovery was in flight: broke free iff real net displacement
+                    # (not a legitimate-wait gap) accrued from the active window's anchor.
+                    moved=(self._recovery_anchor is not None
+                           and math.hypot(state.x-self._recovery_anchor[0],
+                                          state.y-self._recovery_anchor[1])>=self.coupled_progress_min_m)
+                    self._recovery_active=False
+                    if moved:
+                        self.breakaway_successes+=1
+                        print('NAV_BREAKAWAY success: base broke free', flush=True)
+            else:
+                if self._prog_stuck_s>=self.coupled_progress_fault_s:
+                    self.terminal=Result(status='failed',reason='coupled_no_progress')
+                    return self.terminal
+                self._force_progress_creep=self._prog_stuck_s>=self.coupled_progress_escape_s
+        # fm-sim-robust-outbound-throat-yaw-align: the pre-throat heading hold. On a STRAIGHT authored
+        # segment, once the base has drifted more than `heading_hold_bound` to the CCW (throat-lip / wedge)
+        # side of the lane goal (travel) heading, OVERRIDE the follower command: hold a fixed modest forward
+        # creep (restoring a speed-schedule-independent steering authority wmax = creep/1.5 AND capping the
+        # forward speed so a misaligned base slows and aligns before entering the throat) and SATURATE the
+        # corrective turn toward the axis. ONE-SIDED (the safe CW/south side is never force-turned) and
+        # FORWARD-only. Skipped while PR 250's break-away owns the command (_breakaway_cmd set, the pinned
+        # backstop) so the two never fight. Off / off-lane / within bound / on a curved segment => untouched.
+        if (self.coupled_heading_hold and self._active_lane is not None and self._breakaway_cmd is None
+                and abs(self.route.curvatures[j])<=self.heading_hold_straight_kappa
+                and wrap(state.yaw-self.goal[2])>self.heading_hold_bound):
+            ae=wrap(state.yaw-self.goal[2])
+            v=min(self.max_speed,self.heading_hold_creep)
+            curvature=-1.0/self.footprint.min_turn_radius     # saturate CW toward the lane axis (reduce ae)
+            self.heading_holds+=1
+            if self.heading_holds==1 or self.heading_holds%30==0:
+                print('NAV_HEADING_HOLD n=%d at=(%.3f,%.3f) base_yaw=%.2f ae=%.2f deg bound=%.2f creep=%.3f'
+                      % (self.heading_holds,state.x,state.y,math.degrees(state.yaw),math.degrees(ae),
+                         math.degrees(self.heading_hold_bound),v),flush=True)
         result=self.gate_velocity(now,odom,obs,v,v*curvature)
         if result.reason!='tracking':
             # A transient measured-curvature trip (the base is momentarily under commanded

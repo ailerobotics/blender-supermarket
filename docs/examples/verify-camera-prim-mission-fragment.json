@@ -1,0 +1,19 @@
+{
+  "_comment": "vr1 / sim-robust-verify-camera-prim-v1: bounded GPU proof that the HONEST live_pose transfer completes THROUGH verify without the armcam3 shelf-camera prim-lifecycle crash (RuntimeError: Accessed invalid expired 'Camera' prim </World/restock_camera_shelf/Camera>). Hand to the integration lane (twin-robot-in-store-boot-v1) for ONE bounded GPU run under /tmp/aile-gpu.lock (never forced, never beside live Blender, never touch whispr). Use the SAME armcam staging (start_at=transfer, start_staging=recorded_bay_park, stop_after=verify, transfer_ground_truth, RESTOCK_STAGE_SCOPED_SENSING set, masked_depth supervisor, mast off) and ADD the one new key below. Do NOT edit the ~/datasets runtime configs from a worker PR; merge this key into the integration-owned config.",
+  "_env": {
+    "RESTOCK_TRANSFER_MODE": "live_pose",
+    "RESTOCK_TRANSFER_CARRY": "wrist_guard",
+    "RESTOCK_STAGE_SCOPED_SENSING": "1",
+    "_note": "Unchanged from armcam re-run 3. RESTOCK_STAGE_SCOPED_SENSING is what fires the fm381 teardown that destroyed the shelf camera; keep it set so the bounded run exercises the fix."
+  },
+  "start_at": "transfer",
+  "start_staging": {"preset": "recorded_bay_park", "carton_support_z_world": 0.9325},
+  "stop_after": "verify",
+  "stages": ["collect", "couple", "outbound", "park", "transfer", "verify", "return"],
+  "transfer_ground_truth": {"enabled": true, "location": "G3_back_s2", "target": [-2.0, 16.424, 0.73], "free_dimensions": [0.7, 0.5, 0.5]},
+  "verify_ground_truth": {"enabled": true},
+  "_new_key": "verify_ground_truth: {enabled: true} is the ONLY addition to the armcam config. The armcam bay shelf camera is NOT commissioned (commissioning_required_locations = backstock_00, rollwagen only; no G3_back_s2 baseline), so the camera InventoryVerifier can never confirm a placement there. verify_ground_truth swaps it for the SIM GROUND-TRUTH verify (handling-unit pose vs the authored bay top; ground_truth_verify.py), labelled source/verify_mode='ground_truth' end-to-end -- consistent with the already-ground-truth transfer. This lets the honest live_pose transfer COMPLETE through verify at the uncommissioned bay.",
+  "_code_fix_also_present": "Independent of this key, the branch fix removes the crash for the CAMERA-verify path too: the fm381 stage-scoped teardown now KEEPS the shelf camera alive whenever an executed stage still reads it (camera-mode transfer / the verify-stage InventoryVerifier), so verify reads a LIVE camera, never an expired prim. If a camera read ever hits a destroyed render product again, it raises the NAMED CameraRenderProductReleased instead of Isaac's raw expired-prim RuntimeError. With verify_ground_truth enabled here, verify never touches the shelf camera (keep_shelf_camera=False, shelf freed as before) -- so this proof completes AND the teardown VRAM saving is unchanged.",
+  "_pass_criteria": "PASS = the mission reaches 'verify' with status succeeded and shuts down cleanly (state not 'failed'); mission.json records verify_mode='ground_truth'; the console shows NO 'Accessed invalid expired Camera prim' and NO 'CameraRenderProductReleased'. FAIL = any crash or a named fail-fast (report the reason verbatim + run dir).",
+  "_cpu_proof": "scripts/twin/tests/test_sim_robust_verify_camera.py (keep-vs-free teardown, the shelf_camera_needed stage predicate, and the CameraRenderProductReleased named failure after a per-op release); run from scripts/ with PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -I -m pytest twin/tests/test_sim_robust_verify_camera.py"
+}

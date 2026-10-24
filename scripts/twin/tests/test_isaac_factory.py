@@ -81,6 +81,32 @@ class ParseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 parse_manipulation_config(manip_cfg(arm_camera_reaim=bad), JOB_SKU)
 
+    def _md_cfg(self, md):
+        # masked_depth is a TOP-LEVEL runtime-config key (not under 'manipulation').
+        cfg = manip_cfg()
+        cfg['masked_depth'] = {'enabled': True, 'runtime_env': '/x/env.sh', **md}
+        return cfg
+
+    def test_masked_depth_economy_absent_is_inactive(self):
+        c = parse_manipulation_config(self._md_cfg({}), JOB_SKU)
+        econ = c.masked_depth['economy']
+        self.assertFalse(econ.active)
+        self.assertEqual(econ.resolution_scale, 1.0)
+        self.assertIsNone(econ.publish_interval_s)
+
+    def test_masked_depth_economy_parsed(self):
+        c = parse_manipulation_config(
+            self._md_cfg({'economy': {'resolution_scale': 0.5, 'publish_interval_s': 0.1}}), JOB_SKU)
+        econ = c.masked_depth['economy']
+        self.assertTrue(econ.active)
+        self.assertEqual(econ.resolution_scale, 0.5)
+        self.assertEqual(econ.publish_interval_s, 0.1)
+
+    def test_masked_depth_economy_malformed_rejected(self):
+        for bad in ({'resolution_scale': 0}, {'publish_interval_s': 0.5}, {'nope': 1}):
+            with self.assertRaises(ValueError):
+                parse_manipulation_config(self._md_cfg({'economy': bad}), JOB_SKU)
+
     def test_cart_placement_malformed_rejected(self):
         for bad in ({'location': 'rollwagen'},                       # missing fields
                     {'location': '', 'load_center_body_xy': [0, 0],  # empty location

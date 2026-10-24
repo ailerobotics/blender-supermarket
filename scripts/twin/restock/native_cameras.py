@@ -12,6 +12,14 @@ import numpy as np
 from twin.restock_camera.geometry import Intrinsics,rigid
 
 
+class CameraRenderProductReleased(RuntimeError):
+    """A camera whose render product was DESTROYED (stage-scoped teardown / per-op close) was read
+    again. Raised as a NAMED mission-fail reason in place of Isaac's raw "Accessed invalid expired
+    'Camera' prim" RuntimeError, so a lifecycle bug reports which camera and why, not an opaque
+    prim-expired trace. The fix is the lifecycle (keep the camera alive until its last reader); this
+    is the backstop so a regression fails by name instead of a bare prim-expired trace."""
+
+
 def camera_spec(spec):
     name=spec.get('id','')
     if not re.fullmatch(r'[a-z][a-z0-9_]*',name):
@@ -41,8 +49,19 @@ class RenderedCamera:
     def __init__(self,camera):
         self.camera=camera
         self.native_denominator=None
+        # Set True by destroy_camera_render_product; a read after that raises CameraRenderProductReleased
+        # (a named reason) instead of Isaac's raw expired-prim RuntimeError.
+        self._render_product_released=False
+
+    def _check_live(self):
+        if self._render_product_released:
+            path=getattr(self.camera,'prim_path',None) or '?'
+            raise CameraRenderProductReleased(
+                'sensing camera render product was released before this stage read it '
+                '(stage-scoped teardown / per-op close): %s' % (path,))
 
     def get_current_frame(self,*args,**kwargs):
+        self._check_live()
         frame=dict(self.camera.get_current_frame(*args,**kwargs))
         identity=frame.get('rendering_frame')
         if isinstance(identity,dict):
@@ -62,6 +81,7 @@ class RenderedCamera:
         return frame
 
     def get_intrinsics_matrix(self):
+        self._check_live()
         cx,cy,fx,fy,distortion=self.camera.get_opencv_pinhole_properties()
         if not np.isfinite([cx,cy,fx,fy,*distortion]).all() or min(fx,fy)<=0 or any(distortion):
             raise ValueError('registered zero-distortion pinhole camera required')
@@ -161,6 +181,12 @@ def destroy_camera_render_product(rendered_camera, stage=None):
             applied['prims_removed'] = removed
         except Exception as exc:                              # noqa: BLE001
             applied['prims_removed'] = repr(exc)
+    # Latch the wrapper as released so a LATER read fails by name (CameraRenderProductReleased) rather
+    # than Isaac's raw expired-prim RuntimeError (a lifecycle bug then names the camera + cause).
+    try:
+        rendered_camera._render_product_released = True
+    except Exception:                                         # noqa: BLE001 -- a non-RenderedCamera input
+        pass
     print('DESTROY_RENDER_PRODUCT %r' % applied, flush=True)
     return applied
 

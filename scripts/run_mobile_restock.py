@@ -16,6 +16,17 @@ from twin.restock.guard import available_ram_mb, gpu_slot
 from twin.restock.inventory import Inventory, Job
 from twin.restock.mission import Mission
 from twin.restock.scenario import validate
+from twin.restock.shutdown import ordered_teardown, write_mission_record
+
+
+def _mission_events(db, scenario):
+    """This job's durable inventory event log, read robustly for the record-first mission.json
+    write at teardown. A read failure must never raise into the teardown path, so it degrades to
+    `[]` (the record still carries state/reason); the outer finally re-reads it on a clean exit."""
+    try:
+        return db.events(scenario['job']['job_id'])
+    except Exception:
+        return []
 
 
 def run_warm_session(run_once, *, warm_attempts, warm_reset, write_attempts=None):
@@ -541,6 +552,9 @@ def run(args, manifest, scenario):
             except Exception as exc:
                 if mission is not None and not mission.terminal:
                     mission.fail(str(exc))
+                # The failure reason the finally's record-first write and the outer handler persist.
+                summary['state'] = 'failed'
+                summary['reason'] = str(exc)
                 # Persist the failure before app.close(): Isaac's SimulationApp.close()
                 # can terminate the process hard, so the outer finally that writes
                 # mission.json may never run and the traceback would otherwise be lost.
@@ -551,19 +565,30 @@ def run(args, manifest, scenario):
                     pass
                 raise
             finally:
-                # Cleanup stays inside GPU lock, including partial boot failures.
-                try:
+                # RECORD FIRST (layer a): persist mission.json BEFORE any Isaac/ROS teardown, on
+                # EVERY exit path (clean success, clean failure, or an exception out of the run).
+                # SimulationApp.close() below can core-dump in the renderer shutdown on a long /
+                # VRAM-pressured failure run, which would skip the outer finally's write -- so the
+                # structured outcome is written here, while the simulator is still up. Clean runs
+                # re-write the fuller record (events + smart-verify) in the outer finally; a crash
+                # leaves this one. Never raises.
+                write_mission_record(args.output, summary, _mission_events(db, scenario))
+                # ORDERED TEARDOWN (layer b): the render products + camera feeds are released
+                # BEFORE the app close, the SAME order on the failure path as on a clean exit, so
+                # the renderer shutdown keeps the VRAM headroom a clean exit has. Each step is
+                # best-effort; a raising step never skips the app close. Cleanup stays inside the
+                # GPU lock, including partial boot failures.
+                def _close_feeds():
                     if bundle is not None:
                         try:
                             bundle.adapter.stop()
                         finally:
                             bundle.close()
-                finally:
-                    # Encode a persistent VFR H.264 walkthrough BEFORE app.close(): Isaac's
-                    # SimulationApp.close() can hard-exit and skip the outer finally, so encoding there
-                    # (or leaving it to an on-demand click) means a run's clip may not exist. frames.json
-                    # is written incrementally so it is complete here. Every run (success OR failure)
-                    # thus leaves <run>/walkthrough.mp4 for the watch page. Never fatal.
+                def _encode_walkthrough():
+                    # Encode a persistent VFR H.264 walkthrough BEFORE app.close(): frames.json is
+                    # written incrementally so it is complete here, and reads from disk (no live
+                    # render product). Every run (success OR failure) thus leaves <run>/walkthrough.mp4
+                    # for the watch page. Never fatal.
                     try:
                         frames_manifest = args.output / 'mission-frames' / 'frames.json'
                         mp4 = args.output / 'walkthrough.mp4'
@@ -577,8 +602,14 @@ def run(args, manifest, scenario):
                                 summary['walkthrough_frames'] = info['frames']
                     except Exception as exc:
                         summary['walkthrough_error'] = str(exc)
-                    if app is not None:
-                        app.close()
+                ordered_teardown([
+                    ('close_feeds', _close_feeds),
+                    ('encode_walkthrough', _encode_walkthrough),
+                    # Free the RTX render products just before the renderer shuts down (nothing reads
+                    # them now the walkthrough is encoded); no-op when bundle is None.
+                    ('release_render', bundle.release_render if bundle is not None else None),
+                    ('close_app', app.close if app is not None else None),
+                ], log=lambda m: print(m, flush=True))
     except Exception as exc:
         summary['state'] = 'failed'
         summary['reason'] = str(exc)

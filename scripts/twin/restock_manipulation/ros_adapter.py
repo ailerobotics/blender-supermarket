@@ -13,6 +13,10 @@ import time
 import xml.etree.ElementTree as ET
 
 from .types import Observation, Sensors, Target
+# sim-robust-host-timers-audit-fix-v1: the shared pace-aware liveness predicate (SIM primary + WALL
+# backstop). pace_watchdog is a leaf pure-arithmetic module (no ROS/Isaac), so this is safe at import.
+from ..restock.pace_watchdog import is_dead as pace_is_dead
+from ..restock.pace_watchdog import frozen_sim_wall_backstop as _frozen_sim_wall_backstop
 
 from .cad_tool import ARM_JOINTS
 
@@ -51,6 +55,12 @@ REPLAN_MAX = 12
 # branch); pose goals keep the full REPLAN_MAX. Env-overridable; clamped to [0, REPLAN_MAX]. Only affects
 # a move that is ALREADY being rejected (a healthy move plans in one), so healthy runs are unchanged.
 REPLAN_MAX_JOINT_SPACE = max(0, min(REPLAN_MAX, int(os.environ.get('RESTOCK_REPLAN_MAX_JOINT_SPACE', 3))))
+# sim-robust-pick-wrist-guard-cspace-fix-v1: a guarded POSE goal (the live_pose transfer PICK approach,
+# the fm327/fm403 task-space LIFT fallback) that PLANS cleanly but whose planned terminal config lands on
+# the ur_wrist_2-vs-ur_forearm self-colliding IK family is re-planned (a fresh stochastic cuMotion seed can
+# draw the clear family, like the collision re-plan). Bounded so a pose that never resolves clear fails fast
+# by name instead of churning the GPU; the PLAN_TOTAL_ATTEMPTS_CAP dispatch ceiling still backstops it.
+POSE_GUARD_REPLAN_MAX = REPLAN_MAX
 # RESTOCK_TRANSFER_CARRY=wrist_guard: wrist-flipped IK re-seeds per move before falling back to the plain
 # seed list (each costs one ~2 s KDL call); bounded so two IK branches cannot ping-pong forever.
 WRIST_FLIP_MAX = 3
@@ -61,12 +71,51 @@ WRIST_FLIP_MAX = 3
 # a stage into a logged retry instead of a lost 20-30 min GPU run. Distinct from REPLAN_MAX, which
 # reacts to a DELIVERED plan rejection; here no result is ever delivered because the server died.
 MOVE_GROUP_CRASH_RETRY_MAX = 3
+# sim-robust-movegroup-second-death-v1: MOVE_GROUP_CRASH_RETRY_MAX is reset to a FRESH budget at the
+# start of every MOVE (begin/begin_joint_goal), so a move_group death in a LATER step of the same op
+# recovers even after an earlier step already used its retries (estopretry: the natural death during
+# the collect pick used retry 1/3, then the injected death during the stow needed its own fresh budget).
+# This TOTAL per-op cap bounds a pathological crash STORM across many moves of one op so the per-move
+# reset cannot become an unbounded retry loop. Generous (covers several independent deaths per op);
+# RESTOCK_MOVE_GROUP_CRASH_RETRY_OP_MAX overrides.
+MOVE_GROUP_CRASH_RETRY_OP_MAX = max(
+    MOVE_GROUP_CRASH_RETRY_MAX,
+    int(os.environ.get('RESTOCK_MOVE_GROUP_CRASH_RETRY_OP_MAX', 6)))
 # Wall cap on how long a single crash-retry holds the move open waiting for move_group to respawn and
 # re-advertise its action servers. The launch respawns with a short delay and the CumotionPlanner
 # plugin re-init blocks on the (still-live) nvblox ESDF service, so a healthy respawn re-advertises in
 # a few seconds; this generous bound makes an UNRECOVERABLE crash (respawn exhausted, or the launch
 # itself down) surface as a clean motion failure instead of an unbounded hold.
 RESPAWN_WAIT_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_RESPAWN_WAIT_CAP_S', 45.0))))  # fm362
+# sim-robust-collect-stow-stall-v1: bounded re-sends of a PLANNING goal when a SIM-clock planning deadline
+# fires -- positive evidence the move_group action server is DEAD or HUNG. PR 228 moved every planning-phase
+# deadline to the SIM clock; its own rationale is that healthy planning consumes only ~1-2 sim-s, so a plan
+# still unaccepted/unresolved after the FULL sim planning budget is genuinely hung, not render-slow. The old
+# move_group-crash recoveries do NOT catch it: a SIGABRT-hung move_group keeps server_is_ready()==True (no
+# clean DDS deregistration), so _handle_server_crash (gated on not-ready) stays inert, and
+# _should_deadline_crash_retry is gated on clock=='wall' -- now unreachable because planning is always
+# sim-clock. coldliveapproach: move_group malloc_consolidate SIGABRT'd at the retreat_tuck->stow boundary and
+# did NOT respawn; the stow goal was never accepted, plan_accept hit the sim deadline every 30 sim-s, and the
+# controller looped STAGED_MOVE_RETRY to the 120-sim-s phase timeout with an opaque reason. We re-send the
+# plan this many times (so a genuine crash+respawn whose server stale-reads ready still recovers), then the
+# port flags a NAMED planner-unrecoverable fault the controller fails fast on. Default 1 => one recovery
+# re-send then fail (2 x PLAN_SIM_DEADLINE_S of sim time, well under a per-phase timeout); 0 => fail on the
+# first sim planning deadline. A healthy run never reaches a sim planning deadline, so this is inert there.
+PLAN_ACCEPT_CRASH_RETRY_MAX = max(0, min(5, int(os.environ.get('RESTOCK_PLAN_ACCEPT_CRASH_RETRY_MAX', 1))))
+# sim-robust-movegroup-double-death-v1 (gap 1, coldwin4): bounded SIM-clock budget for the post-respawn
+# carton RE-ATTACH. A freshly respawned move_group starts with a FRESH planning scene that no longer holds
+# restock_carried_unit, so the crash-retry must re-attach it before resending the plan, and NEVER resend
+# without the carton: fail the op BY NAME if it never succeeds.
+# sim-robust-movegroup-reattach-after-respawn-v1 (respawn2) CORRECTED the coldwin4 hypothesis: the reject was
+# NOT a transient "respawned planner still re-initialising". object_attachment runs in a SEPARATE container
+# that SURVIVES the move_group SIGABRT, so after the respawn it STILL holds restock_carried_unit and refuses
+# the re-attach's bare ADD as a duplicate ("Object already attached. Detach first ...") -- persistently for
+# the whole budget (respawn2: gate=attach_goal_rejected, held=True s_contact=True scene_ready=True
+# attach_ready=True, from sim 60.2 s on). The re-attach now RECONCILES that surviving attach (detach-first,
+# then re-ADD; see _reattach_payload / ros_payload.reattach_reject_gate). The budget retries bounded on the
+# SIM clock (spanning poll()s so the node /clock advances) and stays the backstop. Healthy (no-crash) runs
+# never re-attach so this is inert there. Env-overridable; clamped. Well under the 120 s phase timeout.
+REATTACH_SIM_BUDGET_S = max(1.0, min(600.0, float(os.environ.get('RESTOCK_REATTACH_SIM_BUDGET_S', 30.0))))
 # Fail FAST on a persistently-failing plan (firstmate run-216/279): an IK-infeasible goal churns the
 # 12 replans + every seed, each resetting a fresh per-attempt deadline, so the move could retry well
 # past the host's 30 s /sensors wall backstop -- which then fired as the mission reason instead of a
@@ -75,6 +124,40 @@ RESPAWN_WAIT_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_RESPAWN_W
 # fast. Legit stochastic retries succeed in ~1 s each and never approach this.
 MOVE_WALL_TIMEOUT_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_MOVE_WALL_TIMEOUT_S', 25.0))))  # fm362: the ik/plan-accept WALL deadline default
 PLAN_TOTAL_WALL_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_PLAN_WALL_CAP_S', 22.0))))  # fm362 sim-only env widen
+# sim-robust-plan-deadline-pacing-v1: the PLANNING-phase per-move deadline (ik / plan_accept / plan_result)
+# is measured on the SIM/node clock with THIS budget, not the WALL MOVE_WALL_TIMEOUT_S above. coldlive4
+# (fully-honest live_pose, which enables the masked_depth ARM FEED -- a 2nd full-res render) stretched
+# wall time to ~16x per sim-second overall and ~30x during collect, so the plan ACCEPT/RESULT callback was
+# not serviced within the ~25 s WALL deadline even though the plan was healthy and barely a sim-second had
+# passed: the WALL deadline then false-tripped the move_group crash+respawn heuristic (a slow plan read as
+# a crash) and burned the whole crash-retry budget with ZERO actual move_group deaths -> host e-stop at
+# ~sim 24 s. A sim-clock budget tolerates a render-paced slow-but-alive plan (little SIM time passes under
+# any realistic pacing -- healthy planning consumes ~1-2 sim-s) while a genuinely hung planner still fails
+# after this bounded SIM budget (and the controller's bounded MOVE_DEADLINE_RETRY then e-stops honestly).
+# Env-overridable; clamped. freshness-on-sim-clock (not wall).
+PLAN_SIM_DEADLINE_S = max(5.0, min(600.0, float(os.environ.get('RESTOCK_PLAN_SIM_DEADLINE_S', 30.0))))
+# sim-robust-host-timers-audit-fix-v1: the TOTAL-move planning budget (across every ik/plan dispatch,
+# re-plan and IK seed for ONE move) -- the last wall timer in the planning path. coldlive sample-4
+# e-stopped BARE at the live_pose place-descent because planning_wall_exceeded / PLAN_TOTAL_WALL_CAP_S
+# tripped at 120 s WALL while the cuMotion plan future had NOT resolved (future_done=False): the 2nd
+# full-res masked_depth arm feed render-starved the planner, so ~4-8 SIM seconds had passed -- the plan
+# was alive-but-starved, NOT hung. PR 228 put the PER-DISPATCH deadline on the sim clock but explicitly
+# left THIS total cap on the wall; it is the remaining false-trip. Measure the total-move planning budget
+# on the SIM/node clock with THIS budget, exactly as PLAN_SIM_DEADLINE_S: a render-paced slow-but-alive
+# plan passes little SIM time and is tolerated; a genuinely hung planner (sim advancing, plan never
+# returning) still exhausts it. Default = the historical PLAN_TOTAL_WALL_CAP_S default, so on the real
+# rig (sim == wall) the move still fails at 22 s -- byte-identical. Env-overridable; clamped.
+PLAN_TOTAL_SIM_CAP_S = max(5.0, min(600.0,
+                                    float(os.environ.get('RESTOCK_PLAN_TOTAL_SIM_CAP_S', PLAN_TOTAL_WALL_CAP_S))))
+# The WALL leg of the total-planning budget is now ONLY a frozen-sim backstop (positive evidence: a frozen
+# sim clock can never advance the SIM leg above, so without it a wholly-stalled simulator would hang the
+# move forever). It must NEVER pre-empt the SIM budget for an alive-but-render-starved planner, so it is
+# derived GENEROUS -- the larger of the configured PLAN_TOTAL_WALL_CAP_S and the SIM budget scaled by the
+# worst expected wall-to-sim pacing (above the measured 16-30x of the live_pose arm feed). On the real rig
+# (sim == wall) the SIM budget fires first at 22 s, so this large wall value is inert and the no-pacing
+# path is byte-identical. See plan_total_wall_backstop(). Env-overridable; clamped.
+PLAN_WALL_BACKSTOP_PACING_FACTOR = max(1.0, min(500.0,
+                                               float(os.environ.get('RESTOCK_PLAN_WALL_BACKSTOP_PACING_FACTOR', 50.0))))
 # Hard COUNT cap on the TOTAL cuMotion plan dispatches for a single move (same-goal re-plans AND IK-seed
 # fallbacks AND crash-retry re-sends). The 12 GB GPU (the always-on whispr service holds ~2.2 GB) OOMs
 # cuMotion (FatalException, cuda_array.cu) after ~13 back-to-back plans against an unplannable place goal:
@@ -93,6 +176,13 @@ PLAN_TOTAL_ATTEMPTS_CAP = max(2, min(64, int(os.environ.get('RESTOCK_PLAN_ATTEMP
 SENSOR_STREAM_WALL_BACKSTOP_S = max(5.0, min(600.0, float(os.environ.get('RESTOCK_SENSOR_STREAM_WALL_BACKSTOP_S', 30.0))))
 # fm366: RosTransferBridge startup-grace wall bound (ros_host passes config, default 5 s). Sim-only env.
 STARTUP_GRACE_S = max(1.0, min(120.0, float(os.environ.get('RESTOCK_STARTUP_GRACE_S', 5.0))))
+# sim-robust-host-timers-audit-fix-v1: the first-frame "no initial sensor frame" grace is now SIM-primary
+# too. The warm-up + first ESDF render produce no /sensors frame, but Isaac still steps /clock, so a
+# render-paced startup (the fm465 light rig slows the full-res source render) stretched the wall gap and
+# forced RESTOCK_STARTUP_GRACE_S up to 120. A SIM budget scales with pacing automatically; the WALL leg
+# is a derived-generous frozen-sim backstop (frozen /clock can never advance the SIM leg). Default =
+# STARTUP_GRACE_S, so real rig (sim == wall) fires at 5 s -- byte-identical. Env-overridable; clamped.
+STARTUP_GRACE_SIM_S = max(1.0, min(600.0, float(os.environ.get('RESTOCK_STARTUP_GRACE_SIM_S', STARTUP_GRACE_S))))
 # fm385/run-300c: the host /sensors PER-FRAME bound, in SIM/node seconds. During a long render-paced
 # move (e.g. retreat) the collect capture holds (motion-completion feedback stale) and emits no fresh
 # station snapshot; a 1 s SIM bound then trips mid-retreat even with the render alive and no OOM (run-300c
@@ -149,6 +239,80 @@ def _plan_attempts_exhausted(plan_dispatches):
     return plan_dispatches >= PLAN_TOTAL_ATTEMPTS_CAP
 
 
+def pose_wrist_guard_record(wrist1_cap, wrist2_min):
+    """sim-robust-pick-wrist-guard-cspace-fix-v1: the terminal wrist clear-region ``(cap, w2min)`` recorded
+    for a guarded POSE goal, or None when neither bound is set (byte-identical -- no terminal check). A
+    missing side is PERMISSIVE (the fm327/fm403 lift fallback may cap only wrist_1): +inf upper / -inf
+    lower never rejects, so in_clear_region matches the old one-sided cap. Pure."""
+    if wrist1_cap is None and wrist2_min is None:
+        return None
+    return (float('inf') if wrist1_cap is None else float(wrist1_cap),
+            float('-inf') if wrist2_min is None else float(wrist2_min))
+
+
+def pose_guard_decision(term_q, guard, replans, plan_dispatches, wall_exceeded):
+    """sim-robust-pick-wrist-guard-cspace-fix-v1: classify a guarded POSE plan's planned TERMINAL config
+    ``term_q`` (ARM order) against the wrist clear-region ``guard`` = ``(wrist1_cap, wrist2_min)``. Pure.
+
+    * ``'accept'`` -- no guard, or the terminal lands in the clear (wrist_2-positive) family: execute it.
+    * ``'replan'`` -- terminal is in the ur_wrist_2-vs-ur_forearm self-colliding family AND budget remains:
+      re-plan the SAME clean pose goal (a fresh stochastic cuMotion seed can draw the clear family).
+    * ``'fail'``   -- colliding and the re-plan budget / PLAN_TOTAL_ATTEMPTS_CAP dispatch cap / wall cap is
+      spent: fail fast by name rather than churn the GPU.
+    """
+    if guard is None:
+        return 'accept'
+    from .transfer_carry import in_clear_region
+    cap, w2min = guard
+    if in_clear_region(term_q, cap, w2min):
+        return 'accept'
+    if (not wall_exceeded and not _plan_attempts_exhausted(plan_dispatches)
+            and replans < POSE_GUARD_REPLAN_MAX):
+        return 'replan'
+    return 'fail'
+
+
+def frozen_sim_wall_backstop(sim_budget_s, wall_floor_s, pacing_factor=None):
+    """sim-robust-host-timers-audit-fix-v1: the canonical frozen-sim WALL backstop for ANY sim-primary
+    budget. Large enough never to pre-empt the SIM budget (``sim_budget_s``) for an alive-but-render-
+    starved producer -- the SIM budget scaled by the worst expected wall-to-sim pacing -- but at least the
+    caller's ``wall_floor_s`` so a config can only ever WIDEN it, never tighten below the historical value.
+    On the real rig (sim == wall) the SIM budget fires first, so the returned (large) wall value is inert
+    and the no-pacing path is byte-identical. Shared by the planning budget and the first-frame startup
+    grace. The formula now lives in the leaf ``pace_watchdog`` module (shared with the parked-station
+    heartbeat guards); this wrapper keeps the planning family's env-tunable factor default. Pure for CPU
+    testing."""
+    factor = PLAN_WALL_BACKSTOP_PACING_FACTOR if pacing_factor is None else float(pacing_factor)
+    return _frozen_sim_wall_backstop(sim_budget_s, wall_floor_s, factor)
+
+
+def plan_total_wall_backstop(sim_cap_s, wall_cap_s, pacing_factor=None):
+    """The planning budget's frozen-sim WALL backstop -- a thin, named alias for frozen_sim_wall_backstop
+    (kept for the planning call sites and their CPU tests). Pure for CPU testing."""
+    return frozen_sim_wall_backstop(sim_cap_s, wall_cap_s, pacing_factor)
+
+
+def planning_budget_dead(sim_elapsed, wall_elapsed, sim_cap_s, wall_backstop_s):
+    """sim-robust-host-timers-audit-fix-v1: True when a single move's TOTAL planning budget is exhausted.
+    The SIM leg (``sim_elapsed`` > ``sim_cap_s``) is the primary bound: an advancing sim clock proves the
+    simulator is alive, so a plan that has still not resolved after that much SIM time is genuinely hung,
+    not merely render-slow. The WALL leg (``wall_elapsed`` > ``wall_backstop_s``) only catches a FROZEN
+    sim, whose stalled clock can never advance the SIM leg. Reuses the shared pace-aware predicate
+    (mode='either'): fire on EITHER leg. Pure for CPU testing (no clock, no ROS)."""
+    return pace_is_dead(sim_elapsed=sim_elapsed, wall_elapsed=wall_elapsed,
+                        sim_budget=sim_cap_s, wall_backstop=wall_backstop_s, mode='either')
+
+
+# sim-robust-movegroup-respawn-v1: the port states in which a plan/execute request is in flight at
+# move_group (or its trajectory host). A planning-scene MUTATION (attach/detach via update_payload)
+# issued in any of these would race move_group's in-flight planning request -- the data-race class
+# that corrupts move_group's heap ("malloc(): unaligned tcache chunk detected", coldlive/run-266). The
+# single-threaded controller already serialises them (grasp/release run strictly BETWEEN moves, so the
+# port is 'succeeded'/'idle'/'failed' then); this names the invariant so a future concurrent caller
+# fails loudly on CPU instead of silently at GPU time. 'idle'/'succeeded'/'failed'/'ik' are NOT in flight.
+_PLAN_IN_FLIGHT_STATES = ('plan_accept', 'plan_result', 'execute_accept', 'execute_result', 'await_settle')
+
+
 def _should_crash_retry(crash_retries, has_plan_goal):
     """After a move_group PROCESS crash (its action server vanished mid-move, run-266/268), re-send the
     SAME plan goal to the respawned server up to MOVE_GROUP_CRASH_RETRY_MAX times. Distinct from
@@ -159,15 +323,50 @@ def _should_crash_retry(crash_retries, has_plan_goal):
     return has_plan_goal and crash_retries < MOVE_GROUP_CRASH_RETRY_MAX
 
 
-def _should_deadline_crash_retry(clock, state, has_plan_goal, crash_retries):
+def _should_deadline_crash_retry(clock, state, has_plan_goal, crash_retries, server_ready=True):
     """fm404 B-lite: a move_group SIGABRT+respawn that completes BETWEEN poll()s is invisible to
-    _should_crash_retry (the server reads ready again), so the lost plan request hangs until its WALL
-    deadline and the host e-stops (run-312). When a WALL deadline fires while WAITING FOR A PLAN RESULT
-    with a stored goal and budget left, re-send the plan as a bounded crash-retry instead of failing --
-    a genuinely slow/stuck planner still exhausts the budget and fails honestly. Execute-state and
-    SIM-clock (render-pacing) deadlines are NOT this case. Pure for CPU testing."""
-    return (clock == 'wall' and state in ('plan_accept', 'plan_result')
+    _should_crash_retry (the server reads ready again), so the lost plan request hangs until its deadline
+    and the host e-stops (run-312). When a deadline fires while WAITING FOR A PLAN RESULT with a stored
+    goal and budget left AND the server has VANISHED, re-send the plan as a bounded crash-retry instead of
+    failing.
+
+    sim-robust-plan-deadline-pacing-v1: require POSITIVE evidence of a death (``not server_ready`` -- the
+    move_group action server has GONE) before treating a fired deadline as a crash. coldlive4 showed the
+    cost of guessing: the plan-accept deadline (then WALL, ~25 s) fired a few 10 ms over under the live_pose
+    arm-feed render pacing while move_group was ALIVE and merely slow to be serviced, and this heuristic
+    read each miss as a crash+respawn -- burning the whole crash-retry budget with ZERO actual deaths ->
+    host e-stop. The planning deadline is now the SIM clock (a render-paced slow plan waits and this path
+    is not reached), so this stays a belt-and-braces catch for a crash+respawn that completed between polls
+    (run-312) -- and only ever fires with the server actually gone, never on a live-but-slow planner.
+    Execute-state deadlines are NOT this case. Pure for CPU testing."""
+    return (clock == 'wall' and state in ('plan_accept', 'plan_result') and not server_ready
             and bool(has_plan_goal) and crash_retries < MOVE_GROUP_CRASH_RETRY_MAX)
+
+
+def _should_recover_from_poll_fault(server_ready, has_plan_goal, crash_retries, is_respawn_timeout):
+    """sim-robust-movegroup-estop-retry-v1: an upstream move_group PROCESS death ("malloc(): unaligned
+    tcache chunk detected", exit -6, coldlive) that strikes mid-op can surface as a RAISE inside _poll --
+    a result future that errored on the lost server, an ABORTED result with no payload
+    (``result.result.error_code`` -> AttributeError), or a service failure -- NOT as the clean server-down
+    poll (_handle_server_crash) or the wall-deadline hang (_should_deadline_crash_retry). That raise used
+    to go straight to stop() -> emergency_stop() (the global 'host emergency stop'), ending the whole run
+    even though the launch RESPAWNS move_group and the plan is re-sendable. Route it through the SAME
+    bounded respawn + scene re-sync + retry instead -- but ONLY when it looks like a recoverable death:
+    the action server is GONE (``not server_ready``; a server that is still READY delivered a GENUINE
+    rejection/validation fault we must surface honestly, not mask as a crash), it is NOT the respawn-wait
+    cap timeout (``is_respawn_timeout`` -- that IS the 'respawn never came' escalation), and a stored plan
+    goal + crash-retry budget remain. Pure for CPU testing."""
+    return (not server_ready and not is_respawn_timeout
+            and _should_crash_retry(crash_retries, has_plan_goal))
+
+
+def _op_crash_budget_ok(op_crash_retries):
+    """sim-robust-movegroup-second-death-v1: the TOTAL per-OP crash-retry cap. MOVE_GROUP_CRASH_RETRY_MAX
+    is reset to a fresh budget per MOVE (begin/begin_joint_goal), so a move_group death in a LATER step of
+    the same op recovers even after an earlier step spent its retries; this bounds the SUM across every
+    move of one op so the per-move reset can never become an unbounded crash-retry storm. Reset per op by
+    reset_crash_budget() (controller.start). Pure for CPU testing."""
+    return op_crash_retries < MOVE_GROUP_CRASH_RETRY_OP_MAX
 
 
 def planner_velocity_scale(urdf, *, command_limit=.15, scale_cap=.05):
@@ -289,6 +488,15 @@ class RosMotionPort:
         # render-pacing wall-window relaxations.
         # fm363: env WINS over the ros_host config value (run-290 shadow fix).
         self.plan_wall_cap_s = env_wins('RESTOCK_PLAN_WALL_CAP_S', plan_wall_cap_s, PLAN_TOTAL_WALL_CAP_S)
+        # sim-robust-host-timers-audit-fix-v1: the total-move planning budget is now SIM-primary. The SIM
+        # cap is the real bound; the configured wall cap becomes the frozen-sim backstop, derived GENEROUS
+        # so it can never pre-empt the SIM leg for a render-starved-but-alive planner (coldlive sample-4).
+        # Both SIM-ONLY env wins; default = real-rig (plan_total_sim_cap_s defaults to the wall cap, so
+        # sim == wall fails at the historical 22 s -> byte-identical). _plan_started_sim anchors the budget
+        # at MOVE start, exactly like _plan_started_wall.
+        self.plan_total_sim_cap_s = env_wins('RESTOCK_PLAN_TOTAL_SIM_CAP_S', None, PLAN_TOTAL_SIM_CAP_S)
+        self.plan_wall_backstop_s = plan_total_wall_backstop(self.plan_total_sim_cap_s, self.plan_wall_cap_s)
+        self._plan_started_sim = None
         if node.context.get_domain_id() != 88 or not node.get_parameter('use_sim_time').value:
             raise RuntimeError('node must use domain 88 and simulation clock')
         if namespace != '/restock_sim':
@@ -327,6 +535,30 @@ class RosMotionPort:
             raise ValueError('stow_config must be six in-limit joint values')
         self.stow = tuple(float(q) for q in stow_config) if stow_config is not None else None
         self.payload_sync, self.emergency_stop = payload_sync, emergency_stop
+        # sim-robust-movegroup-respawn-v1: authoritative mirror of the carton attachment last established
+        # through update_payload (the ProductProfile when restock_carried_unit is attached, else None).
+        # A respawned move_group starts with a fresh planning scene that no longer holds the carton, so a
+        # crash-retry re-sends this attach BEFORE resending the plan (_resync_scene_after_respawn). None on
+        # every no-carry move => the resync is a no-op and the no-crash path is byte-identical.
+        self._attached_profile = None
+        # sim-robust-movegroup-second-death-v1: TOTAL crash-retries this OP (sum across all its moves).
+        # _server_crash_retries resets per move; this bounds the whole op (reset_crash_budget at op start).
+        self._op_crash_retries = 0
+        # sim-robust-collect-stow-stall-v1: per-move count of sim-clock planning-deadline crash re-sends
+        # (PLAN_ACCEPT_CRASH_RETRY_MAX), and the terminal flag set once they are exhausted -- a move_group
+        # that crashed/hung and did not respawn. The controller reads the flag after a 'failed' poll to
+        # fail fast with a NAMED cause instead of looping its own move retries to the per-phase timeout.
+        self._plan_accept_crash_retries = 0
+        self._planner_unrecoverable = False
+        # sim-robust-movegroup-double-death-v1 (gap 1, coldwin4): bounded post-respawn carton re-attach
+        # state. _reattach_active is True while retrying the attach against a freshly respawned move_group
+        # (spanning poll()s so the node /clock advances and the respawned server finishes init);
+        # _reattach_started_sim anchors the SIM-clock budget (REATTACH_SIM_BUDGET_S); _reattach_failed is
+        # the terminal flag the controller reads to FAIL the op BY NAME (the carton could not be restored
+        # to the planning scene -- never plan through it). Reset per move + at op start (reset_crash_budget).
+        self._reattach_active = False
+        self._reattach_started_sim = 0.0
+        self._reattach_failed = False
         self.ik = node.create_client(GetPositionIK, namespace + '/compute_ik')
         self.plan = ActionClient(node, MoveGroup, namespace + '/move_action')
         self.execute = ActionClient(node, ExecuteTrajectory, namespace + '/execute_trajectory')
@@ -337,6 +569,16 @@ class RosMotionPort:
         # rejection (a port raise). The controller reads it after a 'failed' poll to retry ONLY the
         # former with a fresh deadline. A wall-clock deadline miss (the wall sweep's job) stays False.
         self._last_fault_sim_deadline = False
+        # sim-robust-phase-timeout-during-recovery-v1: a move_group PROCESS death observed during an
+        # in-flight move via the plan action-server liveness latch (see _poll). The launch can respawn
+        # move_group inside a single render-paced poll gap, so a crash that flows through the controller's
+        # SIM-deadline MOVE_DEADLINE_RETRY (not _awaiting_server_respawn) is otherwise invisible to
+        # crash_recovery_active() (respawn2b). The latch holds from the ready->not-ready transition until
+        # the move SUCCEEDS / stop() / op reset, so the controller can credit the whole orphaned-goal wait +
+        # re-send the death caused out of the per-phase timeout. None/False on a healthy move => the probe is
+        # False => byte-identical.
+        self._movegroup_death_seen = False
+        self._mg_server_was_ready = None
         # fm345 smaller-problems-later: per-move PLACE relaxations for the carton-loaded extend.
         # (b) _move_speed_scale slows the cuMotion joint-space plan (preplace/place) to ~half so the
         # soft arm drive (3e5/8000/400) can track the min-jerk timing it lagged in run-270 (sagged
@@ -351,6 +593,25 @@ class RosMotionPort:
         self._goal_tol_pub = node.create_publisher(
             Float64, namespace + '/arm_controller/goal_position_tol',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        # sim-robust-pick-plan-rejection-v1: op-start re-arm. The trajectory_host latches a fault until
+        # process restart; a latched fault from a previous op then SILENTLY rejects the next move's goal
+        # (bricking the arm against the controller's own bounded retries). Publish a reset at the start
+        # of every move so the host clears a latched fault (+ a stale active flag) before the goal
+        # arrives (mirrors PR 210's gate re-arm). A no-op on the host when there is no fault, so the
+        # normal path is byte-identical. VOLATILE (not latched): a restarted host must not replay an old
+        # reset; begin()/begin_joint_goal() publish a fresh one each move, well before planning finishes.
+        from std_msgs.msg import Bool as _Bool
+        self._reset_pub = node.create_publisher(_Bool, namespace + '/arm_controller/reset', 10)
+        # sim-robust-movegroup-double-death-v1 (gap 2, coldwin4): a FORCE-abort signal to the trajectory_host
+        # for a MID-OP move_group respawn+reseed. The op-start reset (_reset_pub) deliberately NEVER clears a
+        # LIVE active goal (reset_clears guards that). But move_group crashes mid-EXECUTION leaving its
+        # FollowJointTrajectory goal still live on the executor, so the reseeded resend's ExecuteTrajectory is
+        # rejected 'a previous goal is still executing' (coldwin4 death 2) -> execution failed -> the stale
+        # goal tracking-faults at 1.314 rad -> e-stop. This stronger signal forces the crash-abandoned LIVE
+        # goal to abort + clears the fault so the resend is ACCEPTED. Published ONLY on a crash-retry resend;
+        # the no-crash path never publishes it => byte-identical. VOLATILE (a restarted host must not replay it).
+        self._abort_active_pub = node.create_publisher(_Bool, namespace + '/arm_controller/abort_active', 10)
+        self._exec_abort_reason = None   # distinct reason for the last ExecuteTrajectory abort (take_*)
         # Deadlines: IK/planning are compute-bound -> WALL clock. Trajectory EXECUTION is paced by the
         # simulator: under render pacing executing D sim-seconds takes far more WALL time, so a wall
         # execution deadline false-fails a healthy grasp (run-93). The execute deadline is therefore
@@ -367,8 +628,42 @@ class RosMotionPort:
         tol = GOAL_POSITION_TOL_DEFAULT if goal_tol is None else float(goal_tol)
         self._goal_tol_pub.publish(Float64(data=tol))
 
+    def _publish_reset(self):
+        """sim-robust-pick-plan-rejection-v1: op-start re-arm signal to the trajectory_host (clears a
+        latched fault + a stale active flag so the next move's goal is not silently rejected). Published
+        at the start of every move; a no-op on the host when there is no fault. Best-effort: a missing
+        publisher (older fixtures) must never break a move."""
+        pub = getattr(self, '_reset_pub', None)
+        if pub is None:
+            return
+        from std_msgs.msg import Bool
+        pub.publish(Bool(data=True))
+
+    def _publish_abort_active(self):
+        """sim-robust-movegroup-double-death-v1 (gap 2): force the trajectory_host to abort any LIVE active
+        goal + clear its fault on a MID-OP move_group respawn+reseed. move_group crashes mid-execution with
+        its FollowJointTrajectory goal still live on the executor, so the reseeded resend would be rejected
+        'a previous goal is still executing' (PR 229's op-start reset never clears a live goal). Published
+        only on a crash-retry resend; a no-op on the host when nothing is active (byte-identical no-crash
+        path). Best-effort: a missing publisher (older fixtures) must never break the recovery."""
+        pub = getattr(self, '_abort_active_pub', None)
+        if pub is None:
+            return
+        from std_msgs.msg import Bool
+        pub.publish(Bool(data=True))
+
+    def take_exec_abort_reason(self):
+        """Return and clear the DISTINCT reason the last ExecuteTrajectory aborted (a downstream
+        arm_controller goal rejection or execution fault), or None if the last 'failed' poll was not an
+        execute abort (e.g. a planning collision). The controller uses it so a rejected/aborted goal is
+        not mislabelled 'collision planning or execution failed' (seconddeath 2026-10-23)."""
+        reason = getattr(self, '_exec_abort_reason', None)
+        self._exec_abort_reason = None
+        return reason
+
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
-              wrist2_min=None, slow=False, goal_tol=None, near_start=False, wrist_guard=None):
+              wrist2_min=None, slow=False, goal_tol=None, near_start=False, wrist_guard=None,
+              reach_guard=None):
         from moveit_msgs.srv import GetPositionIK
         if self.state not in ('idle', 'succeeded', 'failed'):
             raise RuntimeError('motion already active')
@@ -376,6 +671,28 @@ class RosMotionPort:
         # joint-space goal must satisfy, else it is re-seeded from its wrist-flipped twin. None => off.
         self._wrist_guard = None if wrist_guard is None else (float(wrist_guard[0]), float(wrist_guard[1]))
         self._wrist_flips = 0
+        # sim-robust-pick-wrist-guard-cspace-fix-v1: the wrist clear-region (wrist1_cap, wrist2_min) a
+        # cuMotion TASK-SPACE POSE goal's planned trajectory must TERMINATE in, or None (off =>
+        # byte-identical). It is NOT a goal constraint on the plan request: cuMotion reads any
+        # joint_constraints in goal_constraints as a FULL c-space target (building cspace_position from
+        # exactly those entries, discarding the pose), so a 2-entry wrist list made it call
+        # planToCSpaceTarget([[-0.675, 1]]) against a 6-DOF robot -> 'Invalid c-space position [2] must
+        # equal [6]' x7 -> cumotion::FatalException CUDA OOM -> container death (pickguard1, PR254
+        # regression). Instead the pose goal stays CLEAN and the plan_result path validates the planned
+        # terminal config against this region, re-planning (fresh stochastic seed) off the self-colliding
+        # family. Set only by the pose-goal branch below when a cap/min is supplied. See _pose_plan_goal.
+        self._pose_wrist_guard = None
+        self._pose_guard_replans = 0   # bounded re-plans spent escaping the self-colliding IK family
+        # sim-robust-transfer-preplace-reach-v1: (max_droop, upright_seed) for a wrist-guarded TRANSFER
+        # preplace. Beyond the wrist-clear test, the accepted KDL goal must ALSO keep its shoulder fold
+        # within the holdable envelope (transfer_carry.reachable_fold), and the upright seed is tried so
+        # KDL finds the holdable branch instead of the deep fold the wrist-flip re-seed converges to
+        # (coldwin6 accepted ur_shoulder_lift -4.003, un-reachable). None => the plain wrist-guard
+        # (byte-identical). Only consulted alongside _wrist_guard (see _guard_rejects).
+        self._reach_guard = (None if reach_guard is None
+                             else (float(reach_guard[0]),
+                                   tuple(float(v) for v in reach_guard[1])
+                                   if reach_guard[1] is not None else None))
         if not self.ik.service_is_ready() or not self.plan.server_is_ready() or not self.execute.server_is_ready():
             raise RuntimeError('simulated IK/planner/executor unavailable')
         if (len(pose) != 7 or not all(map(math.isfinite, pose)) or len(joints) != 6
@@ -386,6 +703,8 @@ class RosMotionPort:
         # both reset to the full-speed / tight-tolerance default on every non-place move.
         self._move_speed_scale = 0.5 if slow else 1.0
         self._publish_goal_tol(goal_tol)
+        self._publish_reset()            # op-start re-arm: clear any latched trajectory_host fault
+        self._exec_abort_reason = None   # fresh execute-abort reason per move
         # fm347 (3): pan<->preplace IK-branch consistency. The joint-space IK below normally unwraps to
         # the branch nearest the STOW nominal (_nearest_branch), which let the cart PLACE pose flip
         # shoulder_pan to a far branch (run-273: pan left j0 at -1.822 but preplace solved ~2.09 -> a
@@ -396,6 +715,10 @@ class RosMotionPort:
         self._last_fault_sim_deadline = False   # fm367: fresh deadline-fault signal per move
         self._replan_attempts = 0          # fresh-seed re-plan budget for this move (see REPLAN_MAX)
         self._server_crash_retries = 0     # move_group-respawn re-send budget (see MOVE_GROUP_CRASH_RETRY_MAX)
+        self._plan_accept_crash_retries = 0   # sim-robust-collect-stow-stall-v1: sim-planning-deadline re-sends
+        self._planner_unrecoverable = False   # sim-robust-collect-stow-stall-v1: fresh terminal flag per move
+        self._reattach_active = False         # sim-robust-movegroup-double-death-v1 (gap 1): no re-attach in flight
+        self._reattach_failed = False         # gap 1: fresh terminal re-attach-failure flag per move
         self._awaiting_server_respawn = False  # True while holding the move open for a respawned move_group
         self._plan_goal = None             # the MoveGroup goal to re-send on a plan rejection
         self._plan_dispatches = 0          # total cuMotion plan dispatches this move (see PLAN_TOTAL_ATTEMPTS_CAP)
@@ -405,6 +728,7 @@ class RosMotionPort:
         # sets it True when it builds the joint-constraint goal. The pose path below keeps it False.
         self._plan_goal_joint_space = False
         self._plan_started_wall = time.monotonic()   # total planning-wall cap anchor (see PLAN_TOTAL_WALL_CAP_S)
+        self._plan_started_sim = self._sim_now()      # total planning SIM-budget anchor (PLAN_TOTAL_SIM_CAP_S)
         # Straight-line contact descent (firstmate run-191). The contact move is BY DEFINITION a short
         # straight descent INTO the target carton, so a collision planner that still holds the carton
         # (and its support face) as obstacles rejects it near contact (INVALID_MOTION_PLAN) whenever the
@@ -424,10 +748,14 @@ class RosMotionPort:
         if self.pose_goal and not self._straight_line and not joint_space:
             self.generation += 1
             self.handle = None
-            self._plan_goal = self._pose_plan_goal(pose, joints, wrist1_cap=wrist1_cap, wrist2_min=wrist2_min)
+            # sim-robust-pick-wrist-guard-cspace-fix-v1: a wrist cap/min on a POSE goal is a post-plan
+            # TERMINAL guard, NOT a goal constraint (a joint_constraints list on a pose goal is read by
+            # cuMotion as a malformed c-space target -- see _pose_plan_goal / _pose_wrist_guard). Record
+            # the region; the goal stays clean (no joint_constraints) and plan_result validates against it.
+            self._pose_wrist_guard = pose_wrist_guard_record(wrist1_cap, wrist2_min)
+            self._plan_goal = self._pose_plan_goal(pose, joints)
             self._send(self.plan, self._plan_goal, 'plan_accept')
-            self.deadline_clock = time.monotonic
-            self.deadline = time.monotonic() + self.timeout
+            self._arm_plan_deadline()   # sim-clock planning deadline (render-pacing tolerant)
             return
         if self._straight_line:
             # Seed IK from the measured approach config only -- the arm is already at the pose just above
@@ -451,6 +779,15 @@ class RosMotionPort:
         # near_start) -- KDL then answers the nearby clear solution before any stow-branch twin.
         self._seeds = ([tuple(joints)] + self._seed_configs(joints)
                        if self._near_start or self._wrist_guard is not None else self._seed_configs(joints))
+        # sim-robust-transfer-preplace-reach-v1: with the reach guard, seed a holdable UPRIGHT config as the
+        # FIRST FALLBACK (right after the measured start, which stays seed 0 so an already-upright run is
+        # byte-identical). If the measured seed resolves to the deep fold the reach guard rejects, KDL then
+        # re-solves from this upright seed and finds the holdable branch (coldwin6: ur_shoulder_lift -1.95).
+        if (self._wrist_guard is not None and self._reach_guard is not None
+                and self._reach_guard[1] is not None):
+            up = tuple(float(v) for v in self._reach_guard[1])
+            if up not in self._seeds:
+                self._seeds.insert(min(1, len(self._seeds)), up)
         self._seed_idx = 0
         self._send_ik(self._seeds[0])
 
@@ -539,6 +876,46 @@ class RosMotionPort:
         rt.joint_trajectory = jt
         return rt
 
+    def _begin_straight_line_execute(self, q):
+        """Dispatch a collision-OFF 2-point rest-to-rest smoothstep from the measured start to the
+        explicit joint config ``q`` straight through the host executor -- no cuMotion plan, so a
+        self-colliding start/endpoint is never rejected. Shared by the straight-line pose descent
+        (``q`` = the collision-off pose IK, _nearest_to-branched) and the straight-line JOINT escape
+        (begin_joint_goal(straight_line=True); ``q`` = an explicit clear-branch target, e.g. the collect
+        deck RETREAT backing the empty gripper off the drooped place config -- forearm within the
+        gripper-cube sphere margin -- to the fixed upright standoff that a collision-AWARE plan would
+        reject at its self-colliding start). Sets the move state (execute_accept, or await_settle when a
+        live arm state is wired); the caller returns its own status."""
+        from moveit_msgs.action import ExecuteTrajectory
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory = self._straight_line_goal(q)
+        validate_trajectory(goal.trajectory.joint_trajectory, self.start, self.limits)
+        end = goal.trajectory.joint_trajectory.points[-1].time_from_start
+        duration = end.sec + end.nanosec * 1e-9
+        # Execution is sim-paced, exactly like the cuMotion plan path: bound on the NODE/SIM clock.
+        # fm367: the sim budget (duration + settle margin) is MOVE_SIM_DEADLINE_SCALE-scaled.
+        self.deadline_clock = self._sim_now
+        self.deadline = self._sim_now() + sim_execute_budget(duration)
+        if self._live_arm_state is None:
+            self._send(self.execute, goal, 'execute_accept')
+        else:                                   # fm357: settle + re-seed before dispatch
+            self._pending_exec = goal.trajectory
+            self._settle_wait_start = self._sim_now()   # fm369: start the settle sub-budget clock
+            self.state = 'await_settle'
+
+    def _arm_plan_deadline(self):
+        """sim-robust-plan-deadline-pacing-v1: arm the PLANNING-phase (ik / plan_accept / plan_result)
+        per-move deadline on the SIM/node clock with the PLAN_SIM_DEADLINE_S budget, replacing the WALL
+        ``self.timeout`` that false-tripped under the live_pose arm-feed render pacing (coldlive4: the
+        plan-accept WALL deadline fired a few 10 ms over and was mis-read as a move_group crash+respawn,
+        exhausting the crash-retry budget with zero deaths). A render-paced slow-but-alive plan passes
+        little SIM time, so it is tolerated and NEVER read as a crash; a genuinely hung planner still fails
+        after this bounded sim budget (and the WALL planning_wall_exceeded / PLAN_TOTAL_WALL_CAP_S backstop
+        is untouched). Used at every site that puts the port into an active planning wait (begin pose-goal,
+        _send_ik, begin_joint_goal, the plan-reject re-plan, and the post-respawn crash-retry re-sends)."""
+        self.deadline_clock = self._sim_now
+        self.deadline = self._sim_now() + PLAN_SIM_DEADLINE_S
+
     def _send_ik(self, seed):
         from moveit_msgs.srv import GetPositionIK
         req = GetPositionIK.Request()
@@ -559,8 +936,7 @@ class RosMotionPort:
         self.generation += 1
         self.handle = None
         self.future, self.state = self.ik.call_async(req), 'ik'
-        self.deadline_clock = time.monotonic
-        self.deadline = time.monotonic() + self.timeout
+        self._arm_plan_deadline()   # sim-clock planning deadline (the IK service response is render-paced too)
 
     def _next_seed(self):
         """Advance to the next IK seed; returns True if one was dispatched, False if exhausted."""
@@ -576,9 +952,23 @@ class RosMotionPort:
         wrist-flipped twin (the same tool pose in the clear branch; bounded by WRIST_FLIP_MAX so two
         branches cannot ping-pong), then the remaining seeds -- or RAISE once every seed is spent, so the
         arm is never planned into the ur_wrist_2-vs-ur_forearm stop (warm2: KDL w1 2.08 / w2 -1.02)."""
-        from .transfer_carry import in_clear_region, wrist_flip_seed
+        from .transfer_carry import in_clear_region, wrist_flip_seed, reachable_fold, fold_droop
         cap, w2min = self._wrist_guard
         if in_clear_region(q, cap, w2min):
+            # sim-robust-transfer-preplace-reach-v1: a clear-wrist solution must ALSO be a HOLDABLE fold.
+            # The wrist-flip re-seed can converge into the deep (un-reachable) shoulder fold while still
+            # satisfying the wrist band (coldwin6: ur_shoulder_lift -4.003, clear but froze at -3.65). When
+            # the reach guard is active, REJECT such a clear-but-deep-fold goal and advance to the NEXT seed
+            # (an upright one) -- never wrist-flip it (flipping a clear solution leaves the clear branch).
+            reach = getattr(self, '_reach_guard', None)
+            if reach is not None and not reachable_fold(q, reach[0]):
+                print('WRIST_GUARD reject-deepfold q=%s droop=%.3f > max_droop=%.2f (clear but un-reachable '
+                      'fold) -> next seed' % ([round(v, 3) for v in q], fold_droop(q), reach[0]), flush=True)
+                if self._next_seed():
+                    return True
+                raise RuntimeError(
+                    'transfer preplace: no wrist-clear IK branch within the reachable shoulder-fold '
+                    'envelope (fold_droop<=%.2f) from this park pose' % reach[0])
             print('WRIST_GUARD accept q=%s (w1<=%.2f, w2>=%.2f) seed=%d flips=%d'
                   % ([round(v, 3) for v in q], cap, w2min, self._seed_idx, self._wrist_flips), flush=True)
             return False
@@ -597,17 +987,23 @@ class RosMotionPort:
             return True
         raise RuntimeError('IK outside the carry wrist region (wrist_1<=%.2f, wrist_2>=%.2f)' % (cap, w2min))
 
-    def _pose_plan_goal(self, pose, joints, wrist1_cap=None, wrist2_min=None):
-        """MoveGroup plan request to a cartesian TCP pose (position+orientation goal constraints in
+    def _pose_plan_goal(self, pose, joints):
+        """MoveGroup plan request to a cartesian TCP pose (position+orientation goal constraints ONLY, in
         ur_base_link); cuMotion does its own collision-aware IK, so a single collision model (XRDF)
         decides feasibility. Mirrors begin_joint_goal's request fields; plan_only (the port executes
-        a validated trajectory separately). wrist1_cap (fm327, sim-only) adds a GOAL joint constraint
-        ur_wrist_1_joint <= wrist1_cap so cuMotion IKs a carry pose (the lift) BELOW the ur_wrist_2-vs-
-        ur_forearm self-collision stop (~0.70) even before the planner catches that pair. wrist2_min
-        (fm403, sim-only) adds the companion LOWER bound ur_wrist_2_joint >= wrist2_min so the IK cannot
-        pick the w2-negative self-colliding branch (the bench showed w1-cap alone leaves w2 jamming)."""
+        a validated trajectory separately).
+
+        sim-robust-pick-wrist-guard-cspace-fix-v1: this goal carries NO joint_constraints. cuMotion reads
+        ANY joint_constraints in goal_constraints as a FULL c-space target (it builds cspace_position from
+        exactly those entries and drops the pose), so the earlier fm327/fm403 wrist-cap encoding -- which
+        appended a 1- or 2-entry wrist joint_constraints list onto this pose goal -- made cuMotion call
+        planToCSpaceTarget with a 2-coordinate target against a 6-DOF robot ('Invalid c-space position [2]
+        must equal [6]' -> cumotion::FatalException CUDA OOM -> container death, pickguard1). The wrist
+        clear-region guard is now enforced AFTER planning, by validating the planned trajectory's terminal
+        config against self._pose_wrist_guard (set by begin()) and re-planning off the self-colliding IK
+        family -- see the plan_result handler in _poll."""
         from moveit_msgs.action import MoveGroup
-        from moveit_msgs.msg import Constraints, PositionConstraint, OrientationConstraint, BoundingVolume, JointConstraint
+        from moveit_msgs.msg import Constraints, PositionConstraint, OrientationConstraint, BoundingVolume
         from shape_msgs.msg import SolidPrimitive
         from geometry_msgs.msg import Pose as GPose
         goal = MoveGroup.Goal()
@@ -639,18 +1035,6 @@ class RosMotionPort:
         c = Constraints()
         c.position_constraints.append(pc)
         c.orientation_constraints.append(oc)
-        if wrist1_cap is not None:
-            _low = -2.0   # cap only the UPPER bound at wrist1_cap; generous lower bound
-            c.joint_constraints.append(JointConstraint(
-                joint_name='ur_wrist_1_joint', position=(_low + float(wrist1_cap)) / 2.,
-                tolerance_above=(float(wrist1_cap) - _low) / 2.,
-                tolerance_below=(float(wrist1_cap) - _low) / 2., weight=1.))
-        if wrist2_min is not None:
-            _high = 2.0   # fm403: bound only the LOWER side at wrist2_min; generous upper bound
-            c.joint_constraints.append(JointConstraint(
-                joint_name='ur_wrist_2_joint', position=(float(wrist2_min) + _high) / 2.,
-                tolerance_above=(_high - float(wrist2_min)) / 2.,
-                tolerance_below=(_high - float(wrist2_min)) / 2., weight=1.))
         req.goal_constraints = [c]
         goal.planning_options.plan_only = True
         return goal
@@ -673,8 +1057,19 @@ class RosMotionPort:
         future.add_done_callback(accepted)
         self.future, self.state = future, state
 
-    def begin_joint_goal(self, goal_joints, measured_joints, slow=False, goal_tol=None):
-        """Collision-planned arm stow; never an unchecked joint command."""
+    def begin_joint_goal(self, goal_joints, measured_joints, slow=False, goal_tol=None,
+                         straight_line=False):
+        """Collision-planned arm stow; never an unchecked joint command.
+
+        ``straight_line=True`` (sim-robust-collect-stow-branch-v1): dispatch the move as the collision-OFF
+        2-point rest-to-rest smoothstep to ``goal_joints`` straight through the host executor instead of a
+        cuMotion plan -- the SAME mechanism as the straight-line pose descent (begin(straight_line=True)),
+        but to an EXPLICIT clear-branch joint target rather than a pose IK. Used only for the collect deck
+        RETREAT, whose collision-off place/retreat pose-IK otherwise branches into a self-colliding fold
+        (forearm inside the gripper-cube sphere margin) that makes cuMotion reject the next collision-aware
+        move at its start (INVALID_INITIAL_CSPACE_POSITION). Because the target is an explicit clear joint
+        config the planner is not consulted, so the self-colliding start is never rejected; the arm reaches a
+        known-clear standoff from which the tuck/stow plans cleanly."""
         from moveit_msgs.action import MoveGroup
         from moveit_msgs.msg import Constraints, JointConstraint
         if self.state not in ('idle','succeeded','failed'):
@@ -695,8 +1090,16 @@ class RosMotionPort:
         # reached the shape, no mid-track-miss), so the tight terminal gate rejected an otherwise-arrived
         # pose. The straight-line insert (place) re-solves to the SENSED place, correcting the offset.
         self._publish_goal_tol(goal_tol)
+        self._publish_reset()            # op-start re-arm: clear any latched trajectory_host fault
+        self._exec_abort_reason = None   # fresh execute-abort reason per move
         self._near_start = False   # fm347 (3): begin_joint_goal moves use their own goal, never the near_start IK branch
         self._wrist_guard = None   # transfer_carry: a fixed joint goal has no IK branch to guard
+        self._reach_guard = None   # sim-robust-transfer-preplace-reach-v1: no IK branch to reach-guard either
+        # sim-robust-pick-wrist-guard-cspace-fix-v1: a joint-space goal already IS a 6-joint c-space target
+        # (its terminal config is the commanded goal), so the post-plan pose wrist-guard never applies;
+        # clear it so a prior pose move's guard cannot leak into this move's plan_result check.
+        self._pose_wrist_guard = None
+        self._pose_guard_replans = 0
         # Reset the planning anchors for THIS move, exactly as begin() does (firstmate 292 / run-238):
         # without a fresh _plan_started_wall the total-planning-wall cap carried the stale anchor from
         # the previous pose-goal move (lift), so the tuck/pan/stow joint goal tripped
@@ -705,12 +1108,26 @@ class RosMotionPort:
         self._last_fault_sim_deadline=False   # fm367: fresh deadline-fault signal per move
         self._replan_attempts=0
         self._server_crash_retries=0
+        self._plan_accept_crash_retries=0   # sim-robust-collect-stow-stall-v1: sim-planning-deadline re-sends
+        self._planner_unrecoverable=False   # sim-robust-collect-stow-stall-v1: fresh terminal flag per move
+        self._reattach_active=False         # sim-robust-movegroup-double-death-v1 (gap 1): no re-attach in flight
+        self._reattach_failed=False         # gap 1: fresh terminal re-attach-failure flag per move
         self._awaiting_server_respawn=False
         self._plan_goal=None
         self._plan_dispatches=0            # total cuMotion plan dispatches this move (PLAN_TOTAL_ATTEMPTS_CAP)
         self._plan_goal_joint_space=True   # a fixed joint-constraint goal -> tighter same-goal re-plan budget
-        self._straight_line=False
+        self._straight_line=bool(straight_line)
         self._plan_started_wall=time.monotonic()
+        self._plan_started_sim=self._sim_now()        # total planning SIM-budget anchor (PLAN_TOTAL_SIM_CAP_S)
+        if straight_line:
+            # Collision-OFF straight-line JOINT escape: a 2-point rest-to-rest smoothstep to the explicit
+            # clear-branch target, bypassing cuMotion's start-state self-collision check. No _plan_goal
+            # (nothing to re-plan); _send (via the dispatch helper) increments the generation.
+            self.generation+=1
+            self.handle=None
+            self._plan_goal=None
+            self._begin_straight_line_execute(tuple(float(v) for v in goal_joints))
+            return
         goal=MoveGroup.Goal()
         req=goal.request
         req.group_name=self.group
@@ -745,8 +1162,7 @@ class RosMotionPort:
         self._plan_goal=goal
         self.generation+=1
         self.handle=None
-        self.deadline_clock=time.monotonic
-        self.deadline=time.monotonic()+self.timeout
+        self._arm_plan_deadline()   # sim-clock planning deadline (render-pacing tolerant)
         self._send(self.plan,goal,'plan_accept')
 
     def _pending_plan_success(self):
@@ -792,11 +1208,21 @@ class RosMotionPort:
         if getattr(self, 'state', None) in self._DRAIN_STATES:
             self.poll()
 
+    def _planning_elapsed(self):
+        """(sim_elapsed, wall_elapsed) seconds since THIS move's planning started, for the total-move
+        planning budget. sim_elapsed is None until a move has anchored a sim start (CPU tests of the
+        legacy wall-only path can omit it); the wall leg then still bounds a frozen sim. Read-only."""
+        wall_elapsed = time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
+        sim_start = getattr(self, '_plan_started_sim', None)
+        sim_elapsed = None if sim_start is None else self._sim_now() - sim_start
+        return sim_elapsed, wall_elapsed
+
     def plan_wall_diag(self):
-        """One-line state snapshot for the plan-cap fire (firstmate 290/292, run-237): distinguishes a
-        result DELIVERED-but-not-consumed (future done -> the fix should have caught it) from one
-        NOT-delivered in the cap (future not done -> move_group succeeded but the action result never
-        reached the port). Read-only."""
+        """One-line state snapshot for the plan-budget fire (firstmate 290/292, run-237; coldlive4):
+        distinguishes a result DELIVERED-but-not-consumed (future done -> the fix should have caught it)
+        from one NOT-delivered in the cap (future not done -> move_group succeeded but the action result
+        never reached the port), and names BOTH budget legs so a sim-leg fire (hung planner) is told
+        apart from a wall-backstop fire (frozen sim). Read-only."""
         f = getattr(self, 'future', None)
         done = bool(f is not None and f.done())
         status = None
@@ -806,25 +1232,64 @@ class RosMotionPort:
                 status = getattr(r, 'status', None)
             except Exception as exc:
                 status = 'raised:%r' % exc
-        elapsed = time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
-        return ('PLAN_WALL_DIAG state=%s future_done=%s result_status=%s elapsed=%.2f replans=%s'
-                % (getattr(self, 'state', None), done, status, elapsed,
-                   getattr(self, '_replan_attempts', None)))
+        sim_elapsed, wall_elapsed = self._planning_elapsed()
+        return ('PLAN_WALL_DIAG state=%s future_done=%s result_status=%s elapsed=%.2f replans=%s '
+                'sim_elapsed=%s sim_cap=%.1f wall_backstop=%.1f leg=%s'
+                % (getattr(self, 'state', None), done, status, wall_elapsed,
+                   getattr(self, '_replan_attempts', None),
+                   'n/a' if sim_elapsed is None else '%.2f' % sim_elapsed,
+                   getattr(self, 'plan_total_sim_cap_s', PLAN_TOTAL_SIM_CAP_S),
+                   getattr(self, 'plan_wall_backstop_s',
+                           plan_total_wall_backstop(PLAN_TOTAL_SIM_CAP_S, PLAN_TOTAL_WALL_CAP_S)),
+                   self.planning_budget_leg()))
+
+    def planning_budget_leg(self):
+        """Which leg of the total-move planning budget is exhausted: 'sim' (primary: an advancing sim
+        proves a hung-not-slow planner), 'wall' (frozen-sim backstop), or None. Read-only."""
+        sim_elapsed, wall_elapsed = self._planning_elapsed()
+        sim_cap = getattr(self, 'plan_total_sim_cap_s', PLAN_TOTAL_SIM_CAP_S)
+        wall_backstop = getattr(self, 'plan_wall_backstop_s',
+                                plan_total_wall_backstop(PLAN_TOTAL_SIM_CAP_S, PLAN_TOTAL_WALL_CAP_S))
+        if sim_elapsed is not None and sim_elapsed > sim_cap:
+            return 'sim'
+        if wall_elapsed > wall_backstop:
+            return 'wall'
+        return None
 
     def planning_wall_exceeded(self):
-        """True once a single move has spent more than the total planning-wall cap in a PLANNING
-        phase (ik / plan request / plan result) WITHOUT a usable result yet. Read-only (no state
-        advance): the bridge watchdog checks it on its own 0.1 s timer so a planning hang surfaces as
-        a motion failure within the cap EVEN WHEN /sensors has stalled and poll() is no longer being
-        driven (run-220: the preplace PLANNING_FAILED was masked by the 30 s /sensors wall backstop
-        because poll() stopped being called). A SUCCEEDED plan result already delivered but not yet
-        consumed by the sensor-paced poll() does NOT count as exhausted (firstmate 290; run-234
-        false-tripped on a plan move_group had already completed). Execution phases are excluded -- a
-        render-paced execute legitimately runs long."""
-        return (self.state in ('ik', 'plan_accept', 'plan_result')
-                and not self._pending_plan_success()
-                and time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic())
-                > getattr(self, 'plan_wall_cap_s', PLAN_TOTAL_WALL_CAP_S))
+        """True once a single move's TOTAL planning budget is exhausted in a PLANNING phase (ik / plan
+        request / plan result) WITHOUT a usable result yet. Read-only (no state advance): the bridge
+        watchdog checks it on its own 0.1 s timer so a planning hang surfaces as a motion failure EVEN
+        WHEN /sensors has stalled and poll() is no longer being driven (run-220: the preplace
+        PLANNING_FAILED was masked by the 30 s /sensors wall backstop because poll() stopped being
+        called). A SUCCEEDED plan result already delivered but not yet consumed by the sensor-paced
+        poll() does NOT count as exhausted (firstmate 290; run-234 false-tripped on a plan move_group
+        had already completed). Execution phases are excluded -- a render-paced execute legitimately
+        runs long.
+
+        sim-robust-host-timers-audit-fix-v1: the budget is now SIM-primary (``plan_total_sim_cap_s``)
+        with the configured wall cap as a derived-generous FROZEN-SIM backstop (``plan_wall_backstop_s``),
+        reusing pace_watchdog.is_dead(mode='either'). coldlive sample-4 e-stopped bare here: the pure-wall
+        cap (120 s env) tripped while the plan future had not resolved under the live_pose arm-feed render
+        pacing (only ~4-8 SIM s had passed -- alive-but-starved, not hung). The SIM leg tolerates a
+        render-paced plan; a genuinely hung planner (sim advancing, plan never returning) still exhausts
+        it; a frozen sim (SIM leg can never advance) is caught by the wall backstop. Real rig (sim == wall)
+        fires at the historical 22 s via the SIM leg -> byte-identical."""
+        # sim-robust-movegroup-estop-retry-v1: while the move is HELD for a move_group respawn
+        # (_awaiting_server_respawn), the dedicated RESPAWN_WAIT_CAP_S bounds the wait -- the stale
+        # per-move anchors would otherwise let this bridge-watchdog cap fire and e-stop the recovery
+        # mid-hold. Suspend it for the respawn wait only (a genuine planning hang has no awaiting flag
+        # set, so it is unaffected). Hardens the pre-existing _handle_server_crash hold too.
+        if (self.state not in ('ik', 'plan_accept', 'plan_result')
+                or getattr(self, '_awaiting_server_respawn', False)
+                or self._pending_plan_success()):
+            return False
+        sim_elapsed, wall_elapsed = self._planning_elapsed()
+        return planning_budget_dead(
+            sim_elapsed, wall_elapsed,
+            getattr(self, 'plan_total_sim_cap_s', PLAN_TOTAL_SIM_CAP_S),
+            getattr(self, 'plan_wall_backstop_s',
+                    plan_total_wall_backstop(PLAN_TOTAL_SIM_CAP_S, PLAN_TOTAL_WALL_CAP_S)))
 
     def failed_result_pending(self):
         """True when an EXECUTE action RESULT has arrived FAILED (status != SUCCEEDED) but poll() has
@@ -857,12 +1322,29 @@ class RosMotionPort:
         self.state, self.handle, self.future = 'idle', None, None
 
     def _server_action_for_state(self):
-        """The MoveGroup/ExecuteTrajectory action client whose server must be live for the current
-        state, or None outside a planning/execution state. Used to notice a move_group PROCESS crash
-        (the server vanishes) distinctly from a slow-but-alive server."""
+        """The action client whose server DEATH we recover for the current state, or None outside a
+        planning/execution state. Plan states -> move_group (self.plan). Execute states -> normally the
+        trajectory host (self.execute), BUT self.plan when MOVE_GROUP is the process that died mid-
+        EXECUTION: a cuMotion-planned move (stored ``_plan_goal``) whose trajectory host is still alive
+        while move_group's own action server has vanished.
+
+        sim-robust-movegroup-second-death-v1: the intermittent upstream move_group SIGABRT (exit -6) can
+        strike while a trajectory is EXECUTING, not only mid-plan (estopretry: the injected death landed
+        during the collect STOW). The trajectory host does NOT die with move_group, so watching only
+        self.execute during an execute state was blind to it -- the death was never routed through the
+        bounded respawn + scene re-sync + re-plan recovery. Switching to self.plan here makes
+        _handle_server_crash / _recover_movegroup_death_or_none hold the arm at its last commanded pose,
+        wait for the respawn, re-sync the scene and RE-PLAN the move from the live measured pose (which
+        resumes the remaining segment). A straight-line execute has ``_plan_goal is None`` (it bypasses
+        move_group entirely), so it correctly falls through to self.execute -- a move_group death is
+        irrelevant to it. A normal execute (move_group alive) keeps self.execute => byte-identical."""
         if self.state in ('plan_accept', 'plan_result'):
             return self.plan
         if self.state in ('execute_accept', 'execute_result'):
+            if (getattr(self, '_plan_goal', None) is not None
+                    and self.execute.server_is_ready()        # trajectory host still alive
+                    and not self.plan.server_is_ready()):     # move_group gone -> death during execution
+                return self.plan
             return self.execute
         return None
 
@@ -878,9 +1360,11 @@ class RosMotionPort:
             return None
         if not server.server_is_ready():
             # Server down: crashed, or in the respawn gap. Keep the move alive for the respawn only if
-            # we have a goal to re-send and crash-retry budget remains.
-            if not _should_crash_retry(getattr(self, '_server_crash_retries', 0),
-                                       getattr(self, '_plan_goal', None) is not None):
+            # we have a goal to re-send and BOTH the per-move AND the total per-op crash-retry budget remain
+            # (sim-robust-movegroup-second-death-v1: the per-op cap bounds a crash storm across moves).
+            if not (_should_crash_retry(getattr(self, '_server_crash_retries', 0),
+                                        getattr(self, '_plan_goal', None) is not None)
+                    and _op_crash_budget_ok(getattr(self, '_op_crash_retries', 0))):
                 return None                     # no goal / budget spent -> normal failure path owns it
             now = time.monotonic()
             if not getattr(self, '_awaiting_server_respawn', False):
@@ -902,18 +1386,150 @@ class RosMotionPort:
             # the per-move planning anchors for a full fresh budget; count the crash retry.
             self._awaiting_server_respawn = False
             self._server_crash_retries = getattr(self, '_server_crash_retries', 0) + 1
+            self._op_crash_retries = getattr(self, '_op_crash_retries', 0) + 1
             self._replan_attempts = 0
             self.handle = None
             self.generation += 1
-            self.deadline_clock = time.monotonic
-            self.deadline = time.monotonic() + self.timeout
-            self._plan_started_wall = time.monotonic()
-            print('MOVE_GROUP_CRASH_RETRY resending plan goal after respawn (retry %d/%d)'
-                  % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
-            self._reanchor_plan_goal_to_live()
-            self._send(self.plan, self._plan_goal, 'plan_accept')
+            print('MOVE_GROUP_CRASH_RETRY resending plan goal after respawn (retry %d/%d, op %d/%d)'
+                  % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX,
+                     self._op_crash_retries, MOVE_GROUP_CRASH_RETRY_OP_MAX), flush=True)
+            # gap 2: force-clear a crash-abandoned LIVE trajectory_host goal; gap 1: re-attach the carried
+            # carton (bounded on the sim clock) BEFORE resending, and resend only once it is back. The plan
+            # deadline/anchors are armed at the actual resend (in _resend_plan_after_respawn), not here, so a
+            # bounded re-attach that spans polls does not eat the new plan's budget.
+            self._begin_post_respawn_recovery()
             return 'running'
         return None
+
+    def _begin_post_respawn_recovery(self):
+        """sim-robust-movegroup-double-death-v1: drive the post-respawn recovery for a crash-retry resend.
+        (gap 2) Force the trajectory_host to abort a crash-abandoned LIVE FollowJointTrajectory goal so the
+        reseeded resend is accepted. (gap 1) When a carton is held, re-attach it to the respawned planning
+        scene BEFORE resending the plan, retried bounded on the sim clock (spanning poll()s); never resend
+        carton-less. With nothing held the plan is resent immediately (byte-identical no-carry path)."""
+        self._publish_abort_active()   # gap 2: clear a crash-abandoned live goal + fault on the executor
+        if getattr(self, '_attached_profile', None) is None:
+            self._resend_plan_after_respawn()   # nothing held -> resend now (no-carry, byte-identical)
+            return
+        self._reattach_active = True
+        self._reattach_started_sim = self._sim_now()
+        self._step_reattach()   # try once now; _step_reattach resends on success, or defers across polls
+
+    def _resend_plan_after_respawn(self):
+        """sim-robust-movegroup-double-death-v1: (re-)dispatch the stored plan goal to the respawned
+        move_group after the recovery (gap 1 re-attach + gap 2 executor clear) has completed. Arms a FRESH
+        sim-clock planning deadline + total-planning anchors AT THE ACTUAL RESEND (so a bounded re-attach
+        that spanned several polls does not charge its sim time against the new plan's budget), re-anchors
+        the request start to the live measured joints (fm405), and sends. Shared by every resend site."""
+        self._arm_plan_deadline()   # sim-clock planning deadline on the re-sent plan (render-pacing tolerant)
+        self._plan_started_wall = time.monotonic()
+        self._plan_started_sim = self._sim_now()   # fresh total planning SIM budget after respawn
+        self._reanchor_plan_goal_to_live()         # fm405: re-plan from live state (resume mid-descent)
+        self._send(self.plan, self._plan_goal, 'plan_accept')
+
+    def _step_reattach(self):
+        """sim-robust-movegroup-double-death-v1 (gap 1): one poll-step of the bounded post-respawn carton
+        re-attach. Retries the attach against the freshly respawned move_group until it ACCEPTS (coldwin4:
+        the respawned planner transiently rejected the attach despite valid held/contact/fresh state and
+        ready servers), then resends the plan. Bounded on the SIM clock -- called once per poll() so the
+        node /clock advances and the respawned attach server finishes init between attempts. On budget
+        exhaustion the op FAILS BY NAME (_reattach_failed) rather than planning without the carton: the
+        carton is not in the scene, so a resend would plan straight through it. _fail_hold (no global stop)
+        lets the controller surface the named reason honestly."""
+        if self._resync_scene_after_respawn():   # one attach attempt (also True when nothing is held)
+            self._reattach_active = False
+            self._resend_plan_after_respawn()
+            return
+        waited = self._sim_now() - getattr(self, '_reattach_started_sim', self._sim_now())
+        if waited > REATTACH_SIM_BUDGET_S:
+            self._reattach_active = False
+            self._reattach_failed = True
+            self._last_fault_sim_deadline = False   # terminal: the controller must NOT deadline-retry this
+            print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit NEVER SUCCEEDED within %.0fs sim '
+                  '(the respawned move_group kept rejecting the attach -- see PAYLOAD_SYNC_DIAG); failing the '
+                  'op rather than planning without the carton' % REATTACH_SIM_BUDGET_S, flush=True)
+            self._deadline_fail('sim')   # hold (no global stop); the controller _fail()s with a named reason
+        # else: still re-attaching -> stay _reattach_active and retry on the next poll()
+
+    def _resync_scene_after_respawn(self):
+        """sim-robust-movegroup-respawn-v1: before re-sending a plan goal to a RESPAWNED move_group,
+        restore its planning scene from the authoritative object_attachment state. A respawned move_group
+        starts with a FRESH planning scene that no longer holds restock_carried_unit, so a plan resent
+        without this ignores the attached carton and plans straight through it (the coldlive respawn
+        landed between the grasp attach and the detach). When the port's mirror says a carton is held
+        (``_attached_profile`` set via a successful update_payload), re-issue the attach so the carton is
+        back in both MoveIt's and cuMotion's scene BEFORE any plan is resent. No-op when nothing is held
+        => the no-carry crash-retry (and the whole no-crash path) is byte-identical. Best-effort and
+        logged: a failed re-attach does not abort the retry here (the resent plan's own start-state
+        self-collision / result validation still gates correctness), but it is reported TRUTHFULLY.
+
+        Returns True when the carton is (or was already) restored to the scene -- including the no-carry
+        no-op -- and False when a re-attach was NEEDED but the payload_sync call reported not-ok (the carton
+        is NOT YET in the respawned scene). sim-robust-movegroup-double-death-v1 (gap 1, coldwin4): this is a
+        SINGLE attach attempt; the caller (_step_reattach) RETRIES it bounded on the sim clock and never
+        resends the plan carton-less, failing the op BY NAME if the attach never succeeds. The false here is
+        not "a stale packet" -- coldwin4 showed valid held/contact/fresh state and ready servers, yet the
+        freshly respawned planner rejected the attach goal (gate=attach_goal_rejected) until it finished
+        re-initialising. Report the not-yet-acknowledged attach truthfully; a raise is swallowed to False."""
+        profile = getattr(self, '_attached_profile', None)
+        if profile is None:
+            return True                                         # nothing held -> scene already consistent
+        # sim-robust-movegroup-reattach-after-respawn-v1: re-establish the STATIC world collision objects the
+        # respawned move_group's planning-scene monitor lost (base obstacle + each world obstacle) BEFORE the
+        # carton re-attach, so a resent plan sees the whole scene again. Best-effort; a test double for
+        # payload_sync has no such method -> skipped. Empty on respawn2 (no obstacles) => byte-identical.
+        resync_world = getattr(self.payload_sync, 'resync_world_after_respawn', None)
+        if callable(resync_world):
+            try:
+                resync_world()
+            except Exception as exc:
+                print('MOVE_GROUP_CRASH_RETRY world-obstacle resync RAISED after respawn (%r); continuing '
+                      'to the carton re-attach' % (exc,), flush=True)
+        try:
+            # sim-robust-movegroup-reattach-after-respawn-v1: RECONCILE mode -- object_attachment survives
+            # the move_group crash and still holds the carton, so a bare ADD is refused as a duplicate. The
+            # reconcile re-attach detaches that surviving attach first, then re-ADDs (and re-applies the
+            # move_group AttachedCollisionObject move_group lost). See reattach_reject_gate in ros_payload.
+            ok = self._reattach_payload(profile) is True
+        except Exception as exc:                                # re-attach raised -> report, do not mask
+            print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit RAISED after respawn (carton '
+                  'NOT restored to the respawned planning scene): %r' % (exc,), flush=True)
+            return False
+        if ok:
+            print('MOVE_GROUP_CRASH_RETRY re-attached restock_carried_unit to the respawned move_group '
+                  'planning scene before resend', flush=True)
+        else:
+            # The reconcile re-attach was still not acknowledged. The caller (_step_reattach) RETRIES this
+            # bounded on the sim clock and NEVER resends carton-less; PAYLOAD_SYNC_DIAG now names WHY
+            # (reattach_reject_gate surfaces object_attachment's surviving-attach cause by name).
+            print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit not yet acknowledged by the '
+                  'respawned move_group (payload_sync returned not-ok -> carton NOT yet in the respawned '
+                  'planning scene; will retry bounded on the sim clock, never plan without it). '
+                  'See PAYLOAD_SYNC_DIAG for the failing gate.', flush=True)
+        return ok
+
+    def _reattach_payload(self, profile):
+        """sim-robust-movegroup-reattach-after-respawn-v1: drive the post-respawn carton re-attach through
+        the payload sync in RECONCILE mode (detach the surviving object_attachment attach, then re-ADD). The
+        real RosPayloadSync.__call__ takes a reconcile= kwarg; a minimal test double may not, so pass it only
+        when the callable's SIGNATURE accepts it (a genuine TypeError from inside payload_sync is never
+        masked). Only this post-respawn path uses reconcile=True; update_payload and the first-start attach
+        call payload_sync(held, profile) unchanged => byte-identical."""
+        if self._payload_accepts_reconcile():
+            return self.payload_sync(True, profile, reconcile=True)
+        return self.payload_sync(True, profile)
+
+    def _payload_accepts_reconcile(self):
+        cached = getattr(self, '_payload_reconcile_ok', None)
+        if cached is None:
+            import inspect
+            try:
+                inspect.signature(self.payload_sync).bind_partial(True, None, reconcile=True)
+                cached = True
+            except (TypeError, ValueError):
+                cached = False      # test double without a reconcile parameter -> plain two-arg call
+            self._payload_reconcile_ok = cached
+        return cached
 
     def _reanchor_plan_goal_to_live(self):
         """fm405: before re-sending a plan goal to a RESPAWNED move_group, re-anchor its request
@@ -959,21 +1575,139 @@ class RosMotionPort:
         a wall-clock miss. Cleared at the start of every move (begin/begin_joint_goal)."""
         return bool(getattr(self, '_last_fault_sim_deadline', False))
 
+    def last_fault_was_planner_unrecoverable(self):
+        """sim-robust-collect-stow-stall-v1: True iff the most recent 'failed' poll was a sim-clock PLANNING
+        deadline whose bounded crash re-sends (PLAN_ACCEPT_CRASH_RETRY_MAX) were exhausted -- positive
+        evidence the move_group planner crashed or hung and did not respawn. The controller reads it after a
+        'failed' poll to fail the op FAST with a NAMED cause instead of looping its own move retries to the
+        per-phase timeout. Takes precedence over last_fault_was_sim_deadline (which is cleared in this case).
+        Cleared at the start of every move (begin/begin_joint_goal)."""
+        return bool(getattr(self, '_planner_unrecoverable', False))
+
+    def last_fault_was_reattach_failure(self):
+        """sim-robust-movegroup-double-death-v1 (gap 1): True iff the most recent 'failed' poll was a terminal
+        post-respawn carton RE-ATTACH failure -- the freshly respawned move_group never acknowledged the
+        attach of restock_carried_unit within REATTACH_SIM_BUDGET_S. The controller reads it after a 'failed'
+        poll to fail the op FAST with a NAMED cause: the carton is NOT in the respawned planning scene, so a
+        resend would plan straight through it. Takes precedence over last_fault_was_sim_deadline (cleared in
+        this case). Cleared at the start of every move (begin/begin_joint_goal)."""
+        return bool(getattr(self, '_reattach_failed', False))
+
+    def crash_recovery_active(self):
+        """sim-robust-phase-timeout-during-recovery-v1: True while a NAMED move_group crash recovery is in
+        flight for the current move -- the respawn hold (``_awaiting_server_respawn``), the post-respawn
+        carton re-attach (``_reattach_active``), OR a move_group PROCESS death observed during this move and
+        not yet recovered (``_movegroup_death_seen``, the liveness latch that also catches a launch respawn
+        faster than the crash-retry path sees the server down -- respawn2b). The controller credits this sim
+        time out of the per-phase timeout so a recovered crash cannot convert into 'phase timeout'. False on
+        a healthy move / real rig => the controller's phase-timeout accounting is byte-identical."""
+        return bool(getattr(self, '_awaiting_server_respawn', False)
+                    or getattr(self, '_reattach_active', False)
+                    or getattr(self, '_movegroup_death_seen', False))
+
+    def _track_movegroup_liveness(self):
+        """sim-robust-phase-timeout-during-recovery-v1: latch a move_group PROCESS death observed during an
+        in-flight move. Watch the move_group (plan) action server's liveness each active poll; a
+        ready -> not-ready transition is positive crash evidence (the launch respawns it inside the
+        render-paced poll gap, so the SIGABRT flows through the controller's SIM-deadline MOVE_DEADLINE_RETRY
+        -- never _awaiting_server_respawn -- and would otherwise be invisible to crash_recovery_active()).
+        The latch holds (set below, cleared on a successful move / stop / op reset) across the whole
+        orphaned-goal wait + re-send the death caused. No death => no transition => never set => byte-
+        identical. Best-effort: a plan client without server_is_ready (test double / teardown) is a no-op."""
+        probe = getattr(getattr(self, 'plan', None), 'server_is_ready', None)
+        if not callable(probe):
+            return
+        try:
+            ready = bool(probe())
+        except Exception:
+            return
+        prev = getattr(self, '_mg_server_was_ready', None)
+        self._mg_server_was_ready = ready
+        if prev is True and not ready:
+            self._movegroup_death_seen = True
+
     def poll(self):
         try:
             return self._poll()
-        except Exception:
+        except Exception as exc:
+            # sim-robust-movegroup-estop-retry-v1: a RAISE here can be an upstream move_group PROCESS death
+            # that struck mid-op (a lost-server result future, an ABORTED result with no payload, a service
+            # failure) rather than a genuine fault. When the action server for the current state is GONE and
+            # crash-retry budget remains, HOLD the move open for the launch's respawn + PR 224 scene re-sync
+            # + a bounded re-send (_recover_movegroup_death_or_none) instead of e-stopping -- the arm keeps
+            # its last commanded pose and the weld stays intact. A live server (genuine rejection) or an
+            # exhausted budget / absent goal returns None and falls through to the honest e-stop below.
+            recovered = self._recover_movegroup_death_or_none(exc)
+            if recovered is not None:
+                return recovered
             # fm367: a port RAISE is a collision/plan-rejection/crash fault, never a sim-deadline miss ->
             # clear the flag so the controller's deadline retry does not fire (fail-fast preserved).
             self._last_fault_sim_deadline = False
+            # sim-robust-host-timers-audit-fix-v1 (named trigger): this stop() publishes the global
+            # emergency stop, which the Isaac side surfaces to the mission as a BARE 'host emergency stop'
+            # (the stop wire carries no reason). Log the port-side cause here so host-stack.log ALWAYS
+            # names the trigger (state + exception) before the stop -- sample-4 had none.
+            print('PORT_FAULT_ESTOP state=%s exc=%r' % (getattr(self, 'state', None), exc), flush=True)
             self.stop()
             return 'failed'
+
+    def _recover_movegroup_death_or_none(self, exc):
+        """sim-robust-movegroup-estop-retry-v1: decide whether a raise caught in poll() is a RECOVERABLE
+        move_group process death (hold for respawn, return 'running') or a genuine fault (return None ->
+        poll() e-stops honestly). A move_group death is distinguished from a planning rejection by the
+        action server for the CURRENT state having VANISHED (server_is_ready() False) -- a live server
+        that delivered a rejection/validation fault is NOT a crash and must surface. When recoverable,
+        arm the respawn-wait so the NEXT poll()'s _handle_server_crash waits for the respawn, re-attaches
+        the carried carton to the fresh planning scene (PR 224) and re-sends the SAME plan goal; the
+        emergency stop fires only once the crash-retry budget is spent or the respawn never comes (the
+        RESPAWN_WAIT_CAP_S 'did not respawn' raise -- never masked here). No GPU/ROS: reads only the
+        action client's readiness and the port's own retry state."""
+        try:
+            server = self._server_action_for_state()
+        except AttributeError:
+            return None          # a port without its action clients cannot be in a recoverable crash
+        if server is None:
+            return None                                  # not a server-interaction state -> genuine fault
+        is_respawn_timeout = isinstance(exc, RuntimeError) and 'did not respawn' in str(exc)
+        if not (_should_recover_from_poll_fault(
+                    server.server_is_ready(), getattr(self, '_plan_goal', None) is not None,
+                    getattr(self, '_server_crash_retries', 0), is_respawn_timeout)
+                and _op_crash_budget_ok(getattr(self, '_op_crash_retries', 0))):
+            return None                                  # live server / budget spent / no goal -> e-stop
+        # Recoverable upstream death: hold the move open WITHOUT emergency_stop. Arm _handle_server_crash
+        # for the next poll (it owns the respawn wait + re-sync + re-send); invalidate any late callback
+        # from the dead goal and reset the deadline so the hold is bounded by RESPAWN_WAIT_CAP_S, not the
+        # stale per-move deadline. The retry is COUNTED when _handle_server_crash resends after respawn.
+        self._awaiting_server_respawn = True
+        self._respawn_wait_started = time.monotonic()
+        self.handle = None
+        self.generation += 1
+        self.deadline_clock = time.monotonic
+        self.deadline = time.monotonic() + self.timeout
+        self._last_fault_sim_deadline = False
+        print('MOVE_GROUP_CRASH_RETRY state=%s op-phase fault (%s: %s); move_group action server gone -> '
+              'holding for respawn + scene re-sync instead of e-stop (retry %d/%d)'
+              % (self.state, type(exc).__name__, str(exc)[:80],
+                 getattr(self, '_server_crash_retries', 0) + 1, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
+        return 'running'
 
     def _poll(self):
         from moveit_msgs.action import MoveGroup, ExecuteTrajectory
         from moveit_msgs.msg import Constraints, JointConstraint
         if self.state in ('succeeded', 'failed'):
             return self.state
+        # sim-robust-phase-timeout-during-recovery-v1: latch a move_group death observed during this
+        # in-flight move (crash_recovery_active()). Only in an active state (the early return above skips
+        # idle/succeeded/failed), so it cannot latch on an idle-time background respawn.
+        self._track_movegroup_liveness()
+        # sim-robust-movegroup-double-death-v1 (gap 1): a bounded post-respawn carton re-attach is in
+        # progress (the respawned move_group transiently rejected the attach). Step it HERE, before the
+        # crash/deadline checks -- spanning poll()s so the node /clock advances and the respawned attach
+        # server finishes init -- until the carton is re-attached (then the plan is resent) or the sim
+        # budget is exhausted (then the op fails BY NAME, never carton-less). Inert when not re-attaching.
+        if getattr(self, '_reattach_active', False):
+            self._step_reattach()
+            return 'failed' if self.state == 'failed' else 'running'
         # A move_group SIGABRT (double-free in cuMotion result handling, run-266/268) makes its action
         # server vanish mid-move. Checked BEFORE the deadline so the move is held open for the launch's
         # respawn and re-sent, rather than timing out to 'failed'. Inert when the server is live.
@@ -983,43 +1717,92 @@ class RosMotionPort:
         if self.deadline_clock() > self.deadline:
             # fm362 evidence: this is the ONLY path that returns 'failed' (-> 'collision planning or
             # execution failed'), and it is silent. run-289's retreat died here with move_group all
-            # SUCCEEDED, so name the fired deadline: which clock (wall MOVE_WALL_TIMEOUT / sim settle),
-            # the overrun, and the state, so a wall-gate trip is unambiguous next run.
+            # SUCCEEDED, so name the fired deadline: which clock (sim-robust-plan-deadline-pacing-v1: the
+            # planning phases ik/plan_accept/plan_result and execution/settle are now all on the SIM clock;
+            # a 'wall' fire is the respawn-hold bound only), the overrun, and the state.
             _clock = 'wall' if self.deadline_clock is time.monotonic else 'sim'
             print('MOVE_DEADLINE_FAULT clock=%s over=%.2fs state=%s straight=%s'
                   % (_clock, self.deadline_clock() - self.deadline, self.state,
                      getattr(self, '_straight_line', False)), flush=True)
-            # fm404 B-lite: a WALL deadline while WAITING FOR A PLAN RESULT can be a move_group
-            # SIGABRT+respawn that completed BETWEEN polls -- _handle_server_crash above only fires while
-            # the server is DOWN, so a crash that respawned before the next poll leaves the lost plan
-            # request hanging until this wall deadline (run-312: move_group died pid 1937157 -> respawned
-            # pid 2066726, but the lost plan's wall deadline then e-stopped the host). Re-send the SAME
-            # plan goal to the (now-respawned) server as a BOUNDED crash-retry instead of failing; a
-            # genuinely stuck/slow planner still exhausts MOVE_GROUP_CRASH_RETRY_MAX and fails honestly.
-            # The post-respawn plan result is re-anchored to the live measured start by the validate path
-            # below (fm368), so a start-drift during the crash gap does not reject it. plan states only
-            # (execute is the trajectory host, not move_group).
-            if _should_deadline_crash_retry(_clock, self.state, self._plan_goal is not None,
-                                            getattr(self, '_server_crash_retries', 0)):
+            # fm404 B-lite: a deadline while WAITING FOR A PLAN RESULT can be a move_group SIGABRT+respawn
+            # that completed BETWEEN polls -- _handle_server_crash above only fires while the server is
+            # DOWN, so a crash that respawned before the next poll leaves the lost plan request hanging
+            # until this deadline (run-312: move_group died pid 1937157 -> respawned pid 2066726, but the
+            # lost plan's deadline then e-stopped the host). Re-send the SAME plan goal to the (now-
+            # respawned) server as a BOUNDED crash-retry instead of failing.
+            # sim-robust-plan-deadline-pacing-v1: the planning deadline is now the SIM clock (a render-paced
+            # slow-but-alive plan waits), and this crash-retry requires POSITIVE death evidence -- the
+            # move_group action server GONE (``not self.plan.server_is_ready()``). coldlive4 proved the old
+            # guess (any wall plan-deadline -> crash) burned the crash-retry budget on a healthy-but-slow
+            # plan (0 deaths) -> e-stop. _handle_server_crash above has already held/recovered if the server
+            # is down, so this stays a belt-and-braces catch and fires only with the server actually gone.
+            # The re-sent plan result is re-anchored to the live measured start by the validate path below
+            # (fm368), so a start-drift during the crash gap does not reject it. plan states only.
+            if (_should_deadline_crash_retry(_clock, self.state, self._plan_goal is not None,
+                                             getattr(self, '_server_crash_retries', 0),
+                                             server_ready=self.plan.server_is_ready())
+                    and _op_crash_budget_ok(getattr(self, '_op_crash_retries', 0))):
                 self._server_crash_retries = getattr(self, '_server_crash_retries', 0) + 1
+                self._op_crash_retries = getattr(self, '_op_crash_retries', 0) + 1
                 self._replan_attempts = 0
                 self._awaiting_server_respawn = False
                 self.handle = None
                 self.generation += 1
-                self.deadline_clock = time.monotonic
-                self.deadline = time.monotonic() + self.timeout
-                self._plan_started_wall = time.monotonic()
                 print('MOVE_GROUP_CRASH_RETRY plan-result wall-deadline (likely move_group crash+respawn '
-                      'between polls); resending plan goal (retry %d/%d)'
-                      % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX), flush=True)
-                self._reanchor_plan_goal_to_live()   # fm405: re-plan from live state (resume mid-descent)
-                self._send(self.plan, self._plan_goal, 'plan_accept')
+                      'between polls); resending plan goal (retry %d/%d, op %d/%d)'
+                      % (self._server_crash_retries, MOVE_GROUP_CRASH_RETRY_MAX,
+                         self._op_crash_retries, MOVE_GROUP_CRASH_RETRY_OP_MAX), flush=True)
+                # gap 1/2: clear a crash-abandoned live executor goal + re-attach the carton (bounded on the
+                # sim clock) before resending. The plan deadline/anchors are armed at the actual resend.
+                self._begin_post_respawn_recovery()
                 return 'running'
+            # sim-robust-collect-stow-stall-v1: a SIM-clock PLANNING-state deadline (plan_accept/plan_result)
+            # is positive evidence move_group is DEAD/HUNG, not merely render-slow -- PR 228 set this deadline
+            # on the SIM clock precisely because healthy planning consumes only ~1-2 sim-s, so the full
+            # sim budget elapsing with the goal never accepted / the plan never returned is a hang. The
+            # recoveries above miss it: a SIGABRT-hung move_group keeps server_is_ready()==True (no clean DDS
+            # deregistration), so _handle_server_crash stays inert and _should_deadline_crash_retry (gated on
+            # clock=='wall') is unreachable now planning is always sim-clock. coldliveapproach: the stow
+            # plan goal was never accepted, plan_accept hit this deadline every 30 sim-s, and the controller
+            # looped STAGED_MOVE_RETRY to the 120-sim-s phase timeout with an opaque reason. Re-send the plan
+            # a bounded number of times (so a genuine crash+respawn whose server stale-reads ready still
+            # recovers -- the fm404 belt-and-braces, now reachable on the sim clock), then flag the move_group
+            # planner UNRECOVERABLE so the controller fails fast with a NAMED cause. Scoped to a planning
+            # state with a stored goal + per-op crash budget; execute/await_settle and goal-less
+            # straight-line moves fall through to the existing sim-deadline hold (byte-identical). A healthy
+            # run never reaches a sim planning deadline, so the passing path is byte-identical.
+            if (_clock == 'sim' and self.state in ('plan_accept', 'plan_result')
+                    and self._plan_goal is not None):
+                if (getattr(self, '_plan_accept_crash_retries', 0) < PLAN_ACCEPT_CRASH_RETRY_MAX
+                        and _op_crash_budget_ok(getattr(self, '_op_crash_retries', 0))):
+                    self._plan_accept_crash_retries = getattr(self, '_plan_accept_crash_retries', 0) + 1
+                    self._op_crash_retries = getattr(self, '_op_crash_retries', 0) + 1
+                    self._replan_attempts = 0
+                    self._awaiting_server_respawn = False
+                    self.handle = None
+                    self.generation += 1
+                    print('MOVE_GROUP_CRASH_RETRY plan %s sim-deadline (goal/plan not serviced within the '
+                          'sim planning budget; likely move_group crash/hang); resending plan goal '
+                          '(retry %d/%d, op %d/%d)'
+                          % (self.state, self._plan_accept_crash_retries, PLAN_ACCEPT_CRASH_RETRY_MAX,
+                             self._op_crash_retries, MOVE_GROUP_CRASH_RETRY_OP_MAX), flush=True)
+                    # gap 1/2: clear a crash-abandoned live executor goal + re-attach the carton (bounded on
+                    # the sim clock) before resending. The plan deadline/anchors are armed at the resend.
+                    self._begin_post_respawn_recovery()
+                    return 'running'
+                self._planner_unrecoverable = True
+                self._last_fault_sim_deadline = False   # terminal: the controller must NOT deadline-retry
+                print('PLANNER_UNRECOVERABLE state=%s: the move_group planner did not accept/return a plan '
+                      'across %d sim-deadline crash re-sends (%g sim-s each); it crashed or hung and did not '
+                      'respawn -- failing fast' % (self.state, PLAN_ACCEPT_CRASH_RETRY_MAX, PLAN_SIM_DEADLINE_S),
+                      flush=True)
+                self._deadline_fail('sim')   # hold (no global stop); the controller's _fail() stops honestly
+                return 'failed'
             # fm367: a SIM-clock miss is a render-pacing transient (not a collision), so flag it so the
             # controller can re-issue the SAME move with a fresh deadline (bounded). A WALL miss is the
             # wall sweep's job and the planner's fail-fast -- do NOT flag it for the deadline retry.
             self._last_fault_sim_deadline = (_clock == 'sim')
-            self.stop()
+            self._deadline_fail(_clock)
             return 'failed'
         # fm357: before dispatching ExecuteTrajectory, hold until the arm is settled, then re-seed the
         # first waypoint to the live measured state. This state has NO pending future (the plan already
@@ -1085,22 +1868,16 @@ class RosMotionPort:
                 q = self._nearest_to(q, self.start)
                 if q is None:
                     raise ValueError('contact IK outside joint limits')
-                from moveit_msgs.action import ExecuteTrajectory
-                goal = ExecuteTrajectory.Goal()
-                goal.trajectory = self._straight_line_goal(q)
-                validate_trajectory(goal.trajectory.joint_trajectory, self.start, self.limits)
-                end = goal.trajectory.joint_trajectory.points[-1].time_from_start
-                duration = end.sec + end.nanosec * 1e-9
-                # Execution is sim-paced, exactly like the cuMotion plan path: bound on the NODE/SIM clock.
-                # fm367: the sim budget (duration + settle margin) is MOVE_SIM_DEADLINE_SCALE-scaled.
-                self.deadline_clock = self._sim_now
-                self.deadline = self._sim_now() + sim_execute_budget(duration)
-                if self._live_arm_state is None:
-                    self._send(self.execute, goal, 'execute_accept')
-                else:                                   # fm357: settle + re-seed before dispatch
-                    self._pending_exec = goal.trajectory
-                    self._settle_wait_start = self._sim_now()   # fm369: start the settle sub-budget clock
-                    self.state = 'await_settle'
+                # sim-robust-transfer-settle-oscillation-v1 (coldwin12): when a wrist_guard is active for this
+                # straight-line move (the live_pose transfer PICK contact), the collision-off KDL IK must still
+                # land in the clear wrist region -- a config in the ur_wrist_2-vs-ur_forearm self-colliding
+                # branch (invisible to the IK's collision model) would otherwise descend into the stop and
+                # limit-cycle. _guard_rejects re-seeds from the wrist-flipped twin (same TCP, clear branch) or,
+                # once the bounded seeds are spent, RAISES the named carry-wrist-region reason. None => off
+                # (no wrist_guard passed for the contact) => byte-identical straight-line descent.
+                if getattr(self, '_wrist_guard', None) is not None and self._guard_rejects(q):
+                    return 'running'
+                self._begin_straight_line_execute(q)
                 return 'running'
             # fm347 (3): the cart PLACE moves (near_start) branch to the config NEAREST the measured pan
             # start, so shoulder_pan stays on the pan branch (no ~3.9 rad flip to the stow-nominal
@@ -1148,9 +1925,12 @@ class RosMotionPort:
                 # seed-variant base/plate collision (INVALID_MOTION_PLAN, ~half of seeds) into a
                 # near-certain pass. Then fall back to the next IK seed (a wrapped-branch self-collision
                 # needs a different c-space target), then fail.
-                # Fail fast: once the cumulative planning wall time for this move crosses the cap, stop
-                # retrying (seed/replan) and surface a clean motion failure before the /sensors backstop.
-                if time.monotonic() - getattr(self, '_plan_started_wall', time.monotonic()) > getattr(self, 'plan_wall_cap_s', PLAN_TOTAL_WALL_CAP_S):
+                # Fail fast: once the cumulative planning budget for this move is exhausted, stop retrying
+                # (seed/replan) and surface a clean motion failure before the /sensors backstop. sim-robust-
+                # host-timers-audit-fix-v1: SIM-primary + frozen-sim wall backstop (same predicate as
+                # planning_wall_exceeded), so a render-paced re-plan storm is bounded on the sim clock, not
+                # cut off by the pure wall cap that false-tripped coldlive sample-4.
+                if self.planning_wall_exceeded():
                     raise RuntimeError('planning failed (exhausted within wall cap)')
                 # Hard GPU backstop: once this move has dispatched PLAN_TOTAL_ATTEMPTS_CAP cuMotion plans,
                 # stop -- an unplannable goal (e.g. a self-colliding cart-place branch) would otherwise churn
@@ -1163,8 +1943,7 @@ class RosMotionPort:
                 if _should_replan(self._replan_attempts, getattr(self, '_plan_goal', None) is not None,
                                   getattr(self, '_plan_goal_joint_space', False)):
                     self._replan_attempts += 1
-                    self.deadline_clock = time.monotonic
-                    self.deadline = time.monotonic() + self.timeout   # fresh planning budget per retry
+                    self._arm_plan_deadline()   # fresh sim-clock planning budget per retry (render-pacing tolerant)
                     self._send(self.plan, self._plan_goal, 'plan_accept')
                     return 'running'
                 if getattr(self, '_seeds', None) and self._next_seed():
@@ -1198,6 +1977,41 @@ class RosMotionPort:
                 self.start = live_start
                 print('MOVE_GROUP_RESPAWN_RESEED start re-anchored to live measured joints '
                       'after post-respawn plan start-drift', flush=True)
+            # sim-robust-pick-wrist-guard-cspace-fix-v1: enforce the wrist clear-region on a guarded POSE
+            # goal HERE (post-plan), not via a malformed joint_constraints goal. cuMotion's task-space IK
+            # picks one of the two IK families reaching this TCP; the ur_wrist_2-vs-ur_forearm self-
+            # colliding one (coldwin12: terminal wrist_2 < 0) limit-cycles at contact, the clear wrist_2-
+            # positive one (coldwin11) settles. Validate the planned TERMINAL config; if it is in the
+            # colliding family, re-plan the SAME clean pose goal -- cuMotion is stochastic, so a fresh seed
+            # can draw the clear family (the exact mechanism the collision re-plan above relies on) --
+            # bounded by _pose_guard_replans and the same PLAN_TOTAL_ATTEMPTS_CAP GPU backstop, and FAIL BY
+            # NAME when exhausted. _pose_wrist_guard is None whenever no wrist cap/min was supplied (key
+            # off / collect / non-pick) => this block never runs => byte-identical.
+            pg = getattr(self, '_pose_wrist_guard', None)
+            if pg is not None and self._plan_goal is not None:
+                names = list(trajectory.joint_trajectory.joint_names)
+                terminal = trajectory.joint_trajectory.points[-1].positions
+                term_q = [terminal[names.index(j)] for j in JOINTS]
+                cap, w2min = pg
+                decision = pose_guard_decision(term_q, pg, self._pose_guard_replans,
+                                               getattr(self, '_plan_dispatches', 0),
+                                               self.planning_wall_exceeded())
+                if decision == 'replan':
+                    self._pose_guard_replans += 1
+                    print('POSE_WRIST_GUARD reject term=%s (want wrist_1<=%.2f, wrist_2>=%.2f) -> '
+                          're-plan %d/%d (fresh seed, clean pose goal)'
+                          % ([round(v, 3) for v in term_q], cap, w2min,
+                             self._pose_guard_replans, POSE_GUARD_REPLAN_MAX), flush=True)
+                    self._arm_plan_deadline()   # fresh sim-clock planning budget per retry
+                    self._send(self.plan, self._plan_goal, 'plan_accept')
+                    return 'running'
+                if decision == 'fail':
+                    raise RuntimeError(
+                        'pose goal could not reach the clear carry wrist region '
+                        '(wrist_1<=%.2f, wrist_2>=%.2f) within %d re-plans'
+                        % (cap, w2min, POSE_GUARD_REPLAN_MAX))
+                print('POSE_WRIST_GUARD accept term=%s (wrist_1<=%.2f, wrist_2>=%.2f) replans=%d'
+                      % ([round(v, 3) for v in term_q], cap, w2min, self._pose_guard_replans), flush=True)
             end=trajectory.joint_trajectory.points[-1].time_from_start
             duration=end.sec+end.nanosec*1e-9
             if duration>110.:
@@ -1218,8 +2032,23 @@ class RosMotionPort:
                 self.state = 'await_settle'
         elif self.state == 'execute_result':
             if result.status != 4 or result.result.error_code.val != 1:
+                # A downstream arm_controller (trajectory_host) goal REJECTION and a mid-trajectory
+                # execution FAULT both abort ExecuteTrajectory (CONTROL_FAILED); NEITHER is a planning
+                # collision. Record a distinct reason pointing at the host log (where trajectory_host now
+                # logs the precise cause: TRAJ_HOST_GOAL_REJECT for a rejection, TRAJ_HOST_FAULT for a
+                # fault) so the mission does not mislabel it 'collision planning or execution failed'
+                # (seconddeath 2026-10-23: a first-goal startup-race rejection surfaced as that string).
+                _code = getattr(getattr(result.result, 'error_code', None), 'val', None)
+                self._exec_abort_reason = (
+                    'arm controller aborted trajectory (goal rejected or execution fault, moveit_err=%s; '
+                    'see host-stack.log TRAJ_HOST_GOAL_REJECT/TRAJ_HOST_FAULT)' % (_code,))
                 raise RuntimeError('execution failed')
             self.state = 'succeeded'
+        if self.state == 'succeeded':
+            # sim-robust-phase-timeout-during-recovery-v1: the move completed -> any move_group crash it
+            # survived is recovered; clear the liveness latch so crash_recovery_active() stops crediting.
+            self._movegroup_death_seen = False
+            self._mg_server_was_ready = None
         return 'succeeded' if self.state == 'succeeded' else 'running'
 
     def stop(self):
@@ -1227,12 +2056,70 @@ class RosMotionPort:
         if self.handle is not None:
             self.handle.cancel_goal_async()
         self.state = 'failed'
+        # sim-robust-phase-timeout-during-recovery-v1: terminal halt -> clear the crash-liveness latch.
+        self._movegroup_death_seen = False
+        self._mg_server_was_ready = None
         self.emergency_stop()  # immediate task-owned simulator joint hold
+
+    def _fail_hold(self):
+        """sim-robust-movegroup-second-death-v1: fail the current move to 'failed' WITHOUT publishing the
+        mission-fatal global emergency stop. Used for a retriable SIM-clock deadline miss the controller
+        re-issues (MOVE_DEADLINE_RETRY, fm367): cancel the in-flight goal and invalidate any late callback
+        exactly like stop(), but leave the arm holding its last commanded pose (the simulator drive) and do
+        NOT fire emergency_stop -- the global /manipulation/stop latches PERMANENTLY in the Isaac host
+        (check_health sets faulted=True), so firing it on a transient killed the whole run before the
+        retry could re-issue. If the controller's deadline-retry budget is spent it calls _fail() ->
+        motion.stop(), which fires the honest emergency stop then. Byte-identical halt state (state=failed,
+        goal cancelled, generation bumped) minus the global stop."""
+        self.generation += 1
+        if self.handle is not None:
+            self.handle.cancel_goal_async()
+        self.state = 'failed'
+
+    def _deadline_fail(self, clock):
+        """sim-robust-movegroup-second-death-v1: halt on a FIRED move deadline. A WALL miss is a genuine
+        hang / planner fail-fast -> stop() (the immediate, mission-FATAL global emergency stop). A SIM-clock
+        miss is a render-pacing transient the controller RE-ISSUES (MOVE_DEADLINE_RETRY, fm367) -> _fail_hold()
+        (cancel the goal + hold the commanded pose, NO global stop). The global /manipulation/stop latches
+        PERMANENTLY in the Isaac host (check_health -> 'host emergency stop'), so firing it on a SIM-deadline
+        transient killed the whole run BEFORE the controller's next-tick retry could re-issue (estopretry:
+        the collect STOW retreat over=0.01 s). When the controller's deadline-retry budget is spent it calls
+        _fail() -> motion.stop(), which fires the honest emergency stop then. CPU-testable (no ROS/GPU)."""
+        if clock == 'sim':
+            self._fail_hold()
+        else:
+            self.stop()
+
+    def reset_crash_budget(self):
+        """sim-robust-movegroup-second-death-v1: reset the TOTAL per-OP move_group crash-retry budget.
+        Called by the controller at the start of each operation (controller.start). The per-MOVE budget
+        (_server_crash_retries) is reset by begin/begin_joint_goal; this clears the per-op SUM so a fresh
+        op gets the full MOVE_GROUP_CRASH_RETRY_OP_MAX. Inert/safe on a port built without __init__."""
+        self._op_crash_retries = 0
+        self._server_crash_retries = 0
+        self._plan_accept_crash_retries = 0   # sim-robust-collect-stow-stall-v1
+        self._planner_unrecoverable = False   # sim-robust-collect-stow-stall-v1
+        self._reattach_active = False         # sim-robust-movegroup-double-death-v1 (gap 1)
+        self._reattach_failed = False         # sim-robust-movegroup-double-death-v1 (gap 1)
+        self._movegroup_death_seen = False    # sim-robust-phase-timeout-during-recovery-v1: fresh per op
+        self._mg_server_was_ready = None
 
     def update_payload(self, held, profile):
         # Must update BOTH MoveIt and cuMotion collision attachment, not PhysX
         # teleport/parenting. The simulator separately supplies physical contact.
-        return self.payload_sync(held, profile) is True
+        # sim-robust-movegroup-respawn-v1: a scene mutation must never overlap an in-flight plan/execute
+        # (that race corrupts move_group's heap). The single-threaded controller already issues attach/
+        # detach strictly BETWEEN moves, so this guard is inert on the real path; it fails a future
+        # concurrent caller loudly on CPU instead of silently at GPU time.
+        if getattr(self, 'state', 'idle') in _PLAN_IN_FLIGHT_STATES:
+            raise RuntimeError('planning-scene mutation issued while a plan/execute is in flight '
+                               '(state=%s)' % self.state)
+        ok = self.payload_sync(held, profile) is True
+        if ok:
+            # Mirror the authoritative object_attachment state so a move_group respawn can restore it
+            # before resending a plan (no behavioural change; the return value is unchanged).
+            self._attached_profile = profile if held else None
+        return ok
 
 
 def sensors_from_json(value):
@@ -1314,6 +2201,12 @@ class RosTransferBridge:
         # weakening the moving-arm protection (before the first frame the arm has acted on nothing).
         self.watchdog_seconds = env_wins('RESTOCK_SENSOR_WATCHDOG_S', watchdog_seconds, SENSOR_WATCHDOG_S)
         self.startup_grace_seconds = env_wins('RESTOCK_STARTUP_GRACE_S', startup_grace_seconds, STARTUP_GRACE_S)
+        # sim-robust-host-timers-audit-fix-v1: SIM-primary first-frame grace + derived-generous frozen-sim
+        # WALL backstop. Default sim grace = the wall grace, so real rig (sim == wall) fires at the same 5 s.
+        self.startup_grace_sim_seconds = env_wins('RESTOCK_STARTUP_GRACE_SIM_S', None, STARTUP_GRACE_SIM_S)
+        self.startup_grace_wall_backstop_s = frozen_sim_wall_backstop(
+            self.startup_grace_sim_seconds, self.startup_grace_seconds)
+        self.job_start_sim = None
         self.wall_backstop_seconds = wall_backstop_seconds
         # fm490: WALL budget for the TRANSIT sensing-pause (reposition carry-drive); both /sensors bounds
         # are suspended across the pause, this is the only backstop then. Reset each time transit begins.
@@ -1344,6 +2237,7 @@ class RosTransferBridge:
             self.last_packet_sim = None
             self.first_frame = False
             self.job_start_wall = time.monotonic()
+            self.job_start_sim = self.node.get_clock().now().nanoseconds * 1e-9
             self.last_packet_wall = time.monotonic()
         except (ValueError, KeyError, TypeError) as exc:
             self.status.publish(self.String(data=json.dumps({'status': 'rejected', 'reason': str(exc)})))
@@ -1444,10 +2338,21 @@ class RosTransferBridge:
         self._transit_pause_start_wall = None
         if not self.first_frame:
             # No /sensors yet: the looser startup grace (not the 1 s per-frame bound) applies, so a
-            # warm-up + cold first ESDF has time to produce the first frame. Stays in WALL time; a
-            # job that never produces a frame still hard-stops with a distinct reason.
-            if self.job_start_wall is not None and wall_now - self.job_start_wall > self.startup_grace_seconds:
-                self._emit(self.controller._fail('no initial sensor frame'))
+            # warm-up + cold first ESDF has time to produce the first frame. sim-robust-host-timers-audit-
+            # fix-v1: SIM-primary grace (scales with render pacing: the fm465 light rig slows the first
+            # full-res frame) with a derived-generous frozen-sim WALL backstop (a job that never produces a
+            # frame AND never advances /clock still hard-stops). Real rig (sim == wall) fires at the same 5 s.
+            if self.job_start_sim is None:
+                return
+            sim_gap = self.node.get_clock().now().nanoseconds * 1e-9 - self.job_start_sim
+            wall_gap = wall_now - self.job_start_wall if self.job_start_wall is not None else 0.0
+            if pace_is_dead(sim_elapsed=sim_gap, wall_elapsed=wall_gap,
+                            sim_budget=self.startup_grace_sim_seconds,
+                            wall_backstop=self.startup_grace_wall_backstop_s, mode='either'):
+                self._emit(self.controller._fail(
+                    'no initial sensor frame (sim_gap=%.1fs > %.1fs or wall_gap=%.0fs > %.0fs)'
+                    % (sim_gap, self.startup_grace_sim_seconds, wall_gap,
+                       self.startup_grace_wall_backstop_s)))
             return
         # Per-frame bound in NODE-CLOCK (sim) time: on real hardware sim == wall so the 1 s
         # semantics are unchanged, and under a render-paced /clock it does not false-trip on the

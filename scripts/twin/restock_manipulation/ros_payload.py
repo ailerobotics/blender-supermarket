@@ -5,11 +5,23 @@ Sensors before attach; loss of seal prevents a collision attachment request.
 """
 import os
 import threading
+import time
 import numpy as np
+
+from ..restock.pace_watchdog import is_dead as pace_is_dead
+from .ros_adapter import frozen_sim_wall_backstop
 
 # fm366: payload grasp/detach ack WALL timeout. ros_host passes config['payload_ack_wall_s'] (sim 15);
 # the sim-only env WINS over it when set (default None => the passed value, byte-identical real-rig).
 PAYLOAD_ACK_WALL_S = os.environ.get('RESTOCK_PAYLOAD_ACK_WALL_S')
+# sim-robust-host-timers-audit-fix-v1: the attach/detach ack budget is now SIM-primary. The
+# object_attachment / ApplyPlanningScene handshake runs in a separate container and is compute-bound, but
+# under the live_pose masked_depth arm feed the host is busy rendering between spins, so a pure WALL
+# timeout can mis-read a live-but-render-slow ack as dead. The SIM budget (an advancing /clock proves the
+# ack process is hung, not slow) is the real bound; a generous frozen-sim WALL backstop still hard-stops a
+# wholly-stalled sim. Default = the wall ack budget so real rig (sim == wall) fails at the same time ->
+# byte-identical. Env RESTOCK_PAYLOAD_ACK_SIM_S (None => mirror the wall budget). See frozen_sim_wall_backstop.
+PAYLOAD_ACK_SIM_S = os.environ.get('RESTOCK_PAYLOAD_ACK_SIM_S')
 
 # Sim-clock lead tolerance (run-221): the gripper_pad_tcp /tf (and the Sensors feedback) are stamped
 # with Isaac's world.current_time, which can lead the payload node's relayed /clock by up to ~1
@@ -18,6 +30,95 @@ PAYLOAD_ACK_WALL_S = os.environ.get('RESTOCK_PAYLOAD_ACK_WALL_S')
 # attachment not acknowledged"). Tolerate the same ~1-step lead the capture (isaac_sensors) and the
 # /sensors integrity check (ros_manipulation) already allow, so the gate no longer flickers.
 RENDER_LEAD_S = 0.02
+
+# ROS action GoalStatus.STATUS_SUCCEEDED. The object_attachment AttachObject action is the AUTHORITATIVE
+# planner-collision attach/detach (it updates the robot description / cuMotion collision spheres the
+# planner actually uses); the handshake is acknowledged iff it reports this status.
+ATTACH_ACTION_SUCCEEDED = 4
+
+# fm (sim-robust-release-detach-ack-v1): the collect RELEASE detach is a two-step host handshake -- a
+# move_group ApplyPlanningScene diff (remove the MoveIt attached_collision_object + its world copy),
+# THEN the AUTHORITATIVE object_attachment AttachObject detach (clears the cuMotion collision spheres
+# the planner actually uses, in a SEPARATE container). move_group has an intermittent SIGABRT double-free
+# in cuMotion result handling (run-266/268) and is launched respawn=True. If it crashes+respawns BETWEEN
+# the grasp attach and the release detach -- coldlive did (live_pose + the arm masked-depth feed loaded
+# the host container enough to trip it; coldhonest, feed off, never crashed) -- the respawned move_group
+# starts with a FRESH scene that never held restock_carried_unit, so the detach's REMOVE returns
+# success=False and the single-shot handshake aborted the whole collect (gate=scene_apply_unsuccessful,
+# coldlive). But an unsuccessful REMOVE means there is NOTHING to remove: the scene is ALREADY in the
+# post-detach state, and the object_attachment node survives the crash, so the detach must PROCEED to
+# that authoritative action rather than abort. A successful REMOVE (coldhonest) never enters this branch
+# => byte-identical. Default on; RESTOCK_DETACH_SCENE_TOLERANT=0 restores the legacy fail-fast.
+DETACH_SCENE_TOLERANT_DEFAULT = True
+
+
+def detach_scene_gate(held, scene_ok, tolerant):
+    """Decide whether the attach/detach handshake may PROCEED past the move_group ApplyPlanningScene step
+    to the authoritative AttachObject action, and name the gate for diagnostics. Pure for CPU testing.
+
+    Returns (proceed, note):
+      * scene_ok True                           -> (True,  None)   normal path, no note
+      * DETACH (held False) + tolerant + ~ok    -> (True,  'scene_apply_unsuccessful_detach_tolerated')
+      * ATTACH (held True) ~ok, or tolerance off -> (False, 'scene_apply_unsuccessful')
+
+    An ATTACH must NEVER tolerate an unsuccessful scene apply: the object has to be ADDED to the planning
+    scene before the lift is planned. A DETACH may, because the authoritative detach is the AttachObject
+    action and an unsuccessful REMOVE means the scene is already in the post-detach state."""
+    if scene_ok:
+        return True, None
+    if not held and tolerant:
+        return True, 'scene_apply_unsuccessful_detach_tolerated'
+    return False, 'scene_apply_unsuccessful'
+
+
+def attach_acked(status):
+    """The object_attachment AttachObject action is the authoritative attach/detach ack: acknowledged iff
+    it reports SUCCEEDED. Pure, shared by RosPayloadSync.__call__ and the CPU test."""
+    return status == ATTACH_ACTION_SUCCEEDED
+
+
+def reattach_reject_gate(reconcile, detach_ok):
+    """sim-robust-movegroup-reattach-after-respawn-v1: name the AttachObject-rejection diagnostic gate so
+    PAYLOAD_SYNC_DIAG carries the KNOWN cause, not the bare 'attach_goal_rejected'. Pure for CPU testing.
+
+    A goal REJECTION (send_goal_async -> accepted=False) carries no wire message; object_attachment logs the
+    reason only in its own container ("Object already attached. Detach first before attaching a new object.").
+    So on a post-respawn reconcile re-attach we surface that known reason by name:
+      * not reconcile              -> 'attach_goal_rejected' (byte-identical to the legacy first-start gate)
+      * reconcile, detach acked    -> the reconcile detach cleared the surviving attach yet the re-ADD was
+                                      still refused (an unexpected planner state), named for the next run
+      * reconcile, detach not acked-> could not clear object_attachment's surviving attach
+                                      ('Object already attached'); the duplicate ADD is refused as a result"""
+    if not reconcile:
+        return 'attach_goal_rejected'
+    if detach_ok:
+        return 'attach_goal_rejected_after_reconcile_detach'
+    return ('attach_goal_rejected object_attachment_already_holds_restock_carried_unit'
+            '(reconcile_detach_not_acked)')
+
+
+def scene_bootstrap_ops(published_base_obstacle, published_world_obstacles, attached_profile):
+    """sim-robust-movegroup-reattach-after-respawn-v1: the ORDERED planning-scene bootstrap ops the payload
+    node is responsible for re-establishing on a respawned move_group -- computed identically at first start
+    and at the post-respawn resync, which is exactly what makes the two scenes equal. Base obstacle (if ever
+    published), then each world obstacle in publish order, then the carton attach (if a carton is held). Pure
+    for CPU testing: given the same recorded state, first-start and resync return the same list."""
+    ops = []
+    if published_base_obstacle:
+        ops.append(('base_obstacle',))
+    for obj_id, _boxes in published_world_obstacles:
+        ops.append(('world_obstacle', str(obj_id)))
+    if attached_profile is not None:
+        ops.append(('attach', getattr(attached_profile, 'sku', attached_profile)))
+    return ops
+
+
+def resolve_detach_scene_tolerant(env_value):
+    """RESTOCK_DETACH_SCENE_TOLERANT -> bool. Unset => the default-on module policy; any set value except
+    '0' => on; '0' => off (reproduce the legacy single-shot fail-fast). Pure for CPU testing."""
+    if env_value is None:
+        return DETACH_SCENE_TOLERANT_DEFAULT
+    return env_value != '0'
 
 
 def relative_pose(base_object, base_tcp):
@@ -44,6 +145,14 @@ class RosPayloadSync:
         from moveit_msgs.srv import ApplyPlanningScene
         self.ack_wall_s = (max(1.0, min(120.0, float(PAYLOAD_ACK_WALL_S)))
                            if PAYLOAD_ACK_WALL_S is not None else float(ack_wall_s))
+        # sim-robust-host-timers-audit-fix-v1: the SIM-primary ack budget (default = the wall budget, so
+        # real rig is byte-identical). The WALL leg becomes a generous frozen-sim backstop in _wait().
+        self.ack_sim_s = (max(1.0, min(600.0, float(PAYLOAD_ACK_SIM_S)))
+                          if PAYLOAD_ACK_SIM_S is not None else float(self.ack_wall_s))
+        # Tolerate an unsuccessful move_group scene REMOVE on DETACH (see detach_scene_gate). Default on;
+        # RESTOCK_DETACH_SCENE_TOLERANT=0 reproduces the legacy single-shot fail-fast of a pre-fix run.
+        self.detach_scene_tolerant = resolve_detach_scene_tolerant(
+            os.environ.get('RESTOCK_DETACH_SCENE_TOLERANT'))
         self.node = rclpy.create_node('restock_payload',namespace='/restock_sim',
                        parameter_overrides=[Parameter('use_sim_time',value=True)])
         self.tf = Buffer()
@@ -51,24 +160,57 @@ class RosPayloadSync:
         self.scene = self.node.create_client(ApplyPlanningScene,'/restock_sim/apply_planning_scene')
         self.attach = None
         self.controller = self.sensors = None
+        # sim-robust-movegroup-reattach-after-respawn-v1: remember the STATIC world collision objects
+        # published at startup so resync_world_after_respawn() can re-establish them in a respawned
+        # move_group (whose planning-scene monitor restarts empty). Empty on respawn2 (no obstacles) ->
+        # the resync makes no calls -> byte-identical there.
+        self._published_base_obstacle = False
+        self._published_world_obstacles = []   # list of (obj_id, boxes) in add_world_obstacle() form
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
         self.thread = threading.Thread(target=self.executor.spin,daemon=True)
         self.thread.start()
 
-    def _wait(self, future, timeout=None):
-        # WALL timeout on a host ROS service/action future. Real-rig default 1 s (fast move_group);
-        # under the sim's render-paced stepping the host is busy rendering between spins, so the sim
-        # profile widens it (ack_wall_s, >= 3x worst case) to avoid a false grasp-time timeout.
+    def _sim_now(self):
+        """The node/sim clock (use_sim_time) in seconds. Advances with Isaac's /clock; under render
+        pacing it runs far behind wall."""
+        return self.node.get_clock().now().nanoseconds * 1e-9
+
+    def _wait(self, future, timeout=None, sim_budget=None):
+        # sim-robust-host-timers-audit-fix-v1: SIM-primary ack budget + frozen-sim WALL backstop on a host
+        # ROS service/action future, replacing the pure-WALL event.wait() that false-tripped a live-but-
+        # render-slow ack under the live_pose masked_depth arm feed. Poll the future in small wall slices
+        # and fail only when the SIM budget is exhausted (an advancing /clock proves the ack process is
+        # hung, not slow) OR the generous frozen-sim WALL backstop is exceeded. Real rig (sim == wall)
+        # fails at the same ``timeout`` -> byte-identical. ``timeout`` is the wall value historically used;
+        # ``sim_budget`` defaults to it (or to self.ack_sim_s for the default ack path).
         if timeout is None:
-            timeout = self.ack_wall_s
+            timeout, sim_budget = self.ack_wall_s, (self.ack_sim_s if sim_budget is None else sim_budget)
+        if sim_budget is None:
+            sim_budget = float(timeout)
+        wall_backstop = frozen_sim_wall_backstop(sim_budget, timeout)
         event = threading.Event()
-        future.add_done_callback(lambda _:event.set())
-        if not event.wait(timeout):
-            raise TimeoutError('payload acknowledgement deadline exceeded')
+        future.add_done_callback(lambda _: event.set())
+        sim0, wall0 = self._sim_now(), time.monotonic()
+        # Slice the wait so both clocks are sampled; the slice is bounded by the wall value so the real-rig
+        # path still returns promptly. A frozen sim leaves sim_elapsed at ~0 -> only the wall backstop fires.
+        slice_s = max(0.05, min(0.5, float(timeout)))
+        while not event.wait(slice_s):
+            sim_elapsed = self._sim_now() - sim0
+            wall_elapsed = time.monotonic() - wall0
+            if pace_is_dead(sim_elapsed=sim_elapsed, wall_elapsed=wall_elapsed,
+                            sim_budget=sim_budget, wall_backstop=wall_backstop, mode='either'):
+                raise TimeoutError(
+                    'payload acknowledgement deadline exceeded (sim=%.1fs/%.1fs, wall=%.0fs/%.0fs)'
+                    % (sim_elapsed, sim_budget, wall_elapsed, wall_backstop))
         return future.result()
 
-    def __call__(self, held, profile):
+    def __call__(self, held, profile, reconcile=False):
+        # reconcile (sim-robust-movegroup-reattach-after-respawn-v1): a post-respawn carton RE-ATTACH.
+        # object_attachment runs in a container that SURVIVES the move_group SIGABRT, so it still holds
+        # restock_carried_unit and refuses a bare ADD ("Object already attached. Detach first ..."). When
+        # True (held attach only), clear that surviving attach FIRST, then re-ADD. Default False on every
+        # other call site (update_payload, first-start attach, release detach) => byte-identical.
         from rclpy.action import ActionClient
         from rclpy.time import Time
         from moveit_msgs.srv import ApplyPlanningScene
@@ -109,6 +251,14 @@ class RosPayloadSync:
             self.attach = ActionClient(self.node,AttachObject,'/restock_sim/attach_object')
         if not self.attach.server_is_ready():
             return _diag('attach_server')
+        # sim-robust-movegroup-reattach-after-respawn-v1: on a post-respawn re-attach, the surviving
+        # object_attachment attach must be cleared BEFORE the re-ADD or the server refuses it as a
+        # duplicate. Best-effort + logged; the physical grasp (contact=True) is untouched -- this only
+        # resets the planner's collision spheres. A detach the server declines (it DID restart, nothing
+        # attached) is tolerated and we still ADD. reconcile_detached names which happened for the gate.
+        reconcile_detached = None
+        if reconcile and held:
+            reconcile_detached = self._reconcile_detach(AttachObject)
         attached = AttachedCollisionObject()
         attached.link_name = 'gripper_pad_tcp'
         # The held carton is seated on the suction panel AND rests against the gripper surface-plate
@@ -161,8 +311,15 @@ class RosPayloadSync:
             world_remove.header.frame_id = 'ur_base_link'
             world_remove.operation = CollisionObject.REMOVE
             request.scene.world.collision_objects = [world_remove]
-        if not self._wait(self.scene.call_async(request)).success:
-            return _diag('scene_apply_unsuccessful')
+        scene_ok = bool(self._wait(self.scene.call_async(request)).success)
+        proceed, note = detach_scene_gate(held, scene_ok, self.detach_scene_tolerant)
+        if not proceed:
+            return _diag(note)
+        if note is not None:
+            # Tolerated DETACH: the move_group scene REMOVE was a no-op (nothing to remove -- a
+            # respawned/clean scene), so LOG the gate and continue to the authoritative object_attachment
+            # detach below, which decides the ack. _diag only prints (returns False, ignored here).
+            _diag(note)
         pending = self.attach.send_goal_async(goal)
         try:
             accepted = self._wait(pending)
@@ -174,15 +331,67 @@ class RosPayloadSync:
             pending.add_done_callback(cancel_late)
             raise
         if not accepted.accepted:
-            return _diag('attach_goal_rejected')
+            return _diag(reattach_reject_gate(reconcile and held, reconcile_detached))
         try:
             result = self._wait(accepted.get_result_async())
         except TimeoutError:
             accepted.cancel_goal_async()
             raise
-        if result.status != 4:
+        if not attach_acked(result.status):
             return _diag('attach_result_status=%s' % result.status)
         return True
+
+    def _reconcile_detach(self, AttachObject):
+        """sim-robust-movegroup-reattach-after-respawn-v1: clear a carton attachment that SURVIVED a
+        move_group crash in the still-live object_attachment container, so the following re-ADD is not
+        refused as a duplicate ("Object already attached. Detach first ..."). Sends ONLY the authoritative
+        object_attachment AttachObject detach (attach_object=False) -- NOT a release: the physical grasp is
+        unaffected, this only resets the planner's collision spheres. Best-effort and tolerant: a detach the
+        server declines (it DID restart -> nothing attached) or that times out is LOGGED and swallowed, and
+        the caller proceeds to the ADD regardless (which then succeeds on the now-clean server). Returns True
+        iff the detach was acked SUCCEEDED (the surviving attach was actually cleared)."""
+        def _log(gate):
+            if os.environ.get('PAYLOAD_SYNC_DIAG', '1') != '0':
+                print('PAYLOAD_SYNC_DIAG gate=%s' % gate, flush=True)
+        goal = AttachObject.Goal()
+        goal.attach_object = False
+        try:
+            pending = self.attach.send_goal_async(goal)
+            accepted = self._wait(pending)
+            if not accepted.accepted:
+                _log('reconcile_detach_rejected (nothing to clear; proceeding to re-ADD)')
+                return False
+            result = self._wait(accepted.get_result_async())
+        except TimeoutError:
+            _log('reconcile_detach_timeout (proceeding to re-ADD)')
+            return False
+        ok = attach_acked(result.status)
+        _log('reconcile_detach_%s (surviving object_attachment attach %s before re-ADD)'
+             % (('ok', 'cleared') if ok else ('result_status=%s' % result.status, 'NOT cleared')))
+        return ok
+
+    def resync_world_after_respawn(self):
+        """sim-robust-movegroup-reattach-after-respawn-v1: re-publish the STATIC world collision objects this
+        node established at startup (the base obstacle + each world obstacle) to a RESPAWNED move_group, whose
+        planning-scene monitor restarts empty. The carton attached-body is re-established separately by the
+        reconcile re-attach; this covers the remaining collision objects. Best-effort + logged; returns the
+        ordered list of ops re-sent (scene_bootstrap_ops form, minus the attach). No obstacles recorded
+        (respawn2) -> empty, no service calls -> byte-identical there."""
+        ops = []
+        try:
+            if self._published_base_obstacle:
+                self.add_base_obstacle()
+                ops.append(('base_obstacle',))
+            for obj_id, boxes in list(self._published_world_obstacles):
+                self.add_world_obstacle(obj_id, boxes)
+                ops.append(('world_obstacle', str(obj_id)))
+        except Exception as exc:
+            print('WORLD_RESYNC after respawn raised (%r); continuing to the carton re-attach' % (exc,),
+                  flush=True)
+        if ops:
+            print('WORLD_RESYNC re-published %d static collision-object group(s) after respawn' % len(ops),
+                  flush=True)
+        return ops
 
     def add_base_obstacle(self, allow_links=None, wait_s=30.):
         """Publish the FIXED mobile base (chassis + arm-mount + hitch + wheel boxes) as a STATIC world
@@ -248,6 +457,7 @@ class RosPayloadSync:
         req2.scene.allowed_collision_matrix = acm2
         if not self._wait(self.scene.call_async(req2)).success:
             raise RuntimeError('base obstacle planning-scene apply unsuccessful')
+        self._published_base_obstacle = True   # remember for resync_world_after_respawn()
         print('BASE_OBSTACLE published (%d boxes) allow=%d links (carton checked)'
               % (len(boxes), len(allow)), flush=True)
         return OBJ
@@ -296,6 +506,10 @@ class RosPayloadSync:
         req.scene.world.collision_objects = [co]
         if not self._wait(self.scene.call_async(req), timeout=wait_s).success:
             raise RuntimeError('world obstacle planning-scene apply unsuccessful: ' + str(obj_id))
+        # Remember the spec (in this method's own arg form) for resync_world_after_respawn(); de-dup by id
+        # so a resync re-publish is recorded at most once.
+        self._published_world_obstacles = [e for e in self._published_world_obstacles if e[0] != str(obj_id)]
+        self._published_world_obstacles.append((str(obj_id), list(boxes)))
         print('WORLD_OBSTACLE published id=%s (%d boxes)' % (obj_id, len(co.primitives)), flush=True)
         return co.id
 

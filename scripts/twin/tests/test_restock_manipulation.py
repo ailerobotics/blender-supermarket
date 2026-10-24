@@ -29,7 +29,15 @@ class FixtureMotion:
         self._raised_count = 0
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
-              wrist2_min=None, slow=False, goal_tol=None, near_start=False):
+              wrist2_min=None, slow=False, goal_tol=None, near_start=False, **_extra):
+        # _extra absorbs the optional per-move kwargs the real port accepts (e.g. wrist_guard from
+        # collect_place_wrist_guard / transfer_carry); recorded for assertions when a test needs them.
+        self.begin_extra = getattr(self, 'begin_extra', [])
+        self.begin_extra.append(dict(_extra))
+        # sim-robust-collect-place-straightline-v1: record the collision-off straight-line flag per begin()
+        # (cart-cage / live_pose / collect-deck place route place+retreat through begin(straight_line=True)).
+        self.straight_lines = getattr(self, 'straight_lines', [])
+        self.straight_lines.append(bool(straight_line))
         self.moves.append(pose)
         self.joint_space_moves = getattr(self, 'joint_space_moves', [])
         self.joint_space_moves.append(joint_space)
@@ -58,8 +66,22 @@ class FixtureMotion:
     def last_fault_was_sim_deadline(self):
         return self.sim_deadline_fault
 
-    def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None):
+    def take_exec_abort_reason(self):
+        # sim-robust-pick-plan-rejection-v1: distinct reason for the last ExecuteTrajectory abort
+        # (a trajectory_host goal rejection / execution fault). Default None => the controller keeps the
+        # generic 'collision planning or execution failed' (existing tests unchanged).
+        r = getattr(self, 'exec_abort_reason', None)
+        self.exec_abort_reason = None
+        return r
+
+    def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None, straight_line=False):
         self.stows.append((goal,measured,slow))
+        # sim-robust-collect-stow-branch-v1: record every begin_joint_goal with its collision-off
+        # straight-line flag + goal (the collect deck RETREAT backs the empty gripper off the
+        # self-colliding place fold to the fixed clear shape via a straight-line JOINT smoothstep).
+        self.joint_goals = getattr(self, 'joint_goals', [])
+        self.joint_goals.append(dict(goal=tuple(goal), measured=tuple(measured), slow=slow,
+                                     goal_tol=goal_tol, straight_line=bool(straight_line)))
 
     def stop(self):
         self.stops += 1
@@ -481,6 +503,28 @@ def test_grasp_press_sim_budget_is_not_rearmed_by_retries():
     assert c._grasp_retries >= 1                      # a re-seat DID happen, yet the clock was not re-armed
 
 
+def test_grasp_press_budget_effective_by_default_in_host_wiring(monkeypatch):
+    # firstmate sim-robust-weld-attach-v1: the production host wiring (ros_host) now defaults the
+    # grasp-press budget ON so a non-forming grasp that keeps the host ALIVE (no heartbeat trip) fails
+    # fast with a named reason instead of looping to the coarse 120 s phase_timeout. Switch keys stay
+    # backward compatible: env overrides the default, and an explicit config 0 disables it.
+    from scripts.twin.restock_manipulation import ros_host
+    monkeypatch.delenv('RESTOCK_GRASP_PRESS_TIMEOUT_S', raising=False)
+    assert ros_host._default_grasp_press_timeout_s() > 0           # effective by default
+    # ros_host resolves float(config.get('grasp_press_timeout_s', _default_grasp_press_timeout_s())):
+    resolve = lambda cfg: float(cfg.get('grasp_press_timeout_s', ros_host._default_grasp_press_timeout_s()))
+    assert resolve({}) == ros_host._DEFAULT_GRASP_PRESS_TIMEOUT_S  # absent key => default-on
+    assert resolve({'grasp_press_timeout_s': 0.0}) == 0.0          # explicit 0 => disabled (pre-fix)
+    assert resolve({'grasp_press_timeout_s': 7.5}) == 7.5          # config overrides
+    monkeypatch.setenv('RESTOCK_GRASP_PRESS_TIMEOUT_S', '20')
+    assert ros_host._default_grasp_press_timeout_s() == 20.0       # env overrides the default
+    assert resolve({}) == 20.0
+    monkeypatch.setenv('RESTOCK_GRASP_PRESS_TIMEOUT_S', 'nonsense')
+    assert ros_host._default_grasp_press_timeout_s() == ros_host._DEFAULT_GRASP_PRESS_TIMEOUT_S  # bad => default
+    monkeypatch.setenv('RESTOCK_GRASP_PRESS_TIMEOUT_S', '-5')
+    assert ros_host._default_grasp_press_timeout_s() == ros_host._DEFAULT_GRASP_PRESS_TIMEOUT_S  # neg => default
+
+
 def test_collision_stale_pause_keeps_stream_alive_and_wall_fail_fast_fm427():
     # fm427 (A1) / run-323 cold lift: the COLLISION_STALE_PAUSE held the post-attach lift on a genuinely-
     # stale collision stamp (the benign weld/ESDF re-incorporation lag) by returning EMPTY controls -- a
@@ -846,6 +890,151 @@ def test_reposition_full_place_path_reaches_verify():
         r = c.step(.1, packet(c, t0 + i * .1, contact=contact, **extra))
         assert r.status != 'failed', (c.phase, r.reason)
     assert c.phase == 'verify'
+
+
+# -- sim-robust-collect-place-straightline-v1: collision-off straight-line collect deck place (collect4) ----
+#
+# collect4 (data/sim-robust-collect-place-straightline-v1/report.md): the honest cold collect reached the
+# upright preplace (PR #209) + the host planned the place descent (PR #213), but the place config on the
+# cart deck is rejected by cuMotion as an attached-object SELF-collision -- the held carton is a 34-sphere
+# attached_object NOT self-collision-ignored against the forearm/wrist/upper-arm, so the set-down fold
+# brings it within the self-collision margin ('Invalid c-space position: self collision detected', 0 world
+# collisions) EVEN THOUGH the bare arm + PR #209 wrist-guard are clear there. The cart deck is not a
+# cuMotion world object for this run. The fix ports the cart-cage / live_pose (PR #215) mechanism: route
+# the place descent + empty retreat as the collision-off straight-line seeded insert (begin(straight_line=
+# True)); the preplace standoff stays collision-aware. Opt-in collect_place_straight_line; off => identical.
+
+_SL_STOW = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+_SL_TUCK = (-2.3, 1.0, 2.1066, 0.8, -1.2545)
+_SL_PREPLACE_SHAPE = (0.093, -1.91, 2.014, -0.103, 1.664, 0.0)   # collect4's upright clear-region shape
+
+
+def _collect_place_controller(straight_line):
+    return make_controller('collect', transport_joints=_SL_STOW, staged_cart_swing=True,
+                           cart_pan_joint0=-0.8605, cart_tuck_shape=_SL_TUCK,
+                           reposition_before_place=True,
+                           collect_place_preplace_shape=_SL_PREPLACE_SHAPE,
+                           collect_place_wrist_guard=True,
+                           collect_place_straight_line=straight_line)
+
+
+def _drive_collect_place(c, m):
+    """Drive the collect reposition place to verify (as test_reposition_full_place_path_reaches_verify),
+    returning {phase_that_issued_a_begin()_pose-move: straight_line_flag}, the ordered phase sequence, and
+    {phase_that_issued_a_begin_joint_goal: {goal, straight_line}} (the fixed-shape preplace, the staged
+    tuck/pan/retreat_tuck/stow folds, and the collect deck straight-line RETREAT escape)."""
+    by_phase, jg_by_phase, seq, n, k, t0 = {}, {}, [], 0, 0, 1.0
+    for i in range(140):
+        if c.phase == 'verify':
+            break
+        if not seq or seq[-1] != c.phase:
+            seq.append(c.phase)
+        if c.phase == 'transit':
+            c.base_repositioned = True                       # the adapter drove the base to place_approach
+        contact = c.held or (c.phase == 'grasp' and c.issued)
+        if c.phase == 'release' and c.issued:
+            contact = False
+        extra = {'joint_positions': _SL_STOW} if c.phase == 'stow' else {}
+        phase_before = c.phase
+        r = c.step(.1, packet(c, t0 + i * .1, contact=contact, **extra))
+        assert r.status != 'failed', (phase_before, r.reason)
+        if len(m.moves) > n:                                 # a begin() pose-move was issued this step
+            by_phase[phase_before] = m.straight_lines[-1]
+            n = len(m.moves)
+        jg = getattr(m, 'joint_goals', [])
+        if len(jg) > k:                                      # a begin_joint_goal was issued this step
+            jg_by_phase[phase_before] = jg[-1]
+            k = len(jg)
+    assert c.phase == 'verify', c.phase
+    return by_phase, seq, jg_by_phase
+
+
+def test_collect_deck_place_predicate_is_scoped():
+    # _collect_deck_place: on only for a NON-cage COLLECT with the key set; off for the key default, for a
+    # cage run, and for a transfer (so transfer / live_pose / scripted-still are untouched).
+    c, _ = _collect_place_controller(straight_line=True)
+    assert c._collect_deck_place() is True
+    c, _ = _collect_place_controller(straight_line=False)      # key default off
+    assert c._collect_deck_place() is False
+    c, _ = _collect_place_controller(straight_line=True)
+    c.cart_cage_place = True                                   # a cage run routes place via the cage insert
+    assert c._collect_deck_place() is False
+    c, m = make_controller('transfer', collect_place_straight_line=True)
+    assert c._collect_deck_place() is False                   # never a transfer
+
+
+def test_collect_deck_place_routes_place_and_retreat_straight_line():
+    # With collect_place_straight_line the deck place descent + empty retreat route collision-off
+    # straight-line; the PREPLACE stays collision-aware (a fixed joint goal here) and the free-space pick
+    # approach stays collision-aware; release -> retreat -> stow -> verify still follow.
+    c, m = _collect_place_controller(straight_line=True)
+    by_phase, seq, jg_by_phase = _drive_collect_place(c, m)
+    assert by_phase.get('place') is True                      # place descent onto the deck: collision-off
+    # ONLY the place descent routes as a begin() pose straight-line now; the empty-handed RETREAT routes
+    # as a collision-off straight-line JOINT escape (begin_joint_goal(straight_line=True)) to the fixed
+    # clear upright shape -- sim-robust-collect-stow-branch-v1, so the self-colliding place fold can't
+    # block the next collision-aware staged retreat_tuck. Every other begin() pose-move (the free-space
+    # pick approach/contact/lift) stays collision-aware.
+    assert {p for p, straight in by_phase.items() if straight} == {'place'}, by_phase
+    assert 'retreat' not in by_phase                          # retreat is no longer a begin() pose-move
+    # the preplace is a fixed collision-aware joint goal (begin_joint_goal), never a begin() pose-move
+    assert 'preplace' not in by_phase
+    assert _SL_PREPLACE_SHAPE in [g for g, _m, _s in m.stows]
+    # the RETREAT is a collision-OFF straight-line JOINT smoothstep to the fixed clear upright shape
+    retreat_jg = jg_by_phase.get('retreat')
+    assert retreat_jg is not None and retreat_jg['straight_line'] is True, jg_by_phase
+    assert retreat_jg['goal'] == _SL_PREPLACE_SHAPE
+    # the preplace / staged folds are collision-AWARE joint goals (never straight-line)
+    assert jg_by_phase['preplace']['straight_line'] is False
+    assert all(jg['straight_line'] is False
+               for p, jg in jg_by_phase.items() if p != 'retreat')
+    # the full place-side sequence completed through release/retreat/stow to verify
+    for p in ('preplace', 'place', 'release', 'retreat', 'stow'):
+        assert p in seq, (p, seq)
+    assert c.phase == 'verify'
+
+
+def test_collect_deck_place_straight_line_default_off_is_byte_identical():
+    # Default off: the deck place + retreat stay collision-aware joint-space moves (NO straight-line insert),
+    # and the collect_place_wrist_guard is carried on the place/retreat begin() exactly as before.
+    c, m = _collect_place_controller(straight_line=False)
+    assert c.collect_place_straight_line is False
+    by_phase, seq, jg_by_phase = _drive_collect_place(c, m)
+    assert by_phase.get('place') is False                     # collision-aware place (baseline)
+    assert by_phase.get('retreat') is False                   # collision-aware retreat (baseline)
+    assert not any(m.straight_lines)                          # nothing routed straight-line (begin())
+    assert not any(jg['straight_line'] for jg in getattr(m, 'joint_goals', []))  # nor a joint-goal escape
+    # the wrist-guard is still applied to the collision-aware place pose-IK (PR #209 behaviour unchanged)
+    place_extra = [e for pose, e in zip(m.moves, m.begin_extra)
+                   if pose == c.poses['place']]
+    assert place_extra and all('wrist_guard' in e for e in place_extra)
+    assert c.phase == 'verify'
+
+
+def test_collect_deck_retreat_fails_by_name_without_a_clear_escape_shape():
+    # sim-robust-collect-stow-branch-v1: a collect deck straight-line place with NO clear escape shape
+    # configured (collect_place_preplace_shape=None) must FAIL BY NAME at the retreat rather than drive the
+    # collision-aware tuck into the self-colliding place fold (the collect5 INVALID_INITIAL_CSPACE_POSITION).
+    c, m = make_controller('collect', transport_joints=_SL_STOW, staged_cart_swing=True,
+                           cart_pan_joint0=-0.8605, cart_tuck_shape=_SL_TUCK,
+                           reposition_before_place=True,
+                           collect_place_preplace_shape=None,       # no configured clear escape
+                           collect_place_straight_line=True)
+    t0, r = 1.0, None
+    for i in range(140):
+        if c.phase in ('failed', 'verify'):
+            break
+        if c.phase == 'transit':
+            c.base_repositioned = True
+        contact = c.held or (c.phase == 'grasp' and c.issued)
+        if c.phase == 'release' and c.issued:
+            contact = False
+        extra = {'joint_positions': _SL_STOW} if c.phase == 'stow' else {}
+        r = c.step(.1, packet(c, t0 + i * .1, contact=contact, **extra))
+        if r.status == 'failed':
+            break
+    assert c.phase == 'failed' and r is not None and r.status == 'failed'
+    assert 'clear-branch escape shape' in r.reason and 'collect_place_preplace_shape' in r.reason, r.reason
 
 
 def test_reposition_fails_if_deck_target_not_reacquired():
@@ -1415,6 +1604,29 @@ def test_move_group_respawn_drift_hard_fails_without_live_state(monkeypatch):
     assert stopped
 
 
+def test_begin_joint_goal_straight_line_dispatches_executor_no_plan(monkeypatch):
+    # sim-robust-collect-stow-branch-v1: begin_joint_goal(straight_line=True) dispatches the collision-OFF
+    # 2-point smoothstep to the explicit joint target straight through the host EXECUTOR (the same path as
+    # the straight-line pose descent) -- it NEVER enters a cuMotion plan, so the collect retreat escape is
+    # never rejected for a self-colliding start. A settling arm dispatches and the move succeeds.
+    port, clk, trajectory = _settle_adapter(monkeypatch, vel=0.0, live_pos=0.3)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6, straight_line=True)
+    assert port._straight_line is True
+    assert port.state in ('await_settle', 'execute_accept')   # straight to the executor, no plan_accept
+    assert _drive_to_terminal(port) == 'succeeded'
+    # the dispatched trajectory ends at the explicit joint target (a 2-point rest-to-rest smoothstep)
+    assert list(trajectory.joint_trajectory.points[-1].positions) == pytest.approx([0.3] * 6)
+
+
+def test_begin_joint_goal_default_is_collision_planned(monkeypatch):
+    # Default (straight_line unset): begin_joint_goal still plans through cuMotion (plan_accept) -- byte-
+    # identical to the stow/tuck behaviour; nothing routes to the executor directly.
+    port, clk, trajectory = _settle_adapter(monkeypatch, vel=0.0, live_pos=0.3)
+    port.begin_joint_goal([0.3] * 6, [0.0] * 6)
+    assert port._straight_line is False
+    assert port.state == 'plan_accept'
+
+
 def test_move_group_respawn_recovery_still_hard_fails_bad_plan(monkeypatch):
     # The recovery is start-drift ONLY: an out-of-limits waypoint still hard-fails even WITH a live state,
     # so a collision/garbage plan is never silently accepted.
@@ -1706,6 +1918,22 @@ def test_fm372_collision_returned_failed_still_hard_fails_general():
     assert c.reason == 'collision planning or execution failed'
 
 
+def test_rejected_goal_surfaces_distinct_reason_not_collision():
+    # sim-robust-pick-plan-rejection-v1: a RETURNED 'failed' that came from a trajectory_host goal
+    # rejection / execution abort (not a planning collision) must surface the port's DISTINCT reason,
+    # so seconddeath's first-goal startup-race rejection is no longer mislabelled a planning collision.
+    c, m = _staged_controller()
+    tp = _issue_move(c, m, 'retreat')
+    m.outcome, m.sim_deadline_fault = 'failed', False
+    m.exec_abort_reason = ('arm controller aborted trajectory (goal rejected or execution fault, '
+                           'moveit_err=-4; see host-stack.log TRAJ_HOST_GOAL_REJECT/TRAJ_HOST_FAULT)')
+    r = c.step(.1, packet(c, tp))
+    assert r.status == 'failed'
+    assert c.reason != 'collision planning or execution failed'
+    assert 'arm controller aborted trajectory' in c.reason and 'TRAJ_HOST_GOAL_REJECT' in c.reason
+    assert m.take_exec_abort_reason() is None   # consumed exactly once
+
+
 def test_fm372_sim_deadline_returned_failed_retries_general():
     # A sim-deadline fault is a RETURNED 'failed' flagged retriable -> re-issue (existing fm367 path).
     c, m = _staged_controller()
@@ -1778,3 +2006,142 @@ def test_gripper_command_result_carries_the_acquisition_deadline():
     r = c.step(.1, packet(c, t + .1, contact=False, valid_until_steady=_fresh()))   # suction enabled
     assert {'kind': 'gripper', 'enabled': True} in r.controls
     assert r.valid_until_steady is not None     # carried Sensors -> Result so isaac_ros_graph accepts
+
+
+# --------------------------------------------------------------------------------------------------
+# sim-robust-cart-place-descent-v1: the COLLECT place onto the rollwagen deck must run descent ->
+# release (weld detach) -> retreat -> stow all the way to the transport pose, and a release that does
+# NOT detach the weld must FAIL FAST with a named reason instead of carrying the carton back up on
+# retreat/stow or stalling to the coarse phase_timeout. (collect2 never reached release -- the mission's
+# base-moved guard aborted at the descent; those runtime guard tests live in test_restock_runtime.py.)
+
+_TRANSPORT = (0.1, -2.5, 1.7, -0.7, -1.5708, 0.0)   # a stow (transport) joint config for these tests
+
+
+def test_release_detach_timeout_off_by_default_and_rejects_bad_values():
+    c, _ = make_controller('collect', transport_joints=_TRANSPORT)
+    assert c.release_detach_timeout_s == 0.0                      # default off => rely on phase_timeout
+    with pytest.raises(ValueError):
+        make_controller('collect', release_detach_timeout_s=float('nan'))
+    with pytest.raises(ValueError):
+        make_controller('collect', release_detach_timeout_s=-1.0)
+    # clamped to <= phase_timeout (a tighter bound than the coarse per-phase timeout)
+    c2, _ = make_controller('collect', transport_joints=_TRANSPORT, release_detach_timeout_s=1e9)
+    assert c2.release_detach_timeout_s == c2.phase_timeout
+
+
+def test_collect_place_runs_descent_release_stow_to_the_transport_pose():
+    """Replay the collect place from release onward: the gripper-open detaches the weld (contact clears),
+    the empty arm retreats, and stow drives to the TRANSPORT joint config, whose feedback is checked
+    before verify. Proves the descent->release->retreat->stow sequence reaches transport."""
+    c, m = make_controller('collect', transport_joints=_TRANSPORT,
+                           collect_place_wrist_guard=True, release_detach_timeout_s=5.0)
+    t = run_to(c, 'release')                                      # observe..place reached, release not yet issued
+    # First release tick: emit the gripper-open (contact still latched this tick).
+    r = c.step(.1, packet(c, t, contact=True, joint_positions=_TRANSPORT, valid_until_steady=_fresh()))
+    assert {'kind': 'gripper', 'enabled': False} in r.controls
+    assert c.phase == 'release' and r.status == 'running'
+    # Weld lets go (contact clears) -> detach acknowledged -> retreat; then run the empty retreat ->
+    # stow (begin_joint_goal to transport) -> transport feedback check -> verify. Drive tick by tick
+    # (each move phase issues then polls) with the weld released (contact False) and the arm reporting
+    # the transport joints, tracking the phases reached.
+    phases, tt = [], t + .1
+    for _ in range(20):
+        r = c.step(.1, packet(c, tt, contact=False, joint_positions=_TRANSPORT, valid_until_steady=_fresh()))
+        phases.append(c.phase)
+        assert r.status != 'failed', r.reason
+        if c.phase == 'verify':
+            break
+        tt += .1
+    assert m.payloads[-1] is False                               # the detach was commanded (weld released)
+    assert 'retreat' in phases and 'stow' in phases              # empty retreat then the stow move ran
+    assert c.phase == 'verify'                                   # reached the transport pose, en route to verify
+    stow_goal = m.stows[-1][0]
+    assert list(stow_goal) == list(_TRANSPORT)                   # stow drove the transport (stow) joint config
+
+
+def test_release_fails_fast_when_the_weld_does_not_detach():
+    """The failing-release case: the gripper-open is emitted but the SIM_ATTACH weld / suction keeps
+    holding (contact stays True). With a release-detach budget the release FAILS FAST with a named reason
+    once the SIM-clock budget elapses -- never carries the carton up on retreat/stow, never stalls to the
+    coarse phase_timeout."""
+    c, m = make_controller('collect', transport_joints=_TRANSPORT, release_detach_timeout_s=1.0)
+    t = run_to(c, 'release')
+    r = c.step(.1, packet(c, t, contact=True, valid_until_steady=_fresh()))     # emit gripper-open
+    assert c.phase == 'release' and r.status == 'running'
+    # Weld stuck: step with contact held. Must not fail before the 1.0 s sim budget...
+    tt = t + .1
+    for _ in range(9):                                            # ~0.9 s of sim, still inside the budget
+        r = c.step(.1, packet(c, tt, contact=True, valid_until_steady=_fresh()))
+        assert r.status == 'running', r.reason
+        tt += .1
+    r = c.step(.1, packet(c, tt, contact=True, valid_until_steady=_fresh()))    # past 1.0 s sim
+    assert r.status == 'failed'
+    assert 'did not detach' in r.reason and 'weld/suction still engaged' in r.reason
+    assert c.phase == 'failed'
+    assert m.payloads == [True]                                  # never commanded a (false) detach / never advanced
+
+
+def test_release_with_budget_off_does_not_fast_fail_a_stuck_weld():
+    """Backward compatible: with the budget off (default 0) a stuck release stays 'running' (the coarse
+    phase_timeout / host watchdog remain the only backstop) -- byte-identical to the pre-fix release."""
+    c, m = make_controller('collect', transport_joints=_TRANSPORT)   # release_detach_timeout_s default 0
+    t = run_to(c, 'release')
+    c.step(.1, packet(c, t, contact=True, valid_until_steady=_fresh()))
+    tt = t + .1
+    for _ in range(30):                                          # 3 s of a stuck weld: never fast-fails
+        r = c.step(.1, packet(c, tt, contact=True, valid_until_steady=_fresh()))
+        assert r.status == 'running', r.reason
+        tt += .1
+    assert c.phase == 'release'
+
+
+def test_release_detach_acked_transitions_to_retreat():
+    """sim-robust-release-detach-ack-v1 (mission-visible contract): once the sim release drops contact,
+    the controller requests the payload detach (motion.update_payload(False)); when it is ACKNOWLEDGED
+    the collect advances to retreat. With the detach-scene tolerance (ros_payload.detach_scene_gate) the
+    host acks whether or not move_group lost the attached object to a crash+respawn, so this holds under
+    both the coldhonest (feed off) and the coldlive (live_pose + arm masked-depth feed) configurations --
+    the controller sees the same acknowledged detach in both."""
+    c, m = make_controller()
+    t = run_to(c, 'release')
+    c.step(.1, packet(c, t, contact=True))                 # release not issued -> issue gripper disable
+    r = c.step(.1, packet(c, t + .1, contact=False))       # contact dropped -> detach requested + acked
+    assert r.status != 'failed', r.reason
+    assert c.phase == 'retreat'
+    assert m.payloads[-1] is False                         # a DETACH (held=False) was requested
+
+
+def test_release_detach_not_acknowledged_fails_by_name():
+    """A genuinely unacknowledged detach (the authoritative object_attachment action does not succeed;
+    here the fixture reports update_payload False) must still FAIL FAST with the named reason -- the
+    scene tolerance must never silently swallow a real detach failure."""
+    c, m = make_controller()
+    t = run_to(c, 'release')
+    c.step(.1, packet(c, t, contact=True))                 # issue gripper disable
+    m.attach_ok = False                                    # the detach is NOT acknowledged
+    r = c.step(.1, packet(c, t + .1, contact=False))
+    assert r.status == 'failed'
+    assert r.reason == 'payload collision detachment not acknowledged'
+
+
+def test_start_resets_the_port_per_op_crash_budget():
+    """sim-robust-movegroup-second-death-v1: controller.start() clears the port's TOTAL per-op move_group
+    crash-retry budget so a fresh operation gets the full cap (the per-move budget already resets in
+    begin/begin_joint_goal). Guarded by getattr, so a motion stub without the method is byte-identical."""
+    motion = FixtureMotion()
+    calls = []
+    motion.reset_crash_budget = lambda: calls.append(True)
+    c = TransferController(motion, {'sku-box': PROFILE}, fixture_mode=True)
+    c.start('transfer', JOB)
+    assert calls == [True]                                  # reset called exactly once at op start
+
+
+def test_start_tolerates_a_motion_without_reset_crash_budget():
+    """The FixtureMotion has no reset_crash_budget; start() must not raise (byte-identical to the legacy
+    path for any motion that predates the per-op budget)."""
+    motion = FixtureMotion()
+    assert not hasattr(motion, 'reset_crash_budget')
+    c = TransferController(motion, {'sku-box': PROFILE}, fixture_mode=True)
+    c.start('transfer', JOB)                                # no AttributeError
+    assert c.phase == 'observe'

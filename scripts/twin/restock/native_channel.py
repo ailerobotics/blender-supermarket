@@ -185,6 +185,9 @@ class StationClient:
         self._prepared=False
         self._restarts=0
         self.active=False
+        # sim-robust-station-pause-on-transfer-v1: this epoch was explicitly PAUSED (the base towed away to
+        # a far op). Bookkeeping only; the host carries the authoritative paused state. Reset on begin().
+        self._paused=False
         self.latest=None
         self.last_send=-1.
         self.last_reply=None
@@ -197,6 +200,7 @@ class StationClient:
         self.sequence=0
         self._prepared=False
         self._restarts=0
+        self._paused=False
         self.camera_frame=camera_frame
         self.active=True
         self.latest=None
@@ -369,5 +373,26 @@ class StationClient:
             self.sequence+=1
             self.channel.publish(dict(action='stop',epoch=self.epoch,sequence=self.sequence,
                                       stamp=self.now-self.publish_lag,parked=True))
+        self.active=False
+        self.latest=None
+
+    def pause(self):
+        """sim-robust-station-pause-on-transfer-v1: SUSPEND the parked-station liveness watchdog when a manip
+        op completes and the base is about to tow AWAY to a far op (collect done -> couple/outbound/park/
+        transfer). No op heartbeats this station during the tow, so without a pause the host accrues a
+        heartbeat gap and false-trips the global /manipulation/stop on this idle-but-ALIVE station (coldwin2
+        transfer sim gap 30.05 s, 0.05 s over budget -> recovered one tick later). 'pause' tells the host to
+        SUSPEND the gap while keeping the epoch (host state 'paused', not 'idle'); the next op re-prepares a
+        fresh epoch via begin() at its own pose. Stamp the command fresh off the stage clock (this is a
+        stage-boundary call, so self.now from the last tick could be stale past the ack's 0.5 s freshness
+        window). active=False locally so begin() can re-prepare (the host keeps the epoch, superseded by the
+        fresh prepare). A no-op until the epoch has been acknowledged (an unprepared epoch has nothing to
+        suspend; begin()/stop() still re-open it)."""
+        if self.active and self._prepared:
+            now=self.stage_clock() if self.stage_clock is not None else self.now
+            self.sequence+=1
+            self.channel.publish(dict(action='pause',epoch=self.epoch,sequence=self.sequence,
+                                      stamp=now-self.publish_lag,parked=True))
+            self._paused=True
         self.active=False
         self.latest=None

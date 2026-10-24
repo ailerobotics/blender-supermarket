@@ -1,0 +1,24 @@
+{
+  "_comment": "Bounded TRANSFER-ONLY GPU proof of the SCRIPTED transfer driven by the host trajectory EXECUTOR (RESTOCK_SCRIPTED_TRANSFER_ARM=executor): the arm physically follows the scripted pick/carry/place through trajectory_host while the carton rides the measured tool. Hand this to the integration lane (twin-robot-in-store-boot-v1) for one bounded GPU proof scheduled through /tmp/aile-gpu.lock (never forced, never beside live Blender, whispr untouched). This is the SAME transfer1 executor staging (mission-runtime-transfer1.json) unchanged -- reproduced here only so a worker PR can describe the proof without editing the ~/datasets configs. The validated fix (fm/sim-robust-executor-wrist-branch-v1): the scripted pick now commands ur_wrist_1 in the CLEAR branch (transfer_carry.clear_branch re-expression) instead of the far +2*pi branch that wrapped 'clear' yet swept the arm up through the ur_wrist_1-vs-ur_forearm stop at ~0.69 (execretest TRAJ_HOST_FAULT 1.31 rad on joint 3).",
+  "_bounded_command": "RESTOCK_TRANSFER_MODE=scripted RESTOCK_SCRIPTED_TRANSFER_ARM=executor RESTOCK_TRANSFER_CARRY=wrist_guard,weld python3 scripts/run_mobile_restock.py --start-at transfer --start-staging recorded_bay_park --stop-after verify",
+  "_env": {
+    "RESTOCK_TRANSFER_MODE": "scripted",
+    "RESTOCK_SCRIPTED_TRANSFER_ARM": "executor",
+    "RESTOCK_TRANSFER_CARRY": "wrist_guard,weld",
+    "_note": "All three are ENV VARS read by BOTH mission processes (Isaac capture AND host trajectory_host) -- NOT runtime-config keys (the run-277 split trap). RESTOCK_TRANSFER_CARRY=wrist_guard turns on the clear carry wrist region in plan_transfer (default-on anyway); the fix re-expresses the PICK half onto the clear branch too. ',weld' labels the SIM fixed-joint attach in mission.json + caption. RESTOCK_SCRIPTED_TRANSFER_ARM=still (the banked warm11 path) is unaffected and byte-identical."
+  },
+  "start_at": "transfer",
+  "start_staging": {"preset": "recorded_bay_park", "carton_support_z_world": 0.9325},
+  "stop_after": "verify",
+  "sim_attach_fallback": true,
+  "transfer_ground_truth": {
+    "enabled": true,
+    "location": "G3_back_s2",
+    "target": [-2.0, 16.424, 0.73],
+    "free_dimensions": [0.7, 0.5, 0.5],
+    "ground_truth_pick": false
+  },
+  "_runtime_keys_note": "start_at/start_staging/stop_after bound the run to transfer+verify (mission.bounded_stages; fails closed before any boot). start_staging spawns the coupled train + carton on the cart upper shelf at the recorded bay-park->transfer handover (carton_support_z_world 0.9325). transfer_ground_truth accepts the authored bay target as the GT verify destination (shelf not camera-commissioned; labelled source='ground_truth', ground_truth_pick=false so the PICK is from the LIVE carton pose). sim_attach_fallback holds the carton with the captain-approved SIM weld. Do NOT edit the ~/datasets mission runtime configs from a worker PR -- the integration lane owns them.",
+  "_pass_criteria": "PASS = the executor transfer reaches 'verify' with status succeeded; the console shows 'SCRIPTED_TRANSFER begin arm=executor' and each 'SCRIPTED_TRANSFER executor pick/carry/retreat sent'; host-stack.log shows the pick TRAJ_HOST_PLAN with ur_wrist_1 staying <= 0.65 (NOT ramping toward +2.0/+4.1) and NO 'TRAJ_HOST_FAULT ... 1.3 rad' on joint 3 (ur_wrist_1); the carton lands on the GT target (bottom_gap within z_tol). FAIL = any TRAJ_HOST_FAULT, a 'SCRIPTED TRANSFER executor ... the pick trajectory' named fail-fast (report the reason verbatim -- e.g. 'the carry wrist guard found no clear-branch solution' means the geometry has no in-limit clear branch), or a silent still degrade.",
+  "_cpu_proof": "scripts/twin/tests/test_restock_scripted_transfer.py (test_execretest_pick_commands_wrist1_below_the_self_collision_stop, test_clear_branch_reexpresses_the_far_wrist1_branch_that_wrap_reads_as_clear, test_executor_fails_fast_with_a_named_reason_when_no_clear_branch_exists); run with PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH="
+}

@@ -5,10 +5,11 @@ import os
 import time
 from ..restock_camera.freshness import require_fresh
 
+from . import esdf_boot_gate
 from . import ground_truth_collect as gtc
 from .fit import axis_fits
 from .transfer_carry import (DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN, GUARDED_PHASES, WELD, WRIST_GUARD,
-                             carry_flags)
+                             carry_flags, resolve_reach_guard)
 from .transfer_mode import LIVE_POSE, near_face_poses, transfer_mode
 from .types import MotionPort, ProductProfile, Result, Sensors
 
@@ -29,6 +30,13 @@ STAGED_MOVE_RETRY_MAX = 2
 # times before failing the phase. Mirrors STAGED_MOVE_RETRY_MAX but for the general move path, which
 # had NO retry. A collision/plan-rejection (port raised -> flag False) is NOT retried (fail-fast kept).
 MOVE_DEADLINE_RETRY_MAX = 2
+# sim-robust-phase-timeout-during-recovery-v1: default bound (SIM seconds) on the phase-clock credit a
+# named move_group crash recovery may accrue in one phase. Generous on purpose -- it only has to cover a
+# real multi-death recovery (respawn2b's two deaths credited ~119 sim-s; the lifetime respawn budget is a
+# few deaths), and the adapter's own recovery bounds fail fast by name long before it in a genuine hang.
+# It is the belt-and-braces terminator for a pathological probe-stuck-True, so a hung recovery still ends
+# by name here instead of pausing forever. Env RESTOCK_RECOVERY_PAUSE_CAP_S overrides; 0 disables.
+RECOVERY_PAUSE_CAP_S = 300.0
 # fm387: which collect phases issue an arm MOVE (and so can suffer a goal-tolerance/track-miss the
 # host-stack WATCHDOG surfaces -- ros_adapter failed_result_pending / drain -- OUTSIDE poll(), where
 # fm372's in-poll retry never saw it). Staged moves (begin_joint_goal) use the staged budget; the rest
@@ -91,9 +99,14 @@ class TransferController:
                  cart_cage_place: bool = False, cage_axis=(1.0, 0.0, 0.0),
                  cage_mouth_standoff: float = 0.55, cage_insert_gap: float = 0.03,
                  cage_preplace_shape=None, reposition_before_place: bool = False,
+                 collect_place_preplace_shape=None, collect_place_wrist_guard: bool = False,
+                 collect_place_straight_line: bool = False,
                  grasp_track_m=None, require_collect_source_evidence: bool = False,
                  transfer_ground_truth: bool = False, ground_truth_pick: bool = False,
-                 collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0):
+                 collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0,
+                 release_detach_timeout_s: float = 0.0, transfer_preplace_reach_guard=None,
+                 transfer_pick_wrist_guard: bool = False,
+                 esdf_boot_ack_grace_s: float = 0.0):
         self.steady_clock=steady_clock
         # collect-gt (demo, opt-in, default off): GROUND-TRUTH COLLECT. Accept the collect SOURCE observation
         # labelled 'ground_truth' (the controlled carton asset's simulated pose, served Isaac-side when the
@@ -232,6 +245,33 @@ class TransferController:
             raise ValueError('grasp_press_timeout_s must be a finite, non-negative number of sim seconds')
         self.grasp_press_timeout_s = min(float(grasp_press_timeout_s), float(phase_timeout))
         self._press_sim_start = None   # sim time the current unconfirmed pre-weld press began (see step)
+        # sim-robust-cart-place-descent-v1: SIM-CLOCK release-detach budget (release_detach_timeout_s, SIM
+        # seconds; default 0 => off => rely on the coarse phase_timeout, byte-identical). After the place
+        # descent the RELEASE emits a gripper-open and waits for the measured contact to clear (the
+        # SIM_ATTACH weld / suction to let go) before advancing to retreat/stow. If the weld fails to
+        # detach, the carton would be carried back UP on retreat/stow -- the opposite of 'carton left on the
+        # deck'. Without a tight bound the release just loops 'running' to the coarse phase_timeout; this
+        # FAILS FAST with a NAMED reason (SIM-clock, render-pacing-safe; see 'Freshness on sim clock, not
+        # wall'). Clamped to (0, phase_timeout] so it is a tighter bound than the per-phase timeout.
+        if not (isinstance(release_detach_timeout_s, (int, float))
+                and math.isfinite(release_detach_timeout_s) and release_detach_timeout_s >= 0):
+            raise ValueError('release_detach_timeout_s must be a finite, non-negative number of sim seconds')
+        self.release_detach_timeout_s = (min(float(release_detach_timeout_s), float(phase_timeout))
+                                         if release_detach_timeout_s > 0 else 0.0)
+        # sim-robust-esdf-boot-gate-v1: opt-in HOST key esdf_boot_ack_grace_s (SIM seconds; default 0 =>
+        # off => byte-identical). Names a never-acknowledged nvblox ESDF incorporation at boot, on the sim
+        # clock, BEFORE the first arm motion streams -- rather than letting the collision_dt invariant
+        # discover it ~40 s in with an opaque reason (meshuris1: collision_time stuck at the -1 not-ready
+        # sentinel from tick 1, invariant tripped collision_dt=40 at the first observe step now=39). The
+        # gate HOLDs the op (no motion) until the first valid incorporation ack (collision_time leaves -1)
+        # or the grace elapses, then fails fast by name. Once a valid ack has arrived it disarms
+        # permanently and the collision_dt invariant below is the sole owner (its band untouched). See
+        # esdf_boot_gate.EsdfBootGate.
+        if not (isinstance(esdf_boot_ack_grace_s, (int, float)) and math.isfinite(esdf_boot_ack_grace_s)
+                and esdf_boot_ack_grace_s >= 0):
+            raise ValueError('esdf_boot_ack_grace_s must be a finite, non-negative number of sim seconds')
+        self.esdf_boot_ack_grace_s = float(esdf_boot_ack_grace_s)
+        self._esdf_boot_gate = esdf_boot_gate.EsdfBootGate(self.esdf_boot_ack_grace_s)
         # fm427 (A1) (run-323 cold lift): the fm419(a) COLLISION_STALE_PAUSE holds the post-attach lift on
         # a genuinely-stale collision stamp (run-323: collision_dt 0.52->0.65 s, the benign weld/ESDF
         # re-incorporation lag) by returning EMPTY controls -- a SILENT hold. Under render pacing that
@@ -338,6 +378,77 @@ class TransferController:
         if self.cage_preplace_shape is not None and (len(self.cage_preplace_shape) != 6
                 or not all(map(math.isfinite, self.cage_preplace_shape))):
             raise ValueError('cage_preplace_shape must be 6 finite joint values')
+        # sim-robust-cart-place-goal-v1: the COLLECT place-on-cart counterpart of cage_preplace_shape,
+        # for the NON-cage reposition place (reposition_before_place + cart_cage_place False -- the base
+        # drives in front of the rollwagen mouth, so there is no cage insert). The deck place/preplace
+        # poses have TWO collision-free IK families: an UPRIGHT one (shoulder_lift ~ -1.9) and a DEEP fold
+        # (~ -3.57). The host KDL/cuMotion nearest-branch seeds from the folded carry config and lands
+        # EITHER in the deep fold -- which the soft arm cannot HOLD under the carton load (collect1:
+        # shoulder_lift sagged 0.39 rad short of -3.596 at steady state -> PATH_TOLERANCE_VIOLATED ->
+        # arm-command heartbeat lost) -- OR in a wrist self-colliding branch (collectsrc: 'Invalid c-space
+        # position: self collision detected', the 12-replan storm). Driving the preplace to this FIXED,
+        # CPU-validated UPRIGHT clear-region 6-joint config (begin_joint_goal, like cage_preplace_shape)
+        # fixes the GOAL branch: FK TCP ~ the sensed preplace standoff, in the low-droop upright branch,
+        # so the subsequent place (pose-IK, near_start-seeded from here, collect_place_wrist_guard on)
+        # stays upright + clear and tracks the SENSED deck target. None => pose-IK preplace (byte-identical).
+        # Validated clear-region + reach margin by tests/test_restock_cart_place_goal.py and recorded in
+        # data/sim-robust-cart-place-goal-v1/station-contract.md.
+        self.collect_place_preplace_shape = (tuple(float(v) for v in collect_place_preplace_shape)
+                                             if collect_place_preplace_shape is not None else None)
+        if self.collect_place_preplace_shape is not None and (len(self.collect_place_preplace_shape) != 6
+                or not all(map(math.isfinite, self.collect_place_preplace_shape))):
+            raise ValueError('collect_place_preplace_shape must be 6 finite joint values')
+        # sim-robust-cart-place-goal-v1: extend the transfer wrist-guard clear-branch selection
+        # (in_clear_region / wrist_flip_seed, transfer_carry.py) to the COLLECT place moves
+        # (place/retreat pose-IK; the preplace is the fixed shape above). Off (default) => the collect
+        # place pose-IK is unguarded => byte-identical. See _place_wrist_guard.
+        self.collect_place_wrist_guard = bool(collect_place_wrist_guard)
+        # sim-robust-collect-place-straightline-v1 (collect4, 2026-10-23): route the NON-cage COLLECT
+        # deck PLACE descent + empty RETREAT as the collision-OFF straight-line seeded insert
+        # (begin(straight_line=True)) -- the SAME mechanism the cart-cage place and the live_pose transfer
+        # place (PR #215) already use. The collect place lowers the HELD carton ONTO the cart deck; the
+        # carton is a cuMotion attached_object (ros_host attaches a 34-sphere cuboid at gripper_tcp), and
+        # the attached_object is NOT self-collision-ignored against the forearm / wrist / upper-arm, so the
+        # set-down fold brings the carton spheres within the attached-object self-collision margin and
+        # cuMotion rejects a collision-AWARE plan to the place config ('Invalid c-space position: self
+        # collision detected' -> trajopt UNKNOWN_STATUS -> MANIP_HOST_FAILED op=collect), EVEN THOUGH the
+        # bare arm is self-clear there and PR #209's wrist-guard accepted the config (collect4 host-stack.log:
+        # 6 self-collisions, 0 world collisions; bare-arm worst self-pair +0.0339 m at BOTH the upright
+        # preplace and the place). The cart deck is not a cuMotion WORLD obstacle for this run
+        # (world_obstacles=[], base_collision_object=False), so this is purely the attached-carton self-check
+        # -- a conservative sphere rejection of the intended set-down, exactly like the cart-cage insert and
+        # the live_pose place. The PREPLACE standoff stays collision-aware (the fixed upright
+        # collect_place_preplace_shape joint goal). OFF (default) => byte-identical; collect4 staging + this
+        # key = the fix. Scoped to the non-cage collect place, so transfer / live_pose / scripted-still are
+        # untouched. See _collect_deck_place and data/sim-robust-collect-place-straightline-v1/report.md.
+        self.collect_place_straight_line = bool(collect_place_straight_line)
+        # sim-robust-transfer-preplace-reach-v1 (coldwin6, 2026-10-24): steer the live_pose TRANSFER
+        # PREPLACE's wrist-guarded seeded-KDL IK to the HOLDABLE upright clear branch and reject a
+        # clear-but-DEEP-fold goal. The preplace standoff above the bay has (at least) two wrist-clear IK
+        # branches: a holdable upright one (ur_shoulder_lift ~ -1.9) and a deep fold (~ -4.0) the arm
+        # physically cannot reach. The full-chain park (unlike the staged recorded_bay_park, which accepts
+        # the upright branch at seed 0) lands KDL's measured seed in the deep branch, then the wrist-flip
+        # re-seed that clears the wrist converges to the deep-fold clear twin -- which the plain wrist-guard
+        # ACCEPTED (coldwin6 commanded ur_shoulder_lift -4.003; the arm froze 0.35 rad short at -3.65 ->
+        # PATH_TOLERANCE_VIOLATED -> HOST_FAULT_ESTOP phase=preplace). A reachable UPRIGHT clear branch
+        # (ur_shoulder_lift -1.95) provably EXISTS at that same park pose (CPU: tests/
+        # test_restock_transfer_preplace_reach). (max_droop, upright_seed) or None (off => the plain
+        # wrist-guard, byte-identical). Validated in data/sim-robust-transfer-preplace-reach-v1/report.md.
+        self.transfer_preplace_reach_guard = resolve_reach_guard(transfer_preplace_reach_guard)
+        # sim-robust-transfer-settle-oscillation-v1 (coldwin12, 2026-10-24): extend the clear-wrist-region
+        # guard to the live_pose TRANSFER PICK (approach + contact), which the carry wrist_guard deliberately
+        # does NOT cover (transfer_carry.GUARDED_PHASES = preplace/place/retreat only). The pick's approach is
+        # a cuMotion task-space pose goal and the contact is a straight-line seeded-KDL IK seeded from the
+        # approach branch; both were unguarded, so the approach IK intermittently landed on the ur_wrist_2-vs-
+        # ur_forearm self-colliding family (coldwin12: wrist_1 1.171 above the ~0.69 stop, wrist_2 -1.033 below
+        # 0) and the contact inherited it and limit-cycled 0.169 rad / ~1.6 rad/s for the whole 30 s settle
+        # window (PR239's envelope correctly failed it), where coldwin11 took the clear wrist_2-positive family
+        # (wrist_1 -0.18, wrist_2 +0.93) and settled instantly. On => the approach pose goal carries the
+        # clear-region joint constraints (ur_wrist_1 <= carry_wrist1_cap, ur_wrist_2 >= carry_wrist2_min, the
+        # proven fm327/fm403 bounds) and the contact straight-line IK is wrist-guarded (clear-branch re-seed),
+        # so the pick stays on the clear family. Off (default) => byte-identical. See _pick_wrist_guard and
+        # data/sim-robust-transfer-settle-oscillation-v1/report.md.
+        self.transfer_pick_wrist_guard = bool(transfer_pick_wrist_guard)
         # fm476: SIM-ONLY env override for the sensor-packet freshness bound. The fm465 light rig makes
         # the TRANSFER capture's full-res render slow, so by the time the packet reaches the host the
         # sim /clock has advanced ~0.55 s past the packet stamp -- STALE beyond the 0.5 s default, so the
@@ -379,6 +490,24 @@ class TransferController:
         self._place_verify_xy_tol = _float_env('RESTOCK_PLACE_VERIFY_XY_TOL', 0.25)
         self._place_verify_z_tol = _float_env('RESTOCK_PLACE_VERIFY_Z_TOL', 0.12)
         self._place_offdeck_frames = 0
+        # sim-robust-phase-timeout-during-recovery-v1: credit the per-phase timeout clock for the sim time
+        # spent while the motion adapter is inside a NAMED move_group crash recovery (respawn hold /
+        # post-respawn re-attach / an observed move_group death still being recovered -- motion.
+        # crash_recovery_active()). respawn2b: two deaths inside the collect lift consumed ~119 of the 120 s
+        # lift budget (orphaned-goal waits + re-sends), tripping 'phase timeout: lift' on a crash that had
+        # otherwise recovered. The phase is NOT stuck during that window -- it is waiting out a bounded
+        # recovery nothing in the phase caused -- so the credited sim time is subtracted from the timeout
+        # comparison (elapsed - credit > phase_timeout). The credit is BOUNDED by _recovery_pause_cap_s so a
+        # recovery that never completes still ends BY NAME here rather than pausing forever; the adapter's
+        # own bounds (RESPAWN_WAIT_CAP_S, the re-attach budget, the PR 234/242 fast-fail) normally end it
+        # first. No recovery => the probe is False, credit stays 0.0, the comparison is the old
+        # `elapsed > phase_timeout` => byte-identical. Cap env (SIM seconds, >0 enables; 0 disables the
+        # feature entirely => byte-identical); default is a generous belt-and-braces bound above a real
+        # multi-death recovery, not a primary terminator.
+        self._recovery_pause_cap_s = _float_env_bounded('RESTOCK_RECOVERY_PAUSE_CAP_S',
+                                                        RECOVERY_PAUSE_CAP_S, 0.0, 3600.0)
+        self._recovery_credit_s = 0.0        # sim time credited to crash recovery in the current phase
+        self._recovery_pause_logged = False  # the once-per-phase PHASE_CLOCK_RECOVERY_PAUSE line fired
         self.evidence = []
         self.reason = ''
         self.last_time = None
@@ -493,6 +622,12 @@ class TransferController:
         self.last_time = None
         self.evidence, self.reason = [], ''
         self.issued = False
+        # sim-robust-movegroup-second-death-v1: clear the port's TOTAL per-op move_group crash-retry budget
+        # so a fresh operation gets the full cap (the per-move budget already resets in begin/begin_joint_goal).
+        # Guarded for a motion stub without the method (byte-identical when absent).
+        _reset_crash_budget = getattr(self.motion, 'reset_crash_budget', None)
+        if callable(_reset_crash_budget):
+            _reset_crash_budget()
         self._contact_suction = False   # suction enabled once during the contact descent (grasp latch)
         self._contact_waits = 0         # bounded grace ticks awaiting a fresh acquisition deadline
         self._contact_step = 0.0        # cumulative contact-feedback over-press travel (m); see __init__
@@ -504,6 +639,9 @@ class TransferController:
         self._grasp_retries = 0         # fm395: bounded grasp re-seat retries used this operation
         self._carton_z_at_grasp = None  # fm410: latched at grasp-confirm; the lift-probe tracking baseline
         self._collect_source_evidence_waits = 0  # fm449: ticks awaiting a clean source capture before the reach
+        self._recovery_credit_s = 0.0           # sim-robust-phase-timeout-during-recovery-v1: fresh per op
+        self._recovery_pause_logged = False
+        self._esdf_boot_gate.reset()   # sim-robust-esdf-boot-gate-v1: re-arm the boot ESDF-ack gate per op
         self.verify_ids = set()
         self.release_time = None
 
@@ -529,25 +667,89 @@ class TransferController:
         """RESTOCK_TRANSFER_MODE=live_pose AND this run is the transfer (collect is never affected)."""
         return self.transfer_mode == LIVE_POSE and getattr(self, 'operation', None) == 'transfer'
 
-    def _transfer_wrist_guard(self):
-        """RESTOCK_TRANSFER_CARRY=wrist_guard on a TRANSFER: the (wrist1_cap, wrist2_min) clear carry region
-        every transfer place move's KDL goal must satisfy (the configured carry guards, else the
-        bench-proven 0.65 / 0.0). None => off (collect, or the flag unset) => byte-identical begin()."""
-        if WRIST_GUARD not in self.transfer_carry or getattr(self, 'operation', None) != 'transfer':
+    def _collect_deck_place(self):
+        """collect_place_straight_line AND this run is the NON-cage COLLECT deck place. Its place descent
+        lowers the HELD carton onto the cart deck, and the carton is a cuMotion attached_object not
+        self-collision-ignored against the forearm/wrist/upper-arm, so the set-down fold is rejected as a
+        (conservative) attached-object SELF-collision even though the bare arm + wrist-guard are clear
+        there (collect4). The place + empty retreat therefore route collision-OFF straight-line like the
+        cart-cage place and the live_pose transfer place; the PREPLACE standoff stays collision-aware.
+        Off (default) or a cage/transfer run => False => byte-identical."""
+        return (self.collect_place_straight_line
+                and getattr(self, 'operation', None) == 'collect'
+                and not self.cart_cage_place)
+
+    def _place_wrist_guard(self):
+        """The (wrist1_cap, wrist2_min) clear carry region a place-side KDL goal must satisfy, else the
+        adapter re-seeds from the wrist-flipped twin (same TCP, clear branch). Active for:
+          * a TRANSFER with RESTOCK_TRANSFER_CARRY=wrist_guard (the warm2 preplace jam, unchanged), or
+          * a COLLECT place-on-cart with collect_place_wrist_guard set (sim-robust-cart-place-goal-v1:
+            the deck place pose-IK otherwise lands in the ur_wrist_2-vs-ur_forearm self-colliding branch,
+            collectsrc's 12-replan 'Invalid c-space position' storm).
+        The region is the configured carry guards, else the bench-proven 0.65 / 0.0 (data/sim-restock-
+        armbench-v1). None => off => byte-identical begin()."""
+        op = getattr(self, 'operation', None)
+        on = ((op == 'transfer' and WRIST_GUARD in self.transfer_carry)
+              or (op == 'collect' and self.collect_place_wrist_guard))
+        if not on:
             return None
         cap = DEFAULT_WRIST1_CAP if self.carry_wrist1_cap is None else self.carry_wrist1_cap
         w2min = DEFAULT_WRIST2_MIN if self.carry_wrist2_min is None else self.carry_wrist2_min
         return (cap, w2min)
+
+    def _pick_wrist_guard(self):
+        """sim-robust-transfer-settle-oscillation-v1: the ``(wrist1_cap, wrist2_min)`` clear carry region the
+        live_pose TRANSFER PICK (approach + contact) IK must satisfy, or None (off/not applicable =>
+        byte-identical). The carry wrist_guard covers only the place half (GUARDED_PHASES), so the pick was
+        free to IK the ur_wrist_2-vs-ur_forearm self-colliding family (coldwin12: approach landed wrist_2
+        -0.598, the straight-line contact descended to goal wrist_1 1.171 / wrist_2 -1.033 and limit-cycled
+        0.169 rad short); coldwin11 took the clear wrist_2-positive family (wrist_1 -0.18, wrist_2 +0.93) and
+        settled instantly. Scoped to a live_pose transfer pick approach/contact, so collect / non-live_pose /
+        every other phase / the unset key are byte-identical. The region is the configured carry guards, else
+        the bench-proven 0.65 / 0.0 (the same bounds _place_wrist_guard uses)."""
+        if not (self.transfer_pick_wrist_guard and self._live_pose_transfer()
+                and self.phase in ('approach', 'contact')):
+            return None
+        cap = DEFAULT_WRIST1_CAP if self.carry_wrist1_cap is None else self.carry_wrist1_cap
+        w2min = DEFAULT_WRIST2_MIN if self.carry_wrist2_min is None else self.carry_wrist2_min
+        return (cap, w2min)
+
+    def _preplace_reach_guard(self):
+        """sim-robust-transfer-preplace-reach-v1: the ``(max_droop, upright_seed)`` reach guard for the
+        live_pose TRANSFER PREPLACE's wrist-guarded KDL IK, or None when off/not applicable. Scoped to the
+        PREPLACE of a live_pose transfer with the wrist_guard active -- the one seeded-KDL pose-IC move that
+        hit the deep-fold trap (place/retreat are collision-off straight-line, not pose-IK). None =>
+        byte-identical. Only consulted when ``_place_wrist_guard`` is already active for this move."""
+        if self.transfer_preplace_reach_guard is None:
+            return None
+        if not (self._live_pose_transfer() and WRIST_GUARD in self.transfer_carry
+                and self.phase == 'preplace'):
+            return None
+        return self.transfer_preplace_reach_guard
 
     def _repositions_before_place(self):
         """fm390's TRANSIT base-reposition handshake applies. Never for a live_pose transfer: the runtime
         drives that reposition for collect only, so a transfer would hold in TRANSIT to the phase timeout."""
         return self.reposition_before_place and not self._live_pose_transfer()
 
+    def _note_recovery_pause(self):
+        """sim-robust-phase-timeout-during-recovery-v1: log the sim time credited to a named move_group
+        crash recovery in the current phase, ONCE per phase. Called at each phase exit (success transition
+        and the phase-timeout fail path). No credit => no line => byte-identical console on a crash-free
+        run. The recovery-bound fail path names the amount in its own reason instead."""
+        if self._recovery_credit_s > 0 and not self._recovery_pause_logged:
+            print('PHASE_CLOCK_RECOVERY_PAUSE phase=%s paused=%.2fs sim (a named move_group crash recovery '
+                  'held the arm; the per-phase timeout budget was credited that time so a recovered crash '
+                  'is not charged as a phase timeout)' % (self.phase, self._recovery_credit_s), flush=True)
+            self._recovery_pause_logged = True
+
     def _transition(self, phase):
+        self._note_recovery_pause()   # sim-robust-phase-timeout-during-recovery-v1: report before reset
         self.phase, self.elapsed, self.issued = phase, 0.0, False
         self._staged_retries = 0   # fm358: fresh retry budget per phase
         self._move_deadline_retries = 0   # fm367: fresh deadline-retry budget per phase
+        self._recovery_credit_s = 0.0          # sim-robust-phase-timeout-during-recovery-v1: fresh per phase
+        self._recovery_pause_logged = False
         if phase == 'contact':
             self._contact_progress_wall = self.steady_clock()   # fm425: start the WALL no-progress budget
 
@@ -557,6 +759,13 @@ class TransferController:
                       None if status=='failed' else getattr(self,'valid_until_steady',None))
 
     def _fail(self, reason):
+        # sim-robust-host-timers-audit-fix-v1 (named trigger): motion.stop() publishes the global
+        # emergency stop, which the Isaac side reports to the mission as a BARE 'host emergency stop'
+        # (the stop wire carries no reason). Log the NAMED host-side cause here so host-stack.log can
+        # ALWAYS be traced to a distinct trigger -- which watchdog / deadline / freshness / gate fired --
+        # before the stop (coldlive sample-4 had no such line, only the PLAN_WALL_DIAG hint). Cheap, one
+        # line per fault, at the single controller fault chokepoint. Logs the ACTIVE phase (pre-fail).
+        print('HOST_FAULT_ESTOP phase=%s reason=%r' % (self.phase, reason), flush=True)
         self.reason, self.phase = reason, 'failed'
         try:
             self.motion.stop()
@@ -596,6 +805,33 @@ class TransferController:
         self.issued = False   # re-plan + re-execute this move next tick
         return self._result()
 
+    def _planner_crash_failfast_or_none(self):
+        """sim-robust-collect-stow-stall-v1: when the motion port reports a terminal move_group planner
+        crash/hang (last_fault_was_planner_unrecoverable -- a sim-clock PLANNING deadline whose bounded
+        crash re-sends were exhausted because the planner did not respawn), FAIL the op FAST with a NAMED
+        cause instead of looping our own move retries (MOVE_DEADLINE_RETRY / STAGED_MOVE_RETRY) to the
+        per-phase timeout. coldliveapproach: the post-release collect STOW consumed the full 120-sim-s
+        phase timeout re-sending plans to a crashed-and-not-respawned move_group, reported only as the
+        opaque 'phase timeout: stow'. Returns a terminal _fail Result, or None when the port has no such
+        fault (then the caller keeps its normal retry path -- byte-identical). Checked before the sim-
+        deadline / staged retries so the terminal planner fault always wins."""
+        probe = getattr(self.motion, 'last_fault_was_planner_unrecoverable', None)
+        if callable(probe) and probe():
+            return self._fail('%s aborted: the move_group planner crashed or hung (a plan goal was never '
+                              'accepted / no plan returned within the sim planning budget) and did not '
+                              'respawn -- failing fast' % self.phase)
+        # sim-robust-movegroup-double-death-v1 (gap 1, coldwin4): the carried carton could not be re-attached
+        # to the respawned move_group's planning scene within the bounded sim budget. The carton is NOT in
+        # the scene, so re-planning would plan straight through it -- fail the op BY NAME rather than resend
+        # carton-less (the coldwin4 recovery gap). Checked beside the planner-crash fast-fail; no such fault
+        # on a healthy or no-carry recovery -> None (byte-identical).
+        reattach = getattr(self.motion, 'last_fault_was_reattach_failure', None)
+        if callable(reattach) and reattach():
+            return self._fail('%s aborted: the carried carton could not be re-attached to the respawned '
+                              'move_group planning scene within the re-attach budget -- failing fast rather '
+                              'than planning without the carton' % self.phase)
+        return None
+
     def retry_or_fail_move(self, reason):
         """fm387: a motion fault surfaced by the host-stack WATCHDOG (goal-tolerance / track-miss /
         watchdog-drain -- ros_adapter failed_result_pending()/drain()) fires on its 0.1 s timer OUTSIDE
@@ -613,6 +849,14 @@ class TransferController:
             ack()
         return self._raised_move_exc(RuntimeError(reason), staged=staged)
 
+    def _crash_recovery_active(self):
+        """sim-robust-phase-timeout-during-recovery-v1: True iff the motion adapter reports it is inside a
+        NAMED move_group crash recovery right now (respawn hold / post-respawn re-attach / an observed
+        move_group death still being recovered). Read through getattr so a motion stub without the probe
+        (and the real rig) => False => byte-identical phase-timeout accounting."""
+        probe = getattr(self.motion, 'crash_recovery_active', None)
+        return bool(probe()) if callable(probe) else False
+
     def step(self, dt: float, sensors: Sensors) -> Result:
         if self.phase == 'idle':
             raise RuntimeError('call start before step')
@@ -625,8 +869,46 @@ class TransferController:
             return self._fail('invalid or regressing simulation clock')
         self.last_time = now
         self.elapsed += dt
-        if self.elapsed > self.phase_timeout:
+        # sim-robust-phase-timeout-during-recovery-v1: while the motion adapter is inside a NAMED move_group
+        # crash recovery, credit this dt out of the phase-timeout budget (elapsed - credit vs phase_timeout)
+        # so a recovered crash is not charged as 'phase timeout' (respawn2b: two deaths ate ~119 of 120 s).
+        # Bounded by _recovery_pause_cap_s: a recovery that outruns the bound FAILS FAST by name here (never
+        # pauses forever). Disabled (cap 0) or no recovery => credit stays 0 => the comparison is exactly the
+        # legacy `elapsed > phase_timeout` => byte-identical.
+        if self._recovery_pause_cap_s > 0 and self._crash_recovery_active():
+            if self._recovery_credit_s >= self._recovery_pause_cap_s:
+                return self._fail('crash recovery exceeded its %.0fs sim pause budget in phase %s: a named '
+                                  'move_group crash recovery did not complete within the bound -- failing '
+                                  'fast by name instead of pausing the phase clock indefinitely'
+                                  % (self._recovery_pause_cap_s, self.phase))
+            self._recovery_credit_s = min(self._recovery_pause_cap_s, self._recovery_credit_s + dt)
+        if self.elapsed - self._recovery_credit_s > self.phase_timeout:
+            self._note_recovery_pause()   # name any credited recovery time before the (honest) timeout
             return self._fail('phase timeout: ' + self.phase)
+        # sim-robust-esdf-boot-gate-v1: boot ESDF-incorporation gate (opt-in HOST key, 0 => off =>
+        # byte-identical). Checked BEFORE the collision_dt invariant and before any motion streams.
+        # HOLD (no motion) until the first valid incorporation ack, FAIL FAST by name if the sim-clock
+        # grace elapses with collision_time still at the -1 sentinel, PROCEED once a valid ack has
+        # arrived (then the collision_dt invariant below owns freshness).
+        _boot = self._esdf_boot_gate.observe(now, sensors.collision_time)
+        if _boot is esdf_boot_gate.HOLD:
+            print('ESDF_BOOT_GATE_HOLD phase=%s now=%.3f collision_time=%.3f (grace %.1fs)'
+                  % (self.phase, now, sensors.collision_time, self._esdf_boot_gate.grace_s), flush=True)
+            return self._result()
+        if _boot is not esdf_boot_gate.PROCEED:
+            print('ESDF_BOOT_GATE_TRIP phase=%s now=%.3f %s' % (self.phase, now, _boot), flush=True)
+            return self._fail(_boot)
+        # sim-robust-esdf-boot-gate-v2: log the collision_time sentinel -> first valid stamp transition
+        # ONCE per op (cheap one-shot), so the gate's PROCEED decision is never again invisible -- the
+        # value, the sim now, and the source are recorded exactly where the gate hands freshness to the
+        # collision_dt invariant below. Fires whether the first step already carried a valid ack (no HOLD,
+        # the healthy case) or a HOLD preceded it (the one-tick boot race). Only when the gate is enabled,
+        # so a gate-off run stays byte-identical on the console too.
+        if self._esdf_boot_gate.consume_just_satisfied():
+            print('ESDF_BOOT_GATE_READY phase=%s now=%.3f collision_time=%.3f (first valid nvblox '
+                  'incorporation ack: the mirrored station collision_time left the -1 not-ready sentinel; '
+                  'source=sensors.collision_time packet mirror; collision_dt invariant now owns freshness)'
+                  % (self.phase, now, sensors.collision_time), flush=True)
         collision_fresh = self._fresh(sensors.collision_time, now)
         # fm430 (2a) fallback: ride the post-attach LIFT (to the fixed clear-region carry_lift_shape, which
         # does NOT depend on the live collision world) THROUGH a brief ESDF-re-incorporation staleness for
@@ -944,12 +1226,20 @@ class TransferController:
             if self.transfer_carry and getattr(self, 'operation', None) == 'transfer':
                 # Label the carry workarounds honestly in the evidence + console (mission.json records them).
                 label = {'source': 'transfer_carry', 'transfer_carry': sorted(self.transfer_carry)}
-                guard = self._transfer_wrist_guard()
+                guard = self._place_wrist_guard()
                 if guard is not None:
                     label['wrist_guard'] = {'wrist1_cap': guard[0], 'wrist2_min': guard[1],
                                             'phases': list(GUARDED_PHASES)}
                     print('TRANSFER_CARRY wrist_guard active: %s KDL goals must keep wrist_1<=%.2f, wrist_2>=%.2f '
                           '(wrist-flipped re-seed)' % ('/'.join(GUARDED_PHASES), guard[0], guard[1]), flush=True)
+                    # sim-robust-transfer-preplace-reach-v1: name the preplace reach guard honestly.
+                    if self._live_pose_transfer() and self.transfer_preplace_reach_guard is not None:
+                        md, seed = self.transfer_preplace_reach_guard
+                        label['preplace_reach_guard'] = {'max_droop': md, 'upright_seed': list(seed)
+                                                         if seed is not None else None}
+                        print('TRANSFER_CARRY preplace_reach_guard active: preplace KDL goal must also keep the '
+                              'shoulder fold holdable (fold_droop<=%.2f); upright-seeded, deep-fold clear '
+                              'branch rejected' % md, flush=True)
                 if WELD in self.transfer_carry:
                     label['transfer_attach'] = 'weld'
                     print('TRANSFER_CARRY weld: the carton is held by the SIM fixed-joint weld from the grasp '
@@ -997,6 +1287,25 @@ class TransferController:
                                                  slow=True, goal_tol=0.2)
                     self.issued = True
                     return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+                # sim-robust-cart-place-goal-v1: droop-safe + self-collision-safe fixed-shape PREPLACE for
+                # the NON-cage COLLECT place-on-cart. The reposition place drives the base to the rollwagen
+                # mouth, then the pose-IK preplace's nearest-branch seed (from the folded carry config) lands
+                # in a branch the arm cannot execute: either the ur_wrist_2-vs-ur_forearm self-collision
+                # (collectsrc's 'Invalid c-space position' replan storm) or the DEEP shoulder_lift fold
+                # (~ -3.57) the soft drive cannot HOLD under the carton load (collect1 sagged 0.39 rad short
+                # -> PATH_TOLERANCE_VIOLATED -> heartbeat lost). This CPU-validated UPRIGHT clear-region shape
+                # (shoulder_lift ~ -1.9; FK TCP ~ the sensed preplace standoff) is driven as a fixed
+                # collision-planned begin_joint_goal exactly like cage_preplace_shape; the place (pose-IK
+                # below, near_start-seeded from here with collect_place_wrist_guard on) then tracks the SENSED
+                # deck target, staying on the upright clear branch. Scoped to collect preplace, non-cage.
+                # Absent => the pose-IK preplace (byte-identical).
+                if (self.phase == 'preplace' and not self.cart_cage_place
+                        and getattr(self, 'operation', None) == 'collect'
+                        and self.collect_place_preplace_shape is not None):
+                    self.motion.begin_joint_goal(self.collect_place_preplace_shape, s.joint_positions,
+                                                 slow=True, goal_tol=0.2)
+                    self.issued = True
+                    return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
                 # fm403: wrist_2-safe fixed-shape LIFT. The task-space lift IK can flip wrist_2 to the
                 # negative self-colliding branch (w2 -> -1.25 crosses the ur_wrist_2-vs-ur_forearm stop;
                 # runs 300d/305/311 jammed even with wrist_1 capped -- the bench showed w1 cleared but w2
@@ -1010,13 +1319,65 @@ class TransferController:
                                                  slow=True, goal_tol=0.2)
                     self.issued = True
                     return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+                # sim-robust-collect-stow-branch-v1 (collect5, 2026-10-23): clear-branch RETREAT for the
+                # NON-cage COLLECT deck place. The place + retreat run collision-OFF straight-line
+                # (_collect_deck_place) because the set-down fold is a conservative attached-carton
+                # self-collision; but with collision-avoidance OFF the empty-retreat pose IK branches into a
+                # DROOPED config where the forearm sits ~18 mm inside the gripper-cube (cube_without_surface_
+                # plates) sphere margin (collect5 retreat endpoint [0.214,-1.755,2.075,-0.320,1.975,0], FK TCP
+                # ~10 cm below the standoff). The NEXT move is the collision-AWARE staged retreat_tuck, and
+                # cuMotion rejects that self-colliding START ('Invalid c-space position: self collision
+                # detected' -> INVALID_INITIAL_CSPACE_POSITION -> MANIP_HOST_FAILED op=collect -> arm
+                # heartbeat lost). Fix: return the empty gripper to the FIXED clear UPRIGHT standoff
+                # (collect_place_preplace_shape -- the same CPU-validated clear-region shape the preplace
+                # uses, FK TCP = the retreat standoff pose) via a collision-OFF straight-line JOINT smoothstep
+                # (begin_joint_goal(straight_line=True)): the smoothstep monotonically un-folds the forearm
+                # out of the cube margin to a self-clear config, so retreat_tuck/stow then plan from a clean
+                # start. No clear escape shape configured => fail by name (never drive the collision-aware
+                # tuck into a self-colliding start). Scoped to _collect_deck_place retreat, so cart-cage /
+                # live_pose / scripted-still stay byte-identical.
+                if self.phase == 'retreat' and self._collect_deck_place():
+                    if self.collect_place_preplace_shape is None:
+                        return self._fail('collect deck retreat has no clear-branch escape shape: '
+                                          'collect_place_straight_line needs collect_place_preplace_shape '
+                                          'to back the empty gripper off the self-colliding place fold')
+                    self.motion.begin_joint_goal(self.collect_place_preplace_shape, s.joint_positions,
+                                                 straight_line=True)
+                    self.issued = True
+                    return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
                 straight_contact = self.phase == 'contact' and self.contact_straight_line
                 # Cart-cage open-face place: the INSERT (place) and empty-handed RETREAT are straight-line
                 # moves THROUGH the single open +x face (begin(straight_line=True): collision-off seeded
                 # 2-point). The cage walls are published only so cuMotion routes the collision-aware
                 # PREPLACE around them to the mouth standoff; the insert then deliberately drives into the
                 # open mouth and back out, never crossing a wall (CPU-proven by the fold->insert sweep).
-                straight = straight_contact or (self.cart_cage_place and self.phase in ('place', 'retreat'))
+                #
+                # live_pose transfer (armcam2, 2026-10-22): the place lowers the carton ONTO the bay
+                # surface, so the place config necessarily brings the gripper tines to within ~13 mm of
+                # the TransferBay top (CPU-measured: surface_plate_6 at +0.0126 m, vs the preplace standoff
+                # at +0.143 m -- data/.../livepose-pick-collision), inside cuMotion's ESDF collision margin.
+                # A collision-AWARE joint-space plan to that config is therefore rejected
+                # ('Invalid c-space position: world collision detected' -> trajopt UNKNOWN_STATUS ->
+                # MANIP_HOST_FAILED op=transfer), exactly as the preplace plans cleanly. Route the final
+                # place descent and the empty-handed retreat as the SAME straight-line collision-off seeded
+                # insert the cart-cage place uses (the preplace standoff stays collision-aware): touching the
+                # surface is the intent, like the contact descent at the pick. Scoped to live_pose so the
+                # scripted/still path and every non-live_pose run are byte-identical.
+                #
+                # collect deck place (collect4, 2026-10-23): the NON-cage COLLECT place lowers the HELD
+                # carton onto the cart deck. The carton is a cuMotion attached_object (ros_host attaches a
+                # 34-sphere cuboid at gripper_tcp) NOT self-collision-ignored against the forearm/wrist/
+                # upper-arm, so the set-down fold is rejected as an attached-object SELF-collision ('Invalid
+                # c-space position: self collision detected' -> MANIP_HOST_FAILED op=collect) EVEN THOUGH the
+                # bare arm is self-clear and PR #209's wrist-guard accepted the config. Route it the same
+                # way (place + empty retreat straight-line; preplace collision-aware) -- the deck is not a
+                # cuMotion world object here, so this is purely the conservative attached-carton self-check
+                # of the intended set-down. Gated on _collect_deck_place() (collect_place_straight_line,
+                # non-cage collect), so transfer / live_pose / scripted-still stay byte-identical.
+                straight = (straight_contact
+                            or (self.cart_cage_place and self.phase in ('place', 'retreat'))
+                            or (self._live_pose_transfer() and self.phase in ('place', 'retreat'))
+                            or (self._collect_deck_place() and self.phase in ('place', 'retreat')))
                 target = self._overpressed_contact(self._contact_step) if straight_contact else self.poses[self.phase]
                 # Per-move goal type (firstmate msg 284/285): the cart PLACE poses have no cuMotion
                 # task-space IK solution (the solver is systemically broken here); route them through
@@ -1031,6 +1392,15 @@ class TransferController:
                 # fm403: belt-and-braces wrist_2 lower bound on the task-space LIFT fallback (carry_lift_shape
                 # unset) so the IK cannot pick the w2-negative self-colliding branch. None elsewhere.
                 carry_w2min = self.carry_wrist2_min if self.phase == 'lift' else None
+                # sim-robust-transfer-settle-oscillation-v1 (coldwin12): guard the live_pose transfer PICK
+                # (approach + contact) to the clear wrist region too. The approach is a cuMotion task-space
+                # pose goal -- carry the clear-region joint constraints (ur_wrist_1 <= cap, ur_wrist_2 >= min)
+                # so cuMotion IKs the pick on the clear wrist_2-positive family, not the ur_wrist_2-vs-forearm
+                # self-colliding one that limit-cycled. (The contact's straight-line seeded-KDL IK is guarded
+                # via the wrist_guard extra below.) None/off => byte-identical.
+                pick_guard = self._pick_wrist_guard()
+                if pick_guard is not None:
+                    carry_cap, carry_w2min = pick_guard
                 # fm345 smaller-problems-later: the carton-loaded PLACE extend (preplace/place) is too
                 # fast for the soft arm drive to track the cuMotion min-jerk timing (run-270 sagged
                 # 0.567 rad short at rest). Slow those two moves to ~half and widen their terminal
@@ -1044,9 +1414,26 @@ class TransferController:
                 # RESTOCK_TRANSFER_CARRY=wrist_guard: the transfer place moves' KDL goal must land in the clear
                 # wrist branch (warm2: the preplace IK chose w1 2.08 / w2 -1.02 and jammed at the stop). Passed
                 # ONLY when active, so an unset flag keeps this begin() call byte-identical.
-                guard = self._transfer_wrist_guard()
+                guard = self._place_wrist_guard()
                 extra = ({'wrist_guard': guard} if guard is not None and joint_space and not straight
                          and self.phase in GUARDED_PHASES else {})
+                # sim-robust-transfer-preplace-reach-v1: alongside the wrist-guard, reject a clear-but-deep
+                # shoulder fold and seed the holdable upright branch for the live_pose transfer PREPLACE.
+                # Only added when the wrist-guard itself is active for this move, so an unset key keeps the
+                # begin() call byte-identical.
+                if 'wrist_guard' in extra:
+                    reach = self._preplace_reach_guard()
+                    if reach is not None:
+                        extra['reach_guard'] = reach
+                # sim-robust-transfer-settle-oscillation-v1: the live_pose transfer PICK CONTACT descent is a
+                # straight-line seeded-KDL IK (contact_straight_line); guard that IK to the clear wrist branch
+                # so a contact config outside the region is re-seeded from its wrist-flipped twin (or fails by
+                # the named carry-wrist-region reason) instead of silently descending into the self-collision
+                # stop, and so a MOVE_RETRY of the contact phase re-plans onto the clear branch from the live
+                # pose. With the approach guarded (above) the contact start is clear and this accepts first try
+                # (byte-identical). Off/non-pick => pick_guard is None => this never fires.
+                if pick_guard is not None and straight_contact:
+                    extra['wrist_guard'] = pick_guard
                 self.motion.begin(target, s.joint_positions, straight_line=straight,
                                   joint_space=joint_space, wrist1_cap=carry_cap, wrist2_min=carry_w2min,
                                   slow=place_move, goal_tol=(0.12 if place_move else None),
@@ -1087,6 +1474,11 @@ class TransferController:
                 # still fails fast.
                 return self._raised_move_exc(exc, staged=False)
             if outcome == 'failed':
+                # sim-robust-collect-stow-stall-v1: a terminal move_group planner crash/hang fails fast with
+                # a named cause BEFORE the sim-deadline retry (which would re-send to the dead planner).
+                crash = self._planner_crash_failfast_or_none()
+                if crash is not None:
+                    return crash
                 # fm367: a SIM-clock move/settle deadline miss (the port flags it; a collision/plan
                 # rejection raises -> flag False) is a render-pacing transient, so re-issue the SAME
                 # move with a fresh deadline up to the deadline-retry max before failing the phase.
@@ -1099,7 +1491,12 @@ class TransferController:
                           (self.phase, self._move_deadline_retries, self._move_deadline_retry_max), flush=True)
                     self.issued = False   # re-issue this move (fresh deadline) next tick
                     return self._result()
-                return self._fail('collision planning or execution failed')
+                # A rejected/aborted ExecuteTrajectory (trajectory_host goal rejection or execution
+                # fault) is NOT a planning collision: surface the port's distinct reason when it has one
+                # (sim-robust-pick-plan-rejection-v1), else the generic collision/plan-rejection string.
+                _take = getattr(self.motion, 'take_exec_abort_reason', None)
+                _distinct = _take() if callable(_take) else None
+                return self._fail(_distinct or 'collision planning or execution failed')
             if outcome not in ('running', 'succeeded'):
                 return self._fail('invalid motion outcome')
             if outcome == 'succeeded':
@@ -1193,6 +1590,11 @@ class TransferController:
                 # below on the same budget; a genuine collision/invalid outcome still fails fast.
                 return self._raised_move_exc(exc, staged=True)
             if outcome == 'failed':
+                # sim-robust-collect-stow-stall-v1: a terminal move_group planner crash/hang fails fast with
+                # a named cause before the staged retry (which would re-send to the dead planner).
+                crash = self._planner_crash_failfast_or_none()
+                if crash is not None:
+                    return crash
                 # fm358 guard: a staged move failed once at the plan->execute handoff (run-283 pan) after
                 # a normal plan -- a transient. Re-issue (fresh plan + deadline + budget) up to the
                 # staged-move retry max before failing the stage. Does NOT loosen any tolerance.
@@ -1294,6 +1696,15 @@ class TransferController:
                 if not self.motion.update_payload(False, self.profile):
                     return self._fail('payload collision detachment not acknowledged')
                 self._transition('retreat')
+                return self._result()
+            # sim-robust-cart-place-descent-v1: the gripper-open was emitted but the measured contact has
+            # not cleared -- the SIM_ATTACH weld / suction is still holding the carton. self.elapsed counts
+            # SIM seconds in this release phase (reset on entry, advanced at the top of step). Fail fast with
+            # a named reason rather than carry the carton back up on retreat/stow or stall to phase_timeout.
+            if self.release_detach_timeout_s and self.elapsed > self.release_detach_timeout_s:
+                return self._fail('release did not detach the held carton within %.1fs sim of the '
+                                  'gripper-open command (weld/suction still engaged)'
+                                  % self.release_detach_timeout_s)
             return self._result()
         if self.phase == 'stow':
             if s.contact or self.held:
@@ -1313,6 +1724,13 @@ class TransferController:
                 # returned 'failed' below still fails fast as a collision.
                 return self._raised_move_exc(exc, staged=True)
             if outcome == 'failed':
+                # sim-robust-collect-stow-stall-v1: a terminal move_group planner crash/hang fails fast with
+                # a named cause before the staged retry. This is the coldliveapproach failure: the stow plan
+                # goal was never accepted (move_group SIGABRT-hung, no respawn), so re-sending it only
+                # consumed the per-phase timeout -- fail fast named instead.
+                crash = self._planner_crash_failfast_or_none()
+                if crash is not None:
+                    return crash
                 # fm389/run-300e: a returned 'failed' at STOW was hard-failed here, UNLIKE the other staged
                 # moves (tuck/pan/retreat_tuck) which bounded-retry a returned 'failed' (fm358). run-300e
                 # reached stow (deepest ever -- lift/place/release/retreat all cleared) and the stochastic

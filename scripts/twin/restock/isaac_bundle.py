@@ -290,6 +290,11 @@ class Bundle:
     # Record of the opt-in recorded start staging (shortcut.staged_scenario) for mission.json; None
     # unless config['start_staging'] is set.
     start_staging: dict = None
+    # Best-effort RTX render-product / camera-feed releases, run by release_render() BEFORE
+    # SimulationApp.close() so VRAM is freed before the renderer shuts down -- the failure path
+    # (a run that ends on a per-op manip failure) then tears the renderer down with the same
+    # headroom a clean exit has, instead of core-dumping. Empty => release_render() is a no-op.
+    _render_closers: tuple = ()
 
     def close(self):
         errors = []
@@ -300,6 +305,18 @@ class Bundle:
                 errors.append(str(exc))
         if errors:
             raise RuntimeError('; '.join(errors))
+
+    def release_render(self):
+        """Pause every known camera's RTX render product so its GPU buffers are freed before
+        ``SimulationApp.close()``. Teardown robustness only -- run AFTER the walkthrough is encoded
+        (nothing reads a render product at this point) and BEFORE the app close. Never raises (a
+        render-release failure must not skip the app close); returns the number attempted."""
+        for closer in self._render_closers:
+            try:
+                closer()
+            except Exception:  # noqa: BLE001 -- best-effort VRAM release; never block the app close
+                pass
+        return len(self._render_closers)
 
 
 def _resolve_factory(config, key):
@@ -410,6 +427,11 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              uncouple_on_return=bool(config.get('uncouple_on_return')),
                              carry_reposition_drive=bool(config.get('carry_reposition_drive')),
                              couple_standoff_tolerance=config.get('couple_standoff_tolerance'),
+                             # sim-robust-couple-approach-v1: land the couple standoff on the MEASURED
+                             # cart axis (+ bounded re-approach) so the fine-dock starts aligned to the
+                             # pinned cart's actual yaw, not the stale fixed map pose. Absent => the
+                             # authored fixed standoff (byte-identical).
+                             couple_cart_relative=config.get('couple_cart_relative'),
                              # vr1: accept the fm461 ground-truth place check as the transfer (and,
                              # opt-in, collect) stage evidence -- labelled source='ground_truth'. Derived
                              # from config['transfer_ground_truth'].enabled / collect_ground_truth_place_
@@ -418,7 +440,13 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              # Staged start (start_at set, not collect): hold the first manipulation
                              # dispatch until the sim settled (config['staged_start_settle_s'], default
                              # 20 s); 0.0 on a cold run => no hold, byte-identical. See staged_start.py.
-                             staged_settle_s=staged_settle_seconds(config))
+                             staged_settle_s=staged_settle_seconds(config),
+                             # sim-robust-cart-place-descent-v1: tolerate a bounded base excursion from the
+                             # place_approach anchor during the loaded collect place onto the deck (the
+                             # extended carton-loaded arm's descent transiently shoves the yaw-lock-only
+                             # braked base), so the place/release/stow sequence completes; a shove beyond
+                             # the bound fails with a named reason. Absent => the strict guard (byte-identical).
+                             collect_place_base_settle_m=config.get('collect_place_base_settle_m'))
     if staged_clock_sync(config):
         # Staged start: the shortcut's settle steps leave /clock a constant offset ahead of the packet
         # clock; stamp it on every host sensor packet so the host freshness checks measure true age
@@ -450,7 +478,29 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
         warm_reset = build_warm_reset(app=app, assembly=assembly, parts=parts, plan=plan,
                                       config=config, output=output)
     return Bundle(adapter=adapter, recording=recording, _closers=tuple(closers),
-                  warm_reset=warm_reset, start_staging=start_staging)
+                  warm_reset=warm_reset, start_staging=start_staging,
+                  _render_closers=_render_closers(assembly))
+
+
+def _render_closers(assembly):
+    """Best-effort zero-arg callables that pause each known camera's RTX render product, for
+    :meth:`Bundle.release_render` to run before ``SimulationApp.close()``.
+
+    Covers the station decode cameras (the dominant 2560x1920 source/cart/shelf render products)
+    and any location cameras. The chase recorder camera and the arm/mast masked-depth feeds are
+    NOT included here: the recorder is finalized by its own closer and the masked-depth ROS
+    bridges are stopped by ``Bundle.close()`` before the app close. Each closer delegates to the
+    pre-existing best-effort toggle, which already logs-and-skips a raw ``Camera`` with no hydra
+    pause -- so this never raises and adds no new VRAM-release path to validate on CPU."""
+    from .native_cameras import set_camera_render_products_enabled
+    sources = getattr(assembly, 'sensing_sources', None)
+    sources = sources if isinstance(sources, dict) else {}
+    cams = []
+    for key in ('cameras', 'location_cameras'):
+        for cam in (sources.get(key) or {}).values():
+            if cam is not None:
+                cams.append(cam)
+    return tuple((lambda c=cam: set_camera_render_products_enabled(c, False)) for cam in cams)
 
 
 def _hitch_geometry(config):
@@ -542,11 +592,30 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # station baselines were commissioned under; _check_match is geometric so a brighter mission still
     # matches); absent => None => byte-identical (no rig authored, pre-fm465 behaviour).
     _light_rig_scale = config.get('light_intensity_scale')
+    # vr1: the stage-scoped sensing teardown (RESTOCK_STAGE_SCOPED_SENSING) frees the "unused" shelf
+    # camera at the pick lift -- but a camera-mode transfer or the verify-stage InventoryVerifier reads
+    # it AFTER that, so destroying it left the post-place verify reading an expired prim. Keep it alive
+    # whenever an executed stage still reads it; collect-only / fully ground-truth missions free it
+    # (byte-identical). Derived from config only, so it is inert unless the teardown is also wired.
+    from .mission import bounded_stages as _bounded_stages
+    from .sensing_sources import shelf_camera_needed as _shelf_camera_needed
+    from . import ground_truth_verify as _ground_truth_verify
+    _active_stages = _bounded_stages(config.get('stages'), config.get('stop_after'), config.get('start_at'))
+    _start_at = config.get('start_at')
+    if _start_at and _start_at in _active_stages:
+        _active_stages = _active_stages[_active_stages.index(_start_at):]
+    _transfer_gt_block = config.get('transfer_ground_truth')
+    _transfer_gt = bool(_transfer_gt_block.get('enabled') if isinstance(_transfer_gt_block, dict)
+                        else _transfer_gt_block)
+    _keep_shelf_camera = _shelf_camera_needed(
+        _active_stages, transfer_ground_truth=_transfer_gt,
+        verify_ground_truth=_ground_truth_verify.config_block(config) is not None)
     assembly.sensing_sources = build_sensing_sources(
         assembly=assembly, scenario=scenario, manifest=mobile_manifest,
         manip_runtime=manipulation.controller, pose_bridge_root=config['pose_bridge_root'],
         render_scale=float(config.get('render_scale', 1.0)),
         full_res_locations=_decode_locations, light_rig_scale=_light_rig_scale,
+        keep_shelf_camera=_keep_shelf_camera,
         mast_depth=_mast_enabled, mast_depth_settings=_mast_settings)
     sensing = sensing_factory(app=app, assembly=assembly, plan=plan, config=config, output=output)
     capture = sensing['capture']
@@ -739,8 +808,40 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # SimSpeed() + no idle cameras when config['sim_speed'] is absent => byte-identical.
         sim_speed=speed, idle_cameras=idle_cameras)
 
+    # sim-robust-vram-headroom-v1: durable, incremental stage-progress writer (crash-safe recording)
+    # ALWAYS on -- it only appends a NEW mission-progress.jsonl sidecar (success-path mission.json is
+    # byte-identical) so a native Isaac crash still leaves a reconstructable verdict. Best-effort.
+    from .crash_record import ProgressWriter
+    port._progress_writer = ProgressWriter(output)
+    # Opt-in VRAM headroom monitor (config['vram_headroom']; absent/false => None => byte-identical).
+    from . import vram_headroom as _vram
+    _vram_cfg = _vram.from_config(config)
+    if _vram_cfg.active:
+        actuators = {}
+        # Shed 1: widen the walkthrough record stride (a recording, never an honest-stage input).
+        def _shed_capture_rate(_port=port):
+            old = _port.record_stride
+            _port.record_stride = min(int(old) * 3, int(old) + 30)
+            return 'record_stride %d->%d' % (old, _port.record_stride)
+        actuators['capture_rate'] = _shed_capture_rate
+        # Shed 3: destroy the station decode render products this mission never reads (fm380/fm381
+        # teardown; keep_shelf_camera protects a camera a later stage still reads). ~0.95 GB+ returned.
+        _teardown = (assembly.sensing_sources or {}).get('stage_scoped_teardown')
+        if _teardown is not None:
+            def _shed_secondary_cameras(_t=_teardown):
+                return 'stage_scoped_teardown applied=%r' % (_t(),)
+            actuators['secondary_cameras'] = _shed_secondary_cameras
+        # Shed 2 (arm_feed_economy) has no safe RUNTIME actuator today (the eye-in-hand feed is
+        # load-bearing in collect/transfer/verify and its resolution is fixed at authoring), so it is
+        # left unregistered -> the monitor skips it and escalates. Set masked_depth.economy at boot.
+        port._vram_monitor = _vram.VramHeadroomMonitor(_vram_cfg, actuators=actuators, run_dir=output)
+        closers_extra = (port._vram_monitor.close,)
+    else:
+        closers_extra = ()
+
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)
+    closers = closers + closers_extra
     # Terminate the mast masked-depth publisher subprocess on shutdown (the wrist bridge is closed by
     # RosManipulationRuntime; the mast rides the port's masked_depth hook, so close it here). No-op None.
     _mast_bridge = assembly.sensing_sources.get('mast_depth')

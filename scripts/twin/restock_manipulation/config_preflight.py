@@ -42,6 +42,12 @@ KEY_CONSUMER = {
     'sim_cart_place_policy': HOST,
     'reposition_before_place': HOST,   # fm390: ros_host builds the controller with it (base drives to place_approach)
     'cage_preplace_shape': HOST,
+    # sim-robust-cart-place-goal-v1: non-cage collect place-on-cart goal guards (ros_host -> TransferController)
+    'collect_place_preplace_shape': HOST,   # fixed UPRIGHT clear-region preplace joint shape (begin_joint_goal)
+    'collect_place_wrist_guard': HOST,       # clear-branch wrist-guard extended to the collect place/retreat pose-IK
+    'collect_place_straight_line': HOST,     # route the collect deck place+retreat collision-off straight-line (attached-carton self-collision)
+    'transfer_preplace_reach_guard': HOST,   # sim-robust-transfer-preplace-reach-v1: steer the live_pose transfer preplace to the holdable upright clear branch
+    'transfer_pick_wrist_guard': HOST,       # sim-robust-transfer-settle-oscillation-v1: extend the clear-wrist-region guard to the live_pose transfer PICK approach+contact (coldwin12 contact limit cycle)
     'cart_pan_joint0': HOST,
     'cart_tuck_shape': HOST,
     'base_collision_object': HOST,
@@ -59,12 +65,25 @@ KEY_CONSUMER = {
     'arm_max_speed': HOST,
     'plan_wall_cap_s': HOST,
     'grasp_track_m': HOST,        # fm410: lift-probe carton-tracking physics confirm threshold (m)
+    # sim-robust-cart-place-descent-v1: SIM-clock release-detach budget; ros_host -> TransferController
+    'release_detach_timeout_s': HOST,
+    # sim-robust-movegroup-collision-meshes-v1: rewrite the resolved URDF's bare absolute <mesh>
+    # paths to file:// URIs so move_group's resource_retriever loads real arm link collision
+    # geometry (restock_host.launch reads it from ros_host_config.json). Default off => the
+    # robot_description is the file verbatim (byte-identical, the historical empty-geometry path).
+    'moveit_mesh_uris': HOST,
+    'esdf_boot_ack_grace_s': HOST,  # sim-robust-esdf-boot-gate-v1: SIM-clock boot grace for the first valid ESDF ack
     # --- RUNTIME config (isaac_bundle / isaac_port / physics_setup) ---
     'phase_drive': RUNTIME,
     'arm_stiffness_abs': RUNTIME,
     'arm_damping_abs': RUNTIME,
     'arm_max_effort': RUNTIME,
     'arm_gravity_ff': RUNTIME,
+    # sim-robust-executor-shoulder-sag-v1: load-aware gravity FF for the executor LOADED pick. All three
+    # are read by physics_setup.assemble (RUNTIME). Opt-in, default-off => byte-identical.
+    'arm_gravity_ff_loaded_carry': RUNTIME,
+    'arm_gravity_ff_payload_kg': RUNTIME,
+    'arm_gravity_ff_payload_link': RUNTIME,
     'stage_timeout_s': RUNTIME,
     'commissioning_dir': RUNTIME,
     # couple/outbound/park activation (fm356): the nav stack + mode that drive the post-collect stages
@@ -76,6 +95,9 @@ KEY_CONSUMER = {
     'collect_observe_force_render_ticks': RUNTIME,   # fm452: COLD force-render window; isaac_bundle reads it
     'cage_collision': RUNTIME,   # sim-only carton-vs-cage contact filter; physics_setup -> scene.build reads it
     'sim_speed': RUNTIME,        # sim-video-speedup-v1 speed profile; isaac_bundle/isaac_port + bt view read it
+    # sim-robust-cart-place-descent-v1: bounded base-settle tolerance for the loaded collect place;
+    # isaac_bundle builds the RuntimeAdapter with it (orchestrate process), NOT ros_host.
+    'collect_place_base_settle_m': RUNTIME,
 }
 
 # fm402: cap/limit keys the controller reads OPTIONALLY (config.get with a silent default). These are

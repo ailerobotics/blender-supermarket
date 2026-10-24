@@ -41,3 +41,21 @@ def is_dead(*, sim_elapsed, wall_elapsed, sim_budget, wall_backstop, mode):
     if mode == 'either':
         return sim_hit or wall_hit
     raise ValueError("mode must be 'either' or 'both'")
+
+
+# The derived frozen-sim WALL backstop for a SIM-primary budget: large enough never to pre-empt the SIM
+# leg for an alive-but-render-starved producer. factor 50 > the worst observed 16-30x live_pose pacing.
+DEFAULT_WALL_BACKSTOP_PACING_FACTOR = 50.0
+
+
+def frozen_sim_wall_backstop(sim_budget_s, wall_floor_s, pacing_factor=None):
+    """Canonical frozen-sim WALL backstop for ANY sim-primary budget (sim-robust-host-timers-audit-fix-v1,
+    extended to the station timers by sim-robust-station-heartbeat-simclock-v1). Returns the SIM budget
+    scaled by the worst expected wall-to-sim ``pacing_factor`` (default 50), floored at the caller's
+    ``wall_floor_s`` so a config can only ever WIDEN it, never tighten below the historical wall value.
+    On the real rig (sim == wall) the SIM budget fires first, so this (large) wall value is inert and the
+    no-pacing path is byte-identical. Pure arithmetic: no clock, no I/O. The leaf home shared by the
+    manipulation-host planning/startup/ack budgets (``ros_adapter.frozen_sim_wall_backstop`` delegates
+    here with its env-tunable factor) and the parked-station heartbeat guards."""
+    factor = DEFAULT_WALL_BACKSTOP_PACING_FACTOR if pacing_factor is None else float(pacing_factor)
+    return max(float(wall_floor_s), float(sim_budget_s) * factor)

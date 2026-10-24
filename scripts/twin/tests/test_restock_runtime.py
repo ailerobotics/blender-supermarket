@@ -255,7 +255,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(s): s._flagged = False; s._resumed = False
             def start(s, a, j): events.append('start')
             def warm(s, t, parked=None): return True                 # re-warm ready (fresh ESDF)
-            def pause_station(s, t): events.append('pause_station')   # clean stop at drive-start
+            def pause_station(s, t, *, suspend_only=False): events.append('pause_station')   # clean stop at drive-start
             def set_base_repositioned(s): s._flagged = True; events.append('set_base_repositioned')
             def step(s, dt, t, parked=None):
                 if s._flagged:                                        # arrival carried on the packet
@@ -343,7 +343,7 @@ class RuntimeTests(unittest.TestCase):
             def __init__(s): s.base_repositioned = False
             def start(s, a, j): pass
             def warm(s, t, parked=None): return True
-            def pause_station(s, t): pauses.append((t, s.base_repositioned))
+            def pause_station(s, t, *, suspend_only=False): pauses.append((t, s.base_repositioned, suspend_only))
             def step(s, dt, t, parked=None):
                 return ManipResult('running', 'transit')
         owned = Owned()
@@ -479,6 +479,216 @@ class RuntimeTests(unittest.TestCase):
         r = self.adapter.step(.1)
         self.assertEqual(r.status, 'failed')
         self.assertIn('base moved during stationary operation', r.reason)
+
+    # ---- sim-robust-cart-place-descent-v1: the loaded collect place base-settle tolerance ----
+    # collect2 reached the UPRIGHT preplace over the deck, began the place descent, then the extended
+    # carton-loaded arm's reaction shoved the yaw-lock-only braked base ~4 cm (base x -4.518 -> -4.559,
+    # the 0.25 s windowed `parked` flag flipped False for 3 ticks). The strict stationary guard aborted
+    # the stage 'base moved during stationary operation' mid-descent -- the carton stayed held, the arm
+    # never stowed, and every re-begin then failed 'arm_not_in_transport_timeout'. The opt-in tolerance
+    # lets the (braked, re-settling, far-inside-the-0.25 m-place-verify-tol) place-descent reaction pass
+    # so the place/release/stow sequence completes; a shove BEYOND the bound still fails, with a name.
+
+    def _place_shove_adapter(self, *, base_settle_m, anchor=(-4.5, 15.25, 3.14159), manip=None):
+        """A collect adapter driven to execute(place) after the fm390 reposition, with controllable base
+        odometry + parked so a test can inject the loaded-place base shove. Returns (adapter, state): mutate
+        state['pose']/state['parked'] then call adapter._step(.1). The place manip holds phase='place'.
+        Pass ``manip`` to substitute a controller that models the station parking gate (see
+        test_loaded_place_feeds_effective_parked_to_the_station_gate)."""
+        state = {'pose': anchor, 'parked': True}
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1,
+                           parked=state['parked'], odometry=NS(pose=state['pose']))
+        nav = NS(start=lambda g, c, **k: None,
+                 step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                 cancel=lambda: None)
+        port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+
+        class M:                                   # the raw controller the adapter wraps in a bridge
+            cart_location = 'rollwagen'
+            def __init__(s): s.base_repositioned = False; s.steps = 0
+            def start(s, a, j): pass
+            def warm(s, dt, p): return True
+            def step(s, dt, p):
+                s.steps += 1                        # HOLD in the loaded place descent (phase='place')
+                if not s.base_repositioned:
+                    return NS(status='running', reason='', controls=(), phase='transit')
+                return NS(status='running', reason='', controls=({'kind': 'move'},), phase='place')
+        manip = manip if manip is not None else M()
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach'] = list(anchor)
+        adapter = RuntimeAdapter(nav, self.mobile, manip, port, poses, fixture_mode=True,
+                                 collect_place_base_settle_m=base_settle_m)
+        adapter.start('collect', self.job)
+        for _ in range(14):                         # navigate->warm->transit->navigate->rewarm->execute(place)
+            adapter._step(.1)
+            if adapter._collect_repositioned and adapter._last_manip_phase == 'place':
+                break
+        assert adapter._collect_repositioned and adapter._last_manip_phase == 'place'
+        assert adapter._place_base_anchor == (anchor[0], anchor[1])   # anchored at the place_approach re-park
+        return adapter, state, manip
+
+    def test_loaded_place_tolerates_a_bounded_base_shove_and_keeps_placing(self):
+        adapter, state, manip = self._place_shove_adapter(base_settle_m=0.08)
+        steps_before = manip.steps
+        state['pose'] = (-4.54, 15.25, 3.14159)          # shoved 4 cm (collect2's magnitude), within 8 cm tol
+        state['parked'] = False
+        r = adapter._step(.1)
+        self.assertEqual(r.status, 'running')            # NOT aborted: the sequence keeps placing
+        self.assertNotIn('base moved', r.reason or '')
+        self.assertGreater(manip.steps, steps_before)    # the manip place step still ran this tick
+
+    def test_loaded_place_fails_named_when_the_base_is_pushed_beyond_tolerance(self):
+        adapter, state, _ = self._place_shove_adapter(base_settle_m=0.08)
+        state['pose'] = (-4.65, 15.25, 3.14159)          # shoved 15 cm, beyond the 8 cm tol -> real runaway
+        state['parked'] = False
+        r = adapter._step(.1)
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('beyond the 0.080 m collect-place settle tolerance', r.reason)
+        self.assertNotIn('base moved during stationary operation', r.reason)   # a NAMED, measured reason
+
+    def test_loaded_place_base_guard_strict_by_default_byte_identical(self):
+        adapter, state, _ = self._place_shove_adapter(base_settle_m=None)   # key off (default)
+        state['pose'] = (-4.54, 15.25, 3.14159)          # even a tiny shove fails the strict guard
+        state['parked'] = False
+        r = adapter._step(.1)
+        self.assertEqual(r.status, 'failed')
+        self.assertEqual(r.reason, 'base moved during stationary operation')
+
+    def test_loaded_place_tolerance_is_scoped_to_collect_and_the_loaded_place(self):
+        # The tolerance predicate returns None (=> the strict guard) for everything except a collect that
+        # is placing (repositioned, a loaded place phase, with an anchor + a usable base pose). Any gap
+        # keeps the strict 'base moved' guard -- so transfer/park, the pre-place phases, and a missing
+        # anchor are all unaffected (byte-identical outside the loaded collect place).
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        a = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True,
+                           collect_place_base_settle_m=0.08)
+        pkt = replace(self.p, odometry=NS(pose=(0.5, 0.0, 0.0)))
+        a._place_base_anchor = (0.0, 0.0)
+        a._last_manip_phase = 'place'
+        a._collect_repositioned = True
+        a.action = 'collect'
+        self.assertAlmostEqual(a._loaded_place_base_excursion(pkt), 0.5, places=6)   # collect place: measured
+        a.action = 'transfer'
+        self.assertIsNone(a._loaded_place_base_excursion(pkt))        # transfer: strict guard (not relaxed)
+        a.action = 'collect'
+        a._last_manip_phase = 'observe'
+        self.assertIsNone(a._loaded_place_base_excursion(pkt))        # pre-place phase: strict
+        a._last_manip_phase = 'place'
+        a._collect_repositioned = False
+        self.assertIsNone(a._loaded_place_base_excursion(pkt))        # not repositioned: strict
+        a._collect_repositioned = True
+        a._place_base_anchor = None
+        self.assertIsNone(a._loaded_place_base_excursion(pkt))        # no anchor: strict
+        a._place_base_anchor = (0.0, 0.0)
+        self.assertIsNone(a._loaded_place_base_excursion(replace(self.p, odometry=None)))  # no base pose: strict
+
+    def test_loaded_place_base_guard_off_key_leaves_excursion_predicate_none(self):
+        # With the key off (default) the predicate is None even in a loaded collect place => strict guard.
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        a = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True)
+        a._place_base_anchor = (0.0, 0.0)
+        a._last_manip_phase = 'place'
+        a._collect_repositioned = True
+        a.action = 'collect'
+        self.assertIsNone(a._loaded_place_base_excursion(replace(self.p, odometry=NS(pose=(0.5, 0., 0.)))))
+
+    def test_collect_place_base_settle_m_validation(self):
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        for bad in (0.0, -0.1, 0.5, float('nan')):
+            with self.assertRaises(ValueError):
+                RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                               fixture_mode=True, collect_place_base_settle_m=bad)
+
+    # ---- sim-robust-place-descent-plan-v1: feed the tolerated verdict to the station parking gate ----
+    # PR 211 relaxed the mission-level stationary guard (`not p.parked`) so the tolerated ~cm descent-
+    # reaction shove no longer aborts 'base moved during stationary operation'. But the sensor-owning host
+    # runtime ALSO feeds packet.parked into the station channel's OWN parking gate (native_channel:
+    # StationClient.tick -> `if not parked: raise ValueError('station lost measured parking')`), and PR 211
+    # left that path getting the RAW packet.parked. collect3: the place reached z=0.608 and was descending
+    # (gripper gap 31->15 mm) when a 25.7 mm shove (within the 0.08 m tol) flipped packet.parked False; the
+    # mission guard tolerated it but self.manip.step passed parked=False to the station gate, which raised
+    # 'station lost measured parking' -> MANIP_STEP_EXCEPTION -> failed/'host' -> the arm never
+    # placed/released/stowed -> arm_not_in_transport on every re-begin. The fix presents the station gate
+    # the SAME effective-parked verdict the mission guard reached, so the descent/release/stow completes.
+
+    def _station_gate_bridge(self):
+        """A sensor-owning (owns_sensor_io=True) bridge whose inner controller models the station parking
+        gate on the REAL path: its step(dt, simulation_time, parked=...) RECORDS parked and RAISES
+        'station lost measured parking' (exactly native_channel.StationClient.tick) when fed parked=False
+        in the loaded place. This is the path the adapter actually feeds packet.parked into -- proving the
+        fix presents the gate the tolerated verdict. Returns the bridge; its inner is .controller."""
+        class StationGate:
+            cart_location = 'rollwagen'
+            def __init__(s): s.base_repositioned = False; s.steps = 0; s.seen_parked = []
+            def start(s, a, j): pass
+            def warm(s, t, parked=None): return True                 # pre-grasp + re-warm ready
+            def step(s, dt, t, parked=None):
+                if not s.base_repositioned:
+                    return ManipResult('running', 'transit')         # HOLD in transit until arrival
+                s.steps += 1
+                s.seen_parked.append(bool(parked))
+                if not parked:                                       # mirror native_channel's parking gate
+                    raise ValueError('station lost measured parking')
+                return ManipResult('running', 'place')
+        return ManipulationBridge(StationGate(), owns_sensor_io=True)
+
+    def test_loaded_place_feeds_effective_parked_to_the_station_gate(self):
+        # With the tolerance on, a within-bound shove (parked=False on the raw packet) must reach the
+        # station gate as parked=True, so the gate does NOT raise and the place keeps running.
+        bridge = self._station_gate_bridge()
+        adapter, state, bridge = self._place_shove_adapter(base_settle_m=0.08, manip=bridge)
+        gate = bridge.controller
+        steps_before = gate.steps
+        state['pose'] = (-4.54, 15.25, 3.14159)          # shoved 4 cm (collect3's magnitude), within 8 cm tol
+        state['parked'] = False
+        r = adapter._step(.1)
+        self.assertEqual(r.status, 'running', r.reason)  # station gate did NOT raise 'station lost...'
+        self.assertNotIn('station lost measured parking', r.reason or '')
+        self.assertGreater(gate.steps, steps_before)     # the place step ran this tick
+        self.assertTrue(gate.seen_parked[-1])            # the station gate was fed the tolerated verdict
+
+    def test_loaded_place_without_tolerance_station_gate_never_fed_the_shove(self):
+        # Control: key OFF (default) -> the strict mission guard fails 'base moved...' FIRST, so the raw
+        # parked=False never reaches the station gate (the gate is not even stepped this tick). Proves the
+        # effective-parked override is scoped to the tolerated path, byte-identical when the key is off.
+        bridge = self._station_gate_bridge()
+        adapter, state, bridge = self._place_shove_adapter(base_settle_m=None, manip=bridge)
+        gate = bridge.controller
+        seen_before = len(gate.seen_parked)
+        state['pose'] = (-4.54, 15.25, 3.14159)
+        state['parked'] = False
+        r = adapter._step(.1)
+        self.assertEqual(r.status, 'failed')
+        self.assertEqual(r.reason, 'base moved during stationary operation')
+        self.assertEqual(len(gate.seen_parked), seen_before)   # station gate not fed a False this tick
+
+    def test_loaded_place_beyond_tolerance_does_not_reach_the_station_gate(self):
+        # A runaway shove (beyond the bound) fails with the NAMED settle-tolerance reason BEFORE manip.step,
+        # so the station gate never sees the bad parked -- the named runaway reason is what surfaces.
+        bridge = self._station_gate_bridge()
+        adapter, state, bridge = self._place_shove_adapter(base_settle_m=0.08, manip=bridge)
+        gate = bridge.controller
+        seen_before = len(gate.seen_parked)
+        state['pose'] = (-4.65, 15.25, 3.14159)          # 15 cm, beyond the 8 cm tol
+        state['parked'] = False
+        r = adapter._step(.1)
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('beyond the 0.080 m collect-place settle tolerance', r.reason)
+        self.assertEqual(len(gate.seen_parked), seen_before)
+
+    def test_loaded_place_parked_true_passes_through_unchanged(self):
+        # When the base is genuinely parked (the common case) nothing is overridden: the station gate sees
+        # parked=True straight from the packet, byte-identical to before the fix.
+        bridge = self._station_gate_bridge()
+        adapter, state, bridge = self._place_shove_adapter(base_settle_m=0.08, manip=bridge)
+        gate = bridge.controller
+        state['parked'] = True                           # no shove
+        r = adapter._step(.1)
+        self.assertEqual(r.status, 'running', r.reason)
+        self.assertTrue(gate.seen_parked[-1])
 
     def test_return_default_tows_cart_home_coupled(self):
         # Default (uncouple_on_return off): return navigates straight to home as a COUPLED tow and

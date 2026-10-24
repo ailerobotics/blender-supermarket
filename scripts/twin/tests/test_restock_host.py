@@ -96,6 +96,22 @@ class HostTests(unittest.TestCase):
         self.assertIn('collision_time', external)
         self.assertIn('station/status', external)
 
+    def test_movegroup_respawn_threaded_and_bounded(self):
+        # sim-robust-movegroup-respawn-reliability-v1: launch_plan resolves a BOUNDED move_group
+        # respawn budget so launch.py (respawn_max_retries) and preflight see the same values.
+        from twin.restock_host.movegroup_respawn import DEFAULT_MAX_RETRIES, DEFAULT_RESPAWN_DELAY_S
+        plan = launch_plan(self.config)                       # absent block => bounded default
+        self.assertEqual(plan['movegroup_respawn'],
+                         {'max_retries': DEFAULT_MAX_RETRIES, 'delay': DEFAULT_RESPAWN_DELAY_S})
+        self.assertGreaterEqual(DEFAULT_MAX_RETRIES, 0)       # bounded, never launch's -1 infinite
+        plan = launch_plan(self.config | {'movegroup_respawn': {'max_retries': 2, 'delay': 5.0}})
+        self.assertEqual(plan['movegroup_respawn'], {'max_retries': 2, 'delay': 5.0})
+
+    def test_reject_bad_movegroup_respawn(self):
+        for bad in (5, {'max_retries': 2, 'extra': 1}):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'movegroup_respawn'):
+                launch_plan(self.config | {'movegroup_respawn': bad})
+
     def test_manifest_stow_missing_or_out_of_bounds(self):
         path = Path(self.config['mobile_manifest'])
         for positions in ({}, dict.fromkeys(JOINTS, 100.)):
@@ -459,15 +475,31 @@ class IncorporationAckTest(unittest.TestCase):
         self.assertNotEqual(snap['state'], 'failed')
         self.assertEqual(snap['reason'], '')
 
-    def test_fault_names_wall_heartbeat_gap_with_value(self):
+    def test_wall_gap_backstop_is_derived_generous_not_the_flat_floor(self):
+        # sim-robust-station-heartbeat-simclock-v1: the wall leg is now the DERIVED frozen-sim backstop
+        # (sim_gap_s 0.5 x 50 = 25 s, floored at RESTOCK_STATION_WALL_GAP_S=3), NOT the flat 3 s floor.
+        st, _ = self.state()
+        self.assertEqual(st.wall_backstop_s, 25.0)
+
+    def test_render_paced_wall_gap_no_longer_false_trips(self):
         st, clock = self.prepared()
         st.acknowledge(10.2, 1)
-        # A genuinely hung client (no tick completes) exceeds the 3 s wall guard while the
-        # sim gap stays within 0.5 s, so the wall-heartbeat condition trips, named with value.
+        # A 3.40 s wall gap with a healthy (frozen) sim gap once faulted on the old flat 3 s wall guard.
+        # Under the derived 25 s frozen-sim backstop it no longer does -- a render-slow station is alive.
         clock[0] = 103.4
         snap = st.snapshot(10.2, endpoints_ready=True, process_alive=True)
+        self.assertNotEqual(snap['state'], 'failed')
+        self.assertEqual(snap['reason'], '')
+
+    def test_fault_names_wall_heartbeat_gap_at_derived_backstop(self):
+        st, clock = self.prepared()
+        st.acknowledge(10.2, 1)
+        # A genuinely FROZEN sim (sim gap stays within 0.5 s while wall runs on) is still caught once the
+        # derived 25 s wall backstop trips, named with its measured value.
+        clock[0] = 125.5   # wall gap 25.50 s from the prepare wall (100.0)
+        snap = st.snapshot(10.2, endpoints_ready=True, process_alive=True)
         self.assertEqual(snap['state'], 'failed')
-        self.assertEqual(snap['reason'], 'parked heartbeat lost: wall gap 3.40 s')
+        self.assertEqual(snap['reason'], 'parked heartbeat lost: wall gap 25.50 s')
 
     def test_stopped_station_does_not_fault_across_a_long_gap_run309_replay(self):
         # fm399 (1) run-309 replay at the host-ack level: the host tick() publishes emergency stop on
@@ -489,10 +521,31 @@ class IncorporationAckTest(unittest.TestCase):
                                       process_alive=True)['state'], 'failed')
 
     def test_default_gap_budgets_are_byte_identical(self):
-        # fm399 (2): unset env => the documented real-rig contract (0.5 s sim / 3.0 s wall).
+        # fm399 (2): unset env => the documented real-rig contract (0.5 s sim; 3.0 s wall FLOOR).
+        # sim-robust-station-heartbeat-simclock-v1: wall_gap_s is now the floor feeding the derived backstop.
         st, _ = self.state()
         self.assertEqual(st.sim_gap_s, .5)
         self.assertEqual(st.wall_gap_s, 3.)
+        self.assertEqual(st.wall_backstop_s, 25.0)   # max(3, 0.5 x 50): derived, inert on the real rig
+
+    def test_proof_config_widened_sim_bound_makes_wall_backstop_huge(self):
+        # The bounded GPU proof sets RESTOCK_STATION_SIM_GAP_S=30 (the real sim bound for the live_pose
+        # transfer manip gap) and leaves RESTOCK_STATION_WALL_GAP_S at the validator's 30. The wall leg
+        # then derives to max(30, 30 x 50) = 1500 s, so coldliverecovery's 30.75 s render-paced wall gap
+        # can never trip it; the 30 s SIM bound is the real guard. No 120 s wall widen needed.
+        from twin.restock_host.incorporation_ack import IncorporationAckState
+        with patch.dict(os.environ, {'RESTOCK_STATION_SIM_GAP_S': '30',
+                                     'RESTOCK_STATION_WALL_GAP_S': '30'}):
+            st = IncorporationAckState(wall_clock=lambda: 100.0)
+        self.assertEqual(st.sim_gap_s, 30.)
+        self.assertEqual(st.wall_backstop_s, 1500.0)
+        st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=10.0, parked=True,
+                       camera_frame='restock_camera_transfer'), 10.0)
+        st.acknowledge(10.2, 1)
+        # The exact coldliverecovery shape: 30.75 s WALL gap, sim gap a healthy ~2 s -> NOT failed.
+        st.wall_clock = lambda: 130.75
+        snap = st.snapshot(12.0, endpoints_ready=True, process_alive=True)
+        self.assertNotEqual(snap['state'], 'failed')
 
     def test_sim_only_env_widens_gap_budgets_to_survive_render_paced_transit(self):
         # fm399 (2): a widened sim-gap budget lets a long render-paced reposition/re-incorporation
@@ -549,11 +602,74 @@ class IncorporationAckTest(unittest.TestCase):
             st.accept(dict(action='prepare', epoch=ep + 1, sequence=0, stamp=float(ep) + 11,
                            parked=True, camera_frame='restock_camera_transfer'), float(ep) + 11)
 
+    def test_paused_station_accrues_no_gap_over_a_300s_far_op_coldwin2(self):
+        # sim-robust-station-pause-on-transfer-v1 (the coldwin2 transfer trip): the collect station is left
+        # un-heartbeat-ed through the whole couple->outbound->park->transfer far op. PAUSE it before towing
+        # away: a paused epoch must NOT fault across a 300 s SIM / long-WALL gap, so tick() publishes no stop.
+        st, clock = self.prepared()  # epoch 1, parked at sim 10.0, wall 100.0
+        st.acknowledge(10.2, 1)
+        self.assertEqual(st.accept(dict(action='pause', epoch=1, sequence=1, stamp=10.3, parked=True), 10.3),
+                         'pause')
+        self.assertTrue(st.paused and st.active)                 # suspended, epoch KEPT (not idle)
+        clock[0] = 100.0 + 9000.0                                # ~9000 s WALL later (30x of 300 s SIM)
+        snap = st.snapshot(10.3 + 300.0, endpoints_ready=True, process_alive=True)  # 300 s SIM later
+        self.assertEqual(snap['state'], 'paused')                # paused, NOT failed -> tick() publishes no stop
+        self.assertEqual(snap['reason'], '')
+        self.assertEqual(snap['collision_time'], -1.)            # a paused station is never 'ready'
+        # Contrast: the SAME epoch left ACTIVE (not paused) DOES fault across the gap (the coldwin2 trigger).
+        st2, _ = self.prepared()
+        st2.acknowledge(10.2, 1)
+        self.assertEqual(st2.snapshot(10.3 + 300.0, endpoints_ready=True,
+                                      process_alive=True)['state'], 'failed')
+
+    def test_fresh_prepare_clears_a_pause_and_reopens_the_epoch(self):
+        # The next op re-prepares a FRESH epoch at its own pose; that must clear the pause and warm from cold.
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        st.accept(dict(action='pause', epoch=1, sequence=1, stamp=10.3, parked=True), 10.3)
+        self.assertTrue(st.paused)
+        st.accept(dict(action='prepare', epoch=2, sequence=0, stamp=11.0, parked=True,
+                       camera_frame='restock_camera_transfer'), 11.0)
+        self.assertFalse(st.paused)
+        self.assertEqual(st.collision_time, -1.)                 # fresh epoch re-earns its ack
+        self.assertEqual(st.snapshot(11.1, endpoints_ready=True, process_alive=True)['state'], 'warming')
+
+    def test_stop_clears_a_pause_to_idle(self):
+        st, _ = self.prepared()
+        st.accept(dict(action='pause', epoch=1, sequence=1, stamp=10.3, parked=True), 10.3)
+        st.accept(dict(action='stop', epoch=1, sequence=2, stamp=10.4, parked=True), 10.4)
+        self.assertFalse(st.paused or st.active)
+        self.assertEqual(st.snapshot(10.5, endpoints_ready=True, process_alive=True)['state'], 'idle')
+
+    def test_pause_requires_active_matching_epoch(self):
+        st, _ = self.state()                                     # no active epoch
+        with self.assertRaises(ValueError):
+            st.accept(dict(action='pause', epoch=1, sequence=0, stamp=10.0, parked=True), 10.0)
+
+    def test_recovery_within_budget_arms_the_stop_wire_release_mid_op(self):
+        # sim-robust-station-pause-on-transfer-v1 (requirement 1c / the coldwin2 latched-wire kill): when a
+        # borderline trip DID fire mid-op and the station then RECOVERS within budget, the node must RELEASE
+        # the latched Isaac stop wire for the CURRENT op (consume_release armed by the recovery prepare), so
+        # PR 235's op-START re-derive is extended with a mid-op release. No release is armed on the ordinary
+        # paths (fresh prepare, heartbeat, pause).
+        st, _ = self.prepared()
+        st.acknowledge(10.2, 1)
+        self.assertFalse(st.consume_release())                   # a clean prepare arms nothing
+        # A borderline trip faults the station mid far op...
+        self.assertEqual(st.snapshot(10.3, endpoints_ready=True, process_alive=False)['state'], 'failed')
+        # ...the mission re-prepares a fresh epoch; the station recovers WITHIN budget and arms the release.
+        st.accept(dict(action='prepare', epoch=2, sequence=0, stamp=11.0, parked=True,
+                       camera_frame='restock_camera_transfer'), 11.0)
+        self.assertEqual(st.recoveries, 1)
+        self.assertTrue(st.consume_release())                    # release armed -> node publishes Bool(False)
+        self.assertFalse(st.consume_release())                   # one-shot
+
     def test_invalid_commands_rejected(self):
         st, _ = self.state()
         for bad in [dict(action='prepare', epoch=1, sequence=0, stamp=10.0, parked=True,
                          camera_frame='wrong_frame'),          # uncalibrated camera frame
                     dict(action='heartbeat', epoch=1, sequence=0, stamp=10.0, parked=True),  # no active epoch
+                    dict(action='pause', epoch=1, sequence=0, stamp=10.0, parked=True),  # no active epoch
                     dict(action='prepare', epoch=1, sequence=0, stamp=9.0, parked=True,
                          camera_frame='restock_camera_collect')]:  # stale stamp vs now
             with self.assertRaises((ValueError, RuntimeError)):
@@ -575,6 +691,16 @@ class RosHostLaunchWiring(unittest.TestCase):
         # It must be a shutdown-guarded process (in `processes`), not an auxiliary like the ack.
         self.assertIn('masker, manipulation, trajectory]', src)
 
+    def test_move_group_robot_description_honours_moveit_mesh_uris_opt_in(self):
+        # sim-robust-movegroup-collision-meshes-v1: move_group's robot_description is the resolved
+        # URDF rewritten to file:// mesh URIs ONLY when the opt-in HOST key moveit_mesh_uris is set;
+        # off (default) it is the file verbatim (byte-identical, the historical empty-geometry path).
+        src = (Path(__file__).resolve().parents[1] / 'restock_host' / 'launch.py').read_text()
+        self.assertIn('from .mesh_uri import normalize_mesh_uris', src)
+        self.assertIn("host_cfg.get('moveit_mesh_uris')", src)
+        self.assertIn('normalize_mesh_uris(robot_description)', src)
+        self.assertIn("'robot_description': robot_description", src)
+
     def test_launch_wires_follow_joint_trajectory_executor(self):
         # MoveIt is configured with a MoveItSimpleControllerManager pointing at
         # arm_controller/follow_joint_trajectory; the host must also LAUNCH that action
@@ -595,9 +721,13 @@ class RosHostLaunchWiring(unittest.TestCase):
         # down. The move_group Node declares respawn=True + a respawn delay, and move_group is NOT in the
         # OnProcessExit shutdown-guard set (whose exits EmitEvent Shutdown), so its recoverable crash does
         # not SIGINT the rest of the stack; the other components stay genuinely fatal.
+        # sim-robust-movegroup-respawn-reliability-v1: the delay + the new BOUNDED limit now come from the
+        # resolved plan (plan['movegroup_respawn']), so the launch respawn is no longer the -1 infinite
+        # default; an observe-only OnProcessExit logger names each respawn / the give-up.
         src = (Path(__file__).resolve().parents[1] / 'restock_host' / 'launch.py').read_text()
         self.assertRegex(src, r"name='move_group'[^\n]*respawn=True")      # move_group respawns
-        self.assertRegex(src, r"respawn_delay=[0-9.]+")                    # with a delay
+        self.assertRegex(src, r"respawn_delay=mg_respawn\['delay'\]")      # with the resolved delay
+        self.assertRegex(src, r"respawn_max_retries=mg_respawn\['max_retries'\]")  # BOUNDED (not -1)
         guarded_line = next(l for l in src.splitlines() if l.strip().startswith('guarded ='))
         self.assertNotIn('moveit', guarded_line)                          # move_group excluded from teardown
         for comp in ('container', 'masker', 'manipulation', 'trajectory'):
@@ -605,6 +735,12 @@ class RosHostLaunchWiring(unittest.TestCase):
         # The OnProcessExit guards are built over `guarded` (not all processes), so move_group's exit
         # does NOT EmitEvent Shutdown -- it respawns instead.
         self.assertRegex(src, r"for process in guarded")
+        # The observe-only respawn logger targets move_group (not a guarded teardown) via RespawnSupervisor.
+        self.assertRegex(src, r"OnProcessExit\(target_action=moveit")
+        self.assertIn('RespawnSupervisor', src)
+        # No double supervision: move_group has exactly ONE OnProcessExit handler, and it is the
+        # observe-only logger (target_action=moveit), never a guarded EmitEvent(Shutdown).
+        self.assertEqual(src.count('target_action=moveit'), 1)
 
     def test_ros_host_config_fixture_is_usable(self):
         from twin.restock_manipulation.types import ProductProfile
@@ -646,7 +782,31 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     # fm461 (demo fallback): the controller accepts a GROUND-TRUTH bay transfer
                                     # target + ground-truth verify when the shelf is not camera-commissioned.
                                     # Inert without a ground-truth provider (runtime sensing); default path unchanged.
-                                    'transfer_ground_truth'})
+                                    'transfer_ground_truth',
+                                    # The validated collect-stack place keys (PR 209/211/217), activated by
+                                    # default here after coldhonest + collect6 proved them together: the
+                                    # upright clear-branch preplace shape + wrist guard, the sim-clock
+                                    # release-detach budget, and the collision-off straight-line deck place.
+                                    'collect_place_preplace_shape', 'collect_place_wrist_guard',
+                                    'release_detach_timeout_s', 'collect_place_straight_line',
+                                    # sim-robust-movegroup-collision-meshes-v1: rewrite the resolved URDF's bare
+                                    # absolute <mesh> paths to file:// URIs so move_group's resource_retriever
+                                    # loads real arm link geometry. Optional bool read by restock_host.launch;
+                                    # default False => robot_description is the file verbatim (byte-identical).
+                                    'moveit_mesh_uris',
+                                    # The validated transfer/boot guards, activated by default here after
+                                    # pickguard2 + coldwin16 (2026-10-24) proved them together in a complete
+                                    # cold cycle: transfer_pick_wrist_guard (PR256 clean pose goal + post-plan
+                                    # clear-wrist terminal guard; replaces PR254's malformed c-space goal),
+                                    # the sim-clock ESDF boot-incorporation grace, and the preplace reach guard
+                                    # (reject a clear-but-unreachable deep shoulder fold by name).
+                                    'transfer_pick_wrist_guard', 'esdf_boot_ack_grace_s',
+                                    'transfer_preplace_reach_guard'})
+        self.assertEqual(len(cfg['collect_place_preplace_shape']), 6)   # full 6-joint upright preplace shape
+        self.assertLessEqual(cfg['collect_place_preplace_shape'][3], 0.65)  # wrist_1 at/below the stop
+        self.assertIsInstance(cfg['collect_place_wrist_guard'], bool)
+        self.assertIsInstance(cfg['collect_place_straight_line'], bool)
+        self.assertGreater(cfg['release_detach_timeout_s'], 0.0)        # a positive sim-seconds budget
         self.assertIsInstance(cfg['carry_wrist1_cap'], (int, float))
         self.assertLessEqual(cfg['carry_wrist1_cap'], 0.65)   # at/below the wrist_2-vs-forearm stop
         self.assertEqual(len(cfg['carry_lift_shape']), 6)     # full 6-joint clear-region lift goal
@@ -659,6 +819,8 @@ class RosHostLaunchWiring(unittest.TestCase):
         for k in ('sim_cart_place_policy', 'staged_cart_swing', 'base_collision_object', 'cart_cage_place',
                   'reposition_before_place'):
             self.assertIsInstance(cfg[k], bool)
+        # moveit_mesh_uris must ship OFF so the resolved URDF reaches move_group verbatim (byte-identical).
+        self.assertIs(cfg['moveit_mesh_uris'], False)
         for k in ('payload_ack_wall_s', 'cart_pan_joint0', 'plan_wall_cap_s'):
             self.assertIsInstance(cfg[k], (int, float))
         self.assertEqual(len(cfg['cart_tuck_shape']), 5)   # arm joints 1-5 of the high carry pose

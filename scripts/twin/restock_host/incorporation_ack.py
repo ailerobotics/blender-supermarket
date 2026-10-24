@@ -24,16 +24,17 @@ The epoch/acknowledgement state machine below is a self-contained copy of the pa
 mapper lifecycle contract (the integration lane keeps the mirror-side copy); the two
 agree on the JSON wire fields, not on a shared import.
 
-Heartbeat liveness has two independent guards (``snapshot``): a 0.5 s **sim-time** gap
-(``now - last_heartbeat``) and a 3.0 s **wall-clock** gap since the last accepted command
-(``wall_clock() - wall_heartbeat``). The two measure different failures. The sim guard is
-the parked-mapper freshness contract and rides the render-paced ``/clock``, so it stays at
-0.5 s. The wall guard is a pure liveness check that does NOT stretch with ``/clock``: the
-mission client is render-paced and its single render tick during the first capture takes up
-to ~2 s of wall time, during which it cannot heartbeat (it is blocked inside the tick) --
-run-72 faulted on the old 1.0 s wall guard with ``wall gap 1.85 s``. The wall guard is 3.0 s
-so a normal render-paced client survives a ~2 s capture tick while a genuinely hung client
-(no tick completes) is still caught within 3 s.
+Heartbeat liveness is **SIM-clock primary** (``snapshot``): the ``sim_gap_s`` bound on the sim-time gap
+(``now - last_heartbeat``, both on the render-paced ``/clock``) is the parked-mapper freshness contract --
+an advancing sim clock proves the simulator is alive, so a parked station un-heartbeat-ed for that much
+SIM time is genuinely lost. The **wall-clock** gap (``wall_clock() - wall_heartbeat``) is only a bounded
+backstop for a FROZEN sim, whose stalled ``/clock`` can never advance the SIM leg; it fires at the DERIVED
+``wall_backstop_s`` (``frozen_sim_wall_backstop(sim_gap_s, wall_floor)`` = sim budget x 50, floored at
+``RESTOCK_STATION_WALL_GAP_S``), far above the worst 16-30x live_pose render pacing, so a render-slow-but-
+alive station never false-trips (coldliverecovery e-stopped at ``wall gap 30.75 s`` while the sim gap was
+healthy -- the last pace-unsafe parked-heartbeat timer). Both legs feed the shared ``pace_watchdog.is_dead``
+(mode='either'), the same predicate the manipulation-host planning/startup/ack budgets use. On the real rig
+(sim == wall) the SIM leg fires first, so the wall value is inert and the no-pacing path is byte-identical.
 
 Each ``tick`` publishes the liveness ack BEFORE its mapper maintenance (graph discovery + a fresh
 ``get_esdf_and_gradient`` request), so a cuMotion replan storm saturating that shared service during
@@ -46,6 +47,12 @@ import json
 import math
 import os
 import time
+
+# sim-robust-station-heartbeat-simclock-v1: the shared pace-aware liveness predicate and the derived
+# frozen-sim WALL backstop (the same leaf used by the manipulation-host planning/startup/ack budgets).
+# pace_watchdog is a leaf pure-arithmetic module (no ROS/Isaac/clock/I-O), so this is safe at import --
+# the parked-station heartbeat now runs on the SIM clock with only a frozen-sim WALL backstop.
+from ..restock.pace_watchdog import is_dead as pace_is_dead, frozen_sim_wall_backstop
 
 # Bounded fault recovery, mirroring restock.station.StationState: a fresh measured parked epoch
 # ('prepare') clears a latched fault so the mission client's re-prepare recovers the ack instead of
@@ -71,8 +78,16 @@ class IncorporationAckState:
         # (the documented real-rig contract) => byte-identical. Clamped; a dead host is still caught.
         self.sim_gap_s = (max(.5, min(600., float(os.environ['RESTOCK_STATION_SIM_GAP_S'])))
                           if 'RESTOCK_STATION_SIM_GAP_S' in os.environ else .5)
+        # sim-robust-station-heartbeat-simclock-v1: RESTOCK_STATION_WALL_GAP_S is now the wall FLOOR feeding
+        # the DERIVED frozen-sim backstop (role change; a widen only ever widens the backstop, byte-compat).
+        # The SIM gap is the primary liveness bound: under the live_pose transfer's render pacing (measured
+        # 16-30x wall-to-sim) the mission legitimately goes several SIM seconds without heart-beating the
+        # parked station while it runs a multi-capture manip op, stretching WALL far past a flat wall cap --
+        # coldliverecovery e-stopped at 'wall gap 30.75 s' with the sim gap healthy. The wall leg now only
+        # catches a FROZEN sim (sim_gap_s x 50 > the worst pacing), never a render-slow-but-alive station.
         self.wall_gap_s = (max(3., min(600., float(os.environ['RESTOCK_STATION_WALL_GAP_S'])))
                            if 'RESTOCK_STATION_WALL_GAP_S' in os.environ else 3.)
+        self.wall_backstop_s = frozen_sim_wall_backstop(self.sim_gap_s, self.wall_gap_s)
         # fm430 (2a): post-attach ESDF re-integration KICK (opt-in, default off => byte-identical). After
         # the SIM_ATTACH weld the host object_attachment clears the carton voxels and the parked mapper
         # must re-incorporate at the new state, but under render pacing the next ESDF integration stamp
@@ -84,6 +99,14 @@ class IncorporationAckState:
         # and issue a fresh one immediately, so the post-attach ESDF integrates ~a cycle sooner. Pure
         # sequencing lives on this state object (unit-tested); the ROS subscription is glue.
         self.kick_enabled = (os.environ.get('RESTOCK_ESDF_POSTATTACH_KICK', '0') not in ('0', '', 'false', 'False'))
+        # sim-robust-esdf-boot-gate-v2: PROOF/TEST switch (opt-in, default off => byte-identical). When set,
+        # acknowledge() REFUSES every stamp, so collision_time never advances past the -1 not-ready sentinel
+        # -- a faithful "nvblox genuinely never incorporates" reproduction (the arm host sees exactly the
+        # stuck -1 the boot gate keys on), through the REAL reject path, for the esdf_boot_gate fail-fast
+        # TRIP proof. NOT a production feature: the stale commission baseline does NOT reproduce never-ack
+        # (it incorporates one tick late), so the TRIP path needs the feed/mapper actually disabled.
+        self.force_never_ack = (os.environ.get('RESTOCK_ESDF_FORCE_NEVER_ACK', '0')
+                                not in ('0', '', 'false', 'False'))
         self._kick_pending = False
         self._last_phase = None
         self.epoch = 0
@@ -93,10 +116,22 @@ class IncorporationAckState:
         self.wall_heartbeat = wall_clock()
         self.collision_time = -1.
         self.active = False
+        # sim-robust-station-pause-on-transfer-v1: an ACTIVE epoch whose liveness watchdog is explicitly
+        # SUSPENDED because no op is using the station while the base tows away to a FAR op (collect done
+        # -> couple/outbound/park/transfer). A paused station keeps its epoch (it is NOT torn down like a
+        # 'stop'->idle) but accrues NO heartbeat gap and publishes NO stop, so a long far op cannot false-
+        # trip the global stop on this idle-but-ALIVE station (coldwin2 transfer sim gap 30.05 s). Cleared
+        # by 'stop' (idle) and by a fresh 'prepare' (new epoch). See snapshot().
+        self.paused = False
         self.fault = None
         self.camera_frame = None
         self.recoveries = 0
         self.recovered_from = None
+        # sim-robust-station-pause-on-transfer-v1: one-shot flag (consume_release, mirroring consume_kick)
+        # armed when a fault is RECOVERED within budget. The node drops it to publish a Bool(False) RELEASE
+        # on the latched Isaac /manipulation/stop wire mid-op, so a borderline trip during a far op does not
+        # leave the wire latched True (coldwin2) once the station proves alive again.
+        self._release_wire_pending = False
 
     def accept(self, command, now):
         recovering = False
@@ -126,10 +161,12 @@ class IncorporationAckState:
                 self.recovered_from = self.fault
                 self.fault = None
                 self.recoveries += 1
+                self._release_wire_pending = True   # arm the mid-op Isaac stop-wire release
             self.epoch, self.parked_since, self.camera_frame = epoch, stamp, frame
             self.active = True
             self.collision_time = -1.
-        elif action in ('heartbeat', 'stop'):
+            self.paused = False          # a fresh epoch is live, never carrying a prior pause
+        elif action in ('heartbeat', 'stop', 'pause'):
             if epoch != self.epoch or not self.active:
                 raise ValueError('station command has no active matching epoch')
             if action == 'heartbeat' and command.get('parked') is not True:
@@ -137,6 +174,13 @@ class IncorporationAckState:
             if action == 'stop':
                 self.active = False
                 self.collision_time = -1.
+                self.paused = False
+            elif action == 'pause':
+                # sim-robust-station-pause-on-transfer-v1: SUSPEND the parked-heartbeat liveness while the
+                # base tows away and no op heartbeats this station. The epoch stays active (state 'paused',
+                # not 'idle'); snapshot() publishes NO stop while paused. The next op re-prepares a fresh
+                # epoch at its own pose (begin()), which clears paused above.
+                self.paused = True
         else:
             raise ValueError('unsupported station action')
         self.sequence = seq
@@ -164,31 +208,52 @@ class IncorporationAckState:
         self._kick_pending = False
         return k
 
+    def consume_release(self):
+        """sim-robust-station-pause-on-transfer-v1: pop the one-shot stop-wire RELEASE arm (True at most once
+        per within-budget recovery). The node publishes a Bool(False) on the latched Isaac /manipulation/stop
+        wire so a borderline parked-heartbeat trip during a far op does not survive the station's own recovery
+        and kill the live op (extends PR 235's op-START re-derive with a MID-op release)."""
+        r = self._release_wire_pending
+        self._release_wire_pending = False
+        return r
+
     def acknowledge(self, stamp, epoch):
+        if self.force_never_ack:
+            # sim-robust-esdf-boot-gate-v2 proof switch: refuse through the REAL reject path so
+            # collision_time stays at the -1 sentinel (genuine never-incorporation for the gate TRIP).
+            raise ValueError('RESTOCK_ESDF_FORCE_NEVER_ACK: incorporation acknowledgement disabled '
+                             '(boot-gate fail-fast TRIP proof)')
         if (not self.active or epoch != self.epoch or not math.isfinite(stamp)
                 or stamp <= self.parked_since or stamp < self.collision_time):
             raise ValueError('mapper acknowledgement does not belong to current parked epoch')
         self.collision_time = stamp
 
     def snapshot(self, now, *, endpoints_ready, process_alive):
-        # Name the tripped liveness condition with its measured value so a mission failure
-        # says which one fired. The sim guard stays 0.5 s; the wall guard is 3.0 s (see the
-        # module docstring -- a render-paced client stalls its heartbeat up to ~2 s per
-        # capture tick, and 3 s still catches a genuinely hung client). The first-tripped
-        # reason is frozen (a fault is terminal until explicit recovery).
-        if self.active and not self.fault:
+        # Name the tripped liveness condition with its measured value so a mission failure says which one
+        # fired. The SIM gap (now - last_heartbeat, both on the node /clock) is the PRIMARY bound: an
+        # advancing sim clock proves the simulator is alive, so a parked station un-heartbeat-ed for that
+        # much SIM time is genuinely lost. The WALL gap only backstops a FROZEN sim (whose stalled /clock
+        # can never advance the SIM leg) at the derived ``wall_backstop_s`` -- large enough that a render-
+        # slow-but-alive station (16-30x wall-to-sim) never trips it. Shared pace predicate, mode='either'
+        # (sim OR wall), matching the manipulation-host timers. The first-tripped reason is frozen (a fault
+        # is terminal until explicit recovery).
+        # sim-robust-station-pause-on-transfer-v1: an explicitly PAUSED station is a known idle-but-alive
+        # state, NOT a death -- skip the liveness gap entirely so it publishes no stop no matter how long
+        # the far op runs. An in-use (active, not paused) station still faults by name on a real gap.
+        if self.active and not self.fault and not self.paused:
             sim_gap = now - self.last_heartbeat
             wall_gap = self.wall_clock() - self.wall_heartbeat
             if not process_alive:
                 self.fault = 'station process lost'
-            elif sim_gap > self.sim_gap_s:
-                self.fault = f'parked heartbeat lost: sim gap {sim_gap:.2f} s'
-            elif wall_gap > self.wall_gap_s:
-                self.fault = f'parked heartbeat lost: wall gap {wall_gap:.2f} s'
-        ready = (self.active and not self.fault and endpoints_ready
+            elif pace_is_dead(sim_elapsed=sim_gap, wall_elapsed=wall_gap, sim_budget=self.sim_gap_s,
+                              wall_backstop=self.wall_backstop_s, mode='either'):
+                self.fault = (f'parked heartbeat lost: sim gap {sim_gap:.2f} s' if sim_gap > self.sim_gap_s
+                              else f'parked heartbeat lost: wall gap {wall_gap:.2f} s')
+        ready = (self.active and not self.fault and not self.paused and endpoints_ready
                  and 0 <= now - self.collision_time <= .5 and self.collision_time > self.parked_since)
         return dict(epoch=self.epoch, sequence=self.sequence, stamp=now,
-                    state='failed' if self.fault else ('ready' if ready else ('warming' if self.active else 'idle')),
+                    state=('failed' if self.fault else 'paused' if self.paused
+                           else 'ready' if ready else 'warming' if self.active else 'idle'),
                     reason=self.fault or '', collision_time=self.collision_time if ready else -1.,
                     parked_since=self.parked_since, camera_frame=self.camera_frame)
 
@@ -219,8 +284,39 @@ def main():
     if node.context.get_domain_id() != 88:
         raise RuntimeError('incorporation ack requires domain 88')
     state = IncorporationAckState()
+    if state.force_never_ack:
+        print('ESDF_FORCE_NEVER_ACK enabled: incorporation acknowledgement disabled for the boot-gate '
+              'fail-fast TRIP proof -- collision_time will stay at the -1 not-ready sentinel for the whole '
+              'run (sim-robust-esdf-boot-gate-v2; default off => byte-identical)', flush=True)
     publisher = node.create_publisher(String, NS + '/station/status', 10)
     stop = node.create_publisher(Bool, NS + '/manipulation/stop', 10)
+    # sim-robust-transfer-start-estop-v1: the global /manipulation/stop wire is a bare Bool the Isaac
+    # side LATCHES permanently, and this station-liveness node does NOT set /manipulation/status, so a
+    # stop published here surfaced to the mission as a BARE 'host emergency stop' with no cause (the
+    # coldlivefull transfer-start e-stop: a 'parked heartbeat lost: wall gap' fault during the between-
+    # ops nav gap). Name EVERY publication in host-stack.log so a bare op-start e-stop can always be
+    # traced to its trigger. Throttled to the first of each distinct reason (tick republishes at 20 Hz).
+    _last_estop_reason = [None]
+    def estop(reason, *, site):
+        if reason != _last_estop_reason[0]:
+            _last_estop_reason[0] = reason
+            print('STATION_ESTOP_PUBLISH site=%s reason=%r' % (site, reason), flush=True)
+        stop.publish(Bool(data=True))
+
+    def release(reason, *, site):
+        # sim-robust-station-pause-on-transfer-v1: un-latch the bare-Bool Isaac /manipulation/stop wire the
+        # moment the station RECOVERS within its budget, so a borderline parked-heartbeat trip during a long
+        # far op (the collect station through the live_pose transfer) does not leave the wire latched True
+        # and kill the live op. PR 235 (IsaacRosGraph._clear_stale_global_stop) only re-derives the wire at
+        # a NEW op's START; a stop that fires mid-op (site=tick) and whose station recovers one tick later
+        # was never released for the CURRENT op (coldwin2: 'station recovered' one tick after the trip, but
+        # the transfer still e-stopped on the latched wire). Publishing False is a NEW message the Isaac
+        # ROS2Subscriber takes (overwriting outputs:data to False); a GENUINELY ongoing stop re-arms True on
+        # the next faulted tick, so this only ever clears a now-recovered stale latch. Resets the estop
+        # reason-throttle so a later distinct trip re-publishes + re-prints.
+        _last_estop_reason[0] = None
+        print('STATION_ESTOP_RELEASE site=%s reason=%r' % (site, reason), flush=True)
+        stop.publish(Bool(data=False))
     service = node.create_client(EsdfAndGradients, NS + '/nvblox_node/get_esdf_and_gradient')
     pending = None
     pending_epoch = None
@@ -251,6 +347,11 @@ def main():
                 node.get_logger().info(
                     f'station recovered: epoch={state.epoch} from={prior_fault!r} '
                     f'recoveries={state.recoveries}/{_MAX_RECOVERIES}')
+            # sim-robust-station-pause-on-transfer-v1: the station recovered within budget -> RELEASE the
+            # latched Isaac stop wire mid-op so a borderline trip during the far op does not kill the live
+            # op once the station proves alive again (one-shot, armed by accept()).
+            if state.consume_release():
+                release(f'station recovered from {prior_fault}', site='recovery')
         except Exception as exc:
             # Make a rejected command (bad epoch/sequence/timestamp, lost parked flag,
             # unparseable JSON) visible in host-stack.log with its ValueError text and the
@@ -259,7 +360,7 @@ def main():
             node.get_logger().info(
                 f'station command rejected: {exc}; now={n:.3f} stamp={stamp}')
             state.fault = str(exc)
-            stop.publish(Bool(data=True))
+            estop(f'station command rejected: {exc}', site='command')
 
     def tick():
         nonlocal pending, pending_epoch, pending_wall, last_discovery, endpoints_ready, diag_left
@@ -299,7 +400,7 @@ def main():
             # live ack node implies the planner/mapper processes are still alive.
             result = state.snapshot(stamp, endpoints_ready=endpoints_ready, process_alive=True)
             if state.fault:
-                stop.publish(Bool(data=True))
+                estop(state.fault, site='tick')
             publisher.publish(String(data=json.dumps(result, allow_nan=False)))
             # Mapper maintenance AFTER the liveness publish: graph discovery (endpoints_ready, used by the
             # NEXT snapshot) and issuing/cancelling the get_esdf_and_gradient request -- the parts that
@@ -341,7 +442,7 @@ def main():
                     pending_wall = time.monotonic()
         except Exception as exc:
             state.fault = str(exc)
-            stop.publish(Bool(data=True))
+            estop(f'tick exception: {exc}', site='tick-exception')
 
     def manip_status(message):
         # fm430 (2a): arm the post-attach ESDF kick on the mission phase rising into 'lift' (post-weld).

@@ -1,0 +1,32 @@
+{
+  "_comment": "sim-robust-outbound-throat-yaw-align-v1: MERGE into the mission runtime-config (navigation block), ON TOP of the sim-robust-coupled-breakaway-from-rest-v1 / outbound-stall-recovery / traction keys (keep them -- they are the untouched backstop). One new master key coupled_heading_hold (default-off; absent => byte-identical) plus three numerics. WHY: in the every-stage-honest cycle the only intermittently-failing stage is the coupled outbound tow at the sales_backroom_portal throat (x~=-3.875). coldwin7/coldwin8/rock1 crossed the throat aligned (base yaw -0.2..+0.3 deg about the east travel axis) and threaded; coldwin9/coldwin10 drifted CCW during the SLOW FROM-REST CREEP after the couple->outbound plan-wait dip (coldwin9: -1.7 deg post-dip creeping at ~0.11 m/s -> +4.9 deg at the throat; coldwin10: +1.2 deg carried to +2.2 deg) and a base+cart envelope yawed >~+1 deg catches the throat lip (coldwin10 wedged at only +2.2 deg -> ~2 deg wedge margin). The root cause: the lane follower's lateral term chases the authored centreline and commands a CCW rotation, and at the crawl the coupled steering cap wmax=v/1.5 collapses to ~0.03 rad/s (vs ~0.12 for the passing runs) so nothing arrests it. The throat is INVISIBLE to the nav static map (footprint valid at every base yaw -8..+6 deg; slack 0.8 m) -- the wedge is a PhysX door-frame contact, the gate returns 'tracking', never obstacle_stop. The heading hold, on a STRAIGHT authored segment once the base drifts more than heading_hold_bound_deg to the CCW/lip side of the lane GOAL (travel) heading, holds a fixed forward creep (restoring a speed-schedule-independent steering authority AND capping forward speed so a misaligned base slows and aligns BEFORE entering the throat) and SATURATES the corrective turn toward the axis -- forward-only (v>=0, the coupled-reverse interlock honoured). PR 201's monitor, PR 236's bound and PR 250's rock stay the untouched backstop. CPU proofs: scripts/twin/tests/test_outbound_heading_hold.py (real coldwin7/rock1/coldwin9/coldwin10 recorded-creep replay), factory wiring scripts/twin/tests/test_navigation_factory.py (test_coupled_heading_hold_*).",
+  "navigation": {
+    "coupled_heading_hold": true,
+    "heading_hold_bound_deg": 1.0,
+    "heading_hold_creep_mps": 0.14,
+    "heading_hold_straight_kappa": 0.08,
+
+    "coupled_progress_escape": true,
+    "coupled_progress_min_m": 0.05,
+    "coupled_progress_escape_s": 3.0,
+    "coupled_progress_fault_s": 8.0,
+    "coupled_progress_recovery": true,
+    "coupled_breakaway_speed_mps": 0.18,
+    "coupled_breakaway_window_s": 2.0,
+    "coupled_breakaway_pulse_s": 0.5,
+    "coupled_breakaway_attempts": 3,
+    "coupled_breakaway_rock": true,
+    "coupled_breakaway_launch_mps": 0.30,
+
+    "coupled_creep_escape": true,
+    "coupled_creep_floor_mps": 0.03
+  },
+  "_key_notes": {
+    "coupled_heading_hold": "bool, default false. Master switch for the pre-throat heading hold, scoped to the COUPLED authored-lane follower. Off => the legacy follower, byte-identical. Reference axis = the lane GOAL heading (the portal-crossing/travel axis; 0 deg east for outbound_dock_to_bay).",
+    "heading_hold_bound_deg": "float, default 1.0 deg. The CCW (throat-lip/wedge-side) align-error threshold that engages the hold. 1.0 sits below coldwin10's failing +2.2 deg (~1.2 deg margin) and above the passing runs' <= +0.3 deg -- so it fires for the stalls and never for the clean threads.",
+    "heading_hold_creep_mps": "float, default 0.14 m/s. The guaranteed authority creep while holding -- restores wmax=creep/1.5 (~0.093 rad/s) regardless of the collapsed tracking-speed schedule, AND caps the forward speed so a misaligned base slows and aligns rather than accelerating into the throat. Clamped to the controller max_speed. Forward-only.",
+    "heading_hold_straight_kappa": "float, default 0.08 1/m. Only hold heading on a STRAIGHT authored segment (|route curvature| <= this). The portal crossing has curvature ~0; a legitimate authored turn (|k| larger) is never fought."
+  },
+  "_gpu_proof_note": "Bounded couple+outbound proof for the integration lane, from the coldwin9/coldwin10 seat (collect+couple clean, then the from-rest creep toward the portal). Recipe: run_mobile_restock.py --start-at couple --stop-after outbound (OR the full coldwin9/capstone recipe), this fragment MERGED on top of the capstone241 navigation block, serialized through flock /tmp/aile-gpu.lock, HEAVY_MB=2500 if whispr holds VRAM, NEVER --force, never touch whispr (pid 1339, ~2.2 GB). Enable the nav diag (RESTOCK_NAV_PLAN_DIAG=1) so the base yaw across the throat is captured. PASS = yaw at throat entry WITHIN the bound (base |yaw| about the east travel axis <~ heading_hold_bound_deg + a small margin), NO 'NAV_BREAKAWAY enter' (the base never pins, so the rock never fires), and arrival at the transfer bay. Grade the nav-trace with the SAME shipped gate as the clean runs: python3 scripts/check_tow_traction.py --environment <env.json> --scenario <mission-scenario.json> --camera-config <camera-config-bay.json> --fragment docs/examples/coupled-traction-fragment.json --runs-dir <mission-dir> --gpu-run <run-dir> (prints GPU_RUN PASS/FAIL: reached_goal=True, longest_pin_s < escape_s -> PASS; coldwin9/coldwin10 score reached_goal=False, longest_pin_s 19-27 s -> FAIL). Then the full capstone. To reproduce a pre-fix run, set coupled_heading_hold:false.",
+  "_scope_note": "This key keeps the coupled base aligned to the lane axis before the throat; it does not touch PR 241's lead-in, PR 201's monitor thresholds, PR 236's bound, PR 250's rock, the couple fine-dock, or any cart/caster friction or mass value, and it never commands reverse (the coupled-reverse interlock, mobile.wheel_targets v>=0 / gate_velocity linear>=0, is a separate captain decision and out of scope). Full analysis + the five-run numbers: data/sim-robust-outbound-throat-yaw-align-v1/report.md."
+}
