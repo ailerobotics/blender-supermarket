@@ -1,0 +1,27 @@
+{
+  "_comment": "sim-robust-coupled-breakaway-from-rest-v1: MERGE into the mission runtime-config (navigation block), ON TOP of the sim-robust-coupled-traction-v1 / outbound-stall-recovery keys. Two new keys, both default-off (absent => byte-identical): coupled_breakaway_rock turns PR 236's forward-only break-away pulse into a reinforced ROCK, and coupled_breakaway_launch_mps is the elevated surge speed it uses. WHY: coldwin9 (2026-10-24) collected + coupled clean, then the coupled tow pinned at the sales_backroom_portal throat (x=-3.93) with the base yawed ~5 deg off the lane axis -- a base+cart envelope catches the throat lip and the base STOPS DEAD while still commanding forward (a physical wedge, NOT a gate refusal). PR 236's forward-only pulse (0.18 m/s) cannot free a forward wedge: nine surges over the three BT re-begins netted ZERO advance (NAV_BREAKAWAY exhausted x3 -> coupled_no_progress). coldwin7/coldwin8 passed because they crossed the throat while still rolling, near-axis-aligned, before a heading error accumulated in the slow from-rest creep. A coupled train cannot reverse (mobile.wheel_targets clamps v>=0 by a deliberate bring-up interlock; gate_velocity rejects linear<0), so the rock uses the only authority a coupled train has: a STRONGER forward launch surge (more momentum + drive force; and a higher coupled steering cap wmax=v/1.5) with the corrective turn SATURATED to +-wmax toward the route heading on the hi pulse phase, to rotate the yaw-wedged base back into alignment and swivel the casters free. The PR 201 net-progress monitor and PR 236's bounded coupled_breakaway_attempts windows (then FAULT 'coupled_no_progress' by name on the sim clock) are the UNTOUCHED backstop. CPU proofs: scripts/twin/tests/test_articulated_navigation.py (test_breakaway_rock_*), scripts/twin/tests/test_coupled_breakaway_rock.py (real coldwin7/coldwin9 recorded-trace replay), factory wiring test_navigation_factory.py.",
+  "navigation": {
+    "coupled_progress_escape": true,
+    "coupled_progress_min_m": 0.05,
+    "coupled_progress_escape_s": 3.0,
+    "coupled_progress_fault_s": 8.0,
+
+    "coupled_progress_recovery": true,
+    "coupled_breakaway_speed_mps": 0.18,
+    "coupled_breakaway_window_s": 2.0,
+    "coupled_breakaway_pulse_s": 0.5,
+    "coupled_breakaway_attempts": 3,
+
+    "coupled_breakaway_rock": true,
+    "coupled_breakaway_launch_mps": 0.30,
+
+    "coupled_creep_escape": true,
+    "coupled_creep_floor_mps": 0.03
+  },
+  "_key_notes": {
+    "coupled_breakaway_rock": "bool, default false. Master switch for the reinforced break-away. Requires coupled_progress_recovery:true (fails LOUD at controller construction otherwise -- never a silent no-op). Off => the PR 236 forward-only pulse, byte-identical.",
+    "coupled_breakaway_launch_mps": "float, default 0.30 m/s. The ELEVATED forward surge speed used during the break-away recovery when the rock is on (replaces coupled_breakaway_speed_mps's 0.18 as the hi-pulse level; the lo phase stays 0.4x). Clamped to the controller max_speed at the gate, so it is bounded in effort. Must be >= coupled_breakaway_speed_mps. NOTE: the mission ArticulatedController max_speed is ~0.25, so 0.30 is effectively capped at 0.25 -- still a ~1.4x boost over the 0.18 pulse, with ~1.4x more coupled steering authority (wmax=v/1.5). Raise the controller max_speed (navigation.max_speed) if a larger launch is wanted."
+  },
+  "_gpu_proof_note": "Bounded couple+outbound proof for the integration lane, reproducing the coldwin9 condition (the base fully stopped after the latch before the tow). Recipe: run_mobile_restock.py --start-at couple --stop-after outbound with --start-staging recorded_bay_park (OR the full coldwin9/capstone recipe if the couple staging is unavailable), this fragment MERGED on top of the capstone241 navigation block, serialized through flock /tmp/aile-gpu.lock, HEAVY_MB=2500 if whispr holds VRAM, NEVER --force, never touch whispr (pid 1339, ~2.2 GB). Enable the nav diag so the NAV_BREAKAWAY enter/next/success/exhausted lines (now tagged rock=1) and the commanded-vs-measured velocity/yaw are captured. PASS = the outbound breaks away on the FIRST attempt (NAV_BREAKAWAY success, or no NAV_BREAKAWAY at all) and the train reaches the transfer bay with NO coupled_no_progress. Grade the nav-trace with the SAME shipped gate as the clean runs: python3 scripts/check_tow_traction.py --gpu-run <run-dir> (coldwin9's own trace scores reached_goal=False, longest_pin_s=27.1 -> FAIL; a passing run scores reached_goal=True, longest_pin_s < escape_s -> PASS). Then the full capstone. To reproduce a pre-fix run, set coupled_breakaway_rock:false (the forward-only pulse that failed coldwin9).",
+  "_scope_note": "This key only changes WHAT the break-away recovery commands; it does not touch PR 241's lead-in, PR 201's monitor thresholds, the couple fine-dock, or any cart/caster friction or mass value. The couple-end heading variance that seeds the throat yaw-wedge is a fine-dock property owned by sim-robust-couple-fine-dock-v1; this fix makes the tow robust to it at the throat. If a GPU proof shows the forward rock still cannot free a hard wedge, the next lever is a bounded REVERSE back-off during recovery -- which requires owner sign-off to relax the coupled-reverse interlock (mobile.wheel_targets v>=0, gate_velocity linear>=0) plus a backward swept-envelope collision proof for the pushed trailer; see data/sim-robust-coupled-breakaway-from-rest-v1/report.md."
+}
