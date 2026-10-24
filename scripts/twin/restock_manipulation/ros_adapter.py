@@ -55,6 +55,12 @@ REPLAN_MAX = 12
 # branch); pose goals keep the full REPLAN_MAX. Env-overridable; clamped to [0, REPLAN_MAX]. Only affects
 # a move that is ALREADY being rejected (a healthy move plans in one), so healthy runs are unchanged.
 REPLAN_MAX_JOINT_SPACE = max(0, min(REPLAN_MAX, int(os.environ.get('RESTOCK_REPLAN_MAX_JOINT_SPACE', 3))))
+# sim-robust-pick-wrist-guard-cspace-fix-v1: a guarded POSE goal (the live_pose transfer PICK approach,
+# the fm327/fm403 task-space LIFT fallback) that PLANS cleanly but whose planned terminal config lands on
+# the ur_wrist_2-vs-ur_forearm self-colliding IK family is re-planned (a fresh stochastic cuMotion seed can
+# draw the clear family, like the collision re-plan). Bounded so a pose that never resolves clear fails fast
+# by name instead of churning the GPU; the PLAN_TOTAL_ATTEMPTS_CAP dispatch ceiling still backstops it.
+POSE_GUARD_REPLAN_MAX = REPLAN_MAX
 # RESTOCK_TRANSFER_CARRY=wrist_guard: wrist-flipped IK re-seeds per move before falling back to the plain
 # seed list (each costs one ~2 s KDL call); bounded so two IK branches cannot ping-pong forever.
 WRIST_FLIP_MAX = 3
@@ -231,6 +237,39 @@ def _plan_attempts_exhausted(plan_dispatches):
     bounded before the 12 GB card OOMs and before the shared ESDF service is starved into a station-
     heartbeat gap. Pure for CPU testing."""
     return plan_dispatches >= PLAN_TOTAL_ATTEMPTS_CAP
+
+
+def pose_wrist_guard_record(wrist1_cap, wrist2_min):
+    """sim-robust-pick-wrist-guard-cspace-fix-v1: the terminal wrist clear-region ``(cap, w2min)`` recorded
+    for a guarded POSE goal, or None when neither bound is set (byte-identical -- no terminal check). A
+    missing side is PERMISSIVE (the fm327/fm403 lift fallback may cap only wrist_1): +inf upper / -inf
+    lower never rejects, so in_clear_region matches the old one-sided cap. Pure."""
+    if wrist1_cap is None and wrist2_min is None:
+        return None
+    return (float('inf') if wrist1_cap is None else float(wrist1_cap),
+            float('-inf') if wrist2_min is None else float(wrist2_min))
+
+
+def pose_guard_decision(term_q, guard, replans, plan_dispatches, wall_exceeded):
+    """sim-robust-pick-wrist-guard-cspace-fix-v1: classify a guarded POSE plan's planned TERMINAL config
+    ``term_q`` (ARM order) against the wrist clear-region ``guard`` = ``(wrist1_cap, wrist2_min)``. Pure.
+
+    * ``'accept'`` -- no guard, or the terminal lands in the clear (wrist_2-positive) family: execute it.
+    * ``'replan'`` -- terminal is in the ur_wrist_2-vs-ur_forearm self-colliding family AND budget remains:
+      re-plan the SAME clean pose goal (a fresh stochastic cuMotion seed can draw the clear family).
+    * ``'fail'``   -- colliding and the re-plan budget / PLAN_TOTAL_ATTEMPTS_CAP dispatch cap / wall cap is
+      spent: fail fast by name rather than churn the GPU.
+    """
+    if guard is None:
+        return 'accept'
+    from .transfer_carry import in_clear_region
+    cap, w2min = guard
+    if in_clear_region(term_q, cap, w2min):
+        return 'accept'
+    if (not wall_exceeded and not _plan_attempts_exhausted(plan_dispatches)
+            and replans < POSE_GUARD_REPLAN_MAX):
+        return 'replan'
+    return 'fail'
 
 
 def frozen_sim_wall_backstop(sim_budget_s, wall_floor_s, pacing_factor=None):
@@ -632,6 +671,18 @@ class RosMotionPort:
         # joint-space goal must satisfy, else it is re-seeded from its wrist-flipped twin. None => off.
         self._wrist_guard = None if wrist_guard is None else (float(wrist_guard[0]), float(wrist_guard[1]))
         self._wrist_flips = 0
+        # sim-robust-pick-wrist-guard-cspace-fix-v1: the wrist clear-region (wrist1_cap, wrist2_min) a
+        # cuMotion TASK-SPACE POSE goal's planned trajectory must TERMINATE in, or None (off =>
+        # byte-identical). It is NOT a goal constraint on the plan request: cuMotion reads any
+        # joint_constraints in goal_constraints as a FULL c-space target (building cspace_position from
+        # exactly those entries, discarding the pose), so a 2-entry wrist list made it call
+        # planToCSpaceTarget([[-0.675, 1]]) against a 6-DOF robot -> 'Invalid c-space position [2] must
+        # equal [6]' x7 -> cumotion::FatalException CUDA OOM -> container death (pickguard1, PR254
+        # regression). Instead the pose goal stays CLEAN and the plan_result path validates the planned
+        # terminal config against this region, re-planning (fresh stochastic seed) off the self-colliding
+        # family. Set only by the pose-goal branch below when a cap/min is supplied. See _pose_plan_goal.
+        self._pose_wrist_guard = None
+        self._pose_guard_replans = 0   # bounded re-plans spent escaping the self-colliding IK family
         # sim-robust-transfer-preplace-reach-v1: (max_droop, upright_seed) for a wrist-guarded TRANSFER
         # preplace. Beyond the wrist-clear test, the accepted KDL goal must ALSO keep its shoulder fold
         # within the holdable envelope (transfer_carry.reachable_fold), and the upright seed is tried so
@@ -697,7 +748,12 @@ class RosMotionPort:
         if self.pose_goal and not self._straight_line and not joint_space:
             self.generation += 1
             self.handle = None
-            self._plan_goal = self._pose_plan_goal(pose, joints, wrist1_cap=wrist1_cap, wrist2_min=wrist2_min)
+            # sim-robust-pick-wrist-guard-cspace-fix-v1: a wrist cap/min on a POSE goal is a post-plan
+            # TERMINAL guard, NOT a goal constraint (a joint_constraints list on a pose goal is read by
+            # cuMotion as a malformed c-space target -- see _pose_plan_goal / _pose_wrist_guard). Record
+            # the region; the goal stays clean (no joint_constraints) and plan_result validates against it.
+            self._pose_wrist_guard = pose_wrist_guard_record(wrist1_cap, wrist2_min)
+            self._plan_goal = self._pose_plan_goal(pose, joints)
             self._send(self.plan, self._plan_goal, 'plan_accept')
             self._arm_plan_deadline()   # sim-clock planning deadline (render-pacing tolerant)
             return
@@ -931,17 +987,23 @@ class RosMotionPort:
             return True
         raise RuntimeError('IK outside the carry wrist region (wrist_1<=%.2f, wrist_2>=%.2f)' % (cap, w2min))
 
-    def _pose_plan_goal(self, pose, joints, wrist1_cap=None, wrist2_min=None):
-        """MoveGroup plan request to a cartesian TCP pose (position+orientation goal constraints in
+    def _pose_plan_goal(self, pose, joints):
+        """MoveGroup plan request to a cartesian TCP pose (position+orientation goal constraints ONLY, in
         ur_base_link); cuMotion does its own collision-aware IK, so a single collision model (XRDF)
         decides feasibility. Mirrors begin_joint_goal's request fields; plan_only (the port executes
-        a validated trajectory separately). wrist1_cap (fm327, sim-only) adds a GOAL joint constraint
-        ur_wrist_1_joint <= wrist1_cap so cuMotion IKs a carry pose (the lift) BELOW the ur_wrist_2-vs-
-        ur_forearm self-collision stop (~0.70) even before the planner catches that pair. wrist2_min
-        (fm403, sim-only) adds the companion LOWER bound ur_wrist_2_joint >= wrist2_min so the IK cannot
-        pick the w2-negative self-colliding branch (the bench showed w1-cap alone leaves w2 jamming)."""
+        a validated trajectory separately).
+
+        sim-robust-pick-wrist-guard-cspace-fix-v1: this goal carries NO joint_constraints. cuMotion reads
+        ANY joint_constraints in goal_constraints as a FULL c-space target (it builds cspace_position from
+        exactly those entries and drops the pose), so the earlier fm327/fm403 wrist-cap encoding -- which
+        appended a 1- or 2-entry wrist joint_constraints list onto this pose goal -- made cuMotion call
+        planToCSpaceTarget with a 2-coordinate target against a 6-DOF robot ('Invalid c-space position [2]
+        must equal [6]' -> cumotion::FatalException CUDA OOM -> container death, pickguard1). The wrist
+        clear-region guard is now enforced AFTER planning, by validating the planned trajectory's terminal
+        config against self._pose_wrist_guard (set by begin()) and re-planning off the self-colliding IK
+        family -- see the plan_result handler in _poll."""
         from moveit_msgs.action import MoveGroup
-        from moveit_msgs.msg import Constraints, PositionConstraint, OrientationConstraint, BoundingVolume, JointConstraint
+        from moveit_msgs.msg import Constraints, PositionConstraint, OrientationConstraint, BoundingVolume
         from shape_msgs.msg import SolidPrimitive
         from geometry_msgs.msg import Pose as GPose
         goal = MoveGroup.Goal()
@@ -973,18 +1035,6 @@ class RosMotionPort:
         c = Constraints()
         c.position_constraints.append(pc)
         c.orientation_constraints.append(oc)
-        if wrist1_cap is not None:
-            _low = -2.0   # cap only the UPPER bound at wrist1_cap; generous lower bound
-            c.joint_constraints.append(JointConstraint(
-                joint_name='ur_wrist_1_joint', position=(_low + float(wrist1_cap)) / 2.,
-                tolerance_above=(float(wrist1_cap) - _low) / 2.,
-                tolerance_below=(float(wrist1_cap) - _low) / 2., weight=1.))
-        if wrist2_min is not None:
-            _high = 2.0   # fm403: bound only the LOWER side at wrist2_min; generous upper bound
-            c.joint_constraints.append(JointConstraint(
-                joint_name='ur_wrist_2_joint', position=(float(wrist2_min) + _high) / 2.,
-                tolerance_above=(_high - float(wrist2_min)) / 2.,
-                tolerance_below=(_high - float(wrist2_min)) / 2., weight=1.))
         req.goal_constraints = [c]
         goal.planning_options.plan_only = True
         return goal
@@ -1045,6 +1095,11 @@ class RosMotionPort:
         self._near_start = False   # fm347 (3): begin_joint_goal moves use their own goal, never the near_start IK branch
         self._wrist_guard = None   # transfer_carry: a fixed joint goal has no IK branch to guard
         self._reach_guard = None   # sim-robust-transfer-preplace-reach-v1: no IK branch to reach-guard either
+        # sim-robust-pick-wrist-guard-cspace-fix-v1: a joint-space goal already IS a 6-joint c-space target
+        # (its terminal config is the commanded goal), so the post-plan pose wrist-guard never applies;
+        # clear it so a prior pose move's guard cannot leak into this move's plan_result check.
+        self._pose_wrist_guard = None
+        self._pose_guard_replans = 0
         # Reset the planning anchors for THIS move, exactly as begin() does (firstmate 292 / run-238):
         # without a fresh _plan_started_wall the total-planning-wall cap carried the stale anchor from
         # the previous pose-goal move (lift), so the tuck/pan/stow joint goal tripped
@@ -1922,6 +1977,41 @@ class RosMotionPort:
                 self.start = live_start
                 print('MOVE_GROUP_RESPAWN_RESEED start re-anchored to live measured joints '
                       'after post-respawn plan start-drift', flush=True)
+            # sim-robust-pick-wrist-guard-cspace-fix-v1: enforce the wrist clear-region on a guarded POSE
+            # goal HERE (post-plan), not via a malformed joint_constraints goal. cuMotion's task-space IK
+            # picks one of the two IK families reaching this TCP; the ur_wrist_2-vs-ur_forearm self-
+            # colliding one (coldwin12: terminal wrist_2 < 0) limit-cycles at contact, the clear wrist_2-
+            # positive one (coldwin11) settles. Validate the planned TERMINAL config; if it is in the
+            # colliding family, re-plan the SAME clean pose goal -- cuMotion is stochastic, so a fresh seed
+            # can draw the clear family (the exact mechanism the collision re-plan above relies on) --
+            # bounded by _pose_guard_replans and the same PLAN_TOTAL_ATTEMPTS_CAP GPU backstop, and FAIL BY
+            # NAME when exhausted. _pose_wrist_guard is None whenever no wrist cap/min was supplied (key
+            # off / collect / non-pick) => this block never runs => byte-identical.
+            pg = getattr(self, '_pose_wrist_guard', None)
+            if pg is not None and self._plan_goal is not None:
+                names = list(trajectory.joint_trajectory.joint_names)
+                terminal = trajectory.joint_trajectory.points[-1].positions
+                term_q = [terminal[names.index(j)] for j in JOINTS]
+                cap, w2min = pg
+                decision = pose_guard_decision(term_q, pg, self._pose_guard_replans,
+                                               getattr(self, '_plan_dispatches', 0),
+                                               self.planning_wall_exceeded())
+                if decision == 'replan':
+                    self._pose_guard_replans += 1
+                    print('POSE_WRIST_GUARD reject term=%s (want wrist_1<=%.2f, wrist_2>=%.2f) -> '
+                          're-plan %d/%d (fresh seed, clean pose goal)'
+                          % ([round(v, 3) for v in term_q], cap, w2min,
+                             self._pose_guard_replans, POSE_GUARD_REPLAN_MAX), flush=True)
+                    self._arm_plan_deadline()   # fresh sim-clock planning budget per retry
+                    self._send(self.plan, self._plan_goal, 'plan_accept')
+                    return 'running'
+                if decision == 'fail':
+                    raise RuntimeError(
+                        'pose goal could not reach the clear carry wrist region '
+                        '(wrist_1<=%.2f, wrist_2>=%.2f) within %d re-plans'
+                        % (cap, w2min, POSE_GUARD_REPLAN_MAX))
+                print('POSE_WRIST_GUARD accept term=%s (wrist_1<=%.2f, wrist_2>=%.2f) replans=%d'
+                      % ([round(v, 3) for v in term_q], cap, w2min, self._pose_guard_replans), flush=True)
             end=trajectory.joint_trajectory.points[-1].time_from_start
             duration=end.sec+end.nanosec*1e-9
             if duration>110.:

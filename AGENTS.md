@@ -176,6 +176,16 @@ repo's `scenes/`, `export/` or `renders/`.
   `restock_host/incorporation_ack.py` publishes the station liveness ack BEFORE its ESDF maintenance
   so a plan storm can't starve the heartbeat (readiness still gated on a real integration). Report +
   the collect+couple validation env: `data/sim-robust-collect-place-v1/report.md`.
+  **Sharp edge — never put `joint_constraints` on a cuMotion POSE goal**: the Isaac ROS cuMotion MoveIt
+  planner reads ANY `joint_constraints` in `goal_constraints` as a FULL c-space target (it builds
+  `cspace_position` from exactly those entries and DROPS the pose), so a partial (1–2 joint) wrist-bound
+  list made it call `planToCSpaceTarget([[-0.675, 1]])` against a 6-DOF robot → `'Invalid c-space position …
+  [2] must equal [6]'` → `cumotion::FatalException` CUDA OOM → container death (pickguard1, the PR254
+  regression). To bound a pose goal's wrist family, plan a CLEAN pose goal and validate the planned
+  TERMINAL config post-plan (`ros_adapter.pose_guard_decision` + `transfer_carry.in_clear_region`),
+  re-planning off the self-colliding family — never joint_constraints as bounds. The well-formed c-space
+  shape is the seeded-KDL joint path's **six**-entry list. Fix + evidence:
+  `data/sim-robust-pick-wrist-guard-cspace-fix-v1/report.md`.
   **Place-on-cart goal/branch fix** (opt-in, default-off ⇒ byte-identical): the non-cage reposition deck
   place poses have TWO collision-free IK families — UPRIGHT (`shoulder_lift≈-1.9`, holdable) and a DEEP
   fold (`≈-3.57`, the soft arm can't hold under load → collect1 sagged 0.39 rad short → heartbeat lost);
