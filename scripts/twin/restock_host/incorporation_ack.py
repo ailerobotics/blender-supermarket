@@ -99,6 +99,14 @@ class IncorporationAckState:
         # and issue a fresh one immediately, so the post-attach ESDF integrates ~a cycle sooner. Pure
         # sequencing lives on this state object (unit-tested); the ROS subscription is glue.
         self.kick_enabled = (os.environ.get('RESTOCK_ESDF_POSTATTACH_KICK', '0') not in ('0', '', 'false', 'False'))
+        # sim-robust-esdf-boot-gate-v2: PROOF/TEST switch (opt-in, default off => byte-identical). When set,
+        # acknowledge() REFUSES every stamp, so collision_time never advances past the -1 not-ready sentinel
+        # -- a faithful "nvblox genuinely never incorporates" reproduction (the arm host sees exactly the
+        # stuck -1 the boot gate keys on), through the REAL reject path, for the esdf_boot_gate fail-fast
+        # TRIP proof. NOT a production feature: the stale commission baseline does NOT reproduce never-ack
+        # (it incorporates one tick late), so the TRIP path needs the feed/mapper actually disabled.
+        self.force_never_ack = (os.environ.get('RESTOCK_ESDF_FORCE_NEVER_ACK', '0')
+                                not in ('0', '', 'false', 'False'))
         self._kick_pending = False
         self._last_phase = None
         self.epoch = 0
@@ -210,6 +218,11 @@ class IncorporationAckState:
         return r
 
     def acknowledge(self, stamp, epoch):
+        if self.force_never_ack:
+            # sim-robust-esdf-boot-gate-v2 proof switch: refuse through the REAL reject path so
+            # collision_time stays at the -1 sentinel (genuine never-incorporation for the gate TRIP).
+            raise ValueError('RESTOCK_ESDF_FORCE_NEVER_ACK: incorporation acknowledgement disabled '
+                             '(boot-gate fail-fast TRIP proof)')
         if (not self.active or epoch != self.epoch or not math.isfinite(stamp)
                 or stamp <= self.parked_since or stamp < self.collision_time):
             raise ValueError('mapper acknowledgement does not belong to current parked epoch')
@@ -271,6 +284,10 @@ def main():
     if node.context.get_domain_id() != 88:
         raise RuntimeError('incorporation ack requires domain 88')
     state = IncorporationAckState()
+    if state.force_never_ack:
+        print('ESDF_FORCE_NEVER_ACK enabled: incorporation acknowledgement disabled for the boot-gate '
+              'fail-fast TRIP proof -- collision_time will stay at the -1 not-ready sentinel for the whole '
+              'run (sim-robust-esdf-boot-gate-v2; default off => byte-identical)', flush=True)
     publisher = node.create_publisher(String, NS + '/station/status', 10)
     stop = node.create_publisher(Bool, NS + '/manipulation/stop', 10)
     # sim-robust-transfer-start-estop-v1: the global /manipulation/stop wire is a bare Bool the Isaac
