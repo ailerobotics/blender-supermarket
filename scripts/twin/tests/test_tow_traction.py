@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from twin.traction import (coupled_tow_margin, drive_wheel_normal_share,
-                           static_traction_budget, TowMargin)
+                           static_traction_budget, throat_single_tick_stops, TowMargin)
 
 GOAL = (-2.0, 15.25, 0.0)
 
@@ -95,6 +95,34 @@ def test_coupling_gap_reanchors_so_a_legitimate_wait_is_not_charged():
 def test_bad_params_raise():
     with pytest.raises(ValueError):
         coupled_tow_margin(_clean_tow(), GOAL, pin_fault_s=0.0)
+
+
+# ---- throat single-tick-stop detector (momentum signature) --------------------------------------
+
+def test_clean_tow_has_no_single_tick_stop():
+    stops, first = throat_single_tick_stops(_clean_tow())
+    assert stops == 0 and first is None
+
+
+def test_pin_from_rest_is_a_single_tick_stop():
+    # advance at ~0.18 m/s to x=-3.935, then collapse to ~0.006 in one tick (the coldwin18 signature)
+    rows, x, t = [], -4.46, 0.0
+    while x < -3.936:
+        rows.append(_row(round(x, 3), round(t, 2), lin=0.18)); x += 0.003; t += 0.017
+    rows.append(_row(-3.935, round(t, 2), lin=0.006)); t += 0.017
+    for _ in range(10):
+        rows.append(_row(-3.935, round(t, 2), parked=True, lin=0.01)); t += 0.017
+    stops, first = throat_single_tick_stops(rows)
+    assert stops == 1 and first == (-3.935, 15.25)
+
+
+def test_crossing_at_cruise_is_not_flagged():
+    # the base crosses x=-3.935 WEST->EAST at cruise and keeps going: no collapse west of -3.90
+    rows, x, t = [], -4.46, 0.0
+    while x <= -2.0 + 1e-9:
+        rows.append(_row(round(x, 3), round(t, 2), lin=0.18)); x += 0.01; t += 0.05
+    stops, first = throat_single_tick_stops(rows)
+    assert stops == 0 and first is None
 
 
 # ---- quasi-static budget (lever direction) ------------------------------------------------------

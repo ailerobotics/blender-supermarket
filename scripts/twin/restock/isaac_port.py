@@ -177,7 +177,7 @@ class IsaacPort:
                  stage_scoped_teardown=None, release_source_capture=None,
                  collect_keep_source_render=False, collect_observe_force_render_ticks=0,
                  trace_carton_path=None, sim_speed=None, idle_cameras=None,
-                 vram_monitor=None, progress_writer=None):
+                 vram_monitor=None, progress_writer=None, trace_casters=False):
         self.world,self.robot=world,robot
         # sim-robust-vram-headroom-v1: opt-in VRAM headroom monitor (samples used VRAM on the sim clock
         # and sheds optional load below a floor) and the always-on durable stage-progress writer (so a
@@ -317,6 +317,31 @@ class IsaacPort:
         self.tick=0
         self.names=tuple(robot.dof_names)
         self.wheels=tuple(self.names.index(n) for n in ('left_wheel_joint','right_wheel_joint'))
+        # sim-robust-throat-momentum-launch-v1 diagnostic (RESTOCK_TRACE_CASTERS=1, default off =>
+        # byte-identical: no extra nav-trace fields, no stage reads). The throat pin (the base stops dead
+        # at x~=-3.935 on a flat floor with NO collider) is hypothesised to turn on the TRAILING-CASTER
+        # swivel state: a caster left angled by the pre-throat alignment turn scrubs instead of rolls from
+        # the near-stop. These fields let the next GPU runs SEE the swivel at the pin: the two caster
+        # swivel-joint angles (the discriminator the momentum launch addresses) and a geometric ground-
+        # contact proxy (each wheel/caster link's world-z vs its rolling radius above the floor z=0).
+        self._trace_casters=bool(trace_casters)
+        self._caster_swivel_dofs={}
+        self._wheel_prims={}
+        if self._trace_casters:
+            for nm in self.names:
+                if nm.endswith('caster_swivel'):
+                    self._caster_swivel_dofs[nm]=self.names.index(nm)
+            try:
+                from pxr import UsdGeom as _UsdGeom
+                r_wheel=float(self.mobile.spec.wheel_radius)
+                wanted={'left_wheel':r_wheel,'right_wheel':r_wheel,
+                        'front_caster_wheel':0.065,'rear_caster_wheel':0.065}
+                for prim in self.world.stage.Traverse():
+                    nm=prim.GetName()
+                    if nm in wanted and nm not in self._wheel_prims and _UsdGeom.Xformable(prim):
+                        self._wheel_prims[nm]=(prim,wanted[nm])
+            except Exception:
+                self._wheel_prims={}
         self.sensor_models={'docking':'ideal_simulated_rigid_body_proprioception',
                             'navigation':'wheel_encoders_and_physical_range_scan',
                             'inventory':'rendered_rgb_depth_only'}
@@ -657,7 +682,8 @@ class IsaacPort:
                     vel=dict(rv=round(float(np.linalg.norm(rv)),4),rw=round(float(np.linalg.norm(rw)),4),
                              cv=round(float(np.linalg.norm(cv)),4),cw=round(float(np.linalg.norm(cw)),4)),
                     unknown=sum(1 for u in scan.unknown if u),
-                    **({'probe':rec} if self._trace_probe() else {})))
+                    **({'probe':rec} if self._trace_probe() else {}),
+                    **({'casters':self._caster_trace(positions)} if self._trace_casters else {})))
                 if self._trace_carton_path is not None:
                     line=line[:-1]+', '+_json.dumps(self._trace_poses(cur,c,cz))[1:]
                 with (self.recorder.directory.parent/'nav-trace.jsonl').open('a') as _f:
@@ -685,6 +711,46 @@ class IsaacPort:
         return Packet(f'physics:{self.tick}','sensor',now,
             odometry,navigation,docking,None,
             ready,coupled,articulation,parked,evidence)
+
+    def _caster_trace(self, positions):
+        """Caster-swivel + wheel-contact diagnostic for the nav-trace row (RESTOCK_TRACE_CASTERS=1).
+
+        sim-robust-throat-momentum-launch-v1: the throat pin (base stops dead at x~=-3.935 on a flat floor
+        with NO collider) is hypothesised to turn on the TRAILING-CASTER swivel state. Emits:
+          * ``swivel_deg``: each passive caster swivel-joint angle (deg) from the measured encoder dict --
+            the discriminator the momentum launch addresses (a caster angled by the pre-throat alignment
+            turn scrubs instead of rolls from the near-stop);
+          * ``wheel_z`` / ``contact``: each drive + caster wheel link's world-z (m) and a GEOMETRIC contact
+            proxy (z <= rolling_radius + 10 mm above the floor z=0). A proxy, NOT a PhysX contact report --
+            labelled as such; it still shows which wheel has lifted off when the base pitches.
+        Never raises (a read failure drops the offending field); costs one encoder-dict read + up to four
+        cached-prim world transforms per tick when enabled, and is absent entirely when off."""
+        out={}
+        try:
+            sw={nm.replace('_caster_swivel',''):round(math.degrees(float(positions[nm])),1)
+                for nm in self._caster_swivel_dofs if nm in positions}
+            if sw:
+                out['swivel_deg']=sw
+        except Exception:
+            pass
+        if self._wheel_prims:
+            try:
+                from pxr import UsdGeom
+                cache=UsdGeom.XformCache()
+                wz={}; contact={}
+                for nm,(prim,rad) in self._wheel_prims.items():
+                    if not prim.IsValid():
+                        continue
+                    z=float(cache.GetLocalToWorldTransform(prim).ExtractTranslation()[2])
+                    key=nm.replace('_wheel','').replace('_caster','')
+                    wz[key]=round(z,4)
+                    contact[key]=bool(z<=rad+0.01)
+                if wz:
+                    out['wheel_z']=wz
+                    out['contact']=contact
+            except Exception:
+                pass
+        return out
 
     def _trace_poses(self, cur, cart, cart_z):
         """Carton + cart world poses for the nav-trace row (RESTOCK_TRACE_POSES=1). The carton is read

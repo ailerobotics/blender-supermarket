@@ -623,6 +623,35 @@ throat (it is not meant to span a genuine authored turn). PR 201/236/250 stay th
 (coldwin17/coldwin16/coldwin11 recorded-creep replay — all converge to ~+0.9° at the lip vs the +5.5° wedge);
 write-up `data/sim-robust-heading-hold-bound-v1/report.md`.
 
+**Momentum launch window** (`navigation.heading_hold_launch_m`, opt-in, default `0.0` ⇒ the pre-throat
+alignment gate above is byte-identical; sim-robust-throat-momentum-launch-v1). The PR 258 gate removed the
+**yaw** cause but **coldwin18** (byte-identical to the complete coldwin16 + the gate) still failed: the base
+entered the throat **aligned** (base_yaw ≈ −1°, `throat_misaligned=0`) and then **pinned FROM REST at
+x=−3.935** — one trace tick collapsed the robot speed `0.183 → 0.006 m/s` in 16.7 ms (a ~10 m/s² impulse the
+200 N drive cannot brake), the hitch articulation dropped `0.1996 → 0.1987`, the train sat ~27 s SIM jittering
+< 0.01 m net, `NAV_BREAKAWAY enter ×3` → `coupled_no_progress`. **CPU scene inspection of the mission.usda
+around the throat (x = −3.5…−3.935, y = 15.25) finds NO door threshold / sill / jamb / wall / floor seam** —
+the backroom floor is a single flat plane at z = 0 and the only colliders there are the ceiling (z = 4), the
+east wall (x = 1.0) and the TransferBay (north, off the path). So the pin is **not a modelled collider**; it is
+a from-low-momentum **PhysX wheel/caster contact**, stochastic across byte-identical runs. The passers
+(coldwin16, coldwin11, hold2) all rolled **through** the same spot at cruise carrying straight-travel momentum;
+the pinners had just been correcting yaw into the lip, leaving the trailing casters swiveled off-axle so they
+**scrub instead of roll** from the near-stop. When `heading_hold_launch_m > 0` (requires
+`heading_hold_prethroat_m > 0` and `heading_hold_launch_m < heading_hold_prethroat_m`, so alignment has runway
+first), the follower command inside the **launch window** — within that distance of the throat along the travel
+axis, **either side of the lip** so the straight cruise spans the pin — is overridden, **once aligned**, to a
+**dead-straight forward cruise** (`curvature = 0`, no steering corrections) at `heading_hold_launch_mps` (or the
+full speed cap when `0.0`), never below the follower's own speed (only *adds* momentum, never crawls), forward
+only. A base still misaligned on launch entry keeps the bounded PR 258 alignment gate (so the launch never
+fires misaligned and the align-timeout still names `throat_misaligned`). PR 201/236/250 stay the untouched
+backstop (the launch only acts while the break-away is idle). To **see** the discriminator, set
+`RESTOCK_TRACE_CASTERS=1` so each nav-trace row carries the two trailing-caster swivel angles + a geometric
+wheel-contact proxy. Example `docs/examples/throat-momentum-launch-mission-fragment.json`; CPU proof
+`tests/test_outbound_throat_launch.py` (coldwin18 recorded-creep replay: alignment complete before the window,
+no steering + cruise across the pin, forward-only, key-off byte-identical) + the acceptance gate's single-tick-
+stop detector `tests/test_tow_traction.py` / `scripts/check_tow_traction.py --gpu-run`; write-up
+`data/sim-robust-throat-momentum-launch-v1/report.md`.
+
 **Wall-clock stuck-stage fail-fast** (`RESTOCK_NAV_STUCK_WALL_S`, opt-in, default `0` = off): the nav
 `blocked_timeout`/`goal_timeout` are **sim-clock** caps, which under render pacing (sim advances far
 slower than wall) cannot fire — run-322b's outbound sat on `lane_blocked` for ~50 min WALL and only the
