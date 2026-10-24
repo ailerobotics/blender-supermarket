@@ -530,6 +530,16 @@ class RosMotionPort:
         # rejection (a port raise). The controller reads it after a 'failed' poll to retry ONLY the
         # former with a fresh deadline. A wall-clock deadline miss (the wall sweep's job) stays False.
         self._last_fault_sim_deadline = False
+        # sim-robust-phase-timeout-during-recovery-v1: a move_group PROCESS death observed during an
+        # in-flight move via the plan action-server liveness latch (see _poll). The launch can respawn
+        # move_group inside a single render-paced poll gap, so a crash that flows through the controller's
+        # SIM-deadline MOVE_DEADLINE_RETRY (not _awaiting_server_respawn) is otherwise invisible to
+        # crash_recovery_active() (respawn2b). The latch holds from the ready->not-ready transition until
+        # the move SUCCEEDS / stop() / op reset, so the controller can credit the whole orphaned-goal wait +
+        # re-send the death caused out of the per-phase timeout. None/False on a healthy move => the probe is
+        # False => byte-identical.
+        self._movegroup_death_seen = False
+        self._mg_server_was_ready = None
         # fm345 smaller-problems-later: per-move PLACE relaxations for the carton-loaded extend.
         # (b) _move_speed_scale slows the cuMotion joint-space plan (preplace/place) to ~half so the
         # soft arm drive (3e5/8000/400) can track the min-jerk timing it lagged in run-270 (sagged
@@ -1528,6 +1538,39 @@ class RosMotionPort:
         this case). Cleared at the start of every move (begin/begin_joint_goal)."""
         return bool(getattr(self, '_reattach_failed', False))
 
+    def crash_recovery_active(self):
+        """sim-robust-phase-timeout-during-recovery-v1: True while a NAMED move_group crash recovery is in
+        flight for the current move -- the respawn hold (``_awaiting_server_respawn``), the post-respawn
+        carton re-attach (``_reattach_active``), OR a move_group PROCESS death observed during this move and
+        not yet recovered (``_movegroup_death_seen``, the liveness latch that also catches a launch respawn
+        faster than the crash-retry path sees the server down -- respawn2b). The controller credits this sim
+        time out of the per-phase timeout so a recovered crash cannot convert into 'phase timeout'. False on
+        a healthy move / real rig => the controller's phase-timeout accounting is byte-identical."""
+        return bool(getattr(self, '_awaiting_server_respawn', False)
+                    or getattr(self, '_reattach_active', False)
+                    or getattr(self, '_movegroup_death_seen', False))
+
+    def _track_movegroup_liveness(self):
+        """sim-robust-phase-timeout-during-recovery-v1: latch a move_group PROCESS death observed during an
+        in-flight move. Watch the move_group (plan) action server's liveness each active poll; a
+        ready -> not-ready transition is positive crash evidence (the launch respawns it inside the
+        render-paced poll gap, so the SIGABRT flows through the controller's SIM-deadline MOVE_DEADLINE_RETRY
+        -- never _awaiting_server_respawn -- and would otherwise be invisible to crash_recovery_active()).
+        The latch holds (set below, cleared on a successful move / stop / op reset) across the whole
+        orphaned-goal wait + re-send the death caused. No death => no transition => never set => byte-
+        identical. Best-effort: a plan client without server_is_ready (test double / teardown) is a no-op."""
+        probe = getattr(getattr(self, 'plan', None), 'server_is_ready', None)
+        if not callable(probe):
+            return
+        try:
+            ready = bool(probe())
+        except Exception:
+            return
+        prev = getattr(self, '_mg_server_was_ready', None)
+        self._mg_server_was_ready = ready
+        if prev is True and not ready:
+            self._movegroup_death_seen = True
+
     def poll(self):
         try:
             return self._poll()
@@ -1598,6 +1641,10 @@ class RosMotionPort:
         from moveit_msgs.msg import Constraints, JointConstraint
         if self.state in ('succeeded', 'failed'):
             return self.state
+        # sim-robust-phase-timeout-during-recovery-v1: latch a move_group death observed during this
+        # in-flight move (crash_recovery_active()). Only in an active state (the early return above skips
+        # idle/succeeded/failed), so it cannot latch on an idle-time background respawn.
+        self._track_movegroup_liveness()
         # sim-robust-movegroup-double-death-v1 (gap 1): a bounded post-respawn carton re-attach is in
         # progress (the respawned move_group transiently rejected the attach). Step it HERE, before the
         # crash/deadline checks -- spanning poll()s so the node /clock advances and the respawned attach
@@ -1898,6 +1945,11 @@ class RosMotionPort:
                     'see host-stack.log TRAJ_HOST_GOAL_REJECT/TRAJ_HOST_FAULT)' % (_code,))
                 raise RuntimeError('execution failed')
             self.state = 'succeeded'
+        if self.state == 'succeeded':
+            # sim-robust-phase-timeout-during-recovery-v1: the move completed -> any move_group crash it
+            # survived is recovered; clear the liveness latch so crash_recovery_active() stops crediting.
+            self._movegroup_death_seen = False
+            self._mg_server_was_ready = None
         return 'succeeded' if self.state == 'succeeded' else 'running'
 
     def stop(self):
@@ -1905,6 +1957,9 @@ class RosMotionPort:
         if self.handle is not None:
             self.handle.cancel_goal_async()
         self.state = 'failed'
+        # sim-robust-phase-timeout-during-recovery-v1: terminal halt -> clear the crash-liveness latch.
+        self._movegroup_death_seen = False
+        self._mg_server_was_ready = None
         self.emergency_stop()  # immediate task-owned simulator joint hold
 
     def _fail_hold(self):
@@ -1947,6 +2002,8 @@ class RosMotionPort:
         self._planner_unrecoverable = False   # sim-robust-collect-stow-stall-v1
         self._reattach_active = False         # sim-robust-movegroup-double-death-v1 (gap 1)
         self._reattach_failed = False         # sim-robust-movegroup-double-death-v1 (gap 1)
+        self._movegroup_death_seen = False    # sim-robust-phase-timeout-during-recovery-v1: fresh per op
+        self._mg_server_was_ready = None
 
     def update_payload(self, held, profile):
         # Must update BOTH MoveIt and cuMotion collision attachment, not PhysX

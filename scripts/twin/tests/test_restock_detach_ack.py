@@ -186,6 +186,20 @@ def test_reconcile_detach_clears_a_surviving_attach():
     assert client.holds is False
 
 
+def test_reconcile_detach_ok_log_line_is_emitted_on_success(capsys, monkeypatch):
+    # sim-robust-phase-timeout-during-recovery-v1: confirm the PR 249 reconcile SUCCESS log string is
+    # exactly `reconcile_detach_ok`, matching docs/examples/movegroup-reattach-after-respawn-mission-
+    # fragment.json. (respawn2b never reached the reconcile path -- the launch respawn beat the crash-retry
+    # path -- so the line was 'not observed' there, not wrong.) The diag print is default-on; pin it.
+    monkeypatch.delenv('PAYLOAD_SYNC_DIAG', raising=False)
+    client = _AttachClient(holds=True)
+    ok = RosPayloadSync._reconcile_detach(_reconcile_self(client), _FakeAttachObject)
+    assert ok is True
+    out = capsys.readouterr().out
+    assert 'PAYLOAD_SYNC_DIAG gate=reconcile_detach_ok (surviving object_attachment attach cleared before '\
+           're-ADD)' in out
+
+
 def test_reconcile_detach_tolerates_nothing_attached():
     # If object_attachment DID restart (nothing attached), the detach is rejected -> tolerated (False), and
     # the caller proceeds to the ADD regardless (which then succeeds on the clean server).

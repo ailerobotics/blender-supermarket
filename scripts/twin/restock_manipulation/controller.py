@@ -30,6 +30,13 @@ STAGED_MOVE_RETRY_MAX = 2
 # times before failing the phase. Mirrors STAGED_MOVE_RETRY_MAX but for the general move path, which
 # had NO retry. A collision/plan-rejection (port raised -> flag False) is NOT retried (fail-fast kept).
 MOVE_DEADLINE_RETRY_MAX = 2
+# sim-robust-phase-timeout-during-recovery-v1: default bound (SIM seconds) on the phase-clock credit a
+# named move_group crash recovery may accrue in one phase. Generous on purpose -- it only has to cover a
+# real multi-death recovery (respawn2b's two deaths credited ~119 sim-s; the lifetime respawn budget is a
+# few deaths), and the adapter's own recovery bounds fail fast by name long before it in a genuine hang.
+# It is the belt-and-braces terminator for a pathological probe-stuck-True, so a hung recovery still ends
+# by name here instead of pausing forever. Env RESTOCK_RECOVERY_PAUSE_CAP_S overrides; 0 disables.
+RECOVERY_PAUSE_CAP_S = 300.0
 # fm387: which collect phases issue an arm MOVE (and so can suffer a goal-tolerance/track-miss the
 # host-stack WATCHDOG surfaces -- ros_adapter failed_result_pending / drain -- OUTSIDE poll(), where
 # fm372's in-poll retry never saw it). Staged moves (begin_joint_goal) use the staged budget; the rest
@@ -468,6 +475,24 @@ class TransferController:
         self._place_verify_xy_tol = _float_env('RESTOCK_PLACE_VERIFY_XY_TOL', 0.25)
         self._place_verify_z_tol = _float_env('RESTOCK_PLACE_VERIFY_Z_TOL', 0.12)
         self._place_offdeck_frames = 0
+        # sim-robust-phase-timeout-during-recovery-v1: credit the per-phase timeout clock for the sim time
+        # spent while the motion adapter is inside a NAMED move_group crash recovery (respawn hold /
+        # post-respawn re-attach / an observed move_group death still being recovered -- motion.
+        # crash_recovery_active()). respawn2b: two deaths inside the collect lift consumed ~119 of the 120 s
+        # lift budget (orphaned-goal waits + re-sends), tripping 'phase timeout: lift' on a crash that had
+        # otherwise recovered. The phase is NOT stuck during that window -- it is waiting out a bounded
+        # recovery nothing in the phase caused -- so the credited sim time is subtracted from the timeout
+        # comparison (elapsed - credit > phase_timeout). The credit is BOUNDED by _recovery_pause_cap_s so a
+        # recovery that never completes still ends BY NAME here rather than pausing forever; the adapter's
+        # own bounds (RESPAWN_WAIT_CAP_S, the re-attach budget, the PR 234/242 fast-fail) normally end it
+        # first. No recovery => the probe is False, credit stays 0.0, the comparison is the old
+        # `elapsed > phase_timeout` => byte-identical. Cap env (SIM seconds, >0 enables; 0 disables the
+        # feature entirely => byte-identical); default is a generous belt-and-braces bound above a real
+        # multi-death recovery, not a primary terminator.
+        self._recovery_pause_cap_s = _float_env_bounded('RESTOCK_RECOVERY_PAUSE_CAP_S',
+                                                        RECOVERY_PAUSE_CAP_S, 0.0, 3600.0)
+        self._recovery_credit_s = 0.0        # sim time credited to crash recovery in the current phase
+        self._recovery_pause_logged = False  # the once-per-phase PHASE_CLOCK_RECOVERY_PAUSE line fired
         self.evidence = []
         self.reason = ''
         self.last_time = None
@@ -599,6 +624,8 @@ class TransferController:
         self._grasp_retries = 0         # fm395: bounded grasp re-seat retries used this operation
         self._carton_z_at_grasp = None  # fm410: latched at grasp-confirm; the lift-probe tracking baseline
         self._collect_source_evidence_waits = 0  # fm449: ticks awaiting a clean source capture before the reach
+        self._recovery_credit_s = 0.0           # sim-robust-phase-timeout-during-recovery-v1: fresh per op
+        self._recovery_pause_logged = False
         self._esdf_boot_gate.reset()   # sim-robust-esdf-boot-gate-v1: re-arm the boot ESDF-ack gate per op
         self.verify_ids = set()
         self.release_time = None
@@ -673,10 +700,24 @@ class TransferController:
         drives that reposition for collect only, so a transfer would hold in TRANSIT to the phase timeout."""
         return self.reposition_before_place and not self._live_pose_transfer()
 
+    def _note_recovery_pause(self):
+        """sim-robust-phase-timeout-during-recovery-v1: log the sim time credited to a named move_group
+        crash recovery in the current phase, ONCE per phase. Called at each phase exit (success transition
+        and the phase-timeout fail path). No credit => no line => byte-identical console on a crash-free
+        run. The recovery-bound fail path names the amount in its own reason instead."""
+        if self._recovery_credit_s > 0 and not self._recovery_pause_logged:
+            print('PHASE_CLOCK_RECOVERY_PAUSE phase=%s paused=%.2fs sim (a named move_group crash recovery '
+                  'held the arm; the per-phase timeout budget was credited that time so a recovered crash '
+                  'is not charged as a phase timeout)' % (self.phase, self._recovery_credit_s), flush=True)
+            self._recovery_pause_logged = True
+
     def _transition(self, phase):
+        self._note_recovery_pause()   # sim-robust-phase-timeout-during-recovery-v1: report before reset
         self.phase, self.elapsed, self.issued = phase, 0.0, False
         self._staged_retries = 0   # fm358: fresh retry budget per phase
         self._move_deadline_retries = 0   # fm367: fresh deadline-retry budget per phase
+        self._recovery_credit_s = 0.0          # sim-robust-phase-timeout-during-recovery-v1: fresh per phase
+        self._recovery_pause_logged = False
         if phase == 'contact':
             self._contact_progress_wall = self.steady_clock()   # fm425: start the WALL no-progress budget
 
@@ -776,6 +817,14 @@ class TransferController:
             ack()
         return self._raised_move_exc(RuntimeError(reason), staged=staged)
 
+    def _crash_recovery_active(self):
+        """sim-robust-phase-timeout-during-recovery-v1: True iff the motion adapter reports it is inside a
+        NAMED move_group crash recovery right now (respawn hold / post-respawn re-attach / an observed
+        move_group death still being recovered). Read through getattr so a motion stub without the probe
+        (and the real rig) => False => byte-identical phase-timeout accounting."""
+        probe = getattr(self.motion, 'crash_recovery_active', None)
+        return bool(probe()) if callable(probe) else False
+
     def step(self, dt: float, sensors: Sensors) -> Result:
         if self.phase == 'idle':
             raise RuntimeError('call start before step')
@@ -788,7 +837,21 @@ class TransferController:
             return self._fail('invalid or regressing simulation clock')
         self.last_time = now
         self.elapsed += dt
-        if self.elapsed > self.phase_timeout:
+        # sim-robust-phase-timeout-during-recovery-v1: while the motion adapter is inside a NAMED move_group
+        # crash recovery, credit this dt out of the phase-timeout budget (elapsed - credit vs phase_timeout)
+        # so a recovered crash is not charged as 'phase timeout' (respawn2b: two deaths ate ~119 of 120 s).
+        # Bounded by _recovery_pause_cap_s: a recovery that outruns the bound FAILS FAST by name here (never
+        # pauses forever). Disabled (cap 0) or no recovery => credit stays 0 => the comparison is exactly the
+        # legacy `elapsed > phase_timeout` => byte-identical.
+        if self._recovery_pause_cap_s > 0 and self._crash_recovery_active():
+            if self._recovery_credit_s >= self._recovery_pause_cap_s:
+                return self._fail('crash recovery exceeded its %.0fs sim pause budget in phase %s: a named '
+                                  'move_group crash recovery did not complete within the bound -- failing '
+                                  'fast by name instead of pausing the phase clock indefinitely'
+                                  % (self._recovery_pause_cap_s, self.phase))
+            self._recovery_credit_s = min(self._recovery_pause_cap_s, self._recovery_credit_s + dt)
+        if self.elapsed - self._recovery_credit_s > self.phase_timeout:
+            self._note_recovery_pause()   # name any credited recovery time before the (honest) timeout
             return self._fail('phase timeout: ' + self.phase)
         # sim-robust-esdf-boot-gate-v1: boot ESDF-incorporation gate (opt-in HOST key, 0 => off =>
         # byte-identical). Checked BEFORE the collision_dt invariant and before any motion streams.
