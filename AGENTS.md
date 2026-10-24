@@ -761,6 +761,18 @@ repo's `scenes/`, `export/` or `renders/`.
   a genuinely failing authoritative detach, still fails fast by name. A successful REMOVE (coldhonest) is
   byte-identical. CPU proof `tests/test_restock_detach_ack.py` + the release-phase contract in
   `tests/test_restock_manipulation.py`; bounded GPU proof `docs/examples/collect-release-detach-ack-fragment.json`.
+- **move_group mesh URIs** (opt-in HOST key `moveit_mesh_uris`, default off ⇒ byte-identical):
+  the resolved URDF the host ships (`host-cad/mobile.urdf`) carries BARE ABSOLUTE `<mesh>` paths,
+  which MoveIt's `resource_retriever` rejects (`URL rejected: No host part in the URL`), so
+  move_group loads NO arm link geometry and FCL `ValidateSolution` runs on empty geometry (the
+  cuMotion XRDF spheres do the real checking). `restock_host.launch` rewrites them to `file://`
+  URIs when the key is on (`restock_host/mesh_uri.py`; registered HOST in `config_preflight`).
+  Loading real (tighter-than-sphere) link meshes only makes self-collision MORE permissive; the
+  one newly-checked family is the ATTACHED carton vs non-touch arm links (collect place /
+  transfer preplace). CPU proof `scripts/check_movegroup_mesh_uris.py` (cross-checks the real
+  retriever when ROS is sourced); write-up + FCL risk + GPU fragment:
+  `data/sim-robust-movegroup-collision-meshes-v1/report.md`,
+  `docs/examples/movegroup-mesh-uris-mission-fragment.json`.
 - **Dev-loop tooling for the Isaac mobile-restock lane** lives in `scripts/twin/tools/`
   (CPU, no GPU): `profile_mission_run.py` breaks a recorded run's wall clock into
   boot/commissioning/collect-observe/approach-reach/per-frame-render/ROS-idle/shutdown from

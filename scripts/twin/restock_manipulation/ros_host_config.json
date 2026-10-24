@@ -77,5 +77,6 @@
   "collect_place_preplace_shape": [0.093, -1.910, 2.014, -0.103, 1.664, 0.0],
   "collect_place_wrist_guard": true,
   "release_detach_timeout_s": 8.0,
-  "collect_place_straight_line": true
+  "collect_place_straight_line": true,
+  "moveit_mesh_uris": false
 }
