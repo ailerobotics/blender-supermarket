@@ -804,6 +804,145 @@ class MoveGroupDoubleDeathRecovery(unittest.TestCase):
                     sys.modules[k] = v
 
 
+class _AttachServer:
+    """A faithful model of the object_attachment container that SURVIVES a move_group crash. A bare ADD
+    while it still holds the carton is refused as a duplicate ('Object already attached'); a DETACH clears
+    it (acked iff something was attached)."""
+    def __init__(self, holds=True):
+        self.holds = holds
+        self.calls = []
+
+    def attach_add(self):
+        self.calls.append('add')
+        if self.holds:
+            return False          # duplicate ADD refused -> send_goal_async accepted=False
+        self.holds = True
+        return True
+
+    def detach(self):
+        self.calls.append('detach')
+        was = self.holds
+        self.holds = False
+        return was                # acked only if something was attached (tolerated otherwise)
+
+
+def _reconcile_payload(server, record=None):
+    """A payload_sync double with the real reconcile= contract: a bare ADD against a holding server is
+    rejected; reconcile=True detaches-first (tolerant) then re-ADDs, which now succeeds."""
+    def payload(held, profile, reconcile=False):
+        if record is not None:
+            record.append((held, reconcile))
+        if not held:
+            return server.detach()
+        if reconcile:
+            server.detach()       # detach-first: clear the surviving attach (best-effort/tolerant)
+        return server.attach_add()
+    return payload
+
+
+class _ReconcilePayloadObj:
+    """Callable payload double that ALSO exposes resync_world_after_respawn, so the adapter's best-effort
+    world-obstacle resync hook is exercised (a plain lambda has no such attribute -> skipped)."""
+    def __init__(self, server, world_ops):
+        self._server, self._world_ops, self.world_resyncs = server, world_ops, 0
+
+    def __call__(self, held, profile, reconcile=False):
+        return _reconcile_payload(self._server)(held, profile, reconcile)
+
+    def resync_world_after_respawn(self):
+        self.world_resyncs += 1
+        return list(self._world_ops)
+
+
+class MoveGroupReattachReconcileAfterRespawn(unittest.TestCase):
+    """sim-robust-movegroup-reattach-after-respawn-v1 (respawn2): object_attachment survives the move_group
+    SIGABRT in a separate container, so after the respawn it STILL holds restock_carried_unit and refuses the
+    re-attach's bare ADD as a duplicate ('Object already attached. Detach first ...') -- the recovery rejected
+    forever and PR 242 fast-failed. The re-attach now RECONCILES that surviving attach (detach-first, re-ADD)
+    so it succeeds; the world-obstacle resync re-establishes the rest of the scene; no-respawn is unchanged."""
+
+    @staticmethod
+    def _port(payload, *, attached='PROFILE', sim=None):
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state = 'execute_result'
+        p.timeout = 25.0
+        p.generation = 7
+        p.handle = None
+        p._plan_goal = 'GOAL'
+        p._server_crash_retries = p._op_crash_retries = 0
+        p._awaiting_server_respawn = False
+        p._replan_attempts = 5
+        p._attached_profile = attached
+        p._reattach_active = p._reattach_failed = False
+        p._reattach_started_sim = 0.0
+        p._last_fault_sim_deadline = False
+        p._live_arm_state = None
+        p._plan_dispatches = 0
+        p._sim_now = sim if sim is not None else (lambda: 0.0)
+        p._estops = []
+        p.emergency_stop = lambda: p._estops.append(True)
+        p.plan = _FakePlan(True)
+        p.execute = _FakePlan(True)
+        p.payload_sync = payload
+        p.aborts = []
+        p._publish_abort_active = lambda: p.aborts.append('abort_active')
+        return p
+
+    def test_surviving_attach_blocks_the_legacy_bare_ADD(self):
+        # Documents the respawn2 bug: a holding server refuses the bare ADD a non-reconcile call sends.
+        server = _AttachServer(holds=True)
+        self.assertFalse(_reconcile_payload(server)(True, 'PROFILE'))        # rejected 'already attached'
+        self.assertEqual(server.calls, ['add'])
+
+    def test_reconcile_reattach_clears_the_surviving_attach_then_resends(self):
+        server = _AttachServer(holds=True)
+        record = []
+        p = self._port(_reconcile_payload(server, record))
+        p._begin_post_respawn_recovery()
+        # The re-attach went through reconcile=True, so it detached-first then re-ADDed and SUCCEEDED.
+        self.assertEqual(record, [(True, True)])
+        self.assertEqual(server.calls, ['detach', 'add'])
+        self.assertFalse(p._reattach_active)
+        self.assertFalse(p._reattach_failed)
+        self.assertEqual(p.plan.sent, ['GOAL'])            # resent only once the carton was back
+
+    def test_reattach_passes_reconcile_true(self):
+        record = []
+        p = self._port(_reconcile_payload(_AttachServer(holds=True), record))
+        self.assertTrue(p._resync_scene_after_respawn())
+        self.assertEqual(record, [(True, True)])
+
+    def test_world_obstacles_reestablished_before_reattach(self):
+        payload = _ReconcilePayloadObj(_AttachServer(holds=True), world_ops=[('world_obstacle', 'cart_cage')])
+        p = self._port(payload)
+        self.assertTrue(p._resync_scene_after_respawn())
+        self.assertEqual(payload.world_resyncs, 1)         # the static scene was re-established on respawn
+
+    def test_world_resync_raise_does_not_abort_the_reattach(self):
+        class _Boom(_ReconcilePayloadObj):
+            def resync_world_after_respawn(self):
+                raise RuntimeError('apply_planning_scene not ready')
+        payload = _Boom(_AttachServer(holds=True), world_ops=[])
+        p = self._port(payload)
+        self.assertTrue(p._resync_scene_after_respawn())   # carton re-attach still proceeds + succeeds
+
+    def test_no_respawn_update_payload_never_passes_reconcile(self):
+        # Byte-identical no-respawn path: update_payload issues a plain attach with reconcile defaulting off.
+        record = []
+        p = RosMotionPort.__new__(RosMotionPort)
+        p.state = 'succeeded'
+        p._attached_profile = None
+        p.payload_sync = _reconcile_payload(_AttachServer(holds=False), record)
+        self.assertTrue(p.update_payload(True, 'PROFILE'))
+        self.assertEqual(record, [(True, False)])          # reconcile NOT set outside the respawn recovery
+
+    def test_lambda_double_without_reconcile_still_works(self):
+        # A minimal fixture lambda(held, profile) is detected and called two-arg (no masked TypeError).
+        p = self._port(lambda held, profile: True)
+        self.assertTrue(p._resync_scene_after_respawn())
+        self.assertFalse(p._payload_accepts_reconcile())
+
+
 class Drain(unittest.TestCase):
     """drain() advances the PLANNING state machine off the independent watchdog tick (firstmate 290
     option b / run-237), so a move_group result is consumed within 0.1 s of arrival regardless of the
