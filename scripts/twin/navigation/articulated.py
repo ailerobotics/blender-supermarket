@@ -491,7 +491,9 @@ class ArticulatedController(Controller):
                  coupled_breakaway_window_s=2.0, coupled_breakaway_pulse_s=0.5,
                  coupled_breakaway_attempts=3,
                  coupled_breakaway_rock=False, coupled_breakaway_launch_mps=0.30,
-                 lane_acquire_timeout_s=0.0, tow_lane_goal_stop=False, **kwargs):
+                 lane_acquire_timeout_s=0.0, tow_lane_goal_stop=False,
+                 coupled_heading_hold=False, heading_hold_bound_deg=1.0,
+                 heading_hold_creep_mps=0.14, heading_hold_straight_kappa=0.08, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm481/fm482 (navigation.coupled_creep_escape, default off => byte-identical): the coupled
         # measured-curvature brake divides odom.angular by odom.linear, and at a near-stationary crawl that
@@ -613,6 +615,45 @@ class ArticulatedController(Controller):
             if self.coupled_breakaway_launch<self.coupled_breakaway_speed:
                 raise ValueError('coupled_breakaway_launch_mps must be >= coupled_breakaway_speed_mps '
                                  '(the launch surge is an ELEVATED break-away speed)')
+        # fm-sim-robust-outbound-throat-yaw-align (navigation.coupled_heading_hold, default off =>
+        # byte-identical): keep the coupled base ALIGNED to the lane axis during the slow from-rest creep so
+        # the base+cart envelope never enters the sales_backroom_portal throat (x~=-3.875) yawed and wedges on
+        # the lip. coldwin9/coldwin10 outbound drifted CCW off the east travel axis during the crawl right
+        # after the couple->outbound plan-wait dip (coldwin9: exits the dip at -1.7 deg, creeps at ~0.11 m/s,
+        # drifts monotonically to +4.9 deg at the throat; coldwin10: carries +1.2 deg into the throat at
+        # +2.2 deg) and wedged (reached_goal=False); coldwin7/coldwin8/rock1 held within +-1.2 deg of east
+        # (cross the throat at -0.2..+0.3 deg) and threaded. The follower's pure-pursuit law WANTS to correct
+        # the drift, but the coupled steering cap wmax = v/1.5 collapses at the crawl (failing runs: mean cap
+        # ~0.03 rad/s vs ~0.12 for the passing runs), so the correction is throttled to near zero. The throat
+        # is INVISIBLE to the nav static map (footprint valid at every base yaw -8..+6 deg; slack 0.8 m), so
+        # the wedge is a PhysX contact on door-frame geometry finer than the AABB map (the gate returns
+        # 'tracking', never 'obstacle_stop') and a slack-triggered pre-throat guard is impossible -- the
+        # trigger is the CCW yaw drift on the lane itself. When ON, the coupled follower, on a STRAIGHT
+        # authored segment, once the base has drifted more than `heading_hold_bound` to the CCW/throat-lip
+        # (wedge) side of the lane goal (travel) heading: (1) holds a fixed modest forward creep
+        # `heading_hold_creep_mps` -- restoring a steering authority wmax = creep/1.5 that does NOT depend on
+        # the (collapsed) tracking speed schedule AND capping the forward speed so a misaligned base slows and
+        # corrects rather than accelerating into the throat; and (2) SATURATES the corrective turn toward the
+        # axis (curvature = -1/min_turn_radius, the coupled cap, swept-checked by the unchanged gate). It is
+        # ONE-SIDED (a base on the safe CW/south side is never force-turned -- that would push it toward the
+        # lip) and FORWARD-only (v>0 always; the coupled-reverse interlock is honoured). Because the
+        # correction rate (~5 deg/s at the creep) dominates the measured drift (~0.4 deg/s), the base reaches
+        # the throat aligned and never pins, so PR 201's net-progress monitor / PR 236's bound / PR 250's rock
+        # stay dormant as the untouched backstop. Off => the legacy follower, byte-identical.
+        self.coupled_heading_hold=bool(coupled_heading_hold)
+        if not (isinstance(heading_hold_bound_deg,(int,float)) and not isinstance(heading_hold_bound_deg,bool)
+                and math.isfinite(heading_hold_bound_deg) and 0.0<float(heading_hold_bound_deg)<=45.0):
+            raise ValueError('heading_hold_bound_deg must be a finite number of degrees in (0, 45]')
+        if not (isinstance(heading_hold_creep_mps,(int,float)) and not isinstance(heading_hold_creep_mps,bool)
+                and math.isfinite(heading_hold_creep_mps) and 0.0<float(heading_hold_creep_mps)<=1.0):
+            raise ValueError('heading_hold_creep_mps must be a finite number in (0, 1.0] m/s')
+        if not (isinstance(heading_hold_straight_kappa,(int,float)) and not isinstance(heading_hold_straight_kappa,bool)
+                and math.isfinite(heading_hold_straight_kappa) and 0.0<float(heading_hold_straight_kappa)<=1.0):
+            raise ValueError('heading_hold_straight_kappa must be a finite curvature in (0, 1] 1/m')
+        self.heading_hold_bound=math.radians(float(heading_hold_bound_deg))
+        self.heading_hold_creep=float(heading_hold_creep_mps)
+        self.heading_hold_straight_kappa=float(heading_hold_straight_kappa)
+        self.heading_holds=0                               # ticks the heading hold overrode the follower
         # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
         # swept train envelope as free (the static map proved that corridor clear), so the base is not
         # frozen at an unmapped turn (run-327b: outbound drove 4.87 m then 'unknown_navigation_cell' at the
@@ -1480,6 +1521,25 @@ class ArticulatedController(Controller):
                     self.terminal=Result(status='failed',reason='coupled_no_progress')
                     return self.terminal
                 self._force_progress_creep=self._prog_stuck_s>=self.coupled_progress_escape_s
+        # fm-sim-robust-outbound-throat-yaw-align: the pre-throat heading hold. On a STRAIGHT authored
+        # segment, once the base has drifted more than `heading_hold_bound` to the CCW (throat-lip / wedge)
+        # side of the lane goal (travel) heading, OVERRIDE the follower command: hold a fixed modest forward
+        # creep (restoring a speed-schedule-independent steering authority wmax = creep/1.5 AND capping the
+        # forward speed so a misaligned base slows and aligns before entering the throat) and SATURATE the
+        # corrective turn toward the axis. ONE-SIDED (the safe CW/south side is never force-turned) and
+        # FORWARD-only. Skipped while PR 250's break-away owns the command (_breakaway_cmd set, the pinned
+        # backstop) so the two never fight. Off / off-lane / within bound / on a curved segment => untouched.
+        if (self.coupled_heading_hold and self._active_lane is not None and self._breakaway_cmd is None
+                and abs(self.route.curvatures[j])<=self.heading_hold_straight_kappa
+                and wrap(state.yaw-self.goal[2])>self.heading_hold_bound):
+            ae=wrap(state.yaw-self.goal[2])
+            v=min(self.max_speed,self.heading_hold_creep)
+            curvature=-1.0/self.footprint.min_turn_radius     # saturate CW toward the lane axis (reduce ae)
+            self.heading_holds+=1
+            if self.heading_holds==1 or self.heading_holds%30==0:
+                print('NAV_HEADING_HOLD n=%d at=(%.3f,%.3f) base_yaw=%.2f ae=%.2f deg bound=%.2f creep=%.3f'
+                      % (self.heading_holds,state.x,state.y,math.degrees(state.yaw),math.degrees(ae),
+                         math.degrees(self.heading_hold_bound),v),flush=True)
         result=self.gate_velocity(now,odom,obs,v,v*curvature)
         if result.reason!='tracking':
             # A transient measured-curvature trip (the base is momentarily under commanded

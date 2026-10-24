@@ -226,6 +226,23 @@ class FactoryDispatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _build('reference', coupled_progress_recovery='true')            # _strict_bool
 
+    def test_coupled_heading_hold_flows_through(self):
+        c = _build('reference')
+        self.assertFalse(c.coupled_heading_hold)                             # default off
+        self.assertAlmostEqual(c.heading_hold_bound, math.radians(1.0))      # defaults
+        self.assertAlmostEqual(c.heading_hold_creep, 0.14)
+        self.assertAlmostEqual(c.heading_hold_straight_kappa, 0.08)
+        c2 = _build('reference', coupled_heading_hold=True, heading_hold_bound_deg=1.5,
+                    heading_hold_creep_mps=0.16, heading_hold_straight_kappa=0.06)
+        self.assertTrue(c2.coupled_heading_hold)
+        self.assertAlmostEqual(c2.heading_hold_bound, math.radians(1.5))
+        self.assertAlmostEqual(c2.heading_hold_creep, 0.16)
+        self.assertAlmostEqual(c2.heading_hold_straight_kappa, 0.06)
+
+    def test_coupled_heading_hold_rejects_non_bool(self):
+        with self.assertRaises(ValueError):
+            _build('reference', coupled_heading_hold='true')                 # _strict_bool
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

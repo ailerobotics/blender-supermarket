@@ -434,6 +434,19 @@ repo's `scenes/`, `export/` or `renders/`.
   retirement (pending the bounded GPU run) — but KEEP `tow_lane_static_tol_m` and the `tow_lane_trust_unknown`
   coverage waiver (independent of the yaw bug). CPU proof `scripts/check_lidar_yaw_fix.py`; decision + GPU
   config `data/sim-restock-lidar-yaw-fix-eval/` (orientation locked by `test_restock_mission_tail.py`).
+  **Outbound throat yaw-align** (`navigation.coupled_heading_hold`, opt-in, default off ⇒ byte-identical):
+  the UPSTREAM fix for the `sales_backroom_portal` throat wedge — keep the coupled base aligned to the lane
+  (east) travel axis BEFORE the lip so it never enters yawed (PR 250's rock is the after-the-wedge backstop).
+  Five recorded tows: pass runs cross at −0.2…+0.3°, fail runs drift CCW in the slow from-rest creep
+  (coldwin9→+4.9°, coldwin10→+2.2°) and wedge (~2° margin). The follower's lateral term COMMANDS the CCW
+  rotation and at the crawl `wmax=v/1.5` collapses; the throat is INVISIBLE to the nav static map (footprint
+  valid at every yaw, slack 0.8 m — a PhysX door-frame contact, gate says `tracking`), so the drift on the
+  lane is the only trigger. On a straight segment past `heading_hold_bound_deg` (1.0°) CCW of the goal
+  heading: hold a fixed `heading_hold_creep_mps` (0.14, restores authority + caps speed) and saturate the
+  corrective turn toward the axis; one-sided, forward-only (v≥0). Doc + the five-run numbers:
+  [docs/restock_navigation.md](docs/restock_navigation.md) "Pre-throat heading hold",
+  `data/sim-robust-outbound-throat-yaw-align-v1/report.md`; fragment
+  `docs/examples/outbound-heading-hold-mission-fragment.json`; CPU proof `test_outbound_heading_hold.py`.
 - **Pace-aware producer watchdogs**: the mission renders slower than wall (measured 0.17-0.31x
   sim-to-wall), so a wall-timed watchdog false-trips a healthy-but-slow pipeline. The shared predicate
   `twin/restock/pace_watchdog.py` `is_dead(mode='either'|'both')` states the rule once (fire only when
