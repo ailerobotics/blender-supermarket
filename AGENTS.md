@@ -449,6 +449,19 @@ repo's `scenes/`, `export/` or `renders/`.
   additionally needs the per-op failure to TERMINATE before OOM (PR 215 collision + the
   `mission-vram-ceiling-12gb` lane). Report + bounded GPU proof:
   `data/sim-robust-teardown-crash-v1/report.md`, `docs/examples/teardown-crash-proof-fragment.json`.
+- **Boot ESDF-incorporation gate** (opt-in HOST key `esdf_boot_ack_grace_s`, SIM seconds; default 0 ⇒
+  off ⇒ byte-identical; registered HOST in `config_preflight`): names a NEVER-acknowledged nvblox ESDF
+  incorporation at boot, before the first arm motion streams, instead of the opaque ~40 s mid-stage
+  `collision_dt` invariant trip (meshuris1: mirrored station `collision_time` stuck at the `-1`
+  not-ready sentinel from tick 1 → `CONTROLLER_INVARIANT_TRIP collision_dt=40` at the first observe
+  step). The pure gate `restock_manipulation/esdf_boot_gate.py` (driven from `TransferController.step`)
+  HOLDs the op (no motion) for a sim-clock grace awaiting the first valid ack (`collision_time` leaving
+  `-1`), then FAILS FAST by name (grace elapsed, stuck stamp, likely cause: nvblox not incorporating /
+  stale commission baseline); once a valid ack arrives it disarms and the `collision_dt` invariant is
+  the sole owner (band untouched). Does NOT fix why a stale baseline fails to incorporate, or the
+  `collision_dt`/station-liveness thresholds. CPU `tests/test_sim_robust_esdf_boot_gate.py`; GPU proof
+  fragment `docs/examples/esdf-boot-gate-mission-fragment.json`; write-up
+  `data/sim-robust-esdf-boot-gate-v1/report.md`.
 - **Mission tail** (transfer → verify → uncouple return → end): the uncouple happens in RETURN at
   `cart_parking`, AFTER transfer + verify (tow → brake/pin → uncouple → back away → home uncoupled).
   CPU dry-run through the real BT/`Mission`/`RuntimeAdapter`: `scripts/check_mission_tail.py`
