@@ -98,14 +98,17 @@ RESPAWN_WAIT_CAP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_RESPAWN_W
 PLAN_ACCEPT_CRASH_RETRY_MAX = max(0, min(5, int(os.environ.get('RESTOCK_PLAN_ACCEPT_CRASH_RETRY_MAX', 1))))
 # sim-robust-movegroup-double-death-v1 (gap 1, coldwin4): bounded SIM-clock budget for the post-respawn
 # carton RE-ATTACH. A freshly respawned move_group starts with a FRESH planning scene that no longer holds
-# restock_carried_unit, so the crash-retry must re-attach it before resending the plan. coldwin4 proved the
-# single-shot re-attach is not enough: PAYLOAD_SYNC_DIAG at the respawn showed held=True s_contact=True
-# age=0.067 scene_ready=True attach_ready=True, yet the attach goal was REJECTED (gate=attach_goal_rejected)
-# because the respawned object_attachment/move_group had not finished re-initialising -- and the recovery
-# then proceeded CARTON-LESS (the resend planned through the held carton). Retry the attach, bounded on the
-# SIM clock (spanning poll()s so the node /clock advances and the respawned server finishes init), and NEVER
-# resend without the carton: fail the op BY NAME if it never succeeds. Healthy (no-crash) runs never re-attach
-# so this is inert there. Env-overridable; clamped. Generous but well under the 120 s phase timeout.
+# restock_carried_unit, so the crash-retry must re-attach it before resending the plan, and NEVER resend
+# without the carton: fail the op BY NAME if it never succeeds.
+# sim-robust-movegroup-reattach-after-respawn-v1 (respawn2) CORRECTED the coldwin4 hypothesis: the reject was
+# NOT a transient "respawned planner still re-initialising". object_attachment runs in a SEPARATE container
+# that SURVIVES the move_group SIGABRT, so after the respawn it STILL holds restock_carried_unit and refuses
+# the re-attach's bare ADD as a duplicate ("Object already attached. Detach first ...") -- persistently for
+# the whole budget (respawn2: gate=attach_goal_rejected, held=True s_contact=True scene_ready=True
+# attach_ready=True, from sim 60.2 s on). The re-attach now RECONCILES that surviving attach (detach-first,
+# then re-ADD; see _reattach_payload / ros_payload.reattach_reject_gate). The budget retries bounded on the
+# SIM clock (spanning poll()s so the node /clock advances) and stays the backstop. Healthy (no-crash) runs
+# never re-attach so this is inert there. Env-overridable; clamped. Well under the 120 s phase timeout.
 REATTACH_SIM_BUDGET_S = max(1.0, min(600.0, float(os.environ.get('RESTOCK_REATTACH_SIM_BUDGET_S', 30.0))))
 # Fail FAST on a persistently-failing plan (firstmate run-216/279): an IK-infeasible goal churns the
 # 12 replans + every seed, each resetting a fresh per-attempt deadline, so the move could retry well
@@ -1406,8 +1409,23 @@ class RosMotionPort:
         profile = getattr(self, '_attached_profile', None)
         if profile is None:
             return True                                         # nothing held -> scene already consistent
+        # sim-robust-movegroup-reattach-after-respawn-v1: re-establish the STATIC world collision objects the
+        # respawned move_group's planning-scene monitor lost (base obstacle + each world obstacle) BEFORE the
+        # carton re-attach, so a resent plan sees the whole scene again. Best-effort; a test double for
+        # payload_sync has no such method -> skipped. Empty on respawn2 (no obstacles) => byte-identical.
+        resync_world = getattr(self.payload_sync, 'resync_world_after_respawn', None)
+        if callable(resync_world):
+            try:
+                resync_world()
+            except Exception as exc:
+                print('MOVE_GROUP_CRASH_RETRY world-obstacle resync RAISED after respawn (%r); continuing '
+                      'to the carton re-attach' % (exc,), flush=True)
         try:
-            ok = self.payload_sync(True, profile) is True
+            # sim-robust-movegroup-reattach-after-respawn-v1: RECONCILE mode -- object_attachment survives
+            # the move_group crash and still holds the carton, so a bare ADD is refused as a duplicate. The
+            # reconcile re-attach detaches that surviving attach first, then re-ADDs (and re-applies the
+            # move_group AttachedCollisionObject move_group lost). See reattach_reject_gate in ros_payload.
+            ok = self._reattach_payload(profile) is True
         except Exception as exc:                                # re-attach raised -> report, do not mask
             print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit RAISED after respawn (carton '
                   'NOT restored to the respawned planning scene): %r' % (exc,), flush=True)
@@ -1416,15 +1434,37 @@ class RosMotionPort:
             print('MOVE_GROUP_CRASH_RETRY re-attached restock_carried_unit to the respawned move_group '
                   'planning scene before resend', flush=True)
         else:
-            # sim-robust-movegroup-double-death-v1 (gap 1): the respawned move_group rejected the attach
-            # (coldwin4: gate=attach_goal_rejected despite held=True/contact=True/fresh/servers-ready -- the
-            # respawned planner had not finished re-initialising). The caller (_step_reattach) RETRIES this
-            # bounded on the sim clock and NEVER resends carton-less; see PAYLOAD_SYNC_DIAG for the gate.
+            # The reconcile re-attach was still not acknowledged. The caller (_step_reattach) RETRIES this
+            # bounded on the sim clock and NEVER resends carton-less; PAYLOAD_SYNC_DIAG now names WHY
+            # (reattach_reject_gate surfaces object_attachment's surviving-attach cause by name).
             print('MOVE_GROUP_CRASH_RETRY re-attach of restock_carried_unit not yet acknowledged by the '
                   'respawned move_group (payload_sync returned not-ok -> carton NOT yet in the respawned '
                   'planning scene; will retry bounded on the sim clock, never plan without it). '
                   'See PAYLOAD_SYNC_DIAG for the failing gate.', flush=True)
         return ok
+
+    def _reattach_payload(self, profile):
+        """sim-robust-movegroup-reattach-after-respawn-v1: drive the post-respawn carton re-attach through
+        the payload sync in RECONCILE mode (detach the surviving object_attachment attach, then re-ADD). The
+        real RosPayloadSync.__call__ takes a reconcile= kwarg; a minimal test double may not, so pass it only
+        when the callable's SIGNATURE accepts it (a genuine TypeError from inside payload_sync is never
+        masked). Only this post-respawn path uses reconcile=True; update_payload and the first-start attach
+        call payload_sync(held, profile) unchanged => byte-identical."""
+        if self._payload_accepts_reconcile():
+            return self.payload_sync(True, profile, reconcile=True)
+        return self.payload_sync(True, profile)
+
+    def _payload_accepts_reconcile(self):
+        cached = getattr(self, '_payload_reconcile_ok', None)
+        if cached is None:
+            import inspect
+            try:
+                inspect.signature(self.payload_sync).bind_partial(True, None, reconcile=True)
+                cached = True
+            except (TypeError, ValueError):
+                cached = False      # test double without a reconcile parameter -> plain two-arg call
+            self._payload_reconcile_ok = cached
+        return cached
 
     def _reanchor_plan_goal_to_live(self):
         """fm405: before re-sending a plan goal to a RESPAWNED move_group, re-anchor its request

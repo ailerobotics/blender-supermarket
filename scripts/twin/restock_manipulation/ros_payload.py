@@ -77,6 +77,42 @@ def attach_acked(status):
     return status == ATTACH_ACTION_SUCCEEDED
 
 
+def reattach_reject_gate(reconcile, detach_ok):
+    """sim-robust-movegroup-reattach-after-respawn-v1: name the AttachObject-rejection diagnostic gate so
+    PAYLOAD_SYNC_DIAG carries the KNOWN cause, not the bare 'attach_goal_rejected'. Pure for CPU testing.
+
+    A goal REJECTION (send_goal_async -> accepted=False) carries no wire message; object_attachment logs the
+    reason only in its own container ("Object already attached. Detach first before attaching a new object.").
+    So on a post-respawn reconcile re-attach we surface that known reason by name:
+      * not reconcile              -> 'attach_goal_rejected' (byte-identical to the legacy first-start gate)
+      * reconcile, detach acked    -> the reconcile detach cleared the surviving attach yet the re-ADD was
+                                      still refused (an unexpected planner state), named for the next run
+      * reconcile, detach not acked-> could not clear object_attachment's surviving attach
+                                      ('Object already attached'); the duplicate ADD is refused as a result"""
+    if not reconcile:
+        return 'attach_goal_rejected'
+    if detach_ok:
+        return 'attach_goal_rejected_after_reconcile_detach'
+    return ('attach_goal_rejected object_attachment_already_holds_restock_carried_unit'
+            '(reconcile_detach_not_acked)')
+
+
+def scene_bootstrap_ops(published_base_obstacle, published_world_obstacles, attached_profile):
+    """sim-robust-movegroup-reattach-after-respawn-v1: the ORDERED planning-scene bootstrap ops the payload
+    node is responsible for re-establishing on a respawned move_group -- computed identically at first start
+    and at the post-respawn resync, which is exactly what makes the two scenes equal. Base obstacle (if ever
+    published), then each world obstacle in publish order, then the carton attach (if a carton is held). Pure
+    for CPU testing: given the same recorded state, first-start and resync return the same list."""
+    ops = []
+    if published_base_obstacle:
+        ops.append(('base_obstacle',))
+    for obj_id, _boxes in published_world_obstacles:
+        ops.append(('world_obstacle', str(obj_id)))
+    if attached_profile is not None:
+        ops.append(('attach', getattr(attached_profile, 'sku', attached_profile)))
+    return ops
+
+
 def resolve_detach_scene_tolerant(env_value):
     """RESTOCK_DETACH_SCENE_TOLERANT -> bool. Unset => the default-on module policy; any set value except
     '0' => on; '0' => off (reproduce the legacy single-shot fail-fast). Pure for CPU testing."""
@@ -124,6 +160,12 @@ class RosPayloadSync:
         self.scene = self.node.create_client(ApplyPlanningScene,'/restock_sim/apply_planning_scene')
         self.attach = None
         self.controller = self.sensors = None
+        # sim-robust-movegroup-reattach-after-respawn-v1: remember the STATIC world collision objects
+        # published at startup so resync_world_after_respawn() can re-establish them in a respawned
+        # move_group (whose planning-scene monitor restarts empty). Empty on respawn2 (no obstacles) ->
+        # the resync makes no calls -> byte-identical there.
+        self._published_base_obstacle = False
+        self._published_world_obstacles = []   # list of (obj_id, boxes) in add_world_obstacle() form
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
         self.thread = threading.Thread(target=self.executor.spin,daemon=True)
@@ -163,7 +205,12 @@ class RosPayloadSync:
                     % (sim_elapsed, sim_budget, wall_elapsed, wall_backstop))
         return future.result()
 
-    def __call__(self, held, profile):
+    def __call__(self, held, profile, reconcile=False):
+        # reconcile (sim-robust-movegroup-reattach-after-respawn-v1): a post-respawn carton RE-ATTACH.
+        # object_attachment runs in a container that SURVIVES the move_group SIGABRT, so it still holds
+        # restock_carried_unit and refuses a bare ADD ("Object already attached. Detach first ..."). When
+        # True (held attach only), clear that surviving attach FIRST, then re-ADD. Default False on every
+        # other call site (update_payload, first-start attach, release detach) => byte-identical.
         from rclpy.action import ActionClient
         from rclpy.time import Time
         from moveit_msgs.srv import ApplyPlanningScene
@@ -204,6 +251,14 @@ class RosPayloadSync:
             self.attach = ActionClient(self.node,AttachObject,'/restock_sim/attach_object')
         if not self.attach.server_is_ready():
             return _diag('attach_server')
+        # sim-robust-movegroup-reattach-after-respawn-v1: on a post-respawn re-attach, the surviving
+        # object_attachment attach must be cleared BEFORE the re-ADD or the server refuses it as a
+        # duplicate. Best-effort + logged; the physical grasp (contact=True) is untouched -- this only
+        # resets the planner's collision spheres. A detach the server declines (it DID restart, nothing
+        # attached) is tolerated and we still ADD. reconcile_detached names which happened for the gate.
+        reconcile_detached = None
+        if reconcile and held:
+            reconcile_detached = self._reconcile_detach(AttachObject)
         attached = AttachedCollisionObject()
         attached.link_name = 'gripper_pad_tcp'
         # The held carton is seated on the suction panel AND rests against the gripper surface-plate
@@ -276,7 +331,7 @@ class RosPayloadSync:
             pending.add_done_callback(cancel_late)
             raise
         if not accepted.accepted:
-            return _diag('attach_goal_rejected')
+            return _diag(reattach_reject_gate(reconcile and held, reconcile_detached))
         try:
             result = self._wait(accepted.get_result_async())
         except TimeoutError:
@@ -285,6 +340,58 @@ class RosPayloadSync:
         if not attach_acked(result.status):
             return _diag('attach_result_status=%s' % result.status)
         return True
+
+    def _reconcile_detach(self, AttachObject):
+        """sim-robust-movegroup-reattach-after-respawn-v1: clear a carton attachment that SURVIVED a
+        move_group crash in the still-live object_attachment container, so the following re-ADD is not
+        refused as a duplicate ("Object already attached. Detach first ..."). Sends ONLY the authoritative
+        object_attachment AttachObject detach (attach_object=False) -- NOT a release: the physical grasp is
+        unaffected, this only resets the planner's collision spheres. Best-effort and tolerant: a detach the
+        server declines (it DID restart -> nothing attached) or that times out is LOGGED and swallowed, and
+        the caller proceeds to the ADD regardless (which then succeeds on the now-clean server). Returns True
+        iff the detach was acked SUCCEEDED (the surviving attach was actually cleared)."""
+        def _log(gate):
+            if os.environ.get('PAYLOAD_SYNC_DIAG', '1') != '0':
+                print('PAYLOAD_SYNC_DIAG gate=%s' % gate, flush=True)
+        goal = AttachObject.Goal()
+        goal.attach_object = False
+        try:
+            pending = self.attach.send_goal_async(goal)
+            accepted = self._wait(pending)
+            if not accepted.accepted:
+                _log('reconcile_detach_rejected (nothing to clear; proceeding to re-ADD)')
+                return False
+            result = self._wait(accepted.get_result_async())
+        except TimeoutError:
+            _log('reconcile_detach_timeout (proceeding to re-ADD)')
+            return False
+        ok = attach_acked(result.status)
+        _log('reconcile_detach_%s (surviving object_attachment attach %s before re-ADD)'
+             % (('ok', 'cleared') if ok else ('result_status=%s' % result.status, 'NOT cleared')))
+        return ok
+
+    def resync_world_after_respawn(self):
+        """sim-robust-movegroup-reattach-after-respawn-v1: re-publish the STATIC world collision objects this
+        node established at startup (the base obstacle + each world obstacle) to a RESPAWNED move_group, whose
+        planning-scene monitor restarts empty. The carton attached-body is re-established separately by the
+        reconcile re-attach; this covers the remaining collision objects. Best-effort + logged; returns the
+        ordered list of ops re-sent (scene_bootstrap_ops form, minus the attach). No obstacles recorded
+        (respawn2) -> empty, no service calls -> byte-identical there."""
+        ops = []
+        try:
+            if self._published_base_obstacle:
+                self.add_base_obstacle()
+                ops.append(('base_obstacle',))
+            for obj_id, boxes in list(self._published_world_obstacles):
+                self.add_world_obstacle(obj_id, boxes)
+                ops.append(('world_obstacle', str(obj_id)))
+        except Exception as exc:
+            print('WORLD_RESYNC after respawn raised (%r); continuing to the carton re-attach' % (exc,),
+                  flush=True)
+        if ops:
+            print('WORLD_RESYNC re-published %d static collision-object group(s) after respawn' % len(ops),
+                  flush=True)
+        return ops
 
     def add_base_obstacle(self, allow_links=None, wait_s=30.):
         """Publish the FIXED mobile base (chassis + arm-mount + hitch + wheel boxes) as a STATIC world
@@ -350,6 +457,7 @@ class RosPayloadSync:
         req2.scene.allowed_collision_matrix = acm2
         if not self._wait(self.scene.call_async(req2)).success:
             raise RuntimeError('base obstacle planning-scene apply unsuccessful')
+        self._published_base_obstacle = True   # remember for resync_world_after_respawn()
         print('BASE_OBSTACLE published (%d boxes) allow=%d links (carton checked)'
               % (len(boxes), len(allow)), flush=True)
         return OBJ
@@ -398,6 +506,10 @@ class RosPayloadSync:
         req.scene.world.collision_objects = [co]
         if not self._wait(self.scene.call_async(req), timeout=wait_s).success:
             raise RuntimeError('world obstacle planning-scene apply unsuccessful: ' + str(obj_id))
+        # Remember the spec (in this method's own arg form) for resync_world_after_respawn(); de-dup by id
+        # so a resync re-publish is recorded at most once.
+        self._published_world_obstacles = [e for e in self._published_world_obstacles if e[0] != str(obj_id)]
+        self._published_world_obstacles.append((str(obj_id), list(boxes)))
         print('WORLD_OBSTACLE published id=%s (%d boxes)' % (obj_id, len(co.primitives)), flush=True)
         return co.id
 
