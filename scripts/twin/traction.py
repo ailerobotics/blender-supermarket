@@ -102,6 +102,28 @@ def _median(xs):
     return xs[n // 2] if n % 2 else 0.5 * (xs[n // 2 - 1] + xs[n // 2])
 
 
+def throat_single_tick_stops(rows, *, before_x=-3.90, drop_from_mps=0.12, to_mps=0.03):
+    """Count the coupled-tow's single-tick velocity COLLAPSES WEST of ``before_x`` (the throat momentum
+    signature). sim-robust-throat-momentum-launch-v1: in every pinning run the base went from ~0.18 m/s to
+    ~0.006 m/s in ONE trace tick at x=-3.935 (a ~10 m/s^2 impulse) then never advanced; the passers rolled
+    through the same spot at cruise with no such collapse. A momentum-launch run that threaded the pin has
+    ZERO such collapses before ``before_x``. Keyed on the recorded robot linear speed (``lin``) between
+    adjacent coupled rows; returns (count, first_pose) where first_pose is (x, y) of the first collapse or
+    None. A collapse is a drop from >= ``drop_from_mps`` to <= ``to_mps`` across one tick while still west of
+    ``before_x`` (the base has not yet carried momentum past the pin)."""
+    coupled = [r for r in rows if r.get('coupled')]
+    count = 0
+    first = None
+    for a, b in zip(coupled, coupled[1:]):
+        va = float(a.get('lin', 0.0))
+        vb = float(b.get('lin', 0.0))
+        if float(b['x']) <= before_x and va >= drop_from_mps and vb <= to_mps:
+            count += 1
+            if first is None:
+                first = (round(float(b['x']), 3), round(float(b['y']), 3))
+    return count, first
+
+
 # ---- (2) quasi-static drive-authority budget (lever DIRECTION only) -----------------------------
 
 # Robot-side body masses carried by the two drive wheels (the composed mission articulation; the cart is

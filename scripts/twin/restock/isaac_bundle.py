@@ -799,6 +799,10 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # rollwagen and landed on the bay. Observation only; unset => None => byte-identical trace.
         trace_carton_path=(assembly.evidence['composition']['stock']
                            if os.environ.get('RESTOCK_TRACE_POSES') == '1' else None),
+        # sim-robust-throat-momentum-launch-v1: RESTOCK_TRACE_CASTERS=1 adds the two trailing-caster
+        # swivel angles + a geometric wheel-contact proxy to each nav-trace row, so a GPU run can see the
+        # caster state at the throat pin. Unset => False => no extra fields/stage reads => byte-identical.
+        trace_casters=(os.environ.get('RESTOCK_TRACE_CASTERS') == '1'),
         # fm384 phase-aware collect capture: at grasp-confirm, switch the capture to destination-only
         # (real fresh cart render) + destroy the source render product. None unless the knob is set.
         release_source_capture=(sensing.get('release_source_capture')

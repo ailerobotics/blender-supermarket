@@ -262,6 +262,21 @@ class FactoryDispatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _build('reference', coupled_heading_hold=True, heading_hold_prethroat_m=0.8)
 
+    def test_heading_hold_launch_flows_through(self):
+        # sim-robust-throat-momentum-launch-v1: the momentum launch keys thread through.
+        c = _build('reference')
+        self.assertEqual(c.heading_hold_launch_m, 0.0)                       # default off
+        self.assertEqual(c.heading_hold_launch_mps, 0.0)
+        c2 = _build('reference', coupled_heading_hold=True, heading_hold_prethroat_m=0.8,
+                    heading_hold_throat=[-3.875, 15.26], heading_hold_launch_m=0.25,
+                    heading_hold_launch_mps=0.18)
+        self.assertAlmostEqual(c2.heading_hold_launch_m, 0.25)
+        self.assertAlmostEqual(c2.heading_hold_launch_mps, 0.18)
+
+    def test_heading_hold_launch_requires_prethroat(self):
+        with self.assertRaises(ValueError):
+            _build('reference', coupled_heading_hold=True, heading_hold_launch_m=0.25)
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

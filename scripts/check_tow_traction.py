@@ -46,7 +46,7 @@ from twin.navigation.scenario import environment_grid
 from twin.navigation.lanes import TowLaneGraph
 from twin.navigation.articulated import ArticulatedController, ArticulatedMap, ArticulatedPlanner, TrainState
 from twin.mobile import MobileSpec
-from twin.traction import coupled_tow_margin, static_traction_budget
+from twin.traction import coupled_tow_margin, static_traction_budget, throat_single_tick_stops
 from check_tow_lanes import _obstacle_points, _drive_lane, _record
 
 
@@ -173,15 +173,26 @@ def main():
 
     # --gpu-run: grade one run against the acceptance gate and exit (the integration lane's PASS/FAIL).
     if args.gpu_run is not None:
-        m = _margin(args.gpu_run, goal)
-        verdict = 'PASS' if m.passed else 'FAIL'
-        out = dict(run=str(args.gpu_run), passed=m.passed, reached_goal=m.reached_goal,
+        rows = _outbound_rows(args.gpu_run)
+        m = coupled_tow_margin(rows, goal)
+        # sim-robust-throat-momentum-launch-v1 additions (both strengthen the gate, never weaken it):
+        # (a) the base must cross the throat (x=-3.90) with NO single-tick velocity collapse -- the
+        #     from-rest pin signature; a momentum-launch run that threaded the lip has zero. (b) the
+        #     opt-in caster-swivel/contact diagnostic fields must be present (RESTOCK_TRACE_CASTERS=1),
+        #     so the swivel state at the lip is captured for the record.
+        stops, first_stop = throat_single_tick_stops(rows)
+        has_casters = any('casters' in r for r in rows)
+        passed = bool(m.passed and stops == 0)
+        reason = m.reason if not m.passed else ('single_tick_stop_%s' % (first_stop,) if stops else 'passed')
+        verdict = 'PASS' if passed else 'FAIL'
+        out = dict(run=str(args.gpu_run), passed=passed, reached_goal=m.reached_goal,
                    longest_pin_s=m.longest_pin_s, max_advance_m=m.max_advance_m,
-                   drive_cruise_mps=m.drive_cruise_mps, reason=m.reason)
+                   drive_cruise_mps=m.drive_cruise_mps, single_tick_stops=stops,
+                   first_stop=first_stop, trace_has_casters=has_casters, reason=reason)
         print('GPU_RUN ' + verdict + ' ' + json.dumps(out), flush=True)
         if args.json:
             args.json.write_text(json.dumps(out, indent=2) + '\n')
-        return 0 if m.passed else 1
+        return 0 if passed else 1
 
     manifest = json.loads(args.environment.read_text())
     scenario = json.loads(args.scenario.read_text())

@@ -358,6 +358,8 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
                                        heading_hold_align_timeout_s=float(nav.get('heading_hold_align_timeout_s', 20.0)),
                                        heading_hold_axis_deg=(float(nav['heading_hold_axis_deg'])
                                                               if nav.get('heading_hold_axis_deg') is not None else None),
+                                       heading_hold_launch_m=float(nav.get('heading_hold_launch_m', 0.0)),
+                                       heading_hold_launch_mps=float(nav.get('heading_hold_launch_mps', 0.0)),
                                        **_controller_kwargs(nav))
 
     if 'dynamic_obstacles' in nav and mode != 'sensor':

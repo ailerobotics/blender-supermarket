@@ -479,6 +479,19 @@ repo's `scenes/`, `export/` or `renders/`.
   [docs/restock_navigation.md](docs/restock_navigation.md) "Pre-throat heading hold",
   `data/sim-robust-outbound-throat-yaw-align-v1/report.md`; fragment
   `docs/examples/outbound-heading-hold-mission-fragment.json`; CPU proof `test_outbound_heading_hold.py`.
+  The two-sided PR258 refinement (`heading_hold_prethroat_m` + `heading_hold_throat`) and the momentum
+  LAUNCH below both build on this. **Throat momentum launch** (`navigation.heading_hold_launch_m` +
+  `heading_hold_launch_mps`, opt-in default off ⇒ byte-identical; sim-robust-throat-momentum-launch-v1):
+  once the yaw cause was closed (PR258), coldwin18 still pinned the ALIGNED base FROM REST at x=−3.935
+  (one-tick rv 0.183→0.006, coupled_no_progress). **CPU-verified: there is NO collider at the throat** —
+  `mission.usda`/`supermarket.usdc` around (x −3.5…−3.935, y 15.25) is a single FLAT floor plane at z=0;
+  the "PhysX door-frame contact" belief above is wrong, it is a from-low-momentum wheel/caster-scrub pin
+  (a caster left angled by the just-finished alignment turn). Fix = finish alignment `launch_m` before the
+  throat then cross with STRAIGHT cruise (curvature 0, no steering) carrying momentum; `RESTOCK_TRACE_CASTERS=1`
+  adds caster-swivel + wheel-contact trace fields. Grader `scripts/check_tow_traction.py --gpu-run` now also
+  fails a single-tick stop. Doc [docs/restock_navigation.md](docs/restock_navigation.md) "Momentum launch
+  window", `data/sim-robust-throat-momentum-launch-v1/report.md`, fragment
+  `docs/examples/throat-momentum-launch-mission-fragment.json`, CPU proof `test_outbound_throat_launch.py`.
 - **Pace-aware producer watchdogs**: the mission renders slower than wall (measured 0.17-0.31x
   sim-to-wall), so a wall-timed watchdog false-trips a healthy-but-slow pipeline. The shared predicate
   `twin/restock/pace_watchdog.py` `is_dead(mode='either'|'both')` states the rule once (fire only when

@@ -495,7 +495,8 @@ class ArticulatedController(Controller):
                  coupled_heading_hold=False, heading_hold_bound_deg=1.0,
                  heading_hold_creep_mps=0.14, heading_hold_straight_kappa=0.08,
                  heading_hold_prethroat_m=0.0, heading_hold_throat=None,
-                 heading_hold_align_timeout_s=20.0, heading_hold_axis_deg=None, **kwargs):
+                 heading_hold_align_timeout_s=20.0, heading_hold_axis_deg=None,
+                 heading_hold_launch_m=0.0, heading_hold_launch_mps=0.0, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm481/fm482 (navigation.coupled_creep_escape, default off => byte-identical): the coupled
         # measured-curvature brake divides odom.angular by odom.linear, and at a near-stationary crawl that
@@ -712,6 +713,46 @@ class ArticulatedController(Controller):
         if self.heading_hold_prethroat_m>0.0 and not self.coupled_heading_hold:
             raise ValueError('heading_hold_prethroat_m>0 requires coupled_heading_hold (it shapes the hold)')
         self._align_anchor=None            # SIM time the base entered the window still misaligned (for the timeout)
+        # fm-sim-robust-throat-momentum-launch (navigation.heading_hold_launch_m, default 0.0 => the new
+        # MOMENTUM LAUNCH is OFF and the PR258 pre-throat alignment gate above is byte-identical): CPU scene
+        # inspection of the mission.usda around the throat (x=-3.875..-3.935, y=15.25) finds NO door
+        # threshold, sill, jamb, wall or floor seam -- the backroom floor is a single flat plane at z=0 and
+        # the only colliders in the region are the ceiling (z=4), the east wall (x=1.0) and the TransferBay
+        # (north, off the path). Yet in coldwin18 (byte-identical to the complete coldwin16 + the PR258 gate)
+        # the ALIGNED base (yaw ~ -1 deg, throat_misaligned=0) pinned from rest at x=-3.935: at tick 13283 the
+        # robot linear speed collapsed 0.183 -> 0.006 m/s in ONE 16.7 ms tick (a ~10 m/s^2 impulse the 200 N
+        # drive cannot brake), the hitch articulation dropped 0.1996 -> 0.1987, and the train then sat ~27 s
+        # SIM jittering < 0.01 m net until NAV_BREAKAWAY exhausted -> coupled_no_progress. So the pin is a
+        # from-low-momentum PhysX wheel/caster contact, NOT a modelled collider, and it is stochastic across
+        # byte-identical runs. The passers (coldwin16, coldwin11, hold2) all rolled THROUGH the same spot at
+        # cruise carrying straight-travel momentum; the pinners had just been correcting yaw into the lip,
+        # leaving the trailing casters swiveled off-axle so they scrub instead of roll from the near-stop.
+        # The launch is the brief's most-robust forward-only lever: COMPLETE the pre-throat alignment at least
+        # heading_hold_launch_m before the throat, then CROSS the pin with STRAIGHT travel (curvature = 0, NO
+        # steering corrections) at CRUISE so the casters trail and the wheels carry momentum across the
+        # contact. Inside the launch window (within heading_hold_launch_m of the throat along the travel axis,
+        # either side) and once aligned, the follower command is overridden to a dead-straight forward cruise
+        # (never below the launch cruise, never above the speed cap, FORWARD-only). A base that is STILL
+        # misaligned on entry keeps the bounded PR258 alignment gate (creep + saturated corrective turn +
+        # align-timeout -> named 'throat_misaligned'), so the launch never fires misaligned and there is never
+        # a silent wedge. PR 201's monitor / PR 236's bound / PR 250's rock stay the untouched backstop (the
+        # launch only replaces the command while _breakaway_cmd is None). See docs/restock_navigation.md
+        # "Momentum launch window" and data/sim-robust-throat-momentum-launch-v1/report.md.
+        for _nm,_v,_hi in (('heading_hold_launch_m',heading_hold_launch_m,20.0),
+                           ('heading_hold_launch_mps',heading_hold_launch_mps,1.0)):
+            if not (isinstance(_v,(int,float)) and not isinstance(_v,bool)
+                    and math.isfinite(_v) and 0.0<=float(_v)<=_hi):
+                raise ValueError('%s must be a finite number in [0, %g]'%(_nm,_hi))
+        self.heading_hold_launch_m=float(heading_hold_launch_m)
+        self.heading_hold_launch_mps=float(heading_hold_launch_mps)
+        if self.heading_hold_launch_m>0.0:
+            if self.heading_hold_prethroat_m<=0.0:
+                raise ValueError('heading_hold_launch_m>0 requires heading_hold_prethroat_m>0 '
+                                 '(the alignment gate must complete before the launch window)')
+            if self.heading_hold_launch_m>=self.heading_hold_prethroat_m:
+                raise ValueError('heading_hold_launch_m must be < heading_hold_prethroat_m '
+                                 '(alignment needs runway before the launch window)')
+        self.heading_launches=0            # ticks the momentum launch overrode the follower with straight cruise
         # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
         # swept train envelope as free (the static map proved that corridor clear), so the base is not
         # frozen at an unmapped turn (run-327b: outbound drove 4.87 m then 'unknown_navigation_cell' at the
@@ -1598,7 +1639,32 @@ class ArticulatedController(Controller):
             # distance to the throat ALONG the travel axis; >0 => throat is still ahead of the base
             ahead=(tx-state.x)*math.cos(axis)+(ty-state.y)*math.sin(axis)
             in_window=0.0<=ahead<=self.heading_hold_prethroat_m
-            if in_window and abs(ae)>self.heading_hold_bound:
+            # fm-sim-robust-throat-momentum-launch: the launch window straddles the throat within
+            # heading_hold_launch_m on EITHER side of it along the travel axis (so the base carries straight
+            # cruise momentum from before the pin through past it). Default launch_m=0.0 => in_launch is always
+            # False => the branch below is EXACTLY the PR258 gate => byte-identical. When >0 (validated
+            # launch_m < prethroat_m), the launch OWNS the command once aligned; a base still misaligned on
+            # entry keeps the alignment gate (the elif) as the bounded backstop, so the launch never fires
+            # misaligned and the align-timeout still fails by name instead of a silent wedge.
+            in_launch=self.heading_hold_launch_m>0.0 and abs(ahead)<=self.heading_hold_launch_m
+            if in_launch and abs(ae)<=self.heading_hold_bound:
+                # MOMENTUM LAUNCH: alignment is complete; cross the from-rest PhysX pin at x~=-3.935 with a
+                # dead-straight forward cruise (curvature 0, NO steering corrections) so the trailing casters
+                # stay aligned/rolling and the drive wheels carry momentum across the contact instead of
+                # creeping into it and starving the re-break-away. Never below the launch cruise (carry
+                # momentum), never above the speed cap, and never below the follower's own v (only ADD
+                # momentum, never crawl); FORWARD-only. heading_hold_launch_mps=0.0 => use the full speed cap.
+                cruise=self.heading_hold_launch_mps if self.heading_hold_launch_mps>0.0 else self.max_speed
+                v=max(v,min(self.max_speed,cruise))
+                curvature=0.0
+                self._align_anchor=None
+                self.heading_launches+=1
+                if self.heading_launches==1 or self.heading_launches%30==0:
+                    print('NAV_THROAT_LAUNCH n=%d at=(%.3f,%.3f) base_yaw=%.2f ae=%+.2f deg bound=%.2f '
+                          'cruise=%.3f ahead=%+.2f straight=1'
+                          % (self.heading_launches,state.x,state.y,math.degrees(state.yaw),math.degrees(ae),
+                             math.degrees(self.heading_hold_bound),v,ahead),flush=True)
+            elif (in_window or in_launch) and abs(ae)>self.heading_hold_bound:
                 # The pre-throat window's single job is to point the base at the TRAVEL axis (the heading
                 # that threads the x-gap) before it reaches the lip, so: (1) slow to the creep -- restoring a
                 # steering authority wmax=creep/1.5 that does NOT depend on the collapsed tracking speed
