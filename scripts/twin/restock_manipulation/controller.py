@@ -5,6 +5,7 @@ import os
 import time
 from ..restock_camera.freshness import require_fresh
 
+from . import esdf_boot_gate
 from . import ground_truth_collect as gtc
 from .fit import axis_fits
 from .transfer_carry import (DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN, GUARDED_PHASES, WELD, WRIST_GUARD,
@@ -96,7 +97,8 @@ class TransferController:
                  grasp_track_m=None, require_collect_source_evidence: bool = False,
                  transfer_ground_truth: bool = False, ground_truth_pick: bool = False,
                  collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0,
-                 release_detach_timeout_s: float = 0.0, transfer_preplace_reach_guard=None):
+                 release_detach_timeout_s: float = 0.0, transfer_preplace_reach_guard=None,
+                 esdf_boot_ack_grace_s: float = 0.0):
         self.steady_clock=steady_clock
         # collect-gt (demo, opt-in, default off): GROUND-TRUTH COLLECT. Accept the collect SOURCE observation
         # labelled 'ground_truth' (the controlled carton asset's simulated pose, served Isaac-side when the
@@ -248,6 +250,20 @@ class TransferController:
             raise ValueError('release_detach_timeout_s must be a finite, non-negative number of sim seconds')
         self.release_detach_timeout_s = (min(float(release_detach_timeout_s), float(phase_timeout))
                                          if release_detach_timeout_s > 0 else 0.0)
+        # sim-robust-esdf-boot-gate-v1: opt-in HOST key esdf_boot_ack_grace_s (SIM seconds; default 0 =>
+        # off => byte-identical). Names a never-acknowledged nvblox ESDF incorporation at boot, on the sim
+        # clock, BEFORE the first arm motion streams -- rather than letting the collision_dt invariant
+        # discover it ~40 s in with an opaque reason (meshuris1: collision_time stuck at the -1 not-ready
+        # sentinel from tick 1, invariant tripped collision_dt=40 at the first observe step now=39). The
+        # gate HOLDs the op (no motion) until the first valid incorporation ack (collision_time leaves -1)
+        # or the grace elapses, then fails fast by name. Once a valid ack has arrived it disarms
+        # permanently and the collision_dt invariant below is the sole owner (its band untouched). See
+        # esdf_boot_gate.EsdfBootGate.
+        if not (isinstance(esdf_boot_ack_grace_s, (int, float)) and math.isfinite(esdf_boot_ack_grace_s)
+                and esdf_boot_ack_grace_s >= 0):
+            raise ValueError('esdf_boot_ack_grace_s must be a finite, non-negative number of sim seconds')
+        self.esdf_boot_ack_grace_s = float(esdf_boot_ack_grace_s)
+        self._esdf_boot_gate = esdf_boot_gate.EsdfBootGate(self.esdf_boot_ack_grace_s)
         # fm427 (A1) (run-323 cold lift): the fm419(a) COLLISION_STALE_PAUSE holds the post-attach lift on
         # a genuinely-stale collision stamp (run-323: collision_dt 0.52->0.65 s, the benign weld/ESDF
         # re-incorporation lag) by returning EMPTY controls -- a SILENT hold. Under render pacing that
@@ -583,6 +599,7 @@ class TransferController:
         self._grasp_retries = 0         # fm395: bounded grasp re-seat retries used this operation
         self._carton_z_at_grasp = None  # fm410: latched at grasp-confirm; the lift-probe tracking baseline
         self._collect_source_evidence_waits = 0  # fm449: ticks awaiting a clean source capture before the reach
+        self._esdf_boot_gate.reset()   # sim-robust-esdf-boot-gate-v1: re-arm the boot ESDF-ack gate per op
         self.verify_ids = set()
         self.release_time = None
 
@@ -773,6 +790,19 @@ class TransferController:
         self.elapsed += dt
         if self.elapsed > self.phase_timeout:
             return self._fail('phase timeout: ' + self.phase)
+        # sim-robust-esdf-boot-gate-v1: boot ESDF-incorporation gate (opt-in HOST key, 0 => off =>
+        # byte-identical). Checked BEFORE the collision_dt invariant and before any motion streams.
+        # HOLD (no motion) until the first valid incorporation ack, FAIL FAST by name if the sim-clock
+        # grace elapses with collision_time still at the -1 sentinel, PROCEED once a valid ack has
+        # arrived (then the collision_dt invariant below owns freshness).
+        _boot = self._esdf_boot_gate.observe(now, sensors.collision_time)
+        if _boot is esdf_boot_gate.HOLD:
+            print('ESDF_BOOT_GATE_HOLD phase=%s now=%.3f collision_time=%.3f (grace %.1fs)'
+                  % (self.phase, now, sensors.collision_time, self._esdf_boot_gate.grace_s), flush=True)
+            return self._result()
+        if _boot is not esdf_boot_gate.PROCEED:
+            print('ESDF_BOOT_GATE_TRIP phase=%s now=%.3f %s' % (self.phase, now, _boot), flush=True)
+            return self._fail(_boot)
         collision_fresh = self._fresh(sensors.collision_time, now)
         # fm430 (2a) fallback: ride the post-attach LIFT (to the fixed clear-region carry_lift_shape, which
         # does NOT depend on the live collision world) THROUGH a brief ESDF-re-incorporation staleness for

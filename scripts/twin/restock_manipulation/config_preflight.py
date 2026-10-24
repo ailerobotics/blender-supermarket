@@ -71,6 +71,7 @@ KEY_CONSUMER = {
     # geometry (restock_host.launch reads it from ros_host_config.json). Default off => the
     # robot_description is the file verbatim (byte-identical, the historical empty-geometry path).
     'moveit_mesh_uris': HOST,
+    'esdf_boot_ack_grace_s': HOST,  # sim-robust-esdf-boot-gate-v1: SIM-clock boot grace for the first valid ESDF ack
     # --- RUNTIME config (isaac_bundle / isaac_port / physics_setup) ---
     'phase_drive': RUNTIME,
     'arm_stiffness_abs': RUNTIME,

@@ -230,6 +230,10 @@ def main():
         # under the transfer_ground_truth block; default off. Does NOT bypass the station/masked-depth pump.
         ground_truth_pick=bool(config.get('transfer_ground_truth', {}).get('ground_truth_pick', False))
                           if isinstance(config.get('transfer_ground_truth'), dict) else False,
+        # sim-robust-esdf-boot-gate-v1: SIM-clock boot grace (seconds) for the first valid nvblox ESDF
+        # incorporation ack; names a never-acknowledged ESDF at boot before the first arm motion, instead
+        # of the opaque ~40 s collision_dt invariant trip (meshuris1). Absent/0 => off => byte-identical.
+        esdf_boot_ack_grace_s=float(config.get('esdf_boot_ack_grace_s', 0.0)),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # collect-gt: the ground-truth collect switch is the shared RESTOCK_COLLECT_GROUND_TRUTH env (inherited from
@@ -303,6 +307,8 @@ def main():
         'sim_cart_place_policy': _policy is not None and bool(config.get('sim_cart_place_policy')),
         'base_collision_object': bool(config.get('base_collision_object', False)),
         'world_obstacles': [s['id'] for s in config.get('world_obstacles', [])],
+        # sim-robust-esdf-boot-gate-v1: boot ESDF-ack grace (sim s); 0.0 => gate off (byte-identical).
+        'esdf_boot_ack_grace_s': controller.esdf_boot_ack_grace_s,
     }), flush=True)
     try:
         rclpy.spin(node)
