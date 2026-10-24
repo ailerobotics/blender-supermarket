@@ -493,7 +493,9 @@ class ArticulatedController(Controller):
                  coupled_breakaway_rock=False, coupled_breakaway_launch_mps=0.30,
                  lane_acquire_timeout_s=0.0, tow_lane_goal_stop=False,
                  coupled_heading_hold=False, heading_hold_bound_deg=1.0,
-                 heading_hold_creep_mps=0.14, heading_hold_straight_kappa=0.08, **kwargs):
+                 heading_hold_creep_mps=0.14, heading_hold_straight_kappa=0.08,
+                 heading_hold_prethroat_m=0.0, heading_hold_throat=None,
+                 heading_hold_align_timeout_s=20.0, heading_hold_axis_deg=None, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm481/fm482 (navigation.coupled_creep_escape, default off => byte-identical): the coupled
         # measured-curvature brake divides odom.angular by odom.linear, and at a near-stationary crawl that
@@ -654,6 +656,62 @@ class ArticulatedController(Controller):
         self.heading_hold_creep=float(heading_hold_creep_mps)
         self.heading_hold_straight_kappa=float(heading_hold_straight_kappa)
         self.heading_holds=0                               # ticks the heading hold overrode the follower
+        # fm-sim-robust-heading-hold-bound (navigation.heading_hold_prethroat_m, default 0.0 => the new
+        # robust path is OFF and the legacy one-sided hold above is byte-identical): the PR 253 hold had
+        # THREE gaps the coldwin17 wedge exposed (CPU-reproduced in data/sim-robust-heading-hold-bound-v1):
+        #   (a) the drift is introduced on the CURVED authored merge lead-in (the lane bridges a ~0.25 m
+        #       lateral seat offset), where the straight-segment guard (|curv|<=straight_kappa) DISABLES the
+        #       hold; by the time the base reaches the straight segment it is already ~+5 deg yawed and ~0.2 m
+        #       from the lip (coldwin17: the real hold first fired at x=-4.079, base_yaw +5.18 deg -- far too
+        #       late). The drift is DRIVEN by the follower's lateral term 2*lateral (~+0.52 for the seat
+        #       offset), which commands a CCW turn that INCREASES the yaw vs the travel axis (reproduced: the
+        #       follower law commands CCW on ~90% of approach ticks, matching the recorded cw>0 on 100%).
+        #   (b) the hold was ONE-SIDED (only the CCW/lip side), so a CW seat drift is never corrected.
+        #   (c) it bounds vs the lane goal (travel) axis but never GATES the throat entry, so a base that
+        #       fails to align simply wedges on the lip with no named failure.
+        # When heading_hold_prethroat_m > 0 (and a throat point is configured) the hold becomes a two-sided
+        # PRE-THROAT ALIGNMENT GATE scoped to the window within that distance of the throat along the travel
+        # axis: it (1) CAPS the follower's lateral/heading correction so it can never command a turn that
+        # drives the yaw FURTHER off the travel axis (the cap works on the curved lead-in too -- it keeps the
+        # authored turn, only removing the off-axis overshoot), (2) slows to the creep (restoring the
+        # speed-schedule-independent authority wmax=creep/1.5), (3) on a straight authored segment SATURATES
+        # the corrective turn toward the axis on EITHER side, and (4) if the base cannot reach within the
+        # bound inside heading_hold_align_timeout_s SIM seconds in the window, FAILS by the named reason
+        # 'throat_misaligned' (bounded, never a silent wedge). Reference axis = heading_hold_axis_deg if set
+        # else the lane goal heading (the portal-crossing/travel direction the passing runs held; the
+        # physically min-clearance heading through the x-gap -- NOT the descending centreline tangent, which
+        # would widen the envelope through the opening). Forward-only (v>=0); PR 201/236/250 stay the
+        # untouched backstop. See docs/restock_navigation.md "Pre-throat heading alignment".
+        for _nm,_v in (('heading_hold_prethroat_m',heading_hold_prethroat_m),
+                       ('heading_hold_align_timeout_s',heading_hold_align_timeout_s)):
+            if not (isinstance(_v,(int,float)) and not isinstance(_v,bool)
+                    and math.isfinite(_v) and 0.0<=float(_v)<=120.0):
+                raise ValueError('%s must be a finite number in [0, 120]'%_nm)
+        self.heading_hold_prethroat_m=float(heading_hold_prethroat_m)
+        self.heading_hold_align_timeout_s=float(heading_hold_align_timeout_s)
+        if heading_hold_throat is None:
+            self.heading_hold_throat=None
+        else:
+            try:
+                tx,ty=heading_hold_throat
+                tx,ty=float(tx),float(ty)
+            except (TypeError,ValueError):
+                raise ValueError('heading_hold_throat must be None or an (x, y) pair')
+            if not (math.isfinite(tx) and math.isfinite(ty)):
+                raise ValueError('heading_hold_throat (x, y) must be finite')
+            self.heading_hold_throat=(tx,ty)
+        if heading_hold_axis_deg is None:
+            self.heading_hold_axis=None
+        else:
+            if not (isinstance(heading_hold_axis_deg,(int,float)) and not isinstance(heading_hold_axis_deg,bool)
+                    and math.isfinite(heading_hold_axis_deg) and -180.0<=float(heading_hold_axis_deg)<=180.0):
+                raise ValueError('heading_hold_axis_deg must be None or a finite number of degrees in [-180, 180]')
+            self.heading_hold_axis=math.radians(float(heading_hold_axis_deg))
+        if self.heading_hold_prethroat_m>0.0 and self.heading_hold_throat is None:
+            raise ValueError('heading_hold_prethroat_m>0 requires heading_hold_throat (the throat (x, y))')
+        if self.heading_hold_prethroat_m>0.0 and not self.coupled_heading_hold:
+            raise ValueError('heading_hold_prethroat_m>0 requires coupled_heading_hold (it shapes the hold)')
+        self._align_anchor=None            # SIM time the base entered the window still misaligned (for the timeout)
         # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
         # swept train envelope as free (the static map proved that corridor clear), so the base is not
         # frozen at an unmapped turn (run-327b: outbound drove 4.87 m then 'unknown_navigation_cell' at the
@@ -1529,8 +1587,51 @@ class ArticulatedController(Controller):
         # corrective turn toward the axis. ONE-SIDED (the safe CW/south side is never force-turned) and
         # FORWARD-only. Skipped while PR 250's break-away owns the command (_breakaway_cmd set, the pinned
         # backstop) so the two never fight. Off / off-lane / within bound / on a curved segment => untouched.
-        if (self.coupled_heading_hold and self._active_lane is not None and self._breakaway_cmd is None
-                and abs(self.route.curvatures[j])<=self.heading_hold_straight_kappa
+        _hh=(self.coupled_heading_hold and self._active_lane is not None and self._breakaway_cmd is None)
+        if _hh and self.heading_hold_prethroat_m>0.0 and self.heading_hold_throat is not None:
+            # fm-sim-robust-heading-hold-bound: the two-sided PRE-THROAT ALIGNMENT GATE (see __init__). The
+            # reference is the TRAVEL axis (heading_hold_axis else the lane goal heading) -- the direction
+            # that threads the x-gap, which the passing runs held -- NOT the local descending segment tangent.
+            axis=self.heading_hold_axis if self.heading_hold_axis is not None else self.goal[2]
+            ae=wrap(state.yaw-axis)                            # +: yawed CCW (throat-lip/wedge side)
+            tx,ty=self.heading_hold_throat
+            # distance to the throat ALONG the travel axis; >0 => throat is still ahead of the base
+            ahead=(tx-state.x)*math.cos(axis)+(ty-state.y)*math.sin(axis)
+            in_window=0.0<=ahead<=self.heading_hold_prethroat_m
+            if in_window and abs(ae)>self.heading_hold_bound:
+                # The pre-throat window's single job is to point the base at the TRAVEL axis (the heading
+                # that threads the x-gap) before it reaches the lip, so: (1) slow to the creep -- restoring a
+                # steering authority wmax=creep/1.5 that does NOT depend on the collapsed tracking speed
+                # schedule and capping the forward speed so a misaligned base aligns rather than accelerating
+                # into the throat; and (2) SATURATE the corrective turn toward the axis, TWO-SIDED
+                # (curvature = -sign(ae)/min_turn_radius). Overriding the follower curvature here fully
+                # subsumes the lateral-offset correction, so the lateral term can never command a turn that
+                # drives the yaw further off-axis (brief clause B, strongest form). The window must be sized
+                # (heading_hold_prethroat_m) to the STRAIGHT run-up to the throat -- it is not meant to span a
+                # genuine authored turn; the descending centreline tangent is deliberately NOT the target
+                # (aligning to it would widen the base+cart envelope through the opening).
+                v=min(self.max_speed,self.heading_hold_creep)
+                curvature=-math.copysign(1.0/self.footprint.min_turn_radius,ae)
+                self.heading_holds+=1
+                # (4) bounded in time: FAIL by name if the base cannot align inside the window
+                if self._align_anchor is None:
+                    self._align_anchor=now
+                elif (self.heading_hold_align_timeout_s>0.0
+                      and now is not None and (now-self._align_anchor)>=self.heading_hold_align_timeout_s):
+                    self.terminal=Result(status='failed',reason='throat_misaligned')
+                    print('NAV_HEADING_HOLD throat_misaligned at=(%.3f,%.3f) base_yaw=%.2f ae=%.2f deg '
+                          'bound=%.2f after=%.1fs' % (state.x,state.y,math.degrees(state.yaw),
+                          math.degrees(ae),math.degrees(self.heading_hold_bound),now-self._align_anchor),
+                          flush=True)
+                    return self.terminal
+                if self.heading_holds==1 or self.heading_holds%30==0:
+                    print('NAV_HEADING_HOLD n=%d at=(%.3f,%.3f) base_yaw=%.2f ae=%+.2f deg bound=%.2f '
+                          'creep=%.3f ahead=%.2f two_sided=1'
+                          % (self.heading_holds,state.x,state.y,math.degrees(state.yaw),math.degrees(ae),
+                             math.degrees(self.heading_hold_bound),v,ahead),flush=True)
+            else:
+                self._align_anchor=None                        # aligned, or out of the pre-throat window
+        elif (_hh and abs(self.route.curvatures[j])<=self.heading_hold_straight_kappa
                 and wrap(state.yaw-self.goal[2])>self.heading_hold_bound):
             ae=wrap(state.yaw-self.goal[2])
             v=min(self.max_speed,self.heading_hold_creep)

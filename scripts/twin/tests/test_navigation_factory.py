@@ -243,6 +243,25 @@ class FactoryDispatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _build('reference', coupled_heading_hold='true')                 # _strict_bool
 
+    def test_heading_hold_prethroat_flows_through(self):
+        # sim-robust-heading-hold-bound-v1: the pre-throat alignment gate keys thread through.
+        c = _build('reference')
+        self.assertEqual(c.heading_hold_prethroat_m, 0.0)                    # default off
+        self.assertIsNone(c.heading_hold_throat)
+        self.assertIsNone(c.heading_hold_axis)
+        self.assertAlmostEqual(c.heading_hold_align_timeout_s, 20.0)
+        c2 = _build('reference', coupled_heading_hold=True, heading_hold_prethroat_m=0.8,
+                    heading_hold_throat=[-3.875, 15.26], heading_hold_align_timeout_s=15.0,
+                    heading_hold_axis_deg=0.0)
+        self.assertAlmostEqual(c2.heading_hold_prethroat_m, 0.8)
+        self.assertEqual(c2.heading_hold_throat, (-3.875, 15.26))
+        self.assertAlmostEqual(c2.heading_hold_align_timeout_s, 15.0)
+        self.assertAlmostEqual(c2.heading_hold_axis, 0.0)
+
+    def test_heading_hold_prethroat_requires_throat(self):
+        with self.assertRaises(ValueError):
+            _build('reference', coupled_heading_hold=True, heading_hold_prethroat_m=0.8)
+
 
 class FailClosedTests(unittest.TestCase):
     def test_invalid_nav_mode_refused(self):

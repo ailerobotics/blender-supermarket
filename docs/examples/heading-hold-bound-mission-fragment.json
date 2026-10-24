@@ -1,0 +1,37 @@
+{
+  "_comment": "sim-robust-heading-hold-bound-v1: MERGE into the mission runtime-config (navigation block), ON TOP of the sim-robust-outbound-throat-yaw-align-v1 (coupled_heading_hold) + coupled-breakaway-from-rest + outbound-stall-recovery + traction keys (keep them ALL -- PR 201/236/250 stay the untouched backstop). This fragment ADDS the two-sided PRE-THROAT ALIGNMENT GATE that PR 253 was missing. WHY: coldwin17 (2026-10-24, byte-identical to the COMPLETE coldwin16) wedged at the sales_backroom_portal throat ~(-3.93, 15.28) with base yaw ~+5 deg off the east travel axis; coupled_no_progress after NAV_BREAKAWAY exhausted twice. CPU reconstruction (data/sim-robust-heading-hold-bound-v1): the base seats ~0.25 m SOUTH of the descending authored centreline (outbound_dock_to_bay drops y 15.5->15.25), so the follower's lateral term (2*lateral ~ +0.52) drives a CCW yaw drift (reproduced: the follower law commands CCW on ~90% of the approach ticks, matching the recorded cw>0 on 100%); the drift builds on the CURVED merge lead-in where PR 253's straight-segment guard DISABLES the hold, so the hold first fired only at x=-4.079 with base_yaw already +5.18 deg -- far too late and too little authority at the crawl to un-yaw before the base+cart envelope caught the lip. The passers (coldwin16 +2 deg, coldwin11 +5.3 deg) had the SAME drift and threaded only on momentum -- a yawed entry is a STOCHASTIC wedge. The new gate, within heading_hold_prethroat_m of the throat along the travel axis, slows to the creep and SATURATES the corrective turn toward the travel axis TWO-SIDED (either drift side), fully overriding the follower so the lateral term can never push further off-axis; it aligns the base to the travel heading (the min-clearance direction through the x-gap, NOT the descending centreline tangent) BEFORE the lip, bounded in time (FAILS by the named reason 'throat_misaligned' rather than wedging silently). CPU proof: scripts/twin/tests/test_outbound_heading_hold_bound.py (coldwin17/coldwin16/coldwin11 recorded-creep replay: all converge to ~+0.9 deg at the lip vs the recorded +5.5 deg wedge); factory wiring scripts/twin/tests/test_navigation_factory.py.",
+  "navigation": {
+    "coupled_heading_hold": true,
+    "heading_hold_bound_deg": 1.0,
+    "heading_hold_creep_mps": 0.14,
+    "heading_hold_straight_kappa": 0.08,
+
+    "heading_hold_prethroat_m": 0.8,
+    "heading_hold_throat": [-3.875, 15.26],
+    "heading_hold_align_timeout_s": 20.0,
+
+    "coupled_progress_escape": true,
+    "coupled_progress_min_m": 0.05,
+    "coupled_progress_escape_s": 3.0,
+    "coupled_progress_fault_s": 8.0,
+    "coupled_progress_recovery": true,
+    "coupled_breakaway_speed_mps": 0.18,
+    "coupled_breakaway_window_s": 2.0,
+    "coupled_breakaway_pulse_s": 0.5,
+    "coupled_breakaway_attempts": 3,
+    "coupled_breakaway_rock": true,
+    "coupled_breakaway_launch_mps": 0.30,
+
+    "coupled_creep_escape": true,
+    "coupled_creep_floor_mps": 0.03
+  },
+  "_key_notes": {
+    "heading_hold_prethroat_m": "float, default 0.0 => the new gate is OFF and the legacy one-sided PR 253 hold is byte-identical. When > 0 (requires coupled_heading_hold AND heading_hold_throat), the gate is active within this distance of the throat measured ALONG the travel axis. 0.8 covers the straight run-up from x~=-4.675 to the lip x=-3.875; size it to the STRAIGHT approach (it is not meant to span a genuine authored turn).",
+    "heading_hold_throat": "[x, y] or null (default null). The sales_backroom_portal throat (x = the lip the base wedges at; y ~ the crossing centre). Required when heading_hold_prethroat_m > 0. The gate engages only while the throat is still AHEAD of the base along the travel axis and within heading_hold_prethroat_m.",
+    "heading_hold_align_timeout_s": "float, default 20.0 (consulted only when prethroat_m > 0). SIM seconds the base may stay in the window beyond the bound before the gate FAILS by the named reason 'throat_misaligned' (a bounded, named failure instead of a silent wedge -> StageRetry). 0 disables the timeout.",
+    "heading_hold_axis_deg": "float or null (default null => the lane goal heading). The explicit travel axis the base is aligned to (the portal-crossing direction; 0 deg east for outbound_dock_to_bay). Set only if the authored straight segment's travel heading differs from the lane goal heading.",
+    "coupled_heading_hold": "bool. Master switch (unchanged from PR 253). With prethroat_m=0 it is the legacy one-sided straight-segment hold; with prethroat_m>0 it becomes the two-sided pre-throat alignment gate."
+  },
+  "_gpu_proof_note": "Bounded couple+outbound proof for the integration lane, from the coldwin17 seat (or the coldwin9 seat): collect+couple clean, then the from-rest creep toward the portal. Recipe: run_mobile_restock.py --start-at couple --stop-after outbound (OR the full coldwin17/capstone recipe), this fragment MERGED on top of the capstone241 navigation block, serialized through flock /tmp/aile-gpu.lock, HEAVY_MB=2500 if whispr holds VRAM, NEVER --force, never touch whispr (pid 1339, ~2.2 GB). Enable the nav diag (RESTOCK_NAV_PLAN_DIAG=1) so NAV_HEADING_HOLD + the base yaw across the throat are captured. PASS = base |yaw| about the east travel axis WITHIN the bound at throat entry, NO 'NAV_BREAKAWAY enter' (the base never pins so the rock never fires), NO 'throat_misaligned', and arrival at the transfer bay. Grade the nav-trace with the shipped gate: python3 scripts/check_tow_traction.py --environment <env.json> --scenario <mission-scenario.json> --camera-config <camera-config-bay.json> --fragment docs/examples/coupled-traction-fragment.json --runs-dir <mission-dir> --gpu-run <run-dir> (prints GPU_RUN PASS: reached_goal=True, longest_pin_s < escape_s). Then the full capstone. To reproduce a pre-fix run set heading_hold_prethroat_m:0.0 (the PR 253 one-sided hold only).",
+  "_scope_note": "This fragment only tightens the coupled heading hold to enter the throat aligned regardless of seat offset/drift; it does not touch PR 241's lead-in, PR 201's monitor thresholds, PR 236's bound, PR 250's rock, the couple fine-dock, or any cart/caster friction or mass value, and it never commands reverse (the coupled-reverse interlock, mobile.wheel_targets v>=0 / gate_velocity linear>=0, is a separate captain decision and out of scope). Full analysis + the three-run numbers: data/sim-robust-heading-hold-bound-v1/report.md."
+}
