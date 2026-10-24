@@ -5,6 +5,7 @@ import os
 import sys
 
 from .config import FRAME, JOINTS, NS, launch_plan
+from .host_guard_exit import MARKER_ENV, clean_line, guard_exit_reason, write_guard_exit
 from .mesh_uri import normalize_mesh_uris
 from .movegroup_respawn import RespawnSupervisor
 
@@ -14,7 +15,7 @@ def description(config):
     from ament_index_python.packages import get_package_share_directory as share
     from launch import LaunchDescription
     from launch.actions import ExecuteProcess, EmitEvent, RegisterEventHandler
-    from launch.event_handlers import OnProcessExit
+    from launch.event_handlers import OnProcessExit, OnProcessIO
     from launch.events import Shutdown
     from launch_ros.actions import Node, ComposableNodeContainer
     from launch_ros.descriptions import ComposableNode
@@ -256,8 +257,17 @@ def description(config):
     # interpolates move_group's plan, subscribing measured /restock_sim/joint_states and publishing
     # /restock_sim/arm_joint_command (the articulation command Isaac drives the UR10 with). --urdf is the
     # same generated CAD urdf the plan validates (host.json["urdf"]); it reads arm joint limits only.
+    # sim-robust-pick-wrist-guard-cspace-fix-v1: a per-launch marker path the shutdown-guard handler
+    # writes the dying component (name, exit code, last error line) into, so the trajectory executor's
+    # last-resort fault NAMES the container death (e.g. the cumotion::FatalException CUDA OOM) instead of
+    # the bare 'executor stopped'. Shared in-process with the guard closure below; passed to the executor
+    # via env. An already-set value (orchestrator-chosen) is honoured.
+    import tempfile
+    guard_marker = os.environ.get(MARKER_ENV) or os.path.join(
+        tempfile.gettempdir(), 'restock_host_guard_exit.%d.json' % os.getpid())
     trajectory = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock.trajectory_host',
-        '--urdf', robot['urdf']], output='screen')
+        '--urdf', robot['urdf']], output='screen',
+        additional_env={MARKER_ENV: guard_marker})
     processes = [moveit, container, masker, manipulation, trajectory]
     # Losing mapping/masking must not leave an apparently healthy planner behind -- these exits DO tear
     # the stack down. move_group is excluded: it respawns (above), so its (recoverable) crash must not
@@ -281,9 +291,37 @@ def description(config):
             output='screen')
         processes.append(mast_masker)
         guarded.append(mast_masker)
-    guards = [RegisterEventHandler(OnProcessExit(target_action=process,
-              on_exit=[EmitEvent(event=Shutdown(reason='restock host component exited'))]))
+    # sim-robust-pick-wrist-guard-cspace-fix-v1: name the shutdown-guard death. Keep each guarded
+    # process's LAST stderr/stdout line (an OnProcessIO ring of one), and on its exit write the marker
+    # (process name + returncode + that last line) BEFORE emitting the Shutdown -- the write is
+    # synchronous in the launch process, so it lands before the SIGINT reaches the trajectory executor's
+    # last-resort finally. The Shutdown reason is now named too (was 'restock host component exited').
+    # Behaviour is otherwise unchanged: the stack still tears down on any guarded exit.
+    last_lines = {}
+
+    def _io_recorder(process):
+        def _on_io(event):
+            line = clean_line(getattr(event, 'text', b''))
+            if line:
+                last_lines[id(process)] = line
+        return _on_io
+
+    def _guard_exit(process):
+        def _on_exit(event, _context):
+            name = getattr(event, 'process_name', None) or 'restock host component'
+            rc = getattr(event, 'returncode', None)
+            last = last_lines.get(id(process))
+            write_guard_exit(guard_marker, name, rc, last)
+            reason = guard_exit_reason(name, rc, last)
+            print('HOST_GUARD_EXIT %s' % reason, flush=True)
+            return [EmitEvent(event=Shutdown(reason=reason))]
+        return _on_exit
+
+    guards = [RegisterEventHandler(OnProcessExit(target_action=process, on_exit=_guard_exit(process)))
               for process in guarded]
+    guards += [RegisterEventHandler(OnProcessIO(
+        target_action=process, on_stderr=_io_recorder(process), on_stdout=_io_recorder(process)))
+        for process in guarded]
     # Host-published nvblox mapper-incorporation acknowledgement. nvblox runs
     # update_esdf_rate_hz 0.0 (on-request only), so this node's ESDF service poll is what
     # integrates pending masked depth, and it publishes the real NVIDIA incorporation

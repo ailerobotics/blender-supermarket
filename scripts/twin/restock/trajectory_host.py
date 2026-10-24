@@ -1099,7 +1099,15 @@ def main():
     finally:
         with lock:
             if not state['fault']:
-                fault('executor stopped')   # honest last-resort marker if nothing truer recorded
+                # sim-robust-pick-wrist-guard-cspace-fix-v1: a SIGINT from a shutdown-guard component
+                # death (e.g. the cuMotion container's FatalException CUDA OOM) tears the context down
+                # with no tracking fault, so the generic 'executor stopped' used to mask the real cause.
+                # If the launch guard recorded the dying component in the marker, fault with THAT named
+                # reason instead; absent/clean run => the unchanged generic marker.
+                from twin.restock_host.host_guard_exit import (
+                    MARKER_ENV, guard_exit_fault_reason, read_guard_exit)
+                marker = read_guard_exit(os.environ.get(MARKER_ENV))
+                fault(guard_exit_fault_reason(marker, 'executor stopped'))
         server.destroy()
         executor.shutdown()
         node.destroy_node()
