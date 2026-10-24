@@ -68,6 +68,10 @@ class _FakePlan:
 def _port_at_fired_sim_plan_deadline(state='plan_accept', plan_accept_crash_retries=0, ready=True):
     """A port whose SIM-clock planning deadline has already fired (goal never serviced), as in the
     coldliveapproach stow: move_group is unresponsive but server_is_ready() stale-reads True."""
+    # RosMotionPort._poll() imports moveit_msgs at entry; the port tier below drives _poll() directly, so
+    # skip precisely (not fail) where ROS is off PYTHONPATH (e.g. PYTHONPATH= CPU invocation) and moveit_msgs
+    # is absent. The controller tier (FixtureMotion) never touches _poll and runs regardless.
+    pytest.importorskip('moveit_msgs')
     p = RosMotionPort.__new__(RosMotionPort)
     p.state = state
     p.timeout = 25.0
