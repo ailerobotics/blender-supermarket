@@ -652,6 +652,24 @@ no steering + cruise across the pin, forward-only, key-off byte-identical) + the
 stop detector `tests/test_tow_traction.py` / `scripts/check_tow_traction.py --gpu-run`; write-up
 `data/sim-robust-throat-momentum-launch-v1/report.md`.
 
+**Portal floor-box collider — the actual cause of the from-rest throat pin** (`portal_floor_box`, a TOP-LEVEL
+scene-build key, NOT under `navigation`; opt-in, default off ⇒ byte-identical; sim-robust-portal-floor-seam-v1).
+PR 259 commanded a perfect straight cruise yet launch1b still pinned at **x = −3.935 to the millimetre, from
+rest, while aligned** — refuting the momentum theory. A full CPU scan of the composed stage (AABB + actual mesh
+vertices + point-level nearest-collider + every floor/decor mesh) confirms **there is no collider edge, seam, or
+z-step at the pin**: `Backroom_floor` is one flat continuous slab. The real cause: that slab is a **triangle-mesh
+collider** (`approximation="none"`), and PhysX cooks its top quad into two triangles sharing one internal
+**diagonal** edge; on a flat floor that edge is an in-plane (horizontal) ghost-contact normal. The cart's
+**front-left caster** lands on it (measured perpendicular distance: launch1b −0.002 m, coldwin18 −0.014 m,
+coldwin9 +0.040 m — all pinned; launch1a +0.238 m — the one that crossed; momentum is *not* the discriminator,
+caster-on-edge is), and the coupled base halts at `cart_x + (cart_hitch_x − hitch_x) = cart_x + 1.27 = −3.935`.
+Fix: author the flat drive-floor mesh (`twin.colliders.DRIVE_FLOOR_MESHES`) as a **box (`boundingCube`)** collider —
+same flat slab, no internal edge, so the casters roll across cleanly. Set at scene build
+(`restock.scene.build(portal_floor_box=…)` → `compose.author_static_colliders(flat_floor_box=…)`); absent/false
+⇒ the floor stays a triangle mesh (byte-identical). Merge on top of the PR 258/259 keys (keep them on). Example
+`docs/examples/portal-floor-box-mission-fragment.json`; CPU before/after `scripts/check_portal_floor_seam.py` +
+`tests/test_portal_floor_seam.py`; write-up `data/sim-robust-portal-floor-seam-v1/report.md`.
+
 **Wall-clock stuck-stage fail-fast** (`RESTOCK_NAV_STUCK_WALL_S`, opt-in, default `0` = off): the nav
 `blocked_timeout`/`goal_timeout` are **sim-clock** caps, which under render pacing (sim advances far
 slower than wall) cannot fire — run-322b's outbound sat on `lane_blocked` for ~50 min WALL and only the

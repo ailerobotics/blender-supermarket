@@ -17,13 +17,27 @@ from typing import Iterable
 # Collider kinds
 TRIANGLE_MESH = "triangle_mesh"   # UsdPhysics.MeshCollisionAPI approximation "none"
 CONVEX_HULL = "convex_hull"       # approximation "convexHull"
+BOX = "box"                       # approximation "boundingCube"
 SKIP = "skip"
 
 # UsdPhysics MeshCollisionAPI approximation tokens
-APPROX = {TRIANGLE_MESH: "none", CONVEX_HULL: "convexHull"}
+APPROX = {TRIANGLE_MESH: "none", CONVEX_HULL: "convexHull", BOX: "boundingCube"}
 
 # Top-level groups whose direct meshes are large, static, non-convex scenery.
 STATIC_GROUPS = {"GRP_Structure", "GRP_Fixtures", "GRP_Signage"}
+
+# Flat, horizontal drive surfaces the coupled tow train (robot + cart) rolls across.
+# A triangle-mesh collider on such a slab cooks an internal diagonal edge straight under
+# the tow lane; PhysX reports an internal-edge ("ghost") contact with an in-plane normal
+# when a wheel/caster comes to low speed ON that edge, arresting the train on a perfectly
+# flat floor with NO z step. That is the from-rest sales_backroom_portal pin: the cart's
+# front caster lands on Backroom_floor's cooked diagonal (CPU-measured perp <2 cm on every
+# pinned run; >20 cm clear on the one that crossed) and the base halts at cart_x + hitch
+# offset = x=-3.935 to the millimetre. A box ("boundingCube") approximation is the same
+# flat slab with NO internal edge, so the casters roll across cleanly. See
+# data/sim-robust-portal-floor-seam-v1/report.md. Opt-in only (``flat_floor_box``); off =>
+# these stay triangle meshes, byte-identical.
+DRIVE_FLOOR_MESHES = frozenset({"Backroom_floor"})
 
 
 @dataclass(frozen=True)
@@ -47,8 +61,14 @@ class ColliderDecision:
         return self.kind != SKIP
 
 
-def classify(prim: PrimInfo) -> ColliderDecision:
-    """Decide the collider for one prim. Order matters."""
+def classify(prim: PrimInfo, *, flat_floor_box: bool = False) -> ColliderDecision:
+    """Decide the collider for one prim. Order matters.
+
+    ``flat_floor_box`` (opt-in, default off => byte-identical): when True, the flat
+    horizontal drive-floor meshes in :data:`DRIVE_FLOOR_MESHES` get a box
+    ("boundingCube") collider instead of a triangle mesh, removing the internal
+    triangulation edge that ghost-collides the coupled tow casters at the portal.
+    """
     # 1. Never author on an instanceable placement — the collider belongs on the
     #    shared prototype so all instances inherit it once. This is THE guard.
     if prim.is_instance:
@@ -73,6 +93,13 @@ def classify(prim: PrimInfo) -> ColliderDecision:
     # 4. Large static scenery (structure/fixtures/signage): triangle mesh so the
     #    concave shelves/walls collide faithfully. Immovable, so no mass.
     if prim.top_group in STATIC_GROUPS:
+        # 4a. A flat drive floor the tow train rolls across: box collider (no internal
+        #     triangle edge for the casters to ghost-collide at the portal). Opt-in.
+        if flat_floor_box and prim.name in DRIVE_FLOOR_MESHES:
+            return ColliderDecision(
+                BOX, APPROX[BOX],
+                f"flat drive-floor {prim.name} — box collider (no internal triangle edge "
+                "to ghost-collide the coupled tow casters at the portal)")
         return ColliderDecision(
             TRIANGLE_MESH, APPROX[TRIANGLE_MESH],
             f"static non-convex scenery in {prim.top_group} — triangle-mesh collider")
@@ -88,23 +115,26 @@ def classify(prim: PrimInfo) -> ColliderDecision:
 class ColliderPlan:
     triangle_mesh: int = 0
     convex_hull: int = 0
+    box: int = 0
     skipped_instances: int = 0
     skipped_other: int = 0
 
     @property
     def authored(self) -> int:
-        return self.triangle_mesh + self.convex_hull
+        return self.triangle_mesh + self.convex_hull + self.box
 
 
-def plan_colliders(prims: Iterable[PrimInfo]) -> ColliderPlan:
+def plan_colliders(prims: Iterable[PrimInfo], *, flat_floor_box: bool = False) -> ColliderPlan:
     """Aggregate classify() over prims into counts for the dry-run / logs."""
     plan = ColliderPlan()
     for p in prims:
-        d = classify(p)
+        d = classify(p, flat_floor_box=flat_floor_box)
         if d.kind == TRIANGLE_MESH:
             plan.triangle_mesh += 1
         elif d.kind == CONVEX_HULL:
             plan.convex_hull += 1
+        elif d.kind == BOX:
+            plan.box += 1
         elif p.is_instance:
             plan.skipped_instances += 1
         else:

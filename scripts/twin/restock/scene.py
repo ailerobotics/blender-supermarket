@@ -41,7 +41,7 @@ def promote_stock(stage, path, sku, mass_kg):
 
 def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
           stock_mass_kg, spec=MobileSpec(), scenario=None, cage_collision=None,
-          visuals=None):
+          visuals=None, portal_floor_box=None):
     from pxr import Gf, UsdGeom, UsdPhysics, Usd
     from . import cage_collision as _cage
     from . import visuals as _visuals
@@ -62,9 +62,14 @@ def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
         raise ValueError('imported robot must have a default prim')
     if not any(p.HasAPI(UsdPhysics.ArticulationRootAPI) for p in robot_stage.Traverse()):
         raise ValueError('imported robot is not an articulation')
+    # Opt-in flat drive-floor box collider (restock sim-robust-portal-floor-seam): removes the
+    # Backroom_floor triangle-mesh internal edge that ghost-collides the tow casters at the portal.
+    # Absent/False => byte-identical triangle-mesh floor. Accepts bool or a truthy mapping.
+    floor_box = bool(portal_floor_box if not isinstance(portal_floor_box, dict)
+                     else portal_floor_box.get('enabled', True))
     stage, root = compose.open_output_stage(str(output), str(store))
     compose.author_physics_scene(stage, root)
-    static = compose.author_static_colliders(stage, root)
+    static = compose.author_static_colliders(stage, root, flat_floor_box=floor_box)
     products = compose.author_product_colliders(stage, root)
     assets = author(stage, robot_usd, spec=spec)
     # Imported base_link origin is chassis centre; cart root is at ground plane.
@@ -86,6 +91,7 @@ def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
         raise RuntimeError('input USD layer changed during composition')
     result = dict(stage=str(output),assets=assets,stock=stock,initial_scenario=initial,
                   static_colliders=static,product_colliders=products,
+                  portal_floor_box=floor_box,
                   evidence='offline_usd_schema_only',physics_verified=False,
                   input_sha256={str(p):digest for p,digest in hashes.items()})
     if cage is not None:

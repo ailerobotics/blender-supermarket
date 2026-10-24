@@ -455,7 +455,19 @@ repo's `scenes/`, `export/` or `renders/`.
   it). CPU proofs `tests/test_articulated_navigation.py` (`test_breakaway_rock_*`), `tests/test_coupled_breakaway_rock.py`
   (real coldwin7/9 recorded-trace replay + `coupled_tow_margin` gate); fragment
   `docs/examples/coupled-breakaway-rock-mission-fragment.json`; write-up
-  `data/sim-robust-coupled-breakaway-from-rest-v1/report.md`. **Lidar sensor-frame yaw (vr1, now FIXED default-on):**
+  `data/sim-robust-coupled-breakaway-from-rest-v1/report.md`. **The from-rest throat pin's REAL cause is the
+  floor COLLIDER, not scrub/momentum/yaw** (sim-robust-portal-floor-seam-v1 — this corrects the
+  coupled-traction "drive-authority not geometry / x red herring" reading): with PR258 (yaw) and PR259 (momentum)
+  both on, launch1b still pinned at **x=−3.935 to the mm, from rest, aligned, straight-commanded**. There is NO
+  collider edge there (CPU scan: `Backroom_floor` is one flat continuous slab) — but it is a **triangle-mesh
+  collider** (`approximation="none"`) whose cooked quad **diagonal** is a PhysX internal-edge ghost contact the
+  cart's **front-left caster** lands on (perp to the diagonal: ≤1.5 cm on every pinned run, +0.24 m on the one that
+  crossed; momentum is NOT the discriminator — caster-on-edge is), and the base halts at
+  `cart_x + (cart_hitch_x−hitch_x)=cart_x+1.27=−3.935`. Fix = author the flat drive floor as a **box
+  (`boundingCube`)** collider (no internal edge): top-level `portal_floor_box` scene key (default off ⇒
+  byte-identical), `twin.colliders.DRIVE_FLOOR_MESHES`. CPU `scripts/check_portal_floor_seam.py` +
+  `tests/test_portal_floor_seam.py`; fragment `docs/examples/portal-floor-box-mission-fragment.json`; write-up
+  `data/sim-robust-portal-floor-seam-v1/report.md`. **Lidar sensor-frame yaw (vr1, now FIXED default-on):**
   `Scan.sensor_to_base` is (x, y, YAW) but the legacy `isaac_bundle` wiring passed the lidar URDF origin
   (x, y, z) — the `lidar_frame` is a fixed rpy-0 child of base_link, so its z (0.15 m) is a mount height,
   NOT a yaw; reading it as yaw rotated every return 8.59° and was the sole source of the tow-lane
