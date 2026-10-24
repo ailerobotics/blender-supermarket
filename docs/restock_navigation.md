@@ -599,6 +599,30 @@ stay the untouched backstop. Example `docs/examples/outbound-heading-hold-missio
 `tests/test_outbound_heading_hold.py` (real coldwin7/rock1/coldwin9/coldwin10 recorded-creep replay) + factory
 wiring `tests/test_navigation_factory.py`; write-up `data/sim-robust-outbound-throat-yaw-align-v1/report.md`.
 
+**Pre-throat heading alignment** (`navigation.heading_hold_prethroat_m`, opt-in, default `0.0` ⇒ the PR 253
+hold above is byte-identical; sim-robust-heading-hold-bound-v1). The PR 253 hold still let **coldwin17** wedge
+(byte-identical to the COMPLETE coldwin16). CPU reconstruction (`data/sim-robust-heading-hold-bound-v1`): the
+base seats **~0.25 m south** of the descending authored centreline (`outbound_dock_to_bay` drops y 15.5→15.25),
+so the follower's lateral term (`2·lateral ≈ +0.52`) *drives* the CCW yaw drift — the follower law commands CCW
+on ~90 % of the approach ticks, matching the recorded `cw>0` on 100 %. The drift builds on the **curved merge
+lead-in** where PR 253's straight-segment guard **disables the hold**, so the hold first fired only at x≈−4.079
+with base_yaw already **+5.18°** — too late and too little authority at the crawl to un-yaw before the lip; the
+passers (coldwin16 +2°, coldwin11 +5.3°) had the same drift and threaded only on momentum (a yawed entry is a
+stochastic wedge). PR 253's hold was also **one-sided** (a CW seat drift was never corrected) and never gated
+the throat entry (a failed align simply wedged, unnamed). When `heading_hold_prethroat_m > 0` (requires
+`coupled_heading_hold` + `heading_hold_throat` `[x,y]`), the hold becomes a **two-sided pre-throat alignment
+gate** scoped to the window within that distance of the throat **along the travel axis**: while in the window
+and off-axis beyond `heading_hold_bound_deg` on **either** side, slow to the creep and **saturate the corrective
+turn toward the travel axis** (`heading_hold_axis_deg` or the lane goal heading — the min-clearance heading
+through the x-gap, *not* the descending centreline tangent), fully overriding the follower so the lateral term
+can never push further off-axis. Forward-only (`v≥0`); if the base cannot reach the bound inside
+`heading_hold_align_timeout_s` SIM seconds (default 20) it **fails by the named reason `throat_misaligned`**
+(StageRetry) rather than wedging silently. Size `heading_hold_prethroat_m` to the **straight run-up** to the
+throat (it is not meant to span a genuine authored turn). PR 201/236/250 stay the untouched backstop. Example
+`docs/examples/heading-hold-bound-mission-fragment.json`; CPU proof `tests/test_outbound_heading_hold_bound.py`
+(coldwin17/coldwin16/coldwin11 recorded-creep replay — all converge to ~+0.9° at the lip vs the +5.5° wedge);
+write-up `data/sim-robust-heading-hold-bound-v1/report.md`.
+
 **Wall-clock stuck-stage fail-fast** (`RESTOCK_NAV_STUCK_WALL_S`, opt-in, default `0` = off): the nav
 `blocked_timeout`/`goal_timeout` are **sim-clock** caps, which under render pacing (sim advances far
 slower than wall) cannot fire — run-322b's outbound sat on `lane_blocked` for ~50 min WALL and only the
