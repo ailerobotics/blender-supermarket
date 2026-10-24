@@ -199,6 +199,14 @@ def main():
         # {max_droop, upright_seed}; absent/False => the plain wrist-guard (byte-identical). See
         # transfer_carry.resolve_reach_guard.
         transfer_preplace_reach_guard=config.get('transfer_preplace_reach_guard'),
+        # sim-robust-transfer-settle-oscillation-v1 (coldwin12): extend the clear-wrist-region guard to the
+        # live_pose TRANSFER PICK (approach + contact), which the carry wrist_guard does not cover. The pick
+        # intermittently IK'd the ur_wrist_2-vs-ur_forearm self-colliding family and the contact descent
+        # limit-cycled 0.169 rad / ~1.6 rad/s for the whole 30 s settle window (PR239 envelope failed it);
+        # coldwin11 took the clear family and settled instantly. On => the pick approach pose goal carries the
+        # clear-region joint constraints and the contact straight-line IK is wrist-guarded. Absent/False =>
+        # byte-identical. See controller._pick_wrist_guard.
+        transfer_pick_wrist_guard=bool(config.get('transfer_pick_wrist_guard', False)),
         # fm390: drive the base in front of the rollwagen mouth between the carry fold and the place
         # (lift->tuck->TRANSIT->[base nav]->preplace), instead of the arm-only cage insert. Absent =>
         # byte-identical. Mutually exclusive in practice with cart_cage_place (base nav replaces it).
@@ -299,6 +307,8 @@ def main():
         'collect_place_straight_line': controller.collect_place_straight_line,
         # sim-robust-transfer-preplace-reach-v1: effective live_pose transfer preplace reach guard (None = off)
         'transfer_preplace_reach_guard': controller.transfer_preplace_reach_guard,
+        # sim-robust-transfer-settle-oscillation-v1: effective live_pose transfer PICK wrist guard (False = off)
+        'transfer_pick_wrist_guard': controller.transfer_pick_wrist_guard,
         # sim-robust-cart-place-descent-v1: effective SIM-clock release-detach budget (0 = off)
         'release_detach_timeout_s': controller.release_detach_timeout_s,
         'reposition_before_place': controller.reposition_before_place,

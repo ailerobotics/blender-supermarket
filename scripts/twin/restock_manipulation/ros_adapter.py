@@ -1813,6 +1813,15 @@ class RosMotionPort:
                 q = self._nearest_to(q, self.start)
                 if q is None:
                     raise ValueError('contact IK outside joint limits')
+                # sim-robust-transfer-settle-oscillation-v1 (coldwin12): when a wrist_guard is active for this
+                # straight-line move (the live_pose transfer PICK contact), the collision-off KDL IK must still
+                # land in the clear wrist region -- a config in the ur_wrist_2-vs-ur_forearm self-colliding
+                # branch (invisible to the IK's collision model) would otherwise descend into the stop and
+                # limit-cycle. _guard_rejects re-seeds from the wrist-flipped twin (same TCP, clear branch) or,
+                # once the bounded seeds are spent, RAISES the named carry-wrist-region reason. None => off
+                # (no wrist_guard passed for the contact) => byte-identical straight-line descent.
+                if getattr(self, '_wrist_guard', None) is not None and self._guard_rejects(q):
+                    return 'running'
                 self._begin_straight_line_execute(q)
                 return 'running'
             # fm347 (3): the cart PLACE moves (near_start) branch to the config NEAREST the measured pan

@@ -516,7 +516,16 @@ repo's `scenes/`, `export/` or `renders/`.
   reposition (`restock_manipulation/transfer_mode.py`). **`live_pose` REQUIRES
   `RESTOCK_TRANSFER_CARRY=wrist_guard`** — it fixes only the PICK reach; its preplace/place/retreat stay
   seeded-KDL, so without the guard the controller FAILS FAST at observe with a named reason rather than
-  silently running the `ur_wrist_2`-vs-forearm jam (audit `transfer-preplace-wrist-branch-jam`). The
+  silently running the `ur_wrist_2`-vs-forearm jam (audit `transfer-preplace-wrist-branch-jam`). **Sharp
+  edge:** `RESTOCK_TRANSFER_CARRY=wrist_guard` covers only the PLACE half (`transfer_carry.GUARDED_PHASES`
+  = preplace/place/retreat); the live_pose transfer PICK (approach cuMotion pose goal + contact straight-line
+  KDL) was unguarded and intermittently IK'd the same `ur_wrist_2`-vs-forearm family, where the contact
+  descent limit-cycles ~0.17 rad / ~1.6 rad/s and PR239's settle envelope fails it (coldwin12; coldwin11 took
+  the clear branch). Opt-in HOST key `transfer_pick_wrist_guard` (default off ⇒ byte-identical) extends the
+  clear-region bounds (`carry_wrist1_cap`/`carry_wrist2_min`) to the pick approach+contact; CPU
+  `tests/test_restock_transfer_pick_wrist_guard.py`, fragment
+  `docs/examples/transfer-pick-wrist-guard-mission-fragment.json`, write-up
+  `data/sim-robust-transfer-settle-oscillation-v1/report.md`. The
   live_pose PLACE lowers the carton ONTO the bay, so its place config sits ~13 mm above the bay top (inside
   cuMotion's ESDF voxel margin) and a collision-aware plan is rejected (`world collision detected`); the
   place descent + empty retreat therefore route as the collision-OFF straight-line insert (like the
