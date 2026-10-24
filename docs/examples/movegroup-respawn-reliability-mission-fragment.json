@@ -1,0 +1,36 @@
+{
+  "_comment": "sim-robust-movegroup-respawn-reliability-v1 bounded GPU proof config for the integration lane (twin-robot-in-store-boot-v1). Purpose: prove move_group respawn is BOUNDED and OBSERVABLE after the intermittent cuMotion SIGABRT -- each respawn and the give-up are logged BY NAME with an attempt count, and the give-up hands off to the client fast-fail (ros_adapter RESPAWN_WAIT_CAP, PR 234) instead of an unbounded respawn loop or a lost 20-30 min GPU run. Scheduled through /tmp/aile-gpu.lock, never forced; never touch whispr (pid 1339, ~2.2 GB VRAM). Do NOT run on the box here -- hand to the integration lane.",
+  "_where": "Merge the 'movegroup_respawn' block below into the HOST-STACK config JSON (the file passed to scripts/run_restock_host.py --config, i.e. config['host_config'] read by twin.restock.host_session). It is validated by twin.restock_host.config.validate_config and resolved into launch_plan()['movegroup_respawn'], which twin.restock_host.launch passes to the move_group Node as respawn_max_retries + respawn_delay. Absent => the module default (max_retries 3, delay 3.0) => a healthy run is byte-identical.",
+  "movegroup_respawn": {
+    "max_retries": 2,
+    "delay": 3.0
+  },
+  "_movegroup_respawn_note": "max_retries 2 is chosen for the proof so that the double-death (2 kills) recovers fully (deaths 1,2 are within budget) while the triple-death (3 kills) exhausts the budget on the 3rd death and gives up. delay 3.0 s lets the dying process release its endpoints before the replacement binds them.",
+
+  "_injector": "The validator's v3 double-death injector ~/datasets/twin-robot-in-store-boot-v1/mission/inject_dbl.sh fires kill -ABRT on MY move_group ONLY (single-pid, runtime-overlay-path scoped): KILL1 right after the carton object_attachment, KILL2 during a post-recovery execution window. For the triple-death variant, add a third kill (KILL3) gated the same way as KILL2 on a SECOND post-recovery execution window after KILL2.",
+
+  "_variants": {
+    "double_death_PASS": {
+      "injector": "inject_dbl.sh as-is (2 kills during collect)",
+      "expected_log": [
+        "MOVE_GROUP_RESPAWN move_group died pid=<p1> exit=-6; relaunching move_group (attempt 1/2, respawn_delay=3.0s)",
+        "[INFO] [move_group-1]: process started with pid [<p2>]   (launch native respawn 1)",
+        "MOVE_GROUP_RESPAWN move_group died pid=<p2> exit=-6; relaunching move_group (attempt 2/2, respawn_delay=3.0s)",
+        "[INFO] [move_group-1]: process started with pid [<p3>]   (launch native respawn 2)"
+      ],
+      "expected_pass": "BOTH deaths respawn by name with attempt counts 1/2 and 2/2, move_group re-advertises each time, the client logs MOVE_GROUP_CRASH_RETRY and re-sends the same plan, and COLLECT COMPLETES (action=collect status=succeeded). NO MOVE_GROUP_RESPAWN_GIVE_UP line, NO 'move_group did not respawn within', NO HOST_FAULT_ESTOP."
+    },
+    "triple_death_GIVE_UP": {
+      "injector": "inject_dbl.sh + a third KILL3 (same gating as KILL2, on a second post-recovery execution window)",
+      "expected_log": [
+        "MOVE_GROUP_RESPAWN ... attempt 1/2 ...",
+        "MOVE_GROUP_RESPAWN ... attempt 2/2 ...",
+        "MOVE_GROUP_RESPAWN_GIVE_UP move_group died pid=<p3> exit=-6 and the bounded respawn budget is exhausted (2/2 respawns used); move_group will NOT be relaunched -- the planning client fast-fails the stage by name (ros_adapter RESPAWN_WAIT_CAP)",
+        "move_group did not respawn within 45s   (ros_adapter RESPAWN_WAIT_CAP client fast-fail)"
+      ],
+      "expected_pass": "The 3rd death logs MOVE_GROUP_RESPAWN_GIVE_UP by name with the 2/2 count, launch does NOT start a 4th move_group pid, and the stage FAILS FAST BY NAME via the client RESPAWN_WAIT_CAP ('move_group did not respawn within 45s') -- NOT an opaque phase timeout and NOT an unbounded respawn loop."
+    }
+  },
+  "_grep": "In the run's host-stack.log: `grep -nE 'MOVE_GROUP_RESPAWN( |_GIVE_UP)|process (has died|started with pid)|did not respawn within' host-stack.log` shows the full respawn ladder and the named give-up.",
+  "_scope_note": "This proves the LAUNCH-side bounded respawn + naming for a move_group that EXITS (clean SIGABRT, exit -6 -- what kill -ABRT and the real run-266/268/coldwin7 crash produce). A move_group that HANGS in glibc's abort path (coldliveapproach: 'malloc_consolidate(): invalid chunk size' with NO 'process has died') never exits, so NO launch respawn can fire; that case is owned by the client crash-retry / RESPAWN_WAIT_CAP and is out of this lane's scope (see data/sim-robust-movegroup-respawn-reliability-v1/report.md)."
+}

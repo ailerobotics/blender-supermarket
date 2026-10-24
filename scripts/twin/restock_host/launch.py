@@ -6,6 +6,7 @@ import sys
 
 from .config import FRAME, JOINTS, NS, launch_plan
 from .mesh_uri import normalize_mesh_uris
+from .movegroup_respawn import RespawnSupervisor
 
 
 def description(config):
@@ -70,9 +71,19 @@ def description(config):
     # mission's planning client re-sends the same goal (ros_adapter _handle_server_crash). The short
     # delay lets the old process fully release its endpoints before the replacement binds them.
     # move_group is deliberately NOT in the shutdown-guard set below (see `guarded`).
+    #
+    # sim-robust-movegroup-respawn-reliability-v1: the respawn is now BOUNDED (respawn_max_retries,
+    # was the launch default -1 = infinite) and OBSERVABLE -- an OnProcessExit handler (below) logs
+    # each respawn and the give-up BY NAME with the attempt count. ROS 2 launch respawn fires only on
+    # a real process EXIT, so it recovers a clean SIGABRT (exit -6: dblproof, coldwin7) but NOT a
+    # move_group that HANGS in glibc's abort path (coldliveapproach); the hang and the exhausted-budget
+    # give-up are both owned by the client RESPAWN_WAIT_CAP fast-fail (ros_adapter, PR 234/242). The
+    # handler is observe-only (no respawn/kill, no second Shutdown), so launch stays the sole respawner.
+    mg_respawn = plan['movegroup_respawn']
     moveit = Node(
         package='moveit_ros_move_group', executable='move_group', namespace=NS,
-        name='move_group', output='screen', respawn=True, respawn_delay=3.0, parameters=[{
+        name='move_group', output='screen', respawn=True,
+        respawn_delay=mg_respawn['delay'], respawn_max_retries=mg_respawn['max_retries'], parameters=[{
             **common, 'robot_description': robot_description,
             'robot_description_semantic': Path(robot['srdf']).read_text(),
             'robot_description_kinematics': {'ur_manipulator': {
@@ -284,4 +295,11 @@ def description(config):
     ack = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock_host.incorporation_ack',
         '--workspace-min', *(str(v) for v in plan['workspace_min']),
         '--workspace-max', *(str(v) for v in plan['workspace_max'])], output='screen')
-    return LaunchDescription(guards + processes + [ack])
+    # Observe-only move_group respawn logger: NOT a shutdown guard and NOT a respawner -- it logs
+    # each respawn / the give-up BY NAME with the attempt count (so the double-death proof is
+    # greppable) and returns no launch actions, leaving ROS 2 launch the sole respawner. The
+    # give-up leaves move_group dead; the client RESPAWN_WAIT_CAP (ros_adapter) names the stage fail.
+    respawn_log = RegisterEventHandler(OnProcessExit(target_action=moveit,
+        on_exit=RespawnSupervisor(mg_respawn['max_retries'], mg_respawn['delay'],
+                                  lambda line: print(line, flush=True)).on_exit))
+    return LaunchDescription(guards + [respawn_log] + processes + [ack])

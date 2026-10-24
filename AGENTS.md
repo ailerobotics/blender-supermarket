@@ -314,6 +314,19 @@ repo's `scenes/`, `export/` or `renders/`.
   it on a per-op `failed` was the OTHER half of the live_pose freeze: the StationClient read a frozen ack
   → `StationAckStreamStalled` at ~sim 31 s, masking the true `collision planning or execution failed`
   (armcam/transfer2/bench1). Report: `data/sim-robust-station-ack-v1/report.md`.
+- **move_group respawn (bounded + observable)**: the host launch (`restock_host/launch.py`)
+  respawns `move_group` on the intermittent cuMotion SIGABRT instead of tearing the stack down.
+  ROS 2 launch respawn fires ONLY on a real process EXIT — a clean SIGABRT (exit -6) respawns,
+  but a `move_group` that HANGS in glibc's abort path (`malloc_consolidate(): invalid chunk size`
+  with NO following `process has died` line) never exits, so no launch respawn can fire; that hang
+  is owned by the client `RESPAWN_WAIT_CAP` fast-fail (`restock_manipulation/ros_adapter.py`,
+  PR 234/242), not the launch. The respawn is BOUNDED + logged by name with an attempt count via
+  `restock_host/movegroup_respawn.py` (pure/CPU-tested): optional host-config block
+  `movegroup_respawn: {max_retries, delay}` (default 3 / 3.0 s, surfaced in `launch_plan`), each
+  respawn/give-up prints `MOVE_GROUP_RESPAWN[_GIVE_UP]`. The `OnProcessExit` logger is observe-only
+  (never respawns/kills — launch stays the sole respawner). Report + GPU double/triple-death proof:
+  `data/sim-robust-movegroup-respawn-reliability-v1/report.md`,
+  `docs/examples/movegroup-respawn-reliability-mission-fragment.json`.
 - **Mobile navigation**: `scripts/twin/navigation/` and
   [docs/restock_navigation.md](docs/restock_navigation.md) define sensor, footprint
   and goal contracts; RUNBOOK §12 has CPU checks and isolated Nav2 launch. Coupled

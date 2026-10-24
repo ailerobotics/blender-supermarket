@@ -43,9 +43,16 @@ def validate_config(config):
     import yaml
     allowed = {'urdf', 'srdf', 'xrdf', 'workspace_min', 'workspace_max',
                'domain', 'namespace', 'frame', 'tcp', 'shelfbot_root', 'mobile_manifest', 'asset_report',
-               'mast_depth'}
+               'mast_depth', 'movegroup_respawn'}
     if set(config) - allowed:
         raise ValueError(f'unknown configuration keys: {sorted(set(config)-allowed)}')
+    # Optional bounded move_group respawn override (see twin.restock_host.movegroup_respawn).
+    # Default off: absent => the module's bounded defaults, so the host launch is byte-identical
+    # for a healthy run. The integration lane sets {max_retries, delay} for the double/triple-death
+    # proof; resolve_respawn clamps the values, so only the shape and key set are checked here.
+    mg = config.get('movegroup_respawn')
+    if mg is not None and (not isinstance(mg, dict) or set(mg) - {'max_retries', 'delay', 'respawn_delay'}):
+        raise ValueError("movegroup_respawn must be {'max_retries': int, 'delay': float}")
     # Optional second nvblox depth feed (the body-mounted mast camera). Default off: when
     # absent or {'enabled': False} the host launch is byte-for-byte the single-feed default.
     # The integration lane turns it on for a run; the Isaac side must then publish the mast
@@ -220,9 +227,12 @@ def launch_plan(config):
             f"(the attached carton is a rig-instance subtree, so it is masked), with "
             f"{feed['masked_depth_info']} (frame {feed['frame_id']}) and /clock -- the second "
             'nvblox feed (camera_1) while the wrist (camera_0) is carton-blocked')
+    from .movegroup_respawn import resolve_respawn
+    mg_max_retries, mg_delay = resolve_respawn(c)
     return {
         'environment': ENV, 'namespace': NS, 'frame': FRAME, 'tcp': TCP,
         'mast_depth': {'enabled': mast_enabled},
+        'movegroup_respawn': {'max_retries': mg_max_retries, 'delay': mg_delay},
         'robot': {k: c[k] for k in ('urdf', 'srdf', 'xrdf')},
         'workspace_min': c['workspace_min'], 'workspace_max': c['workspace_max'],
         'shelfbot_root': str(Path(c['shelfbot_root']).resolve()),

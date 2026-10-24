@@ -96,6 +96,22 @@ class HostTests(unittest.TestCase):
         self.assertIn('collision_time', external)
         self.assertIn('station/status', external)
 
+    def test_movegroup_respawn_threaded_and_bounded(self):
+        # sim-robust-movegroup-respawn-reliability-v1: launch_plan resolves a BOUNDED move_group
+        # respawn budget so launch.py (respawn_max_retries) and preflight see the same values.
+        from twin.restock_host.movegroup_respawn import DEFAULT_MAX_RETRIES, DEFAULT_RESPAWN_DELAY_S
+        plan = launch_plan(self.config)                       # absent block => bounded default
+        self.assertEqual(plan['movegroup_respawn'],
+                         {'max_retries': DEFAULT_MAX_RETRIES, 'delay': DEFAULT_RESPAWN_DELAY_S})
+        self.assertGreaterEqual(DEFAULT_MAX_RETRIES, 0)       # bounded, never launch's -1 infinite
+        plan = launch_plan(self.config | {'movegroup_respawn': {'max_retries': 2, 'delay': 5.0}})
+        self.assertEqual(plan['movegroup_respawn'], {'max_retries': 2, 'delay': 5.0})
+
+    def test_reject_bad_movegroup_respawn(self):
+        for bad in (5, {'max_retries': 2, 'extra': 1}):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'movegroup_respawn'):
+                launch_plan(self.config | {'movegroup_respawn': bad})
+
     def test_manifest_stow_missing_or_out_of_bounds(self):
         path = Path(self.config['mobile_manifest'])
         for positions in ({}, dict.fromkeys(JOINTS, 100.)):
@@ -705,9 +721,13 @@ class RosHostLaunchWiring(unittest.TestCase):
         # down. The move_group Node declares respawn=True + a respawn delay, and move_group is NOT in the
         # OnProcessExit shutdown-guard set (whose exits EmitEvent Shutdown), so its recoverable crash does
         # not SIGINT the rest of the stack; the other components stay genuinely fatal.
+        # sim-robust-movegroup-respawn-reliability-v1: the delay + the new BOUNDED limit now come from the
+        # resolved plan (plan['movegroup_respawn']), so the launch respawn is no longer the -1 infinite
+        # default; an observe-only OnProcessExit logger names each respawn / the give-up.
         src = (Path(__file__).resolve().parents[1] / 'restock_host' / 'launch.py').read_text()
         self.assertRegex(src, r"name='move_group'[^\n]*respawn=True")      # move_group respawns
-        self.assertRegex(src, r"respawn_delay=[0-9.]+")                    # with a delay
+        self.assertRegex(src, r"respawn_delay=mg_respawn\['delay'\]")      # with the resolved delay
+        self.assertRegex(src, r"respawn_max_retries=mg_respawn\['max_retries'\]")  # BOUNDED (not -1)
         guarded_line = next(l for l in src.splitlines() if l.strip().startswith('guarded ='))
         self.assertNotIn('moveit', guarded_line)                          # move_group excluded from teardown
         for comp in ('container', 'masker', 'manipulation', 'trajectory'):
@@ -715,6 +735,12 @@ class RosHostLaunchWiring(unittest.TestCase):
         # The OnProcessExit guards are built over `guarded` (not all processes), so move_group's exit
         # does NOT EmitEvent Shutdown -- it respawns instead.
         self.assertRegex(src, r"for process in guarded")
+        # The observe-only respawn logger targets move_group (not a guarded teardown) via RespawnSupervisor.
+        self.assertRegex(src, r"OnProcessExit\(target_action=moveit")
+        self.assertIn('RespawnSupervisor', src)
+        # No double supervision: move_group has exactly ONE OnProcessExit handler, and it is the
+        # observe-only logger (target_action=moveit), never a guarded EmitEvent(Shutdown).
+        self.assertEqual(src.count('target_action=moveit'), 1)
 
     def test_ros_host_config_fixture_is_usable(self):
         from twin.restock_manipulation.types import ProductProfile
