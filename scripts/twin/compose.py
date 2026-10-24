@@ -168,9 +168,14 @@ def _apply_collider(prim, decision):
     UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr().Set(decision.approximation)
 
 
-def author_static_colliders(stage, root) -> int:
+def author_static_colliders(stage, root, *, flat_floor_box: bool = False) -> int:
     """Triangle-mesh colliders on the direct static meshes (structure/fixtures/
-    signage). Static = immovable: no RigidBodyAPI, so the robot can't shove scenery."""
+    signage). Static = immovable: no RigidBodyAPI, so the robot can't shove scenery.
+
+    ``flat_floor_box`` (opt-in, default off => byte-identical): the flat drive-floor
+    meshes (:data:`colliders.DRIVE_FLOOR_MESHES`) get a box ("boundingCube") collider
+    instead of a triangle mesh, removing the internal triangulation edge that
+    ghost-collides the coupled tow casters at the sales_backroom_portal."""
     from pxr import Usd
     n = 0
     for grp in sorted(colliders.STATIC_GROUPS):
@@ -183,8 +188,8 @@ def author_static_colliders(stage, root) -> int:
             info = colliders.PrimInfo(path=str(p.GetPath()), type_name="Mesh", top_group=grp,
                                       is_instance=p.IsInstance(), in_prototype=False,
                                       name=p.GetName())
-            d = colliders.classify(info)
-            if d.kind == colliders.TRIANGLE_MESH:
+            d = colliders.classify(info, flat_floor_box=flat_floor_box)
+            if d.kind in (colliders.TRIANGLE_MESH, colliders.BOX):
                 _apply_collider(p, d)
                 n += 1
     return n

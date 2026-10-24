@@ -392,7 +392,8 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
         robot_pose=staging['robot_base_pose'],cart_pose=staging['cart_body_pose'],
         stock_path=None,sku=scenario['job']['sku'],
         stock_mass_kg=scenario['handling_unit']['mass_kg'],spec=spec,scenario=scenario,
-        cage_collision=config.get('cage_collision'),visuals=config.get('visuals'))
+        cage_collision=config.get('cage_collision'),visuals=config.get('visuals'),
+        portal_floor_box=config.get('portal_floor_box'))
     # Opt-in SIM-ONLY carton-vs-cage contact filter (restock.cage_collision; labelled demo workaround).
     _cage=composition.get('cage_collision')
     print('CAGE_COLLISION mode=%s filtered=%d kept=%s (sim-only workaround; off => cage collides)'
@@ -402,6 +403,9 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     print('VISUALS enabled=%s bound=%d env_retoned=%d (visual materials only: UR10 palette, grey base, '
           'galvanised rollwagen, sealed backroom; DEFAULT ON, visuals=false => plain white look)'
           % ((True,_vis['bound_count'],len(_vis['env_retoned'])) if _vis else (False,0,0)),flush=True)
+    print('PORTAL_FLOOR_BOX enabled=%s (flat drive floor -> box collider, no triangle-mesh internal '
+          'edge for the tow casters to ghost-collide at the portal; default off => triangle-mesh floor)'
+          % bool(composition.get('portal_floor_box')),flush=True)
     if not open_stage(composition['stage']):
         raise RuntimeError('could not open task composed stage')
     for _ in range(300):
