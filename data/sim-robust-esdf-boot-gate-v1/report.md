@@ -1,5 +1,15 @@
 # sim-robust-esdf-boot-gate-v1
 
+> **CORRECTED by `data/sim-robust-esdf-boot-gate-v2/report.md` (2026-10-24).** The gate code in this
+> PR is kept, but §1's claim that the stale `cc-bench1` baseline (meshuris1) reproduces a
+> *never-acknowledged* ESDF is **wrong**. The GPU proof `esdfgate1` (same stale baseline, gate on)
+> held exactly ONE tick then ran to completion at sim 174 with zero `collision_dt` trips — i.e. the
+> stale baseline incorporates **one tick late**, not never; meshuris1 died one controller step before
+> it could land. So this PR's Run A proved the gate's one-tick-hold boot-race absorb, **not** the
+> fail-fast TRIP. The genuine never-incorporation TRIP proof, the once-per-op `ESDF_BOOT_GATE_READY`
+> transition log, and the `RESTOCK_ESDF_FORCE_NEVER_ACK` reproduction are in v2. Read v2 for the
+> current facts and the `docs/examples/esdf-boot-gate-v2-mission-fragment.json` hand-off.
+
 Name a **never-acknowledged nvblox ESDF incorporation at boot**, on the sim clock, **before the
 first arm motion streams** — instead of letting it surface ~40 s into a staged run as an opaque
 mid-stage controller invariant trip. The same failure would happen on the real robot if nvblox

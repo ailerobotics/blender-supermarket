@@ -803,6 +803,17 @@ class TransferController:
         if _boot is not esdf_boot_gate.PROCEED:
             print('ESDF_BOOT_GATE_TRIP phase=%s now=%.3f %s' % (self.phase, now, _boot), flush=True)
             return self._fail(_boot)
+        # sim-robust-esdf-boot-gate-v2: log the collision_time sentinel -> first valid stamp transition
+        # ONCE per op (cheap one-shot), so the gate's PROCEED decision is never again invisible -- the
+        # value, the sim now, and the source are recorded exactly where the gate hands freshness to the
+        # collision_dt invariant below. Fires whether the first step already carried a valid ack (no HOLD,
+        # the healthy case) or a HOLD preceded it (the one-tick boot race). Only when the gate is enabled,
+        # so a gate-off run stays byte-identical on the console too.
+        if self._esdf_boot_gate.consume_just_satisfied():
+            print('ESDF_BOOT_GATE_READY phase=%s now=%.3f collision_time=%.3f (first valid nvblox '
+                  'incorporation ack: the mirrored station collision_time left the -1 not-ready sentinel; '
+                  'source=sensors.collision_time packet mirror; collision_dt invariant now owns freshness)'
+                  % (self.phase, now, sensors.collision_time), flush=True)
         collision_fresh = self._fresh(sensors.collision_time, now)
         # fm430 (2a) fallback: ride the post-attach LIFT (to the fixed clear-region carry_lift_shape, which
         # does NOT depend on the live collision world) THROUGH a brief ESDF-re-incorporation staleness for
