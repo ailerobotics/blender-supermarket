@@ -86,6 +86,7 @@ def _cart_with_unit():
 
 
 def test_filter_targets_every_cage_collider_and_never_a_support():
+    pytest.importorskip('pxr')          # USD tier: skip precisely (not fail) where pxr/usd-core is absent
     from pxr import UsdPhysics
     stage, cart = _cart_with_unit()
     ev = cc.author_filter(stage, '/RestockScenario/HandlingUnit', cart['body'])
@@ -108,6 +109,7 @@ def test_filter_targets_every_cage_collider_and_never_a_support():
 
 
 def test_filter_refuses_a_missing_unit_body_or_cage():
+    pytest.importorskip('pxr')          # USD tier: skip precisely (not fail) where pxr/usd-core is absent
     from pxr import Usd, UsdGeom
     stage, cart = _cart_with_unit()
     with pytest.raises(ValueError, match='not a rigid body'):
