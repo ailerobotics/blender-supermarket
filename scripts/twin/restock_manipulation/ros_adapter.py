@@ -610,7 +610,8 @@ class RosMotionPort:
         return reason
 
     def begin(self, pose, joints, straight_line=False, joint_space=False, wrist1_cap=None,
-              wrist2_min=None, slow=False, goal_tol=None, near_start=False, wrist_guard=None):
+              wrist2_min=None, slow=False, goal_tol=None, near_start=False, wrist_guard=None,
+              reach_guard=None):
         from moveit_msgs.srv import GetPositionIK
         if self.state not in ('idle', 'succeeded', 'failed'):
             raise RuntimeError('motion already active')
@@ -618,6 +619,16 @@ class RosMotionPort:
         # joint-space goal must satisfy, else it is re-seeded from its wrist-flipped twin. None => off.
         self._wrist_guard = None if wrist_guard is None else (float(wrist_guard[0]), float(wrist_guard[1]))
         self._wrist_flips = 0
+        # sim-robust-transfer-preplace-reach-v1: (max_droop, upright_seed) for a wrist-guarded TRANSFER
+        # preplace. Beyond the wrist-clear test, the accepted KDL goal must ALSO keep its shoulder fold
+        # within the holdable envelope (transfer_carry.reachable_fold), and the upright seed is tried so
+        # KDL finds the holdable branch instead of the deep fold the wrist-flip re-seed converges to
+        # (coldwin6 accepted ur_shoulder_lift -4.003, un-reachable). None => the plain wrist-guard
+        # (byte-identical). Only consulted alongside _wrist_guard (see _guard_rejects).
+        self._reach_guard = (None if reach_guard is None
+                             else (float(reach_guard[0]),
+                                   tuple(float(v) for v in reach_guard[1])
+                                   if reach_guard[1] is not None else None))
         if not self.ik.service_is_ready() or not self.plan.server_is_ready() or not self.execute.server_is_ready():
             raise RuntimeError('simulated IK/planner/executor unavailable')
         if (len(pose) != 7 or not all(map(math.isfinite, pose)) or len(joints) != 6
@@ -699,6 +710,15 @@ class RosMotionPort:
         # near_start) -- KDL then answers the nearby clear solution before any stow-branch twin.
         self._seeds = ([tuple(joints)] + self._seed_configs(joints)
                        if self._near_start or self._wrist_guard is not None else self._seed_configs(joints))
+        # sim-robust-transfer-preplace-reach-v1: with the reach guard, seed a holdable UPRIGHT config as the
+        # FIRST FALLBACK (right after the measured start, which stays seed 0 so an already-upright run is
+        # byte-identical). If the measured seed resolves to the deep fold the reach guard rejects, KDL then
+        # re-solves from this upright seed and finds the holdable branch (coldwin6: ur_shoulder_lift -1.95).
+        if (self._wrist_guard is not None and self._reach_guard is not None
+                and self._reach_guard[1] is not None):
+            up = tuple(float(v) for v in self._reach_guard[1])
+            if up not in self._seeds:
+                self._seeds.insert(min(1, len(self._seeds)), up)
         self._seed_idx = 0
         self._send_ik(self._seeds[0])
 
@@ -863,9 +883,23 @@ class RosMotionPort:
         wrist-flipped twin (the same tool pose in the clear branch; bounded by WRIST_FLIP_MAX so two
         branches cannot ping-pong), then the remaining seeds -- or RAISE once every seed is spent, so the
         arm is never planned into the ur_wrist_2-vs-ur_forearm stop (warm2: KDL w1 2.08 / w2 -1.02)."""
-        from .transfer_carry import in_clear_region, wrist_flip_seed
+        from .transfer_carry import in_clear_region, wrist_flip_seed, reachable_fold, fold_droop
         cap, w2min = self._wrist_guard
         if in_clear_region(q, cap, w2min):
+            # sim-robust-transfer-preplace-reach-v1: a clear-wrist solution must ALSO be a HOLDABLE fold.
+            # The wrist-flip re-seed can converge into the deep (un-reachable) shoulder fold while still
+            # satisfying the wrist band (coldwin6: ur_shoulder_lift -4.003, clear but froze at -3.65). When
+            # the reach guard is active, REJECT such a clear-but-deep-fold goal and advance to the NEXT seed
+            # (an upright one) -- never wrist-flip it (flipping a clear solution leaves the clear branch).
+            reach = getattr(self, '_reach_guard', None)
+            if reach is not None and not reachable_fold(q, reach[0]):
+                print('WRIST_GUARD reject-deepfold q=%s droop=%.3f > max_droop=%.2f (clear but un-reachable '
+                      'fold) -> next seed' % ([round(v, 3) for v in q], fold_droop(q), reach[0]), flush=True)
+                if self._next_seed():
+                    return True
+                raise RuntimeError(
+                    'transfer preplace: no wrist-clear IK branch within the reachable shoulder-fold '
+                    'envelope (fold_droop<=%.2f) from this park pose' % reach[0])
             print('WRIST_GUARD accept q=%s (w1<=%.2f, w2>=%.2f) seed=%d flips=%d'
                   % ([round(v, 3) for v in q], cap, w2min, self._seed_idx, self._wrist_flips), flush=True)
             return False
@@ -997,6 +1031,7 @@ class RosMotionPort:
         self._exec_abort_reason = None   # fresh execute-abort reason per move
         self._near_start = False   # fm347 (3): begin_joint_goal moves use their own goal, never the near_start IK branch
         self._wrist_guard = None   # transfer_carry: a fixed joint goal has no IK branch to guard
+        self._reach_guard = None   # sim-robust-transfer-preplace-reach-v1: no IK branch to reach-guard either
         # Reset the planning anchors for THIS move, exactly as begin() does (firstmate 292 / run-238):
         # without a fresh _plan_started_wall the total-planning-wall cap carried the stale anchor from
         # the previous pose-goal move (lift), so the tuck/pan/stow joint goal tripped

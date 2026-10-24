@@ -469,7 +469,16 @@ repo's `scenes/`, `export/` or `renders/`.
   cuMotion's ESDF voxel margin) and a collision-aware plan is rejected (`world collision detected`); the
   place descent + empty retreat therefore route as the collision-OFF straight-line insert (like the
   cart-cage place), PREPLACE stays collision-aware — automatic within live_pose, no new key
-  (`data/twin-robot-in-store-boot-v1/livepose-pick-collision/report.md`). `scripted`
+  (`data/twin-robot-in-store-boot-v1/livepose-pick-collision/report.md`). **Sharp edge: the wrist-guard
+  wrist-flip re-seed can land the PREPLACE in a clear-but-DEEP shoulder fold the arm can't reach**
+  (coldwin6: it accepted `ur_shoulder_lift` −4.003, froze at −3.65 → PATH_TOLERANCE_VIOLATED). The preplace
+  standoff has a holdable UPRIGHT clear branch (`ur_shoulder_lift` ~−1.95) AND a deep fold; the full-chain
+  park (unlike the staged recorded_bay_park, which accepts upright at seed 0) seeds KDL into the deep one.
+  Opt-in HOST key `transfer_preplace_reach_guard` (default off ⇒ byte-identical) requires a clear solution
+  to also be a holdable fold (`transfer_carry.reachable_fold`) + seeds the upright branch, rejecting a deep
+  fold by name before execution (`restock_manipulation/ros_adapter._guard_rejects`). CPU:
+  `tests/test_restock_transfer_preplace_reach.py`; fragment `docs/examples/transfer-preplace-reach-mission-fragment.json`;
+  write-up `data/sim-robust-transfer-preplace-reach-v1/report.md`. `scripted`
   = the labelled safety net
   (`restock/scripted_transfer.py`): no warm-up/host job, kinematic carton onto `transfer_ground_truth.target`
   (needs `enabled`; evidence `source='ground_truth'`), arm `RESTOCK_SCRIPTED_TRANSFER_ARM=still` (default) |

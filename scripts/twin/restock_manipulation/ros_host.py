@@ -193,6 +193,12 @@ def main():
         # plan to the place config is rejected ('self collision detected') even though the bare arm + wrist
         # guard are clear. The preplace standoff stays collision-aware. Absent/False => byte-identical.
         collect_place_straight_line=bool(config.get('collect_place_straight_line', False)),
+        # sim-robust-transfer-preplace-reach-v1 (coldwin6): steer the live_pose TRANSFER PREPLACE's
+        # wrist-guarded KDL IK to the holdable upright clear branch and reject a clear-but-deep (un-reachable)
+        # shoulder fold (coldwin6 accepted ur_shoulder_lift -4.003 and froze at -3.65). bool / mapping
+        # {max_droop, upright_seed}; absent/False => the plain wrist-guard (byte-identical). See
+        # transfer_carry.resolve_reach_guard.
+        transfer_preplace_reach_guard=config.get('transfer_preplace_reach_guard'),
         # fm390: drive the base in front of the rollwagen mouth between the carry fold and the place
         # (lift->tuck->TRANSIT->[base nav]->preplace), instead of the arm-only cage insert. Absent =>
         # byte-identical. Mutually exclusive in practice with cart_cage_place (base nav replaces it).
@@ -287,6 +293,8 @@ def main():
         'collect_place_wrist_guard': controller.collect_place_wrist_guard,
         # sim-robust-collect-place-straightline-v1: collect deck place/retreat routed collision-off (False = off)
         'collect_place_straight_line': controller.collect_place_straight_line,
+        # sim-robust-transfer-preplace-reach-v1: effective live_pose transfer preplace reach guard (None = off)
+        'transfer_preplace_reach_guard': controller.transfer_preplace_reach_guard,
         # sim-robust-cart-place-descent-v1: effective SIM-clock release-detach budget (0 = off)
         'release_detach_timeout_s': controller.release_detach_timeout_s,
         'reposition_before_place': controller.reposition_before_place,
