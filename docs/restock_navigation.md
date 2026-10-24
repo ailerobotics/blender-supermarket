@@ -576,6 +576,29 @@ Example `docs/examples/coupled-breakaway-rock-mission-fragment.json`; CPU proofs
 free a hard wedge, the next lever is a bounded **reverse** back-off during recovery — owner sign-off required
 to relax the coupled-reverse interlock.
 
+**Pre-throat heading hold** (`navigation.coupled_heading_hold`, opt-in, default `false` ⇒ byte-identical;
+sim-robust-outbound-throat-yaw-align-v1). The UPSTREAM fix for the throat wedge: keep the coupled base
+**aligned to the lane axis before it reaches the portal throat** so it never enters yawed (the rock above is
+the after-the-wedge backstop). From five recorded outbound tows: coldwin7/coldwin8/rock1 crossed the throat
+at **−0.2…+0.3°** of the east travel axis and threaded; coldwin9/coldwin10 drifted CCW during the slow
+from-rest creep after the couple→outbound plan-wait dip (coldwin9 −1.7°→**+4.9°**, coldwin10 +1.2°→**+2.2°**)
+and wedged — coldwin10 at only +2.2°, so the wedge margin is **~2°**. The lane follower's lateral term chases
+the authored centreline and *commands* the CCW rotation, and at the crawl the coupled steering cap
+`wmax=v/1.5` collapses to ~0.03 rad/s (vs ~0.12 for the passing runs) so nothing arrests it; the throat is
+**invisible to the nav static map** (footprint valid at every base yaw −8…+6°, slack 0.8 m), so the wedge is a
+PhysX door-frame contact (`gate_velocity` returns `tracking`, never `obstacle_stop`) and the drift on the lane
+itself is the only usable trigger. When ON, on a **straight** authored segment (`|route curvature| ≤
+heading_hold_straight_kappa`, default 0.08 1/m) once the base drifts more than `heading_hold_bound_deg`
+(default 1.0°) to the CCW/lip side of the lane **goal (travel) heading**, the follower command is overridden:
+hold a fixed forward creep `heading_hold_creep_mps` (default 0.14 — restores `wmax=creep/1.5≈0.093 rad/s`
+regardless of the collapsed speed schedule AND caps the forward speed so a misaligned base **slows and aligns
+before entering the throat**) and **saturate the corrective turn** toward the axis. **One-sided** (a base on
+the safe/south side is never force-turned) and **forward-only** (`v≥0`, the coupled-reverse interlock
+honoured); skipped while the break-away owns the command. PR 201's monitor, PR 236's bound and PR 250's rock
+stay the untouched backstop. Example `docs/examples/outbound-heading-hold-mission-fragment.json`; CPU proof
+`tests/test_outbound_heading_hold.py` (real coldwin7/rock1/coldwin9/coldwin10 recorded-creep replay) + factory
+wiring `tests/test_navigation_factory.py`; write-up `data/sim-robust-outbound-throat-yaw-align-v1/report.md`.
+
 **Wall-clock stuck-stage fail-fast** (`RESTOCK_NAV_STUCK_WALL_S`, opt-in, default `0` = off): the nav
 `blocked_timeout`/`goal_timeout` are **sim-clock** caps, which under render pacing (sim advances far
 slower than wall) cannot fire — run-322b's outbound sat on `lane_blocked` for ~50 min WALL and only the

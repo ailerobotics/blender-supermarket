@@ -348,6 +348,10 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
                                        coupled_breakaway_launch_mps=float(nav.get('coupled_breakaway_launch_mps', 0.30)),
                                        lane_acquire_timeout_s=float(nav.get('tow_lane_acquire_timeout_s', 0.0)),
                                        tow_lane_goal_stop=bool(nav.get('tow_lane_goal_stop', False)),
+                                       coupled_heading_hold=_strict_bool(nav, 'coupled_heading_hold'),
+                                       heading_hold_bound_deg=float(nav.get('heading_hold_bound_deg', 1.0)),
+                                       heading_hold_creep_mps=float(nav.get('heading_hold_creep_mps', 0.14)),
+                                       heading_hold_straight_kappa=float(nav.get('heading_hold_straight_kappa', 0.08)),
                                        **_controller_kwargs(nav))
 
     if 'dynamic_obstacles' in nav and mode != 'sensor':
