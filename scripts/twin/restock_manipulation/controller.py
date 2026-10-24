@@ -105,6 +105,7 @@ class TransferController:
                  transfer_ground_truth: bool = False, ground_truth_pick: bool = False,
                  collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0,
                  release_detach_timeout_s: float = 0.0, transfer_preplace_reach_guard=None,
+                 transfer_pick_wrist_guard: bool = False,
                  esdf_boot_ack_grace_s: float = 0.0):
         self.steady_clock=steady_clock
         # collect-gt (demo, opt-in, default off): GROUND-TRUTH COLLECT. Accept the collect SOURCE observation
@@ -434,6 +435,20 @@ class TransferController:
         # test_restock_transfer_preplace_reach). (max_droop, upright_seed) or None (off => the plain
         # wrist-guard, byte-identical). Validated in data/sim-robust-transfer-preplace-reach-v1/report.md.
         self.transfer_preplace_reach_guard = resolve_reach_guard(transfer_preplace_reach_guard)
+        # sim-robust-transfer-settle-oscillation-v1 (coldwin12, 2026-10-24): extend the clear-wrist-region
+        # guard to the live_pose TRANSFER PICK (approach + contact), which the carry wrist_guard deliberately
+        # does NOT cover (transfer_carry.GUARDED_PHASES = preplace/place/retreat only). The pick's approach is
+        # a cuMotion task-space pose goal and the contact is a straight-line seeded-KDL IK seeded from the
+        # approach branch; both were unguarded, so the approach IK intermittently landed on the ur_wrist_2-vs-
+        # ur_forearm self-colliding family (coldwin12: wrist_1 1.171 above the ~0.69 stop, wrist_2 -1.033 below
+        # 0) and the contact inherited it and limit-cycled 0.169 rad / ~1.6 rad/s for the whole 30 s settle
+        # window (PR239's envelope correctly failed it), where coldwin11 took the clear wrist_2-positive family
+        # (wrist_1 -0.18, wrist_2 +0.93) and settled instantly. On => the approach pose goal carries the
+        # clear-region joint constraints (ur_wrist_1 <= carry_wrist1_cap, ur_wrist_2 >= carry_wrist2_min, the
+        # proven fm327/fm403 bounds) and the contact straight-line IK is wrist-guarded (clear-branch re-seed),
+        # so the pick stays on the clear family. Off (default) => byte-identical. See _pick_wrist_guard and
+        # data/sim-robust-transfer-settle-oscillation-v1/report.md.
+        self.transfer_pick_wrist_guard = bool(transfer_pick_wrist_guard)
         # fm476: SIM-ONLY env override for the sensor-packet freshness bound. The fm465 light rig makes
         # the TRANSFER capture's full-res render slow, so by the time the packet reaches the host the
         # sim /clock has advanced ~0.55 s past the packet stamp -- STALE beyond the 0.5 s default, so the
@@ -677,6 +692,23 @@ class TransferController:
         on = ((op == 'transfer' and WRIST_GUARD in self.transfer_carry)
               or (op == 'collect' and self.collect_place_wrist_guard))
         if not on:
+            return None
+        cap = DEFAULT_WRIST1_CAP if self.carry_wrist1_cap is None else self.carry_wrist1_cap
+        w2min = DEFAULT_WRIST2_MIN if self.carry_wrist2_min is None else self.carry_wrist2_min
+        return (cap, w2min)
+
+    def _pick_wrist_guard(self):
+        """sim-robust-transfer-settle-oscillation-v1: the ``(wrist1_cap, wrist2_min)`` clear carry region the
+        live_pose TRANSFER PICK (approach + contact) IK must satisfy, or None (off/not applicable =>
+        byte-identical). The carry wrist_guard covers only the place half (GUARDED_PHASES), so the pick was
+        free to IK the ur_wrist_2-vs-ur_forearm self-colliding family (coldwin12: approach landed wrist_2
+        -0.598, the straight-line contact descended to goal wrist_1 1.171 / wrist_2 -1.033 and limit-cycled
+        0.169 rad short); coldwin11 took the clear wrist_2-positive family (wrist_1 -0.18, wrist_2 +0.93) and
+        settled instantly. Scoped to a live_pose transfer pick approach/contact, so collect / non-live_pose /
+        every other phase / the unset key are byte-identical. The region is the configured carry guards, else
+        the bench-proven 0.65 / 0.0 (the same bounds _place_wrist_guard uses)."""
+        if not (self.transfer_pick_wrist_guard and self._live_pose_transfer()
+                and self.phase in ('approach', 'contact')):
             return None
         cap = DEFAULT_WRIST1_CAP if self.carry_wrist1_cap is None else self.carry_wrist1_cap
         w2min = DEFAULT_WRIST2_MIN if self.carry_wrist2_min is None else self.carry_wrist2_min
@@ -1360,6 +1392,15 @@ class TransferController:
                 # fm403: belt-and-braces wrist_2 lower bound on the task-space LIFT fallback (carry_lift_shape
                 # unset) so the IK cannot pick the w2-negative self-colliding branch. None elsewhere.
                 carry_w2min = self.carry_wrist2_min if self.phase == 'lift' else None
+                # sim-robust-transfer-settle-oscillation-v1 (coldwin12): guard the live_pose transfer PICK
+                # (approach + contact) to the clear wrist region too. The approach is a cuMotion task-space
+                # pose goal -- carry the clear-region joint constraints (ur_wrist_1 <= cap, ur_wrist_2 >= min)
+                # so cuMotion IKs the pick on the clear wrist_2-positive family, not the ur_wrist_2-vs-forearm
+                # self-colliding one that limit-cycled. (The contact's straight-line seeded-KDL IK is guarded
+                # via the wrist_guard extra below.) None/off => byte-identical.
+                pick_guard = self._pick_wrist_guard()
+                if pick_guard is not None:
+                    carry_cap, carry_w2min = pick_guard
                 # fm345 smaller-problems-later: the carton-loaded PLACE extend (preplace/place) is too
                 # fast for the soft arm drive to track the cuMotion min-jerk timing (run-270 sagged
                 # 0.567 rad short at rest). Slow those two moves to ~half and widen their terminal
@@ -1384,6 +1425,15 @@ class TransferController:
                     reach = self._preplace_reach_guard()
                     if reach is not None:
                         extra['reach_guard'] = reach
+                # sim-robust-transfer-settle-oscillation-v1: the live_pose transfer PICK CONTACT descent is a
+                # straight-line seeded-KDL IK (contact_straight_line); guard that IK to the clear wrist branch
+                # so a contact config outside the region is re-seeded from its wrist-flipped twin (or fails by
+                # the named carry-wrist-region reason) instead of silently descending into the self-collision
+                # stop, and so a MOVE_RETRY of the contact phase re-plans onto the clear branch from the live
+                # pose. With the approach guarded (above) the contact start is clear and this accepts first try
+                # (byte-identical). Off/non-pick => pick_guard is None => this never fires.
+                if pick_guard is not None and straight_contact:
+                    extra['wrist_guard'] = pick_guard
                 self.motion.begin(target, s.joint_positions, straight_line=straight,
                                   joint_space=joint_space, wrist1_cap=carry_cap, wrist2_min=carry_w2min,
                                   slow=place_move, goal_tol=(0.12 if place_move else None),
