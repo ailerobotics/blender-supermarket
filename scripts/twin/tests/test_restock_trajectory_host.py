@@ -453,6 +453,23 @@ def test_reset_clears_rearms_latched_fault_never_a_live_goal():
     assert reset_clears('x', True, True) == (True, False)                # fault cleared; live active kept
 
 
+def test_abort_active_clears_forces_only_a_live_goal_and_clears_fault():
+    # sim-robust-movegroup-double-death-v1 (gap 2): a mid-op move_group respawn+reseed. move_group crashes
+    # mid-execution leaving its FollowJointTrajectory goal LIVE on the executor, so the reseeded resend would
+    # be rejected 'a previous goal is still executing' (coldwin4 death 2). abort_active REQUESTS the live
+    # goal to self-terminate (only when active AND its handle is live) and clears a latched fault so the
+    # resend is accepted -- where reset_clears (PR 229 op-start) deliberately never touches a live goal.
+    from twin.restock.trajectory_host import abort_active_clears, reset_clears
+    assert abort_active_clears(True, True, None) == (True, False)    # live goal -> force-abort it
+    assert abort_active_clears(True, True, 'x') == (True, True)       # + clear a latched fault
+    assert abort_active_clears(True, False, None) == (False, False)  # stale active -> active_is_stale owns it
+    assert abort_active_clears(False, False, 'x') == (False, True)   # idle + fault -> just re-arm the fault
+    assert abort_active_clears(False, False, None) == (False, False)  # idle, fault-free -> no-op
+    # Decisive contrast with the op-start reset: on a LIVE goal, reset_clears refuses to clear it, abort does.
+    assert reset_clears('x', True, True)[1] is False                 # op-start reset keeps a live goal
+    assert abort_active_clears(True, True, 'x')[0] is True            # abort_active terminates it
+
+
 def test_handle_live_tolerates_none_and_duck_types():
     from twin.restock.trajectory_host import _handle_live
     from types import SimpleNamespace as NS
