@@ -1,9 +1,11 @@
 """Explicit launch of installed components, never vendor hardware launch files."""
+import json
 from pathlib import Path
 import os
 import sys
 
 from .config import FRAME, JOINTS, NS, launch_plan
+from .mesh_uri import normalize_mesh_uris
 
 
 def description(config):
@@ -20,6 +22,19 @@ def description(config):
     if plan['static_errors']:
         raise ValueError('; '.join(plan['static_errors']))
     robot = plan['robot']
+    # The HOST config (restock_manipulation/ros_host_config.json) -- the same file the manip
+    # bridge below reads -- also carries the opt-in robustness switches (config_preflight HOST
+    # keys). We load it once here so move_group's robot_description can honour moveit_mesh_uris.
+    ros_host_config = Path(__file__).resolve().parents[1] / 'restock_manipulation' / 'ros_host_config.json'
+    host_cfg = json.loads(ros_host_config.read_text())
+    # Opt-in (default off): rewrite the resolved URDF's bare absolute <mesh> paths to file://
+    # URIs so move_group's resource_retriever actually loads the arm link collision/visual
+    # geometry instead of logging "URL rejected: No host part in the URL" and running FCL
+    # ValidateSolution against empty link geometry. Off => robot_description is the file verbatim
+    # (byte-identical). See restock_host.mesh_uri and sim-robust-movegroup-collision-meshes-v1.
+    robot_description = Path(robot['urdf']).read_text()
+    if host_cfg.get('moveit_mesh_uris'):
+        robot_description = normalize_mesh_uris(robot_description)
     # Optional second nvblox depth feed: the body-mounted mast camera (camera_1), so a carried
     # carton occluding the wrist (camera_0) no longer freezes the ESDF. Off by default: the
     # whole feed below is skipped and the mapper stays single-camera. See
@@ -58,7 +73,7 @@ def description(config):
     moveit = Node(
         package='moveit_ros_move_group', executable='move_group', namespace=NS,
         name='move_group', output='screen', respawn=True, respawn_delay=3.0, parameters=[{
-            **common, 'robot_description': Path(robot['urdf']).read_text(),
+            **common, 'robot_description': robot_description,
             'robot_description_semantic': Path(robot['srdf']).read_text(),
             'robot_description_kinematics': {'ur_manipulator': {
                 'kinematics_solver': 'kdl_kinematics_plugin/KDLKinematicsPlugin',
@@ -215,7 +230,7 @@ def description(config):
     # 5 s process/status watchdog. The verified {profiles, walls} fixture is the manipulation
     # lane's ros_host_config.json (walls cover source/cart/target so no regrasp); urdf, shelfbot
     # root and the mobile manifest come from the validated plan (integration_host_arguments).
-    ros_host_config = Path(__file__).resolve().parents[1] / 'restock_manipulation' / 'ros_host_config.json'
+    # ros_host_config is loaded once at the top of this function (shared with moveit_mesh_uris).
     manipulation = ExecuteProcess(cmd=[sys.executable, '-m', 'twin.restock_manipulation.ros_host',
         '--config', str(ros_host_config), *plan['integration_host_arguments']],
         additional_env={'PYTHONPATH': plan['shelfbot_root'] + os.pathsep + os.environ.get('PYTHONPATH', '')},

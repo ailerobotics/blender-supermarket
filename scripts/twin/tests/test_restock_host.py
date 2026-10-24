@@ -675,6 +675,16 @@ class RosHostLaunchWiring(unittest.TestCase):
         # It must be a shutdown-guarded process (in `processes`), not an auxiliary like the ack.
         self.assertIn('masker, manipulation, trajectory]', src)
 
+    def test_move_group_robot_description_honours_moveit_mesh_uris_opt_in(self):
+        # sim-robust-movegroup-collision-meshes-v1: move_group's robot_description is the resolved
+        # URDF rewritten to file:// mesh URIs ONLY when the opt-in HOST key moveit_mesh_uris is set;
+        # off (default) it is the file verbatim (byte-identical, the historical empty-geometry path).
+        src = (Path(__file__).resolve().parents[1] / 'restock_host' / 'launch.py').read_text()
+        self.assertIn('from .mesh_uri import normalize_mesh_uris', src)
+        self.assertIn("host_cfg.get('moveit_mesh_uris')", src)
+        self.assertIn('normalize_mesh_uris(robot_description)', src)
+        self.assertIn("'robot_description': robot_description", src)
+
     def test_launch_wires_follow_joint_trajectory_executor(self):
         # MoveIt is configured with a MoveItSimpleControllerManager pointing at
         # arm_controller/follow_joint_trajectory; the host must also LAUNCH that action
@@ -752,7 +762,12 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     # upright clear-branch preplace shape + wrist guard, the sim-clock
                                     # release-detach budget, and the collision-off straight-line deck place.
                                     'collect_place_preplace_shape', 'collect_place_wrist_guard',
-                                    'release_detach_timeout_s', 'collect_place_straight_line'})
+                                    'release_detach_timeout_s', 'collect_place_straight_line',
+                                    # sim-robust-movegroup-collision-meshes-v1: rewrite the resolved URDF's bare
+                                    # absolute <mesh> paths to file:// URIs so move_group's resource_retriever
+                                    # loads real arm link geometry. Optional bool read by restock_host.launch;
+                                    # default False => robot_description is the file verbatim (byte-identical).
+                                    'moveit_mesh_uris'})
         self.assertEqual(len(cfg['collect_place_preplace_shape']), 6)   # full 6-joint upright preplace shape
         self.assertLessEqual(cfg['collect_place_preplace_shape'][3], 0.65)  # wrist_1 at/below the stop
         self.assertIsInstance(cfg['collect_place_wrist_guard'], bool)
@@ -770,6 +785,8 @@ class RosHostLaunchWiring(unittest.TestCase):
         for k in ('sim_cart_place_policy', 'staged_cart_swing', 'base_collision_object', 'cart_cage_place',
                   'reposition_before_place'):
             self.assertIsInstance(cfg[k], bool)
+        # moveit_mesh_uris must ship OFF so the resolved URDF reaches move_group verbatim (byte-identical).
+        self.assertIs(cfg['moveit_mesh_uris'], False)
         for k in ('payload_ack_wall_s', 'cart_pan_joint0', 'plan_wall_cap_s'):
             self.assertIsInstance(cfg[k], (int, float))
         self.assertEqual(len(cfg['cart_tuck_shape']), 5)   # arm joints 1-5 of the high carry pose

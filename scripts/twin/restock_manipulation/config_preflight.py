@@ -66,6 +66,11 @@ KEY_CONSUMER = {
     'grasp_track_m': HOST,        # fm410: lift-probe carton-tracking physics confirm threshold (m)
     # sim-robust-cart-place-descent-v1: SIM-clock release-detach budget; ros_host -> TransferController
     'release_detach_timeout_s': HOST,
+    # sim-robust-movegroup-collision-meshes-v1: rewrite the resolved URDF's bare absolute <mesh>
+    # paths to file:// URIs so move_group's resource_retriever loads real arm link collision
+    # geometry (restock_host.launch reads it from ros_host_config.json). Default off => the
+    # robot_description is the file verbatim (byte-identical, the historical empty-geometry path).
+    'moveit_mesh_uris': HOST,
     # --- RUNTIME config (isaac_bundle / isaac_port / physics_setup) ---
     'phase_drive': RUNTIME,
     'arm_stiffness_abs': RUNTIME,
