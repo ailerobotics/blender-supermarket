@@ -8,7 +8,7 @@ from ..restock_camera.freshness import require_fresh
 from . import ground_truth_collect as gtc
 from .fit import axis_fits
 from .transfer_carry import (DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN, GUARDED_PHASES, WELD, WRIST_GUARD,
-                             carry_flags)
+                             carry_flags, resolve_reach_guard)
 from .transfer_mode import LIVE_POSE, near_face_poses, transfer_mode
 from .types import MotionPort, ProductProfile, Result, Sensors
 
@@ -96,7 +96,7 @@ class TransferController:
                  grasp_track_m=None, require_collect_source_evidence: bool = False,
                  transfer_ground_truth: bool = False, ground_truth_pick: bool = False,
                  collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0,
-                 release_detach_timeout_s: float = 0.0):
+                 release_detach_timeout_s: float = 0.0, transfer_preplace_reach_guard=None):
         self.steady_clock=steady_clock
         # collect-gt (demo, opt-in, default off): GROUND-TRUTH COLLECT. Accept the collect SOURCE observation
         # labelled 'ground_truth' (the controlled carton asset's simulated pose, served Isaac-side when the
@@ -398,6 +398,19 @@ class TransferController:
         # key = the fix. Scoped to the non-cage collect place, so transfer / live_pose / scripted-still are
         # untouched. See _collect_deck_place and data/sim-robust-collect-place-straightline-v1/report.md.
         self.collect_place_straight_line = bool(collect_place_straight_line)
+        # sim-robust-transfer-preplace-reach-v1 (coldwin6, 2026-10-24): steer the live_pose TRANSFER
+        # PREPLACE's wrist-guarded seeded-KDL IK to the HOLDABLE upright clear branch and reject a
+        # clear-but-DEEP-fold goal. The preplace standoff above the bay has (at least) two wrist-clear IK
+        # branches: a holdable upright one (ur_shoulder_lift ~ -1.9) and a deep fold (~ -4.0) the arm
+        # physically cannot reach. The full-chain park (unlike the staged recorded_bay_park, which accepts
+        # the upright branch at seed 0) lands KDL's measured seed in the deep branch, then the wrist-flip
+        # re-seed that clears the wrist converges to the deep-fold clear twin -- which the plain wrist-guard
+        # ACCEPTED (coldwin6 commanded ur_shoulder_lift -4.003; the arm froze 0.35 rad short at -3.65 ->
+        # PATH_TOLERANCE_VIOLATED -> HOST_FAULT_ESTOP phase=preplace). A reachable UPRIGHT clear branch
+        # (ur_shoulder_lift -1.95) provably EXISTS at that same park pose (CPU: tests/
+        # test_restock_transfer_preplace_reach). (max_droop, upright_seed) or None (off => the plain
+        # wrist-guard, byte-identical). Validated in data/sim-robust-transfer-preplace-reach-v1/report.md.
+        self.transfer_preplace_reach_guard = resolve_reach_guard(transfer_preplace_reach_guard)
         # fm476: SIM-ONLY env override for the sensor-packet freshness bound. The fm465 light rig makes
         # the TRANSFER capture's full-res render slow, so by the time the packet reaches the host the
         # sim /clock has advanced ~0.55 s past the packet stamp -- STALE beyond the 0.5 s default, so the
@@ -624,6 +637,19 @@ class TransferController:
         cap = DEFAULT_WRIST1_CAP if self.carry_wrist1_cap is None else self.carry_wrist1_cap
         w2min = DEFAULT_WRIST2_MIN if self.carry_wrist2_min is None else self.carry_wrist2_min
         return (cap, w2min)
+
+    def _preplace_reach_guard(self):
+        """sim-robust-transfer-preplace-reach-v1: the ``(max_droop, upright_seed)`` reach guard for the
+        live_pose TRANSFER PREPLACE's wrist-guarded KDL IK, or None when off/not applicable. Scoped to the
+        PREPLACE of a live_pose transfer with the wrist_guard active -- the one seeded-KDL pose-IC move that
+        hit the deep-fold trap (place/retreat are collision-off straight-line, not pose-IK). None =>
+        byte-identical. Only consulted when ``_place_wrist_guard`` is already active for this move."""
+        if self.transfer_preplace_reach_guard is None:
+            return None
+        if not (self._live_pose_transfer() and WRIST_GUARD in self.transfer_carry
+                and self.phase == 'preplace'):
+            return None
+        return self.transfer_preplace_reach_guard
 
     def _repositions_before_place(self):
         """fm390's TRANSIT base-reposition handshake applies. Never for a live_pose transfer: the runtime
@@ -1070,6 +1096,14 @@ class TransferController:
                                             'phases': list(GUARDED_PHASES)}
                     print('TRANSFER_CARRY wrist_guard active: %s KDL goals must keep wrist_1<=%.2f, wrist_2>=%.2f '
                           '(wrist-flipped re-seed)' % ('/'.join(GUARDED_PHASES), guard[0], guard[1]), flush=True)
+                    # sim-robust-transfer-preplace-reach-v1: name the preplace reach guard honestly.
+                    if self._live_pose_transfer() and self.transfer_preplace_reach_guard is not None:
+                        md, seed = self.transfer_preplace_reach_guard
+                        label['preplace_reach_guard'] = {'max_droop': md, 'upright_seed': list(seed)
+                                                         if seed is not None else None}
+                        print('TRANSFER_CARRY preplace_reach_guard active: preplace KDL goal must also keep the '
+                              'shoulder fold holdable (fold_droop<=%.2f); upright-seeded, deep-fold clear '
+                              'branch rejected' % md, flush=True)
                 if WELD in self.transfer_carry:
                     label['transfer_attach'] = 'weld'
                     print('TRANSFER_CARRY weld: the carton is held by the SIM fixed-joint weld from the grasp '
@@ -1238,6 +1272,14 @@ class TransferController:
                 guard = self._place_wrist_guard()
                 extra = ({'wrist_guard': guard} if guard is not None and joint_space and not straight
                          and self.phase in GUARDED_PHASES else {})
+                # sim-robust-transfer-preplace-reach-v1: alongside the wrist-guard, reject a clear-but-deep
+                # shoulder fold and seed the holdable upright branch for the live_pose transfer PREPLACE.
+                # Only added when the wrist-guard itself is active for this move, so an unset key keeps the
+                # begin() call byte-identical.
+                if 'wrist_guard' in extra:
+                    reach = self._preplace_reach_guard()
+                    if reach is not None:
+                        extra['reach_guard'] = reach
                 self.motion.begin(target, s.joint_positions, straight_line=straight,
                                   joint_space=joint_space, wrist1_cap=carry_cap, wrist2_min=carry_w2min,
                                   slow=place_move, goal_tol=(0.12 if place_move else None),
