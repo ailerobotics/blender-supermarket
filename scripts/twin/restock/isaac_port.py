@@ -176,8 +176,15 @@ class IsaacPort:
                  position_uncertainty=0.05, phase_drive=None, arm_joints=None,
                  stage_scoped_teardown=None, release_source_capture=None,
                  collect_keep_source_render=False, collect_observe_force_render_ticks=0,
-                 trace_carton_path=None, sim_speed=None, idle_cameras=None):
+                 trace_carton_path=None, sim_speed=None, idle_cameras=None,
+                 vram_monitor=None, progress_writer=None):
         self.world,self.robot=world,robot
+        # sim-robust-vram-headroom-v1: opt-in VRAM headroom monitor (samples used VRAM on the sim clock
+        # and sheds optional load below a floor) and the always-on durable stage-progress writer (so a
+        # native crash still leaves a reconstructable verdict). Both None/best-effort => byte-identical.
+        self._vram_monitor=vram_monitor
+        self._progress_writer=progress_writer
+        self._sim_now=0.0
         # sim-video-speedup-v1: opt-in speed levers (twin.restock.sim_speed; config['sim_speed']). None
         # (default) => SimSpeed() == the legacy behaviour on every path below (byte-identical).
         from .sim_speed import SimSpeed, HostStagePacer, IdleCameraPauser, TickProfiler
@@ -478,6 +485,16 @@ class IsaacPort:
         # the packet a few nanoseconds ahead of the mission's dt-accumulated clock and
         # tripped the freshness lower bound on the very first tick.
         now=self.tick*dt
+        self._sim_now=now
+        # sim-robust-vram-headroom-v1: sample VRAM on the sim clock and shed optional load below the
+        # floor (sub-second cadence so a transient spike between the 20 s orchestrator samples is seen).
+        # Cheap: it reads the sampler's latest in-memory value. None (default) => byte-identical.
+        monitor=getattr(self,'_vram_monitor',None)
+        if monitor is not None:
+            try:
+                monitor.tick(now)
+            except Exception as _exc:  # noqa: BLE001 -- monitoring must never break the tick
+                print('VRAM_MONITOR_TICK_ERROR %r' % (_exc,), flush=True)
         # Host-facing stamp source = Isaac's actual simulation time. The masked depth is stamped at
         # world.current_time, and tf2 never extrapolates into the future, so the relayed /tf,
         # /joint_states and /clock MUST carry world.current_time too (not the dt-accumulated mission
@@ -740,6 +757,18 @@ class IsaacPort:
         if profiler is not None:
             profiler.flush()              # sim_speed tick_profile_s: one TICK_PROFILE line per stage window
         self.current_action=action
+        # sim-robust-vram-headroom-v1: tell the headroom monitor which stage is running (for the
+        # stage-safety gate) and durably record the stage transition (crash-safe recording). Both are
+        # best-effort and None by default => byte-identical.
+        monitor=getattr(self,'_vram_monitor',None)
+        if monitor is not None:
+            try:
+                monitor.begin_stage(action)
+            except Exception:  # noqa: BLE001 -- monitoring must never break a stage transition
+                pass
+        writer=getattr(self,'_progress_writer',None)
+        if writer is not None:
+            writer.begin(action, getattr(self,'_sim_now',0.0))
         idle=getattr(self,'_idle_cameras',None)
         if idle is not None:
             # sim_speed pause_idle_cameras: couple/outbound/park/return read no station camera, so stop

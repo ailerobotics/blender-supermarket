@@ -808,8 +808,40 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # SimSpeed() + no idle cameras when config['sim_speed'] is absent => byte-identical.
         sim_speed=speed, idle_cameras=idle_cameras)
 
+    # sim-robust-vram-headroom-v1: durable, incremental stage-progress writer (crash-safe recording)
+    # ALWAYS on -- it only appends a NEW mission-progress.jsonl sidecar (success-path mission.json is
+    # byte-identical) so a native Isaac crash still leaves a reconstructable verdict. Best-effort.
+    from .crash_record import ProgressWriter
+    port._progress_writer = ProgressWriter(output)
+    # Opt-in VRAM headroom monitor (config['vram_headroom']; absent/false => None => byte-identical).
+    from . import vram_headroom as _vram
+    _vram_cfg = _vram.from_config(config)
+    if _vram_cfg.active:
+        actuators = {}
+        # Shed 1: widen the walkthrough record stride (a recording, never an honest-stage input).
+        def _shed_capture_rate(_port=port):
+            old = _port.record_stride
+            _port.record_stride = min(int(old) * 3, int(old) + 30)
+            return 'record_stride %d->%d' % (old, _port.record_stride)
+        actuators['capture_rate'] = _shed_capture_rate
+        # Shed 3: destroy the station decode render products this mission never reads (fm380/fm381
+        # teardown; keep_shelf_camera protects a camera a later stage still reads). ~0.95 GB+ returned.
+        _teardown = (assembly.sensing_sources or {}).get('stage_scoped_teardown')
+        if _teardown is not None:
+            def _shed_secondary_cameras(_t=_teardown):
+                return 'stage_scoped_teardown applied=%r' % (_t(),)
+            actuators['secondary_cameras'] = _shed_secondary_cameras
+        # Shed 2 (arm_feed_economy) has no safe RUNTIME actuator today (the eye-in-hand feed is
+        # load-bearing in collect/transfer/verify and its resolution is fixed at authoring), so it is
+        # left unregistered -> the monitor skips it and escalates. Set masked_depth.economy at boot.
+        port._vram_monitor = _vram.VramHeadroomMonitor(_vram_cfg, actuators=actuators, run_dir=output)
+        closers_extra = (port._vram_monitor.close,)
+    else:
+        closers_extra = ()
+
     recording = {'frames_dir': str(output / 'mission-frames'), 'fps': plan.recording_fps}
     closers = (verifier.stop, recorder.close) if hasattr(recorder, 'close') else (verifier.stop,)
+    closers = closers + closers_extra
     # Terminate the mast masked-depth publisher subprocess on shutdown (the wrist bridge is closed by
     # RosManipulationRuntime; the mast rides the port's masked_depth hook, so close it here). No-op None.
     _mast_bridge = assembly.sensing_sources.get('mast_depth')

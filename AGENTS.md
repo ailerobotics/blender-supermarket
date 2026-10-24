@@ -314,6 +314,28 @@ repo's `scenes/`, `export/` or `renders/`.
   it on a per-op `failed` was the OTHER half of the live_pose freeze: the StationClient read a frozen ack
   → `StationAckStreamStalled` at ~sim 31 s, masking the true `collision planning or execution failed`
   (armcam/transfer2/bench1). Report: `data/sim-robust-station-ack-v1/report.md`.
+- **VRAM headroom monitor + crash-safe recording**: the full capstone runs within ~500 MiB of the
+  12 GiB top (completes peak ~11.7 GB, whispr ~2.2 GB resident) and can SIGSEGV late (coldwin13, native,
+  no `mission.json`). Two pieces (`data/sim-robust-vram-headroom-v1/report.md` has the component budget
+  table + per-run peaks). (1) **Opt-in monitor** `scripts/twin/restock/vram_headroom.py` (runtime key
+  `vram_headroom`, DEFAULT OFF ⇒ byte-identical): samples used VRAM on the SIM clock sub-second (NVML or
+  a background nvidia-smi poller), and below `floor_mib` (default 800) sheds optional load in a fixed
+  named ratchet — `capture_rate` (widen the walkthrough record stride) → `arm_feed_economy`
+  (stage-blocked in collect/transfer/verify, no runtime actuator — set `masked_depth.economy` at boot
+  instead) → `secondary_cameras` (the fm380/fm381 `stage_scoped_teardown`, frees ~0.95 GB+ of never-read
+  decode products) — logging each `VRAM_SHED` by name, never shedding the live_pose feed/nvblox/planner,
+  and naming `VRAM_CEILING_REACHED` if still below floor. Writes `vram-headroom.json` (last headroom +
+  peak) for the crash record. **Render resolution + GI/DLSS are NOT the lever** (≤160 MiB; memory
+  `mission-vram-ceiling-12gb`); the late creep is an internal RTX/Vulkan allocator event, so freeing
+  render targets is the real mechanism. (2) **Crash-safe recording** (always on): the mission appends a
+  durable `mission-progress.jsonl` per stage transition (`crash_record.ProgressWriter`), and
+  `run_mobile_restock.sh` (the shell parent — NO longer `exec`, so it survives a native python SIGSEGV)
+  runs `scripts/finalize_crashed_run.py` after the process exits: on a signal death / wall-cap timeout
+  with NO `mission.json`, it writes `state=crashed` (crash signal, last stage, sim time, stage ladder,
+  last VRAM) reconstructed from `mission-progress.jsonl` else `nav-trace.jsonl`+`bt_events.jsonl` (so it
+  also recovers legacy runs like coldwin13). No-op when `mission.json` exists ⇒ success path
+  byte-identical. CPU tests `test_restock_vram_headroom.py`, `test_restock_crash_record.py`; GPU proof
+  `docs/examples/vram-headroom-mission-fragment.json`.
 - **move_group respawn (bounded + observable)**: the host launch (`restock_host/launch.py`)
   respawns `move_group` on the intermittent cuMotion SIGABRT instead of tearing the stack down.
   ROS 2 launch respawn fires ONLY on a real process EXIT — a clean SIGABRT (exit -6) respawns,
