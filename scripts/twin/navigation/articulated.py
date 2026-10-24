@@ -490,6 +490,7 @@ class ArticulatedController(Controller):
                  coupled_progress_recovery=False, coupled_breakaway_speed_mps=0.18,
                  coupled_breakaway_window_s=2.0, coupled_breakaway_pulse_s=0.5,
                  coupled_breakaway_attempts=3,
+                 coupled_breakaway_rock=False, coupled_breakaway_launch_mps=0.30,
                  lane_acquire_timeout_s=0.0, tow_lane_goal_stop=False, **kwargs):
         self.require_temporal_map=require_temporal_map
         # fm481/fm482 (navigation.coupled_creep_escape, default off => byte-identical): the coupled
@@ -582,8 +583,36 @@ class ArticulatedController(Controller):
         self._recovery_window_start=None  # sim time the current attempt window began
         self._recovery_anchor=None        # (x, y) base pose at the current window's start
         self._breakaway_cmd=None          # per-tick committed forward speed override for gate_velocity
+        self._breakaway_turn=False        # per-tick: saturate the corrective turn (rock hi phase)
         self.breakaway_recoveries=0       # recovery sequences entered
         self.breakaway_successes=0        # recovery sequences that broke the base free
+        # fm-sim-robust-coupled-breakaway-from-rest (navigation.coupled_breakaway_rock, default off =>
+        # byte-identical): coldwin9 outbound pinned at the sales_backroom_portal throat (x=-3.93) with the
+        # base yawed ~5 deg off the lane axis -- a base+cart envelope catches the throat lip and the base
+        # stops dead while still COMMANDING forward (a physical wedge, not a gate refusal). PR 236's
+        # forward-only break-away pulse (0.18 m/s) cannot free a forward wedge: nine surges over the three
+        # BT re-begins netted zero advance, so each re-begin from rest repeats the same push-into-the-lip.
+        # A coupled train cannot reverse (mobile.wheel_targets clamps v>=0 by a deliberate bring-up
+        # interlock; gate_velocity rejects linear<0), so the rock uses the only authority it has -- a
+        # STRONGER forward LAUNCH surge (coupled_breakaway_launch_mps, clamped to max_speed at the gate: more
+        # momentum + drive force, and a higher coupled steering cap wmax=v/1.5) with the corrective turn
+        # SATURATED to the full +-wmax toward the route heading on the hi pulse phase, to rotate the
+        # yaw-wedged base back toward alignment and swivel the casters free; the lo phase relaxes to "rock"
+        # the contact. It replaces ONLY what the break-away pulse commands -- the PR 201 net-progress monitor
+        # and PR 236's bounded coupled_breakaway_attempts windows (then fault 'coupled_no_progress') are the
+        # untouched backstop. Requires coupled_progress_recovery (fail loud, never a silent no-op).
+        self.coupled_breakaway_rock=bool(coupled_breakaway_rock)
+        if not (isinstance(coupled_breakaway_launch_mps,(int,float)) and not isinstance(coupled_breakaway_launch_mps,bool)
+                and math.isfinite(coupled_breakaway_launch_mps) and 0.0<float(coupled_breakaway_launch_mps)<=1.0):
+            raise ValueError('coupled_breakaway_launch_mps must be a finite number in (0, 1.0] m/s')
+        self.coupled_breakaway_launch=float(coupled_breakaway_launch_mps)
+        if self.coupled_breakaway_rock:
+            if not self.coupled_progress_recovery:
+                raise ValueError('coupled_breakaway_rock requires coupled_progress_recovery '
+                                 '(the rock shapes the break-away recovery; without it it is a no-op)')
+            if self.coupled_breakaway_launch<self.coupled_breakaway_speed:
+                raise ValueError('coupled_breakaway_launch_mps must be >= coupled_breakaway_speed_mps '
+                                 '(the launch surge is an ELEVATED break-away speed)')
         # fm437: on a static-validated authored lane, trust UNOBSERVED (unknown) temporal-map cells in the
         # swept train envelope as free (the static map proved that corridor clear), so the base is not
         # frozen at an unmapped turn (run-327b: outbound drove 4.87 m then 'unknown_navigation_cell' at the
@@ -785,6 +814,7 @@ class ArticulatedController(Controller):
         self._recovery_window_start=None
         self._recovery_anchor=None
         self._breakaway_cmd=None
+        self._breakaway_turn=False
         self._acquire_fail_s=0.0                           # fresh goal -> fresh lane-acquire window
         self._acquire_fail_pose=None
         self.goal_articulation=self.spec.max_articulation if goal_articulation is None else goal_articulation
@@ -1141,7 +1171,14 @@ class ArticulatedController(Controller):
         if breakaway:
             v=min(self.max_speed,max(1e-3,self._breakaway_cmd))
             wmax=v/self.footprint.min_turn_radius
-            w=max(-wmax,min(w,wmax))
+            if self._breakaway_turn and w!=0.0:
+                # fm-breakaway-rock hi phase: saturate the corrective turn to the full +-wmax in the
+                # follower's tracking direction (toward the route heading), to rotate a yaw-wedged base
+                # back into alignment with the lane. Bounded by the coupled cap wmax=v/R; still swept-
+                # checked by the braking rollout below exactly as any other commanded (v, w).
+                w=wmax if w>0 else -wmax
+            else:
+                w=max(-wmax,min(w,wmax))
         elif escape:
             v=max(v,min(self.coupled_creep_floor,self.max_speed))
             wmax=v/self.footprint.min_turn_radius
@@ -1201,6 +1238,7 @@ class ArticulatedController(Controller):
         now=self.elapsed if now is None else now
         self._force_progress_creep=False   # fm-sim-robust-outbound: set only by the net-progress monitor
         self._breakaway_cmd=None           # fm-outbound-recovery: set only by the break-away recovery below
+        self._breakaway_turn=False         # fm-breakaway-rock: saturate the corrective turn (hi phase only)
         reason=self._inputs(now,odometry,observations)
         if reason:
             return self._wait(dt,reason)
@@ -1398,8 +1436,9 @@ class ArticulatedController(Controller):
                         self._recovery_window_start=now
                         self._recovery_anchor=(state.x,state.y)
                         self.breakaway_recoveries+=1
-                        print('NAV_BREAKAWAY enter attempt=0 at=(%.3f,%.3f) stuck=%.2fs'
-                              % (state.x,state.y,self._prog_stuck_s), flush=True)
+                        print('NAV_BREAKAWAY enter attempt=0 at=(%.3f,%.3f) stuck=%.2fs rock=%d'
+                              % (state.x,state.y,self._prog_stuck_s,int(self.coupled_breakaway_rock)),
+                              flush=True)
                     elif now-self._recovery_window_start>=self.coupled_breakaway_window_s:
                         # window elapsed with < min_m net progress (progress would have reset _prog_stuck_s)
                         self._recovery_attempt+=1
@@ -1415,8 +1454,17 @@ class ArticulatedController(Controller):
                     # pulse the committed forward speed (square wave) to rock the stuck contact; reverse is
                     # clamped off for a coupled train (wheel_targets), so the low phase is a relaxed forward.
                     hi=(int((now-self._recovery_window_start)/self.coupled_breakaway_pulse_s)%2)==0
-                    self._breakaway_cmd=(self.coupled_breakaway_speed if hi
-                                         else self.coupled_breakaway_speed*0.4)
+                    if self.coupled_breakaway_rock:
+                        # fm-breakaway-rock: a STRONGER forward launch surge (more momentum + drive force,
+                        # and a higher steering cap wmax=v/R) with the corrective turn SATURATED on the hi
+                        # phase (via _breakaway_turn) to rotate a yaw-wedged base back toward the lane
+                        # heading; the lo phase relaxes (0.4x, straight clamp) to rock the contact.
+                        self._breakaway_cmd=(self.coupled_breakaway_launch if hi
+                                             else self.coupled_breakaway_launch*0.4)
+                        self._breakaway_turn=hi
+                    else:
+                        self._breakaway_cmd=(self.coupled_breakaway_speed if hi
+                                             else self.coupled_breakaway_speed*0.4)
                 elif self._recovery_active:
                     # Stuck cleared while a recovery was in flight: broke free iff real net displacement
                     # (not a legitimate-wait gap) accrued from the active window's anchor.

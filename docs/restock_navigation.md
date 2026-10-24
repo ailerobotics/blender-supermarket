@@ -554,6 +554,28 @@ stall → break-away success, attempt exhaustion → named fault, continuous-for
 **fail-fast-by-name** when it cannot recover; the underlying coupled traction asset levers (caster lift,
 drive force) remain owned by sim-robust-coupled-traction-v1 (PR 207).
 
+**Reinforced break-away ROCK** (`navigation.coupled_breakaway_rock`, opt-in, default `false` ⇒ byte-identical
+to the forward-only pulse above; requires `coupled_progress_recovery`; `coupled_breakaway_launch_mps` 0.30;
+sim-robust-coupled-breakaway-from-rest-v1). coldwin9 collected + coupled clean, then pinned at the throat
+(x≈−3.93) with the base yawed **~5° off the lane axis** — a base+cart envelope **catches the throat lip** and
+stops dead while still commanding forward (a physical wedge, not a gate refusal). The forward-only pulse
+**cannot free a forward wedge**: nine surges over the three BT re-begins netted zero advance
+(`NAV_BREAKAWAY exhausted ×3`). coldwin7/8 passed by crossing the throat while still rolling, near-axis-aligned,
+before a heading error accumulated in the slow from-rest creep (all three enter at ~0.4 m/s and dip to
+near-rest at the plan-wait — the discriminator is the **yaw drift**, not momentum at the latch). Because a
+coupled train cannot reverse (`mobile.wheel_targets` `v≥0`; `gate_velocity` rejects `linear<0`), the rock uses
+the only authority it has: the recovery surge becomes an **elevated forward launch** (`coupled_breakaway_launch_mps`,
+clamped to `max_speed` — more momentum + drive force, and a higher coupled steering cap `wmax=v/1.5`) with the
+corrective turn **saturated to ±wmax** toward the route heading on the hi pulse phase, to **rotate the
+yaw-wedged base back into alignment** and swivel the casters free; the lo phase relaxes to rock the contact.
+PR 201's monitor and the bounded `coupled_breakaway_attempts` → `coupled_no_progress` fault stay the backstop.
+Example `docs/examples/coupled-breakaway-rock-mission-fragment.json`; CPU proofs
+`tests/test_articulated_navigation.py` (`test_breakaway_rock_*`) and `tests/test_coupled_breakaway_rock.py`
+(real coldwin7/coldwin9 recorded-trace replay + the shipped `coupled_tow_margin` gate); write-up
+`data/sim-robust-coupled-breakaway-from-rest-v1/report.md`. If a GPU proof shows the forward rock still cannot
+free a hard wedge, the next lever is a bounded **reverse** back-off during recovery — owner sign-off required
+to relax the coupled-reverse interlock.
+
 **Wall-clock stuck-stage fail-fast** (`RESTOCK_NAV_STUCK_WALL_S`, opt-in, default `0` = off): the nav
 `blocked_timeout`/`goal_timeout` are **sim-clock** caps, which under render pacing (sim advances far
 slower than wall) cannot fire — run-322b's outbound sat on `lane_blocked` for ~50 min WALL and only the

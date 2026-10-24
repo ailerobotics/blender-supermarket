@@ -410,7 +410,20 @@ repo's `scenes/`, `export/` or `renders/`.
   force-releases every brake each drive tick, so `parked=True` is a readout not a stale brake) that re-tows
   a bounded number of times before failing `coupled_no_progress` by name; default-off ⇒ byte-identical.
   Example `docs/examples/outbound-stall-recovery-mission-fragment.json`, write-up
-  `data/sim-robust-outbound-stall-recovery-v1/report.md`. **Lidar sensor-frame yaw (vr1, now FIXED default-on):**
+  `data/sim-robust-outbound-stall-recovery-v1/report.md`. **Reinforced break-away ROCK**
+  (sim-robust-coupled-breakaway-from-rest-v1): coldwin9 pinned at the throat with the base yawed ~5° off-axis —
+  a base+cart envelope CATCHES THE THROAT LIP (a forward WEDGE, not a gate refusal; all 3 runs enter at
+  ~0.4 m/s and dip to rest, so the discriminator is the YAW DRIFT in the slow from-rest creep, NOT momentum at
+  the latch), and the forward-only pulse above can't free a forward wedge (9 surges → 0 advance). Opt-in
+  `navigation.coupled_breakaway_rock` (+`coupled_breakaway_launch_mps`, requires `coupled_progress_recovery`,
+  default-off ⇒ byte-identical) makes the recovery surge an ELEVATED forward launch (clamped to `max_speed`:
+  more momentum + the higher coupled steering cap `wmax=v/1.5`) with the corrective turn SATURATED to ±wmax
+  toward the route heading on the hi pulse, to rotate the yaw-wedged base back into alignment (no reverse — the
+  coupled v≥0 interlock stands; a bounded reverse back-off is the documented next lever, owner sign-off to relax
+  it). CPU proofs `tests/test_articulated_navigation.py` (`test_breakaway_rock_*`), `tests/test_coupled_breakaway_rock.py`
+  (real coldwin7/9 recorded-trace replay + `coupled_tow_margin` gate); fragment
+  `docs/examples/coupled-breakaway-rock-mission-fragment.json`; write-up
+  `data/sim-robust-coupled-breakaway-from-rest-v1/report.md`. **Lidar sensor-frame yaw (vr1, now FIXED default-on):**
   `Scan.sensor_to_base` is (x, y, YAW) but the legacy `isaac_bundle` wiring passed the lidar URDF origin
   (x, y, z) — the `lidar_frame` is a fixed rpy-0 child of base_link, so its z (0.15 m) is a mount height,
   NOT a yaw; reading it as yaw rotated every return 8.59° and was the sole source of the tow-lane
