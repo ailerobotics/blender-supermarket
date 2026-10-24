@@ -793,7 +793,15 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     # absolute <mesh> paths to file:// URIs so move_group's resource_retriever
                                     # loads real arm link geometry. Optional bool read by restock_host.launch;
                                     # default False => robot_description is the file verbatim (byte-identical).
-                                    'moveit_mesh_uris'})
+                                    'moveit_mesh_uris',
+                                    # The validated transfer/boot guards, activated by default here after
+                                    # pickguard2 + coldwin16 (2026-10-24) proved them together in a complete
+                                    # cold cycle: transfer_pick_wrist_guard (PR256 clean pose goal + post-plan
+                                    # clear-wrist terminal guard; replaces PR254's malformed c-space goal),
+                                    # the sim-clock ESDF boot-incorporation grace, and the preplace reach guard
+                                    # (reject a clear-but-unreachable deep shoulder fold by name).
+                                    'transfer_pick_wrist_guard', 'esdf_boot_ack_grace_s',
+                                    'transfer_preplace_reach_guard'})
         self.assertEqual(len(cfg['collect_place_preplace_shape']), 6)   # full 6-joint upright preplace shape
         self.assertLessEqual(cfg['collect_place_preplace_shape'][3], 0.65)  # wrist_1 at/below the stop
         self.assertIsInstance(cfg['collect_place_wrist_guard'], bool)
