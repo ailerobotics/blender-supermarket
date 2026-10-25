@@ -162,20 +162,36 @@ def author_physics_scene(stage, root):
     return scene
 
 
-def _apply_collider(prim, decision):
-    from pxr import UsdPhysics
+def _apply_collider(prim, decision, *, rest_offset=None, contact_offset=None):
+    from pxr import UsdPhysics, Sdf
     UsdPhysics.CollisionAPI.Apply(prim)
     UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr().Set(decision.approximation)
+    # Optional PhysX contact offsets (raw attrs: readable by PhysX at runtime, no PhysxSchema
+    # needed to author offline). restOffset fixes the resting-contact surface; contactOffset is
+    # the (larger) margin at which contacts start generating. Used on the flat drive-floor box so
+    # a rolling wheel rests on the box top (z=0 => wheel_z 0.160) instead of a lower plane.
+    if rest_offset is not None:
+        prim.CreateAttribute('physxCollision:restOffset', Sdf.ValueTypeNames.Float).Set(float(rest_offset))
+    if contact_offset is not None:
+        prim.CreateAttribute('physxCollision:contactOffset', Sdf.ValueTypeNames.Float).Set(float(contact_offset))
 
 
-def author_static_colliders(stage, root, *, flat_floor_box: bool = False) -> int:
+def author_static_colliders(stage, root, *, flat_floor_box: bool = False,
+                            drop_subfloor: bool = False,
+                            box_rest_offset=None, box_contact_offset=None) -> int:
     """Triangle-mesh colliders on the direct static meshes (structure/fixtures/
     signage). Static = immovable: no RigidBodyAPI, so the robot can't shove scenery.
 
     ``flat_floor_box`` (opt-in, default off => byte-identical): the flat drive-floor
     meshes (:data:`colliders.DRIVE_FLOOR_MESHES`) get a box ("boundingCube") collider
     instead of a triangle mesh, removing the internal triangulation edge that
-    ghost-collides the coupled tow casters at the sales_backroom_portal."""
+    ghost-collides the coupled tow casters at the sales_backroom_portal.
+
+    ``drop_subfloor`` (opt-in, default off => byte-identical): the redundant sub-floor
+    backdrop meshes (:data:`colliders.SUBFLOOR_MESHES`, e.g. ``Ground_exterior`` at z=-0.010)
+    get NO collider, so a rolling wheel rests on the flat-floor box at z=0 instead of sinking
+    to that lower plane. ``box_rest_offset`` / ``box_contact_offset`` author PhysX contact
+    offsets on the flat-floor box (default None => PhysX defaults)."""
     from pxr import Usd
     n = 0
     for grp in sorted(colliders.STATIC_GROUPS):
@@ -188,9 +204,14 @@ def author_static_colliders(stage, root, *, flat_floor_box: bool = False) -> int
             info = colliders.PrimInfo(path=str(p.GetPath()), type_name="Mesh", top_group=grp,
                                       is_instance=p.IsInstance(), in_prototype=False,
                                       name=p.GetName())
-            d = colliders.classify(info, flat_floor_box=flat_floor_box)
+            d = colliders.classify(info, flat_floor_box=flat_floor_box,
+                                   drop_subfloor=drop_subfloor)
             if d.kind in (colliders.TRIANGLE_MESH, colliders.BOX):
-                _apply_collider(p, d)
+                if d.kind == colliders.BOX and p.GetName() in colliders.DRIVE_FLOOR_MESHES:
+                    _apply_collider(p, d, rest_offset=box_rest_offset,
+                                    contact_offset=box_contact_offset)
+                else:
+                    _apply_collider(p, d)
                 n += 1
     return n
 

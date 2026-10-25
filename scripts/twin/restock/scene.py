@@ -62,14 +62,21 @@ def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
         raise ValueError('imported robot must have a default prim')
     if not any(p.HasAPI(UsdPhysics.ArticulationRootAPI) for p in robot_stage.Traverse()):
         raise ValueError('imported robot is not an articulation')
-    # Opt-in flat drive-floor box collider (restock sim-robust-portal-floor-seam): removes the
-    # Backroom_floor triangle-mesh internal edge that ghost-collides the tow casters at the portal.
-    # Absent/False => byte-identical triangle-mesh floor. Accepts bool or a truthy mapping.
-    floor_box = bool(portal_floor_box if not isinstance(portal_floor_box, dict)
-                     else portal_floor_box.get('enabled', True))
+    # Opt-in flat drive-floor box collider (restock sim-robust-portal-floor-seam / -box-scope):
+    # Backroom_floor gets a box ("boundingCube") collider (no internal triangulation edge), and
+    # option C makes a ROLLING wheel rest on the box at z=0 by dropping the redundant
+    # Ground_exterior sub-floor (z=-0.010) and authoring restOffset=0 on the box. Absent/False =>
+    # byte-identical triangle-mesh floor with the sub-floor collider intact. Accepts bool/mapping.
+    from . import portal_floor as _pf
+    floor_cfg = _pf.resolve_config(portal_floor_box)
+    floor_box = floor_cfg['enabled']
     stage, root = compose.open_output_stage(str(output), str(store))
     compose.author_physics_scene(stage, root)
-    static = compose.author_static_colliders(stage, root, flat_floor_box=floor_box)
+    static = compose.author_static_colliders(
+        stage, root, flat_floor_box=floor_box,
+        drop_subfloor=floor_cfg['drop_subfloor'],
+        box_rest_offset=floor_cfg['rest_offset'],
+        box_contact_offset=floor_cfg['contact_offset'])
     products = compose.author_product_colliders(stage, root)
     assets = author(stage, robot_usd, spec=spec)
     # Imported base_link origin is chassis centre; cart root is at ground plane.
@@ -91,7 +98,7 @@ def build(store, robot_usd, output, *, robot_pose, cart_pose, stock_path, sku,
         raise RuntimeError('input USD layer changed during composition')
     result = dict(stage=str(output),assets=assets,stock=stock,initial_scenario=initial,
                   static_colliders=static,product_colliders=products,
-                  portal_floor_box=floor_box,
+                  portal_floor_box=floor_box,portal_floor_cfg=floor_cfg,
                   evidence='offline_usd_schema_only',physics_verified=False,
                   input_sha256={str(p):digest for p,digest in hashes.items()})
     if cage is not None:

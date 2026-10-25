@@ -403,9 +403,13 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     print('VISUALS enabled=%s bound=%d env_retoned=%d (visual materials only: UR10 palette, grey base, '
           'galvanised rollwagen, sealed backroom; DEFAULT ON, visuals=false => plain white look)'
           % ((True,_vis['bound_count'],len(_vis['env_retoned'])) if _vis else (False,0,0)),flush=True)
-    print('PORTAL_FLOOR_BOX enabled=%s (flat drive floor -> box collider, no triangle-mesh internal '
-          'edge for the tow casters to ghost-collide at the portal; default off => triangle-mesh floor)'
-          % bool(composition.get('portal_floor_box')),flush=True)
+    _pfc=composition.get('portal_floor_cfg') or {}
+    print('PORTAL_FLOOR_BOX enabled=%s drop_subfloor=%s rest_offset=%s contact_offset=%s '
+          '(flat drive floor -> box collider at z=0; option C drops the redundant Ground_exterior '
+          'sub-floor so a ROLLING wheel rests on the box at z=0 (wheel_z 0.160), not the z=-0.010 '
+          'plane; default off => triangle-mesh floor + sub-floor intact)'
+          % (bool(composition.get('portal_floor_box')),_pfc.get('drop_subfloor'),
+             _pfc.get('rest_offset'),_pfc.get('contact_offset')),flush=True)
     if not open_stage(composition['stage']):
         raise RuntimeError('could not open task composed stage')
     for _ in range(300):

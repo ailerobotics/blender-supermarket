@@ -44,6 +44,19 @@ def test_floor_on_is_box():
     assert colliders.APPROX[colliders.BOX] == "boundingCube"
 
 
+def test_subfloor_dropped_only_when_asked():
+    # Ground_exterior keeps its triangle-mesh collider by default (byte-identical) and is
+    # dropped only under drop_subfloor (option C: removes the z=-0.010 sink trap).
+    gx = colliders.PrimInfo(path="/x/Ground_exterior", type_name="Mesh",
+                            top_group="GRP_Structure", name="Ground_exterior")
+    assert colliders.classify(gx).kind == colliders.TRIANGLE_MESH
+    assert colliders.classify(gx, drop_subfloor=False).kind == colliders.TRIANGLE_MESH
+    assert colliders.classify(gx, drop_subfloor=True).kind == colliders.SKIP
+    # the drive floor itself is never dropped by drop_subfloor.
+    assert colliders.classify(_floor(), flat_floor_box=True,
+                              drop_subfloor=True).kind == colliders.BOX
+
+
 def test_non_drive_structure_unchanged_by_switch():
     # walls / ceiling / shelves must STAY triangle mesh even with the switch on.
     for name in ("Backroom_wall_east", "Backroom_ceiling", "Wall_back_west"):
@@ -137,6 +150,46 @@ def test_crossing_run_front_left_caster_clear_of_diagonal():
         assert abs(perp) > 0.15, f"{run}: front-left caster perp {perp} should be clear of the diagonal"
 
 
+# --- option C: rolling wheel rests on the box at z=0 (no sink to Ground_exterior) ----
+
+def test_box_top_z_equals_mesh_z():
+    # the boundingCube approximation does not move the floor's top surface: both the mesh
+    # and the box top out at z=0 (DRIVE_FLOOR_TOP_Z). No z step is authored by the switch.
+    assert pf.DRIVE_FLOOR_TOP_Z == 0.0
+    assert max(0.0 for _ in pf.BACKROOM_FLOOR_TOP_QUAD) == pf.DRIVE_FLOOR_TOP_Z
+
+
+def test_zero_offsets_put_wheel_contact_at_zero():
+    # restOffset 0 on the box (top z=0) + 0 on the wheel => the wheel's lowest contact is at
+    # z=0, so the axle/wheel_z sits one drive-wheel radius above it => 0.160 (the mesh value).
+    assert pf.wheel_rest_contact_z(box_top_z=0.0, box_rest_offset=0.0, wheel_rest_offset=0.0) == 0.0
+    assert pf.wheel_z_on_box() == pytest.approx(MobileSpec().wheel_radius)
+    assert pf.wheel_z_on_box() == pytest.approx(0.160, abs=1e-9)
+    # the sub-floor plane the box run sank to is 10 mm below the box top.
+    assert pf.SUBFLOOR_TOP_Z == pytest.approx(pf.DRIVE_FLOOR_TOP_Z - 0.010)
+
+
+def test_subfloor_has_no_edge_on_the_tow_path():
+    # Ground_exterior's cooked top diagonal is corner-to-corner; every caster/wheel point on
+    # the tow lane is >13 m from it => the box-run pin is NOT a Ground_exterior edge.
+    probes = [(-3.94, 15.25), (-4.93, 15.5), (-5.53, 14.96), (-5.21, 15.22)]
+    assert min(pf.subfloor_edges_on_path(probes)) > 10.0
+
+
+def test_resolve_config_off_and_on():
+    for off in (None, False, 0, {}, {"enabled": False}):
+        c = pf.resolve_config(off)
+        assert c == dict(enabled=False, rest_offset=None, contact_offset=None, drop_subfloor=False)
+    on = pf.resolve_config(True)
+    assert on["enabled"] and on["drop_subfloor"] is True
+    assert on["rest_offset"] == colliders.DRIVE_FLOOR_BOX_REST_OFFSET == 0.0
+    assert on["contact_offset"] == colliders.DRIVE_FLOOR_BOX_CONTACT_OFFSET
+    # overrides honoured.
+    o = pf.resolve_config({"enabled": True, "rest_offset": 0.001,
+                           "contact_offset": 0.03, "drop_subfloor": False})
+    assert (o["rest_offset"], o["contact_offset"], o["drop_subfloor"]) == (0.001, 0.03, False)
+
+
 # --- authored-stage round-trip (needs usd-core) ----------------------------
 
 def test_authored_floor_approximation_round_trip():
@@ -164,3 +217,52 @@ def test_authored_floor_approximation_round_trip():
         assert got == want, f"flat_floor_box={flag}: floor approximation {got!r} != {want!r}"
         wgot = UsdPhysics.MeshCollisionAPI(stage.GetPrimAtPath(wp)).GetApproximationAttr().Get()
         assert wgot == "none", "wall must stay a triangle mesh regardless of the switch"
+
+
+def _author_floor_stage(drop_subfloor, rest_offset, contact_offset, flat_floor_box=True):
+    from pxr import Usd, UsdGeom, Gf
+    from twin import compose
+    stage = Usd.Stage.CreateInMemory()
+    root = stage.DefinePrim("/Supermarket", "Xform").GetPath()
+    stage.DefinePrim("/Supermarket/GRP_Structure", "Xform")
+    stage.DefinePrim("/Supermarket/GRP_Structure/Backroom_floor", "Xform")
+    mp = "/Supermarket/GRP_Structure/Backroom_floor/Backroom_floor"
+    fm = UsdGeom.Mesh.Define(stage, mp)
+    fm.CreatePointsAttr([Gf.Vec3f(x, y, 0.0) for x, y in pf.BACKROOM_FLOOR_TOP_QUAD])
+    fm.CreateFaceVertexCountsAttr([4]); fm.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+    stage.DefinePrim("/Supermarket/GRP_Structure/Ground_exterior", "Xform")
+    gp = "/Supermarket/GRP_Structure/Ground_exterior/Ground_exterior"
+    gm = UsdGeom.Mesh.Define(stage, gp)
+    gm.CreatePointsAttr([Gf.Vec3f(-60, -60, -0.01), Gf.Vec3f(60, -60, -0.01),
+                         Gf.Vec3f(60, 60, -0.01), Gf.Vec3f(-60, 60, -0.01)])
+    gm.CreateFaceVertexCountsAttr([4]); gm.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+    compose.author_static_colliders(stage, root, flat_floor_box=flat_floor_box,
+                                    drop_subfloor=drop_subfloor, box_rest_offset=rest_offset,
+                                    box_contact_offset=contact_offset)
+    return stage, mp, gp
+
+
+def test_option_c_authors_offsets_and_drops_subfloor():
+    pytest.importorskip("pxr")
+    from pxr import UsdPhysics
+    # option C on: box gets restOffset=0 / contactOffset=0.02; Ground_exterior collider dropped.
+    stage, mp, gp = _author_floor_stage(drop_subfloor=True, rest_offset=0.0, contact_offset=0.02)
+    floor = stage.GetPrimAtPath(mp)
+    assert UsdPhysics.MeshCollisionAPI(floor).GetApproximationAttr().Get() == "boundingCube"
+    assert floor.GetAttribute("physxCollision:restOffset").Get() == pytest.approx(0.0)
+    assert floor.GetAttribute("physxCollision:contactOffset").Get() == pytest.approx(0.02)
+    assert not stage.GetPrimAtPath(gp).HasAPI(UsdPhysics.CollisionAPI), \
+        "Ground_exterior collider must be dropped under drop_subfloor"
+
+
+def test_option_c_off_is_byte_identical_subfloor_and_no_offsets():
+    pytest.importorskip("pxr")
+    from pxr import UsdPhysics
+    # switch off: triangle-mesh floor, Ground_exterior keeps its collider, no offsets authored.
+    stage, mp, gp = _author_floor_stage(drop_subfloor=False, rest_offset=None,
+                                        contact_offset=None, flat_floor_box=False)
+    floor = stage.GetPrimAtPath(mp)
+    assert UsdPhysics.MeshCollisionAPI(floor).GetApproximationAttr().Get() == "none"
+    assert not floor.GetAttribute("physxCollision:restOffset").IsValid()
+    assert stage.GetPrimAtPath(gp).HasAPI(UsdPhysics.CollisionAPI), \
+        "Ground_exterior collider must stay when the switch is off (byte-identical)"
