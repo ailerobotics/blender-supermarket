@@ -39,6 +39,26 @@ STATIC_GROUPS = {"GRP_Structure", "GRP_Fixtures", "GRP_Signage"}
 # these stay triangle meshes, byte-identical.
 DRIVE_FLOOR_MESHES = frozenset({"Backroom_floor"})
 
+# Redundant sub-floor backdrop planes that sit a few mm BELOW the real drive floors.
+# ``Ground_exterior`` is a 120x120 m plane with its top at z=-0.010, 10 mm under the
+# ``Floor`` (sales) and ``Backroom_floor`` (backroom) colliders, which both top out at
+# z=0 and together cover the whole drivable area. Under a ROLLING wheel the flat-floor
+# box lets the wheel penetrate the box top (z=0) down to this stiffer triangle-mesh plane
+# (measured wheel_z 0.150 vs 0.160 on the mesh = resting at z=-0.010), so the box floor is
+# never actually exercised. Dropping this redundant sub-floor collider removes the 10 mm
+# "sink trap" so the wheel rests on the box at z=0. Opt-in (paired with the flat-floor box);
+# off => the collider stays, byte-identical. See data/sim-robust-portal-floor-seam-v1 and the
+# sim-robust-portal-floor-box-scope evidence.
+SUBFLOOR_MESHES = frozenset({"Ground_exterior"})
+
+# Physics contact offsets authored on the flat drive-floor box so a rolling wheel's resting
+# contact is exactly at the box top (z=0 => wheel_z = wheel_radius = 0.160). restOffset=0
+# keeps the rest-contact surface at the box top; contactOffset is a small positive margin so
+# the box generates contacts before the wheel can reach any lower plane. Authored as raw
+# ``physxCollision:*`` attributes (readable by PhysX at runtime; no PhysxSchema needed offline).
+DRIVE_FLOOR_BOX_REST_OFFSET = 0.0
+DRIVE_FLOOR_BOX_CONTACT_OFFSET = 0.02
+
 
 @dataclass(frozen=True)
 class PrimInfo:
@@ -61,13 +81,19 @@ class ColliderDecision:
         return self.kind != SKIP
 
 
-def classify(prim: PrimInfo, *, flat_floor_box: bool = False) -> ColliderDecision:
+def classify(prim: PrimInfo, *, flat_floor_box: bool = False,
+             drop_subfloor: bool = False) -> ColliderDecision:
     """Decide the collider for one prim. Order matters.
 
     ``flat_floor_box`` (opt-in, default off => byte-identical): when True, the flat
     horizontal drive-floor meshes in :data:`DRIVE_FLOOR_MESHES` get a box
     ("boundingCube") collider instead of a triangle mesh, removing the internal
     triangulation edge that ghost-collides the coupled tow casters at the portal.
+
+    ``drop_subfloor`` (opt-in, default off => byte-identical): when True, the redundant
+    sub-floor backdrop meshes in :data:`SUBFLOOR_MESHES` (e.g. ``Ground_exterior``) get NO
+    collider, removing the z=-0.010 plane a rolling wheel otherwise sinks to through the
+    flat-floor box. Paired with ``flat_floor_box``; see :data:`SUBFLOOR_MESHES`.
     """
     # 1. Never author on an instanceable placement — the collider belongs on the
     #    shared prototype so all instances inherit it once. This is THE guard.
@@ -82,6 +108,14 @@ def classify(prim: PrimInfo, *, flat_floor_box: bool = False) -> ColliderDecisio
 
     if prim.top_group == "GRP_EnvironmentDecor":
         return ColliderDecision(SKIP, "", "nonphysical environment decoration")
+
+    # 2a. Redundant sub-floor backdrop (Ground_exterior): drop its collider when asked, so a
+    #     rolling wheel cannot sink through the flat-floor box to its z=-0.010 plane.
+    if drop_subfloor and prim.name in SUBFLOOR_MESHES:
+        return ColliderDecision(
+            SKIP, "",
+            f"redundant sub-floor backdrop {prim.name} — collider dropped (real floors cover "
+            "the drivable area at z=0; removes the flat-floor-box sink trap)")
 
     # 3. Prototype meshes: the small, repeated products/price-tags. Convex hull is
     #    cheap and authored ONCE per prototype (~196), shared by every instance.
@@ -124,11 +158,12 @@ class ColliderPlan:
         return self.triangle_mesh + self.convex_hull + self.box
 
 
-def plan_colliders(prims: Iterable[PrimInfo], *, flat_floor_box: bool = False) -> ColliderPlan:
+def plan_colliders(prims: Iterable[PrimInfo], *, flat_floor_box: bool = False,
+                   drop_subfloor: bool = False) -> ColliderPlan:
     """Aggregate classify() over prims into counts for the dry-run / logs."""
     plan = ColliderPlan()
     for p in prims:
-        d = classify(p, flat_floor_box=flat_floor_box)
+        d = classify(p, flat_floor_box=flat_floor_box, drop_subfloor=drop_subfloor)
         if d.kind == TRIANGLE_MESH:
             plan.triangle_mesh += 1
         elif d.kind == CONVEX_HULL:

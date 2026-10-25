@@ -164,3 +164,81 @@ def front_caster_edge_analysis(cart_pose, spec: MobileSpec = MobileSpec(),
         out.append(CasterOnEdge(label, (round(xy[0], 4), round(xy[1], 4)),
                                 round(perp_distance(xy, a, b), 4)))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Option C — the flat drive floor is a box; make a ROLLING wheel rest ON it at #
+# z=0 (not sink to the redundant Ground_exterior sub-floor at z=-0.010).       #
+# The whole-slab boundingCube keeps the collect station on the box too, so the #
+# key is that its resting contact matches the mesh (wheel_z = wheel_radius).   #
+# Pure geometry/contact helpers for the CPU proof; no pxr.                     #
+# --------------------------------------------------------------------------- #
+
+# Measured top-surface z of the drive-floor colliders (store USD, metres). The box's
+# boundingCube top equals the triangle-mesh top exactly, so the switch authors NO z step.
+DRIVE_FLOOR_TOP_Z = 0.0
+# The redundant sub-floor backdrop (Ground_exterior) top, 10 mm below the real floors.
+SUBFLOOR_TOP_Z = -0.010
+
+
+def wheel_rest_contact_z(box_top_z: float = DRIVE_FLOOR_TOP_Z,
+                         box_rest_offset: float = 0.0,
+                         wheel_rest_offset: float = 0.0) -> float:
+    """World z of a wheel's lowest contact point when it rests on the flat-floor box.
+
+    PhysX rests two shapes separated by the sum of their rest offsets, so the wheel's
+    lowest point sits at ``box_top_z + box_rest_offset + wheel_rest_offset``. With both
+    offsets 0 and the box top at z=0 the contact is at z=0 (so the axle/wheel_z sits one
+    wheel radius above => 0.160 for the 0.16 m drive wheel)."""
+    return box_top_z + box_rest_offset + wheel_rest_offset
+
+
+def wheel_z_on_box(spec: MobileSpec = MobileSpec(), **kw) -> float:
+    """The drive-wheel axle height (the trace's ``casters.wheel_z``) when resting on the
+    box: contact z + wheel radius. Expected 0.160 with zero offsets and box top z=0."""
+    return wheel_rest_contact_z(**kw) + spec.wheel_radius
+
+
+def ground_exterior_top_quad(half: float = 60.0, top_z: float = SUBFLOOR_TOP_Z):
+    """The Ground_exterior backdrop's top quad (an axis-aligned square, authored v0..v3)."""
+    return ((-half, -half), (half, -half), (half, half), (-half, half))
+
+
+def subfloor_edges_on_path(points, half: float = 60.0) -> List[float]:
+    """Perp distances from each probe point to Ground_exterior's cooked top diagonal
+    (fan v0->v2 = corner to corner). Large everywhere on the tow lane (>13 m), i.e. the
+    sub-floor has NO internal edge on any caster/wheel path -- the box-run pin is not a
+    Ground_exterior edge."""
+    q = ground_exterior_top_quad(half)
+    a, c = q[0], q[2]
+    return [abs(perp_distance(p, a, c)) for p in points]
+
+
+def resolve_config(portal_floor_box):
+    """Normalise the opt-in ``portal_floor_box`` runtime value into a settings dict.
+
+    Accepts a bool or a mapping; absent/falsey => ``enabled=False`` (byte-identical off).
+    Keys (all optional, with the option-C defaults):
+      * ``enabled``        -- author the flat-floor box at all.
+      * ``rest_offset``    -- PhysX restOffset on the box (default 0.0 => contact at box top).
+      * ``contact_offset`` -- PhysX contactOffset on the box (default 0.02 m margin).
+      * ``drop_subfloor``  -- drop the redundant Ground_exterior sub-floor collider so the
+                              rolling wheel cannot sink to z=-0.010 (default True when enabled).
+    """
+    from .. import colliders
+    if not portal_floor_box:
+        return dict(enabled=False, rest_offset=None, contact_offset=None, drop_subfloor=False)
+    if not isinstance(portal_floor_box, dict):
+        cfg = {}
+        enabled = bool(portal_floor_box)
+    else:
+        cfg = portal_floor_box
+        enabled = bool(cfg.get('enabled', True))
+    if not enabled:
+        return dict(enabled=False, rest_offset=None, contact_offset=None, drop_subfloor=False)
+    return dict(
+        enabled=True,
+        rest_offset=float(cfg.get('rest_offset', colliders.DRIVE_FLOOR_BOX_REST_OFFSET)),
+        contact_offset=float(cfg.get('contact_offset', colliders.DRIVE_FLOOR_BOX_CONTACT_OFFSET)),
+        drop_subfloor=bool(cfg.get('drop_subfloor', True)),
+    )

@@ -86,6 +86,23 @@ def main(argv=None) -> int:
         print("  FAIL: expected exactly one internal edge OFF and none ON")
         ok = False
 
+    print("\n== option C: a rolling wheel rests on the box at z=0 (no sink to Ground_exterior) ==")
+    print(f"  box top z == mesh top z == {pf.DRIVE_FLOOR_TOP_Z:.3f} (boundingCube authors no z step)")
+    contact = pf.wheel_rest_contact_z(box_rest_offset=0.0, wheel_rest_offset=0.0)
+    wz = pf.wheel_z_on_box(spec)
+    print(f"  restOffset 0 (box) + 0 (wheel) => wheel contact z = {contact:.3f}; "
+          f"wheel_z (axle) = {wz:.3f} (drive radius {spec.wheel_radius})")
+    if not (abs(contact) < 1e-9 and abs(wz - 0.160) < 1e-9):
+        print("  FAIL: zero offsets must put the contact at z=0 and wheel_z at 0.160")
+        ok = False
+    probes = [(-3.94, 15.25), (-4.93, 15.5), (-5.53, 14.96), (-5.21, 15.22)]
+    sub_min = min(pf.subfloor_edges_on_path(probes))
+    print(f"  Ground_exterior (sub-floor z={pf.SUBFLOOR_TOP_Z}) cooked-diagonal clearance on the "
+          f"tow path: {sub_min:.1f} m => no sub-floor edge at the pin (the box-run pin is NOT one)")
+    if sub_min < 1.0:
+        print("  FAIL: a Ground_exterior edge lies on the tow path")
+        ok = False
+
     if args.run:
         run = args.run
         print(f"\n== recorded pin evidence: {run.name} ==")
@@ -134,6 +151,35 @@ def main(argv=None) -> int:
                     ok = False
                 print(f"  flat_floor_box={str(flag):5} -> approximation={got!r} (want {want!r}) "
                       f"[{n} static collider(s)] {status}")
+
+        # option C: offsets on the box + Ground_exterior collider dropped.
+        with tempfile.TemporaryDirectory() as td:
+            from pxr import Gf
+            stage = Usd.Stage.CreateNew(str(Path(td) / "floorC.usda"))
+            root = stage.DefinePrim("/Supermarket", "Xform").GetPath()
+            stage.DefinePrim("/Supermarket/GRP_Structure", "Xform")
+            stage.DefinePrim("/Supermarket/GRP_Structure/Backroom_floor", "Xform")
+            mp = "/Supermarket/GRP_Structure/Backroom_floor/Backroom_floor"
+            fm = UsdGeom.Mesh.Define(stage, mp)
+            fm.CreatePointsAttr([Gf.Vec3f(x, y, 0.0) for x, y in pf.BACKROOM_FLOOR_TOP_QUAD])
+            fm.CreateFaceVertexCountsAttr([4]); fm.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+            stage.DefinePrim("/Supermarket/GRP_Structure/Ground_exterior", "Xform")
+            gp = "/Supermarket/GRP_Structure/Ground_exterior/Ground_exterior"
+            gm = UsdGeom.Mesh.Define(stage, gp)
+            gm.CreatePointsAttr([Gf.Vec3f(-60, -60, -0.01), Gf.Vec3f(60, -60, -0.01),
+                                 Gf.Vec3f(60, 60, -0.01), Gf.Vec3f(-60, 60, -0.01)])
+            gm.CreateFaceVertexCountsAttr([4]); gm.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+            compose.author_static_colliders(stage, root, flat_floor_box=True, drop_subfloor=True,
+                                            box_rest_offset=0.0, box_contact_offset=0.02)
+            floor = stage.GetPrimAtPath(mp)
+            ro = floor.GetAttribute("physxCollision:restOffset").Get()
+            co = floor.GetAttribute("physxCollision:contactOffset").Get()
+            dropped = not stage.GetPrimAtPath(gp).HasAPI(UsdPhysics.CollisionAPI)
+            cok = (abs(ro) < 1e-6 and abs(co - 0.02) < 1e-6 and dropped)
+            if not cok:
+                ok = False
+            print(f"  option C -> box restOffset={ro} contactOffset={co}, Ground_exterior "
+                  f"collider dropped={dropped} {'OK' if cok else 'FAIL'}")
 
     print("\n" + ("PORTAL_FLOOR_SEAM OK: the box switch removes the portal-band internal edge"
                   if ok else "PORTAL_FLOOR_SEAM FAIL"))

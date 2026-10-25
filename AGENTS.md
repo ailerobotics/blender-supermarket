@@ -467,7 +467,18 @@ repo's `scenes/`, `export/` or `renders/`.
   (`boundingCube`)** collider (no internal edge): top-level `portal_floor_box` scene key (default off ⇒
   byte-identical), `twin.colliders.DRIVE_FLOOR_MESHES`. CPU `scripts/check_portal_floor_seam.py` +
   `tests/test_portal_floor_seam.py`; fragment `docs/examples/portal-floor-box-mission-fragment.json`; write-up
-  `data/sim-robust-portal-floor-seam-v1/report.md`. **Lidar sensor-frame yaw (vr1, now FIXED default-on):**
+  `data/sim-robust-portal-floor-seam-v1/report.md`. **Sharp edge the box alone exposes (sim-robust-portal-floor-box-scope-v1):**
+  under the whole-slab `boundingCube`, a ROLLING drive wheel sinks ~10 mm THROUGH the box top (z=0) to the
+  redundant `Ground_exterior` backdrop collider (a 120 m plane, top z=−0.010) — measured `casters.wheel_z` 0.150
+  (box, rolling) vs 0.160 (mesh) — so the box floor is never actually tested under a moving wheel, and the box
+  run still pinned (floorbox1a/1c, hard single-tick stops; `Ground_exterior`'s own cooked diagonal is >13 m from
+  the pin, so NOT the cause). Fix = make the rolling wheel rest on the box at z=0: `portal_floor_box` now also
+  **drops `Ground_exterior`'s redundant sub-floor collider** (`twin.colliders.SUBFLOOR_MESHES`; the real floors
+  `Floor`+`Backroom_floor` cover the drivable area at z=0) and authors `physxCollision:restOffset=0` on the box
+  (`drop_subfloor`/`rest_offset`/`contact_offset` keys; `twin.restock.portal_floor.resolve_config`). Opt-in,
+  byte-identical off. Evidence `data/twin-robot-in-store-boot-v1/floorbox-obstacle-and-stepz-evidence.md`;
+  fragment `docs/examples/portal-floor-box-contact-mission-fragment.json` (collect-only ×2, throat-only ×3 asserting
+  rolling wheel_z 0.160 + `single_tick_stops=0`, then capstone). **Lidar sensor-frame yaw (vr1, now FIXED default-on):**
   `Scan.sensor_to_base` is (x, y, YAW) but the legacy `isaac_bundle` wiring passed the lidar URDF origin
   (x, y, z) — the `lidar_frame` is a fixed rpy-0 child of base_link, so its z (0.15 m) is a mount height,
   NOT a yaw; reading it as yaw rotated every return 8.59° and was the sole source of the tow-lane
