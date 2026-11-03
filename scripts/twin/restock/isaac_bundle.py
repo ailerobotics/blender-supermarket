@@ -389,6 +389,19 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
         from .shortcut import staged_scenario
         build_scenario, start_staging = staged_scenario(scenario, config, **_hitch_geometry(config))
 
+    # Cold-run dock-align (sim-couple-shortcut-settle-dt-v1, opt-in config['couple_dock_align']): spawn the
+    # assembly cart + robot at the configured couple dock (the ONE dock source -- the active outbound lane's
+    # couple_dock, else derived from its start + start_cart_yaw) so a COLD run's coupled train faces the
+    # outbound lane heading. Without it the cart spawns at the legacy EAST scenario yaw, the couple seats an
+    # east-facing train and the SOUTH side-bay lane is never acquired (coldwin25e). Only cold runs: a
+    # start_at=couple/transfer shortcut dock-aligns via staged_scenario above (same dock source). Default
+    # off and a no-op for a legacy config whose lane dock already equals the scenario spawn => byte-identical.
+    cold_dock_align = None
+    if config.get('couple_dock_align') and not config.get('start_at'):
+        from .shortcut import dock_align_scenario
+        build_scenario, cold_dock_align = dock_align_scenario(build_scenario, config,
+                                                              **_hitch_geometry(config))
+
     assemble = _assemble or _real_assemble
     assembly = assemble(app=app, config=config, scenario=build_scenario, output=output)
 
@@ -397,6 +410,11 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
     if config.get('start_at'):
         from .shortcut import apply_start_state
         apply_start_state(assembly, config, build_scenario)
+    elif cold_dock_align is not None:
+        # Cold run spawned dock-aligned: verify the cart rests at the configured dock heading before the
+        # mission drives (rest + heading verify, the cold twin of the shortcut's apply_start_state verify).
+        from .shortcut import verify_dock_seat
+        verify_dock_seat(assembly, config, build_scenario)
 
     build_runtime = _runtime or _build_isaac_runtime
     parts = build_runtime(app=app, assembly=assembly, plan=plan, config=config, output=output,
@@ -509,7 +527,8 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
         warm_reset = build_warm_reset(app=app, assembly=assembly, parts=parts, plan=plan,
                                       config=config, output=output)
     return Bundle(adapter=adapter, recording=recording, _closers=tuple(closers),
-                  warm_reset=warm_reset, start_staging=start_staging,
+                  warm_reset=warm_reset,
+                  start_staging=start_staging if start_staging is not None else cold_dock_align,
                   _render_closers=_render_closers(assembly))
 
 

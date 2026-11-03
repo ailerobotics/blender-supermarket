@@ -20,7 +20,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from twin.restock.start_settle import (resolve_settle_params, converge_settle, resting_check,
                                        heading_check, _DEFAULTS)
-from twin.restock.shortcut import apply_start_state
+from twin.restock.shortcut import (apply_start_state, resolve_couple_dock, dock_align_scenario,
+                                   couple_start_poses, verify_dock_seat)
 
 
 # --------------------------------------------------------------------------- #
@@ -300,6 +301,94 @@ class ApplyCoupleSettleTests(unittest.TestCase):
         cfg = {'start_at': 'couple', 'start_state_settle': {**_FAST, 'hold_during_settle': False}}
         plan = apply_start_state(asm, cfg, _scenario(dock_yaw=0.0), _rigid_prim=_Carton)
         self.assertEqual(plan.start_at, 'couple')
+
+
+# --------------------------------------------------------------------------- #
+# dock-align: the assembly cart/robot spawn follows the configured couple dock  #
+# (one source), for cold runs AND the start_at=couple shortcut                  #
+# --------------------------------------------------------------------------- #
+_SOUTH_LANE = {'name': 'outbound_dock_to_side_bay', 'start': [-3.875, 14.5, -math.pi / 2],
+               'start_cart_yaw': -math.pi / 2, 'goal': [-4.3, 6.95, -math.pi / 2]}
+# East lane whose derived dock equals the scenario cart spawn (-5.73,15.25,0): a legacy no-op.
+_EAST_LANE = {'name': 'outbound_dock_to_bay', 'start': [-4.46, 15.25, 0.0],
+              'start_cart_yaw': 0.0, 'goal': [-2.0, 15.25, 0.0]}
+
+
+def _lane_cfg(lane, **extra):
+    cfg = {'navigation': {'tow_lanes': [lane]}}
+    cfg.update(extra)
+    return cfg
+
+
+class DockResolveTests(unittest.TestCase):
+    def test_south_lane_derives_dock_from_start(self):
+        r = resolve_couple_dock(_lane_cfg(_SOUTH_LANE))
+        self.assertEqual(r['source'], 'derived_from_lane_start')
+        self.assertAlmostEqual(r['cart_dock'][2], -math.pi / 2, places=5)   # SOUTH
+        self.assertAlmostEqual(r['cart_dock'][0], -3.875, places=3)
+        self.assertAlmostEqual(r['cart_dock'][1], 15.77, places=2)          # == towstaging3 couple_dock
+        # the seat the lane start is derived from
+        self.assertEqual([round(v, 4) for v in r['robot_seat']], [-3.875, 14.5, round(-math.pi / 2, 4)])
+
+    def test_east_lane_derives_the_scenario_dock(self):
+        r = resolve_couple_dock(_lane_cfg(_EAST_LANE))
+        self.assertAlmostEqual(r['cart_dock'][0], -5.73, places=3)
+        self.assertAlmostEqual(r['cart_dock'][2], 0.0, places=5)
+
+    def test_explicit_couple_dock_wins(self):
+        lane = {**_EAST_LANE, 'couple_dock': [-5.73, 15.25, 0.0]}
+        r = resolve_couple_dock(_lane_cfg(lane))
+        self.assertEqual(r['source'], 'lane.couple_dock')
+
+    def test_no_lane_is_none(self):
+        self.assertIsNone(resolve_couple_dock({}))
+        self.assertIsNone(resolve_couple_dock({'navigation': {}}))
+
+
+class DockAlignScenarioTests(unittest.TestCase):
+    def test_south_lane_reheads_the_spawn(self):
+        variant, record = dock_align_scenario(_scenario(dock_yaw=0.0), _lane_cfg(_SOUTH_LANE))
+        self.assertIsNotNone(record)
+        self.assertAlmostEqual(variant['initial_staging']['cart_body_pose'][2], -math.pi / 2, places=5)
+        self.assertEqual(record['mode'], 'couple_dock_align')
+        self.assertEqual(record['dock_source'], 'derived_from_lane_start')
+
+    def test_east_derived_dock_is_no_op(self):
+        # scenario cart at (-5.73,15.25,0); the east lane's derived dock equals it -> byte-identical.
+        sc = _scenario(dock_yaw=0.0)
+        variant, record = dock_align_scenario(sc, _lane_cfg(_EAST_LANE))
+        self.assertIs(variant, sc)
+        self.assertIsNone(record)
+
+    def test_no_lane_is_no_op(self):
+        sc = _scenario(dock_yaw=0.0)
+        variant, record = dock_align_scenario(sc, {})
+        self.assertIs(variant, sc)
+        self.assertIsNone(record)
+
+
+class VerifyDockSeatTests(unittest.TestCase):
+    def test_good_cold_seat_passes(self):
+        cart = _CartBody(None, None, -3.875, 15.77, 0.2, -math.pi / 2)
+        asm = _Assembly(cart); cart.world = asm.world; cart.mobile = asm.mobile
+        cfg = {'start_state_settle': {**_FAST}}
+        out = verify_dock_seat(asm, cfg, _scenario(dock_yaw=-math.pi / 2))
+        self.assertIsNotNone(out)
+        self.assertFalse(asm.mobile.pinned)        # hold released after the verify
+
+    def test_misheaded_cold_seat_is_refused(self):
+        # cart spawned EAST while the configured dock is SOUTH -> named heading mismatch.
+        cart = _CartBody(None, None, -3.875, 15.77, 0.2, 0.0)
+        asm = _Assembly(cart); cart.world = asm.world; cart.mobile = asm.mobile
+        cfg = {'start_state_settle': {**_FAST}}
+        with self.assertRaises(RuntimeError) as ctx:
+            verify_dock_seat(asm, cfg, _scenario(dock_yaw=-math.pi / 2))
+        self.assertIn('START_STATE_SETTLE_MISMATCH', str(ctx.exception))
+
+    def test_no_cart_body_is_noop(self):
+        class Bare:
+            cart_body = None
+        self.assertIsNone(verify_dock_seat(Bare(), {}, _scenario()))
 
 
 if __name__ == '__main__':
