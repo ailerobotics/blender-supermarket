@@ -55,11 +55,32 @@ def static_boxes(environment, scenario, camera_config=None):
     return out
 
 
+# Within this band of |sin(cyaw)| the cart is treated as axis-aligned (the historical approximation); the
+# parking pose used to be straight (yaw ~ 0 or ~ pi). PR 271 re-heads the cart SOUTH on the portal axis
+# (cart_parking yaw = +pi/2), so a parked cart can now sit at an arbitrary yaw -- handled by rotating the
+# canonical part boxes below. The band is kept so results stay byte-identical for the old near-axis poses.
+_AXIS_ALIGNED_SIN_TOL = 0.2
+
+
 def cart_boxes(cx, cy, cyaw):
     """The parked rollwagen as the lidar sees it (posts, mesh side/back walls, deck, drawbar, casters),
-    authored like mobile_assets.author_cart. Axis-aligned approximation (the parking pose is straight)."""
-    if abs(math.sin(cyaw)) > 0.2:
-        raise ValueError('cart_boxes approximates a near-axis-aligned parked cart only')
+    authored like mobile_assets.author_cart, as 3-D AABBs at parking yaw ``cyaw``.
+
+    For a near-axis-aligned pose (``|sin(cyaw)| <= 0.2``) this is the historical axis-aligned approximation
+    (byte-identical, so every old near-axis call is unchanged); flip semantics (``cos(cyaw) < 0`` reflects
+    the asymmetric back wall / drawbar to the far end, as a y-symmetric cart's 180 deg rotation does). For
+    any other yaw (e.g. the PR 271 south-headed ``+pi/2`` parking pose) the canonical (flip = 1) part boxes
+    are rigidly rotated about the cart centre and returned as the conservative axis-aligned bounds of the
+    rotated corners -- so the boxes always CONTAIN the true rotated footprint and are never smaller than the
+    axis-aligned approximation."""
+    if abs(math.sin(cyaw)) <= _AXIS_ALIGNED_SIN_TOL:
+        return _cart_boxes_axis_aligned(cx, cy, cyaw)
+    return _cart_boxes_rotated(cx, cy, cyaw)
+
+
+def _cart_boxes_axis_aligned(cx, cy, cyaw):
+    """The historical near-axis-aligned approximation, verbatim: the cart as axis-aligned AABBs with the
+    only yaw handling a 180 deg ``flip`` of the asymmetric back wall / drawbar."""
     flip = -1.0 if math.cos(cyaw) < 0 else 1.0
     L, W, H, z0 = CART_L, CART_W, CART_H, 0.20
     out = []
@@ -79,6 +100,48 @@ def cart_boxes(cx, cy, cyaw):
         for py in (-W / 2 + 0.08, W / 2 - 0.08):
             x, y = cx + flip * px, cy + py
             out.append((x - 0.10, y - 0.02, 0.0, x + 0.05, y + 0.02, 0.15, '/Rollwagen/wheel'))
+    return out
+
+
+def _cart_local_boxes():
+    """The canonical (parked yaw = 0, flip = 1) rollwagen part boxes in the cart-centre frame, each
+    ``(lxmin, lymin, zmin, lxmax, lymax, zmax, path)`` -- the same geometry the axis-aligned path lays down
+    at the origin, with the asymmetric back wall at the -x end and the drawbar protruding at the +x end.
+    The rotated path rotates these about the centre; a true 180 deg rotation reproduces the flip layout
+    (the cart is symmetric about its x-axis)."""
+    L, W, H, z0 = CART_L, CART_W, CART_H, 0.20
+    out = []
+    for px in (-L / 2 + 0.02, L / 2 - 0.02):
+        for py in (-W / 2 + 0.02, W / 2 - 0.02):
+            out.append((px - 0.0125, py - 0.0125, z0, px + 0.0125, py + 0.0125, H, '/Rollwagen/chassis/post'))
+    for sgn in (-1, 1):
+        y = sgn * (W / 2 - 0.02)
+        out.append((-L / 2, y - 0.006, z0, L / 2, y + 0.006, H, '/Rollwagen/chassis/side'))
+    xb = -(L / 2 - 0.02)
+    out.append((xb - 0.006, -W / 2, z0, xb + 0.006, W / 2, H, '/Rollwagen/chassis/back'))
+    out.append((-L / 2, -W / 2, z0 - 0.025, L / 2, W / 2, z0 + 0.025, '/Rollwagen/chassis/deck'))
+    dx0, dx1 = sorted((L / 2, 0.65))
+    out.append((dx0, -0.02, 0.26, dx1, 0.02, 0.30, '/Rollwagen/chassis/drawbar'))
+    for px in (-L / 2 + 0.10, L / 2 - 0.10):
+        for py in (-W / 2 + 0.08, W / 2 - 0.08):
+            out.append((px - 0.10, py - 0.02, 0.0, px + 0.05, py + 0.02, 0.15, '/Rollwagen/wheel'))
+    return out
+
+
+def _cart_boxes_rotated(cx, cy, cyaw):
+    """A parked cart at arbitrary yaw: rotate the canonical part boxes about the centre by ``cyaw`` and
+    return the conservative axis-aligned bounds of the rotated xy corners (heights unchanged). Each AABB
+    contains its rotated box, so the union contains the true rotated footprint; always >= the canonical
+    extent."""
+    c, s = math.cos(cyaw), math.sin(cyaw)
+    out = []
+    for lx0, ly0, zlo, lx1, ly1, zhi, path in _cart_local_boxes():
+        xs, ys = [], []
+        for lx in (lx0, lx1):
+            for ly in (ly0, ly1):
+                xs.append(cx + c * lx - s * ly)
+                ys.append(cy + s * lx + c * ly)
+        out.append((min(xs), min(ys), zlo, max(xs), max(ys), zhi, path))
     return out
 
 
