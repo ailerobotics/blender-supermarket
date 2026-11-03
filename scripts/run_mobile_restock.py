@@ -323,18 +323,21 @@ def _run_transport_probe(bundle, scenario, args, app):
     manip.start('collect', asdict(Job(**scenario['job'])))  # source station + bridge.target_location
     port.current_action = 'collect'                         # force the sensing render each tick
     frames = int(args.transport_probe)
+    # sim-realtime-factor-v1: step at the live World physics step (config-driven; 1/60 by default),
+    # so advance()'s world.get_physics_dt()==dt assert holds whatever physics_dt the run configured.
+    _dt = float(port.world.get_physics_dt())
     # Warm up the camera render + annotators (depth/instance-ID populate a few frames in).
     for _ in range(20):
         if not app.is_running():
             break
-        port.advance(1 / 60)
+        port.advance(_dt)
     # Publish continuously for a HOLD window so the host stays alive and keeps integrating while
     # the host-side verdict (masked_depth rate + the nvblox ESDF query) runs against it; stop
     # once at least `frames` were published AND the hold elapsed.
     hold_until = time.monotonic() + 70.0
     published = 0
     while app.is_running():
-        packet = port.advance(1 / 60)
+        packet = port.advance(_dt)
         if bridge.publish(packet.simulation_time) is not None:
             published += 1
         if published >= frames and time.monotonic() >= hold_until:
@@ -554,12 +557,18 @@ def run(args, manifest, scenario):
                                            is_running=app.is_running)
                     m = _make_mission(db_i)
                     m.start()
-                    for _ in range(60*20*60):  # bounded simulation time; shell also bounds wall time
+                    # sim-realtime-factor-v1: the physics step is config-driven (absent => 1/60,
+                    # byte-identical). assemble() built World with this exact value; advance() asserts
+                    # they agree. The loop budget is 20 min of SIM time regardless of the step, so a
+                    # coarser step runs fewer ticks for the same simulated span (the wall saving).
+                    from twin.restock.physics_step import resolve_dt as _resolve_physics_dt
+                    _dt = _resolve_physics_dt(config)
+                    for _ in range(int(60*20*60 * (1/60) / _dt)):  # bounded SIM time; shell bounds wall
                         if m.terminal:
                             break
                         if not app.is_running():
                             raise RuntimeError('simulation app stopped')
-                        m.tick(1/60)
+                        m.tick(_dt)
                     if not m.terminal:
                         m.fail('simulation step budget exceeded')
                     s = {'state': m.state, 'reason': m.reason, 'physics_verified': False,

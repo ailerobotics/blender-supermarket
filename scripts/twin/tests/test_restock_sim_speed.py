@@ -35,6 +35,7 @@ def test_max_profile_turns_every_lever_on():
     assert speed.pacing == 'host_coupled' and speed.host_stage_max_ratio == 1.0
     assert speed.walkthrough_hz == 3.0 and speed.trace_probe is False
     assert speed.bt_snapshot_hz == 5.0 and speed.tick_profile_s == 10.0
+    assert speed.trace_hz is None                                 # opt-in only (per-tick trace feeds graders)
     assert S.from_config({'sim_speed': 'max'}) == speed           # shorthand string form
 
 
@@ -226,7 +227,12 @@ def test_unread_station_cameras_per_stage_and_config():
           'transfer_shelf_location': 'G3_back_s2'}
     assert S.unread_station_cameras(gt, 'transfer', ids, locs) == {'source', 'cart', 'shelf'}
     assert S.unread_station_cameras(gt, 'verify', ids, locs) == {'source', 'cart', 'shelf'}
-    assert S.unread_station_cameras(gt, 'collect', ids, locs) == set()          # collect keeps all
+    assert S.unread_station_cameras(gt, 'collect', ids, locs) == set()          # sensor collect keeps all
+    # sim-realtime-factor-v1: ground-truth collect reads no station camera, so all three pause; a sensor
+    # collect (collect_ground_truth False) still keeps them all.
+    assert S.unread_station_cameras(gt, 'collect', ids, locs, collect_ground_truth=True) == {'source', 'cart', 'shelf'}
+    assert S.unread_station_cameras(gt, 'collect', ids, locs, collect_ground_truth=False) == set()
+    assert S.unread_station_cameras(gt, 'transfer', ids, locs, collect_ground_truth=True) == {'source', 'cart', 'shelf'}
     camera = {'transfer_shelf_location': 'G3_back_s2'}
     assert S.unread_station_cameras(camera, 'transfer', ids, locs) == {'source', 'cart'}   # shelf read
     assert S.unread_station_cameras(camera, 'verify', ids, locs) == set()       # camera verify reads
@@ -422,7 +428,8 @@ def test_port_legacy_default_is_unchanged(tmp_path):
 def test_port_max_profile_same_packets_and_renders_trace_without_probe(tmp_path):
     legacy_dir, max_dir = tmp_path / 'legacy', tmp_path / 'max'
     legacy, _ = _fake_port(legacy_dir)
-    fast, _ = _fake_port(max_dir, sim_speed=S.from_config({'sim_speed': {'profile': 'max', 'tick_profile_s': None}}))
+    fast, _ = _fake_port(max_dir, sim_speed=S.from_config(
+        {'sim_speed': {'profile': 'max', 'tick_profile_s': None, 'trace_hz': None}}))
     a, b = _run(legacy, 'outbound', 30), _run(fast, 'outbound', 30)
     # Same physics stepping, same render decisions, same packets: the levers change no decision.
     assert legacy.world.renders == fast.world.renders
@@ -453,6 +460,35 @@ def test_port_max_profile_disables_legacy_pacer_and_pauses_idle_cameras(tmp_path
     port.begin_action('transfer', {})
     assert sorted(toggles[-2:]) == [('cart', True), ('source', True)]
     assert set(SENSING_ACTIONS) == set(S.HOST_COUPLED_ACTIONS)
+
+
+def test_trace_hz_is_opt_in_and_describe_names_it():
+    assert S.from_config({'sim_speed': {'profile': 'max'}}).trace_hz is None   # not in the profile
+    speed = S.from_config({'sim_speed': {'profile': 'max', 'trace_hz': 5.0}})
+    assert speed.trace_hz == 5.0 and 'trace_hz=5.0' in speed.describe()
+    assert 'trace_hz=None' in S.from_config({'sim_speed': {'profile': 'max'}}).describe()
+    with pytest.raises(ValueError, match='trace_hz'):
+        S.from_config({'sim_speed': {'trace_hz': 0}})
+
+
+def test_trace_hz_rate_limits_nav_trace_rows_but_keeps_tick1_and_stage_changes(tmp_path):
+    # Legacy (no trace_hz): a row every tick. trace_hz=10 at dt=1/60: a row ~ every 6 ticks, plus tick 1
+    # and every stage change. Same packets either way (the lever only drops diagnostic rows).
+    legacy, _ = _fake_port(tmp_path / 'legacy')
+    _run(legacy, 'couple', 30)
+    assert len(_trace(tmp_path / 'legacy')) == 30
+
+    fast, _ = _fake_port(tmp_path / 'fast', sim_speed=S.from_config({'sim_speed': {'trace_hz': 10.0}}))
+    fast.begin_action('couple', {})
+    [fast.advance(1 / 60) for _ in range(30)]
+    fast.begin_action('outbound', {})                                  # stage change forces a row
+    [fast.advance(1 / 60) for _ in range(6)]
+    rows = _trace(tmp_path / 'fast')
+    assert rows[0]['tick'] == 1                                        # tick 1 always written
+    assert 5 <= len(rows) <= 10                                        # far fewer than one-per-tick (36)
+    assert any(r['action'] == 'outbound' for r in rows)               # the stage boundary is not lost
+    ticks = [r['tick'] for r in rows]
+    assert ticks == sorted(ticks)                                      # monotonic, no duplicate rows
 
 
 def test_port_tick_profile_line(tmp_path, capsys):

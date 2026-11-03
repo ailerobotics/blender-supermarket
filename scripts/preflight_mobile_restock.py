@@ -82,6 +82,16 @@ def check(config):
                                evidence='actual CAD limits, declared spawn state and content hashes'))
         except Exception as exc:
             checks.append(dict(input='physical_assembly_inputs',status='invalid',reason=str(exc)))
+    # sim-realtime-factor-v1: a RAISED physics step (config['physics_dt']) must resolve to an in-range
+    # value, so a typo refuses the boot at preflight instead of at World construction. Absent => 1/60.
+    try:
+        from twin.restock.physics_step import resolve_dt, is_default
+        _dt=resolve_dt(config)
+        checks.append(dict(input='physics_dt',status='present',
+                           description='physics step (s)',path=None,
+                           dt=_dt,hz=1.0/_dt,raised=not is_default(_dt)))
+    except Exception as exc:
+        checks.append(dict(input='physics_dt',status='invalid',reason=str(exc)))
     missing=[c['input'] for c in checks if c['status']!='present']
     return dict(files_ready=not missing,unresolved_inputs=missing,checks=checks,
         input_file_sha256=hashes,physical_assembly_sha256=assembly,

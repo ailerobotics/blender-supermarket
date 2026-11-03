@@ -472,7 +472,18 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     if len(scenes)!=1:
         raise ValueError('one composed physics scene required')
     scene_physics=configure_scene_physics(stage,scenes[0])
-    world=World(physics_dt=1/60,rendering_dt=1/60,stage_units_in_meters=1.,physics_prim_path=scenes[0])
+    # sim-realtime-factor-v1: the physics step (seconds per tick) is config-driven. Absent
+    # config['physics_dt'] => resolve_dt returns exactly 1/60 => byte-identical World construction.
+    # A raised step cuts the NUMBER of ticks (hence wall cost) for a given span of sim time; it is
+    # gated behind a stated contact-tolerance check (twin.restock.physics_step). The mission loop
+    # (run_mobile_restock / the BT driver) resolves the SAME value from the SAME config and feeds it
+    # to tick()/advance(), and IsaacPort.advance asserts world.get_physics_dt()==dt, so a mis-thread
+    # fails the boot loudly. rendering_dt tracks physics_dt (the render decision is the port's render
+    # flag, not Isaac's own render cadence).
+    from .physics_step import resolve_dt as _resolve_physics_dt, describe as _describe_physics_dt
+    _physics_dt=_resolve_physics_dt(config)
+    print(_describe_physics_dt(_physics_dt),flush=True)
+    world=World(physics_dt=_physics_dt,rendering_dt=_physics_dt,stage_units_in_meters=1.,physics_prim_path=scenes[0])
     # World's PhysicsContext re-applies Isaac defaults at construction
     # (enable_stablization(False)), silently clobbering the USD attribute authored
     # above. Re-assert it through the context BEFORE the first reset so PhysX parses

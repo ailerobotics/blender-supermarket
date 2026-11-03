@@ -76,6 +76,10 @@ PROFILES = {
         'trace_probe': False,
         'bt_snapshot_hz': 5.0,
         'tick_profile_s': 10.0,
+        # trace_hz is NOT in the profile: the per-tick nav-trace.jsonl is read by offline graders
+        # (check_tow_traction --gpu-run single-tick-stop, caster/pose evidence) that need every tick, so
+        # rate-limiting it is an explicit opt-in (set trace_hz on top of the profile when a run does not
+        # need the per-tick trace), never the default.
     },
 }
 
@@ -92,6 +96,12 @@ class SimSpeed:
     trace_probe: bool = True
     bt_snapshot_hz: float | None = None
     tick_profile_s: float | None = None
+    # sim-realtime-factor-v1: bound the per-tick nav-trace.jsonl row to N Hz of SIM time (the row is a
+    # diagnostic no mission consumer reads back; a full run writes it every tick -- ~24 MB / ~24 k rows
+    # for a cold cycle -- which is JSON-serialise + an open/append per tick in the hot loop). None
+    # (default) => every tick => byte-identical trace. Tick 1 is always written (keeps nav-trace.err's
+    # first-tick probe), and the stride never skips a stage-change row.
+    trace_hz: float | None = None
 
     @property
     def active(self):
@@ -101,10 +111,11 @@ class SimSpeed:
     def describe(self):
         """One boot-log line naming every lever (so a wrongly-set switch is visible at boot)."""
         return ('SIM_SPEED profile=%s pause_idle_cameras=%s pause_unread_decode=%s pacing=%s '
-                'host_stage_max_ratio=%g walkthrough_hz=%s trace_probe=%s bt_snapshot_hz=%s tick_profile_s=%s'
+                'host_stage_max_ratio=%g walkthrough_hz=%s trace_probe=%s bt_snapshot_hz=%s '
+                'tick_profile_s=%s trace_hz=%s'
                 % (self.profile, self.pause_idle_cameras, self.pause_unread_decode, self.pacing,
                    self.host_stage_max_ratio, self.walkthrough_hz, self.trace_probe, self.bt_snapshot_hz,
-                   self.tick_profile_s))
+                   self.tick_profile_s, self.trace_hz))
 
 
 def _positive_or_none(name, value):
@@ -146,7 +157,8 @@ def from_config(config):
     return replace(speed, host_stage_max_ratio=float(ratio),
                    walkthrough_hz=_positive_or_none('walkthrough_hz', speed.walkthrough_hz),
                    bt_snapshot_hz=_positive_or_none('bt_snapshot_hz', speed.bt_snapshot_hz),
-                   tick_profile_s=_positive_or_none('tick_profile_s', speed.tick_profile_s))
+                   tick_profile_s=_positive_or_none('tick_profile_s', speed.tick_profile_s),
+                   trace_hz=_positive_or_none('trace_hz', speed.trace_hz))
 
 
 def summary_fields(config):
@@ -176,7 +188,8 @@ def _enabled(block):
     return bool(block.get('enabled')) if isinstance(block, dict) else bool(block)
 
 
-def unread_station_cameras(config, action, station_ids, location_cameras=None):
+def unread_station_cameras(config, action, station_ids, location_cameras=None, *,
+                           collect_ground_truth=False):
     """Station decode camera ids that no consumer reads in ``action`` under ``config`` (pure).
 
     * transfer -- the cart observation is derived from the cart / live carton prim, never a camera; the
@@ -185,7 +198,15 @@ def unread_station_cameras(config, action, station_ids, location_cameras=None):
       ``transfer_shelf_location`` (an unknown shelf camera keeps all -- fail safe).
     * verify -- ``verify_ground_truth`` reads the carton prim, no camera: every station camera; the
       camera verifier keeps them all.
-    * collect (and anything else) -- none: the collect capture keeps its cameras.
+    * collect -- the pick target normally comes from the fixed SOURCE camera, but ground-truth collect
+      (``RESTOCK_COLLECT_GROUND_TRUTH``, threaded as ``collect_ground_truth``) takes the pick from the
+      simulated carton pose and reads NO station camera at all (that workaround exists precisely because
+      the source decode was unreliable, PR #163). So under ground-truth collect every station camera is
+      unread -- the dominant waste on a cold cycle, where collect is ~60 % of the wall yet all three
+      2560x1920 decode cameras render on every walkthrough frame. A SENSOR collect keeps all its cameras
+      (we do not try to single out the source camera here); the on-demand resume is the safety net either
+      way, so a wrong guess costs one tick, never the run.
+    * anything else -- none.
     """
     ids = set(station_ids)
     cfg = config if isinstance(config, dict) else {}
@@ -195,6 +216,8 @@ def unread_station_cameras(config, action, station_ids, location_cameras=None):
         shelf_camera = (location_cameras or {}).get(cfg.get('transfer_shelf_location'))
         return ids - {shelf_camera} if shelf_camera in ids else set()
     if action == 'verify' and _enabled(cfg.get('verify_ground_truth')):
+        return ids
+    if action == 'collect' and collect_ground_truth:
         return ids
     return set()
 
