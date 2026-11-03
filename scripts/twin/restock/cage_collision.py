@@ -1,10 +1,14 @@
 """Opt-in, SIM-ONLY carton-vs-cage collision filter (labelled demo workaround; default OFF => byte-identical).
 
-Why (sim-video-preflight-review-s1 L1/L2): the collect place threads the carton's 0.6 m side between the
-rollwagen's front corner posts with 7.5 mm per side (post inner faces at |y| = 0.3075 in the cart body
-frame; the side-wall bars' inner faces at |y| = 0.314 leave 14 mm), and the transfer lift out of the same
-upper-shelf slot is a joint-space swing (``carry_lift_shape``) -- while the carton is deliberately NOT a
-cuMotion collision object, so the planner cannot keep it clear of the bars. Neither motion has ever run live.
+Why (sim-video-preflight-review-s1 L1/L2): the collect place threads the carton's longest side between the
+rollwagen's front corner posts (post inner faces at |y| = 0.3075 in the cart body frame => a 0.615 m mouth;
+the side-wall bars' inner faces at |y| = 0.314 => 0.628 m). sim-carton-size-v1 shrank the carton to
+0.45 x 0.30 x 0.18 m (``handling_unit.dimensions_m`` -- the single source of truth), so that side now clears
+by ~82.5 mm per side (was 7.5 mm for the 0.6 m carton) and the straight-line place/withdraw stay clear
+kinematically (scripts/check_cage_clearance.py). This filter is therefore no longer required for straight-line
+clearance; it stays available because the carton is deliberately NOT a cuMotion collision object (so the
+planner still cannot reason about the bars) and the transfer lift out of the upper-shelf slot is a joint-space
+swing (``carry_lift_shape``). Neither motion has ever run live.
 
 ``config['cage_collision'] = 'filtered'`` (the RUNTIME config: the Isaac process composes the stage) authors
 a ``UsdPhysics.FilteredPairsAPI`` on the handling unit (``/RestockScenario/HandlingUnit``) against every

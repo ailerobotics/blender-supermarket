@@ -123,7 +123,7 @@ def recompute(src_decision_log, out_dir, *, fps=15):
         if fr['stage'] == 'collect' and fr['step'] == 2:
             kx, ky, kz, kyaw = fr['carton']
             grasp_gaps.append(M.box_surface_gap(r['pad_xyz'], (kx, ky, kz), kyaw,
-                                                (0.6, 0.4, 0.16)))
+                                                (0.45, 0.3, 0.18)))
     grasp_mm = min(grasp_gaps) * 1000.0 if grasp_gaps else 0.0
     grasp_reason = ('contact gap <1 mm at grasp · sealed' if grasp_mm < 1.0
                     else f'contact gap {grasp_mm:.0f} mm at grasp')

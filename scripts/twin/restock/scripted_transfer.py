@@ -1122,7 +1122,7 @@ def build_scripted_transfer(*, assembly, config, scenario, output=None, environ=
                          "{'enabled': true, 'target': [x, y, z]} -- the ground-truth bay top; 'enabled' is what "
                          "makes the Mission accept the labelled ground-truth transfer evidence")
     unit = scenario.get('handling_unit') or {}
-    dims = unit.get('dimensions_m') or (0.6, 0.4, 0.16)
+    dims = unit.get('dimensions_m') or (0.45, 0.3, 0.18)
     opts = dict(config.get('scripted_transfer') or {})
     env = os.environ if environ is None else environ
     imported = Path(output) / 'mobile-import.urdf' if output is not None else None

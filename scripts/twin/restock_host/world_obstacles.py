@@ -173,7 +173,7 @@ def carton_arm_clearance(urdf_path: str, xrdf_path: str, config: Dict[str, float
     registration (add_frame + ignore, spheres supplied at runtime) is meant to close. Used to
     reproduce the run-250 finding and to prove the carry fold contact the self-collision must catch."""
     ac, ar, owners = arm_spheres_world(urdf_path, xrdf_path, config)
-    carton = carton or {'dims': [0.6, 0.4, 0.16]}
+    carton = carton or {'dims': [0.45, 0.3, 0.18]}
     cc, cr = carton_spheres_world(urdf_path, config, **carton)
     seat = set(seat_links)
     per_link, worst = {}, None
@@ -300,7 +300,7 @@ def _cli(argv=None):
     ap.add_argument('--config', action='append', default=[],
                     help='extra named config as name=j0,j1,... (6 arm joints in ur_ order); repeatable')
     ap.add_argument('--carton', action='store_true', help='also model the attached carton at the gripper')
-    ap.add_argument('--carton-dims', default='0.6,0.4,0.16')
+    ap.add_argument('--carton-dims', default='0.45,0.3,0.18')
     args = ap.parse_args(argv)
     specs = json.loads(Path(args.obstacles).read_text()).get('world_obstacles', [])
     boxes = boxes_from_specs(specs)
