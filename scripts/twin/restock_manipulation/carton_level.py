@@ -54,6 +54,13 @@ def _unit(v):
     return v / n
 
 
+def _wrap(a):
+    """Wrap an angle (rad) to (-pi, pi] so a +/-2*pi joint branch is not counted as a large
+    displacement when ranking level solutions by nearness to the reach shape."""
+    from twin.restock_manipulation.transfer_carry import wrap_angle
+    return wrap_angle(float(a))
+
+
 def up_axis_rpy(up):
     """(roll_deg, pitch_deg, tilt_deg) of a carton whose world up-axis is ``up`` (3-vector).
 
@@ -103,12 +110,23 @@ def angle_between_deg(a, b):
 def tool_rotation(robot, config, tool_link='ur_tool0', root='ur_base_link'):
     """World 3x3 rotation of ``tool_link`` at arm joint ``config`` (a dict joint_name->rad, or a
     6-vector in ARM order), via the Isaac-free URDF FK. Pure/CPU."""
+    return tool_transform(robot, config, tool_link, root)[:3, :3]
+
+
+def tool_transform(robot, config, tool_link='ur_tool0', root='ur_base_link'):
+    """World 4x4 transform of ``tool_link`` at arm joint ``config`` (dict or 6-vector in ARM order),
+    via the Isaac-free URDF FK. Pure/CPU. ``tool_rotation`` / ``tool_position`` are views of this."""
     from twin.urdf_probe import link_world_transforms
     cfg = _as_joint_map(config)
     world = link_world_transforms(robot, cfg, root=root)
     if tool_link not in world:
         raise ValueError(f'tool link {tool_link!r} not in the URDF FK ({len(world)} links)')
-    return np.asarray(world[tool_link][:3, :3], float)
+    return np.asarray(world[tool_link], float)
+
+
+def tool_position(robot, config, tool_link='ur_tool0', root='ur_base_link'):
+    """World position (3-vector) of ``tool_link`` origin at arm joint ``config``. Pure/CPU."""
+    return tool_transform(robot, config, tool_link, root)[:3, 3].copy()
 
 
 def _as_joint_map(config):
@@ -153,6 +171,7 @@ class LevelConfig:
     level_goals: bool = True
     trip: bool = True
     level_weld: bool = True
+    level_place: bool = True
     joints: tuple = DEFAULT_LEVEL_JOINTS
     tool_link: str = 'ur_tool0'
 
@@ -169,8 +188,8 @@ class LevelConfig:
 def resolve_level_config(spec):
     """Normalise a ``carton_level`` config value into a ``LevelConfig`` or ``None`` (off =>
     byte-identical). Accepts absent/None/False/'0'/'off' => None; True/'on'/{} => defaults; a
-    mapping with optional ``bound_deg``, ``level_goals``, ``trip``, ``level_weld``, ``joints``,
-    ``tool_link``. Raises on a malformed value so a typo fails loudly at boot."""
+    mapping with optional ``bound_deg``, ``level_goals``, ``trip``, ``level_weld``, ``level_place``,
+    ``joints``, ``tool_link``. Raises on a malformed value so a typo fails loudly at boot."""
     if spec is None or spec is False:
         return None
     if isinstance(spec, str):
@@ -187,7 +206,7 @@ def resolve_level_config(spec):
     kw = {}
     if 'bound_deg' in spec and spec['bound_deg'] is not None:
         kw['bound_deg'] = float(spec['bound_deg'])
-    for flag in ('level_goals', 'trip', 'level_weld'):
+    for flag in ('level_goals', 'trip', 'level_weld', 'level_place'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     if spec.get('joints'):
@@ -329,6 +348,151 @@ def interpolate_level(robot, start_config, goal_config, up_in_tool, *, n=8,
         out.append(level_config(robot, wp, up_in_tool, joints=joints, tool_link=tool_link,
                                 root=root, limits=limits))
     return out
+
+
+# ----------------------------------------------------- level-place IK (reach + level)
+
+# Seeds (ABSOLUTE wrist targets) the level-place IK restarts from. For a TOP-DOWN grasp the carton's
+# up-axis is FIXED off the tool approach axis, so a ~pi flip of wrist_3 (the flange roll about the
+# approach axis) turns an inverted hold upright WITHOUT moving the tool origin (tool0 sits on the
+# wrist_3 axis); the sweep lands a seed in the upright basin of every branch so the position+level
+# descent cannot hide the holdable level solution behind a reach-authored (inverted) start.
+_W3_SEED_GRID = tuple(np.linspace(-math.pi, math.pi, 9))
+
+
+def level_place_ik(robot, target_pos, up_in_tool, seed_config, *, joints=None,
+                   tool_link='ur_tool0', root='ur_base_link', limits=None, max_iter=200,
+                   pos_tol=1e-3, tilt_tol_deg=0.05, w_ori=1.0):
+    """Re-plan a carried place pose that is BOTH at ``target_pos`` (tool origin in ``root``) AND level
+    (carton up-axis world +Z) -- the fix PR 287 flagged as a follow-up: wrist-ONLY leveling of a
+    reach-authored place shape holds the attitude but shifts the TCP ~0.2-0.5 m and loses the deck
+    reach. This is a FULL-DOF (shoulder + elbow + wrist) damped-least-squares IK over a stacked
+    residual ``[tool_pos - target_pos (3); w_ori*(up_world - world_up) (3)]`` with multi-start restarts
+    over the attitude wrists, so it moves whatever joints are needed to reach the deck AND stay parallel
+    to the ground. ``seed_config`` is the reach-validated place shape (dict or 6-vector); its TCP is the
+    reach the solution must preserve (pass ``target_pos = tool_position(robot, seed_config)``). Returns
+    a joint map (ARM order). Prefers a solution that is level, reaches, is in ``limits``, in the clear
+    carry wrist region, and nearest the seed. Raises ValueError when no in-limits pose reaches both
+    within tolerance (genuinely unreachable-while-level -- the caller fails honestly / the CARTON_TILT
+    trip owns it)."""
+    from twin.restock_manipulation.cad_tool import ARM_JOINTS
+    cfg = _as_joint_map(seed_config)
+    adj = list(joints) if joints is not None else list(ARM_JOINTS)
+    adj = [j for j in adj if j in cfg]
+    if not adj:
+        raise ValueError('no adjustable joints present in the seed config')
+    u = _unit(up_in_tool)
+    tgt = np.asarray(target_pos, float)[:3]
+    idx = [ARM_JOINTS.index(j) for j in adj]
+
+    def state(cfgmap):
+        T = tool_transform(robot, cfgmap, tool_link, root)
+        return T[:3, 3], T[:3, :3] @ u
+
+    def residual(cfgmap):
+        p, uw = state(cfgmap)
+        return np.concatenate([(p - tgt), w_ori * (uw - WORLD_UP)])
+
+    def clamp(cfgmap):
+        if limits:
+            for j in adj:
+                if j in limits:
+                    lo, hi = limits[j]
+                    cfgmap[j] = min(max(cfgmap[j], lo), hi)
+        return cfgmap
+
+    def descend(start):
+        m = clamp(dict(start))
+        step_fd = 1e-5
+        for _ in range(int(max_iter)):
+            r0 = residual(m)
+            if np.linalg.norm(r0[:3]) <= pos_tol and tilt_from(m) <= tilt_tol_deg:
+                break
+            J = np.zeros((6, len(adj)))
+            for k, j in enumerate(adj):
+                m2 = dict(m)
+                m2[j] = m[j] + step_fd
+                J[:, k] = (residual(m2) - r0) / step_fd
+            dq = -np.linalg.solve(J.T @ J + 1e-6 * np.eye(len(adj)), J.T @ r0)
+            mx = float(np.max(np.abs(dq))) if dq.size else 0.0
+            if mx > 0.3:
+                dq *= 0.3 / mx
+            for k, j in enumerate(adj):
+                m[j] = m[j] + float(dq[k])
+            clamp(m)
+        return m
+
+    def tilt_from(cfgmap):
+        _, uw = state(cfgmap)
+        return math.degrees(math.acos(max(-1.0, min(1.0, float(uw[2])))))
+
+    def in_limits(cfgmap):
+        if not limits:
+            return True
+        return all(lo - 1e-9 <= cfgmap[j] <= hi + 1e-9
+                   for j in adj if j in limits for lo, hi in [limits[j]])
+
+    # Seeds: the reach shape first (fast, nearest the plan), then the wrist_3 flange-roll sweep (which
+    # flips an inverted hold upright without moving the origin) x the wrist_1 attitude sweep.
+    seeds = [{}]
+    w3 = 'ur_wrist_3_joint'
+    w1 = 'ur_wrist_1_joint'
+    if w3 in cfg:
+        for a in _W3_SEED_GRID:
+            seeds.append({w3: a})
+    if w3 in cfg and w1 in cfg:
+        for a in _W3_SEED_GRID[::2]:
+            for b in (-math.pi / 2, 0.0, math.pi / 2):
+                seeds.append({w3: a, w1: cfg[w1] + b})
+
+    # wrist_3 is the flange ROLL about the tool approach axis: rolling it does NOT move the tool
+    # origin and (for a top grasp) flips an inverted hold upright, while leaving every upstream link
+    # -- and thus the reach shape's self-collision / cage / deck-reach validation -- untouched. So a
+    # wrist_3 change is near-free; weight it ~0 in the "nearest the reach shape" metric so the solver
+    # prefers the minimal flange-roll level solution ON the validated arm branch over a far branch
+    # that happens to be numerically closer in raw joint space.
+    _w3 = 'ur_wrist_3_joint'
+    weight = {j: (0.02 if j == _w3 else 1.0) for j in adj}
+
+    best = None  # (rank, cfgmap)
+    for seed in seeds:
+        start = dict(cfg)
+        start.update(seed)
+        sol = descend(start)
+        r = residual(sol)
+        pos_err = float(np.linalg.norm(r[:3]))
+        tilt = tilt_from(sol)
+        if pos_err <= pos_tol and tilt <= tilt_tol_deg and in_limits(sol):
+            disp = sum(weight[j] * (_wrap(sol[j] - cfg[j])) ** 2 for j in adj)
+            rank = (0 if _in_clear_wrist(sol) else 1, disp)
+            if best is None or rank < best[0]:
+                best = (rank, sol)
+            if rank[0] == 0 and disp < 0.25:
+                break
+    if best is not None:
+        return best[1]
+    raise ValueError(f'no level place solution at target {tgt.round(4).tolist()} within '
+                     f'{pos_tol:.3f} m / {tilt_tol_deg:.2f} deg (joints {adj})')
+
+
+def _in_clear_wrist(cfgmap, wrist1_cap=0.65, wrist2_min=0.0):
+    """Whether a config stays in the bench-proven clear carry wrist region (wrist_1 <= cap,
+    wrist_2 >= min, wrapped to (-pi, pi]) so the level pose is not driven into the
+    ur_wrist_2-vs-forearm self-collision stop. Used only to RANK level-place solutions."""
+    from twin.restock_manipulation.transfer_carry import wrap_angle
+    return (wrap_angle(cfgmap.get('ur_wrist_1_joint', 0.0)) <= wrist1_cap + 1e-6
+            and wrap_angle(cfgmap.get('ur_wrist_2_joint', 0.0)) >= wrist2_min - 1e-6)
+
+
+def level_preserve_tcp(robot, config, up_in_tool, *, joints=None, tool_link='ur_tool0',
+                       root='ur_base_link', limits=None, **kw):
+    """Re-plan ``config`` to keep the carton level WHILE preserving its tool TCP position (the reach).
+    The in-place counterpart of ``level_place_ik`` for a reach-authored place SHAPE whose TCP is
+    already correct but whose attitude is off level (e.g. collect_place_preplace_shape holds a
+    top-grasped carton inverted). Returns a level joint map at the same TCP; raises if none exists."""
+    target = tool_position(robot, config, tool_link, root)
+    return level_place_ik(robot, target, up_in_tool, config, joints=joints, tool_link=tool_link,
+                          root=root, limits=limits, **kw)
 
 
 # --------------------------------------------------------------------- trip

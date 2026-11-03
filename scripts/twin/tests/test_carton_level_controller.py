@@ -66,3 +66,109 @@ def test_trip_disabled_flag_suppresses_trip_but_keeps_leveling():
     c._capture_level_up(WELD)
     assert c._carton_tilt_trip(TILTED_FOLD) is None     # trip off
     assert c._level_carried_goal(TILTED_FOLD, WELD) != TILTED_FOLD  # leveling still on
+
+
+# ---------------------------------------------- level place-on-cart wiring (sim-carton-level-place-on-cart-v1)
+
+# The TOP-DOWN collect grasp weld + the real reach-authored place standoff (holds the carton ~180 deg off).
+TOP_GRASP_WELD = (-math.pi, -2.2, 2.2, -math.pi, 0.0, 0.0)
+PLACE_PREPLACE = (0.093, -1.91, 2.014, -0.103, 1.664, 0.0)
+
+
+def test_level_place_goal_off_is_passthrough():
+    c = _ctrl(carry_wrist1_cap=0.65, carry_wrist2_min=0.0)
+    assert c._carton_level is None
+    assert c._level_place_goal(PLACE_PREPLACE, TOP_GRASP_WELD) == PLACE_PREPLACE
+
+
+@need_urdf
+def test_level_place_flag_off_is_passthrough_even_with_carton_level_on():
+    c = _ctrl(carton_level=cl.resolve_level_config({'level_place': False}), fk_urdf=URDF,
+              carry_wrist1_cap=0.65, carry_wrist2_min=0.0)
+    c._capture_level_up(TOP_GRASP_WELD)
+    assert c._level_place_goal(PLACE_PREPLACE, TOP_GRASP_WELD) == PLACE_PREPLACE
+
+
+@need_urdf
+def test_level_place_goal_levels_the_standoff_preserving_reach():
+    c = _ctrl(carton_level=cl.resolve_level_config(True), fk_urdf=URDF,
+              carry_wrist1_cap=0.65, carry_wrist2_min=0.0)
+    robot = c._fk_model()
+    c._capture_level_up(TOP_GRASP_WELD)
+    up = c._carton_up_in_tool
+    pad = 'gripper_pad_tcp'                                           # the reach frame (port IK tcp)
+    assert cl.carried_rpy(robot, list(PLACE_PREPLACE), up)[2] > 175   # reach shape holds it inverted
+    leveled = c._level_place_goal(PLACE_PREPLACE, TOP_GRASP_WELD)
+    assert leveled != PLACE_PREPLACE
+    roll, pitch, _ = cl.carried_rpy(robot, list(leveled), up)
+    assert abs(roll) < 0.1 and abs(pitch) < 0.1                       # level
+    assert cl.tool_position(robot, list(leveled), pad) == pytest.approx(
+        cl.tool_position(robot, list(PLACE_PREPLACE), pad), abs=3e-3)  # SAME deck reach (pad TCP)
+
+
+@need_urdf
+def test_level_place_goal_reaches_a_lowered_sensed_target():
+    c = _ctrl(carton_level=cl.resolve_level_config(True), fk_urdf=URDF,
+              carry_wrist1_cap=0.65, carry_wrist2_min=0.0)
+    robot = c._fk_model()
+    c._capture_level_up(TOP_GRASP_WELD)
+    up = c._carton_up_in_tool
+    pad = 'gripper_pad_tcp'
+    standoff = c._level_place_goal(PLACE_PREPLACE, TOP_GRASP_WELD)
+    target = list(cl.tool_position(robot, list(standoff), pad))       # the sensed deck is a pad-TCP pose
+    target[2] -= 0.12
+    setdown = c._level_place_goal(standoff, TOP_GRASP_WELD, target_pos=target)
+    assert cl.tool_position(robot, list(setdown), pad) == pytest.approx(target, abs=3e-3)  # reaches the deck
+    roll, pitch, _ = cl.carried_rpy(robot, list(setdown), up)
+    assert abs(roll) < 0.1 and abs(pitch) < 0.1                       # level
+
+
+@need_urdf
+def test_level_place_goal_unsolved_returns_goal_for_the_trip(capsys):
+    c = _ctrl(carton_level=cl.resolve_level_config(True), fk_urdf=URDF,
+              carry_wrist1_cap=0.65, carry_wrist2_min=0.0)
+    c._capture_level_up(TOP_GRASP_WELD)
+    # an unreachable target: the helper must not crash and must return the seed (CARTON_TILT trip owns it)
+    out = c._level_place_goal(PLACE_PREPLACE, TOP_GRASP_WELD, target_pos=(5.0, 5.0, 5.0))
+    assert out == PLACE_PREPLACE
+    assert 'CARTON_LEVEL_UNSOLVED' in capsys.readouterr().out
+
+
+@need_urdf
+def test_end_to_end_collect_place_levels_the_preplace_standoff_and_reaches_verify():
+    """End-to-end wiring: driving the REAL collect reposition place with carton_level ON issues a LEVELED
+    preplace standoff (not the raw reach shape) and still completes to verify. trip=False so the fixture's
+    constant measured joints do not false-trip the release level gate (the trip is unit-tested above)."""
+    from twin.tests import test_restock_manipulation as T
+    c = T.make_controller(
+        'collect', transport_joints=T._SL_STOW, staged_cart_swing=True,
+        cart_pan_joint0=-0.8605, cart_tuck_shape=T._SL_TUCK, reposition_before_place=True,
+        collect_place_preplace_shape=T._SL_PREPLACE_SHAPE, collect_place_wrist_guard=True,
+        collect_place_straight_line=True,
+        carton_level=cl.resolve_level_config({'trip': False}), fk_urdf=URDF,
+        carry_wrist1_cap=0.65, carry_wrist2_min=0.0)[0]
+    m = c.motion
+    robot = c._fk_model()
+    c._capture_level_up(TOP_GRASP_WELD)              # the real top-down grasp up-axis (idempotent)
+    up = c._carton_up_in_tool
+    assert cl.carried_rpy(robot, list(T._SL_PREPLACE_SHAPE), up)[2] > 175   # raw shape holds it inverted
+    _by_phase, seq, jg_by_phase = T._drive_collect_place(c, m)
+    assert c.phase == 'verify', seq
+    preplace_goal = jg_by_phase['preplace']['goal']
+    assert list(preplace_goal) != list(T._SL_PREPLACE_SHAPE)               # the standoff was re-planned level
+    roll, pitch, _ = cl.carried_rpy(robot, list(preplace_goal), up)
+    assert abs(roll) < 0.1 and abs(pitch) < 0.1                            # ... and it is level
+    assert jg_by_phase['preplace']['straight_line'] is False               # standoff stays collision-aware
+    # same deck reach preserved (pad TCP within a few mm of the raw reach shape)
+    assert cl.tool_position(robot, list(preplace_goal), 'gripper_pad_tcp') == pytest.approx(
+        cl.tool_position(robot, list(T._SL_PREPLACE_SHAPE), 'gripper_pad_tcp'), abs=5e-3)
+
+
+@need_urdf
+def test_end_to_end_collect_place_off_is_byte_identical_preplace():
+    """carton_level OFF: the collect place preplace is the raw reach shape, byte-identical to the baseline."""
+    from twin.tests import test_restock_manipulation as T
+    c, m = T._collect_place_controller(straight_line=True)
+    assert c._carton_level is None
+    _by_phase, _seq, jg_by_phase = T._drive_collect_place(c, m)
+    assert list(jg_by_phase['preplace']['goal']) == list(T._SL_PREPLACE_SHAPE)

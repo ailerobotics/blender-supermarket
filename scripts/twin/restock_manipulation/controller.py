@@ -109,8 +109,13 @@ class TransferController:
                  transfer_pick_wrist_guard: bool = False,
                  transfer_service_carry: bool = False,
                  esdf_boot_ack_grace_s: float = 0.0,
-                 carton_level=None, fk_urdf=None):
+                 carton_level=None, fk_urdf=None, place_tcp_link='gripper_pad_tcp'):
         self.steady_clock=steady_clock
+        # sim-carton-level-place-on-cart-v1: the FK link the collect place-on-cart reach targets -- the
+        # motion port's IK tcp ('gripper_pad_tcp'), NOT ur_tool0 (~0.27 m apart). The level place IK must
+        # target this frame for POSITION so the leveled standoff/set-down reach the sensed deck pose; its
+        # rotation equals ur_tool0's (rigid translation), so the carton attitude (leveling) is identical.
+        self._place_tcp_link = str(place_tcp_link)
         # collect-gt (demo, opt-in, default off): GROUND-TRUTH COLLECT. Accept the collect SOURCE observation
         # labelled 'ground_truth' (the controlled carton asset's simulated pose, served Isaac-side when the
         # source camera refuses every frame) and let it stand in for the fm449 clean-camera gate, recording
@@ -886,6 +891,76 @@ class TransferController:
             return goal
         return tuple(float(leveled[j]) for j in ARM_JOINTS)
 
+    def _place_level_limits(self):
+        """Joint limits for the level place IK: the clear carry wrist region (carry_wrist1_cap /
+        carry_wrist2_min, so the level pose stays off the ur_wrist_2-vs-forearm stop) plus the arm's
+        elbow range, so a level re-plan can never drive a joint out of its envelope."""
+        big = 2 * math.pi
+        limits = {'ur_elbow_joint': (0.1, math.pi)}
+        if self.carry_wrist1_cap is not None:
+            limits['ur_wrist_1_joint'] = (-big, float(self.carry_wrist1_cap))
+        if self.carry_wrist2_min is not None:
+            limits['ur_wrist_2_joint'] = (float(self.carry_wrist2_min), big)
+        return limits
+
+    def _level_place_goal(self, goal, measured, target_pos=None):
+        """sim-carton-level-place-on-cart-v1: a LEVEL place config that keeps the carton parallel to the
+        ground AND preserves the deck reach -- the fix PR 287 flagged. The place-on-cart standoff
+        (collect_place_preplace_shape) holds the TOP-grasped carton ~180 deg off level; wrist-ONLY
+        leveling would hold the attitude but shift the TCP and lose the deck. This re-plans the FULL arm
+        (a near-free wrist_3 flange roll turns the inverted hold upright without moving the origin), so
+        the standoff keeps its reach-validated TCP and the carton is level. ``target_pos`` None =>
+        preserve the goal's own TCP (the fixed standoff shape); a 3-vector => reach that sensed set-down
+        position (the deck) while level. Off / no FK / no captured up-axis / non-6 goal => ``goal``
+        unchanged (byte-identical). No level solution in the clear region => CARTON_LEVEL_UNSOLVED, return
+        ``goal`` (the CARTON_TILT trip then names and fails it -- never a silent tilt)."""
+        if (self._carton_level is None or not self._carton_level.level_goals
+                or not self._carton_level.level_place or len(goal) != 6):
+            return goal
+        robot = self._fk_model()
+        if robot is None:
+            return goal
+        self._capture_level_up(measured)
+        if self._carton_up_in_tool is None:
+            return goal
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+        try:
+            leveled = self._solve_level_place(robot, list(goal), target_pos)
+        except ValueError as exc:
+            print('CARTON_LEVEL_UNSOLVED phase=%s: %s (proceeding unleveled; CARTON_TILT trip owns it)'
+                  % (self.phase, exc), flush=True)
+            return goal
+        return tuple(float(leveled[j]) for j in ARM_JOINTS)
+
+    def _place_fk_link(self, robot, goal):
+        """The FK link the place reach targets: the motion port's IK tcp (gripper_pad_tcp) when present in
+        the FK URDF, else the carton_level attitude tool_link. Its rotation equals ur_tool0's (rigid
+        translation), so leveling the up-axis on it is identical."""
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+        from twin.urdf_probe import link_world_transforms
+        try:
+            links = link_world_transforms(robot, dict(zip(ARM_JOINTS, [float(v) for v in goal])),
+                                          root='ur_base_link')
+            if self._place_tcp_link in links:
+                return self._place_tcp_link
+        except Exception:  # noqa: BLE001 -- FK probe is advisory; fall back to the attitude link
+            pass
+        return self._carton_level.tool_link
+
+    def _solve_level_place(self, robot, goal, target_pos):
+        """The level-place IK in the port's reach frame. ``target_pos`` None => preserve the goal's own TCP
+        (the standoff); a 3-vector => reach that sensed set-down position while level. Raises ValueError
+        when no clear level solution exists (the caller decides: standoff -> fail honestly, set-down ->
+        fall through to the unleveled place)."""
+        from twin.restock_manipulation import carton_level as cl
+        limits = self._place_level_limits() or None
+        tcp_link = self._place_fk_link(robot, goal)
+        if target_pos is None:
+            return cl.level_preserve_tcp(robot, goal, self._carton_up_in_tool,
+                                         tool_link=tcp_link, limits=limits)
+        return cl.level_place_ik(robot, target_pos, self._carton_up_in_tool, goal,
+                                 tool_link=tcp_link, limits=limits)
+
     def _carton_tilt_trip(self, measured):
         """CARTON_TILT trip message when the welded carton (this carried pose) leaves level by more
         than the bound, else None. No-op when off / trip disabled / no FK / up-axis not yet captured."""
@@ -1441,14 +1516,17 @@ class TransferController:
                 if (self.phase == 'preplace' and not self.cart_cage_place
                         and getattr(self, 'operation', None) == 'collect'
                         and self.collect_place_preplace_shape is not None):
-                    # sim-carton-tilt-trip-margin-v1: the place-on-cart standoff is NOT leveled here.
-                    # It is a precision reach whose TCP must match the sensed deck standoff; a wrist-only
-                    # level re-solve for the top-down grasp shifts the TCP ~0.47 m and loses that reach
-                    # (CPU-measured, data/sim-carton-tilt-trip-margin-v1). A level place-on-cart needs a
-                    # re-planned level place shape (shoulder/elbow, not wrist-only) + in-sim deck-reach
-                    # validation -- flagged as the integration/GPU follow-up. The confirmed coldwin24/24b
-                    # failure was the LIFT; the lift + tuck/pan carry fold are leveled (fixed solver).
-                    self.motion.begin_joint_goal(self.collect_place_preplace_shape, s.joint_positions,
+                    # sim-carton-level-place-on-cart-v1: level the place-on-cart standoff. The
+                    # reach-authored collect_place_preplace_shape holds the TOP-grasped carton ~180 deg off
+                    # level (the follow-up PR 287 flagged). PR 287's note that wrist-only leveling loses the
+                    # deck reach (TCP shift ~0.47 m) still holds -- so this re-plans the FULL arm while
+                    # PRESERVING the TCP: a near-free wrist_3 flange roll turns the inverted hold upright
+                    # without moving the origin, keeping the shape's reach-validated TCP and self-collision
+                    # branch. Off / level_place off => the shape is unchanged (byte-identical); if no clear
+                    # level solution exists it proceeds unleveled and the CARTON_TILT trip owns it.
+                    preplace_goal = self._level_place_goal(self.collect_place_preplace_shape,
+                                                           s.joint_positions)
+                    self.motion.begin_joint_goal(preplace_goal, s.joint_positions,
                                                  slow=True, goal_tol=0.2)
                     self.issued = True
                     return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
@@ -1494,6 +1572,33 @@ class TransferController:
                                                  straight_line=True)
                     self.issued = True
                     return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+                # sim-carton-level-place-on-cart-v1: LEVEL place descent for the collect deck place. Lower
+                # the carton onto the SENSED deck slot while keeping it parallel to the ground -- a single
+                # straight-line (PR 268) joint descent from the level standoff to a FULL-arm level IK
+                # solution at the sensed place TCP (reach + level), seeded off the leveled standoff so the
+                # descent stays on the reach-validated branch. The preplace already leveled the standoff;
+                # this holds level through set-down (the whole move stays < 0.1 deg off level, CPU-proven).
+                # If no clear level solution reaches the sensed deck, fall through to the existing (unleveled)
+                # straight-line place and let the CARTON_TILT trip own it -- never set down in the air.
+                if (self.phase == 'place' and self._collect_deck_place()
+                        and self._carton_level is not None and self._carton_level.level_goals
+                        and self._carton_level.level_place and self._carton_up_in_tool is not None
+                        and self.collect_place_preplace_shape is not None and 'place' in self.poses):
+                    robot = self._fk_model()
+                    if robot is not None:
+                        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+                        seed = self._level_place_goal(self.collect_place_preplace_shape, s.joint_positions)
+                        target_pos = tuple(float(c) for c in self.poses['place'][:3])
+                        try:
+                            lev = self._solve_level_place(robot, list(seed), target_pos)
+                            setdown = tuple(float(lev[j]) for j in ARM_JOINTS)
+                            self.motion.begin_joint_goal(setdown, s.joint_positions, straight_line=True,
+                                                         slow=True, goal_tol=0.12)
+                            self.issued = True
+                            return self._result(({'kind': 'move', 'pose': self.poses['place']},))
+                        except ValueError as exc:
+                            print('CARTON_LEVEL_UNSOLVED phase=place: %s (unleveled straight-line place; '
+                                  'CARTON_TILT trip owns it)' % exc, flush=True)
                 straight_contact = self.phase == 'contact' and self.contact_straight_line
                 # Cart-cage open-face place: the INSERT (place) and empty-handed RETREAT are straight-line
                 # moves THROUGH the single open +x face (begin(straight_line=True): collision-off seeded
@@ -1698,6 +1803,17 @@ class TransferController:
                           flush=True)
                     if risen < self.grasp_track_m:
                         return self._fail('grasp not confirmed: carton did not track the tool through the lift')
+                # sim-carton-level-place-on-cart-v1: release only after a LEVEL set-down. Before advancing
+                # place -> release, confirm the carried carton is parallel to the ground at the completed
+                # place, so a tilted set-down fails by name instead of opening the gripper on an off-level
+                # carton. Inert when carton_level / trip is off, or the up-axis was never captured.
+                if (self.phase == 'place' and self._carton_level is not None
+                        and self._carton_level.trip and self._carton_up_in_tool is not None):
+                    tilt_msg = self._carton_tilt_trip(s.joint_positions)
+                    if tilt_msg is not None:
+                        return self._fail('place not level before release: ' + tilt_msg)
+                    print('PLACE_LEVEL_CONFIRMED phase=place (carton parallel to the ground before release)',
+                          flush=True)
                 self._transition(next_phase[self.phase])
                 return self._result()
             # Contact-terminated grasp descent (firstmate key contact-move-termination): while the
