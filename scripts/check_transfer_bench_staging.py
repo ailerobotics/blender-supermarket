@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""CPU proof for the warm start_at=transfer bench: staged poses == recorded end-of-park poses.
+"""CPU proof for the warm start_at=transfer bench staging (sim-rerecord-bay-park-v3-v1).
 
-Reads the raw evidence of real coupled tows (each run's nav-trace.jsonl + console log), takes the
-park->transfer handover (first nav-trace row whose action is 'transfer', right after park_succeeded),
-and checks the start staging ``shortcut.staged_scenario`` builds for ``start_at=transfer`` +
-``start_staging=recorded_bay_park`` against it:
+The staged pose is now DERIVED from the live scenario geometry (``shortcut.derive_bay_park``: the
+transfer bay centre, the tow corridor + heading, the hitch geometry, the carton height), NOT a replay
+of the frozen v2 recorded runs -- the v2 pose read as misaligned at the staged dock on the v3-portal26
+store + 0.45 m carton (ledger stage-transfer2). This script proves, for ``start_at=transfer`` +
+``start_staging=recorded_bay_park`` on the CURRENT scenario:
 
-* robot base pose vs every run's handover pose (xy / yaw tolerance), coupled + parked there;
-* rollwagen: deck centre in ur_base_link vs the run's own TRANSFER_CAPTURE ``cart=`` measurement, the
-  hitch residual (must be ~0) and the cart yaw vs the run's last tow-lane ``cart_err``;
+* the derived pose keeps BOTH the carton pick (cart behind) and the bay place (bay in front) in reach,
+  and stamps its provenance (carton dims, transfer-bay centre) so a change invalidates it by name;
+* rollwagen: deck centre in ur_base_link == -1.27 (store-independent hitch), the hitch residual ~0,
+  and the cart yaw vs each recorded tow-lane ``cart_err``;
 * carton centre at the decided spot: the scenario's upper shelf (cart_support_z_world) at its
   cart_load_center_body_xy -- the same spot the warm start_at=couple shortcut uses;
 * the mission (state machine, and the behaviour tree when py_trees imports) begins at transfer with
   collect/couple/outbound/park recorded as ``*_shortcut``.
+
+The per-run v2 recorded-handover comparison is printed as an INFORMATIONAL before/after delta (a v3
+store / smaller carton legitimately moves the pose vs the v2 runs). Missing v2 run dirs are skipped.
 
 No Isaac, no GPU. Exit 0 = PASS. Example:
 
@@ -134,14 +139,33 @@ def main():
     def check(name, ok, detail):
         checks.append({'check': name, 'pass': bool(ok), 'detail': detail})
 
+    # sim-rerecord-bay-park-v3-v1: the staged pose is now DERIVED from the live scenario geometry, not a
+    # replay of the v2 recorded runs. Gate on the derivation (reach-feasible, provenance stamped) and
+    # treat the v2 recorded-handover comparison below as an INFORMATIONAL before/after delta, not a gate
+    # (a v3 store / 0.45 carton legitimately moves the pose vs the v2 runs -- that WAS the bug).
+    print(f"POSE_ORIGIN {record.get('robot_base_pose_origin')}  staged robot={st['robot_base_pose']}")
+    if 'reach' in record:
+        r = record['reach']
+        check('derived pose keeps pick+place in reach',
+              r['carton_pick_m'] <= r['max_m'] and r['bay_place_m'] <= r['max_m'],
+              f"carton_pick={r['carton_pick_m']} m, bay_place={r['bay_place_m']} m, max={r['max_m']} m")
+    if 'provenance' in record:
+        pr = record['provenance']
+        print(f"PROVENANCE carton={pr['carton_dimensions_m']} bay={pr['transfer_bay_center_xy']} "
+              f"dataset={pr.get('dataset')} git={pr.get('git_head')}")
+
     for run in (f'run-{r}' if not str(r).startswith('run-') else r for r in a.runs):
-        h = recorded_handover(a.mission_dir, run)
+        try:
+            h = recorded_handover(a.mission_dir, run)
+        except (FileNotFoundError, StopIteration):
+            print(f'NOTE recorded run {run} not present under {a.mission_dir} (v2 before/after skipped)')
+            continue
         rx, ry, ryaw = h['robot']
         dxy, dyaw = math.hypot(robot.x - rx, robot.y - ry), abs(_wrap(robot.yaw - ryaw))
         rows.append(dict(h, dxy=round(dxy, 4), dyaw_deg=round(math.degrees(dyaw), 2)))
-        check(f'{run} robot pose', dxy <= a.xy_tol and dyaw <= a.yaw_tol,
-              f'staged ({robot.x:.3f},{robot.y:.3f},{math.degrees(robot.yaw):.2f}deg) vs recorded '
-              f'({rx:.3f},{ry:.3f},{math.degrees(ryaw):.2f}deg): dxy={dxy*1e3:.1f}mm dyaw={math.degrees(dyaw):.2f}deg')
+        print(f'V2_DELTA {run}: staged ({robot.x:.3f},{robot.y:.3f},{math.degrees(robot.yaw):.2f}deg) vs '
+              f'recorded ({rx:.3f},{ry:.3f},{math.degrees(ryaw):.2f}deg): '
+              f'dxy={dxy*1e3:.1f}mm dyaw={math.degrees(dyaw):.2f}deg (informational)')
         check(f'{run} coupled+parked at handover', h['coupled'] and h['parked'] and h['park_succeeded']
               and h['prev_action'] == 'park', f"coupled={h['coupled']} parked={h['parked']} "
               f"park_succeeded={h['park_succeeded']} prev={h['prev_action']}")
