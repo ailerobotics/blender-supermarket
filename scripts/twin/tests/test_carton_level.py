@@ -177,3 +177,88 @@ def test_interpolate_level_keeps_every_waypoint_level():
     for wp in wps:
         roll, pitch, _ = cl.carried_rpy(r, wp, u)
         assert abs(roll) < 0.2 and abs(pitch) < 0.2
+
+
+# -------------------------------------------- level-place IK (reach + level), sim-carton-level-place-on-cart-v1
+
+# The TOP-DOWN collect grasp up-axis (PR 287): tool0 +Y points world-down, so the level carton's
+# up-axis is [0,-1,0] in the tool frame. The real reach-authored place-on-cart standoff.
+TOP_GRASP_WELD = (-math.pi, -2.2, 2.2, -math.pi, 0.0, 0.0)
+COLLECT_PLACE_PREPLACE = [0.093, -1.91, 2.014, -0.103, 1.664, 0.0]
+
+
+@need_urdf
+def test_tool_position_matches_fk_transform():
+    from twin.urdf_probe import parse_urdf
+    r = parse_urdf(URDF)
+    T = cl.tool_transform(r, COLLECT_PLACE_PREPLACE)
+    assert cl.tool_position(r, COLLECT_PLACE_PREPLACE) == pytest.approx(T[:3, 3], abs=1e-9)
+    assert np.allclose(cl.tool_rotation(r, COLLECT_PLACE_PREPLACE), T[:3, :3])
+
+
+@need_urdf
+def test_reach_authored_place_standoff_holds_the_top_grasped_carton_inverted():
+    from twin.urdf_probe import parse_urdf
+    r = parse_urdf(URDF)
+    u = cl.carton_up_in_tool(cl.tool_rotation(r, list(TOP_GRASP_WELD)))
+    assert u == pytest.approx([0, -1, 0], abs=1e-3)      # top-down grasp up-axis
+    tilt = cl.carried_rpy(r, COLLECT_PLACE_PREPLACE, u)[2]
+    assert tilt > 175                                     # ~180 deg: a real inverted hold, not an artifact
+
+
+@need_urdf
+def test_level_preserve_tcp_levels_the_standoff_at_the_same_reach():
+    from twin.urdf_probe import parse_urdf
+    from twin.tools.carton_level_bench import clear_wrist_limits
+    r = parse_urdf(URDF)
+    u = cl.carton_up_in_tool(cl.tool_rotation(r, list(TOP_GRASP_WELD)))
+    tcp0 = cl.tool_position(r, COLLECT_PLACE_PREPLACE)
+    lev = cl.level_preserve_tcp(r, COLLECT_PLACE_PREPLACE, u, limits=clear_wrist_limits())
+    levv = [lev[j] for j in ARM_JOINTS]
+    roll, pitch, _ = cl.carried_rpy(r, levv, u)
+    assert abs(roll) < 0.1 and abs(pitch) < 0.1          # level
+    assert cl.tool_position(r, levv) == pytest.approx(tcp0, abs=1e-3)   # SAME reach (TCP preserved)
+    # the non-wrist_3 joints barely move (same arm branch -> inherits the reach/self-collision validation);
+    # the leveling is a wrist_3 flange roll
+    for k in range(5):
+        assert abs(cl._wrap(levv[k] - COLLECT_PLACE_PREPLACE[k])) < math.radians(2)
+    assert abs(cl._wrap(levv[5] - COLLECT_PLACE_PREPLACE[5])) > math.radians(90)
+
+
+@need_urdf
+def test_level_place_ik_reaches_a_lowered_deck_target_while_level():
+    from twin.urdf_probe import parse_urdf
+    from twin.tools.carton_level_bench import clear_wrist_limits
+    r = parse_urdf(URDF)
+    u = cl.carton_up_in_tool(cl.tool_rotation(r, list(TOP_GRASP_WELD)))
+    limits = clear_wrist_limits()
+    limits['ur_elbow_joint'] = (0.1, math.pi)
+    lev = cl.level_preserve_tcp(r, COLLECT_PLACE_PREPLACE, u, limits=limits)
+    levv = [lev[j] for j in ARM_JOINTS]
+    target = cl.tool_position(r, levv).copy()
+    target[2] -= 0.12                                    # a vertical set-down descent
+    sd = cl.level_place_ik(r, target, u, levv, limits=limits)
+    sdv = [sd[j] for j in ARM_JOINTS]
+    assert cl.tool_position(r, sdv) == pytest.approx(target, abs=2e-3)   # reaches the lowered deck
+    roll, pitch, _ = cl.carried_rpy(r, sdv, u)
+    assert abs(roll) < 0.1 and abs(pitch) < 0.1          # and stays level
+    # the straight-line (2-point) descent from standoff to set-down stays level throughout
+    for i in range(21):
+        a = i / 20.0
+        wp = [(1 - a) * levv[k] + a * sdv[k] for k in range(6)]
+        rr, pp, _ = cl.carried_rpy(r, wp, u)
+        assert abs(rr) < 0.1 and abs(pp) < 0.1
+
+
+@need_urdf
+def test_level_place_ik_raises_when_target_is_unreachable():
+    from twin.urdf_probe import parse_urdf
+    r = parse_urdf(URDF)
+    u = cl.carton_up_in_tool(cl.tool_rotation(r, list(TOP_GRASP_WELD)))
+    with pytest.raises(ValueError):
+        cl.level_place_ik(r, [5.0, 5.0, 5.0], u, COLLECT_PLACE_PREPLACE)   # far outside the envelope
+
+
+def test_level_place_flag_resolves():
+    assert cl.resolve_level_config(True).level_place is True
+    assert cl.resolve_level_config({'level_place': False}).level_place is False

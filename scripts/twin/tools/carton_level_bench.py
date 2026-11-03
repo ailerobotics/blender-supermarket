@@ -90,6 +90,75 @@ def run_collect(urdf_path, *, bound_deg=cl.DEFAULT_TILT_BOUND_DEG, weld=TOP_GRAS
     return u, out
 
 
+@dataclass
+class PlaceResult:
+    """The level place-on-cart proof (sim-carton-level-place-on-cart-v1): the reach-authored place
+    standoff holds the top-grasped carton inverted; the re-planned level place reaches the SAME deck
+    TCP and stays parallel to the ground through the straight-line descent."""
+    preplace_before_tilt: float          # reach shape, unleveled (the ~180 deg inverted hold)
+    preplace_after_tilt: float           # level standoff
+    preplace_tcp_shift_mm: float         # reach preserved (~0)
+    preplace_wrist3_roll_deg: float      # the near-free flange roll that levels it
+    preplace_arm_shift_deg: float        # max |change| of the non-wrist_3 joints (branch preserved)
+    setdown_after_tilt: float            # level set-down on the deck
+    setdown_pos_err_mm: float            # reaches the sensed deck target
+    descent_max_tilt: float              # max |roll|,|pitch| across the straight-line descent
+    preplace_clear: bool
+    setdown_clear: bool
+
+    def passes(self, bound_deg, strict_deg=0.1):
+        return (self.preplace_after_tilt <= strict_deg and self.setdown_after_tilt <= strict_deg
+                and self.descent_max_tilt <= strict_deg and self.preplace_clear and self.setdown_clear
+                and self.preplace_tcp_shift_mm <= 1.0 and self.setdown_pos_err_mm <= 5.0)
+
+
+def run_place(urdf_path, *, bound_deg=cl.DEFAULT_TILT_BOUND_DEG, weld=TOP_GRASP_WELD,
+              descent_m=0.12, n=20, host_config_path=_HOST_CONFIG, tool_link='gripper_pad_tcp'):
+    """CPU proof of the LEVEL place-on-cart move on the REAL kinematics + the REAL reach-authored
+    standoff (collect_place_preplace_shape) + the REAL top-down grasp up-axis. Shows the standoff holds
+    the carton ~180 deg off level, that the re-planned level place reaches the SAME deck TCP at ~0 deg
+    (a near-free wrist_3 flange roll, same arm branch), and that the single straight-line descent to a
+    level set-down on the deck stays parallel to the ground throughout. ``tool_link`` is the port's IK
+    reach frame (gripper_pad_tcp, the frame the sensed deck poses are in); its rotation equals ur_tool0's,
+    so the carton attitude is identical. Returns a PlaceResult."""
+    robot = parse_urdf(urdf_path)
+    u = cl.carton_up_in_tool(cl.tool_rotation(robot, list(weld), tool_link))
+    limits = clear_wrist_limits()
+    limits['ur_elbow_joint'] = (0.1, math.pi)
+    with open(host_config_path) as f:
+        preplace = [float(v) for v in json.load(f)['collect_place_preplace_shape']]
+
+    before = cl.carried_rpy(robot, preplace, u, tool_link)[2]
+    lev = cl.level_preserve_tcp(robot, preplace, u, tool_link=tool_link, limits=limits)
+    levv = [lev[j] for j in ARM_JOINTS]
+    after_pp = cl.carried_rpy(robot, levv, u, tool_link)[2]
+    tcp0 = cl.tool_position(robot, preplace, tool_link)
+    tcp1 = cl.tool_position(robot, levv, tool_link)
+    tcp_shift = float(np.linalg.norm(tcp1 - tcp0)) * 1000.0
+    w3_roll = abs(math.degrees(wrap_angle(levv[5] - preplace[5])))
+    arm_shift = max(abs(math.degrees(wrap_angle(levv[k] - preplace[k]))) for k in range(5))
+
+    target = tcp0.copy()
+    target[2] -= float(descent_m)                       # vertical descent to the deck set-down
+    sd = cl.level_place_ik(robot, target, u, levv, tool_link=tool_link, limits=limits)
+    sdv = [sd[j] for j in ARM_JOINTS]
+    after_sd = cl.carried_rpy(robot, sdv, u, tool_link)[2]
+    pos_err = float(np.linalg.norm(cl.tool_position(robot, sdv, tool_link) - target)) * 1000.0
+
+    dmax = 0.0
+    for i in range(int(n) + 1):
+        a = i / float(n)
+        wp = [(1 - a) * levv[k] + a * sdv[k] for k in range(6)]
+        roll, pitch, _ = cl.carried_rpy(robot, wp, u, tool_link)
+        dmax = max(dmax, abs(roll), abs(pitch))
+
+    return PlaceResult(
+        preplace_before_tilt=before, preplace_after_tilt=after_pp,
+        preplace_tcp_shift_mm=tcp_shift, preplace_wrist3_roll_deg=w3_roll,
+        preplace_arm_shift_deg=arm_shift, setdown_after_tilt=after_sd, setdown_pos_err_mm=pos_err,
+        descent_max_tilt=dmax, preplace_clear=_in_clear_wrist(lev), setdown_clear=_in_clear_wrist(sd))
+
+
 def _vec(cfg):
     """Config map -> 6-vector in ARM order."""
     return [float(cfg[j]) for j in ARM_JOINTS]

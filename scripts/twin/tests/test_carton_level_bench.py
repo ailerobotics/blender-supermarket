@@ -124,3 +124,22 @@ def test_level_solver_escapes_the_180_basin():
     lev = cl.level_config(r, preplace, u, limits=limits, accept_deg=cl.DEFAULT_TILT_BOUND_DEG)
     assert cl.carried_rpy(r, lev, u)[2] < 0.1
     assert lev['ur_wrist_1_joint'] <= 0.65 + 1e-9 and lev['ur_wrist_2_joint'] >= -1e-9
+
+
+def test_run_place_levels_the_whole_place_at_the_same_reach():
+    """sim-carton-level-place-on-cart-v1: the LEVEL place-on-cart proof. The reach-authored standoff
+    holds the top-grasped carton ~180 deg off level; the re-planned level place reaches the SAME deck
+    TCP (a near-free wrist_3 flange roll on the same arm branch) and the single straight-line descent to
+    a level set-down on the deck stays under 0.1 deg off level throughout."""
+    from twin.tools import carton_level_bench as b
+    r = b.run_place(URDF)
+    assert r.preplace_before_tilt > 175.0            # reach shape holds it inverted
+    assert r.preplace_after_tilt < 0.1               # standoff leveled
+    assert r.preplace_tcp_shift_mm < 1.0             # reach preserved
+    assert r.setdown_after_tilt < 0.1                # level set-down
+    assert r.setdown_pos_err_mm < 5.0                # reaches the sensed deck
+    assert r.descent_max_tilt < 0.1                  # level THROUGHOUT the descent
+    assert r.preplace_clear and r.setdown_clear      # in the clear carry wrist region
+    assert r.preplace_wrist3_roll_deg > 90.0         # leveling is a flange roll
+    assert r.preplace_arm_shift_deg < 2.0            # ... on the same arm branch (reach validation held)
+    assert r.passes(cl.DEFAULT_TILT_BOUND_DEG)
