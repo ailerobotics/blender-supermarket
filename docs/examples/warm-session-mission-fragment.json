@@ -1,0 +1,19 @@
+{
+  "_comment": "sim-warm-reset-provider-v1: the runtime-config lines that turn on warm-session reuse for the mobile-restock mission. Merge these keys into the integration lane's mission-runtime JSON (the mission run configs live outside this repo). Absent these keys the run is byte-identical. Pair with the launcher flags --start-at/--stop-after + --warm-attempts N (or --consecutive-runs N). See docs/warm_session.md.",
+
+  "warm_reset": "twin.restock.warm_reset_provider:build",
+  "_warm_reset": "The production provider. isaac_bundle.create resolves it, calls build(app, assembly, parts, plan, config, output, scenario) ONCE after the bundle is assembled, and wires the returned WarmResetProvider onto bundle.warm_reset (the per-run reset(attempt, now) callable) and its stage_census onto bundle.warm_stage_state (the stage_clean gate census).",
+
+  "warm_reset_hooks": "your_integration_module:build_warm_hooks",
+  "_warm_reset_hooks": "Integration-lane host lifecycle hooks (the host stack is not built in this repo). module:function called fn(app=, assembly=, parts=, plan=, config=, output=) returning an object/mapping with any of: stop_runtime() ; relaunch_host(attempt=, now=) OR reset_host_state(attempt=, now=) [one REQUIRED or the provider refuses relaunch_host -> cold boot] ; verify(now=). Each raises to refuse. relaunch_host/reset_host_state MUST leave bundle.adapter ready for the next Mission (planning scene cleared, nvblox ESDF re-init, station acks fresh).",
+
+  "start_at": "collect",
+  "stop_after": "collect",
+  "_bench": "Stage-isolated bench keys (PR 284/297) so the warm acceptance is a fast collect-only loop; also settable via --start-at/--stop-after.",
+
+  "start_state_settle": {
+    "_comment": "PR 297 sim-time settle + rest/heading verify params the reseat step re-runs through shortcut.apply_start_state. Absent => tuned defaults (0.5 s floor, 5 deg heading tol).",
+    "max_settle_s": 4.0,
+    "heading_tol_deg": 5.0
+  }
+}

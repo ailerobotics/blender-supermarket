@@ -85,6 +85,24 @@ def run_warm_session(run_once, *, warm_attempts, warm_reset, write_attempts=None
     return mission, summary
 
 
+def warm_run_count(*, warm_attempts, consecutive_runs, has_provider):
+    """Resolve how many consecutive missions one warm session runs (sim-warm-reset-provider-v1).
+
+    ``--consecutive-runs`` is the explicit N-independent-missions flag. ``--warm-attempts`` is the
+    retry-a-failed-attempt flag whose legacy semantics stop on the first complete run -- but once a
+    ``config.warm_reset`` provider is wired, ``--warm-attempts N`` ALSO means N consecutive independent
+    missions (the integration lane's three-run acceptance used ``--warm-attempts`` and got three cold
+    boots because there was no provider to reset the stage in place). Both floor to 1. Returns the
+    number of consecutive runs the launcher drives on one session; ``1`` keeps the single-run /
+    legacy ``run_warm_session`` retry path (byte-identical). Pure.
+    """
+    wa = max(1, int(warm_attempts or 1))
+    cr = max(1, int(consecutive_runs or 1))
+    if has_provider and wa > 1:
+        return max(cr, wa)
+    return cr
+
+
 def run_consecutive_warm(run_once, *, runs, between, write_records=None):
     """Run ``run_once(index)`` for index 1..runs in ONE live session; return (mission, summary, records).
 
@@ -655,7 +673,16 @@ def run(args, manifest, scenario):
                 # step refusal -- falls back to a cold boot (stops the warm loop with the reason), so a
                 # possibly-corrupt session is never reused. Default N=1 => the single run_warm_session
                 # path below, byte-identical.
-                consecutive = max(1, int(getattr(args, 'consecutive_runs', 1) or 1))
+                # sim-warm-reset-provider-v1: with a warm_reset provider wired, --warm-attempts N means
+                # N consecutive INDEPENDENT missions on one session (each gated by the warm-session
+                # decision + reset), fixing the stop-at-first-success retry semantics the integration
+                # lane hit when it had no provider. Without a provider --warm-attempts keeps its old
+                # retry-a-failed-attempt meaning (run_warm_session below, byte-identical). --consecutive-runs
+                # is the explicit N-independent-runs flag and still works on its own. (pure helper, tested)
+                consecutive = warm_run_count(
+                    warm_attempts=getattr(args, 'warm_attempts', 1),
+                    consecutive_runs=getattr(args, 'consecutive_runs', 1),
+                    has_provider=callable(getattr(bundle, 'warm_reset', None)))
                 if consecutive > 1:
                     from twin.restock import warm_session as _ws
                     # Post-boot VRAM baseline for the "VRAM returned" gate: sampled once here, before
@@ -825,9 +852,11 @@ def main():
                              '(runtime-config "stop_after"); later stages are not run')
     parser.add_argument('--warm-attempts', type=int, default=1,
                         help='dev iteration: re-run the mission up to N times inside the SAME live '
-                             'Isaac session (no re-boot / re-commission per attempt), re-seating the '
-                             'scene between failed attempts via config.warm_reset and re-validating the '
-                             'commissioned baseline. 1 (default) = a single run, byte-identical.')
+                             'Isaac session (no re-boot / re-commission per attempt). With a '
+                             'config.warm_reset provider wired, N>1 runs N consecutive INDEPENDENT '
+                             'missions on one session (each gated by the warm-session reset decision); '
+                             'without a provider it keeps the legacy retry-a-failed-attempt behaviour '
+                             '(stops on the first complete run). 1 (default) = a single run, byte-identical.')
     parser.add_argument('--consecutive-runs', type=int, default=1,
                         help='dev iteration: run N INDEPENDENT full missions back-to-back on ONE '
                              'warm Isaac session (reusing the ~215 s boot), each in args.output/run-N '

@@ -644,15 +644,21 @@ gate the reuse: any doubt — a HOST-level config change (`config_preflight.KEY_
 stage / leaked prims, VRAM not returned to the post-boot baseline (±400 MiB), or a reset-step
 refusal (including no `config['warm_reset']` provider wired) — falls back to a cold boot, stops the
 warm loop and records `warm_fallback` with the reason in `<output>/warm-session.json`. Default
-`N=1` => a single run, byte-identical. A true warm reuse needs the lane-owned re-seat provider
-(`config['warm_reset']`, same contract as `--warm-attempts`) and, for the `stage_clean` gate, an
-optional `bundle.warm_stage_state()` prim census; absent either, run 2 cold-boot-falls-back
-honestly. Offline dry-run + CPU proof:
+`N=1` => a single run, byte-identical. The production re-seat provider is
+`twin.restock.warm_reset_provider:build` (set `config['warm_reset']` to it); it exposes the
+`stage_census` wired onto `bundle.warm_stage_state` for the `stage_clean` gate, and its
+host-stack relaunch/re-sync is delegated to an integration-lane hook named by
+`config['warm_reset_hooks']` — with no hook wired the provider refuses `relaunch_host` and run 2
+cold-boot-falls-back honestly. `--warm-attempts N` means the same N consecutive missions once a
+provider is wired (without one it keeps its legacy retry-a-failed-attempt meaning). See
+[docs/warm_session.md](docs/warm_session.md) for the full contract, config lines and acceptance.
+Offline dry-run + CPU proof:
 
 ```bash
 python3 scripts/check_warm_session_reset.py --state scripts/twin/tests/fixtures/warm_session_state.json
 python3 scripts/check_warm_session_reset.py --state scripts/twin/tests/fixtures/warm_session_state.json --inject-fault preflight_verify --expect cold
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest scripts/twin/tests/test_warm_session.py -q
+python3 scripts/check_warm_session_reset.py --state scripts/twin/tests/fixtures/warm_session_state.json --provider --inject-fault relaunch_host --expect cold
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest scripts/twin/tests/test_warm_session.py scripts/twin/tests/test_restock_warm_reset_provider.py -q
 ```
 
 ### 11a. Demand-driven mission job (store-vision plan, CPU, opt-in)

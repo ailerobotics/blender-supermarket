@@ -102,9 +102,10 @@ def test_create_wires_config_warm_reset_onto_the_bundle():
     built = {}
     mod = types.ModuleType('warm_reset_probe_mod')
 
-    def build(*, app, assembly, parts, plan, config, output):
+    def build(*, app, assembly, parts, plan, config, output, scenario=None, **_):
         built['called'] = True
         assert 'port' in parts and plan is not None       # provider gets the live scene handles
+        assert 'adapter' in parts                          # the live adapter is threaded for stop_runtime
         return lambda **k: None
     mod.build = build
     sys.modules['warm_reset_probe_mod'] = mod
