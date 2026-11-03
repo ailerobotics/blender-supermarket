@@ -318,10 +318,20 @@ def build_tail(config, scenario, *, unit_offset=(0.0, 0.0, 0.0), unsettle_after_
     gt_on = bool(gt_cfg.get('enabled') if isinstance(gt_cfg, dict) else gt_cfg)
     manip = TransferStub(world, _profile(scenario, config), bay_target_world=bay_target_world(scenario, config),
                          transfer_ground_truth=gt_on)
+    # sim-cart-side-bay-v1: honour the shelf-staging / side-bay re-sequence so the RETURN dry-run
+    # exercises the HOME-EMPTY leg (the cart is left parked in the bay) rather than the legacy
+    # uncouple-at-parking tow-home. build_tail skips the OUTBOUND that normally releases the cart at
+    # the bay, so when the side bay is active we pre-set _shelf_cart_parked (what the outbound would
+    # have done) exactly as test_cart_side_bay_return_drives_home_empty does.
+    side_bay = bool(config.get('cart_side_bay')) and 'cart_side_bay' in poses
     adapter = RuntimeAdapter(nav, mobile, manip, port, poses, fixture_mode=False,
                              goal_articulation=config.get('goal_articulation'),
                              uncouple_on_return=bool(config.get('uncouple_on_return')),
+                             shelf_staging=bool(config.get('shelf_staging')),
+                             cart_side_bay=bool(config.get('cart_side_bay')),
                              ground_truth_place_actions=ground_truth_place_actions(config))
+    if side_bay:
+        adapter._shelf_cart_parked = True
     adapter.stage_modes = stage_modes(config)
     return NS(world=world, port=port, nav=nav, mobile=mobile, manip=manip, adapter=adapter, verifier=verifier)
 
@@ -378,8 +388,17 @@ def check_config(config, scenario, rep):
               shelf_approach=poses.get('shelf_approach'), cart_parking=poses.get('cart_parking'),
               home=poses.get('home'), backaway=poses.get('cart_parking_backaway'))
     rep.check(not stages or stages[-3:] == TAIL_STAGES, 'config_stages_end_with_tail', stages=list(stages))
-    rep.check(bool(config.get('uncouple_on_return')) and 'cart_parking' in poses,
-              'config_uncouple_at_parking_enabled', uncouple_on_return=config.get('uncouple_on_return'))
+    # sim-cart-side-bay-v1: two mutually-exclusive return variants. The side bay (cart left parked
+    # off-axis, base returns HOME EMPTY) REQUIRES uncouple_on_return=false AND a cart_side_bay pose; the
+    # legacy uncouple-at-parking tow-home REQUIRES uncouple_on_return=true + a cart_parking pose. Check
+    # whichever this config selects so a side-bay run is not false-failed for the legacy flag.
+    if bool(config.get('cart_side_bay')) and 'cart_side_bay' in poses:
+        rep.check(not config.get('uncouple_on_return') and bool(config.get('shelf_staging')),
+                  'config_side_bay_return_home_empty', uncouple_on_return=config.get('uncouple_on_return'),
+                  cart_side_bay=poses.get('cart_side_bay'), shelf_staging=config.get('shelf_staging'))
+    else:
+        rep.check(bool(config.get('uncouple_on_return')) and 'cart_parking' in poses,
+                  'config_uncouple_at_parking_enabled', uncouple_on_return=config.get('uncouple_on_return'))
     gt = config.get('transfer_ground_truth')
     gt = gt if isinstance(gt, dict) else {}
     rep.check(bool(gt.get('enabled')) and gt.get('location') == job['shelf_id'],
