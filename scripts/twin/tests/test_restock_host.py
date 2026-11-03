@@ -675,6 +675,40 @@ class IncorporationAckTest(unittest.TestCase):
             with self.assertRaises((ValueError, RuntimeError)):
                 st.accept(bad, 10.0)
 
+    def test_late_read_liveness_command_accepted_not_faulted(self):
+        # sim-collect-host-estop-v1: under a loaded-host executor / render spike in a long collect the host
+        # READS a parked-station heartbeat LATE (now - stamp = 0.7 s > the 0.5 s window) though the mission is
+        # alive and still sending a strictly-increasing sequence. The pre-fix accept() rejected it -> the node
+        # faulted the station -> bare global e-stop with no controller fault. It must now be ACCEPTED, and the
+        # same tolerance applies to the liveness-relaxing pause/stop (the couple-start quiesce arriving late).
+        for action in ('heartbeat', 'pause', 'stop'):
+            st, _ = self.prepared()                       # epoch 1, parked at sim 10.0
+            cmd = dict(action=action, epoch=1, sequence=1, stamp=10.0, parked=True)
+            self.assertEqual(st.accept(cmd, 10.7), action)   # read 0.7 s late -> accepted, no raise
+            self.assertIsNone(st.fault)
+
+    def test_late_read_heartbeat_resets_the_liveness_gap(self):
+        # The liveness gap is measured from the host's OWN acceptance clock, so a late-but-accepted heartbeat
+        # closes it: a snapshot right after must NOT fault even though the heartbeat's stamp was > 0.5 s old.
+        st, _ = self.prepared()                           # last_heartbeat = 10.0 (acceptance clock)
+        # Gap would have reached 0.9 s by sim 10.9; a heartbeat read 0.7 s late lands first and resets it.
+        self.assertEqual(st.accept(dict(action='heartbeat', epoch=1, sequence=1, stamp=10.2, parked=True),
+                                   10.9), 'heartbeat')
+        snap = st.snapshot(10.95, endpoints_ready=True, process_alive=True)
+        self.assertNotEqual(snap['state'], 'failed')      # gap reset to ~0.05 s from the 10.9 acceptance
+        self.assertEqual(snap['reason'], '')
+
+    def test_prepare_still_rejects_a_stale_stamp(self):
+        # The freshness window is retained for prepare (a new measured parked epoch must be fresh for the
+        # nvblox-incorporation contract), and a FUTURE stamp is still invalid for any action.
+        st, _ = self.state()
+        with self.assertRaises(ValueError):               # stale prepare (now - stamp = 0.7 > 0.5)
+            st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=10.0, parked=True,
+                           camera_frame='restock_camera_collect'), 10.7)
+        st2, _ = self.prepared()
+        with self.assertRaises(ValueError):               # future stamp (now - stamp < 0)
+            st2.accept(dict(action='heartbeat', epoch=1, sequence=1, stamp=11.0, parked=True), 10.5)
+
 
 class RosHostLaunchWiring(unittest.TestCase):
     """The mission host stack must launch ros_host (the manipulation bridge) so

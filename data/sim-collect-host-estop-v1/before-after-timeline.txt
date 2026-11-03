@@ -1,0 +1,16 @@
+sim-collect-host-estop-v1 : parked source-station heartbeat read-lag across collect
+
+  accept() window (now-stamp bound) : 0.50 s  (unchanged)
+  coldwin22 PASS: couple begins      : 173.87 s sim
+  coldwin23 attempt-1 e-stop         : 175.70 s sim (collect stage, bare host e-stop, no controller fault)
+
+  BEFORE (strict now-stamp<=0.5 for every command):
+      read-lag crosses 0.50 s at sim ~175.8 s -> late heartbeat REJECTED
+      -> station fault -> STATION_ESTOP_PUBLISH -> bare /manipulation/stop (latched) -> e-stop
+
+  AFTER (shipped: liveness commands accepted regardless of read latency; gap from acceptance clock):
+      outcome=survived  accepted_heartbeats=10434  final_sim=173.9s
+      late reads absorbed; collect runs to the couple handoff at 173.87 s; station never faults
+
+  regression kept: a genuinely silent station (no newer-sequence command) still faults on the
+  0.5 s SIM gap -> "parked heartbeat lost: sim gap X.XX s" (test_silent_station_still_faults_by_name).

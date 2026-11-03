@@ -145,9 +145,25 @@ class IncorporationAckState:
         stamp = command.get('stamp')
         seq = command.get('sequence')
         action = command.get('action')
+        # Base validity: types, finiteness, a non-future stamp (publish_lag keeps the lower bound
+        # satisfied under /clock delivery skew). The UPPER freshness bound (now - stamp <= 0.5) stays ONLY
+        # for 'prepare' -- a new measured parked epoch must be fresh for the nvblox-incorporation
+        # (collision_time) contract. For the recurring LIVENESS commands (heartbeat/pause/stop) it is a
+        # pace-UNSAFE trip (sim-collect-host-estop-v1, the intermittent collect host e-stop): under a loaded-
+        # host executor / render spike in a long collect the host can READ a parked-station heartbeat several
+        # sim-tenths LATE (now - stamp > 0.5) though the mission is alive and still sending (the mission
+        # heart-beats every tick; the host drains a backlog oldest-first, and the oldest is the stale one).
+        # Rejecting that valid late read faulted the station -> bare global /manipulation/stop with NO
+        # controller fault. Strictly-increasing (epoch, sequence) already rejects a replay as 'ignored'
+        # below, so a NEWER-sequence liveness command is proof of mission liveness regardless of read
+        # latency -- accept it, and measure the liveness gap from the host's OWN acceptance clock (now, set
+        # below), so a genuinely silent mission still faults on the snapshot sim-gap guard. No liveness
+        # bound is widened; the collision_time/ESDF freshness safety (acknowledge + ready) is untouched.
+        # See freshness-sim-clock-not-wall.
         if (type(epoch) is not int or epoch <= 0 or type(seq) is not int or seq < 0
                 or not isinstance(stamp, (int, float)) or not math.isfinite(stamp)
-                or not math.isfinite(now) or not 0 <= now - stamp <= .5):
+                or not math.isfinite(now) or now - stamp < 0
+                or (action == 'prepare' and now - stamp > .5)):
             raise ValueError('invalid station epoch, sequence or timestamp')
         if epoch < self.epoch or (epoch == self.epoch and seq <= self.sequence):
             return 'ignored'
@@ -184,7 +200,13 @@ class IncorporationAckState:
         else:
             raise ValueError('unsupported station action')
         self.sequence = seq
-        self.last_heartbeat = stamp
+        # Measure the parked-heartbeat liveness gap from the host's OWN acceptance clock, not the command
+        # stamp: a heartbeat the host read late (now - stamp > 0.5, accepted above) still resets the gap, so
+        # a loaded-host executor spike that merely delayed the READ no longer leaves a stale reference that
+        # the next snapshot tick would fault. A genuinely silent mission sends no new-sequence command, so
+        # last_heartbeat freezes and the sim-gap guard still catches it. On the real rig (now ~= stamp) this
+        # is inert / byte-identical. See sim-collect-host-estop-v1.
+        self.last_heartbeat = now
         self.wall_heartbeat = self.wall_clock()
         return action
 

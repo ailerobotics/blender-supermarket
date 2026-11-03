@@ -170,3 +170,59 @@ def simulate_far_station_paused(*, pacing, sim_gap_budget, wall_floor, far_op_si
                     'state': snap['state']}
         clock.advance(dwall)
     raise AssertionError('far-station guard neither survived nor tripped within max_wall -- unbounded wait')
+
+
+def simulate_loaded_collect_heartbeat_read_lag(*, pacing, sim_gap_budget, wall_floor, read_lag_sim,
+                                               op_sim, dwall=0.5, max_wall=2000000.0):
+    """Reproduce the intermittent COLLECT host e-stop (sim-collect-host-estop-v1) on CPU.
+
+    The mission heart-beats the parked collect/source station every tick while it is actively picking, but
+    under a loaded-host executor / render spike in a long collect the host READS each heartbeat LATE -- it
+    drains a backlog oldest-first, so the heartbeat it processes this service cycle was stamped
+    ``read_lag_sim`` SIM seconds earlier (the oldest, stalest backlogged command), while the mission is
+    alive and still sending strictly-increasing sequences. Models exactly that: each host service cycle
+    (``dwall`` wall apart) the host calls ``accept`` with a NEWER-sequence heartbeat whose stamp lags the
+    host's own /clock by ``read_lag_sim``. A ``read_lag_sim`` > the ``now - stamp`` upper bound reproduced
+    the trip on the pre-fix host (``accept`` rejected the valid late read -> fault -> bare global e-stop);
+    the shipped pace-safe ``accept`` must instead ACCEPT it and the station must survive the whole op.
+
+    Drives the REAL ``restock_host.incorporation_ack.IncorporationAckState`` against the fake clock pair.
+    Returns a dict: outcome in {'survived','tripped_reject','tripped_gap'} with the final wall/sim readings,
+    the reason, and the count of accepted heartbeats. 'survived' == every late heartbeat was accepted AND the
+    liveness gap never faulted across the whole op (no false stop). Raises on an unbounded wait."""
+    from twin.restock_host.incorporation_ack import IncorporationAckState
+    clock = FakeClockPair(pacing=pacing, frozen=False)
+    st = IncorporationAckState(wall_clock=lambda: clock.wall)
+    st.sim_gap_s = float(sim_gap_budget)
+    st.wall_gap_s = float(wall_floor)
+    st.wall_backstop_s = frozen_sim_wall_backstop(sim_gap_budget, wall_floor)
+    # The parked epoch is prepared FRESH while the base first parks (prepare keeps the strict freshness
+    # window -- the nvblox-incorporation contract); only the recurring heartbeats are later read late.
+    st.accept(dict(action='prepare', epoch=1, sequence=0, stamp=0.0, parked=True,
+                   camera_frame='restock_camera_collect'), 0.0)
+    op_start_sim = clock.sim
+    seq = 0
+    accepted = 0
+    while clock.wall <= max_wall:
+        # The mission stamped this heartbeat read_lag_sim SIM-seconds ago (newer sequence each cycle); the
+        # loaded host only gets to it now.
+        seq += 1
+        stamp = max(0.0, clock.sim - read_lag_sim)
+        try:
+            action = st.accept(dict(action='heartbeat', epoch=1, sequence=seq, stamp=stamp, parked=True),
+                               clock.sim)
+            if action == 'heartbeat':
+                accepted += 1
+        except ValueError as exc:
+            # Pre-fix: the valid-but-late heartbeat is rejected; the node turns this into the fault + stop.
+            return {'outcome': 'tripped_reject', 'wall': clock.wall, 'sim': clock.sim,
+                    'reason': str(exc), 'accepted': accepted}
+        snap = st.snapshot(clock.sim, endpoints_ready=True, process_alive=True)
+        if snap['state'] == 'failed':
+            return {'outcome': 'tripped_gap', 'wall': clock.wall, 'sim': clock.sim,
+                    'reason': snap['reason'], 'accepted': accepted}
+        if (clock.sim - op_start_sim) >= op_sim:
+            return {'outcome': 'survived', 'wall': clock.wall, 'sim': clock.sim,
+                    'reason': snap['reason'], 'accepted': accepted}
+        clock.advance(dwall)
+    raise AssertionError('loaded-collect heartbeat guard neither survived nor tripped -- unbounded wait')
