@@ -30,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # scripts/ -> twin.*
 from twin.navigation.scenario import environment_grid
 from twin.navigation.core import Controller, Footprint, GridMap
-from twin.navigation.lanes import TowLaneGraph
+from twin.navigation.lanes import TowLaneGraph, TowLane, couple_seat_from_cart
 from twin.navigation.articulated import ArticulatedController, ArticulatedMap, TrainState, advance
 from twin.navigation import Odometry, Observation
 from twin.mobile import MobileSpec, wrap
@@ -223,6 +223,12 @@ def check_reacquire_along_route(grid, lanes_cfg, report):
     graph = TowLaneGraph.from_config(nav['tow_lanes'])
     graph.expand_all(ArticulatedMap(grid, spec))
     lane = next((ln for ln in graph.lanes if 'outbound' in ln.name), graph.lanes[0])
+    # This reproduction ISOLATES the reacquire-along-route mechanism from the per-lane lead-in (the
+    # separate recovery proved in check_couple_seat_acquire): with a lead-in active the drifted follower
+    # recovers via the synthesised merge instead of trapping, so strip it here to exercise the start-only
+    # trap the reacquire-along-route flag addresses. (lead_in_max_m=0 => no lead-in synthesised.)
+    for ln in graph.lanes:
+        ln.lead_in_max_m = 0.0
     adv = lane.route.states[len(lane.route.states) // 20]   # advanced a little way along the lane
     pose = (adv.x, adv.y, adv.yaw)
     from_start = math.dist(pose[:2], lane.start[:2])
@@ -584,6 +590,89 @@ def _drive_lane(controller, spec, lane, goal, *, jitter, report, label, direct_x
     return reached, length, direct_xy
 
 
+def check_couple_seat_acquire(grid, lanes_cfg, report):
+    """sim-outbound-lane-start-dockalign-v1 (item 4): the outbound lane start must FOLLOW the configured
+    couple DOCK, so a bounded `start_at=couple --stop-after outbound` dock-align proof acquires the lane
+    from the post-couple seat instead of failing `lane_not_acquired_timeout` (coldwin23-2: the couple drive
+    seated the base at the LEGACY EAST pose, facing east, while the lane start was the dock-align SOUTH seat
+    -- a ~0.97 m + 1.6 rad frame mismatch).
+
+    Prove, for BOTH the dock-align SOUTH dock (this fragment's lane) and the LEGACY EAST dock (the same
+    geometry coldwin23 actually coupled at): (a) the seat DERIVED from the dock (`couple_seat_from_cart`)
+    matches the matching lane start; (b) the lane acquires that derived seat; (c) a modeled crosstrack
+    couple residual (ALIGNED, off the exact seat) acquires via the per-lane lead-in; and the SAFETY
+    direction -- (d) the CROSS case (the east seat vs the SOUTH lane, the coldwin23-2 mismatch) is REFUSED
+    by both acquire and the lead-in, and (e) a lane whose `start` does not match its declared `couple_dock`
+    FAILS TO BUILD (never silently)."""
+    spec = MobileSpec()
+    world = ArticulatedMap(grid, spec)
+    nav = lanes_cfg['navigation']
+    graph = TowLaneGraph.from_config(nav['tow_lanes'])
+    graph.expand_all(world)
+    south = next(ln for ln in graph.lanes if ln.name == 'outbound_dock_to_staging')
+
+    # (a) the SOUTH lane start follows its declared dock, derived by couple_seat_from_cart.
+    seat = south.synthesised_couple_seat(spec)
+    cart_yaw = south.couple_dock[2]
+    _record(report, 'south_seat_follows_configured_dock',
+            seat is not None and math.dist(seat[:2], south.start[:2]) <= south.start_tol_xy
+            and abs(wrap(seat[2] - south.start[2])) <= south.start_tol_yaw,
+            derived_seat=tuple(round(c, 3) for c in (seat or ())),
+            lane_start=tuple(round(c, 3) for c in south.start),
+            couple_dock=tuple(round(c, 3) for c in south.couple_dock))
+    # (b) the SOUTH lane acquires its dock-derived seat directly (no lead-in needed).
+    _record(report, 'south_lane_acquires_derived_seat',
+            south.acquirable(seat, cart_yaw), seat=tuple(round(c, 3) for c in seat))
+
+    # (c) a crosstrack couple residual: the seat 0.5 m behind (north of) the start, still aligned. Too far
+    #     for the direct acquire (0.5 > start_tol_xy), so the per-lane lead-in must synthesise the merge.
+    resid = TrainState(seat[0], seat[1] + 0.5, seat[2], cart_yaw)
+    direct_ok = south.acquirable(resid.pose, cart_yaw)
+    li = south.build_lead_in(resid, world, spec, (), 0.02)
+    _record(report, 'south_residual_seat_acquires_via_leadin',
+            (not direct_ok) and li is not None and bool(li.states),
+            residual_m=0.5, direct_acquire=direct_ok,
+            leadin_states=(len(li.states) if li else 0), lead_in_max_m=south.lead_in_max_m)
+
+    # The LEGACY EAST dock (what coldwin23 actually coupled at): cart staged behind the east seat.
+    east_cart = (-5.73, 15.25, 0.0)
+    east_seat = couple_seat_from_cart(east_cart, hitch_x=spec.hitch_x, cart_hitch_x=spec.cart_hitch_x)
+    east_lane = TowLane('outbound_dock_to_staging', [-4.46, 15.25, 0.0], [-2.0, 15.25, 0.0],
+                        start_cart_yaw=0.0, couple_dock=east_cart)
+    # (a') the EAST lane start follows the EAST dock by the SAME derivation (config-general).
+    _record(report, 'east_seat_follows_configured_dock',
+            math.dist(east_seat[:2], east_lane.start[:2]) <= east_lane.start_tol_xy
+            and abs(wrap(east_seat[2] - east_lane.start[2])) <= east_lane.start_tol_yaw,
+            derived_seat=tuple(round(c, 3) for c in east_seat),
+            lane_start=tuple(round(c, 3) for c in east_lane.start))
+    # (b') the EAST lane acquires its own derived seat.
+    _record(report, 'east_lane_acquires_derived_seat',
+            east_lane.acquirable(east_seat, 0.0), seat=tuple(round(c, 3) for c in east_seat))
+
+    # (d) SAFETY: the east seat against the SOUTH lane (coldwin23-2) is refused by acquire AND the lead-in
+    #     cannot bridge the 1.6 rad / 0.97 m flip -- a gross frame mismatch is never silently absorbed.
+    cross_acquire = south.acquirable(east_seat, 0.0)
+    cross_li = south.build_lead_in(TrainState(east_seat[0], east_seat[1], east_seat[2], 0.0),
+                                   world, spec, (), 0.02)
+    _record(report, 'east_seat_refused_by_south_lane',
+            (not cross_acquire) and (cross_li is None or not cross_li.states),
+            cross_acquire=cross_acquire, cross_leadin=(None if cross_li is None else len(cross_li.states)),
+            east_seat=tuple(round(c, 3) for c in east_seat),
+            south_start=tuple(round(c, 3) for c in south.start))
+
+    # (e) SAFETY: a lane that declares a couple_dock inconsistent with its start FAILS TO BUILD.
+    mismatched = TowLane('outbound_dock_to_staging', [-3.875, 14.5, -math.pi / 2],
+                         [-3.875, 8.0, -math.pi / 2], start_cart_yaw=-math.pi / 2,
+                         couple_dock=east_cart)                     # legacy-east dock, dock-align-south start
+    raised = False
+    try:
+        mismatched.expand(world)
+    except ValueError:
+        raised = True
+    _record(report, 'mismatched_couple_dock_fails_to_build', raised,
+            note='legacy-east couple_dock paired with the dock-align-south start must raise at expand')
+
+
 def check_tow_lanes(grid, lanes_cfg, report):
     import time as _time
     spec = MobileSpec()
@@ -653,6 +742,7 @@ def main():
     print(f'grid: {len(grid.obstacles)} static obstacles, bounds {grid.bounds}', flush=True)
     check_directional_zone(grid, report)
     check_tow_lanes(grid, lanes_cfg, report)
+    check_couple_seat_acquire(grid, lanes_cfg, report)
     check_proud_tolerance(grid, lanes_cfg, report)
     check_trust_static(grid, lanes_cfg, report)
     check_reacquire_along_route(grid, lanes_cfg, report)

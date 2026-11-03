@@ -33,6 +33,25 @@ def _pose3(value, what):
     return p
 
 
+def couple_seat_from_cart(cart_pose, *, hitch_x=-0.62, cart_hitch_x=0.65, articulation=0.0):
+    """The robot base (x, y, yaw) seated COUPLED to a cart docked at ``cart_pose``, with the robot
+    hitch coincident with the cart drawbar at the given ``articulation`` (robot yaw = cart yaw +
+    articulation; 0.0 => the train is straight/aligned).
+
+    This is the exact inverse of the couple geometry ``restock.shortcut.cart_pose_from_hitch``: given
+    WHERE the cart is docked, it returns WHERE the robot ends up once the fine-dock has seated the
+    hitch. It is the post-couple SEAT the outbound tow lane must start from, derived from the active
+    couple-dock pose instead of a hardcoded legacy seat -- so the lane start follows whatever dock the
+    mission configures (the dock-align SOUTH dock and the legacy EAST dock both fall out of the same
+    formula; see data/sim-outbound-lane-start-dockalign-v1). ``hitch_x``/``cart_hitch_x`` default to the
+    ``twin.mobile.MobileSpec`` values; pass the live spec's to stay single-source."""
+    cx, cy, cyaw = _pose3(cart_pose, 'couple_dock cart pose')
+    ryaw = wrap(cyaw + float(articulation))
+    # cart drawbar point (the hitch) in the world, then step back along the ROBOT heading by hitch_x.
+    dx, dy = cx + cart_hitch_x * math.cos(cyaw), cy + cart_hitch_x * math.sin(cyaw)
+    return (dx - hitch_x * math.cos(ryaw), dy - hitch_x * math.sin(ryaw), ryaw)
+
+
 class TowLane:
     """One authored coupled centreline, expanded to a validated trajectory at build time."""
 
@@ -41,7 +60,8 @@ class TowLane:
                  start_tol_xy=0.25, start_tol_yaw=0.15, start_tol_cart_yaw=0.20,
                  waypoint_tol=1.25, route_through_waypoints=False,
                  rigid_hitch_lock=False, lock_curvature_threshold=0.30, lock_engage_tol=0.12,
-                 lead_in_max_m=0.0, lead_in_fine_xy=0.10, lead_in_lookahead=0.8):
+                 lead_in_max_m=0.0, lead_in_fine_xy=0.10, lead_in_lookahead=0.8,
+                 couple_dock=None, couple_dock_articulation=0.0):
         if not isinstance(name, str) or not name:
             raise ValueError('tow lane needs a non-empty name')
         self.name = name
@@ -101,6 +121,19 @@ class TowLane:
         self.lead_in_max_m = float(lead_in_max_m)
         self.lead_in_fine_xy = float(lead_in_fine_xy)
         self.lead_in_lookahead = float(lead_in_lookahead)
+        # sim-outbound-lane-start-dockalign-v1 (opt-in, default None => byte-identical): the active
+        # couple-DOCK (the cart pose the robot docks behind). When set, `expand()` DERIVES the
+        # post-couple robot seat from it (`couple_seat_from_cart`, the inverse of the couple hitch) and
+        # asserts it matches `start` within the lane's own start tolerances -- so the outbound lane start
+        # FOLLOWS the configured dock and can never silently disagree with it. coldwin23-2 failed
+        # `lane_not_acquired_timeout` because its couple drive seated the base at the LEGACY EAST dock
+        # (facing east) while the lane start was the dock-align SOUTH seat (facing south, a ~0.97 m / 1.6 rad
+        # frame mismatch); a lane that DECLARES its dock catches that at build time instead of at the GPU
+        # run. `couple_dock_articulation` (default 0 => aligned) is the train articulation at the seat.
+        self.couple_dock = None if couple_dock is None else _pose3(couple_dock, f'{name!r} couple_dock')
+        self.couple_dock_articulation = float(couple_dock_articulation)
+        if not math.isfinite(self.couple_dock_articulation):
+            raise ValueError(f'tow lane {name!r} couple_dock_articulation must be finite')
         # Set by expand(): the validated train trajectory (an articulated.Route).
         self.route = None
 
@@ -206,6 +239,36 @@ class TowLane:
         from .articulated import TrainState
         return TrainState(self.start[0], self.start[1], self.start[2], self.start_cart_yaw)
 
+    def synthesised_couple_seat(self, spec=None):
+        """The post-couple robot seat (x, y, yaw) derived from this lane's declared ``couple_dock``
+        (``couple_seat_from_cart``), or None when the lane declares no dock. ``spec`` supplies the hitch
+        geometry (a ``twin.mobile.MobileSpec``); default uses the MobileSpec defaults."""
+        if self.couple_dock is None:
+            return None
+        hitch_x = -0.62 if spec is None else spec.hitch_x
+        cart_hitch_x = 0.65 if spec is None else spec.cart_hitch_x
+        return couple_seat_from_cart(self.couple_dock, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x,
+                                     articulation=self.couple_dock_articulation)
+
+    def _validate_couple_dock(self, spec):
+        """Assert the lane ``start`` matches the seat derived from the declared ``couple_dock`` (within
+        the lane's own start tolerances). Raises with both poses on a frame mismatch -- the coldwin23-2
+        class of bug (a legacy-east couple dock paired with a dock-align-south lane). No-op when the lane
+        declares no ``couple_dock`` (byte-identical)."""
+        if self.couple_dock is None:
+            return
+        seat = self.synthesised_couple_seat(spec)
+        dxy = math.dist(seat[:2], self.start[:2])
+        dyaw = abs(wrap(seat[2] - self.start[2]))
+        if dxy > self.start_tol_xy or dyaw > self.start_tol_yaw:
+            raise ValueError(
+                f'tow lane {self.name!r} start {tuple(round(c, 3) for c in self.start)} does not match '
+                f'the seat {tuple(round(c, 3) for c in seat)} derived from its couple_dock '
+                f'{tuple(round(c, 3) for c in self.couple_dock)} (xy {dxy:.3f} m > {self.start_tol_xy} '
+                f'or yaw {dyaw:.3f} rad > {self.start_tol_yaw}); the outbound lane start must FOLLOW the '
+                'configured couple dock -- a legacy dock paired with a re-authored lane is the coldwin23-2 '
+                'lane_not_acquired frame mismatch')
+
     def expand(self, world, *, build_margin=0.02, build_timeout=30.0):
         """Expand the authored centreline into a validated train trajectory (build time).
 
@@ -215,6 +278,7 @@ class TowLane:
         cannot be realised -- a broken lane fails the build rather than the mission.
         """
         from .articulated import ArticulatedPlanner, Route, TrainState
+        self._validate_couple_dock(world.spec)   # the lane start must follow the declared couple dock
         planner = ArticulatedPlanner(world, timeout=build_timeout)
         planner.seeds = []
         ga = self.goal_articulation if self.goal_articulation is not None else world.spec.max_articulation
@@ -330,7 +394,8 @@ class TowLane:
                  'goal_tol_xy', 'goal_tol_yaw', 'start_tol_xy', 'start_tol_yaw',
                  'start_tol_cart_yaw', 'waypoint_tol', 'route_through_waypoints',
                  'rigid_hitch_lock', 'lock_curvature_threshold', 'lock_engage_tol',
-                 'lead_in_max_m', 'lead_in_fine_xy', 'lead_in_lookahead'}
+                 'lead_in_max_m', 'lead_in_fine_xy', 'lead_in_lookahead',
+                 'couple_dock', 'couple_dock_articulation'}
         unknown = set(cfg) - known
         if unknown:
             raise ValueError(f'unknown tow lane keys: {sorted(unknown)}')
@@ -344,6 +409,8 @@ class TowLane:
                    goal_articulation=cfg.get('goal_articulation'),
                    route_through_waypoints=bool(cfg.get('route_through_waypoints', False)),
                    rigid_hitch_lock=bool(cfg.get('rigid_hitch_lock', False)),
+                   couple_dock=cfg.get('couple_dock'),
+                   couple_dock_articulation=float(cfg.get('couple_dock_articulation', 0.0)),
                    **{k: float(cfg[k]) for k in ('lock_curvature_threshold', 'lock_engage_tol',
                                                  'lead_in_max_m', 'lead_in_fine_xy', 'lead_in_lookahead')
                       if k in cfg},
