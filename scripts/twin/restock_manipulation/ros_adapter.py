@@ -2323,6 +2323,47 @@ class RosTransferBridge:
             elif command['kind'] == 'contact':
                 self.arm_contact.publish(self.Bool(data=True))
 
+    def heartbeat(self):
+        """sim-host-status-watchdog-v1: publish a liveness-only /manipulation/status (fresh sequence, no
+        controls) WHILE the host's single-threaded executor is occupied in a BOUNDED blocking wait
+        (``RosPayloadSync._wait``: the grasp/weld attach ack, the post-move_group-respawn carton
+        reconcile, the release detach). Those waits block ``_sensors``/``_emit`` on the SAME executor
+        thread, so the controller-driven status stream goes silent for the whole wait even though the
+        host is alive -- and the Isaac-side status watchdog (``IsaacRosGraph.poll``, 5 sim-s) then
+        pre-empts the host's OWN named ack/plan/respawn timers and kills a live, recovering host
+        (collectretreat1: tripped at the post-lift MOVE_GROUP_CRASH_RETRY payload reconcile while nvblox
+        and the station ack -- published by independent nodes -- were still advancing). Keeping the status
+        source publishing THROUGH those windows leaves liveness detection with the host's named timer that
+        owns the wait (the ``_wait`` sim-budget ``TimeoutError``, the plan sim-deadline, the respawn cap),
+        exactly as the captain requires ('name a trip by its real cause').
+
+        No controls => never re-fires the gripper/contact (``_emit`` still carries the real commands);
+        ``'running'`` => never clears ``self.active`` on the Isaac side. A genuine host hang still
+        surfaces by name: the owning ``_wait``'s sim-budget TimeoutError for an instrumented wait, or --
+        for an UNINSTRUMENTED executor hang that emits no heartbeat at all -- the Isaac status watchdog's
+        5 sim-s backstop (now a named HOST_STATUS_WATCHDOG line). Guarded on an active job so the startup
+        obstacle waits (phase 'idle') publish nothing => byte-identical to a run with no blocking wait."""
+        phase = getattr(self.controller, 'phase', 'host')
+        if phase in ('idle', 'failed', 'succeeded'):
+            return
+        self.sequence += 1
+        data = {'status': 'running', 'phase': phase, 'reason': 'host-alive heartbeat',
+                'controls': [], 'evidence': [], 'sequence': self.sequence,
+                'job_id': getattr(self.controller, 'job', {}).get('job_id'), 'heartbeat': True}
+        self.status.publish(self.String(data=json.dumps(data, allow_nan=False)))
+        # SIBLING of the same class (the one-table audit): the host's OWN sensor-stream _watchdog runs on
+        # this SAME single-threaded executor, so a blocking payload _wait reached via the _watchdog->drain
+        # path leaves last_packet_sim/last_packet_wall stale, and when _watchdog resumes it would false-trip
+        # 'sensor stream watchdog expired' -- the fix above would merely MOVE the false trip here. The
+        # blocking ack wait is a host-BUSY window, NOT a simulator sensor stall: Isaac keeps producing
+        # /sensors (they queue) and only the host's consumption is deferred until the bounded wait returns
+        # (the wait is itself sim-budget-bounded). So advance the sensor-stream anchors to NOW, exactly as
+        # the transit sensing-pause does, so the bound measures sensor liveness from AFTER the wait, never
+        # across it. Only after the first frame has armed the per-frame bound (None => startup grace owns it).
+        self.last_packet_wall = time.monotonic()
+        if self.last_packet_sim is not None:
+            self.last_packet_sim = self.node.get_clock().now().nanoseconds * 1e-9
+
     def _job(self, message):
         try:
             data = json.loads(message.data)

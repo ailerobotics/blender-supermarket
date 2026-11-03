@@ -161,6 +161,12 @@ class RosPayloadSync:
         self.scene = self.node.create_client(ApplyPlanningScene,'/restock_sim/apply_planning_scene')
         self.attach = None
         self.controller = self.sensors = None
+        # sim-host-status-watchdog-v1: optional liveness hook, called each poll slice of _wait() so the
+        # host keeps advancing /manipulation/status WHILE this blocking ack wait occupies the main host
+        # executor (the grasp/weld attach, the post-respawn carton reconcile, the release detach all run
+        # here). ros_host wires it to RosTransferBridge.heartbeat; None (unit tests / real rig without the
+        # bridge) => no heartbeat, byte-identical wait.
+        self.heartbeat = None
         # sim-robust-movegroup-reattach-after-respawn-v1: remember the STATIC world collision objects
         # published at startup so resync_world_after_respawn() can re-establish them in a respawned
         # move_group (whose planning-scene monitor restarts empty). Empty on respawn2 (no obstacles) ->
@@ -197,6 +203,17 @@ class RosPayloadSync:
         # path still returns promptly. A frozen sim leaves sim_elapsed at ~0 -> only the wall backstop fires.
         slice_s = max(0.05, min(0.5, float(timeout)))
         while not event.wait(slice_s):
+            # sim-host-status-watchdog-v1: this blocking ack wait runs ON the main host executor thread,
+            # so _sensors/_emit cannot publish /manipulation/status until the future resolves. Pulse the
+            # host liveness heartbeat each slice (sub-second wall) so the Isaac-side status watchdog sees
+            # the host alive through the wait and defers to THIS wait's own named sim-budget below. A
+            # heartbeat failure must never break the ack wait.
+            hb = self.heartbeat
+            if hb is not None:
+                try:
+                    hb()
+                except Exception:
+                    pass
             sim_elapsed = self._sim_now() - sim0
             wall_elapsed = time.monotonic() - wall0
             if pace_is_dead(sim_elapsed=sim_elapsed, wall_elapsed=wall_elapsed,
