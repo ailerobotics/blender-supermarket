@@ -488,7 +488,12 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
     Returns camera paths for integration's initialized native camera objects.
     """
     from pathlib import Path
-    from pxr import Gf, Sdf, UsdGeom, UsdPhysics, UsdShade
+    from pxr import Gf, Sdf, UsdGeom, UsdPhysics, UsdShade, Vt
+    # usd-core >= 26.8 no longer implicitly converts a plain Python list of tuples into a typed
+    # Vt array: CreatePointsAttr/Set(list_of_tuples) authors a vector<VtValue> and raises
+    # "Type mismatch ... expected 'VtArray<GfVec3f>'". The points/uv authoring below therefore
+    # builds the typed Vt array explicitly (byte-identical to the array the older implicit
+    # conversion produced, so no change on Isaac's bundled pxr).
     def transform(prim,matrix):
         UsdGeom.Xformable(prim).AddTransformOp().Set(Gf.Matrix4d(np.asarray(matrix).T.tolist()))
     def path(parent,name):
@@ -546,7 +551,7 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
             start = len(points)
             points += [(x,y,z) for (x,y) in quad]
             counts.append(4); indices += [start,start+1,start+2,start+3]
-        mesh.CreatePointsAttr(points); mesh.CreateFaceVertexCountsAttr(counts)
+        mesh.CreatePointsAttr(Vt.Vec3fArray([Gf.Vec3f(float(px),float(py),float(pz)) for (px,py,pz) in points])); mesh.CreateFaceVertexCountsAttr(counts)
         mesh.CreateFaceVertexIndicesAttr(indices); mesh.CreateSubdivisionSchemeAttr('none')
         # Double-sided so the module/base faces render regardless of winding vs the camera.
         mesh.CreateDoubleSidedAttr(True)
@@ -623,14 +628,14 @@ def author_camera_design(stage, config, *, parent_paths, marker_textures):
                 raise ValueError('marker texture must be an unwarped square QR')
             base = path(support['parent'],name+'_marker_'+str(index))
             mesh = UsdGeom.Mesh.Define(stage,base)
-            side = marker['side_m']*pixels.shape[0]/edge.mean()/2
-            mesh.CreatePointsAttr([(-side,-side,.0002),(side,-side,.0002),
-                                  (side,side,.0002),(-side,side,.0002)])
+            side = float(marker['side_m']*pixels.shape[0]/edge.mean()/2)   # plain float: Gf.Vec3f has no numpy-float32 ctor on usd-core 26.8
+            mesh.CreatePointsAttr(Vt.Vec3fArray([Gf.Vec3f(-side,-side,.0002),Gf.Vec3f(side,-side,.0002),
+                                  Gf.Vec3f(side,side,.0002),Gf.Vec3f(-side,side,.0002)]))
             mesh.CreateFaceVertexCountsAttr([4]); mesh.CreateFaceVertexIndicesAttr([0,1,2,3])
             mesh.CreateSubdivisionSchemeAttr('none')
             transform(mesh.GetPrim(),marker['parent_from_marker'])
             uv = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar('st',Sdf.ValueTypeNames.TexCoord2fArray,'vertex')
-            uv.Set([(0,0),(1,0),(1,1),(0,1)])
+            uv.Set(Vt.Vec2fArray([(0,0),(1,0),(1,1),(0,1)]))
             material = UsdShade.Material.Define(stage,base+'/Material')
             shader = UsdShade.Shader.Define(stage,base+'/Material/Surface')
             shader.CreateIdAttr('UsdPreviewSurface')
