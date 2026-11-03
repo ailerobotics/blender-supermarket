@@ -12,7 +12,7 @@ from unittest import mock
 
 from twin.restock.host_pacing_harness import (
     FakeClockPair, simulate_sim_primary_budget, simulate_station_heartbeat,
-    simulate_far_station_paused,
+    simulate_far_station_paused, simulate_loaded_collect_heartbeat_read_lag,
 )
 from twin.restock_manipulation import ros_adapter
 from twin.restock_manipulation.ros_adapter import (
@@ -245,6 +245,46 @@ class FarStationPausedUnderPacing(unittest.TestCase):
             self.assertEqual(r['outcome'], 'tripped_sim', (pacing, r))
             self.assertIn('parked heartbeat lost: sim gap', r['reason'], (pacing, r))
             self.assertLessEqual(r['sim'], self.SIM_GAP + 1.0, (pacing, r))
+
+
+class LoadedCollectHeartbeatReadLag(unittest.TestCase):
+    """sim-collect-host-estop-v1: the intermittent COLLECT host e-stop. The mission heart-beats the parked
+    source station every tick while picking, but a loaded-host executor / render spike in a long collect makes
+    the host READ a heartbeat several sim-tenths LATE (now - stamp > the 0.5 s window) though the mission is
+    alive and still sending strictly-increasing sequences. The pre-fix host REJECTED that valid late read and
+    turned it into a station fault -> bare global /manipulation/stop with NO controller fault. The shipped
+    pace-safe accept() must ACCEPT the late heartbeat and the station must survive the whole collect. Drives
+    the REAL IncorporationAckState."""
+
+    SIM_GAP, WALL_FLOOR = 0.5, 3.0          # the shipped real-rig defaults (unchanged; no bound widened)
+    OP_SIM = 174.0                          # ~the coldwin22/coldwin23 collect duration (failed at sim 175.7)
+
+    def test_late_read_heartbeat_is_accepted_and_collect_survives(self):
+        # A read lag of 0.6 sim-s -- past the 0.5 s window that rejected it pre-fix -- across the whole ~174 s
+        # collect at every pacing. The late heartbeats are all accepted and the station never faults.
+        for pacing in PACINGS:
+            r = simulate_loaded_collect_heartbeat_read_lag(
+                pacing=pacing, sim_gap_budget=self.SIM_GAP, wall_floor=self.WALL_FLOOR,
+                read_lag_sim=0.6, op_sim=self.OP_SIM)
+            self.assertEqual(r['outcome'], 'survived', (pacing, r))
+            self.assertGreater(r['accepted'], 0, (pacing, r))
+
+    def test_silent_station_still_faults_by_name(self):
+        # The safety bound is NOT widened: a station that goes genuinely silent (read_lag so large the host
+        # never sees a fresh-enough stamp AND no new acceptance -- modelled as the mission sending nothing new,
+        # i.e. the gap grows) still faults. Here we drive the pure gap via the sibling heartbeat harness to
+        # confirm a real death is caught at ~the 0.5 s SIM budget, unchanged by this fix.
+        r = simulate_station_heartbeat(pacing=16.0, sim_gap_budget=self.SIM_GAP, wall_floor=self.WALL_FLOOR,
+                                       no_heartbeat_sim=1e9)
+        self.assertEqual(r['outcome'], 'tripped_sim', r)
+        self.assertIn('parked heartbeat lost: sim gap', r['reason'], r)
+        self.assertLessEqual(r['sim'], self.SIM_GAP + 0.2, r)
+
+    def test_1x_realrig_fresh_reads_byte_identical(self):
+        # On the real rig (1x pacing) reads are fresh (read_lag 0): nothing about the normal path changes.
+        r = simulate_loaded_collect_heartbeat_read_lag(
+            pacing=1.0, sim_gap_budget=0.5, wall_floor=3.0, read_lag_sim=0.0, op_sim=10.0)
+        self.assertEqual(r['outcome'], 'survived', r)
 
 
 if __name__ == '__main__':

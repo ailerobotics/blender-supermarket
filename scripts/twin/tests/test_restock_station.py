@@ -62,6 +62,32 @@ def test_pause_cleared_by_fresh_prepare_and_by_stop():
     assert not state.paused and not state.active
 
 
+def test_late_read_liveness_command_accepted_and_gap_reset():
+    # sim-collect-host-estop-v1 (StationState parity): a loaded-host executor / render spike in a long collect
+    # makes the host READ a heartbeat LATE (now - stamp = 0.7 s > the 0.5 s window) though the mission is alive
+    # and still sending a newer sequence. The pre-fix accept() rejected it -> fault -> bare e-stop. It must now
+    # be accepted (likewise the late-arriving couple-start pause/stop), and the liveness gap must reset from
+    # the host's acceptance clock so the next snapshot does not fault.
+    state=StationState(wall_clock=lambda:0.)
+    state.accept(message(),1.)                                  # prepare at sim 1.0
+    assert state.accept(message('heartbeat',sequence=1,stamp=1.2),1.9)=='heartbeat'   # read 0.7 s late
+    assert state.fault is None
+    assert state.snapshot(1.95,endpoints_ready=True,process_alive=True)['state']!='failed'  # gap reset to ~0.05
+    assert state.accept(message('pause',sequence=2,stamp=1.95),2.8)=='pause'           # late pause honoured
+    assert state.accept(message('stop',epoch=1,sequence=3,stamp=2.8),3.9)=='stop'      # late stop honoured
+
+
+def test_prepare_still_rejects_stale_stamp_and_future_stamp():
+    # The freshness window is retained for prepare (fresh measured parked epoch), and a future stamp is
+    # invalid for any action -- so the fix relaxes ONLY the late-read case for the recurring liveness commands.
+    state=StationState(wall_clock=lambda:0.)
+    with pytest.raises(ValueError):                            # stale prepare (now - stamp = 0.7 > 0.5)
+        state.accept(message(stamp=1.0),1.7)
+    state.accept(message(stamp=1.0),1.0)                       # fresh prepare
+    with pytest.raises(ValueError):                            # future stamp (now - stamp < 0)
+        state.accept(message('heartbeat',sequence=1,stamp=3.0),2.0)
+
+
 def test_client_pause_sends_pause_and_frees_the_client_to_reprepare():
     # The mission StationClient.pause() sends a 'pause' (host suspends) and goes inactive locally so the next
     # op's begin() can re-prepare a fresh epoch (the host keeps the epoch, superseded by the fresh prepare).

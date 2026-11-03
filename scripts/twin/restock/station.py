@@ -108,9 +108,20 @@ class StationState:
         stamp=command.get('stamp')
         seq=command.get('sequence')
         action=command.get('action')
+        # Base validity: types, finiteness, a non-future stamp. The UPPER freshness bound (now-stamp<=0.5)
+        # stays ONLY for 'prepare' (a fresh measured parked epoch -- the nvblox-incorporation contract). For
+        # the recurring LIVENESS commands (heartbeat/pause/stop) it is a pace-UNSAFE trip: a loaded-host
+        # executor / render spike in a long collect makes the host READ a heartbeat late (now-stamp>0.5)
+        # though the mission is alive, and rejecting that valid late read faulted the station and latched a
+        # bare global e-stop with no controller fault (sim-collect-host-estop-v1). Strictly-increasing
+        # (epoch,sequence) already rejects a replay as 'ignored' below, so a newer-sequence liveness command
+        # is proof of liveness regardless of read latency; the snapshot sim-gap death guard (measured from
+        # the acceptance clock) stays the authority on a silent station, so no bound is widened. Mirror of
+        # restock_host.incorporation_ack.IncorporationAckState.accept.
         if (type(epoch) is not int or epoch<=0 or type(seq) is not int or seq<0
                 or not isinstance(stamp,(int,float)) or not math.isfinite(stamp)
-                or not math.isfinite(now) or not 0<=now-stamp<=.5):
+                or not math.isfinite(now) or now-stamp<0
+                or (action=='prepare' and now-stamp>.5)):
             raise ValueError('invalid station epoch, sequence or timestamp')
         if epoch<self.epoch or (epoch==self.epoch and seq<=self.sequence):
             return 'ignored'
@@ -146,7 +157,10 @@ class StationState:
         else:
             raise ValueError('unsupported station action')
         self.sequence=seq
-        self.last_heartbeat=stamp
+        # Liveness gap from the host's OWN acceptance clock (now), not the command stamp, so a late-but-
+        # accepted heartbeat resets it; a silent mission (no new-sequence command) still faults on the
+        # snapshot sim-gap. now ~= stamp on the real rig => byte-identical. See sim-collect-host-estop-v1.
+        self.last_heartbeat=now
         self.wall_heartbeat=self.wall_clock()
         return action
 
