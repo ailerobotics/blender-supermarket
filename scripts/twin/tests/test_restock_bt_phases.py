@@ -58,16 +58,27 @@ RETURN_UNCOUPLE_SCRIPT = [{'phase': 'navigate', '_return_leg': 'cart_parking'},
                           {'phase': 'navigate', '_return_leg': 'cart_parking_backaway'},
                           {'phase': 'navigate', '_return_leg': 'home'}]
 
-# sim-shelf-staging-v1: the re-sequenced outbound legs (tow->staging, brake, uncouple, drive->service).
+# sim-shelf-staging-v1: the re-sequenced outbound legs (tow->staging, brake, uncouple); the base is then
+# left parked at the staging pose (the carton-carry service to the endcap is the transfer service leg).
 OUTBOUND_STAGING_SCRIPT = [{'phase': 'navigate', '_outbound_leg': 'staging'},
                            {'phase': 'execute', '_outbound_leg': 'brake'},
-                           {'phase': 'execute', '_outbound_leg': 'uncouple'},
-                           {'phase': 'navigate', '_outbound_leg': 'service'}]
+                           {'phase': 'execute', '_outbound_leg': 'uncouple'}]
+
+# sim-service-leg-carry-v1: the re-sequenced transfer SERVICE LEG legs (perceive carton -> pick@staging ->
+# carry->endcap -> perceive slot -> place@endcap -> verify -> drive->staging). _transfer_leg is the carry
+# leg the milestone classifier keys on; the final `succeeded` tick arrives from drive->staging.
+TRANSFER_STAGING_SCRIPT = [{'phase': 'warm', '_transfer_leg': 'pick'},
+                           {'phase': 'execute', '_last_manip_phase': 'tuck', '_transfer_leg': 'pick'},
+                           {'phase': 'navigate', '_transfer_leg': 'carry'},
+                           {'phase': 'rewarm', '_transfer_leg': 'place'},
+                           {'phase': 'execute', '_last_manip_phase': 'place', '_transfer_leg': 'place'},
+                           {'phase': 'execute', '_last_manip_phase': 'verify', '_transfer_leg': 'place'},
+                           {'phase': 'navigate', '_transfer_leg': 'return_staging'}]
 
 
 class PhasedFixture:
     _PHASE_ATTRS = ('phase', '_last_manip_phase', '_collect_reposition_pending',
-                    '_collect_repositioned', '_return_leg', '_outbound_leg')
+                    '_collect_repositioned', '_return_leg', '_outbound_leg', '_transfer_leg')
 
     def __init__(self, scripts, *, uncouple_on_return=False, shelf_staging=False):
         self.time = 0.
@@ -98,6 +109,7 @@ class PhasedFixture:
         self._collect_repositioned = False
         self._return_leg = None
         self._outbound_leg = None
+        self._transfer_leg = None
 
     def start(self, action, job):
         self.action, self.job = action, job
@@ -235,13 +247,15 @@ class PhasedDriverTests(unittest.TestCase):
         self.assertEqual(len(leaf_names), 5)       # tow->park, brake, uncouple, back away, drive->home
         self.assertEqual(log[-1], 'complete')
 
-    def test_shelf_staging_outbound_subtree_drives_the_four_new_steps(self):
-        # sim-shelf-staging-v1: with shelf_staging on, the outbound stage is a subtree of four
-        # position-first leaves (tow->staging, brake, uncouple, drive->service), driven in series,
-        # and the full mission still completes (parity with the state machine).
+    def test_shelf_staging_outbound_subtree_drives_the_three_new_steps(self):
+        # sim-shelf-staging-v1 (+ sim-service-leg-carry-v1): with shelf_staging on, the outbound stage is a
+        # subtree of three position-first leaves (tow->staging, brake cart, uncouple) driven in series -- the
+        # base is left parked at the staging pose (the carton-carry service to the endcap is the TRANSFER
+        # service leg, below); the full mission still completes (parity with the state machine).
         from twin.restock.bt.view import serialise_node
-        from twin.restock.bt.stage_phases import OUTBOUND_STAGING_PLAN
-        scripts = dict(SCRIPTS, **{'outbound': OUTBOUND_STAGING_SCRIPT})
+        from twin.restock.bt.stage_phases import OUTBOUND_STAGING_PLAN, TRANSFER_STAGING_PLAN
+        scripts = dict(SCRIPTS, **{'outbound': OUTBOUND_STAGING_SCRIPT,
+                                   'transfer': TRANSFER_STAGING_SCRIPT})
         adapter = PhasedFixture(scripts, shelf_staging=True)
         state, log, shelf, ctx, root, _ = self._tree(adapter)
         self.assertEqual(state, 'complete')
@@ -249,7 +263,31 @@ class PhasedDriverTests(unittest.TestCase):
         out = serialise_node(next(c for c in mission.children if c.name == 'stage:outbound'))
         leaf_names = [c['name'] for c in out['children'][0]['children']]
         self.assertEqual(leaf_names, [f"outbound:{label}" for label, _ in OUTBOUND_STAGING_PLAN])
-        self.assertEqual(len(leaf_names), 4)       # tow->staging, brake, uncouple, drive->service
+        self.assertEqual(len(leaf_names), 3)       # tow->staging, brake cart, uncouple (no drive->service)
+        self.assertEqual(log[-1], 'complete')
+
+    def test_shelf_staging_transfer_service_leg_drives_the_seven_new_steps(self):
+        # sim-service-leg-carry-v1: with shelf_staging on, the transfer stage is the SERVICE LEG -- a subtree
+        # of seven position-first leaves (perceive carton -> transfer-pick@staging -> carry->endcap -> perceive
+        # slot -> place@endcap -> verify placed -> drive->staging), driven in series, each its own node; and the
+        # full mission still completes (parity with the state machine). The leg ends with the robot back at the
+        # staging pose beside the parked cart (the last 'drive->staging' leaf).
+        from twin.restock.bt.view import serialise_node
+        from twin.restock.bt.stage_phases import OUTBOUND_STAGING_PLAN, TRANSFER_STAGING_PLAN
+        scripts = dict(SCRIPTS, **{'outbound': OUTBOUND_STAGING_SCRIPT,
+                                   'transfer': TRANSFER_STAGING_SCRIPT})
+        adapter = PhasedFixture(scripts, shelf_staging=True)
+        state, log, shelf, ctx, root, _ = self._tree(adapter)
+        self.assertEqual(state, 'complete')
+        mission = next(c for c in root.children if c.name == 'mission')
+        xfer = serialise_node(next(c for c in mission.children if c.name == 'stage:transfer'))
+        leaf_names = [c['name'] for c in xfer['children'][0]['children']]
+        self.assertEqual(leaf_names, [f"transfer:{label}" for label, _ in TRANSFER_STAGING_PLAN])
+        self.assertEqual(leaf_names, ['transfer:perceive carton', 'transfer:transfer-pick@staging',
+                                      'transfer:carry→endcap', 'transfer:perceive slot',
+                                      'transfer:place@endcap', 'transfer:verify placed',
+                                      'transfer:drive→staging'])
+        self.assertEqual(len(leaf_names), 7)
         self.assertEqual(log[-1], 'complete')
 
     def test_mid_stage_failure_re_enters_phase_sequence_and_recovers(self):

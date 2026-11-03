@@ -95,6 +95,8 @@ def _stage_steps(stage, *, plans, timeline, return_uncouple, shelf_staging=False
         return [(lbl, k) for lbl, k in _sp.RETURN_UNCOUPLE_PLAN]
     if stage == 'outbound' and shelf_staging:
         return [(lbl, k) for lbl, k in _sp.OUTBOUND_STAGING_PLAN]
+    if stage == 'transfer' and shelf_staging:
+        return [(lbl, k) for lbl, k in _sp.TRANSFER_STAGING_PLAN]
     return [(lbl, k) for lbl, k in plans.get(stage, [])]
 
 
@@ -110,7 +112,9 @@ def build_model(*, plans=None, stage_order=None, timeline=None, return_uncouple=
       taken from the run, so the diagram matches that run exactly.
     * ``return_uncouple`` -- without a timeline, select the uncouple-at-parking return plan.
     * ``shelf_staging`` -- without a timeline, select the sim-shelf-staging-v1 outbound plan (tow→staging,
-      brake, uncouple, drive→service) in place of the single tow→shelf leaf.
+      brake, uncouple) in place of the single tow→shelf leaf, AND the sim-service-leg-carry-v1 transfer
+      service-leg plan (perceive → pick@staging → carry→endcap → perceive slot → place@endcap → verify →
+      drive→staging) in place of the single-pose transfer plan.
     """
     plans = dict(_sp.PLANS) if plans is None else dict(plans)
     if timeline is not None and getattr(timeline, 'shortcut_stages', None) is not None:

@@ -94,6 +94,39 @@ def _profile_mark(port, name):
         profiler.mark(name)
 
 
+# sim-service-leg-carry-v1: the drive-with-payload base speed/accel profile for the TRANSFER carry→endcap
+# leg. The base must not shove the held carton, so while carrying it drives slower and ramps gently. The
+# defaults are conservative (well under the nav max 0.25 m/s / 0.35 rad/s): a calm carry the arm's level
+# fold + the CARTON_TILT trip keep honest. A config mapping overrides any field; an unknown field raises so
+# a typo fails loudly at boot.
+_CARRY_DRIVE_DEFAULT = {'max_speed': 0.12, 'max_angular': 0.20, 'max_accel': 0.15, 'max_angular_accel': 0.40}
+
+
+def _resolve_carry_drive_profile(spec):
+    """Normalise a ``carry_drive_profile`` config value into a positive-finite mapping with keys
+    ``max_speed`` / ``max_angular`` / ``max_accel`` / ``max_angular_accel`` (m/s, rad/s, m/s^2, rad/s^2).
+    ``None`` / absent => the conservative built-in default; a mapping overrides any subset. Raises on a
+    non-mapping, an unknown key, or a non-positive/non-finite value (a typo fails loudly, never silently)."""
+    out = dict(_CARRY_DRIVE_DEFAULT)
+    if spec is None:
+        return out
+    if not isinstance(spec, dict):
+        raise ValueError('carry_drive_profile must be a mapping of {max_speed, max_angular, max_accel, '
+                         'max_angular_accel}')
+    bad = set(spec) - set(_CARRY_DRIVE_DEFAULT)
+    if bad:
+        raise ValueError(f'carry_drive_profile: unknown key(s) {sorted(bad)}; '
+                         f'allowed {sorted(_CARRY_DRIVE_DEFAULT)}')
+    for k, v in spec.items():
+        if v is None:
+            continue
+        v = float(v)
+        if not (math.isfinite(v) and v > 0):
+            raise ValueError(f'carry_drive_profile.{k} must be a finite positive number')
+        out[k] = v
+    return out
+
+
 @dataclass(frozen=True)
 class Packet:
     observation_id: str
@@ -258,7 +291,7 @@ class RuntimeAdapter:
                  ground_truth_place_actions=(), staged_settle_s=0.0,
                  collect_place_base_settle_m=None,
                  hold_base_on_reposition_block=False,
-                 shelf_staging=False):
+                 shelf_staging=False, carry_drive_profile=None):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         # Staged-start settle hold (twin.restock.staged_start; the bundle passes
         # config['staged_start_settle_s'] only when start_at is set and not collect): the warm-up of the
@@ -394,17 +427,35 @@ class RuntimeAdapter:
         # Instead the OUTBOUND stage tows the rollwagen STRAIGHT down the portal axis to a staging pose
         # (`shelf_staging`, south of the wall on the axis, coupled articulation ~0 deg the whole way,
         # cart crosses the doorway aligned), BRAKES the cart and RELEASES the tow coupling there (reusing
-        # the uncouple mechanic), then drives the robot ALONE (uncoupled) to the endcap `shelf_approach`
-        # service pose -- so the sharp turn to the endcap is done by the free base, not the coupled train.
-        # park/transfer/verify then run at the service pose with the cart parked at the staging. The
-        # uncoupled service leg and the cart RETRIEVAL on return (re-couple) are integration/GPU-owned:
-        # the robot must CARRY the carton during the uncoupled service (the cart no longer accompanies it
-        # to the endcap) -- "do not change manipulation" (captain) means that carry + the return re-couple
-        # are wired + GPU-validated by the integration lane, NOT here. See docs/examples/
-        # tow-lanes-mission-fragment.json (_shelf_staging_note) and data/sim-shelf-staging-v1/report.md.
+        # the uncouple mechanic), and leaves the base PARKED (uncoupled) at the staging pose beside the
+        # parked cart. The TRANSFER stage then services the endcap ALONE (sim-service-leg-carry-v1): pick
+        # the carton off the parked cart at the staging pose, carry it to the endcap held level, place it,
+        # drive back -- the sharp turn to the endcap + the carry are done by the free base, not the coupled
+        # train. The cart RETRIEVAL on return (re-couple) stays a separate captain decision (NOT here). See
+        # docs/examples/service-leg-carry-mission-fragment.json and data/sim-service-leg-carry-v1/report.md.
         self.shelf_staging = bool(shelf_staging)
-        self._outbound_leg = None       # staging | brake | uncouple | uncouple_wait | service
+        self._outbound_leg = None       # staging | brake | uncouple | uncouple_wait
         self._shelf_cart_parked = False  # True once the outbound released the cart at the staging pose
+        # sim-service-leg-carry-v1 (captain 2026-11-03, opt-in with shelf_staging): the manipulation half
+        # of the re-sequence. OUTBOUND leaves the base PARKED (uncoupled) at the staging pose beside the
+        # parked cart (no empty drive to the endcap); the TRANSFER stage then services the endcap ALONE --
+        # pick the carton off the parked cart at the staging pose, carry it to the endcap with the carton
+        # held LEVEL (carton_level, CARTON_TILT trip) and a drive-with-payload base profile, place it, then
+        # drive the empty base BACK to the staging pose. The carry-drive reuses fm390's TRANSIT carry-hold
+        # handshake (the SAME mechanic as the collect place-on-cart reposition): the arm holds the level
+        # fold while the base drives to `shelf_approach`, then re-registers the sensed endcap slot in the
+        # new base frame and places. `_transfer_leg`: pick | carry | place | return_staging (None = legacy
+        # single-pose transfer). The cart RETRIEVAL on return is a separate captain decision, NOT here.
+        self._transfer_leg = None
+        self._transfer_carry_pending = False   # carry-drive to the endcap in flight (base moving, carton held)
+        self._transfer_carried = False         # True once the base has carried the carton to the endcap
+        self._transfer_place_evidence = None   # the manip's place-success evidence, held across the drive back
+        self._carry_last_v = 0.0               # last commanded carry linear/angular (for the accel ramp)
+        self._carry_last_w = 0.0
+        # Drive-with-payload base speed/accel caps for the carry-drive leg (the base must not shove the held
+        # carton). A mapping {max_speed, max_angular} (m/s, rad/s); None => a conservative built-in default.
+        # Only applied on the carry→endcap leg (carton held); every other leg keeps its normal profile.
+        self.carry_drive_profile = _resolve_carry_drive_profile(carry_drive_profile)
         # Set in start(); declared here so the opt-in behaviour-tree layer can tell at tree-build time
         # (before any stage begins) that this adapter exposes per-stage phases (vs a plain fixture).
         self.phase = None
@@ -532,6 +583,14 @@ class RuntimeAdapter:
         self.phase = 'execute'
         self._return_leg = None           # set when the uncouple-on-return multi-leg return runs
         self._outbound_leg = None         # set when the shelf-staging multi-leg outbound runs
+        # sim-service-leg-carry-v1: reset the transfer service-leg carry state so a re-begun transfer
+        # (BT StageRetry / fm363 STEP_RETRY) restarts the pick->carry->place->drive-back arc cleanly.
+        self._transfer_leg = None
+        self._transfer_carry_pending = False
+        self._transfer_carried = False
+        self._transfer_place_evidence = None
+        self._carry_last_v = 0.0
+        self._carry_last_w = 0.0
         if action in ('collect', 'couple'):
             # sim-shelf-staging-v1: a fresh collect or a (re-)couple re-attaches the cart, so forget any
             # prior shelf-staging park; it is set True again only when the outbound releases the cart.
@@ -601,7 +660,8 @@ class RuntimeAdapter:
             elif action == 'outbound' and self._shelf_staging_active():
                 # sim-shelf-staging-v1: tow the COUPLED train STRAIGHT down the portal axis to the staging
                 # pose (first leg of the re-sequenced sales-floor stage); the execute phase then brakes +
-                # releases the cart there and the base drives on ALONE to the endcap service pose.
+                # releases the cart there and leaves the base PARKED (uncoupled) at the staging pose. The
+                # carton-carry service to the endcap is the transfer service leg (sim-service-leg-carry-v1).
                 kwargs = ({'goal_articulation': self.goal_articulation['outbound']}
                           if 'outbound' in self.goal_articulation else {})
                 self._start_nav_leg(self.poses['shelf_staging'], True, **kwargs)
@@ -635,6 +695,11 @@ class RuntimeAdapter:
             # grasp is dispatched (manip.start('transfer')) when the warm phase completes.
             self.phase = 'warm'
             self._warmn = 0
+            # sim-service-leg-carry-v1: in shelf-staging mode the transfer is the SERVICE LEG -- pick at the
+            # staging pose, carry to the endcap, place, drive back. Mark the carry leg so the BT milestone
+            # view decomposes it into its seven position-first steps (see stage_phases.TRANSFER_STAGING_PLAN).
+            if self._shelf_staging_active():
+                self._transfer_leg = 'pick'
         elif action not in ('park', 'verify'):
             raise ValueError(f'unsupported action: {action}')
 
@@ -873,6 +938,21 @@ class RuntimeAdapter:
         self._nav_stuck_reason = None
         self.nav.start(goal, coupled, **kw)
 
+    def _carry_drive_clamp(self, linear, angular, dt):
+        """sim-service-leg-carry-v1 drive-with-payload profile: clamp the commanded base (linear, angular)
+        to the carry profile's speed caps AND ramp each toward the command by at most max_accel*dt (a gentle
+        base so the held carton is not shoved; the arm keeps it level + the CARTON_TILT trip owns the attitude
+        safety). Pure/stateful on ``_carry_last_{v,w}``; applied only while the carry→endcap leg is active."""
+        prof = self.carry_drive_profile
+        v = max(-prof['max_speed'], min(float(linear), prof['max_speed']))
+        w = max(-prof['max_angular'], min(float(angular), prof['max_angular']))
+        dv_cap = prof['max_accel'] * max(float(dt), 0.0)
+        dw_cap = prof['max_angular_accel'] * max(float(dt), 0.0)
+        v = self._carry_last_v + max(-dv_cap, min(v - self._carry_last_v, dv_cap))
+        w = self._carry_last_w + max(-dw_cap, min(w - self._carry_last_w, dw_cap))
+        self._carry_last_v, self._carry_last_w = v, w
+        return v, w
+
     def _hold_base_on_nav_hold(self, r):
         """sim-collect-reposition-block-v1: should this navigate tick HOLD the base pinned instead of
         driving it? True only when the opt-in hold is enabled AND this is the uncoupled mid-collect carry
@@ -957,7 +1037,14 @@ class RuntimeAdapter:
                     # base brake (it never releases it) and locks the wheels. See _hold_base_on_nav_hold.
                     self.mobile.hold()
                 else:
-                    self.mobile.command(r.linear, r.angular, p.docking,
+                    linear, angular = r.linear, r.angular
+                    if self._transfer_carry_pending:
+                        # sim-service-leg-carry-v1 drive-with-payload profile: while CARRYING the held carton
+                        # to the endcap, cap the commanded base speed + yaw rate and ramp them gently so the
+                        # base cannot shove the carton (the arm holds it level; CARTON_TILT is the trip). Only
+                        # the carry→endcap leg is clamped; every other leg drives at its normal profile.
+                        linear, angular = self._carry_drive_clamp(linear, angular, dt)
+                    self.mobile.command(linear, angular, p.docking,
                                         transport_ready=p.transport_ready)
                 return Result('running', reason=r.reason)
             self.mobile.park()
@@ -965,8 +1052,9 @@ class RuntimeAdapter:
                 return Result('running', reason='waiting for measured parking')
             if self.action == 'outbound' and self._outbound_leg == 'staging':
                 # sim-shelf-staging-v1: reached the staging pose still COUPLED (straight portal-axis tow).
-                # Hand off to the execute phase, which brakes the cart and releases the tow coupling before
-                # the base drives on ALONE to the endcap service pose.
+                # Hand off to the execute phase, which brakes the cart and releases the tow coupling; the
+                # base is then left PARKED (uncoupled) at the staging pose (the carton-carry service to the
+                # endcap is the transfer service leg, sim-service-leg-carry-v1 -- not an empty drive here).
                 if not p.coupled:
                     raise ValueError('cart lost before the staging pose')
                 limit = self.goal_articulation.get('outbound')
@@ -975,11 +1063,6 @@ class RuntimeAdapter:
                 self.phase = 'execute'
                 self._outbound_leg = 'brake'
                 return Result('running', reason='towed to shelf staging pose; braking cart before uncouple')
-            if self.action == 'outbound' and self._outbound_leg == 'service':
-                # sim-shelf-staging-v1: the base drove ALONE (uncoupled) to the endcap service pose with the
-                # cart left parked at the staging. Arrived uncoupled -> outbound done; park/transfer follow.
-                return Result('succeeded', self._evidence(p, arrived=True, shelf_staging=True,
-                                                          **self._nav_workarounds('outbound')))
             if self.action == 'outbound':
                 if not p.coupled:
                     raise ValueError('cart lost at destination')
@@ -1018,6 +1101,32 @@ class RuntimeAdapter:
                     # Home, empty: the cart was left parked, so no coupled requirement here.
                     return Result('succeeded', self._evidence(p, home=True))
                 raise RuntimeError(f'invalid return leg at navigate: {self._return_leg!r}')
+            if self.action == 'transfer' and self._transfer_carry_pending:
+                # sim-service-leg-carry-v1: carried the held carton to the endcap service pose. Resume the
+                # PAUSED arm (its TRANSIT -> preplace) after re-warming the collision map at the endcap base
+                # pose; do NOT re-begin the manipulation (the controller is mid-run, holding the level carry
+                # fold). Mirrors the collect place_approach arrival (fm390/fm399): the station was cleanly
+                # stopped at carry-drive start, so the re-warm begins a FRESH epoch at the endcap and re-reads
+                # the sensed slot target in the NEW base frame (controller._reregister_place) before placing.
+                self.manip.set_base_repositioned()
+                self._transfer_carry_pending = False
+                self._transfer_carried = True
+                self._transfer_leg = 'place'
+                self.phase = 'rewarm'
+                self._warmn = 0
+                return Result('running', reason='carried to the endcap; re-parking + re-warming before place')
+            if self.action == 'transfer' and self._transfer_leg == 'return_staging':
+                # sim-service-leg-carry-v1: the empty base drove BACK to the staging pose beside the parked
+                # cart -- the service leg is complete (captain: end at staging). Return the held place-success
+                # evidence re-stamped to THIS arrival packet (its observation id + sim clock), so the mission's
+                # freshness gate measures the acceptance here, not the stale place instant. The `released`
+                # fact + sku/quantity/location were validated at the place; only the clock is re-stamped.
+                if self._transfer_place_evidence is None:
+                    raise RuntimeError('transfer return-to-staging without held place evidence')
+                evidence = dict(self._transfer_place_evidence,
+                                observation_id=f'service_leg:transfer:{p.observation_id}',
+                                simulation_time=p.simulation_time)
+                return Result('succeeded', evidence)
             if self.action == 'collect' and self._collect_reposition_pending:
                 if self._reposition_seq_i < len(self._reposition_seq) - 1:
                     # Reached the staging waypoint (east of the cart); advance to place_approach.
@@ -1298,6 +1407,24 @@ class RuntimeAdapter:
                 self._collect_reposition_pending = True
                 return Result('running', reason=f'pick done; staging base to {self._reposition_seq[0]} '
                                                  f'en route to place_approach')
+            # sim-service-leg-carry-v1: the transfer PICK arm has folded to the carry pose and is HOLDING in
+            # TRANSIT -- carry the held carton to the endcap `shelf_approach` service pose BEFORE it places on
+            # the endcap. This mirrors the collect place-on-cart reposition above (pause the arm, drive the
+            # base, re-register + place at the new pose), re-targeted to the endcap and with a drive-with-
+            # payload base profile (clamped in the navigate command below) + the carton held LEVEL
+            # (carton_level, CARTON_TILT trip). One-shot per transfer; only fires in shelf-staging mode once
+            # the arm reaches TRANSIT (the opt-in transfer_service_carry controller flag produces it).
+            if (self.action == 'transfer' and self._shelf_staging_active()
+                    and self._last_manip_phase == 'transit' and not self._transfer_carried):
+                self.manip.pause_station(self.time)   # cleanly stop the parked station before the base moves
+                self._carry_last_v = 0.0
+                self._carry_last_w = 0.0
+                self._start_nav_leg(self.poses['shelf_approach'], False, carry_drive=True)
+                self.phase = 'navigate'
+                self._transfer_carry_pending = True
+                self._transfer_leg = 'carry'
+                return Result('running', reason='transfer pick done; carrying the held carton to the endcap '
+                                                'service pose (held level, payload speed profile)')
             stalled = self._sensor_stall(r)
             if stalled is not None:                       # unrecoverable reach -> fail fast
                 return Result('failed', reason=stalled)
@@ -1322,22 +1449,36 @@ class RuntimeAdapter:
                 key = 'released' if self.action == 'transfer' else 'loaded'
                 ground_truth = self._ground_truth_place_evidence(last, expected, p, key)
                 if ground_truth is not None:
-                    return Result('succeeded', ground_truth)
-                final_sources = sources
-                if (gtc.enabled() and self.action in _GT_PLACE_EVIDENCE_STAGES and isinstance(last, dict)
-                        and last.get('source') == gtc.PLACE_CHECK):
-                    # collect-gt: under RESTOCK_VERIFY_PLACE the stage's final evidence is the controller's
-                    # sim-measured ground-truth place check (no camera frames the cart), which has no
-                    # sku/observation_id and is not 'sensor' -- so every completed collect would die here
-                    # ('transfer evidence mismatch'). Convert it to honestly-labelled ground_truth evidence.
-                    last = gtc.stage_evidence_from_place_check(
-                        last, sku=self.job.sku, quantity=self.job.quantity, expected_location=expected)
-                    final_sources = tuple(sources) + (gtc.SOURCE,)
-                if (last.get('source') not in final_sources or last.get('sku') != self.job.sku or
-                        last.get('location') != expected or last.get('quantity') != self.job.quantity):
-                    raise ValueError('transfer evidence mismatch')
-                # Keep the actual final observation identity and clock.
-                return Result('succeeded', dict(last, **{key: True}))
+                    evidence = ground_truth
+                else:
+                    final_sources = sources
+                    if (gtc.enabled() and self.action in _GT_PLACE_EVIDENCE_STAGES and isinstance(last, dict)
+                            and last.get('source') == gtc.PLACE_CHECK):
+                        # collect-gt: under RESTOCK_VERIFY_PLACE the stage's final evidence is the controller's
+                        # sim-measured ground-truth place check (no camera frames the cart), which has no
+                        # sku/observation_id and is not 'sensor' -- so every completed collect would die here
+                        # ('transfer evidence mismatch'). Convert it to honestly-labelled ground_truth evidence.
+                        last = gtc.stage_evidence_from_place_check(
+                            last, sku=self.job.sku, quantity=self.job.quantity, expected_location=expected)
+                        final_sources = tuple(sources) + (gtc.SOURCE,)
+                    if (last.get('source') not in final_sources or last.get('sku') != self.job.sku or
+                            last.get('location') != expected or last.get('quantity') != self.job.quantity):
+                        raise ValueError('transfer evidence mismatch')
+                    # Keep the actual final observation identity and clock.
+                    evidence = dict(last, **{key: True})
+                if (self.action == 'transfer' and self._shelf_staging_active()
+                        and self._transfer_place_evidence is None):
+                    # sim-service-leg-carry-v1: the carton is placed + released at the endcap. Drive the EMPTY
+                    # base BACK to the staging pose beside the parked cart before the stage succeeds (captain:
+                    # end the leg at staging). Hold the place-success evidence; re-stamp it to the arrival
+                    # packet on return (the navigate-completion return_staging handler above).
+                    self._transfer_place_evidence = evidence
+                    self._transfer_leg = 'return_staging'
+                    self._start_nav_leg(self.poses['shelf_staging'], False)
+                    self.phase = 'navigate'
+                    return Result('running',
+                                  reason='placed at the endcap; driving the empty base back to the staging pose')
+                return Result('succeeded', evidence)
             return Result(r.status, reason=r.reason)
         if self.action == 'verify':
             evidence = p.verification
@@ -1459,13 +1600,12 @@ class RuntimeAdapter:
         if self._outbound_leg == 'uncouple_wait':
             if p.coupled:
                 return Result('running', reason='awaiting measured uncoupled observation')
-            # Drive the base ALONE to the endcap service pose (uncoupled). The carton is carried by the
-            # robot through this leg -- a manipulation concern owned by the integration lane (see
-            # shelf_staging in __init__); this nav leg only repositions the free base.
-            self._start_nav_leg(self.poses['shelf_approach'], False)
-            self.phase = 'navigate'
-            self._outbound_leg = 'service'
-            return Result('running', reason='uncoupled at staging; driving alone to the endcap service pose')
+            # sim-service-leg-carry-v1: the cart is parked + uncoupled at the staging pose and the base is
+            # left PARKED there beside it (uncoupled). Outbound is DONE -- the carton-carry service to the
+            # endcap is the TRANSFER service leg (pick@staging -> carry -> place -> drive back), NOT an empty
+            # drive here (which was PR 274's placeholder; the robot must pick the carton off the cart first).
+            return Result('succeeded', self._evidence(p, arrived=True, shelf_staging=True,
+                                                      **self._nav_workarounds('outbound')))
         raise RuntimeError(f'invalid outbound leg at execute: {self._outbound_leg!r}')
 
     def step(self, dt):

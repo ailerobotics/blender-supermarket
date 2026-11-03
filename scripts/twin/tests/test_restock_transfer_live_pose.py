@@ -332,6 +332,59 @@ def test_collect_is_untouched_by_the_switch(policy, monkeypatch):
     assert c._repositions_before_place() is True
 
 
+# -- sim-service-leg-carry-v1: transfer_service_carry gives a live_pose transfer the TRANSIT carry-hold ----
+
+def test_transfer_service_carry_predicate(policy, monkeypatch):
+    # The opt-in flag makes _repositions_before_place() True for a live_pose TRANSFER (so the carry fold
+    # holds in TRANSIT while the runtime drives the base to the endcap); off => a live_pose transfer stays
+    # tuck->preplace (byte-identical). collect is unaffected either way.
+    monkeypatch.setenv(tm.ENV, 'live_pose')
+    on = TransferController(Motion(), {'juice_orange': PROFILE}, pose_policy=policy,
+                           transfer_service_carry=True)
+    on.start('transfer', JOB)
+    assert on._live_pose_transfer() and on._repositions_before_place() is True
+    off = TransferController(Motion(), {'juice_orange': PROFILE}, pose_policy=policy,
+                            transfer_service_carry=False)
+    off.start('transfer', JOB)
+    assert off._live_pose_transfer() and off._repositions_before_place() is False
+    # collect never live_pose => the flag cannot turn it on; its own reposition_before_place still governs.
+    col = TransferController(Motion(), {'juice_orange': PROFILE}, pose_policy=policy,
+                            transfer_service_carry=True)
+    col.start('collect', JOB)
+    assert not col._live_pose_transfer() and col._repositions_before_place() is False
+
+
+def service_carry_host_controller(policy):
+    # host_controller + the sim-service-leg-carry-v1 opt-in carry flag.
+    stow = (0.11, -2.5, 1.7, -0.7, -1.5708, 0.0)
+    m = Motion()
+    c = TransferController(m, {'juice_orange': PROFILE}, pose_policy=policy, transport_joints=stow,
+                           contact_straight_line=True, staged_cart_swing=True,
+                           cart_pan_joint0=HOST['cart_pan_joint0'], cart_tuck_shape=HOST['cart_tuck_shape'],
+                           carry_lift_shape=HOST['carry_lift_shape'], carry_wrist1_cap=HOST['carry_wrist1_cap'],
+                           carry_wrist2_min=HOST['carry_wrist2_min'], grasp_track_m=HOST['grasp_track_m'],
+                           reposition_before_place=HOST['reposition_before_place'],
+                           transfer_service_carry=True, transfer_ground_truth=True, phase_timeout=120.)
+    c.start('transfer', JOB)
+    return c, m, stow
+
+
+def test_live_pose_transfer_with_service_carry_folds_into_transit_and_holds(policy, monkeypatch):
+    # With live_pose + wrist_guard + transfer_service_carry, the live_pose transfer pick folds lift -> tuck
+    # -> TRANSIT and HOLDS the carry pose (the runtime would drive the base to the endcap here, then signal
+    # base_repositioned to resume -> preplace). Since run_stage never sets base_repositioned, it holds in
+    # TRANSIT and never reaches preplace -- the carry-hold the service leg drives. (Vs the no-flag live_pose
+    # which goes tuck -> preplace directly, asserted in test_live_pose_transfer_completes_from_the_run356_...)
+    monkeypatch.setenv(tm.ENV, 'live_pose')
+    monkeypatch.setenv(tc.ENV, 'wrist_guard')
+    c, _, stow = service_carry_host_controller(policy)
+    assert c.transfer_service_carry and tc.WRIST_GUARD in c.transfer_carry
+    phases, _ = run_stage(c, live_source(), stow, ticks=60)
+    assert 'transit' in phases and 'preplace' not in phases
+    seq = [p for i, p in enumerate(phases) if i == 0 or phases[i - 1] != p]
+    assert seq[seq.index('tuck') + 1] == 'transit'   # the carry fold holds in TRANSIT, not straight to preplace
+
+
 # -- live_pose requires the wrist_guard: fail fast, never silently run the jam-prone place -------------
 
 def test_live_pose_transfer_without_wrist_guard_fails_fast_with_a_named_reason(policy, monkeypatch, capsys):

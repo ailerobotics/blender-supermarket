@@ -106,6 +106,7 @@ class TransferController:
                  collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0,
                  release_detach_timeout_s: float = 0.0, transfer_preplace_reach_guard=None,
                  transfer_pick_wrist_guard: bool = False,
+                 transfer_service_carry: bool = False,
                  esdf_boot_ack_grace_s: float = 0.0,
                  carton_level=None, fk_urdf=None):
         self.steady_clock=steady_clock
@@ -121,6 +122,14 @@ class TransferController:
         # and the arm waits -- the adapter pauses stepping us, drives the base to place_approach, then sets
         # base_repositioned so TRANSIT -> preplace proceeds at the new pose. Default off => byte-identical.
         self.reposition_before_place = bool(reposition_before_place)
+        # sim-service-leg-carry-v1 (opt-in, default off => byte-identical): the shelf-staging TRANSFER
+        # service leg picks the carton off the parked cart at the staging pose and must CARRY it to the
+        # endcap before placing. That needs the TRANSIT carry-hold handshake (lift -> tuck -> TRANSIT, the
+        # arm holds the level fold while the runtime drives the base, then re-registers + places at the
+        # endcap) -- the SAME fm390 mechanic the collect place-on-cart uses, but for a live_pose transfer
+        # (which otherwise goes tuck -> preplace with no carry-hold). When set, _repositions_before_place()
+        # is True for a live_pose transfer so the carry-hold is produced; the runtime drives the carry.
+        self.transfer_service_carry = bool(transfer_service_carry)
         self.base_repositioned = False
         self._source_obs = None   # fm390: the matched source observation, for re-running the place policy
         # Opt-in SIM transfer workaround (env RESTOCK_TRANSFER_MODE, twin.restock_manipulation.transfer_mode,
@@ -739,8 +748,15 @@ class TransferController:
         return self.transfer_preplace_reach_guard
 
     def _repositions_before_place(self):
-        """fm390's TRANSIT base-reposition handshake applies. Never for a live_pose transfer: the runtime
-        drives that reposition for collect only, so a transfer would hold in TRANSIT to the phase timeout."""
+        """fm390's TRANSIT base-reposition handshake applies to this move. True when:
+          * a non-live_pose op has reposition_before_place set (the collect place-on-cart, unchanged), OR
+          * sim-service-leg-carry-v1: a live_pose TRANSFER with transfer_service_carry set -- the shelf-
+            staging service leg carries the picked carton to the endcap before placing, so the arm MUST hold
+            the carry fold in TRANSIT while the runtime drives the base (which drives the carry for transfer
+            only in shelf-staging mode). Without the flag a live_pose transfer stays tuck -> preplace (no
+            carry-hold) so it would hold in TRANSIT to the phase timeout -- hence the opt-in gate."""
+        if self.transfer_service_carry and self._live_pose_transfer():
+            return True
         return self.reposition_before_place and not self._live_pose_transfer()
 
     def _note_recovery_pause(self):
@@ -1718,10 +1734,10 @@ class TransferController:
                 return self._fail('staged cart-swing %s move failed' % self.phase)
             if outcome == 'succeeded':
                 nxt = {'tuck': 'pan', 'pan': 'preplace', 'retreat_tuck': 'stow'}[self.phase]
-                if self.phase == 'tuck' and self._live_pose_transfer():
-                    nxt = 'preplace'  # live_pose: no TRANSIT hold (no transfer reposition), no collect-cart pan
-                elif self.phase == 'tuck' and self.reposition_before_place:
-                    nxt = 'transit'   # fm390: hold the carry fold; the base drives to place_approach next
+                if self.phase == 'tuck' and self._repositions_before_place():
+                    nxt = 'transit'   # fm390 / service-leg: hold the carry fold; the base drives next
+                elif self.phase == 'tuck' and self._live_pose_transfer():
+                    nxt = 'preplace'  # live_pose (no service carry): no TRANSIT hold, no collect-cart pan
                 self._transition(nxt)
             elif outcome != 'running':
                 return self._fail('invalid staged cart-swing motion outcome')

@@ -782,10 +782,11 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(r.evidence['home'])
         self.assertEqual(nav_goals, [((2.0, -1.0, 1.57), True), ((0, 0, 0), False)])
 
-    def test_shelf_staging_outbound_tows_to_staging_uncouples_then_drives_to_service(self):
-        # sim-shelf-staging-v1: with shelf_staging on + a shelf_staging pose, the OUTBOUND stage tows the
-        # COUPLED train to the staging pose, brakes the cart, releases the coupling, then drives the base
-        # ALONE (uncoupled) to the endcap shelf_approach service pose. Position-first, step by step.
+    def test_shelf_staging_outbound_tows_to_staging_and_uncouples(self):
+        # sim-shelf-staging-v1 (+ sim-service-leg-carry-v1): with shelf_staging on + a shelf_staging pose, the
+        # OUTBOUND stage tows the COUPLED train to the staging pose, brakes the cart, releases the coupling,
+        # and leaves the base PARKED (uncoupled) at the staging pose -- it does NOT drive to the endcap (the
+        # carton-carry service to the endcap is the TRANSFER service leg). One coupled tow leg only.
         nav_goals = []
         self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
                       step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
@@ -822,9 +823,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(adapter._shelf_cart_parked)
         # The sequence: brake the cart, then release the coupling -- in that order.
         self.assertEqual(events, ['brake', 'uncouple'])
-        # Nav legs: coupled tow to the staging pose, then the UNCOUPLED solo drive to the service pose.
-        self.assertEqual(nav_goals, [((-3.875, 8.0, -1.5708), True),       # tow to staging, coupled
-                                     ((-3.05, 6.0, 3.14159), False)])      # drive to endcap, uncoupled
+        # Nav legs: ONLY the coupled tow to the staging pose -- the base is left parked there (no empty
+        # drive to the endcap; that carton-carry service is the transfer service leg).
+        self.assertEqual(nav_goals, [((-3.875, 8.0, -1.5708), True)])
+        self.assertEqual(adapter._outbound_leg, 'uncouple_wait')
 
     def test_shelf_staging_park_allows_uncoupled_cart_parked_at_staging(self):
         # After the shelf-staging outbound releases the cart at the staging, the base is parked UNCOUPLED
@@ -881,6 +883,105 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
                            fixture_mode=True, shelf_staging=True)
+
+    def test_shelf_staging_transfer_service_leg_picks_carries_places_returns(self):
+        # sim-service-leg-carry-v1: with shelf_staging the TRANSFER stage is the SERVICE LEG. From the base
+        # parked at the staging pose: warm/perceive -> pick (the arm folds to the TRANSIT carry-hold) ->
+        # carry-drive to the endcap shelf_approach (carry_drive leg) -> re-warm/perceive slot -> place ->
+        # drive the EMPTY base BACK to the staging pose, succeeding there (the captain's "end at staging").
+        nav_goals = []
+        nav = NS(start=lambda g, c, **k: nav_goals.append((tuple(g), c, dict(k))),
+                 step=lambda dt, p: NS(status='succeeded', linear=0.1, angular=0., reason=''),
+                 cancel=lambda: None)
+        events = []
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1,
+                           parked=True, odometry=NS(pose=(-3.875, 8.0, -1.5708)))
+        port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+
+        class M:                                   # the raw controller the adapter wraps in a bridge
+            cart_location = 'rollwagen'
+            def __init__(s): s.base_repositioned = False; s.steps = 0
+            def start(s, a, j): events.append(('start', a))
+            def warm(s, dt, p): return True
+            def pause_station(s, t, *, suspend_only=False): events.append('pause_station')
+            def set_base_repositioned(s): s.base_repositioned = True; events.append('set_base_repositioned')
+            def step(s, dt, p):
+                s.steps += 1
+                if not s.base_repositioned:          # HOLD the level carry fold until the base has carried it
+                    return NS(status='running', reason='', controls=(), phase='transit')
+                ev = [{'source': 'test_fixture', 'observation_id': 'plc',
+                       'simulation_time': ticks[0] * .1, 'sku': 'milk', 'quantity': 1,
+                       'location': 'shelf'}]                # placed + released at the endcap
+                return NS(status='succeeded', reason='', controls=(), phase='place', evidence=ev)
+
+        manip = M()
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['shelf_approach'] = [-3.05, 6.0, 3.14159]
+        poses['shelf_staging'] = [-3.875, 8.0, -1.5708]
+        adapter = RuntimeAdapter(nav, self.mobile, manip, port, poses, fixture_mode=True, shelf_staging=True)
+        adapter.start('transfer', self.job)
+        self.assertEqual(adapter._transfer_leg, 'pick')
+        legs, r = [], None
+        for _ in range(30):
+            r = adapter._step(.1)
+            legs.append(adapter._transfer_leg)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence['released'])
+        self.assertEqual(r.evidence['location'], 'shelf')
+        self.assertTrue(r.evidence['observation_id'].startswith('service_leg:transfer:'))
+        # Observed the carry-hold handshake: the paused arm was re-armed on arrival at the endcap
+        # (set_base_repositioned), which resumes its TRANSIT -> preplace -> place at the new base frame.
+        self.assertIn('set_base_repositioned', events)
+        # The carry→endcap leg drove UNCOUPLED to shelf_approach with carry_drive set; the LAST leg drove
+        # back to the staging pose (robot ends at staging beside the parked cart).
+        self.assertTrue(any(g == (-3.05, 6.0, 3.14159) and not c and k.get('carry_drive')
+                            for g, c, k in nav_goals))
+        self.assertEqual(nav_goals[-1][0], (-3.875, 8.0, -1.5708))
+        self.assertIn('carry', legs)
+        self.assertIn('return_staging', legs)
+
+    def test_shelf_staging_off_transfer_is_single_pose_byte_identical(self):
+        # Default (shelf_staging off): the transfer never enters the service-leg carry -- _transfer_leg stays
+        # None and the single-pose warm->place->verify path runs unchanged.
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True)
+        adapter.start('transfer', self.job)
+        self.assertIsNone(adapter._transfer_leg)
+        self.assertEqual(adapter.phase, 'warm')
+
+    def test_carry_drive_profile_resolver(self):
+        from twin.restock.runtime import _resolve_carry_drive_profile, _CARRY_DRIVE_DEFAULT
+        self.assertEqual(_resolve_carry_drive_profile(None), _CARRY_DRIVE_DEFAULT)
+        got = _resolve_carry_drive_profile({'max_speed': 0.08})
+        self.assertEqual(got['max_speed'], 0.08)
+        self.assertEqual(got['max_angular'], _CARRY_DRIVE_DEFAULT['max_angular'])   # others keep the default
+        with self.assertRaises(ValueError):
+            _resolve_carry_drive_profile({'bogus': 1.0})                            # unknown key fails loudly
+        with self.assertRaises(ValueError):
+            _resolve_carry_drive_profile({'max_speed': -1.0})                       # non-positive fails loudly
+
+    def test_carry_drive_clamp_caps_speed_and_ramps(self):
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['shelf_staging'] = [-3.875, 8.0, -1.5708]
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True,
+                                 shelf_staging=True,
+                                 carry_drive_profile={'max_speed': 0.12, 'max_accel': 0.15})
+        # First tick from rest: the accel ramp bounds the step to max_accel*dt, not the full speed cap.
+        v, w = adapter._carry_drive_clamp(0.25, 0.0, 0.1)
+        self.assertAlmostEqual(v, 0.015, places=6)              # 0.15 m/s^2 * 0.1 s
+        # Keep commanding full speed: it ramps up but never exceeds the carry speed cap.
+        for _ in range(200):
+            v, w = adapter._carry_drive_clamp(0.25, 0.0, 0.1)
+        self.assertLessEqual(v, 0.12 + 1e-9)
+        self.assertAlmostEqual(v, 0.12, places=6)
+        # Angular is capped to the profile too.
+        _, w = adapter._carry_drive_clamp(0.0, 5.0, 1.0)
+        self.assertLessEqual(abs(w), adapter.carry_drive_profile['max_angular'] + 1e-9)
 
     def test_couple_runs_fine_dock_servo_before_attach(self):
         # With a fine_dock servo attached, couple must creep (commanding the base) until the

@@ -67,22 +67,38 @@ class ModelFromCode(unittest.TestCase):
             self.assertEqual(gate_labels, [f'{stage}:{label}' for label, _ in plan])
         self.assertEqual(mission['children'][-1]['name'], 'finalize')
 
-    def _outbound_gates(self, model):
+    def _stage_gates(self, model, stage):
         mission = next(c for c in model['children'] if c['name'] == 'mission')
-        outbound = next(n for n in mission['children']
-                        if n['role'] == 'stage_retry' and n['stage'] == 'outbound')
-        return [c['name'] for c in outbound['children'][0]['children']]
+        node = next(n for n in mission['children']
+                    if n['role'] == 'stage_retry' and n['stage'] == stage)
+        return [c['name'] for c in node['children'][0]['children']]
+
+    def _outbound_gates(self, model):
+        return self._stage_gates(model, 'outbound')
 
     def test_shelf_staging_outbound_plan_shows_the_new_nodes(self):
-        # sim-shelf-staging-v1: with shelf_staging the outbound stage decomposes into the re-sequenced
-        # position-first leaves (tow->staging, brake, uncouple, drive->service); the diagram generator
-        # must show them in series (the "new nodes" the captain follow-up adds).
+        # sim-shelf-staging-v1 (+ sim-service-leg-carry-v1): with shelf_staging the outbound stage
+        # decomposes into the re-sequenced position-first leaves (tow->staging, brake cart, uncouple); the
+        # base is left parked at the staging pose (the endcap carton-carry is the transfer service leg).
         gates = self._outbound_gates(D.build_model(shelf_staging=True))
         self.assertEqual(gates, [f'outbound:{label}' for label, _ in sp.OUTBOUND_STAGING_PLAN])
-        self.assertEqual(gates, ['outbound:tow→staging', 'outbound:brake cart',
-                                 'outbound:uncouple', 'outbound:drive→service'])
+        self.assertEqual(gates, ['outbound:tow→staging', 'outbound:brake cart', 'outbound:uncouple'])
         # Default (flag off) keeps the single tow->shelf leaf (byte-identical).
         self.assertEqual(self._outbound_gates(D.build_model()), ['outbound:tow→shelf'])
+
+    def test_shelf_staging_transfer_service_leg_shows_the_new_nodes(self):
+        # sim-service-leg-carry-v1: with shelf_staging the transfer stage decomposes into the seven
+        # position-first service-leg leaves (perceive carton -> pick@staging -> carry->endcap -> perceive slot
+        # -> place@endcap -> verify -> drive->staging); the diagram generator must show them in series.
+        gates = self._stage_gates(D.build_model(shelf_staging=True), 'transfer')
+        self.assertEqual(gates, [f'transfer:{label}' for label, _ in sp.TRANSFER_STAGING_PLAN])
+        self.assertEqual(gates, ['transfer:perceive carton', 'transfer:transfer-pick@staging',
+                                 'transfer:carry→endcap', 'transfer:perceive slot',
+                                 'transfer:place@endcap', 'transfer:verify placed',
+                                 'transfer:drive→staging'])
+        # Default (flag off) keeps the legacy single-pose transfer plan (byte-identical).
+        self.assertEqual(self._stage_gates(D.build_model(), 'transfer'),
+                         [f'transfer:{label}' for label, _ in sp.PLANS['transfer']])
 
     def test_stage_steps_sequences_have_memory(self):
         m = D.build_model()

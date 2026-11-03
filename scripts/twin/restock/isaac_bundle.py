@@ -463,7 +463,13 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              # `shelf_staging` pose in mission_poses; the uncoupled service carton-carry +
                              # cart retrieval on return are integration/manip-owned. Absent => the coupled
                              # tow straight to the endcap (byte-identical). See the fragment + report.
-                             shelf_staging=bool(config.get('shelf_staging')))
+                             shelf_staging=bool(config.get('shelf_staging')),
+                             # sim-service-leg-carry-v1: the drive-with-payload base speed/accel caps for the
+                             # shelf-staging transfer carry→endcap leg (the base must not shove the held
+                             # carton). None => a conservative built-in default; a mapping overrides any of
+                             # {max_speed, max_angular, max_accel, max_angular_accel}. Only applied on the
+                             # carry leg; every other leg keeps its normal profile.
+                             carry_drive_profile=config.get('carry_drive_profile'))
     if staged_clock_sync(config):
         # Staged start: the shortcut's settle steps leave /clock a constant offset ahead of the packet
         # clock; stamp it on every host sensor packet so the host freshness checks measure true age
