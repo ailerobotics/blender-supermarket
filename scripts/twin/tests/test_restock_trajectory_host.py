@@ -605,3 +605,81 @@ def test_settle_envelope_switch_is_backward_compatible():
     finally:
         os.environ.pop('RESTOCK_SETTLE_ENVELOPE', None)
         importlib.reload(th)
+
+
+# --- sim-collect-host-estop-v2: the COLLECT trajectory-stop path (rtfcollect2 preserved run) ----------
+# rtfcollect2 (max pacing, default 1/60 physics, collect-only) e-stopped COLLECT. host-stack.log named
+# the SOURCE (a trajectory stop, NOT the PR-277 station liveness):
+#   TRAJ_HOST_GOAL_MISS pos_err=0.4381 ... settle=30.01 per_joint_err=[...0.4381...]
+#   TRAJ_HOST_FAULT pose not bounded within settle window: position peak 0.4382 > goal tol 0.010 rad
+#   ... MOVE_RETRY phase=retreat ... TRAJ_HOST_RESET op-start re-arm ...
+#   TRAJ_HOST_TRACK_MISS ... worst_j=4 ref=1.8377 meas=3.3044  (wrist_2 runaway)
+#   TRAJ_HOST_FAULT trajectory tracking error 1.467 exceeds 1.3 rad for 3 samples
+# The COLLECT retreat could not reach its goal pose (ur_shoulder_lift -1.47 vs goal -1.91, 0.44 rad short)
+# and on the per-move retry ur_wrist_2 ran away (meas 3.30 vs ref 1.84). fault() published the BARE global
+# /manipulation/stop with no /manipulation/status, so the mission recorded a bare 'host emergency stop (no
+# matching host-controller fault ...)' at sim 170.93; then the host went silent and ~8 s later (the sim
+# heartbeat backstop) the mission recorded the MASKING terminal 'arm command heartbeat lost' at sim 178.9.
+
+
+def test_rtfcollect2_retreat_settle_miss_is_pose_not_bounded_by_name():
+    # The recorded retreat settle: ur_shoulder_lift held ~0.438 rad from goal for the whole settle window
+    # while the wrists slewed at saturation (~pi rad/s). The envelope gate must NAME it a position miss
+    # (the position tolerance is never loosened), matching the recorded host-stack line.
+    from twin.restock.trajectory_host import settle_decision, GOAL_POSITION_TOL
+    samples = [(t, 0.4382, 3.137) for t in [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]]
+    verdict, reason = settle_decision(samples, pos_tol=GOAL_POSITION_TOL, vel_tol=GOAL_VELOCITY_TOL,
+                                      final=True)
+    assert verdict == 'miss'
+    assert 'pose not bounded within settle window' in reason
+    assert 'position peak 0.4382' in reason and 'goal tol 0.010' in reason
+
+
+def test_rtfcollect2_retreat_retry_wrist2_runaway_faults_at_debounce():
+    # The per-move retry's ur_wrist_2 runaway: ref 1.8377, meas rising 3.21 -> 3.26 -> 3.30 => track_err
+    # 1.368 -> 1.420 -> 1.467. One/two over-tol samples are tolerated (terminal decel transient); the
+    # third sustained sample faults, exactly as recorded (> 1.3 rad for 3 samples).
+    from twin.restock.trajectory_host import tracking_fault, TRACKING_TOL
+    assert not tracking_fault(1.3682, 1)
+    assert not tracking_fault(1.4203, 2)
+    assert tracking_fault(1.4667, 3)
+    assert 1.4667 > TRACKING_TOL
+
+
+def test_heartbeat_hold_q_prefers_measured_then_target_then_none():
+    from twin.restock.trajectory_host import heartbeat_hold_q
+    measured = np.array([-0.042, -1.4719, 1.7503, -0.2524, 1.6653, 0.0017])
+    target = np.array([0.093, -1.91, 2.014, -0.103, 1.664, 0.0])
+    # feedback present -> hold the latest MEASURED pose (feedback is (stamp, q, v))
+    held = heartbeat_hold_q((171.0, measured, np.zeros(6)), target)
+    assert np.allclose(held, measured)
+    # no feedback yet but a latched target -> hold the target
+    assert np.allclose(heartbeat_hold_q(None, target), target)
+    # neither known -> nothing to keep alive
+    assert heartbeat_hold_q(None, None) is None
+
+
+def test_rtfcollect2_heartbeat_starves_silent_but_survives_with_faulted_hold():
+    # Reproduce the recorded sim 170.93 -> 178.9 cascade with the EXACT heartbeat mechanism
+    # (native_transport ArmCommandGate.watchdog -> pace_watchdog.is_dead, SIM-primary, mode='either').
+    from twin.restock.pace_watchdog import is_dead
+    from twin.restock.native_transport import (ARM_HEARTBEAT_SIM_BACKSTOP_S,
+                                                ARM_HEARTBEAT_WALL_BACKSTOP_S)
+    fault_sim = 170.93           # _host_now freezes near here when the host faults and goes SILENT
+    terminal_sim = 178.95        # the mission recorded 'arm command heartbeat lost' at sim ~178.9
+    # BEFORE the fix: the faulted host publishes no command, so _host_now is frozen at fault_sim while
+    # Isaac keeps stepping /clock. At the recorded terminal the sim gap has crossed the backstop and the
+    # (still-alive, merely faulted) host is declared dead -- masking the trajectory stop. The recorded
+    # window (sim ~170.93 -> ~178.9) is the ~8 s sim backstop (is_dead fires once the gap is strictly past).
+    silent_sim_gap = terminal_sim - fault_sim
+    assert silent_sim_gap > ARM_HEARTBEAT_SIM_BACKSTOP_S           # the recorded ~8 s window is the backstop
+    assert is_dead(sim_elapsed=silent_sim_gap, wall_elapsed=0.0,
+                   sim_budget=ARM_HEARTBEAT_SIM_BACKSTOP_S,
+                   wall_backstop=ARM_HEARTBEAT_WALL_BACKSTOP_S, mode='either')
+    # AFTER the fix: heartbeat_hold_q keeps the host commanding a hold each ~0.02 s tick, so _host_now
+    # tracks the sim clock and the gap never grows past a single tick -- the faulted-but-alive host is
+    # correctly seen as alive and the real (named) trajectory stop is what the mission surfaces.
+    held_sim_gap = 0.02
+    assert not is_dead(sim_elapsed=held_sim_gap, wall_elapsed=0.0,
+                       sim_budget=ARM_HEARTBEAT_SIM_BACKSTOP_S,
+                       wall_backstop=ARM_HEARTBEAT_WALL_BACKSTOP_S, mode='either')
