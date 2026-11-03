@@ -97,12 +97,20 @@ class GroundTruthVerifierGeometry(unittest.TestCase):
 
 class GroundTruthSwitches(unittest.TestCase):
     def test_default_config_is_byte_identical(self):
-        self.assertEqual(mission_modes({}), {})
+        # sim-robust-vram-headroom-default-on-v1: the VRAM headroom monitor is default-on, so its
+        # provenance is the ONE expected default mode; every ground-truth/return switch stays absent.
+        modes = mission_modes({})
+        self.assertEqual(modes.get('vram_headroom_mode'), 'on')
+        self.assertEqual({k for k in modes if k != 'vram_headroom_mode' and k != 'vram_headroom'}, set())
+        # opting the monitor out restores the fully-empty (byte-identical) modes dict.
+        self.assertEqual(mission_modes({'vram_headroom': False}), {})
         self.assertEqual(ground_truth_place_actions({}), ())
         self.assertEqual(mission_ground_truth_sources({}), ())
 
     def test_run_config_modes(self):
-        config = _config(verify_ground_truth={'enabled': True})
+        # opt the default-on VRAM monitor out here so the assertion isolates the ground-truth/return
+        # modes (the monitor's own provenance is covered by test_restock_vram_headroom.py).
+        config = _config(verify_ground_truth={'enabled': True}, vram_headroom=False)
         self.assertEqual(mission_modes(config), {'verify_mode': 'ground_truth',
                                                  'transfer_verify_mode': 'ground_truth',
                                                  'return_mode': 'uncouple_at_cart_parking'})

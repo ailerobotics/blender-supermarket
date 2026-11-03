@@ -5,12 +5,47 @@ return are measured by the release-bench `--destroy-sensing` run, not here. Thes
 selector and the byte-identical-when-off gating of the collect->couple teardown call."""
 import types
 
+import pytest
+
 from twin.restock.isaac_port import IsaacPort, SENSING_ACTIONS
-from twin.restock.sensing_sources import _stage_scoped_teardown_camera_ids
+from twin.restock.sensing_sources import (_stage_scoped_teardown_camera_ids,
+                                           stage_scoped_teardown_enabled)
 
 
 def _design(supports):
     return {'supports': {n: {'camera_id': cid} for n, cid in supports.items()}}
+
+
+# ---- sim-robust-vram-headroom-default-on-v1: proactive teardown is DEFAULT ON, opt-out via config ----
+
+def test_teardown_default_on_for_absent_config(monkeypatch):
+    monkeypatch.delenv('RESTOCK_STAGE_SCOPED_SENSING', raising=False)
+    assert stage_scoped_teardown_enabled({}) is True
+    assert stage_scoped_teardown_enabled({'sensing_teardown': {}}) is True
+
+
+def test_teardown_config_opt_out(monkeypatch):
+    monkeypatch.delenv('RESTOCK_STAGE_SCOPED_SENSING', raising=False)
+    assert stage_scoped_teardown_enabled({'sensing_teardown': False}) is False
+    assert stage_scoped_teardown_enabled({'sensing_teardown': {'stage_scoped': False}}) is False
+    assert stage_scoped_teardown_enabled({'sensing_teardown': True}) is True
+
+
+def test_teardown_env_overrides_config(monkeypatch):
+    # legacy env wins when set: a falsey value forces OFF, anything else ON.
+    monkeypatch.setenv('RESTOCK_STAGE_SCOPED_SENSING', '0')
+    assert stage_scoped_teardown_enabled({}) is False
+    assert stage_scoped_teardown_enabled({'sensing_teardown': True}) is False
+    monkeypatch.setenv('RESTOCK_STAGE_SCOPED_SENSING', '1')
+    assert stage_scoped_teardown_enabled({'sensing_teardown': False}) is True
+
+
+def test_teardown_malformed_block_fails_closed(monkeypatch):
+    monkeypatch.delenv('RESTOCK_STAGE_SCOPED_SENSING', raising=False)
+    with pytest.raises(ValueError):
+        stage_scoped_teardown_enabled({'sensing_teardown': 5})
+    with pytest.raises(ValueError):
+        stage_scoped_teardown_enabled({'sensing_teardown': {'stage_scoped': 'yes'}})
 
 
 # ---- pure selector: which station cameras are torn down at collect end ----
