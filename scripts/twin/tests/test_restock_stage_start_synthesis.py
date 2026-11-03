@@ -249,15 +249,44 @@ class CoupleStartSeatsAtTheDockAlignedLane(unittest.TestCase):
             self.assertEqual(plan.carton_target, 'cart', name)
             self.assertFalse(plan.couple_cart, name)
 
-    def test_couple_without_a_couple_dock_lane_is_byte_identical(self):
-        # the backroom-bay bench lane declares no couple_dock => the couple shortcut is a no-op.
+    def test_couple_on_a_legacy_east_lane_is_byte_identical(self):
+        # sim-couple-shortcut-settle-dt-v1: the dock is now resolved from the ONE source (lane couple_dock,
+        # else derived from the lane start + start_cart_yaw). The backroom-bay fixture lane has no
+        # couple_dock but a start/start_cart_yaw whose DERIVED dock equals the scenario cart spawn (legacy
+        # EAST), so couple_start_poses resolves that dock yet staged_scenario is byte-identical (nothing to
+        # re-head). A SOUTH lane (below) re-heads the spawn.
         cfg = copy.deepcopy(FIXTURE['config'])
         cfg['start_at'] = 'couple'
-        self.assertIsNone(couple_start_poses(cfg))
         scenario = FIXTURE['scenario']
+        poses = couple_start_poses(cfg)
+        self.assertIsNotNone(poses)
+        self.assertEqual([round(v, 4) for v in poses['cart_dock']],
+                         [round(float(v), 4) for v in scenario['initial_staging']['cart_body_pose']])
         variant, record = staged_scenario(scenario, cfg)
-        self.assertIs(variant, scenario)
+        self.assertIs(variant, scenario)      # dock == scenario spawn => no rewrite
         self.assertIsNone(record)
+
+    def test_couple_on_a_south_lane_without_couple_dock_dock_aligns_from_lane_start(self):
+        # The side-bay lane carries only start + start_cart_yaw (SOUTH), no explicit couple_dock. The
+        # derived dock re-heads the spawn south so the coupled train faces the lane heading (fixes
+        # coldwin25e, where the cart spawned EAST and the south lane was never acquired).
+        cfg = copy.deepcopy(FIXTURE['config'])
+        cfg['start_at'] = 'couple'
+        cfg['navigation']['tow_lanes'] = [{'name': 'outbound_dock_to_side_bay',
+                                           'start': [-3.875, 14.5, -math.pi / 2],
+                                           'start_cart_yaw': -math.pi / 2,
+                                           'goal': [-4.3, 6.95, -math.pi / 2]}]
+        poses = couple_start_poses(cfg)
+        self.assertIsNotNone(poses)
+        self.assertAlmostEqual(poses['cart_dock'][2], -math.pi / 2, places=5)  # cart faces SOUTH
+        self.assertAlmostEqual(poses['cart_dock'][0], -3.875, places=3)
+        self.assertAlmostEqual(poses['cart_dock'][1], 15.77, places=2)  # == towstaging3's couple_dock
+        self.assertEqual([round(v, 4) for v in poses['robot_seat']],
+                         [round(v, 4) for v in cfg['navigation']['tow_lanes'][0]['start']])
+        variant, record = staged_scenario(FIXTURE['scenario'], cfg)
+        self.assertIsNot(variant, FIXTURE['scenario'])
+        self.assertAlmostEqual(variant['initial_staging']['cart_body_pose'][2], -math.pi / 2, places=5)
+        self.assertEqual(record['start_at'], 'couple')
 
 
 if __name__ == '__main__':

@@ -600,6 +600,13 @@ def run(args, manifest, scenario):
                         from twin.restock.shortcut import shortcut_summary
                         s.update(shortcut_summary(m.shortcut, config,
                                                   getattr(bundle, 'start_staging', None)))
+                    elif getattr(bundle, 'start_staging', None) is not None:
+                        # Cold run whose assembly spawn was dock-aligned to the configured couple dock
+                        # (sim-couple-shortcut-settle-dt-v1): record the provenance so the run shows the
+                        # cart/robot were spawned at the dock heading, not the legacy east scenario yaw.
+                        s['couple_dock_align'] = bundle.start_staging
+                        s['note'] += (' COUPLE DOCK-ALIGN: assembly cart+robot spawned at the configured '
+                                      'couple dock so the coupled train faces the outbound lane heading.')
                     # A stop_after targeted test: record the stop stage + the stages NOT run.
                     from twin.restock.shortcut import bounded_summary
                     bounded = bounded_summary(config)
