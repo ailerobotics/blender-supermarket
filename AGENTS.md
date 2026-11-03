@@ -1034,7 +1034,7 @@ repo's `scenes/`, `export/` or `renders/`.
   ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`; the box defaults to `SUBNET`). `--frame-start/--frame-end`
   renders ONE stage/segment as a compilation source (outbound = global frames 460–739 at fps 10).
   The OUTBOUND choreography must leave the backroom through the `sales_backroom_portal`
-  (centre x=−3.875, 2.5 m opening at y=11.125; `store_environment.py`), NOT the solid wall —
+  (centre x=−3.875, 2.6 m opening at y=11.125; `store_environment.py`), NOT the solid wall —
   pinned by `scripts/twin/demo/tests/test_door_path.py` (base/cart footprint vs wall/door,
   articulation < 55°).
 - **Real-mission demo cut + run checker** (CPU, only READS the run dir; RUNBOOK §20):

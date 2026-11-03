@@ -19,7 +19,7 @@ articulation initializes every runtime braking rollout. It is a quasi-static
 no-side-slip approximation, not a claim about free-caster PhysX dynamics.
 
 The 0.05 m geometry margin remains mandatory and localization uncertainty is
-added separately. Straight passage through a 2.5 m portal now passes, while an
+added separately. Straight passage through a 2.6 m portal now passes, while an
 in-aisle turn still fails. Optional `start(..., goal_articulation=0.08)` requests
 aligned final parking; default arrival permits any articulation below the rig
 limit. Shelf-facing arm yaw is separate from the chassis goal yaw.
@@ -357,6 +357,15 @@ The authored mission lanes (example fragment `docs/examples/tow-lanes-mission-fr
 |------|--------------|------------------|-------|-------|
 | `outbound_dock_to_shelf` | couple dock `[-4.46, 15.25, 0]` → shelf park `[-3.05, 6.0, π]` | `goal_articulation 0.9` | 22.2 m via the `sales_backroom_portal` corridor | the coupled train can only curve into this pull-through shelf, arriving at ~0.8 rad articulation — aligning to a tighter arrival is not kinematically feasible here (see the report; a transfer/station concern) |
 | `return_shelf_to_cart_parking` | shelf park `[-3.05, 6.0, π]` → **cart parking** `[-9.0, 16.0, π]` | `goal_articulation 0.2` | 15.1 m, arrival articulation 0.18 | west-facing park: no reorientation loop (ratio 1.3 vs the 2.3 of the east-facing `home` that timed out) |
+
+**Straight dead-centre portal crossing** (sim-portal-widen-v1): paired with the `PORTAL_WIDTH`
+widening to 2.6 m, both lanes carry via-poses on the portal centreline `x=-3.875` so the
+`route_through_waypoints` expansion crosses the wall opening (`y=11.125`) dead-centre and straight
+(turns kept north/south of the doorway). Outbound already crossed centred (0.5° at the wall line);
+the widening lifts its crossing clearance to 0.586 m/side. The return gains a north centreline
+waypoint that moves its crossing from 0.31 m west-of-centre (0.286 m clearance) to dead-centre
+(0.586 m). Numbers + before/after plots: `data/sim-portal-widen-v1/`; the GPU from-rest pin at the
+dock still needs `portal_floor_box` + the throat heading-hold/launch keys (unchanged).
 
 **Cart parking spot** (`mission_poses.cart_parking = [-9.0, 16.0, π]`, robot base pose): the coupled
 return ends here (in the backroom `rollwagen_parking` zone, near the dock); the cart trails to

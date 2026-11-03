@@ -8,7 +8,16 @@ import math
 from pathlib import Path
 
 PORTAL_X = -3.875
-PORTAL_WIDTH = 2.5
+# 2.6 m clear opening: the coupled train's aligned swept envelope is 1.427 m wide (the robot's
+# circumscribed arm-transport disc dominates at 0.714 m half-width; twin.mobile.occupied_envelope),
+# so a straight portal crossing clears with 0.586 m each side -- and still clears a worst-case
+# ~46 deg articulated (un-settled) crossing (1.775 m envelope) with >0.41 m each side. The opening
+# stays centred on the existing rear-fixture gap (W_back ends at x=-5.25, C_back starts at x=-2.5;
+# 2.6 m keeps both jambs flush inside that 2.75 m gap -- see scripts/tests/test_store_environment.py
+# test_portal_fits_existing_rear_fixture_gap). Widening further would require moving those planogram
+# fixtures for no robustness gain: the opening was never the binding constraint on the portal tow
+# (the kinematically-forced dock turn is) -- see data/sim-portal-widen-v1/.
+PORTAL_WIDTH = 2.6
 BACKROOM = (-12.0, 1.0, 11.25, 19.25)
 
 

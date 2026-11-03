@@ -51,7 +51,7 @@ HOME = (-5.73, 16.0, 0.0)                  # unchanged
 # to the shelf -- no reorientation loop (the robot already faces the tow direction) and no
 # in-place spin. The sales/backroom dividing wall is at y=11.125 (store_environment.py:
 # Wall_back_{west,east}); the ONLY gap is the service portal `sales_backroom_portal` centred
-# at x=-3.875 with a 2.5 m clear opening (x in [-5.125, -2.625], jambs just outside). The
+# at x=-3.875 with a 2.6 m clear opening (x in [-5.175, -2.575], jambs just outside). The
 # earlier demo-005 arc hugged x~-1.7 the whole descent, so it crossed the wall line at
 # x~-2.06 -- i.e. straight THROUGH the solid east wall, ~0.6 m past the door edge. This path
 # dips west to the portal column (base holds x~-3.70 so BOTH the base disk and the trailed
