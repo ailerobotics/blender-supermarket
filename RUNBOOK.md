@@ -634,6 +634,27 @@ reproduced on the legacy packet, both cleared when synced):
 python3 -m pytest -q scripts/twin/tests/test_restock_staged_start.py
 ```
 
+### 11-warm. Consecutive runs on one warm session (dev iteration, opt-in)
+
+`run_mobile_restock.py --consecutive-runs N` runs N INDEPENDENT full missions back-to-back on ONE
+live Isaac session, reusing the fixed ~215 s cold boot (Kit boot + stage load; measured in
+`data/sim-warm-session-reset-v1/`). Run K lands in `<output>/run-K` with a fresh scenario-seeded
+inventory. Between runs the warm-session reset decision + sequence (`twin/restock/warm_session.py`)
+gate the reuse: any doubt — a HOST-level config change (`config_preflight.KEY_CONSUMER`), a dirty
+stage / leaked prims, VRAM not returned to the post-boot baseline (±400 MiB), or a reset-step
+refusal (including no `config['warm_reset']` provider wired) — falls back to a cold boot, stops the
+warm loop and records `warm_fallback` with the reason in `<output>/warm-session.json`. Default
+`N=1` => a single run, byte-identical. A true warm reuse needs the lane-owned re-seat provider
+(`config['warm_reset']`, same contract as `--warm-attempts`) and, for the `stage_clean` gate, an
+optional `bundle.warm_stage_state()` prim census; absent either, run 2 cold-boot-falls-back
+honestly. Offline dry-run + CPU proof:
+
+```bash
+python3 scripts/check_warm_session_reset.py --state scripts/twin/tests/fixtures/warm_session_state.json
+python3 scripts/check_warm_session_reset.py --state scripts/twin/tests/fixtures/warm_session_state.json --inject-fault preflight_verify --expect cold
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH= python3 -m pytest scripts/twin/tests/test_warm_session.py -q
+```
+
 ### 11a. Demand-driven mission job (store-vision plan, CPU, opt-in)
 
 The mission job is normally the one hardcoded in `scripts/restock_scenario.json`.
