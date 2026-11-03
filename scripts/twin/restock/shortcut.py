@@ -19,13 +19,40 @@ Design split, mirroring ``isaac_bundle.plan_bundle`` vs ``_build_isaac_runtime``
 ``start_at='transfer'`` + ``config['start_staging']`` (see ``staged_scenario``) spawns the train at a
 RECORDED park->transfer handover of a real tow instead of a hand-authored variant scenario.
 
-Supported today: ``start_at='couple'`` -- skip only ``collect`` (the backstock->cart grasp, the
-expensive and least-reliable arm reach). The post-collect fact is "the carton is loaded on the
-cart": the robot is already at the pickup pose, the cart at the dock and the arm stowed by the
-assembly's spawn defaults, so the ONLY body to synthesize is the carton, placed resting at the
-cart load centre exactly as the real collect would leave it (NOT welded -- the downstream transfer
-stage must be able to re-grasp it off the cart). couple -> outbound -> park -> transfer -> verify ->
-return then run for real, proving every downstream phase in one shortcut run.
+Supported start points (dev iteration; each lets a LATER stage be proven in seconds-to-minutes
+instead of a ~45-min cold run):
+
+* ``start_at='couple'`` -- skip only ``collect`` (the backstock->cart grasp). The robot is already at
+  the pickup pose, the cart at the dock and the arm stowed by the assembly's spawn defaults, so the
+  ONLY body to synthesize is the carton, placed resting at the cart load centre exactly as the real
+  collect would leave it (NOT welded -- the downstream transfer stage must re-grasp it off the cart);
+  the cart is left UNCOUPLED for the real couple stage.
+* ``start_at='outbound'`` / ``'park'`` / ``'transfer'`` -- skip the collect+couple(+outbound[+park])
+  prefix: the carton rests level on the cart AND the cart is physically COUPLED behind the robot. The
+  robot+cart are spawned at the sanctioned build-time pose for that stage (a variant scenario's
+  ``initial_staging`` -- NOT a runtime teleport, which physics_setup forbids): ``outbound`` at the
+  coupled tow lane START (the post-couple dock), ``park`` at the tow lane GOAL (the stationarise
+  point -- bay, or the shelf-staging pose when ``shelf_staging`` is set), ``transfer`` at the
+  recorded park->transfer handover (``recorded_bay_park``). This module places the carton and authors
+  the real hitch so the chosen stage onward runs against a coupled, loaded, parked train.
+* ``start_at='verify'`` -- skip collect..transfer: the carton is already PLACED level on the transfer
+  bay top (``transfer_bay`` / the ``transfer_ground_truth.target``), the arm is empty and the cart is
+  still coupled, exactly as a succeeded transfer leaves it. verify (the stock-commit gate) then runs
+  for real against the synthesized placement.
+
+``start_at='return'`` is NOT a Mission start point -- ``Mission`` refuses any ``start_at`` AFTER the
+``verify`` stock-commit gate (verify is the only stage that commits stock, and skipping it would leave
+inventory uncredited). ``return`` is therefore run in isolation via ``--start-at verify --stop-after
+return``: the verify-entry state (carton placed, coupled) is synthesized, the one instant ground-truth
+``verify`` runs (committing stock honestly) and ``return`` then tows home. ``stage_isolation`` encodes
+exactly this. The verify-skip guard is a safety bound and is left intact (never widened for a bench).
+
+Base poses for the coupled stages are DERIVED from the configured flow (``navigation.tow_lanes`` +
+``mission_poses``), so the synthesis follows whichever of the dock-align / shelf-staging flows the run
+is configured for; the verify/return carton placement follows the backroom-bay tail that
+``check_mission_tail`` validates. The shelf-staging sales-floor transfer/verify/return (an UNCOUPLED
+endcap service with the carton CARRIED, not on the cart) stays integration-owned per
+``docs/examples/tow-lanes-mission-fragment.json``; see docs/restock_stages.md.
 """
 from __future__ import annotations
 
@@ -35,18 +62,26 @@ from dataclasses import dataclass
 
 from .mission import ACTIONS
 
-# Stages whose physical end state this module knows how to synthesize.
-#   'couple'   -- skip only collect: carton placed resting on the cart at its DOCK spawn; the real
-#                 couple->outbound->park then run (cart gets physically coupled/towed by the mission).
-#   'transfer' -- skip collect+couple+outbound+park: carton on the cart AND the cart physically
-#                 coupled behind the robot. The robot+cart are spawned already parked at the shelf
-#                 (a variant scenario's initial_staging, the sanctioned build-time pose -- NOT a
-#                 runtime teleport, which physics_setup forbids); this module places the carton and
-#                 authors the hitch so transfer->verify run against a coupled, loaded, parked train.
-_SUPPORTED_START_AT = ('couple', 'transfer')
+# Stages whose physical end state this module's start-phase shortcut can synthesize, in ACTIONS order.
+#   'couple'   -- skip collect: carton resting on the cart at its DOCK spawn, left UNCOUPLED.
+#   'outbound' -- skip collect+couple: carton on the cart, cart COUPLED, spawned at the tow lane start.
+#   'park'     -- skip collect+couple+outbound: carton on the cart, cart COUPLED, spawned at the tow
+#                 lane goal (the stationarise point).
+#   'transfer' -- skip collect+couple+outbound+park: carton on the cart, cart COUPLED, spawned at the
+#                 recorded park->transfer handover (recorded_bay_park staging).
+#   'verify'   -- skip collect..transfer: carton PLACED on the bay top, arm empty, cart still COUPLED,
+#                 exactly as a succeeded transfer leaves it; verify (the stock-commit gate) runs for real.
+# ('return' is reached via start_at='verify' --stop-after return; Mission refuses a start_at past verify.)
+_SUPPORTED_START_AT = ('couple', 'outbound', 'park', 'transfer', 'verify')
 # Exact in-order prefix each supported start_at must skip (a guard against a mis-ordered stages list).
 _EXPECTED_SKIP = {'couple': ('collect',),
-                  'transfer': ('collect', 'couple', 'outbound', 'park')}
+                  'outbound': ('collect', 'couple'),
+                  'park': ('collect', 'couple', 'outbound'),
+                  'transfer': ('collect', 'couple', 'outbound', 'park'),
+                  'verify': ('collect', 'couple', 'outbound', 'park', 'transfer')}
+# start_at values that must author the physical robot<->cart hitch at synthesis (the skipped prefix
+# already coupled the train). couple is excluded -- the real couple stage does the latching.
+_COUPLE_AT_SYNTHESIS = ('outbound', 'park', 'transfer', 'verify')
 
 
 # Opt-in RECORDED start staging for start_at='transfer' (sim-video-transfer-bench-v1): instead of a
@@ -80,7 +115,19 @@ RECORDED_BAY_PARK_CART_IN_BASE_XY = (-1.27, 0.0)   # deck centre in ur_base_link
 # deck (top z 0.225 = chassis origin 0.20 + half the 0.05 m deck, mobile_assets.author_cart) is
 # collision-tight over the hitch; it stays available as an explicit carton_support_z_world override.
 DECK_TOP_Z_WORLD = 0.225
-START_STAGING_PRESETS = ('recorded_bay_park',)
+
+# Start-staging presets. Each spawns the robot+cart at the sanctioned build-time pose for ONE start_at
+# (the base pose is DERIVED from the configured flow for the lane-driven presets; recorded_bay_park is
+# the hand-recorded backroom-bay pose). The preset<->start_at mapping is one-to-one so a mis-paired
+# (preset, start_at) is refused, never silently applied to the wrong stage.
+START_STAGING_PRESETS = ('recorded_bay_park', 'dock_coupled', 'bay_parked', 'bay_placed')
+#   recorded_bay_park -> transfer : robot at the recorded park->transfer handover; carton on the cart.
+#   dock_coupled      -> outbound : robot at the coupled tow lane START (post-couple dock); carton on cart.
+#   bay_parked        -> park     : robot at the coupled tow lane GOAL (stationarise point); carton on cart.
+#   bay_placed        -> verify   : robot at the transfer/verify park pose; carton PLACED on the bay top.
+_PRESET_FOR_START_AT = {'transfer': 'recorded_bay_park', 'outbound': 'dock_coupled',
+                        'park': 'bay_parked', 'verify': 'bay_placed'}
+_START_AT_FOR_PRESET = {preset: stage for stage, preset in _PRESET_FOR_START_AT.items()}
 
 
 def _mean_pose(poses):
@@ -232,14 +279,102 @@ def check_bay_park_provenance(provenance, scenario, *, hitch_x=-0.62, cart_hitch
     return live
 
 
+def _mission_pose(config, name):
+    poses = config.get('mission_poses') if isinstance(config, dict) else None
+    pose = poses.get(name) if isinstance(poses, dict) else None
+    if isinstance(pose, (list, tuple)) and len(pose) == 3 and _finite(*pose):
+        return tuple(float(v) for v in pose)
+    return None
+
+
+def _park_pose_name(config):
+    """The pose a coupled OUTBOUND tow ends at (where PARK stationarises the train): the shelf-staging
+    pose when the sales-floor re-sequence is configured, else the backroom-bay park (``shelf_approach``)."""
+    return 'shelf_staging' if (isinstance(config, dict) and config.get('shelf_staging')) else 'shelf_approach'
+
+
+def _outbound_lane_cfg(config):
+    """The configured coupled OUTBOUND tow lane (the one whose goal is the park pose), or None.
+
+    Follows whichever flow is configured: the dock-align / shelf-staging ``navigation.tow_lanes`` are
+    read straight from the mission runtime config, so the derived dock/park base poses match the lane
+    geometry the live coupled drive actually follows (no second source of truth)."""
+    nav = config.get('navigation') if isinstance(config, dict) else None
+    lanes = nav.get('tow_lanes') if isinstance(nav, dict) else None
+    if not isinstance(lanes, (list, tuple)) or not lanes:
+        return None
+    park = _mission_pose(config, _park_pose_name(config))
+    if park is not None:
+        for lane in lanes:
+            goal = lane.get('goal') if isinstance(lane, dict) else None
+            if (isinstance(goal, (list, tuple)) and len(goal) == 3 and _finite(*goal)
+                    and math.dist(goal[:2], park[:2]) <= 0.30):
+                return lane
+    first = lanes[0]
+    return first if isinstance(first, dict) else None
+
+
+def _derive_stage_base_pose(config, start_at):
+    """Derive the build-time base spawn pose + cart yaw for a lane-driven coupled start.
+
+    outbound -> the outbound tow lane START (the post-couple dock, with the authored ``start_cart_yaw``);
+    park     -> the outbound tow lane GOAL (the stationarise point -- bay / shelf-staging pose);
+    verify   -> the transfer/verify park pose (``mission_poses.shelf_approach``), where the coupled train
+                sits for the transfer and the placed carton is verified.
+    Returns ``(robot_pose, cart_yaw)``. Raises (fail-closed) when the configured flow lacks the pose the
+    stage needs, so a shortcut never spawns at an invented pose."""
+    lane = _outbound_lane_cfg(config)
+    if start_at in ('outbound', 'park'):
+        if lane is None:
+            raise ValueError(
+                f"start_at={start_at!r} staging needs a coupled tow lane in navigation.tow_lanes whose "
+                f"goal is the park pose (mission_poses.{_park_pose_name(config)}); none is configured")
+        key = 'start' if start_at == 'outbound' else 'goal'
+        pose = lane.get(key)
+        if not (isinstance(pose, (list, tuple)) and len(pose) == 3 and _finite(*pose)):
+            raise ValueError(f"tow lane {lane.get('name')!r} {key} must be a finite (x, y, yaw) for the "
+                             f'start_at={start_at!r} staging')
+        cart_yaw = lane.get('start_cart_yaw', pose[2]) if start_at == 'outbound' else pose[2]
+        return tuple(float(v) for v in pose), float(cart_yaw)
+    if start_at == 'verify':
+        pose = _mission_pose(config, 'shelf_approach')
+        if pose is None:
+            raise ValueError("start_at='verify' staging needs mission_poses.shelf_approach (the "
+                             'transfer/verify park pose where the placed carton is verified)')
+        return pose, pose[2]
+    raise ValueError(f'no lane-derived base pose for start_at={start_at!r}')
+
+
+def _bay_target_world(config, scenario):
+    """The transfer bay-top target (x, y, top_z) a verify-start carton is PLACED on: the configured
+    ground-truth target when set, else the scenario ``transfer_bay`` top. Fails closed when absent."""
+    gt = config.get('transfer_ground_truth') if isinstance(config, dict) else None
+    if isinstance(gt, dict) and gt.get('target'):
+        t = gt['target']
+        if isinstance(t, (list, tuple)) and len(t) >= 3 and _finite(*t[:3]):
+            return (float(t[0]), float(t[1]), float(t[2]))
+    bay = scenario.get('transfer_bay') if isinstance(scenario, dict) else None
+    if isinstance(bay, dict):
+        c = bay.get('center_xy')
+        top = bay.get('top_z')
+        if (isinstance(c, (list, tuple)) and len(c) == 2 and _finite(*c) and _finite(top)):
+            return (float(c[0]), float(c[1]), float(top))
+    raise ValueError("start_at='verify' needs a bay target: config transfer_ground_truth.target or "
+                     'scenario.transfer_bay (center_xy + top_z)')
+
+
 def resolve_start_staging(config):
     """Normalized ``config['start_staging']`` (a preset name or an object), or None when absent.
 
-    Object keys (all optional; preset defaults): ``preset`` ('recorded_bay_park'), ``robot_base_pose``
-    [x, y, yaw], ``articulation`` (rad), ``carton_load_center_body_xy`` [x, y] (default: the scenario's
-    ``initial_staging.cart_load_center_body_xy``, +0.18), ``carton_support_z_world`` (default: the
-    scenario's ``initial_staging.cart_support_z_world``, the upper shelf the warm couple shortcut uses;
-    ``DECK_TOP_Z_WORLD`` puts it on the deck). Fails closed unless ``start_at`` is 'transfer'."""
+    The preset selects WHICH stage is staged and how the base pose is sourced (one preset per start_at;
+    a mis-paired (preset, start_at) is refused). ``recorded_bay_park`` uses the hand-recorded backroom
+    pose; the lane-driven presets (``dock_coupled``/``bay_parked``/``bay_placed``) DERIVE the base pose
+    from the configured flow (``navigation.tow_lanes`` + ``mission_poses``) so it matches whichever
+    dock-align / shelf-staging lane the live coupled drive follows. Object keys (all optional; derived /
+    preset defaults): ``preset``, ``robot_base_pose`` [x, y, yaw] (override the derivation),
+    ``articulation`` (rad, default 0 -- spawn aligned so the synthetic hitch can latch),
+    ``carton_load_center_body_xy`` [x, y], ``carton_support_z_world`` (``DECK_TOP_Z_WORLD`` puts it on
+    the deck). Fails closed on an unknown preset or a (preset, start_at) mismatch."""
     spec = config.get('start_staging') if isinstance(config, dict) else None
     if spec is None:
         return None
@@ -247,15 +382,21 @@ def resolve_start_staging(config):
         spec = {'preset': spec}
     if not isinstance(spec, dict):
         raise ValueError('start_staging must be a preset name or an object')
-    preset = spec.get('preset', 'recorded_bay_park')
+    start_at = config.get('start_at')
+    preset = spec.get('preset', _PRESET_FOR_START_AT.get(start_at, 'recorded_bay_park'))
     if preset not in START_STAGING_PRESETS:
         raise ValueError(f'start_staging preset {preset!r} unknown; supported: {START_STAGING_PRESETS}')
-    if config.get('start_at') != 'transfer':
-        raise ValueError("start_staging applies only to start_at='transfer' (the park->transfer handover)")
+    expected = _START_AT_FOR_PRESET[preset]
+    if start_at != expected:
+        raise ValueError(f'start_staging preset {preset!r} applies only to start_at={expected!r}, '
+                         f'not start_at={start_at!r}')
     if spec.get('coupled', True) is not True:
-        raise ValueError('start_staging: the mission is still coupled at the transfer handover '
+        raise ValueError('start_staging: the staged train is still coupled at a synthesized start '
                          '(uncouple_on_return releases the cart at the parking spot during return)')
-    robot = spec.get('robot_base_pose')          # None => derive from the live scenario geometry
+    # None => derive in staged_scenario from the single configured source of truth: the live
+    # transfer_bay geometry for recorded_bay_park, the configured tow lane for the lane-driven presets
+    # (dock_coupled / bay_parked / bay_placed). An explicit robot_base_pose overrides either derivation.
+    robot = spec.get('robot_base_pose')
     articulation = spec.get('articulation', 0.0)
     load_xy = spec.get('carton_load_center_body_xy')
     support_z = spec.get('carton_support_z_world')
@@ -271,11 +412,78 @@ def resolve_start_staging(config):
         raise ValueError('start_staging.carton_support_z_world must be finite')
     if provenance is not None and not isinstance(provenance, dict):
         raise ValueError('start_staging.provenance must be an object')
-    return {'preset': preset, 'robot_base_pose': None if robot is None else tuple(float(v) for v in robot),
+    return {'preset': preset, 'start_at': start_at,
+            'carton_target': 'bay' if start_at == 'verify' else 'cart',
+            'robot_base_pose': None if robot is None else tuple(float(v) for v in robot),
             'articulation': float(articulation),
             'carton_load_center_body_xy': None if load_xy is None else tuple(float(v) for v in load_xy),
             'carton_support_z_world': None if support_z is None else float(support_z), 'coupled': True,
             'provenance': provenance}
+
+
+def couple_start_poses(config, *, hitch_x=-0.62, cart_hitch_x=0.65):
+    """For a ``start_at='couple'`` bench: the dock-aligned couple-start spawn (robot seat + cart dock)
+    DERIVED from the active outbound tow lane's ``couple_dock`` -- the SAME single source PR 282's
+    ``navigation.lanes.couple_seat_from_cart`` uses to make the outbound lane start FOLLOW the configured
+    dock (the legacy EAST dock and the dock-align SOUTH dock both fall out of the one formula).
+
+    A ``start_at=couple --stop-after outbound`` bench must spawn the post-collect train at the dock the
+    live outbound lane expects, so the real couple latch seats the base at the lane-start seat and the
+    outbound tow ACQUIRES the lane -- instead of a stale scenario spawn seating the base ~1 m / 90 deg
+    off the lane start (coldwin23-2: ``lane_not_acquired_timeout``). Returns
+    ``{'robot_seat', 'cart_dock', 'articulation', 'lane'}`` or ``None`` when no active outbound lane
+    declares a ``couple_dock`` -- then the couple shortcut is byte-identical and the backroom-bay bench
+    is unaffected. Pure."""
+    if not isinstance(config, dict) or config.get('start_at') != 'couple':
+        return None
+    lane = _outbound_lane_cfg(config)
+    dock = lane.get('couple_dock') if isinstance(lane, dict) else None
+    if not (isinstance(dock, (list, tuple)) and len(dock) == 3 and _finite(*dock)):
+        return None
+    art = lane.get('couple_dock_articulation', 0.0)
+    if not _finite(art):
+        art = 0.0
+    from ..navigation.lanes import couple_seat_from_cart
+    seat = couple_seat_from_cart(tuple(float(v) for v in dock), hitch_x=hitch_x,
+                                 cart_hitch_x=cart_hitch_x, articulation=float(art))
+    return {'robot_seat': tuple(round(float(v), 6) for v in seat),
+            'cart_dock': tuple(float(v) for v in dock), 'articulation': float(art),
+            'lane': lane.get('name')}
+
+
+def _staged_couple_scenario(scenario, config, *, hitch_x, cart_hitch_x):
+    """``staged_scenario`` for ``start_at='couple'``: spawn the robot at the dock-derived couple SEAT and
+    the cart at the configured ``couple_dock`` (cart left UNCOUPLED -- the real couple stage latches), so
+    the couple->outbound bench runs from the dock-aligned seat. No active outbound ``couple_dock`` =>
+    ``(scenario, None)`` byte-identical."""
+    poses = couple_start_poses(config, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
+    if poses is None:
+        return scenario, None
+    variant = copy.deepcopy(scenario)
+    st = variant.get('initial_staging') if isinstance(variant, dict) else None
+    if not isinstance(st, dict) or not _finite(*st.get('cart_body_pose', (math.nan,))[:3]):
+        raise ValueError('scenario.initial_staging.cart_body_pose is required to stage the couple start')
+    robot, cart = poses['robot_seat'], poses['cart_dock']
+    dyaw = _wrap(float(cart[2]) - float(st['cart_body_pose'][2]))
+    st['robot_base_pose'] = list(robot)
+    st['cart_body_pose'] = list(cart)
+    yaws = dict(st.get('unit_yaws_world', {}))
+    if _finite(yaws.get('cart')):                      # the carton turns with the cart to the new dock yaw
+        yaws['cart'] = _wrap(float(yaws['cart']) + dyaw)
+    st['unit_yaws_world'] = yaws
+    record = {'mode': 'start_phase_shortcut:couple_dock', 'preset': 'couple_dock', 'start_at': 'couple',
+              'carton_target': 'cart',
+              'robot_base_pose': [round(v, 4) for v in robot],
+              'robot_base_pose_origin': 'derived_from_couple_dock',
+              'cart_body_pose': [round(float(v), 4) for v in cart],
+              'couple_seat': [round(v, 4) for v in robot],
+              'couple_dock': [round(float(v), 4) for v in cart],
+              'articulation': poses['articulation'], 'coupled': False, 'lane': poses['lane'],
+              'note': ('robot+cart spawned at the dock-aligned couple start derived from the active '
+                       'outbound lane couple_dock (PR282 couple_seat_from_cart); cart left UNCOUPLED for '
+                       'the real couple stage, which latches at this dock-aligned seat so the outbound '
+                       'tow acquires the lane')}
+    return variant, record
 
 
 def staged_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
@@ -283,6 +491,9 @@ def staged_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
     at the configured start staging (a build-time pose, never a runtime teleport), plus the JSON record
     of what was staged for mission.json. Absent ``start_staging`` => ``(scenario, None)``, the SAME
     object (byte-identical). Pure; only the physical build and the shortcut synthesis consume it."""
+    if isinstance(config, dict) and config.get('start_at') == 'couple':
+        # couple has no staging preset; its dock-aligned spawn is derived from the active lane couple_dock.
+        return _staged_couple_scenario(scenario, config, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
     staging = resolve_start_staging(config)
     if staging is None:
         return scenario, None
@@ -299,19 +510,28 @@ def staged_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
     # first, so a dataset or carton change can never silently replay a pose for the wrong store/carton.
     if staging.get('provenance') is not None:
         check_bay_park_provenance(staging['provenance'], variant, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
-    # Robot base pose: an explicit config pose wins; otherwise DERIVE it from the live scenario geometry
-    # (transfer_bay + corridor + hitch), so a store or carton change re-derives rather than replaying the
-    # stale v2 record. A scenario without a transfer_bay falls back to the historical v2 pose.
+    # Robot base pose: an explicit config pose wins; otherwise DERIVE it from the single configured
+    # source of truth for that preset -- the live transfer_bay + corridor geometry for recorded_bay_park
+    # (so a store or carton change re-derives rather than replaying the stale v2 record), the configured
+    # tow lane for the lane-driven presets (so the spawn follows the same dock-align lane the live coupled
+    # drive does -- no second seat derivation). A scenario without a transfer_bay falls back to the v2 pose.
     robot = staging['robot_base_pose']
+    pose_origin = 'explicit_config'
     if robot is None:
-        if isinstance(variant.get('transfer_bay'), dict):
-            derived = derive_bay_park(variant, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x,
-                                      articulation=staging['articulation'])
-            robot = derived['robot_base_pose']
-            provenance = bay_park_provenance(variant, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x,
-                                             dataset=stamp.get('dataset'), git_head=stamp.get('git_head'))
+        if staging['preset'] == 'recorded_bay_park':
+            if isinstance(variant.get('transfer_bay'), dict):
+                derived = derive_bay_park(variant, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x,
+                                          articulation=staging['articulation'])
+                robot = derived['robot_base_pose']
+                provenance = bay_park_provenance(variant, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x,
+                                                 dataset=stamp.get('dataset'), git_head=stamp.get('git_head'))
+                pose_origin = 'derived_from_scenario'
+            else:
+                robot = RECORDED_BAY_PARK_ROBOT_POSE
+                pose_origin = 'v2_fallback'
         else:
-            robot = RECORDED_BAY_PARK_ROBOT_POSE
+            robot, _derived_cart_yaw = _derive_stage_base_pose(config, staging['start_at'])
+            pose_origin = 'derived_from_lane'
     elif staging.get('provenance') is not None and isinstance(variant.get('transfer_bay'), dict):
         provenance = bay_park_provenance(variant, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x,
                                          dataset=stamp.get('dataset'), git_head=stamp.get('git_head'))
@@ -329,18 +549,28 @@ def staged_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
     st['unit_yaws_world'] = yaws
     if not _finite(st.get('cart_support_z_world')):
         raise ValueError('scenario.initial_staging.cart_support_z_world (carton support z) is required')
-    pose_origin = ('explicit_config' if staging['robot_base_pose'] is not None
-                   else 'derived_from_scenario' if derived is not None else 'v2_fallback')
+    # The carton ends up ON THE CART for the coupled loaded starts, or PLACED on the bay for a verify
+    # start (a succeeded transfer has already set it down); plan_start_state derives this from start_at,
+    # and apply_start_state repositions the carton accordingly after the build spawn.
+    if staging['carton_target'] == 'bay':
+        note = ('robot+cart spawned coupled at the transfer/verify park pose; carton synthesized PLACED '
+                'level on the bay top (arm empty), as a succeeded transfer leaves it')
+    elif staging['preset'] == 'recorded_bay_park':
+        note = ('robot+cart spawned at the park->transfer handover (derived from the live transfer_bay + '
+                'corridor geometry, else the recorded v2 tow); carton synthesized resting on the cart at '
+                'carton_support_z_world')
+    else:
+        note = (f"robot+cart spawned coupled at the {staging['preset']} pose derived from the configured "
+                'tow lane; carton synthesized resting level on the cart at carton_support_z_world')
     record = {'mode': f"start_phase_shortcut:{staging['preset']}", 'preset': staging['preset'],
+              'start_at': staging['start_at'], 'carton_target': staging['carton_target'],
               'robot_base_pose': [round(v, 4) for v in robot], 'robot_base_pose_origin': pose_origin,
               'cart_body_pose': [round(v, 4) for v in cart],
               'articulation': staging['articulation'], 'coupled': True,
               'carton_load_center_body_xy': [round(float(v), 4) for v in st['cart_load_center_body_xy']],
               'carton_support_z_world': float(st['cart_support_z_world']),
-              'source_runs': sorted(RECORDED_BAY_PARK_RUNS),
-              'note': ('robot+cart spawned at the park->transfer handover (derived from the live '
-                       'transfer_bay + corridor geometry, else the recorded v2 tow); carton synthesized '
-                       'resting on the cart at carton_support_z_world')}
+              'source_runs': sorted(RECORDED_BAY_PARK_RUNS) if staging['preset'] == 'recorded_bay_park' else [],
+              'note': note}
     if derived is not None:
         record['reach'] = derived['reach']
     if provenance is not None:
@@ -413,42 +643,52 @@ _STAGE_PRECONDITIONS = {
 
 
 def stage_isolation(stage, stages=None):
-    """Pure facts for running ``stage`` ALONE on a dev bench (no GPU/Isaac here).
+    """Pure facts for running ``stage`` ALONE on a dev bench (no GPU/Isaac here). Every stage isolates.
 
-    ``stop_after`` bounds the END and is supported for every stage (``mission.bounded_stages``).
-    The START needs the prefix synthesized: ``collect`` begins from the top (no start_at); a stage
-    in ``_SUPPORTED_START_AT`` has a start-phase shortcut (``transfer`` also needs the
-    ``recorded_bay_park`` staging); any other middle stage cannot yet start in isolation, because no
-    shortcut synthesizes its coupled/loaded precondition (Isaac-side ``apply_start_state`` work).
+    ``stop_after`` bounds the END and is supported for every stage (``mission.bounded_stages``). The
+    START needs the prefix's physical end state synthesized (``shortcut.apply_start_state``):
+
+    * ``collect`` begins from the top (no start_at).
+    * ``couple`` has a start-phase shortcut (carton on the cart, UNCOUPLED) with no staging.
+    * ``outbound`` / ``park`` / ``transfer`` each spawn the coupled, loaded train at that stage's
+      build-time pose via a staging preset (``dock_coupled`` / ``bay_parked`` / ``recorded_bay_park``);
+      the lane-driven presets derive the base pose from the configured tow lane.
+    * ``verify`` spawns the carton PLACED on the bay (``bay_placed`` staging) and runs the stock-commit
+      gate for real.
+    * ``return`` is reached via ``start_at=verify --stop-after return``: ``Mission`` refuses a start_at
+      AFTER verify (the only stock-commit gate -- skipping it would leave inventory uncredited), so
+      return runs the one instant ground-truth verify (committing stock honestly) then tows home. The
+      verify-skip guard is a safety bound and is NOT widened for the bench.
 
     Returns ``{stage, precondition, stop_after, start_at, start_staging, can_isolate, recipe,
-    blocker}``."""
+    blocker, note}``. ``start_at``/``start_staging`` are the flags to pass (for ``return`` they are the
+    verify-start flags; the mission still stops after ``return``)."""
     stages = tuple(stages) if stages else ACTIONS
     if stage not in stages:
         raise ValueError(f'stage {stage!r} not in {stages}')
     idx = stages.index(stage)
     stop_after = stage                                  # bounded_stages supports every stage
+    note = None
     if idx == 0:
-        start_at, start_staging, can = None, None, True
+        start_at, start_staging = None, None
         recipe = f'--stop-after {stage}'
-    elif stage in _SUPPORTED_START_AT:
+    elif stage == 'return':
+        # Mission forbids start_at past verify (the stock-commit gate); synthesize the verify-entry
+        # state and run the one instant verify, then return. The synthesized START state is verify's.
+        start_at, start_staging = 'verify', _PRESET_FOR_START_AT['verify']
+        recipe = f'--start-at verify --start-staging {start_staging} --stop-after return'
+        note = ('start_at may not skip the verify stock-commit gate, so return is reached by '
+                'synthesising the verify-entry (placed + coupled) state and running the one instant '
+                'ground-truth verify (which commits stock), then the real return tow')
+    else:                                               # couple / outbound / park / transfer / verify
         start_at = stage
-        start_staging = 'recorded_bay_park' if stage == 'transfer' else None
-        can = True
+        start_staging = _PRESET_FOR_START_AT.get(stage)   # None for couple (no spawn needed)
         recipe = (f'--start-at {stage}'
                   + (f' --start-staging {start_staging}' if start_staging else '')
                   + f' --stop-after {stage}')
-    else:
-        start_at, start_staging, can, recipe = None, None, False, None
-    blocker = None
-    if not can:
-        blocker = (f'no start-phase shortcut synthesizes start_at={stage!r} yet (supported: '
-                   f'{_SUPPORTED_START_AT}); its entry precondition -- {_STAGE_PRECONDITIONS[stage]} '
-                   '-- must be seeded in shortcut.apply_start_state (Isaac-side), so it cannot run '
-                   'in isolation from a CPU-only bench today')
     return {'stage': stage, 'precondition': _STAGE_PRECONDITIONS[stage], 'stop_after': stop_after,
-            'start_at': start_at, 'start_staging': start_staging, 'can_isolate': can,
-            'recipe': recipe, 'blocker': blocker}
+            'start_at': start_at, 'start_staging': start_staging, 'can_isolate': True,
+            'recipe': recipe, 'blocker': None, 'note': note}
 
 
 def isolation_matrix(stages=None):
@@ -485,23 +725,28 @@ class StartState:
     skipped: tuple               # stages the shortcut skips (in ACTIONS order)
     carton_position: tuple       # world (x, y, z) of the carton CENTRE
     carton_orientation_wxyz: tuple
-    couple_cart: bool            # author the physical robot<->cart hitch at synthesis (transfer start)
+    couple_cart: bool            # author the physical robot<->cart hitch at synthesis (coupled starts)
+    carton_target: str           # 'cart' (resting on the rollwagen) | 'bay' (placed on the bay top)
     note: str
 
 
-def plan_start_state(scenario, start_at, stages=None):
+def plan_start_state(scenario, start_at, stages=None, config=None):
     """Pure start-state plan from the scenario's measured staging. No Isaac import.
 
-    Raises ValueError (fail-closed) on an unsupported ``start_at`` or missing/malformed staging,
-    so a misconfigured shortcut refuses to synthesize rather than place bodies at an invented pose.
+    Computes the carton CENTRE pose + whether the shortcut must author the robot<->cart hitch. The
+    carton rests on the cart for the loaded starts (``couple``/``outbound``/``park``/``transfer``) and
+    is PLACED on the bay top for ``verify`` (a succeeded transfer has set it down -- the bay target comes
+    from ``config['transfer_ground_truth']['target']`` or ``scenario['transfer_bay']``). Raises
+    ValueError (fail-closed) on an unsupported ``start_at`` or missing/malformed staging, so a
+    misconfigured shortcut refuses to synthesize rather than place bodies at an invented pose.
     """
     stages = tuple(stages) if stages else ACTIONS
     if start_at not in stages:
         raise ValueError(f'start_at {start_at!r} not in mission stages {stages}')
     if start_at not in _SUPPORTED_START_AT:
         raise ValueError(
-            f'start-phase shortcut does not yet synthesize start_at={start_at!r}; '
-            f'supported: {_SUPPORTED_START_AT}')
+            f'start-phase shortcut does not synthesize start_at={start_at!r}; '
+            f'supported: {_SUPPORTED_START_AT} (return is reached via start_at=verify --stop-after return)')
     skipped = tuple(stages[:stages.index(start_at)])
     if skipped != _EXPECTED_SKIP[start_at]:
         raise ValueError(f'start_at={start_at!r} skips {skipped}; expected {_EXPECTED_SKIP[start_at]} '
@@ -510,40 +755,53 @@ def plan_start_state(scenario, start_at, stages=None):
     staging = scenario.get('initial_staging') if isinstance(scenario, dict) else None
     if not isinstance(staging, dict):
         raise ValueError('scenario.initial_staging is required to synthesize a start state')
-    cart_pose = staging.get('cart_body_pose')
-    load_xy = staging.get('cart_load_center_body_xy')
-    support_z = staging.get('cart_support_z_world')
     handling = scenario.get('handling_unit', {})
     dims = handling.get('dimensions_m')
-    yaws = staging.get('unit_yaws_world', {})
-    cart_yaw_on_unit = yaws.get('cart')
-    if not (isinstance(cart_pose, (list, tuple)) and len(cart_pose) == 3 and _finite(*cart_pose)):
-        raise ValueError('initial_staging.cart_body_pose must be finite x/y/yaw')
-    if not (isinstance(load_xy, (list, tuple)) and len(load_xy) == 2 and _finite(*load_xy)):
-        raise ValueError('initial_staging.cart_load_center_body_xy must be finite x/y')
-    if not _finite(support_z):
-        raise ValueError('initial_staging.cart_support_z_world must be finite')
     if not (isinstance(dims, (list, tuple)) and len(dims) == 3 and _finite(*dims) and all(d > 0 for d in dims)):
         raise ValueError('handling_unit.dimensions_m must be three finite positive extents')
-    if not _finite(cart_yaw_on_unit):
-        raise ValueError('initial_staging.unit_yaws_world.cart must be a finite yaw')
+    yaws = staging.get('unit_yaws_world', {})
+    couple_cart = start_at in _COUPLE_AT_SYNTHESIS
+    carton_target = 'bay' if start_at == 'verify' else 'cart'
 
-    cx, cy, cyaw = (float(v) for v in cart_pose)
-    lx, ly = (float(v) for v in load_xy)
-    # Load centre is given in the cart BODY frame; rotate by the cart's world yaw into the map frame.
-    cos_y, sin_y = math.cos(cyaw), math.sin(cyaw)
-    wx = cx + lx * cos_y - ly * sin_y
-    wy = cy + lx * sin_y + ly * cos_y
-    wz = float(support_z) + float(dims[2]) / 2.0   # carton CENTRE sits half its height above the deck
-    couple_cart = start_at == 'transfer'
-    return StartState(
-        start_at=start_at, skipped=skipped,
-        carton_position=(wx, wy, wz),
-        carton_orientation_wxyz=_yaw_to_wxyz(float(cart_yaw_on_unit)),
-        couple_cart=couple_cart,
-        note=('synthesized carton resting at the cart load centre (not welded; the arm re-grasps it)'
-              + ('; cart physically coupled behind the robot (hitch authored), parked at the shelf'
-                 if couple_cart else '; cart at the dock, left uncoupled for the real couple stage')))
+    if carton_target == 'bay':
+        # verify: the carton is already PLACED on the bay top (centre half its height above the top),
+        # level, at the shelf placement yaw; the cart is empty but still coupled.
+        bx, by, top_z = _bay_target_world(config or {}, scenario)
+        carton_pos = (bx, by, float(top_z) + float(dims[2]) / 2.0)
+        shelf_yaw = yaws.get('shelf', 0.0)
+        if not _finite(shelf_yaw):
+            shelf_yaw = 0.0
+        carton_quat = _yaw_to_wxyz(float(shelf_yaw))
+        note = ('synthesized carton placed level on the bay top (arm empty); cart physically coupled '
+                'behind the robot (hitch authored), parked at the transfer/verify pose')
+    else:
+        cart_pose = staging.get('cart_body_pose')
+        load_xy = staging.get('cart_load_center_body_xy')
+        support_z = staging.get('cart_support_z_world')
+        cart_yaw_on_unit = yaws.get('cart')
+        if not (isinstance(cart_pose, (list, tuple)) and len(cart_pose) == 3 and _finite(*cart_pose)):
+            raise ValueError('initial_staging.cart_body_pose must be finite x/y/yaw')
+        if not (isinstance(load_xy, (list, tuple)) and len(load_xy) == 2 and _finite(*load_xy)):
+            raise ValueError('initial_staging.cart_load_center_body_xy must be finite x/y')
+        if not _finite(support_z):
+            raise ValueError('initial_staging.cart_support_z_world must be finite')
+        if not _finite(cart_yaw_on_unit):
+            raise ValueError('initial_staging.unit_yaws_world.cart must be a finite yaw')
+        cx, cy, cyaw = (float(v) for v in cart_pose)
+        lx, ly = (float(v) for v in load_xy)
+        # Load centre is given in the cart BODY frame; rotate by the cart's world yaw into the map frame.
+        cos_y, sin_y = math.cos(cyaw), math.sin(cyaw)
+        wx = cx + lx * cos_y - ly * sin_y
+        wy = cy + lx * sin_y + ly * cos_y
+        wz = float(support_z) + float(dims[2]) / 2.0   # carton CENTRE sits half its height above the deck
+        carton_pos = (wx, wy, wz)
+        carton_quat = _yaw_to_wxyz(float(cart_yaw_on_unit))
+        note = ('synthesized carton resting level at the cart load centre (not welded; the arm re-grasps it)'
+                + ('; cart physically coupled behind the robot (hitch authored)'
+                   if couple_cart else '; cart at the dock, left uncoupled for the real couple stage'))
+    return StartState(start_at=start_at, skipped=skipped, carton_position=carton_pos,
+                      carton_orientation_wxyz=carton_quat, couple_cart=couple_cart,
+                      carton_target=carton_target, note=note)
 
 
 def apply_start_state(assembly, config, scenario, *, settle_steps=30, _rigid_prim=None):
@@ -553,7 +811,7 @@ def apply_start_state(assembly, config, scenario, *, settle_steps=30, _rigid_pri
     uses Isaac's SingleRigidPrim. Returns the StartState actually applied.
     """
     start_at = config.get('start_at')
-    plan = plan_start_state(scenario, start_at, stages=config.get('stages'))
+    plan = plan_start_state(scenario, start_at, stages=config.get('stages'), config=config)
 
     stock_path = assembly.evidence['composition']['stock']
     if _rigid_prim is None:
@@ -571,7 +829,7 @@ def apply_start_state(assembly, config, scenario, *, settle_steps=30, _rigid_pri
     # goes fresh (ds-009). Spawn the arm at a configured observe pose that aims the eye-in-hand at the
     # reach workspace, mirroring collect's observe-then-execute. Absent => arm stays at the transport
     # default (hook is a no-op). Joint-name keyed; unknown names are ignored by the articulation.
-    observe = config.get('transfer_observe_joints') if plan.couple_cart else None
+    observe = config.get('transfer_observe_joints') if plan.start_at == 'transfer' else None
     if observe:
         robot = assembly.robot
         q = np.asarray(robot.get_joint_positions(), dtype=float).copy()

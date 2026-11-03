@@ -380,7 +380,9 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
     # dock spawn. Only the build + shortcut synthesis see the variant; the runtime keeps the scenario.
     # Absent => (scenario, None), the same object -> byte-identical.
     build_scenario, start_staging = scenario, None
-    if config.get('start_staging') is not None:
+    if config.get('start_staging') is not None or config.get('start_at') == 'couple':
+        # start_at='couple' has no staging preset, but still derives its dock-aligned spawn from the
+        # active outbound lane couple_dock (staged_scenario); byte-identical when no couple_dock lane.
         from .shortcut import staged_scenario
         build_scenario, start_staging = staged_scenario(scenario, config, **_hitch_geometry(config))
 

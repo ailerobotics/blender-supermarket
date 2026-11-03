@@ -67,14 +67,64 @@ class PlanStartStateTests(unittest.TestCase):
         plan = plan_start_state(transfer_scenario(), 'transfer')
         self.assertEqual(plan.skipped, ('collect', 'couple', 'outbound', 'park'))
         self.assertTrue(plan.couple_cart)  # couple/outbound/park skipped -> shortcut authors the hitch
+        self.assertEqual(plan.carton_target, 'cart')
         # cart yaw pi: +x body load offset rotates to -x world.
         self.assertAlmostEqual(plan.carton_position[0], -1.78 - 0.08, places=6)
         self.assertAlmostEqual(plan.carton_position[1], 6.0, places=6)
         self.assertAlmostEqual(plan.carton_position[2], 0.9325 + 0.16 / 2, places=6)
         self.assertAlmostEqual(plan.carton_orientation_wxyz[0], math.cos(math.pi / 4), places=6)
 
+    def test_outbound_and_park_load_the_cart_and_couple(self):
+        # outbound/park skip the collect+couple(+outbound) prefix -> the carton is loaded on the cart AND
+        # the cart is coupled (authored at synthesis); the carton pose is identical to the couple case
+        # (same cart load centre), only the skipped prefix and the coupled flag differ.
+        for stage, skipped in (('outbound', ('collect', 'couple')),
+                               ('park', ('collect', 'couple', 'outbound'))):
+            plan = plan_start_state(scenario(), stage)
+            self.assertEqual(plan.skipped, skipped, stage)
+            self.assertTrue(plan.couple_cart, stage)
+            self.assertEqual(plan.carton_target, 'cart', stage)
+            self.assertAlmostEqual(plan.carton_position[0], -5.73 + 0.08, msg=stage)
+            self.assertAlmostEqual(plan.carton_position[1], 15.25, msg=stage)
+            self.assertAlmostEqual(plan.carton_position[2], 0.9325 + 0.16 / 2, msg=stage)
+
+    def test_verify_places_carton_on_the_bay_top_coupled(self):
+        # verify skips collect..transfer: a succeeded transfer has already PLACED the carton on the bay
+        # top (centre half its height above it), level, arm empty, cart still coupled.
+        sc = scenario()
+        sc['transfer_bay'] = {'center_xy': [-2.0, 16.42], 'top_z': 0.73, 'dimensions_m': [0.7, 0.5, 0.73]}
+        plan = plan_start_state(sc, 'verify')
+        self.assertEqual(plan.skipped, ('collect', 'couple', 'outbound', 'park', 'transfer'))
+        self.assertTrue(plan.couple_cart)
+        self.assertEqual(plan.carton_target, 'bay')
+        self.assertAlmostEqual(plan.carton_position[0], -2.0)
+        self.assertAlmostEqual(plan.carton_position[1], 16.42)
+        self.assertAlmostEqual(plan.carton_position[2], 0.73 + 0.16 / 2)
+        # level: shelf placement yaw (0 here) -> identity-about-z quaternion.
+        self.assertAlmostEqual(plan.carton_orientation_wxyz[0], 1.0)
+        self.assertAlmostEqual(plan.carton_orientation_wxyz[3], 0.0)
+
+    def test_verify_bay_target_prefers_the_config_ground_truth_target(self):
+        sc = scenario()
+        sc['transfer_bay'] = {'center_xy': [-2.0, 16.42], 'top_z': 0.73}
+        plan = plan_start_state(sc, 'verify', config={'transfer_ground_truth': {'target': [1.0, 2.0, 0.5]}})
+        self.assertAlmostEqual(plan.carton_position[0], 1.0)
+        self.assertAlmostEqual(plan.carton_position[1], 2.0)
+        self.assertAlmostEqual(plan.carton_position[2], 0.5 + 0.16 / 2)
+
+    def test_verify_without_a_bay_target_refuses(self):
+        with self.assertRaises(ValueError):
+            plan_start_state(scenario(), 'verify')   # no transfer_bay, no config target
+
+    def test_couple_start_is_left_uncoupled(self):
+        plan = plan_start_state(scenario(), 'couple')
+        self.assertFalse(plan.couple_cart)           # the real couple stage latches the hitch
+        self.assertEqual(plan.carton_target, 'cart')
+
     def test_unsupported_start_at_refuses(self):
-        for bad in ('outbound', 'park', 'verify'):
+        # collect (stage 0, nothing to synthesize) and return (past the verify stock-commit gate) are not
+        # Mission start points -- plan_start_state refuses both. return is reached via start_at=verify.
+        for bad in ('collect', 'return'):
             with self.assertRaises(ValueError):
                 plan_start_state(scenario(), bad)
 
@@ -233,25 +283,43 @@ class StageIsolationTests(unittest.TestCase):
             self.assertEqual(bounded_stages(None, stage), ACTIONS[:i + 1])
             self.assertEqual(stage_isolation(stage)['stop_after'], stage)
 
-    def test_only_collect_and_supported_start_ats_isolate(self):
+    def test_every_stage_isolates(self):
+        # The gap the lane closed: outbound/park/verify/return now each start in isolation too.
         can = {r['stage'] for r in isolation_matrix() if r['can_isolate']}
-        self.assertEqual(can, {'collect'} | set(_SUPPORTED_START_AT))
-        # The rest carry an explanatory blocker and no recipe.
+        self.assertEqual(can, set(ACTIONS))
         for r in isolation_matrix():
-            if r['can_isolate']:
-                self.assertIsNone(r['blocker'])
-                self.assertIn(f"--stop-after {r['stage']}", r['recipe'])
-            else:
-                self.assertIsNone(r['recipe'])
-                self.assertIn('no start-phase shortcut', r['blocker'])
+            self.assertTrue(r['can_isolate'], r['stage'])
+            self.assertIsNone(r['blocker'], r['stage'])
+            self.assertIn(f"--stop-after {r['stage']}", r['recipe'])
 
     def test_recipes_match_the_supported_shortcuts(self):
         self.assertEqual(stage_isolation('collect')['recipe'], '--stop-after collect')
         self.assertEqual(stage_isolation('couple')['recipe'],
                          '--start-at couple --stop-after couple')
+        self.assertEqual(stage_isolation('outbound')['recipe'],
+                         '--start-at outbound --start-staging dock_coupled --stop-after outbound')
+        self.assertEqual(stage_isolation('park')['recipe'],
+                         '--start-at park --start-staging bay_parked --stop-after park')
         self.assertEqual(stage_isolation('transfer')['recipe'],
                          '--start-at transfer --start-staging recorded_bay_park --stop-after transfer')
         self.assertEqual(stage_isolation('transfer')['start_staging'], 'recorded_bay_park')
+        self.assertEqual(stage_isolation('verify')['recipe'],
+                         '--start-at verify --start-staging bay_placed --stop-after verify')
+
+    def test_return_isolates_via_verify_start_without_skipping_the_commit_gate(self):
+        r = stage_isolation('return')
+        self.assertTrue(r['can_isolate'])
+        # start_at is verify (not return): Mission refuses a start past the stock-commit gate.
+        self.assertEqual(r['start_at'], 'verify')
+        self.assertEqual(r['start_staging'], 'bay_placed')
+        self.assertEqual(r['stop_after'], 'return')
+        self.assertEqual(r['recipe'],
+                         '--start-at verify --start-staging bay_placed --stop-after return')
+        self.assertIn('stock-commit gate', r['note'])
+
+    def test_couple_needs_no_staging(self):
+        self.assertIsNone(stage_isolation('couple')['start_staging'])
+        self.assertIsNone(stage_isolation('collect')['start_staging'])
 
     def test_unknown_stage_rejected(self):
         with self.assertRaises(ValueError):
