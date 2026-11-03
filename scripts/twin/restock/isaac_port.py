@@ -432,6 +432,13 @@ class IsaacPort:
         if self._profiler is not None:
             self._profiler.mark(name)
 
+    def arm_fault_reason(self):
+        """The NAMED fault the in-process arm-command gate latched (controller_not_ready / the tracking-
+        envelope trip), or None. Lets the runtime surface the real cause over the HOST's downstream
+        symptom in the stage result (native_transport.remap_arm_fault_reason)."""
+        gate = getattr(self.native_transport, 'command_gate', None) if self.native_transport is not None else None
+        return getattr(gate, 'fault_reason', None) if gate is not None else None
+
     def _trace_probe(self):
         speed = getattr(self, '_speed', None)
         return True if speed is None else speed.trace_probe

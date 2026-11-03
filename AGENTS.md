@@ -694,9 +694,10 @@ repo's `scenes/`, `export/` or `renders/`.
   upper shelf and drawbar still collide; rays and cuMotion untouched), labelled in mission.json and the
   caption. Since sim-carton-size-v1 the carton is 0.45 x 0.30 x 0.18 m (`handling_unit.dimensions_m`, the
   single source of truth): its side threads the 0.615 m front-post mouth with ~82.5 mm per side (was 7.5 mm
-  for the old 0.6 m carton), leaving the cage takes only 0.3625 m out through the mouth, and a
-  fixed-orientation straight line out is IK-feasible past that on every UR10 branch (collect from
-  `place_approach` reaches 0.45 m, transfer coupled park 0.40 m). **Sharp edge:
+  for the old 0.6 m carton), leaving the cage takes 0.4625 m out through the mouth (the carton sits at the
+  scenario load centre `cart_load_center_body_xy` +0.08, not the stale +0.18 the script once hardcoded), and a
+  fixed-orientation straight line out is IK-feasible to that exit on every UR10 branch (collect + coupled
+  transfer park both reach the 0.4625 m exit). **Sharp edge:
   `begin(straight_line=True)` is ONE 2-point joint-space smoothstep, not a Cartesian line.** Over a 0.4 m
   insert it still bows ~39 mm, but with the smaller carton's slack that single move now CLEARS the cage by
   ~75 mm (was a penetration); more segments only tighten the bow. The filter is therefore no longer needed

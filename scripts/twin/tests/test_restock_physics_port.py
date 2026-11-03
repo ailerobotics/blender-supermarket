@@ -502,6 +502,11 @@ def test_first_command_ramp_fails_named_when_controller_never_advances():
             gate.command(names=list(ARM_JOINTS),positions=[1.5]*6,velocities=[0.]*6,
                          efforts=[],stamp=float(k+1),now=float(k+1))
     assert gate.faulted
+    # The NAMED cause is recorded so the runtime can surface it over the HOST's downstream symptom
+    # (sim-polish-bundle-v1 cross-process host reason remap). resume() clears it.
+    assert gate.fault_reason=='controller_not_ready'
+    gate.resume()
+    assert gate.fault_reason is None
 
 
 def test_first_command_within_envelope_does_not_ramp():
@@ -534,6 +539,47 @@ def test_resume_rearms_a_latched_gate_so_a_streamed_command_actuates():
     gate.command(names=list(ARM_JOINTS),positions=[.1]*6,velocities=[.03]*6,
                  efforts=[],stamp=2.,now=2.)
     assert not gate.faulted and np.allclose(applied[-1][0],0.1) and np.allclose(applied[-1][1],0.03)
+
+
+def test_tracking_envelope_trip_records_its_named_fault_reason():
+    # The mid-move envelope safety trip is also a NAMED gate fault, recorded for the cross-process remap.
+    gate,applied=gate_fixture()
+    gate.command(names=list(ARM_JOINTS),positions=[.05]*6,velocities=[.01]*6,efforts=[],stamp=1.,now=1.)
+    assert gate.started and gate.fault_reason is None
+    with pytest.raises(ValueError,match='exceeds limits or tracking envelope'):
+        gate.command(names=list(ARM_JOINTS),positions=[2.9]*6,velocities=[0.]*6,efforts=[],stamp=2.,now=2.)
+    assert gate.faulted and gate.fault_reason=='arm target exceeds limits or tracking envelope'
+
+
+def test_remap_arm_fault_reason_surfaces_the_gate_cause_over_a_downstream_symptom():
+    # Cross-process host reason remap (sim-polish-bundle-v1, PR 262 f/u). The HOST reports a generic
+    # downstream symptom once the in-process gate holds the arm; surface the gate's NAMED cause instead.
+    from twin.restock.native_transport import remap_arm_fault_reason as remap
+    # a downstream symptom + a named gate fault => the gate cause, annotated with the symptom
+    out = remap('arm command heartbeat lost', 'controller_not_ready')
+    assert out.startswith('controller_not_ready') and 'arm command heartbeat lost' in out
+    assert remap('StationAckStreamStalled stage=collect', 'controller_not_ready').startswith('controller_not_ready')
+    # no gate fault => unchanged (byte-identical healthy / unrelated path)
+    assert remap('arm command heartbeat lost', None) == 'arm command heartbeat lost'
+    assert remap('arm command heartbeat lost', '') == 'arm command heartbeat lost'
+    # an UNRELATED host reason is never rewritten, even with a gate fault latched
+    assert remap('collision planning or execution failed', 'controller_not_ready') == \
+        'collision planning or execution failed'
+    # a host reason that already names the gate fault is not double-labelled
+    assert remap('controller_not_ready: ...', 'controller_not_ready') == 'controller_not_ready: ...'
+    # an empty reported reason falls back to the bare gate cause
+    assert remap('', 'controller_not_ready') == 'controller_not_ready'
+
+
+def test_isaac_port_arm_fault_reason_reads_the_gate():
+    # The runtime reaches the in-process gate's named fault through this accessor to apply the remap.
+    port = IsaacPort.__new__(IsaacPort)
+    port.native_transport = None
+    assert port.arm_fault_reason() is None
+    port.native_transport = NS(command_gate=NS(fault_reason='controller_not_ready'))
+    assert port.arm_fault_reason() == 'controller_not_ready'
+    port.native_transport = NS(command_gate=None)
+    assert port.arm_fault_reason() is None
 
 
 def test_masked_depth_renders_on_sensing_cadence_through_suspension():

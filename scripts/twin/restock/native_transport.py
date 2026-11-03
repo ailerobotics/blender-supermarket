@@ -60,6 +60,34 @@ ARM_FIRST_CMD_RAMP_MAX = max(ARM_FIRST_CMD_RAMP_STALL_MAX,
                              int(float(os.environ.get('RESTOCK_ARM_FIRST_CMD_RAMP_MAX', 400))))
 ARM_FIRST_CMD_RAMP_PROGRESS = 1e-4  # rad: min track_err decrease to count a ramp step as progressing
 
+# Generic downstream symptoms the HOST manipulation process (a separate process) reports once the arm
+# gate holds the arm and stops relaying /joint_states: its own command-heartbeat / execution / station-
+# ack watchdogs fire and publish one of these, which then overwrites the true cause in mission.json's op
+# reason. remap_arm_fault_reason surfaces the IN-PROCESS gate's NAMED fault (controller_not_ready, the
+# tracking-envelope trip) over the symptom (captain rule: name a trip by its real cause), so the stage
+# result reads the real reason, never only the downstream publisher close. Cross-process host reason
+# remap (sim-polish-bundle-v1, PR 262 follow-up).
+_DOWNSTREAM_ARM_SYMPTOMS = ('arm command heartbeat lost', 'StationAckStreamStalled',
+                            'host emergency stop', 'arm command feedback', 'writer_eof',
+                            'MASKED_DEPTH_SERVE_EXIT')
+
+
+def remap_arm_fault_reason(reported, gate_fault_reason):
+    """Return the arm gate's NAMED fault when a cross-process HOST reason is only a downstream symptom of
+    it; otherwise the reported reason unchanged. Pure. No gate fault, or a host reason that is not a known
+    downstream symptom, or a host reason that already names the gate fault => reported is returned as-is,
+    so a healthy op and every unrelated failure stay byte-identical."""
+    if not gate_fault_reason:
+        return reported
+    text = reported or ''
+    if gate_fault_reason in text:
+        return reported
+    if not text:                                      # a failed op with no host reason => the gate cause
+        return gate_fault_reason
+    if any(symptom in text for symptom in _DOWNSTREAM_ARM_SYMPTOMS):
+        return f'{gate_fault_reason} (downstream host symptom: {text})'
+    return reported
+
 
 def joint_states_payload(now, names, positions, velocities):
     """The /restock_sim/joint_states relay JSON. Measured positions AND velocities both ride along:
@@ -110,6 +138,13 @@ class ArmCommandGate:
         self._wd_now_wall=time.monotonic()
         self.started=False
         self.faulted=False
+        # The NAMED cause of the latched fault (controller_not_ready / the tracking-envelope trip / the
+        # heartbeat loss), set at each raise site. This gate runs in the Isaac/mission process and gates
+        # the HOST's streamed arm commands, so when it holds the arm the HOST manipulation process
+        # independently reports a generic downstream symptom ('arm command heartbeat lost', a trajectory
+        # abort) that overwrites the true cause in mission.json's op reason. The runtime surfaces THIS
+        # named reason over that symptom via remap_arm_fault_reason (sim-polish-bundle-v1 / PR 262 f/u).
+        self.fault_reason=None
         self.hold_target=None
         # Temporary (non-faulting) contact hold: freeze the arm at the measured joints while the sim
         # attach-fallback settles the link to ~0 velocity before welding, so the weld snaps no moving
@@ -164,6 +199,7 @@ class ArmCommandGate:
         commands the measured pose so the arm holds until the first host command. Never on the production
         path (no shortcut => apply_start_state is not called => byte-identical)."""
         self.faulted=False
+        self.fault_reason=None
         self._contact_hold=False
         self._contact_hold_target=None
         self.hold_target=None
@@ -221,6 +257,7 @@ class ArmCommandGate:
                 print(f'ARM_CMD_ENVELOPE track_err={track_err:.4f} vel={vel_mag:.4f} '
                       f'max_error={self.max_error} max_speed={self.max_speed} '
                       f'limit_ok={limit_ok}',flush=True)
+                self.fault_reason='arm target exceeds limits or tracking envelope'
                 raise ValueError('arm target exceeds limits or tracking envelope')
             if track_err>self.max_error:
                 if not self.started:
@@ -243,6 +280,7 @@ class ArmCommandGate:
                               f'max_error={self.max_error} ramps={self._ramp_count} '
                               f'stall={self._ramp_stall}/{ARM_FIRST_CMD_RAMP_STALL_MAX} '
                               f'(arm not advancing toward the first target)',flush=True)
+                        self.fault_reason='controller_not_ready'
                         raise ValueError('controller_not_ready: arm first command did not ramp to the '
                                          'planned start from the measured pose')
                     step=np.clip(q-measured,-self.max_error,self.max_error)
@@ -258,6 +296,7 @@ class ArmCommandGate:
                 print(f'ARM_CMD_ENVELOPE track_err={track_err:.4f} vel={vel_mag:.4f} '
                       f'max_error={self.max_error} max_speed={self.max_speed} '
                       f'limit_ok={limit_ok}',flush=True)
+                self.fault_reason='arm target exceeds limits or tracking envelope'
                 raise ValueError('arm target exceeds limits or tracking envelope')
             # Within the envelope: a normal command (and the convergence of any first-command ramp).
             self.apply(q,v,self.indices)
