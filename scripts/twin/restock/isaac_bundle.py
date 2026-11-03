@@ -395,12 +395,14 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
         build_scenario, start_staging = staged_scenario(scenario, config, **_hitch_geometry(config))
 
     # Cold-run dock-align (sim-couple-shortcut-settle-dt-v1, opt-in config['couple_dock_align']): spawn the
-    # assembly cart + robot at the configured couple dock (the ONE dock source -- the active outbound lane's
+    # assembly CART at the configured couple dock heading (the ONE dock source -- the active outbound lane's
     # couple_dock, else derived from its start + start_cart_yaw) so a COLD run's coupled train faces the
-    # outbound lane heading. Without it the cart spawns at the legacy EAST scenario yaw, the couple seats an
-    # east-facing train and the SOUTH side-bay lane is never acquired (coldwin25e). Only cold runs: a
-    # start_at=couple/transfer shortcut dock-aligns via staged_scenario above (same dock source). Default
-    # off and a no-op for a legacy config whose lane dock already equals the scenario spawn => byte-identical.
+    # outbound lane heading. The robot KEEPS its collect start pose (cart-only); it still runs the collect
+    # drive from the start, then drives to the dock to couple. Without dock-align the cart spawns at the
+    # legacy EAST scenario yaw, the couple seats an east-facing train and the SOUTH side-bay lane is never
+    # acquired (coldwin25e). Only cold runs: a start_at=couple/transfer shortcut dock-aligns BOTH bodies via
+    # staged_scenario above (same dock source). Default off and a no-op for a legacy config whose lane dock
+    # already equals the scenario spawn => byte-identical.
     cold_dock_align = None
     if config.get('couple_dock_align') and not config.get('start_at'):
         from .shortcut import dock_align_scenario

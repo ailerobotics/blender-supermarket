@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from twin.restock.start_settle import (resolve_settle_params, converge_settle, resting_check,
                                        heading_check, _DEFAULTS)
 from twin.restock.shortcut import (apply_start_state, resolve_couple_dock, dock_align_scenario,
-                                   couple_start_poses, verify_dock_seat)
+                                   couple_start_poses, verify_dock_seat, staged_scenario)
 
 
 # --------------------------------------------------------------------------- #
@@ -345,6 +345,12 @@ class DockResolveTests(unittest.TestCase):
         self.assertIsNone(resolve_couple_dock({'navigation': {}}))
 
 
+def _scenario_with_robot(dock_yaw=0.0, robot=(-5.73, 16.0, 0.0)):
+    sc = _scenario(dock_yaw=dock_yaw)
+    sc['initial_staging']['robot_base_pose'] = list(robot)
+    return sc
+
+
 class DockAlignScenarioTests(unittest.TestCase):
     def test_south_lane_reheads_the_spawn(self):
         variant, record = dock_align_scenario(_scenario(dock_yaw=0.0), _lane_cfg(_SOUTH_LANE))
@@ -352,6 +358,37 @@ class DockAlignScenarioTests(unittest.TestCase):
         self.assertAlmostEqual(variant['initial_staging']['cart_body_pose'][2], -math.pi / 2, places=5)
         self.assertEqual(record['mode'], 'couple_dock_align')
         self.assertEqual(record['dock_source'], 'derived_from_lane_start')
+
+    def test_cold_path_moves_the_cart_only_not_the_robot(self):
+        # The cold dock-align re-poses ONLY the cart to the dock heading; the robot KEEPS its collect
+        # start pose (fixes PR 297, which stranded the robot at the dock seat behind the backstock Support).
+        start = (-5.73, 16.0, 0.0)
+        variant, record = dock_align_scenario(_scenario_with_robot(dock_yaw=0.0, robot=start),
+                                              _lane_cfg(_SOUTH_LANE))
+        st = variant['initial_staging']
+        # robot untouched
+        self.assertEqual([round(v, 4) for v in st['robot_base_pose']], [round(v, 4) for v in start])
+        # cart re-headed SOUTH and moved to the dock position (NOT the robot start)
+        self.assertAlmostEqual(st['cart_body_pose'][2], -math.pi / 2, places=5)
+        self.assertAlmostEqual(st['cart_body_pose'][0], -3.875, places=3)
+        self.assertAlmostEqual(st['cart_body_pose'][1], 15.77, places=2)
+        # record names the cart-only behaviour and still carries the couple seat for provenance
+        self.assertTrue(record['cart_only'])
+        self.assertFalse(record['robot_repositioned'])
+        self.assertEqual([round(v, 4) for v in record['robot_base_pose']], [round(v, 4) for v in start])
+        self.assertEqual([round(v, 4) for v in record['couple_seat']],
+                         [-3.875, 14.5, round(-math.pi / 2, 4)])
+
+    def test_shortcut_couple_moves_both_bodies(self):
+        # The start_at=couple shortcut (staged_scenario) DOES seat BOTH the robot (at the dock seat) and
+        # the cart (at the dock) -- the contrast the cold cart-only path must not share.
+        cfg = _lane_cfg(_SOUTH_LANE, start_at='couple')
+        variant, record = staged_scenario(_scenario_with_robot(dock_yaw=0.0), cfg)
+        st = variant['initial_staging']
+        self.assertEqual([round(v, 4) for v in st['robot_base_pose']],
+                         [-3.875, 14.5, round(-math.pi / 2, 4)])      # robot seated at the dock
+        self.assertAlmostEqual(st['cart_body_pose'][2], -math.pi / 2, places=5)
+        self.assertEqual(record['start_at'], 'couple')
 
     def test_east_derived_dock_is_no_op(self):
         # scenario cart at (-5.73,15.25,0); the east lane's derived dock equals it -> byte-identical.
