@@ -876,6 +876,113 @@ class RosMotionPort:
         rt.joint_trajectory = jt
         return rt
 
+    def _waypoints_goal(self, waypoints):
+        """A collision-OFF multi-waypoint joint trajectory through ``waypoints`` (each a 6-vector in
+        JOINTS order, the first == measured start) for the host executor (sim-carry-level-lift-v1).
+
+        Every waypoint is a rest point (zero velocity), so each segment is an independent cubic-Hermite
+        smoothstep that visits exactly the straight joint segment q[i]->q[i+1] -- the carton attitude the
+        leveled-waypoint planner replayed is therefore the attitude the executor drives. Segment durations
+        are sized so the rest-to-rest cubic's peak speed/accel stay under the conservative host ceilings
+        (same 0.08 rad/s / 0.15 rad/s^2 targets as the 2-point straight line), making the plan pass
+        validate_trajectory and the trajectory_host Plan checks regardless of the --max-speed profile."""
+        from moveit_msgs.msg import RobotTrajectory
+        from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+        from builtin_interfaces.msg import Duration
+        pts = [[float(v) for v in w] for w in waypoints]
+        jt = JointTrajectory()
+        jt.joint_names = list(JOINTS)
+        t = 0.0
+        for i, q in enumerate(pts):
+            p = JointTrajectoryPoint()
+            p.positions = list(q)
+            p.velocities = [0.0] * 6
+            if i > 0:
+                dmax = max((abs(b - a) for a, b in zip(pts[i - 1], q)), default=0.0)
+                # Rest-to-rest cubic peaks: speed = 1.5*dmax/T, accel = 6*dmax/T^2. Floor 1.0 s so a
+                # many-waypoint carry does not stack to an excessive total while each segment stays gentle.
+                seg = max(1.0, 1.5 * dmax / 0.08, math.sqrt(6 * dmax / 0.15))
+                t += seg
+            sec = int(t)
+            nanosec = int(round((t - sec) * 1e9))
+            if nanosec >= 1_000_000_000:
+                sec += 1
+                nanosec -= 1_000_000_000
+            p.time_from_start = Duration(sec=sec, nanosec=nanosec)
+            jt.points.append(p)
+        rt = RobotTrajectory()
+        rt.joint_trajectory = jt
+        return rt
+
+    def begin_joint_path(self, waypoints, measured_joints, slow=False, goal_tol=None):
+        """Drive a carried LEVELED WAYPOINT PATH as ONE collision-OFF multi-waypoint smoothstep trajectory
+        through the host executor (sim-carry-level-lift-v1). ``waypoints`` is the list of 6-joint configs
+        (JOINTS order; first == ``measured_joints``) the carton-level planner produced so the carried
+        carton stays parallel to the ground THROUGHOUT the move, not only at its endpoints. Like
+        begin_joint_goal(straight_line=True) the planner is not consulted (the waypoints are the explicit
+        path), so no cuMotion plan is issued; unlike it, the path has >2 points. ``slow`` is accepted for
+        interface parity (the per-segment sizing already gentles the carried fold). Rejects a malformed
+        path, an out-of-limits waypoint, or a first waypoint that does not match the measured start."""
+        if self.state not in ('idle', 'succeeded', 'failed'):
+            raise RuntimeError('motion already active')
+        if not self.execute.server_is_ready():
+            raise RuntimeError('simulated executor unavailable')
+        wps = [tuple(float(v) for v in w) for w in waypoints]
+        if len(wps) < 2:
+            raise ValueError('joint path needs at least two waypoints')
+        for q in wps + [tuple(measured_joints)]:
+            if len(q) != 6 or any(not math.isfinite(v) or not lo <= v <= hi
+                                  for v, (lo, hi) in zip(q, self.limits)):
+                raise ValueError('invalid joint path waypoint or measured start')
+        if max(abs(a - b) for a, b in zip(wps[0], measured_joints)) > 0.05:
+            raise ValueError('joint path start differs from measured joints')
+        self.start = tuple(measured_joints)
+        self._publish_goal_tol(goal_tol)
+        self._publish_reset()            # op-start re-arm: clear any latched trajectory_host fault
+        self._exec_abort_reason = None
+        self._near_start = False
+        self._wrist_guard = None
+        self._reach_guard = None
+        self._pose_wrist_guard = None
+        self._pose_guard_replans = 0
+        self._last_fault_sim_deadline = False
+        self._replan_attempts = 0
+        self._server_crash_retries = 0
+        self._plan_accept_crash_retries = 0
+        self._planner_unrecoverable = False
+        self._reattach_active = False
+        self._reattach_failed = False
+        self._awaiting_server_respawn = False
+        self._plan_dispatches = 0
+        self._plan_goal_joint_space = True
+        self._straight_line = True       # collision-off explicit path: the waypoints ARE the plan
+        self._plan_started_wall = time.monotonic()
+        self._plan_started_sim = self._sim_now()
+        self.generation += 1
+        self.handle = None
+        self._plan_goal = None           # nothing to re-plan: an explicit waypoint path
+        self._begin_execute_trajectory(self._waypoints_goal(wps))
+
+    def _begin_execute_trajectory(self, trajectory):
+        """Dispatch a prebuilt collision-off ``RobotTrajectory`` straight through the host executor
+        (shared by the 2-point straight line and the multi-waypoint leveled path). Validates the plan,
+        sizes the sim-clock execution deadline from its duration, and either sends it or defers to the
+        settle+reseed when a live arm state is wired -- the single-/multi-point paths behave identically."""
+        from moveit_msgs.action import ExecuteTrajectory
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory = trajectory
+        validate_trajectory(goal.trajectory.joint_trajectory, self.start, self.limits)
+        end = goal.trajectory.joint_trajectory.points[-1].time_from_start
+        duration = end.sec + end.nanosec * 1e-9
+        self.deadline_clock = self._sim_now
+        self.deadline = self._sim_now() + sim_execute_budget(duration)
+        if self._live_arm_state is None:
+            self._send(self.execute, goal, 'execute_accept')
+        else:
+            self._pending_exec = goal.trajectory
+            self._settle_wait_start = self._sim_now()
+            self.state = 'await_settle'
+
     def _begin_straight_line_execute(self, q):
         """Dispatch a collision-OFF 2-point rest-to-rest smoothstep from the measured start to the
         explicit joint config ``q`` straight through the host executor -- no cuMotion plan, so a
@@ -885,23 +992,10 @@ class RosMotionPort:
         deck RETREAT backing the empty gripper off the drooped place config -- forearm within the
         gripper-cube sphere margin -- to the fixed upright standoff that a collision-AWARE plan would
         reject at its self-colliding start). Sets the move state (execute_accept, or await_settle when a
-        live arm state is wired); the caller returns its own status."""
-        from moveit_msgs.action import ExecuteTrajectory
-        goal = ExecuteTrajectory.Goal()
-        goal.trajectory = self._straight_line_goal(q)
-        validate_trajectory(goal.trajectory.joint_trajectory, self.start, self.limits)
-        end = goal.trajectory.joint_trajectory.points[-1].time_from_start
-        duration = end.sec + end.nanosec * 1e-9
-        # Execution is sim-paced, exactly like the cuMotion plan path: bound on the NODE/SIM clock.
-        # fm367: the sim budget (duration + settle margin) is MOVE_SIM_DEADLINE_SCALE-scaled.
-        self.deadline_clock = self._sim_now
-        self.deadline = self._sim_now() + sim_execute_budget(duration)
-        if self._live_arm_state is None:
-            self._send(self.execute, goal, 'execute_accept')
-        else:                                   # fm357: settle + re-seed before dispatch
-            self._pending_exec = goal.trajectory
-            self._settle_wait_start = self._sim_now()   # fm369: start the settle sub-budget clock
-            self.state = 'await_settle'
+        live arm state is wired); the caller returns its own status. Execution is sim-paced, exactly like
+        the cuMotion plan path: the sim budget (duration + settle margin) is MOVE_SIM_DEADLINE_SCALE-scaled
+        inside the shared dispatch helper."""
+        self._begin_execute_trajectory(self._straight_line_goal(q))
 
     def _arm_plan_deadline(self):
         """sim-robust-plan-deadline-pacing-v1: arm the PLANNING-phase (ik / plan_accept / plan_result)

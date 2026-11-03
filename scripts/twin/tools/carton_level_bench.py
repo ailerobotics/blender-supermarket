@@ -159,6 +159,97 @@ def run_place(urdf_path, *, bound_deg=cl.DEFAULT_TILT_BOUND_DEG, weld=TOP_GRASP_
         descent_max_tilt=dmax, preplace_clear=_in_clear_wrist(lev), setdown_clear=_in_clear_wrist(sd))
 
 
+# The coldwin25 collect grasp/weld pose (ARM order): the measured arm config where the carton welds
+# level and the lift begins, reconstructed from the run's final grasp-track creep endpoint
+# (data/sim-carry-level-lift-v1). The EXECUTED-path proof anchors the real carry here, not the
+# representative WELD_CONFIG, so it replays the ACTUAL failing lift.
+COLDWIN25_GRASP = (1.2655, -1.2755, 2.0905, -0.8149, 1.2621, 0.0)
+
+
+@dataclass
+class ExecutedPathResult:
+    """Replay of a REAL carried move (sim-carry-level-lift-v1): the single-goal joint path (what the
+    executor drives for a single leveled-ENDPOINT begin_joint_goal) tilts the carton mid-path, while the
+    leveled WAYPOINT path (begin_joint_path) keeps |roll|,|pitch| under the bound THROUGHOUT."""
+    name: str
+    single_goal_max_tilt: float      # straight joint segment start->leveled goal (both ends level)
+    single_goal_max_roll: float
+    single_goal_max_pitch: float
+    path_max_tilt: float             # leveled waypoint path (predicted executed)
+    path_max_roll: float
+    path_max_pitch: float
+    waypoints_n: int
+    single_series: list = field(default_factory=list)   # [(frac, roll, pitch, tilt)]
+    path_series: list = field(default_factory=list)      # [(frac, roll, pitch, tilt)]
+
+    def passes(self, bound_deg):
+        return max(self.path_max_roll, self.path_max_pitch) <= bound_deg
+
+
+def _series(robot, waypoints, u, tool_link, interior):
+    """Sample (frac, roll, pitch, tilt) along the straight-segment interiors of a waypoint list."""
+    pts = [list(w) for w in waypoints]
+    out = []
+    total = len(pts) - 1
+    for i in range(total):
+        for k in range(interior + 1):
+            if i > 0 and k == 0:
+                continue
+            a = k / float(interior)
+            q = [(1 - a) * pts[i][j] + a * pts[i + 1][j] for j in range(6)]
+            roll, pitch, tilt = cl.carried_rpy(robot, q, u, tool_link)
+            out.append(((i + a) / total, roll, pitch, tilt))
+    return out
+
+
+def run_executed_paths(urdf_path, *, bound_deg=cl.DEFAULT_TILT_BOUND_DEG, weld=COLDWIN25_GRASP,
+                       tool_link='ur_tool0', host_config_path=_HOST_CONFIG, interior=20):
+    """Replay the REAL collect carry (lift, then the pan fold to the cart) on the REAL mission kinematics
+    + REAL carry shapes + the measured coldwin25 grasp up-axis. For each move it returns an
+    ExecutedPathResult comparing the single-goal joint path (the current single begin_joint_goal: both
+    ENDPOINTS leveled but the straight joint segment between them tilts the carton) against the leveled
+    WAYPOINT path (the fix). This is the brief's EXECUTED-path proof -- it replays the PATH, not just the
+    endpoints."""
+    robot = parse_urdf(urdf_path)
+    u = cl.carton_up_in_tool(cl.tool_rotation(robot, list(weld), tool_link))
+    limits = clear_wrist_limits()
+    c = json.load(open(host_config_path))
+    lift = [float(v) for v in c['carry_lift_shape']]
+    pan = [float(c['cart_pan_joint0'])] + [float(v) for v in c['cart_tuck_shape']]
+    # lift starts at the grasp pose; pan starts at the leveled lift goal.
+    lift_leveled_goal = [cl.level_config(robot, lift, u, limits=limits, accept_deg=bound_deg)[j]
+                         for j in ARM_JOINTS]
+    moves = [('lift', list(weld), lift), ('pan', lift_leveled_goal, pan)]
+    out = []
+    for name, start, goal in moves:
+        leveled_goal = [cl.level_config(robot, goal, u, limits=limits, accept_deg=bound_deg)[j]
+                        for j in ARM_JOINTS]
+        single = _series(robot, [start, leveled_goal], u, tool_link, interior)
+        plan = cl.plan_level_path(robot, start, goal, u, bound_deg=bound_deg, tool_link=tool_link,
+                                  limits=limits)
+        path = _series(robot, [list(w) for w in plan.waypoints], u, tool_link, interior)
+        out.append(ExecutedPathResult(
+            name=name,
+            single_goal_max_tilt=max(r[3] for r in single),
+            single_goal_max_roll=max(abs(r[1]) for r in single),
+            single_goal_max_pitch=max(abs(r[2]) for r in single),
+            path_max_tilt=plan.max_tilt, path_max_roll=plan.max_roll, path_max_pitch=plan.max_pitch,
+            waypoints_n=plan.waypoints_n, single_series=single, path_series=path))
+    return u, out
+
+
+def executed_table(results, bound_deg=cl.DEFAULT_TILT_BOUND_DEG):
+    rows = [('move', 'single|roll|', 'single|pitch|', 'single_tilt',
+             'path|roll|', 'path|pitch|', 'path_tilt', 'n', 'verdict')]
+    for r in results:
+        rows.append((r.name, f'{r.single_goal_max_roll:.2f}', f'{r.single_goal_max_pitch:.2f}',
+                     f'{r.single_goal_max_tilt:.2f}', f'{r.path_max_roll:.2f}', f'{r.path_max_pitch:.2f}',
+                     f'{r.path_max_tilt:.2f}', str(r.waypoints_n),
+                     'PASS' if r.passes(bound_deg) else 'FAIL'))
+    w = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    return '\n'.join('  '.join(c.ljust(w[i]) for i, c in enumerate(row)) for row in rows)
+
+
 def _vec(cfg):
     """Config map -> 6-vector in ARM order."""
     return [float(cfg[j]) for j in ARM_JOINTS]

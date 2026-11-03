@@ -38,6 +38,13 @@ CARTON_TILT = 'CARTON_TILT'
 # The log token for a SUB-GRACE tilt spike that is reported but does NOT fail the move
 # (sim-carton-tilt-transient-debounce-v1): a one-to-few-tick tracking/impulse excursion.
 CARTON_TILT_TRANSIENT = 'CARTON_TILT_TRANSIENT'
+# The log token the planner prints when a carried move's PREDICTED executed path (replayed before
+# dispatch) would leave level by more than the bound (sim-carry-level-lift-v1). The caller FAILS the
+# move by name BEFORE executing it, rather than streaming a visibly tilted carry -- the captain's rule
+# that a visually wrong moment never reaches the camera. This is the PLAN-time counterpart of the
+# execution-time CARTON_TILT trip: CARTON_TILT catches a tilt the live arm actually reached;
+# CARTON_LEVEL_PLAN_REJECTED catches one the plan WOULD reach, so the arm never starts the move.
+CARTON_LEVEL_PLAN_REJECTED = 'CARTON_LEVEL_PLAN_REJECTED'
 # Default bound (deg) on |roll| and |pitch| while carrying -- the captain's "parallel to the
 # ground"; 2 deg is the brief's stated threshold for naming a move off-level.
 DEFAULT_TILT_BOUND_DEG = 2.0
@@ -196,6 +203,18 @@ class LevelConfig:
     level_place: bool = True
     joints: tuple = DEFAULT_LEVEL_JOINTS
     tool_link: str = 'ur_tool0'
+    # sim-carry-level-lift-v1: plan the carried LIFT (and the tuck/pan carry) as a LEVELED WAYPOINT
+    # PATH rather than a single leveled-ENDPOINT joint goal. ``level_goals`` alone levels only the goal
+    # pose, so the executor's joint-space path from the grasp pose to that goal passes through a tilted
+    # configuration (coldwin25: the lift to carry_lift_shape -- CPU-reconstructed ~11 deg mid-path to the
+    # leveled endpoint, ~97 deg to the raw shape -- while BOTH endpoints are level). With ``level_path``
+    # on, the move is decomposed into ``path_waypoints`` leveled waypoints (the wrist cluster re-solved
+    # at every waypoint), so the carton stays parallel to the ground THROUGHOUT; the predicted executed
+    # tilt is replayed before dispatch and the move is CARTON_LEVEL_PLAN_REJECTED if it exceeds the bound.
+    # Default ON when carton_level is enabled (the repo default carton_level is None => off => byte-
+    # identical); ``level_path: false`` restores the single leveled-endpoint goal.
+    level_path: bool = True
+    path_waypoints: int = 12
     # sim-carton-tilt-transient-debounce-v1: SUSTAINED-tilt grace (sim-seconds AT 1/60). The trip FAILS
     # only when the measured tilt exceeds the bound CONTINUOUSLY for this long; a shorter spike logs
     # CARTON_TILT_TRANSIENT and proceeds. 0 => legacy immediate trip. The controller rebases this onto
@@ -207,6 +226,8 @@ class LevelConfig:
             raise ValueError('carton_level.bound_deg must be a finite positive number of degrees')
         if not (math.isfinite(self.tilt_grace_s) and self.tilt_grace_s >= 0):
             raise ValueError('carton_level.tilt_grace_s must be a finite non-negative number of seconds')
+        if not (isinstance(self.path_waypoints, int) and self.path_waypoints >= 2):
+            raise ValueError('carton_level.path_waypoints must be an integer >= 2')
         from twin.restock_manipulation.cad_tool import ARM_JOINTS
         bad = [j for j in self.joints if j not in ARM_JOINTS]
         if bad or not self.joints:
@@ -218,7 +239,8 @@ def resolve_level_config(spec):
     """Normalise a ``carton_level`` config value into a ``LevelConfig`` or ``None`` (off =>
     byte-identical). Accepts absent/None/False/'0'/'off' => None; True/'on'/{} => defaults; a
     mapping with optional ``bound_deg``, ``tilt_grace_s``, ``level_goals``, ``trip``, ``level_weld``,
-    ``level_place``, ``joints``, ``tool_link``. Raises on a malformed value so a typo fails loudly at boot."""
+    ``level_place``, ``level_path``, ``path_waypoints``, ``joints``, ``tool_link``. Raises on a malformed
+    value so a typo fails loudly at boot."""
     if spec is None or spec is False:
         return None
     if isinstance(spec, str):
@@ -237,7 +259,9 @@ def resolve_level_config(spec):
         kw['bound_deg'] = float(spec['bound_deg'])
     if 'tilt_grace_s' in spec and spec['tilt_grace_s'] is not None:
         kw['tilt_grace_s'] = float(spec['tilt_grace_s'])
-    for flag in ('level_goals', 'trip', 'level_weld', 'level_place'):
+    if 'path_waypoints' in spec and spec['path_waypoints'] is not None:
+        kw['path_waypoints'] = int(spec['path_waypoints'])
+    for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     if spec.get('joints'):
@@ -379,6 +403,110 @@ def interpolate_level(robot, start_config, goal_config, up_in_tool, *, n=8,
         out.append(level_config(robot, wp, up_in_tool, joints=joints, tool_link=tool_link,
                                 root=root, limits=limits))
     return out
+
+
+# ------------------------------------------------ leveled WAYPOINT path (sim-carry-level-lift-v1)
+
+def _as_vec(cfg):
+    """A config map -> 6-vector in ARM order."""
+    from twin.restock_manipulation.cad_tool import ARM_JOINTS
+    return [float(cfg[j]) for j in ARM_JOINTS]
+
+
+def predict_path_tilt(robot, waypoints, up_in_tool, *, tool_link='ur_tool0', root='ur_base_link',
+                      interior=8):
+    """Replay the carton attitude along an EXECUTED leveled waypoint path and return
+    ``(max_abs_roll_deg, max_abs_pitch_deg, max_tilt_deg)``.
+
+    ``waypoints`` is a list of 6-vectors (ARM order) the host executor will drive through, each a
+    rest-to-rest cubic Hermite segment (zero waypoint velocities => a joint-space smoothstep that visits
+    exactly the straight joint segment q[i]->q[i+1]). The set of configs the executor visits between two
+    waypoints is therefore the straight joint segment, so linear-interior sampling here is EXACT for the
+    executor's max tilt (the smoothstep only reparameterises time, not the joint-value path). ``interior``
+    samples per segment catches a tilt that the leveled ENDPOINTS hide but the interpolation passes through
+    (the wrist-branch transition). Pure/CPU."""
+    pts = [list(w) for w in waypoints]
+    mr = mp = mt = 0.0
+    for i in range(len(pts) - 1):
+        for k in range(interior + 1):
+            a = k / float(interior)
+            q = [(1 - a) * pts[i][j] + a * pts[i + 1][j] for j in range(6)]
+            roll, pitch, tilt = carried_rpy(robot, q, up_in_tool, tool_link, root)
+            mr = max(mr, abs(roll)); mp = max(mp, abs(pitch)); mt = max(mt, tilt)
+    return mr, mp, mt
+
+
+@dataclass(frozen=True)
+class LevelPathPlan:
+    """A leveled carried-move plan (sim-carry-level-lift-v1).
+
+    * ``waypoints`` -- the ARM-order 6-vectors the host executor drives through (leveled at every
+      waypoint); the first is the measured start, the last the leveled goal.
+    * ``max_roll`` / ``max_pitch`` / ``max_tilt`` -- the PREDICTED executed attitude extremes (replayed
+      over the waypoints AND their straight-segment interiors), so the caller can reject a plan whose
+      executed path would leave level before any motion streams.
+    * ``waypoints_n`` -- the segment count actually chosen (the lowest-tilt candidate).
+    """
+    waypoints: tuple
+    max_roll: float
+    max_pitch: float
+    max_tilt: float
+    waypoints_n: int
+
+    def reject(self, bound_deg):
+        """The CARTON_LEVEL_PLAN_REJECTED message when the predicted executed path exceeds ``bound_deg``
+        on |roll| or |pitch|, else ``None``. Never widens the bound: the message names the predicted
+        peak and the segment count so the lane sees exactly how far over it was."""
+        worst = max(self.max_roll, self.max_pitch)
+        if worst <= float(bound_deg):
+            return None
+        return (f'{CARTON_LEVEL_PLAN_REJECTED} carried move would tilt the carton off level: predicted '
+                f'peak roll={self.max_roll:.2f} pitch={self.max_pitch:.2f} deg over the '
+                f'{self.waypoints_n}-waypoint leveled path exceeds bound {float(bound_deg):.2f} deg '
+                f'-- refusing to execute a visibly tilted carry')
+
+
+def plan_level_path(robot, start_config, goal_config, up_in_tool, *, bound_deg=DEFAULT_TILT_BOUND_DEG,
+                    joints=DEFAULT_LEVEL_JOINTS, tool_link='ur_tool0', root='ur_base_link', limits=None,
+                    waypoints=12, candidates=(8, 12, 16), interior=8):
+    """Plan a carried move from ``start_config`` to ``goal_config`` as a LEVELED WAYPOINT PATH that keeps
+    the welded carton parallel to the ground THROUGHOUT (not only at the endpoints).
+
+    The goal is first leveled (``level_config``; raises if it has no in-``limits`` level solution), then
+    the move is decomposed into leveled waypoints via ``interpolate_level``. Because a leveled waypoint's
+    wrist branch can jump between adjacent waypoints (the carton up-axis manifold is constrained by the
+    clear carry wrist region, so a fully level + self-clear + continuous path need not exist), the
+    straight-segment INTERIOR between two level waypoints can still tilt; the segment count that minimises
+    the predicted interior tilt is chosen from ``candidates`` (|| plus the requested ``waypoints``). The
+    returned ``LevelPathPlan`` carries the predicted executed extremes so the caller can
+    CARTON_LEVEL_PLAN_REJECTED a plan still over the bound. Raises ValueError only when the GOAL itself
+    has no in-limits level solution (genuinely un-levelable -- the caller falls back / fails honestly).
+    Pure/CPU."""
+    leveled_goal = level_config(robot, list(goal_config), up_in_tool, joints=joints, tool_link=tool_link,
+                                root=root, limits=limits, accept_deg=bound_deg)
+    gvec = _as_vec(leveled_goal)
+    tried = []
+    seen = set()
+    # Try the requested count first, then the fallbacks, in ascending order so a satisfying plan with
+    # the FEWEST waypoints wins (fewer rest-to-rest segments => a shorter executed carry).
+    order = sorted({int(n) for n in (int(waypoints),) + tuple(candidates) if int(n) >= 2})
+    for n in order:
+        if n in seen:
+            continue
+        seen.add(n)
+        wps = interpolate_level(robot, start_config, gvec, up_in_tool, n=n, joints=joints,
+                                tool_link=tool_link, root=root, limits=limits)
+        vecs = [_as_vec(w) for w in wps]
+        mr, mp, mt = predict_path_tilt(robot, vecs, up_in_tool, tool_link=tool_link, root=root,
+                                       interior=interior)
+        plan = LevelPathPlan(waypoints=tuple(tuple(v) for v in vecs),
+                             max_roll=mr, max_pitch=mp, max_tilt=mt, waypoints_n=n)
+        if max(mr, mp) <= float(bound_deg):
+            return plan           # fewest waypoints that keep the predicted carry under the bound
+        tried.append(plan)
+    # None kept it under the bound: return the lowest-tilt attempt so the caller's reject gate fires
+    # honestly with the true minimal residual (never silently execute a tilt).
+    return min(tried, key=lambda p: max(p.max_roll, p.max_pitch))
 
 
 # ----------------------------------------------------- level-place IK (reach + level)
