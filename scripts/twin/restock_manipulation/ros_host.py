@@ -212,6 +212,13 @@ def main():
         # (lift->tuck->TRANSIT->[base nav]->preplace), instead of the arm-only cage insert. Absent =>
         # byte-identical. Mutually exclusive in practice with cart_cage_place (base nav replaces it).
         reposition_before_place=bool(config.get('reposition_before_place', False)),
+        # sim-service-leg-carry-v1: the shelf-staging TRANSFER service leg picks the carton off the parked
+        # cart at the staging pose and CARRIES it to the endcap before placing. That needs the TRANSIT
+        # carry-hold for a live_pose transfer (lift->tuck->TRANSIT->[base carry-drive]->preplace); the runtime
+        # drives the carry (it is wired only in shelf_staging mode). Set this HOST key true together with the
+        # mission runtime `shelf_staging: true`. Absent/False => a live_pose transfer stays tuck->preplace
+        # (byte-identical). See controller._repositions_before_place + restock/runtime service-leg legs.
+        transfer_service_carry=bool(config.get('transfer_service_carry', False)),
         # fm410 (run-316): physics grasp confirm -- the lift-probe carton-tracking threshold (m). The grasp
         # advances to carry only if the measured carton rose by >= this from the grasp-confirm baseline, so
         # the confirm reads physics, never the (arm-occluded) source camera. Absent => inert (byte-identical).
@@ -320,6 +327,8 @@ def main():
         # sim-robust-cart-place-descent-v1: effective SIM-clock release-detach budget (0 = off)
         'release_detach_timeout_s': controller.release_detach_timeout_s,
         'reposition_before_place': controller.reposition_before_place,
+        # sim-service-leg-carry-v1: TRANSIT carry-hold for the shelf-staging live_pose transfer service leg
+        'transfer_service_carry': controller.transfer_service_carry,
         'transfer_mode': controller.transfer_mode,   # env RESTOCK_TRANSFER_MODE (None = off)
         'transfer_carry': sorted(controller.transfer_carry),   # env RESTOCK_TRANSFER_CARRY ([] = off)
         'sim_cart_place_policy': _policy is not None and bool(config.get('sim_cart_place_policy')),

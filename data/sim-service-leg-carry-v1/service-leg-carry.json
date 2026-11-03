@@ -1,0 +1,89 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "carry_drive_to_endcap_clears_with_carton",
+      "passed": true,
+      "min_static_clear_m": 0.15,
+      "min_cart_clear_m": 0.05,
+      "carton_fwd_m": 0.4,
+      "carton_footprint_m": [
+        0.45,
+        0.3
+      ],
+      "hit": null
+    },
+    {
+      "name": "drive_back_to_staging_clears_empty",
+      "passed": true,
+      "min_static_clear_m": 0.442,
+      "min_cart_clear_m": 0.05,
+      "hit": null
+    },
+    {
+      "name": "pick_at_staging_within_reach",
+      "passed": true,
+      "reach_m": 1.204,
+      "max_reach_m": 1.3,
+      "margin_m": 0.096,
+      "carton_world": [
+        -3.875,
+        9.09,
+        1.012
+      ],
+      "note": "same base-relative cart geometry as the proven coldwin22 transfer pick"
+    },
+    {
+      "name": "place_at_endcap_within_reach",
+      "passed": true,
+      "reach_m": 1.217,
+      "max_reach_m": 1.3,
+      "margin_m": 0.083,
+      "slot_world": [
+        -3.05,
+        4.826,
+        0.82
+      ],
+      "note": "the proven coldwin22 transfer place pose (endcap G3_back slot)"
+    },
+    {
+      "name": "carried_carton_stays_level",
+      "passed": true,
+      "worst_after_tilt_deg": 0.02,
+      "bound_deg": 2.0,
+      "segments": [
+        {
+          "seg": "lift",
+          "before_tilt": 5.7,
+          "after_tilt": 0.0,
+          "pass": true
+        },
+        {
+          "seg": "tuck",
+          "before_tilt": 40.1,
+          "after_tilt": 0.02,
+          "pass": true
+        },
+        {
+          "seg": "pan",
+          "before_tilt": 40.1,
+          "after_tilt": 0.02,
+          "pass": true
+        },
+        {
+          "seg": "preplace",
+          "before_tilt": 40.1,
+          "after_tilt": 0.02,
+          "pass": true
+        },
+        {
+          "seg": "place",
+          "before_tilt": 11.5,
+          "after_tilt": 0.0,
+          "pass": true
+        }
+      ]
+    }
+  ],
+  "static_obstacles": 798
+}

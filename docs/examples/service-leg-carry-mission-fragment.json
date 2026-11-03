@@ -1,0 +1,56 @@
+{
+  "_comment": "sim-service-leg-carry-v1 (captain 2026-11-03): the MANIPULATION half of the shelf-staging re-sequence. With the cart parked + uncoupled at the staging pose (sim-shelf-staging-v1 OUTBOUND, docs/examples/tow-lanes-mission-fragment.json), the free base services the endcap ALONE: pick the carton off the parked cart AT the staging pose, CARRY it to the endcap held level, place it, drive the empty base BACK to the staging pose. This fragment shows the FULL coldwin24 re-sequenced-cycle config. The keys split across THREE consumers (do NOT put a key in the wrong file -- it silently never activates): RUNTIME = the mission runtime-config the orchestrate process reads (isaac_bundle); HOST = restock_manipulation/ros_host_config.json the host process reads (TransferController); ENV = environment variables both processes inherit. See scripts/twin/restock_manipulation/config_preflight.py for the registered side of each key.",
+
+  "_RUNTIME_keys": "merge into the mission runtime-config",
+  "shelf_staging": true,
+  "carry_drive_profile": {
+    "_comment": "drive-with-payload base speed/accel caps for the carry→endcap leg ONLY (the base must not shove the held carton; the arm keeps it level + CARTON_TILT is the trip). Absent => a conservative built-in default {max_speed 0.12, max_angular 0.20, max_accel 0.15, max_angular_accel 0.40}.",
+    "max_speed": 0.12,
+    "max_angular": 0.20,
+    "max_accel": 0.15,
+    "max_angular_accel": 0.40
+  },
+  "mission_poses": {
+    "shelf_staging": [-3.875, 8.0, -1.5707963267948966],
+    "shelf_approach": [-3.05, 6.0, 3.141592653589793],
+    "cart_parking": [-3.875, 16.3, 1.5707963267948966]
+  },
+  "navigation": {
+    "_comment": "the COUPLED outbound-to-staging tow lane (sim-shelf-staging-v1); copy the full navigation block (tow_lanes + tow_lane_* keys + directional_zone) from docs/examples/tow-lanes-mission-fragment.json. The UNCOUPLED service leg (staging↔endcap) carries NO tow lane -- the free base free-plans it (scripts/check_service_leg_carry.py proves the swept base∪carton footprint clears).",
+    "tow_lanes": [
+      {
+        "name": "outbound_dock_to_staging",
+        "start": [-3.875, 14.5, -1.5707963267948966],
+        "start_cart_yaw": -1.5707963267948966,
+        "goal": [-3.875, 8.0, -1.5707963267948966],
+        "goal_articulation": 0.2,
+        "start_tol_cart_yaw": 0.35,
+        "waypoints": [[-3.875, 11.125, -1.5707963267948966]],
+        "route_through_waypoints": true
+      }
+    ]
+  },
+
+  "_HOST_keys": "merge into restock_manipulation/ros_host_config.json",
+  "host_config": {
+    "transfer_service_carry": true,
+    "carton_level": true,
+    "_carton_level_note": "sim-carton-level-carry-v1 (PR 270): level the carried carton (fold goals) + arm the CARTON_TILT trip (bound 2 deg). MUST stay on while driving with the carton -- it is the attitude safety the captain's 'carton always parallel to the ground' depends on.",
+    "_transfer_service_carry_note": "sim-service-leg-carry-v1: gives a live_pose TRANSFER the TRANSIT carry-hold (lift→tuck→TRANSIT→[base carry-drive]→preplace→place). WITHOUT it a live_pose transfer goes tuck→preplace and places from the staging pose (the endcap slot is out of reach there). Pair it with the RUNTIME shelf_staging=true -- the runtime drives the carry only in shelf-staging mode; a split (one side only) is the run-277 trap (config_preflight guards it)."
+  },
+
+  "_ENV_vars": "export in BOTH the orchestrate and host processes (RESTOCK_TRANSFER_MODE/CARRY are read in both)",
+  "env": {
+    "RESTOCK_TRANSFER_MODE": "live_pose",
+    "RESTOCK_TRANSFER_CARRY": "wrist_guard",
+    "_note": "live_pose picks from the LIVE sensed carton pose (works wherever the cart is parked), near-face side grip; wrist_guard keeps the place-side KDL IK in the clear wrist branch. live_pose REQUIRES wrist_guard (the controller fails fast at observe otherwise). The pick capture gate is unchanged -- the FIXED source/shelf station cameras + the ground-truth/live-pose gate (transfer_ground_truth.enabled / IsaacCartonSensors.capture); the arm eye-in-hand camera is masked-depth only and does not frame the pick."
+  },
+
+  "_gpu_handoff_note": "Keep the sim-shelf-staging-v1 GPU keys unchanged: top-level portal_floor_box=true and the coupled_heading_hold / heading_hold_prethroat_m / heading_hold_launch_m keys from docs/examples/throat-momentum-launch-mission-fragment.json (the from-rest dock pin, unaffected by this change). Also apply the couple-approach station geometry from tow-lanes-mission-fragment.json (_couple_handoff_note).",
+
+  "_acceptance_coldwin24": "With this config the re-sequenced cycle runs: (1) couple south-aligned on the portal axis; (2) OUTBOUND tows STRAIGHT to shelf_staging (<=10 deg coupled articulation everywhere, cart crosses the doorway aligned <=3 deg), brakes + uncouples the cart there, base parked at staging; (3) PARK stationarizes at staging beside the parked cart; (4) TRANSFER SERVICE LEG: pick the carton off the parked cart at staging (live_pose), CARRY it to the endcap with the carton LEVEL throughout (no CARTON_TILT trip) and the base on the carry_drive_profile, PLACE it on the endcap slot (G3_back_s2), then drive the EMPTY base BACK to the staging pose; (5) VERIFY the placement. ACCEPTANCE: pick at staging completes; carton level through the drive (no CARTON_TILT); place at endcap completes; robot back at the staging pose beside the parked cart. The behaviour-tree diagram (scripts/build_bt_diagram.py) shows the seven transfer service-leg nodes (perceive carton → transfer-pick@staging → carry→endcap → perceive slot → place@endcap → verify placed → drive→staging).",
+
+  "_return_out_of_scope": "The RETURN of the cart to the backroom is a separate captain decision and is NOT part of this leg -- it ends with the robot back at the staging pose next to the parked cart. See tow-lanes-mission-fragment.json _return_handoff_note for the return options the integration lane chooses between.",
+
+  "_cpu_proofs": "scripts/check_service_leg_carry.py (carry-drive swept base∪carton clearance staging↔endcap, pick+place reach, carried-carton tilt bound) -- SERVICE_LEG_CARRY PASS; scripts/twin/tests/test_restock_bt_phases.py / test_restock_bt_diagram.py (the 7-step service-leg plan + diagram + state-machine parity); scripts/twin/tests/test_restock_runtime.py (the runtime pick→carry→place→drive-back legs + the carry speed/accel clamp); scripts/twin/tests/test_restock_transfer_live_pose.py (transfer_service_carry produces the TRANSIT carry-hold); scripts/twin/tests/test_service_leg_carry.py + test_carton_level_bench.py (reach + tilt guards). data/sim-service-leg-carry-v1/report.md."
+}

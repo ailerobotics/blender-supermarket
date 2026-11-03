@@ -48,6 +48,7 @@ KEY_CONSUMER = {
     'collect_place_straight_line': HOST,     # route the collect deck place+retreat collision-off straight-line (attached-carton self-collision)
     'transfer_preplace_reach_guard': HOST,   # sim-robust-transfer-preplace-reach-v1: steer the live_pose transfer preplace to the holdable upright clear branch
     'transfer_pick_wrist_guard': HOST,       # sim-robust-transfer-settle-oscillation-v1: extend the clear-wrist-region guard to the live_pose transfer PICK approach+contact (coldwin12 contact limit cycle)
+    'transfer_service_carry': HOST,          # sim-service-leg-carry-v1: TRANSIT carry-hold for the shelf-staging live_pose transfer service leg (pick@staging -> carry -> place); pair with runtime shelf_staging
     'cart_pan_joint0': HOST,
     'cart_tuck_shape': HOST,
     'base_collision_object': HOST,
@@ -99,6 +100,12 @@ KEY_CONSUMER = {
     # sim-robust-cart-place-descent-v1: bounded base-settle tolerance for the loaded collect place;
     # isaac_bundle builds the RuntimeAdapter with it (orchestrate process), NOT ros_host.
     'collect_place_base_settle_m': RUNTIME,
+    # sim-shelf-staging-v1 / sim-service-leg-carry-v1: the sales-floor re-sequence + solo carton-carry
+    # service leg. isaac_bundle builds the RuntimeAdapter with these (RUNTIME). Pair `shelf_staging: true`
+    # (runtime) with the HOST `transfer_service_carry: true` so the live_pose transfer produces the carry-
+    # hold the runtime drives; a split (one side only) is the run-277 trap these registrations guard against.
+    'shelf_staging': RUNTIME,
+    'carry_drive_profile': RUNTIME,   # drive-with-payload base speed/accel caps for the carry→endcap leg
 }
 
 # fm402: cap/limit keys the controller reads OPTIONALLY (config.get with a silent default). These are
