@@ -411,7 +411,28 @@ class NativePanelContact:
         print('SIM_ATTACH_FALLBACK attach body=%s gap_mm=%s pad_vs_surface_deg=%s'
               % (body, getattr(self, '_pending_gap', None), getattr(self, '_pending_pvs', None)),
               flush=True)
+        self._check_weld_level(body)
         self._pending_body = None
+
+    def _check_weld_level(self, body_path):
+        """sim-carton-level-carry-v1 point 3: CHECK the attach transform. The FixedJoint captures the
+        carton's CURRENT world pose relative to the gripper (zero correction, zero impulse), so the
+        carton is welded at whatever world attitude it has NOW -- and then rigidly follows the tool. A
+        carton resting level on the shelf is welded level, so a level tool keeps it level. Log the
+        carton's world roll/pitch/tilt at the weld (observe-only; re-authoring the relative rotation
+        to FORCE level is deliberately NOT done -- that would yank the carton and pivot the base, the
+        runs 208-212 impulse). Best-effort; never raises."""
+        try:
+            from pxr import Gf, UsdGeom
+            from . import carton_level
+            up = UsdGeom.XformCache().GetLocalToWorldTransform(
+                self.stage.GetPrimAtPath(body_path)).TransformDir(Gf.Vec3d(0, 0, 1))
+            roll, pitch, tilt = carton_level.up_axis_rpy([up[0], up[1], up[2]])
+            flag = '' if tilt <= carton_level.DEFAULT_TILT_BOUND_DEG else '  (ATTACH NOT LEVEL)'
+            print('SIM_ATTACH_LEVEL_CHECK body=%s carton roll=%+.2f pitch=%+.2f tilt=%.2f deg%s'
+                  % (body_path, roll, pitch, tilt, flag), flush=True)
+        except Exception as exc:
+            print('SIM_ATTACH_LEVEL_CHECK skipped (%s: %s)' % (type(exc).__name__, exc), flush=True)
 
     def _fallback_weld(self, body_path):
         from pxr import UsdPhysics, UsdGeom, Gf, Sdf

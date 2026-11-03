@@ -1,0 +1,19 @@
+{
+  "_comment": "sim-carton-level-carry-v1: keep the welded carton parallel to the ground through every carried move. HOST config key (the controller drives the arm). Merge this `carton_level` block into the mission-runtime JSON (the integration lane owns that external file). Absent / false => byte-identical. Default (true) uses a 2 deg bound, levels the carried fold goals within the clear wrist caps, and arms the CARTON_TILT trip.",
+
+  "carton_level": {
+    "bound_deg": 2.0,
+    "level_goals": true,
+    "trip": true,
+    "joints": ["ur_wrist_1_joint", "ur_wrist_2_joint", "ur_wrist_3_joint"],
+    "tool_link": "ur_tool0"
+  },
+
+  "_notes": [
+    "bound_deg: the |roll|/|pitch| bound (deg) for 'parallel to the ground' -- the CARTON_TILT trip threshold AND the leveling target.",
+    "level_goals: re-solve the carried FOLD goals (lift carry_lift_shape, tuck/pan cart_tuck_shape) so the welded carton's up-axis stays vertical, bounded to the existing clear carry wrist region (carry_wrist1_cap / carry_wrist2_min) so the self-collision shapes are respected. Preplace/place are left to their existing surface-dictated poses.",
+    "trip: while the carton is welded in a carried phase, FAIL the move with a named CARTON_TILT log line if the measured carton leaves level by more than bound_deg (never carry a visibly tilted carton silently). Keep this ON whenever level_goals is on.",
+    "The carton's level up-axis is captured at the first carried pose (it rests level on the shelf at the grasp). The FK is the arm the host already loaded (args.urdf), Isaac-free.",
+    "GPU VALIDATION REQUIRED before relying on level_goals: the leveled fold shape must remain cuMotion-plannable / self-clear through the carry. The CPU bench (scripts/twin/tools/carton_level_bench.py) proves the leveling keeps every carried segment < bound on the real kinematics and inside the clear wrist region, but reachability/plannability in-sim is the integration lane's to confirm. If a leveled fold cannot plan, the trip names it (CARTON_TILT) rather than showing a tilt."
+  ]
+}

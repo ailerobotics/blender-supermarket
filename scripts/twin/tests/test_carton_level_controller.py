@@ -1,0 +1,68 @@
+"""CPU-only: the carton-level opt-in wiring in TransferController (off => byte-identical;
+on => levels the carried fold goal + CARTON_TILT trip). No Isaac/ROS/GPU.
+
+    PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=scripts python3 -m pytest scripts/twin/tests/test_carton_level_controller.py
+"""
+import math
+import os
+
+import pytest
+
+from twin.restock_manipulation import TransferController
+from twin.restock_manipulation import carton_level as cl
+from twin.restock_manipulation.cad_tool import ARM_JOINTS
+from twin.tests.test_restock_manipulation import PROFILE, FixtureMotion
+
+URDF = '/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/coldwin16/mobile-import.urdf'
+need_urdf = pytest.mark.skipif(not os.path.exists(URDF), reason='mission URDF not present')
+
+# a level grasp pose (tool +Z = world +Y side grip) and a fold goal that would tilt the carton
+WELD = (0.0, -math.pi / 2, math.pi / 2, 0.0, 0.0, 0.0)
+TILTED_FOLD = (0.0, -1.0, 1.1, 0.6, 0.3, 0.0)
+
+
+def _ctrl(**kw):
+    return TransferController(FixtureMotion(), {'sku-box': PROFILE}, fixture_mode=True, **kw)
+
+
+def test_off_is_passthrough():
+    c = _ctrl()
+    assert c._carton_level is None
+    assert c._level_carried_goal(TILTED_FOLD, WELD) == TILTED_FOLD
+    assert c._carton_tilt_trip(TILTED_FOLD) is None
+
+
+@need_urdf
+def test_on_levels_the_fold_goal():
+    c = _ctrl(carton_level=cl.resolve_level_config(True), fk_urdf=URDF,
+              carry_wrist1_cap=0.65, carry_wrist2_min=0.0)
+    robot = c._fk_model()
+    c._capture_level_up(WELD)              # grasp pose is level on the shelf
+    up = c._carton_up_in_tool
+    # the raw fold tilts the carton; the leveled goal does not
+    assert cl.carried_rpy(robot, list(TILTED_FOLD), up)[2] > 10
+    leveled = c._level_carried_goal(TILTED_FOLD, WELD)
+    assert leveled != TILTED_FOLD
+    roll, pitch, _ = cl.carried_rpy(robot, list(leveled), up)
+    assert abs(roll) < 0.2 and abs(pitch) < 0.2
+    # leveling stayed in the clear wrist region
+    assert dict(zip(ARM_JOINTS, leveled))['ur_wrist_1_joint'] <= 0.65 + 1e-9
+    assert dict(zip(ARM_JOINTS, leveled))['ur_wrist_2_joint'] >= -1e-9
+
+
+@need_urdf
+def test_on_trips_a_tilted_carried_pose():
+    c = _ctrl(carton_level=cl.resolve_level_config({'bound_deg': 2.0}), fk_urdf=URDF)
+    c._capture_level_up(WELD)
+    assert c._carton_tilt_trip(WELD) is None            # the weld pose itself is level
+    trip = c._carton_tilt_trip(TILTED_FOLD)             # a tilted carried pose
+    assert trip is not None and trip.startswith(cl.CARTON_TILT)
+
+
+@need_urdf
+def test_trip_disabled_flag_suppresses_trip_but_keeps_leveling():
+    c = _ctrl(carton_level=cl.resolve_level_config({'trip': False}), fk_urdf=URDF,
+              carry_wrist1_cap=0.65, carry_wrist2_min=0.0)
+    c._capture_level_up(WELD)
+    assert c._carton_tilt_trip(TILTED_FOLD) is None     # trip off
+    assert c._level_carried_goal(TILTED_FOLD, WELD) != TILTED_FOLD  # leveling still on

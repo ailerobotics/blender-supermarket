@@ -12,6 +12,7 @@ import sys
 
 from .ros_adapter import (RosMotionPort, RosTransferBridge, require_sim_domain,
                           sensors_from_json,planner_velocity_scale)
+from . import carton_level
 
 # Sim-clock pre-weld grasp-press budget (SIM seconds), now EFFECTIVE BY DEFAULT (firstmate
 # sim-robust-weld-attach-v1). A press that never seals a weld keeps the host alive (trajectory_host
@@ -242,6 +243,13 @@ def main():
         # incorporation ack; names a never-acknowledged ESDF at boot before the first arm motion, instead
         # of the opaque ~40 s collision_dt invariant trip (meshuris1). Absent/0 => off => byte-identical.
         esdf_boot_ack_grace_s=float(config.get('esdf_boot_ack_grace_s', 0.0)),
+        # sim-carton-level-carry-v1: keep the welded carton parallel to the ground through every carried
+        # move (level the fold goals within the clear wrist caps) and NAME + FAIL a carried carton that
+        # leaves level by more than the bound (CARTON_TILT) rather than carry it visibly tilted. A mapping
+        # {bound_deg, level_goals, trip, joints} / bool; absent/false => None => byte-identical. The FK
+        # URDF is the arm the host already loaded (args.urdf).
+        carton_level=carton_level.resolve_level_config(config.get('carton_level')),
+        fk_urdf=args.urdf,
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # collect-gt: the ground-truth collect switch is the shared RESTOCK_COLLECT_GROUND_TRUTH env (inherited from
