@@ -67,6 +67,23 @@ class ModelFromCode(unittest.TestCase):
             self.assertEqual(gate_labels, [f'{stage}:{label}' for label, _ in plan])
         self.assertEqual(mission['children'][-1]['name'], 'finalize')
 
+    def _outbound_gates(self, model):
+        mission = next(c for c in model['children'] if c['name'] == 'mission')
+        outbound = next(n for n in mission['children']
+                        if n['role'] == 'stage_retry' and n['stage'] == 'outbound')
+        return [c['name'] for c in outbound['children'][0]['children']]
+
+    def test_shelf_staging_outbound_plan_shows_the_new_nodes(self):
+        # sim-shelf-staging-v1: with shelf_staging the outbound stage decomposes into the re-sequenced
+        # position-first leaves (tow->staging, brake, uncouple, drive->service); the diagram generator
+        # must show them in series (the "new nodes" the captain follow-up adds).
+        gates = self._outbound_gates(D.build_model(shelf_staging=True))
+        self.assertEqual(gates, [f'outbound:{label}' for label, _ in sp.OUTBOUND_STAGING_PLAN])
+        self.assertEqual(gates, ['outbound:tow→staging', 'outbound:brake cart',
+                                 'outbound:uncouple', 'outbound:drive→service'])
+        # Default (flag off) keeps the single tow->shelf leaf (byte-identical).
+        self.assertEqual(self._outbound_gates(D.build_model()), ['outbound:tow→shelf'])
+
     def test_stage_steps_sequences_have_memory(self):
         m = D.build_model()
         for n, _ in D.iter_nodes(m):

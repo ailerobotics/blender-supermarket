@@ -42,9 +42,29 @@ PLANS = {
 RETURN_UNCOUPLE_PLAN = [('tow→cart park', NAV), ('brake cart', MANIP), ('uncouple', UNCOUPLE),
                         ('back away', NAV), ('drive→home', NAV)]
 
+# sim-shelf-staging-v1 (captain follow-up): the re-sequenced sales-floor OUTBOUND. Instead of towing the
+# COUPLED train straight to the west-facing endcap (a ~46 deg in-aisle turn + the cart exiting the doorway
+# angled ~40 deg), tow the rollwagen STRAIGHT down the portal axis to a staging pose (0 deg articulation,
+# cart crosses the doorway aligned), brake + release the cart there (reusing the uncouple mechanic), then
+# drive the robot ALONE to the endcap service pose. Each step is a separate position-first leaf; the sharp
+# turn to the endcap is done by the free base, not the coupled train. Selected when the adapter opts into
+# shelf-staging (see stage_plan / adapter.shelf_staging); absent => the single 'tow→shelf' leaf above.
+OUTBOUND_STAGING_PLAN = [('tow→staging', NAV), ('brake cart', MANIP), ('uncouple', UNCOUPLE),
+                         ('drive→service', NAV)]
+
 
 def _return_is_uncouple(adapter) -> bool:
     fn = getattr(adapter, '_uncouple_return', None)
+    try:
+        return bool(fn()) if callable(fn) else False
+    except Exception:
+        return False
+
+
+def _shelf_staging(adapter) -> bool:
+    """True when the adapter opts into the sim-shelf-staging-v1 sales-floor re-sequence (outbound tows to
+    a staging pose, uncouples, then the base services the endcap alone)."""
+    fn = getattr(adapter, '_shelf_staging_active', None)
     try:
         return bool(fn()) if callable(fn) else False
     except Exception:
@@ -86,6 +106,8 @@ def stage_plan(action, adapter):
         return None
     if action == 'return' and _return_is_uncouple(adapter):
         return RETURN_UNCOUPLE_PLAN
+    if action == 'outbound' and _shelf_staging(adapter):
+        return OUTBOUND_STAGING_PLAN
     return _tag_mode(action, PLANS.get(action), adapter)
 
 
@@ -136,8 +158,21 @@ def _return_milestone(adapter) -> int:
     return _RETURN_LEG_MILESTONE.get(getattr(adapter, '_return_leg', None), 0)
 
 
+_OUTBOUND_LEG_MILESTONE = {None: 0, 'staging': 0, 'brake': 1, 'uncouple': 2,
+                           'uncouple_wait': 2, 'service': 3}
+
+
+def _outbound_milestone(adapter) -> int:
+    # Single 'tow→shelf' leaf (always step 0) unless the shelf-staging re-sequence is active, when the
+    # observed leg maps to tow→staging(0) / brake(1) / uncouple(2) / drive→service(3).
+    if not _shelf_staging(adapter):
+        return 0
+    return _OUTBOUND_LEG_MILESTONE.get(getattr(adapter, '_outbound_leg', None), 0)
+
+
 _CLASSIFIERS = {'collect': _collect_milestone, 'couple': _couple_milestone,
-                'transfer': _transfer_milestone, 'return': _return_milestone}
+                'transfer': _transfer_milestone, 'return': _return_milestone,
+                'outbound': _outbound_milestone}
 
 
 def milestone(action, adapter) -> int:

@@ -782,6 +782,106 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(r.evidence['home'])
         self.assertEqual(nav_goals, [((2.0, -1.0, 1.57), True), ((0, 0, 0), False)])
 
+    def test_shelf_staging_outbound_tows_to_staging_uncouples_then_drives_to_service(self):
+        # sim-shelf-staging-v1: with shelf_staging on + a shelf_staging pose, the OUTBOUND stage tows the
+        # COUPLED train to the staging pose, brakes the cart, releases the coupling, then drives the base
+        # ALONE (uncoupled) to the endcap shelf_approach service pose. Position-first, step by step.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        events = []
+        state_uncoupled = {'joint_present': False, 'requested_attached': False, 'healthy': False}
+        self.mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None,
+                         command=lambda *a, **k: None,
+                         hold_cart_pin=lambda: events.append('brake'),
+                         uncouple=lambda obs: (events.append('uncouple'), state_uncoupled)[1],
+                         attach=lambda obs: None, coupling_state=lambda o: {'healthy': True})
+        # coupled while towing + braking + at uncouple-dispatch; goes False once released.
+        coupled_seq = [True, True, True, False, False, False, False, False]
+        ticks = [0]
+        def advance(dt):
+            i = ticks[0]; ticks[0] += 1
+            return replace(self.p, observation_id=f'f{i}', simulation_time=(i + 1) * .1,
+                           coupled=coupled_seq[min(i, len(coupled_seq) - 1)], parked=True)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['shelf_approach'] = [-3.05, 6.0, 3.14159]
+        poses['shelf_staging'] = [-3.875, 8.0, -1.5708]
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, shelf_staging=True)
+        adapter.start('outbound', self.job)
+        r = None
+        for _ in range(12):
+            r = adapter.step(.1)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence['arrived'])
+        self.assertTrue(r.evidence.get('shelf_staging'))
+        self.assertTrue(adapter._shelf_cart_parked)
+        # The sequence: brake the cart, then release the coupling -- in that order.
+        self.assertEqual(events, ['brake', 'uncouple'])
+        # Nav legs: coupled tow to the staging pose, then the UNCOUPLED solo drive to the service pose.
+        self.assertEqual(nav_goals, [((-3.875, 8.0, -1.5708), True),       # tow to staging, coupled
+                                     ((-3.05, 6.0, 3.14159), False)])      # drive to endcap, uncoupled
+
+    def test_shelf_staging_park_allows_uncoupled_cart_parked_at_staging(self):
+        # After the shelf-staging outbound releases the cart at the staging, the base is parked UNCOUPLED
+        # at the service pose, so the park stage must SUCCEED on an uncoupled packet (not 'cart lost').
+        self.p = replace(self.p, coupled=False, parked=True)
+        self.port = NS(advance=lambda dt: self.p, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['shelf_staging'] = [-3.875, 8.0, -1.5708]
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, shelf_staging=True)
+        adapter._shelf_cart_parked = True
+        adapter.start('park', self.job)
+        r = adapter.step(.1)
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence['stationary'])
+
+    def test_shelf_staging_park_without_cart_parked_still_requires_coupled(self):
+        # park with shelf_staging on but the cart NOT yet released (e.g. a bad sequence) still fails on an
+        # uncoupled packet -- the relax is scoped strictly to _shelf_cart_parked.
+        self.p = replace(self.p, coupled=False, parked=True)
+        self.port = NS(advance=lambda dt: self.p, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['shelf_staging'] = [-3.875, 8.0, -1.5708]
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                                 fixture_mode=True, shelf_staging=True)
+        adapter.start('park', self.job)          # start('park') does NOT reset _shelf_cart_parked
+        self.assertFalse(adapter._shelf_cart_parked)
+        r = adapter.step(.1)
+        self.assertEqual(r.status, 'failed')
+        self.assertIn('cart lost', r.reason)
+
+    def test_shelf_staging_off_is_byte_identical_tow_to_endcap(self):
+        # Default (shelf_staging off): outbound navigates straight to the endcap shelf_approach as a
+        # single COUPLED tow and succeeds with arrived=True -- unchanged legacy behaviour.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        self.p = replace(self.p, coupled=True, parked=True)
+        self.port = NS(advance=lambda dt: self.p, controls=lambda c: None, stop=lambda: None)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['shelf_approach'] = [-3.05, 6.0, 3.14159]
+        poses['shelf_staging'] = [-3.875, 8.0, -1.5708]   # present but unused when the flag is off
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses, fixture_mode=True)
+        adapter.start('outbound', self.job)
+        r = adapter.step(.1)
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence['arrived'])
+        self.assertNotIn('shelf_staging', r.evidence)
+        self.assertEqual(nav_goals, [((-3.05, 6.0, 3.14159), True)])   # single coupled tow to the endcap
+
+    def test_shelf_staging_requires_staging_pose(self):
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        with self.assertRaises(ValueError):
+            RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                           fixture_mode=True, shelf_staging=True)
+
     def test_couple_runs_fine_dock_servo_before_attach(self):
         # With a fine_dock servo attached, couple must creep (commanding the base) until the
         # servo reports 'ready', THEN attach -- not attach straight off the nav arrival.
