@@ -298,14 +298,32 @@ class IsaacRosGraph:
             wall_now = time.monotonic()
             if simulation_time is None:
                 if wall_now - self.last_receive > self.timeout:
+                    print('HOST_STATUS_WATCHDOG site=isaac_ros_graph.poll clock=wall '
+                          'reason=%r wall_gap=%.2fs bound=%.2fs job=%r' % (
+                              'no fresh /manipulation/status (legacy wall path)',
+                              wall_now - self.last_receive, self.timeout, self.job_id), flush=True)
                     return self._status_fault('host process/status watchdog')
             else:
                 last_sim = getattr(self, 'last_receive_sim', None)
                 if last_sim is None:
                     self.last_receive_sim = simulation_time   # seed from the first poll of the job
                 elif simulation_time - last_sim > self.timeout:
+                    # sim-host-status-watchdog-v1: the host emits /manipulation/status (incl. the
+                    # RosTransferBridge.heartbeat pulsed through its blocking payload-ack waits) only
+                    # while its executor is live. No fresh status for the sim bound while the sim clock
+                    # advances means the host is genuinely not producing -- a real, named loss, NOT the
+                    # old false trip of a live host blocked in a bounded payload reconcile.
+                    print('HOST_STATUS_WATCHDOG site=isaac_ros_graph.poll clock=sim '
+                          'reason=%r sim_gap=%.2fs bound=%.2fs job=%r' % (
+                              'no fresh /manipulation/status (no host heartbeat; host not producing)',
+                              simulation_time - last_sim, self.timeout, self.job_id), flush=True)
                     return self._status_fault('host process/status watchdog')
                 elif wall_now - self.last_receive > getattr(self, 'wall_backstop', 180.):
+                    print('HOST_STATUS_WATCHDOG site=isaac_ros_graph.poll clock=wall_backstop '
+                          'reason=%r wall_gap=%.2fs bound=%.2fs job=%r' % (
+                              'frozen sim clock; no fresh /manipulation/status within the wall backstop',
+                              wall_now - self.last_receive, getattr(self, 'wall_backstop', 180.),
+                              self.job_id), flush=True)
                     return self._status_fault('host process/status wall backstop')
         return result
 
