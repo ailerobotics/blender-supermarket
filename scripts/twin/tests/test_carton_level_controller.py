@@ -172,3 +172,50 @@ def test_end_to_end_collect_place_off_is_byte_identical_preplace():
     assert c._carton_level is None
     _by_phase, _seq, jg_by_phase = T._drive_collect_place(c, m)
     assert list(jg_by_phase['preplace']['goal']) == list(T._SL_PREPLACE_SHAPE)
+
+
+# ----------------------------------------- sustained-tilt debounce wiring (sim-carton-tilt-transient-debounce-v1)
+
+def test_debounce_off_is_passthrough():
+    c = _ctrl()
+    assert c._tilt_debounce is None
+    assert c._carton_tilt_observe(0.0, TILTED_FOLD) is None     # off => no decision, byte-identical
+
+
+@need_urdf
+def test_controller_debounces_a_one_tick_tilt_spike():
+    c = _ctrl(carton_level=cl.resolve_level_config({'bound_deg': 2.0}), fk_urdf=URDF)
+    c._capture_level_up(WELD)                                   # level at the weld
+    dt = 1.0 / 60.0
+    v = c._carton_tilt_observe(1 * dt, TILTED_FOLD)            # one tilted tick (>10 deg off)
+    assert v is not None and v.trip is None                    # within grace -> held, no abort
+    v = c._carton_tilt_observe(2 * dt, WELD)                   # back to level before the window ends
+    assert v.trip is None and v.transient is not None          # logged transient, still no abort
+    assert v.transient.startswith(cl.CARTON_TILT_TRANSIENT)
+
+
+@need_urdf
+def test_controller_trips_on_sustained_tilt_at_window_end():
+    c = _ctrl(carton_level=cl.resolve_level_config({'bound_deg': 2.0}), fk_urdf=URDF)
+    c._capture_level_up(WELD)
+    dt = 1.0 / 60.0
+    trip_at = None
+    for i in range(60):
+        v = c._carton_tilt_observe(i * dt, TILTED_FOLD)        # held off level continuously
+        if v.trip is not None:
+            trip_at = i * dt
+            break
+    assert trip_at is not None
+    assert trip_at >= cl.DEFAULT_TILT_GRACE_S - 1e-9           # not before the grace window
+    assert cl.CARTON_TILT in v.trip and 'sustained' in v.trip
+
+
+@need_urdf
+def test_transition_resets_the_debounce_window():
+    c = _ctrl(carton_level=cl.resolve_level_config({'bound_deg': 2.0}), fk_urdf=URDF)
+    c._capture_level_up(WELD)
+    dt = 1.0 / 60.0
+    c._carton_tilt_observe(0.0, TILTED_FOLD)                   # start an exceedance
+    assert c._tilt_debounce.exceeding
+    c._transition('tuck')                                      # a new move boundary
+    assert not c._tilt_debounce.exceeding                      # window cleared -> no cross-phase charge

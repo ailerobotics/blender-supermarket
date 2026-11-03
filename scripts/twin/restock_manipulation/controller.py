@@ -311,6 +311,13 @@ class TransferController:
         self._fk_urdf = fk_urdf                      # URDF path for the Isaac-free FK, or None
         self._fk_robot = None                        # lazily parsed Robot (first carried step)
         self._carton_up_in_tool = None               # the level carton up-axis in the tool frame, captured at the weld
+        # sim-carton-tilt-transient-debounce-v1: a SUSTAINED-tilt debounce on the CARTON_TILT trip. The
+        # measured carton tilt can spike over the bound for one-to-few ticks on a tracking/impulse
+        # transient (collectacc1: the LIFT re-plan restart after a move_group respawn) while the planned
+        # path is level -- that spike is reported (CARTON_TILT_TRANSIENT) but must NOT abort; only a tilt
+        # that stays over the bound for the whole grace window trips. Built lazily on the first carried
+        # tick (needs the resolved bound + the physics-step-scaled grace). None when carton_level is off.
+        self._tilt_debounce = None
         # fm427 (A1) (run-323 cold lift): the fm419(a) COLLISION_STALE_PAUSE holds the post-attach lift on
         # a genuinely-stale collision stamp (run-323: collision_dt 0.52->0.65 s, the benign weld/ESDF
         # re-incorporation lag) by returning EMPTY controls -- a SILENT hold. Under render pacing that
@@ -801,6 +808,11 @@ class TransferController:
         self._move_deadline_retries = 0   # fm367: fresh deadline-retry budget per phase
         self._recovery_credit_s = 0.0          # sim-robust-phase-timeout-during-recovery-v1: fresh per phase
         self._recovery_pause_logged = False
+        # sim-carton-tilt-transient-debounce-v1: a phase boundary is a settled, level moment (the move
+        # completed) -- start a fresh continuous-exceedance window so a transient in one carried phase is
+        # never charged against the next. No-op when the debounce was never built (carton_level off).
+        if self._tilt_debounce is not None:
+            self._tilt_debounce.reset()
         if phase == 'contact':
             self._contact_progress_wall = self.steady_clock()   # fm425: start the WALL no-progress budget
 
@@ -975,6 +987,30 @@ class TransferController:
         out = cl.tilt_trip(roll, pitch, self._carton_level.bound_deg)
         return out[0] if out else None
 
+    def _carton_tilt_observe(self, now, measured):
+        """sim-carton-tilt-transient-debounce-v1: the DEBOUNCED carried-tilt decision for this tick.
+
+        Measures the welded carton's roll/pitch (FK from the measured joints) and advances the sustained-
+        tilt debounce, returning a ``carton_level.TiltVerdict`` (``.trip`` = the CARTON_TILT fault message
+        once the tilt has stayed over the bound for the whole grace window; ``.transient`` = the
+        CARTON_TILT_TRANSIENT log line for a sub-grace spike that just ended). Returns ``None`` when the
+        constraint/trip is off, there is no FK model, or the up-axis has not been captured yet (same gate
+        as ``_carton_tilt_trip``). The grace is rebased onto the running physics step so the window is a
+        constant frame-count budget (never widened); grace 0 reproduces the immediate trip."""
+        if self._carton_level is None or not self._carton_level.trip:
+            return None
+        robot = self._fk_model()
+        if robot is None or self._carton_up_in_tool is None:
+            return None
+        from twin.restock_manipulation import carton_level as cl
+        if self._tilt_debounce is None:
+            self._tilt_debounce = cl.TiltDebounce(
+                bound_deg=self._carton_level.bound_deg,
+                grace_s=self._carton_level.tilt_grace_s * self._freshness_scale)
+        roll, pitch, _ = cl.carried_rpy(robot, list(measured), self._carton_up_in_tool,
+                                        self._carton_level.tool_link)
+        return self._tilt_debounce.observe(now, roll, pitch)
+
     def _raised_move_exc(self, exc, *, staged):
         """fm371/fm372: a collect move's poll() RAISED. Close the whole "a move raise kills the mission"
         family: route EVERY non-collision, non-joint-limit raise -- plan-exhaust (RuntimeError), a
@@ -1116,14 +1152,22 @@ class TransferController:
         # the move by name if the measured carton leaves level by more than the bound -- never carry
         # a visibly tilted carton silently. Off (carton_level None) / no FK / non-6 pose => inert =>
         # byte-identical. Checked before motion streams so a tilt stops the arm, not the video.
+        # sim-carton-tilt-transient-debounce-v1: the trip is DEBOUNCED over a sustained sim-time grace
+        # window. A one-to-few-tick tracking/impulse spike over the bound (collectacc1: the lift re-plan
+        # restart after a move_group respawn -- the planned path is level, CPU-proven) is logged as
+        # CARTON_TILT_TRANSIENT and does NOT abort; only a tilt held over the bound for the whole window
+        # fails. The bound is unchanged; grace 0 => legacy immediate trip => byte-identical.
         if (self._carton_level is not None and self.held and self.phase in self._CARRIED_PHASES
                 and len(sensors.joint_positions) == 6
                 and all(math.isfinite(x) for x in sensors.joint_positions)):
             self._capture_level_up(sensors.joint_positions)
-            _tilt = self._carton_tilt_trip(sensors.joint_positions)
-            if _tilt:
-                print(_tilt, flush=True)
-                return self._fail(_tilt)
+            _verdict = self._carton_tilt_observe(now, sensors.joint_positions)
+            if _verdict is not None:
+                if _verdict.transient is not None:
+                    print('%s phase=%s now=%.3f' % (_verdict.transient, self.phase, now), flush=True)
+                if _verdict.trip is not None:
+                    print(_verdict.trip, flush=True)
+                    return self._fail(_verdict.trip)
         # fm430 (2a) fallback: ride the post-attach LIFT (to the fixed clear-region carry_lift_shape, which
         # does NOT depend on the live collision world) THROUGH a brief ESDF-re-incorporation staleness for
         # a bounded WALL grace -- proceed (treat collision as fresh for this pre-validated move), then FAIL
