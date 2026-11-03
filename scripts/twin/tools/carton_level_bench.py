@@ -19,7 +19,9 @@ scripts/twin/tests/test_carton_level_bench.py.
 """
 from __future__ import annotations
 
+import json
 import math
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -33,6 +35,59 @@ from twin.restock_manipulation.transfer_carry import wrap_angle
 # tool approach axis points world +Y, horizontal), carton resting level. A representative arm
 # config that reaches tool +Z = world +Y (verified by FK in the tests).
 WELD_CONFIG = (0.0, -math.pi / 2, math.pi / 2, 0.0, 0.0, 0.0)
+
+# sim-carton-tilt-trip-margin-v1: the coldwin24 collect grasp is TOP-DOWN, not the coldwin16 side
+# grip. SEAL_DIAG logged forward_world ~ [-0.04, 0, -0.999] (the suction plates point straight DOWN
+# onto the carton top). The suction-plate joint's local +Z expressed in the tool0 frame is [0, 1, 0]
+# (URDF-fixed), so a grasp whose plate forward points world-down has tool0 +Y pointing world-down,
+# which makes the level carton's up-axis (world +Z) read [0, -1, 0] in the tool frame. This arm
+# config realises exactly that (FK-verified in the tests: plate forward world ~ [0,0,-1], up_in_tool
+# ~ [0,-1,0], carton level at the weld) -- the honest reconstruction of the failing collect grasp.
+TOP_GRASP_WELD = (-math.pi, -2.2, 2.2, -math.pi, 0.0, 0.0)
+
+# The REAL carried joint goals the collect carry drives to (restock_manipulation/ros_host_config.json),
+# loaded from that file so the bench can never drift from the shipped config.
+_HOST_CONFIG = os.path.join(os.path.dirname(__file__), '..', 'restock_manipulation', 'ros_host_config.json')
+
+
+def collect_carry_shapes(host_config_path=_HOST_CONFIG):
+    """The fixed carried joint goals of the real COLLECT carry, read from the host config:
+    lift (carry_lift_shape), tuck/pan (cart_pan_joint0 + cart_tuck_shape) and the place-on-cart
+    standoff (collect_place_preplace_shape). These are the moves the CARTON_TILT trip guards and the
+    ones coldwin24/24b tripped at. Returns [(name, goal6)]."""
+    with open(host_config_path) as f:
+        c = json.load(f)
+    lift = tuple(float(v) for v in c['carry_lift_shape'])
+    tuck = (float(c['cart_pan_joint0'] if c.get('cart_pan_joint0') is not None else 0.0),) \
+        + tuple(float(v) for v in c['cart_tuck_shape'])
+    preplace = tuple(float(v) for v in c['collect_place_preplace_shape'])
+    return [('lift', lift), ('pan', tuck), ('place_preplace', preplace)]
+
+
+def run_collect(urdf_path, *, bound_deg=cl.DEFAULT_TILT_BOUND_DEG, weld=TOP_GRASP_WELD,
+                joints=cl.DEFAULT_LEVEL_JOINTS, tool_link='ur_tool0', host_config_path=_HOST_CONFIG):
+    """Reproduce the coldwin24 collect-carry tilt on the REAL kinematics + REAL carry shapes + the
+    REAL top-down grasp up-axis, then prove the (fixed) leveling cancels it. Returns (up_in_tool,
+    [(name, before_tilt_deg, after_tilt_deg, after_wrists, in_clear)]). ``before`` is the raw fixed
+    shape (what the controller drove when the leveling silently failed -> the carton off level); the
+    carried bound is the leveling acceptance (clear wrist region)."""
+    robot = parse_urdf(urdf_path)
+    u = cl.carton_up_in_tool(cl.tool_rotation(robot, list(weld), tool_link))
+    limits = clear_wrist_limits()
+    out = []
+    for name, goal in collect_carry_shapes(host_config_path):
+        before = cl.carried_rpy(robot, list(goal), u, tool_link)[2]
+        try:
+            lev = cl.level_config(robot, list(goal), u, joints=joints, tool_link=tool_link,
+                                  limits=limits, accept_deg=bound_deg)
+            after = cl.carried_rpy(robot, lev, u, tool_link)[2]
+            w = (wrap_angle(lev['ur_wrist_1_joint']), wrap_angle(lev['ur_wrist_2_joint']),
+                 wrap_angle(lev['ur_wrist_3_joint']))
+            clear = w[0] <= 0.65 + 1e-6 and w[1] >= -1e-6
+        except ValueError:
+            after, w, clear = float('nan'), None, False
+        out.append((name, before, after, w, clear))
+    return u, out
 
 
 def _vec(cfg):
