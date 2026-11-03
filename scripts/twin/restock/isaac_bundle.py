@@ -446,7 +446,13 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              # extended carton-loaded arm's descent transiently shoves the yaw-lock-only
                              # braked base), so the place/release/stow sequence completes; a shove beyond
                              # the bound fails with a named reason. Absent => the strict guard (byte-identical).
-                             collect_place_base_settle_m=config.get('collect_place_base_settle_m'))
+                             collect_place_base_settle_m=config.get('collect_place_base_settle_m'),
+                             # sim-collect-reposition-block-v1: on a blocked/stopped tick of the uncoupled
+                             # mid-collect carry reposition, HOLD the base pinned instead of issuing a
+                             # zero-velocity mobile.command (which releases the parking/full brake and let
+                             # the carried load drift the base into the live backstock Support -> permanent
+                             # blocked_no_route, boxc1a). Absent => mobile.command(0,0) as before (byte-identical).
+                             hold_base_on_reposition_block=bool(config.get('hold_base_on_reposition_block')))
     if staged_clock_sync(config):
         # Staged start: the shortcut's settle steps leave /clock a constant offset ahead of the packet
         # clock; stamp it on every host sensor packet so the host freshness checks measure true age

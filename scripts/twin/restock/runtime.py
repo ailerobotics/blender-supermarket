@@ -256,7 +256,8 @@ class RuntimeAdapter:
                  carry_reposition_drive=False, couple_standoff_tolerance=None,
                  couple_cart_relative=None,
                  ground_truth_place_actions=(), staged_settle_s=0.0,
-                 collect_place_base_settle_m=None):
+                 collect_place_base_settle_m=None,
+                 hold_base_on_reposition_block=False):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         # Staged-start settle hold (twin.restock.staged_start; the bundle passes
         # config['staged_start_settle_s'] only when start_at is set and not collect): the warm-up of the
@@ -337,6 +338,17 @@ class RuntimeAdapter:
         # holds => byte-identical. SIM-only safety: valid only with the arm in the verified carry; the
         # in-sim drive + no-drop validation is a GPU check (run-326). See navigation.core carry_drive.
         self.carry_reposition_drive = bool(carry_reposition_drive)
+        # sim-collect-reposition-block-v1 (opt-in, default off => byte-identical): HOLD the base pinned on
+        # a non-driving tick (linear==0 AND angular==0) of the uncoupled mid-collect carry reposition,
+        # instead of issuing mobile.command(0,0,...) -- which releases the base parking/full brake "to
+        # resume driving" even when the planner has no route. Because port.advance() steps physics with
+        # the PRIOR tick's brake state (it re-engages the full brake only AFTER world.step), that per-tick
+        # release let the carried carton's cantilever moment roll the un-pinned base ~0.28 m NORTH into the
+        # live backstock Support over a ~40 s blocked window (boxc1a), flipping free_start False and making
+        # the short reposition permanently unroutable (blocked_no_route_timeout). Holding on the stopped
+        # tick keeps the base on its proven-clear departure pose, where a route exists with OR without the
+        # trusted-static drive. Off (default) keeps mobile.command(0,0,...) => byte-identical.
+        self.hold_base_on_reposition_block = bool(hold_base_on_reposition_block)
         # sim-robust-cart-place-descent-v1 (opt-in, default off => byte-identical): the reposition collect
         # PLACE lowers the welded carton onto the rollwagen deck with the arm extended; its descent reaction
         # shoves the YAW-LOCK-ONLY braked base a few cm in TRANSLATION (isaac_port keeps translation free
@@ -818,6 +830,22 @@ class RuntimeAdapter:
         self._nav_stuck_reason = None
         self.nav.start(goal, coupled, **kw)
 
+    def _hold_base_on_nav_hold(self, r):
+        """sim-collect-reposition-block-v1: should this navigate tick HOLD the base pinned instead of
+        driving it? True only when the opt-in hold is enabled AND this is the uncoupled mid-collect carry
+        reposition (``_collect_reposition_pending``) AND the navigation result is a full stop
+        (linear==0 AND angular==0 -- a blocked/settling hold, not a turn-in-place or a forward creep).
+
+        Keeping the base pinned on a stopped reposition tick stops the loaded chassis drifting off its
+        proven-clear departure pose while the planner has no route (the boxc1a failure). A tick that
+        commands ANY motion still drives through ``mobile.command`` as before. Off / any other stage /
+        any nonzero command => False => byte-identical (``mobile.command`` on every tick)."""
+        if not self.hold_base_on_reposition_block:
+            return False
+        if self.action != 'collect' or not self._collect_reposition_pending:
+            return False
+        return float(getattr(r, 'linear', 0.) or 0.) == 0. and float(getattr(r, 'angular', 0.) or 0.) == 0.
+
     def _loaded_place_base_excursion(self, p):
         """sim-robust-cart-place-descent-v1: the measured base xy excursion (m) from the place_approach
         anchor IFF the loaded-place base-settle tolerance applies this tick, else None (keep the strict
@@ -879,8 +907,15 @@ class RuntimeAdapter:
                 stuck = self._nav_stuck_check(r.reason, getattr(p, 'odometry', None))
                 if stuck is not None:
                     return Result('failed', reason=stuck)
-                self.mobile.command(r.linear, r.angular, p.docking,
-                                    transport_ready=p.transport_ready)
+                if self._hold_base_on_nav_hold(r):
+                    # Blocked/stopped mid-collect carry reposition: HOLD the base pinned (do NOT release
+                    # the full brake to a zero-velocity "drive"), so the carried load cannot roll the base
+                    # off its proven-clear departure pose. mobile.hold() keeps the already-engaged full
+                    # base brake (it never releases it) and locks the wheels. See _hold_base_on_nav_hold.
+                    self.mobile.hold()
+                else:
+                    self.mobile.command(r.linear, r.angular, p.docking,
+                                        transport_ready=p.transport_ready)
                 return Result('running', reason=r.reason)
             self.mobile.park()
             if not p.parked:
