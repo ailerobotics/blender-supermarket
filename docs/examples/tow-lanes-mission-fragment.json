@@ -1,5 +1,5 @@
 {
-  "_comment": "Opt-in authored tow lanes + cart parking spot for the COUPLED restock drives. Merge the 'navigation.tow_lanes'/'navigation.directional_zone' keys into the mission runtime-config's navigation block, and the 'mission_poses.cart_parking' pose into mission_poses (the integration/bt-driver lane wires the return nav goal + uncouple step on that key). Absent => coupled drives free-plan exactly as before (byte-identical) and the braking gate uses the direction-aware zone by default. Poses are map-frame [x, y, yaw] in metres/radians; yaw PI = facing -x (west), 0 = facing +x (east). Waypoints are the authored centreline the expanded trajectory must pass through (asserted at build time). goal_articulation is the lane's achievable terminal cart articulation and governs arrival when the lane is active.",
+  "_comment": "Opt-in authored tow lanes + cart parking spot for the COUPLED restock drives. Merge the 'navigation.tow_lanes'/'navigation.directional_zone' keys into the mission runtime-config's navigation block, and the 'mission_poses.cart_parking' pose into mission_poses (the integration/bt-driver lane wires the return nav goal + uncouple step on that key). Absent => coupled drives free-plan exactly as before (byte-identical) and the braking gate uses the direction-aware zone by default. Poses are map-frame [x, y, yaw] in metres/radians; yaw PI = facing -x (west), 0 = facing +x (east), -PI/2 = facing -y (south). Waypoints are the authored centreline the expanded trajectory must pass through (asserted at build time). goal_articulation is the lane's achievable terminal cart articulation and governs arrival when the lane is active.",
   "mission_poses": {
     "cart_parking": [
       -9.0,
@@ -27,7 +27,7 @@
         "start_tol_cart_yaw": 0.35,
         "waypoints": [
           [
-            -3.87,
+            -3.875,
             13.4,
             -1.5707963267948966
           ]
@@ -51,8 +51,13 @@
         "start_tol_cart_yaw": 0.35,
         "waypoints": [
           [
-            -3.87,
+            -3.875,
             9.5,
+            1.5707963267948966
+          ],
+          [
+            -3.875,
+            13.4,
             1.5707963267948966
           ]
         ],
@@ -71,5 +76,7 @@
     "measured_turn_fault_s": 20.0
   },
   "_fm437_note": "tow_lane_trust_unknown (default off): on a static-validated authored lane, trust UNOBSERVED temporal-map cells in the swept envelope as free (the static map proved that corridor clear); a POSITIVE/occupied return still stops the tow. Unblocks the run-327b outbound stall at the first southward turn ('unknown_navigation_cell' over the unmapped sector south of the dock corridor).",
-  "_fm454_note": "fm454 (option b): both tow lanes set route_through_waypoints=true and carry ONE sparse via-pose at the doorway (outbound [-3.87,13.4,-pi/2] south-aligned north of the throat; return [-3.87,9.5,+pi/2] north-aligned south of the throat). expand() then routes the train THROUGH that via as an ordered sub-goal: it reorients in the OPEN floor to an aligned pose feeding the doorway corridor, and the corridor route supplies the STRAIGHT lead-in through the throat so the towed cart lines up behind the base (articulation decays to ~0) BEFORE the goal turn -- replacing the free-plan reorientation that held the cart at steady-state articulation 0.80 through a full loop. route_through_waypoints absent/false => free-plan-and-validate, byte-identical to the historical lane."
+  "_portal_widen_note": "sim-portal-widen-v1: the PORTAL_WIDTH widening to 2.6 m (scripts/store_environment.py) is paired with a dead-centre STRAIGHT portal crossing on BOTH lanes. The via-poses sit on the portal centreline x=-3.875 and are south-aligned (outbound) / north-aligned (return) so route_through_waypoints forces a straight lead-in, a dead-centre straight crossing of the wall opening (y=11.125), and a straight lead-out; the turn to/from the shelf happens south of the opening and the kinematically-forced east-facing-dock turn happens north of it, never in the doorway. Measured (CPU, expanded against the regenerated 797-obstacle static map): OUTBOUND already crossed straight and dead-centre (x=-3.875, 0.5 deg articulation at the wall line) -- the opening was never the binding constraint there -- so its lane is unchanged apart from centring the waypoint on x=-3.875; the 2.6 m widening lifts its crossing clearance 0.536 -> 0.586 m per side and its ~25 deg approach-band cart lag (the forced dock turn) now has more door margin. RETURN is the real lane fix: an added north centreline waypoint moves the crossing from x=-4.185 (0.31 m west of centre, 5.2 deg at the wall line / 21.9 deg approach-band peak / 0.286 m clearance) to dead-centre x=-3.875 (2.5 deg / 9.6 deg band / 0.586 m clearance) -- the crossing clearance doubles. The unavoidable dock/parking turns stay ~46 deg (< the 55 deg demo budget and 65 deg limit). Proof + before/after plots: data/sim-portal-widen-v1/.",
+  "_fm454_note": "fm454 (option b): both tow lanes set route_through_waypoints=true. expand() routes the train THROUGH the authored via-poses as ordered sub-goals (reorient in the OPEN floor to an aligned pose feeding the doorway corridor, then the collinear centreline pair supplies the STRAIGHT crossing), so the realised trajectory IS the authored corner, not a free-plan that merely passes near it. route_through_waypoints absent/false => free-plan-and-validate, byte-identical to the historical lane.",
+  "_gpu_handoff_note": "For a tow-through-portal GPU proof the integration lane should ALSO set the top-level scene-build key portal_floor_box=true (flat drive-floor box collider -- removes the from-rest caster ghost-contact pin at the dock, sim-robust-portal-floor-seam-v1) and keep the coupled_heading_hold / heading_hold_prethroat_m / heading_hold_launch_m keys from docs/examples/throat-momentum-launch-mission-fragment.json. Those address the from-rest dock pin, which the geometry change does not; the geometry change gives the crossing margin."
 }

@@ -529,7 +529,7 @@ not turn feasibility, grasp reach, control tracking, or dynamics.
 build to obtain them. `poses`, `zones`, `portal`, `map_bounds`, and `route_hints`
 are available to scenario/navigation adapters. Route hints are not a planner.
 
-The rear opening is 2.5 m wide × 2.8 m high and meets the existing fixture gap.
+The rear opening is 2.6 m wide × 2.8 m high and meets the existing fixture gap.
 The backroom has a continuous floor at Z=0, racks, receiving staging, cart bays,
 and a 3.2 m turning zone. `check_environment.py` samples a 0.65 m circular
 footprint along the route to the G3/G4 aisle; it does **not** prove a coupled

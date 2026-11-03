@@ -28,8 +28,8 @@ WALL_Y = 11.125          # Wall_back_* centre (store_environment.build_environme
 WALL_T = 0.25            # wall box depth in y -> band [11.0, 11.25]
 JAMB_T = 0.30            # Portal_jamb_* depth in y -> band [10.975, 11.275]
 JAMB_W = 0.07            # jamb box width in x
-LEFT = PORTAL_X - PORTAL_WIDTH / 2.0     # -5.125  west edge of the clear opening
-RIGHT = PORTAL_X + PORTAL_WIDTH / 2.0    # -2.625  east edge of the clear opening
+LEFT = PORTAL_X - PORTAL_WIDTH / 2.0     # -5.175  west edge of the clear opening (2.6 m portal)
+RIGHT = PORTAL_X + PORTAL_WIDTH / 2.0    # -2.575  east edge of the clear opening (2.6 m portal)
 
 # Each box is (xmin, xmax, ymin, ymax) in the map frame.
 WALL_BOXES = {

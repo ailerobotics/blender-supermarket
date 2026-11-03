@@ -635,14 +635,17 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--environment', type=Path, required=True)
     ap.add_argument('--scenario', type=Path, required=True)
-    ap.add_argument('--camera-config', type=Path, required=True)
+    ap.add_argument('--camera-config', type=Path, default=None,
+                    help='optional; adds the fixed-camera mount obstacles. Omit to build the grid from the '
+                         'environment manifest + scenario alone (the mission camera_config needs the external '
+                         'mobile manifest, and the small camera mounts do not affect the portal lane geometry).')
     ap.add_argument('--lanes', type=Path, required=True,
                     help='mission fragment with navigation.tow_lanes (e.g. docs/examples/tow-lanes-mission-fragment.json)')
     args = ap.parse_args()
 
     manifest = json.loads(args.environment.read_text())
     scenario = json.loads(args.scenario.read_text())
-    camera = json.loads(args.camera_config.read_text())
+    camera = json.loads(args.camera_config.read_text()) if args.camera_config else None
     lanes_cfg = json.loads(args.lanes.read_text())
     grid = environment_grid(manifest, scenario, camera)   # the exact mission nav grid (+ camera mounts)
 
