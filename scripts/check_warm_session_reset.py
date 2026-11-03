@@ -56,6 +56,46 @@ def build_from_state(state: dict, *, inject_fault=None, leak_vram=0.0):
     return stage_state, used_now, baseline, tol, steps
 
 
+def provider_steps(state, *, inject_fault=None):
+    """Drive the REAL production provider (``warm_reset_provider.build`` + its ordered __call__
+    sequence) offline with an injected fake ``ResetOps``, so the dry-run proves the provider's
+    fail-closed orchestration + prim census -- not just the pure core -- with no Isaac. The fake ops
+    record nothing live; ``inject_fault`` names a provider STEP_NAMES step to raise so the cold-boot
+    fallback through the real sequence is demonstrable. Returns a single ``SequenceStep`` whose fn runs
+    the provider, matching the harness' reset-sequence shape."""
+    from twin.restock import warm_reset_provider as wrp
+
+    present = list((state.get('stage') or {}).get('present_prims', []))
+
+    def _noop(*a, **k):
+        pass
+
+    def _reseat(*, attempt, now):
+        if inject_fault == 'reseat':
+            raise RuntimeError('injected reseat fault (e.g. START_STATE_SETTLE_MISMATCH)')
+
+    def _relaunch(*, attempt, now):
+        if inject_fault == 'relaunch_host':
+            raise RuntimeError('injected host relaunch fault (no lane hook wired)')
+
+    def _stop():
+        if inject_fault == 'stop_runtime':
+            raise RuntimeError('injected runtime-stop fault')
+
+    def _reset_stage(leaked):
+        if inject_fault == 'reset_stage':
+            raise RuntimeError('injected stage-reset fault')
+
+    def _verify(*, now):
+        if inject_fault == 'verify':
+            raise RuntimeError('injected verify fault')
+
+    ops = wrp.ResetOps(list_prims=lambda: present, stop_runtime=_stop, reset_stage=_reset_stage,
+                       reseat=_reseat, relaunch_host=_relaunch, verify=_verify)
+    provider = wrp.build(app=None, assembly=None, parts={}, plan=None, config={}, output='/x', _ops=ops)
+    return ws.SequenceStep('warm_reset_provider', lambda: provider(attempt=2, now=2.0))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -68,11 +108,18 @@ def main(argv=None):
     parser.add_argument('--expect', choices=('reuse', 'cold'), default='reuse',
                         help='expected verdict for the exit code (default: reuse)')
     parser.add_argument('--json', action='store_true', help='print the machine-readable record only')
+    parser.add_argument('--provider', action='store_true',
+                        help='drive the REAL warm_reset_provider sequence (built with a fake ResetOps) '
+                             'instead of the dry named steps, so the provider orchestration is proven '
+                             'offline too; --inject-fault then names a provider step (stop_runtime, '
+                             'reset_stage, reseat, relaunch_host, verify).')
     args = parser.parse_args(argv)
 
     state = load_state(args.state)
     stage_state, used_now, baseline, tol, steps = build_from_state(
         state, inject_fault=args.inject_fault, leak_vram=args.leak_vram)
+    if args.provider:
+        steps = [provider_steps(state, inject_fault=args.inject_fault)]
 
     logs = []
     outcome = ws.plan_and_run_reset(
