@@ -40,11 +40,64 @@ EVENT_TYPES = frozenset({
     'baseline_expired',
     'coupling_failed',
     'stuck', 'low_battery',
+    # Recovery observations (sim-bt-reactive-recoveries-v1): a recovery code path OUTSIDE the tree
+    # (nav stall recovery, VRAM shed, host station-liveness e-stop) engaged/cleared. The tree does
+    # NOT drive these -- it OBSERVES them (the owning lane keeps doing the work) so the live /bt view
+    # and the generated diagram/timeline show a recovery as it happens, and clear when it returns to
+    # nominal. See RECOVERY_SPECS below and docs/behaviour_tree.md.
+    'nav_recovery', 'nav_recovery_cleared',
+    'vram_shed', 'vram_shed_cleared',
+    'host_estop', 'host_estop_cleared',
 })
 
 # Persistent-condition events and the event that clears each. Everything else is momentary
 # (consumed by its handler / logged by the failing stage); these stay 'active' until cleared.
-CLEARED_BY = {'human_cleared': 'human_detected', 'obstacle_cleared': 'dynamic_obstacle'}
+CLEARED_BY = {
+    'human_cleared': 'human_detected', 'obstacle_cleared': 'dynamic_obstacle',
+    'nav_recovery_cleared': 'nav_recovery', 'vram_shed_cleared': 'vram_shed',
+    'host_estop_cleared': 'host_estop',
+}
+
+# The recovery observations the tree surfaces. Each is a persistent condition (active while the
+# recovery is engaged, cleared by the ``cleared_by`` event). ``markers`` are the named console
+# markers the owning recovery code path already prints -- the single source a producer maps to the
+# event (the tree never re-detects the condition). ``scripted`` names where the recovery itself
+# lives (it is NOT reimplemented here). A unit test cross-checks ``type`` / ``cleared_by`` against
+# EVENT_TYPES + CLEARED_BY so a renamed event cannot rot this table silently.
+RECOVERY_SPECS = {
+    'nav_recovery': {
+        'label': 'nav stall recovery',
+        'cleared_by': 'nav_recovery_cleared',
+        'markers': ('coupled_no_progress', 'coupled_breakaway', 'HEADING_HOLD', 'momentum launch',
+                    'tow-lane re-centre', 'arrival hysteresis'),
+        'scripted': 'scripts/twin/navigation/articulated.py (coupled break-away / heading-hold / '
+                    'momentum-launch during the coupled tow)',
+        'action': 'observe the nav stall recovery maneuver; return to nominal when the tow resumes',
+    },
+    'vram_shed': {
+        'label': 'VRAM shed',
+        'cleared_by': 'vram_shed_cleared',
+        'markers': ('VRAM_SHED', 'VRAM_CEILING_REACHED', 'VRAM_HEADROOM_LOW'),
+        'scripted': 'scripts/twin/restock/vram_headroom.py (the headroom shed ratchet: capture_rate '
+                    '-> arm_feed_economy -> secondary_cameras)',
+        'action': 'observe the shed ratchet (which optional load was dropped); clear when headroom '
+                  'returns above the floor',
+    },
+    'host_estop': {
+        'label': 'host station-liveness e-stop',
+        'cleared_by': 'host_estop_cleared',
+        'markers': ('STATION_ESTOP_PUBLISH', 'HOST_FAULT_ESTOP', 'PORT_FAULT_ESTOP',
+                    'HOST_EXIT_ESTOP_PUBLISH', 'STATION_ESTOP_RELEASE'),
+        'scripted': 'scripts/twin/restock/{incorporation_ack,station_host,trajectory_host}.py '
+                    '(the named /manipulation/stop trip + re-derive/release; '
+                    'coordinates with sim-collect-host-estop-v1)',
+        'action': 'observe the named host e-stop trip and its within-budget release; clear when the '
+                  'stop wire is released',
+    },
+}
+
+# The recovery observation types (the active side only; their cleared counterparts are in CLEARED_BY).
+RECOVERY_TYPES = frozenset(RECOVERY_SPECS)
 
 # Momentary stage-failure events a Stage leaf derives from a failed step_stage() reason, so the
 # live timeline shows WHAT failed; the bounded Retry decorator owns the actual retry/abort.

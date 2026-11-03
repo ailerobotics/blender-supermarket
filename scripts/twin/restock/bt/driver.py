@@ -16,15 +16,23 @@ from .context import CLOCK, MissionContext
 from .tree import build_tree
 
 
-def build_bus(scenario=None, *, extra_sources=()):
+def build_bus(scenario=None, *, extra_sources=(), recovery_provider=None):
     """An :class:`EventBus` with a scenario source (if the scenario declares ``events``) plus a
     thread-safe :class:`QueueEventSource` a ROS subscriber (or a test) can ``push`` onto. Returns
-    ``(bus, queue)`` so the caller keeps a handle on the queue."""
+    ``(bus, queue)`` so the caller keeps a handle on the queue.
+
+    ``recovery_provider`` -- an optional best-effort callable surfacing the current recovery signals
+    (see :mod:`recovery`); when given, a :class:`recovery.RecoveryPollSource` is added so lane-owned
+    recoveries (nav stall / VRAM shed / host e-stop) are OBSERVED by the tree. Absent / ``None`` ⇒
+    no such source ⇒ byte-identical run."""
     sources = []
     if scenario is not None and scenario.get('events'):
         sources.append(ScenarioEventSource(scenario))
     queue = QueueEventSource()
     sources.append(queue)
+    if recovery_provider is not None:
+        from .recovery import RecoveryPollSource
+        sources.append(RecoveryPollSource(recovery_provider))
     sources.extend(extra_sources)
     return EventBus(sources), queue
 

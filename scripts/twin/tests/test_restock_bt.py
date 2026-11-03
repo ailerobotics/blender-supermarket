@@ -148,6 +148,53 @@ class PureContractTests(unittest.TestCase):
         self.assertEqual(ev.classify_stage_failure('couple', 'cart lost before transfer'), 'coupling_failed')
         self.assertEqual(ev.classify_stage_failure('park', 'mystery'), 'goal_miss')   # stage fallback
 
+    def test_recovery_specs_consistent_with_contract(self):
+        # sim-bt-reactive-recoveries-v1: every recovery type + its cleared counterpart are real event
+        # types, CLEARED_BY wires the clear back to the active type, and the two sets agree.
+        self.assertEqual(ev.RECOVERY_TYPES, frozenset(ev.RECOVERY_SPECS))
+        for rtype, spec in ev.RECOVERY_SPECS.items():
+            self.assertIn(rtype, ev.EVENT_TYPES)
+            cleared = spec['cleared_by']
+            self.assertIn(cleared, ev.EVENT_TYPES)
+            self.assertEqual(ev.CLEARED_BY.get(cleared), rtype)
+            self.assertTrue(spec['markers'] and spec['scripted'] and spec['action'])
+
+    def test_recovery_observer_push_edges(self):
+        # The push seam de-dups an unchanged active observation and emits a cleared event on the
+        # active->inactive edge.
+        from twin.restock.bt import recovery as rec
+        from twin.restock.bt.bus import QueueEventSource
+        q = QueueEventSource()
+        obs = rec.RecoveryObserver(q)
+        self.assertEqual(obs.engaged('nav_recovery', {'kind': 'breakaway'}).type, 'nav_recovery')
+        self.assertIsNone(obs.engaged('nav_recovery', {'kind': 'breakaway'}))   # unchanged => no event
+        self.assertEqual(obs.engaged('nav_recovery', {'kind': 'momentum'}).type, 'nav_recovery')  # data change
+        self.assertEqual(obs.cleared('nav_recovery').type, 'nav_recovery_cleared')
+        self.assertIsNone(obs.cleared('nav_recovery'))                          # already clear => no event
+        with self.assertRaises(ValueError):
+            obs.engaged('not_a_recovery')
+        pushed = q.poll(0.0)
+        self.assertEqual([e.type for e in pushed],
+                         ['nav_recovery', 'nav_recovery', 'nav_recovery_cleared'])
+
+    def test_recovery_poll_source_edges_and_best_effort(self):
+        from twin.restock.bt import recovery as rec
+        signals = []
+        src = rec.RecoveryPollSource(lambda: signals)
+        signals[:] = [('vram_shed', True, {'lever': 'capture_rate'})]
+        self.assertEqual([e.type for e in src.poll(0.0)], ['vram_shed'])
+        self.assertEqual(src.poll(0.1), [])                                    # unchanged => nothing
+        signals[:] = [('vram_shed', False, None)]
+        self.assertEqual([e.type for e in src.poll(0.2)], ['vram_shed_cleared'])
+        # None provider and a raising provider are inert (byte-identical run).
+        self.assertEqual(rec.RecoveryPollSource(None).poll(0.0), [])
+        def boom():
+            raise RuntimeError('provider down')
+        self.assertEqual(rec.RecoveryPollSource(boom).poll(0.0), [])
+        # a malformed signal is skipped, the rest kept
+        src2 = rec.RecoveryPollSource(lambda: [('bogus', True), ('host_estop', True, {'trigger': 'x'})])
+        self.assertEqual([e.type for e in src2.poll(0.0)], ['host_estop'])
+
     def test_scenario_validate_rejects_bad_events(self):
         # A minimal manifest/scenario that is otherwise valid enough to reach the events check.
         manifest = {'frame': 'map', 'units': 'metres', 'up_axis': 'Z', 'ground_truth_only': True}
@@ -341,6 +388,59 @@ class TreeTests(unittest.TestCase):
         m2, ctx2, root2, summary2, _ = self._run(Fixture(), reactions=reactions, scenario=scenario)
         self.assertEqual(m2.state, 'complete')
         self.assertNotIn('baseline_expired', ctx2.active())
+
+    def test_recovery_observed_then_returns_to_nominal(self):
+        # sim-bt-reactive-recoveries-v1: each recovery, injected active then cleared, must light up
+        # the matching RecoveryGuard leaf (a 'recover' log entry) and return to nominal (a
+        # 'return_to_nominal' entry) -- WITHOUT changing the mission (no pause, no reaction, still
+        # completes). One subtest per recovery.
+        from twin.restock.bt.context import RecordingReactions
+        cases = {
+            'nav_recovery': {'kind': 'breakaway'},
+            'vram_shed': {'lever': 'capture_rate'},
+            'host_estop': {'trigger': 'parked heartbeat lost'},
+        }
+        for rtype, data in cases.items():
+            with self.subTest(recovery=rtype):
+                self.tearDown(); self.setUp()
+                cleared = {'nav_recovery': 'nav_recovery_cleared',
+                           'vram_shed': 'vram_shed_cleared',
+                           'host_estop': 'host_estop_cleared'}[rtype]
+                scenario = {'events': [{'t': 0.02, 'type': rtype, 'data': data},
+                                       {'t': 0.10, 'type': cleared}]}
+                reactions = RecordingReactions()
+                m, ctx, root, summary, _ = self._run(Fixture(running_ticks=3), reactions=reactions,
+                                                     scenario=scenario)
+                # Mission behaviour is byte-identical to a no-event run: it completes and the observe
+                # leaf fired NO reaction and never paused the mission.
+                self.assertEqual(m.state, 'complete')
+                self.assertEqual(reactions.calls, [])
+                self.assertFalse(ctx.paused)
+                log = ctx.bb.get('/event/log')
+                actions = [(e['type'], e['action']) for e in log]
+                self.assertIn((rtype, 'recover'), actions)
+                self.assertIn((rtype, 'return_to_nominal'), actions)
+                # the recover entry carries the sim time (so the aligned diagram can seek the video)
+                rec_entry = next(e for e in log if e['type'] == rtype and e['action'] == 'recover')
+                self.assertIn('sim_time', rec_entry['data'])
+
+    def test_recovery_via_poll_provider_shows_in_timeline(self):
+        # The live POLL seam: a bundle-style recovery provider surfaces a signal; the tree observes
+        # it through RecoveryPollSource and writes it to the durable timeline (bt_events.jsonl).
+        from twin.restock.bt.driver import build_bus, run_mission_tree
+        from twin.restock.bt.view import SnapshotWriter
+        signals = [('nav_recovery', True, {'kind': 'heading_hold'})]
+        out = tempfile.TemporaryDirectory()
+        writer = SnapshotWriter(out.name, title='rec')
+        m = Mission(self.inv, self.job, Fixture(running_ticks=4), fixture_mode=True)
+        bus, queue = build_bus(None, recovery_provider=lambda: signals)
+        ctx, root, summary = run_mission_tree(m, bus, snapshot=writer, max_ticks=2000)
+        self.assertEqual(m.state, 'complete')
+        lines = [json.loads(l) for l in
+                 (Path(out.name) / 'bt_events.jsonl').read_text().strip().splitlines()]
+        kinds = [(e['type'], e['action']) for e in lines]
+        self.assertIn(('nav_recovery', 'recover'), kinds)       # observed from the provider
+        out.cleanup()
 
     def test_snapshot_writer_outputs(self):
         from twin.restock.bt.view import SnapshotWriter

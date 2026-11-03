@@ -8,7 +8,11 @@ Shape (left-to-right = tick order under memory=False roots)::
       |    |- health_guard      (stuck/low_battery -> safe park, FAILS to tear down)
       |    |- human_safety      (slow -> stop + pause arm -> resume)
       |    |- obstacle_avoid    (dynamic obstacle / blocked aisle -> wait + re-plan)
-      |    `- baseline_guard    (baseline_expired -> re-commission via stations provider)
+      |    |- baseline_guard    (baseline_expired -> re-commission via stations provider)
+      |    `- recoveries  (Sequence, memory=False)   -- OBSERVE lane-owned recoveries (no reaction)
+      |         |- nav_recovery  (coupled break-away / heading-hold / momentum-launch during tow)
+      |         |- vram_shed      (headroom shed ratchet)
+      |         `- host_estop     (station-liveness / host e-stop trip + release)
       `- mission   (Sequence, memory=True)         -- resumes at the running stage
            |- stage:collect  (StageRetry) -> "collect steps" (Sequence, memory=True)
            |      |- collect:drive->pick         (navigate)
@@ -42,9 +46,15 @@ from __future__ import annotations
 
 import py_trees
 
+from .events import RECOVERY_SPECS
 from .leaves import (BaselineGuard, EventPump, Finalize, HealthGuard, HumanSafety,
-                     ObstacleAvoid, PhaseGate, StageRetry, StageRun)
+                     ObstacleAvoid, PhaseGate, RecoveryGuard, StageRetry, StageRun)
 from .stage_phases import stage_plan
+
+# The recovery observations surfaced as tree nodes, in a fixed tick order (nav -> vram -> host), so
+# the generated diagram and the real tree agree. Each is a leaf under the ``recoveries`` sequence.
+RECOVERY_ORDER = ('nav_recovery', 'vram_shed', 'host_estop')
+assert set(RECOVERY_ORDER) == set(RECOVERY_SPECS), 'RECOVERY_ORDER drifted from events.RECOVERY_SPECS'
 
 
 def active_stages(mission):
@@ -71,6 +81,16 @@ def build_stage(ctx, action, *, max_retries=2):
     return StageRetry(seq, run, max_retries=max_retries)
 
 
+def build_recoveries(ctx):
+    """The OBSERVE-ONLY recovery handlers: one :class:`RecoveryGuard` per recovery surfaced from a
+    lane outside the tree, grouped under a ``recoveries`` sequence. Every leaf always SUCCEEDs and
+    sets no control flag, so this subtree is byte-identical to the mission behaviour without it --
+    it only makes the recovery visible on the live view and the generated diagram/timeline."""
+    recoveries = py_trees.composites.Sequence(name='recoveries', memory=False)
+    recoveries.add_children([RecoveryGuard(ctx, rtype) for rtype in RECOVERY_ORDER])
+    return recoveries
+
+
 def build_reactive(ctx):
     reactive = py_trees.composites.Sequence(name='reactive', memory=False)
     reactive.add_children([
@@ -78,6 +98,7 @@ def build_reactive(ctx):
         HumanSafety(ctx),
         ObstacleAvoid(ctx),
         BaselineGuard(ctx),
+        build_recoveries(ctx),
     ])
     return reactive
 

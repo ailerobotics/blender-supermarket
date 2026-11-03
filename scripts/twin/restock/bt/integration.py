@@ -25,6 +25,17 @@ def make_reactions(bundle):
                             recommission_provider=getattr(bundle, 'recommission', None))
 
 
+def make_recovery_provider(bundle):
+    """The best-effort recovery-signals provider for the OBSERVE-only recovery nodes
+    (sim-bt-reactive-recoveries-v1): ``bundle.recovery_signals`` if the bundle exposes a callable,
+    else ``None`` (⇒ no recovery source ⇒ byte-identical run). The lane that owns a recovery
+    (nav stall / VRAM shed / host e-stop) attaches that callable so its already-running recovery
+    becomes visible on ``/bt``; the tree never drives it. See docs/behaviour_tree.md for the
+    per-recovery wiring follow-ups."""
+    provider = getattr(bundle, 'recovery_signals', None)
+    return provider if callable(provider) else None
+
+
 def start_event_subscriber(queue):
     """Subscribe to :data:`EVENT_TOPIC` and push parsed events onto ``queue``. Returns a callable
     that tears the subscriber down, or ``None`` if ROS is unavailable (CPU runs). Best-effort: a
@@ -79,7 +90,7 @@ def run_once_bt(db, scenario, bundle, config, output_dir, *, mission_factory, is
     from .view import SnapshotWriter
 
     mission = mission_factory()
-    bus, queue = build_bus(scenario)
+    bus, queue = build_bus(scenario, recovery_provider=make_recovery_provider(bundle))
     # Write the live view FIRST so bt_view.html exists even if a later step fails.
     from ..sim_speed import from_config as _sim_speed
     _hz = _sim_speed(config).bt_snapshot_hz     # sim_speed bt_snapshot_hz; None (default) => every tick
