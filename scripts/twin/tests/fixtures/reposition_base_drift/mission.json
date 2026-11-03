@@ -1,0 +1,36 @@
+{
+  "state": "failed",
+  "reason": "blocked_no_route_timeout",
+  "orchestrator": "behaviour_tree",
+  "stage_timeline": [
+    {
+      "t": 0.6,
+      "type": "stage_step",
+      "data": {
+        "stage": "collect",
+        "attempt": 1,
+        "step": 2,
+        "label": "grasp\u00b7lift\u00b7tuck"
+      }
+    },
+    {
+      "t": 5.0,
+      "type": "stage_step",
+      "data": {
+        "stage": "collect",
+        "attempt": 1,
+        "step": 3,
+        "label": "drive\u2192rollwagen"
+      }
+    },
+    {
+      "t": 10.0,
+      "type": "stage_failed",
+      "data": {
+        "stage": "collect",
+        "attempt": 1,
+        "reason": "blocked_no_route_timeout"
+      }
+    }
+  ]
+}
