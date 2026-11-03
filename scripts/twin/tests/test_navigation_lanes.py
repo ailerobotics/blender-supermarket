@@ -797,5 +797,74 @@ class TowLaneLeadInConfigTests(unittest.TestCase):
                 TowLane.from_config(cfg)
 
 
+class CoupleSeatDerivationTests(unittest.TestCase):
+    """sim-outbound-lane-start-dockalign-v1 (item 4): the outbound lane start must FOLLOW the configured
+    couple dock, derived by `couple_seat_from_cart` -- not a hardcoded legacy seat. coldwin23-2 failed
+    `lane_not_acquired_timeout` because the couple drive seated the base at the legacy EAST dock while the
+    lane start was the dock-align SOUTH seat (a ~0.97 m / 1.6 rad frame mismatch)."""
+    SPEC = MobileSpec()
+
+    def test_seat_derivation_inverts_the_couple_hitch(self):
+        from twin.navigation.lanes import couple_seat_from_cart
+        from twin.restock.shortcut import cart_pose_from_hitch
+        hx, chx = self.SPEC.hitch_x, self.SPEC.cart_hitch_x
+        for robot in ([-3.875, 14.5, -math.pi / 2], [-4.46, 15.25, 0.0], [2.0, -1.0, 1.3]):
+            cart = cart_pose_from_hitch(robot, 0.0, hitch_x=hx, cart_hitch_x=chx)
+            seat = couple_seat_from_cart(cart, hitch_x=hx, cart_hitch_x=chx)
+            self.assertAlmostEqual(seat[0], robot[0], places=6)
+            self.assertAlmostEqual(seat[1], robot[1], places=6)
+            self.assertAlmostEqual(math.sin(seat[2]), math.sin(robot[2]), places=6)
+            self.assertAlmostEqual(math.cos(seat[2]), math.cos(robot[2]), places=6)
+
+    def test_seat_matches_dock_align_south_lane_start(self):
+        # the dock-align SOUTH dock: cart staged at [-3.875, 15.77, -PI/2] -> robot seat == the lane start.
+        from twin.navigation.lanes import couple_seat_from_cart
+        seat = couple_seat_from_cart([-3.875, 15.77, -math.pi / 2],
+                                     hitch_x=self.SPEC.hitch_x, cart_hitch_x=self.SPEC.cart_hitch_x)
+        self.assertAlmostEqual(seat[0], -3.875, places=3)
+        self.assertAlmostEqual(seat[1], 14.5, places=3)
+        self.assertAlmostEqual(seat[2], -math.pi / 2, places=3)
+
+    def test_seat_matches_legacy_east_lane_start(self):
+        # the legacy EAST dock coldwin23 actually coupled at: cart [-5.73, 15.25, 0] -> seat [-4.46, 15.25, 0].
+        from twin.navigation.lanes import couple_seat_from_cart
+        seat = couple_seat_from_cart([-5.73, 15.25, 0.0],
+                                     hitch_x=self.SPEC.hitch_x, cart_hitch_x=self.SPEC.cart_hitch_x)
+        self.assertAlmostEqual(seat[0], -4.46, places=3)
+        self.assertAlmostEqual(seat[1], 15.25, places=3)
+        self.assertAlmostEqual(seat[2], 0.0, places=3)
+
+    def test_synthesised_couple_seat_uses_spec_hitch(self):
+        lane = TowLane('L', [-3.875, 14.5, -math.pi / 2], [-3.875, 8.0, -math.pi / 2],
+                       start_cart_yaw=-math.pi / 2, couple_dock=[-3.875, 15.77, -math.pi / 2])
+        seat = lane.synthesised_couple_seat(self.SPEC)
+        self.assertAlmostEqual(seat[0], lane.start[0], places=3)
+        self.assertAlmostEqual(seat[1], lane.start[1], places=3)
+        self.assertIsNone(TowLane('L2', [-4, 0, 0], [4, 0, 0]).synthesised_couple_seat(self.SPEC))
+
+    def test_expand_accepts_matching_couple_dock(self):
+        lane = TowLane('ok', [-3.875, 14.5, -math.pi / 2], [-3.875, 11.0, -math.pi / 2],
+                       start_cart_yaw=-math.pi / 2, couple_dock=[-3.875, 15.77, -math.pi / 2])
+        lane.expand(ArticulatedMap(GridMap((-8, 6, 8, 18), (), 0.20), MobileSpec()))
+        self.assertIsNotNone(lane.route)
+
+    def test_expand_rejects_mismatched_couple_dock(self):
+        # a legacy-east couple dock paired with the dock-align-south start must FAIL TO BUILD (never silent).
+        bad = TowLane('bad', [-3.875, 14.5, -math.pi / 2], [-3.875, 11.0, -math.pi / 2],
+                      start_cart_yaw=-math.pi / 2, couple_dock=[-5.73, 15.25, 0.0])
+        with self.assertRaises(ValueError):
+            bad.expand(ArticulatedMap(GridMap((-8, 6, 8, 18), (), 0.20), MobileSpec()))
+
+    def test_from_config_round_trips_couple_dock(self):
+        lane = TowLane.from_config({'name': 'L', 'start': [-3.875, 14.5, -1.5707963267948966],
+                                    'goal': [-3.875, 8.0, -1.5707963267948966],
+                                    'start_cart_yaw': -1.5707963267948966,
+                                    'couple_dock': [-3.875, 15.77, -1.5707963267948966]})
+        self.assertEqual(lane.couple_dock, (-3.875, 15.77, -1.5707963267948966))
+        self.assertEqual(lane.couple_dock_articulation, 0.0)
+        # absent => None => no build-time validation (byte-identical).
+        self.assertIsNone(TowLane.from_config({'name': 'L', 'start': [-4, 0, 0], 'goal': [4, 0, 0]}).couple_dock)
+
+
 if __name__ == '__main__':
     unittest.main()

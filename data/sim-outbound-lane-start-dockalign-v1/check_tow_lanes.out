@@ -1,0 +1,47 @@
+grid: 798 static obstacles, bounds (-13.25, -11.25, 13.25, 19.5)
+PASS directional_rear_support_clears {"dist_m": 0.81, "reason": "tracking"}
+PASS directional_ahead_same_distance_stops {"dist_m": 0.81, "reason": "obstacle_stop"}
+PASS legacy_omnidirectional_disk_trips_on_rear {"dist_m": 0.81, "reason": "obstacle_stop"}
+PASS both_lanes_expand_against_static_map {"lanes": ["outbound_dock_to_staging"], "expand_cpu_s": 0.06}
+PASS lane_swept_envelope_clear_live[outbound_dock_to_staging] {"reason": "validated_seed", "states": 84, "validate_cpu_s": 0.047}
+TRACK_DIAG err=0.066 tol=0.250 slack=n/a cart_err=0.040 cart_tol=0.200 at=(-3.88,14.42)
+TRACK_DIAG err=0.052 tol=0.250 slack=n/a cart_err=0.041 cart_tol=0.200 at=(-3.88,13.79)
+TRACK_DIAG err=0.037 tol=0.250 slack=n/a cart_err=0.018 cart_tol=0.200 at=(-3.88,13.09)
+TRACK_DIAG err=0.032 tol=0.250 slack=n/a cart_err=0.039 cart_tol=0.200 at=(-3.88,12.30)
+TRACK_DIAG err=0.013 tol=0.250 slack=n/a cart_err=0.027 cart_tol=0.200 at=(-3.88,11.60)
+TRACK_DIAG err=0.028 tol=0.250 slack=n/a cart_err=0.008 cart_tol=0.200 at=(-3.88,10.89)
+TRACK_DIAG err=0.006 tol=0.250 slack=n/a cart_err=0.003 cart_tol=0.200 at=(-3.88,10.11)
+TRACK_DIAG err=0.037 tol=0.250 slack=n/a cart_err=0.004 cart_tol=0.200 at=(-3.88,9.41)
+TRACK_DIAG err=0.004 tol=0.250 slack=n/a cart_err=0.002 cart_tol=0.200 at=(-3.88,8.63)
+TRACK_DIAG err=0.019 tol=0.250 slack=n/a cart_err=0.001 cart_tol=0.200 at=(-3.88,8.16)
+PASS lane_follows_to_goal[outbound_dock_to_staging] {"detail": "arrived_stopped", "route_len_m": 6.5, "direct_m": 6.5, "loop_ratio": 1.0, "end_articulation_rad": 0.0, "final_pose": [-3.874, 8.078, -1.572], "follow_cpu_s": 0.15}
+PASS south_seat_follows_configured_dock {"derived_seat": [-3.875, 14.5, -1.571], "lane_start": [-3.875, 14.5, -1.571], "couple_dock": [-3.875, 15.77, -1.571]}
+PASS south_lane_acquires_derived_seat {"seat": [-3.875, 14.5, -1.571]}
+PASS south_residual_seat_acquires_via_leadin {"residual_m": 0.5, "direct_acquire": false, "leadin_states": 89, "lead_in_max_m": 1.0}
+PASS east_seat_follows_configured_dock {"derived_seat": [-4.46, 15.25, 0.0], "lane_start": [-4.46, 15.25, 0.0]}
+PASS east_lane_acquires_derived_seat {"seat": [-4.46, 15.25, 0.0]}
+PASS east_seat_refused_by_south_lane {"cross_acquire": false, "cross_leadin": null, "east_seat": [-4.46, 15.25, 0.0], "south_start": [-3.875, 14.5, -1.571]}
+PASS mismatched_couple_dock_fails_to_build {"note": "legacy-east couple_dock paired with the dock-align-south start must raise at expand"}
+PASS proud_reproduction_na_open_lane {"reason": "validated_lane", "note": "lane does not hug static; proud returns do not block (bay mission)"}
+LANE_BLOCKED_DIAG lane='outbound_dock_to_staging' vseed_reason=seed_collision live_pts=14447 discounted_near_static=14446 kept=1 proud_tol_m=0.120 trust_static=False start=(-3.88, 14.5, -1.57) goal=(-3.88, 8.0, -1.57) kept_near_static=((-3.88, 11.2, 1.3),)
+LANE_BLOCKED_DIAG lane='outbound_dock_to_staging' vseed_reason=seed_collision live_pts=14447 discounted_near_static=14446 kept=1 proud_tol_m=0.120 trust_static=False start=(-3.88, 14.5, -1.57) goal=(-3.88, 8.0, -1.57) kept_near_static=((-3.88, 11.2, 1.3),)
+PASS new_obstacle_on_lane_still_blocks_tow {"new_obstacle": [-3.88, 11.2], "reason": "lane_blocked"}
+LANE_BLOCKED_DIAG lane='outbound_dock_to_staging' vseed_reason=seed_collision live_pts=14447 discounted_near_static=14446 kept=1 proud_tol_m=0.120 trust_static=False start=(-3.88, 14.5, -1.57) goal=(-3.88, 8.0, -1.57) kept_near_static=((-3.88, 11.2, 1.3),)
+LANE_BLOCKED_DIAG lane='outbound_dock_to_staging' vseed_reason=seed_collision live_pts=14447 discounted_near_static=14446 kept=1 proud_tol_m=0.120 trust_static=False start=(-3.88, 14.5, -1.57) goal=(-3.88, 8.0, -1.57) kept_near_static=((-3.88, 11.2, 1.3),)
+PASS unmapped_static_return_defeats_tol {"centreline_nearest_static_m": 1.3, "tol_m": 0.12, "reason": "lane_blocked"}
+PASS trust_static_reopens_lane {"reason": "validated_lane"}
+PASS trust_static_new_obstacle_still_stops_tow_via_brake_gate {"clear_reason": "tracking", "blocked_reason": "obstacle_stop", "obstacle": [-3.88, 14.0]}
+PASS start_only_acquire_traps_drifted_follower {"dist_from_start_m": 0.314, "start_tol_xy": 0.25, "reason": "lane_not_acquired"}
+PASS reacquire_along_route_recovers_the_lane {"reason": "validated_lane"}
+PASS portal_leadin_aligns_cart[outbound_dock_to_staging] {"straight_span_m": 3.84, "cart_art_entry_rad": 0.0, "cart_art_at_leadin_exit_rad": 0.0, "throat_states": 50}
+PASS cart_yaw_envelope_margin[outbound_dock_to_staging] {"envelope_safe_offset_rad": 0.6, "relaxed_tol_rad": 0.3, "relaxed_within_envelope": true}
+PASS cart_yaw_excessive_offset_na_open_lane[outbound_dock_to_staging] {"envelope_exceeds_probe_cap_rad": 0.6}
+PASS track_tol_envelope_margin[outbound_dock_to_staging] {"mode": "position_aware", "relaxed_tol_m": 0.35, "global_min_slack_m": 0.586, "eff_tol_min_m": 0.35, "eff_tol_max_m": 0.35, "all_eff_within_envelope": true}
+PASS cart_yaw_rebase_envelope_clear[outbound_dock_to_staging] {"rebased_used": true, "envelope_clear": true}
+PASS cart_yaw_rebase_entry_no_longer_trips[outbound_dock_to_staging] {"entry_divergence_rad": 0.0, "cart_yaw_tol": 0.3}
+PASS cart_yaw_rebase_acquire_aligned_reacquires[outbound_dock_to_staging] {"xy_near": true, "cart_err_rad": 0, "cart_tol": 0.2, "authored_cart_yaw_gate_would_refuse": false}
+PASS cart_yaw_rebase_acquire_offlane_refused[outbound_dock_to_staging] {"cart_err_rad": 1.4, "cart_tol": 0.2}
+PASS rigid_pivot_swept_radius_within_clearance {"swept_radius_m": 1.7, "clearance_to_static_m": 3.02, "pivot_rotation_clears_static": true, "pivot_at": [-3.87, 14.0]}
+PASS measured_turn_radius_trips_on_overrotating_arc {"measured_k": 10.0, "reason": "measured_turn_radius"}
+PASS well_tracked_arc_does_not_trip_measured_turn_radius {"measured_k": 0.64, "reason": "tracking"}
+TOW_LANES_PROOF PASS
