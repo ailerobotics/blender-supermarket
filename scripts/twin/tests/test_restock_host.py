@@ -823,6 +823,11 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     # release-detach budget, and the collision-off straight-line deck place.
                                     'collect_place_preplace_shape', 'collect_place_wrist_guard',
                                     'release_detach_timeout_s', 'collect_place_straight_line',
+                                    # sim-collect-retreat-abort-v2: lift the empty gripper straight up before
+                                    # the collect deck-place retreat folds to the preplace shape (default ON),
+                                    # with the straight-up rise (m). Separates the enabled wrist links from the
+                                    # re-enabled carton/shelf/cage that pinned the single-fold retreat.
+                                    'collect_retreat_liftoff', 'collect_retreat_liftoff_dz',
                                     # sim-robust-movegroup-collision-meshes-v1: rewrite the resolved URDF's bare
                                     # absolute <mesh> paths to file:// URIs so move_group's resource_retriever
                                     # loads real arm link geometry. Optional bool read by restock_host.launch;

@@ -46,6 +46,8 @@ KEY_CONSUMER = {
     'collect_place_preplace_shape': HOST,   # fixed UPRIGHT clear-region preplace joint shape (begin_joint_goal)
     'collect_place_wrist_guard': HOST,       # clear-branch wrist-guard extended to the collect place/retreat pose-IK
     'collect_place_straight_line': HOST,     # route the collect deck place+retreat collision-off straight-line (attached-carton self-collision)
+    'collect_retreat_liftoff': HOST,         # sim-collect-retreat-abort-v2: lift the empty gripper straight up before the collect deck retreat folds to the preplace shape (default ON)
+    'collect_retreat_liftoff_dz': HOST,      # sim-collect-retreat-abort-v2: the straight-up TCP rise (m) for that lift-off
     'transfer_preplace_reach_guard': HOST,   # sim-robust-transfer-preplace-reach-v1: steer the live_pose transfer preplace to the holdable upright clear branch
     'transfer_pick_wrist_guard': HOST,       # sim-robust-transfer-settle-oscillation-v1: extend the clear-wrist-region guard to the live_pose transfer PICK approach+contact (coldwin12 contact limit cycle)
     'transfer_service_carry': HOST,          # sim-service-leg-carry-v1: TRANSIT carry-hold for the shelf-staging live_pose transfer service leg (pick@staging -> carry -> place); pair with runtime shelf_staging
