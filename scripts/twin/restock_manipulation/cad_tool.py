@@ -157,6 +157,34 @@ def _release_held_on_open(held, open_streak, release_ticks):
     return (not held) or open_streak >= release_ticks
 
 
+#: fm320: the tool-side gripper geometry that collides with the forearm/upper_arm/wrist as the carry fold
+#: closes (42.7 kN tool-vs-arm contact) -- all on the cuMotion self-collision ignore list, so disabled while
+#: welded. sim-collect-retreat-fault-v1 also defers re-enabling exactly this set past the empty retreat.
+TOOL_SIDE_COLLIDERS = ('suction_cups', 'cube_without_surface_plates', 'surface_plate_1',
+                       'surface_plate_2', 'surface_plate_3', 'surface_plate_4',
+                       'surface_plate_5', 'surface_plate_6')
+
+
+def is_tool_side_collider(path_str, tool_side=TOOL_SIDE_COLLIDERS):
+    """True if a collider prim path is one of the tool-side gripper links (pure/CPU-testable)."""
+    return any(('/' + t) in str(path_str) for t in tool_side)
+
+
+def collision_groups_to_toggle(groups):
+    """sim-collect-retreat-fault-v1: map a toggle request to (touch_carton, touch_tool_side). Pure.
+
+    ``'both'`` (the fm318/fm320 default) toggles the carton colliders AND the tool-side gripper colliders;
+    ``'carton'`` toggles only the carton (release when the tool-side re-enable is deferred past the retreat);
+    ``'tool'`` toggles only the tool-side (the deferred restore on the next grasp close)."""
+    if groups == 'carton':
+        return (True, False)
+    if groups == 'tool':
+        return (False, True)
+    if groups == 'both':
+        return (True, True)
+    raise ValueError('groups must be one of both|carton|tool')
+
+
 def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
                            max_gap=SIM_MAX_GRIP_DISTANCE, force_limit=30.,
                            clearance_offset=None, retry_interval=1e6, stroke_limit=None):
@@ -327,6 +355,19 @@ class NativePanelContact:
         self._fallback_body = None
         self._open_streak = 0   # fm395 (B): consecutive Open-status readings, for the weld-release debounce
         self._fallback_joint = None
+        # sim-collect-retreat-fault-v1 (env RESTOCK_DEFER_TOOL_COLLISION, DEFAULT OFF => byte-identical):
+        # defer re-enabling the TOOL-SIDE gripper colliders (cube/surface_plates/suction_cups) past the empty
+        # retreat. At the carton-weld release they are normally re-enabled TOGETHER with the carton colliders,
+        # but the empty retreat happens right after, from the folded place pose, so re-enabling them there
+        # re-establishes the cuMotion-ignore-list contact (tool-vs-arm / gripper-in-cart) that the collision-
+        # OFF straight-line retreat cannot model -- pinning the arm (rtfcollect2). With this on, release re-
+        # enables the CARTON colliders only (so the placed carton still rests/contacts the deck); the tool-side
+        # colliders stay OFF through the retreat and are restored on the NEXT grasp close (gripper then in free
+        # space at the source carton, not folded in the cart). The tool geometry is on the planner self-
+        # collision ignore list, so keeping it collision-inert during a planned arm move changes no planned path.
+        self._defer_tool_collision = os.environ.get('RESTOCK_DEFER_TOOL_COLLISION', '').lower() \
+            not in ('', '0', 'false', 'off', 'no')
+        self._tool_collision_deferred = False   # True while a release left the tool-side colliders disabled
         self.api = surface_gripper.acquire_surface_gripper_interface()
         self.api.set_write_to_usd(True)
         self.closed_status = surface_gripper.GripperStatus.Closed
@@ -352,6 +393,14 @@ class NativePanelContact:
     def command(self, enabled):
         self.enabled = bool(enabled)
         if self.enabled:
+            # sim-collect-retreat-fault-v1: restore the tool-side gripper colliders deferred at the previous
+            # release (if any) before the next grasp close -- the gripper is now at the source carton in free
+            # space (not folded in the cart), so re-enabling here cannot re-pin the arm against the cart.
+            if getattr(self, '_tool_collision_deferred', False):
+                body = getattr(self, '_fallback_body', None)
+                self._set_carton_collision(body, True, groups='tool')
+                self._tool_collision_deferred = False
+                print('SIM_ATTACH_FALLBACK tool-side collision RESTORED at grasp close', flush=True)
             self.api.close_gripper(self.path)
         else:
             self.api.open_gripper(self.path)
@@ -461,7 +510,7 @@ class NativePanelContact:
         # links (wrist_2/wrist_3/suction) during the folded carry; restored at release (_release_fallback).
         self._set_carton_collision(body_path, False)
 
-    def _set_carton_collision(self, body_path, enabled):
+    def _set_carton_collision(self, body_path, enabled, groups='both'):
         # fm318: the SIM_ATTACH_FALLBACK FixedJoint only disables collision between the two JOINTED
         # bodies (gripper-body + carton), so the welded carton's geometry still collides in PhysX with
         # the tool-side links (wrist_2/wrist_3/suction) -- and the PLANNER ignores exactly those pairs
@@ -470,35 +519,49 @@ class NativePanelContact:
         # independent). While welded the carton is rigidly held by the joint and needs no collision at
         # all, so toggle its colliders OFF on weld and back ON at release (so the placement drop onto the
         # cart still makes contact). CollisionEnabled is a runtime-reliable toggle (cart_diagnostic).
-        from pxr import UsdPhysics, Usd
+        #
         # fm320: the bench weld-reaction probe proved the fight is the TOOL geometry (cube /
         # surface_plates / suction_cups) colliding with the forearm/upper_arm/wrist as the fold closes
         # (42.7 kN tool-vs-arm contact; the NO-CARTON trial also stalled) -- NOT the carton alone, and
         # those self-pairs are on the vendor planner ignore list so cuMotion never avoids them. So while
         # the carton is welded (held rigidly by the joint, needs no collision), disable BOTH the carton
-        # colliders AND the tool-side gripper colliders; restore on release (next grasp + the cart drop).
-        tool_side = ('suction_cups', 'cube_without_surface_plates', 'surface_plate_1',
-                     'surface_plate_2', 'surface_plate_3', 'surface_plate_4',
-                     'surface_plate_5', 'surface_plate_6')
+        # colliders AND the tool-side gripper colliders. ``groups`` selects which sets to toggle
+        # (sim-collect-retreat-fault-v1): 'both' (default), 'carton' only, or 'tool' only.
+        from pxr import UsdPhysics, Usd
+        touch_carton, touch_tool = collision_groups_to_toggle(groups)
         targets = set()
-        prim = self.stage.GetPrimAtPath(body_path)
-        if prim:
-            for p in Usd.PrimRange(prim):
-                if p.HasAPI(UsdPhysics.CollisionAPI):
+        if touch_carton:
+            prim = self.stage.GetPrimAtPath(body_path)
+            if prim:
+                for p in Usd.PrimRange(prim):
+                    if p.HasAPI(UsdPhysics.CollisionAPI):
+                        targets.add(p.GetPath())
+        if touch_tool:
+            for p in self.stage.Traverse():
+                if p.HasAPI(UsdPhysics.CollisionAPI) and is_tool_side_collider(p.GetPath()):
                     targets.add(p.GetPath())
-        for p in self.stage.Traverse():
-            if p.HasAPI(UsdPhysics.CollisionAPI) and any(('/' + t) in str(p.GetPath()) for t in tool_side):
-                targets.add(p.GetPath())
         for path in targets:
             UsdPhysics.CollisionAPI(self.stage.GetPrimAtPath(path)).CreateCollisionEnabledAttr(bool(enabled))
-        print('SIM_ATTACH_FALLBACK carry collision %s on %d collider(s) (carton + tool-side) body=%s'
-              % ('ENABLED' if enabled else 'DISABLED', len(targets), body_path), flush=True)
+        label = {'both': 'carton + tool-side', 'carton': 'carton', 'tool': 'tool-side'}[groups]
+        print('SIM_ATTACH_FALLBACK carry collision %s on %d collider(s) (%s) body=%s'
+              % ('ENABLED' if enabled else 'DISABLED', len(targets), label, body_path), flush=True)
 
     def _release_fallback(self):
         if getattr(self, '_fallback_joint', None) is not None:
             body = getattr(self, '_fallback_body', None)
             if body is not None:
-                self._set_carton_collision(body, True)   # restore for the cart drop
+                if getattr(self, '_defer_tool_collision', False):
+                    # sim-collect-retreat-fault-v1: re-enable the CARTON colliders only (so the placed carton
+                    # still rests/contacts the deck), and DEFER the tool-side gripper colliders -- they stay
+                    # OFF through the empty retreat (where re-enabling them re-establishes the collision-OFF-
+                    # retreat-invisible tool-vs-arm/cart contact that pins the arm), and are restored on the
+                    # next grasp close (command(True)), gripper then clear of the cart in free space.
+                    self._set_carton_collision(body, True, groups='carton')
+                    self._tool_collision_deferred = True
+                    print('SIM_ATTACH_FALLBACK tool-side collision DEFERRED past the empty retreat '
+                          '(restored on next grasp close)', flush=True)
+                else:
+                    self._set_carton_collision(body, True)   # restore for the cart drop
             self.stage.RemovePrim(self._fallback_joint)
             # fm379 mitigation 3: SIM-ONLY opt-in -- for a proof run, keep the released carton KINEMATIC
             # at the release pose instead of letting it become a FREE DYNAMIC body. This avoids adding a
