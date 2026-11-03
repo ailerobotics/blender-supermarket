@@ -935,6 +935,70 @@ class TransferController:
             return goal
         return tuple(float(leveled[j]) for j in ARM_JOINTS)
 
+    def _level_path_plan(self, goal_shape, measured):
+        """sim-carry-level-lift-v1: plan a carried fixed-shape move (``goal_shape``) from the measured
+        start as a LEVELED WAYPOINT PATH so the welded carton stays parallel to the ground THROUGHOUT the
+        move -- not only at its endpoints. Returns a ``carton_level.LevelPathPlan`` (whose predicted
+        executed tilt the caller checks against the bound before dispatch), or ``None`` to fall back to
+        the single leveled-endpoint goal: when the constraint is off, ``level_path`` is off, there is no
+        FK model, the up-axis is not captured yet, the goal is not a 6-vector, or the GOAL has no in-clear-
+        region level solution (ValueError from the planner). Bounded to the clear carry wrist region
+        (carry_wrist1_cap / carry_wrist2_min) exactly like ``_level_carried_goal``."""
+        if (self._carton_level is None or not self._carton_level.level_goals
+                or not self._carton_level.level_path or len(goal_shape) != 6):
+            return None
+        robot = self._fk_model()
+        if robot is None:
+            return None
+        self._capture_level_up(measured)
+        if self._carton_up_in_tool is None:
+            return None
+        from twin.restock_manipulation import carton_level as cl
+        big = 2 * math.pi
+        limits = {}
+        if self.carry_wrist1_cap is not None:
+            limits['ur_wrist_1_joint'] = (-big, float(self.carry_wrist1_cap))
+        if self.carry_wrist2_min is not None:
+            limits['ur_wrist_2_joint'] = (float(self.carry_wrist2_min), big)
+        try:
+            return cl.plan_level_path(robot, list(measured), list(goal_shape), self._carton_up_in_tool,
+                                      bound_deg=self._carton_level.bound_deg,
+                                      joints=self._carton_level.joints,
+                                      tool_link=self._carton_level.tool_link,
+                                      limits=limits or None,
+                                      waypoints=self._carton_level.path_waypoints)
+        except ValueError as exc:
+            # The GOAL itself has no in-clear-region level solution. Fall back to the single-goal path
+            # (which also levels the endpoint via _level_carried_goal, or proceeds unleveled under the
+            # CARTON_TILT trip) -- never crash, never silently carry a tilt.
+            print('CARTON_LEVEL_UNSOLVED phase=%s: %s (no leveled waypoint path; falling back to the '
+                  'single leveled-endpoint goal)' % (self.phase, exc), flush=True)
+            return None
+
+    def _issue_level_carried_move(self, goal_shape, measured, *, slow, goal_tol):
+        """Dispatch a carried fixed-shape move keeping the carton level. With ``level_path`` on and a
+        feasible leveled waypoint path, replay the PREDICTED executed tilt and either
+        CARTON_LEVEL_PLAN_REJECTED it (fail by name BEFORE any motion) or drive it as a multi-waypoint
+        ``begin_joint_path``; otherwise fall back to the single leveled-endpoint ``begin_joint_goal``.
+        Returns a controller result (the dispatched move, or the reject failure)."""
+        plan = self._level_path_plan(goal_shape, measured)
+        if plan is not None:
+            reject = plan.reject(self._carton_level.bound_deg)
+            if reject is not None:
+                print(reject, flush=True)
+                return self._fail(reject)
+            print('CARTON_LEVEL_PATH phase=%s n=%d predicted_max roll=%.2f pitch=%.2f tilt=%.2f deg '
+                  '(<= bound %.2f) -- leveled waypoint carry'
+                  % (self.phase, plan.waypoints_n, plan.max_roll, plan.max_pitch, plan.max_tilt,
+                     self._carton_level.bound_deg), flush=True)
+            self.motion.begin_joint_path(list(plan.waypoints), measured, slow=slow, goal_tol=goal_tol)
+            self.issued = True
+            return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+        goal = self._level_carried_goal(goal_shape, measured)
+        self.motion.begin_joint_goal(goal, measured, slow=slow, goal_tol=goal_tol)
+        self.issued = True
+        return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+
     def _place_level_limits(self):
         """Joint limits for the level place IK: the clear carry wrist region (carry_wrist1_cap /
         carry_wrist2_min, so the level pose stays off the ur_wrist_2-vs-forearm stop) plus the arm's
@@ -1643,13 +1707,16 @@ class TransferController:
                 # into the shape settles a little short on joint0 only, so relax THIS move's terminal gate
                 # (the subsequent tuck/transit re-anchor). Absent carry_lift_shape => legacy task-space lift.
                 if self.phase == 'lift' and self.carry_lift_shape is not None:
-                    # sim-carton-level-carry-v1: level the lifted carry shape so the carton rises
-                    # parallel to the ground (within the clear wrist caps). Off => shape unchanged.
-                    _lift_goal = self._level_carried_goal(self.carry_lift_shape, s.joint_positions)
-                    self.motion.begin_joint_goal(_lift_goal, s.joint_positions,
-                                                 slow=True, goal_tol=0.2)
-                    self.issued = True
-                    return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+                    # sim-carton-level-carry-v1 / sim-carry-level-lift-v1: raise the carton parallel to
+                    # the ground. level_goals alone levels only the ENDPOINT -- the joint-space path from
+                    # the grasp pose to the leveled carry_lift_shape still passes through a tilted config
+                    # (coldwin25: CPU-reconstructed ~11 deg mid-path). With level_path on, drive the lift
+                    # as a LEVELED WAYPOINT PATH (carton level throughout) and CARTON_LEVEL_PLAN_REJECTED
+                    # any plan whose predicted executed tilt exceeds the bound before motion streams; off
+                    # => the single leveled-endpoint goal (byte-identical). Carton-loaded -> slow; relax
+                    # THIS move's terminal gate (the subsequent tuck/transit re-anchor).
+                    return self._issue_level_carried_move(self.carry_lift_shape, s.joint_positions,
+                                                          slow=True, goal_tol=0.2)
                 # sim-robust-collect-stow-branch-v1 (collect5, 2026-10-23): clear-branch RETREAT for the
                 # NON-cage COLLECT deck place. The place + retreat run collision-OFF straight-line
                 # (_collect_deck_place) because the set-down fold is a conservative attached-carton
@@ -1965,18 +2032,18 @@ class TransferController:
             # apply (tuck/pan carry the held carton; retreat_tuck is empty-handed).
             goal = ((self.cart_pan_joint0,) + tuple(self.cart_tuck_shape) if self.phase == 'pan'
                     else (s.joint_positions[0],) + tuple(self.cart_tuck_shape))
-            # sim-carton-level-carry-v1: level the carried fold (tuck/pan) so the carton stays
-            # parallel to the ground through the swing; retreat_tuck is empty-handed (untouched).
-            # Off => goal unchanged (byte-identical).
-            if self.phase in ('tuck', 'pan'):
-                goal = self._level_carried_goal(goal, s.joint_positions)
             if not self.issued:
                 if s.valid_until_steady is not None:
                     require_fresh(s.valid_until_steady, self.steady_clock)
-                # tuck/pan carry the welded carton -> plan the fold gently so the carton's inertia does
-                # not displace the wrist off the body-clear plan (run-246); retreat_tuck is empty-handed.
-                self.motion.begin_joint_goal(goal, s.joint_positions,
-                                             slow=self.phase in ('tuck', 'pan'))
+                # sim-carton-level-carry-v1 / sim-carry-level-lift-v1: tuck/pan carry the welded carton ->
+                # keep it parallel to the ground through the swing (level_path => leveled WAYPOINT path +
+                # CARTON_LEVEL_PLAN_REJECTED gate; else the single leveled-endpoint goal; off =>
+                # byte-identical). Plan the fold gently so the carton's inertia does not displace the
+                # wrist off the body-clear plan (run-246). retreat_tuck is empty-handed -> never leveled.
+                if self.phase in ('tuck', 'pan'):
+                    return self._issue_level_carried_move(goal, s.joint_positions,
+                                                          slow=True, goal_tol=None)
+                self.motion.begin_joint_goal(goal, s.joint_positions, slow=False)
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
             try:

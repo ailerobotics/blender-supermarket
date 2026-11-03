@@ -4,6 +4,8 @@
   "carton_level": {
     "bound_deg": 2.0,
     "level_goals": true,
+    "level_path": true,
+    "path_waypoints": 12,
     "trip": true,
     "joints": ["ur_wrist_1_joint", "ur_wrist_2_joint", "ur_wrist_3_joint"],
     "tool_link": "ur_tool0"
@@ -12,8 +14,12 @@
   "_notes": [
     "bound_deg: the |roll|/|pitch| bound (deg) for 'parallel to the ground' -- the CARTON_TILT trip threshold AND the leveling target.",
     "level_goals: re-solve the carried FOLD goals (lift carry_lift_shape, tuck/pan cart_tuck_shape) so the welded carton's up-axis stays vertical, bounded to the existing clear carry wrist region (carry_wrist1_cap / carry_wrist2_min) so the self-collision shapes are respected. Preplace/place are left to their existing surface-dictated poses.",
+    "level_path (sim-carry-level-lift-v1, DEFAULT true): level_goals alone levels only the ENDPOINT, so the executor's joint-space path from the grasp pose to the leveled carry_lift_shape still passes through a tilted config (coldwin25: ~11 deg mid-path, CARTON_TILT at the lift). With level_path on, the carried LIFT and the tuck/pan carry are driven as a LEVELED WAYPOINT PATH (begin_joint_path: a multi-waypoint collision-OFF smoothstep, the wrist cluster re-solved at every waypoint) so the carton stays parallel to the ground THROUGHOUT. The predicted executed tilt is replayed before dispatch; a plan still over the bound is CARTON_LEVEL_PLAN_REJECTED (the move fails by name, no motion). level_path:false restores the single leveled-endpoint goal.",
+    "path_waypoints: requested segment count for the leveled path (default 12). The planner also tries {8,12,16} and picks the FEWEST waypoints that keep the predicted carry under bound_deg (fewer rest-to-rest segments => shorter executed carry).",
     "trip: while the carton is welded in a carried phase, FAIL the move with a named CARTON_TILT log line if the measured carton leaves level by more than bound_deg (never carry a visibly tilted carton silently). Keep this ON whenever level_goals is on.",
     "The carton's level up-axis is captured at the first carried pose (it rests level on the shelf at the grasp). The FK is the arm the host already loaded (args.urdf), Isaac-free.",
-    "GPU VALIDATION REQUIRED before relying on level_goals: the leveled fold shape must remain cuMotion-plannable / self-clear through the carry. The CPU bench (scripts/twin/tools/carton_level_bench.py) proves the leveling keeps every carried segment < bound on the real kinematics and inside the clear wrist region, but reachability/plannability in-sim is the integration lane's to confirm. If a leveled fold cannot plan, the trip names it (CARTON_TILT) rather than showing a tilt."
+    "RESIDUAL (stated, not widened): the lift's wrist cluster must cross between level branches inside the clear wrist region (a fully-level + self-clear + continuous path does not exist there), so the leveled waypoint path has an irreducible ~1.76 deg transition peak -- UNDER the 2 deg bound (CPU-replayed over the real coldwin25 lift), so collect completes. Keep the sim-carton-tilt-transient-debounce grace (0.15 s) on so a sub-grace execution spike at the transition is reported, not a fault.",
+    "COLLISION-OFF caveat: begin_joint_path drives the waypoints without a cuMotion collision plan (the waypoints are the explicit path), exactly like the existing straight-line joint escape. The lift RAISES the carton off the shelf and the tuck/pan fold is the shipped clear-region shape; GPU-validate that the leveled waypoint path stays collision-clear in-sim. If a leveled fold cannot level at all, the planner falls back to the single leveled-endpoint goal and the CARTON_TILT trip owns the result.",
+    "GPU VALIDATION REQUIRED before relying on level_goals/level_path: the leveled shapes must remain self-clear through the carry. The CPU bench (scripts/twin/tools/carton_level_bench.py run_executed_paths) proves the EXECUTED lift+pan stay < bound on the real kinematics and inside the clear wrist region; reachability/plannability in-sim is the integration lane's to confirm."
   ]
 }
