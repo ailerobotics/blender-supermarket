@@ -277,6 +277,12 @@ def main():
     # never produces a frame, so the generous wall grace cannot hide a real stall.
     bridge = RosTransferBridge(node,controller,
         startup_grace_seconds=float(config.get('startup_grace_seconds', 5.0)))
+    # sim-host-status-watchdog-v1: the payload ack waits (RosPayloadSync._wait) block the main host
+    # executor, silencing the controller-driven /manipulation/status stream for the whole bounded wait
+    # (the grasp/weld attach, the post-move_group-respawn carton reconcile, the release detach). Pulse a
+    # liveness heartbeat on the status topic each wait slice so the Isaac status watchdog sees the live
+    # host and defers to the wait's own named sim-budget (collectretreat1 false trip).
+    payload.heartbeat = bridge.heartbeat
     # Remember the synchronized native-contact packet before controller consumes it.
     original = bridge._sensors
     node.destroy_subscription(bridge.subscriptions[1])

@@ -485,10 +485,17 @@ def couple_start_poses(config, *, hitch_x=-0.62, cart_hitch_x=0.65):
 
 
 def dock_align_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
-    """Rewrite ``initial_staging`` so the ASSEMBLY spawns robot + cart at the configured couple dock (the
-    one dock source, :func:`resolve_couple_dock`) -- for COLD runs, so the robot couples to a cart that
-    already faces the dock heading the outbound lane expects (instead of the legacy EAST scenario yaw,
-    which leaves the coupled train facing east and the south side-bay lane unacquirable: coldwin25e).
+    """Rewrite ``initial_staging`` so the ASSEMBLY spawns the CART at the configured couple dock heading
+    (the one dock source, :func:`resolve_couple_dock`) -- for COLD runs, so the robot couples to a cart
+    that already faces the dock heading the outbound lane expects (instead of the legacy EAST scenario
+    yaw, which leaves the coupled train facing east and the south side-bay lane unacquirable: coldwin25e).
+
+    CART-ONLY: this re-poses ONLY the cart body (its hitch frame rides the cart pose + the fixed
+    articulation) and the carton that rests on it. The robot KEEPS the assembly's collect start pose. A
+    COLD run must begin its collect drive from the normal start pose (drive to the collect station, pick
+    the carton, then drive to the dock to couple); seating the robot at the dock too (the original PR 297
+    behaviour) stranded the base ~1 m behind the backstock Support and blocked the collect drive
+    (collectlevel2). The start_at=couple shortcut DOES seat both bodies -- see :func:`_staged_couple_scenario`.
 
     Returns ``(variant, record)`` or ``(scenario, None)`` byte-identical when no dock resolves OR the
     resolved dock already equals the scenario spawn (legacy configs whose lane start matches the scenario
@@ -503,26 +510,33 @@ def dock_align_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
     cur = tuple(float(v) for v in st0['cart_body_pose'])
     cart = res['cart_dock']
     # No-op (byte-identical) for a DERIVED dock that already equals the scenario spawn (legacy east lane).
-    # An explicit couple_dock equal to the scenario spawn still re-seats the robot, matching the shortcut.
+    # An explicit couple_dock equal to the scenario spawn still re-heads the cart, matching the shortcut.
     if (res['source'] == 'derived_from_lane_start'
             and math.dist(cur[:2], cart[:2]) <= 1e-4 and abs(_wrap(cur[2] - cart[2])) <= 1e-4):
         return scenario, None
     variant = copy.deepcopy(scenario)
     st = variant['initial_staging']
-    robot = res['robot_seat']
     dyaw = _wrap(float(cart[2]) - float(st['cart_body_pose'][2]))
-    st['robot_base_pose'] = list(robot)
+    # Cart-only re-pose: the robot base pose is left exactly as the scenario authored it (the collect
+    # start). Only the cart body (+ the carton riding it) move to the dock heading.
+    robot_unchanged = st.get('robot_base_pose')
     st['cart_body_pose'] = list(cart)
     yaws = dict(st.get('unit_yaws_world', {}))
     if _finite(yaws.get('cart')):                      # the carton (once on the cart) turns with it
         yaws['cart'] = _wrap(float(yaws['cart']) + dyaw)
     st['unit_yaws_world'] = yaws
-    record = {'mode': 'couple_dock_align', 'robot_base_pose': [round(v, 4) for v in robot],
+    record = {'mode': 'couple_dock_align', 'cart_only': True, 'robot_repositioned': False,
+              'robot_base_pose': (list(robot_unchanged) if isinstance(robot_unchanged, (list, tuple))
+                                  else robot_unchanged),
+              'couple_seat': [round(v, 4) for v in res['robot_seat']],
               'cart_body_pose': [round(v, 4) for v in cart], 'articulation': res['articulation'],
               'lane': res['lane'], 'dock_source': res['source'],
-              'note': ('cold-run assembly spawn dock-aligned: robot+cart spawned at the configured couple '
-                       'dock so the coupled train faces the outbound lane heading (fixes the east-spawn '
-                       'left the south lane unacquirable)')}
+              'note': ('cold-run CART dock-aligned, robot kept at its collect start pose: the cart spawns '
+                       'at the configured couple dock heading so the coupled train will face the outbound '
+                       'lane, while the robot still runs its collect drive from the start pose. couple_seat '
+                       'records where the base will seat at couple time (it is NOT moved there now). Fixes '
+                       'PR 297, which also moved the robot to the dock seat and stranded the collect drive '
+                       'behind the backstock Support (collectlevel2)')}
     return variant, record
 
 

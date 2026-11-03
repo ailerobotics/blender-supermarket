@@ -170,7 +170,28 @@ def test_plan_reuse_then_sequence_refusal_is_not_reused():
 # --------------------------------------------------- consecutive-run launcher control flow
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
-from run_mobile_restock import run_consecutive_warm  # noqa: E402
+from run_mobile_restock import run_consecutive_warm, warm_run_count  # noqa: E402
+
+
+# --------------------------------------------------- --warm-attempts / --consecutive-runs routing
+
+def test_warm_attempts_runs_consecutive_only_with_a_provider():
+    # sim-warm-reset-provider-v1: --warm-attempts 3 with a provider wired => 3 consecutive missions;
+    # without a provider it floors to 1 (the legacy run_warm_session retry path keeps the old meaning).
+    assert warm_run_count(warm_attempts=3, consecutive_runs=1, has_provider=True) == 3
+    assert warm_run_count(warm_attempts=3, consecutive_runs=1, has_provider=False) == 1
+
+
+def test_consecutive_runs_flag_is_independent_of_the_provider():
+    assert warm_run_count(warm_attempts=1, consecutive_runs=2, has_provider=False) == 2
+    assert warm_run_count(warm_attempts=1, consecutive_runs=2, has_provider=True) == 2
+
+
+def test_routing_takes_the_larger_of_the_two_and_floors_to_one():
+    assert warm_run_count(warm_attempts=5, consecutive_runs=2, has_provider=True) == 5
+    assert warm_run_count(warm_attempts=2, consecutive_runs=4, has_provider=True) == 4
+    for n in (0, -3, None):
+        assert warm_run_count(warm_attempts=n, consecutive_runs=n, has_provider=True) == 1
 
 
 def _reuse_outcome():

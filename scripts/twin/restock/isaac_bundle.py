@@ -293,6 +293,11 @@ class Bundle:
     # so the mission can be re-run in the SAME Isaac session without a re-boot/re-commission. None
     # unless config['warm_reset'] names a provider; the launcher runs a single attempt without it.
     warm_reset: object = None
+    # Opt-in warm-session stage census: a zero-arg callable returning a ``warm_session.StageState`` (the
+    # live post-teardown prim census vs the post-boot baseline) the consecutive-run loop feeds into the
+    # ``stage_clean`` gate. None unless the warm_reset provider exposes a ``stage_census`` (the production
+    # ``warm_reset_provider.build`` does); absent => the loop treats the stage as un-proven (cold boot).
+    warm_stage_state: object = None
     # Record of the opt-in recorded start staging (shortcut.staged_scenario) for mission.json; None
     # unless config['start_staging'] is set.
     start_staging: dict = None
@@ -390,12 +395,14 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
         build_scenario, start_staging = staged_scenario(scenario, config, **_hitch_geometry(config))
 
     # Cold-run dock-align (sim-couple-shortcut-settle-dt-v1, opt-in config['couple_dock_align']): spawn the
-    # assembly cart + robot at the configured couple dock (the ONE dock source -- the active outbound lane's
+    # assembly CART at the configured couple dock heading (the ONE dock source -- the active outbound lane's
     # couple_dock, else derived from its start + start_cart_yaw) so a COLD run's coupled train faces the
-    # outbound lane heading. Without it the cart spawns at the legacy EAST scenario yaw, the couple seats an
-    # east-facing train and the SOUTH side-bay lane is never acquired (coldwin25e). Only cold runs: a
-    # start_at=couple/transfer shortcut dock-aligns via staged_scenario above (same dock source). Default
-    # off and a no-op for a legacy config whose lane dock already equals the scenario spawn => byte-identical.
+    # outbound lane heading. The robot KEEPS its collect start pose (cart-only); it still runs the collect
+    # drive from the start, then drives to the dock to couple. Without dock-align the cart spawns at the
+    # legacy EAST scenario yaw, the couple seats an east-facing train and the SOUTH side-bay lane is never
+    # acquired (coldwin25e). Only cold runs: a start_at=couple/transfer shortcut dock-aligns BOTH bodies via
+    # staged_scenario above (same dock source). Default off and a no-op for a legacy config whose lane dock
+    # already equals the scenario spawn => byte-identical.
     cold_dock_align = None
     if config.get('couple_dock_align') and not config.get('start_at'):
         from .shortcut import dock_align_scenario
@@ -518,16 +525,25 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
     # Opt-in warm-session reset provider (dev iteration): config['warm_reset'] names a
     # lane-owned builder `module:function` called once here with the live scene; it returns the
     # per-attempt `reset(attempt, now)` callable (re-seat + baseline re-validation), or None to
-    # leave warm retry unavailable. The native World reset + robot re-seat + sensing-clock rebase
-    # live where the stage/camera do (integration + camera/stations lanes), so the Isaac-side reset
-    # is provided here rather than hard-coded into the launcher.
+    # leave warm retry unavailable. The production provider is twin.restock.warm_reset_provider:build.
+    # The native World reset + robot re-seat live on the live stage; the host-stack relaunch/re-sync is
+    # integration-lane-owned and delegated to the provider's config.warm_reset_hooks (see that module).
+    # The adapter + the variant start-state scenario are added to parts so the provider can stop the
+    # runtime and re-run shortcut.apply_start_state for the next start_at.
     warm_reset = None
+    warm_stage_state = None
     if config.get('warm_reset'):
         build_warm_reset = _resolve_factory(config, 'warm_reset')
+        if isinstance(parts, dict):
+            parts.setdefault('adapter', adapter)
         warm_reset = build_warm_reset(app=app, assembly=assembly, parts=parts, plan=plan,
-                                      config=config, output=output)
+                                      config=config, output=output, scenario=build_scenario)
+        # A provider that exposes stage_census (the production WarmResetProvider) feeds the stage_clean
+        # gate; a bare callable leaves warm_stage_state None (the loop then cannot prove the stage clean).
+        census = getattr(warm_reset, 'stage_census', None)
+        warm_stage_state = census if callable(census) else None
     return Bundle(adapter=adapter, recording=recording, _closers=tuple(closers),
-                  warm_reset=warm_reset,
+                  warm_reset=warm_reset, warm_stage_state=warm_stage_state,
                   start_staging=start_staging if start_staging is not None else cold_dock_align,
                   _render_closers=_render_closers(assembly))
 
