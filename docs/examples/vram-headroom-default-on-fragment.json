@@ -1,0 +1,38 @@
+{
+  "__doc__": "sim-robust-vram-headroom-default-on-v1 bounded GPU proof + acceptance numbers for the integration lane. This lane flips TWO footprint defaults ON (each opt-out via config) and makes the pre-boot VRAM guard's minimum HONEST (derived from the measured mission peak minus the default-on trims plus a stated margin, naming what holds the memory). The point: a run must boot AND complete on the 12 GiB RTX 3060 with ~2.5 GB already taken by the always-on whispr service (which is NEVER touched). The capstone config needs NO new keys to get the protection now -- it is the DEFAULT. Opt-out lines are below for a controlled A/B. GPU rule unchanged: one run at a time via flock /tmp/aile-gpu.lock, never --force, --heavy-threshold-mb 2500 for whispr, whispr never touched.",
+
+  "_default_on_now": "With NO 'vram_headroom' block and NO RESTOCK_STAGE_SCOPED_SENSING env, a run now gets: (1) the VRAM headroom monitor (samples FREE VRAM on the sim clock, sheds optional load by name below floor_mib, names the ceiling) AND (2) the proactive fm380 stage-scoped sensing teardown fired at collect->couple (returns the ~0.95 GB shelf-camera render product BEFORE the long couple->transfer->return creep span). coldwin16 proved both mechanisms under genuine pressure (free fell to 368 MiB at return; the monitor fired capture_rate + secondary_cameras by name and the run COMPLETED, where un-monitored coldwin13 took a native SIGSEGV at the ceiling).",
+
+  "_opt_out_for_an_A_B": {
+    "vram_headroom": false,
+    "sensing_teardown": {"stage_scoped": false},
+    "_note": "Set EITHER/BOTH to reproduce the pre-flip behaviour. The env RESTOCK_STAGE_SCOPED_SENSING=0 is an equivalent legacy opt-out for the teardown. Absent => both ON."
+  },
+
+  "_tune_the_monitor_optional": {
+    "vram_headroom": {"enabled": true, "floor_mib": 800, "sample_period_s": 0.2,
+                      "shed_order": ["capture_rate", "arm_feed_economy", "secondary_cameras"]}
+  },
+
+  "_preboot_guard": "The honest pre-boot guard is scripts/twin/tools/vram_guard.py. One line (the orchestrator runs it before boot): `python3 scripts/twin/tools/vram_guard.py --config <mission-runtime.json>`. It DERIVES the minimum FREE VRAM from gpu_budget's measured mission footprint (the configured feeds) MINUS the default-on stage-scoped teardown saving (~948 MiB) PLUS a stated margin (default 400 MiB), and its refusal line names the resident holders (whispr) parsed from nvidia-smi. Exit 0 = enough free; exit 6 = refuse (names the derived minimum + its breakdown + what holds the memory). `--margin-mib` tunes the stated margin; `--min-free-mib` overrides (discouraged).",
+
+  "_acceptance_numbers": {
+    "derived_min_free_default_single_feed": "9082 MiB  (= mission peak 9630 - teardown 948 + margin 400)",
+    "old_fixed_min": "9500 MiB (removed -- unrelated to any measured peak; refused free=9473 beside 2.44 GB whispr yet was itself below the real ~9630 footprint)",
+    "boots_beside_244gb_whispr": "free ~9473 MiB (card 12288 - whispr ~2498 - ~317 other) >= derived 9082 => the honest guard now ADMITS the boot the fixed 9500 wrongly refused",
+    "teardown_opt_out_min": "9544 MiB (no trim => mission needs its full footprint free -- the guard honestly refuses to boot it beside 2.44 GB whispr)",
+    "mast_second_feed_min": "9568 MiB (opt-in mast camera_1 raises the minimum)",
+    "expected_operating_peak_target": "coldwin16 peaked 11697 MiB used WITHOUT the proactive teardown (its secondary_cameras shed fired only at RETURN). With the teardown DEFAULT-ON firing at collect->couple, the shelf ~0.95 GB is gone before the creep window => expect the creep peak ~10.7-10.8 GB used (coldwin16 - ~948), i.e. headroom ~1.5 GB above the card floor beside 2.5 GB whispr. The vram_headroom monitor remains the reactive net if the internal RTX allocator creep still brushes the floor."
+  },
+
+  "_run_A_default_on": "FULL CAPSTONE with NO vram_headroom/sensing_teardown keys and NO RESTOCK_STAGE_SCOPED_SENSING (= all default-on). PASS = mission.json state=complete; STAGE_SCOPED_SENSING torn down line present at the collect->couple boundary (shelf freed, unless a camera-mode transfer/sensor-verify keeps it); vram_headroom_mode=on in mission.json; vram-headroom.json peak_used recorded; peak_used MiB <= coldwin16's 11697 (expect ~10.7-10.8 GB); whispr untouched; lock released.",
+
+  "_run_B_guard_honest": "Pre-boot, with whispr resident at ~2.4-2.5 GB and the card otherwise idle, run `python3 scripts/twin/tools/vram_guard.py --config <capstone-runtime.json>`. PASS = exit 0 with a line like `VRAM_GUARD OK: free=<~9473> MiB >= min 9082 MiB [min = mission peak 9630.0 MiB - teardown 948 MiB + margin 400 MiB]`. Then flip sensing_teardown off in the config and re-run the guard: PASS = exit 6 (or a higher min) naming whispr as the holder (the opt-out config honestly needs more free VRAM).",
+
+  "_run_C_opt_out_byte_identical": "Controlled A/B: a staged transfer (start_at=transfer, recorded_bay_park, stop_after=verify) with BOTH opt-outs set (vram_headroom:false + sensing_teardown:{stage_scoped:false}). PASS = state=complete AND no STAGE_SCOPED_SENSING teardown line AND no vram_headroom_mode in mission.json (restores the pre-flip path).",
+
+  "_suggested_env": {
+    "RESTOCK_RENDER_WIDTH": "960 (unchanged -- render resolution is NOT the VRAM lever, memory mission-vram-ceiling-12gb)",
+    "RESTOCK_STAGE_SCOPED_SENSING": "leave UNSET (teardown is default-on via config now); set to 0 only to force the teardown off as a legacy override"
+  }
+}

@@ -598,7 +598,8 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # whenever an executed stage still reads it; collect-only / fully ground-truth missions free it
     # (byte-identical). Derived from config only, so it is inert unless the teardown is also wired.
     from .mission import bounded_stages as _bounded_stages
-    from .sensing_sources import shelf_camera_needed as _shelf_camera_needed
+    from .sensing_sources import (shelf_camera_needed as _shelf_camera_needed,
+                                   stage_scoped_teardown_enabled as _stage_scoped_teardown_enabled)
     from . import ground_truth_verify as _ground_truth_verify
     _active_stages = _bounded_stages(config.get('stages'), config.get('stop_after'), config.get('start_at'))
     _start_at = config.get('start_at')
@@ -790,10 +791,15 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         # => byte-identical stride cadence. Does NOT widen the freshness window.
         collect_observe_force_render_ticks=int(config.get('collect_observe_force_render_ticks', 0)),
         # fm380: stage-scoped sensing -- destroy the collect-only station cameras' render products at
-        # the collect->couple boundary to return their VRAM. SIM-ONLY, opt-in; unset => None => never
-        # torn down => byte-identical. The cart camera + nav/nvblox + walkthrough recorder are untouched.
+        # the collect->couple boundary to return their VRAM (~0.95 GB shelf, fm380-measured), SIM-ONLY.
+        # DEFAULT ON (sim-robust-vram-headroom-default-on-v1): firing it PROACTIVELY at collect->couple
+        # (rather than only reactively via the vram_headroom secondary_cameras shed) gives the RTX
+        # allocator that headroom through the whole couple->transfer->return creep span -- the report's
+        # named mechanism. keep_shelf_camera (passed into build_sensing_sources above) protects a camera
+        # a later stage still reads, so a camera-mode transfer / sensor verify is untouched. Opt out with
+        # config {"sensing_teardown": {"stage_scoped": false}} or the env RESTOCK_STAGE_SCOPED_SENSING=0.
         stage_scoped_teardown=(assembly.sensing_sources.get('stage_scoped_teardown')
-                               if os.environ.get('RESTOCK_STAGE_SCOPED_SENSING') else None),
+                               if _stage_scoped_teardown_enabled(config) else None),
         # Demo-cut evidence: RESTOCK_TRACE_POSES=1 adds the carton + cart world poses (and Isaac stage
         # time) to nav-trace.jsonl so scripts/check_walkthrough_run.py can prove the carton rode on the
         # rollwagen and landed on the bay. Observation only; unset => None => byte-identical trace.
@@ -817,7 +823,8 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     # byte-identical) so a native Isaac crash still leaves a reconstructable verdict. Best-effort.
     from .crash_record import ProgressWriter
     port._progress_writer = ProgressWriter(output)
-    # Opt-in VRAM headroom monitor (config['vram_headroom']; absent/false => None => byte-identical).
+    # VRAM headroom monitor (config['vram_headroom']; DEFAULT ON, opt out with false). Absent => the
+    # enabled default (sim-robust-vram-headroom-default-on-v1); sheds fire only under genuine pressure.
     from . import vram_headroom as _vram
     _vram_cfg = _vram.from_config(config)
     if _vram_cfg.active:

@@ -327,8 +327,9 @@ repo's `scenes/`, `export/` or `renders/`.
 - **VRAM headroom monitor + crash-safe recording**: the full capstone runs within ~500 MiB of the
   12 GiB top (completes peak ~11.7 GB, whispr ~2.2 GB resident) and can SIGSEGV late (coldwin13, native,
   no `mission.json`). Two pieces (`data/sim-robust-vram-headroom-v1/report.md` has the component budget
-  table + per-run peaks). (1) **Opt-in monitor** `scripts/twin/restock/vram_headroom.py` (runtime key
-  `vram_headroom`, DEFAULT OFF ⇒ byte-identical): samples used VRAM on the SIM clock sub-second (NVML or
+  table + per-run peaks). (1) **Headroom monitor** `scripts/twin/restock/vram_headroom.py` (runtime key
+  `vram_headroom`, **DEFAULT ON**; opt out with `false`, see `data/sim-robust-vram-headroom-default-on-v1/`):
+  samples used VRAM on the SIM clock sub-second (NVML or
   a background nvidia-smi poller), and below `floor_mib` (default 800) sheds optional load in a fixed
   named ratchet — `capture_rate` (widen the walkthrough record stride) → `arm_feed_economy`
   (stage-blocked in collect/transfer/verify, no runtime actuator — set `masked_depth.economy` at boot
@@ -922,7 +923,9 @@ repo's `scenes/`, `export/` or `renders/`.
   masked-depth bridge stamps frames with the publishing tick's sim time, so a pre-pause buffer would
   reach nvblox as current. The unrendered 40–72 ms tick caps the sim near 0.3×. Replay estimator
   `scripts/twin/tools/estimate_sim_speed.py`; guard audit `~/firstmate/data/sim-video-speedup-v1/report.md`.
-  **Stage-scoped teardown vs a later camera reader** (`RESTOCK_STAGE_SCOPED_SENSING`): the fm381
+  **Stage-scoped teardown vs a later camera reader** (`sensing_sources.stage_scoped_teardown_enabled`,
+  **DEFAULT ON**; opt out with config `sensing_teardown:{stage_scoped:false}` or env
+  `RESTOCK_STAGE_SCOPED_SENSING=0`; `data/sim-robust-vram-headroom-default-on-v1/`): the fm381
   teardown DESTROYS (not pauses) the "unused" shelf camera at the pick lift to free VRAM, but a
   camera-mode transfer or the verify-stage `InventoryVerifier` reads the shelf camera AFTER that →
   the post-place verify read an expired prim (`Accessed invalid expired 'Camera' prim`). The teardown

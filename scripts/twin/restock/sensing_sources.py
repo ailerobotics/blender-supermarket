@@ -199,6 +199,39 @@ def shelf_camera_needed(active_stages, *, transfer_ground_truth=False, verify_gr
     return False
 
 
+def stage_scoped_teardown_enabled(config):
+    """Whether the proactive collect->couple stage-scoped sensing teardown is wired (pure).
+
+    **DEFAULT ON** (sim-robust-vram-headroom-default-on-v1). Firing the fm380/fm381 teardown
+    PROACTIVELY at the pick lift (not only reactively via the ``vram_headroom`` ``secondary_cameras``
+    shed) returns the ~0.95 GB shelf-camera render product before the long couple->transfer->return
+    render span, giving the RTX allocator that headroom through the whole creep window. The
+    ``keep_shelf_camera`` guard (``shelf_camera_needed``) still protects a camera a later stage reads,
+    so a camera-mode transfer / sensor verify is byte-identical regardless of this flag.
+
+    Resolution order:
+      * env ``RESTOCK_STAGE_SCOPED_SENSING`` wins when set -- a falsey value
+        (``0``/``false``/``off``/``no``/empty) forces OFF, anything else forces ON (legacy override);
+      * else ``config['sensing_teardown']`` -- ``false`` or ``{"stage_scoped": false}`` opts OUT;
+      * else ON.
+    Fails closed on a malformed block so a typo refuses the boot rather than silently disabling it."""
+    env = os.environ.get('RESTOCK_STAGE_SCOPED_SENSING')
+    if env is not None:
+        return env.strip().lower() not in ('', '0', 'false', 'off', 'no')
+    block = config.get('sensing_teardown') if isinstance(config, dict) else None
+    if block is None:
+        return True
+    if block is False or block is True:
+        return bool(block)
+    if not isinstance(block, dict):
+        raise ValueError('sensing_teardown must be a bool or an object such as '
+                         '{"stage_scoped": false}')
+    value = block.get('stage_scoped', True)
+    if not isinstance(value, bool):
+        raise ValueError('sensing_teardown.stage_scoped must be a bool')
+    return value
+
+
 def _run_stage_scoped_teardown(design, cameras, keep_shelf_camera, *, destroy=None, stage=None):
     """Pure-ish core of ``stage_scoped_teardown`` (CPU-testable): DESTROY the ``_unused_sensing_camera_ids``
     render products, EXCEPT the shelf camera when ``keep_shelf_camera`` is set (a later active stage still

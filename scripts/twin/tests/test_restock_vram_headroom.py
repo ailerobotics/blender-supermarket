@@ -13,12 +13,20 @@ from twin.restock.ground_truth_verify import mission_modes
 
 
 # ---------------------------------------------------------------- config resolution
-def test_absent_config_is_disabled_byte_identical():
-    for config in ({}, {'vram_headroom': None}, {'vram_headroom': False}):
+def test_absent_config_is_default_on():
+    # sim-robust-vram-headroom-default-on-v1: absent/null => the enabled default monitor.
+    for config in ({}, {'vram_headroom': None}):
         cfg = V.from_config(config)
-        assert cfg == V.VramHeadroom()
-        assert cfg.active is False
-        assert V.summary_fields(config) == {}
+        assert cfg.active is True
+        assert cfg.floor_mib == V.FLOOR_MIB_DEFAULT          # the default levers
+        assert V.summary_fields(config)['vram_headroom_mode'] == 'on'
+
+
+def test_explicit_false_opts_out_disabled():
+    cfg = V.from_config({'vram_headroom': False})
+    assert cfg == V.VramHeadroom()
+    assert cfg.active is False
+    assert V.summary_fields({'vram_headroom': False}) == {}
 
 
 def test_enabled_shapes():
@@ -44,8 +52,10 @@ def test_summary_fields_provenance_only_when_on():
     on = V.summary_fields({'vram_headroom': {'enabled': True}})
     assert on['vram_headroom_mode'] == 'on'
     assert on['vram_headroom']['floor_mib'] == V.FLOOR_MIB_DEFAULT
-    # mission_modes merges it: off => no key; on => the mode key present.
-    assert 'vram_headroom_mode' not in mission_modes({})
+    # mission_modes merges it: default-on => the mode key present even for an absent block; the
+    # explicit opt-out (false) removes it.
+    assert mission_modes({})['vram_headroom_mode'] == 'on'
+    assert 'vram_headroom_mode' not in mission_modes({'vram_headroom': False})
     assert mission_modes({'vram_headroom': {'enabled': True}})['vram_headroom_mode'] == 'on'
 
 

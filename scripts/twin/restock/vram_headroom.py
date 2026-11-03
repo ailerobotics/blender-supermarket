@@ -9,9 +9,11 @@ on the SIM clock (sub-second), and when free headroom drops below a configurable
 optional load in a fixed, named order, logging each shed by name with the reading, and names the
 ceiling by name if it is reached anyway.
 
-One runtime-config key turns it on (absent/`false` => byte-identical, no monitor constructed)::
+The monitor is **DEFAULT ON** (sim-robust-vram-headroom-default-on-v1): an absent key gets the
+enabled default. Opt out (restore the no-monitor path) with `false`::
 
-    "vram_headroom": {"enabled": true, "floor_mib": 800}
+    "vram_headroom": false                               # opt out
+    "vram_headroom": {"enabled": true, "floor_mib": 800} # tune the levers
 
 Design:
 * ``floor_mib`` (default 800) -- shed when FREE VRAM drops below this.
@@ -58,7 +60,9 @@ NVBLOX_FEED_STAGES = frozenset({'collect', 'transfer', 'verify'})
 
 @dataclass(frozen=True)
 class VramHeadroom:
-    """Resolved headroom-monitor levers. Defaults = disabled (byte-identical)."""
+    """Resolved headroom-monitor levers. The bare ``VramHeadroom()`` is the DISABLED sentinel (the
+    explicit ``vram_headroom: false`` opt-out); the monitor is DEFAULT ON otherwise -- see
+    :func:`from_config` (sim-robust-vram-headroom-default-on-v1)."""
     enabled: bool = False
     floor_mib: float = FLOOR_MIB_DEFAULT
     card_mib: float = CARD_MIB_DEFAULT
@@ -88,11 +92,18 @@ def _positive(name, value):
 
 
 def from_config(config):
-    """Resolve ``config['vram_headroom']`` (absent/false => disabled). Fails closed on a typo so a bad
-    key refuses the boot rather than silently running unprotected."""
+    """Resolve ``config['vram_headroom']``. **DEFAULT ON** (sim-robust-vram-headroom-default-on-v1):
+    an absent key (or an explicit ``null``) yields the enabled default monitor, so a run on the 12 GiB
+    card gets the headroom safety net without having to ask -- coldwin16 fired its named sheds under
+    genuine pressure (free fell to 368 MiB at return) and still COMPLETED, where the un-monitored
+    coldwin13 took a native SIGSEGV at the ceiling. Opt OUT with ``"vram_headroom": false`` (or
+    ``{"enabled": false}``). Fails closed on a typo so a bad key refuses the boot rather than silently
+    running unprotected."""
     block = config.get('vram_headroom') if isinstance(config, dict) else None
-    if block is None or block is False:
-        return VramHeadroom()
+    if block is False:
+        return VramHeadroom()                     # explicit opt-out => disabled
+    if block is None:
+        return VramHeadroom(enabled=True)         # absent/null => DEFAULT ON
     if block is True:
         block = {'enabled': True}
     if not isinstance(block, dict):
