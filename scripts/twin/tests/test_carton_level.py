@@ -262,3 +262,86 @@ def test_level_place_ik_raises_when_target_is_unreachable():
 def test_level_place_flag_resolves():
     assert cl.resolve_level_config(True).level_place is True
     assert cl.resolve_level_config({'level_place': False}).level_place is False
+
+
+# ----------------------------------------------- sustained-tilt debounce (grace window)
+# sim-carton-tilt-transient-debounce-v1. These are PURE (no URDF/Isaac): they drive the debounce
+# with a crafted (roll, pitch, sim-time) sequence -- the exact shape the controller feeds it.
+
+def test_tilt_grace_resolves_and_defaults():
+    assert cl.resolve_level_config(True).tilt_grace_s == cl.DEFAULT_TILT_GRACE_S
+    assert cl.resolve_level_config({'tilt_grace_s': 0.25}).tilt_grace_s == 0.25
+    assert cl.resolve_level_config({'tilt_grace_s': 0.0}).tilt_grace_s == 0.0
+    with pytest.raises(ValueError):
+        cl.resolve_level_config({'tilt_grace_s': -0.1})
+
+
+def test_one_tick_spike_passes_and_is_logged():
+    """A single tick over the bound, then back within it => a CARTON_TILT_TRANSIENT (no trip)."""
+    d = cl.TiltDebounce(bound_deg=2.0, grace_s=0.15)
+    dt = 1.0 / 60.0
+    assert d.observe(0 * dt, 0.1, 0.5).trip is None                 # level
+    v = d.observe(1 * dt, -0.56, 2.08)                              # one-tick spike over 2.0
+    assert v.trip is None and v.transient is None                  # within grace -> hold, no log yet
+    assert d.exceeding
+    v = d.observe(2 * dt, 0.1, 1.9)                                 # back within the bound
+    assert v.trip is None
+    assert v.transient is not None and v.transient.startswith(cl.CARTON_TILT_TRANSIENT)
+    assert 'peak=2.08' in v.transient
+    assert not d.exceeding                                          # exceedance window cleared
+
+
+def test_sustained_tilt_trips_at_window_end():
+    """Tilt held over the bound for the whole grace window trips -- at the window end, not before."""
+    grace = 0.15
+    d = cl.TiltDebounce(bound_deg=2.0, grace_s=grace)
+    dt = 1.0 / 60.0
+    tripped_at = None
+    for i in range(40):
+        now = i * dt
+        v = d.observe(now, 0.2, 2.5)                                # continuously off level
+        if v.trip is not None:
+            tripped_at = now
+            break
+    assert tripped_at is not None
+    # trips the first tick at/after grace, never before it
+    assert tripped_at >= grace - 1e-9
+    assert tripped_at < grace + dt + 1e-9
+    assert cl.CARTON_TILT in v.trip and 'sustained' in v.trip
+
+
+def test_broken_exceedance_does_not_trip():
+    """A tilt that dips back within the bound before the window elapses never trips (window unbroken)."""
+    d = cl.TiltDebounce(bound_deg=2.0, grace_s=0.15)
+    dt = 1.0 / 60.0
+    for i in range(100):
+        roll, pitch = (0.0, 2.3) if (i % 4 == 0) else (0.0, 0.5)   # spike every 4th tick only
+        v = d.observe(i * dt, roll, pitch)
+        assert v.trip is None                                      # never sustained -> never trips
+
+
+def test_grace_zero_is_immediate_trip_legacy():
+    """grace 0 reproduces the legacy immediate trip on the first crossing tick (byte-identical)."""
+    d = cl.TiltDebounce(bound_deg=2.0, grace_s=0.0)
+    assert d.observe(0.0, 0.1, 1.5).trip is None
+    v = d.observe(1.0 / 60.0, -0.56, 2.01)
+    assert v.trip is not None and v.trip.startswith(cl.CARTON_TILT)
+    assert 'sustained' not in v.trip                               # the plain legacy message
+
+
+def test_window_scales_with_physics_dt():
+    """The grace window is a FRAME-COUNT budget: scaling it by freshness_scale(dt) trips after the
+    SAME number of physics ticks at any step (1/60, 1/36, 1/30)."""
+    from twin.restock.physics_step import freshness_scale, DEFAULT_DT
+    base_grace = 0.15                                              # at 1/60
+    def ticks_to_trip(dt):
+        d = cl.TiltDebounce(bound_deg=2.0, grace_s=base_grace * freshness_scale(dt))
+        for i in range(200):
+            if d.observe(i * dt, 0.0, 3.0).trip is not None:
+                return i
+        return None
+    n60 = ticks_to_trip(DEFAULT_DT)
+    n36 = ticks_to_trip(1.0 / 36.0)
+    n30 = ticks_to_trip(1.0 / 30.0)
+    assert n60 == n36 == n30                                       # identical frame budget across steps
+    assert n60 == math.ceil(base_grace / DEFAULT_DT)               # 9 ticks at 1/60

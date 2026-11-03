@@ -35,9 +35,31 @@ import numpy as np
 
 # The log token the executor prints when a carried carton leaves level by more than the bound.
 CARTON_TILT = 'CARTON_TILT'
+# The log token for a SUB-GRACE tilt spike that is reported but does NOT fail the move
+# (sim-carton-tilt-transient-debounce-v1): a one-to-few-tick tracking/impulse excursion.
+CARTON_TILT_TRANSIENT = 'CARTON_TILT_TRANSIENT'
 # Default bound (deg) on |roll| and |pitch| while carrying -- the captain's "parallel to the
 # ground"; 2 deg is the brief's stated threshold for naming a move off-level.
 DEFAULT_TILT_BOUND_DEG = 2.0
+# Default SUSTAINED-tilt grace window (sim-seconds AT 1/60 physics step). A carried-carton tilt must
+# exceed the bound CONTINUOUSLY for this long before the CARTON_TILT trip FAILS the move; a shorter
+# spike logs CARTON_TILT_TRANSIENT (peak + duration) and proceeds. Why 0.15 s / 9 physics ticks at
+# 1/60 (sim-carton-tilt-transient-debounce-v1):
+#   * the observed transient is one-to-few ticks -- collectacc1 tripped at the LIFT re-plan restart
+#     (a move_group SIGABRT respawn + carton re-attach + plan re-delivery, then the arm re-accelerated
+#     from the settled hold along the re-sent trajectory). The joint->carton-tilt sensitivity is ~1:1
+#     (CPU-measured at carry_lift_shape), so a ~2 deg wrist/elbow tracking excursion momentarily crosses
+#     the 2.00 deg bound; the CPU-reconstructed leveled lift PATH is level to <0.01 deg throughout, so
+#     the 2.01 deg was an EXECUTION transient, not a planned-pose tilt;
+#   * 9 ticks covers "a few ticks" with margin while staying under the 1/3 s walkthrough capture
+#     interval, so a debounced spike cannot yield a visibly-tilted RECORDED frame (the captain's
+#     "nothing visually wrong on camera"); and
+#   * 0.15 s is ~2 orders of magnitude below the multi-second carry, so a GENUINELY off-level carton
+#     (which stays tilted the whole carry) still trips within 9 ticks -- effectively immediately at
+#     mission scale. The window is a FRAME-COUNT budget: scale it onto a raised physics step with
+#     twin.restock.physics_step.freshness_scale (identical frame margin, re-expressed on the running
+#     clock). 0.0 => legacy IMMEDIATE trip on the first crossing tick (byte-identical to pre-debounce).
+DEFAULT_TILT_GRACE_S = 0.15
 # The arm joints (ARM order) a level-orientation waypoint is allowed to re-solve. The wrist
 # cluster sets the tool attitude; pan/lift/elbow carry the position the carry plan chose.
 DEFAULT_LEVEL_JOINTS = ('ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_joint')
@@ -174,10 +196,17 @@ class LevelConfig:
     level_place: bool = True
     joints: tuple = DEFAULT_LEVEL_JOINTS
     tool_link: str = 'ur_tool0'
+    # sim-carton-tilt-transient-debounce-v1: SUSTAINED-tilt grace (sim-seconds AT 1/60). The trip FAILS
+    # only when the measured tilt exceeds the bound CONTINUOUSLY for this long; a shorter spike logs
+    # CARTON_TILT_TRANSIENT and proceeds. 0 => legacy immediate trip. The controller rebases this onto
+    # the running physics step (freshness_scale) so it is a constant FRAME-COUNT budget.
+    tilt_grace_s: float = DEFAULT_TILT_GRACE_S
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
             raise ValueError('carton_level.bound_deg must be a finite positive number of degrees')
+        if not (math.isfinite(self.tilt_grace_s) and self.tilt_grace_s >= 0):
+            raise ValueError('carton_level.tilt_grace_s must be a finite non-negative number of seconds')
         from twin.restock_manipulation.cad_tool import ARM_JOINTS
         bad = [j for j in self.joints if j not in ARM_JOINTS]
         if bad or not self.joints:
@@ -188,8 +217,8 @@ class LevelConfig:
 def resolve_level_config(spec):
     """Normalise a ``carton_level`` config value into a ``LevelConfig`` or ``None`` (off =>
     byte-identical). Accepts absent/None/False/'0'/'off' => None; True/'on'/{} => defaults; a
-    mapping with optional ``bound_deg``, ``level_goals``, ``trip``, ``level_weld``, ``level_place``,
-    ``joints``, ``tool_link``. Raises on a malformed value so a typo fails loudly at boot."""
+    mapping with optional ``bound_deg``, ``tilt_grace_s``, ``level_goals``, ``trip``, ``level_weld``,
+    ``level_place``, ``joints``, ``tool_link``. Raises on a malformed value so a typo fails loudly at boot."""
     if spec is None or spec is False:
         return None
     if isinstance(spec, str):
@@ -206,6 +235,8 @@ def resolve_level_config(spec):
     kw = {}
     if 'bound_deg' in spec and spec['bound_deg'] is not None:
         kw['bound_deg'] = float(spec['bound_deg'])
+    if 'tilt_grace_s' in spec and spec['tilt_grace_s'] is not None:
+        kw['tilt_grace_s'] = float(spec['tilt_grace_s'])
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
@@ -508,6 +539,95 @@ def tilt_trip(roll_deg, pitch_deg, bound_deg=DEFAULT_TILT_BOUND_DEG):
     msg = (f'{CARTON_TILT} carried carton off level: roll={float(roll_deg):+.2f} '
            f'pitch={float(pitch_deg):+.2f} deg exceeds bound {float(bound_deg):.2f} deg')
     return msg, worst
+
+
+# ----------------------------------------------------- sustained-tilt debounce (grace window)
+
+@dataclass(frozen=True)
+class TiltVerdict:
+    """The decision for one carried tick (sim-carton-tilt-transient-debounce-v1).
+
+    * ``trip`` -- the ``CARTON_TILT`` log/fault message when the tilt has exceeded the bound
+      CONTINUOUSLY for the whole grace window (the caller FAILS the move), else ``None``. The
+      message keeps the legacy ``CARTON_TILT carried carton off level: ...`` prefix (so downstream
+      reason-string matching is unchanged) and appends the sustained duration + peak.
+    * ``transient`` -- the ``CARTON_TILT_TRANSIENT`` log line for a SUB-grace spike that just ENDED
+      (returned to within the bound) -- the caller LOGS it and PROCEEDS, else ``None``.
+
+    A tick that is still exceeding but within the grace, or a plainly level tick, yields both
+    ``None`` (proceed silently)."""
+    trip: object = None        # str | None
+    transient: object = None   # str | None
+
+
+class TiltDebounce:
+    """Debounce the CARTON_TILT trip over a SUSTAINED sim-time grace window.
+
+    Fed the measured carton (roll, pitch) each carried tick with the tick's sim time, it fails the
+    move only when the tilt stays over the bound CONTINUOUSLY for ``grace_s`` sim-seconds -- so a
+    one-to-few-tick tracking/impulse spike (collectacc1's lift re-plan restart) is reported as
+    ``CARTON_TILT_TRANSIENT`` with its peak + duration but does NOT abort, while a genuinely off-level
+    carry (tilted for the whole multi-second carry) still trips within the window. Any tick within the
+    bound RESETS the continuous-exceedance timer (the window must be unbroken).
+
+    ``grace_s <= 0`` reproduces the legacy IMMEDIATE trip on the first crossing tick, so a run with the
+    grace disabled is byte-identical to the pre-debounce controller. PURE / CPU unit-tested; the
+    controller passes it the physics-step-scaled grace so the window is a constant frame-count budget.
+    """
+
+    def __init__(self, bound_deg=DEFAULT_TILT_BOUND_DEG, grace_s=DEFAULT_TILT_GRACE_S):
+        self.bound_deg = float(bound_deg)
+        self.grace_s = max(0.0, float(grace_s))
+        self.reset()
+
+    def reset(self):
+        """Clear the continuous-exceedance state (call on a phase/move boundary)."""
+        self._start = None          # sim time the current unbroken exceedance began (None => level now)
+        self._peak = 0.0            # max worst(|roll|,|pitch|) seen in the current exceedance
+        self._peak_rp = (0.0, 0.0)  # (roll, pitch) at the peak
+        self._tripped = False       # latched: once sustained-tripped, stay tripped (avoid re-arming)
+
+    @property
+    def exceeding(self):
+        return self._start is not None
+
+    def observe(self, now, roll_deg, pitch_deg):
+        """Advance the debounce one tick. Returns a ``TiltVerdict``. ``now`` is the sim time (seconds)."""
+        roll = float(roll_deg)
+        pitch = float(pitch_deg)
+        worst = max(abs(roll), abs(pitch))
+        now = float(now)
+        if worst <= self.bound_deg:
+            # Within the bound -- end any ongoing exceedance (report it as a sub-grace transient).
+            if self._start is not None and not self._tripped:
+                dur = max(0.0, now - self._start)
+                transient = (f'{CARTON_TILT_TRANSIENT} carried carton spiked off level: peak={self._peak:.2f}'
+                             f' deg (roll={self._peak_rp[0]:+.2f} pitch={self._peak_rp[1]:+.2f}) for'
+                             f' {dur:.3f}s (<= grace {self.grace_s:.3f}s) -- reported, not a fault')
+                self._start = None
+                self._peak = 0.0
+                self._peak_rp = (0.0, 0.0)
+                return TiltVerdict(trip=None, transient=transient)
+            self._start = None
+            self._peak = 0.0
+            self._peak_rp = (0.0, 0.0)
+            return TiltVerdict()
+        # Exceeding the bound this tick.
+        if self._start is None:
+            self._start = now
+            self._peak = worst
+            self._peak_rp = (roll, pitch)
+        elif worst > self._peak:
+            self._peak = worst
+            self._peak_rp = (roll, pitch)
+        dur = max(0.0, now - self._start)
+        if dur >= self.grace_s and not self._tripped:
+            self._tripped = True
+            base = tilt_trip(roll, pitch, self.bound_deg)[0]
+            msg = (f'{base} (sustained {dur:.3f}s > grace {self.grace_s:.3f}s, peak {self._peak:.2f} deg)'
+                   if self.grace_s > 0 else base)
+            return TiltVerdict(trip=msg, transient=None)
+        return TiltVerdict()
 
 
 # --------------------------------------------------------------- weld attach level
