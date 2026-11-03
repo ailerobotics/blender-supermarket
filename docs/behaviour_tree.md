@@ -52,7 +52,11 @@ restock_root  (Sequence, memory=False)        — re-evaluated every tick
   │    ├─ health_guard    stuck / low_battery → brake to safe park + mission.fail  (FAILS → tears tree down)
   │    ├─ human_safety    slow-zone → slow;  stop-zone → safety hold + pause arm;  resume when clear
   │    ├─ obstacle_avoid  dynamic_obstacle / blocked_aisle → safety hold + request re-plan; resume when clear
-  │    └─ baseline_guard  baseline_expired → hold + re-commission the station baseline via the provider
+  │    ├─ baseline_guard  baseline_expired → hold + re-commission the station baseline via the provider
+  │    └─ recoveries  (Sequence, memory=False) — OBSERVE lane-owned recoveries (no reaction, no pause)
+  │         ├─ nav_recovery  coupled break-away / heading-hold / momentum-launch during the tow
+  │         ├─ vram_shed      the VRAM headroom shed ratchet
+  │         └─ host_estop     the named host station-liveness / e-stop trip + release
   └─ mission   (Sequence, memory=True)         — resumes at the running stage
        ├─ stage:collect  (StageRetry) → "collect steps" (Sequence, memory=True):
        │     drive→pick · perceive carton · grasp·lift·tuck · drive→rollwagen · perceive deck · place · verify placed
@@ -102,24 +106,52 @@ from the scenario list.
 | grasp/seal/goal/tracking miss (`grasp_failed`, `seal_failed`, `goal_miss`, `tracking_miss`) | a stage's `step_stage` reason | classified by `StageRetry` → `reobserve` (manip) or `replan` (nav) recovery, bounded retry, honest fail. |
 | **stuck / low battery** (`stuck`, `low_battery`) | health lane / scenario | `health_guard` brakes to a safe park and `mission.fail`s, FAILS so the root tears the tree down. |
 
-### Events the tree does **not** see today (handled by scripted code)
+### Reactive recoveries the tree now OBSERVES (sim-bt-reactive-recoveries-v1)
 
-These are real run conditions that are handled **outside** the tree, by host/runtime/adapter code,
-and surface to the tree only as a stage-step failure (if they fail the step) or not at all. They are
-the follow-ups where a new reactive stage/handler would have to be wired:
+Three high-value recoveries that were previously invisible are now surfaced as **observe-only**
+`RecoveryGuard` nodes under the `recoveries` sequence, so the live `/bt` view and the generated
+diagram/timeline show the recovery engage and return to nominal. **The tree does not perform or
+change them** — the owning lane still does all the work; each guard only reads the matching event,
+logs the engage/update/return-to-nominal (with the sim time, so the aligned diagram can seek the
+video), and always SUCCEEDs with no control flag set. A run with no recovery is byte-identical; a
+coldwin16-style clean run shows all three as *armed · never triggered*.
+
+| Recovery node | Observes (owning lane) | Named markers it maps from | Event |
+|---|---|---|---|
+| `nav_recovery` | coupled break-away / pre-throat heading-hold / momentum-launch / tow-lane re-centre / arrival-hysteresis — `navigation/articulated.py` | `coupled_no_progress`, `coupled_breakaway`, `HEADING_HOLD`, `momentum launch` | `nav_recovery` / `nav_recovery_cleared` |
+| `vram_shed` | the VRAM headroom shed ratchet — `restock/vram_headroom.py` | `VRAM_SHED`, `VRAM_CEILING_REACHED`, `VRAM_HEADROOM_LOW` | `vram_shed` / `vram_shed_cleared` |
+| `host_estop` | the named station-liveness / host e-stop trip + release — `restock/{incorporation_ack,station_host,trajectory_host}.py` (coordinates with **sim-collect-host-estop-v1**) | `STATION_ESTOP_PUBLISH`, `HOST_FAULT_ESTOP`, `STATION_ESTOP_RELEASE` | `host_estop` / `host_estop_cleared` |
+
+**How a recovery reaches the tree.** The recovery still runs in its lane's code, outside the BT
+tick. A tiny seam forwards its *already-named* marker to the tree as an edge-detected event
+(`scripts/twin/restock/bt/recovery.py`): a code path with a handle calls
+`RecoveryObserver.note(type, active, data)` (**push**), or a best-effort provider is polled each
+tick by `RecoveryPollSource` (**poll**) — the integration wires `bundle.recovery_signals` into the
+bus (`integration.make_recovery_provider`). Absent provider / no handle ⇒ no events ⇒ byte-identical
+run; nothing to configure. The event contract + the marker→event mapping is
+`events.RECOVERY_SPECS`.
+
+**Follow-up (per recovery, the one-line emit each lane adds).** This PR ships the tree nodes, the
+event contract, the observe seam and the diagram/timeline hook. The remaining work is one small,
+behaviour-neutral emit per owning lane so the signal flows on a live run:
+* `nav_recovery` — have `articulated.py` call the observer (or expose a `recovery_signals` entry)
+  when it enters/leaves a break-away / heading-hold / momentum-launch window.
+* `vram_shed` — forward `VramHeadroomMonitor`'s `_actuate` / headroom-recovered transitions
+  (the monitor already takes a `log=` callback, a natural tap) to the observer.
+* `host_estop` — forward the host's `STATION_ESTOP_PUBLISH` / `STATION_ESTOP_RELEASE` (and the
+  adapter's graph-health `host emergency stop` read) to the observer.
+
+### Events the tree still does **not** see today (handled by scripted code)
+
+These remain **outside** the tree, handled by host/runtime/adapter code, and surface to the tree
+only as a stage-step failure (if they fail the step) or not at all — the remaining follow-ups:
 
 * **Envelope trip** — `ArmCommandGate` (arm command envelope) and `trajectory_host` tracking
   e-stops are host-side; they latch/abort the arm and the mission reads a `('failed', …)` step
   reason at most. No `envelope_trip` event exists.
-* **VRAM shed** — `vram_headroom.py` sheds optional load (capture rate → arm-feed economy →
-  secondary cameras) on the runtime, logging `VRAM_SHED` by name. The tree never sees it.
 * **move_group SIGABRT crash + respawn / scene re-sync** — recovered entirely inside
-  `ros_adapter.RosMotionPort` (`MOVE_GROUP_CRASH_RETRY`); invisible to the tree.
-* **Navigation stall recoveries** — coupled break-away, pre-throat heading hold, momentum launch,
-  arrival-hysteresis, tow-lane re-centre — all inside the nav/adapter layer; `obstacle_avoid` only
-  handles the `blocked_aisle` / `dynamic_obstacle` *events*, not these.
-* **Host station-liveness e-stops** — `incorporation_ack` / `station_host` / `trajectory_host`
-  publish the global `/manipulation/stop`; the mission surfaces a failure, not a tree event.
+  `ros_adapter.RosMotionPort` (`MOVE_GROUP_CRASH_RETRY`); invisible to the tree. (A natural next
+  `move_group_recovery` observe node, same pattern.)
 * **Start-phase shortcut** — `start_at` synthesizes the skipped stage prefix (`shortcut.py`); those
   stages are logged `*_shortcut` and shown *idle / synthesized* in the diagram, never driven by the
   tree.

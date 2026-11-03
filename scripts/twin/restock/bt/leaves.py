@@ -20,7 +20,8 @@ from __future__ import annotations
 import py_trees
 from py_trees.common import Status
 
-from .events import (Event, RECOVERY_FOR, STAGE_FAILURE_TYPES, classify_stage_failure)
+from .events import (Event, RECOVERY_FOR, RECOVERY_SPECS, STAGE_FAILURE_TYPES,
+                     classify_stage_failure)
 from .stage_phases import milestone as _milestone
 
 RUNNING, SUCCESS, FAILURE = Status.RUNNING, Status.SUCCESS, Status.FAILURE
@@ -168,6 +169,57 @@ class BaselineGuard(py_trees.behaviour.Behaviour):
         else:
             self.ctx.log('baseline_expired', {'station': station}, action='recommission_refused')
             self.feedback_message = f'recommission {station}: REFUSED, holding'
+        return SUCCESS
+
+
+class RecoveryGuard(py_trees.behaviour.Behaviour):
+    """OBSERVE a recovery handled by a lane OUTSIDE the tree (a nav stall recovery, a VRAM shed, a
+    host station-liveness e-stop -- see :data:`events.RECOVERY_SPECS`), so the live view and the
+    generated diagram/timeline show it engage and return to nominal. One leaf per recovery, grouped
+    under the ``recoveries`` sequence.
+
+    It is the same guarded-handler shape the other reactive leaves use -- a *condition* that reads
+    the event, a *recovery action*, and a *return-to-nominal* -- but OBSERVE-ONLY: it fires NO
+    reaction and sets NO control flag, because the owning lane already performs (and is still
+    performing) the recovery. So the mission behaviour is byte-identical to a run without this leaf;
+    all it adds is the timeline/diagram visibility the brief asks for. Edge-triggered, so an engage /
+    data-update / clear is logged once (``action`` ``recover`` / ``recover_update`` /
+    ``return_to_nominal``), each entry carrying the sim time so the aligned diagram can map it to a
+    video timecode. Always SUCCEEDs."""
+    def __init__(self, ctx, recovery_type, name=None):
+        super().__init__(name or recovery_type)
+        self.ctx = ctx
+        self.rtype = recovery_type
+        self.spec = RECOVERY_SPECS[recovery_type]
+        self._engaged = False
+        self._last_data = None
+
+    def _sim_time(self):
+        return round(float(getattr(self.ctx.mission, 'time', 0.0)), 4)
+
+    def _log(self, action, data):
+        self.ctx.log(self.rtype, dict(data, sim_time=self._sim_time()), action=action)
+
+    def update(self):
+        data = self.ctx.active().get(self.rtype)          # condition: is the recovery engaged?
+        if data is None:
+            if self._engaged:                             # return-to-nominal edge
+                self._log('return_to_nominal', {})
+                self._engaged = False
+                self._last_data = None
+            self.feedback_message = f'{self.spec["label"]}: nominal'
+            return SUCCESS
+        # recovery action (observe only): log the engage / a data update once
+        if not self._engaged:
+            self._log('recover', data)
+            self._engaged = True
+            self._last_data = dict(data)
+        elif data != self._last_data:
+            self._log('recover_update', data)
+            self._last_data = dict(data)
+        detail = data.get('kind') or data.get('lever') or data.get('trigger') or data.get('reason')
+        self.feedback_message = (f'{self.spec["label"]}: recovering'
+                                 + (f' ({detail})' if detail else ''))
         return SUCCESS
 
 

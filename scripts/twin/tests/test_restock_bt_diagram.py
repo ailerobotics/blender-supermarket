@@ -53,7 +53,25 @@ class ModelFromCode(unittest.TestCase):
         m = D.build_model()
         reactive = next(c for c in m['children'] if c['name'] == 'reactive')
         self.assertEqual([c['name'] for c in reactive['children']],
-                         ['health_guard', 'human_safety', 'obstacle_avoid', 'baseline_guard'])
+                         ['health_guard', 'human_safety', 'obstacle_avoid', 'baseline_guard',
+                          'recoveries'])
+
+    def test_recoveries_subtree_shape(self):
+        # sim-bt-reactive-recoveries-v1: the observe-only recovery handlers are grouped under a
+        # `recoveries` sequence, one RecoveryGuard leaf per recovery, in nav->vram->host tick order.
+        m = D.build_model()
+        reactive = next(c for c in m['children'] if c['name'] == 'reactive')
+        recoveries = next(c for c in reactive['children'] if c['name'] == 'recoveries')
+        self.assertEqual(recoveries['cls'], 'Sequence')
+        self.assertEqual(recoveries['memory'], False)
+        self.assertEqual([c['name'] for c in recoveries['children']],
+                         ['nav_recovery', 'vram_shed', 'host_estop'])
+        for leaf in recoveries['children']:
+            self.assertEqual(leaf['cls'], 'RecoveryGuard')
+            self.assertEqual(leaf['category'], D.ACTION)
+            # each reacts to its recovery event + the event that clears it
+            spec = ev.RECOVERY_SPECS[leaf['name']]
+            self.assertEqual(set(leaf['reacts']), {leaf['name'], spec['cleared_by']})
 
     def test_every_plans_stage_and_step_present(self):
         m = D.build_model()
@@ -166,6 +184,43 @@ class RunAlignment(unittest.TestCase):
             # couple begins at sim 10 => frame 100 => video 100/20 = 5.0s
             self.assertAlmostEqual(align['stage']['couple']['video_start'], 5.0, places=1)
             self.assertAlmostEqual(align['video_duration'], 201 / 20.0, places=2)
+
+    def test_recovery_window_aligns_and_annotates(self):
+        # sim-bt-reactive-recoveries-v1: a RecoveryGuard's own log entries (type=<recovery>,
+        # action=recover/.../return_to_nominal, data.sim_time) must give the recovery node a sim
+        # window + a video timecode, and annotate_model must mark it fired+seekable.
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self._write_run(tmp)                 # collect+couple stages, frames 0..20s @10fps
+            # append a nav_recovery observed from sim 3s to 6s (engage + update + return)
+            rec = [
+                {'t': 3.0, 'type': 'nav_recovery', 'action': 'recover',
+                 'data': {'kind': 'breakaway', 'sim_time': 3.0}},
+                {'t': 5.0, 'type': 'nav_recovery', 'action': 'recover_update',
+                 'data': {'kind': 'momentum', 'sim_time': 5.0}},
+                {'t': 6.0, 'type': 'nav_recovery', 'action': 'return_to_nominal',
+                 'data': {'sim_time': 6.0}},
+            ]
+            with (run / 'bt_events.jsonl').open('a') as fh:
+                for e in rec:
+                    fh.write(json.dumps(e) + '\n')
+            align = D.align_to_run(run, fps=20.0)
+            w = align['recovery']['nav_recovery']
+            self.assertEqual(w['count'], 1)            # one engage
+            self.assertAlmostEqual(w['sim_start'], 3.0)
+            self.assertAlmostEqual(w['sim_end'], 6.0)
+            self.assertAlmostEqual(w['video_start'], 30 / 20.0, places=1)   # sim 3s -> frame 30
+            model = D.build_model()
+            D.annotate_model(model, align)
+            nav = next(n for n, _ in D.iter_nodes(model) if n['role'] == 'nav_recovery')
+            self.assertEqual(nav['active']['status'], 'fired')
+            self.assertEqual(nav['active']['scope'], 'recovery')
+            self.assertIsNotNone(nav['active']['video_start'])
+            # a recovery that never fired stays armed (never triggered)
+            host = next(n for n, _ in D.iter_nodes(model) if n['role'] == 'host_estop')
+            self.assertEqual(host['active']['status'], 'armed')
+            # the rendered HTML marks the fired recovery seekable and shows its window
+            html = D.render_html(model, align=align, video_url='v.mp4')
+            self.assertIn('recovered ×1', html)
 
     def test_annotate_colours_stage_and_step_nodes(self):
         with tempfile.TemporaryDirectory() as tmp:

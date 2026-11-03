@@ -50,6 +50,10 @@ IMPL = {
     'human_safety':  ('leaves.py', 'HumanSafety'),
     'obstacle_avoid': ('leaves.py', 'ObstacleAvoid'),
     'baseline_guard': ('leaves.py', 'BaselineGuard'),
+    'recoveries':    ('tree.py', 'build_recoveries'),
+    'nav_recovery':  ('leaves.py', 'RecoveryGuard'),
+    'vram_shed':     ('leaves.py', 'RecoveryGuard'),
+    'host_estop':    ('leaves.py', 'RecoveryGuard'),
     'mission':       ('tree.py', 'build_mission'),
     'stage_retry':   ('leaves.py', 'StageRetry'),
     'stage_steps':   ('tree.py', 'build_stage'),
@@ -64,7 +68,16 @@ GUARD_EVENTS = {
     'human_safety':   ('human_detected', 'human_cleared'),
     'obstacle_avoid': ('dynamic_obstacle', 'obstacle_cleared', 'blocked_aisle'),
     'baseline_guard': ('baseline_expired',),
+    # Recovery observers (sim-bt-reactive-recoveries-v1): each reacts to its recovery event + the
+    # event that clears it. Cross-checked against events.RECOVERY_SPECS by the unit test.
+    'nav_recovery':   ('nav_recovery', 'nav_recovery_cleared'),
+    'vram_shed':      ('vram_shed', 'vram_shed_cleared'),
+    'host_estop':     ('host_estop', 'host_estop_cleared'),
 }
+
+# Recovery roles (the observe-only RecoveryGuard leaves), so the renderers can give them a run
+# window + a video seek (not just the fired/armed badge the other guards get).
+RECOVERY_ROLES = ('nav_recovery', 'vram_shed', 'host_estop')
 
 # What each reactive leaf does when its event fires (for the diagram's "handled by" column).
 GUARD_ACTION = {
@@ -72,6 +85,9 @@ GUARD_ACTION = {
     'human_safety':   'slow-zone: slow; stop-zone: safety hold + pause arm; resume when clear',
     'obstacle_avoid': 'safety hold + request nav re-plan; resume when clear',
     'baseline_guard': 'hold + re-commission the station baseline via the stations provider',
+    'nav_recovery':   'OBSERVE the coupled break-away / heading-hold / momentum-launch; no reaction',
+    'vram_shed':      'OBSERVE the headroom shed ratchet (which load was dropped); no reaction',
+    'host_estop':     'OBSERVE the named host e-stop trip + release; no reaction',
 }
 
 
@@ -124,7 +140,12 @@ def build_model(*, plans=None, stage_order=None, timeline=None, return_uncouple=
             any(lbl == 'uncouple' for lbl, _ in timeline.labels.get('outbound', []))
     stages = list(stage_order) if stage_order is not None else list(plans.keys())
 
-    # Reactive subtree: the four guards, in tick order (tree.build_reactive).
+    # Reactive subtree: the four guards then the observe-only recoveries, in tick order
+    # (tree.build_reactive -> tree.build_recoveries).
+    recoveries = _n('recoveries', 'recoveries', 'Sequence', SEQUENCE, memory=False, children=[
+        _n(rtype, rtype, 'RecoveryGuard', ACTION, reacts=GUARD_EVENTS[rtype])
+        for rtype in RECOVERY_ROLES
+    ])
     reactive = _n('reactive', 'reactive', 'Sequence', SEQUENCE, memory=False, children=[
         _n('health_guard', 'health_guard', 'HealthGuard', CONDITION,
            reacts=GUARD_EVENTS['health_guard']),
@@ -134,6 +155,7 @@ def build_model(*, plans=None, stage_order=None, timeline=None, return_uncouple=
            reacts=GUARD_EVENTS['obstacle_avoid']),
         _n('baseline_guard', 'baseline_guard', 'BaselineGuard', ACTION,
            reacts=GUARD_EVENTS['baseline_guard']),
+        recoveries,
     ])
 
     # Mission subtree: one StageRetry subtree per active stage, then finalize.
@@ -242,6 +264,10 @@ def align_to_run(run_dir, *, fps=20.0):
     stage_begin, stage_end, stage_status = {}, {}, {}
     step_begin, step_end, step_status = {}, {}, {}
     fired = {}
+    # Recovery observations (sim-bt-reactive-recoveries-v1): per recovery type, the number of times it
+    # engaged and the sim window it was active, from the RecoveryGuard's own log entries (which carry
+    # the sim_time). Lets a recovery node get a video seek, not just a fired/armed badge.
+    rec_begin, rec_end, rec_count = {}, {}, {}
     for e in sorted(bt_events, key=lambda e: e.get('t', 0.0)):
         d = e.get('data') or {}
         stage = d.get('stage')
@@ -249,6 +275,13 @@ def align_to_run(run_dir, *, fps=20.0):
         st = d.get('sim_time')
         if typ in _events.EVENT_TYPES:
             fired[typ] = fired.get(typ, 0) + 1
+        action = e.get('action')
+        if typ in _events.RECOVERY_TYPES and st is not None:
+            st_f = float(st)
+            if action == 'recover':
+                rec_count[typ] = rec_count.get(typ, 0) + 1
+            rec_begin.setdefault(typ, st_f)
+            rec_end[typ] = max(rec_end.get(typ, st_f), st_f)
         if stage is None or st is None:
             continue
         st = float(st)
@@ -303,9 +336,16 @@ def align_to_run(run_dir, *, fps=20.0):
         w['status'] = step_status.get(key, 'success')
         step_align[key] = w
 
+    recovery_align = {}
+    for rtype in rec_begin:
+        w = _window(rec_begin, rec_end, rtype)
+        w['status'] = 'fired'
+        w['count'] = rec_count.get(rtype, 0)
+        recovery_align[rtype] = w
+
     sim_end = max([*stage_end.values(), *(step_end.values() or [0.0])], default=0.0)
     return {
-        'stage': stage_align, 'step': step_align, 'fired': fired,
+        'stage': stage_align, 'step': step_align, 'fired': fired, 'recovery': recovery_align,
         'mission_state': timeline.mission_state, 'mission_reason': timeline.mission_reason,
         'sim_end': sim_end, 'fps': fps,
         'video_duration': (len(frame_times) / fps) if frame_times else None,
@@ -343,6 +383,12 @@ def annotate_model(model, align):
         elif role == 'phase_gate':
             # recover the index from the position in the parent; filled by the caller via index map
             node.setdefault('active', {'status': 'idle', 'scope': 'step'})
+        elif role in RECOVERY_ROLES:
+            w = (align.get('recovery') or {}).get(role)
+            if w:
+                node['active'] = dict(w, scope='recovery')
+            else:
+                node['active'] = {'status': 'armed', 'fired': 0, 'count': 0, 'scope': 'recovery'}
         elif role in GUARD_EVENTS:
             hits = sum(fired.get(ev, 0) for ev in GUARD_EVENTS[role])
             node['active'] = {'status': 'fired' if hits else 'armed', 'fired': hits, 'scope': 'guard'}
@@ -449,9 +495,11 @@ def render_svg(model, *, align=None, title='restock mission behaviour tree'):
         react = _reacts_label(node)
         act = node.get('active') or {}
         detail = react
-        if act.get('scope') in ('stage', 'step') and act.get('video_start') is not None:
+        if act.get('scope') in ('stage', 'step', 'recovery') and act.get('video_start') is not None:
             detail = (f'video {_fmt_t(act["video_start"])}–{_fmt_t(act.get("video_end"))}'
                       f'  (sim {act.get("sim_start"):.1f}–{float(act.get("sim_end") or 0):.1f}s)')
+            if act.get('scope') == 'recovery':
+                detail = f'recovered ×{act.get("count", 0)}  ·  ' + detail
             if react:
                 detail += '  ·  ' + react
         if len(detail) > 96:
@@ -485,6 +533,12 @@ def _node_html(node, align_present):
         meta_bits.append(f'<span class=react>{html.escape(react)}</span>')
     if act.get('scope') == 'guard':
         meta_bits.append(f'<span class=win>{"fired ×%d" % act.get("fired", 0) if act.get("fired") else "armed · never triggered"}</span>')
+    if act.get('scope') == 'recovery':
+        if vs is not None:
+            meta_bits.append(f'<span class=win>recovered ×{act.get("count", 0)} · ▶ video '
+                             f'{_fmt_t(vs)}–{_fmt_t(act.get("video_end"))}</span>')
+        else:
+            meta_bits.append('<span class=win>armed · never triggered</span>')
     if act.get('scope') in ('stage', 'step') and vs is not None:
         meta_bits.append(f'<span class=win>▶ video {_fmt_t(vs)}–{_fmt_t(act.get("video_end"))} '
                          f'· sim {act.get("sim_start"):.1f}–{float(act.get("sim_end") or 0):.1f}s</span>')

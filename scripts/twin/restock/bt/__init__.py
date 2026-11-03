@@ -11,12 +11,12 @@ Only ``events`` is imported eagerly here-adjacent (it is pure Python with no py_
 ROS dependency, so ``scenario.py`` can validate the scenario ``events`` list without
 pulling py_trees). The tree/leaf modules import py_trees lazily via their own imports.
 """
-from .events import (Event, EVENT_TOPIC, EVENT_TYPES, ScenarioEvent,
-                     classify_stage_failure, detection_to_event,
+from .events import (Event, EVENT_TOPIC, EVENT_TYPES, RECOVERY_SPECS, RECOVERY_TYPES,
+                     ScenarioEvent, classify_stage_failure, detection_to_event,
                      parse_scenario_events, validate_scenario_events)
 
 __all__ = [
-    'Event', 'EVENT_TOPIC', 'EVENT_TYPES', 'ScenarioEvent',
+    'Event', 'EVENT_TOPIC', 'EVENT_TYPES', 'RECOVERY_SPECS', 'RECOVERY_TYPES', 'ScenarioEvent',
     'classify_stage_failure', 'detection_to_event',
     'parse_scenario_events', 'validate_scenario_events',
 ]
