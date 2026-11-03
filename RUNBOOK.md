@@ -497,6 +497,17 @@ blender -b "$OUT/store.blend" -t 4 --python-exit-code 1 \
 python3 -m unittest discover -s scripts/tests -v
 ```
 
+To rebuild the **external Isaac dataset** the mission actually loads (the `store_usd`
+config target, NOT the repo `export/`) as one command — steps 1–5 above plus a strict
+USD validate, a portal-geometry probe and a `manifest.json` (git HEAD, `PORTAL_WIDTH`,
+measured portal clear width, artifact SHA-256s) — use the regenerator. It is CPU /
+headless, refuses the protected `sim-store-realism-v2` dir and the live scene, and
+writes to a fresh dataset dir. See **docs/dataset_regen.md**.
+
+```bash
+scripts/regen_store_dataset.py --out ~/datasets/sim-store-realism-v3-portal26
+```
+
 The manifest uses metres, Z up, `map` world coordinates and planar `[x,y,yaw]`
 poses. `stocking_stations` reference existing shelf `slot` IDs and SKU lists;
 `backroom_stocks` list six case origins per source bin. `static_obstacles` are
