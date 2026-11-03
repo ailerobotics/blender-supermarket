@@ -392,6 +392,33 @@ def abort_active_clears(active, handle_live, fault):
     return (bool(active) and bool(handle_live), fault is not None)
 
 
+def heartbeat_hold_q(feedback, target):
+    """sim-collect-host-estop-v2: the joint vector a FAULTED-but-alive executor keeps commanding so its
+    arm-command heartbeat stays alive, or ``None`` when no pose is known yet.
+
+    When ``fault()`` latches, ``tick()`` historically published the global stop and returned WITHOUT
+    commanding, so the host went silent. The arm-command heartbeat (``native_transport`` ``ArmCommandGate``
+    ``watchdog``) is driven by the greatest received command stamp (``_host_now``); with the host silent
+    that stamp freezes and, ``ARM_HEARTBEAT_SIM_BACKSTOP_S`` SIM seconds later, the watchdog declares the
+    (still-alive, merely faulted) executor DEAD with ``'arm command heartbeat lost'`` -- MASKING the real
+    trajectory stop and poisoning the stage retry. rtfcollect2: a COLLECT-retreat settle/tracking
+    ``TRAJ_HOST_FAULT`` at sim ~170.93 surfaced as ``'arm command heartbeat lost'`` at sim ~178.9 (~8 s =
+    the sim backstop). A faulted executor that is still TICKING is NOT dead -- it is stopped and awaiting an
+    op-start re-arm (``/arm_controller/reset`` -> ``reset_clears``) -- so it must keep PROVING liveness by
+    commanding the arm to STAY where it is. The heartbeat bound is NOT widened: a genuinely crashed/hung
+    executor stops ticking, publishes no hold, and the watchdog still fires correctly.
+
+    Returns the latest MEASURED joints (``feedback[1]``) if a feedback sample exists, else the latched
+    ``target`` pose, else ``None`` (no feedback yet => heartbeat never started => nothing to keep alive).
+    The command is a pure hold (velocity 0) at the current pose and the global stop stays latched, so the
+    arm is only ever told to STAY, never to move. Pure/CPU-testable (no clock, no ROS)."""
+    if feedback is not None:
+        return np.array(feedback[1], float)
+    if target is not None:
+        return np.array(target, float)
+    return None
+
+
 def _handle_live(handle):
     """True if a stored goal handle is still executing (so clearing its active flag would abandon a live
     goal). Tolerates a None / duck-typed handle; rclpy ServerGoalHandle exposes ``is_active``."""
@@ -597,6 +624,14 @@ def main():
         # context is invalid') that buried the real cause. With the context already gone the stop is
         # moot (everything is tearing down), so skip it rather than crash the teardown.
         if rclpy.ok():
+            # sim-collect-host-estop-v2: NAME the trajectory-stop e-stop at its source. The global
+            # /manipulation/stop is a bare Bool with NO /manipulation/status, so the mission reads a
+            # TRAJECTORY stop as a bare 'host emergency stop (no matching host-controller fault ...)'
+            # (rtfcollect2 attempt-1, sim ~170.93). The mission's _NON_CONTROLLER_STOP_HINT already points
+            # the reader at host-stack.log '*_ESTOP_PUBLISH'; emit the matching named line (as the station
+            # path prints STATION_ESTOP_PUBLISH) so a trajectory stop is attributable to THIS executor with
+            # its concrete settle/tracking reason, never a bare stop again.
+            print(f"TRAJ_ESTOP_PUBLISH site=trajectory_host reason={reason!r}",flush=True)
             stop.publish(Bool(data=True))
 
     def feedback(msg):
@@ -645,6 +680,21 @@ def main():
         with lock:
             if state['fault']:
                 stop.publish(Bool(data=True))
+                # sim-collect-host-estop-v2: keep the arm-command heartbeat alive while a fault is latched
+                # so a faulted-but-ALIVE executor is not misread as a DEAD one ('arm command heartbeat
+                # lost') ~ARM_HEARTBEAT_SIM_BACKSTOP_S sim s later, which MASKED the real trajectory stop
+                # (rtfcollect2) and poisoned the stage retry. Hold the measured pose (velocity 0): the arm
+                # is told only to STAY, the global stop stays latched, and the stamp keeps advancing so the
+                # watchdog correctly sees the still-ticking host as alive. A genuinely crashed/hung executor
+                # stops ticking, publishes no hold, and the heartbeat still fires (bound untouched).
+                hold_q=heartbeat_hold_q(state['feedback'],state['target'])
+                if hold_q is not None:
+                    hold=JointState()
+                    hold.header.stamp=node.get_clock().now().to_msg()
+                    hold.name=list(ARM_JOINTS)
+                    hold.position=hold_q.tolist()
+                    hold.velocity=[0.0]*6
+                    command.publish(hold)
                 return
             if state['feedback'] is None:
                 return
