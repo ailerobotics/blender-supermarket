@@ -1037,7 +1037,14 @@ def main():
                                       f'meas_q={np.array2string(measured[1],precision=4,separator=",")} '
                                       f'goal_q={np.array2string(plan.end,precision=4,separator=",")}',
                                       flush=True)
-                                raise RuntimeError(reason)
+                                # sim-collect-retreat-abort-v2: the collect empty-retreat contact pin
+                                # surfaces HERE (the envelope diverges mid-window) too, not only at budget
+                                # expiry. Name the real cause -- proximal joint(s) pinned by an unmodelled
+                                # contact while the wrists saturate -- instead of the generic oscillation
+                                # reason (captain: name the trip by its real cause). Diagnosis only; the
+                                # position tolerance is never loosened.
+                                pin_reason=classify_contact_pin(perr, measured[2], state['goal_pos_tol'])
+                                raise RuntimeError(pin_reason if pin_reason else reason)
                         if settle_elapsed>goal_settle_budget():   # fm367: sim-scaled settle window
                             # Diagnostic: the exact terminal error so a miss is attributable (settle
                             # tolerance vs a genuine tracking error) without another blind run.

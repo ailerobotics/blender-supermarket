@@ -85,6 +85,8 @@
   "collect_place_wrist_guard": true,
   "release_detach_timeout_s": 8.0,
   "collect_place_straight_line": true,
+  "collect_retreat_liftoff": true,
+  "collect_retreat_liftoff_dz": 0.15,
   "moveit_mesh_uris": false,
   "transfer_pick_wrist_guard": true,
   "esdf_boot_ack_grace_s": 15.0,
