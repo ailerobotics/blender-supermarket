@@ -13,6 +13,7 @@ from ..restock_manipulation import ground_truth_collect as gtc
 from typing import Protocol
 
 from .mission import Result
+from .native_transport import remap_arm_fault_reason
 from .staged_start import SettleHold
 from . import pace_watchdog
 
@@ -1479,6 +1480,14 @@ class RuntimeAdapter:
                     return Result('running',
                                   reason='placed at the endcap; driving the empty base back to the staging pose')
                 return Result('succeeded', evidence)
+            if r.status == 'failed':
+                # Cross-process host reason remap (sim-polish-bundle-v1, PR 262 follow-up): when the HOST
+                # manipulation process reports a generic downstream symptom (heartbeat/abort/ack-stalled)
+                # that the in-process arm-command gate CAUSED by holding the arm, surface the gate's NAMED
+                # fault (controller_not_ready / the tracking-envelope trip) so the stage reason names the
+                # real cause. No gate fault / an unrelated reason => r.reason unchanged (byte-identical).
+                gate_reason = self.port.arm_fault_reason() if hasattr(self.port, 'arm_fault_reason') else None
+                return Result('failed', reason=remap_arm_fault_reason(r.reason, gate_reason))
             return Result(r.status, reason=r.reason)
         if self.action == 'verify':
             evidence = p.verification
