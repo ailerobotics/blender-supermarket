@@ -1,10 +1,10 @@
 {
-  "_comment": "Opt-in authored tow lanes + cart parking spot for the COUPLED restock drives. Merge the 'navigation.tow_lanes'/'navigation.directional_zone' keys into the mission runtime-config's navigation block, and the 'mission_poses.cart_parking' pose into mission_poses (the integration/bt-driver lane wires the return nav goal + uncouple step on that key). Absent => coupled drives free-plan exactly as before (byte-identical) and the braking gate uses the direction-aware zone by default. Poses are map-frame [x, y, yaw] in metres/radians; yaw PI = facing -x (west), 0 = facing +x (east), -PI/2 = facing -y (south). Waypoints are the authored centreline the expanded trajectory must pass through (asserted at build time). goal_articulation is the lane's achievable terminal cart articulation and governs arrival when the lane is active.",
+  "_comment": "Opt-in authored tow lanes + cart parking spot for the COUPLED restock drives. Merge the 'navigation.tow_lanes'/'navigation.directional_zone' keys into the mission runtime-config's navigation block, and the 'mission_poses.cart_parking' pose into mission_poses (the integration/bt-driver lane wires the return nav goal + uncouple step on that key). Absent => coupled drives free-plan exactly as before (byte-identical) and the braking gate uses the direction-aware zone by default. Poses are map-frame [x, y, yaw] in metres/radians; yaw PI = facing -x (west), 0 = facing +x (east), -PI/2 = facing -y (south), +PI/2 = facing +y (north). Waypoints are the authored centreline the expanded trajectory must pass through (asserted at build time). goal_articulation is the lane's achievable terminal cart articulation and governs arrival when the lane is active.",
   "mission_poses": {
     "cart_parking": [
-      -9.0,
-      16.0,
-      3.141592653589793
+      -3.875,
+      16.3,
+      1.5707963267948966
     ]
   },
   "navigation": {
@@ -13,11 +13,11 @@
       {
         "name": "outbound_dock_to_shelf",
         "start": [
-          -4.46,
-          15.25,
-          0.0
+          -3.875,
+          14.5,
+          -1.5707963267948966
         ],
-        "start_cart_yaw": 0.0,
+        "start_cart_yaw": -1.5707963267948966,
         "goal": [
           -3.05,
           6.0,
@@ -28,7 +28,7 @@
         "waypoints": [
           [
             -3.875,
-            13.4,
+            10.5,
             -1.5707963267948966
           ]
         ],
@@ -43,21 +43,21 @@
         ],
         "start_cart_yaw": 3.141592653589793,
         "goal": [
-          -9.0,
-          16.0,
-          3.141592653589793
+          -3.875,
+          16.3,
+          1.5707963267948966
         ],
         "goal_articulation": 0.2,
         "start_tol_cart_yaw": 0.35,
         "waypoints": [
           [
             -3.875,
-            9.5,
+            9.8,
             1.5707963267948966
           ],
           [
             -3.875,
-            13.4,
+            12.5,
             1.5707963267948966
           ]
         ],
@@ -75,8 +75,9 @@
     "tow_lane_curve_speed_floor": 0.55,
     "measured_turn_fault_s": 20.0
   },
-  "_fm437_note": "tow_lane_trust_unknown (default off): on a static-validated authored lane, trust UNOBSERVED temporal-map cells in the swept envelope as free (the static map proved that corridor clear); a POSITIVE/occupied return still stops the tow. Unblocks the run-327b outbound stall at the first southward turn ('unknown_navigation_cell' over the unmapped sector south of the dock corridor).",
-  "_portal_widen_note": "sim-portal-widen-v1: the PORTAL_WIDTH widening to 2.6 m (scripts/store_environment.py) is paired with a dead-centre STRAIGHT portal crossing on BOTH lanes. The via-poses sit on the portal centreline x=-3.875 and are south-aligned (outbound) / north-aligned (return) so route_through_waypoints forces a straight lead-in, a dead-centre straight crossing of the wall opening (y=11.125), and a straight lead-out; the turn to/from the shelf happens south of the opening and the kinematically-forced east-facing-dock turn happens north of it, never in the doorway. Measured (CPU, expanded against the regenerated 797-obstacle static map): OUTBOUND already crossed straight and dead-centre (x=-3.875, 0.5 deg articulation at the wall line) -- the opening was never the binding constraint there -- so its lane is unchanged apart from centring the waypoint on x=-3.875; the 2.6 m widening lifts its crossing clearance 0.536 -> 0.586 m per side and its ~25 deg approach-band cart lag (the forced dock turn) now has more door margin. RETURN is the real lane fix: an added north centreline waypoint moves the crossing from x=-4.185 (0.31 m west of centre, 5.2 deg at the wall line / 21.9 deg approach-band peak / 0.286 m clearance) to dead-centre x=-3.875 (2.5 deg / 9.6 deg band / 0.586 m clearance) -- the crossing clearance doubles. The unavoidable dock/parking turns stay ~46 deg (< the 55 deg demo budget and 65 deg limit). Proof + before/after plots: data/sim-portal-widen-v1/.",
-  "_fm454_note": "fm454 (option b): both tow lanes set route_through_waypoints=true. expand() routes the train THROUGH the authored via-poses as ordered sub-goals (reorient in the OPEN floor to an aligned pose feeding the doorway corridor, then the collinear centreline pair supplies the STRAIGHT crossing), so the realised trajectory IS the authored corner, not a free-plan that merely passes near it. route_through_waypoints absent/false => free-plan-and-validate, byte-identical to the historical lane.",
-  "_gpu_handoff_note": "For a tow-through-portal GPU proof the integration lane should ALSO set the top-level scene-build key portal_floor_box=true (flat drive-floor box collider -- removes the from-rest caster ghost-contact pin at the dock, sim-robust-portal-floor-seam-v1) and keep the coupled_heading_hold / heading_hold_prethroat_m / heading_hold_launch_m keys from docs/examples/throat-momentum-launch-mission-fragment.json. Those address the from-rest dock pin, which the geometry change does not; the geometry change gives the crossing margin."
+  "_dock_align_note": "sim-dock-align-v1: the couple dock is RE-HEADED to face SOUTH on the portal axis so the coupled train never does a REORIENTATION in the warehouse backroom. BEFORE (east-facing dock [-4.46, 15.25, 0]): the train coupled facing EAST and swung a ~46 deg coupled-articulation reorientation LOOP at the throat to turn south into the portal (outbound backroom articulation max 46.1 deg, loop_ratio 2.28 -- a 21.3 m path for an 8.5 m direct); the OLD return likewise turned ~42.5 deg coupled in the backroom to reach the far west parking spot [-9, 16] -- these backroom reorientations are the rotation the captain saw. AFTER: the outbound lane STARTS at the south-facing portal-axis dock [-3.875, 14.5, -PI/2] with the cart already aligned behind it (start_cart_yaw -PI/2), so the train couples aligned and drives STRAIGHT south -- backroom articulation 0.0 deg, loop_ratio 1.22 -- crossing the wall opening (y=11.125) dead-centre at robot articulation 0.0 deg, 0.586 m clearance per side. The return mirrors it: tows the cart north and parks it on the portal axis at cart_parking [-3.875, 16.3, +PI/2] (robot north of the cart in the receiving/turning zone ~4 m back from the doorway; it uncouples and exits sideways UNCOUPLED -- a turn with no cart attached), backroom articulation 3.2 deg, loop_ratio 1.09, cart crosses the opening aligned (~1 deg). MEASURED (CPU, twin.mobile train envelope, 798-obstacle static map, data/sim-dock-align-v1/): the BACKROOM + DOCK + robot wall-crossing is <=3.6 deg both ways (the captain's win). The whole-lane MAX stays ~46 deg at the sales-floor SHELF-SERVICE turn, INHERENT to the externally-fixed endcap service pose [-3.05, 6.0, PI] (0.825 m EAST of the portal axis, facing west, so delivering the coupled cart there needs a sharp in-aisle turn regardless of the dock; goal_articulation < 0.78 does not expand). On the OUTBOUND that turn begins immediately south of the wall, so the cart's TAIL finishes its pass through the opening angled up to ~40 deg (unchanged from BEFORE's 40.7 deg; a property of the shelf goal, not the dock) -- the swept envelope stays wall-clear (no wedge, ~0.8 m each side). Follow-up to pull the outbound cart's doorway transit straight too: relocate shelf_approach to a sales-floor staging pose on the portal axis + a separate uncoupled service leg, OR move the endcap service pose (store planogram) -- integration-owned.",
+  "_couple_handoff_note": "STATION geometry the integration lane wires to match the new lane start (mission runtime-config mission_poses, external): keep the couple APPROACH a SEPARATE navigation step ending in a straight reverse (captain-approved shape). Recommended south-facing couple poses on the portal axis -- robot faces south, cart staged NORTH of it facing south (hitch pointing south toward the robot rear), robot reverses NORTH to seat: couple_standoff [-3.875, 14.1, -PI/2] (on the cart axis, ~0.4 m south of the dock, TIGHT xy arrival; the fine-dock insert reverses north onto the drawbar), couple_approach [-3.875, 13.0, -PI/2] (on-axis, clear south of the staged cart). Post-couple the robot sits at the lane start [-3.875, 14.5, -PI/2] with the cart centre at [-3.875, 15.77] (1.27 m aligned separation, clear of the backroom racks at y>=17.87). Stage the cart (initial_staging cart_body_pose + unit_yaws_world.cart) at that pose facing south. cart_parking_backaway: after the return parks + uncouples, the robot (north of the parked cart, boxed from the racks) turns UNCOUPLED and exits east/west along y~16.3 to home -- any uncoupled pose that clears the parked cart, e.g. [-5.2, 16.3, PI]. Tune all couple poses against the measured pinned cart with couple_cart_relative (docs/examples/couple-approach-mission-fragment.json).",
+  "_gpu_handoff_note": "For a tow-through-portal GPU proof the integration lane should ALSO set the top-level scene-build key portal_floor_box=true (flat drive-floor box collider -- removes the from-rest caster ghost-contact pin, sim-robust-portal-floor-seam-v1) and keep the coupled_heading_hold / heading_hold_prethroat_m / heading_hold_launch_m keys from docs/examples/throat-momentum-launch-mission-fragment.json. Those address the from-rest dock pin, which the geometry change does not; the geometry change gives the straight passage. ACCEPTANCE (couple + outbound + return): the coupled train couples south-aligned on the portal axis and drives STRAIGHT through the backroom + dock + wall crossing (<=3.6 deg coupled articulation through the whole backroom passage, robot dead-centre in the opening, >=0.5 m clearance each side), no from-rest pin, no doorway wedge (swept envelope wall-clear even where the outbound cart tail exits the opening angled up to ~40 deg as the sales-floor shelf turn begins); the whole-lane max articulation ~46 deg occurs ONLY at the sales-floor shelf-service turn, south of the wall (inherent to the external shelf pose, unchanged before/after). nav_towing_check / towing_check are the GPU validations of the straight crossing (both already assume a portal-aligned dock + a 0.80 rad / 46 deg jackknife guard the straight backroom passage clears with margin; the shelf-turn terminal ~0.80 rad is unchanged from the pre-existing lane).",
+  "_fm437_note": "tow_lane_trust_unknown (default off): on a static-validated authored lane, trust UNOBSERVED temporal-map cells in the swept envelope as free (the static map proved that corridor clear); a POSITIVE/occupied return still stops the tow.",
+  "_fm454_note": "fm454 (option b): both tow lanes set route_through_waypoints=true. expand() routes the train THROUGH the authored via-poses as ordered sub-goals so the realised trajectory IS the authored corner (a straight portal crossing forced by the on-axis south/north via-poses), not a free-plan that merely passes near it. route_through_waypoints absent/false => free-plan-and-validate, byte-identical to the historical lane."
 }
