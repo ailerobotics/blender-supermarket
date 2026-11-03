@@ -16,6 +16,7 @@ Prints the geometric predictions behind two findings:
 
 Offline ray/visibility checks are geometric design predictions, never rendered RGB-D.
 """
+import json
 import sys
 from pathlib import Path
 
@@ -26,6 +27,13 @@ from twin.restock_camera import mast_depth as M
 from twin.restock_camera.geometry import Intrinsics, project, transform_points, look_at
 from twin.restock_camera.visibility import box_surface, sample_plane, ray_hits
 from twin.navigation.observed_space import ObservedSpace
+
+# The held carton is sized from the SINGLE source of truth (scripts/restock_scenario.json
+# handling_unit.dimensions_m), the same value every runtime consumer and the fit gate read --
+# not a hardcode. sim-carton-size-v1 (PR 268) shrank it to 0.45 x 0.30 x 0.18 m.
+CARTON = tuple(float(v) for v in json.loads(
+    (Path(__file__).resolve().parent / 'restock_scenario.json').read_text()
+)['handling_unit']['dimensions_m'])
 
 
 def deliverable_1():
