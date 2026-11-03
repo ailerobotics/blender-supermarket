@@ -30,13 +30,42 @@ caption so it can never pass for the full seven-stage cycle):
 - **`--start-at <stage>`** begins the real state machine at a later stage, **synthesising** the
   skipped prefix's physical end state out of band (`twin.restock.shortcut`) and recording each
   skipped stage honestly as a `<stage>_shortcut` event (never a performed success). `start_at`
-  **cannot skip `verify`** (the only stock-commit gate). Only the stages whose physical precondition
-  a shortcut knows how to build are supported: `shortcut._SUPPORTED_START_AT = ('couple',
-  'transfer')`. `transfer` additionally needs `--start-staging recorded_bay_park`, which spawns the
-  coupled, loaded train at the recorded park→transfer handover of a real tow.
+  **cannot skip `verify`** (the only stock-commit gate — `Mission` refuses any start_at *after* it,
+  so inventory is never left uncredited; this safety bound is intact). Supported start points are
+  `shortcut._SUPPORTED_START_AT = ('couple', 'outbound', 'park', 'transfer', 'verify')`. Every one
+  except `couple` spawns the coupled, loaded train at that stage's sanctioned build-time pose via a
+  **staging preset** (`--start-staging`), one preset per stage:
 
-To run **one stage alone**: `--start-at <stage> --stop-after <stage>` (for `collect`, which is the
-first stage, just `--stop-after collect`).
+  | `--start-at` | `--start-staging` | base spawn pose (derived from) | carton |
+  |---|---|---|---|
+  | `couple`   | *(none)*            | the dock-aligned couple **seat** derived from the active outbound lane `couple_dock` (else the scenario spawn default) | resting on cart, **uncoupled** |
+  | `outbound` | `dock_coupled`      | the coupled tow lane **start** (post-couple dock)      | resting level on cart, **coupled** |
+  | `park`     | `bay_parked`        | the coupled tow lane **goal** (stationarise point)     | resting level on cart, **coupled** |
+  | `transfer` | `recorded_bay_park` | the recorded park→transfer handover of a real tow       | resting level on cart, **coupled** |
+  | `verify`   | `bay_placed`        | the transfer/verify park pose (`shelf_approach`)       | **placed level on the bay top**, arm empty, **coupled** |
+
+  The `dock_coupled` / `bay_parked` base poses are **derived from the configured flow**
+  (`navigation.tow_lanes` + `mission_poses`), so the train spawns exactly on the tow lane the live
+  coupled drive follows (no off-lane spawn → no `lane_not_acquired`); the derivation follows whichever
+  of the dock-align / shelf-staging flows the run is configured for. `bay_placed` places the carton on
+  the configured bay target (`transfer_ground_truth.target` or the scenario `transfer_bay` top), exactly
+  as a succeeded transfer leaves it.
+
+  `couple` takes **no** staging preset, but when the active outbound lane declares a `couple_dock` its
+  shortcut spawns the post-collect train at the dock-aligned couple **seat** —
+  `shortcut.couple_start_poses` reuses PR 282's single source `navigation.lanes.couple_seat_from_cart`
+  (the same inverse-hitch derivation the outbound lane start follows), for both the legacy EAST dock and
+  the dock-align SOUTH dock — so `--start-at couple --stop-after outbound` seats the base ON the lane
+  start and the real couple latch + outbound tow **acquire** the lane instead of seating ~1 m / 90° off
+  (coldwin23-2 `lane_not_acquired_timeout`). The cart is left **uncoupled** (the real couple stage
+  latches). A lane with no `couple_dock` (the backroom-bay bench) is **byte-identical** — the scenario
+  spawn default stands.
+
+To run **one stage alone**: `--start-at <stage> --start-staging <preset> --stop-after <stage>` (for
+`collect`, the first stage, just `--stop-after collect`; `couple` needs no staging). **`return` in
+isolation** is `--start-at verify --start-staging bay_placed --stop-after return`: `start_at` may not
+skip the `verify` stock-commit gate, so the verify-entry (placed + coupled) state is synthesised and
+the one instant ground-truth `verify` runs (committing stock honestly) before the real return tow.
 
 ## Per-stage isolation matrix
 
@@ -49,44 +78,80 @@ stages leave behind (seeded cart pose, carried unit, coupled state). This table 
 |---|---|---|---|
 | `collect`  | **yes** | `--stop-after collect` | spawn defaults only: robot at the backstock pickup, cart at the dock, arm stowed, carton in the backstock (no carried unit, uncoupled) |
 | `couple`   | **yes** | `--start-at couple --stop-after couple` | carton loaded on the cart (collect done); robot still at the pickup, cart at the dock, uncoupled |
-| `outbound` | no | — | carton loaded AND the cart physically coupled behind the robot at the dock (couple done) |
-| `park`     | no | — | loaded + coupled, towed to the transfer bay (outbound done) |
+| `outbound` | **yes** | `--start-at outbound --start-staging dock_coupled --stop-after outbound` | carton loaded AND the cart physically coupled behind the robot at the dock (couple done) |
+| `park`     | **yes** | `--start-at park --start-staging bay_parked --stop-after park` | loaded + coupled, towed to the transfer bay (outbound done) |
 | `transfer` | **yes** | `--start-at transfer --start-staging recorded_bay_park --stop-after transfer` | loaded + coupled + parked at the transfer bay, arm stowed (park done) |
-| `verify`   | no | — | the carton placed on the bay top, still coupled (transfer done) |
-| `return`   | no | — | stock committed at verify, still coupled at the bay (verify done) |
+| `verify`   | **yes** | `--start-at verify --start-staging bay_placed --stop-after verify` | the carton placed on the bay top, still coupled (transfer done) |
+| `return`   | **yes** | `--start-at verify --start-staging bay_placed --stop-after return` | stock committed at verify, still coupled at the bay (verify done) |
 
-### Stages that cannot yet start in isolation
+### How each late-stage start is synthesised
 
-`outbound`, `park`, `verify` and `return` have **no start-phase shortcut**, so they can only be
-reached by running from an earlier supported entry point:
+`outbound`, `park` and `verify` now each have a start-phase shortcut, and `return` is reached via a
+`verify` start without skipping the stock-commit gate:
 
-- **`outbound` alone** and **`park` alone**: both need the cart **coupled and loaded** (outbound at
-  the dock, park at/near the bay). The nearest existing entry is `--start-at couple` (which performs
-  the real couple, then runs outbound + park for real) or `--start-at transfer --start-staging
-  recorded_bay_park` (which spawns already coupled + parked and runs transfer onward). There is no
-  shortcut that drops the train coupled + loaded at the **dock** and stops after outbound/park.
-- **`verify` alone** and **`return` alone**: `verify` is the stock-commit gate and `start_at` may
-  not skip it, so `verify` can only be entered by driving through `transfer` first (`--start-at
-  transfer … --stop-after verify`). `return` needs the full coupled/placed/committed state and has
-  no shortcut, so reach it with `--start-at transfer … --stop-after return`.
+- **`outbound` alone** / **`park` alone**: the train spawns **coupled + loaded** at the coupled tow
+  lane **start** (outbound: the post-couple dock) or **goal** (park: the stationarise point). The base
+  pose is derived from the configured `navigation.tow_lanes` so the spawn sits exactly on the lane the
+  live coupled drive follows; `shortcut.apply_start_state` authors the real robot↔cart hitch and settles
+  the carton on the cart. (If the configured flow has no tow lane, the synthesis fails closed rather than
+  spawn at an invented dock pose.)
+- **`verify` alone**: the carton spawns **placed level on the bay top** (the configured
+  `transfer_ground_truth.target` / scenario `transfer_bay`), the arm empty and the cart still coupled —
+  exactly as a succeeded transfer leaves it. The real `verify` stage then confirms the placement and
+  commits stock.
+- **`return` alone**: `start_at` may **not** skip the `verify` stock-commit gate (`Mission` refuses any
+  start_at after it), so `return` is run as `--start-at verify … --stop-after return`: the verify-entry
+  (placed + coupled) state is synthesised, the one instant ground-truth `verify` runs (committing stock
+  honestly) and the real coupled return tow → uncouple → empty drive-home then follows. The safety bound
+  is intact — stock is still committed exactly once, by the real `verify`.
 
-### Why these were not seeded here, and the follow-up
-
-Adding a new `start_at` is **not** a CPU-only change: the END-bound (`stop_after`) is pure prefix
-logic and already universal, but a new START-bound must physically synthesise the stage's
-precondition in the **live Isaac stage** — `shortcut.apply_start_state` authors the real
-robot↔cart hitch, places/settles the carton and asserts the latch is healthy, none of which can be
-validated without a GPU boot. Seeding `start_at=outbound`/`park` would reuse the
-`transfer`/`recorded_bay_park` coupling machinery but against a **dock** (not bay) spawn pose; that
-is a bounded extension of `_SUPPORTED_START_AT` + `apply_start_state`, but it must be proved on the
-integration lane's GPU, which is out of scope for this CPU lane. It is the natural follow-up when a
-dock-side outbound/park bench is needed.
+Base poses follow whichever flow is configured (the dock-align / shelf-staging tow lanes drive the
+`outbound`/`park` spawns). The **shelf-staging** sales-floor transfer/verify/return — an *uncoupled*
+endcap service with the carton *carried* rather than resting on the cart — stays integration-owned per
+`docs/examples/tow-lanes-mission-fragment.json`; the synthesis here targets the coupled backroom-bay
+tail that `check_mission_tail` validates.
 
 What this lane added, CPU-verified:
 
-- the pure, anchored `shortcut.stage_isolation(stage)` / `isolation_matrix()` facts above, and
-- a test confirming `bounded_stages` already supports `--stop-after` for all seven stages (so no
-  stop-point was actually missing — the gap is the start side, documented above).
+- `shortcut._SUPPORTED_START_AT` extended to `('couple', 'outbound', 'park', 'transfer', 'verify')`
+  with a staging preset per stage (`dock_coupled` / `bay_parked` / `recorded_bay_park` / `bay_placed`),
+  base poses derived from the configured tow lanes + `mission_poses`;
+- `shortcut.plan_start_state` / `staged_scenario` / `apply_start_state` synthesise the carton on the
+  cart (loaded starts) or on the bay (verify), coupling the cart at synthesis;
+- `shortcut.stage_isolation(stage)` / `isolation_matrix()` now report **every** stage isolatable;
+- tests (`test_restock_shortcut.py`, `test_restock_stage_start_synthesis.py`) asserting each
+  synthesised state satisfies that stage's ACTIONS precondition, `Mission` accepts the start_at (and
+  refuses one past `verify`), the spawn sits on the configured tow lane, and the preflight gates
+  (`config_preflight`, `check_mission_tail`) still pass on the synthesised config.
+
+### GPU acceptance (integration lane)
+
+These starts are CPU-proved only; the integration lane owns the bounded GPU proof that each boots in
+isolation and reaches its first action. With the backroom-bay tail config (the
+`fixtures/mission_tail_bay.json` flow: `navigation.tow_lanes` + `mission_poses` + `transfer_bay` +
+`verify_ground_truth`), run each on the GPU (one `/tmp/aile-gpu.lock` holder, never beside live Blender):
+
+```
+# outbound alone (reaches the first coupled tow NAV_STEP)
+python3 scripts/run_mobile_restock.py --execute --runtime-config <cfg> \
+    --start-at outbound --start-staging dock_coupled --stop-after outbound
+# park alone (reaches the stationarise/park phase at the bay)
+python3 scripts/run_mobile_restock.py --execute --runtime-config <cfg> \
+    --start-at park --start-staging bay_parked --stop-after park
+# verify alone (reaches the ground-truth verify confirmation + stock commit)
+python3 scripts/run_mobile_restock.py --execute --runtime-config <cfg> \
+    --start-at verify --start-staging bay_placed --stop-after verify
+# return alone (reaches the coupled return tow → uncouple → empty home)
+python3 scripts/run_mobile_restock.py --execute --runtime-config <cfg> \
+    --start-at verify --start-staging bay_placed --stop-after return
+```
+
+Acceptance per stage: the shortcut prints `START_PHASE_SHORTCUT applied start_at=<stage> …
+coupled=True`, the spawned train is coupled + at the expected pose, and the stage reaches its first
+real action (outbound/park: first `NAV_STEP`; verify: first verifier confirmation; return: first
+coupled return `NAV_STEP`) within a few sim-seconds of the first mission tick — not the ~45-min cold
+cycle. Each run is labelled in `mission.json` (`start_at`, `shortcut`, the `start_staging` record) and
+by the burned-in walkthrough caption, so a bench run can never pass for the full seven-stage cycle.
 
 ## The per-stage audit tool
 

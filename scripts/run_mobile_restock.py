@@ -792,12 +792,17 @@ def main():
                              'collect source + sensing at 0.6 scale (~2.8x fewer pixels) to speed '
                              'iteration; use the SAME preset for commissioning so the baseline matches.')
     parser.add_argument('--output', type=Path)
-    parser.add_argument('--start-at', choices=('couple', 'transfer'),
+    parser.add_argument('--start-at', choices=('couple', 'outbound', 'park', 'transfer', 'verify'),
                         help='dev bench: begin the mission at this stage (runtime-config "start_at"); '
-                             'the skipped prefix is synthesized and recorded as *_shortcut')
-    parser.add_argument('--start-staging', choices=('recorded_bay_park',),
-                        help='dev bench (with --start-at transfer): spawn at the recorded '
-                             'park->transfer handover (runtime-config "start_staging")')
+                             'the skipped prefix is synthesized and recorded as *_shortcut. For "return" '
+                             'in isolation use --start-at verify --stop-after return (start_at may not '
+                             'skip the verify stock-commit gate). See docs/restock_stages.md.')
+    parser.add_argument('--start-staging', choices=('recorded_bay_park', 'dock_coupled',
+                                                    'bay_parked', 'bay_placed'),
+                        help='dev bench (with --start-at outbound|park|transfer|verify): spawn the '
+                             'coupled train at that stage\'s build-time pose (runtime-config '
+                             '"start_staging"). recorded_bay_park->transfer, dock_coupled->outbound, '
+                             'bay_parked->park, bay_placed->verify.')
     parser.add_argument('--stop-after', choices=('collect', 'couple', 'outbound', 'park', 'transfer',
                                                  'verify', 'return'),
                         help='dev targeted test: end the mission right after this stage '
