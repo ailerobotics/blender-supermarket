@@ -1,0 +1,39 @@
+{
+  "description": "Recorded warm-session state captured between two consecutive stage runs on one live Isaac session. VRAM figures are anchored on a real run (coldwin23: used 8647 MiB, peak 8647, far below the 12 GiB ceiling); the post-boot baseline is the Isaac+host+nvblox+planner footprint before the mission's heavy load, and used_mib_now is the live reading after the first run's teardown. The prim census is the invariant mission stage set the integration lane's warm_stage_state() reports.",
+  "source_run": "coldwin23",
+  "prev_config": {
+    "scenario": "scenarios/restock_scenario.json",
+    "host_config": "restock_manipulation/ros_host_config.json",
+    "package_roots": ["/home/u/workspaces/shelfbot_newgripper"],
+    "commissioning_dir": "commissioning/backstock",
+    "nav_mode": "sensor",
+    "stage_timeout_s": 120,
+    "carry_wrist1_cap": 0.65,
+    "render_width": 960,
+    "render_height": 540
+  },
+  "next_config": {
+    "scenario": "scenarios/restock_scenario.json",
+    "host_config": "restock_manipulation/ros_host_config.json",
+    "package_roots": ["/home/u/workspaces/shelfbot_newgripper"],
+    "commissioning_dir": "commissioning/backstock",
+    "nav_mode": "sensor",
+    "stage_timeout_s": 120,
+    "carry_wrist1_cap": 0.65,
+    "render_width": 960,
+    "render_height": 540,
+    "output": "/scratch/run-2"
+  },
+  "stage": {
+    "present_prims": ["/Supermarket", "/Rollwagen", "/mobile_robot", "/RestockScenario/Support", "/World/handling_unit"],
+    "expected_prims": ["/Supermarket", "/Rollwagen", "/mobile_robot", "/RestockScenario/Support", "/World/handling_unit"],
+    "dirty": false,
+    "note": ""
+  },
+  "vram": {
+    "post_boot_baseline_mib": 8200.0,
+    "used_mib_now": 8360.0,
+    "tol_mib": 400.0
+  },
+  "reset_steps": ["reset_stage_and_reseed", "preflight_verify", "vram_baseline_check"]
+}

@@ -29,6 +29,21 @@ def _mission_events(db, scenario):
         return []
 
 
+def _read_used_vram_mib():
+    """Best-effort used-VRAM (MiB) reading for the warm-session "VRAM returned" gate, via NVML
+    (cheap, ~1 ms). Returns None when NVML is unavailable -- the gate then skips the VRAM check
+    (the caller owns that risk; the dry-run always supplies a reading). Never raises."""
+    try:
+        from twin.restock.vram_headroom import nvml_sampler
+        sampler = nvml_sampler()
+        if sampler is not None:
+            used, _free = sampler()
+            return float(used)
+    except Exception:
+        pass
+    return None
+
+
 def run_warm_session(run_once, *, warm_attempts, warm_reset, write_attempts=None):
     """Run ``run_once`` up to ``warm_attempts`` times in one live session; return (mission, summary).
 
@@ -68,6 +83,48 @@ def run_warm_session(run_once, *, warm_attempts, warm_reset, write_attempts=None
         if write_attempts is not None:
             write_attempts(attempts)
     return mission, summary
+
+
+def run_consecutive_warm(run_once, *, runs, between, write_records=None):
+    """Run ``run_once(index)`` for index 1..runs in ONE live session; return (mission, summary, records).
+
+    Pure control flow (no Isaac). Unlike :func:`run_warm_session` -- which retries only a FAILED
+    attempt of the SAME job and stops on the first success -- this runs ``runs`` INDEPENDENT full
+    missions back to back on one warm session, regardless of each run's outcome, so the integration
+    lane can prove two consecutive stage runs reuse the boot. Each ``run_once(index)`` persists its
+    own artifacts (the launcher routes run>=2 to a per-run subdir) and returns ``(mission, summary)``.
+
+    Between consecutive runs, ``between(prev_summary, index)`` returns a
+    :class:`twin.restock.warm_session.WarmOutcome` (the decision gate + the reset sequence). When it
+    is a cold-boot fallback (``outcome.cold_boot``), this STOPS and records the reason on the last
+    summary (``warm_fallback``) -- the warm session is NOT reused on a possibly-corrupt stage; the
+    caller cold-boots the next run in a fresh process. ``runs <= 1`` is exactly one ``run_once(1)``
+    (byte-identical to a single run; ``between`` never consulted).
+
+    ``write_records`` (optional) receives the per-run record list when more than one run was
+    configured, so the launcher can persist warm-session.json.
+    """
+    runs = max(1, int(runs or 1))
+    records = []
+    mission = summary = None
+    for index in range(1, runs + 1):
+        mission, summary = run_once(index)
+        rec = {'run': index, 'state': summary['state'], 'reason': summary.get('reason')}
+        records.append(rec)
+        if index >= runs:
+            break
+        outcome = between(summary, index)
+        rec['warm'] = outcome.record()
+        if outcome.cold_boot:
+            # The live session is not safe to reuse (HOST-key change / dirty stage / VRAM not
+            # returned / a reset step refused). Stop warm; the caller cold-boots the next run.
+            summary['warm_fallback'] = outcome.reason
+            break
+    if runs > 1:
+        summary['warm_runs'] = records
+        if write_records is not None:
+            write_records(records)
+    return mission, summary, records
 
 
 def apply_bench_keys(config, *, start_at=None, start_staging=None, stop_after=None):
@@ -344,6 +401,9 @@ def run(args, manifest, scenario):
     db = Inventory(args.output/'inventory.sqlite')
     for row in scenario['initial_inventory']:
         db.seed(row['location'], row['sku'], row['quantity'])
+    # Per-run inventories opened by the --consecutive-runs warm loop (run>=2); closed in the
+    # outer finally. Empty on the default single-run / --warm-attempts path.
+    _consecutive_dbs = []
     # A proven won't-fit refuses the mission here, BEFORE paying the Isaac boot / GPU slot --
     # the job is never reserved and no robot is sent. 'ok'/'unknown' fall through to the run.
     if fit_verdict is not None and fit_verdict.status == 'wont_fit':
@@ -447,35 +507,52 @@ def run(args, manifest, scenario):
                         json.dumps(dict(summary, events=db.events(scenario['job']['job_id'])),
                                    indent=2, allow_nan=False) + '\n')
                     return 0 if summary['state'] == 'complete' else 1
-                def _make_mission():
+                def _make_mission(db_i=db):
                     # Per-stage timeout (default 120 s). The couple stage's rounded approach
                     # (couple_approach waypoint + slow dock-approach cap) travels farther than a
                     # direct dock run, so it may need more than the default; config-settable.
                     # vr1: the labelled ground-truth demo workarounds (transfer_ground_truth /
                     # verify_ground_truth) need the Mission to accept their honestly-labelled
                     # 'ground_truth' evidence source; () when none is configured => byte-identical.
+                    # db_i defaults to the run's inventory; the consecutive warm loop passes a
+                    # fresh per-run db so run N+1 starts from the scenario's initial stock.
                     from twin.restock.ground_truth_verify import mission_ground_truth_sources
-                    return Mission(db, Job(**scenario['job']), bundle.adapter,
+                    return Mission(db_i, Job(**scenario['job']), bundle.adapter,
                                    stages=config.get('stages'), start_at=config.get('start_at'),
                                    timeout_s=float(config.get('stage_timeout_s', 120.)),
                                    fit_preflight=fit_verdict,
                                    ground_truth_sources=mission_ground_truth_sources(config))
-                def run_once():
+                def run_once(index=1):
                     """One full mission attempt against the live bundle; returns (mission, summary)
                     and persists mission.json. Unchanged from the single-run behaviour -- the warm
                     loop below runs it once by default (--warm-attempts 1), composing cleanly with
                     the downstream --start-at shortcut (which selects WHERE a run begins; warm
                     selects HOW MANY runs per boot).
 
+                    ``index`` selects the per-run output + inventory: index<=1 (the default and the
+                    single-run / --warm-attempts path) uses args.output + the primary db verbatim
+                    (byte-identical); the --consecutive-runs loop passes index>=2 to route run N's
+                    artifacts to args.output/run-N with a FRESH scenario-seeded inventory, so two
+                    full runs on one warm session do not share stock or mission.json.
+
                     Opt-in: runtime-config ``"bt": true`` drives the SAME Mission through the
                     behaviour-tree orchestrator (reactive event handling + live view in the run
                     dir); default off keeps the production state machine below byte-identical."""
+                    if index <= 1:
+                        out_i, db_i = args.output, db
+                    else:
+                        out_i = args.output / f'run-{index}'
+                        out_i.mkdir(parents=True, exist_ok=True)
+                        db_i = Inventory(out_i / 'inventory.sqlite')
+                        for row in scenario['initial_inventory']:
+                            db_i.seed(row['location'], row['sku'], row['quantity'])
+                        _consecutive_dbs.append(db_i)
                     if config.get('bt'):
                         from twin.restock.bt.integration import run_once_bt
-                        return run_once_bt(db, scenario, bundle, config, args.output,
-                                           mission_factory=_make_mission,
+                        return run_once_bt(db_i, scenario, bundle, config, out_i,
+                                           mission_factory=lambda: _make_mission(db_i),
                                            is_running=app.is_running)
-                    m = _make_mission()
+                    m = _make_mission(db_i)
                     m.start()
                     for _ in range(60*20*60):  # bounded simulation time; shell also bounds wall time
                         if m.terminal:
@@ -528,8 +605,8 @@ def run(args, manifest, scenario):
                     # Isaac's SimulationApp.close() can terminate the process hard and skip the
                     # outer finally (which re-writes mission.json with events as a fallback).
                     try:
-                        early = dict(s, events=db.events(scenario['job']['job_id']))
-                        (args.output/'mission.json').write_text(json.dumps(early, indent=2, allow_nan=False)+'\n')
+                        early = dict(s, events=db_i.events(scenario['job']['job_id']))
+                        (out_i/'mission.json').write_text(json.dumps(early, indent=2, allow_nan=False)+'\n')
                     except Exception:
                         pass
                     return m, s
@@ -546,9 +623,65 @@ def run(args, manifest, scenario):
                             json.dumps(records, indent=2, allow_nan=False) + '\n')
                     except Exception:
                         pass
-                mission, summary = run_warm_session(
-                    run_once, warm_attempts=getattr(args, 'warm_attempts', 1),
-                    warm_reset=getattr(bundle, 'warm_reset', None), write_attempts=_write_attempts)
+                # Opt-in --consecutive-runs N: run N INDEPENDENT full missions on ONE warm session
+                # (reusing the ~215 s boot), gated between runs by the warm-session reset decision +
+                # sequence (twin.restock.warm_session). Any doubt -- a HOST-level config change, a
+                # dirty stage / leaked prims, VRAM not returned to the post-boot baseline, or a reset
+                # step refusal -- falls back to a cold boot (stops the warm loop with the reason), so a
+                # possibly-corrupt session is never reused. Default N=1 => the single run_warm_session
+                # path below, byte-identical.
+                consecutive = max(1, int(getattr(args, 'consecutive_runs', 1) or 1))
+                if consecutive > 1:
+                    from twin.restock import warm_session as _ws
+                    # Post-boot VRAM baseline for the "VRAM returned" gate: sampled once here, before
+                    # the first mission, so a run that leaks GPU memory is caught before run N+1.
+                    _post_boot_vram = _read_used_vram_mib()
+                    print('WARM_SESSION consecutive_runs=%d post_boot_vram_mib=%s' % (
+                        consecutive, '%.0f' % _post_boot_vram if _post_boot_vram is not None else 'unavailable'),
+                        flush=True)
+                    def _between(prev_summary, index):
+                        stage_state = None
+                        census = getattr(bundle, 'warm_stage_state', None)
+                        if callable(census):
+                            try:
+                                stage_state = census()
+                            except Exception as exc:  # a failed census is a doubt, not a crash
+                                stage_state = _ws.StageState(dirty=True, note=f'stage census failed: {exc}')
+                        reset = getattr(bundle, 'warm_reset', None)
+                        if callable(reset):
+                            def _reset_step():
+                                reset(attempt=index, now=index)
+                        else:
+                            def _reset_step():
+                                raise RuntimeError('no config.warm_reset provider wired; in-session '
+                                                   'stage re-seat unavailable (cold boot required)')
+                        def _verify_step():
+                            # Re-run the existing runtime-input preflight: every sensor/host/CAD input
+                            # the next mission needs must still resolve before it starts.
+                            readiness = check_runtime_inputs(config)
+                            if not readiness['files_ready']:
+                                raise RuntimeError('preflight: runtime inputs unresolved: '
+                                                   + ', '.join(readiness['unresolved_inputs']))
+                        steps = [_ws.SequenceStep('reset_stage_and_reseed', _reset_step),
+                                 _ws.SequenceStep('preflight_verify', _verify_step)]
+                        return _ws.plan_and_run_reset(
+                            config, config, steps, stage_state=stage_state,
+                            vram_used_mib=_read_used_vram_mib(),
+                            post_boot_baseline_mib=_post_boot_vram,
+                            on_log=lambda m: print(m, flush=True))
+                    def _write_warm_runs(records):
+                        try:
+                            (args.output/'warm-session.json').write_text(
+                                json.dumps(records, indent=2, allow_nan=False) + '\n')
+                        except Exception:
+                            pass
+                    mission, summary, _ = run_consecutive_warm(
+                        run_once, runs=consecutive, between=_between,
+                        write_records=_write_warm_runs)
+                else:
+                    mission, summary = run_warm_session(
+                        run_once, warm_attempts=getattr(args, 'warm_attempts', 1),
+                        warm_reset=getattr(bundle, 'warm_reset', None), write_attempts=_write_attempts)
             except Exception as exc:
                 if mission is not None and not mission.terminal:
                     mission.fail(str(exc))
@@ -630,6 +763,11 @@ def run(args, manifest, scenario):
             _maybe_smart_verify(args, scenario, summary)
         (args.output/'mission.json').write_text(json.dumps(summary, indent=2, allow_nan=False)+'\n')
         db.close()
+        for _extra_db in _consecutive_dbs:
+            try:
+                _extra_db.close()
+            except Exception:
+                pass
     return 0 if summary['state'] == 'complete' else 1
 
 
@@ -660,6 +798,14 @@ def main():
                              'Isaac session (no re-boot / re-commission per attempt), re-seating the '
                              'scene between failed attempts via config.warm_reset and re-validating the '
                              'commissioned baseline. 1 (default) = a single run, byte-identical.')
+    parser.add_argument('--consecutive-runs', type=int, default=1,
+                        help='dev iteration: run N INDEPENDENT full missions back-to-back on ONE '
+                             'warm Isaac session (reusing the ~215 s boot), each in args.output/run-N '
+                             'with a fresh scenario-seeded inventory. Between runs the warm-session '
+                             'reset decision + sequence (twin.restock.warm_session) gate the reuse; '
+                             'any doubt (HOST-level config change, dirty stage, VRAM not returned, or a '
+                             'reset-step refusal, e.g. no config.warm_reset provider wired) falls back '
+                             'to a cold boot and says why. 1 (default) = a single run, byte-identical.')
     parser.add_argument('--heavy-threshold-mb', type=int, choices=(1500,2500), default=1500)
     parser.add_argument('--host-stack', action='store_true',
                         help='co-launch the MoveIt/cuMotion planner stack + nvblox mapper (domain 88) '
