@@ -9,6 +9,8 @@ import heapq
 import math
 import os
 
+import numpy as np
+
 
 def wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
@@ -263,15 +265,34 @@ class GridMap:
         for r in self.obstacles:
             if len(r) != 4 or not all(math.isfinite(v) for v in r) or r[2] < r[0] or r[3] < r[1]:
                 raise ValueError('invalid obstacle')
+        # Precompute the obstacle AABB bounds as numpy columns ONCE (the map is immutable), so free()
+        # can cull to the handful of obstacles near the query point in a single vectorised pass instead
+        # of scanning every rectangle in pure Python. The column names match the loop operands below so
+        # the cull is bit-identical, not an approximation (see free()).
+        if self.obstacles:
+            _ob = np.asarray(self.obstacles, dtype=float)
+            self._ob_xmin, self._ob_ymin, self._ob_xmax, self._ob_ymax = (
+                np.ascontiguousarray(_ob[:, 0]), np.ascontiguousarray(_ob[:, 1]),
+                np.ascontiguousarray(_ob[:, 2]), np.ascontiguousarray(_ob[:, 3]))
+        else:
+            self._ob_xmin = self._ob_ymin = self._ob_xmax = self._ob_ymax = None
 
     def free(self, p, radius, dynamic=()):
         x, y = p[:2]
         a, b, c, d = self.bounds
         if not a + radius < x < c - radius or not b + radius < y < d - radius:
             return False
-        for xmin, ymin, xmax, ymax in self.obstacles:
-            if math.hypot(max(xmin-x, 0, x-xmax), max(ymin-y, 0, y-ymax)) <= radius:
-                return False
+        if self._ob_xmin is not None:
+            # An obstacle can only collide the disk when max(xmin-x, 0, x-xmax) <= radius AND the same
+            # for y -- the exact component tests the hypot below would need to pass. Masking on those
+            # SAME subexpressions (xmin-x, x-xmax, ...) yields a superset of every real collision with
+            # no float drift, so the per-candidate hypot test is bit-identical to the full scan.
+            cand = ((self._ob_xmin - x <= radius) & (x - self._ob_xmax <= radius)
+                    & (self._ob_ymin - y <= radius) & (y - self._ob_ymax <= radius))
+            for i in np.nonzero(cand)[0]:
+                xmin, ymin, xmax, ymax = self.obstacles[i]
+                if math.hypot(max(xmin-x, 0, x-xmax), max(ymin-y, 0, y-ymax)) <= radius:
+                    return False
         return all(math.hypot(x-q[0], y-q[1]) > radius for q in dynamic)
 
     def segment_free(self, a, b, radius, dynamic=()):
