@@ -6,12 +6,42 @@ from scripts.twin.restock_camera.config import camera_config, author_camera_desi
 from scripts.twin.restock_camera.geometry import pose_matrix, transform_points, usd_camera_transform
 
 
-def design():
-    scenario = dict(handling_unit=dict(local_wall=3,grasp_mode='side',dimensions_m=[.6,.4,.16]),
+def design(dims=(.6,.4,.16)):
+    scenario = dict(handling_unit=dict(local_wall=3,grasp_mode='side',dimensions_m=list(dims)),
         initial_staging=dict(support_center_xy=[-5.73,17.1],unit_bottom_z=.6,
             target_surface_pose_world=[-3.05,4.826,.73,0],cart_load_center_body_xy=[.08,0],
             cart_support_z_world=.225))
     return camera_config(scenario,dict(spec=dict(arm_mount_z=.5)))
+
+
+def test_gate_accepts_both_audited_units_and_derives_source_framing():
+    """The audit reads the unit from the scenario (never a hardcoded footprint) and derives the
+    source support patch as footprint+.02 per axis: .62x.42 for the original .60x.40x.16 carton
+    and .47x.32 for the PR 268 .45x.30x.18 carton. The cart/shelf patches are structure-bound
+    (rollwagen cage / shelf-board edges) and stay fixed across both units."""
+    old, new = design([.6,.4,.16]), design([.45,.3,.18])
+    assert old['supports']['source']['required_xy_m'] == [.62,.42]
+    np.testing.assert_allclose(new['supports']['source']['required_xy_m'],[.47,.32])
+    for cfg in (old,new):
+        assert cfg['supports']['cart']['required_xy_m'] == [.54,.34]
+        assert cfg['supports']['shelf']['required_xy_m'] == [.58,.36]
+    # Marker side + resolution are decode-bound, not carton-bound: identical across both units.
+    for cfg in (old,new):
+        assert all(m['side_m'] == .06 for s in cfg['supports'].values() for m in s['markers'])
+        assert cfg['cameras']['source']['intrinsics']['width'] == 2560
+
+
+def test_gate_refuses_an_unaudited_unit():
+    """The gate must still bite: a wall/grasp/mount mismatch or an un-audited size is refused."""
+    for bad in ([.5,.5,.5], [.6,.4,.18], [.45,.3,.16]):
+        with pytest.raises(ValueError,match='audited mobile wall3 handling unit'):
+            design(bad)
+    scn = dict(handling_unit=dict(local_wall=2,grasp_mode='side',dimensions_m=[.45,.3,.18]),
+        initial_staging=dict(support_center_xy=[-5.73,17.1],unit_bottom_z=.6,
+            target_surface_pose_world=[-3.05,4.826,.73,0],cart_load_center_body_xy=[.08,0],
+            cart_support_z_world=.225))
+    with pytest.raises(ValueError,match='audited mobile wall3 handling unit'):
+        camera_config(scn,dict(spec=dict(arm_mount_z=.5)))
 
 
 def test_write_camera_config_script_emits_the_current_station_design(tmp_path):
@@ -238,7 +268,8 @@ def test_shelf_markers_are_textureless_geometry_that_decodes(tmp_path):
     assert {d.text for d in detections} == {'support:shelf:0', 'support:shelf:1'}
 
 
-def test_shelf_camera_sees_under_the_tier_to_the_carton_top_and_support():
+@pytest.mark.parametrize('dims', [(.6, .4, .16), (.45, .3, .18)])
+def test_shelf_camera_sees_under_the_tier_to_the_carton_top_and_support(dims):
     """The shelf lens must stay below the shelf tier so it still senses the station.
 
     The decode proof above guards the OTHER half of the shelf camera's job (reading the
@@ -250,17 +281,21 @@ def test_shelf_camera_sees_under_the_tier_to_the_carton_top_and_support():
     decoded markers while blinding restocking. The shipped pure -6.75 deg tilt keeps the
     lens under the tier. This reproduces the planner's ray-visibility audit with a
     synthetic tier so the trade-off can never regress silently without the store USD.
+
+    Parametrised over both audited units: the PR 268 .45x.30x.18 carton is .02 m TALLER, so
+    its top sits ~0.91 m (vs 0.89 m) -- closer to the ~0.97 m tier underside -- yet the fixed
+    -6.75 deg shelf lens (z=0.96 m) still sees the whole carton top and empty support under it.
     """
     from scripts.twin.restock_camera.geometry import Intrinsics
     from scripts.twin.restock_camera.visibility import box_surface, inspect_view, sample_plane
-    config = design()
+    config = design(dims)
     camera = config['cameras']['shelf']
     pose = np.array(camera['parent_from_optical']); k = Intrinsics(**camera['intrinsics'])
     support = config['supports']['shelf']
     center = np.array(support['nominal_center']); yaw = support['yaw']
-    dims = np.array([.6, .4, .16])                       # audited wall-3 handling unit
+    dims = np.array(dims)                                # audited wall-3 handling unit
     top = sample_plane(center + [0, 0, dims[2]], dims[:2] - .02, yaw)   # carton-top plane
-    footprint = sample_plane(center, [.62, .42], yaw)                  # empty support
+    footprint = sample_plane(center, dims[:2] + .02, yaw)              # empty support
     # The next shelf tier: a horizontal plate whose underside sits ~0.24 m above the 0.73 m
     # support surface (~0.97 m), spanning the support footprint and out over the aisle lip.
     tier_z = center[2] + .24
