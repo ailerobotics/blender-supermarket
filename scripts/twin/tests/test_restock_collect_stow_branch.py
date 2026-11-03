@@ -134,6 +134,31 @@ def test_straight_line_retreat_escape_unfolds_monotonically_to_clear(model):
     assert clearances[0] < 0, 'the start must be the self-colliding fold (else there is nothing to fix)'
 
 
+# sim-collect-retreat-fault-v1: rtfcollect2-fail1 recorded place/retreat (TRAJ_HOST_PLAN, ARM_JOINTS order).
+RTF_PLACE = (0.0675, -1.4839, 1.7494, -0.3074, 1.8391, -0.0024)  # retreat START = post-release place fold
+RTF_PREPLACE = UPRIGHT_ESCAPE                                     # retreat GOAL = collect_place_preplace_shape
+
+
+def test_rtfcollect2_retreat_is_self_clear_on_the_planner_model(model):
+    """The rtfcollect2 empty retreat jammed in SIM (shoulder_lift 0.438 rad short, wrists at ~3.13 rad/s
+    for the whole 30 s settle window), yet on the PLANNER's own XRDF sphere model the place->preplace
+    straight-line is entirely self-CLEAR and UN-FOLDS monotonically. So cuMotion / the collision-off
+    smoothstep are blind to the jam -- it is a SIM PhysX contact (the carton-weld release re-enables the
+    tool-side gripper colliders, on the self-collision ignore list, grazing the arm/cart at the folded place
+    pose), not a planner self-collision. This is why collect5's wrist_guard + straight_line, both ON in the
+    failing run, did not prevent it."""
+    place_worst, place_pair = _worst_self_clearance(model, RTF_PLACE)
+    # the place fold sits right at the forearm<->gripper-cube margin (grazing, but positive on the spheres)
+    assert 0.0 < place_worst < 0.003, (place_worst, place_pair)
+    assert set(place_pair) == {'ur_forearm_link', 'cube_without_surface_plates'}, place_pair
+    start, goal = np.array(RTF_PLACE), np.array(RTF_PREPLACE)
+    clearances = [_worst_self_clearance(model, start + (goal - start) * u)[0]
+                  for u in np.linspace(0.0, 1.0, 21)]
+    for a, b in zip(clearances, clearances[1:]):
+        assert b >= a - 1e-4, f'planner-model clearance regressed along the retreat: {a:.4f} -> {b:.4f}'
+    assert clearances[0] > 0 and clearances[-1] > 0, clearances  # self-clear end to end on the planner model
+
+
 def test_staged_tuck_and_transport_goals_are_self_clear(model):
     """After the clean escape, the staged retreat_tuck (arm joints 1-5 folded to cart_tuck_shape at the
     escape pan) and the transport stow goal are both self-collision-free, so the collision-aware plans

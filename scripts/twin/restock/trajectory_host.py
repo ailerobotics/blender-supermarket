@@ -195,6 +195,61 @@ GOAL_MISS_FAR_RAD = 0.03            # a single joint this far past tol is a gros
 GOAL_MISS_FROZEN_VEL = 0.05         # the blocked joint has settled against the block (rad/s)
 _GOAL_MISS_GENERIC = 'measured goal tolerance not reached'
 
+# sim-collect-retreat-fault-v1: the signature of the collect deck-place EMPTY-RETREAT jam. The retreat is a
+# collision-OFF straight-line joint smoothstep from the folded place pose to the clear preplace/stow standoff;
+# cuMotion and the smoothstep are blind to a SIM contact (the carton-weld release RE-ENABLES the carton + the
+# tool-side gripper colliders -- cube/surface_plates/suction_cups -- which are on the cuMotion self-collision
+# IGNORE list, so a re-enabled gripper collider grazing the arm/cart at the folded place pose is never
+# modelled). The arm then PINS: one or more PROXIMAL joints (shoulder_pan/lift/elbow) stall far short of goal
+# while the distal WRIST joints run at velocity SATURATION about their already-reached targets -- the whole-
+# wrist-cluster oscillation of runs 254-258 reborn. rtfcollect2-fail1 (host-stack.log): shoulder_lift stuck
+# 0.438 rad short (goal -1.91, meas -1.472), elbow 0.264 short, while wrist_1/2/3 ran at ~3.13 rad/s for the
+# full 30 s settle window. classify_goal_miss stays GENERIC here (several joints past tol, none frozen), so
+# the fault surfaced only as the generic "pose not bounded within settle window" -- naming the oscillation,
+# not its cause. This classifier names the real cause; it NEVER loosens a tolerance (diagnosis only).
+CONTACT_PIN_SAT_VEL = 2.5           # a wrist running this fast at a tight pose is velocity saturation, not tracking
+CONTACT_PIN_STALL_RAD = 0.15        # a proximal joint this far short (>> pos_tol) is pinned, not settle/track noise
+CONTACT_PIN_WRIST_IDX = (3, 4, 5)   # ur_wrist_1/2/3 in ARM_JOINTS order
+CONTACT_PIN_PROXIMAL_IDX = (0, 1, 2)  # ur_shoulder_pan/lift/elbow
+
+
+def classify_contact_pin(per_joint_err, per_joint_vel, pos_tol, *, joint_names=ARM_JOINTS,
+                         sat_vel=CONTACT_PIN_SAT_VEL, stall_rad=CONTACT_PIN_STALL_RAD,
+                         wrist_idx=CONTACT_PIN_WRIST_IDX, proximal_idx=CONTACT_PIN_PROXIMAL_IDX):
+    """Name a terminal settle miss that is the collect deck-place EMPTY-RETREAT contact pin, else return None
+    (pure/CPU-testable; the caller then keeps whatever naming it would otherwise use). Returns a reason iff
+    BOTH hold at the terminal sample: at least TWO wrist joints run at velocity saturation (``|vel|>=sat_vel``,
+    far above any planned/settle velocity) AND at least ONE proximal joint (shoulder_pan/lift/elbow) is stalled
+    far short of goal (``|err|>=stall_rad``). That is the fingerprint of a re-enabled gripper collider (on the
+    cuMotion self-collision ignore list) contacting the arm/cart at the folded place pose while the
+    collision-OFF straight-line retreat drives on -- the proximal joints cannot push through the contact and
+    the distal wrists chatter at saturation. It is deliberately DISTINCT from classify_goal_miss's single-
+    frozen-joint pick block (there the one far joint is FROZEN, |vel| small, and no wrist saturates): a
+    crisply-settling move (all velocities low) and a genuine single-joint block both return None here and are
+    left to the existing namings. Position tolerance is never loosened."""
+    try:
+        err = np.asarray(per_joint_err, float)
+        vel = np.asarray(per_joint_vel, float)
+        if err.shape != vel.shape or err.ndim != 1:
+            return None
+        saturated = [i for i in wrist_idx if i < len(vel) and abs(vel[i]) >= sat_vel]
+        stalled = [i for i in proximal_idx
+                   if i < len(err) and abs(err[i]) > pos_tol and abs(err[i]) >= stall_rad]
+        if len(saturated) < 2 or not stalled:
+            return None
+        def _nm(i):
+            return joint_names[i] if i < len(joint_names) else 'joint[%d]' % i
+        worst = max(stalled, key=lambda i: abs(err[i]))
+        stalled_s = ', '.join('%s %+.3f rad' % (_nm(i), err[i]) for i in stalled)
+        sat_s = ', '.join('%s %.2f rad/s' % (_nm(i), vel[i]) for i in saturated)
+        return ('collect retreat pinned by an unmodelled contact: proximal joint(s) stalled short of goal '
+                '[%s] (worst %s %.4f rad) while wrist(s) run at velocity saturation [%s] -- the collision-OFF '
+                'straight-line retreat drove a re-enabled gripper collider (carton-weld release; cuMotion '
+                'self-collision ignore list) into the arm/cart at the folded place pose; not a tracking-bound '
+                'failure and not gravity sag' % (stalled_s, _nm(worst), abs(err[worst]), sat_s))
+    except Exception:
+        return None
+
 
 def classify_goal_miss(per_joint_err, per_joint_vel, pos_tol, *, joint_names=ARM_JOINTS,
                        surface=None, far_rad=GOAL_MISS_FAR_RAD, frozen_vel=GOAL_MISS_FROZEN_VEL):
@@ -1006,6 +1061,12 @@ def main():
                             # else the generic. SETTLE_ENVELOPE=0 => pure classify_goal_miss (upstream).
                             miss_reason=classify_goal_miss(
                                 perr, measured[2], state['goal_pos_tol'], surface=state['pick_surface'])
+                            # sim-collect-retreat-fault-v1: the collect deck-place empty-retreat jam is a
+                            # MULTI-joint miss (proximal stalled + wrists saturated), so classify_goal_miss
+                            # (single-frozen-joint) stays generic and the envelope only names the oscillation.
+                            # Name the real cause here; it ranks ABOVE the generic settle/position reasons but
+                            # BELOW a specific pick-block (single frozen joint) and below an envelope 'settled'.
+                            pin_reason=classify_contact_pin(perr, measured[2], state['goal_pos_tol'])
                             if SETTLE_ENVELOPE:
                                 verdict,reason=settle_decision(state['settle_samples'],
                                     pos_tol=state['goal_pos_tol'],vel_tol=GOAL_VELOCITY_TOL,final=True)
@@ -1016,10 +1077,14 @@ def main():
                                     handle.succeed()
                                     result.error_code=result.SUCCESSFUL
                                     return result
-                                # A specific pick-block diagnosis is authoritative; otherwise the envelope's
-                                # settle reason is more specific than the generic position miss.
+                                # A specific pick-block diagnosis is authoritative; otherwise the retreat
+                                # contact-pin reason (when it matches) names the cause of the oscillation the
+                                # envelope only describes; otherwise the envelope's settle reason is more
+                                # specific than the generic position miss.
                                 if miss_reason==_GOAL_MISS_GENERIC:
-                                    raise RuntimeError(reason)
+                                    raise RuntimeError(pin_reason if pin_reason else reason)
+                            if miss_reason==_GOAL_MISS_GENERIC and pin_reason:
+                                raise RuntimeError(pin_reason)
                             raise RuntimeError(miss_reason)
                 time.sleep(.01)
             raise RuntimeError('executor shutdown')
