@@ -36,6 +36,30 @@ ARM_HEARTBEAT_WALL_BACKSTOP_S = max(5.0, min(300.0, float(os.environ.get('RESTOC
 # trip this). See pace_watchdog.is_dead(mode='either') and freshness-sim-clock-not-wall.
 ARM_HEARTBEAT_SIM_BACKSTOP_S = max(2.0, min(120.0, float(os.environ.get('RESTOCK_ARM_HEARTBEAT_SIM_BACKSTOP_S', 8.0))))
 
+# --- First-command ramp from the MEASURED pose (sim-robust-arm-start-envelope-v1) -------------------
+# The command-vs-measured tracking envelope (max_error) is a SAFETY trip for a gross divergence DURING
+# a move; it must NOT fire on the very FIRST command after boot (or after resume() re-arms the gate).
+# Between world.reset() and the first streamed host command NOTHING actively position-holds the arm at
+# its planned start pose, so under gravity / soft-drive settling the measured joints drift away from the
+# pose the host planned the trajectory from (floorbox1a attempt-1: the first command's target sat
+# track_err=1.5094 rad from the measured arm, vel=0.0000, and the gripper tilt jumped 5deg->47deg in the
+# same 0.1 s -- a physical drift, not a tracking fault). The gate then tripped ARM_CMD_ENVELOPE and
+# e-stopped the run at collect start, mis-surfaced downstream as the masked-depth publisher close / 'arm
+# command heartbeat lost'. The fix: the first command RAMPS the arm from where it ACTUALLY is toward the
+# commanded target, stepping at most max_error rad per command (so every applied step stays inside the
+# envelope), until the measured pose is within the envelope of the target -- then normal streaming/the
+# envelope safety trip take over (started=True). A first command that never converges (a genuinely dead
+# or wedged controller: measured not advancing toward the target) fails by the NAMED reason
+# controller_not_ready instead of the opaque downstream close. Sim-only, generous, env-overridable.
+# ARM_FIRST_CMD_RAMP_STALL_MAX: consecutive ramp commands with no measurable progress toward the target
+# before declaring the controller not ready. ARM_FIRST_CMD_RAMP_MAX: absolute cap on ramp commands for
+# one un-started episode (a backstop; at max_error ~0.2 rad/step a ~1.5 rad drift converges in <10 steps
+# once the drive follows, so a few hundred is far above any healthy ramp even under heavy render pacing).
+ARM_FIRST_CMD_RAMP_STALL_MAX = max(4, int(float(os.environ.get('RESTOCK_ARM_FIRST_CMD_RAMP_STALL_MAX', 60))))
+ARM_FIRST_CMD_RAMP_MAX = max(ARM_FIRST_CMD_RAMP_STALL_MAX,
+                             int(float(os.environ.get('RESTOCK_ARM_FIRST_CMD_RAMP_MAX', 400))))
+ARM_FIRST_CMD_RAMP_PROGRESS = 1e-4  # rad: min track_err decrease to count a ramp step as progressing
+
 
 def joint_states_payload(now, names, positions, velocities):
     """The /restock_sim/joint_states relay JSON. Measured positions AND velocities both ride along:
@@ -93,6 +117,17 @@ class ArmCommandGate:
         # released (begin/end_contact_hold) and the arm resumes host commands for lift/couple/tow/park.
         self._contact_hold=False
         self._contact_hold_target=None
+        # First-command ramp bookkeeping (sim-robust-arm-start-envelope-v1): until the gate has accepted
+        # one in-envelope command (started), a command whose target is beyond max_error of the measured
+        # pose is treated as a cold-boot drift to be ramped out, not a tracking fault. Reset by resume().
+        self._ramp_count=0
+        self._ramp_best=float('inf')
+        self._ramp_stall=0
+
+    def _reset_first_cmd_ramp(self):
+        self._ramp_count=0
+        self._ramp_best=float('inf')
+        self._ramp_stall=0
 
     def begin_contact_hold(self):
         if not self.faulted:
@@ -134,6 +169,7 @@ class ArmCommandGate:
         self.hold_target=None
         self.last_stamp=-1.
         self.started=False
+        self._reset_first_cmd_ramp()
         self.apply(self.measured(),np.zeros(6),self.indices)
 
     def command(self, *, names, positions, velocities, efforts, stamp, now):
@@ -172,23 +208,63 @@ class ArmCommandGate:
             order=[names.index(name) for name in ARM_JOINTS]
             q=np.asarray(positions,float)[order]
             v=np.asarray(velocities,float)[order]
-            track_err=float(np.max(np.abs(q-self.measured())))
+            measured=self.measured()
+            track_err=float(np.max(np.abs(q-measured)))
             vel_mag=float(np.max(np.abs(v)))
+            limit_ok=all(lo<=value<=hi for value,(lo,hi) in zip(q,self.limits))
+            # Finiteness, joint LIMITS and the velocity ceiling always gate -- a command outside them is
+            # malformed regardless of whether the arm has started moving. The command-vs-measured
+            # tracking ENVELOPE (track_err>max_error) is handled separately below: it is a SAFETY trip
+            # during a move, but on the FIRST command after boot/resume it is a cold-boot drift to ramp.
             if (not np.isfinite(q).all() or not np.isfinite(v).all()
-                    or any(not lo<=value<=hi for value,(lo,hi) in zip(q,self.limits))
-                    or vel_mag>self.max_speed
-                    or track_err>self.max_error):
-                # Diagnostic: which sub-condition rejected the command (the Isaac-side command-vs-
-                # measured tracking envelope mirrors trajectory_host's TRACKING_TOL; under render pacing
-                # the ~0.15 rad control lag can trip a too-tight max_error, run-115).
+                    or not limit_ok or vel_mag>self.max_speed):
                 print(f'ARM_CMD_ENVELOPE track_err={track_err:.4f} vel={vel_mag:.4f} '
                       f'max_error={self.max_error} max_speed={self.max_speed} '
-                      f'limit_ok={all(lo<=value<=hi for value,(lo,hi) in zip(q,self.limits))}',flush=True)
+                      f'limit_ok={limit_ok}',flush=True)
                 raise ValueError('arm target exceeds limits or tracking envelope')
+            if track_err>self.max_error:
+                if not self.started:
+                    # First command after boot/resume, target beyond the envelope => cold-boot drift
+                    # (sim-robust-arm-start-envelope-v1). The arm was not actively held at the planned
+                    # start between reset and this command and has drifted; ramp it from the MEASURED
+                    # pose toward the target by at most max_error per command (every applied step stays
+                    # inside the envelope) until it converges, rather than tripping the safety trip on a
+                    # drift that is not a tracking fault. A genuinely dead/wedged controller (measured
+                    # making no progress toward the target) fails by the NAMED reason controller_not_ready.
+                    self._ramp_count+=1
+                    if track_err<self._ramp_best-ARM_FIRST_CMD_RAMP_PROGRESS:
+                        self._ramp_best=track_err
+                        self._ramp_stall=0
+                    else:
+                        self._ramp_stall+=1
+                    if (self._ramp_stall>ARM_FIRST_CMD_RAMP_STALL_MAX
+                            or self._ramp_count>ARM_FIRST_CMD_RAMP_MAX):
+                        print(f'ARM_FIRST_CMD_RAMP controller_not_ready track_err={track_err:.4f} '
+                              f'max_error={self.max_error} ramps={self._ramp_count} '
+                              f'stall={self._ramp_stall}/{ARM_FIRST_CMD_RAMP_STALL_MAX} '
+                              f'(arm not advancing toward the first target)',flush=True)
+                        raise ValueError('controller_not_ready: arm first command did not ramp to the '
+                                         'planned start from the measured pose')
+                    step=np.clip(q-measured,-self.max_error,self.max_error)
+                    q_ramp=measured+step
+                    print(f'ARM_FIRST_CMD_RAMP track_err={track_err:.4f} step={float(np.max(np.abs(step))):.4f} '
+                          f'max_error={self.max_error} ramp={self._ramp_count} '
+                          f'(ramping first command from the measured pose)',flush=True)
+                    self.apply(q_ramp,np.zeros(6),self.indices)
+                    self.last_stamp=stamp
+                    self.last_receive=time.monotonic()
+                    return
+                # started => a genuine mid-move command-vs-measured divergence: the safety trip.
+                print(f'ARM_CMD_ENVELOPE track_err={track_err:.4f} vel={vel_mag:.4f} '
+                      f'max_error={self.max_error} max_speed={self.max_speed} '
+                      f'limit_ok={limit_ok}',flush=True)
+                raise ValueError('arm target exceeds limits or tracking envelope')
+            # Within the envelope: a normal command (and the convergence of any first-command ramp).
             self.apply(q,v,self.indices)
             self.last_stamp=stamp
             self.last_receive=time.monotonic()
             self.started=True
+            self._reset_first_cmd_ramp()
         except Exception:
             self.hold()
             raise

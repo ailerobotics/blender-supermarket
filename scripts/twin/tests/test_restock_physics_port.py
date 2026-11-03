@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from twin.restock.isaac_port import (body_measurement, MissionCamera, IsaacPort, SENSING_ACTIONS,
                                       _sensing_frame_due, _collect_observe_force_due)
+import twin.restock.native_transport as nt
 from twin.restock.native_transport import ArmCommandGate
 from twin.restock_manipulation.cad_tool import ARM_JOINTS
 
@@ -443,14 +444,73 @@ def test_arm_command_ignores_the_effort_field():
 
 
 def test_arm_tracking_jump_latches_measured_hold_and_rejects_later_move():
+    # The command-vs-measured envelope is the SAFETY trip for a gross divergence DURING a move -- it
+    # fires once the gate has started (one in-envelope command accepted). (The FIRST command after boot
+    # is the cold-boot ramp case, covered separately below.)
     gate,applied=gate_fixture()
+    gate.command(names=list(ARM_JOINTS),positions=[.01]*6,velocities=[.01]*6,
+                 efforts=[],stamp=1.,now=1.)      # a normal in-envelope command: the gate starts
+    assert gate.started and not gate.faulted
     with pytest.raises(ValueError,match='tracking'):
         gate.command(names=list(ARM_JOINTS),positions=[1.]*6,velocities=[.01]*6,
-                     efforts=[],stamp=1.,now=1.)
+                     efforts=[],stamp=2.,now=2.)  # a mid-move jump beyond the envelope faults
     assert gate.faulted and np.array_equal(applied[-1][0],np.zeros(6))
     gate.command(names=list(ARM_JOINTS),positions=[.01]*6,velocities=[.01]*6,
-                 efforts=[],stamp=2.,now=2.)
+                 efforts=[],stamp=3.,now=3.)
     assert np.array_equal(applied[-1][0],np.zeros(6))
+
+
+def test_first_command_ramps_from_measured_instead_of_tripping_the_envelope():
+    # sim-robust-arm-start-envelope-v1: the arm drifts from its planned start between world.reset() and
+    # the first streamed command (floorbox1a attempt-1: first target track_err=1.5094 rad from measured,
+    # vel=0.0000, gripper tilt 5->47 deg). The FIRST command must RAMP the arm from where it actually is
+    # toward the target (every applied step within max_error), never trip the envelope on that drift.
+    applied=[]
+    measured=np.zeros(6)
+    robot=NS(get_dof_index=lambda name:ARM_JOINTS.index(name),
+             get_joint_positions=lambda **kwargs:measured.copy())
+    gate=ArmCommandGate(robot,[(-3,3)]*6,lambda q,v,i:applied.append((q.copy(),v.copy())),
+                        max_speed=0.75,max_error=0.2)   # the floorbox1a sim profile (tol 0.2-1.5 class)
+    target=np.full(6,1.5094)                             # the first target, ~1.5 rad from measured (0)
+    track=[]
+    # Stream the (static, v=0) first target repeatedly, advancing the measured pose toward the
+    # commanded ramp step each tick as the position drive would. No command may trip the envelope.
+    for k in range(40):
+        track.append(float(np.max(np.abs(target-measured))))
+        gate.command(names=list(ARM_JOINTS),positions=target.tolist(),velocities=[0.]*6,
+                     efforts=[],stamp=float(k+1),now=float(k+1))
+        assert not gate.faulted                          # never the envelope trip on the first command
+        q_cmd=applied[-1][0]
+        assert float(np.max(np.abs(q_cmd-measured)))<=gate.max_error+1e-9   # each step within envelope
+        measured=q_cmd.copy()                            # the drive reaches the commanded step
+    assert gate.started                                  # converged -> normal streaming resumes
+    assert np.allclose(applied[-1][0],target)            # final command is the full target
+    assert track[0]>gate.max_error and track[-1]<=gate.max_error   # before: would trip; after: ramped in
+
+
+def test_first_command_ramp_fails_named_when_controller_never_advances():
+    # A genuinely dead/wedged controller (measured never moves toward the target) must fail by the NAMED
+    # reason controller_not_ready -- never the opaque downstream 'arm command heartbeat lost' / masked
+    # depth close that mis-surfaced floorbox1a attempt-1.
+    applied=[]
+    robot=NS(get_dof_index=lambda name:ARM_JOINTS.index(name),
+             get_joint_positions=lambda **kwargs:np.zeros(6))   # frozen: never advances
+    gate=ArmCommandGate(robot,[(-3,3)]*6,lambda q,v,i:applied.append((q.copy(),v.copy())),
+                        max_speed=0.75,max_error=0.2)
+    with pytest.raises(ValueError,match='controller_not_ready'):
+        for k in range(nt.ARM_FIRST_CMD_RAMP_STALL_MAX+5):
+            gate.command(names=list(ARM_JOINTS),positions=[1.5]*6,velocities=[0.]*6,
+                         efforts=[],stamp=float(k+1),now=float(k+1))
+    assert gate.faulted
+
+
+def test_first_command_within_envelope_does_not_ramp():
+    # A first command already within the envelope is a normal command: applied in full, gate started,
+    # no ramp (byte-identical to the pre-fix normal path).
+    gate,applied=gate_fixture()
+    gate.command(names=list(ARM_JOINTS),positions=[.05]*6,velocities=[.01]*6,
+                 efforts=[],stamp=1.,now=1.)
+    assert gate.started and not gate.faulted and np.allclose(applied[-1][0],0.05)
 
 
 def test_resume_rearms_a_latched_gate_so_a_streamed_command_actuates():
