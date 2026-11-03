@@ -1,0 +1,804 @@
+{
+ "state": "complete",
+ "reason": "",
+ "orchestrator": "behaviour_tree",
+ "ticks": 24057,
+ "degraded": [],
+ "physics_verified": false,
+ "note": "Mission success alone does not verify video, contacts or autonomy. BOUNDED RUN: stopped after return; not run: none; state covers only collect, couple, outbound, park, transfer, verify, return GROUND-TRUTH COLLECT (RESTOCK_COLLECT_GROUND_TRUTH=1): the collect pick target is the simulated pose of the controlled backstock carton asset, not a source-camera observation (labelled demo workaround); see collect_mode. TRANSFER_MODE=live_pose: real-arm transfer picks the carton from its live (controlled-asset ground-truth) pose with a near-face side grip, bay place yaw chosen for reach, and no base reposition. CAGE_COLLISION=filtered: carton-vs-rollwagen-cage contacts are filtered in the simulation (UsdPhysics FilteredPairsAPI on the handling unit vs the cage posts/bars; deck + upper shelf still collide) so the collect place and the transfer lift cannot strike the cage (labelled workaround, not a clearance proof). TRANSFER_CARRY=wrist_guard: transfer place moves (preplace/place/retreat) keep the arm IK in the clear wrist branch (wrist_1 <= carry cap, wrist_2 >= carry min; wrist-flipped re-seed) so the carry never drives into the ur_wrist_2-vs-forearm self-collision stop. TRANSFER_CARRY=weld: the transfer carton is held by the SIM fixed-joint weld (SIM_ATTACH_FALLBACK, the captain-approved collect pattern) from the grasp contact to the release at the place pose, not native suction physics.",
+ "stage_timeline": [
+  {
+   "t": 0.017,
+   "type": "stage_begin",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 0.0,
+    "steps": [
+     "drive\u2192pick",
+     "perceive carton",
+     "grasp\u00b7lift\u00b7tuck",
+     "drive\u2192rollwagen",
+     "perceive deck",
+     "place",
+     "verify placed"
+    ]
+   },
+   "action": "stage"
+  },
+  {
+   "t": 0.017,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 0.0,
+    "step": 0,
+    "label": "drive\u2192pick",
+    "kind": "nav"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 0.417,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 0.4,
+    "step": 1,
+    "label": "perceive carton",
+    "kind": "perceive"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 0.633,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 0.6167,
+    "step": 2,
+    "label": "grasp\u00b7lift\u00b7tuck",
+    "kind": "manip"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 59.4,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 59.3833,
+    "step": 3,
+    "label": "drive\u2192rollwagen",
+    "kind": "nav"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 91.033,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 91.0167,
+    "step": 4,
+    "label": "perceive deck",
+    "kind": "perceive"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 91.167,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 91.15,
+    "step": 5,
+    "label": "place",
+    "kind": "manip"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 164.783,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 164.7667,
+    "step": 6,
+    "label": "verify placed",
+    "kind": "verify"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 164.817,
+   "type": "stage_succeeded",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 164.8
+   },
+   "action": "stage"
+  },
+  {
+   "t": 164.817,
+   "type": "stage_begin",
+   "data": {
+    "stage": "couple",
+    "attempt": 1,
+    "sim_time": 164.8,
+    "steps": [
+     "drive\u2192cart",
+     "dock drawbar",
+     "attach"
+    ]
+   },
+   "action": "stage"
+  },
+  {
+   "t": 164.817,
+   "type": "stage_step",
+   "data": {
+    "stage": "couple",
+    "attempt": 1,
+    "sim_time": 164.8,
+    "step": 0,
+    "label": "drive\u2192cart",
+    "kind": "nav"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 197.933,
+   "type": "stage_step",
+   "data": {
+    "stage": "couple",
+    "attempt": 1,
+    "sim_time": 197.9167,
+    "step": 1,
+    "label": "dock drawbar",
+    "kind": "perceive"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 210.883,
+   "type": "stage_step",
+   "data": {
+    "stage": "couple",
+    "attempt": 1,
+    "sim_time": 210.8667,
+    "step": 2,
+    "label": "attach",
+    "kind": "couple"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 210.9,
+   "type": "stage_succeeded",
+   "data": {
+    "stage": "couple",
+    "attempt": 1,
+    "sim_time": 210.8833
+   },
+   "action": "stage"
+  },
+  {
+   "t": 210.9,
+   "type": "stage_begin",
+   "data": {
+    "stage": "outbound",
+    "attempt": 1,
+    "sim_time": 210.8833,
+    "steps": [
+     "tow\u2192shelf"
+    ]
+   },
+   "action": "stage"
+  },
+  {
+   "t": 210.9,
+   "type": "stage_step",
+   "data": {
+    "stage": "outbound",
+    "attempt": 1,
+    "sim_time": 210.8833,
+    "step": 0,
+    "label": "tow\u2192shelf",
+    "kind": "nav"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 227.8,
+   "type": "stage_succeeded",
+   "data": {
+    "stage": "outbound",
+    "attempt": 1,
+    "sim_time": 227.7833
+   },
+   "action": "stage"
+  },
+  {
+   "t": 227.8,
+   "type": "stage_begin",
+   "data": {
+    "stage": "park",
+    "attempt": 1,
+    "sim_time": 227.7833,
+    "steps": [
+     "stationarize"
+    ]
+   },
+   "action": "stage"
+  },
+  {
+   "t": 227.8,
+   "type": "stage_step",
+   "data": {
+    "stage": "park",
+    "attempt": 1,
+    "sim_time": 227.7833,
+    "step": 0,
+    "label": "stationarize",
+    "kind": "manip"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 227.817,
+   "type": "stage_succeeded",
+   "data": {
+    "stage": "park",
+    "attempt": 1,
+    "sim_time": 227.8
+   },
+   "action": "stage"
+  },
+  {
+   "t": 227.817,
+   "type": "stage_begin",
+   "data": {
+    "stage": "transfer",
+    "attempt": 1,
+    "sim_time": 227.8,
+    "steps": [
+     "perceive slot [ground truth]",
+     "place on shelf",
+     "verify placed [ground truth]"
+    ]
+   },
+   "action": "stage"
+  },
+  {
+   "t": 227.817,
+   "type": "stage_step",
+   "data": {
+    "stage": "transfer",
+    "attempt": 1,
+    "sim_time": 227.8,
+    "step": 0,
+    "label": "perceive slot [ground truth]",
+    "kind": "perceive"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 227.967,
+   "type": "stage_step",
+   "data": {
+    "stage": "transfer",
+    "attempt": 1,
+    "sim_time": 227.95,
+    "step": 1,
+    "label": "place on shelf",
+    "kind": "manip"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 363.967,
+   "type": "stage_step",
+   "data": {
+    "stage": "transfer",
+    "attempt": 1,
+    "sim_time": 363.95,
+    "step": 2,
+    "label": "verify placed [ground truth]",
+    "kind": "verify"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 364.0,
+   "type": "stage_succeeded",
+   "data": {
+    "stage": "transfer",
+    "attempt": 1,
+    "sim_time": 363.9833
+   },
+   "action": "stage"
+  },
+  {
+   "t": 364.0,
+   "type": "stage_begin",
+   "data": {
+    "stage": "verify",
+    "attempt": 1,
+    "sim_time": 363.9833,
+    "steps": [
+     "observe inventory [ground truth]"
+    ]
+   },
+   "action": "stage"
+  },
+  {
+   "t": 364.0,
+   "type": "stage_step",
+   "data": {
+    "stage": "verify",
+    "attempt": 1,
+    "sim_time": 363.9833,
+    "step": 0,
+    "label": "observe inventory [ground truth]",
+    "kind": "perceive"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 364.033,
+   "type": "stage_succeeded",
+   "data": {
+    "stage": "verify",
+    "attempt": 1,
+    "sim_time": 364.0167
+   },
+   "action": "stage"
+  },
+  {
+   "t": 364.033,
+   "type": "stage_begin",
+   "data": {
+    "stage": "return",
+    "attempt": 1,
+    "sim_time": 364.0167,
+    "steps": [
+     "tow\u2192cart park",
+     "brake cart",
+     "uncouple",
+     "back away",
+     "drive\u2192home"
+    ]
+   },
+   "action": "stage"
+  },
+  {
+   "t": 364.033,
+   "type": "stage_step",
+   "data": {
+    "stage": "return",
+    "attempt": 1,
+    "sim_time": 364.0167,
+    "step": 0,
+    "label": "tow\u2192cart park",
+    "kind": "nav"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 370.5,
+   "type": "stage_step",
+   "data": {
+    "stage": "return",
+    "attempt": 1,
+    "sim_time": 370.4833,
+    "step": 1,
+    "label": "brake cart",
+    "kind": "manip"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 370.517,
+   "type": "stage_step",
+   "data": {
+    "stage": "return",
+    "attempt": 1,
+    "sim_time": 370.5,
+    "step": 2,
+    "label": "uncouple",
+    "kind": "uncouple"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 370.55,
+   "type": "stage_step",
+   "data": {
+    "stage": "return",
+    "attempt": 1,
+    "sim_time": 370.5333,
+    "step": 3,
+    "label": "back away",
+    "kind": "nav"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 387.1,
+   "type": "stage_step",
+   "data": {
+    "stage": "return",
+    "attempt": 1,
+    "sim_time": 387.0833,
+    "step": 4,
+    "label": "drive\u2192home",
+    "kind": "nav"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 400.95,
+   "type": "stage_succeeded",
+   "data": {
+    "stage": "return",
+    "attempt": 1,
+    "sim_time": 400.9333
+   },
+   "action": "stage"
+  },
+  {
+   "t": 400.95,
+   "type": "mission_complete",
+   "data": {
+    "state": "complete",
+    "reason": "",
+    "sim_time": 400.9333
+   },
+   "action": "stage"
+  }
+ ],
+ "verify_mode": "ground_truth",
+ "transfer_verify_mode": "ground_truth",
+ "return_mode": "uncouple_at_cart_parking",
+ "vram_headroom_mode": "on",
+ "vram_headroom": {
+  "enabled": true,
+  "floor_mib": 800.0,
+  "card_mib": 12288.0,
+  "sample_period_s": 0.2,
+  "shed_order": [
+   "capture_rate",
+   "arm_feed_economy",
+   "secondary_cameras"
+  ],
+  "durable_write_period_s": 1.0
+ },
+ "stop_after": "return",
+ "stages_driven": [
+  "collect",
+  "couple",
+  "outbound",
+  "park",
+  "transfer",
+  "verify",
+  "return"
+ ],
+ "not_run": [],
+ "walkthrough_caption": "BENCH RUN stop_after=return: no stage cut | collect: GROUND-TRUTH pick (simulated carton pose, not camera) | TRANSFER: live-pose pick (ground-truth carton pose) | CAGE COLLISION FILTERED (sim workaround): the carton passes through the rollwagen cage bars | TRANSFER CARRY: wrist-guarded IK (clear wrist branch) | TRANSFER CARRY: weld attach (sim fixed joint), not suction",
+ "bounded_note": "BOUNDED RUN: stopped after return; not run: none; state covers only collect, couple, outbound, park, transfer, verify, return",
+ "collect_mode": "ground_truth",
+ "bt_view": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/coldwin16/bt_view.html",
+ "transfer_mode": "live_pose",
+ "workarounds": [
+  "transfer_mode=live_pose",
+  "cage_collision=filtered",
+  "transfer_carry=wrist_guard",
+  "transfer_carry=weld"
+ ],
+ "cage_collision_mode": "filtered",
+ "transfer_carry": [
+  "wrist_guard",
+  "weld"
+ ],
+ "transfer_attach": "weld",
+ "events": [
+  {
+   "sequence": 1,
+   "job_id": "restock-one",
+   "state": "reserved",
+   "evidence": {}
+  },
+  {
+   "sequence": 2,
+   "job_id": "restock-one",
+   "state": "collect",
+   "evidence": {}
+  },
+  {
+   "sequence": 3,
+   "job_id": "restock-one",
+   "state": "collect_succeeded",
+   "evidence": {
+    "source": "ground_truth",
+    "ground_truth": true,
+    "observation_id": "ground_truth_place:164.783",
+    "simulation_time": 164.78333333333333,
+    "sku": "juice_orange",
+    "location": "rollwagen",
+    "quantity": 1,
+    "verify_mode": "ground_truth_place",
+    "collect_mode": "ground_truth",
+    "xy_offset": 0.013842025196859993,
+    "bottom_gap": 0.02817284406581233,
+    "carton_pose_station": [
+     1.1243115854163612,
+     0.114540478950788,
+     0.4621329054507642,
+     0.0,
+     0.0,
+     0.0,
+     1.0
+    ],
+    "support_pose_station": [
+     1.118064513663028,
+     0.10218832302320946,
+     0.35396006138495184,
+     0.022845881037958187,
+     0.027751962416457863,
+     0.635129138605475,
+     0.7715690970975329
+    ],
+    "loaded": true
+   }
+  },
+  {
+   "sequence": 4,
+   "job_id": "restock-one",
+   "state": "couple",
+   "evidence": {}
+  },
+  {
+   "sequence": 5,
+   "job_id": "restock-one",
+   "state": "couple_succeeded",
+   "evidence": {
+    "observation_id": "physics:12653",
+    "source": "sensor",
+    "simulation_time": 210.88333333333333,
+    "coupled": true,
+    "couple_arrival_mode": "standoff xy-hysteresis 0.03 m; cart-relative standoff offset 0.4 m; fine-dock progress cap 120 s"
+   }
+  },
+  {
+   "sequence": 6,
+   "job_id": "restock-one",
+   "state": "outbound",
+   "evidence": {}
+  },
+  {
+   "sequence": 7,
+   "job_id": "restock-one",
+   "state": "outbound_succeeded",
+   "evidence": {
+    "observation_id": "physics:13667",
+    "source": "sensor",
+    "simulation_time": 227.78333333333333,
+    "arrived": true,
+    "outbound_brake_mode": "coupled creep-escape (0 noise-band ticks)"
+   }
+  },
+  {
+   "sequence": 8,
+   "job_id": "restock-one",
+   "state": "park",
+   "evidence": {}
+  },
+  {
+   "sequence": 9,
+   "job_id": "restock-one",
+   "state": "park_succeeded",
+   "evidence": {
+    "observation_id": "physics:13668",
+    "source": "sensor",
+    "simulation_time": 227.79999999999998,
+    "stationary": true
+   }
+  },
+  {
+   "sequence": 10,
+   "job_id": "restock-one",
+   "state": "transfer",
+   "evidence": {}
+  },
+  {
+   "sequence": 11,
+   "job_id": "restock-one",
+   "state": "transfer_succeeded",
+   "evidence": {
+    "observation_id": "ground_truth:transfer:physics:21839",
+    "source": "ground_truth",
+    "ground_truth": true,
+    "simulation_time": 363.98333333333335,
+    "sku": "juice_orange",
+    "quantity": 1,
+    "location": "G3_back_s2",
+    "verify_mode": "ground_truth",
+    "ground_truth_place_check": {
+     "source": "ground_truth_place_check",
+     "location": "G3_back_s2",
+     "verify_mode": "ground_truth",
+     "simulation_time": 363.96666666666664,
+     "carton_pose_station": [
+      0.024347140859589,
+      1.174160412925113,
+      0.30999250751463925,
+      0.0,
+      0.0,
+      0.0,
+      1.0
+     ],
+     "support_pose_station": [
+      0.025388250370606213,
+      1.1718579868321544,
+      0.22999449342337575,
+      4.3252301933852117e-07,
+      1.317035895067535e-05,
+      0.0003356365674314183,
+      0.9999999435872231
+     ],
+     "xy_offset": 0.0025268705798809046,
+     "bottom_gap": -1.9859087365126094e-06
+    },
+    "released": true
+   }
+  },
+  {
+   "sequence": 12,
+   "job_id": "restock-one",
+   "state": "verify",
+   "evidence": {}
+  },
+  {
+   "sequence": 13,
+   "job_id": "restock-one",
+   "state": "inventory_verified",
+   "evidence": {
+    "observation_id": "ground_truth_verify:364.0167",
+    "source": "ground_truth",
+    "verify_mode": "ground_truth",
+    "simulation_time": 364.01666666666665,
+    "sku": "juice_orange",
+    "quantity": 1,
+    "location": "G3_back_s2",
+    "unit_kind": "handling_unit",
+    "transfer_confirmed": true,
+    "source_vacancy_location": "rollwagen",
+    "source_vacancy": "implied: the single handling unit rests on the bay (sim ground truth)",
+    "verification_started": 363.98333333333335,
+    "confirming_observation_ids": [
+     "ground_truth_verify:364.0000",
+     "ground_truth_verify:364.0167"
+    ],
+    "ground_truth_check": {
+     "offset_bay_xy": [
+      -0.0011,
+      0.0063
+     ],
+     "bottom_gap_m": -0.0,
+     "tilt_deg": 0.0,
+     "on_bay": true,
+     "far": false,
+     "unit_center_world": [
+      -2.0011,
+      16.4263,
+      0.81
+     ],
+     "gripper_contact": false
+    },
+    "tolerances": {
+     "xy_margin_m": 0.02,
+     "z_tol_m": 0.04,
+     "max_tilt_deg": 10.0,
+     "frames": 2,
+     "bay_center_xy": [
+      -2.0,
+      16.42
+     ],
+     "bay_half_xy": [
+      0.35,
+      0.25
+     ],
+     "bay_top_z": 0.73
+    },
+    "note": "vr1 labelled demo workaround: SIM GROUND-TRUTH verify (handling-unit pose vs the authored bay top); the bay shelf camera is not commissioned. NOT a camera measurement."
+   }
+  },
+  {
+   "sequence": 14,
+   "job_id": "restock-one",
+   "state": "verify_succeeded",
+   "evidence": {
+    "observation_id": "ground_truth_verify:364.0167",
+    "source": "ground_truth",
+    "verify_mode": "ground_truth",
+    "simulation_time": 364.01666666666665,
+    "sku": "juice_orange",
+    "quantity": 1,
+    "location": "G3_back_s2",
+    "unit_kind": "handling_unit",
+    "transfer_confirmed": true,
+    "source_vacancy_location": "rollwagen",
+    "source_vacancy": "implied: the single handling unit rests on the bay (sim ground truth)",
+    "verification_started": 363.98333333333335,
+    "confirming_observation_ids": [
+     "ground_truth_verify:364.0000",
+     "ground_truth_verify:364.0167"
+    ],
+    "ground_truth_check": {
+     "offset_bay_xy": [
+      -0.0011,
+      0.0063
+     ],
+     "bottom_gap_m": -0.0,
+     "tilt_deg": 0.0,
+     "on_bay": true,
+     "far": false,
+     "unit_center_world": [
+      -2.0011,
+      16.4263,
+      0.81
+     ],
+     "gripper_contact": false
+    },
+    "tolerances": {
+     "xy_margin_m": 0.02,
+     "z_tol_m": 0.04,
+     "max_tilt_deg": 10.0,
+     "frames": 2,
+     "bay_center_xy": [
+      -2.0,
+      16.42
+     ],
+     "bay_half_xy": [
+      0.35,
+      0.25
+     ],
+     "bay_top_z": 0.73
+    },
+    "note": "vr1 labelled demo workaround: SIM GROUND-TRUTH verify (handling-unit pose vs the authored bay top); the bay shelf camera is not commissioned. NOT a camera measurement."
+   }
+  },
+  {
+   "sequence": 15,
+   "job_id": "restock-one",
+   "state": "return",
+   "evidence": {}
+  },
+  {
+   "sequence": 16,
+   "job_id": "restock-one",
+   "state": "return_succeeded",
+   "evidence": {
+    "observation_id": "physics:24056",
+    "source": "sensor",
+    "simulation_time": 400.93333333333334,
+    "home": true
+   }
+  },
+  {
+   "sequence": 17,
+   "job_id": "restock-one",
+   "state": "complete",
+   "evidence": {}
+  }
+ ]
+}

@@ -1,0 +1,7 @@
+{"event": "begin", "stage": "collect", "sim_time": 0.0, "done": []}
+{"event": "begin", "stage": "couple", "sim_time": 164.8, "done": []}
+{"event": "begin", "stage": "outbound", "sim_time": 210.88333333333333, "done": []}
+{"event": "begin", "stage": "park", "sim_time": 227.78333333333333, "done": []}
+{"event": "begin", "stage": "transfer", "sim_time": 227.79999999999998, "done": []}
+{"event": "begin", "stage": "verify", "sim_time": 363.98333333333335, "done": []}
+{"event": "begin", "stage": "return", "sim_time": 364.01666666666665, "done": []}

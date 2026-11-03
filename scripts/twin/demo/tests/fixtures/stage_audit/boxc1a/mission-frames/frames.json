@@ -1,0 +1,33 @@
+{
+ "nominal_fps": 30,
+ "timing": "synthetic fixture frames",
+ "frames": [
+  {
+   "file": "000000.png",
+   "simulation_time": 48.1042,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000001.png",
+   "simulation_time": 96.2083,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000002.png",
+   "simulation_time": 144.3125,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  }
+ ]
+}
