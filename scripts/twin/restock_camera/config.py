@@ -14,6 +14,15 @@ from .lights import camera_lamp
 from .wrist_camera import wrist_camera_design
 
 
+#: Audited wall-3 side-grasp handling units (metres). The camera design (QR marker size +
+#: placement, support framing, FOV/standoff, decode pixel margins) was re-audited for each: the
+#: original .60x.40x.16 m unit and the PR 268 .45x.30x.18 m unit. A unit outside this set is
+#: un-audited and the design gate refuses it. The derived per-unit numbers are computed from the
+#: unit's own ``dimensions_m`` (never a hardcoded footprint), so the SAME code produces the correct
+#: source support framing for whichever audited unit the scenario carries.
+AUDITED_UNITS = ((.60, .40, .16), (.45, .30, .18))
+
+
 def camera_config(scenario, manifest, *, mast_depth=False):
     """Fixed station camera + QR support design (``source``/``cart``/``shelf``).
 
@@ -25,13 +34,31 @@ def camera_config(scenario, manifest, *, mast_depth=False):
     are unchanged unless the integration lane regenerates with the switch on.
     """
     staging,unit = scenario['initial_staging'],scenario['handling_unit']
+    dims = np.asarray(unit['dimensions_m'],float)
     if (unit['local_wall'] != 3 or unit['grasp_mode'] != 'side'
-            or not np.allclose(unit['dimensions_m'],[.6,.4,.16])
+            or not any(np.allclose(dims,audited) for audited in AUDITED_UNITS)
             or not np.isclose(manifest['spec']['arm_mount_z'],.5)):
         raise ValueError('camera design requires audited mobile wall3 handling unit')
+    # Source support framing is derived PER audited unit: the clean flat empty-support patch the
+    # source camera certifies is the carton footprint + .02 m margin per axis (the same convention
+    # as plan_restock_camera.roi_size). It is .62x.42 for the .60x.40 carton and .47x.32 for the
+    # PR 268 .45x.30 carton. The cart/shelf patches stay structure-bound (ringed by the rollwagen
+    # cage / the shelf-board edges) at their tightened values below; both still cover the smaller
+    # carton core. Marker side (.06 m), the 2560x1920 resolution and the per-camera FOV/standoff
+    # are decode/marker-bound not carton-bound (the markers sit on fixed support structures, not on
+    # the carton faces), so they are unchanged. The audit line states the derived numbers so the
+    # integration GPU boot log carries them.
+    source_required_xy = tuple(round(float(v),6) for v in dims[:2]+.02)
+    print('CAMERA_AUDIT unit_m=%s source_required_xy_m=%s marker_side_m=0.060 '
+          'cart_required_xy_m=(0.54,0.34) shelf_required_xy_m=(0.58,0.36) '
+          'carton_top_on_shelf_z_m=%.3f tier_underside_z_m=%.3f'
+          % (tuple(round(float(v),6) for v in dims), source_required_xy,
+             float(staging['target_surface_pose_world'][2]+dims[2]),
+             float(staging['target_surface_pose_world'][2]+.24)))
     # Per-camera pixel sampling sized so the 60 mm paired QR markers (25-module v2)
-    # clear a decode-safe pixels-per-module margin (~6 px/module) while the full
-    # .62x.42 support stays framed. Resolution stays 2560x1920, so the bounded QR
+    # clear a decode-safe pixels-per-module margin (~6 px/module) while the full source support
+    # patch (.62x.42 for the .60x.40 carton, .47x.32 for the .45x.30 carton) stays framed.
+    # Resolution stays 2560x1920, so the bounded QR
     # tile grid (hence decode latency) is unchanged: it is resolution-bound, not
     # marker-size-bound. Source/cart narrow the FOV to enlarge their frontal-ish
     # markers; the shelf keeps the wide FOV because its markers and support span a
@@ -170,7 +197,7 @@ def camera_config(scenario, manifest, *, mast_depth=False):
             warning='nominal geometry is design only; select support/witness quads from empty RGB-D')
 
     support('source','map',source,np.pi,[source+[-.30,.30,0],source+[.30,.30,0]],
-            source+[0,.30,0],[.18,.06])
+            source+[0,.30,0],[.18,.06],required_xy=source_required_xy)
     # Cart support: the required_xy is tightened to .54x.34 (from the default .62x.42) because
     # the cart's LOWER deck is ringed by its cage: the vertical cage-wall posts have ~34 mm bases
     # that poke into a full .62x.42 support polygon at its +/-y edges, and the +x edge reaches the
