@@ -106,6 +106,9 @@ KEY_CONSUMER = {
     # hold the runtime drives; a split (one side only) is the run-277 trap these registrations guard against.
     'shelf_staging': RUNTIME,
     'carry_drive_profile': RUNTIME,   # drive-with-payload base speed/accel caps for the carry→endcap leg
+    # sim-cart-side-bay-v1: park the cart in an OFF-AXIS side bay (extends shelf_staging); isaac_bundle
+    # builds the RuntimeAdapter with it (RUNTIME). Pair `cart_side_bay: true` with `shelf_staging: true`.
+    'cart_side_bay': RUNTIME,
 }
 
 # fm402: cap/limit keys the controller reads OPTIONALLY (config.get with a silent default). These are

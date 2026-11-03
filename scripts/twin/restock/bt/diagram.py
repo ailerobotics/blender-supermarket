@@ -101,12 +101,21 @@ def _n(name, role, cls, category, *, stage='', kind='', reacts=(), memory=None, 
     }
 
 
-def _stage_steps(stage, *, plans, timeline, return_uncouple, shelf_staging=False):
+def _stage_steps(stage, *, plans, timeline, return_uncouple, shelf_staging=False,
+                 cart_side_bay=False, cart_tow_home=False):
     """The ordered ``(label, kind)`` steps of a stage. A run alignment's recorded labels win (they
     carry the exact run's mode tags, e.g. ``[ground truth]``); otherwise the authored PLANS, with the
-    uncouple-at-parking return plan or the shelf-staging outbound plan selected when requested."""
+    uncouple-at-parking return plan or the shelf-staging/side-bay plans selected when requested."""
     if timeline is not None and stage in getattr(timeline, 'labels', {}):
         return list(timeline.labels[stage])
+    # sim-cart-side-bay-v1 (extends shelf-staging): the outbound tows to the OFF-AXIS side bay, and the
+    # return drives the base HOME EMPTY through the freed doorway (baseline); the coupled tow-home (cart
+    # retrieved to the backroom) is the named config follow-up, shown when cart_tow_home is selected.
+    if stage == 'outbound' and cart_side_bay:
+        return [(lbl, k) for lbl, k in _sp.OUTBOUND_SIDE_BAY_PLAN]
+    if stage == 'return' and cart_side_bay:
+        plan = _sp.RETURN_SIDE_BAY_RECOUPLE_PLAN if cart_tow_home else _sp.RETURN_SIDE_BAY_PLAN
+        return [(lbl, k) for lbl, k in plan]
     if stage == 'return' and return_uncouple:
         return [(lbl, k) for lbl, k in _sp.RETURN_UNCOUPLE_PLAN]
     if stage == 'outbound' and shelf_staging:
@@ -117,7 +126,7 @@ def _stage_steps(stage, *, plans, timeline, return_uncouple, shelf_staging=False
 
 
 def build_model(*, plans=None, stage_order=None, timeline=None, return_uncouple=False,
-                shelf_staging=False):
+                shelf_staging=False, cart_side_bay=False, cart_tow_home=False):
     """Build the full behaviour-tree model (a nested dict of annotated nodes) from the code.
 
     * ``plans`` -- the stage -> ``[(label, kind)]`` plans (defaults to ``stage_phases.PLANS``; a test
@@ -138,6 +147,10 @@ def build_model(*, plans=None, stage_order=None, timeline=None, return_uncouple=
             any(lbl == 'uncouple' for lbl, _ in timeline.labels.get('return', []))
         shelf_staging = 'outbound' in getattr(timeline, 'labels', {}) and \
             any(lbl == 'uncouple' for lbl, _ in timeline.labels.get('outbound', []))
+    # sim-cart-side-bay-v1 extends shelf-staging: the transfer service leg (TRANSFER_STAGING_PLAN) is the
+    # same, so cart_side_bay implies the shelf-staging transfer/outbound selection unless a timeline wins.
+    if cart_side_bay:
+        shelf_staging = True
     stages = list(stage_order) if stage_order is not None else list(plans.keys())
 
     # Reactive subtree: the four guards then the observe-only recoveries, in tick order
@@ -162,7 +175,8 @@ def build_model(*, plans=None, stage_order=None, timeline=None, return_uncouple=
     stage_nodes = []
     for stage in stages:
         steps = _stage_steps(stage, plans=plans, timeline=timeline, return_uncouple=return_uncouple,
-                             shelf_staging=shelf_staging)
+                             shelf_staging=shelf_staging, cart_side_bay=cart_side_bay,
+                             cart_tow_home=cart_tow_home)
         gates = [_n(f'{stage}:{label}', 'phase_gate', 'PhaseGate', CONDITION,
                     stage=stage, kind=kind) for label, kind in steps]
         steps_seq = _n(f'{stage} steps', 'stage_steps', 'Sequence', SEQUENCE,

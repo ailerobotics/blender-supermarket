@@ -858,6 +858,95 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(r.status, 'failed')
         self.assertIn('cart lost', r.reason)
 
+    def _side_bay_poses(self):
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['home'] = [-3.875, 14.0, 0.0]
+        poses['shelf_approach'] = [-3.05, 6.0, 3.14159]
+        poses['shelf_staging'] = [-3.875, 8.0, -1.5708]
+        poses['cart_side_bay'] = [-4.3, 6.95, -1.5708]
+        return poses
+
+    def test_cart_side_bay_outbound_tows_to_bay_not_staging(self):
+        # sim-cart-side-bay-v1: with cart_side_bay on (extends shelf_staging) + a cart_side_bay pose, the
+        # OUTBOUND tows the COUPLED train to the OFF-AXIS bay pose (not the on-axis shelf_staging pose),
+        # brakes + releases the cart there. Same brake/uncouple legs; only the park goal changes.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        events = []
+        state_uncoupled = {'joint_present': False, 'requested_attached': False, 'healthy': False}
+        self.mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None,
+                         command=lambda *a, **k: None,
+                         hold_cart_pin=lambda: events.append('brake'),
+                         uncouple=lambda obs: (events.append('uncouple'), state_uncoupled)[1],
+                         attach=lambda obs: None, coupling_state=lambda o: {'healthy': True})
+        coupled_seq = [True, True, True, False, False, False, False, False]
+        ticks = [0]
+        def advance(dt):
+            i = ticks[0]; ticks[0] += 1
+            return replace(self.p, observation_id=f'f{i}', simulation_time=(i + 1) * .1,
+                           coupled=coupled_seq[min(i, len(coupled_seq) - 1)], parked=True)
+        self.port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, self._side_bay_poses(),
+                                 fixture_mode=True, shelf_staging=True, cart_side_bay=True)
+        self.assertTrue(adapter._cart_side_bay_active())
+        adapter.start('outbound', self.job)
+        r = None
+        for _ in range(12):
+            r = adapter.step(.1)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(adapter._shelf_cart_parked)
+        self.assertEqual(events, ['brake', 'uncouple'])
+        # The single coupled tow leg goes to the OFF-AXIS side-bay pose, not the on-axis staging pose.
+        self.assertEqual(nav_goals, [((-4.3, 6.95, -1.5708), True)])
+
+    def test_cart_side_bay_return_drives_home_empty(self):
+        # sim-cart-side-bay-v1: with the cart parked (uncoupled) in the bay, the RETURN drives the base
+        # HOME EMPTY (coupled=False) through the freed doorway and SUCCEEDS on an uncoupled packet.
+        nav_goals = []
+        self.nav = NS(start=lambda goal, coupled, **kw: nav_goals.append((tuple(goal), coupled)),
+                      step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                      cancel=lambda: None)
+        self.p = replace(self.p, coupled=False, parked=True)
+        self.port = NS(advance=lambda dt: self.p, controls=lambda c: None, stop=lambda: None)
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, self._side_bay_poses(),
+                                 fixture_mode=True, shelf_staging=True, cart_side_bay=True)
+        adapter._shelf_cart_parked = True        # OUTBOUND already parked + released the cart at the bay
+        adapter.start('return', self.job)
+        r = None
+        for _ in range(6):
+            r = adapter.step(.1)
+            if r.status in ('succeeded', 'failed'):
+                break
+        self.assertEqual(r.status, 'succeeded')
+        self.assertTrue(r.evidence['home'])
+        self.assertEqual(adapter._return_leg, 'home')
+        # The home drive is UNCOUPLED (coupled=False) -- no cart towed home in the baseline.
+        self.assertEqual(nav_goals, [((-3.875, 14.0, 0.0), False)])
+
+    def test_cart_side_bay_requires_pose_and_shelf_staging(self):
+        poses = self._side_bay_poses()
+        # cart_side_bay without the bay pose is refused.
+        bad = dict(poses); bad.pop('cart_side_bay')
+        with self.assertRaises(ValueError):
+            RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, bad,
+                           fixture_mode=True, shelf_staging=True, cart_side_bay=True)
+        # cart_side_bay without shelf_staging is refused (it extends shelf-staging).
+        with self.assertRaises(ValueError):
+            RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
+                           fixture_mode=True, shelf_staging=False, cart_side_bay=True)
+
+    def test_cart_side_bay_off_is_shelf_staging_path(self):
+        # shelf_staging on but cart_side_bay off => the on-axis staging path (PR 274), byte-identical:
+        # _cart_side_bay_active() is False and the outbound park goal is the shelf_staging pose.
+        adapter = RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, self._side_bay_poses(),
+                                 fixture_mode=True, shelf_staging=True, cart_side_bay=False)
+        self.assertFalse(adapter._cart_side_bay_active())
+        self.assertTrue(adapter._shelf_staging_active())
+
     def test_shelf_staging_off_is_byte_identical_tow_to_endcap(self):
         # Default (shelf_staging off): outbound navigates straight to the endcap shelf_approach as a
         # single COUPLED tow and succeeds with arrived=True -- unchanged legacy behaviour.

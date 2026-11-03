@@ -292,7 +292,7 @@ class RuntimeAdapter:
                  ground_truth_place_actions=(), staged_settle_s=0.0,
                  collect_place_base_settle_m=None,
                  hold_base_on_reposition_block=False,
-                 shelf_staging=False, carry_drive_profile=None):
+                 shelf_staging=False, carry_drive_profile=None, cart_side_bay=False):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         # Staged-start settle hold (twin.restock.staged_start; the bundle passes
         # config['staged_start_settle_s'] only when start_at is set and not collect): the warm-up of the
@@ -435,6 +435,21 @@ class RuntimeAdapter:
         # train. The cart RETRIEVAL on return (re-couple) stays a separate captain decision (NOT here). See
         # docs/examples/service-leg-carry-mission-fragment.json and data/sim-service-leg-carry-v1/report.md.
         self.shelf_staging = bool(shelf_staging)
+        # sim-cart-side-bay-v1 (captain option 1, opt-in extension of shelf_staging, default False =>
+        # byte-identical). The sim-shelf-staging-v1 OUTBOUND parked the rollwagen ON the portal axis at the
+        # staging pose, which BLOCKS the free base from threading the single 2.6 m doorway home (grid A* NO
+        # PATH) and does not let a coupled re-couple + tow-home expand. Park the cart instead in a SIDE BAY
+        # OFF the portal axis near the shelf: the OUTBOUND tows the COUPLED train straight down the axis
+        # (dead-centre doorway crossing) then tucks it into the bay (`cart_side_bay` pose, ~14 deg coupled
+        # articulation, cart parked off-axis), brakes + releases it there; the free base services the endcap
+        # ALONE and then -- because the bay cleared the on-axis block -- drives HOME EMPTY through the freed
+        # doorway on RETURN, leaving the cart parked (uncoupled) at the side bay. The COUPLED tow-home (cart
+        # retrieved to the backroom) is a conserved-~180-deg-reorientation hard case left as a named,
+        # config-selectable follow-up (docs/examples/cart-side-bay-mission-fragment.json; it is NOT wired
+        # here). cart_side_bay EXTENDS shelf_staging, so it requires shelf_staging True + a `cart_side_bay`
+        # pose; when active the outbound park goal is `cart_side_bay` (not `shelf_staging`) and the return
+        # drives the base home empty. See data/sim-cart-side-bay-v1/report.md.
+        self.cart_side_bay = bool(cart_side_bay)
         self._outbound_leg = None       # staging | brake | uncouple | uncouple_wait
         self._shelf_cart_parked = False  # True once the outbound released the cart at the staging pose
         # sim-service-leg-carry-v1 (captain 2026-11-03, opt-in with shelf_staging): the manipulation half
@@ -515,7 +530,7 @@ class RuntimeAdapter:
         # (in front of the rollwagen mouth) the collect stage drives to before placing; validated only
         # when supplied.
         for name in ('couple_approach', 'couple_standoff', 'place_approach', 'place_approach_stage',
-                     'cart_parking', 'cart_parking_backaway', 'shelf_staging'):
+                     'cart_parking', 'cart_parking_backaway', 'shelf_staging', 'cart_side_bay'):
             if name in poses:
                 wp = poses[name]
                 if len(wp) != 3 or not all(math.isfinite(v) for v in wp):
@@ -524,6 +539,9 @@ class RuntimeAdapter:
         # cart parking on the portal axis) in addition to the existing `shelf_approach` service pose.
         if self.shelf_staging and 'shelf_staging' not in poses:
             raise ValueError('shelf_staging mode requires a "shelf_staging" pose')
+        # sim-cart-side-bay-v1: the side bay extends shelf_staging and needs its own off-axis bay pose.
+        if self.cart_side_bay and not (self.shelf_staging and 'cart_side_bay' in poses):
+            raise ValueError('cart_side_bay mode requires shelf_staging and a "cart_side_bay" pose')
         self.time = 0.
         # fm425 (c) (run-322b): WALL-clock stuck-stage fail-fast for navigate. The nav controller's own
         # blocked_timeout/goal_timeout are SIM-clock caps (factory.py) -- under render pacing the sim
@@ -663,11 +681,24 @@ class RuntimeAdapter:
                 # pose (first leg of the re-sequenced sales-floor stage); the execute phase then brakes +
                 # releases the cart there and leaves the base PARKED (uncoupled) at the staging pose. The
                 # carton-carry service to the endcap is the transfer service leg (sim-service-leg-carry-v1).
+                # sim-cart-side-bay-v1: when the side bay is active, the OUTBOUND tows the cart to the
+                # OFF-AXIS `cart_side_bay` pose instead (a gentle straight-then-tuck lane; cart parks off
+                # the portal axis so the free base can thread the doorway home); the brake/uncouple legs
+                # are identical.
+                park_goal = 'cart_side_bay' if self._cart_side_bay_active() else 'shelf_staging'
                 kwargs = ({'goal_articulation': self.goal_articulation['outbound']}
                           if 'outbound' in self.goal_articulation else {})
-                self._start_nav_leg(self.poses['shelf_staging'], True, **kwargs)
+                self._start_nav_leg(self.poses[park_goal], True, **kwargs)
                 self.phase = 'navigate'
                 self._outbound_leg = 'staging'
+            elif action == 'return' and self._cart_side_bay_active() and self._shelf_cart_parked:
+                # sim-cart-side-bay-v1: the cart is parked (uncoupled) in the OFF-AXIS side bay, so the
+                # free base drives HOME EMPTY through the freed doorway (the side bay cleared the on-axis
+                # block the on-axis staging left -- grid A* home now routes). The cart stays at the bay;
+                # the coupled tow-home (cart retrieved to the backroom) is the named config follow-up.
+                self._start_nav_leg(self.poses['home'], False)
+                self.phase = 'navigate'
+                self._return_leg = 'home'
             else:
                 goal = {'collect': 'pickup', 'outbound': 'shelf_approach', 'return': 'home'}[action]
                 kwargs = ({'goal_articulation':self.goal_articulation[action]}
@@ -775,6 +806,16 @@ class RuntimeAdapter:
         ``shelf_approach`` service pose are configured. Default off (or either pose missing) => the legacy
         coupled tow straight to the endcap, byte-identical."""
         return self.shelf_staging and 'shelf_staging' in self.poses and 'shelf_approach' in self.poses
+
+    def _cart_side_bay_active(self):
+        """True when the opt-in side-bay re-sequence is in effect: ``cart_side_bay`` is enabled, the
+        off-axis bay pose is configured, AND the shelf-staging re-sequence it extends is active. When
+        active the OUTBOUND tows the cart to the OFF-AXIS ``cart_side_bay`` pose (not the on-axis
+        ``shelf_staging`` pose) and the RETURN drives the base HOME EMPTY through the freed doorway
+        (the cart stays parked, uncoupled, in the bay). Default off => the sim-shelf-staging-v1
+        on-axis staging behaviour, byte-identical. See data/sim-cart-side-bay-v1/report.md."""
+        return (self.cart_side_bay and 'cart_side_bay' in self.poses
+                and self._shelf_staging_active())
 
     def stop(self):
         errors = []
@@ -1072,6 +1113,10 @@ class RuntimeAdapter:
                     raise ValueError('cart articulation exceeds manipulation/return goal tolerance')
                 return Result('succeeded', self._evidence(p, arrived=True, **self._nav_workarounds('outbound')))
             if self.action == 'return':
+                if self._cart_side_bay_active() and self._return_leg == 'home':
+                    # sim-cart-side-bay-v1: the base drove HOME EMPTY through the freed doorway; the cart
+                    # stays parked (uncoupled) in the side bay. Arrival ends the mission -- no coupled cart.
+                    return Result('succeeded', self._evidence(p, home=True))
                 if not self._uncouple_return():
                     # Legacy tow-home: the cart is still coupled at home (byte-identical path).
                     if not p.coupled:

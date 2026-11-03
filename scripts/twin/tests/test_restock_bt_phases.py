@@ -25,6 +25,49 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from twin.restock.inventory import Inventory, Job
 from twin.restock.mission import Mission, Result
+from twin.restock.bt import stage_phases as _sp
+
+
+class _PlanAdapter:
+    """Minimal phased stand-in exposing exactly what stage_phases.stage_plan consults (no py_trees)."""
+    def __init__(self, *, shelf_staging=False, cart_side_bay=False, uncouple_on_return=False):
+        self.phase = None                      # adapter_is_phased => True
+        self._shelf = shelf_staging or cart_side_bay
+        self._bay = cart_side_bay
+        self._unc = uncouple_on_return
+
+    def _shelf_staging_active(self):
+        return self._shelf
+
+    def _cart_side_bay_active(self):
+        return self._bay
+
+    def _uncouple_return(self):
+        return self._unc
+
+
+class SideBayStagePlan(unittest.TestCase):
+    """Pure step-order proof (no py_trees): stage_phases.stage_plan picks the side-bay plans."""
+    def _labels(self, plan):
+        return [lbl for lbl, _ in plan]
+
+    def test_outbound_and_return_select_side_bay_plans(self):
+        a = _PlanAdapter(cart_side_bay=True)
+        self.assertEqual(self._labels(_sp.stage_plan('outbound', a)),
+                         ['tow→side bay', 'brake cart', 'uncouple'])
+        self.assertEqual(self._labels(_sp.stage_plan('return', a)), ['drive→home (empty)'])
+        # transfer keeps the (re-targeted) service leg
+        self.assertEqual(_sp.stage_plan('transfer', a), _sp.TRANSFER_STAGING_PLAN)
+
+    def test_flag_off_keeps_shelf_staging_or_legacy_plans(self):
+        # shelf_staging on, side bay off => the on-axis staging plan (PR 274), not the side-bay plan.
+        a = _PlanAdapter(shelf_staging=True)
+        self.assertEqual(_sp.stage_plan('outbound', a), _sp.OUTBOUND_STAGING_PLAN)
+        self.assertEqual(self._labels(_sp.stage_plan('return', a)), ['tow→home'])
+        # everything off => legacy single-leaf plans.
+        b = _PlanAdapter()
+        self.assertEqual(_sp.stage_plan('outbound', b), _sp.PLANS['outbound'])
+
 
 try:
     import py_trees  # noqa: F401
