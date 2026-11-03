@@ -204,6 +204,11 @@ class IsaacPort:
             self._idle_cameras=pauser.install()
         self._profiler=(TickProfiler(self._speed.tick_profile_s)
                         if self._speed.tick_profile_s else None)
+        # sim-realtime-factor-v1 trace_hz: bound nav-trace.jsonl to N Hz of SIM time (None => every
+        # tick => byte-identical). _last_trace_sim is the sim time of the last written row; a persistent
+        # append handle avoids reopening the file every tick in the hot loop (same durable output).
+        self._last_trace_sim=None
+        self._trace_fh=None
         # Demo-cut evidence (RESTOCK_TRACE_POSES=1 via isaac_bundle): the handling-unit prim whose world
         # pose -- with the cart pose and Isaac stage time -- is appended to each nav-trace row for the
         # offline run checker (twin.demo.run_check). None (default) => the trace row is byte-identical.
@@ -431,6 +436,29 @@ class IsaacPort:
         speed = getattr(self, '_speed', None)
         return True if speed is None else speed.trace_probe
 
+    def _trace_row_due(self, now):
+        """Whether to write a nav-trace row this tick under ``sim_speed.trace_hz`` (SIM-clock
+        rate-limit). None => every tick (byte-identical). Tick 1 is always written; otherwise a row is
+        written once ``1/trace_hz`` SIM seconds have elapsed since the last one. A stage change forces a
+        row (the current action differs from the last written row's), so per-stage boundaries never
+        disappear from the trace. Pure given ``self._last_trace_sim`` / ``self._last_trace_action``."""
+        speed = getattr(self, '_speed', None)
+        hz = None if speed is None else speed.trace_hz
+        if hz is None or self._last_trace_sim is None:
+            return True
+        if self.current_action != getattr(self, '_last_trace_action', None):
+            return True
+        return (now - self._last_trace_sim) >= (1.0 / hz) - 1e-9
+
+    def _write_trace_row(self, line):
+        """Append one nav-trace JSONL row through a persistent handle (opened once, flushed each
+        write for crash-record durability), so the hot loop does not reopen the file every tick.
+        Best-effort: a handle failure falls back to a one-shot open so a row is never lost silently."""
+        if self._trace_fh is None:
+            self._trace_fh = (self.recorder.directory.parent / 'nav-trace.jsonl').open('a')
+        self._trace_fh.write(line + '\n')
+        self._trace_fh.flush()
+
     def advance(self, dt):
         if self._profiler is not None:
             self._profiler.begin()
@@ -641,7 +669,7 @@ class IsaacPort:
         navigation=nav_observation(scan,odometry,coupled=coupled,arm_transport=ready,
                                    articulation=articulation)
         self._mark('observation')
-        if self.recorder is not None:
+        if self.recorder is not None and self._trace_row_due(now):
             # Per-tick nav-coverage trace (JSONL): for every tick, evaluate the uncoupled
             # gate's exact coverage probe (coverage_certifies at the real gate radius
             # footprint.radius(False)+position_uncertainty) plus a bracket, and record the
@@ -686,8 +714,9 @@ class IsaacPort:
                     **({'casters':self._caster_trace(positions)} if self._trace_casters else {})))
                 if self._trace_carton_path is not None:
                     line=line[:-1]+', '+_json.dumps(self._trace_poses(cur,c,cz))[1:]
-                with (self.recorder.directory.parent/'nav-trace.jsonl').open('a') as _f:
-                    _f.write(line+'\n')
+                self._write_trace_row(line)
+                self._last_trace_sim=now
+                self._last_trace_action=self.current_action
             except Exception as _e:
                 try:
                     if self.tick==1:
@@ -861,3 +890,12 @@ class IsaacPort:
             self.mobile.park()
         finally:
             self.hold_arm()
+            # sim-realtime-factor-v1: close the persistent nav-trace handle (best-effort; the OS closes
+            # it on process exit anyway, and every row was flushed, so this never loses data).
+            fh=getattr(self,'_trace_fh',None)
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._trace_fh=None

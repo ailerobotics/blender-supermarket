@@ -208,6 +208,9 @@ def mission_modes(config):
     # sim-video-speedup-v1: the opt-in speed profile (sim_speed_mode + its resolved levers); {} when off.
     from .sim_speed import summary_fields as _sim_speed_fields
     modes.update(_sim_speed_fields(config))
+    # sim-realtime-factor-v1: a RAISED physics step (physics_dt_mode + dt/hz); {} at the default 1/60.
+    from .physics_step import summary_fields as _physics_step_fields
+    modes.update(_physics_step_fields(config))
     # sim-robust-vram-headroom-v1: the VRAM headroom monitor (vram_headroom_mode + levers). DEFAULT ON
     # (sim-robust-vram-headroom-default-on-v1), so this is {} only when explicitly opted out (false).
     from .vram_headroom import summary_fields as _vram_fields

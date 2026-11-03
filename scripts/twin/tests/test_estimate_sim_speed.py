@@ -83,6 +83,33 @@ def test_measured_reads_the_tick_profiler_lines():
     assert summary['couple']['ratio'] == pytest.approx(DT / 0.030, rel=0.02)
 
 
+def test_collect_ground_truth_pauses_the_collect_decode_cameras():
+    # sim-realtime-factor-v1: a cold cycle's collect is ~60 % of the wall yet renders all three decode
+    # cameras; under ground-truth collect (no station camera read) they pause to the render floor.
+    rows = _rows([('collect', 600, 10, 0.052, 0.600)])
+    live = E.estimate(rows, {'sim_speed': {'profile': 'max'}}, floor_s=0.30)['stages']['collect']
+    assert live['decode_paused'] is False                            # sensor collect keeps its cameras
+    gt = E.estimate(rows, {'sim_speed': {'profile': 'max'}}, floor_s=0.30,
+                    collect_ground_truth=True)['stages']['collect']
+    assert gt['decode_paused'] is True
+    assert gt['est_rendered_ms'] == pytest.approx(300.0)
+    assert gt['est_wall_s'] < live['est_wall_s']
+
+
+def test_physics_dt_scales_the_projected_wall_proportionally():
+    rows = _rows([('couple', 600, 10, 0.040, 0.700)])
+    base = E.estimate(rows, {'sim_speed': {'profile': 'max'}}, floor_s=0.30)
+    # 1/30 step runs half the ticks for the same simulated span => ~half the projected wall; sim is the
+    # recorded span either way.
+    half = E.estimate(rows, {'sim_speed': {'profile': 'max'}}, floor_s=0.30, physics_dt=1 / 30)
+    assert half['total']['est_wall_s'] == pytest.approx(base['total']['est_wall_s'] * 0.5, rel=1e-6)
+    assert half['total']['sim_s'] == pytest.approx(base['total']['sim_s'])
+    assert half['total']['speedup'] > base['total']['speedup']
+    # default (None) is unchanged
+    assert E.estimate(rows, {'sim_speed': {'profile': 'max'}}, floor_s=0.30,
+                      physics_dt=None)['total']['est_wall_s'] == pytest.approx(base['total']['est_wall_s'])
+
+
 def test_cli_reads_a_run_dir_and_writes_json(tmp_path, capsys):
     import json
     run = tmp_path / 'run-001'

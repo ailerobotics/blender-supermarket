@@ -771,12 +771,20 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         station_ids = [key.split(':', 1)[1] for key in cameras if key.startswith('station:')]
         locations = (assembly.sensing_sources or {}).get('location_cameras') or {}
 
+        # sim-realtime-factor-v1: ground-truth collect reads NO station camera (RESTOCK_COLLECT_GROUND_TRUTH),
+        # so pause all three decode cameras through collect -- the dominant cold-cycle render waste. It is an
+        # env-gated workaround (not a config key), so read it here; a SENSOR collect keeps its cameras.
+        from ..restock_manipulation import ground_truth_collect as _gtc
+        _collect_gt = _gtc.enabled()
+
         def unread(action):     # pause_unread_decode: station cameras this stage's consumers never read
             return {'station:' + cid for cid in
-                    _sim_speed.unread_station_cameras(config, action, station_ids, locations)}
+                    _sim_speed.unread_station_cameras(config, action, station_ids, locations,
+                                                      collect_ground_truth=_collect_gt)}
         idle_cameras = _sim_speed.IdleCameraPauser(cameras, unread=unread if speed.pause_unread_decode else None)
         print(speed.describe() + f' record_stride={record_stride} idle_cameras={sorted(cameras)} '
-              f'unread transfer={sorted(unread("transfer"))} verify={sorted(unread("verify"))}', flush=True)
+              f'collect_ground_truth={_collect_gt} unread collect={sorted(unread("collect"))} '
+              f'transfer={sorted(unread("transfer"))} verify={sorted(unread("verify"))}', flush=True)
     # Opt-in sensing execution gate (default off): pass the camera-lane set_render_suspended seam to
     # the port ONLY when config['sensing_execution_gate'] is on, so the port's phase-driven gate()
     # suspends the decode render during the reach. Off => seam is None and the port is byte-identical.

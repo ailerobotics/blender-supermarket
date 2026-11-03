@@ -91,10 +91,16 @@ def run_once_bt(db, scenario, bundle, config, output_dir, *, mission_factory, is
     # needs no ROS at all (events come from the ScenarioEventSource), so default off keeps the
     # mission stable; the humans/dynobs lanes enable it only when they publish live detections.
     shutdown = start_event_subscriber(queue) if config.get('bt_ros_events') else None
+    # sim-realtime-factor-v1: the physics step is config-driven (absent => 1/60, byte-identical).
+    # assemble() built World with this exact value and IsaacPort.advance asserts they agree. Scale
+    # the tree tick budget so the 20-min SIM-time bound is invariant to the step.
+    from ..physics_step import resolve_dt as _resolve_physics_dt
+    _dt = _resolve_physics_dt(config)
+    _max_ticks = int(60 * 20 * 60 * (1 / 60) / _dt)
     try:
         ctx, root, summary = run_mission_tree(
             mission, bus, reactions=make_reactions(bundle), snapshot=writer,
-            is_running=is_running)
+            dt=_dt, max_ticks=_max_ticks, is_running=is_running)
     finally:
         if shutdown is not None:
             shutdown()

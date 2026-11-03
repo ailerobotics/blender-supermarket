@@ -70,12 +70,19 @@ def _stride_of(costs):
 
 
 def estimate(rows, config, *, floor_s=DEFAULT_FLOOR_S, station_ids=('source', 'cart', 'shelf'),
-             location_cameras=None):
+             location_cameras=None, collect_ground_truth=False, physics_dt=None):
     """Per-stage {sim_s, wall_s, ratio, est_wall_s, est_ratio, ...} for the run rows under ``config``'s
-    sim_speed profile (``{'sim_speed': {'profile': 'max'}}`` merged in when the config has none). Pure."""
+    sim_speed profile (``{'sim_speed': {'profile': 'max'}}`` merged in when the config has none). Pure.
+
+    sim-realtime-factor-v1: ``collect_ground_truth`` lets the collect decode cameras be paused (ground-
+    truth collect reads none), and ``physics_dt`` (seconds; None => the recorded 1/60) rescales the
+    projected per-stage wall by ``(1/60)/physics_dt`` -- a coarser step runs proportionally fewer ticks
+    for the same simulated span (per-tick physics and per-frame render costs are dt-invariant to first
+    order; the one GPU confirmation the hand-off asks for checks that)."""
     cfg = dict(config or {})
     cfg.setdefault('sim_speed', {'profile': 'max'})
     speed = from_config(cfg)
+    dt_scale = (DT / float(physics_dt)) if physics_dt else 1.0
     costs = tick_costs(rows)
     plain_saving = ((PROBE_MS if not speed.trace_probe else 0.0)
                     + (BT_SNAPSHOT_MS if speed.bt_snapshot_hz else 0.0)) / 1e3
@@ -91,7 +98,8 @@ def estimate(rows, config, *, floor_s=DEFAULT_FLOOR_S, station_ids=('source', 'c
         if action in NAV_ACTIONS and speed.pause_idle_cameras:
             paused = True
         elif action in HOST_COUPLED_ACTIONS and speed.pause_unread_decode:
-            paused = bool(unread_station_cameras(cfg, action, station_ids, location_cameras))
+            paused = bool(unread_station_cameras(cfg, action, station_ids, location_cameras,
+                                                 collect_ground_truth=collect_ground_truth))
         est_render = min(render_mean, floor_s) if paused else render_mean
         est_n_render = n_render
         if action in NAV_ACTIONS and speed.walkthrough_hz and n_render:
@@ -99,6 +107,9 @@ def estimate(rows, config, *, floor_s=DEFAULT_FLOOR_S, station_ids=('source', 'c
             est_n_render = round(ticks / stride)
         est_n_plain = ticks - est_n_render
         est_wall = est_n_plain * max(0.0, plain_mean - plain_saving) + est_n_render * est_render
+        # sim-realtime-factor-v1: a coarser physics step runs proportionally fewer ticks for the same
+        # simulated span, so the projected wall scales by (1/60)/physics_dt (1.0 at the default step).
+        est_wall *= dt_scale
         sim = ticks * DT
         stages[action] = dict(
             ticks=ticks, sim_s=round(sim, 1), wall_s=round(wall, 1), ratio=round(sim / wall, 3) if wall else None,
@@ -163,6 +174,10 @@ def main(argv=None):
                     help='mission runtime config (its sim_speed block, or profile max when absent)')
     ap.add_argument('--floor', type=float, default=DEFAULT_FLOOR_S,
                     help='rendered-tick wall with the decode cameras off (s)')
+    ap.add_argument('--collect-ground-truth', action='store_true',
+                    help='model ground-truth collect (RESTOCK_COLLECT_GROUND_TRUTH): its decode cameras pause')
+    ap.add_argument('--physics-hz', type=float, default=None,
+                    help='model a raised physics step at this Hz (default: the recorded 1/60)')
     ap.add_argument('--console', type=Path, action='append', default=[],
                     help='summarise the measured TICK_PROFILE lines of a run console log instead')
     ap.add_argument('--json', type=Path, default=None)
@@ -171,7 +186,9 @@ def main(argv=None):
     config = json.loads(args.runtime_config.read_text()) if args.runtime_config else {}
     for run in args.run:
         rows = [json.loads(line) for line in (run / 'nav-trace.jsonl').read_text().splitlines() if line.strip()]
-        result = estimate(rows, config, floor_s=args.floor)
+        result = estimate(rows, config, floor_s=args.floor,
+                          collect_ground_truth=args.collect_ground_truth,
+                          physics_dt=(1.0 / args.physics_hz) if args.physics_hz else None)
         report[run.name] = result
         _print_estimate(run.name, result)
     for console in args.console:
