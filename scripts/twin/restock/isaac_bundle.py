@@ -225,7 +225,10 @@ def plan_bundle(manifest, scenario, config):
     # rollwagen's open +x face, facing the mouth, at an arm-reach standoff) the collect stage drives to
     # WITH the carton carried before lowering it onto the deck, instead of reaching around from pickup.
     _optional_extra = {'couple_approach', 'couple_standoff', 'place_approach', 'place_approach_stage',
-                       'cart_parking', 'cart_parking_backaway'}
+                       'cart_parking', 'cart_parking_backaway',
+                       # sim-shelf-staging-v1: the portal-axis staging pose (coupled tow goal / cart parking)
+                       # the re-sequenced sales-floor outbound tows to before uncoupling for the solo service.
+                       'shelf_staging'}
     if not isinstance(poses_in, dict) or not set(NAV_GOALS) <= set(poses_in) \
             or not set(poses_in) <= set(NAV_GOALS) | _optional_extra:
         raise ValueError(f'config.mission_poses must provide {NAV_GOALS} '
@@ -452,7 +455,15 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              # zero-velocity mobile.command (which releases the parking/full brake and let
                              # the carried load drift the base into the live backstock Support -> permanent
                              # blocked_no_route, boxc1a). Absent => mobile.command(0,0) as before (byte-identical).
-                             hold_base_on_reposition_block=bool(config.get('hold_base_on_reposition_block')))
+                             hold_base_on_reposition_block=bool(config.get('hold_base_on_reposition_block')),
+                             # sim-shelf-staging-v1: re-sequence the sales-floor leg -- tow the coupled train
+                             # STRAIGHT to the `shelf_staging` pose on the portal axis, uncouple there, then
+                             # drive the base ALONE to the endcap `shelf_approach` service pose (the coupled
+                             # ~46 deg endcap turn + the cart-in-doorway angle are eliminated). Needs the
+                             # `shelf_staging` pose in mission_poses; the uncoupled service carton-carry +
+                             # cart retrieval on return are integration/manip-owned. Absent => the coupled
+                             # tow straight to the endcap (byte-identical). See the fragment + report.
+                             shelf_staging=bool(config.get('shelf_staging')))
     if staged_clock_sync(config):
         # Staged start: the shortcut's settle steps leave /clock a constant offset ahead of the packet
         # clock; stamp it on every host sensor packet so the host freshness checks measure true age

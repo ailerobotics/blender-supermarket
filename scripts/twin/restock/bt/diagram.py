@@ -85,18 +85,21 @@ def _n(name, role, cls, category, *, stage='', kind='', reacts=(), memory=None, 
     }
 
 
-def _stage_steps(stage, *, plans, timeline, return_uncouple):
+def _stage_steps(stage, *, plans, timeline, return_uncouple, shelf_staging=False):
     """The ordered ``(label, kind)`` steps of a stage. A run alignment's recorded labels win (they
     carry the exact run's mode tags, e.g. ``[ground truth]``); otherwise the authored PLANS, with the
-    uncouple-at-parking return plan selected when requested."""
+    uncouple-at-parking return plan or the shelf-staging outbound plan selected when requested."""
     if timeline is not None and stage in getattr(timeline, 'labels', {}):
         return list(timeline.labels[stage])
     if stage == 'return' and return_uncouple:
         return [(lbl, k) for lbl, k in _sp.RETURN_UNCOUPLE_PLAN]
+    if stage == 'outbound' and shelf_staging:
+        return [(lbl, k) for lbl, k in _sp.OUTBOUND_STAGING_PLAN]
     return [(lbl, k) for lbl, k in plans.get(stage, [])]
 
 
-def build_model(*, plans=None, stage_order=None, timeline=None, return_uncouple=False):
+def build_model(*, plans=None, stage_order=None, timeline=None, return_uncouple=False,
+                shelf_staging=False):
     """Build the full behaviour-tree model (a nested dict of annotated nodes) from the code.
 
     * ``plans`` -- the stage -> ``[(label, kind)]`` plans (defaults to ``stage_phases.PLANS``; a test
@@ -106,11 +109,15 @@ def build_model(*, plans=None, stage_order=None, timeline=None, return_uncouple=
       recorded step labels (with their run-specific mode tags) and the uncouple-return choice are
       taken from the run, so the diagram matches that run exactly.
     * ``return_uncouple`` -- without a timeline, select the uncouple-at-parking return plan.
+    * ``shelf_staging`` -- without a timeline, select the sim-shelf-staging-v1 outbound plan (tow→staging,
+      brake, uncouple, drive→service) in place of the single tow→shelf leaf.
     """
     plans = dict(_sp.PLANS) if plans is None else dict(plans)
     if timeline is not None and getattr(timeline, 'shortcut_stages', None) is not None:
         return_uncouple = 'return' in getattr(timeline, 'labels', {}) and \
             any(lbl == 'uncouple' for lbl, _ in timeline.labels.get('return', []))
+        shelf_staging = 'outbound' in getattr(timeline, 'labels', {}) and \
+            any(lbl == 'uncouple' for lbl, _ in timeline.labels.get('outbound', []))
     stages = list(stage_order) if stage_order is not None else list(plans.keys())
 
     # Reactive subtree: the four guards, in tick order (tree.build_reactive).
@@ -128,7 +135,8 @@ def build_model(*, plans=None, stage_order=None, timeline=None, return_uncouple=
     # Mission subtree: one StageRetry subtree per active stage, then finalize.
     stage_nodes = []
     for stage in stages:
-        steps = _stage_steps(stage, plans=plans, timeline=timeline, return_uncouple=return_uncouple)
+        steps = _stage_steps(stage, plans=plans, timeline=timeline, return_uncouple=return_uncouple,
+                             shelf_staging=shelf_staging)
         gates = [_n(f'{stage}:{label}', 'phase_gate', 'PhaseGate', CONDITION,
                     stage=stage, kind=kind) for label, kind in steps]
         steps_seq = _n(f'{stage} steps', 'stage_steps', 'Sequence', SEQUENCE,

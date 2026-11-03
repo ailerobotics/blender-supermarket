@@ -257,7 +257,8 @@ class RuntimeAdapter:
                  couple_cart_relative=None,
                  ground_truth_place_actions=(), staged_settle_s=0.0,
                  collect_place_base_settle_m=None,
-                 hold_base_on_reposition_block=False):
+                 hold_base_on_reposition_block=False,
+                 shelf_staging=False):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         # Staged-start settle hold (twin.restock.staged_start; the bundle passes
         # config['staged_start_settle_s'] only when start_at is set and not collect): the warm-up of the
@@ -387,6 +388,23 @@ class RuntimeAdapter:
         self._cart_left_parked = False
         self._cart_pinned_for_uncouple = False
         self._uncouple_wait_s = 0.0
+        # sim-shelf-staging-v1 (captain follow-up, opt-in, default False => byte-identical): re-sequence
+        # the sales-floor leg so the COUPLED train never has to make the ~46 deg in-aisle turn to the
+        # externally-fixed west-facing endcap service pose (and never exits the doorway angled ~40 deg).
+        # Instead the OUTBOUND stage tows the rollwagen STRAIGHT down the portal axis to a staging pose
+        # (`shelf_staging`, south of the wall on the axis, coupled articulation ~0 deg the whole way,
+        # cart crosses the doorway aligned), BRAKES the cart and RELEASES the tow coupling there (reusing
+        # the uncouple mechanic), then drives the robot ALONE (uncoupled) to the endcap `shelf_approach`
+        # service pose -- so the sharp turn to the endcap is done by the free base, not the coupled train.
+        # park/transfer/verify then run at the service pose with the cart parked at the staging. The
+        # uncoupled service leg and the cart RETRIEVAL on return (re-couple) are integration/GPU-owned:
+        # the robot must CARRY the carton during the uncoupled service (the cart no longer accompanies it
+        # to the endcap) -- "do not change manipulation" (captain) means that carry + the return re-couple
+        # are wired + GPU-validated by the integration lane, NOT here. See docs/examples/
+        # tow-lanes-mission-fragment.json (_shelf_staging_note) and data/sim-shelf-staging-v1/report.md.
+        self.shelf_staging = bool(shelf_staging)
+        self._outbound_leg = None       # staging | brake | uncouple | uncouple_wait | service
+        self._shelf_cart_parked = False  # True once the outbound released the cart at the staging pose
         # Set in start(); declared here so the opt-in behaviour-tree layer can tell at tree-build time
         # (before any stage begins) that this adapter exposes per-stage phases (vs a plain fixture).
         self.phase = None
@@ -445,11 +463,15 @@ class RuntimeAdapter:
         # (in front of the rollwagen mouth) the collect stage drives to before placing; validated only
         # when supplied.
         for name in ('couple_approach', 'couple_standoff', 'place_approach', 'place_approach_stage',
-                     'cart_parking', 'cart_parking_backaway'):
+                     'cart_parking', 'cart_parking_backaway', 'shelf_staging'):
             if name in poses:
                 wp = poses[name]
                 if len(wp) != 3 or not all(math.isfinite(v) for v in wp):
                     raise ValueError(f'invalid pose: {name}')
+        # sim-shelf-staging-v1: the opt-in re-sequence needs a `shelf_staging` pose (the coupled tow goal /
+        # cart parking on the portal axis) in addition to the existing `shelf_approach` service pose.
+        if self.shelf_staging and 'shelf_staging' not in poses:
+            raise ValueError('shelf_staging mode requires a "shelf_staging" pose')
         self.time = 0.
         # fm425 (c) (run-322b): WALL-clock stuck-stage fail-fast for navigate. The nav controller's own
         # blocked_timeout/goal_timeout are SIM-clock caps (factory.py) -- under render pacing the sim
@@ -509,6 +531,11 @@ class RuntimeAdapter:
         self.action, self.job = action, job
         self.phase = 'execute'
         self._return_leg = None           # set when the uncouple-on-return multi-leg return runs
+        self._outbound_leg = None         # set when the shelf-staging multi-leg outbound runs
+        if action in ('collect', 'couple'):
+            # sim-shelf-staging-v1: a fresh collect or a (re-)couple re-attaches the cart, so forget any
+            # prior shelf-staging park; it is set True again only when the outbound releases the cart.
+            self._shelf_cart_parked = False
         self._reach_start = None          # set on the first execute tick of a collect/transfer reach
         # fm390 mid-collect base reposition: driven once per collect when the arm reaches TRANSIT (carry
         # fold done) and a place_approach pose is configured. Reset here so a re-begun collect starts clean.
@@ -571,6 +598,15 @@ class RuntimeAdapter:
                 self._start_nav_leg(self.poses['cart_parking'], True, **kwargs)
                 self.phase = 'navigate'
                 self._return_leg = 'cart_parking'
+            elif action == 'outbound' and self._shelf_staging_active():
+                # sim-shelf-staging-v1: tow the COUPLED train STRAIGHT down the portal axis to the staging
+                # pose (first leg of the re-sequenced sales-floor stage); the execute phase then brakes +
+                # releases the cart there and the base drives on ALONE to the endcap service pose.
+                kwargs = ({'goal_articulation': self.goal_articulation['outbound']}
+                          if 'outbound' in self.goal_articulation else {})
+                self._start_nav_leg(self.poses['shelf_staging'], True, **kwargs)
+                self.phase = 'navigate'
+                self._outbound_leg = 'staging'
             else:
                 goal = {'collect': 'pickup', 'outbound': 'shelf_approach', 'return': 'home'}[action]
                 kwargs = ({'goal_articulation':self.goal_articulation[action]}
@@ -666,6 +702,13 @@ class RuntimeAdapter:
         it home coupled: opted in via config (``uncouple_on_return``) AND a ``cart_parking`` pose is
         configured. Default off (or no parking pose) => the legacy tow-home return, byte-identical."""
         return self.uncouple_on_return and 'cart_parking' in self.poses
+
+    def _shelf_staging_active(self):
+        """True when the opt-in sales-floor re-sequence is in effect: ``shelf_staging`` is enabled AND
+        both the staging pose (coupled tow goal / cart parking on the portal axis) and the endcap
+        ``shelf_approach`` service pose are configured. Default off (or either pose missing) => the legacy
+        coupled tow straight to the endcap, byte-identical."""
+        return self.shelf_staging and 'shelf_staging' in self.poses and 'shelf_approach' in self.poses
 
     def stop(self):
         errors = []
@@ -920,6 +963,23 @@ class RuntimeAdapter:
             self.mobile.park()
             if not p.parked:
                 return Result('running', reason='waiting for measured parking')
+            if self.action == 'outbound' and self._outbound_leg == 'staging':
+                # sim-shelf-staging-v1: reached the staging pose still COUPLED (straight portal-axis tow).
+                # Hand off to the execute phase, which brakes the cart and releases the tow coupling before
+                # the base drives on ALONE to the endcap service pose.
+                if not p.coupled:
+                    raise ValueError('cart lost before the staging pose')
+                limit = self.goal_articulation.get('outbound')
+                if limit is not None and abs(p.articulation) >= limit:
+                    raise ValueError('cart articulation exceeds manipulation/return goal tolerance')
+                self.phase = 'execute'
+                self._outbound_leg = 'brake'
+                return Result('running', reason='towed to shelf staging pose; braking cart before uncouple')
+            if self.action == 'outbound' and self._outbound_leg == 'service':
+                # sim-shelf-staging-v1: the base drove ALONE (uncoupled) to the endcap service pose with the
+                # cart left parked at the staging. Arrived uncoupled -> outbound done; park/transfer follow.
+                return Result('succeeded', self._evidence(p, arrived=True, shelf_staging=True,
+                                                          **self._nav_workarounds('outbound')))
             if self.action == 'outbound':
                 if not p.coupled:
                     raise ValueError('cart lost at destination')
@@ -1158,6 +1218,12 @@ class RuntimeAdapter:
             # tick WAITS (the base is held, nothing is commanded) instead of failing the whole stage -- a
             # failure here is unrecoverable once the coupling is released (see _cart_left_parked).
             return self._step_return_uncouple(p, dt)
+        if self.action == 'outbound' and self._shelf_staging_active() and self._outbound_leg in (
+                'brake', 'uncouple', 'uncouple_wait'):
+            # sim-shelf-staging-v1: handled ABOVE the stationary parked-guard, mirroring the return uncouple
+            # (the brake pin + hitch release perturb the train for a tick or two, so an unsettled tick WAITS
+            # with the base held rather than failing). On release the base drives ALONE to the endcap.
+            return self._step_outbound_uncouple(p, dt)
         place_shove_tolerated = False
         if not p.parked:
             tol = self._loaded_place_base_excursion(p)
@@ -1174,7 +1240,10 @@ class RuntimeAdapter:
             # placement proof, and the excursion bound above still fails a genuine runaway.
             place_shove_tolerated = True
         if self.action == 'park':
-            if not p.coupled:
+            if not p.coupled and not (self._shelf_staging_active() and self._shelf_cart_parked):
+                # sim-shelf-staging-v1: in shelf-staging mode the cart is DELIBERATELY parked at the staging
+                # pose and the base is parked UNCOUPLED at the endcap service pose, so an uncoupled park is
+                # expected (not a lost cart). Every other mode still requires the cart here (byte-identical).
                 return Result('failed', reason='cart lost before transfer')
             return Result('succeeded', self._evidence(p, stationary=True))
         if self.action in ('collect', 'transfer'):
@@ -1349,6 +1418,55 @@ class RuntimeAdapter:
             self._return_leg = 'home'
             return Result('running', reason='uncoupled; driving home empty')
         raise RuntimeError(f'invalid return leg at execute: {self._return_leg!r}')
+
+    def _step_outbound_uncouple(self, p, dt):
+        """sim-shelf-staging-v1 outbound execute legs: brake the cart at the staging pose, release the tow
+        coupling (reusing the SAME mechanic as the return uncouple), then start the UNCOUPLED drive to the
+        endcap service pose -- each a distinct observable step so the behaviour tree shows them in series.
+        An unsettled train WAITS (bounded) rather than failing (the brake/release perturb it for a tick)."""
+        if self._outbound_leg == 'brake':
+            if not p.parked:
+                self._uncouple_wait_s += dt
+                if self._uncouple_wait_s > _UNCOUPLE_SETTLE_MAX_S:
+                    return Result('failed', reason=f'cart brake refused: base not parked for '
+                                                   f'{self._uncouple_wait_s:.1f}s at the shelf staging pose')
+                return Result('running', reason='waiting for measured parking before braking the cart')
+            self.mobile.hold_cart_pin()   # pin the parked cart to the world before releasing the joint
+            self._cart_pinned_for_uncouple = True
+            self._uncouple_wait_s = 0.0
+            self._outbound_leg = 'uncouple'
+            return Result('running', reason='cart braked at shelf staging pose; releasing coupling next')
+        if self._outbound_leg == 'uncouple':
+            if not (p.parked and _train_stationary(p.docking)):
+                self._uncouple_wait_s += dt
+                if self._uncouple_wait_s > _UNCOUPLE_SETTLE_MAX_S:
+                    return Result('failed', reason=f'uncouple refused: train not stationary/parked for '
+                                                   f'{self._uncouple_wait_s:.1f}s at the shelf staging pose')
+                return Result('running', reason='waiting for a stationary train before releasing the coupling')
+            try:
+                state = self.mobile.uncouple(p.docking)   # release the tow coupling (once)
+            except ValueError as exc:
+                self._uncouple_wait_s += dt
+                if self._uncouple_wait_s > _UNCOUPLE_SETTLE_MAX_S:
+                    return Result('failed', reason=f'uncouple refused: {exc}')
+                return Result('running', reason=f'uncouple deferred ({exc}); retrying on a settled tick')
+            if state.get('joint_present'):
+                return Result('failed', reason='uncouple failed: tow coupling still present')
+            self._shelf_cart_parked = True
+            self._cart_pinned_for_uncouple = False   # the pin is now the parked cart's own brake (kept)
+            self._outbound_leg = 'uncouple_wait'
+            return Result('running', reason='coupling released at staging; awaiting measured uncoupled observation')
+        if self._outbound_leg == 'uncouple_wait':
+            if p.coupled:
+                return Result('running', reason='awaiting measured uncoupled observation')
+            # Drive the base ALONE to the endcap service pose (uncoupled). The carton is carried by the
+            # robot through this leg -- a manipulation concern owned by the integration lane (see
+            # shelf_staging in __init__); this nav leg only repositions the free base.
+            self._start_nav_leg(self.poses['shelf_approach'], False)
+            self.phase = 'navigate'
+            self._outbound_leg = 'service'
+            return Result('running', reason='uncoupled at staging; driving alone to the endcap service pose')
+        raise RuntimeError(f'invalid outbound leg at execute: {self._outbound_leg!r}')
 
     def step(self, dt):
         try:

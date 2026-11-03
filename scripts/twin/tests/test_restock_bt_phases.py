@@ -58,12 +58,18 @@ RETURN_UNCOUPLE_SCRIPT = [{'phase': 'navigate', '_return_leg': 'cart_parking'},
                           {'phase': 'navigate', '_return_leg': 'cart_parking_backaway'},
                           {'phase': 'navigate', '_return_leg': 'home'}]
 
+# sim-shelf-staging-v1: the re-sequenced outbound legs (tow->staging, brake, uncouple, drive->service).
+OUTBOUND_STAGING_SCRIPT = [{'phase': 'navigate', '_outbound_leg': 'staging'},
+                           {'phase': 'execute', '_outbound_leg': 'brake'},
+                           {'phase': 'execute', '_outbound_leg': 'uncouple'},
+                           {'phase': 'navigate', '_outbound_leg': 'service'}]
+
 
 class PhasedFixture:
     _PHASE_ATTRS = ('phase', '_last_manip_phase', '_collect_reposition_pending',
-                    '_collect_repositioned', '_return_leg')
+                    '_collect_repositioned', '_return_leg', '_outbound_leg')
 
-    def __init__(self, scripts, *, uncouple_on_return=False):
+    def __init__(self, scripts, *, uncouple_on_return=False, shelf_staging=False):
         self.time = 0.
         self.stopped = False
         self.steps = 0
@@ -71,12 +77,19 @@ class PhasedFixture:
         self._i = 0
         self.action = None
         self.uncouple_on_return = uncouple_on_return
+        self.shelf_staging = shelf_staging
         self.poses = {'cart_parking': (0., 0., 0.)} if uncouple_on_return else {}
+        if shelf_staging:
+            self.poses = dict(self.poses, shelf_staging=(0., 0., 0.), shelf_approach=(0., 0., 0.))
         self._reset_phase_view()
 
     # the real RuntimeAdapter._uncouple_return equivalent the classifier consults for 'return'
     def _uncouple_return(self):
         return self.uncouple_on_return and 'cart_parking' in self.poses
+
+    # the real RuntimeAdapter._shelf_staging_active equivalent the classifier consults for 'outbound'
+    def _shelf_staging_active(self):
+        return self.shelf_staging and 'shelf_staging' in self.poses and 'shelf_approach' in self.poses
 
     def _reset_phase_view(self):
         self.phase = None
@@ -84,6 +97,7 @@ class PhasedFixture:
         self._collect_reposition_pending = False
         self._collect_repositioned = False
         self._return_leg = None
+        self._outbound_leg = None
 
     def start(self, action, job):
         self.action, self.job = action, job
@@ -219,6 +233,23 @@ class PhasedDriverTests(unittest.TestCase):
         leaf_names = [c['name'] for c in ret['children'][0]['children']]
         self.assertEqual(leaf_names, [f"return:{label}" for label, _ in RETURN_UNCOUPLE_PLAN])
         self.assertEqual(len(leaf_names), 5)       # tow->park, brake, uncouple, back away, drive->home
+        self.assertEqual(log[-1], 'complete')
+
+    def test_shelf_staging_outbound_subtree_drives_the_four_new_steps(self):
+        # sim-shelf-staging-v1: with shelf_staging on, the outbound stage is a subtree of four
+        # position-first leaves (tow->staging, brake, uncouple, drive->service), driven in series,
+        # and the full mission still completes (parity with the state machine).
+        from twin.restock.bt.view import serialise_node
+        from twin.restock.bt.stage_phases import OUTBOUND_STAGING_PLAN
+        scripts = dict(SCRIPTS, **{'outbound': OUTBOUND_STAGING_SCRIPT})
+        adapter = PhasedFixture(scripts, shelf_staging=True)
+        state, log, shelf, ctx, root, _ = self._tree(adapter)
+        self.assertEqual(state, 'complete')
+        mission = next(c for c in root.children if c.name == 'mission')
+        out = serialise_node(next(c for c in mission.children if c.name == 'stage:outbound'))
+        leaf_names = [c['name'] for c in out['children'][0]['children']]
+        self.assertEqual(leaf_names, [f"outbound:{label}" for label, _ in OUTBOUND_STAGING_PLAN])
+        self.assertEqual(len(leaf_names), 4)       # tow->staging, brake, uncouple, drive->service
         self.assertEqual(log[-1], 'complete')
 
     def test_mid_stage_failure_re_enters_phase_sequence_and_recovers(self):
