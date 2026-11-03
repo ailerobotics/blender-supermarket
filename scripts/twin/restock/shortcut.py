@@ -53,12 +53,20 @@ _EXPECTED_SKIP = {'couple': ('collect',),
 # hand-authored variant scenario, spawn the train exactly where a REAL coupled tow leaves it at the
 # park->transfer handover on the gentle backroom-bay route, so transfer -> verify -> return can be
 # iterated in minutes. Selected by config['start_staging'] (absent => staged_scenario is the identity,
-# byte-identical). Robot base pose = the nav-trace.jsonl row at the first 'transfer' tick of each run
-# (park_succeeded, coupled=True, parked=True); the cart is coupled behind it on the hitch at the
-# measured articulation (TRANSFER_CAPTURE put the deck centre at (-1.27, 0.00) in ur_base_link in all
-# four runs == hitch_x - cart_hitch_x, i.e. articulation 0). Coupled: uncouple_on_return (captain #5)
-# only releases the cart at the parking spot during return, so the train is still coupled here.
-RECORDED_BAY_PARK_RUNS = {           # run -> robot base (x, y, yaw rad) at park -> transfer
+# byte-identical). The cart is coupled behind the robot on the hitch at the measured articulation
+# (TRANSFER_CAPTURE put the deck centre at (-1.27, 0.00) in ur_base_link in all four runs == hitch_x -
+# cart_hitch_x, i.e. articulation 0). Coupled: uncouple_on_return (captain #5) only releases the cart at
+# the parking spot during return, so the train is still coupled here.
+#
+# HISTORICAL (v2 store, 0.6 m carton): the four runs below recorded the robot base pose at the first
+# 'transfer' tick (park_succeeded, coupled=True, parked=True) on the v2-store / 0.6 m-carton build. That
+# frozen pose went STALE on the v3-portal26 store with the 0.45 m carton (ledger stage-transfer2: the
+# train spawned there read as misaligned at the dock gate before the transfer pick). It is kept ONLY as
+# the documented 'before' of sim-rerecord-bay-park-v3-v1 and as the fallback when a scenario carries no
+# ``transfer_bay`` to derive from -- the ``recorded_bay_park`` preset now DERIVES its pose from the live
+# scenario geometry (``derive_bay_park``) so a store or carton change re-derives rather than silently
+# replaying a stale pose. See ``bay_park_provenance`` / ``check_bay_park_provenance``.
+RECORDED_BAY_PARK_RUNS = {           # run -> robot base (x, y, yaw rad) at park -> transfer (v2, historical)
     'run-351': (-2.079, 15.251, math.radians(-0.2)),
     'run-353': (-2.079, 15.248, math.radians(0.2)),
     'run-354': (-2.079, 15.248, math.radians(0.2)),
@@ -99,6 +107,131 @@ def cart_pose_from_hitch(robot_pose, articulation=0.0, *, hitch_x=-0.62, cart_hi
     return (hx - cart_hitch_x * math.cos(cyaw), hy - cart_hitch_x * math.sin(cyaw), cyaw)
 
 
+# Default arm reach when the scenario does not state one (handling_unit.max_reach_m); 1.3 m is the
+# UR10 value the mission scenario carries. A derived park pose must keep BOTH the carton on the cart
+# behind the robot AND the transfer bay in front within this radius (planar, base frame).
+_DEFAULT_MAX_REACH_M = 1.3
+
+
+def derive_bay_park(scenario, *, hitch_x=-0.62, cart_hitch_x=0.65, articulation=0.0,
+                    max_reach_m=None):
+    """Re-derive the ``recorded_bay_park`` robot base pose from the CURRENT scenario geometry.
+
+    This is the CPU twin of the pose the full run reaches at the transfer bay: the robot parks on the
+    backroom tow corridor, laterally CENTRED under the transfer bay (so the place reach is centred),
+    coupled to the cart it towed in; the transfer pick then reaches the carton resting on the cart's
+    upper shelf BEHIND the robot and places it on the bay IN FRONT. Every number is read from the
+    scenario -- the transfer bay centre, the corridor line + heading (``initial_staging.cart_body_pose``
+    y/yaw), the cart hitch geometry (the mobile spec, passed in), the load centre and the carton height
+    -- so a store or carton change RE-DERIVES the pose instead of replaying the frozen v2 record.
+
+    Returns ``{'robot_base_pose': (x, y, yaw), 'reach': {...}, 'inputs': {...}}``. Raises ValueError,
+    naming the offending leg with its measured reach vs the bound, when the derived pose cannot keep
+    both the carton pick and the bay place within arm reach -- so an infeasible geometry fails LOUDLY
+    here (CPU) rather than at the GPU bench. ``None`` is never returned; callers that want the legacy
+    fallback must check for ``transfer_bay`` first (see ``staged_scenario``).
+    """
+    bay = scenario.get('transfer_bay') if isinstance(scenario, dict) else None
+    st = scenario.get('initial_staging') if isinstance(scenario, dict) else None
+    handling = scenario.get('handling_unit', {}) if isinstance(scenario, dict) else {}
+    if not isinstance(bay, dict) or not isinstance(st, dict):
+        raise ValueError('derive_bay_park needs scenario.transfer_bay and scenario.initial_staging')
+    center = bay.get('center_xy')
+    cart_pose = st.get('cart_body_pose')
+    load_xy = st.get('cart_load_center_body_xy')
+    support_z = st.get('cart_support_z_world')
+    dims = handling.get('dimensions_m')
+    reach = float(handling.get('max_reach_m', max_reach_m if max_reach_m is not None else _DEFAULT_MAX_REACH_M))
+    if max_reach_m is not None:
+        reach = float(max_reach_m)
+    if not (isinstance(center, (list, tuple)) and len(center) == 2 and _finite(*center)):
+        raise ValueError('transfer_bay.center_xy must be finite x/y')
+    if not (isinstance(cart_pose, (list, tuple)) and len(cart_pose) == 3 and _finite(*cart_pose)):
+        raise ValueError('initial_staging.cart_body_pose must be finite x/y/yaw')
+    if not (isinstance(load_xy, (list, tuple)) and len(load_xy) == 2 and _finite(*load_xy)):
+        raise ValueError('initial_staging.cart_load_center_body_xy must be finite x/y')
+    if not _finite(support_z):
+        raise ValueError('initial_staging.cart_support_z_world must be finite')
+    if not (isinstance(dims, (list, tuple)) and len(dims) == 3 and _finite(*dims) and all(d > 0 for d in dims)):
+        raise ValueError('handling_unit.dimensions_m must be three finite positive extents')
+    if not _finite(reach) or reach <= 0:
+        raise ValueError('arm max reach must be finite and positive')
+
+    # Robot park pose: x under the bay centre (centred lateral place reach); y + yaw on the tow corridor
+    # the cart was towed along (the scenario's own cart_body_pose), so the heading matches the outbound
+    # lane and the dock articulation is 0.
+    bx, _by = (float(v) for v in center)
+    corridor_y, corridor_yaw = float(cart_pose[1]), float(cart_pose[2])
+    robot = (bx, corridor_y, _wrap(corridor_yaw))
+
+    # Where the pick/place must reach from this pose, with the given hitch geometry.
+    cart = cart_pose_from_hitch(robot, articulation, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
+    cx, cy, cyaw = cart
+    lx, ly = (float(v) for v in load_xy)
+    cos_y, sin_y = math.cos(cyaw), math.sin(cyaw)
+    carton_xy = (cx + lx * cos_y - ly * sin_y, cy + lx * sin_y + ly * cos_y)
+    carton_reach = math.hypot(carton_xy[0] - robot[0], carton_xy[1] - robot[1])
+    bay_reach = math.hypot(center[0] - robot[0], center[1] - robot[1])
+    offenders = []
+    if carton_reach > reach:
+        offenders.append(f'carton pick reach {carton_reach:.3f} m > max {reach:.3f} m')
+    if bay_reach > reach:
+        offenders.append(f'bay place reach {bay_reach:.3f} m > max {reach:.3f} m')
+    if offenders:
+        raise ValueError('derive_bay_park: infeasible park pose -- ' + '; '.join(offenders))
+    return {'robot_base_pose': (round(robot[0], 4), round(robot[1], 4), round(robot[2], 6)),
+            'reach': {'carton_pick_m': round(carton_reach, 4), 'bay_place_m': round(bay_reach, 4),
+                      'max_m': round(reach, 4)},
+            'inputs': {'transfer_bay_center_xy': [round(v, 4) for v in center],
+                       'corridor_y': round(corridor_y, 4), 'corridor_yaw': round(_wrap(corridor_yaw), 6),
+                       'carton_dimensions_m': [round(float(v), 4) for v in dims],
+                       'cart_load_center_body_xy': [round(lx, 4), round(ly, 4)],
+                       'cart_support_z_world': round(float(support_z), 4),
+                       'hitch_x': round(float(hitch_x), 4), 'cart_hitch_x': round(float(cart_hitch_x), 4)}}
+
+
+def bay_park_provenance(scenario, *, hitch_x=-0.62, cart_hitch_x=0.65, dataset=None, git_head=None):
+    """A provenance stamp for a derived ``recorded_bay_park`` pose: the geometry it was derived FROM
+    (so a change invalidates it BY NAME) plus the environment it was captured in.
+
+    ``dataset`` / ``git_head`` are environment facts the caller supplies (the dataset manifest id and
+    the repo HEAD -- see ``scripts/check_transfer_bench_staging.py`` and the fragment writer); the pose
+    + the geometry fields come from the scenario via :func:`derive_bay_park`. Pure."""
+    d = derive_bay_park(scenario, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
+    prov = {'dataset': dataset, 'git_head': git_head,
+            'carton_dimensions_m': d['inputs']['carton_dimensions_m'],
+            'transfer_bay_center_xy': d['inputs']['transfer_bay_center_xy'],
+            'cart_support_z_world': d['inputs']['cart_support_z_world'],
+            'cart_load_center_body_xy': d['inputs']['cart_load_center_body_xy'],
+            'derived_robot_base_pose': list(d['robot_base_pose']), 'reach': d['reach'],
+            'source': 'derived_from_scenario (sim-rerecord-bay-park-v3-v1)'}
+    return prov
+
+
+def check_bay_park_provenance(provenance, scenario, *, hitch_x=-0.62, cart_hitch_x=0.65):
+    """Raise (BY NAME) when a frozen ``recorded_bay_park`` provenance stamp no longer matches the live
+    scenario geometry, so a dataset or carton change can never silently replay a stale staged pose.
+
+    Compares the geometry the pose was derived FROM (carton dimensions, transfer-bay centre, cart load
+    centre, support z) against the current scenario. A match returns the live provenance; any drift
+    raises ValueError naming each field with old -> new. ``provenance`` None/empty => no stamp to check
+    (returns the freshly derived provenance)."""
+    live = bay_park_provenance(scenario, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x,
+                               dataset=(provenance or {}).get('dataset'),
+                               git_head=(provenance or {}).get('git_head'))
+    if not provenance:
+        return live
+    drift = []
+    for field in ('carton_dimensions_m', 'transfer_bay_center_xy', 'cart_load_center_body_xy',
+                  'cart_support_z_world'):
+        if field in provenance and provenance[field] != live[field]:
+            drift.append(f'{field}: {provenance[field]} -> {live[field]}')
+    if drift:
+        raise ValueError('recorded_bay_park staging is STALE for this scenario (re-derive with '
+                         'derive_bay_park / regenerate the fragment): ' + '; '.join(drift))
+    return live
+
+
 def resolve_start_staging(config):
     """Normalized ``config['start_staging']`` (a preset name or an object), or None when absent.
 
@@ -122,11 +255,12 @@ def resolve_start_staging(config):
     if spec.get('coupled', True) is not True:
         raise ValueError('start_staging: the mission is still coupled at the transfer handover '
                          '(uncouple_on_return releases the cart at the parking spot during return)')
-    robot = spec.get('robot_base_pose', RECORDED_BAY_PARK_ROBOT_POSE)
+    robot = spec.get('robot_base_pose')          # None => derive from the live scenario geometry
     articulation = spec.get('articulation', 0.0)
     load_xy = spec.get('carton_load_center_body_xy')
     support_z = spec.get('carton_support_z_world')
-    if not (isinstance(robot, (list, tuple)) and len(robot) == 3 and _finite(*robot)):
+    provenance = spec.get('provenance')
+    if robot is not None and not (isinstance(robot, (list, tuple)) and len(robot) == 3 and _finite(*robot)):
         raise ValueError('start_staging.robot_base_pose must be finite x/y/yaw')
     if not _finite(articulation) or abs(articulation) > math.radians(5):
         raise ValueError('start_staging.articulation must be finite and within the 5 deg attach gate')
@@ -135,10 +269,13 @@ def resolve_start_staging(config):
         raise ValueError('start_staging.carton_load_center_body_xy must be finite x/y')
     if support_z is not None and not _finite(support_z):
         raise ValueError('start_staging.carton_support_z_world must be finite')
-    return {'preset': preset, 'robot_base_pose': tuple(float(v) for v in robot),
+    if provenance is not None and not isinstance(provenance, dict):
+        raise ValueError('start_staging.provenance must be an object')
+    return {'preset': preset, 'robot_base_pose': None if robot is None else tuple(float(v) for v in robot),
             'articulation': float(articulation),
             'carton_load_center_body_xy': None if load_xy is None else tuple(float(v) for v in load_xy),
-            'carton_support_z_world': None if support_z is None else float(support_z), 'coupled': True}
+            'carton_support_z_world': None if support_z is None else float(support_z), 'coupled': True,
+            'provenance': provenance}
 
 
 def staged_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
@@ -153,7 +290,31 @@ def staged_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
     st = variant.get('initial_staging') if isinstance(variant, dict) else None
     if not isinstance(st, dict) or not _finite(*st.get('cart_body_pose', (math.nan,))[:3]):
         raise ValueError('scenario.initial_staging.cart_body_pose is required to stage the start')
+    # Robot base pose: an explicit config pose wins; otherwise DERIVE it from the live scenario geometry
+    # (transfer_bay + corridor + hitch), so a store or carton change re-derives rather than replaying the
+    # stale v2 record. A scenario without a transfer_bay falls back to the historical v2 pose.
+    derived, provenance = None, None
+    stamp = staging.get('provenance') or {}
+    # A supplied provenance stamp (e.g. a frozen fragment) is checked BY NAME against the live geometry
+    # first, so a dataset or carton change can never silently replay a pose for the wrong store/carton.
+    if staging.get('provenance') is not None:
+        check_bay_park_provenance(staging['provenance'], variant, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
+    # Robot base pose: an explicit config pose wins; otherwise DERIVE it from the live scenario geometry
+    # (transfer_bay + corridor + hitch), so a store or carton change re-derives rather than replaying the
+    # stale v2 record. A scenario without a transfer_bay falls back to the historical v2 pose.
     robot = staging['robot_base_pose']
+    if robot is None:
+        if isinstance(variant.get('transfer_bay'), dict):
+            derived = derive_bay_park(variant, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x,
+                                      articulation=staging['articulation'])
+            robot = derived['robot_base_pose']
+            provenance = bay_park_provenance(variant, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x,
+                                             dataset=stamp.get('dataset'), git_head=stamp.get('git_head'))
+        else:
+            robot = RECORDED_BAY_PARK_ROBOT_POSE
+    elif staging.get('provenance') is not None and isinstance(variant.get('transfer_bay'), dict):
+        provenance = bay_park_provenance(variant, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x,
+                                         dataset=stamp.get('dataset'), git_head=stamp.get('git_head'))
     cart = cart_pose_from_hitch(robot, staging['articulation'], hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
     dyaw = _wrap(cart[2] - float(st['cart_body_pose'][2]))
     st['robot_base_pose'] = list(robot)
@@ -168,15 +329,22 @@ def staged_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
     st['unit_yaws_world'] = yaws
     if not _finite(st.get('cart_support_z_world')):
         raise ValueError('scenario.initial_staging.cart_support_z_world (carton support z) is required')
+    pose_origin = ('explicit_config' if staging['robot_base_pose'] is not None
+                   else 'derived_from_scenario' if derived is not None else 'v2_fallback')
     record = {'mode': f"start_phase_shortcut:{staging['preset']}", 'preset': staging['preset'],
-              'robot_base_pose': [round(v, 4) for v in robot],
+              'robot_base_pose': [round(v, 4) for v in robot], 'robot_base_pose_origin': pose_origin,
               'cart_body_pose': [round(v, 4) for v in cart],
               'articulation': staging['articulation'], 'coupled': True,
               'carton_load_center_body_xy': [round(float(v), 4) for v in st['cart_load_center_body_xy']],
               'carton_support_z_world': float(st['cart_support_z_world']),
               'source_runs': sorted(RECORDED_BAY_PARK_RUNS),
-              'note': ('robot+cart spawned at the recorded park->transfer handover of a real coupled tow '
-                       '(not driven); carton synthesized resting on the cart at carton_support_z_world')}
+              'note': ('robot+cart spawned at the park->transfer handover (derived from the live '
+                       'transfer_bay + corridor geometry, else the recorded v2 tow); carton synthesized '
+                       'resting on the cart at carton_support_z_world')}
+    if derived is not None:
+        record['reach'] = derived['reach']
+    if provenance is not None:
+        record['provenance'] = provenance
     return variant, record
 
 

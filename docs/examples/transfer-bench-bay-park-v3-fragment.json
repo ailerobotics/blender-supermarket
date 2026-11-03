@@ -1,0 +1,24 @@
+{
+  "_comment": "sim-rerecord-bay-park-v3-v1: re-derived start_at=transfer bench staging for the v3-portal26 store + 0.45 m carton. The frozen v2 pose (robot x=-2.079, captured on the v2 store / 0.6 m carton) read as misaligned at the staged dock on v3 (ledger stage-transfer2), forcing a full cold run to exercise transfer/carton-level work. The recorded_bay_park preset now DERIVES its robot base pose from the live scenario geometry (shortcut.derive_bay_park: transfer_bay centre + tow corridor + hitch + carton height), so a store or carton change re-derives rather than replaying a stale pose. Merge the keys below into the mission runtime config (owned by the integration lane; do not edit the ~/datasets configs from a worker PR). The staging + stop are runtime-config keys; the live-pose transfer itself still needs the RESTOCK_TRANSFER_MODE/RESTOCK_TRANSFER_CARRY env vars (see transfer-live-mission-fragment.json).",
+  "_derived_pose": "robot_base_pose = (-2.0, 15.25, 0.0): x centred under transfer_bay.center_xy (-2.0, so the place reach is centred on the bay), y + yaw on the tow corridor (initial_staging.cart_body_pose = -5.73, 15.25, 0). Reach: carton pick 1.09 m, bay place 1.17 m, both < the 1.3 m arm reach. The cart couples behind at (-3.27, 15.25, 0) with the hitch coincident (articulation 0); the carton rests on the cart upper shelf (cart_support_z_world 0.9325) at centre z 1.0225 for the 0.18 m-tall carton.",
+  "start_at": "transfer",
+  "start_staging": {
+    "preset": "recorded_bay_park",
+    "coupled": true,
+    "provenance": {
+      "source": "derived_from_scenario (sim-rerecord-bay-park-v3-v1)",
+      "dataset": "sim-store-realism-v3-portal26",
+      "git_head": "b0acdb1",
+      "carton_dimensions_m": [0.45, 0.3, 0.18],
+      "transfer_bay_center_xy": [-2.0, 16.42],
+      "cart_support_z_world": 0.9325,
+      "cart_load_center_body_xy": [0.18, 0.0],
+      "derived_robot_base_pose": [-2.0, 15.25, 0.0],
+      "reach": {"carton_pick_m": 1.09, "bay_place_m": 1.17, "max_m": 1.3}
+    }
+  },
+  "stop_after": "verify",
+  "_provenance_note": "The provenance stamp is checked at build time by shortcut.check_bay_park_provenance against the live scenario: if the carton dimensions, transfer-bay centre, cart load centre or support z drift, staged_scenario RAISES by name ('recorded_bay_park staging is STALE for this scenario ...') instead of silently replaying a pose for the wrong geometry. Because the preset derives the pose fresh from the scenario each run, the pose itself cannot go stale silently; the stamp exists to catch a geometry change the human had not re-reviewed.",
+  "_pass_criteria": "PASS = the staged train couples at the dock (NO 'dock rejected: stale, moving, distant, or misaligned ...' -- if it still rejects, the appended category + numbers name exactly which gate and by how much), the bench boots into the transfer stage with collect/couple/outbound/park recorded as *_shortcut, and the transfer pick completes on v3 with the 0.45 m carton. FAIL = any named dock-reject category, a reach failure, or a provenance-stale raise (report the reason verbatim).",
+  "_cpu_proof": "scripts/twin/tests/test_restock_bay_park_derive.py (derivation + reach + provenance) and scripts/check_transfer_bench_staging.py (derived pose vs live geometry, v2 before/after delta). Run with PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=scripts."
+}

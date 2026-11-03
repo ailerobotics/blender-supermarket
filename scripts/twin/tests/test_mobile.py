@@ -39,6 +39,32 @@ def test_bad_dock_never_calls_physics(change):
     assert not c.attached and not calls
 
 
+@pytest.mark.parametrize('change,category,needle', [
+    (dict(age=.2), 'stale', 'age=0.200'),
+    (dict(robot_hitch_z=float('nan')), 'stale', 'non-finite'),
+    (dict(cart_speed=.1), 'moving', 'cart_speed=0.1000'),
+    (dict(robot_yaw_rate=.1), 'moving', 'robot_yaw_rate=0.1000'),
+    (dict(cart=Pose2(-1.4, 0, 0)), 'distant', 'hitch gap='),      # 130 mm > 25 mm (XY)
+    (dict(cart_hitch_z=.30), 'distant', 'hitch Z gap=20.0 mm'),
+    (dict(cart=Pose2(-1.27, 0, .2)), 'misaligned', 'yaw=11.46 deg')])
+def test_dock_reject_names_the_failing_gate_with_numbers(change, category, needle):
+    c = Coupler()
+    obs = replace(observation(), **change)
+    reasons = c.dock_reject_reasons(obs)
+    cats = [cat for cat, _ in reasons]
+    assert category in cats, (category, reasons)
+    assert any(needle in detail for _, detail in reasons), (needle, reasons)
+    with pytest.raises(ValueError) as ei:
+        c.attach(obs, lambda: None)
+    # The legacy phrase is kept (greps/ledger), then the specific categories + numbers appended.
+    assert 'dock rejected: stale, moving, distant, or misaligned' in str(ei.value)
+    assert category in str(ei.value) and needle in str(ei.value)
+
+
+def test_good_dock_has_no_reject_reasons():
+    assert Coupler().dock_reject_reasons(observation()) == []
+
+
 def test_coupling_transaction_and_stopped_detach():
     c = Coupler()
     def failure():

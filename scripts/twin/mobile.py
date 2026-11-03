@@ -144,15 +144,45 @@ class Coupler:
         return (all(math.isfinite(v) for v in vals) and 0 <= obs.age <= 0.1
                 and max(abs(v) for v in vals[:4]) <= 0.02)
 
+    def dock_reject_reasons(self, obs):
+        """Which of the four attach gates fail, each with its measured value vs bound.
+
+        Returns a list of ``(category, detail)`` for every FAILING gate (empty when the dock is
+        acceptable). Categories are the four the legacy message named -- ``stale`` (observation age),
+        ``moving`` (base/cart speed or yaw rate), ``distant`` (hitch-point gap in XY or Z) and
+        ``misaligned`` (robot-vs-cart yaw) -- so a caller can report EXACTLY why it rejected instead
+        of the undifferentiated 'stale, moving, distant, or misaligned'. Pure; no state change."""
+        out = []
+        finite = all(math.isfinite(v) for v in (obs.robot_speed, obs.cart_speed, obs.robot_yaw_rate,
+                     obs.cart_yaw_rate, obs.robot_hitch_z, obs.cart_hitch_z, obs.age))
+        if not finite:
+            out.append(('stale', 'a dock measurement is non-finite'))
+        if not (0 <= obs.age <= 0.1):
+            out.append(('stale', f'age={obs.age:.3f} s not in [0, 0.100] s'))
+        rate = max(abs(obs.robot_speed), abs(obs.cart_speed),
+                   abs(obs.robot_yaw_rate), abs(obs.cart_yaw_rate)) if finite else float('nan')
+        if not (finite and rate <= 0.02):
+            out.append(('moving', f'max |speed/yaw-rate|={rate:.4f} > 0.0200 '
+                        f'(robot_speed={obs.robot_speed:.4f} cart_speed={obs.cart_speed:.4f} '
+                        f'robot_yaw_rate={obs.robot_yaw_rate:.4f} cart_yaw_rate={obs.cart_yaw_rate:.4f})'))
+        gap = math.dist(obs.robot.point(self.spec.hitch_x), obs.cart.point(self.spec.cart_hitch_x))
+        if gap > 0.025:
+            out.append(('distant', f'hitch gap={gap*1e3:.1f} mm > 25.0 mm (XY)'))
+        dz = abs(obs.robot_hitch_z - obs.cart_hitch_z)
+        if dz > 0.015:
+            out.append(('distant', f'hitch Z gap={dz*1e3:.1f} mm > 15.0 mm'))
+        yaw = abs(wrap(obs.robot.yaw - obs.cart.yaw))
+        if yaw > math.radians(5):
+            out.append(('misaligned', f'robot-vs-cart yaw={math.degrees(yaw):.2f} deg > 5.00 deg'))
+        return out
+
     def attach(self, obs, create_joint):
         if self.attached:
             raise ValueError('already coupled')
-        a = obs.robot.point(self.spec.hitch_x)
-        b = obs.cart.point(self.spec.cart_hitch_x)
-        if (not self._stationary(obs) or math.dist(a, b) > 0.025
-                or abs(obs.robot_hitch_z-obs.cart_hitch_z) > 0.015
-                or abs(wrap(obs.robot.yaw-obs.cart.yaw)) > math.radians(5)):
-            raise ValueError('dock rejected: stale, moving, distant, or misaligned')
+        reasons = self.dock_reject_reasons(obs)
+        if reasons:
+            raise ValueError('dock rejected: stale, moving, distant, or misaligned -- '
+                             + '; '.join(f'{cat}: {detail}' for cat, detail in reasons))
         create_joint()
         self.attached = True
 
