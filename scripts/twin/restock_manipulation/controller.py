@@ -102,6 +102,7 @@ class TransferController:
                  cage_preplace_shape=None, reposition_before_place: bool = False,
                  collect_place_preplace_shape=None, collect_place_wrist_guard: bool = False,
                  collect_place_straight_line: bool = False,
+                 collect_retreat_liftoff: bool = True, collect_retreat_liftoff_dz: float = 0.15,
                  grasp_track_m=None, require_collect_source_evidence: bool = False,
                  transfer_ground_truth: bool = False, ground_truth_pick: bool = False,
                  collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0,
@@ -468,6 +469,35 @@ class TransferController:
         # key = the fix. Scoped to the non-cage collect place, so transfer / live_pose / scripted-still are
         # untouched. See _collect_deck_place and data/sim-robust-collect-place-straightline-v1/report.md.
         self.collect_place_straight_line = bool(collect_place_straight_line)
+        # sim-collect-retreat-abort-v2 (physcon1-fail1 / rtfcollect2-fail1, 2026-11-03): the NON-cage
+        # COLLECT deck-place EMPTY retreat is a single collision-OFF straight-line joint smoothstep from
+        # the folded place config to the clear collect_place_preplace_shape. Its first increment is almost
+        # pure HORIZONTAL retract (gripper TCP x ~1.07 -> ~0.71 m, z only +0.07), which drags the still-
+        # ENABLED wrist links (ur_wrist_2/3 -- the carton's seat links, NOT on the deferred tool-side
+        # collider set) sideways into the just-RE-ENABLED carton (SIM_ATTACH re-enables the carton at
+        # release) and the rollwagen cage (arm-vs-cage is NOT collision-filtered). The arm PINS: shoulder_
+        # lift ~0.6 rad / elbow ~0.5 rad short for the whole settle window while the distal wrists run at
+        # velocity saturation (the classify_contact_pin fingerprint), and the settle gate aborts the
+        # trajectory (moveit_err=-4). It is NOT drive authority (gravity ~103 N*m << the 400 N*m release cap
+        # and the smoothstep is already slow, ~0.03 rad/s^2 -> ~1 N*m inertial), NOT a wrist self-collision
+        # (the wrists sit in the clear carry region) -- only a ~300 N*m external CONTACT can hold the
+        # saturated drive pinned. Fix: lift the empty gripper straight UP first (separating the enabled
+        # wrist links from the carton/shelf/cage), THEN fold to the clear preplace shape. The lift-off is a
+        # DLS IK (collect_retreat.liftoff_goal) that raises the TCP +dz along world +Z preserving the tool
+        # orientation, seeded from the measured release config (stays on the self-clear branch, leans on
+        # elbow+wrist_1 so it executes even while the shoulder is pinned against a downward contact). ON by
+        # default for this retreat (owner-authorised; scoped to _collect_deck_place so cart-cage / live_pose
+        # transfer / scripted are byte-identical); env RESTOCK_COLLECT_RETREAT_LIFTOFF=0 disables it. See
+        # collect_retreat.py and data/sim-collect-retreat-abort-v2/report.md.
+        _liftoff_env = os.environ.get('RESTOCK_COLLECT_RETREAT_LIFTOFF', '').strip().lower()
+        if _liftoff_env in ('0', 'false', 'off', 'no'):
+            self.collect_retreat_liftoff = False
+        elif _liftoff_env in ('1', 'true', 'on', 'yes'):
+            self.collect_retreat_liftoff = True
+        else:
+            self.collect_retreat_liftoff = bool(collect_retreat_liftoff)
+        self.collect_retreat_liftoff_dz = _float_env_bounded(
+            'RESTOCK_COLLECT_RETREAT_LIFTOFF_DZ', collect_retreat_liftoff_dz, 0.03, 0.40)
         # sim-robust-transfer-preplace-reach-v1 (coldwin6, 2026-10-24): steer the live_pose TRANSFER
         # PREPLACE's wrist-guarded seeded-KDL IK to the HOLDABLE upright clear branch and reject a
         # clear-but-DEEP-fold goal. The preplace standoff above the bay has (at least) two wrist-clear IK
@@ -525,6 +555,7 @@ class TransferController:
         self.render_lead = _float_env_bounded('RESTOCK_FRESH_RENDER_LEAD_S', 0.2, 0.0, 0.5) * self._freshness_scale
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
+        self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
         self.held = False
         self._staged_retries = 0   # fm358: bounded retry of a failed staged cart-swing move
         self._move_deadline_retries = 0   # fm367: bounded retry of a sim-deadline fault on the general move path
@@ -693,6 +724,7 @@ class TransferController:
         self._recovery_credit_s = 0.0           # sim-robust-phase-timeout-during-recovery-v1: fresh per op
         self._recovery_pause_logged = False
         self._esdf_boot_gate.reset()   # sim-robust-esdf-boot-gate-v1: re-arm the boot ESDF-ack gate per op
+        self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
         self.verify_ids = set()
         self.release_time = None
 
@@ -903,6 +935,70 @@ class TransferController:
             return goal
         return tuple(float(leveled[j]) for j in ARM_JOINTS)
 
+    def _level_path_plan(self, goal_shape, measured):
+        """sim-carry-level-lift-v1: plan a carried fixed-shape move (``goal_shape``) from the measured
+        start as a LEVELED WAYPOINT PATH so the welded carton stays parallel to the ground THROUGHOUT the
+        move -- not only at its endpoints. Returns a ``carton_level.LevelPathPlan`` (whose predicted
+        executed tilt the caller checks against the bound before dispatch), or ``None`` to fall back to
+        the single leveled-endpoint goal: when the constraint is off, ``level_path`` is off, there is no
+        FK model, the up-axis is not captured yet, the goal is not a 6-vector, or the GOAL has no in-clear-
+        region level solution (ValueError from the planner). Bounded to the clear carry wrist region
+        (carry_wrist1_cap / carry_wrist2_min) exactly like ``_level_carried_goal``."""
+        if (self._carton_level is None or not self._carton_level.level_goals
+                or not self._carton_level.level_path or len(goal_shape) != 6):
+            return None
+        robot = self._fk_model()
+        if robot is None:
+            return None
+        self._capture_level_up(measured)
+        if self._carton_up_in_tool is None:
+            return None
+        from twin.restock_manipulation import carton_level as cl
+        big = 2 * math.pi
+        limits = {}
+        if self.carry_wrist1_cap is not None:
+            limits['ur_wrist_1_joint'] = (-big, float(self.carry_wrist1_cap))
+        if self.carry_wrist2_min is not None:
+            limits['ur_wrist_2_joint'] = (float(self.carry_wrist2_min), big)
+        try:
+            return cl.plan_level_path(robot, list(measured), list(goal_shape), self._carton_up_in_tool,
+                                      bound_deg=self._carton_level.bound_deg,
+                                      joints=self._carton_level.joints,
+                                      tool_link=self._carton_level.tool_link,
+                                      limits=limits or None,
+                                      waypoints=self._carton_level.path_waypoints)
+        except ValueError as exc:
+            # The GOAL itself has no in-clear-region level solution. Fall back to the single-goal path
+            # (which also levels the endpoint via _level_carried_goal, or proceeds unleveled under the
+            # CARTON_TILT trip) -- never crash, never silently carry a tilt.
+            print('CARTON_LEVEL_UNSOLVED phase=%s: %s (no leveled waypoint path; falling back to the '
+                  'single leveled-endpoint goal)' % (self.phase, exc), flush=True)
+            return None
+
+    def _issue_level_carried_move(self, goal_shape, measured, *, slow, goal_tol):
+        """Dispatch a carried fixed-shape move keeping the carton level. With ``level_path`` on and a
+        feasible leveled waypoint path, replay the PREDICTED executed tilt and either
+        CARTON_LEVEL_PLAN_REJECTED it (fail by name BEFORE any motion) or drive it as a multi-waypoint
+        ``begin_joint_path``; otherwise fall back to the single leveled-endpoint ``begin_joint_goal``.
+        Returns a controller result (the dispatched move, or the reject failure)."""
+        plan = self._level_path_plan(goal_shape, measured)
+        if plan is not None:
+            reject = plan.reject(self._carton_level.bound_deg)
+            if reject is not None:
+                print(reject, flush=True)
+                return self._fail(reject)
+            print('CARTON_LEVEL_PATH phase=%s n=%d predicted_max roll=%.2f pitch=%.2f tilt=%.2f deg '
+                  '(<= bound %.2f) -- leveled waypoint carry'
+                  % (self.phase, plan.waypoints_n, plan.max_roll, plan.max_pitch, plan.max_tilt,
+                     self._carton_level.bound_deg), flush=True)
+            self.motion.begin_joint_path(list(plan.waypoints), measured, slow=slow, goal_tol=goal_tol)
+            self.issued = True
+            return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+        goal = self._level_carried_goal(goal_shape, measured)
+        self.motion.begin_joint_goal(goal, measured, slow=slow, goal_tol=goal_tol)
+        self.issued = True
+        return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+
     def _place_level_limits(self):
         """Joint limits for the level place IK: the clear carry wrist region (carry_wrist1_cap /
         carry_wrist2_min, so the level pose stays off the ur_wrist_2-vs-forearm stop) plus the arm's
@@ -972,6 +1068,34 @@ class TransferController:
                                          tool_link=tcp_link, limits=limits)
         return cl.level_place_ik(robot, target_pos, self._carton_up_in_tool, goal,
                                  tool_link=tcp_link, limits=limits)
+
+    def _collect_retreat_liftoff_goal(self, measured):
+        """sim-collect-retreat-abort-v2: the collect deck-place empty-retreat LIFT-OFF config -- raise the
+        TCP straight up by ``collect_retreat_liftoff_dz`` (world +Z) preserving the tool orientation,
+        seeded from the measured release config so it stays on the current self-clear IK branch. Bounded
+        to the clear carry wrist region so the lift-off cannot drive a wrist into the ur_wrist_2-vs-forearm
+        stop. Returns a 6-tuple (ARM order) or None when no FK model / no straight-up solution exists (the
+        caller then folds directly, the prior behaviour -- never a regression)."""
+        robot = self._fk_model()
+        if robot is None or len(measured) != 6 or not all(math.isfinite(x) for x in measured):
+            return None
+        from twin.restock_manipulation.collect_retreat import liftoff_goal
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+        big = 2 * math.pi
+        limits = {}
+        if self.carry_wrist1_cap is not None:
+            limits['ur_wrist_1_joint'] = (-big, float(self.carry_wrist1_cap))
+        if self.carry_wrist2_min is not None:
+            limits['ur_wrist_2_joint'] = (float(self.carry_wrist2_min), big)
+        try:
+            sol = liftoff_goal(robot, dict(zip(ARM_JOINTS, [float(v) for v in measured])),
+                               dz=self.collect_retreat_liftoff_dz, tcp_link=self._place_tcp_link,
+                               limits=limits or None)
+        except ValueError as exc:
+            print('COLLECT_RETREAT_LIFTOFF_UNSOLVED: %s (folding straight to the preplace shape)' % exc,
+                  flush=True)
+            return None
+        return tuple(float(sol[j]) for j in ARM_JOINTS)
 
     def _carton_tilt_trip(self, measured):
         """CARTON_TILT trip message when the welded carton (this carried pose) leaves level by more
@@ -1583,13 +1707,16 @@ class TransferController:
                 # into the shape settles a little short on joint0 only, so relax THIS move's terminal gate
                 # (the subsequent tuck/transit re-anchor). Absent carry_lift_shape => legacy task-space lift.
                 if self.phase == 'lift' and self.carry_lift_shape is not None:
-                    # sim-carton-level-carry-v1: level the lifted carry shape so the carton rises
-                    # parallel to the ground (within the clear wrist caps). Off => shape unchanged.
-                    _lift_goal = self._level_carried_goal(self.carry_lift_shape, s.joint_positions)
-                    self.motion.begin_joint_goal(_lift_goal, s.joint_positions,
-                                                 slow=True, goal_tol=0.2)
-                    self.issued = True
-                    return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+                    # sim-carton-level-carry-v1 / sim-carry-level-lift-v1: raise the carton parallel to
+                    # the ground. level_goals alone levels only the ENDPOINT -- the joint-space path from
+                    # the grasp pose to the leveled carry_lift_shape still passes through a tilted config
+                    # (coldwin25: CPU-reconstructed ~11 deg mid-path). With level_path on, drive the lift
+                    # as a LEVELED WAYPOINT PATH (carton level throughout) and CARTON_LEVEL_PLAN_REJECTED
+                    # any plan whose predicted executed tilt exceeds the bound before motion streams; off
+                    # => the single leveled-endpoint goal (byte-identical). Carton-loaded -> slow; relax
+                    # THIS move's terminal gate (the subsequent tuck/transit re-anchor).
+                    return self._issue_level_carried_move(self.carry_lift_shape, s.joint_positions,
+                                                          slow=True, goal_tol=0.2)
                 # sim-robust-collect-stow-branch-v1 (collect5, 2026-10-23): clear-branch RETREAT for the
                 # NON-cage COLLECT deck place. The place + retreat run collision-OFF straight-line
                 # (_collect_deck_place) because the set-down fold is a conservative attached-carton
@@ -1612,6 +1739,23 @@ class TransferController:
                         return self._fail('collect deck retreat has no clear-branch escape shape: '
                                           'collect_place_straight_line needs collect_place_preplace_shape '
                                           'to back the empty gripper off the self-colliding place fold')
+                    # sim-collect-retreat-abort-v2: lift-off-THEN-fold. FIRST raise the empty gripper
+                    # straight UP (+dz along world +Z, orientation preserved) to separate the still-ENABLED
+                    # wrist links from the re-enabled carton / shelf / cage BEFORE the horizontal fold --
+                    # the straight-to-preplace fold's first increment is almost pure horizontal retract and
+                    # dragged those links into a contact that pinned the drive (physcon1/rtfcollect2). THEN
+                    # (once lifted) fold to the clear preplace shape (the existing move). The lift-off is a
+                    # collision-OFF straight_line joint smoothstep like the fold, so the two legs share the
+                    # mechanism. If the lift-off IK cannot reach straight up from here, fall through to the
+                    # direct fold (no regression vs the prior behaviour). Off / non-collect-deck => unchanged.
+                    if self.collect_retreat_liftoff and not self._retreat_lifted:
+                        liftoff = self._collect_retreat_liftoff_goal(s.joint_positions)
+                        if liftoff is not None:
+                            self.motion.begin_joint_goal(liftoff, s.joint_positions, straight_line=True)
+                            self.issued = True
+                            return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+                        # IK refused: skip the lift-off, go straight to the fold (prior behaviour).
+                        self._retreat_lifted = True
                     self.motion.begin_joint_goal(self.collect_place_preplace_shape, s.joint_positions,
                                                  straight_line=True)
                     self.issued = True
@@ -1798,6 +1942,17 @@ class TransferController:
             if outcome not in ('running', 'succeeded'):
                 return self._fail('invalid motion outcome')
             if outcome == 'succeeded':
+                # sim-collect-retreat-abort-v2: the collect deck-place retreat LIFT-OFF just completed (the
+                # empty gripper is now clear ABOVE the carton/shelf/cage). Do NOT transition out of retreat
+                # yet -- re-issue the SAME retreat phase, which now (self._retreat_lifted) folds to the clear
+                # preplace shape in free space. Scoped to the collect-deck retreat with the lift-off on.
+                if (self.phase == 'retreat' and self._collect_deck_place()
+                        and self.collect_retreat_liftoff and not self._retreat_lifted):
+                    self._retreat_lifted = True
+                    self.issued = False
+                    print('COLLECT_RETREAT_LIFTOFF done (gripper raised clear of the carton/shelf/cage) '
+                          '-> fold to clear preplace shape', flush=True)
+                    return self._result()
                 # Contact-feedback descent (firstmate run-202): the step settled. If the seal has NOT
                 # latched and the capped travel is not exhausted, step the contact pose a bit further
                 # toward the carton and re-issue -- this drives to actual contact regardless of the
@@ -1877,18 +2032,18 @@ class TransferController:
             # apply (tuck/pan carry the held carton; retreat_tuck is empty-handed).
             goal = ((self.cart_pan_joint0,) + tuple(self.cart_tuck_shape) if self.phase == 'pan'
                     else (s.joint_positions[0],) + tuple(self.cart_tuck_shape))
-            # sim-carton-level-carry-v1: level the carried fold (tuck/pan) so the carton stays
-            # parallel to the ground through the swing; retreat_tuck is empty-handed (untouched).
-            # Off => goal unchanged (byte-identical).
-            if self.phase in ('tuck', 'pan'):
-                goal = self._level_carried_goal(goal, s.joint_positions)
             if not self.issued:
                 if s.valid_until_steady is not None:
                     require_fresh(s.valid_until_steady, self.steady_clock)
-                # tuck/pan carry the welded carton -> plan the fold gently so the carton's inertia does
-                # not displace the wrist off the body-clear plan (run-246); retreat_tuck is empty-handed.
-                self.motion.begin_joint_goal(goal, s.joint_positions,
-                                             slow=self.phase in ('tuck', 'pan'))
+                # sim-carton-level-carry-v1 / sim-carry-level-lift-v1: tuck/pan carry the welded carton ->
+                # keep it parallel to the ground through the swing (level_path => leveled WAYPOINT path +
+                # CARTON_LEVEL_PLAN_REJECTED gate; else the single leveled-endpoint goal; off =>
+                # byte-identical). Plan the fold gently so the carton's inertia does not displace the
+                # wrist off the body-clear plan (run-246). retreat_tuck is empty-handed -> never leveled.
+                if self.phase in ('tuck', 'pan'):
+                    return self._issue_level_carried_move(goal, s.joint_positions,
+                                                          slow=True, goal_tol=None)
+                self.motion.begin_joint_goal(goal, s.joint_positions, slow=False)
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
             try:

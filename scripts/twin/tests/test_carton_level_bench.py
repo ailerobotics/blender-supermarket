@@ -33,6 +33,26 @@ def test_bench_tighter_bound_still_holds():
     assert all(r.after_max_roll <= 1.0 and r.after_max_pitch <= 1.0 for r in res)
 
 
+# ------------------------------------------------ EXECUTED-path replay (sim-carry-level-lift-v1)
+
+def test_executed_single_goal_lift_tilts_but_waypoint_path_is_level():
+    """The brief's EXECUTED-path proof, on the REAL coldwin25 grasp + REAL carry_lift_shape: the single
+    leveled-ENDPOINT joint goal (current) tilts the carton mid-path well over the bound, while the
+    leveled WAYPOINT path (the fix) keeps |roll|,|pitch| under the bound THROUGHOUT lift and pan."""
+    from twin.tools import carton_level_bench as b
+    _, res = b.run_executed_paths(URDF, bound_deg=cl.DEFAULT_TILT_BOUND_DEG)
+    names = {r.name for r in res}
+    assert names == {'lift', 'pan'}
+    lift = next(r for r in res if r.name == 'lift')
+    # the single-goal lift path tilts the carton off level mid-path (both endpoints level)
+    assert lift.single_goal_max_tilt > 5.0
+    # the leveled waypoint path keeps the whole executed carry under the bound
+    for r in res:
+        assert r.path_max_roll <= cl.DEFAULT_TILT_BOUND_DEG, r.name
+        assert r.path_max_pitch <= cl.DEFAULT_TILT_BOUND_DEG, r.name
+        assert r.passes(cl.DEFAULT_TILT_BOUND_DEG)
+
+
 # ----------------------------------------- sim-carton-tilt-trip-margin-v1: real collect carry
 
 def test_top_grasp_weld_is_top_down():

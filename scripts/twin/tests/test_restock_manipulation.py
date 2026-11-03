@@ -83,6 +83,15 @@ class FixtureMotion:
         self.joint_goals.append(dict(goal=tuple(goal), measured=tuple(measured), slow=slow,
                                      goal_tol=goal_tol, straight_line=bool(straight_line)))
 
+    def begin_joint_path(self, waypoints, measured, slow=False, goal_tol=None):
+        # sim-carry-level-lift-v1: a leveled multi-waypoint carried move (lift / tuck / pan). Recorded
+        # for assertions; counts as one dispatched move (the real port drives all waypoints as one
+        # ExecuteTrajectory). Also mirror it into joint_goals so existing dispatch assertions still see it.
+        self.joint_paths = getattr(self, 'joint_paths', [])
+        self.joint_paths.append(dict(waypoints=[tuple(w) for w in waypoints],
+                                     measured=tuple(measured), slow=slow, goal_tol=goal_tol))
+        self.stows.append((tuple(waypoints[-1]), tuple(measured), slow))
+
     def stop(self):
         self.stops += 1
 

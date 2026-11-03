@@ -194,6 +194,14 @@ def main():
         # plan to the place config is rejected ('self collision detected') even though the bare arm + wrist
         # guard are clear. The preplace standoff stays collision-aware. Absent/False => byte-identical.
         collect_place_straight_line=bool(config.get('collect_place_straight_line', False)),
+        # sim-collect-retreat-abort-v2: lift the empty gripper straight UP before the collect deck-place
+        # retreat folds to the clear preplace shape, so the enabled wrist links separate from the re-enabled
+        # carton / shelf / cage first (the direct fold's horizontal first increment dragged them into a
+        # contact that pinned the drive -- physcon1 / rtfcollect2). ON by default for this retreat (owner-
+        # authorised; scoped to the non-cage collect deck place). dz = the straight-up rise. Set
+        # collect_retreat_liftoff False to restore the single-fold retreat.
+        collect_retreat_liftoff=bool(config.get('collect_retreat_liftoff', True)),
+        collect_retreat_liftoff_dz=float(config.get('collect_retreat_liftoff_dz', 0.15)),
         # sim-robust-transfer-preplace-reach-v1 (coldwin6): steer the live_pose TRANSFER PREPLACE's
         # wrist-guarded KDL IK to the holdable upright clear branch and reject a clear-but-deep (un-reachable)
         # shoulder fold (coldwin6 accepted ur_shoulder_lift -4.003 and froze at -3.65). bool / mapping
@@ -320,6 +328,9 @@ def main():
         'collect_place_wrist_guard': controller.collect_place_wrist_guard,
         # sim-robust-collect-place-straightline-v1: collect deck place/retreat routed collision-off (False = off)
         'collect_place_straight_line': controller.collect_place_straight_line,
+        # sim-collect-retreat-abort-v2: collect deck-place empty-retreat lift-off-then-fold (True = on) + rise
+        'collect_retreat_liftoff': controller.collect_retreat_liftoff,
+        'collect_retreat_liftoff_dz': controller.collect_retreat_liftoff_dz,
         # sim-robust-transfer-preplace-reach-v1: effective live_pose transfer preplace reach guard (None = off)
         'transfer_preplace_reach_guard': controller.transfer_preplace_reach_guard,
         # sim-robust-transfer-settle-oscillation-v1: effective live_pose transfer PICK wrist guard (False = off)
