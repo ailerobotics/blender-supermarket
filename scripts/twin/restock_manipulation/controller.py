@@ -856,7 +856,8 @@ class TransferController:
             leveled = cl.level_config(robot, list(goal), self._carton_up_in_tool,
                                       joints=self._carton_level.joints,
                                       tool_link=self._carton_level.tool_link,
-                                      limits=limits or None)
+                                      limits=limits or None,
+                                      accept_deg=self._carton_level.bound_deg)
         except ValueError as exc:
             # No level solution for this pose within the clear wrist region. Do NOT crash and do NOT
             # silently carry it tilted: proceed with the original goal; the CARTON_TILT trip then names
@@ -1421,6 +1422,13 @@ class TransferController:
                 if (self.phase == 'preplace' and not self.cart_cage_place
                         and getattr(self, 'operation', None) == 'collect'
                         and self.collect_place_preplace_shape is not None):
+                    # sim-carton-tilt-trip-margin-v1: the place-on-cart standoff is NOT leveled here.
+                    # It is a precision reach whose TCP must match the sensed deck standoff; a wrist-only
+                    # level re-solve for the top-down grasp shifts the TCP ~0.47 m and loses that reach
+                    # (CPU-measured, data/sim-carton-tilt-trip-margin-v1). A level place-on-cart needs a
+                    # re-planned level place shape (shoulder/elbow, not wrist-only) + in-sim deck-reach
+                    # validation -- flagged as the integration/GPU follow-up. The confirmed coldwin24/24b
+                    # failure was the LIFT; the lift + tuck/pan carry fold are leveled (fixed solver).
                     self.motion.begin_joint_goal(self.collect_place_preplace_shape, s.joint_positions,
                                                  slow=True, goal_tol=0.2)
                     self.issued = True

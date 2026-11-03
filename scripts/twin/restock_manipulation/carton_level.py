@@ -27,6 +27,7 @@ and every caller leaves the mission byte-identical when it is off.
 """
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass
 
@@ -196,62 +197,109 @@ def resolve_level_config(spec):
     return LevelConfig(**kw).validate()
 
 
+# Wrist seeds (rad, ABSOLUTE targets for the first adjustable joint) the multi-start sweep restarts
+# from. The first adjustable joint (wrist_1) dominates the carton attitude, so sweeping it around the
+# circle lands a seed in the basin of every level branch; the goal's own wrists (offset 0) are tried
+# first so a pose that is already near level converges fast and nearest to the plan.
+_W1_SEED_GRID = tuple(np.linspace(-math.pi, math.pi, 12))
+_W2_SEED_GRID = (0.0, math.pi / 2, math.pi)
+
+
 def level_config(robot, goal_config, up_in_tool, *, joints=DEFAULT_LEVEL_JOINTS,
                  tool_link='ur_tool0', root='ur_base_link', limits=None,
-                 max_iter=60, tol_deg=0.05):
+                 max_iter=80, tol_deg=0.05, accept_deg=None):
     """Re-solve ``joints`` of ``goal_config`` so the carried carton's up-axis points world-up (a
     level-orientation waypoint). Returns a new joint map. Position (pan/lift/elbow) is untouched;
     only the wrist cluster moves, so the tool stays where the carry plan put it and the carton is
-    level. Damped Gauss-Newton on the 2-D tilt residual (up_world cross world-up) over the chosen
-    joints, with optional per-joint ``limits`` {name:(lo,hi)}. Raises if it cannot reach ``tol_deg``
-    (no level solution for this position with these joints -- caller fails honestly / re-plans)."""
+    level.
+
+    sim-carton-tilt-trip-margin-v1: the original single-start Gauss-Newton minimised the 2-D
+    horizontal residual ``up_world x world_up``, which VANISHES at BOTH the upright pole (up_world =
+    +Z, tilt 0) AND the inverted pole (up_world = -Z, tilt 180). From a carried fold whose start tilt
+    is already past ~90 deg -- which the collect carry fold (carry_lift_shape, tuck/pan,
+    collect_place_preplace_shape) is for the real top-grasp up-axis -- the descent fell into the
+    inverted basin and returned "no level solution (residual tilt 180 deg)" even though a clear
+    wrist-only level branch existed (coldwin24 / coldwin24b CARTON_TILT at the collect lift). The fix:
+      * a full **3-D** orientation residual ``up_world - world_up`` that is zero ONLY at the upright
+        pole and strongly NON-zero (and repulsive) at the inverted pole, and
+      * **multi-start** restarts over the attitude wrists so a wrist-IK local minimum cannot hide an
+        existing level branch.
+    Returns the lowest-tilt in-``limits`` solution (preferring a fully level one, then the one nearest
+    the planned goal). Succeeds when the best reaches ``tol_deg`` OR, when ``accept_deg`` is given, when
+    it is within ``accept_deg`` (level as far as the clear wrist region allows -- the caller's carried
+    bound). Raises only when no in-limits config gets under that acceptance (genuinely un-levelable in
+    the clear region -- caller fails honestly / the CARTON_TILT trip owns it)."""
     cfg = _as_joint_map(goal_config)
-    joints = [j for j in joints if j in cfg]
-    if not joints:
+    adj = [j for j in joints if j in cfg]
+    if not adj:
         raise ValueError('no adjustable joints present in the goal config')
     u = _unit(up_in_tool)
+    accept = float(tol_deg if accept_deg is None else accept_deg)
 
     def up_world(cfgmap):
         return tool_rotation(robot, cfgmap, tool_link, root) @ u
-
-    def residual(cfgmap):
-        # tilt residual = world-up x up_world projected to the two horizontal axes (0 when level).
-        uw = up_world(cfgmap)
-        r = np.cross(uw, WORLD_UP)
-        return r[:2]
 
     def tilt_deg(cfgmap):
         uw = up_world(cfgmap)
         return math.degrees(math.acos(max(-1.0, min(1.0, float(uw[2])))))
 
-    step_fd = 1e-4
-    for _ in range(int(max_iter)):
-        if tilt_deg(cfg) <= tol_deg:
-            return cfg
-        r0 = residual(cfg)
-        J = np.zeros((2, len(joints)))
-        for k, j in enumerate(joints):
-            cfg2 = dict(cfg)
-            cfg2[j] = cfg[j] + step_fd
-            J[:, k] = (residual(cfg2) - r0) / step_fd
-        # damped least squares  dq = -(J^T J + lambda I)^-1 J^T r
-        lam = 1e-6
-        JTJ = J.T @ J + lam * np.eye(len(joints))
-        dq = -np.linalg.solve(JTJ, J.T @ r0)
-        # bound the step so FK stays in its linear regime
-        mx = float(np.max(np.abs(dq))) if dq.size else 0.0
-        if mx > 0.3:
-            dq *= 0.3 / mx
-        for k, j in enumerate(joints):
-            v = cfg[j] + float(dq[k])
-            if limits and j in limits:
-                lo, hi = limits[j]
-                v = min(max(v, lo), hi)
-            cfg[j] = v
-    if tilt_deg(cfg) <= max(tol_deg, 1e-3):
-        return cfg
-    raise ValueError(f'no level-orientation solution for this carried pose '
-                     f'(residual tilt {tilt_deg(cfg):.2f} deg > {tol_deg} with joints {joints})')
+    def clamp(cfgmap):
+        if limits:
+            for j in adj:
+                if j in limits:
+                    lo, hi = limits[j]
+                    cfgmap[j] = min(max(cfgmap[j], lo), hi)
+        return cfgmap
+
+    def descend(start):
+        m = clamp(dict(start))
+        step_fd = 1e-4
+        for _ in range(int(max_iter)):
+            if tilt_deg(m) <= tol_deg:
+                break
+            r0 = up_world(m) - WORLD_UP   # 3-D residual: zero only upright, repulsive at the 180 pole
+            J = np.zeros((3, len(adj)))
+            for k, j in enumerate(adj):
+                m2 = dict(m)
+                m2[j] = m[j] + step_fd
+                J[:, k] = (up_world(m2) - WORLD_UP - r0) / step_fd
+            lam = 1e-6
+            dq = -np.linalg.solve(J.T @ J + lam * np.eye(len(adj)), J.T @ r0)
+            mx = float(np.max(np.abs(dq))) if dq.size else 0.0
+            if mx > 0.3:  # bound the step so FK stays in its linear regime
+                dq *= 0.3 / mx
+            for k, j in enumerate(adj):
+                m[j] = m[j] + float(dq[k])
+            clamp(m)
+        return m, tilt_deg(m)
+
+    # Seed combos: the goal itself first (offset 0 -> the fast, nearest-to-plan path for an
+    # already-near-level pose), then wrist_1 swept around the circle (x wrist_2 fallbacks) so a seed
+    # lands in the upright basin of every branch.
+    seeds = [{}]
+    for a in _W1_SEED_GRID:
+        seeds.append({adj[0]: a})
+    if len(adj) > 1:
+        for a in _W1_SEED_GRID[::2]:
+            for b in _W2_SEED_GRID:
+                seeds.append({adj[0]: a, adj[1]: b})
+
+    best = None  # (rank_key, cfgmap, tilt)
+    for seed in seeds:
+        start = dict(cfg)
+        start.update(seed)   # seed entries are ABSOLUTE joint targets
+        sol, t = descend(start)
+        if t <= accept:
+            disp = sum((sol[j] - cfg[j]) ** 2 for j in adj)
+            key = (0 if t <= tol_deg else 1, disp)   # prefer fully level, then nearest the plan
+            if best is None or key < best[0]:
+                best = (key, sol, t)
+            if key[0] == 0 and disp < 1.0:
+                break        # a fully level solution close to the plan -- good enough, stop early
+    if best is not None:
+        return best[1]
+    raise ValueError(f'no level-orientation solution for this carried pose within {accept:.2f} deg '
+                     f'(best in-limits tilt stays above it with joints {adj})')
 
 
 def interpolate_level(robot, start_config, goal_config, up_in_tool, *, n=8,
