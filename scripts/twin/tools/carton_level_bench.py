@@ -238,6 +238,43 @@ def run_executed_paths(urdf_path, *, bound_deg=cl.DEFAULT_TILT_BOUND_DEG, weld=C
     return u, out
 
 
+# ----------------------------------- preplace APPROACH executed path (sim-carton-level-preplace-v1)
+# The REAL collectlevel1 collect carry, reconstructed from the saved run's host-stack TRAJ_HOST_PLAN
+# dense trajectories (ARM order). The grasp fixes the carton up-axis at the weld; the preplace START is
+# the pan/tuck carry pose and the preplace GOAL is the PR 290 full-DOF leveled place-on-cart standoff
+# (the executed endpoint). Both ENDPOINTS are level, but the single begin_joint_goal joint-space path
+# between them passed through a pitched config and tripped CARTON_TILT at ~2.25 deg pitch.
+COLLECTLEVEL1_GRASP = (1.1923, -1.2833, 2.1071, -0.8249, 1.1932, -0.0001)
+COLLECTLEVEL1_PREPLACE_START = (1.2672, -2.27, 1.0, 0.65, 0.0017, 0.6187)
+COLLECTLEVEL1_PREPLACE_GOAL = (0.093, -1.9103, 2.0154, -0.1061, 1.664, -0.0006)
+
+
+def run_preplace_approach(urdf_path, *, bound_deg=cl.DEFAULT_TILT_BOUND_DEG,
+                          grasp=COLLECTLEVEL1_GRASP, start=COLLECTLEVEL1_PREPLACE_START,
+                          goal=COLLECTLEVEL1_PREPLACE_GOAL, tool_link='ur_tool0', interior=40):
+    """Replay the REAL collectlevel1 carry/tuck -> place-on-cart standoff APPROACH on the REAL mission
+    kinematics + the measured grasp up-axis, comparing the single leveled-ENDPOINT joint goal (what the
+    controller drove -- both endpoints level but the straight joint segment between them tilts the carton
+    off level mid-path, tripping CARTON_TILT at the pre-place transition) against the leveled WAYPOINT path
+    to the SAME PR 290 standoff goal (the fix: the goal pinned verbatim, interior wrists re-solved level).
+    Returns an ExecutedPathResult. This is the brief's EXECUTED-path proof for the pre-place segment."""
+    robot = parse_urdf(urdf_path)
+    u = cl.carton_up_in_tool(cl.tool_rotation(robot, list(grasp), tool_link))
+    limits = clear_wrist_limits()
+    s, g = list(start), list(goal)
+    single = _series(robot, [s, g], u, tool_link, interior)
+    plan = cl.plan_level_path_to_goal(robot, s, g, u, bound_deg=bound_deg, tool_link=tool_link,
+                                      limits=limits)
+    path = _series(robot, [list(w) for w in plan.waypoints], u, tool_link, interior)
+    return u, ExecutedPathResult(
+        name='preplace_approach',
+        single_goal_max_tilt=max(r[3] for r in single),
+        single_goal_max_roll=max(abs(r[1]) for r in single),
+        single_goal_max_pitch=max(abs(r[2]) for r in single),
+        path_max_tilt=plan.max_tilt, path_max_roll=plan.max_roll, path_max_pitch=plan.max_pitch,
+        waypoints_n=plan.waypoints_n, single_series=single, path_series=path)
+
+
 def executed_table(results, bound_deg=cl.DEFAULT_TILT_BOUND_DEG):
     rows = [('move', 'single|roll|', 'single|pitch|', 'single_tilt',
              'path|roll|', 'path|pitch|', 'path_tilt', 'n', 'verdict')]

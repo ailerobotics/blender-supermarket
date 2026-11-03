@@ -999,6 +999,72 @@ class TransferController:
         self.issued = True
         return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
 
+    def _level_approach_path_plan(self, leveled_goal, measured):
+        """sim-carton-level-preplace-v1: plan the carried APPROACH from the measured carry/tuck pose to an
+        ALREADY-LEVELED goal (the PR 290 full-DOF leveled place-on-cart standoff) as a LEVELED WAYPOINT
+        PATH, so the welded carton stays parallel to the ground THROUGHOUT the approach -- not only at its
+        endpoints. Unlike ``_level_path_plan`` it does NOT re-level the goal (that would move the PR 290
+        standoff off its reach-validated TCP/branch); the goal is pinned verbatim as the final waypoint and
+        only the interior wrists re-solve for level. Returns a ``carton_level.LevelPathPlan`` or ``None`` to
+        fall back to the single ``begin_joint_goal`` (constraint off, ``level_path`` off, no FK model, the
+        up-axis not captured, a non-6-vector goal, or an interior waypoint with no clear-region level
+        solution). Bounded to the clear carry wrist region exactly like ``_level_path_plan``."""
+        if (self._carton_level is None or not self._carton_level.level_goals
+                or not self._carton_level.level_path or len(leveled_goal) != 6):
+            return None
+        robot = self._fk_model()
+        if robot is None:
+            return None
+        self._capture_level_up(measured)
+        if self._carton_up_in_tool is None:
+            return None
+        from twin.restock_manipulation import carton_level as cl
+        big = 2 * math.pi
+        limits = {}
+        if self.carry_wrist1_cap is not None:
+            limits['ur_wrist_1_joint'] = (-big, float(self.carry_wrist1_cap))
+        if self.carry_wrist2_min is not None:
+            limits['ur_wrist_2_joint'] = (float(self.carry_wrist2_min), big)
+        try:
+            return cl.plan_level_path_to_goal(robot, list(measured), list(leveled_goal),
+                                              self._carton_up_in_tool,
+                                              bound_deg=self._carton_level.bound_deg,
+                                              joints=self._carton_level.joints,
+                                              tool_link=self._carton_level.tool_link,
+                                              limits=limits or None,
+                                              waypoints=self._carton_level.path_waypoints)
+        except ValueError as exc:
+            # An interior waypoint has no in-clear-region level solution. Fall back to the single
+            # leveled-endpoint goal -- never crash, never silently carry a tilt (the CARTON_TILT trip owns
+            # what the single-goal path then does).
+            print('CARTON_LEVEL_UNSOLVED phase=%s: %s (no leveled approach path; falling back to the '
+                  'single leveled-endpoint goal)' % (self.phase, exc), flush=True)
+            return None
+
+    def _issue_level_approach_move(self, leveled_goal, measured, *, slow, goal_tol):
+        """Dispatch the carried APPROACH to an ALREADY-LEVELED goal (the PR 290 place-on-cart standoff)
+        keeping the carton level THROUGHOUT the approach. With ``level_path`` on and a feasible leveled
+        waypoint path, replay the PREDICTED executed tilt and either CARTON_LEVEL_PLAN_REJECTED it (fail by
+        name BEFORE any motion) or drive it as a multi-waypoint ``begin_joint_path`` to the SAME standoff
+        goal; otherwise fall back to the single ``begin_joint_goal`` (byte-identical when the constraint is
+        off). Returns a controller result."""
+        plan = self._level_approach_path_plan(leveled_goal, measured)
+        if plan is not None:
+            reject = plan.reject(self._carton_level.bound_deg)
+            if reject is not None:
+                print(reject, flush=True)
+                return self._fail(reject)
+            print('CARTON_LEVEL_PATH phase=%s n=%d predicted_max roll=%.2f pitch=%.2f tilt=%.2f deg '
+                  '(<= bound %.2f) -- leveled approach to standoff'
+                  % (self.phase, plan.waypoints_n, plan.max_roll, plan.max_pitch, plan.max_tilt,
+                     self._carton_level.bound_deg), flush=True)
+            self.motion.begin_joint_path(list(plan.waypoints), measured, slow=slow, goal_tol=goal_tol)
+            self.issued = True
+            return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+        self.motion.begin_joint_goal(leveled_goal, measured, slow=slow, goal_tol=goal_tol)
+        self.issued = True
+        return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+
     def _place_level_limits(self):
         """Joint limits for the level place IK: the clear carry wrist region (carry_wrist1_cap /
         carry_wrist2_min, so the level pose stays off the ur_wrist_2-vs-forearm stop) plus the arm's
@@ -1694,10 +1760,17 @@ class TransferController:
                     # level solution exists it proceeds unleveled and the CARTON_TILT trip owns it.
                     preplace_goal = self._level_place_goal(self.collect_place_preplace_shape,
                                                            s.joint_positions)
-                    self.motion.begin_joint_goal(preplace_goal, s.joint_positions,
-                                                 slow=True, goal_tol=0.2)
-                    self.issued = True
-                    return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+                    # sim-carton-level-preplace-v1: drive the carry/tuck -> standoff APPROACH as a LEVELED
+                    # WAYPOINT PATH, not a single begin_joint_goal. PR 290 leveled the standoff ENDPOINT and
+                    # PR 296 the lift/carry, but the joint-space interpolation INTO the standoff still passed
+                    # through a pitched config (collectlevel1: both ends level, FK-reconstructed ~13 deg
+                    # mid-path; pitch peak 2.25 deg tripped CARTON_TILT at the pre-place transition). With
+                    # level_path on, interpolate to the SAME PR 290 standoff goal (pinned verbatim) with the
+                    # interior wrists re-solved level, and CARTON_LEVEL_PLAN_REJECTED before motion if the
+                    # predicted path still exceeds the bound; off => the single leveled-endpoint goal
+                    # (byte-identical). The standoff endpoint and the level descent (below) are unchanged.
+                    return self._issue_level_approach_move(preplace_goal, s.joint_positions,
+                                                           slow=True, goal_tol=0.2)
                 # fm403: wrist_2-safe fixed-shape LIFT. The task-space lift IK can flip wrist_2 to the
                 # negative self-colliding branch (w2 -> -1.25 crosses the ur_wrist_2-vs-ur_forearm stop;
                 # runs 300d/305/311 jammed even with wrist_1 capped -- the bench showed w1 cleared but w2

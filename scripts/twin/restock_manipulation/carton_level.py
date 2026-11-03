@@ -485,6 +485,43 @@ def plan_level_path(robot, start_config, goal_config, up_in_tool, *, bound_deg=D
     leveled_goal = level_config(robot, list(goal_config), up_in_tool, joints=joints, tool_link=tool_link,
                                 root=root, limits=limits, accept_deg=bound_deg)
     gvec = _as_vec(leveled_goal)
+    return _select_level_path(robot, start_config, gvec, up_in_tool, bound_deg=bound_deg, joints=joints,
+                              tool_link=tool_link, root=root, limits=limits, waypoints=waypoints,
+                              candidates=candidates, interior=interior, pin_goal=False, pin_start=False)
+
+
+def plan_level_path_to_goal(robot, start_config, leveled_goal, up_in_tool, *,
+                            bound_deg=DEFAULT_TILT_BOUND_DEG, joints=DEFAULT_LEVEL_JOINTS,
+                            tool_link='ur_tool0', root='ur_base_link', limits=None,
+                            waypoints=12, candidates=(8, 12, 16), interior=8):
+    """Plan a carried APPROACH from ``start_config`` to an ALREADY-LEVELED goal as a LEVELED WAYPOINT PATH
+    that keeps the welded carton parallel to the ground THROUGHOUT (not only at the endpoints), WITHOUT
+    re-leveling the goal (sim-carton-level-preplace-v1).
+
+    This is the counterpart of ``plan_level_path`` for the carried move INTO the PR 290 place-on-cart
+    standoff: ``plan_level_path`` levels its goal wrist-only, which for a reach-authored place standoff
+    (``collect_place_preplace_shape`` leveled by the FULL-DOF ``level_place_ik``, PR 290) would pick a
+    different wrist branch and move the standoff off its reach-validated TCP. Here the goal is passed in
+    already leveled (the PR 290 full-DOF solution) and PINNED verbatim as the final waypoint; only the
+    INTERIOR waypoints re-solve the wrist cluster for level, and the FIRST waypoint is pinned to the
+    measured start (so the path begins exactly where the arm is -- ``begin_joint_path`` requires it, and
+    any genuine start-pose tilt is reported honestly rather than hidden). Returns a ``LevelPathPlan``
+    whose predicted executed extremes the caller checks against the bound (CARTON_LEVEL_PLAN_REJECTED).
+    Raises ValueError only when an INTERIOR waypoint has no in-limits level solution. Pure/CPU."""
+    gvec = _as_vec(_as_joint_map(leveled_goal))
+    return _select_level_path(robot, start_config, gvec, up_in_tool, bound_deg=bound_deg, joints=joints,
+                              tool_link=tool_link, root=root, limits=limits, waypoints=waypoints,
+                              candidates=candidates, interior=interior, pin_goal=True, pin_start=True)
+
+
+def _select_level_path(robot, start_config, gvec, up_in_tool, *, bound_deg, joints, tool_link, root,
+                       limits, waypoints, candidates, interior, pin_goal, pin_start):
+    """Shared candidate sweep for ``plan_level_path`` / ``plan_level_path_to_goal``: decompose the move to
+    ``gvec`` into leveled waypoints at several segment counts and return the FEWEST-waypoint plan whose
+    predicted executed tilt stays under ``bound_deg`` (else the lowest-tilt attempt, so the caller's reject
+    gate fires honestly). ``pin_start``/``pin_goal`` overwrite the first/last waypoint with the exact
+    measured start / given goal (used when the goal must be preserved verbatim, e.g. the PR 290 standoff)."""
+    svec = _as_vec(_as_joint_map(start_config))
     tried = []
     seen = set()
     # Try the requested count first, then the fallbacks, in ascending order so a satisfying plan with
@@ -497,6 +534,10 @@ def plan_level_path(robot, start_config, goal_config, up_in_tool, *, bound_deg=D
         wps = interpolate_level(robot, start_config, gvec, up_in_tool, n=n, joints=joints,
                                 tool_link=tool_link, root=root, limits=limits)
         vecs = [_as_vec(w) for w in wps]
+        if pin_start:
+            vecs[0] = list(svec)
+        if pin_goal:
+            vecs[-1] = list(gvec)
         mr, mp, mt = predict_path_tilt(robot, vecs, up_in_tool, tool_link=tool_link, root=root,
                                        interior=interior)
         plan = LevelPathPlan(waypoints=tuple(tuple(v) for v in vecs),
