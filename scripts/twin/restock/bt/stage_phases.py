@@ -71,6 +71,27 @@ TRANSFER_STAGING_PLAN = [('perceive carton', PERCEIVE), ('transfer-pick@staging'
                          ('place@endcap', MANIP), ('verify placed', VERIFY),
                          ('drive→staging', NAV)]
 
+# sim-cart-side-bay-v1 (captain option 1): the side bay extends shelf-staging. The OUTBOUND tows the
+# COUPLED train straight down the portal axis (dead-centre doorway crossing) then tucks it WEST into an
+# OFF-AXIS side bay (~14 deg articulation), brakes + releases it there -- same three position-first leaves
+# as the staging plan, re-labelled for the bay. The free base then services the endcap (TRANSFER_STAGING_PLAN,
+# the service leg re-targeted to the bay park).
+OUTBOUND_SIDE_BAY_PLAN = [('tow→side bay', NAV), ('brake cart', MANIP), ('uncouple', UNCOUPLE)]
+
+# The RETURN baseline: with the cart parked OFF the portal axis, the free base drives HOME EMPTY through the
+# FREED doorway (the on-axis staging cart blocked this -- grid A* NO PATH; the side bay clears it). The cart
+# stays parked (uncoupled) at the side bay. One position-first leaf.
+RETURN_SIDE_BAY_PLAN = [('drive→home (empty)', NAV)]
+
+# The COUPLED tow-home (cart retrieved to the backroom) is a NAMED, config-selectable FOLLOW-UP, not the
+# baseline: the conserved ~180 deg cart reorientation cannot be gentle on a single-doorway floor (south bay
+# loops; west bay needs a 46 deg outbound -- see docs/examples/cart-side-bay-mission-fragment.json +
+# data/sim-cart-side-bay-v1/report.md). Defined here so the diagram can render the five retrieval steps when
+# the follow-up is enabled (config['cart_tow_home']); the runtime wiring for it is deliberately not built here.
+RETURN_SIDE_BAY_RECOUPLE_PLAN = [('re-couple@bay', COUPLE), ('tow→portal lead-in', NAV),
+                                 ('tow→cart park', NAV), ('brake cart', MANIP), ('uncouple', UNCOUPLE),
+                                 ('drive→home', NAV)]
+
 
 def _return_is_uncouple(adapter) -> bool:
     fn = getattr(adapter, '_uncouple_return', None)
@@ -84,6 +105,16 @@ def _shelf_staging(adapter) -> bool:
     """True when the adapter opts into the sim-shelf-staging-v1 sales-floor re-sequence (outbound tows to
     a staging pose, uncouples, then the base services the endcap alone)."""
     fn = getattr(adapter, '_shelf_staging_active', None)
+    try:
+        return bool(fn()) if callable(fn) else False
+    except Exception:
+        return False
+
+
+def _cart_side_bay(adapter) -> bool:
+    """True when the adapter opts into the sim-cart-side-bay-v1 off-axis side bay (outbound tows the cart to
+    the bay, uncouples, and the return drives the base home empty through the freed doorway)."""
+    fn = getattr(adapter, '_cart_side_bay_active', None)
     try:
         return bool(fn()) if callable(fn) else False
     except Exception:
@@ -123,8 +154,12 @@ def stage_plan(action, adapter):
     adapter (single-leaf fallback). ``return`` resolves to the uncouple plan when the adapter opts in."""
     if not adapter_is_phased(adapter):
         return None
+    if action == 'return' and _cart_side_bay(adapter):
+        return RETURN_SIDE_BAY_PLAN
     if action == 'return' and _return_is_uncouple(adapter):
         return RETURN_UNCOUPLE_PLAN
+    if action == 'outbound' and _cart_side_bay(adapter):
+        return OUTBOUND_SIDE_BAY_PLAN
     if action == 'outbound' and _shelf_staging(adapter):
         return OUTBOUND_STAGING_PLAN
     if action == 'transfer' and _shelf_staging(adapter):

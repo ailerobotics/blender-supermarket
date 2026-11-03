@@ -687,6 +687,46 @@ the runtime fails a navigate stage fast with its named reason once the SAME runn
 NO measured base-pose progress for longer than this many WALL seconds (reset on a reason change or base
 progress). Staged `120`. CPU tests: `tests/test_restock_runtime.py`.
 
+### Side bay for the cart (opt-in, default-off) — sim-cart-side-bay-v1
+
+The captain's follow-up (option 1) to the sim-shelf-staging-v1 re-sequence. PR 274 parked the rollwagen
+ON the portal axis at the staging pose, which **blocks the free base from threading the single 2.6 m
+doorway home** (the grid A\* finds NO PATH past the on-axis cart) and does not let a coupled re-couple +
+tow-home expand. Park the cart instead in a **side bay off the portal axis near the shelf**, so both the
+free robot and the (re-coupled) train can pass the doorway. Extends `shelf_staging`: set BOTH
+`shelf_staging: true` AND `cart_side_bay: true`, and provide `mission_poses.cart_side_bay` (the off-axis
+bay robot pose `[-4.3, 6.95, -π/2]`). Absent `cart_side_bay` ⇒ the PR 274 on-axis staging behaviour,
+byte-identical. Example fragment `docs/examples/cart-side-bay-mission-fragment.json`.
+
+The sequence (each leg its own position-first behaviour-tree step — `bt/stage_phases.py`):
+
+| leg | body | coupling | measured (CPU, real planner, 798-obstacle map) |
+|---|---|---|---|
+| **tow→side bay** (`outbound_dock_to_side_bay`) | tow the COUPLED train straight down the portal axis (dead-centre doorway crossing) then tuck WEST into the bay | coupled | **whole-lane articulation 14.4°** (< the 15° target); cart crosses the doorway throat at **5.4°** (aligned, PR 266 kept); cart parks centre `[-4.14, 8.2]` off the axis |
+| **brake cart / uncouple** | pin + release the cart at the bay (reuse the uncouple mechanic) | coupled → uncoupled | — |
+| **robot-only service** (`TRANSFER_STAGING_PLAN`, re-targeted to the bay) | the free base picks the carton off the parked cart, carries it to the endcap, places it, drives back to the bay | uncoupled | PR 276 service leg, re-targeted to the bay park |
+| **drive→home (empty)** | with the cart parked OFF the axis, the free base threads the FREED doorway home; the cart stays parked (uncoupled) in the bay | uncoupled | grid A\* home now **routes** (the exact case that was NO PATH with the on-axis staging cart at `[-3.875, 9.27]`) |
+
+**Straight-reverse re-couple** is proven feasible (`check_cart_side_bay` `recouple_straight_reverse_clears`):
+the free base reverses straight along the parked cart's drawbar axis (`~[-4.45, 6.97]`, heading ~−104°)
+onto the hitch; the fine-dock servo (`fine_dock.standoff_from_cart`) seats it on the MEASURED cart axis
+at GPU time, so the exact angled park is tolerated.
+
+**The coupled tow-home (cart retrieved to the backroom) is a named, config-selectable follow-up**, not the
+baseline. A single doorway + a forward-only rear-hitch drawbar forces a **conserved ~180° cart
+reorientation** on the cramped sales floor that cannot be gentle on both legs — the same wall PR 274
+documented, quantified here: a **SOUTH-faced bay** (gentle 14.4° outbound) makes the coupled return flip
+~180° → the authored route **loops 3.8×** (fails the `check_tow_lanes` `loop_ratio ≤ 1.7` gate) and guided
+U-turns do not expand (no room between the gondolas); a **WEST-faced bay** (the dock-align shape) gives a
+clean return (`loop_ratio 1.09`, 45.6° via the y=6 aisle) but needs a **45.9° outbound** — the captain's
+original complaint. To add the tow-home once the captain picks (`cart_tow_home: true`), swap in the
+west-bay return lane (`_followup_return_lane_west_bay` in the fragment); the runtime RETURN then re-couples
+at the bay (reusing the couple + `uncouple_on_return` mechanics) instead of driving home empty. The BT
+retrieval steps (re-couple@bay → tow→portal lead-in → tow→cart park → brake → uncouple → drive home) are
+already defined (`RETURN_SIDE_BAY_RECOUPLE_PLAN`) so the follow-up is a small diff. Numbers + plots:
+`data/sim-cart-side-bay-v1/report.md`. CPU proofs: `scripts/check_cart_side_bay.py` (`CART_SIDE_BAY PASS`)
+and `scripts/check_tow_lanes.py` (`TOW_LANES_PROOF PASS`).
+
 ## In-process route
 
 `Controller` supplies A* over swept-clearance-checked grid edges, dynamic replan,

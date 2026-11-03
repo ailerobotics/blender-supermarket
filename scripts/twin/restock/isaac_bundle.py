@@ -228,7 +228,10 @@ def plan_bundle(manifest, scenario, config):
                        'cart_parking', 'cart_parking_backaway',
                        # sim-shelf-staging-v1: the portal-axis staging pose (coupled tow goal / cart parking)
                        # the re-sequenced sales-floor outbound tows to before uncoupling for the solo service.
-                       'shelf_staging'}
+                       'shelf_staging',
+                       # sim-cart-side-bay-v1: the OFF-AXIS side-bay pose the outbound tows the cart to
+                       # instead (when config['cart_side_bay']), so the free base can thread the doorway home.
+                       'cart_side_bay'}
     if not isinstance(poses_in, dict) or not set(NAV_GOALS) <= set(poses_in) \
             or not set(poses_in) <= set(NAV_GOALS) | _optional_extra:
         raise ValueError(f'config.mission_poses must provide {NAV_GOALS} '
@@ -464,6 +467,9 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              # cart retrieval on return are integration/manip-owned. Absent => the coupled
                              # tow straight to the endcap (byte-identical). See the fragment + report.
                              shelf_staging=bool(config.get('shelf_staging')),
+                             # sim-cart-side-bay-v1: park the cart in the OFF-AXIS side bay (extends
+                             # shelf_staging); the free base drives home empty through the freed doorway.
+                             cart_side_bay=bool(config.get('cart_side_bay')),
                              # sim-service-leg-carry-v1: the drive-with-payload base speed/accel caps for the
                              # shelf-staging transfer carry→endcap leg (the base must not shove the held
                              # carton). None => a conservative built-in default; a mapping overrides any of

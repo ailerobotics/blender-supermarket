@@ -100,6 +100,25 @@ class ModelFromCode(unittest.TestCase):
         self.assertEqual(self._stage_gates(D.build_model(), 'transfer'),
                          [f'transfer:{label}' for label, _ in sp.PLANS['transfer']])
 
+    def test_cart_side_bay_shows_tow_to_bay_and_home_empty(self):
+        # sim-cart-side-bay-v1: with cart_side_bay the OUTBOUND decomposes into tow->side bay / brake /
+        # uncouple, the TRANSFER keeps the (re-targeted) service leg, and the RETURN baseline is the single
+        # drive-home-empty leaf (the robot threads the freed doorway; the cart stays parked in the bay).
+        m = D.build_model(cart_side_bay=True)
+        self.assertEqual(self._outbound_gates(m),
+                         ['outbound:tow→side bay', 'outbound:brake cart', 'outbound:uncouple'])
+        self.assertEqual(self._stage_gates(m, 'transfer'),
+                         [f'transfer:{label}' for label, _ in sp.TRANSFER_STAGING_PLAN])
+        self.assertEqual(self._stage_gates(m, 'return'), ['return:drive→home (empty)'])
+
+    def test_cart_side_bay_tow_home_followup_shows_the_recouple_steps(self):
+        # The coupled tow-home (cart retrieved to the backroom) is a named config follow-up; when selected
+        # the RETURN diagram shows the five retrieval steps (re-couple@bay -> ... -> drive home).
+        m = D.build_model(cart_side_bay=True, cart_tow_home=True)
+        self.assertEqual(self._stage_gates(m, 'return'),
+                         [f'return:{label}' for label, _ in sp.RETURN_SIDE_BAY_RECOUPLE_PLAN])
+        self.assertEqual(self._stage_gates(m, 'return')[0], 'return:re-couple@bay')
+
     def test_stage_steps_sequences_have_memory(self):
         m = D.build_model()
         for n, _ in D.iter_nodes(m):
