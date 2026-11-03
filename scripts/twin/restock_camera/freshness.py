@@ -2,11 +2,22 @@
 import math
 import time
 
+from ..restock.physics_step import freshness_scale_from_env
+
 
 # A rendered frame reflects the state just AFTER a physics step, so its render clock can lead
 # the consumer's dt-accumulated sim clock by up to one physics step (1/60 s ~= 0.0167 s). Allow
 # that sub-step lead as not-from-the-future; genuine future/stale frames are still rejected.
+# sim-physics-step-collision-band-v1: this is EXACTLY one physics step, so it must rebase onto the
+# running step -- at a RAISED step one step spans more sim time (0.0278 s at 1/36) and a legitimate
+# one-step-ahead frame would otherwise be mis-rejected as future. ``_render_lead()`` reads the step
+# from RESTOCK_PHYSICS_DT at call time (import-order-safe in the Isaac process); factor 1.0 at 1/60
+# => byte-identical.
 _RENDER_LEAD=0.02
+
+
+def _render_lead():
+    return _RENDER_LEAD * freshness_scale_from_env()
 
 
 def frame_deadline(frame, now, started, budget_s=.5, *, use_acquired=True):
@@ -23,7 +34,7 @@ def frame_deadline(frame, now, started, budget_s=.5, *, use_acquired=True):
     render's sim time) already bounds queue age in the clock the budget is measured in.
     """
     stamp=float(frame['rendering_time'])
-    if not all(math.isfinite(v) for v in (now,started,stamp,budget_s)) or not -_RENDER_LEAD<=now-stamp<=budget_s:
+    if not all(math.isfinite(v) for v in (now,started,stamp,budget_s)) or not -_render_lead()<=now-stamp<=budget_s:
         raise ValueError('stale acquisition before processing')
     deadline=started+budget_s-(now-stamp)
     if use_acquired:

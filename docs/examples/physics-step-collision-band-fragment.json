@@ -1,0 +1,26 @@
+{
+  "__doc__": "sim-physics-step-collision-band-v1: the GPU confirmation config for the integration lane (twin-robot-in-store-boot-v1) that physics_dt:{hz:36} is now SAFE for the collision/ESDF freshness band. Root cause (from rtfcollect-fail1-saved/): the controller collision-freshness invariant tripped collision_dt=1.5278 vs band [-0.5,1.5] then lost the arm heartbeat, because the per-FRAME ESDF freshness windows were stored as fixed sim-seconds but encode a frame-count budget (nvblox integrates rendered frames; rendering_dt tracks physics_dt, so one frame = dt sim-s). A ~55-frame ESDF re-incorporation warming gap is 0.92 s (inside the 1.5 s band) at 1/60 but 1.53 s (over) at 1/36. FIX: twin.restock.physics_step.freshness_scale(dt)=dt/(1/60) rebases every per-frame freshness window (controller max_age/render_lead/collision_stale_tol, host incorporation_ack ESDF gate, native_channel/isaac_sensors/isaac_factory ESDF+render-lead gates, trajectory_host feedback, ros_payload/camera render-lead) onto the running step, holding the frame budget constant. Exactly 1.0 at 1/60 => byte-identical. NOT a band widening: identical frame margin, re-expressed on the running clock; a genuinely-dead ESDF still trips. Table: ~/firstmate/data/sim-physics-step-collision-band-v1/dt_thresholds_table.md; write-up: that dir's report.md.",
+  "_no_new_config_key": "Nothing new to set by hand. physics_dt already drives everything: run_mobile_restock pre-exports RESTOCK_PHYSICS_DT from config['physics_dt'] BEFORE the host stack launches, physics_setup.assemble re-exports it for the Isaac process, and host_session sets it for host children -- so the host controller / incorporation-ack / trajectory-host rebase automatically. A standalone host launch that bypasses run_mobile_restock (e.g. verify_restock_host_stack_gpu.py alone) must export RESTOCK_PHYSICS_DT=0.027777777777777776 itself.",
+  "sim_speed": {"profile": "max"},
+  "physics_dt": {"hz": 36},
+  "_runs": {
+    "collect": "scripts/run_mobile_restock.py ... --stop-after collect (ground-truth collect, RESTOCK_COLLECT_GROUND_TRUTH=1) -- the exact rtfcollect isolation.",
+    "transfer": "scripts/run_mobile_restock.py ... --start-staging recorded_bay_park --start-at transfer --stop-after transfer -- the staged transfer isolation."
+  },
+  "_band_env_as_used_by_the_lane": {
+    "_note": "These are the 1/60 band values the lane already sets for render pacing; the fix rebases them onto the running step (at 1/36: max_age 1.5 -> 2.5, render_lead 0.5 -> 0.833). Set them exactly as the 1/60 run did -- do NOT pre-multiply.",
+    "RESTOCK_SENSOR_MAX_AGE_S": "1.5",
+    "RESTOCK_FRESH_RENDER_LEAD_S": "0.5"
+  },
+  "_pass": "collect reaches the same verdict as the 1/60 run (grasp + <=3 mm weld + place), with NO `collision_dt ... (band ...)` trip and NO `arm command heartbeat lost` at the ESDF re-incorporation gap. Same contact numbers (weld gap, tilt, seal) as the 1/60 run -- the fix changes only freshness timing, not contact (contact-approach penetration stays governed by PR 280 max_safe_physics_dt, untouched). Measured collect RTF ~0.28-0.32 (vs 0.124 baseline, ~2.3x). transfer reaches its staged verdict with no freshness/heartbeat trip.",
+  "_what_to_grep": [
+    "grep -nE 'collision_dt=.*\\(band' host-stack.log <mission-console>.log   # MUST be ABSENT (no freshness trip)",
+    "grep -nE 'arm command heartbeat lost' <mission-console>.log             # MUST be ABSENT",
+    "grep -n 'PHYSICS_STEP dt=' <mission-console>.log                         # confirms hz=36 RAISED",
+    "grep -n 'transport_ready=True' host-stack.log                           # collect completed",
+    "grep -n 'TICK_PROFILE action=collect' <mission-console>.log             # measured RTF (ratio=)"
+  ],
+  "_if_a_different_window_trips": "If a per-frame window NOT in dt_thresholds_table.md trips at 1/36, that is a new finding for a follow-up (report the console line). Every window in the table is already rebased.",
+  "_cpu_proof": "scripts/twin/tests/test_physics_step_collision_band.py (replays the exact 59.1111/60.6389/1.5278 trace: legacy fixed band trips at 1/36, step-aware band=2.5 holds it with 0.97 s / 35-frame margin, byte-identical at 1/60, genuinely-dead ESDF still trips).",
+  "_orthogonal_to": "realtime-factor-mission-fragment.json (PR 280, the physics_dt + sim_speed levers themselves). This lane makes the collision/ESDF freshness band safe under those levers."
+}

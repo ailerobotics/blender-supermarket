@@ -88,6 +88,17 @@ class IncorporationAckState:
         self.wall_gap_s = (max(3., min(600., float(os.environ['RESTOCK_STATION_WALL_GAP_S'])))
                            if 'RESTOCK_STATION_WALL_GAP_S' in os.environ else 3.)
         self.wall_backstop_s = frozen_sim_wall_backstop(self.sim_gap_s, self.wall_gap_s)
+        # sim-physics-step-collision-band-v1: the ESDF-incorporation FRESHNESS window (0.5 s: how recent
+        # the integrated collision stamp must be for state='ready', and the 'prepare' epoch freshness) is
+        # a per-FRAME budget -- nvblox integrates rendered frames and rendering_dt tracks physics_dt, so
+        # one frame = dt sim-seconds. At a RAISED step the same frame-count integration cadence spans more
+        # sim time, so a fixed 0.5 s window prematurely drops the station to 'warming' (collision_time=-1),
+        # which ages out the mission controller's held stamp (the rtfcollect collision_dt trip). Rebase it
+        # onto the running step (frame budget held constant; exactly 1.0 at 1/60 => byte-identical). The
+        # step is read from RESTOCK_PHYSICS_DT, which the launcher exports into the inherited host env.
+        from ..restock.physics_step import freshness_scale_from_env
+        self._fresh_scale = freshness_scale_from_env()
+        self._esdf_fresh_window_s = .5 * self._fresh_scale
         # fm430 (2a): post-attach ESDF re-integration KICK (opt-in, default off => byte-identical). After
         # the SIM_ATTACH weld the host object_attachment clears the carton voxels and the parked mapper
         # must re-incorporate at the new state, but under render pacing the next ESDF integration stamp
@@ -163,7 +174,7 @@ class IncorporationAckState:
         if (type(epoch) is not int or epoch <= 0 or type(seq) is not int or seq < 0
                 or not isinstance(stamp, (int, float)) or not math.isfinite(stamp)
                 or not math.isfinite(now) or now - stamp < 0
-                or (action == 'prepare' and now - stamp > .5)):
+                or (action == 'prepare' and now - stamp > self._esdf_fresh_window_s)):
             raise ValueError('invalid station epoch, sequence or timestamp')
         if epoch < self.epoch or (epoch == self.epoch and seq <= self.sequence):
             return 'ignored'
@@ -272,7 +283,8 @@ class IncorporationAckState:
                 self.fault = (f'parked heartbeat lost: sim gap {sim_gap:.2f} s' if sim_gap > self.sim_gap_s
                               else f'parked heartbeat lost: wall gap {wall_gap:.2f} s')
         ready = (self.active and not self.fault and not self.paused and endpoints_ready
-                 and 0 <= now - self.collision_time <= .5 and self.collision_time > self.parked_since)
+                 and 0 <= now - self.collision_time <= self._esdf_fresh_window_s
+                 and self.collision_time > self.parked_since)
         return dict(epoch=self.epoch, sequence=self.sequence, stamp=now,
                     state=('failed' if self.fault else 'paused' if self.paused
                            else 'ready' if ready else 'warming' if self.active else 'idle'),

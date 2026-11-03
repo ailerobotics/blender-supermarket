@@ -5,6 +5,7 @@ import time
 
 from twin.restock_manipulation.ros_adapter import require_sim_domain
 from . import pace_watchdog
+from .physics_step import freshness_scale_from_env
 
 # Wall seconds between station heartbeats. Must stay well under the ack's 1 s wall heartbeat
 # timeout; at the render-paced mission tick (~0.5-0.7 s wall) this sends on every tick.
@@ -360,9 +361,15 @@ class StationClient:
         if self.stage_clock is not None:
             now=self.stage_clock()          # freshness in the /clock domain (matches the ack)
         reply=self.latest
+        # sim-physics-step-collision-band-v1: this mission-side ESDF/reply freshness window (0.5 s) is a
+        # per-FRAME budget, rebased onto the running physics step (one rendered frame = physics_dt
+        # sim-seconds) so a coarser step does not prematurely expose collision_time=-1 (which the host
+        # mirror then ages against max_age). Mirrors the host incorporation_ack gate; 1.0 at 1/60 =>
+        # byte-identical.
+        w=.5*freshness_scale_from_env()
         return bool(self.active and reply and reply.get('state')=='ready'
-                    and 0<=now-reply.get('stamp',-1)<=.5
-                    and 0<=now-reply.get('collision_time',-1)<=.5)
+                    and 0<=now-reply.get('stamp',-1)<=w
+                    and 0<=now-reply.get('collision_time',-1)<=w)
 
     @property
     def collision_time(self):

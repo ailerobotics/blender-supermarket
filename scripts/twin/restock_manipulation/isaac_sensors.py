@@ -16,6 +16,7 @@ from .perception import DepthPerception, load_pose_bridge
 from .types import Sensors
 from ..restock_camera.geometry import rigid
 from ..restock_camera.freshness import frame_deadline, require_fresh
+from ..restock.physics_step import freshness_scale_from_env
 from ..restock_camera.sensed import FrameEvidence, SupportView, masked_cloud, contains, depth_digest
 from ..restock_camera.qr import FixedTileQR, FrameQR, rgb_digest
 
@@ -243,7 +244,11 @@ class IsaacCartonSensors:
         collision_time = motion.collision_time
         joints = tuple(motion.joint_positions())
         contact_state = bool(contact.read())
-        if (not np.isfinite(collision_time) or not 0 <= now - collision_time <= .5
+        # sim-physics-step-collision-band-v1: the 0.5 s ESDF/motion-completion freshness window is a
+        # per-FRAME budget (one rendered frame = physics_dt sim-seconds); rebase onto the running step so
+        # a coarser step does not false-trip a healthy pipeline (factor 1.0 at 1/60 => byte-identical).
+        esdf_fresh_window = .5 * freshness_scale_from_env()
+        if (not np.isfinite(collision_time) or not 0 <= now - collision_time <= esdf_fresh_window
                 or len(joints) != 6 or not np.isfinite(joints).all()):
             raise ValueError('stale or missing motion-completion feedback while sensing is held')
         # Fresh steady-clock deadline = the window remaining since the last clean registration, so the
@@ -274,7 +279,10 @@ class IsaacCartonSensors:
         # deferred until the context tells us whether this is HELD output under approach occlusion
         # (then the bound is the hold window, not 0.5 s — a deliberately held frame is stale by
         # design); see the budget block after the context is resolved.
-        if not np.isfinite([now,stamp]).all() or now-stamp < -0.02:
+        # sim-physics-step-collision-band-v1: the sub-step future lead is one physics/render step, so
+        # rebase onto the running step (0.0278 s at 1/36 > the fixed 0.02 s) or a legitimately one-frame-
+        # ahead frame is dropped as future; factor 1.0 at 1/60 => byte-identical.
+        if not np.isfinite([now,stamp]).all() or now-stamp < -0.02 * freshness_scale_from_env():
             _reject_unsynced('future', now=now, stamp=stamp, delta=now-stamp, frame_id=frame_id)
         # Anchor the acquisition-to-use deadline on the steady clock BEFORE processing; the budget
         # (0.5 s live, or the hold window for held output) is applied once known, below.
@@ -332,7 +340,12 @@ class IsaacCartonSensors:
         # monotonic/reuse gates stopping it once no fresh frame registers.
         held = any(getattr(s.support_view, 'occluded', False) for s in self.slots)
         window = getattr(context, 'occlusion_window_s', None)
-        budget = float(window) if (held and window and np.isfinite(window)) else .5
+        # sim-physics-step-collision-band-v1: the live frame-age budget (0.5 s) is a per-FRAME freshness
+        # window, so rebase it onto the running physics step (one rendered frame = physics_dt sim-seconds;
+        # factor 1.0 at 1/60 => byte-identical). The occlusion hold window is a controller-set sim-time
+        # window and is used verbatim.
+        esdf_fresh_window = .5 * freshness_scale_from_env()
+        budget = float(window) if (held and window and np.isfinite(window)) else esdf_fresh_window
         if now-stamp > budget:
             _reject_unsynced('stale', now=now, stamp=stamp, delta=now-stamp, budget=budget,
                              held=held, frame_id=frame_id)
@@ -352,7 +365,7 @@ class IsaacCartonSensors:
             camera_evidence = evidence
             slot.support_view.validate(depth,k,self.transform,evidence,now,
                                        bool(context.parked and motion.parked()),max_age=budget)
-            if (not np.isfinite(motion.collision_time) or not 0 <= now-motion.collision_time <= .5
+            if (not np.isfinite(motion.collision_time) or not 0 <= now-motion.collision_time <= esdf_fresh_window
                     or (slot.support_view.clearance is not None
                         and motion.collision_time < slot.support_view.clearance.incorporated_time)):
                 raise ValueError('collision map has not incorporated current clearance evidence')

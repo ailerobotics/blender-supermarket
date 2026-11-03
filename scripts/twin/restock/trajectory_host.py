@@ -13,6 +13,7 @@ import time
 
 import numpy as np
 
+from twin.restock.physics_step import freshness_scale_from_env
 from twin.restock_manipulation.cad_tool import ARM_JOINTS, inspect_tool
 from twin.restock_manipulation.ros_adapter import require_sim_domain, validate_trajectory
 
@@ -23,7 +24,14 @@ from twin.restock_manipulation.ros_adapter import require_sim_domain, validate_t
 # = the tight real-rig-equivalent values (byte-identical when unset). The orchestrator widens them
 # (e.g. 1.0 s / 90 s) ONLY when a run has tripped this watchdog on a render-paced feedback gap, so the
 # proof run proceeds while the gap-logging (below) still records the magnitude for a precise fix later.
-FEEDBACK_SIM_STALE_S = max(0.05, min(5.0, float(os.environ.get('RESTOCK_FEEDBACK_SIM_STALE_S', 0.2))))
+# sim-physics-step-collision-band-v1: the measured-feedback staleness/lead windows are per-FRAME
+# budgets (one /joint_states frame = one physics/render step = physics_dt sim-seconds), so rebase them
+# onto the running step so a RAISED step does not shrink the frame budget and false-trip a healthy-but-
+# coarser feed. trajectory_host runs ONLY as a host child, spawned AFTER the launcher exports
+# RESTOCK_PHYSICS_DT, so this import-time read sees the running step. Factor exactly 1.0 at 1/60 =>
+# byte-identical. (The WALL backstop is wall-clock, not per-frame, so it is NOT scaled.)
+_FRESH_SCALE = freshness_scale_from_env()
+FEEDBACK_SIM_STALE_S = max(0.05, min(5.0, float(os.environ.get('RESTOCK_FEEDBACK_SIM_STALE_S', 0.2)))) * _FRESH_SCALE
 FEEDBACK_WALL_BACKSTOP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_FEEDBACK_WALL_BACKSTOP_S', 30.0))))
 # Lead tolerance for the /clock-vs-/joint_states delivery-order race (both relayed with the same sim
 # stamp each tick): now()-stamp may read negative without the frame being stale. Under render pacing
@@ -31,7 +39,7 @@ FEEDBACK_WALL_BACKSTOP_S = max(5.0, min(300.0, float(os.environ.get('RESTOCK_FEE
 # reach ~0.1 s (measured run-104: now-stamp=-0.100 faulted the grasp at a 0.05 s tolerance). Bounded by
 # the forward staleness window (FEEDBACK_SIM_STALE_S) -- a genuinely future stamp beyond that still
 # refuses. This is a render-pacing artifact, not a real stale/future frame.
-FEEDBACK_RENDER_LEAD_S = 0.2
+FEEDBACK_RENDER_LEAD_S = 0.2 * _FRESH_SCALE
 # Frozen/hung-sim WALL backstop for trajectory EXECUTION. Sim-time completion and overrun are governed
 # on the SIM clock by the terminal-tolerance branch (``elapsed`` vs ``plan.times[-1]``); this WALL bound
 # exists only to break out of a genuinely stuck loop (and is redundant with the 30 s feedback watchdog,

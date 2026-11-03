@@ -444,6 +444,15 @@ def run(args, manifest, scenario):
                 # build the ESDF world from the mission's live depth. The recipe does not
                 # re-flock; teardown is by exact PID group. The 4 GiB RAM watchdog + the
                 # wall ceiling still bound the whole run.
+                # sim-physics-step-collision-band-v1: publish the resolved physics step into the
+                # environment BEFORE the host stack is co-launched, so the out-of-Isaac host children
+                # (controller / station-host incorporation ack / trajectory host) -- which inherit this
+                # os.environ -- rebase their per-frame sensor-freshness windows onto the running step.
+                # Absent config['physics_dt'] => 1/60 => RESTOCK_PHYSICS_DT round-trips to factor 1.0 =>
+                # byte-identical. (physics_setup.assemble re-exports it for the Isaac process too.)
+                from twin.restock.physics_step import (resolve_dt as _resolve_physics_dt,
+                                                        export_physics_dt as _export_physics_dt)
+                _export_physics_dt(_resolve_physics_dt(config))
                 if args.host_stack:
                     if not args.plugin_env or not args.nvidia_runtime:
                         raise ValueError('--host-stack requires --plugin-env and --nvidia-runtime')
