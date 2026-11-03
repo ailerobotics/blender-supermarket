@@ -226,6 +226,49 @@ class FineDockTests(unittest.TestCase):
                 self.assertLessEqual(r.hitch_residual_m, 0.020)
                 self.assertLessEqual(abs(r.yaw_residual_rad), math.radians(4.0))
 
+    # ---- sim-couple-finedock-south-v1: the fine-dock servo is yaw-general (south == east) ----------
+    # The towstaging south-dock stall was NOT the servo: the couple nav routed through the stale
+    # east-world couple_approach and never REACHED the fine-dock. These replays prove the servo
+    # converges onto the drawbar for the recorded SOUTH dock exactly as it does for the EAST dock,
+    # from a realistic cart-relative standoff arrival (slight off-axis + yaw residual) -- so the
+    # source fix is the dock-frame approach (runtime), and fine_dock.py needs no per-yaw change.
+    def _standoff_arrival(self, cart, *, cross=0.05, yaw_deg=3.0, offset=0.40):
+        """A realistic couple_standoff arrival: on the cart axis at `offset`, nudged `cross` m off the
+        axis and `yaw_deg` from the dock heading (inside the capture band the runtime gates on)."""
+        from twin.restock.fine_dock import standoff_from_cart
+        sx, sy, syaw = standoff_from_cart(cart, offset, SPEC)
+        nx, ny = -math.sin(cart.yaw), math.cos(cart.yaw)     # cart-axis normal
+        return (sx + cross * nx, sy + cross * ny, syaw + math.radians(yaw_deg))
+
+    def test_fine_dock_seats_the_recorded_south_dock(self):
+        # Recorded couple_dock, south-headed (towstaging cart = (-3.875, 15.796, -90 deg)).
+        cart = Pose2(-3.875, 15.7956, -math.pi / 2)
+        r, t = self._closed_loop(self._standoff_arrival(cart), ct_cfg(), cart=cart, max_t=30,
+                                 drive_deadband=(0.003, 0.02))
+        self.assertEqual(r.status, 'ready')
+        self.assertLessEqual(r.hitch_residual_m, 0.020)
+        self.assertLessEqual(abs(r.yaw_residual_rad), math.radians(4.0))
+        self.assertLess(t, 30.0)
+
+    def test_fine_dock_seats_the_east_dock_unchanged(self):
+        # The same servo, same gains, east dock (yaw 0): converges identically -- no per-heading tuning.
+        cart = Pose2(-4.46, 15.25, 0.0)
+        r, t = self._closed_loop(self._standoff_arrival(cart), ct_cfg(), cart=cart, max_t=30,
+                                 drive_deadband=(0.003, 0.02))
+        self.assertEqual(r.status, 'ready')
+        self.assertLessEqual(r.hitch_residual_m, 0.020)
+        self.assertLessEqual(abs(r.yaw_residual_rad), math.radians(4.0))
+
+    def test_fine_dock_converges_for_every_dock_heading(self):
+        # Yaw-general: a standoff arrival at EACH cardinal/diagonal dock heading latches the drawbar.
+        for yaw_deg in (-90.0, -45.0, 0.0, 45.0, 90.0, 180.0):
+            cart = Pose2(-3.875, 15.7956, math.radians(yaw_deg))
+            r, _ = self._closed_loop(self._standoff_arrival(cart), ct_cfg(), cart=cart, max_t=30,
+                                     drive_deadband=(0.003, 0.02))
+            self.assertEqual(r.status, 'ready', f'dock yaw {yaw_deg} deg failed to seat')
+            self.assertLessEqual(r.hitch_residual_m, 0.020)
+            self.assertLessEqual(abs(r.yaw_residual_rad), math.radians(4.0))
+
     def test_absent_approach_mode_is_byte_identical_to_the_legacy_law(self):
         # Backward compatible: the default approach_mode reproduces the legacy creep command for every
         # pose -- a config without the new keys is byte-identical (the no-change path the spec requires).

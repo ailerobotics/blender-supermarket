@@ -1191,6 +1191,102 @@ class RuntimeTests(unittest.TestCase):
         self.p = replace(self.p, observation_id='frame-2', simulation_time=.2, coupled=True)
         self.assertEqual(self.adapter.step(.1).status, 'succeeded')
 
+    # ---- sim-couple-finedock-south-v1: dock-frame couple (any dock yaw, straight reverse) --------
+    def _dock_frame_harness(self, cart_yaw, *, standoff_offset=0.40, dock_frame=True):
+        """A couple harness whose packet carries a DockObservation with the cart at a GIVEN yaw and
+        the base seated on the cart's hitch axis (so the standoff-arrival capture passes). Records
+        every nav.start goal; the fine_dock returns 'ready' straight off, so a reached standoff
+        hands directly to attach. Mirrors _couple_seq_harness but with a measured dock."""
+        import math as _m
+        from twin.mobile import Pose2, DockObservation, MobileSpec
+        from twin.restock.fine_dock import FineDockResult, standoff_from_cart
+        spec = MobileSpec()
+        cart = Pose2(-3.875, 15.7956, cart_yaw)
+        base = Pose2(*standoff_from_cart(cart, standoff_offset, spec))  # on-axis, seated at the standoff
+        dockobs = DockObservation(robot=base, cart=cart, robot_hitch_z=0.28, cart_hitch_z=0.28,
+                                  robot_speed=0., cart_speed=0., robot_yaw_rate=0., cart_yaw_rate=0.,
+                                  age=0.02)
+        self.p = Packet('d0', 'test_fixture', .1, None, None, dockobs, None, True, False, 0., True)
+        starts = []
+        nav = NS(start=lambda goal, coupled, **kw: starts.append((tuple(goal), kw)),
+                 step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                 cancel=lambda: None)
+        fine = NS(spec=spec, start=lambda now: None,
+                  step=lambda dock, now: FineDockResult('ready', 0., 0., 0.01, 0.0, 'ok'))
+        attached = []
+        mobile = NS(park=lambda: None, hold=lambda: None, release=lambda: None,
+                    command=lambda *a, **k: None, hold_cart_pin=lambda: None,
+                    attach=lambda obs: attached.append(obs), coupling_state=lambda o: {'healthy': True})
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'shelf_approach')}
+        poses['cart_dock'] = [-4.46, 15.25, 0.0]
+        # Authored (stale east) couple_approach present but IGNORED under dock_frame_approach.
+        poses['couple_approach'] = [-4.46, 16.0, 0.0]
+        poses['couple_standoff'] = [-4.06, 15.25, 0.0]
+        cr = {'standoff_offset_m': standoff_offset}
+        if dock_frame:
+            cr['dock_frame_approach'] = True
+        adapter = RuntimeAdapter(
+            nav, mobile, self.manip, self.port, poses, fixture_mode=True, fine_dock=fine,
+            hold_cart_through_couple=True, couple_cart_relative=cr)
+        return adapter, starts, attached, cart, spec
+
+    def test_couple_dock_frame_south_is_a_single_on_axis_standoff_leg(self):
+        # South-headed dock (-pi/2): the couple must NOT route through the authored east couple_approach
+        # [-4.46,16,0] (which forced the towstaging ~180 deg off-axis stall). The one pre-fine-dock leg is
+        # the cart-relative standoff, derived on the MEASURED cart axis (base yaw == cart yaw), so the
+        # base reverses STRAIGHT in with no rotation.
+        import math as _m
+        from twin.restock.fine_dock import standoff_from_cart
+        adapter, starts, attached, cart, spec = self._dock_frame_harness(-_m.pi / 2)
+        adapter.start('couple', self.job)
+        self.assertEqual(starts, [])  # start() dispatches NO leg: the first leg is deferred to a packet
+        r = adapter.step(.1)          # first navigate tick: derive + start the cart-relative standoff
+        self.assertIn('dock-frame', r.reason)
+        self.assertEqual(len(starts), 1)
+        goal, kw = starts[0]
+        expect = standoff_from_cart(cart, 0.40, spec)
+        for g, e in zip(goal, expect):
+            self.assertAlmostEqual(g, e, places=6)
+        self.assertAlmostEqual(goal[2], cart.yaw, places=6)   # base yaw == dock yaw => straight reverse
+        self.assertAlmostEqual(goal[0], cart.x, places=6)     # on the cart hitch axis (x matches)
+        # No authored east approach pose was ever dispatched.
+        self.assertNotIn((-4.46, 16.0, 0.0), [g for g, _ in starts])
+        # standoff reached -> fine-dock insert -> ready -> attach.
+        self.p = replace(self.p, observation_id='d1', simulation_time=.2)
+        r = adapter.step(.1); self.assertIn('insert', r.reason)
+        self.p = replace(self.p, observation_id='d2', simulation_time=.3)
+        self.assertEqual(adapter.step(.1).status, 'running'); self.assertEqual(len(attached), 1)
+
+    def test_couple_dock_frame_works_for_east_dock_too(self):
+        # The same dock-frame path is yaw-general: an east dock (yaw 0) derives its standoff on the
+        # east cart axis (base yaw 0) and couples identically -- no special-casing per heading.
+        import math as _m
+        from twin.restock.fine_dock import standoff_from_cart
+        adapter, starts, attached, cart, spec = self._dock_frame_harness(0.0)
+        adapter.start('couple', self.job)
+        adapter.step(.1)
+        goal, _ = starts[0]
+        for g, e in zip(goal, standoff_from_cart(cart, 0.40, spec)):
+            self.assertAlmostEqual(g, e, places=6)
+        self.assertAlmostEqual(goal[2], 0.0, places=6)
+
+    def test_couple_dock_frame_default_off_keeps_legacy_authored_approach(self):
+        # couple_cart_relative set but dock_frame_approach ABSENT (default off): byte-identical legacy
+        # two-leg path -- start() dispatches the authored east couple_approach leg immediately, exactly
+        # as before this change (the south fix never activates without the opt-in key).
+        import math as _m
+        adapter, starts, attached, cart, spec = self._dock_frame_harness(-_m.pi / 2, dock_frame=False)
+        adapter.start('couple', self.job)
+        self.assertEqual(starts[0][0], (-4.46, 16.0, 0.0))  # authored approach dispatched first, in start()
+
+    def test_couple_cart_relative_dock_frame_must_be_bool(self):
+        from twin.restock.fine_dock import FineDockResult
+        with self.assertRaises(ValueError):
+            RuntimeAdapter(self.nav, self.mobile, self.manip, self.port,
+                           {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')},
+                           fixture_mode=True,
+                           couple_cart_relative={'dock_frame_approach': 'yes'})
+
     def test_stale_packet_stops_every_adapter(self):
         self.adapter.start('outbound',self.job)
         self.p = replace(self.p,simulation_time=-2.)

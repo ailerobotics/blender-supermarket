@@ -333,7 +333,18 @@ class RuntimeAdapter:
             # The worst legal hitch cross-track is arrival_xy_tol + |hitch_x|*arrival_yaw_tol ~ 0.10 m
             # (the fine-dock converges from it in <14 s, verified offline), so 0.11 m clears it.
             defaults = {'standoff_offset_m': 0.40, 'capture_cross_m': 0.11, 'capture_yaw_rad': 0.10,
-                        'max_reapproach': 3, 'arrival_xy_tol': 0.05, 'arrival_yaw_tol': 0.08}
+                        'max_reapproach': 3, 'arrival_xy_tol': 0.05, 'arrival_yaw_tol': 0.08,
+                        # sim-couple-finedock-south-v1: opt-in dock-frame couple. Default OFF =>
+                        # byte-identical (the legacy authored couple_approach -> couple_standoff path,
+                        # east dock unchanged). When True the couple nav skips the authored, world-frame
+                        # couple_approach entirely and drives a SINGLE cart-relative standoff leg
+                        # (standoff_from_cart, derived from the MEASURED cart), then the fine-dock
+                        # straight-reverse insert -- the whole couple is collinear on the cart's hitch
+                        # axis for ANY dock yaw, so a south-headed (-pi/2) dock couples by a straight
+                        # reverse with NO rotation. The stale authored couple_approach (an EAST-dock
+                        # world pose, yaw 0) was what dragged the south seat ~180deg off-axis into the
+                        # towstaging silent nav stall. See data/sim-couple-finedock-south-v1/report.md.
+                        'dock_frame_approach': False}
             unknown = set(cr) - set(defaults)
             if unknown:
                 raise ValueError(f'couple_cart_relative: unknown keys {sorted(unknown)}')
@@ -349,9 +360,18 @@ class RuntimeAdapter:
             mr = merged['max_reapproach']
             if isinstance(mr, bool) or not isinstance(mr, int) or not 0 <= mr <= 10:
                 raise ValueError('couple_cart_relative.max_reapproach must be an int in [0, 10]')
-            self.couple_cart_relative = {k: (int(v) if k == 'max_reapproach' else float(v))
-                                         for k, v in merged.items()}
+            if not isinstance(merged['dock_frame_approach'], bool):
+                raise ValueError('couple_cart_relative.dock_frame_approach must be a bool')
+            self.couple_cart_relative = {
+                k: (int(v) if k == 'max_reapproach'
+                    else bool(v) if k == 'dock_frame_approach'
+                    else float(v))
+                for k, v in merged.items()}
         self._couple_reapproach_n = 0   # bounded cart-measured re-approaches this couple stage
+        # sim-couple-finedock-south-v1: when dock_frame_approach is on, the couple's single
+        # cart-relative standoff leg is derived from the MEASURED cart at the FIRST navigate tick
+        # (start() has no packet); this flag arms that deferred derivation. Always False otherwise.
+        self._couple_approach_pending = False
         # vr1 (labelled sim workaround, default OFF): the stages whose FINAL manipulation evidence may be
         # the controller's ground-truth place check (fm461 'ground_truth_place_check', the sim-measured
         # carton pose vs the bay/deck target) instead of a camera observation. Without this the very first
@@ -602,6 +622,9 @@ class RuntimeAdapter:
         self.phase = 'execute'
         self._return_leg = None           # set when the uncouple-on-return multi-leg return runs
         self._outbound_leg = None         # set when the shelf-staging multi-leg outbound runs
+        # sim-couple-finedock-south-v1: only the dock-frame couple re-arms this; clear it for every
+        # other action so a non-couple navigate can never inherit a stale deferred-standoff flag.
+        self._couple_approach_pending = False
         # sim-service-leg-carry-v1: reset the transfer service-leg carry state so a re-begun transfer
         # (BT StageRetry / fm363 STEP_RETRY) restarts the pick->carry->place->drive-back arc cleanly.
         self._transfer_leg = None
@@ -642,12 +665,29 @@ class RuntimeAdapter:
             # Approaching on-axis turns the lateral error into cross-track the servo nulls WHILE
             # reversing, instead of a residual nobody can close at zero speed. Absent both poses =>
             # the old single cart_dock nav + fine-dock from there.
-            self._couple_seq = (['couple_approach'] if 'couple_approach' in self.poses else [])
-            self._couple_seq.append('couple_standoff' if 'couple_standoff' in self.poses else 'cart_dock')
-            self._couple_seq_i = 0
-            self._couple_reapproach_n = 0   # fresh bounded re-approach budget for this couple attempt
-            self._couple_nav_goal = self._couple_seq[0]
-            self._start_couple_nav(self._couple_nav_goal)
+            dock_frame = (self.couple_cart_relative is not None
+                          and self.couple_cart_relative.get('dock_frame_approach'))
+            if dock_frame:
+                # sim-couple-finedock-south-v1: dock-frame couple. DROP the authored (world-frame)
+                # couple_approach -- it was an EAST-dock pose (yaw 0) that, for a south-headed (-pi/2)
+                # dock, drags the on-axis base ~180deg off-axis and silently stalls (towstaging1/2).
+                # The only pre-fine-dock leg is the cart-relative standoff (standoff_from_cart on the
+                # MEASURED cart), derived at the first navigate tick (start() has no packet); the
+                # fine-dock then reverses STRAIGHT along the same cart hitch axis onto the drawbar.
+                # Collinear for ANY dock yaw => straight reverse, no rotation.
+                self._couple_seq = ['couple_standoff']
+                self._couple_seq_i = 0
+                self._couple_reapproach_n = 0
+                self._couple_nav_goal = 'couple_standoff'
+                self._couple_approach_pending = True
+            else:
+                self._couple_seq = (['couple_approach'] if 'couple_approach' in self.poses else [])
+                self._couple_seq.append('couple_standoff' if 'couple_standoff' in self.poses else 'cart_dock')
+                self._couple_seq_i = 0
+                self._couple_reapproach_n = 0   # fresh bounded re-approach budget for this couple attempt
+                self._couple_nav_goal = self._couple_seq[0]
+                self._couple_approach_pending = False
+                self._start_couple_nav(self._couple_nav_goal)
             self.phase = 'navigate'
             if self.hold_cart_through_couple:
                 # Pin the cart NOW (at its known pose, before the base drives) so the approach
@@ -771,6 +811,15 @@ class RuntimeAdapter:
         if self.couple_static_drive:
             kw['static_drive'] = True
         self._couple_standoff_pose = pose
+        # sim-couple-finedock-south-v1: name the dock-frame geometry so a non-converging dock is
+        # attributable (which axis the base must travel, at what dock yaw) instead of a silent park.
+        from twin.restock.fine_dock import cart_relative_residuals
+        hm, cross, yr = cart_relative_residuals(p.docking, self._fine_dock_spec())
+        print(f'COUPLE_DOCK_FRAME dock_yaw_deg={math.degrees(cart.yaw):.1f} '
+              f'standoff=({pose[0]:.3f},{pose[1]:.3f},{math.degrees(pose[2]):.1f}deg) '
+              f'reapproach={self._couple_reapproach_n} '
+              f'residual hitch={hm*1000:.0f}mm cross={cross*1000:.0f}mm yaw={math.degrees(yr):.1f}deg',
+              flush=True)
         self._start_nav_leg(pose, False, **kw)
 
     def _couple_capture_decision(self, p):
@@ -1048,6 +1097,18 @@ class RuntimeAdapter:
                 f'adapter_time={self.time!r} age={self.time-p.simulation_time!r}]')
         self.last_packet_id = p.observation_id
         if self.phase == 'navigate':
+            if self._couple_approach_pending:
+                # sim-couple-finedock-south-v1: dock-frame couple, deferred first leg. start() has no
+                # packet, so derive the cart-relative standoff from the MEASURED cart here, on the first
+                # navigate tick, then start the leg (mirrors the advance-to-standoff path, which starts
+                # the leg and returns 'running' WITHOUT stepping nav the same tick).
+                if getattr(p, 'docking', None) is None or p.docking.cart is None:
+                    self.mobile.hold()
+                    return Result('running',
+                                  reason='couple: awaiting cart measurement for dock-frame standoff')
+                self._start_cart_relative_standoff(p)
+                self._couple_approach_pending = False
+                return Result('running', reason='couple: dock-frame cart-relative standoff leg started')
             if self.route_alerts is not None:  # opt-in mobile store sensor; self-disabling
                 self.route_alerts.on_navigate(self.port, p, self.time)
             r = self.nav.step(dt, p)

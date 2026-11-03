@@ -1,0 +1,34 @@
+{
+  "_comment": "sim-couple-finedock-south-v1: MERGE into the mission runtime-config for the bounded GPU acceptance (start_at=couple, shelf_staging, --stop-after outbound) of the SOUTH-headed couple dock. dock_frame_approach is the one new key (added to the existing couple_cart_relative block) and is default-off => absent is byte-identical, so the EAST dock (coldwin22, no key) is unchanged. When true the couple nav DROPS the authored, world-frame couple_approach entirely and drives a SINGLE cart-relative standoff leg (standoff_from_cart on the MEASURED cart), then the fine-dock straight-reverse insert -- the whole couple is collinear on the cart's hitch axis for ANY dock yaw. The stale authored couple_approach was an EAST-dock world pose (yaw 0, x=-4.46) that, for the south seat (on-axis at ~(-3.875, 14.5, -pi/2)), dragged the base ~180 deg off-axis and silently stalled (towstaging1/2: parked, nav 'tracking' forever, 120 s no-base-progress). The couple then needs NO authored couple_approach/couple_standoff pose at all (they are ignored under dock_frame_approach; keep them only to run the legacy path). PASS = couple reaches a physical latch (coupled + healthy) within the stated sim time, then the straight coupled tow down the portal axis. CPU proof: scripts/check_couple_finedock_south.py; CPU tests: scripts/twin/tests/test_restock_runtime.py (test_couple_dock_frame_*) and test_restock_fine_dock.py (test_fine_dock_seats_the_recorded_south_dock, ..._east_dock_unchanged, ..._for_every_dock_heading). Diagnostic: a non-converging dock prints COUPLE_DOCK_FRAME (dock yaw, derived standoff, live hitch/cross/yaw residual) and fails by name on the capture or fine-dock band, never parks silently.",
+  "couple_cart_relative": {
+    "standoff_offset_m": 0.40,
+    "capture_cross_m": 0.11,
+    "capture_yaw_rad": 0.10,
+    "max_reapproach": 3,
+    "arrival_xy_tol": 0.05,
+    "arrival_yaw_tol": 0.08,
+    "dock_frame_approach": true
+  },
+  "_fine_dock_note": "The fine_dock block is unchanged from sim-robust-couple-approach-v1 (crosstrack + progress_cap); it carries NO comment key (FineDockConfig rejects unknown keys). The servo math is already dock-frame (every quantity is computed from the MEASURED cart yaw), so no per-heading tuning is needed -- the fix is the dock-frame APPROACH above, not the servo.",
+  "fine_dock": {
+    "creep_speed": 0.035,
+    "creep_yaw_rate": 0.25,
+    "gain_lin": 2.0,
+    "gain_yaw": 1.0,
+    "hitch_tol_m": 0.02,
+    "yaw_tol_rad": 0.069813,
+    "settle_speed": 0.01,
+    "time_cap_s": 30.0,
+    "approach_mode": "crosstrack",
+    "ct_gain_approach": 2.0,
+    "ct_gain_cross": 8.0,
+    "ct_gain_yaw": 1.5,
+    "ct_align_hold_m": 3.0,
+    "ct_min_creep": 0.015,
+    "progress_cap": true,
+    "progress_patience_s": 12.0,
+    "progress_min_improve_m": 0.002,
+    "progress_max_time_cap_s": 120.0
+  },
+  "_acceptance_note": "Merge ALSO the tow-lanes-mission-fragment.json (navigation.tow_lanes with the SOUTH couple_dock [-3.875, 15.77, -pi/2] and start [-3.875, 14.5, -pi/2]) and set start_at='couple', shelf_staging=true, stop_after='outbound'. With dock_frame_approach on, the authored mission_poses.couple_approach/couple_standoff are ignored by the couple nav, so a stale EAST pose there can no longer stall the south seat."
+}
