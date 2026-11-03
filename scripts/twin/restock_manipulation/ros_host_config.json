@@ -73,5 +73,20 @@
   "carry_wrist2_min": 0.0,
   "grasp_track_m": 0.03,
   "require_collect_source_evidence": true,
-  "transfer_ground_truth": true
+  "transfer_ground_truth": true,
+  "collect_place_preplace_shape": [
+    0.093,
+    -1.91,
+    2.014,
+    -0.103,
+    1.664,
+    0.0
+  ],
+  "collect_place_wrist_guard": true,
+  "release_detach_timeout_s": 8.0,
+  "collect_place_straight_line": true,
+  "moveit_mesh_uris": false,
+  "transfer_pick_wrist_guard": true,
+  "esdf_boot_ack_grace_s": 15.0,
+  "transfer_preplace_reach_guard": true
 }

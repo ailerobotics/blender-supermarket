@@ -286,7 +286,7 @@ def _ros_runtime(packet, op='collect'):
     from twin.restock.ros_manipulation import RosManipulationRuntime
     calls = []
     graph = NS(start=lambda *a: calls.append('start'), publish_sensors=lambda s: calls.append('sensor'),
-               poll=lambda *a: None, close=lambda: calls.append('hold'))
+               poll=lambda *a: None, close=lambda **k: calls.append('hold'))
     rt = RosManipulationRuntime(graph, lambda *a: packet, prepare_station=lambda *a: calls.append('calibrate'))
     rt.start(op, dict(job_id='j', source_bin='back', shelf_id='shelf'))
     return rt, calls

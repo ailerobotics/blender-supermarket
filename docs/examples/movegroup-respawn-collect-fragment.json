@@ -1,0 +1,15 @@
+{
+  "_comment": "sim-robust-movegroup-respawn-v1 bounded GPU proof config for the integration lane (twin-robot-in-store-boot-v1). Purpose: exercise the carry (grasp attach -> lift -> carry) under a REAL move_group so that IF the intermittent move_group SIGABRT (malloc(): unaligned tcache chunk detected, exit code -6) fires mid-carry, the respawn recovery is proven correct: the host re-attaches restock_carried_unit to the fresh planning scene BEFORE resending the plan, so the resent plan does not ignore the carried carton. No new switch key -- the re-sync is always-on but only active on the already-abnormal crash path while a carton is held (byte-identical otherwise), so this fragment is just a bounded collect run.",
+  "_how_to_run": "scripts/run_mobile_restock.py ... --stop-after collect  (ends after the collect/pick + carry stage, so the place-on-cart replan / cuMotion OOM owned by other lanes is never reached). One GPU run at a time through flock /tmp/aile-gpu.lock, never --force; do not touch the whispr service (pid 1339, ~2.2 GB VRAM). Either honest collect (RESTOCK_COLLECT_GROUND_TRUTH unset) or the ground-truth shortcut (RESTOCK_COLLECT_GROUND_TRUTH=1) exercises the attach + carry; ground-truth is the faster, more deterministic carry for this proof.",
+  "_expected_pass": "collect reaches a confirmed grasp (attach) and lifts/carries the carton. The run is PASS for THIS lane in either of two ways: (a) no move_group SIGABRT occurs and the carry completes normally (the fix is inert, byte-identical); or (b) a move_group exit-code-6 death occurs and host-stack.log shows, in order: 'process has died ... move_group ... exit code -6' -> 'MOVE_GROUP_CRASH_RETRY ... awaiting respawn' (or the fm404 plan-result wall-deadline retry) -> 'MOVE_GROUP_CRASH_RETRY re-attached restock_carried_unit to the respawned move_group planning scene before resend (ok=True)' -> 'resending plan goal ... (retry N/3)', and the carton remains carried (no plan-through-carton, no 'host emergency stop' terminal line, no lost run).",
+  "_what_to_grep": [
+    "grep -nE 'exit code -6|move_group' host-stack.log   # find any SIGABRT death",
+    "grep -n 'MOVE_GROUP_CRASH_RETRY re-attached restock_carried_unit' host-stack.log   # the new re-sync line (must precede the matching 'resending plan goal' line)",
+    "grep -n 'MOVE_GROUP_CRASH_RETRY' host-stack.log      # ordering: re-attach BEFORE resend"
+  ],
+  "_no_config_keys": "This proof needs NO mission runtime-config key -- the respawn re-sync and the serialization guard are always-on in scripts/twin/restock_manipulation/ros_adapter.py and self-disabling (no-op) when no carton is held. Combine with the collect-only-validation-fragment.json keys if you also want the honest-collect press backstop; they are orthogonal.",
+  "_suggested_env": {
+    "RESTOCK_COLLECT_GROUND_TRUTH": "1 for a deterministic carry proof, or UNSET for an honest-collect carry",
+    "RESTOCK_RESPAWN_WAIT_CAP_S": "optional (default 45) -- the wall cap on holding a move open for the respawn; leave default"
+  }
+}

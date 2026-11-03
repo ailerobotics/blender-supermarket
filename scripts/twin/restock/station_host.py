@@ -42,6 +42,15 @@ def main():
     state=StationState()
     publisher=node.create_publisher(String,'/restock_sim/station/status',10)
     stop=node.create_publisher(Bool,'/restock_sim/manipulation/stop',10)
+    # sim-robust-transfer-start-estop-v1: name every global-stop publication (the Isaac side latches the
+    # bare Bool permanently and this node does NOT set /manipulation/status, so a stop here surfaced as a
+    # bare 'host emergency stop'). Throttled to the first of each distinct reason.
+    _last_estop_reason=[None]
+    def estop(reason,*,site):
+        if reason!=_last_estop_reason[0]:
+            _last_estop_reason[0]=reason
+            print('STATION_ESTOP_PUBLISH site=%s reason=%r'%(site,reason),flush=True)
+        stop.publish(Bool(data=True))
     service=node.create_client(EsdfAndGradients,'/restock_sim/nvblox_node/get_esdf_and_gradient')
     child=None
     pending=None
@@ -83,7 +92,7 @@ def main():
         except Exception as exc:
             state.fault=str(exc)
             shutdown_station()
-            stop.publish(Bool(data=True))
+            estop(f'station command rejected: {exc}',site='command')
 
     def tick():
         nonlocal pending,pending_epoch,pending_wall,last_discovery,endpoints_ready
@@ -125,12 +134,12 @@ def main():
                                   process_alive=bool(child and child.alive))
             if state.fault:
                 shutdown_station()
-                stop.publish(Bool(data=True))
+                estop(state.fault,site='tick')
             publisher.publish(String(data=json.dumps(result,allow_nan=False)))
         except Exception as exc:
             state.fault=str(exc)
             shutdown_station()
-            stop.publish(Bool(data=True))
+            estop(f'tick exception: {exc}',site='tick-exception')
 
     node.create_subscription(String,'/restock_sim/station/command',command,10)
     node.create_timer(.05,tick)
@@ -138,7 +147,7 @@ def main():
         rclpy.spin(node)
     finally:
         shutdown_station()
-        stop.publish(Bool(data=True))
+        estop('station supervisor process exiting',site='process-exit')
         node.destroy_node()
         rclpy.shutdown()
 

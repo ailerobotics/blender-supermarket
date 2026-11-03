@@ -488,3 +488,88 @@ def test_sim_attach_fallback_gating_default_off_and_contact_gated():
                  GetPrimAtPath=lambda p: None, Traverse=lambda: [])
     assert a.sim_attach_contact_ready() is False
     assert a._fallback_body is None and a._releases == ['/Grip/j']
+
+
+# ---------------------------------------------------------------------------
+# firstmate sim-robust-weld-attach-v1: the weld gate must attach reliably at the natural
+# contact-descent endpoint (a few mm, square-on), not depend on sub-mm jitter crossing 0.5 mm.
+
+def test_contact_weld_ready_tolerates_the_descent_endpoint_gap():
+    """The old 0.5 mm gate sat AT the descent endpoint, so welding was a coin-flip on sub-mm jitter:
+    run collect1 measured 0.56 mm on the tick it would have welded (just over 0.5) and skipped; the
+    tolerant default welds square-on at that gap. The tilt gate is unchanged -- 0.56 mm but tilted stays
+    not-ready."""
+    from scripts.twin.restock_manipulation.cad_tool import (_contact_weld_ready, SIM_ATTACH_CONTACT_MM,
+                                                            SIM_ATTACH_FLUSH_DEG)
+    hits = ['/World/Carton']
+    # The exact gap that failed run collect1 under the 0.5 mm gate now attaches (square-on, tilt 0.009).
+    assert SIM_ATTACH_CONTACT_MM >= 3.0          # effective-by-default tolerant gap
+    assert _contact_weld_ready(0.56, 0.009, hits) is True
+    assert _contact_weld_ready(0.50, 0.008, hits) is True   # run collectsrc's endpoint
+    # Explicit tolerant-but-honest band: within the real cup's physical seal reach (REAL_MAX_GRIP_DISTANCE
+    # = 5 mm), inclusive of the gate; beyond it, never ready.
+    assert _contact_weld_ready(SIM_ATTACH_CONTACT_MM, 0.5, hits) is True
+    assert _contact_weld_ready(SIM_ATTACH_CONTACT_MM + 0.01, 0.5, hits) is False
+    # Tilt still gates a tolerant gap: square-on required.
+    assert _contact_weld_ready(0.56, SIM_ATTACH_FLUSH_DEG + 0.1, hits) is False
+    # A probe with no return / NaN is never ready (no fabricated hold).
+    assert _contact_weld_ready(None, 0.0, hits) is False
+    assert _contact_weld_ready(0.1, None, hits) is False
+    assert _contact_weld_ready(0.1, 0.0, []) is False
+    assert _contact_weld_ready(float('nan'), 0.0, hits) is False
+
+
+def test_contact_weld_ready_replays_collect1_descent_must_attach():
+    """Replay run collect1's recorded SIM_ATTACH_DIAG gap sequence (the pad descending onto the carton,
+    all with suction on and tilt ~0.009). Under the old 0.5 mm gate the first-ready tick was 0.48 mm
+    (two readings from the end -- the fragile coin-flip); with the tolerant gate the weld forms the
+    moment the descent reaches the low-mm band, square-on, with margin to spare -- NOT at the very last
+    sub-mm reading."""
+    from scripts.twin.restock_manipulation.cad_tool import _contact_weld_ready, SIM_ATTACH_CONTACT_MM
+    # Verbatim from datasets/.../collect1.console.log SIM_ATTACH_DIAG skip/attach lines (mm).
+    descent = [143.42, 123.7, 102.23, 80.17, 58.72, 39.12, 22.62, 17.97, 11.27, 10.29, 9.68, 8.6,
+               7.6, 7.26, 6.99, 5.95, 4.88, 4.28, 4.09, 3.27, 2.12, 1.39, 1.27, 0.56, 0.48]
+    tilt = 0.009
+    hits = ['/World/HandlingUnit']
+    ready = [i for i, g in enumerate(descent) if _contact_weld_ready(g, tilt, hits)]
+    assert ready, 'the tolerant gate must attach somewhere in the descent'
+    first = ready[0]
+    # Under the old 0.5 mm gate only the final 0.48 reading was ready; the tolerant gate fires earlier.
+    old_first = [i for i, g in enumerate(descent) if g <= 0.5]
+    assert first < old_first[0], (first, old_first)
+    assert descent[first] <= SIM_ATTACH_CONTACT_MM
+    # Every reading at/above the gate before it is correctly NOT ready (monotone descent, one crossing).
+    assert all(not _contact_weld_ready(descent[i], tilt, hits) for i in range(first))
+
+
+def test_contact_weld_ready_never_forming_press_stays_not_ready():
+    """A press that never reaches the carton (gap stays well outside the gate) or is not square-on must
+    NEVER be ready -- so the controller's grasp_press_timeout_s backstop is what ends it, fast, with a
+    named reason, rather than a fabricated weld."""
+    from scripts.twin.restock_manipulation.cad_tool import _contact_weld_ready, SIM_ATTACH_FLUSH_DEG
+    hits = ['/World/Carton']
+    # Pad parks ~5 cm off the carton for the whole press: never ready.
+    assert all(not _contact_weld_ready(50.0, 0.01, hits) for _ in range(500))
+    # Reaches the carton but badly tilted the whole time: never ready.
+    assert all(not _contact_weld_ready(0.3, SIM_ATTACH_FLUSH_DEG + 5.0, hits) for _ in range(500))
+
+
+def test_sim_attach_contact_mm_env_override(monkeypatch):
+    """RESTOCK_SIM_ATTACH_CONTACT_MM reproduces a pre-fix run (0.5) and is clamped to the real cup's
+    seal reach; backward compatible."""
+    import importlib
+    from scripts.twin.restock_manipulation import cad_tool
+    monkeypatch.setenv('RESTOCK_SIM_ATTACH_CONTACT_MM', '0.5')
+    importlib.reload(cad_tool)
+    try:
+        assert cad_tool.SIM_ATTACH_CONTACT_MM == 0.5
+        assert cad_tool._contact_weld_ready(0.56, 0.009, ['/c']) is False   # pre-fix behaviour restored
+        monkeypatch.setenv('RESTOCK_SIM_ATTACH_CONTACT_MM', '999')
+        importlib.reload(cad_tool)
+        assert cad_tool.SIM_ATTACH_CONTACT_MM == cad_tool.REAL_MAX_GRIP_DISTANCE * 1000.0   # clamped
+        monkeypatch.setenv('RESTOCK_SIM_ATTACH_CONTACT_MM', 'not-a-number')
+        importlib.reload(cad_tool)
+        assert cad_tool.SIM_ATTACH_CONTACT_MM == cad_tool._SIM_ATTACH_CONTACT_MM_DEFAULT   # bad => default
+    finally:
+        monkeypatch.delenv('RESTOCK_SIM_ATTACH_CONTACT_MM', raising=False)
+        importlib.reload(cad_tool)

@@ -75,9 +75,43 @@ PY
   fi
 done
 
+# sim-robust-vram-headroom-v1: find --output (the run dir) so the crash-safe finalizer below can
+# reconstruct mission.json out-of-process if the mission dies natively. Supports --output <dir> and
+# --output=<dir>; also note whether this is an --execute (Isaac boots) launch.
+RESTOCK_OUTPUT_DIR=""
+RESTOCK_IS_EXECUTE=0
+_prev=""
+for arg in "$@"; do
+  case "$arg" in
+    --execute) RESTOCK_IS_EXECUTE=1 ;;
+    --output=*) RESTOCK_OUTPUT_DIR="${arg#--output=}" ;;
+  esac
+  if [ "$_prev" = "--output" ]; then RESTOCK_OUTPUT_DIR="$arg"; fi
+  _prev="$arg"
+done
+
 # Wall-clock cap for the whole launch (host warmup + Isaac boot + mission). Default 40 min
 # for a collect+couple stage pair; override with RESTOCK_WALL_CAP (e.g. a short bounded
 # smoke/measurement run). The resource guards (GPU lock, 4 GiB RAM watchdog) are unchanged.
 RESTOCK_WALL_CAP="${RESTOCK_WALL_CAP:-2400s}"
-exec timeout --signal=TERM --kill-after=15s "$RESTOCK_WALL_CAP" \
+# NOTE: no longer `exec` -- this shell must SURVIVE a native Isaac SIGSEGV (which kills only the
+# python child, not this parent) so it can run the out-of-process crash finalizer below. timeout
+# remains the direct child and still owns only this launch's process group.
+set +e
+timeout --signal=TERM --kill-after=15s "$RESTOCK_WALL_CAP" \
   "$RESTOCK_PYTHON" "$SCRIPT_DIR/run_mobile_restock.py" "$@"
+rc=$?
+set -e
+
+# Crash-safe recording (sim-robust-vram-headroom-v1): a native crash (SIGSEGV/SIGABRT, rc 128+signal)
+# or a wall-cap timeout (rc 124) kills the in-process mission before it can write mission.json. Run the
+# finalizer from HERE (the surviving shell parent): it writes a state=crashed mission.json ONLY if one
+# is absent (a clean rc=0/1 run already wrote its verdict -> no-op, byte-identical). Never fatal; the
+# launch's own exit code is always preserved.
+if [ "$RESTOCK_IS_EXECUTE" = "1" ] && [ -n "$RESTOCK_OUTPUT_DIR" ] && [ "$rc" -ne 0 ]; then
+  if [ ! -f "$RESTOCK_OUTPUT_DIR/mission.json" ]; then
+    "$RESTOCK_PYTHON" "$SCRIPT_DIR/finalize_crashed_run.py" \
+      --run-dir "$RESTOCK_OUTPUT_DIR" --exit-code "$rc" || true
+  fi
+fi
+exit "$rc"

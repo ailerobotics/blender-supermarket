@@ -1,8 +1,16 @@
 # Mobile restocking integration checkpoint
 
-Status: incomplete but materially advanced. Guarded GPU use was authorized on October 13;
-native RTX RGB-D rendering, VFR recording, stationary hold, coupling and forward towing all
-pass. **The native collision-map incorporation pipeline is now GREEN end to end**: the
+Status: **a complete autonomous cold cycle now banks end to end** (collect → couple →
+outbound coupled tow → park → transfer → verify → return → uncouple at the parking spot →
+drive home empty), recorded as H.264 with every sim workaround captioned on screen
+(`coldwin16`, 2026-10-24, `state=complete`; cut at
+`data/mobile-restock-v2/coldwin16-full-cycle.mp4`). The honest residual mocks are labelled on
+the video and in the 2026-10-24 section below: ground-truth collect + ground-truth verify
+(sensor decode is proven separately but not yet the mission's live gate on the cold path),
+live-pose transfer pick, filtered rollwagen-cage collision, and the weld (not suction) attach.
+Earlier guarded-GPU milestones still hold: native RTX RGB-D rendering, VFR recording,
+stationary hold, coupling and forward towing all pass. **The native collision-map
+incorporation pipeline is GREEN end to end**: the
 integration sensor+handshake driver drives EmptyGeneration→OpenAdmission→register→integrate→
 EvidenceSnapshot→consume and `TemporalMap.accept_envelope` adopts the slice, yielding a
 measured incorporation identity (`incorp-identity-03`, under the host producer fixes PR#32/#33).
@@ -2982,3 +2990,81 @@ authored lane + the three patches; the re-base already makes the FOLLOW track th
 re-author is largely equivalent to "bake the run-time re-base into the lane." Re-author only if run-335
 reveals a NEW turn layer that the re-base cannot reach from the entry state (i.e. a divergence that is not a
 pure cart_yaw phase-shift) — then the measured entry + cart profile from run-335's nav-trace is the input.
+
+### 2026-10-24 — COMPLETE COLD CYCLE BANKED (`coldwin16`): collect→couple→outbound→park→transfer→verify→return→uncouple→home
+
+The first full autonomous **cold** cycle to reach `state=complete` on a single run, with the
+full robustness fix stack active. This closes the loop the captain asked for: backroom stock
+collection → rollwagen coupling → coupled tow out of the backroom → stable park → product
+transfer → verification → return → uncouple at the parking spot → drive home empty. Recorded
+H.264, every sim workaround captioned: `data/mobile-restock-v2/coldwin16-full-cycle.mp4`
+(1280×720, 77.3 s, `MISSION COMPLETE`). Head `e77e2ca` (PR255 crash-safe recording + PR256
+pick-wrist-guard c-space fix) with repo host config `transfer_pick_wrist_guard=true`,
+`moveit_mesh_uris=true`, `transfer_preplace_reach_guard=true`, `esdf_boot_ack_grace_s=15`.
+
+**The wave that got here (four serialized guarded-GPU runs, one at a time under
+`/tmp/aile-gpu.lock`, HEAVY_MB=2500 for the always-on whispr ~2.2 GB, never forced):**
+
+1. **coldwin15-config-typo** — did not boot. A malformed `transfer_preplace_reach_guard`
+   value in the repo host config → `ValueError 'must be a bool or a mapping'` at host warmup
+   (named by PR256's `HOST_GUARD_EXIT`). No GPU time. `config_preflight` only checks key
+   *presence*, not value type — fixed the value (`true`, validated by
+   `transfer_carry.resolve_reach_guard`) and retried as coldwin15b.
+
+2. **coldwin15b** (full cold, `transfer_pick_wrist_guard=FALSE`, `vram_headroom=true`,
+   `moveit_mesh_uris=TRUE`) — **FAIL@transfer**, but validated three things. collect / couple /
+   **outbound CLEAN** (HEADING_HOLD=3, BREAKAWAY=0, coupled_no_progress=0 — PR253 held) / park
+   all passed. The transfer pick failed with `PATH_TOLERANCE_VIOLATED: pose not bounded within
+   settle window: peak 0.0886 > 0.010 rad` → `HOST_FAULT_ESTOP phase=approach` → arm heartbeat
+   lost — the **known unguarded live-pose pick wrist jam** (coldwin12 class), expected with the
+   guard off. **Positives banked:** (a) the PR255 VRAM-headroom monitor was active and correct
+   (peak 10810 MiB, 0 sheds, `ceiling_reached=false`, floor never breached); (b)
+   `moveit_mesh_uris=TRUE` held cleanly through park (0 container deaths); (c) **0 'Invalid
+   c-space'** — the PR254 regression does not fire with the guard off; (d) the masked-depth
+   bridge published 1859 frames and closed `writer_eof` only in post-fault teardown (a
+   consequence, not the old 10–30-frame publisher-death bug).
+
+3. **pickguard2** (staged transfer→verify, `transfer_pick_wrist_guard=TRUE` + PR256) —
+   **PASS**, `state=complete`. **0 'Invalid c-space'** (the PR254 malformed-goal regression that
+   killed coldwin14/pickguard1 is fixed), `POSE_WRIST_GUARD accept term wrist_2=1.006≥0,
+   wrist_1=-0.04≤0.65, replans=0` (the post-plan terminal guard drew the clear carry-wrist
+   family on the first plan), 0 container deaths, 0 `TRAJ_HOST_FAULT`. This is the isolated proof
+   that the guard both fixes the unguarded jam and no longer self-destructs on a malformed goal.
+
+4. **coldwin16** (full cold, `transfer_pick_wrist_guard=TRUE` + PR256 + `vram_headroom` +
+   `moveit_mesh_uris`) — **COMPLETE**. `state=complete`, `reason=''`. Stage checks all PASS
+   (`stages_in_order`, `mission_succeeded`, `carton_on_cart`, `carton_on_bay`, `demo_video`).
+   Transfer: `POSE_WRIST_GUARD accept wrist_2=0.775≥0 replans=0`, **0 'Invalid c-space'**, **0
+   container deaths**. Return: `UNCOUPLE: tow hitch released; cart left parked`, then drove home
+   uncoupled (`arrived_stopped parked=True`). Clean teardown, lock released, whispr untouched.
+
+**VRAM-headroom monitor proved under genuine pressure (PR255):** coldwin16 peaked at 11697 MiB
+(260 MiB free, a 12 GiB card with whispr ~2.2 GB resident). During RETURN at sim 364.5 s free
+fell to 368 MiB — below the 800 MiB floor — so the monitor fired its named sheds in order
+(`VRAM_SHED capture_rate record_stride 20→50`; `VRAM_SHED secondary_cameras
+stage_scoped_teardown shelf`) and logged `VRAM_CEILING_REACHED`. Despite reaching the ceiling
+the run **completed** with a clean teardown and an encoded video — no native SIGSEGV, so the
+crash-safe finalizer (separately proven by `vramcrash1`) was not needed. This is exactly the
+graceful-degradation + crash-safe design the lane set out to build for the 12 GiB card.
+
+**Honest residual mocks (all captioned on the video, unchanged from the warm runs):**
+collect is ground-truth (`RESTOCK_COLLECT_GROUND_TRUTH=1`; the source camera decode is proven
+separately but is not yet the cold-path mission gate), verify is ground-truth (vr1, labelled;
+not camera), the transfer pick is live-pose from the ground-truth carton pose, the rollwagen
+cage collision is filtered (`cage_collision=filtered` — the 0.6 m carton passes the 0.615 m cage
+mouth as a sim workaround), and the gripper attach is a weld (sim fixed joint), not suction. The
+pre-send gate (`check_walkthrough_run.py`) is OVERALL WARN only because park and verify are
+near-instantaneous ground-truth stages with no dedicated video frames (shown as caption cards);
+every substantive check is PASS.
+
+**Config state landed on the branch:** `transfer_pick_wrist_guard`, `transfer_preplace_reach_guard`
+and `esdf_boot_ack_grace_s` are added to the committed
+`scripts/twin/restock_manipulation/ros_host_config.json`; the two validated transfer guards flip
+to the validated-on default (true), matching the project's existing pattern for validated guard
+keys (collect_place_wrist_guard, collect_place_straight_line). `moveit_mesh_uris` stays shipped
+**off** (false) — it was on during coldwin16 but the complete-cycle PASS does not depend on it
+(coldwin15b already carried collect→park clean with it on, and the guard + c-space fix are what
+close the transfer), and the host-launch convention keeps the resolved URDF byte-identical to
+move_group by default. `test_restock_host.py`'s host-config fixture allowed-set is extended for
+the three new keys. Evidence files: `repeatability-ledger.md`, `coldwin15b-evidence.md`,
+`pickguard2-evidence.md` under the task data dir.

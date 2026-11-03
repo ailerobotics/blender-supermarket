@@ -228,10 +228,11 @@ def test_near_face_keeps_unflipped_poses_on_a_tie_and_fails_closed():
 
 class Motion:
     def __init__(self):
-        self.moves, self.joint_goals = [], []
+        self.moves, self.joint_goals, self.straights = [], [], []
 
     def begin(self, pose, joints, **kw):
         self.moves.append(pose)
+        self.straights.append(bool(kw.get('straight_line', False)))
 
     def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None):
         self.joint_goals.append(tuple(goal))
@@ -376,6 +377,117 @@ def test_wrist_guard_requirement_is_live_pose_only_backward_compatible(policy, m
     cc = TransferController(Motion(), {'juice_orange': PROFILE}, pose_policy=policy)
     cc.start('collect', JOB)
     assert not cc._live_pose_transfer()   # collect is exempt; the observe check never fires for it
+
+
+# -- live_pose place-onto-surface: collision-off straight-line descent (armcam2, 2026-10-22) ----------
+
+def _pose_key(pose):
+    return tuple(round(float(x), 6) for x in pose)
+
+
+def test_live_pose_place_and_retreat_route_collision_off_straight_line(policy, monkeypatch):
+    # armcam2: the live_pose transfer PLACE lowers the carton ONTO the bay surface, so the place config
+    # brings the gripper tines to within ~13 mm of the TransferBay top -- inside cuMotion's ESDF collision
+    # margin -- and a collision-AWARE joint-space plan to it is rejected ('world collision detected').
+    # The PREPLACE standoff (+0.14 m) plans cleanly. So the final place descent and the empty-handed
+    # retreat must route as the collision-off straight-line seeded insert (begin(straight_line=True)),
+    # exactly like the cart-cage place; the preplace stays collision-aware.
+    monkeypatch.setenv(tm.ENV, 'live_pose')
+    monkeypatch.setenv(tc.ENV, 'wrist_guard')
+    c, m, stow = host_controller(policy)
+    phases, r = run_stage(c, live_source(), stow)
+    assert r.status == 'succeeded', (c.phase, r.reason)
+    by_pose = {}
+    for pose, straight in zip(m.moves, m.straights):
+        by_pose[_pose_key(pose)] = straight            # last begin() of each pose (retries keep the flag)
+    flag = lambda phase: by_pose[_pose_key(c.poses[phase])]
+    assert flag('preplace') is False                   # collision-aware standoff above the bay
+    assert flag('place') is True                       # collision-off descent onto the bay surface
+    assert flag('retreat') is True                     # collision-off lift back to the standoff
+    assert flag('approach') is False                   # the free-space pick approach stays collision-aware
+
+
+# A minimal default (transfer_mode OFF) transfer with a reachable in-front deck target, to prove the new
+# straight-line routing is live_pose-ONLY and the baseline place/retreat stay collision-aware (byte-identical).
+_OFF_PROFILE = ProductProfile('sku-box', (.6, .4, .16), (.5, .5, .5, .5), max_reach=1.3, grasp_mode='top')
+_OFF_JOB = dict(job_id='job-1', sku='sku-box', quantity=1, source_bin='backroom', shelf_id='shelf-a')
+
+
+def _off_packet(c, t):
+    obs = Observation(f'source-{t}', 'test_fixture', t, 'sku-box', c.source, (.4, 0., .2, 0, 0, 0, 1), .99)
+    target = Target(f'target-{t}', 'test_fixture', t, c.destination, (-.5, 0., .1, 0, 0, 0, 1), True, (.7, .7, .5))
+    contact = c.held or (c.phase == 'grasp' and c.issued)
+    if c.phase == 'release' and c.issued:
+        contact = False
+    return Sensors(t, (obs,), target, True, contact, t, t, (0.,) * 6, (c.source, c.destination), t,
+                   time.monotonic() + 100.)
+
+
+def test_default_off_place_and_retreat_stay_collision_aware_byte_identical(monkeypatch):
+    # transfer_mode OFF + no cart-cage: the whole place chain is the baseline collision-aware joint-space
+    # move; the new live_pose term never fires, so NO begin() is a straight-line insert.
+    monkeypatch.delenv(tm.ENV, raising=False)
+    monkeypatch.delenv(tc.ENV, raising=False)
+    c = TransferController(Motion(), {'sku-box': _OFF_PROFILE}, fixture_mode=True)
+    c.start('transfer', _OFF_JOB)
+    assert c.transfer_mode is None and not c._live_pose_transfer()
+    m = c.motion
+    for i in range(80):
+        t = 1.0 + i * .1
+        r = c.step(.1, _off_packet(c, t))
+        if c.phase in ('succeeded', 'failed') or r.status == 'failed':
+            break
+    assert c.phase != 'failed' and r.status != 'failed', getattr(c, 'reason', '')
+    # the place chain ran (reaching verify means place+retreat already executed) ...
+    assert {_pose_key(c.poses['preplace']), _pose_key(c.poses['place']), _pose_key(c.poses['retreat'])} \
+        <= {_pose_key(p) for p in m.moves}
+    assert not any(m.straights)                                                   # ... none routed straight-line
+
+
+def test_collect_place_is_not_routed_straight_line_by_the_live_pose_term(policy, monkeypatch):
+    # The new term is scoped to a live_pose TRANSFER: a collect (even with live_pose set) is never a
+    # live_pose transfer, so its place is unaffected.
+    monkeypatch.setenv(tm.ENV, 'live_pose')
+    c = TransferController(Motion(), {'juice_orange': PROFILE}, pose_policy=policy, reposition_before_place=True)
+    c.start('collect', JOB)
+    assert c.transfer_mode == 'live_pose' and not c._live_pose_transfer()
+
+
+# -- recorded world-model clearance (the diagnosis, as a committed regression fixture) ----------------
+
+# armcam run (dataset twin-robot-in-store-boot-v1/mission/armcam, 2026-10-22): reconstructed on CPU from
+# mission.usda + mobile-import.urdf + the shelfbot_gripper cuRobo collision spheres. The TransferBay top
+# (the place surface) is at world z 0.73; cuMotion rasterises obstacles into the nvblox ESDF at a 0.02 m
+# voxel pitch, so a target config whose nearest arm sphere sits inside roughly one voxel (~0.02 m) of the
+# bay box is flagged 'world collision detected'. These are the worst (nearest) arm collision spheres for
+# the two place-side configs the host IK produced (both wrist-guarded, w1<=0.65 / w2>=0): the PREPLACE
+# standoff clears by 0.143 m (cuMotion planned it); the PLACE config clears by only 0.0126 m (rejected).
+_BAY_CENTER = (-2.0, 16.42, 0.365)
+_BAY_HALF = (0.35, 0.25, 0.365)
+_PREPLACE_WORST = dict(center=(-2.1187, 16.0302, 0.7982), radius=0.0128)   # suction_cups sphere
+_PLACE_WORST = dict(center=(-2.1360, 16.1924, 0.7476), radius=0.0050)      # surface_plate_6 tine sphere
+_ESDF_VOXEL_M = 0.02
+
+
+def _signed_dist_to_bay(center, radius):
+    lo = [_BAY_CENTER[i] - _BAY_HALF[i] for i in range(3)]
+    hi = [_BAY_CENTER[i] + _BAY_HALF[i] for i in range(3)]
+    out = [max(lo[i] - center[i], center[i] - hi[i], 0.0) for i in range(3)]
+    outside = math.sqrt(sum(d * d for d in out))
+    if outside > 0:
+        return outside - radius
+    inside = -min(min(center[i] - lo[i], hi[i] - center[i]) for i in range(3))
+    return inside - radius
+
+
+def test_recorded_world_model_place_is_in_the_esdf_margin_preplace_is_clear():
+    preplace = _signed_dist_to_bay(**_PREPLACE_WORST)
+    place = _signed_dist_to_bay(**_PLACE_WORST)
+    assert preplace == pytest.approx(0.1427, abs=1e-3)      # collision-aware preplace plans cleanly
+    assert place == pytest.approx(0.0126, abs=1e-3)         # place config: only ~13 mm to the bay top
+    # the place config is within one ESDF voxel of the bay -> cuMotion rejects a collision-aware plan to
+    # it, while the preplace standoff is many voxels clear: this is why place must be collision-off.
+    assert place < _ESDF_VOXEL_M < preplace
 
 
 # -- Isaac capture: the live carton TOP from the handling-unit prim (usd-core, no Isaac) ---------------

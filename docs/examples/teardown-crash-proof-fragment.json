@@ -1,0 +1,18 @@
+{
+  "_comment": "Bounded GPU proof for sim-robust-teardown-crash-v1. Deliverable: a run that ENDS ON A PER-OP MANIPULATION FAILURE now leaves its mission.json and exits without a core dump. Hand this to the integration lane (twin-robot-in-store-boot-v1) for ONE bounded GPU run scheduled through flock on /tmp/aile-gpu.lock -- never forced, never touching the whispr service (~2.2 GB VRAM). Do NOT edit the ~/datasets mission runtime configs from a worker PR; the integration lane merges these keys into the config it owns.",
+  "_what_it_reproduces": "The armcam failure shape: the HONEST live_pose transfer fails its per-op pick ('MANIP_HOST_FAILED op=transfer', the live_pose pick c-space target in world collision -- that root cause is sim-robust-livepose-pick-collision-v1 / PR 215). Bounded to transfer-only + a short stage timeout so the stage terminates at the Python level (TimeoutError -> Mission failed) instead of render-stepping the full-mission VRAM history up to the 12 GB OOM that killed the full run mid-world.step.",
+  "_bounded_command": "RESTOCK_TRANSFER_MODE=live_pose RESTOCK_TRANSFER_CARRY=wrist_guard python3 scripts/run_mobile_restock.py --execute --factory twin.restock.isaac_bundle:create --host-stack --plugin-env <env.sh> --nvidia-runtime <runtime-root> --heavy-threshold-mb 2500 --start-at transfer --start-staging recorded_bay_park --stop-after transfer --manifest <environment.json> --scenario <mission-scenario.json> --runtime-config <mission-runtime.json> --output <run-dir>",
+  "_env": {
+    "RESTOCK_TRANSFER_MODE": "live_pose",
+    "RESTOCK_TRANSFER_CARRY": "wrist_guard",
+    "_note": "Same env the armcam run used (live_pose pick + wrist_guard for the KDL place half). The per-op failure is expected here -- this proof is about the EXIT, not about making the transfer succeed."
+  },
+  "start_at": "transfer",
+  "start_staging": "recorded_bay_park",
+  "stop_after": "transfer",
+  "stage_timeout_s": 60.0,
+  "_runtime_keys_note": "start_at/start_staging/stop_after bound the run to transfer only (mission.bounded_stages; fails closed before any boot). stage_timeout_s is shortened so a stalled/retrying per-op failure becomes a terminal Mission failure in bounded sim-seconds rather than render-stepping toward OOM. No NEW switch keys are introduced by this lane -- the record-first write + ordered teardown are unconditional robustness (success runs stay byte-identical apart from the earlier record write).",
+  "_pass_criteria": "PASS = the run ENDS (code 0 or a named non-zero), <run-dir>/mission.json EXISTS and records state='failed' with the per-op reason (e.g. 'collision planning or execution failed' or a '<stage> timed out'), AND there is NO 'timeout: the monitored command dumped core' / no carb crash-reporter minidump at exit. The console must show the record-first write and the ordered teardown releasing render before the app close (a 'TEARDOWN_STEP_ERROR' line is only logged if a step raised; its absence is fine). FAIL = no mission.json, OR a core dump at exit.",
+  "_cpu_proof": "scripts/twin/tests/test_restock_shutdown.py (record-first + ordered-teardown invariants + Bundle.release_render); run with PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=scripts python3 -m pytest scripts/twin/tests/test_restock_shutdown.py",
+  "_report": "data/sim-robust-teardown-crash-v1/report.md"
+}

@@ -1,0 +1,14 @@
+{
+  "__doc__": "Opt-in ARM-FEED RENDER ECONOMY fragment to MERGE into a mission runtime-config (e.g. the live_pose cold config mission-runtime-coldlive.json). It adds a `masked_depth.economy` block that lowers the eye-in-hand masked-depth feed's render + per-tick cost during collect/transfer so the simulator paces closer to the still-arm run, WITHOUT touching the decode (QR) cameras, the walkthrough, or the camera's field of view. Absent (or {\"enabled\": false}) => the camera renders native 424x240 and the bridge publishes every tick => byte-identical. Two composable levers, both validated at boot (a typo refuses the boot): (1) resolution_scale (0<s<=1) renders the arm depth product at s of native resolution -- the apertures are unchanged so fx/fy/cx/cy scale with the resolution and the FOV/reprojection is preserved (nvblox back-projects the SAME 3-D rays, sampled coarser); the only cost is pixel quantization, bounded to 0.5*Z/fx_scaled metres of lateral error, held under half an ESDF voxel (0.01 m at voxel_size 0.02) at the recorded working distances (collect ~1.2 m, wrist ~0.32 m). (2) publish_interval_s (SIM seconds) caps the bridge publish rate on the SIM clock -- it skips (never ships a stale buffer) between intervals, cutting the per-tick rig-mask + socket IPC + nvblox integration from ~60 Hz sim to 1/interval Hz; it is bounded BELOW the 0.5 s nvblox depth window so the ESDF never lapses (the freshness-on-sim-clock principle). The dominant SHARED render-cadence lever (record_stride / sensing_stride / sim_speed) is separate and composable; coldhonest completed the full cold cycle WITH the arm feed by widening those. Pre-boot VRAM gate reflects the scale: scripts/twin/restock/gpu_budget.py. GPU proof: the armcam staging with this block merged; PASS = live_pose transfer completes through verify with the pacing improvement recorded.",
+  "masked_depth": {
+    "enabled": true,
+    "runtime_env": "/home/manishsaini/datasets/sim-restock-host-v2/nav-plugin/runtime-env.sh",
+    "python": "python3",
+    "frame_id": "restock_camera_arm",
+    "domain": 88,
+    "economy": {
+      "resolution_scale": 0.5,
+      "publish_interval_s": 0.1
+    }
+  }
+}

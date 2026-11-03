@@ -1,0 +1,25 @@
+{
+  "_comment": "sim-robust-movegroup-collision-meshes-v1 bounded GPU proof. Purpose: prove that turning the opt-in HOST key moveit_mesh_uris ON makes move_group's resource_retriever LOAD the arm link collision/visual geometry (so MoveIt's FCL ValidateSolution runs against real link meshes, not empty geometry) WITHOUT breaking a plan the capstone already lands. Today the resolved URDF the host ships (host-cad/mobile.urdf) carries bare ABSOLUTE <mesh> paths, so move_group logs 'URL rejected: No host part in the URL' for all 16 meshes and loads none (cuMotion XRDF spheres do the real checking). Hand this to the integration lane (twin-robot-in-store-boot-v1); schedule through /tmp/aile-gpu.lock, never forced, never touching whispr (pid 1339).",
+
+  "_the_switch": "moveit_mesh_uris is a HOST key: restock_host.launch reads it from the REPO scripts/twin/restock_manipulation/ros_host_config.json (NOT a ~/datasets mission-runtime config, NOT an env var) and, when true, rewrites the robot_description it hands move_group from bare paths to file:// URIs. It is registered in config_preflight.KEY_CONSUMER as HOST. The repo file ships it FALSE (byte-identical: robot_description is the file verbatim). To arm the proof, set it true in that repo file for the run; config_preflight --require moveit_mesh_uris will then confirm it loads from the host config.",
+
+  "_step1_staged_transfer_only": {
+    "_why_first": "A staged transfer-only run is the cheapest run that actually plans arm moves through move_group (collect pick/place, transfer preplace/place), so it is where loaded link geometry would first change a plan outcome, at a fraction of the capstone's cost.",
+    "_bounded_command": "RESTOCK_TRANSFER_MODE=live_pose RESTOCK_TRANSFER_CARRY=wrist_guard python3 scripts/run_mobile_restock.py --start-at transfer --start-staging recorded_bay_park --stop-after verify",
+    "_host_config_edit": "In scripts/twin/restock_manipulation/ros_host_config.json set \"moveit_mesh_uris\": true for this run.",
+    "start_at": "transfer",
+    "start_staging": "recorded_bay_park",
+    "stop_after": "verify",
+    "_pass_criteria": "PASS = move_group's host-stack.log shows NO 'URL rejected: No host part in the URL' lines at move_group start (grep host-stack.log); the collision geometry is loaded (no 'Link ... has no geometry' for the UR links); AND the staged transfer still completes (reaches 'verify' with status succeeded, no NEW INVALID_MOTION_PLAN / collision-detected abort that the moveit_mesh_uris-off baseline did not have). FAIL = any 'URL rejected' line still present, OR a transfer plan that passed with the key off is now rejected -- capture the plan family + the FCL reason and report it (expected at-risk family: see _fcl_risk)."
+  },
+
+  "_step2_full_capstone_only_after_step1_passes": {
+    "_why": "Only once the staged transfer proves the loaded geometry does not reject a known-good plan do we spend the full every-stage honest capstone (the coldwin7 shape) with moveit_mesh_uris on.",
+    "_command": "python3 scripts/run_mobile_restock.py   (the full honest live_pose cycle, same env/config as coldwin7, with moveit_mesh_uris true)",
+    "_pass_criteria": "PASS = the capstone reaches the same terminal stage as coldwin7 with no 'URL rejected' lines and no new plan rejection vs the key-off capstone."
+  },
+
+  "_fcl_risk": "The XRDF collision spheres are a CONSERVATIVE cover that ENCLOSES each link's collision mesh (generate_assets.coverage), and the generated SRDF disables exactly the same self-collision pairs the XRDF excludes (incl. ur_forearm_link<->ur_wrist_2_link). So loading the real (tighter) link meshes makes FCL self-collision checking MORE permissive, never less -- no self-collision-only plan (collect pick, transfer pick: both PRE-attach) is at risk. The one family that gains a genuinely new check is any plan carrying the ATTACHED carton (MoveIt attached object) while the arm is folded -- collect place and transfer preplace/place -- because carton-vs-(non-touch arm link) was vacuous with empty link geometry and is now real (carton-vs-gripper stays allowed via SRDF touch_links). Watch those two for a new collision-detected/INVALID_MOTION_PLAN abort; if one appears, it is a true clearance finding to report, not a regression of this switch.",
+
+  "_cpu_proof": "scripts/check_movegroup_mesh_uris.py (reports OFF loads 0 meshes, ON loads all 16; cross-checks the real resource_retriever when ROS is sourced) and scripts/twin/tests/test_mesh_uri.py + the launch-wiring test in scripts/twin/tests/test_restock_host.py. Run tests with: env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_mesh_uri.py scripts/twin/tests/test_restock_host.py -q"
+}

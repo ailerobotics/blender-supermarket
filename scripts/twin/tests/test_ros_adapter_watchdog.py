@@ -37,12 +37,16 @@ class _FakeClock:
 SIM_NOW = 1000.0  # fixed fake node-clock reading (seconds)
 
 
-def _bridge(*, phase='observe', first_frame=False, job_age=None,
+def _bridge(*, phase='observe', first_frame=False, job_age=None, job_sim_age=None,
             packet_wall_age=0.1, sim_gap=0.0, wall_backstop=30.0,
+            startup_grace_sim=5.0, startup_grace_wall_backstop=250.0,
             transit_pause_wall=1200.0, transit_start_age=None):
     b = RosTransferBridge.__new__(RosTransferBridge)
     b.watchdog_seconds = 1.0
     b.startup_grace_seconds = 5.0
+    # sim-robust-host-timers-audit-fix-v1: SIM-primary startup grace + generous frozen-sim wall backstop.
+    b.startup_grace_sim_seconds = startup_grace_sim
+    b.startup_grace_wall_backstop_s = startup_grace_wall_backstop
     b.wall_backstop_seconds = wall_backstop
     b.transit_pause_wall_s = transit_pause_wall
     b._transit_pause_start_wall = (None if transit_start_age is None
@@ -50,6 +54,10 @@ def _bridge(*, phase='observe', first_frame=False, job_age=None,
     b.first_frame = first_frame
     now = time.monotonic()
     b.job_start_wall = None if job_age is None else now - job_age
+    # The SIM job-start anchor: defaults to mirror the wall age (sim == wall) so existing tests keep their
+    # semantics; a test sets job_sim_age independently to exercise render pacing.
+    _sim_age = job_age if job_sim_age is None else job_sim_age
+    b.job_start_sim = None if _sim_age is None else SIM_NOW - _sim_age
     b.last_packet_wall = now - packet_wall_age
     # last_packet_sim exists only once a frame has armed the per-frame bound.
     b.last_packet_sim = (SIM_NOW - sim_gap) if first_frame else None
@@ -65,12 +73,30 @@ class StartupGrace(unittest.TestCase):
     def test_no_initial_frame_within_grace_does_not_fail(self):
         b, emitted = _bridge(first_frame=False, job_age=2.0, packet_wall_age=3.0)
         b._watchdog()
-        self.assertEqual(emitted, [])            # 1 s not armed (no first frame); grace not expired
+        self.assertEqual(emitted, [])            # SIM gap 2 s < 5 s grace; not armed
 
     def test_no_initial_frame_past_grace_fails_with_distinct_reason(self):
-        b, emitted = _bridge(first_frame=False, job_age=6.0, packet_wall_age=6.0)
+        # Real rig (sim == wall): SIM gap 6 s > 5 s grace -> fire. Reason names the sim/wall gaps.
+        b, emitted = _bridge(first_frame=False, job_age=6.0, job_sim_age=6.0, packet_wall_age=6.0)
         b._watchdog()
-        self.assertEqual([e.reason for e in emitted], ['no initial sensor frame'])
+        self.assertEqual(len(emitted), 1)
+        self.assertTrue(emitted[0].reason.startswith('no initial sensor frame'))
+
+    def test_render_paced_startup_does_not_false_trip(self):
+        # sim-robust-host-timers-audit-fix-v1: the fm465 light rig slows the first full-res frame, so the
+        # WALL job age runs far ahead of the SIM age. SIM gap 2 s < 5 s grace and wall gap 200 s < 250 s
+        # backstop -> must NOT fire (the old pure-wall 5 s grace false-tripped here before the env widen).
+        b, emitted = _bridge(first_frame=False, job_age=200.0, job_sim_age=2.0, packet_wall_age=200.0)
+        b._watchdog()
+        self.assertEqual(emitted, [])
+
+    def test_frozen_sim_startup_wall_backstop_fires(self):
+        # A startup whose /clock is FROZEN (sim gap stuck at ~0) and no frame ever arrives: the SIM leg
+        # can never advance, so the generous frozen-sim WALL backstop still hard-stops it.
+        b, emitted = _bridge(first_frame=False, job_age=300.0, job_sim_age=0.0, packet_wall_age=300.0)
+        b._watchdog()
+        self.assertEqual(len(emitted), 1)
+        self.assertTrue(emitted[0].reason.startswith('no initial sensor frame'))
 
 
 class PerFrameWatchdog(unittest.TestCase):

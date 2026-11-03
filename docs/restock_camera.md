@@ -534,6 +534,35 @@ subtree, removed like any rig pixel) plus the `object_segmenter` grasp-target ma
   nothing. Masked carton pixels neither clear free space nor assert an obstacle. These are
   geometric design predictions, not rendered RGB-D.
 
+## Arm masked-depth feed economy — opt-in, default-off (sim-robust-arm-feed-economy-v1)
+
+The honest **live_pose** transfer keeps the eye-in-hand arm masked-depth feed on through
+collect/transfer: an extra RTX render product + a per-manip-tick rig-mask + socket IPC +
+nvblox integration, while the pacing is already ~0.08 sim/wall (~12× slower than wall) and the
+host's wall timers trip (the coldlive 4-sample whack-a-mole, 2026-10-23). `masked_depth.economy`
+(`scripts/twin/restock/masked_depth_economy.py`) lowers the feed's cost to what the
+collision/grasp solver actually needs, **without** touching the decode (QR) cameras, the
+walkthrough, or the camera field of view. Two composable levers; an absent/empty/`{"enabled":
+false}` block is **byte-identical**:
+
+- **`resolution_scale`** (`0 < s ≤ 1`, default 1.0): renders the arm depth product at `s` of
+  native 424×240. The apertures are unchanged, so `fx/fy/cx/cy` scale with the resolution and the
+  FOV/reprojection is preserved — nvblox back-projects the SAME 3-D rays, sampled coarser. The
+  only cost is pixel quantization, bounded to `0.5·Z/fx_scaled` m of lateral error
+  (`reprojection_shift_m`), held under half an ESDF voxel (0.01 m at `voxel_size 0.02`) at the
+  recorded working distances (collect ~1.2 m, wrist ~0.32 m) for `s ≥ 0.25`.
+- **`publish_interval_s`** (SIM seconds, default none = every tick): the freshness-on-sim-clock
+  rate cap. The bridge publishes at most one frame per interval of SIM time, skipping (never
+  shipping a stale buffer) between, cutting the rig-mask + IPC + integration from ~60 Hz sim to
+  `1/interval` Hz. Validated **below** the 0.5 s nvblox depth window so the ESDF never lapses.
+
+Levers are validated at boot (a typo refuses the boot) and logged (`MASKED_DEPTH_ECONOMY …`).
+The pre-boot VRAM gate (`gpu_budget.feeds_from_config`) reflects the scale. The dominant SHARED
+render-cadence lever (`record_stride`/`sensing_stride`/`sim_speed`) is separate and composable —
+coldhonest completed the full cold cycle *with* the arm feed by widening those. Example:
+`docs/examples/masked-depth-economy-mission-fragment.json`. CPU tests:
+`scripts/twin/tests/test_masked_depth_economy.py`.
+
 ## Cold-collect grasp confirmation (run-327/328) — named cause
 
 Cold runs fail at **collect**: the fixed `source` camera capture cycles `missing, moving,

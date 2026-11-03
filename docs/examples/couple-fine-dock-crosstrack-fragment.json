@@ -1,0 +1,20 @@
+{
+  "_comment": "sim-robust-couple-fine-dock-v1: opt-in cross-track terminal docking for the couple fine-dock. Merge the fine_dock block into the mission runtime config. The ONLY change vs the shipped block is approach_mode + the ct_* gains; dropping approach_mode (or setting it to 'hitch_jacobian') restores the legacy law byte-for-byte. See docs/restock_navigation.md 'Couple fine-dock' and data/sim-robust-couple-fine-dock-v1/report.md.",
+  "_why": "The legacy inverse-hitch-Jacobian creep has a degenerate zero-command equilibrium LINE (lat = gain_yaw*|hitch_x|/gain_lin * yaw_err): ω cancels (lateral vs yaw) with NEITHER hitch nor yaw seated. The couple approach lands on it at whatever yaw the standoff cross-track implies; coldlivefinal (real live_pose collect) landed at ~4.8 deg yaw / ~26 mm hitch -- just outside the 4 deg / 20 mm latch box -- and the creep limit-cycled for the whole 30 s cap. The still-arm coldhonest landed at ~2.7 deg (inside) and latched. 'crosstrack' servos the REAR HITCH (the leading point of the reverse approach, so minimum-phase/stable) onto the cart axis, holding back until aligned then seating straight in -- the only equilibrium is the seated pose.",
+  "fine_dock": {
+    "creep_speed": 0.035,
+    "creep_yaw_rate": 0.25,
+    "gain_lin": 2.0,
+    "gain_yaw": 1.0,
+    "hitch_tol_m": 0.02,
+    "yaw_tol_rad": 0.069813,
+    "settle_speed": 0.01,
+    "time_cap_s": 30.0,
+    "approach_mode": "crosstrack",
+    "ct_gain_approach": 2.0,
+    "ct_gain_cross": 8.0,
+    "ct_gain_yaw": 1.5,
+    "ct_align_hold_m": 3.0,
+    "ct_min_creep": 0.015
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "_comment": "sim-robust-pick-plan-rejection-v1 bounded GPU proof config. Purpose: prove the trajectory_host (scripts/twin/restock/trajectory_host.py) NEVER silently rejects a valid FIRST collect goal because of a startup/timing race, and that any genuine reject is logged by its real reason. Root cause (run 'seconddeath', 2026-10-23): under live_pose + arm-feed load move_group forwarded the first collect FollowJointTrajectory goal in the wall-gap after the executor's /joint_states subscription went ready but BEFORE its first sample callback fired (render pacing spaces frames seconds apart in WALL though <0.1 s in SIM), so state['feedback'] was still None and goal() returned GoalResponse.REJECT with NO log line; move_group aborted the ExecuteTrajectory and the mission surfaced the misleading 'collision planning or execution failed', then lost the arm-command heartbeat across StageRetry. The fix is DEFAULT-ON and needs NO new config key (grace defaults to 8.0 s; the op-start reset is auto-published by the controller at every move begin), so this fragment is env + validation guidance, not a required config block. Absent any of these keys/env => byte-identical to the pre-fix run except that a reject is now logged + reasoned.",
+
+  "_how_to_run": "Re-run the SAME config as 'seconddeath' at the fixed head (branch fm/sim-robust-pick-plan-rejection-v1 merged into fm/twin-robot-in-store-boot-v1): collect-only staging, RESTOCK_TRANSFER_MODE=live_pose, RESTOCK_TRANSFER_CARRY=weld,wrist_guard, masked_depth arm feed ON, mast OFF, COLLECT_GROUND_TRUTH as in seconddeath. End after collect (`--stop-after collect`) so the place-on-cart replan family (other lanes) is never reached. One GPU run at a time through flock /tmp/aile-gpu.lock, never forced; never touch whispr (pid 1339, ~2.2 GB VRAM); heavy-threshold 2500 for the always-on whispr.",
+
+  "_suggested_env": {
+    "RESTOCK_TRANSFER_MODE": "live_pose",
+    "RESTOCK_TRANSFER_CARRY": "weld,wrist_guard",
+    "RESTOCK_FIRST_FEEDBACK_GRACE_S": "UNSET (defaults to 8.0 s; the goal callback waits out the first-feedback startup race before deciding). Set to 0 only to REPRODUCE the pre-fix silent reject (legacy immediate decision). Clamped to [0,60].",
+    "RESTOCK_COLLECT_GROUND_TRUTH": "match seconddeath (was 1)"
+  },
+
+  "_pass_criteria": "PASS iff: (1) the FIRST collect arm goal is ACCEPTED (host-stack.log shows 'arm_controller started execution' followed by 'Goal request accepted!' and a TRAJ_HOST_PLAN line, NOT 'Goal request rejected'); (2) collect completes (pick -> weld -> carry -> place/release as the staging allows, through `--stop-after collect`); (3) if ANY goal is rejected during the run it is logged by its real reason with the causing state (a 'TRAJ_HOST_GOAL_REJECT <reason> (fault=... active=... feedback=... grace=...)' line), and the mission does NOT surface 'collision planning or execution failed' for a mere goal rejection (it instead names 'arm controller aborted trajectory (goal rejected or execution fault, moveit_err=...; see host-stack.log TRAJ_HOST_GOAL_REJECT/TRAJ_HOST_FAULT)').",
+
+  "_expected_log_markers": [
+    "TRAJ_HOST_PLAN ...                 (first collect goal accepted -- the race no longer rejects it)",
+    "TRAJ_HOST_START anchored start=... (trajectory origin anchored to first post-install feedback)",
+    "TRAJ_HOST_GOAL_REJECT ...          (ONLY if a goal is genuinely rejected -- now reasoned, never silent)",
+    "TRAJ_HOST_RESET op-start re-arm:   (ONLY if a previous op had latched a fault that the new op cleared)"
+  ],
+
+  "_notes": "The op-start reset (/restock_sim/arm_controller/reset, published by RosMotionPort.begin/begin_joint_goal) clears a LATCHED trajectory_host fault at the start of a move so a single fault does not permanently brick the arm against the mission's own bounded retries; it NEVER clears a live execution and is a no-op when there is no fault (byte-identical normal path). The collision-mesh URL warning seen at every move_group start ('Error retrieving file [/opt/ros/jazzy/share/ur_description/meshes/ur10/collision/*.stl]: URL rejected: No host part in the URL' -> 'Link ur_* has ... no collision geometry') is a SEPARATE latent defect reported for its own lane -- see data/sim-robust-pick-plan-rejection-v1/report.md; cuMotion's XRDF spheres do the real arm collision checking, so it does not affect this proof."
+}

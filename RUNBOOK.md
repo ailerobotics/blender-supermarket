@@ -153,6 +153,19 @@ runs before booting (see §8):
 .venv-usd/bin/python scripts/preflight.py                          # exit 0 = whole chain OK
 ```
 
+## 6d. Prove move_group can load the resolved URDF's meshes (no Isaac, no GPU)
+The resolved URDF the host ships to `move_group` (`host-cad/mobile.urdf`) carries bare ABSOLUTE
+`<mesh>` paths, which MoveIt's `resource_retriever` rejects (`URL rejected: No host part in the
+URL`) — so move_group loads no arm link geometry. The opt-in HOST key `moveit_mesh_uris`
+(`ros_host_config.json`, default off ⇒ byte-identical) rewrites them to `file://` URIs.
+```bash
+python3 scripts/check_movegroup_mesh_uris.py       # OFF loads 0 meshes, ON loads all; exit 0 = PASS
+# run from a ROS-sourced shell to also cross-check the real resource_retriever mesh-for-mesh
+```
+Design, FCL risk assessment and the bounded GPU proof fragment:
+`data/sim-robust-movegroup-collision-meshes-v1/report.md`,
+`docs/examples/movegroup-mesh-uris-mission-fragment.json`.
+
 ## 7. Where things are
 ```
 scripts/catalog.py          product catalog (SKU dims, colors, prices)      scripts/planogram.json   generated layout + shelf facings

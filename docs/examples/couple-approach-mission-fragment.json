@@ -1,0 +1,32 @@
+{
+  "_comment": "sim-robust-couple-approach-v1: MERGE into the mission runtime-config for the bounded GPU proof (collect+couple under live_pose, cross-track + economy on, --stop-after couple). Both switches are default-off (absent => byte-identical). couple_cart_relative lands the couple STANDOFF on the MEASURED cart axis instead of the fixed map pose (authored couple_standoff yaw 0, but the pinned cart settles at a run-varying yaw -- coldlivefinal -1.6 deg, coupledock +19.2 deg -- so the fixed pose puts the base 8-27 deg / 25-470 mm off the real cart, a residual the fine-dock cannot null). The base navigates to standoff_from_cart(measured cart) (on-axis, base yaw = cart yaw, hitch held back standoff_offset_m), gates entry on the cart-relative cross-track + yaw, re-approaches a fresh cart-measured standoff when outside (bounded max_reapproach), and the fine-dock progress_cap replaces the blunt 30 s time cap: keep docking while the residual improves, up to progress_max_time_cap_s, failing fast at progress_patience_s on a limit cycle. PASS = couple reaches a physical latch (coupled + healthy). Named in the couple stage evidence (couple_arrival_mode) + the walkthrough caption. CPU proof: scripts/check_couple_approach.py; CPU tests: scripts/twin/tests/test_restock_couple_approach.py.",
+  "couple_cart_relative": {
+    "standoff_offset_m": 0.40,
+    "capture_cross_m": 0.11,
+    "capture_yaw_rad": 0.10,
+    "max_reapproach": 3,
+    "arrival_xy_tol": 0.05,
+    "arrival_yaw_tol": 0.08
+  },
+    "_fine_dock_note": "Same crosstrack servo as PR 232, PLUS the progress-based cap (default off): progress_max_time_cap_s is the hard sim-clock bound, progress_patience_s fails a limit cycle fast, time_cap_s stays the legacy bound when progress_cap is absent. The fine_dock block below carries NO comment key (FineDockConfig rejects unknown keys).",
+  "fine_dock": {
+    "creep_speed": 0.035,
+    "creep_yaw_rate": 0.25,
+    "gain_lin": 2.0,
+    "gain_yaw": 1.0,
+    "hitch_tol_m": 0.02,
+    "yaw_tol_rad": 0.069813,
+    "settle_speed": 0.01,
+    "time_cap_s": 30.0,
+    "approach_mode": "crosstrack",
+    "ct_gain_approach": 2.0,
+    "ct_gain_cross": 8.0,
+    "ct_gain_yaw": 1.5,
+    "ct_align_hold_m": 3.0,
+    "ct_min_creep": 0.015,
+    "progress_cap": true,
+    "progress_patience_s": 12.0,
+    "progress_min_improve_m": 0.002,
+    "progress_max_time_cap_s": 120.0
+  }
+}

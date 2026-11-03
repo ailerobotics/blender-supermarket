@@ -1,0 +1,27 @@
+{
+  "_comment": "sim-robust-release-detach-ack-v1 bounded collect-only GPU proof. Purpose: prove the collect RELEASE detach-ack (controller release phase -> RosPayloadSync scene-apply + authoritative object_attachment AttachObject detach) acknowledges reliably with the live_pose transfer mode AND the arm masked-depth feed enabled -- the exact coldlive (2026-10-23) config that aborted at COLLECT with MANIP_HOST_FAILED reason='payload collision detachment not acknowledged' (gate=scene_apply_unsuccessful). Root cause: move_group (launched respawn=True) hit its intermittent SIGABRT double-free (exit -6, run-266/268) AFTER the grasp attach and respawned BEFORE the detach; the respawned move_group's fresh planning scene never held restock_carried_unit, so the detach's ApplyPlanningScene REMOVE returned success=False and the single-shot handshake aborted the whole collect. coldhonest (arm feed off) never crashed, so its REMOVE succeeded first try. Fix (ros_payload.detach_scene_gate, default ON): an unsuccessful REMOVE on a DETACH means there is NOTHING to remove (the scene is already post-detach), and object_attachment survives the crash in a SEPARATE container, so the detach PROCEEDS to that authoritative action, which decides the ack -- while an ATTACH, or RESTOCK_DETACH_SCENE_TOLERANT=0, still fails fast by name. The integration lane (twin-robot-in-store-boot-v1) schedules this through flock /tmp/aile-gpu.lock, never forced, never touching whispr.",
+
+  "_how_to_run": "scripts/run_mobile_restock.py ... --stop-after collect  (ends after the collect/pick stage, so the live_pose TRANSFER is never reached -- this proof is only the collect release-detach). Set the live_pose + carry via ENV in BOTH processes (RESTOCK_TRANSFER_MODE / RESTOCK_TRANSFER_CARRY are read by Isaac AND the host, never config keys). Merge the masked_depth / mast_depth / stop_after keys below into the mission runtime-config. No code change is needed to activate the fix: ros_payload defaults RESTOCK_DETACH_SCENE_TOLERANT on.",
+
+  "stop_after": "collect",
+  "_stop_after_note": "mission.bounded_stages: end right after collect. Labelled in mission.json + the burned-in walkthrough caption as a bounded bench run.",
+
+  "masked_depth": {"enabled": true},
+  "_masked_depth_note": "The arm (wrist, camera_0) masked-depth feed ON -- the coldlive setting. This is the second of the two coldlive differences vs coldhonest (the first is RESTOCK_TRANSFER_MODE=live_pose). Keep the full masked_depth block from the coldlive runtime-config (runtime_env/python/frame_id/domain/max_restarts/...); only `enabled: true` matters for this proof.",
+
+  "mast_depth": {"enabled": false},
+  "_mast_depth_note": "Mast (body, camera_1) nvblox feed OFF, as in coldlive (one arm feed fits the 12 GB card beside whispr; a second full-res feed does not -- gpu_budget).",
+
+  "_suggested_env": {
+    "RESTOCK_TRANSFER_MODE": "live_pose",
+    "RESTOCK_TRANSFER_CARRY": "wrist_guard,weld",
+    "RESTOCK_COLLECT_GROUND_TRUTH": "1  (match coldlive: reach the collect place+release deterministically; the honest-collect grasp-press is a separate lane -- sim-robust-collect-arrival-v1)",
+    "RESTOCK_DETACH_SCENE_TOLERANT": "UNSET (default ON = the fix). Set to 0 ONLY to reproduce the pre-fix coldlive abort (scene_apply_unsuccessful -> payload collision detachment not acknowledged)."
+  },
+
+  "_expected_pass": "The collect reports `action=collect status=succeeded transport_ready=True`, then `SIM_ATTACH_FALLBACK carry collision ENABLED ... release`, and the release-detach is ACKNOWLEDGED -- i.e. NO `MANIP_HOST_FAILED op=collect ... reason='payload collision detachment not acknowledged'` and NO `arm command heartbeat lost`. If move_group DID crash+respawn this run, host-stack.log shows a `move_group ... process has died [exit code -6]` + a `PAYLOAD_SYNC_DIAG gate=scene_apply_unsuccessful_detach_tolerated` line, after which the object_attachment node logs `Object detached successfully` and the mission proceeds past collect. If move_group did NOT crash this run, the detach is byte-identical to coldhonest (a clean scene REMOVE + object_attachment detach, no tolerated-gate line). Either way collect ends cleanly (--stop-after collect).",
+
+  "_expected_fail_prefix_reproduction": "With RESTOCK_DETACH_SCENE_TOLERANT=0 AND a move_group crash+respawn mid-collect, the run reproduces the coldlive abort: `PAYLOAD_SYNC_DIAG gate=scene_apply_unsuccessful` -> `MANIP_HOST_FAILED op=collect phase='failed' reason='payload collision detachment not acknowledged'`. (The crash is stochastic, so a reproduction may need more than one attempt.)",
+
+  "_cpu_proof": "scripts/twin/tests/test_restock_detach_ack.py (pure detach_scene_gate/attach_acked + the scene->attach->ack re-enactment, acked under both configs, genuinely-missing fails by name) and test_restock_manipulation.py::test_release_detach_acked_transitions_to_retreat / ::test_release_detach_not_acknowledged_fails_by_name (the mission-visible controller contract)."
+}

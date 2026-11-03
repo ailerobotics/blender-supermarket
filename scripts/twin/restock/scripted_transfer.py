@@ -41,7 +41,7 @@ import numpy as np
 
 from ..restock_manipulation.ground_truth_collect import SOURCE as GT_SOURCE
 from ..restock_manipulation.transfer_carry import (DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN,
-                                                   in_clear_region, wrist_flip_seed)
+                                                   clear_branch, in_clear_region, wrist_flip_seed)
 from ..restock_manipulation.transfer_mode import SCRIPTED, transfer_mode
 from .mission import Result
 
@@ -206,10 +206,27 @@ class TransferPlan:
     grasp_offset: np.ndarray        # 4x4 TCP -> carton (rigid while carried)
     ik_complete: bool               # every keyframe solved => a joint path exists (arm can follow)
     choice: dict = field(default_factory=dict)
+    wrist_guard: tuple | None = None   # (wrist1_cap, wrist2_min) when the carry wrist guard is on, else None
 
     @property
     def duration(self):
         return sum(k.duration for k in self.keyframes) + 2 * DWELL_S
+
+    def wrist1_within_cap(self):
+        """With the guard on, True iff every MOVING joint waypoint (keyframe paths; the parked 'stow' pose is
+        excluded) commands ur_wrist_1 at or below the clear cap -- i.e. no sent sample sweeps the arm through
+        the ur_wrist_1-vs-ur_forearm stop. Guard off => True. The companion to in_clear_region that tests the
+        RAW commanded angle, so a far-2*pi branch that wraps 'clear' does not pass."""
+        if self.wrist_guard is None:
+            return True
+        cap = self.wrist_guard[0]
+        for k in self.keyframes:
+            if k.name == 'stow':
+                continue
+            for q in k.path:
+                if float(q[3]) > cap + 1e-6:
+                    return False
+        return True
 
 
 DWELL_S = 0.6        # grasp / release dwell (s)
@@ -330,7 +347,8 @@ def plan_transfer(ik, q_start, carton_base, goal_centre_base, goal_yaw_base, *, 
     else:                                       # no joint path: the carton follows the task-space tool path
         for k in keyframes:
             k.q, k.path = None, []
-    return TransferPlan(keyframes, q_start, carton_base, goal, offset, ik_complete, choice)
+    return TransferPlan(keyframes, q_start, carton_base, goal, offset, ik_complete, choice,
+                        wrist_guard=guard)
 
 
 def _line_path(ik, T_from, T_to, q_from, *, adaptive=False):
@@ -378,6 +396,14 @@ def _solve_seeded(ik, T, prev, *, guard=None):
     for seed in seeds:
         q, perr, rerr = ik.solve(T, seed)
         ok = perr <= _POS_TOL and rerr <= _ROT_TOL
+        # With the guard on, COMMAND the clear wrist_1 branch: an IK solve can unwrap wrist_1 onto a far
+        # 2*pi branch (raw ~+4.1) that reads as clear under in_clear_region's wrap but makes the joint sweep
+        # up through the ~0.69 self-collision stop (the execretest executor-pick jam). clear_branch shifts it
+        # to the equivalent in-limit branch <= cap -- identical tool pose, swept path below the stop.
+        if guard is not None and ok:
+            cb = clear_branch(q, guard[0], ik.lower, ik.upper)
+            if cb is not None:
+                q = np.array(cb)
         # Prefer a reachable, IN-CLEAR-REGION branch; among equals, the one closest to the previous config.
         clear_penalty = (guard is not None and ok and not in_clear_region(q, guard[0], guard[1]))
         key = (not ok, clear_penalty, float(np.linalg.norm(q - prev)) if ok else perr + rerr)
@@ -636,6 +662,7 @@ class ScriptedTransfer:
         self.arm_mode = ARM_EXECUTOR if arm is not None else ARM_STILL
         self.fallback_reason = None
         self.plan = None
+        self._guard_fail = None
         self.t = 0.0
         self.state = 'idle'
         self.phase = None
@@ -670,6 +697,16 @@ class ScriptedTransfer:
         self.offset = self.plan.grasp_offset
         if self.arm_mode == ARM_EXECUTOR and not self.plan.ik_complete:
             self._fallback('no IK solution for every keyframe')
+        # Clear-branch wrist guard: if the guard is on but a moving keyframe still commands ur_wrist_1 past
+        # the carry cap (no clear-branch solution exists for the pick), the executor MUST NOT stream it --
+        # that sweeps the arm through the ur_wrist_1-vs-ur_forearm stop (the execretest jam). Fail fast with
+        # a named reason on the first step (arm held), never a silent still degrade.
+        self._guard_fail = None
+        if (self.arm_mode == ARM_EXECUTOR and self.plan.ik_complete
+                and not self.plan.wrist1_within_cap()):
+            self._guard_fail = ('the carry wrist guard found no clear-branch solution: ur_wrist_1 exceeds the '
+                                '%.2f rad cap on a moving keyframe (would sweep the ur_wrist_1-vs-ur_forearm '
+                                'stop)' % self.plan.wrist_guard[0])
         self._segments = self._timeline()
         self._exec = dict(index=0, step='send', clock=0.0, budget=0.0)
         print('SCRIPTED_TRANSFER begin arm=%s ik_complete=%s duration=%.1fs choice=%s carton_world=%s '
@@ -791,6 +828,10 @@ class ScriptedTransfer:
         """One tick of the event-driven executor timeline; None when the caller should continue in still
         mode (fallback) or report the generic running status."""
         d, ex = self.driver, self._exec
+        if self._guard_fail is not None:
+            reason, self._guard_fail = self._guard_fail, None
+            self._fail_executor('pick', 'infeasible', reason)
+            return None
         ex['clock'] += dt
         if ex['index'] >= len(SEGMENTS):
             self._finish()

@@ -252,7 +252,7 @@ class ArmDepthSubprocessBridge:
                  runtime_env, python='python3', frame_id='restock_camera_arm', domain=88,
                  invalid=INVALID_DEPTH, socket_path=None, idle_timeout_s=1800.0, topics=None,
                  max_restarts=20, restart_connect_timeout_s=20.0,
-                 send_buffer_bytes=8 << 20, send_timeout_s=10.0):
+                 send_buffer_bytes=8 << 20, send_timeout_s=10.0, publish_interval_s=None):
         from pxr import UsdGeom, Gf
         self.camera, self.sensors = camera, sensors
         self.rig_prefixes = tuple(rig_prefixes)
@@ -262,6 +262,11 @@ class ArmDepthSubprocessBridge:
         self.target_location = None
         self._id_cache = (None, frozenset())
         self._bbox = None
+        # sim-robust-arm-feed-economy-v1: optional SIM-clock publish-rate cap (None => every tick =>
+        # byte-identical). Enforced in publish(): skip (never ship a stale buffer) until the interval
+        # has elapsed; it is kept below the nvblox depth window at parse so the ESDF never lapses.
+        self._publish_interval_s = None if publish_interval_s is None else float(publish_interval_s)
+        self._last_publish_s = None
 
         # Optical child prim (ROS +Z forward / +Y down) under the USD camera (-Z / +Y up),
         # handed to the existing TF tree.
@@ -344,6 +349,14 @@ class ArmDepthSubprocessBridge:
                   f'published={getattr(self, "_published", 0)} now={now} rendering_time={rt}', flush=True)
         if no_depth or no_seg:
             return None
+        # sim-robust-arm-feed-economy-v1 SIM-clock rate cap: skip the rig-mask + camera_info + socket
+        # send + nvblox integration until the configured interval of SIM time has elapsed. We never
+        # ship a stale buffer -- a skipped tick publishes nothing (the TF for the optical frame still
+        # streams every physics tick via native_transport, so nvblox keeps the pose), and the interval
+        # is bounded below the nvblox depth window so the ESDF stays fresh. None => publish every tick.
+        from .masked_depth_economy import due_to_publish
+        if not due_to_publish(now, self._last_publish_s, self._publish_interval_s):
+            return None
         # Stamp with the caller's host clock (world.current_time, the SAME source the /tf relay uses),
         # NOT the frame's rendering_time: tf2 never extrapolates forward, so the depth stamp must
         # equal the /tf stamp for that tick or nvblox silently drops the frame (no ESDF integration).
@@ -369,6 +382,7 @@ class ArmDepthSubprocessBridge:
         # the station ack stream. On a clean close() the supervisor refuses (mission is tearing down).
         self._supervisor.send(header, np.ascontiguousarray(masked, dtype='<f4').tobytes())
         self._published = getattr(self, '_published', 0) + 1
+        self._last_publish_s = stamp_s
         return stamp_s
 
     def close(self):
@@ -442,8 +456,13 @@ def build_mast_depth_bridge(*, stage, assembly, design, settings,
     prefixes = settings.get('rig_prefixes') or tuple(dict.fromkeys(
         [_rig_root(assembly.paths['articulation']), _rig_root(cart_root), gripper_path]))
     bridge_cls = _bridge_cls or ArmDepthSubprocessBridge
+    # sim-robust-arm-feed-economy-v1: the mast (camera_1) reuses the masked_depth economy block for its
+    # SIM-clock publish-rate cap (raw dict here, since isaac_bundle merges the raw config blocks).
+    from .masked_depth_economy import from_block as _economy_from_block
+    economy = _economy_from_block(settings.get('economy'))
     return bridge_cls(
         camera=camera, camera_path=camera_path, stage=stage, transport=assembly.transport,
         sensors=None, rig_prefixes=prefixes, frame_id=frame_id,
         domain=int(settings.get('domain', 88)), runtime_env=settings['runtime_env'],
-        python=settings.get('python', 'python3'), topics=mast_sim_topics())
+        python=settings.get('python', 'python3'), topics=mast_sim_topics(),
+        publish_interval_s=economy.publish_interval_s)

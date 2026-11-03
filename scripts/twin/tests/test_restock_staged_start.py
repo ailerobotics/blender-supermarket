@@ -219,7 +219,7 @@ def _ros_runtime(offset, collision_world):
     def capture(t, *a):
         return _sensors(t, feedback.collision_time)
     graph = NS(start=lambda *a: None, publish_sensors=published.append, poll=lambda *a: None,
-               close=lambda: None)
+               close=lambda **k: None)
     rt = RosManipulationRuntime(graph, capture, prepare_station=lambda *a: None,
                                 station=station, feedback=feedback)
     rt.start('transfer', dict(job_id='j', source_bin='back', shelf_id='shelf'))

@@ -24,6 +24,16 @@ and ``stamp_summary`` records it in mission.json.
     (audit transfer-preplace-wrist-branch-jam). The controller fails a live_pose transfer FAST with a named
     reason at observe unless ``RESTOCK_TRANSFER_CARRY=wrist_guard`` is also set, rather than silently
     running the jam-prone planner (which dies as a generic 'arm command heartbeat lost' e-stop).
+  * PLACE-onto-surface (armcam2, 2026-10-22): the PREPLACE stays a collision-aware cuMotion move to the
+    standoff ABOVE the bay, but the final PLACE descent and the empty-handed RETREAT route as the
+    collision-OFF straight-line seeded insert (``begin(straight_line=True)``) -- the SAME path the cart-cage
+    place uses. The place lowers the carton ONTO the bay top, so the place config necessarily brings the
+    gripper tines to within ~13 mm of the surface (CPU-measured: surface_plate_6 at +0.0126 m vs the
+    preplace standoff at +0.143 m), inside cuMotion's ESDF collision margin; a collision-aware plan to it is
+    rejected ('Invalid c-space position: world collision detected'). Touching the surface is the intent,
+    exactly like the contact descent at the pick. No new switch key -- automatic within live_pose, so the
+    scripted/still path and every non-live_pose run stay byte-identical. See the TransferController ``step``
+    comment and data/.../livepose-pick-collision for the reconstruction.
 """
 from __future__ import annotations
 

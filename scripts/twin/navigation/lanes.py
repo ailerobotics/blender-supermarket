@@ -40,7 +40,8 @@ class TowLane:
                  goal_articulation=None, goal_tol_xy=0.30, goal_tol_yaw=0.26,
                  start_tol_xy=0.25, start_tol_yaw=0.15, start_tol_cart_yaw=0.20,
                  waypoint_tol=1.25, route_through_waypoints=False,
-                 rigid_hitch_lock=False, lock_curvature_threshold=0.30, lock_engage_tol=0.12):
+                 rigid_hitch_lock=False, lock_curvature_threshold=0.30, lock_engage_tol=0.12,
+                 lead_in_max_m=0.0, lead_in_fine_xy=0.10, lead_in_lookahead=0.8):
         if not isinstance(name, str) or not name:
             raise ValueError('tow lane needs a non-empty name')
         self.name = name
@@ -79,6 +80,27 @@ class TowLane:
         self.rigid_hitch_lock = bool(rigid_hitch_lock)
         self.lock_curvature_threshold = float(lock_curvature_threshold)
         self.lock_engage_tol = float(lock_engage_tol)
+        # fm-sim-robust-outbound (option c): a bounded COUPLED merge lead-in. When the measured base
+        # seats OFF the fine centreline (the improved crosstrack couple lands the base a little
+        # north/east of the authored dock start, run coldlivewin: +0.5 m north of y=15.25) but within
+        # `lead_in_max_m` of the lane, `build_lead_in` synthesises a short forward pure-pursuit merge
+        # from the seat ONTO the authored centreline and splices the authored tail to the goal, so the
+        # follower acquires from WHEREVER the couple actually left it instead of deadlocking at the
+        # fixed authored start. A hand-authored lead-in-to-the-exact-start is NOT viable here: a
+        # forward-only (no-reverse) train 0.5 m lateral off a flat lane free-plans an absurd ~12 m loop
+        # (the discrete min-1.5 m-radius planner cannot cheaply dip sideways), whereas the closed-loop
+        # lateral merge is the kinematically sane bridge -- see data/sim-robust-outbound-lane-start-v1.
+        # `lead_in_fine_xy` is the convergence radius onto the centreline; `lead_in_lookahead` the
+        # pure-pursuit lookahead. `lead_in_max_m` 0 (default) => OFF => never synthesised, byte-identical.
+        if not (isinstance(lead_in_max_m, (int, float)) and math.isfinite(lead_in_max_m)
+                and lead_in_max_m >= 0.0):
+            raise ValueError(f'tow lane {name!r} lead_in_max_m must be a finite distance >= 0')
+        for _nm, _v in (('lead_in_fine_xy', lead_in_fine_xy), ('lead_in_lookahead', lead_in_lookahead)):
+            if not (isinstance(_v, (int, float)) and math.isfinite(_v) and _v > 0.0):
+                raise ValueError(f'tow lane {name!r} {_nm} must be a positive, finite distance')
+        self.lead_in_max_m = float(lead_in_max_m)
+        self.lead_in_fine_xy = float(lead_in_fine_xy)
+        self.lead_in_lookahead = float(lead_in_lookahead)
         # Set by expand(): the validated train trajectory (an articulated.Route).
         self.route = None
 
@@ -124,6 +146,61 @@ class TowLane:
         if cart_yaw is not None:
             ok = ok and abs(wrap(cart_yaw - self.start_cart_yaw)) <= self.start_tol_cart_yaw
         return ok
+
+    def build_lead_in(self, state, world, spec, dynamic=(), extra_margin=0.02):
+        """Synthesise a bounded coupled merge from the measured seat ONTO this lane's centreline.
+
+        Used by the follower ONLY when the normal acquire fails (the couple seated the base off the
+        fine centreline) AND `lead_in_max_m` > 0. Rolls the coupled train forward with a pure-pursuit
+        law toward the authored centreline (curvature capped at the physical min-turn-radius), swept-
+        validating every step against the LIVE map+obstacle cloud via `world.valid`. On convergence
+        (within `lead_in_fine_xy` xy, `start_tol_cart_yaw` cart, `start_tol_yaw` heading of an authored
+        state) it snaps onto that authored state and splices the authored tail to the goal, returning
+        the spliced ``Route`` whose FIRST state is the measured seat -- so the follower tracks a
+        pre-validated path from exactly where it is. Returns None when the seat is beyond the band the
+        lane can absorb (no convergence within `lead_in_max_m`, or a step breaches the envelope); the
+        caller then names the failure and fails fast instead of churning. The junction snap moves the
+        tracked reference by <= `lead_in_fine_xy` (a closed-loop reference, never an actuator command;
+        the follower's pure-pursuit law and the live braking gate own the real motion)."""
+        from .articulated import advance, Route
+        if self.lead_in_max_m <= 0.0 or self.route is None or not self.route.states:
+            return None
+        st = self.route.states
+        kappa_max = 1.0 / 1.5
+        step = 0.08
+        cur = state
+        merge = [cur]
+        merge_curv = []
+        total = 0.0
+        conv_idx = None
+        while total < self.lead_in_max_m:
+            k = min(range(len(st)), key=lambda i: math.hypot(st[i].x - cur.x, st[i].y - cur.y))
+            if (math.hypot(st[k].x - cur.x, st[k].y - cur.y) <= self.lead_in_fine_xy
+                    and abs(wrap(st[k].cart_yaw - cur.cart_yaw)) <= self.start_tol_cart_yaw
+                    and abs(wrap(st[k].yaw - cur.yaw)) <= self.start_tol_yaw):
+                conv_idx = k
+                break
+            # a lookahead point ~lead_in_lookahead metres ahead of the nearest authored state
+            la = k
+            d = 0.0
+            while la < len(st) - 1 and d < self.lead_in_lookahead:
+                d += math.dist(st[la].pose[:2], st[la + 1].pose[:2]); la += 1
+            tgt = st[la]
+            dx, dy = tgt.x - cur.x, tgt.y - cur.y
+            ld = math.hypot(dx, dy)
+            if ld < 1e-6:
+                break
+            curv = max(-kappa_max, min(kappa_max, 2.0 * math.sin(wrap(math.atan2(dy, dx) - cur.yaw)) / ld))
+            nxt = advance(cur, step, curv, spec)
+            if not world.valid(nxt, dynamic, extra_margin):
+                return None
+            merge.append(nxt); merge_curv.append(curv); total += step; cur = nxt
+        if conv_idx is None:
+            return None
+        merge[-1] = st[conv_idx]                       # snap the reference onto the authored centreline
+        tail = list(st[conv_idx + 1:])
+        tail_curv = list(self.route.curvatures[conv_idx:conv_idx + len(tail)])
+        return Route(merge + tail, merge_curv + tail_curv, 'validated_lane_leadin')
 
     def start_state(self):
         from .articulated import TrainState
@@ -252,7 +329,8 @@ class TowLane:
         known = {'name', 'start', 'goal', 'waypoints', 'start_cart_yaw', 'goal_articulation',
                  'goal_tol_xy', 'goal_tol_yaw', 'start_tol_xy', 'start_tol_yaw',
                  'start_tol_cart_yaw', 'waypoint_tol', 'route_through_waypoints',
-                 'rigid_hitch_lock', 'lock_curvature_threshold', 'lock_engage_tol'}
+                 'rigid_hitch_lock', 'lock_curvature_threshold', 'lock_engage_tol',
+                 'lead_in_max_m', 'lead_in_fine_xy', 'lead_in_lookahead'}
         unknown = set(cfg) - known
         if unknown:
             raise ValueError(f'unknown tow lane keys: {sorted(unknown)}')
@@ -266,7 +344,8 @@ class TowLane:
                    goal_articulation=cfg.get('goal_articulation'),
                    route_through_waypoints=bool(cfg.get('route_through_waypoints', False)),
                    rigid_hitch_lock=bool(cfg.get('rigid_hitch_lock', False)),
-                   **{k: float(cfg[k]) for k in ('lock_curvature_threshold', 'lock_engage_tol')
+                   **{k: float(cfg[k]) for k in ('lock_curvature_threshold', 'lock_engage_tol',
+                                                 'lead_in_max_m', 'lead_in_fine_xy', 'lead_in_lookahead')
                       if k in cfg},
                    **{k: float(cfg[k]) for k in tol_keys if k in cfg})
 

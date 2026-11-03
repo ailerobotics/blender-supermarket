@@ -32,6 +32,64 @@ def test_restart_discards_previous_map_and_reordered_ack():
     assert state.accept(message('heartbeat',epoch=1,sequence=9,stamp=2.),2.)=='ignored'
 
 
+def test_paused_station_accrues_no_gap_and_publishes_no_stop():
+    # sim-robust-station-pause-on-transfer-v1 (StationState parity with IncorporationAckState): a station
+    # PAUSED while the base tows away to a far op must NOT fault across a long un-heartbeat-ed gap -> no stop.
+    wall=[0.]
+    state=StationState(wall_clock=lambda:wall[0])
+    state.accept(message(),1.)
+    state.acknowledge(1.1,1)
+    assert state.accept(message('pause',sequence=1,stamp=1.2),1.2)=='pause'
+    assert state.paused and state.active                       # suspended, epoch KEPT (not idle)
+    wall[0]=9000.                                              # long WALL + SIM gap (the far op)
+    snap=state.snapshot(301.2,endpoints_ready=True,process_alive=True)
+    assert snap['state']=='paused' and snap['reason']==''
+    assert snap['collision_time']==-1.                        # a paused station is never 'ready'
+    # Contrast: the same epoch left ACTIVE faults across the gap.
+    active=StationState(wall_clock=lambda:0.)
+    active.accept(message(),1.);active.acknowledge(1.1,1)
+    assert active.snapshot(301.2,endpoints_ready=True,process_alive=True)['state']=='failed'
+
+
+def test_pause_cleared_by_fresh_prepare_and_by_stop():
+    state=StationState(wall_clock=lambda:0.)
+    state.accept(message(),1.);state.accept(message('pause',sequence=1,stamp=1.2),1.2)
+    assert state.paused
+    state.accept(message(epoch=2,stamp=2.),2.)                 # fresh epoch clears the pause
+    assert not state.paused
+    state.accept(message('pause',epoch=2,sequence=1,stamp=2.1),2.1)
+    state.accept(message('stop',epoch=2,sequence=2,stamp=2.2),2.2)
+    assert not state.paused and not state.active
+
+
+def test_client_pause_sends_pause_and_frees_the_client_to_reprepare():
+    # The mission StationClient.pause() sends a 'pause' (host suspends) and goes inactive locally so the next
+    # op's begin() can re-prepare a fresh epoch (the host keeps the epoch, superseded by the fresh prepare).
+    stage=[5.0]
+    channel=Channel()
+    client=StationClient(channel,wall_clock=lambda:0.,stage_clock=lambda:stage[0],publish_lag=0.)
+    channel.reply=dict(epoch=1,stamp=5.0,state='ready',collision_time=4.9)
+    client.begin('restock_camera_source',5.0)                  # prepare + first ack (acknowledged)
+    assert client.active and client._prepared
+    stage[0]=6.0
+    client.pause()
+    assert channel.messages[-1]['action']=='pause' and channel.messages[-1]['stamp']==6.0  # fresh off the stage clock
+    assert not client.active and client._paused                # freed to re-prepare
+    client.begin('restock_camera_source',7.0)                  # the next op re-prepares cleanly (no raise)
+    assert client.active and not client._paused
+
+
+def test_client_pause_is_a_noop_before_the_epoch_is_acknowledged():
+    # An unprepared epoch has nothing to suspend; pause() must not emit a 'pause' (it would be a stray command
+    # against an epoch the host has not opened) but still frees the client so begin()/stop() re-open cleanly.
+    channel=Channel()
+    client=StationClient(channel,wall_clock=lambda:0.,stage_clock=lambda:1.0,publish_lag=0.)
+    client.epoch=1;client.active=True;client._prepared=False
+    client.pause()
+    assert not any(m['action']=='pause' for m in channel.messages)
+    assert not client.active
+
+
 @pytest.mark.parametrize('field,value',[('stamp',float('nan')),('parked',False),('epoch',True)])
 def test_bad_prepare_rejected(field,value):
     packet=message();packet[field]=value
@@ -52,13 +110,22 @@ def test_process_death_and_sim_heartbeat_fail_closed():
 def test_wall_backstop_tolerates_render_pacing_but_catches_frozen_sim():
     # The wall-clock check is only a loose backstop for a FROZEN sim clock; a render-paced tick
     # (~1 s wall) must NOT false-trip it (regression: ds-011/013 faulted the transfer warm here).
+    # sim-robust-station-heartbeat-simclock-v1: the wall leg is now the DERIVED frozen-sim backstop
+    # (0.5 sim x 50 = 25 s, floored at 15 s), so even a many-second render-paced wall gap with a frozen
+    # sim clock is tolerated until the backstop; a genuinely frozen sim is still caught once it trips.
+    from twin.restock.station import _WALL_HEARTBEAT_BACKSTOP_DERIVED_S
+    assert _WALL_HEARTBEAT_BACKSTOP_DERIVED_S == 25.0   # max(15, 0.5 x 50)
     wall=[0.]
     state=StationState(wall_clock=lambda:wall[0])
     state.accept(message(),1.)
     wall[0]=1.1
     assert state.snapshot(1.1,endpoints_ready=True,process_alive=True)['state']=='warming'
-    # A genuinely frozen sim clock (sim time not advancing) is still caught once the wall backstop trips.
+    # A render-slow-but-alive station: a 20 s wall gap at a FROZEN sim (sim time not advancing) no longer
+    # false-trips -- it sits below the 25 s derived backstop.
     wall[0]=20.
+    assert state.snapshot(1.1,endpoints_ready=True,process_alive=True)['state']=='warming'
+    # A genuinely frozen sim clock is still caught once the derived wall backstop trips.
+    wall[0]=26.
     assert state.snapshot(1.1,endpoints_ready=True,process_alive=True)['state']=='failed'
 
 

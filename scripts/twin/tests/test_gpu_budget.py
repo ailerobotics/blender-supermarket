@@ -1,4 +1,6 @@
 """CPU tests for the advisory VRAM budget gate (twin.restock.gpu_budget)."""
+import json
+import subprocess
 from pathlib import Path
 import sys
 
@@ -52,6 +54,15 @@ def test_feeds_from_config_skips_disabled_and_absent():
     assert g.feeds_from_config({'mast_depth': {'enabled': True}}) == [(1280, 720)]
 
 
+def test_feeds_from_config_applies_economy_resolution_scale():
+    # An economy resolution_scale shrinks the counted feed resolution (self-consistent with the camera).
+    cfg = {'masked_depth': {'enabled': True, 'economy': {'resolution_scale': 0.5}}}
+    assert g.feeds_from_config(cfg) == [(640, 360)]
+    # publish_interval_s alone (no scale) leaves the resolution at the default.
+    cfg2 = {'masked_depth': {'enabled': True, 'economy': {'publish_interval_s': 0.1}}}
+    assert g.feeds_from_config(cfg2) == [(1280, 720)]
+
+
 def test_feed_requires_positive_resolution():
     with pytest.raises(ValueError):
         g.feed_mib(0, 720)
@@ -62,3 +73,40 @@ def test_cli_verdict_exit_code(capsys):
     assert g._main(['--feed', '1280x720', '--feed', '1280x720']) == 1   # over budget
     out = capsys.readouterr().out
     assert 'GPU_BUDGET fits=True' in out and 'GPU_BUDGET fits=False' in out
+
+
+_SCRIPT = Path(__file__).resolve().parents[1] / 'restock' / 'gpu_budget.py'
+
+
+def test_runs_by_file_path_with_a_config(tmp_path):
+    # Invoking the module BY PATH (not ``-m``) must still work: feeds_from_config pulls in the
+    # masked_depth_economy sibling, which has no parent package in this invocation, so a naive
+    # relative import would ImportError. Run it from an unrelated cwd with a clean PYTHONPATH so
+    # the script's own sys.path repair is the only thing that can satisfy the import.
+    cfg = tmp_path / 'mission.json'
+    cfg.write_text(json.dumps({'masked_depth': {'enabled': True}}))
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), str(cfg)],
+        cwd=str(tmp_path), env={'PATH': '/usr/bin:/bin'},
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert 'GPU_BUDGET fits=True' in proc.stdout
+    assert 'num_feeds' in proc.stdout and "'num_feeds': 1" in proc.stdout
+
+
+def test_by_path_and_by_module_agree(tmp_path):
+    # The by-path repair must not change the verdict: -m and the file-path form print the same line.
+    cfg = tmp_path / 'mission.json'
+    cfg.write_text(json.dumps({'masked_depth': {'enabled': True},
+                               'mast_depth': {'enabled': True}}))
+    scripts_root = str(_SCRIPT.resolve().parents[2])
+    by_path = subprocess.run(
+        [sys.executable, str(_SCRIPT), str(cfg)],
+        cwd=str(tmp_path), env={'PATH': '/usr/bin:/bin'},
+        capture_output=True, text=True)
+    by_module = subprocess.run(
+        [sys.executable, '-m', 'twin.restock.gpu_budget', str(cfg)],
+        cwd=str(tmp_path), env={'PATH': '/usr/bin:/bin', 'PYTHONPATH': scripts_root},
+        capture_output=True, text=True)
+    assert by_path.returncode == by_module.returncode == 1, (by_path.stderr, by_module.stderr)
+    assert by_path.stdout == by_module.stdout

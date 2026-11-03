@@ -387,6 +387,14 @@ def apply_start_state(assembly, config, scenario, *, settle_steps=30, _rigid_pri
         for _ in range(int(settle_steps)):
             assembly.hold()
             assembly.world.step(render=False)
+        # The settle loops above held the arm via assembly.hold(), which LATCHES
+        # command_gate.faulted=True (hold() is otherwise a terminal e-stop and is never reset on its
+        # own). The mission that now runs MUST drive the arm (the executor/cuMotion transfer), so re-arm
+        # the gate here -- otherwise every arm command is silently dropped at ``if self.faulted`` and the
+        # arm stays frozen at the stow pose (execretest: the executor transfer faulted 1.3 rad on the
+        # reference-vs-frozen-arm divergence, misread as a clock/self-collision fault). Only the
+        # transfer-start shortcut holds the arm (couple start leaves command_gate untouched).
+        assembly.command_gate.resume()
     print(f'START_PHASE_SHORTCUT applied start_at={plan.start_at} skipped={list(plan.skipped)} '
           f'carton_pos={tuple(round(v, 4) for v in plan.carton_position)} '
           f'carton_quat_wxyz={tuple(round(v, 4) for v in plan.carton_orientation_wxyz)} '

@@ -53,6 +53,15 @@ _SENSOR_STALL_WINDOW_S = 20.
 # RuntimeAdapter(ground_truth_place_actions=('transfer',)) (transfer_ground_truth.enabled) + Mission opt-in.
 _GT_PLACE_EVIDENCE_STAGES = ('collect',)
 
+# sim-robust-cart-place-descent-v1: the collect manip phases that make up the reposition PLACE onto the
+# rollwagen deck (the arm has folded to the carry pose and is now lowering/placing/retreating/stowing).
+# During these the EXTENDED, carton-loaded arm's descent reaction transiently shoves the yaw-lock-only
+# braked base a few cm in translation (collect2: base x -4.518 -> -4.559, ~4 cm, which flipped the 0.25 s
+# windowed `parked` flag False for 3 ticks and tripped the stationary guard mid-descent). Scoped so the
+# bounded base-settle tolerance below never relaxes the strict guard outside the loaded place.
+_LOADED_PLACE_PHASES = frozenset(
+    {'transit', 'preplace', 'place', 'release', 'retreat', 'retreat_tuck', 'stow'})
+
 # vr1: bounded settle wait (sim seconds) before releasing the tow coupling at the cart parking spot.
 # Coupler.detach REFUSES a moving/stale train (any base/cart speed or yaw rate > 0.02), and the cart pin
 # engaged one tick earlier can leave a sub-second transient, so the uncouple waits for a measured
@@ -226,15 +235,15 @@ class ManipulationBridge:
             return True
         return False
 
-    def pause_station(self, simulation_time):
-        """fm399 (1): cleanly STOP the parked station at the START of the reposition drive, while the
-        base is still parked (so the 'stop' is accepted -> idle, NOT faulted). A moving base
-        invalidates the parked mapper, and the host spams emergency-stop while a parked station is
-        faulted/un-heartbeat-ed (the run-309 failure); an idle station publishes no stop. The station
-        is re-begun fresh at place_approach in the re-warm. No-op for a runtime that does not own
-        sensor I/O (byte-identical)."""
+    def pause_station(self, simulation_time, *, suspend_only=False):
+        """fm399 (1): cleanly suspend the parked station while the base is about to leave it, so the host
+        spams no emergency-stop while it cannot be heartbeat-ed (the run-309 failure). suspend_only=False
+        (default, byte-identical): STOP (-> host idle) at the mid-collect reposition drive-start; re-begun
+        fresh at place_approach. suspend_only=True (sim-robust-station-pause-on-transfer-v1): PAUSE (-> host
+        'paused', epoch kept) when a manip op completes and the mission tows AWAY to a far op; the next op
+        re-prepares fresh. No-op for a runtime that does not own sensor I/O (byte-identical)."""
         if self.owns_sensor_io and hasattr(self.controller, 'pause_station'):
-            self.controller.pause_station(simulation_time)
+            self.controller.pause_station(simulation_time, suspend_only=suspend_only)
 
 
 class RuntimeAdapter:
@@ -245,7 +254,9 @@ class RuntimeAdapter:
                  uncouple_on_return=False, wall_clock=time.monotonic, nav_stuck_wall_s=None,
                  nav_stuck_sim_s=None,
                  carry_reposition_drive=False, couple_standoff_tolerance=None,
-                 ground_truth_place_actions=(), staged_settle_s=0.0):
+                 couple_cart_relative=None,
+                 ground_truth_place_actions=(), staged_settle_s=0.0,
+                 collect_place_base_settle_m=None):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
         # Staged-start settle hold (twin.restock.staged_start; the bundle passes
         # config['staged_start_settle_s'] only when start_at is set and not collect): the warm-up of the
@@ -268,6 +279,43 @@ class RuntimeAdapter:
                                        and math.isfinite(tol[key]) and 0 < tol[key] <= cap):
                     raise ValueError(f'couple_standoff_tolerance.{key} must be in (0, {cap}]')
             self.couple_standoff_tolerance = {k: float(v) for k, v in tol.items()}
+        # sim-robust-couple-approach-v1 (opt-in, default None => byte-identical): land the couple STANDOFF
+        # against the MEASURED cart instead of the stale fixed map pose. The authored couple_standoff
+        # carries yaw 0, but the pinned cart's measured yaw varies run to run (coldlivefinal -1.6deg,
+        # coupledock +19.2deg), so the base arrives aligned to the MAP, not the CART -- an 8-27deg yaw /
+        # 25-470mm hitch residual the fine-dock creep cannot null (it lands on its cross-vs-yaw
+        # equilibrium). When set, the couple standoff leg navigates to fine_dock.standoff_from_cart(cart)
+        # (on the cart axis, base yaw = measured cart yaw, hitch held back by standoff_offset_m), and on
+        # arrival the cart-relative residual is checked tight in cross-track + yaw: inside the capture
+        # region => hand to fine-dock from an aligned pose; outside => a bounded cart-measured re-approach;
+        # exhausted => fail honestly with the residual. Requires a couple_standoff pose + DockObservation.
+        self.couple_cart_relative = None
+        if couple_cart_relative is not None:
+            cr = dict(couple_cart_relative)
+            # capture_cross_m/_yaw_rad gate ENTRY to the fine-dock (the fine-dock still closes to the
+            # latch); they are sized to admit any LEGAL standoff arrival without a spurious re-approach.
+            # The worst legal hitch cross-track is arrival_xy_tol + |hitch_x|*arrival_yaw_tol ~ 0.10 m
+            # (the fine-dock converges from it in <14 s, verified offline), so 0.11 m clears it.
+            defaults = {'standoff_offset_m': 0.40, 'capture_cross_m': 0.11, 'capture_yaw_rad': 0.10,
+                        'max_reapproach': 3, 'arrival_xy_tol': 0.05, 'arrival_yaw_tol': 0.08}
+            unknown = set(cr) - set(defaults)
+            if unknown:
+                raise ValueError(f'couple_cart_relative: unknown keys {sorted(unknown)}')
+            merged = {**defaults, **cr}
+            caps = {'standoff_offset_m': (0.05, 1.0), 'capture_cross_m': (0.0, 0.15),
+                    'capture_yaw_rad': (0.0, 0.35), 'arrival_xy_tol': (0.0, 0.15),
+                    'arrival_yaw_tol': (0.0, 0.35)}
+            for key, (lo, hi) in caps.items():
+                v = merged[key]
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) \
+                        or not lo < v <= hi:
+                    raise ValueError(f'couple_cart_relative.{key} must be in ({lo}, {hi}]')
+            mr = merged['max_reapproach']
+            if isinstance(mr, bool) or not isinstance(mr, int) or not 0 <= mr <= 10:
+                raise ValueError('couple_cart_relative.max_reapproach must be an int in [0, 10]')
+            self.couple_cart_relative = {k: (int(v) if k == 'max_reapproach' else float(v))
+                                         for k, v in merged.items()}
+        self._couple_reapproach_n = 0   # bounded cart-measured re-approaches this couple stage
         # vr1 (labelled sim workaround, default OFF): the stages whose FINAL manipulation evidence may be
         # the controller's ground-truth place check (fm461 'ground_truth_place_check', the sim-measured
         # carton pose vs the bay/deck target) instead of a camera observation. Without this the very first
@@ -289,6 +337,30 @@ class RuntimeAdapter:
         # holds => byte-identical. SIM-only safety: valid only with the arm in the verified carry; the
         # in-sim drive + no-drop validation is a GPU check (run-326). See navigation.core carry_drive.
         self.carry_reposition_drive = bool(carry_reposition_drive)
+        # sim-robust-cart-place-descent-v1 (opt-in, default off => byte-identical): the reposition collect
+        # PLACE lowers the welded carton onto the rollwagen deck with the arm extended; its descent reaction
+        # shoves the YAW-LOCK-ONLY braked base a few cm in TRANSLATION (isaac_port keeps translation free
+        # while a carton is welded, to relieve the world->base->arm->weld->carton loop). In collect2 that
+        # ~4 cm transient flipped the 0.25 s windowed `parked` flag False for 3 ticks, and the strict
+        # stationary guard (`not p.parked`) aborted the stage mid-descent with 'base moved during stationary
+        # operation' -- the carton stayed held, the arm never stowed, and every re-begin then failed
+        # 'arm_not_in_transport_timeout'. The reaction is an EXPECTED transient that re-settles, and the
+        # shove (~4 cm) is far inside the 0.25 m ground-truth place-verify xy tol, so when this is set we
+        # tolerate a BOUNDED base excursion from the place_approach anchor through the loaded place phases
+        # and let the place/release/stow sequence COMPLETE; a base pushed BEYOND the bound is a real fault
+        # with a named reason (never a silent slide). The ground-truth carton-on-deck verify stays the
+        # placement proof. None/0 => the strict guard everywhere (byte-identical). Collect-only (the
+        # transfer place has its own carry/mode handling); SIM-only (the real base brakes rigidly).
+        self.collect_place_base_settle_m = None
+        if collect_place_base_settle_m is not None:
+            v = collect_place_base_settle_m
+            if not (isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and math.isfinite(v) and 0 < v <= 0.3):
+                raise ValueError('collect_place_base_settle_m must be a finite value in (0, 0.3] m')
+            self.collect_place_base_settle_m = float(v)
+        # Base (x, y) captured at the place_approach re-park (end of rewarm); the loaded-place base-settle
+        # tolerance measures the excursion from it. None until the reposition place begins / after a re-begin.
+        self._place_base_anchor = None
         # Opt-in uncouple-at-parking-spot on return (captain 2026-10-20: "robot should uncouple at the
         # parking spot"): instead of towing the cart home coupled, the return stage tows it to a cart
         # parking spot (`cart_parking` pose, from the nav-lanes lane), brakes the cart, releases the tow
@@ -432,7 +504,20 @@ class RuntimeAdapter:
         self._collect_repositioned = False
         self._reposition_seq = []          # fm390 nav proof #2: staged drive to place_approach
         self._reposition_seq_i = 0
+        self._place_base_anchor = None     # re-armed at the place_approach re-park (sim-robust-cart-place-descent-v1)
         if action == 'couple':
+            # sim-robust-station-pause-on-transfer-v1: the collect op is COMPLETE and the base is about to tow
+            # AWAY to the far transfer op. No op heartbeats the parked collect/backstock station across the
+            # whole couple -> outbound -> park -> transfer-warm span, so without a pause its host-side liveness
+            # watchdog accrues a heartbeat gap and false-trips the global /manipulation/stop on this idle-but-
+            # ALIVE station (coldwin2: transfer sim gap 30.05 s, 0.05 s over budget -> the station recovered
+            # one tick later, proving it was alive). Apply the fm399 pause_station pattern to the between-ops
+            # nav: SUSPEND the station NOW, while still parked, so the 'pause' lands (host state 'paused', NOT
+            # faulted -> no emergency stop); the transfer warm re-prepares a FRESH epoch at the bay. No-op when
+            # no station was prepared (a start_at=couple/transfer staged start skips collect) or for a runtime
+            # without sensor I/O (byte-identical). See docs/host_timers_audit.md.
+            if hasattr(self.manip, 'pause_station'):
+                self.manip.pause_station(self.time, suspend_only=True)
             # Couple nav runs an in-order sequence of waypoints ending at the ON-AXIS standoff,
             # then the fine-dock servo inserts STRAIGHT along the cart axis to the drawbar:
             #   couple_approach (round the pinned cart, east of it) -> couple_standoff (on the cart
@@ -443,6 +528,7 @@ class RuntimeAdapter:
             self._couple_seq = (['couple_approach'] if 'couple_approach' in self.poses else [])
             self._couple_seq.append('couple_standoff' if 'couple_standoff' in self.poses else 'cart_dock')
             self._couple_seq_i = 0
+            self._couple_reapproach_n = 0   # fresh bounded re-approach budget for this couple attempt
             self._couple_nav_goal = self._couple_seq[0]
             self._start_couple_nav(self._couple_nav_goal)
             self.phase = 'navigate'
@@ -519,6 +605,50 @@ class RuntimeAdapter:
             kw['static_drive'] = True
         self._start_nav_leg(self.poses[goal_name], False, **kw)
 
+    def _fine_dock_spec(self):
+        """MobileSpec the couple geometry is expressed in: the fine-dock's own spec when present."""
+        from twin.mobile import MobileSpec
+        spec = getattr(self.fine_dock, 'spec', None)
+        return spec if spec is not None else MobileSpec()
+
+    def _start_cart_relative_standoff(self, p):
+        """Navigate the couple standoff leg to a pose on the MEASURED cart axis (not the stale map pose).
+
+        ``fine_dock.standoff_from_cart`` seats the base on the measured cart's hitch axis (base yaw =
+        cart yaw, rear hitch held ``standoff_offset_m`` back), so the fine-dock insert starts aligned
+        regardless of where the pinned cart settled. The arrival tolerance is tight in xy + yaw so the
+        cart-relative residual check passes on arrival by construction."""
+        from twin.restock.fine_dock import standoff_from_cart
+        cr = self.couple_cart_relative
+        cart = p.docking.cart
+        pose = standoff_from_cart(cart, cr['standoff_offset_m'], self._fine_dock_spec())
+        kw = {'arrival_xy_tol': cr['arrival_xy_tol'], 'arrival_yaw_tol': cr['arrival_yaw_tol']}
+        if self.couple_static_drive:
+            kw['static_drive'] = True
+        self._couple_standoff_pose = pose
+        self._start_nav_leg(pose, False, **kw)
+
+    def _couple_capture_decision(self, p):
+        """At the cart-relative standoff arrival: 'enter' | 'reapproach' | 'fail'.
+
+        The capture gate is the OFF-AXIS alignment measured against the cart -- |cross-track| and |yaw|
+        -- the pair that decides whether the fine-dock creep can converge (the along-axis hitch offset is
+        the deliberate standoff hold-back the servo creeps in, not a miss). Inside the region => enter the
+        fine-dock from an aligned pose; outside with re-approaches left => re-approach the cart-measured
+        standoff; outside with none left => fail honestly with the residual (never loosen the latch)."""
+        from twin.restock.fine_dock import cart_relative_residuals
+        cr = self.couple_cart_relative
+        hm, cross, yr = cart_relative_residuals(p.docking, self._fine_dock_spec())
+        if abs(cross) <= cr['capture_cross_m'] and abs(yr) <= cr['capture_yaw_rad']:
+            return 'enter'
+        self._couple_capture_reason = (
+            f'couple standoff outside capture after {self._couple_reapproach_n} re-approach(es): '
+            f'hitch={hm*1000:.1f}mm cross={cross*1000:.1f}mm yaw={math.degrees(yr):.2f}deg '
+            f'(capture cross<={cr["capture_cross_m"]*1000:.0f}mm yaw<={math.degrees(cr["capture_yaw_rad"]):.1f}deg)')
+        if self._couple_reapproach_n < cr['max_reapproach']:
+            return 'reapproach'
+        return 'fail'
+
     def _uncouple_return(self):
         """True when the return stage leaves the cart parked and drives home empty, instead of towing
         it home coupled: opted in via config (``uncouple_on_return``) AND a ``cart_parking`` pose is
@@ -567,6 +697,13 @@ class RuntimeAdapter:
                 parts.append('standoff tol ' + ' / '.join(
                     f'{k[:-2] if k.endswith("_m") else k[:-4]} {v:g}{" m" if k.endswith("_m") else " rad"}'
                     for k, v in sorted(tol.items())))
+            if self.couple_cart_relative is not None:
+                cr = self.couple_cart_relative
+                re = f' (+{self._couple_reapproach_n} re-approach)' if self._couple_reapproach_n else ''
+                parts.append(f'cart-relative standoff offset {cr["standoff_offset_m"]:g} m{re}')
+            fd = getattr(self.fine_dock, 'config', None)
+            if fd is not None and getattr(fd, 'progress_cap', False):
+                parts.append(f'fine-dock progress cap {fd.progress_max_time_cap_s:g} s')
             return {'couple_arrival_mode': '; '.join(parts)} if parts else {}
         if action == 'outbound' and getattr(nav, 'coupled_creep_escape', False):
             ticks = int(getattr(nav, 'creep_escapes', 0))
@@ -680,6 +817,25 @@ class RuntimeAdapter:
         self._nav_stuck_pose = None
         self._nav_stuck_reason = None
         self.nav.start(goal, coupled, **kw)
+
+    def _loaded_place_base_excursion(self, p):
+        """sim-robust-cart-place-descent-v1: the measured base xy excursion (m) from the place_approach
+        anchor IFF the loaded-place base-settle tolerance applies this tick, else None (keep the strict
+        stationary guard -- byte-identical when the key is off).
+
+        Applies only when the opt-in ``collect_place_base_settle_m`` is set AND this is the reposition
+        collect place (``_collect_repositioned``) AND the controller is in a loaded place phase AND the
+        place_approach anchor + a usable base odometry pose are both present. Any gap => None => strict."""
+        if (self.collect_place_base_settle_m is None or self.action != 'collect'
+                or not self._collect_repositioned or self._place_base_anchor is None
+                or self._last_manip_phase not in _LOADED_PLACE_PHASES):
+            return None
+        try:
+            ox, oy = float(p.odometry.pose[0]), float(p.odometry.pose[1])
+        except (AttributeError, TypeError, IndexError, ValueError):
+            return None  # no usable base pose => fall back to the strict guard
+        ax, ay = self._place_base_anchor
+        return math.hypot(ox - ax, oy - ay)
 
     def _step(self, dt):
         self.time += dt
@@ -800,16 +956,40 @@ class RuntimeAdapter:
                 # Reached a couple nav waypoint; advance to the next (ending at the standoff).
                 self._couple_seq_i += 1
                 self._couple_nav_goal = self._couple_seq[self._couple_seq_i]
-                self._start_couple_nav(self._couple_nav_goal)
+                # sim-robust-couple-approach-v1: when cart-relative couple is on, the final standoff leg
+                # targets the MEASURED cart axis (see _start_cart_relative_standoff) instead of the stale
+                # fixed map pose, so the fine-dock starts aligned to wherever the pinned cart settled.
+                if (self.couple_cart_relative is not None and self._couple_nav_goal == 'couple_standoff'
+                        and getattr(p, 'docking', None) is not None):
+                    self._start_cart_relative_standoff(p)
+                else:
+                    self._start_couple_nav(self._couple_nav_goal)
                 self.phase = 'navigate'
                 return Result('running', reason=f'couple nav advancing to {self._couple_nav_goal}')
-            if self.action == 'couple' and self.fine_dock is not None:
-                # At the on-axis standoff (or cart_dock when no standoff): insert the rear hitch
-                # STRAIGHT along the cart axis onto the measured drawbar before attach. Motion only.
-                self.fine_dock.start(self.time)
-                self._fdn = 0
-                self.phase = 'fine_dock'
-                return Result('running', reason='nav at standoff; starting fine-dock insert')
+            if self.action == 'couple':
+                # sim-robust-couple-approach-v1: cart-relative standoff arrival gate. Measure the hitch's
+                # alignment to the MEASURED cart (cross-track + yaw) and either enter the fine-dock from an
+                # aligned pose, re-approach a fresh cart-measured standoff (bounded), or fail honestly.
+                if (self.couple_cart_relative is not None and getattr(p, 'docking', None) is not None):
+                    decision = self._couple_capture_decision(p)
+                    if decision == 'reapproach':
+                        self._couple_reapproach_n += 1
+                        self._start_cart_relative_standoff(p)
+                        self.phase = 'navigate'
+                        return Result('running',
+                                      reason=f'couple standoff outside capture; re-approaching cart-measured '
+                                             f'standoff ({self._couple_reapproach_n})')
+                    if decision == 'fail':
+                        self.mobile.park()
+                        return Result('failed', reason=self._couple_capture_reason)
+                    # 'enter' => fall through to the fine-dock insert / direct attach.
+                if self.fine_dock is not None:
+                    # At the on-axis standoff (or cart_dock when no standoff): insert the rear hitch
+                    # STRAIGHT along the cart axis onto the measured drawbar before attach. Motion only.
+                    self.fine_dock.start(self.time)
+                    self._fdn = 0
+                    self.phase = 'fine_dock'
+                    return Result('running', reason='nav at standoff; starting fine-dock insert')
             self.phase = 'execute'
         if self.phase == 'scripted':
             self.mobile.hold()   # stationary manipulation: brake the base
@@ -884,6 +1064,14 @@ class RuntimeAdapter:
             # True once a fresh ESDF has integrated strictly after the new parked epoch at this pose.
             if ready:
                 self.phase = 'execute'
+                # sim-robust-cart-place-descent-v1: anchor the base pose here (parked at place_approach, a
+                # fresh collision map just incorporated) so the loaded-place base-settle tolerance measures
+                # the descent-reaction shove from the pose the place was planned against. Only used when
+                # collect_place_base_settle_m is set; captured unconditionally (cheap, no behaviour change).
+                try:
+                    self._place_base_anchor = (float(p.odometry.pose[0]), float(p.odometry.pose[1]))
+                except (AttributeError, TypeError, IndexError, ValueError):
+                    self._place_base_anchor = None
                 return Result('running', reason='re-warm done; fresh collision map; resuming place from place_approach')
             if self._warmn >= _REWARM_MAX_TICKS:
                 return Result('failed', reason='no fresh collision map re-incorporated at place_approach')
@@ -935,14 +1123,41 @@ class RuntimeAdapter:
             # tick WAITS (the base is held, nothing is commanded) instead of failing the whole stage -- a
             # failure here is unrecoverable once the coupling is released (see _cart_left_parked).
             return self._step_return_uncouple(p, dt)
+        place_shove_tolerated = False
         if not p.parked:
-            return Result('failed', reason='base moved during stationary operation')
+            tol = self._loaded_place_base_excursion(p)
+            if tol is None:
+                return Result('failed', reason='base moved during stationary operation')
+            if tol > self.collect_place_base_settle_m:
+                # sim-robust-cart-place-descent-v1: a real runaway (not the expected transient descent
+                # reaction) -- fail with a NAMED reason, never a silent slide onto the wrong deck point.
+                return Result('failed', reason=(
+                    'base pushed %.3f m beyond the %.3f m collect-place settle tolerance by the loaded '
+                    'place-descent reaction' % (tol, self.collect_place_base_settle_m)))
+            # Expected, bounded place-descent reaction: the base is braked and re-settles; keep placing so
+            # the place/release/stow sequence completes. The ground-truth carton-on-deck verify is the
+            # placement proof, and the excursion bound above still fails a genuine runaway.
+            place_shove_tolerated = True
         if self.action == 'park':
             if not p.coupled:
                 return Result('failed', reason='cart lost before transfer')
             return Result('succeeded', self._evidence(p, stationary=True))
         if self.action in ('collect', 'transfer'):
-            r = self.manip.step(dt, p)
+            # sim-robust-place-descent-plan-v1: when the loaded-place base-settle tolerance above tolerated
+            # the transient descent-reaction shove, present the station/host parking gate the SAME
+            # effective-parked verdict the mission guard just reached. The sensor-owning host runtime feeds
+            # this packet's `parked` straight into the station channel's own parking gate
+            # (native_channel.StationClient.tick: `if not parked: raise 'station lost measured parking'`)
+            # AND the capture's motion.parked() via set_parked. Without this the station gate raises on the
+            # IDENTICAL ~cm transient the mission guard just tolerated -- collect3 died exactly here: the
+            # place descent reached z=0.608 and was descending (gripper gap 31->15 mm) when a 25.7 mm base
+            # shove flipped packet.parked False, the station gate raised, the step returned failed/'host',
+            # the arm never placed/released/stowed, and every re-begin then failed arm_not_in_transport.
+            # Scoped exactly to the already-tolerated loaded collect place (place_shove_tolerated is only
+            # set inside the collect-scoped excursion tolerance); unset/off => p passes through unchanged
+            # (byte-identical), so the scripted/still transfer path is untouched.
+            manip_packet = replace(p, parked=True) if place_shove_tolerated else p
+            r = self.manip.step(dt, manip_packet)
             _profile_mark(self.port, 'manip')   # sim_speed TICK_PROFILE split; no-op unless profiling
             self._last_manip_phase = getattr(r, 'phase', None)  # feeds next tick's port.gate()
             # fm390: the arm has folded to the carry pose and is HOLDING in TRANSIT -- drive the base to

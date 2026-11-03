@@ -1,0 +1,20 @@
+{
+  "_comment": "sim-robust-outbound-stall-recovery-v1: MERGE into the mission runtime-config (navigation block). All keys default-off (absent => byte-identical). coupled_progress_recovery turns the no-progress ESCALATE->FAULT ladder (coupled_progress_escape, sim-robust-outbound-drive-v1) into a BOUNDED break-away RECOVERY: once the coupled base has been pinned below coupled_progress_min_m for coupled_progress_escape_s SIM seconds (the coldlivefull outbound stall -- NAV_STEP cycled measured_turn_radius<->tracking with parked=True, the base jittering in place with ~0 NET displacement, i.e. a failed coupled re-break-away from rest), the controller commands a CONTINUOUS pulsed committed-forward surge (coupled_breakaway_speed_mps, square-waved every coupled_breakaway_pulse_s between the high level and a relaxed 0.4x to rock the contact) for up to coupled_breakaway_attempts windows of coupled_breakaway_window_s SIM seconds each. The surge bypasses the measured_turn_radius COAST that returns v=0 and re-rests the stuck tow (the stop<->forward thrash that starved sustained drive effort), while the obstacle/coverage/map safety gates are UNCHANGED (a real obstacle still stops the surge). The instant net displacement reaches coupled_progress_min_m the break-away SUCCEEDED and normal tracking resumes; if every attempt elapses with no net progress, it FAULTS 'coupled_no_progress' terminal (same name + StageRetry contract as the escape-only path), fast on the SIM clock -- not the 120 s WALL nav-stuck. NOTE: reverse towing is clamped off for a coupled train (mobile.wheel_targets: coupled v>=0), so the recovery is a forward surge/relax PULSE, not a reverse back-off. All brakes are already force-released every drive tick in MobileController.command, so no stale park/cart brake can hold the base. CPU proof (real ArticulatedController, stall + break-away + exhaustion + continuous-forward): scripts/twin/tests/test_articulated_navigation.py (test_coupled_breakaway_*); factory wiring: test_navigation_factory.py.",
+  "navigation": {
+    "coupled_progress_escape": true,
+    "coupled_progress_min_m": 0.05,
+    "coupled_progress_escape_s": 3.0,
+    "coupled_progress_fault_s": 8.0,
+
+    "coupled_progress_recovery": true,
+    "coupled_breakaway_speed_mps": 0.18,
+    "coupled_breakaway_window_s": 2.0,
+    "coupled_breakaway_pulse_s": 0.5,
+    "coupled_breakaway_attempts": 3,
+
+    "coupled_creep_escape": true,
+    "coupled_creep_floor_mps": 0.03
+  },
+  "_gpu_proof_note": "Bounded couple+outbound proof for the integration lane: a coupled start (run_mobile_restock.py --start-at couple --stop-after outbound with --start-staging recorded_bay_park, OR the full coldlivefull config if the couple staging is unavailable) with this fragment merged and RESTOCK_NAV_PLAN_DIAG=1 enabled so the NAV_BREAKAWAY enter/next/success/exhausted lines and the commanded-vs-measured velocity are captured. Expected PASS: the outbound either breaks free (NAV_BREAKAWAY success -> outbound coupled=True) or, if the physics deficit is total, fails fast with a NAMED 'coupled_no_progress' after the bounded attempts (no 120 s WALL hang). GPU rules: one run at a time via flock /tmp/aile-gpu.lock, never forced; never touch the whispr service. Keep coupled_progress_recovery OFF to reproduce a pre-fix escape-only run.",
+  "_drive_fidelity_note": "The recovery makes the stall RARER (re-break-away retries) and FAIL-FAST-BY-NAME when it cannot; it does not change the underlying drive physics. The uncoupled drive-fidelity lever is navigation.mobile_spec.caster_lift_m (fm434 bench); the coupled traction asset levers (caster_lift_m 0.03, wheel_drive max_force 200) are sim-robust-coupled-traction-v1 (PR 207). If a GPU proof still shows a total coupled traction deficit, that asset lane owns raising the drive force / caster lift further."
+}

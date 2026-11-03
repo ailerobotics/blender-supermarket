@@ -38,6 +38,11 @@ STOW = np.array([0., -2.5, 1.7, -0.7, -1.5708, 0.])
 BASE = st.pose_T((-2.079, 15.254, 0.50), st.yaw_quat(math.radians(-0.5)))
 CARTON = st.pose_T((-3.169, 15.265, 1.0125), st.yaw_quat(-math.pi / 2))
 TARGET = (-2.0, 16.424, 0.73)
+# execretest (2026-10-22): the SAME bay park, but the live carton sits ~3.8 cm closer on the cart upper shelf
+# (nav-trace carton = world (-3.1313, 15.2513, 1.0124), yaw -90.14 deg). That small reach change makes the
+# scripted ArmIK unwrap the pick's ur_wrist_1 onto a far +2*pi branch (raw ~+4.1) that in_clear_region's wrap
+# reads as "clear" -- the executor-pick jam this module's clear-branch fix addresses. Same URDF as run-356.
+EXECRETEST_CARTON = st.pose_T((-3.1313, 15.2513, 1.0124), st.yaw_quat(math.radians(-90.14)))
 DIMS = (0.6, 0.4, 0.16)
 SCRIPTED_ENV = {'RESTOCK_TRANSFER_MODE': 'scripted'}
 
@@ -307,6 +312,72 @@ def test_wrist_guard_puts_the_pick_on_the_clear_branch_without_moving_the_tcp(ik
     for k in guarded.keyframes:
         assert np.allclose(k.tcp, by_name[k.name].tcp, atol=1e-6)
     assert guarded.choice == unguarded.choice                        # same near-face / reach / extract
+
+
+def _execretest_plan(ik, wrist_guard=True):
+    base_inv = np.linalg.inv(BASE)
+    goal = (base_inv @ np.array([TARGET[0], TARGET[1], TARGET[2] + DIMS[2] / 2 + 0.002, 1.0]))[:3]
+    return st.plan_transfer(ik, STOW, base_inv @ EXECRETEST_CARTON, goal, math.radians(0.5), dims=DIMS,
+                            wrist_guard=wrist_guard)
+
+
+def test_clear_branch_reexpresses_the_far_wrist1_branch_that_wrap_reads_as_clear():
+    # The wrap blind spot, in isolation: a config whose RAW ur_wrist_1 is +4.12 (a far +2*pi branch) wraps to
+    # -2.16, so in_clear_region reads it as clear even though a joint below the ~0.69 stop must sweep UP
+    # through the stop to reach +4.12. clear_branch re-expresses it to the equivalent in-limit branch at or
+    # below the cap (identical orientation, no sweep through the stop), and returns None when the cap is
+    # unreachable within the joint limits.
+    from twin.restock_manipulation.transfer_carry import clear_branch
+    cap, lower, upper = DEFAULT_WRIST1_CAP, [-2 * math.pi] * 6, [2 * math.pi] * 6
+    far = [0.29, -2.91, 2.01, 4.122, 1.05, 1.76]
+    assert in_clear_region(far, cap, DEFAULT_WRIST2_MIN)             # wrap says "clear" -- the blind spot
+    reexpressed = clear_branch(far, cap, lower, upper)
+    assert reexpressed is not None and reexpressed[3] <= cap + 1e-9   # commanded raw wrist_1 now below the cap
+    assert math.isclose(reexpressed[3], 4.122 - 2 * math.pi, abs_tol=1e-9)
+    # an already-clear raw angle is returned unchanged; wrist_2/3 are never shifted
+    assert clear_branch([0, -2.5, 1.7, -0.70, -1.5708, 0.0], cap, lower, upper)[3] == -0.70
+    # no in-limit turn can satisfy an impossibly low cap => None (let the host report a named failure)
+    assert clear_branch(far, -6.0, [-2 * math.pi] * 6, [2 * math.pi] * 6) is None
+
+
+def test_execretest_pick_commands_wrist1_below_the_self_collision_stop(ik):
+    # The brief's repro: plan the execretest pick from the transport (STOW) pose and assert every COMMANDED
+    # waypoint keeps ur_wrist_1 at or below the clear cap. Before the clear-branch fix the guarded pick
+    # endpoints passed in_clear_region (wrap) yet the host streamed raw wrist_1 ramping to ~+4.57, jamming the
+    # arm on the ur_wrist_1-vs-ur_forearm stop at ~0.69 (TRAJ_HOST_FAULT 1.31 rad). The raw-angle check below
+    # is what the wrapped predicate misses.
+    plan = _execretest_plan(ik, wrist_guard=True)
+    assert plan.ik_complete and plan.wrist_guard == (DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN)
+    assert plan.wrist1_within_cap()
+    for _name, names in st.SEGMENTS:
+        pts = st.segment_points(plan.keyframes, names)
+        for _t, q, _v in pts:
+            assert float(q[3]) <= DEFAULT_WRIST1_CAP + 1e-6, f'commanded wrist_1 {q[3]:.3f} sweeps the stop'
+    # the fix only re-expresses the arm's wrist branch: the carried tool path (and thus the still-mode carton
+    # path) is identical to the unguarded plan, so no still/scripted run regresses.
+    unguarded = {k.name: k for k in _execretest_plan(ik, wrist_guard=False).keyframes}
+    for k in plan.keyframes:
+        assert np.allclose(k.tcp, unguarded[k.name].tcp, atol=1e-3)
+    assert plan.choice == _execretest_plan(ik, wrist_guard=False).choice
+
+
+def test_executor_fails_fast_with_a_named_reason_when_no_clear_branch_exists(ik, monkeypatch):
+    # When no clear-branch solution exists for a moving keyframe (here forced by stubbing clear_branch so the
+    # pick keeps its far colliding branch), the executor must NOT stream the self-colliding trajectory: it
+    # fails fast with a named reason and holds the arm (keep-alive), never the silent still degrade that
+    # starves the arm-command heartbeat.
+    monkeypatch.setattr(st, 'clear_branch', lambda *a, **k: None)
+    driver = FakeDriver(ik)
+    driver.c = EXECRETEST_CARTON.copy()                       # the geometry that unwraps wrist_1 onto the far branch
+    arm = FakeExecutor(driver, ik)
+    runner = _runner(ik, driver, arm=arm)
+    runner.begin()
+    assert not runner.plan.wrist1_within_cap()                # the forced plan is self-colliding
+    r = runner.step(1 / 30, _packet(1))
+    assert r.status == 'failed'
+    assert 'clear-branch' in r.reason and 'ur_wrist_1' in r.reason
+    assert runner.arm_mode == st.ARM_EXECUTOR and arm.holds   # arm held, not degraded to still
+    assert not arm.sent                                       # never streamed the self-colliding goal
 
 
 def _selfcollision_min_gap_fn():

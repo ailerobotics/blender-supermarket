@@ -100,8 +100,41 @@ SIM_MAX_GRIP_DISTANCE = .020
 # gripper_force_limit raised, yet the plugin never welded, while the isolated kinematic-carrier harness
 # welds at 0 mm). It is the same joint the plugin would make, created only on a MEASURED near-zero seal
 # gap + flush pad with suction on, and released on suction off -- never a fabricated hold.
-SIM_ATTACH_CONTACT_MM = 0.5
+# The weld forms when a fresh probe shows a flush pad within SIM_ATTACH_CONTACT_MM of a hit body. The
+# original 0.5 mm gate was right AT the natural endpoint of the cuMotion contact descent (the pad
+# settles ~0.5 mm off the carton surface), so whether a weld formed depended on sub-mm pose/probe jitter
+# crossing exactly 0.5 mm: run collectsrc welded at a measured 0.50 mm, but collect1 measured 0.56 mm on
+# the tick it would have welded -- just over the line -- and only welded a few ticks later at 0.48 mm by
+# jitter (firstmate sim-robust-weld-attach-v1). A tolerant few-mm gate welds reliably at the descent
+# endpoint, square-on, every time instead of on a coin-flip. The ceiling is principled: REAL_MAX_GRIP_
+# DISTANCE (5 mm) is the real cup's physical seal reach, so a sim weld within 3 mm is a contact the real
+# cup would also seal -- not a fabricated hold. Env-overridable (RESTOCK_SIM_ATTACH_CONTACT_MM), clamped
+# to (0, REAL_MAX_GRIP_DISTANCE*1000] mm; set it back to 0.5 to reproduce a pre-fix run. The tilt gate
+# (SIM_ATTACH_FLUSH_DEG) is UNCHANGED -- a tolerant gap must still be square-on.
+_SIM_ATTACH_CONTACT_MM_DEFAULT = 3.0
+try:
+    SIM_ATTACH_CONTACT_MM = max(0.05, min(REAL_MAX_GRIP_DISTANCE * 1000.0,
+                                          float(os.environ.get('RESTOCK_SIM_ATTACH_CONTACT_MM',
+                                                               _SIM_ATTACH_CONTACT_MM_DEFAULT))))
+except (TypeError, ValueError):
+    SIM_ATTACH_CONTACT_MM = _SIM_ATTACH_CONTACT_MM_DEFAULT
 SIM_ATTACH_FLUSH_DEG = 2.0
+
+
+def _contact_weld_ready(gap_mm, pad_vs_surface_deg, hits, *, contact_mm=None, flush_deg=None):
+    """Pure gate (CPU-testable, like _release_held_on_open): should a SIM_ATTACH_FALLBACK weld form this
+    tick? True iff a FRESH probe shows a flush pad -- tilt <= flush_deg -- within contact_mm of at least
+    one hit body. All three of a finite gap, a finite tilt and a hit body are required; a None/NaN/empty
+    probe (no raycast return, geometry error) is never ready. The caller (sim_attach_contact_ready) owns
+    the plugin status (!= Open) and already-held checks and the actual PhysX weld; this is only the
+    measured-contact predicate, so the gap/tilt tolerance can be replayed without Isaac."""
+    contact_mm = SIM_ATTACH_CONTACT_MM if contact_mm is None else contact_mm
+    flush_deg = SIM_ATTACH_FLUSH_DEG if flush_deg is None else flush_deg
+    if gap_mm is None or pad_vs_surface_deg is None or not hits:
+        return False
+    if not (math.isfinite(gap_mm) and math.isfinite(pad_vs_surface_deg)):
+        return False
+    return gap_mm <= contact_mm and pad_vs_surface_deg <= flush_deg
 # fm395 (B): a formed fallback weld must survive a TRANSIENT Open status flicker (the gripper command is
 # applied on a different NativePanelContact instance than IsaacPort ticks, so this instance sees the
 # plugin status with a cross-instance lag, and the plugin status itself flickers). Release a HELD weld
@@ -358,9 +391,8 @@ class NativePanelContact:
         info = self.probe()
         gap, pvs = info.get('min_gap_mm'), info.get('pad_vs_surface_deg')
         hits = [h[0] for h in (info.get('raycast') or []) if h and h[0]]
-        if (gap is None or gap > SIM_ATTACH_CONTACT_MM or pvs is None
-                or pvs > SIM_ATTACH_FLUSH_DEG or not hits):
-            if self._fb_n % 30 == 1 or (gap is not None and gap <= SIM_ATTACH_CONTACT_MM):
+        if not _contact_weld_ready(gap, pvs, hits):
+            if self._fb_n % 30 == 1 or (gap is not None and math.isfinite(gap) and gap <= SIM_ATTACH_CONTACT_MM):
                 print('SIM_ATTACH_DIAG skip gap_mm=%s pad_vs_surface_deg=%s hits=%s'
                       % (gap, pvs, hits), flush=True)
             return False

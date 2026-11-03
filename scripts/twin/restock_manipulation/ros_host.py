@@ -7,10 +7,31 @@ by integration. No hardware launch or simulator boot occurs here.
 import argparse
 from dataclasses import asdict
 import json
+import os
 import sys
 
 from .ros_adapter import (RosMotionPort, RosTransferBridge, require_sim_domain,
                           sensors_from_json,planner_velocity_scale)
+
+# Sim-clock pre-weld grasp-press budget (SIM seconds), now EFFECTIVE BY DEFAULT (firstmate
+# sim-robust-weld-attach-v1). A press that never seals a weld keeps the host alive (trajectory_host
+# still publishes /joint_states, so the pace-aware arm-command heartbeat does NOT trip -- it fires only
+# on host SILENCE), so without this bound a non-forming grasp loops until the COARSE 120 s phase_timeout,
+# burning the GPU wall cap with no named cause. This bounds the WHOLE unconfirmed press on the SIM clock
+# (render-pacing-safe) and fails fast with a NAMED reason. The default is generous: the slowest observed
+# LEGITIMATE grasp press (ground-truth collect, run collect1) was ~13.4 sim s, so 45 s is >3x that yet a
+# third of the 120 s phase_timeout. Env RESTOCK_GRASP_PRESS_TIMEOUT_S overrides the default; the config
+# key 'grasp_press_timeout_s' overrides both (set it to 0 to disable and reproduce a pre-fix run). The
+# controller re-clamps to <= phase_timeout.
+_DEFAULT_GRASP_PRESS_TIMEOUT_S = 45.0
+
+
+def _default_grasp_press_timeout_s():
+    try:
+        v = float(os.environ.get('RESTOCK_GRASP_PRESS_TIMEOUT_S', _DEFAULT_GRASP_PRESS_TIMEOUT_S))
+    except (TypeError, ValueError):
+        return _DEFAULT_GRASP_PRESS_TIMEOUT_S
+    return v if (v == v and v >= 0) else _DEFAULT_GRASP_PRESS_TIMEOUT_S
 
 
 def contract_smoke():
@@ -159,6 +180,33 @@ def main():
         cage_mouth_standoff=float(config.get('cage_mouth_standoff', 0.55)),
         cage_insert_gap=float(config.get('cage_insert_gap', 0.03)),
         cage_preplace_shape=config.get('cage_preplace_shape'),
+        # sim-robust-cart-place-goal-v1: the NON-cage COLLECT place-on-cart counterparts. A CPU-validated
+        # UPRIGHT clear-region preplace joint shape (driven like cage_preplace_shape so the deck preplace
+        # avoids the un-holdable deep fold / self-colliding branch), and the wrist-guard extended to the
+        # collect place/retreat pose-IK (clear-branch re-seed). Both absent/False => byte-identical.
+        collect_place_preplace_shape=config.get('collect_place_preplace_shape'),
+        collect_place_wrist_guard=bool(config.get('collect_place_wrist_guard', False)),
+        # sim-robust-collect-place-straightline-v1 (collect4): route the NON-cage collect deck PLACE
+        # descent + empty RETREAT collision-off straight-line (begin(straight_line=True), the cart-cage /
+        # live_pose place mechanism). The held carton is a cuMotion attached_object (34-sphere cuboid), and
+        # the set-down fold brings it within the attached-object self-collision margin, so a collision-aware
+        # plan to the place config is rejected ('self collision detected') even though the bare arm + wrist
+        # guard are clear. The preplace standoff stays collision-aware. Absent/False => byte-identical.
+        collect_place_straight_line=bool(config.get('collect_place_straight_line', False)),
+        # sim-robust-transfer-preplace-reach-v1 (coldwin6): steer the live_pose TRANSFER PREPLACE's
+        # wrist-guarded KDL IK to the holdable upright clear branch and reject a clear-but-deep (un-reachable)
+        # shoulder fold (coldwin6 accepted ur_shoulder_lift -4.003 and froze at -3.65). bool / mapping
+        # {max_droop, upright_seed}; absent/False => the plain wrist-guard (byte-identical). See
+        # transfer_carry.resolve_reach_guard.
+        transfer_preplace_reach_guard=config.get('transfer_preplace_reach_guard'),
+        # sim-robust-transfer-settle-oscillation-v1 (coldwin12): extend the clear-wrist-region guard to the
+        # live_pose TRANSFER PICK (approach + contact), which the carry wrist_guard does not cover. The pick
+        # intermittently IK'd the ur_wrist_2-vs-ur_forearm self-colliding family and the contact descent
+        # limit-cycled 0.169 rad / ~1.6 rad/s for the whole 30 s settle window (PR239 envelope failed it);
+        # coldwin11 took the clear family and settled instantly. On => the pick approach pose goal carries the
+        # clear-region joint constraints and the contact straight-line IK is wrist-guarded. Absent/False =>
+        # byte-identical. See controller._pick_wrist_guard.
+        transfer_pick_wrist_guard=bool(config.get('transfer_pick_wrist_guard', False)),
         # fm390: drive the base in front of the rollwagen mouth between the carry fold and the place
         # (lift->tuck->TRANSIT->[base nav]->preplace), instead of the arm-only cage insert. Absent =>
         # byte-identical. Mutually exclusive in practice with cart_cage_place (base nav replaces it).
@@ -167,10 +215,18 @@ def main():
         # advances to carry only if the measured carton rose by >= this from the grasp-confirm baseline, so
         # the confirm reads physics, never the (arm-occluded) source camera. Absent => inert (byte-identical).
         grasp_track_m=config.get('grasp_track_m'),
-        # Sim-clock pre-weld press budget (SIM seconds): fail the honest collect fast with a NAMED reason
-        # if the grasp press never seals, before the opaque 90 s WALL arm-command heartbeat watchdog
-        # (runs 321/327). Absent/0 => off => byte-identical. Clamped to <= phase_timeout in the controller.
-        grasp_press_timeout_s=float(config.get('grasp_press_timeout_s', 0.0)),
+        # Sim-clock pre-weld press budget (SIM seconds): fail the collect fast with a NAMED reason if the
+        # grasp press never seals, before the opaque 90 s WALL arm-command heartbeat watchdog (runs
+        # 321/327). Now EFFECTIVE BY DEFAULT (sim-robust-weld-attach-v1): absent config => the
+        # _default_grasp_press_timeout_s backstop (45 s, env RESTOCK_GRASP_PRESS_TIMEOUT_S); the config
+        # key still overrides, and setting it to 0 disables (byte-identical pre-fix). Clamped to <=
+        # phase_timeout in the controller.
+        grasp_press_timeout_s=float(config.get('grasp_press_timeout_s', _default_grasp_press_timeout_s())),
+        # sim-robust-cart-place-descent-v1: SIM-clock release-detach budget (SIM seconds). After the place
+        # descent, fail fast with a NAMED reason if the SIM_ATTACH weld / suction does not let go within
+        # this long of the gripper-open command, instead of carrying the carton back up on retreat/stow or
+        # stalling to the coarse phase_timeout. Absent/0 => off (rely on phase_timeout, byte-identical).
+        release_detach_timeout_s=float(config.get('release_detach_timeout_s', 0.0)),
         # fm449 (run-332 cold collect): gate the observe->reach on a clean synchronized source frame + decoded
         # label at park (the Isaac-side verdict rides Sensors.collect_source_clean). Absent/False => the gate
         # never arms => byte-identical. No injected provider on the host path; the gate reads the packet field.
@@ -182,6 +238,10 @@ def main():
         # under the transfer_ground_truth block; default off. Does NOT bypass the station/masked-depth pump.
         ground_truth_pick=bool(config.get('transfer_ground_truth', {}).get('ground_truth_pick', False))
                           if isinstance(config.get('transfer_ground_truth'), dict) else False,
+        # sim-robust-esdf-boot-gate-v1: SIM-clock boot grace (seconds) for the first valid nvblox ESDF
+        # incorporation ack; names a never-acknowledged ESDF at boot before the first arm motion, instead
+        # of the opaque ~40 s collision_dt invariant trip (meshuris1). Absent/0 => off => byte-identical.
+        esdf_boot_ack_grace_s=float(config.get('esdf_boot_ack_grace_s', 0.0)),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # collect-gt: the ground-truth collect switch is the shared RESTOCK_COLLECT_GROUND_TRUTH env (inherited from
@@ -239,16 +299,35 @@ def main():
         'carry_lift_shape': controller.carry_lift_shape,
         'carry_wrist2_min': controller.carry_wrist2_min,
         'grasp_track_m': controller.grasp_track_m,   # fm410: lift-probe carton-tracking confirm threshold (m)
+        # sim-robust-cart-place-goal-v1: log the EFFECTIVE non-cage collect place goal guards so a console
+        # grep proves they activated in the host that consumes them (host-vs-runtime-config-split trap).
+        'collect_place_preplace_shape': controller.collect_place_preplace_shape,
+        'collect_place_wrist_guard': controller.collect_place_wrist_guard,
+        # sim-robust-collect-place-straightline-v1: collect deck place/retreat routed collision-off (False = off)
+        'collect_place_straight_line': controller.collect_place_straight_line,
+        # sim-robust-transfer-preplace-reach-v1: effective live_pose transfer preplace reach guard (None = off)
+        'transfer_preplace_reach_guard': controller.transfer_preplace_reach_guard,
+        # sim-robust-transfer-settle-oscillation-v1: effective live_pose transfer PICK wrist guard (False = off)
+        'transfer_pick_wrist_guard': controller.transfer_pick_wrist_guard,
+        # sim-robust-cart-place-descent-v1: effective SIM-clock release-detach budget (0 = off)
+        'release_detach_timeout_s': controller.release_detach_timeout_s,
         'reposition_before_place': controller.reposition_before_place,
         'transfer_mode': controller.transfer_mode,   # env RESTOCK_TRANSFER_MODE (None = off)
         'transfer_carry': sorted(controller.transfer_carry),   # env RESTOCK_TRANSFER_CARRY ([] = off)
         'sim_cart_place_policy': _policy is not None and bool(config.get('sim_cart_place_policy')),
         'base_collision_object': bool(config.get('base_collision_object', False)),
         'world_obstacles': [s['id'] for s in config.get('world_obstacles', [])],
+        # sim-robust-esdf-boot-gate-v1: boot ESDF-ack grace (sim s); 0.0 => gate off (byte-identical).
+        'esdf_boot_ack_grace_s': controller.esdf_boot_ack_grace_s,
     }), flush=True)
     try:
         rclpy.spin(node)
     finally:
+        # sim-robust-transfer-start-estop-v1: motion.stop() here publishes the global /manipulation/stop
+        # (emergency_stop) on process exit. The Isaac side latches that bare Bool, so a host restart would
+        # surface to a later op as a bare 'host emergency stop'. Name the publication so host-stack.log
+        # always carries the trigger (PR 231 named only the in-op controller/port fault paths).
+        print('HOST_EXIT_ESTOP_PUBLISH reason=%r' % 'motion host process exiting', flush=True)
         motion.stop()
         payload.close()
         node.destroy_node()
