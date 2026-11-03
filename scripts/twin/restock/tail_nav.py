@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import math
 import os
+import sys
+import time
 from types import SimpleNamespace as NS
 
 import numpy as np
@@ -162,34 +164,136 @@ def robot_boxes(x, y, yaw):
 
 
 class BoxRaycaster:
-    """``raycast_closest`` (the PhysX scene-query call ``IsaacRangeSensor`` makes) over AABBs."""
+    """``raycast_closest`` (the PhysX scene-query call ``IsaacRangeSensor`` makes) over AABBs.
+
+    The slab intersection below is unchanged; the only addition is a per-origin candidate cull so a
+    horizontal beam of length ``rmax`` tests the handful of boxes it could actually reach rather than the
+    whole store map (~900 boxes). A box survives the cull iff its z-span straddles the ray height AND its
+    nearest xy point is within ``rmax`` -- both are the SAME conditions a real hit must satisfy (see
+    ``_candidates``), so the cull is an exact superset and the returned hit is bit-identical to the full
+    scan. The lidar reuses one origin (x, y, z) across all 180 bearings at a height, so the cull is
+    memoised per origin and cleared whenever the dynamic boxes change (``set_dynamic``)."""
 
     def __init__(self, static):
-        self.static = np.array([b[:6] for b in static], float)
+        arr = np.array([b[:6] for b in static], float) if static else np.empty((0, 6), float)
+        self.static_lo, self.static_hi = arr[:, :3].copy(), arr[:, 3:].copy()
         self.static_paths = [b[6] for b in static]
         self.set_dynamic([])
 
     def set_dynamic(self, boxes):
-        self.boxes = (np.vstack([self.static, np.array([b[:6] for b in boxes], float)])
-                      if boxes else self.static)
-        self.paths = self.static_paths + [b[6] for b in boxes]
+        if boxes:
+            d = np.array([b[:6] for b in boxes], float)
+            self.lo = np.vstack([self.static_lo, d[:, :3]])
+            self.hi = np.vstack([self.static_hi, d[:, 3:]])
+            self.paths = self.static_paths + [b[6] for b in boxes]
+        else:
+            self.lo, self.hi, self.paths = self.static_lo, self.static_hi, self.static_paths
+        self._cull = {}
+        self._read_cache = {}
+
+    def prime_read(self, x, y, yaw, heights, beams, rmax):
+        """Precompute every ``(height, bearing)`` closest-hit a ``IsaacRangeSensor.read`` from this pose
+        will request, in a handful of batched numpy ops instead of ``beams * heights`` per-beam calls, and
+        memoise them keyed exactly as ``read`` queries (same ``yaw - pi + i * 2pi/beams`` bearings). It is a
+        pure speed cache: ``raycast_closest`` falls back to the identical per-beam path on any key it does
+        not find, so a drift in the sensor's bearing formula only slows the cache, never changes a result."""
+        inc = 2 * math.pi / beams
+        dirs = [(math.cos(yaw - math.pi + i * inc), math.sin(yaw - math.pi + i * inc)) for i in range(beams)]
+        # Batch only the non-axis-aligned bearings (both components clear of zero): for them the slab
+        # bounds are a plain min/max of the division endpoints -- the bit-identical fast path of
+        # raycast_closest. The handful of exactly-axis-aligned bearings are simply not cached, so
+        # raycast_closest serves them through its parallel-ray branch (identical result, rare).
+        dirs = [d for d in dirs if (d[0] > 1e-12 or d[0] < -1e-12) and (d[1] > 1e-12 or d[1] < -1e-12)]
+        if not dirs:
+            return
+        D = np.array(dirs, float)                                  # (beams, 2)
+        rows = np.arange(len(dirs))
+        invx, invy = D[:, 0][:, None], D[:, 1][:, None]            # (beams, 1), divide (not reciprocal)
+        for z in heights:
+            lo_o, hi_o, _inside, idx = self._candidates(x, y, z, rmax)
+            if len(idx) == 0:
+                miss = {'hit': False}
+                for dx, dy in dirs:
+                    self._read_cache[(x, y, z, dx, dy, rmax)] = miss
+                continue
+            # Per-axis slab bounds as 2-D (beams, M) blocks -- same divisions as the 3-D form, but without
+            # the (beams, M, 2) temporaries or the axis-2 reduction. tmin/tmax are the across-axis
+            # max-of-mins / min-of-maxes, exactly as raycast_closest computes them.
+            tx1 = lo_o[:, 0][None, :] / invx
+            tx2 = hi_o[:, 0][None, :] / invx
+            ty1 = lo_o[:, 1][None, :] / invy
+            ty2 = hi_o[:, 1][None, :] / invy
+            tmin = np.maximum(np.maximum(np.minimum(tx1, tx2), np.minimum(ty1, ty2)), 0.0)
+            tmax = np.minimum(np.minimum(np.maximum(tx1, tx2), np.maximum(ty1, ty2)), rmax)
+            cand = np.where(tmin <= tmax, tmin, np.inf)
+            j = np.argmin(cand, axis=1)                             # closest box per bearing
+            best = cand[rows, j]
+            for b, (dx, dy) in enumerate(dirs):
+                if np.isinf(best[b]):
+                    self._read_cache[(x, y, z, dx, dy, rmax)] = {'hit': False}
+                else:
+                    p = self.paths[idx[j[b]]]
+                    self._read_cache[(x, y, z, dx, dy, rmax)] = {
+                        'hit': True, 'distance': float(best[b]), 'collision': p, 'rigidBody': p}
+
+    def _candidates(self, ox, oy, oz, rmax):
+        """The candidate boxes for an origin, plus the slab terms that depend only on the origin (not the
+        beam direction) so the 180 bearings cast from here reuse them. Because every candidate straddles
+        the ray height ``oz`` (dz=0 for a horizontal ray), the z slab never constrains the hit, so only the
+        x/y slabs are kept -- the result is identical to the full 3-D test on all boxes."""
+        key = (ox, oy, oz, rmax)
+        c = self._cull.get(key)
+        if c is None:
+            lo, hi, n = self.lo, self.hi, len(self.lo)
+            zero = np.zeros(n)
+            dx = np.maximum.reduce([lo[:, 0] - ox, zero, ox - hi[:, 0]])   # xy distance to the box AABB
+            dy = np.maximum.reduce([lo[:, 1] - oy, zero, oy - hi[:, 1]])
+            mask = ((lo[:, 2] <= oz) & (oz <= hi[:, 2])               # ray height inside the box z-span
+                    & (dx * dx + dy * dy <= rmax * rmax + 1e-9))      # nearest xy point within reach
+            idx = np.nonzero(mask)[0]
+            o_xy = np.array([ox, oy])
+            lo_o = lo[idx, :2] - o_xy          # box-min relative to the origin (direction-independent)
+            hi_o = hi[idx, :2] - o_xy
+            inside = (lo[idx, :2] <= o_xy) & (o_xy <= hi[idx, :2])
+            c = (lo_o, hi_o, inside, idx)
+            self._cull[key] = c
+        return c
 
     def raycast_closest(self, origin, direction, rmax):
-        b = self.boxes
-        o, d = np.asarray(origin, float), np.asarray(direction, float)
+        cached = self._read_cache.get((origin[0], origin[1], origin[2], direction[0], direction[1], rmax))
+        if cached is not None:
+            return cached
+        lo_o, hi_o, inside, idx = self._candidates(origin[0], origin[1], origin[2], rmax)
+        if len(idx) == 0:
+            return {'hit': False}
+        dx, dy = direction[0], direction[1]
+        if dx > 1e-12 or dx < -1e-12:
+            if dy > 1e-12 or dy < -1e-12:
+                # Fast path: neither component is parallel, so the slab bounds are just min/max of the
+                # two division endpoints (``par`` all-False collapses the np.where branches away). This is
+                # the bit-identical result of the general path for a non-axis-aligned beam.
+                t1, t2 = lo_o / (dx, dy), hi_o / (dx, dy)
+                tlo, thi = np.minimum(t1, t2), np.maximum(t1, t2)
+                tmin, tmax = np.maximum(tlo.max(axis=1), 0.0), np.minimum(thi.min(axis=1), rmax)
+                ok = tmin <= tmax
+                if not ok.any():
+                    return {'hit': False}
+                j = np.where(ok)[0][np.argmin(tmin[ok])]
+                path = self.paths[idx[j]]
+                return {'hit': True, 'distance': float(tmin[j]), 'collision': path, 'rigidBody': path}
+        d = np.array((dx, dy), float)
         par = np.abs(d) <= 1e-12
         dd = np.where(par, 1.0, d)
-        t1, t2 = (b[:, :3] - o) / dd, (b[:, 3:] - o) / dd
-        inside = (b[:, :3] <= o) & (o <= b[:, 3:])
+        t1, t2 = lo_o / dd, hi_o / dd
         tlo = np.where(par, np.where(inside, -np.inf, np.inf), np.minimum(t1, t2))
         thi = np.where(par, np.where(inside, np.inf, -np.inf), np.maximum(t1, t2))
         tmin, tmax = np.maximum(tlo.max(axis=1), 0.0), np.minimum(thi.min(axis=1), rmax)
         ok = tmin <= tmax
         if not ok.any():
             return {'hit': False}
-        idx = np.where(ok)[0][np.argmin(tmin[ok])]
-        return {'hit': True, 'distance': float(tmin[idx]), 'collision': self.paths[idx],
-                'rigidBody': self.paths[idx]}
+        j = np.where(ok)[0][np.argmin(tmin[ok])]
+        path = self.paths[idx[j]]
+        return {'hit': True, 'distance': float(tmin[j]), 'collision': path, 'rigidBody': path}
 
 
 def return_legs(config, *, home=None, backaway='config'):
@@ -201,7 +305,7 @@ def return_legs(config, *, home=None, backaway='config'):
 
 def simulate_home_leg(config, scenario, environment, *, start=None, home=None, backaway='config',
                       camera_config=None, lidar_yaw_fix=None, max_s=300.0, dt=1 / 60, scan_every=6,
-                      beams=180):
+                      beams=180, heartbeat_s=3.0):
     """Drive the uncoupled legs ``start`` (default: cart_parking) -> [backaway] -> ``home`` with the real
     controller, one ``nav.start`` per leg exactly as the adapter sequences them (each leg must latch
     ``arrived_stopped``). ``max_s`` bounds the WHOLE drive (the return stage budget).
@@ -246,13 +350,25 @@ def simulate_home_leg(config, scenario, environment, *, start=None, home=None, b
     leg = 0
     nav.start(legs[leg], False)
     out = {'lidar_yaw_fix': fix, 'legs': [list(g) for g in legs], 'home': list(legs[-1])}
+    cart_b = cart_boxes(*cart)                      # the parked cart is fixed: its boxes never change
+    wall0 = last_beat = time.perf_counter()
+    if heartbeat_s:
+        print(f'[tail_nav] home leg (lidar_yaw_fix={fix}) start -> {len(legs)} goal(s), '
+              f'budget {max_s:.0f}s sim', file=sys.stderr, flush=True)
     for i in range(int(max_s / dt)):
         t += dt
         x, y, yaw = state['pose']
         odo = Odometry((x, y, yaw), t, v, w, position_uncertainty=0.05)
         if obs is None or i % scan_every == 0:
-            query.set_dynamic(cart_boxes(*cart) + robot_boxes(x, y, yaw))
+            query.set_dynamic(cart_b + robot_boxes(x, y, yaw))
+            lx, ly, lyaw = sensor.get_pose()      # the exact pose read() casts from
+            query.prime_read(lx, ly, lyaw, sensor.heights, sensor.beams, sensor.range_max)
             obs = nav_observation(sensor.read(t), odo, coupled=False, arm_transport=True)
+        if heartbeat_s and (now_wall := time.perf_counter()) - last_beat >= heartbeat_s:
+            last_beat = now_wall
+            print(f'[tail_nav] home leg lidar_yaw_fix={fix} leg {leg + 1}/{len(legs)} '
+                  f'sim t={t:.1f}/{max_s:.0f}s pose=({x:.2f},{y:.2f}) '
+                  f'wall={now_wall - wall0:.1f}s', file=sys.stderr, flush=True)
         r = nav.step(dt, odo, obs, now=t)
         reasons[r.reason] = reasons.get(r.reason, 0) + 1
         if r.reason == 'blocked_no_route' and near_goal is None:

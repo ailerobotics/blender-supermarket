@@ -12,10 +12,13 @@ import copy
 import io
 import json
 import math
+import random
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -399,3 +402,137 @@ class CartBoxesYaw(unittest.TestCase):
         r = simulate_home_leg(FIXTURE['config'], FIXTURE['scenario'], FIXTURE['environment'],
                               camera_config=FIXTURE['camera_config'], start=parking, max_s=5.0)
         self.assertIn('status', r)                                                # the leg ran; cart_boxes did not refuse
+
+
+def _ref_free(grid, p, radius, dynamic=()):
+    """The ORIGINAL ``GridMap.free`` body (full obstacle scan), the oracle the vectorised cull must match."""
+    x, y = p[:2]
+    a, b, c, d = grid.bounds
+    if not a + radius < x < c - radius or not b + radius < y < d - radius:
+        return False
+    for xmin, ymin, xmax, ymax in grid.obstacles:
+        if math.hypot(max(xmin - x, 0, x - xmax), max(ymin - y, 0, y - ymax)) <= radius:
+            return False
+    return all(math.hypot(x - q[0], y - q[1]) > radius for q in dynamic)
+
+
+def _ref_raycast(lo, hi, paths, origin, direction, rmax):
+    """The ORIGINAL ``BoxRaycaster.raycast_closest`` body (full 3-D scan of every box), the oracle the
+    culled + batched implementation must match bit for bit."""
+    o, d = np.asarray(origin, float), np.asarray(direction, float)
+    par = np.abs(d) <= 1e-12
+    dd = np.where(par, 1.0, d)
+    t1, t2 = (lo - o) / dd, (hi - o) / dd
+    inside = (lo <= o) & (o <= hi)
+    tlo = np.where(par, np.where(inside, -np.inf, np.inf), np.minimum(t1, t2))
+    thi = np.where(par, np.where(inside, np.inf, -np.inf), np.maximum(t1, t2))
+    tmin, tmax = np.maximum(tlo.max(axis=1), 0.0), np.minimum(thi.min(axis=1), rmax)
+    ok = tmin <= tmax
+    if not ok.any():
+        return {'hit': False}
+    i = np.where(ok)[0][np.argmin(tmin[ok])]
+    return {'hit': True, 'distance': float(tmin[i]), 'collision': paths[i], 'rigidBody': paths[i]}
+
+
+class TailCheckSpeedupEquivalence(unittest.TestCase):
+    """sim-mission-tail-check-speed-v1: the tail gate was sped up ~17x (100 s -> ~6 s) by culling/batching
+    the geometry primitives, NOT by weakening the check. These regressions pin the optimisations to the
+    exact pre-speedup result -- ``GridMap.free`` and ``BoxRaycaster`` must stay bit-identical to the
+    original full scans, and the batched ``prime_read`` must leave ``simulate_home_leg`` byte-identical for
+    BOTH the old axis-aligned parking and the PR 271 south-headed (pi/2) parking."""
+
+    def test_gridmap_free_bit_identical_to_full_scan(self):
+        from twin.navigation.core import GridMap
+        rng = random.Random(20260203)
+        mism = 0
+        for _ in range(120):
+            obs = []
+            for _ in range(rng.randint(0, 40)):
+                x0, y0 = rng.uniform(-10, 10), rng.uniform(-10, 10)
+                obs.append((x0, y0, x0 + rng.uniform(.01, 5), y0 + rng.uniform(.01, 5)))
+            g = GridMap((-12, -12, 12, 12), obs, resolution=rng.choice([0.1, 0.2, 0.5]))
+            for _ in range(250):
+                p = (rng.uniform(-12, 12), rng.uniform(-12, 12))
+                r = rng.choice([1e-4, .05, .2, .34, .5, 1., 2.])
+                dyn = tuple((rng.uniform(-12, 12), rng.uniform(-12, 12)) for _ in range(rng.randint(0, 3)))
+                mism += g.free(p, r, dyn) != _ref_free(g, p, r, dyn)
+        # boundary-exact points (a disk edge grazing an obstacle corner) must not drift either
+        for _ in range(4000):
+            x0, y0 = rng.uniform(-5, 5), rng.uniform(-5, 5)
+            w, h = rng.uniform(.1, 4), rng.uniform(.1, 4)
+            g = GridMap((-20, -20, 20, 20), [(x0, y0, x0 + w, y0 + h)])
+            r = rng.choice([.2, .34, .5])
+            for px in (x0 - r, x0 - r - 1e-12, x0 - r + 1e-12, x0 + w + r, x0 + w, x0):
+                for py in (y0, y0 + h / 2, y0 - r, y0 + h + r):
+                    mism += g.free((px, py), r) != _ref_free(g, (px, py), r)
+        self.assertEqual(mism, 0)
+
+    def test_boxraycaster_bit_identical_to_full_scan(self):
+        from twin.restock.tail_nav import BoxRaycaster
+        rng = random.Random(7)
+        mism = 0
+        for _ in range(250):
+            boxes = []
+            for k in range(rng.randint(0, 60)):
+                x0, y0, z0 = rng.uniform(-10, 10), rng.uniform(-10, 10), rng.uniform(-.5, 2)
+                boxes.append((x0, y0, z0, x0 + rng.uniform(.05, 3), y0 + rng.uniform(.05, 3),
+                              z0 + rng.uniform(.05, 2), f'/b{k}'))
+            rc = BoxRaycaster(boxes)
+            lo = np.array([b[:3] for b in boxes]) if boxes else np.empty((0, 3))
+            hi = np.array([b[3:6] for b in boxes]) if boxes else np.empty((0, 3))
+            paths = [b[6] for b in boxes]
+            for _ in range(50):
+                ox, oy = rng.uniform(-11, 11), rng.uniform(-11, 11)
+                oz = rng.choice([0.15, 0.5, 1.0, rng.uniform(-1, 3)])
+                ang = rng.uniform(-math.pi, math.pi)
+                rmax = rng.choice([10., 5., 2.])
+                dirc = (math.cos(ang), math.sin(ang), 0.0)
+                got = rc.raycast_closest((ox, oy, oz), dirc, rmax)
+                ref = _ref_raycast(lo, hi, paths, (ox, oy, oz), dirc, rmax)
+                mism += got.get('hit') != ref.get('hit') or (got.get('hit') and (
+                    got['distance'] != ref['distance'] or got['collision'] != ref['collision']))
+        self.assertEqual(mism, 0)
+
+    def test_prime_read_cache_matches_live_including_axis_aligned(self):
+        """The batched ``prime_read`` serves the exact same hit as the per-beam path for every bearing a
+        read requests, and the rare axis-aligned bearings (not cached) fall back to the identical live path."""
+        from twin.restock.tail_nav import BoxRaycaster, static_boxes
+        boxes = static_boxes(FIXTURE['environment'], FIXTURE['scenario'], FIXTURE.get('camera_config'))
+        for x, y, yaw in [(-1.2, 15.25, 0.0), (-2.0, 14.0, math.pi), (-3.0, 14.5, 1.3),
+                          (-2.0, 15.0, math.pi / 2), (-2.5, 14.2, 2.7)]:
+            rc = BoxRaycaster(boxes)
+            rc.set_dynamic([])
+            rc.prime_read(x, y, yaw, (0.15, 0.5, 1.0), 180, 10.0)
+            inc = 2 * math.pi / 180
+            for i in range(180):
+                a = yaw - math.pi + i * inc
+                dx, dy = math.cos(a), math.sin(a)
+                for z in (0.15, 0.5, 1.0):
+                    cached = rc._read_cache.get((x, y, z, dx, dy, 10.0))
+                    live = BoxRaycaster(boxes).raycast_closest((x, y, z), (dx, dy, 0.0), 10.0)
+                    got = cached if cached is not None else live
+                    self.assertEqual(got.get('hit'), live.get('hit'))
+                    if got.get('hit'):
+                        self.assertEqual(got['distance'], live['distance'])
+                        self.assertEqual(got['collision'], live['collision'])
+
+    def test_home_leg_identical_with_and_without_the_batched_prime(self):
+        """Disabling ``prime_read`` forces the slow per-beam path; the home-leg verdict (status, reason,
+        arrival time, pose, reason histogram) must be byte-identical with it on -- for BOTH an axis-aligned
+        ``cart_parking`` (the fixture) and the PR 271 south-headed pi/2 parking (the dock fragment)."""
+        from twin.restock import tail_nav
+        fragment = json.loads((Path(__file__).resolve().parents[3] / 'docs' / 'examples'
+                               / 'tow-lanes-mission-fragment.json').read_text())
+        cases = [('axis_aligned', None), ('pi_over_2', tuple(fragment['mission_poses']['cart_parking']))]
+        for label, start in cases:
+            kw = dict(camera_config=FIXTURE['camera_config'], max_s=8.0, heartbeat_s=0, start=start)
+            fast = tail_nav.simulate_home_leg(FIXTURE['config'], FIXTURE['scenario'],
+                                              FIXTURE['environment'], **kw)
+            orig_prime = tail_nav.BoxRaycaster.prime_read
+            tail_nav.BoxRaycaster.prime_read = lambda *a, **k: None               # force the live per-beam path
+            try:
+                slow = tail_nav.simulate_home_leg(FIXTURE['config'], FIXTURE['scenario'],
+                                                  FIXTURE['environment'], **kw)
+            finally:
+                tail_nav.BoxRaycaster.prime_read = orig_prime
+            self.assertEqual(fast, slow, label)
