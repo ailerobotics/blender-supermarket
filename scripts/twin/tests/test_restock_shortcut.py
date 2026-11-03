@@ -145,13 +145,26 @@ class PlanStartStateTests(unittest.TestCase):
 
 
 class FakeRigidPrim:
-    """Minimal SingleRigidPrim stand-in recording the applied pose/velocity."""
+    """Minimal SingleRigidPrim stand-in recording the applied pose/velocity.
+
+    Also answers the body_measurement() reads (get_world_pose / linear / angular) the sim-time settle
+    samples each step, returning the last-set pose as a static, resting carton."""
     def __init__(self, prim_path, name):
         self.prim_path, self.name = prim_path, name
         self.pose = self.linear = self.angular = None
 
     def set_world_pose(self, position, orientation):
         self.pose = (tuple(position), tuple(orientation))
+
+    def get_world_pose(self):
+        pos, quat = self.pose
+        return (list(pos), list(quat))
+
+    def get_linear_velocity(self):
+        return [0.0, 0.0, 0.0]
+
+    def get_angular_velocity(self):
+        return [0.0, 0.0, 0.0]
 
     def set_linear_velocity(self, v):
         self.linear = tuple(v)
@@ -170,9 +183,13 @@ class FakeScene:
 
 
 class FakeWorld:
-    def __init__(self):
+    def __init__(self, dt=1.0 / 60.0):
         self.scene = FakeScene()
         self.steps = 0
+        self._dt = dt
+
+    def get_physics_dt(self):
+        return self._dt
 
     def step(self, render=False):
         self.steps += 1
@@ -238,15 +255,18 @@ class TransferFakeAssembly:
 class ApplyStartStateTests(unittest.TestCase):
     def test_apply_places_carton_zeroes_velocity_and_settles(self):
         assembly = FakeAssembly()
-        config = {'start_at': 'couple'}
-        plan = apply_start_state(assembly, config, scenario(),
-                                 settle_steps=5, _rigid_prim=FakeRigidPrim)
+        # Sim-time settle (not a fixed tick count): a tiny window keeps the static-carton test fast.
+        config = {'start_at': 'couple',
+                  'start_state_settle': {'min_settle_s': 0.1, 'window_s': 0.05, 'max_settle_s': 0.5}}
+        plan = apply_start_state(assembly, config, scenario(), _rigid_prim=FakeRigidPrim)
         carton = assembly.world.scene.added[0]
         self.assertEqual(carton.prim_path, '/World/Stock')
         self.assertAlmostEqual(carton.pose[0][0], -5.73 + 0.08)
         self.assertEqual(carton.linear, (0.0, 0.0, 0.0))
         self.assertEqual(carton.angular, (0.0, 0.0, 0.0))
-        self.assertEqual(assembly.world.steps, 5)
+        # The static carton converges in sim time (>= min_settle_s at the world's 1/60 step) rather than
+        # running a hardcoded number of ticks.
+        self.assertGreaterEqual(assembly.world.steps, int(0.1 / (1.0 / 60.0)))
         self.assertEqual(plan.start_at, 'couple')
 
     def test_transfer_shortcut_rearms_the_arm_gate_so_the_executor_can_drive(self):
@@ -254,8 +274,9 @@ class ApplyStartStateTests(unittest.TestCase):
         # command_gate.faulted; without a re-arm the mission's executor/cuMotion commands are then all
         # dropped and the arm stays frozen at the stow pose. apply_start_state must hand off a LIVE gate.
         assembly = TransferFakeAssembly()
-        plan = apply_start_state(assembly, {'start_at': 'transfer'}, transfer_scenario(),
-                                 settle_steps=3, _rigid_prim=FakeRigidPrim)
+        config = {'start_at': 'transfer',
+                  'start_state_settle': {'min_settle_s': 0.1, 'window_s': 0.05, 'max_settle_s': 0.5}}
+        plan = apply_start_state(assembly, config, transfer_scenario(), _rigid_prim=FakeRigidPrim)
         self.assertTrue(plan.couple_cart)
         self.assertGreater(assembly.mobile.parked, 0)           # the arm was actually held during settle
         self.assertFalse(assembly.command_gate.faulted)         # ...yet the gate is re-armed at handoff
