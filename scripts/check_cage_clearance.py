@@ -6,9 +6,10 @@ mobile URDF. It quantifies the two motions sim-video-preflight-review-s1 flagged
 slot, L2 transfer lift out of it), and is the evidence behind shipping the sim-only contact filter
 (``cage_collision: filtered``, ``twin.restock.cage_collision``) instead of a precision path:
 
-* STATIC: the 0.6 x 0.4 x 0.16 carton in its slot (cart body ``load_center``, upper shelf, cart-relative yaw
-  -90 deg) -- clearance per side to the front corner posts and the side-wall bars, the travel needed to
-  leave the cage through the open +x mouth, and the rise needed to leave it over the top.
+* STATIC: the carton (``handling_unit.dimensions_m``) in its slot (cart body ``load_center`` = the scenario
+  ``initial_staging.cart_load_center_body_xy``, upper shelf, cart-relative yaw -90 deg) -- clearance per side
+  to the front corner posts and the side-wall bars, the travel needed to leave the cage through the open +x
+  mouth, and the rise needed to leave it over the top.
 * PATHS, per UR10 IK branch of the side-grip TCP on the carton's mouth face (``WallCartonPolicy`` geometry):
   COLLECT = the place at ``mission_poses.place_approach``; TRANSFER = the pick from the coupled park pose
   (cart straight behind the base on the hitch). For each: how far a fixed-orientation straight line out
@@ -44,10 +45,17 @@ def _scenario(path=None):
     return json.loads(p.read_text())
 
 
-_UNIT = _scenario()['handling_unit']
+_SCENARIO = _scenario()
+_UNIT = _SCENARIO['handling_unit']
 CARTON = tuple(float(v) for v in _UNIT['dimensions_m'])   # handling_unit.dimensions_m (source of truth)
-LOAD_CENTER = (0.18, 0.0)                 # initial_staging.cart_load_center_body_xy
-SUPPORT_Z = 0.9325                        # initial_staging.cart_support_z_world (upper shelf top)
+LOAD_CENTER = tuple(float(v) for v in _SCENARIO['initial_staging']['cart_load_center_body_xy'])
+# ^ initial_staging.cart_load_center_body_xy (source of truth, +0.08). This was hardcoded (0.18, 0.0)
+# since PR #186 and never matched the scenario the mission actually stages the carton at; every runtime
+# consumer -- isaac_factory cart_placement, restock_camera.config, ground_truth_collect, the start_at
+# shortcut -- reads this scenario value, so +0.08 is the physically correct load centre and the one the
+# cage-clearance proof must measure.
+SUPPORT_Z = 0.9325                        # rollwagen upper-shelf cage top (cart asset geometry; NOT the
+                                          # scenario's cart_support_z_world=0.225 deck -- a different surface)
 CARTON_YAW_IN_CART = -math.pi / 2         # unit_yaws_world.cart - cart yaw
 TCP_SURFACE_OFFSET = float(_UNIT['tcp_surface_offset_m'])  # host profile tcp_surface_offset (scenario)
 GRASP_QUAT = (0.5, 0.5, 0.5, 0.5)         # host profile tcp_quaternion (side grip, shelfbot wall_grip)

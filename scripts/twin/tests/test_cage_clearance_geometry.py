@@ -35,10 +35,11 @@ def test_slot_clearances_from_the_authored_cage(boxes):
     assert s['front_post_gap_m'] == pytest.approx(0.615)
     assert s['front_post_clearance_per_side_m'] == pytest.approx(0.0825)      # 82.5 mm (was 7.5 mm)
     assert s['side_bar_clearance_per_side_m'] == pytest.approx(0.089)         # 89 mm (was 14 mm)
-    # the 0.30 m-deep carton's mouth face (x=0.33) now sits SHORT of the front posts' x range
+    # the 0.30 m-deep carton's mouth face (x=0.23 at the scenario load centre +0.08) sits SHORT of the posts
     lo, hi = s['front_post_x_range']
     assert (lo, hi) == pytest.approx((0.3675, 0.3925)) and s['carton_front_face_x'] < lo
-    assert s['mouth_exit_travel_m'] == pytest.approx(0.3625)                 # out through the mouth
+    assert s['carton_front_face_x'] == pytest.approx(0.23)                   # load centre +0.08 (was 0.33 at the stale +0.18)
+    assert s['mouth_exit_travel_m'] == pytest.approx(0.4625)                 # out through the mouth (+0.10 m vs the stale +0.18)
     assert s['cage_top_z'] == pytest.approx(1.65)
     assert s['vertical_exit_rise_m'] == pytest.approx(0.7175)                # out over the top
 
@@ -96,14 +97,18 @@ def test_single_straight_line_move_now_clears_the_cage_with_the_smaller_carton(b
 
 @pytest.mark.skipif(not cc.DEFAULT_URDF.is_file(), reason='mobile URDF (dataset) not on this box')
 def test_every_ik_branch_completes_a_straight_exit_through_the_mouth():
-    """Leaving the cage now takes only 0.3625 m out along the slot axis (the 0.30 m-deep carton); from the
-    collect place pose (reaches 0.45 m) and the coupled transfer park (reaches 0.40 m) the fixed-orientation
-    line clears the mouth on EVERY true IK branch -- so the smaller carton makes a clear straight-line path
-    feasible, where the 0.6 m carton stopped short and needed the cage_collision=filtered workaround."""
+    """At the scenario load centre (+0.08) the carton sits 0.10 m deeper than the stale +0.18, so leaving the
+    cage takes 0.4625 m out along the slot axis (the 0.30 m-deep carton); from the collect place pose and the
+    coupled transfer park the fixed-orientation line is still IK-feasible to that exit on EVERY true IK branch
+    -- so the smaller carton keeps a clear straight-line path feasible, where the 0.6 m carton stopped short
+    and needed the cage_collision=filtered workaround. (A single 2-point straight_line move over this full
+    exit clears the cage by ~76 mm on the collect branches and ~15 mm on the tighter transfer branches; more
+    segments only widen it -- see test_single_straight_line_move_now_clears_the_cage.)"""
     from twin.mobile import MobileSpec
     spec = MobileSpec()
     chain = cc.Chain(cc.DEFAULT_URDF)
     exit_m = cc.static_clearance(cc.cage_boxes(spec))['mouth_exit_travel_m']
+    assert exit_m == pytest.approx(0.4625)
     coupled_cart = (spec.hitch_x - spec.cart_hitch_x, 0., 0.)
     for base, cart in ((cc.PLACE_APPROACH, cc.CART_AT_COLLECT),
                        ((0., 0., 0.), coupled_cart)):
@@ -113,5 +118,5 @@ def test_every_ik_branch_completes_a_straight_exit_through_the_mouth():
         assert found
         for q0 in found:
             assert np.linalg.norm(cc._pose_err(chain.fk(q0), tcp)) < 1e-6      # a true solution, not a flip
-            _, reached = cc.straight_path(chain, q0, tcp, axis, 0.45, cc.LIFT)
-            assert reached >= exit_m - 1e-9                   # clears the mouth on every branch
+            _, reached = cc.straight_path(chain, q0, tcp, axis, exit_m, cc.LIFT)
+            assert reached >= exit_m - 1e-9                   # reaches the mouth exit on every branch
