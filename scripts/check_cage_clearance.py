@@ -36,15 +36,24 @@ sys.path.insert(0, str(ROOT))
 DEFAULT_URDF = Path.home() / 'datasets/twin-robot-in-store-boot-v1/mobile-casterlift/mobile_ur10.urdf'
 ARM = ('ur_shoulder_pan_joint', 'ur_shoulder_lift_joint', 'ur_elbow_joint',
        'ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_joint')
-CARTON = (0.6, 0.4, 0.16)                 # handling_unit.dimensions_m
+
+
+def _scenario(path=None):
+    """The committed restock scenario -- the SINGLE source of truth for the carton size/offsets."""
+    p = Path(path) if path else ROOT / 'restock_scenario.json'
+    return json.loads(p.read_text())
+
+
+_UNIT = _scenario()['handling_unit']
+CARTON = tuple(float(v) for v in _UNIT['dimensions_m'])   # handling_unit.dimensions_m (source of truth)
 LOAD_CENTER = (0.18, 0.0)                 # initial_staging.cart_load_center_body_xy
 SUPPORT_Z = 0.9325                        # initial_staging.cart_support_z_world (upper shelf top)
 CARTON_YAW_IN_CART = -math.pi / 2         # unit_yaws_world.cart - cart yaw
-TCP_SURFACE_OFFSET = 0.00275              # host profile tcp_surface_offset
+TCP_SURFACE_OFFSET = float(_UNIT['tcp_surface_offset_m'])  # host profile tcp_surface_offset (scenario)
 GRASP_QUAT = (0.5, 0.5, 0.5, 0.5)         # host profile tcp_quaternion (side grip, shelfbot wall_grip)
 PLACE_APPROACH = (-4.5, 15.4, math.pi)    # mission_poses.place_approach (collect place base pose)
 CART_AT_COLLECT = (-5.73, 15.25, 0.0)     # initial_staging.cart_body_pose (static pre-couple)
-LIFT = 0.03                               # WallCartonPolicy lift (preplace/lift rise)
+LIFT = float(_UNIT['lift_m'])             # WallCartonPolicy lift (preplace/lift rise; scenario lift_m)
 
 
 # ---------------------------------------------------------------- cage + carton geometry (cart frame)

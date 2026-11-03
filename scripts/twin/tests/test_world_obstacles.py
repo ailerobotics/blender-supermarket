@@ -109,12 +109,17 @@ class TestCartonArmClearance(unittest.TestCase):
     ignore, carton spheres supplied at runtime) is what makes cuMotion catch it. Reproduced on CPU
     from the asset URDF FK + XRDF spheres."""
 
+    # run-249/250 reproduced with the carton of that era (0.6 x 0.4 x 0.16); pinned here so the
+    # historical finding stays valid independent of the current mission carton size (sim-carton-size-v1
+    # shrank it to 0.45 x 0.30 x 0.18, which on its own CLEARS this fold -- a separate, welcome result).
+    RUN250_CARTON = {'dims': [0.6, 0.4, 0.16]}
+
     def _cfg(self, w1):
         return dict(zip(_JOINTS, [1.2251, -2.2422, 1.0802, w1, 1.0608, -1.1675]))
 
     def test_carton_clear_at_pinned_but_hits_upper_arm_at_full_fold(self):
-        pinned = carton_arm_clearance(_URDF, _XRDF, self._cfg(0.6965))
-        full = carton_arm_clearance(_URDF, _XRDF, self._cfg(2.1066))
+        pinned = carton_arm_clearance(_URDF, _XRDF, self._cfg(0.6965), carton=self.RUN250_CARTON)
+        full = carton_arm_clearance(_URDF, _XRDF, self._cfg(2.1066), carton=self.RUN250_CARTON)
         self.assertTrue(pinned['clear'], f"expected clear at pinned fold: {pinned}")
         self.assertFalse(full['clear'], f"expected carton-vs-arm contact at full fold: {full}")
         self.assertEqual(full['worst_link'], 'ur_upper_arm_link')

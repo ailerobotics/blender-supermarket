@@ -692,12 +692,17 @@ repo's `scenes/`, `export/` or `renders/`.
 - **Rollwagen cage clearance** (sim-only workaround, RUNTIME config `cage_collision: "filtered"`, default
   off; `restock/cage_collision.py`): a FilteredPairsAPI on the carton against the 50 cage colliders (deck,
   upper shelf and drawbar still collide; rays and cuMotion untouched), labelled in mission.json and the
-  caption. Why it is not a path: the 0.6 m carton side threads the 0.615 m front-post mouth with 7.5 mm
-  per side, and leaving the cage takes 0.4125 m out through the mouth (rising 0.72 m over the top is out
-  of reach), but a fixed-orientation straight line out stays IK-feasible for only ~0.41 m (collect, from
-  `place_approach`) / ~0.36 m (transfer, coupled park) on every UR10 branch. **Sharp edge:
+  caption. Since sim-carton-size-v1 the carton is 0.45 x 0.30 x 0.18 m (`handling_unit.dimensions_m`, the
+  single source of truth): its side threads the 0.615 m front-post mouth with ~82.5 mm per side (was 7.5 mm
+  for the old 0.6 m carton), leaving the cage takes only 0.3625 m out through the mouth, and a
+  fixed-orientation straight line out is IK-feasible past that on every UR10 branch (collect from
+  `place_approach` reaches 0.45 m, transfer coupled park 0.40 m). **Sharp edge:
   `begin(straight_line=True)` is ONE 2-point joint-space smoothstep, not a Cartesian line.** Over a 0.4 m
-  insert it bows 45–64 mm and strikes a post; it takes 5–9 segments to stay clear.
+  insert it still bows ~39 mm, but with the smaller carton's slack that single move now CLEARS the cage by
+  ~75 mm (was a penetration); more segments only tighten the bow. The filter is therefore no longer needed
+  for straight-line clearance — it stays available (opt-in, default off) because the carton is still not a
+  cuMotion collision object. Numbers + reach-replay: `scripts/check_cage_clearance.py` (reads the scenario)
+  and `scripts/twin/tests/test_cage_clearance_geometry.py`.
   CPU proof: `scripts/check_cage_clearance.py`.
 - **Moving obstacles** (opt-in, default-off): `navigation/dynamic.py` tracks
   per-frame `Detection(position,radius,source)` into velocity-predicted occupancy

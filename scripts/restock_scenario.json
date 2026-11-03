@@ -25,11 +25,11 @@
   ],
   "handling_unit": {
     "sku": "juice_orange",
-    "description": "Representative sealed shallow handling unit; hidden contents are not counted",
+    "description": "Representative sealed supermarket handling unit; hidden contents are not counted",
     "dimensions_m": [
-      0.6,
-      0.4,
-      0.16
+      0.45,
+      0.3,
+      0.18
     ],
     "mass_kg": 0.45,
     "tcp_quaternion_xyzw": [

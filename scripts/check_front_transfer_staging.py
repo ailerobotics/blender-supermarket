@@ -35,7 +35,7 @@ from twin.restock.shortcut import RECORDED_BAY_PARK_ROBOT_POSE        # noqa: E4
 DEFAULT_URDF = Path.home() / 'datasets/twin-robot-in-store-boot-v1/mission/warm8/mobile-import.urdf'
 PLANOGRAM = Path(__file__).resolve().parent / 'planogram.json'
 STOW = np.array([0., -2.5, 1.7, -0.7, -1.5708, 0.])
-DIMS = (0.6, 0.4, 0.16)
+DIMS = (0.45, 0.3, 0.18)
 UR_BASE_Z = 0.50
 BAY_TARGET = (-2.0, 16.424, 0.73)              # warm8 transfer_ground_truth target (the bay top)
 BAY_CARTON = (-3.162, 15.267, 1.013, -math.pi / 2)   # warm8 SCRIPTED_TRANSFER begin carton_world (measured)

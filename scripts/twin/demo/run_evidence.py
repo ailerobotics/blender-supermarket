@@ -437,7 +437,7 @@ class CartModel:
     hitch_offset: float = -1.27            # cart centre in the base frame when coupled straight
     load_center: tuple = (0.18, 0.0)       # carton centre in the cart body frame
     carton_yaw_in_cart: float = -math.pi / 2
-    carton_size: tuple = (0.6, 0.4, 0.16)
+    carton_size: tuple = (0.45, 0.3, 0.18)
     support_z: float = 0.9325              # cart stock-support top (world z)
     cart_half: tuple = (0.40, 0.34)        # rollwagen footprint half-extents (0.8 x 0.68)
     initial_cart: tuple = (-5.73, 15.25, 0.0)
