@@ -1,0 +1,141 @@
+{
+ "nominal_fps": 30,
+ "timing": "synthetic fixture frames",
+ "frames": [
+  {
+   "file": "000000.png",
+   "simulation_time": 41.2,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000001.png",
+   "simulation_time": 82.4,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000002.png",
+   "simulation_time": 123.6,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000003.png",
+   "simulation_time": 176.3208,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000004.png",
+   "simulation_time": 187.8417,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000005.png",
+   "simulation_time": 199.3625,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000006.png",
+   "simulation_time": 215.1083,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000007.png",
+   "simulation_time": 219.3333,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000008.png",
+   "simulation_time": 223.5583,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000009.png",
+   "simulation_time": 261.8458,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000010.png",
+   "simulation_time": 295.8917,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000011.png",
+   "simulation_time": 329.9375,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000012.png",
+   "simulation_time": 373.2459,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000013.png",
+   "simulation_time": 382.475,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  },
+  {
+   "file": "000014.png",
+   "simulation_time": 391.7041,
+   "shape": [
+    36,
+    48,
+    3
+   ]
+  }
+ ]
+}

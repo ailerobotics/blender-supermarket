@@ -1,0 +1,258 @@
+{
+ "state": "failed",
+ "reason": "blocked_no_route_timeout",
+ "orchestrator": "behaviour_tree",
+ "ticks": 11546,
+ "degraded": [],
+ "physics_verified": false,
+ "note": "Mission success alone does not verify video, contacts or autonomy. BOUNDED RUN: stopped after collect; not run: couple, outbound, park, transfer, verify, return; state covers only collect GROUND-TRUTH COLLECT (RESTOCK_COLLECT_GROUND_TRUTH=1): the collect pick target is the simulated pose of the controlled backstock carton asset, not a source-camera observation (labelled demo workaround); see collect_mode. TRANSFER_MODE=live_pose: real-arm transfer picks the carton from its live (controlled-asset ground-truth) pose with a near-face side grip, bay place yaw chosen for reach, and no base reposition. CAGE_COLLISION=filtered: carton-vs-rollwagen-cage contacts are filtered in the simulation (UsdPhysics FilteredPairsAPI on the handling unit vs the cage posts/bars; deck + upper shelf still collide) so the collect place and the transfer lift cannot strike the cage (labelled workaround, not a clearance proof). TRANSFER_CARRY=wrist_guard: transfer place moves (preplace/place/retreat) keep the arm IK in the clear wrist branch (wrist_1 <= carry cap, wrist_2 >= carry min; wrist-flipped re-seed) so the carry never drives into the ur_wrist_2-vs-forearm self-collision stop. TRANSFER_CARRY=weld: the transfer carton is held by the SIM fixed-joint weld (SIM_ATTACH_FALLBACK, the captain-approved collect pattern) from the grasp contact to the release at the place pose, not native suction physics.",
+ "stage_timeline": [
+  {
+   "t": 0.017,
+   "type": "stage_begin",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 0.0,
+    "steps": [
+     "drive\u2192pick",
+     "perceive carton",
+     "grasp\u00b7lift\u00b7tuck",
+     "drive\u2192rollwagen",
+     "perceive deck",
+     "place",
+     "verify placed"
+    ]
+   },
+   "action": "stage"
+  },
+  {
+   "t": 0.017,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 0.0,
+    "step": 0,
+    "label": "drive\u2192pick",
+    "kind": "nav"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 0.333,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 0.3167,
+    "step": 1,
+    "label": "perceive carton",
+    "kind": "perceive"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 0.633,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 0.6167,
+    "step": 2,
+    "label": "grasp\u00b7lift\u00b7tuck",
+    "kind": "manip"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 70.567,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 70.55,
+    "step": 3,
+    "label": "drive\u2192rollwagen",
+    "kind": "nav"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 112.4,
+   "type": "stage_failed",
+   "data": {
+    "stage": "collect",
+    "attempt": 1,
+    "sim_time": 112.3833,
+    "reason": "blocked_no_route_timeout"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 112.4,
+   "type": "stage_begin",
+   "data": {
+    "stage": "collect",
+    "attempt": 2,
+    "sim_time": 112.3833,
+    "steps": [
+     "drive\u2192pick",
+     "perceive carton",
+     "grasp\u00b7lift\u00b7tuck",
+     "drive\u2192rollwagen",
+     "perceive deck",
+     "place",
+     "verify placed"
+    ]
+   },
+   "action": "stage"
+  },
+  {
+   "t": 112.4,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 2,
+    "sim_time": 112.3833,
+    "step": 0,
+    "label": "drive\u2192pick",
+    "kind": "nav"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 152.417,
+   "type": "stage_failed",
+   "data": {
+    "stage": "collect",
+    "attempt": 2,
+    "sim_time": 152.4,
+    "reason": "blocked_no_route_timeout"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 152.417,
+   "type": "stage_begin",
+   "data": {
+    "stage": "collect",
+    "attempt": 3,
+    "sim_time": 152.4,
+    "steps": [
+     "drive\u2192pick",
+     "perceive carton",
+     "grasp\u00b7lift\u00b7tuck",
+     "drive\u2192rollwagen",
+     "perceive deck",
+     "place",
+     "verify placed"
+    ]
+   },
+   "action": "stage"
+  },
+  {
+   "t": 152.417,
+   "type": "stage_step",
+   "data": {
+    "stage": "collect",
+    "attempt": 3,
+    "sim_time": 152.4,
+    "step": 0,
+    "label": "drive\u2192pick",
+    "kind": "nav"
+   },
+   "action": "stage"
+  },
+  {
+   "t": 192.433,
+   "type": "stage_failed",
+   "data": {
+    "stage": "collect",
+    "attempt": 3,
+    "sim_time": 192.4167,
+    "reason": "blocked_no_route_timeout"
+   },
+   "action": "stage"
+  }
+ ],
+ "verify_mode": "ground_truth",
+ "transfer_verify_mode": "ground_truth",
+ "return_mode": "uncouple_at_cart_parking",
+ "vram_headroom_mode": "on",
+ "vram_headroom": {
+  "enabled": true,
+  "floor_mib": 800.0,
+  "card_mib": 12288.0,
+  "sample_period_s": 0.2,
+  "shed_order": [
+   "capture_rate",
+   "arm_feed_economy",
+   "secondary_cameras"
+  ],
+  "durable_write_period_s": 1.0
+ },
+ "stop_after": "collect",
+ "stages_driven": [
+  "collect"
+ ],
+ "not_run": [
+  "couple",
+  "outbound",
+  "park",
+  "transfer",
+  "verify",
+  "return"
+ ],
+ "walkthrough_caption": "BENCH RUN stop_after=collect: couple, outbound, park, transfer, verify, return NOT RUN | collect: GROUND-TRUTH pick (simulated carton pose, not camera) | TRANSFER: live-pose pick (ground-truth carton pose) | CAGE COLLISION FILTERED (sim workaround): the carton passes through the rollwagen cage bars | TRANSFER CARRY: wrist-guarded IK (clear wrist branch) | TRANSFER CARRY: weld attach (sim fixed joint), not suction",
+ "bounded_note": "BOUNDED RUN: stopped after collect; not run: couple, outbound, park, transfer, verify, return; state covers only collect",
+ "collect_mode": "ground_truth",
+ "bt_view": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/boxc1a/bt_view.html",
+ "transfer_mode": "live_pose",
+ "workarounds": [
+  "transfer_mode=live_pose",
+  "cage_collision=filtered",
+  "transfer_carry=wrist_guard",
+  "transfer_carry=weld"
+ ],
+ "cage_collision_mode": "filtered",
+ "transfer_carry": [
+  "wrist_guard",
+  "weld"
+ ],
+ "transfer_attach": "weld",
+ "events": [
+  {
+   "sequence": 1,
+   "job_id": "restock-one",
+   "state": "reserved",
+   "evidence": {}
+  },
+  {
+   "sequence": 2,
+   "job_id": "restock-one",
+   "state": "collect",
+   "evidence": {}
+  },
+  {
+   "sequence": 3,
+   "job_id": "restock-one",
+   "state": "collect",
+   "evidence": {}
+  },
+  {
+   "sequence": 4,
+   "job_id": "restock-one",
+   "state": "collect",
+   "evidence": {}
+  },
+  {
+   "sequence": 5,
+   "job_id": "restock-one",
+   "state": "failed",
+   "evidence": {
+    "reason": "blocked_no_route_timeout"
+   }
+  }
+ ]
+}

@@ -12,7 +12,9 @@ from types import SimpleNamespace
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from twin.restock.shortcut import StartState, apply_start_state, plan_start_state
+from twin.restock.mission import ACTIONS, bounded_stages
+from twin.restock.shortcut import (StartState, apply_start_state, isolation_matrix, plan_start_state,
+                                   stage_isolation, _SUPPORTED_START_AT, _STAGE_PRECONDITIONS)
 from twin.restock.native_transport import ArmCommandGate
 from twin.restock_manipulation.cad_tool import ARM_JOINTS
 
@@ -214,6 +216,46 @@ class ApplyStartStateTests(unittest.TestCase):
         self.assertEqual(len(assembly.applied), before + 1)
         self.assertFalse(assembly.command_gate.faulted)
         self.assertTrue(np.allclose(assembly.applied[-1][0], 0.1))
+
+
+class StageIsolationTests(unittest.TestCase):
+    """The pure single-stage isolation facts (docs/restock_stages.md) stay consistent with the
+    mission stage machinery, so the doc/matrix cannot silently drift."""
+
+    def test_matrix_covers_every_stage_in_order(self):
+        matrix = isolation_matrix()
+        self.assertEqual([r['stage'] for r in matrix], list(ACTIONS))
+        self.assertEqual(set(_STAGE_PRECONDITIONS), set(ACTIONS))
+
+    def test_stop_after_is_supported_for_every_stage(self):
+        # The END-bound is universal: bounded_stages accepts every stage (no missing stop_at).
+        for i, stage in enumerate(ACTIONS):
+            self.assertEqual(bounded_stages(None, stage), ACTIONS[:i + 1])
+            self.assertEqual(stage_isolation(stage)['stop_after'], stage)
+
+    def test_only_collect_and_supported_start_ats_isolate(self):
+        can = {r['stage'] for r in isolation_matrix() if r['can_isolate']}
+        self.assertEqual(can, {'collect'} | set(_SUPPORTED_START_AT))
+        # The rest carry an explanatory blocker and no recipe.
+        for r in isolation_matrix():
+            if r['can_isolate']:
+                self.assertIsNone(r['blocker'])
+                self.assertIn(f"--stop-after {r['stage']}", r['recipe'])
+            else:
+                self.assertIsNone(r['recipe'])
+                self.assertIn('no start-phase shortcut', r['blocker'])
+
+    def test_recipes_match_the_supported_shortcuts(self):
+        self.assertEqual(stage_isolation('collect')['recipe'], '--stop-after collect')
+        self.assertEqual(stage_isolation('couple')['recipe'],
+                         '--start-at couple --stop-after couple')
+        self.assertEqual(stage_isolation('transfer')['recipe'],
+                         '--start-at transfer --start-staging recorded_bay_park --stop-after transfer')
+        self.assertEqual(stage_isolation('transfer')['start_staging'], 'recorded_bay_park')
+
+    def test_unknown_stage_rejected(self):
+        with self.assertRaises(ValueError):
+            stage_isolation('teleport')
 
 
 if __name__ == '__main__':

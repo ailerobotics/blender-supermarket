@@ -227,6 +227,67 @@ def bounded_summary(config):
                              f"{', '.join(not_run) or 'none'}; state covers only {', '.join(driven)}")}
 
 
+# ---------------- single-stage isolation (dev bench planning; CPU only) ----------------
+# What physical state each stage needs AT ENTRY -- i.e. what its upstream stages leave behind
+# (seeded cart pose, carried unit, coupled state). Used to plan "run this one stage alone" dev
+# bench runs and documented in docs/restock_stages.md. Keyed on ACTIONS (a test asserts no drift).
+_STAGE_PRECONDITIONS = {
+    'collect':  ('spawn defaults only: robot at the backstock pickup, cart at the dock, arm stowed, '
+                 'the carton in the backstock -- no carried unit, uncoupled'),
+    'couple':   ('carton loaded on the cart (collect done); robot still at the pickup, cart at the '
+                 'dock, uncoupled'),
+    'outbound': 'carton loaded AND the cart physically coupled behind the robot at the dock (couple done)',
+    'park':     'loaded + coupled, towed to the transfer bay (outbound done)',
+    'transfer': 'loaded + coupled + parked at the transfer bay, arm stowed (park done)',
+    'verify':   'the carton placed on the bay top, still coupled (transfer done)',
+    'return':   'stock committed at verify, still coupled at the bay (verify done)',
+}
+
+
+def stage_isolation(stage, stages=None):
+    """Pure facts for running ``stage`` ALONE on a dev bench (no GPU/Isaac here).
+
+    ``stop_after`` bounds the END and is supported for every stage (``mission.bounded_stages``).
+    The START needs the prefix synthesized: ``collect`` begins from the top (no start_at); a stage
+    in ``_SUPPORTED_START_AT`` has a start-phase shortcut (``transfer`` also needs the
+    ``recorded_bay_park`` staging); any other middle stage cannot yet start in isolation, because no
+    shortcut synthesizes its coupled/loaded precondition (Isaac-side ``apply_start_state`` work).
+
+    Returns ``{stage, precondition, stop_after, start_at, start_staging, can_isolate, recipe,
+    blocker}``."""
+    stages = tuple(stages) if stages else ACTIONS
+    if stage not in stages:
+        raise ValueError(f'stage {stage!r} not in {stages}')
+    idx = stages.index(stage)
+    stop_after = stage                                  # bounded_stages supports every stage
+    if idx == 0:
+        start_at, start_staging, can = None, None, True
+        recipe = f'--stop-after {stage}'
+    elif stage in _SUPPORTED_START_AT:
+        start_at = stage
+        start_staging = 'recorded_bay_park' if stage == 'transfer' else None
+        can = True
+        recipe = (f'--start-at {stage}'
+                  + (f' --start-staging {start_staging}' if start_staging else '')
+                  + f' --stop-after {stage}')
+    else:
+        start_at, start_staging, can, recipe = None, None, False, None
+    blocker = None
+    if not can:
+        blocker = (f'no start-phase shortcut synthesizes start_at={stage!r} yet (supported: '
+                   f'{_SUPPORTED_START_AT}); its entry precondition -- {_STAGE_PRECONDITIONS[stage]} '
+                   '-- must be seeded in shortcut.apply_start_state (Isaac-side), so it cannot run '
+                   'in isolation from a CPU-only bench today')
+    return {'stage': stage, 'precondition': _STAGE_PRECONDITIONS[stage], 'stop_after': stop_after,
+            'start_at': start_at, 'start_staging': start_staging, 'can_isolate': can,
+            'recipe': recipe, 'blocker': blocker}
+
+
+def isolation_matrix(stages=None):
+    """The :func:`stage_isolation` record for every stage, in order."""
+    return [stage_isolation(s, stages) for s in (tuple(stages) if stages else ACTIONS)]
+
+
 def shortcut_summary(shortcut, config, staging=None):
     """mission.json fields for a start-phase shortcut run: top-level ``start_at``, the shortcut record
     (with the applied ``staging`` when the recorded start staging ran), the ``start_staging_mode``
