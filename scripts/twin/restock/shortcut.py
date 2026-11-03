@@ -421,34 +421,109 @@ def resolve_start_staging(config):
             'provenance': provenance}
 
 
+def resolve_couple_dock(config, *, hitch_x=-0.62, cart_hitch_x=0.65):
+    """The configured COUPLE DOCK (cart pose), robot seat and articulation from the ONE dock source, for
+    the assembly cart/robot spawn (cold runs AND the start_at=couple shortcut).
+
+    The one source is the active outbound tow lane:
+
+    * its explicit ``couple_dock`` cart pose (PR 282), when authored; else
+    * DERIVED from the lane ``start`` + ``start_cart_yaw`` -- the inverse of ``couple_seat_from_cart``:
+      the lane start IS the post-couple robot seat, so the cart that seats there is
+      ``cart_pose_from_hitch(start, start_yaw - start_cart_yaw)``. This makes the dock-align SOUTH lane
+      (``start_cart_yaw`` south) yield its south dock and the legacy EAST lane yield its east dock from
+      the SAME formula, with no separate ``couple_dock`` needed (the side-bay lane carries only
+      ``start`` + ``start_cart_yaw``; the derived dock equals the hand-authored towstaging3 couple_dock).
+
+    Returns ``{'cart_dock', 'robot_seat', 'articulation', 'lane', 'source'}`` or ``None`` when no outbound
+    lane / finite start is configured (then the spawn is the legacy scenario pose, byte-identical). Pure.
+    """
+    lane = _outbound_lane_cfg(config)
+    if not isinstance(lane, dict):
+        return None
+    from ..navigation.lanes import couple_seat_from_cart
+    dock = lane.get('couple_dock')
+    if isinstance(dock, (list, tuple)) and len(dock) == 3 and _finite(*dock):
+        art = lane.get('couple_dock_articulation', 0.0)
+        art = float(art) if _finite(art) else 0.0
+        dock = tuple(float(v) for v in dock)
+        source = 'lane.couple_dock'
+    else:
+        start = lane.get('start')
+        if not (isinstance(start, (list, tuple)) and len(start) == 3 and _finite(*start)):
+            return None
+        scy = lane.get('start_cart_yaw', start[2])
+        if not _finite(scy):
+            return None
+        art = _wrap(float(start[2]) - float(scy))      # robot yaw - cart yaw at the seat
+        dock = cart_pose_from_hitch(tuple(float(v) for v in start), art,
+                                    hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
+        source = 'derived_from_lane_start'
+    seat = couple_seat_from_cart(dock, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x, articulation=art)
+    return {'cart_dock': tuple(round(float(v), 6) for v in dock),
+            'robot_seat': tuple(round(float(v), 6) for v in seat),
+            'articulation': float(art), 'lane': lane.get('name'), 'source': source}
+
+
 def couple_start_poses(config, *, hitch_x=-0.62, cart_hitch_x=0.65):
     """For a ``start_at='couple'`` bench: the dock-aligned couple-start spawn (robot seat + cart dock)
-    DERIVED from the active outbound tow lane's ``couple_dock`` -- the SAME single source PR 282's
-    ``navigation.lanes.couple_seat_from_cart`` uses to make the outbound lane start FOLLOW the configured
-    dock (the legacy EAST dock and the dock-align SOUTH dock both fall out of the one formula).
+    from the ONE dock source (:func:`resolve_couple_dock`).
 
     A ``start_at=couple --stop-after outbound`` bench must spawn the post-collect train at the dock the
     live outbound lane expects, so the real couple latch seats the base at the lane-start seat and the
-    outbound tow ACQUIRES the lane -- instead of a stale scenario spawn seating the base ~1 m / 90 deg
-    off the lane start (coldwin23-2: ``lane_not_acquired_timeout``). Returns
-    ``{'robot_seat', 'cart_dock', 'articulation', 'lane'}`` or ``None`` when no active outbound lane
-    declares a ``couple_dock`` -- then the couple shortcut is byte-identical and the backroom-bay bench
-    is unaffected. Pure."""
+    outbound tow ACQUIRES the lane -- instead of a stale scenario spawn seating the cart facing the legacy
+    EAST heading while the lane is authored SOUTH (coldwin25c/25e: the coupled train faces east, the
+    south side-bay lane is never acquired). Returns ``{'robot_seat', 'cart_dock', 'articulation', 'lane'}``
+    or ``None`` when no outbound lane resolves a dock (then the couple shortcut is byte-identical). Pure."""
     if not isinstance(config, dict) or config.get('start_at') != 'couple':
         return None
-    lane = _outbound_lane_cfg(config)
-    dock = lane.get('couple_dock') if isinstance(lane, dict) else None
-    if not (isinstance(dock, (list, tuple)) and len(dock) == 3 and _finite(*dock)):
+    res = resolve_couple_dock(config, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
+    if res is None:
         return None
-    art = lane.get('couple_dock_articulation', 0.0)
-    if not _finite(art):
-        art = 0.0
-    from ..navigation.lanes import couple_seat_from_cart
-    seat = couple_seat_from_cart(tuple(float(v) for v in dock), hitch_x=hitch_x,
-                                 cart_hitch_x=cart_hitch_x, articulation=float(art))
-    return {'robot_seat': tuple(round(float(v), 6) for v in seat),
-            'cart_dock': tuple(float(v) for v in dock), 'articulation': float(art),
-            'lane': lane.get('name')}
+    return {'robot_seat': res['robot_seat'], 'cart_dock': res['cart_dock'],
+            'articulation': res['articulation'], 'lane': res['lane']}
+
+
+def dock_align_scenario(scenario, config, *, hitch_x=-0.62, cart_hitch_x=0.65):
+    """Rewrite ``initial_staging`` so the ASSEMBLY spawns robot + cart at the configured couple dock (the
+    one dock source, :func:`resolve_couple_dock`) -- for COLD runs, so the robot couples to a cart that
+    already faces the dock heading the outbound lane expects (instead of the legacy EAST scenario yaw,
+    which leaves the coupled train facing east and the south side-bay lane unacquirable: coldwin25e).
+
+    Returns ``(variant, record)`` or ``(scenario, None)`` byte-identical when no dock resolves OR the
+    resolved dock already equals the scenario spawn (legacy configs whose lane start matches the scenario
+    cart -- then nothing moves). The start_at=couple shortcut uses its own ``staged_scenario`` path (the
+    same dock source via ``couple_start_poses``); this is the cold-run twin. Pure."""
+    res = resolve_couple_dock(config, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
+    if res is None:
+        return scenario, None
+    st0 = scenario.get('initial_staging') if isinstance(scenario, dict) else None
+    if not isinstance(st0, dict) or not _finite(*st0.get('cart_body_pose', (math.nan,))[:3]):
+        raise ValueError('scenario.initial_staging.cart_body_pose is required to dock-align the spawn')
+    cur = tuple(float(v) for v in st0['cart_body_pose'])
+    cart = res['cart_dock']
+    # No-op (byte-identical) for a DERIVED dock that already equals the scenario spawn (legacy east lane).
+    # An explicit couple_dock equal to the scenario spawn still re-seats the robot, matching the shortcut.
+    if (res['source'] == 'derived_from_lane_start'
+            and math.dist(cur[:2], cart[:2]) <= 1e-4 and abs(_wrap(cur[2] - cart[2])) <= 1e-4):
+        return scenario, None
+    variant = copy.deepcopy(scenario)
+    st = variant['initial_staging']
+    robot = res['robot_seat']
+    dyaw = _wrap(float(cart[2]) - float(st['cart_body_pose'][2]))
+    st['robot_base_pose'] = list(robot)
+    st['cart_body_pose'] = list(cart)
+    yaws = dict(st.get('unit_yaws_world', {}))
+    if _finite(yaws.get('cart')):                      # the carton (once on the cart) turns with it
+        yaws['cart'] = _wrap(float(yaws['cart']) + dyaw)
+    st['unit_yaws_world'] = yaws
+    record = {'mode': 'couple_dock_align', 'robot_base_pose': [round(v, 4) for v in robot],
+              'cart_body_pose': [round(v, 4) for v in cart], 'articulation': res['articulation'],
+              'lane': res['lane'], 'dock_source': res['source'],
+              'note': ('cold-run assembly spawn dock-aligned: robot+cart spawned at the configured couple '
+                       'dock so the coupled train faces the outbound lane heading (fixes the east-spawn '
+                       'left the south lane unacquirable)')}
+    return variant, record
 
 
 def _staged_couple_scenario(scenario, config, *, hitch_x, cart_hitch_x):
@@ -456,13 +531,26 @@ def _staged_couple_scenario(scenario, config, *, hitch_x, cart_hitch_x):
     the cart at the configured ``couple_dock`` (cart left UNCOUPLED -- the real couple stage latches), so
     the couple->outbound bench runs from the dock-aligned seat. No active outbound ``couple_dock`` =>
     ``(scenario, None)`` byte-identical."""
-    poses = couple_start_poses(config, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
-    if poses is None:
+    if config.get('start_at') != 'couple':
         return scenario, None
-    variant = copy.deepcopy(scenario)
-    st = variant.get('initial_staging') if isinstance(variant, dict) else None
-    if not isinstance(st, dict) or not _finite(*st.get('cart_body_pose', (math.nan,))[:3]):
+    res = resolve_couple_dock(config, hitch_x=hitch_x, cart_hitch_x=cart_hitch_x)
+    if res is None:
+        return scenario, None
+    st0 = scenario.get('initial_staging') if isinstance(scenario, dict) else None
+    if not isinstance(st0, dict) or not _finite(*st0.get('cart_body_pose', (math.nan,))[:3]):
         raise ValueError('scenario.initial_staging.cart_body_pose is required to stage the couple start')
+    cur = tuple(float(v) for v in st0['cart_body_pose'])
+    cart0 = res['cart_dock']
+    # No-op (byte-identical) ONLY for a DERIVED dock that already equals the scenario spawn -- a legacy
+    # EAST lane with no explicit couple_dock whose derived dock matches the scenario cart: nothing to
+    # re-head, so the shortcut is unchanged. An EXPLICIT couple_dock always stages (even same-heading).
+    if (res['source'] == 'derived_from_lane_start'
+            and math.dist(cur[:2], cart0[:2]) <= 1e-4 and abs(_wrap(cur[2] - cart0[2])) <= 1e-4):
+        return scenario, None
+    poses = {'robot_seat': res['robot_seat'], 'cart_dock': res['cart_dock'],
+             'articulation': res['articulation'], 'lane': res['lane']}
+    variant = copy.deepcopy(scenario)
+    st = variant['initial_staging']
     robot, cart = poses['robot_seat'], poses['cart_dock']
     dyaw = _wrap(float(cart[2]) - float(st['cart_body_pose'][2]))
     st['robot_base_pose'] = list(robot)
@@ -804,12 +892,16 @@ def plan_start_state(scenario, start_at, stages=None, config=None):
                       carton_target=carton_target, note=note)
 
 
-def apply_start_state(assembly, config, scenario, *, settle_steps=30, _rigid_prim=None):
-    """Establish the planned start state in the live stage. Isaac-only; never CPU-tested.
+def apply_start_state(assembly, config, scenario, *, settle_steps=None, _rigid_prim=None):
+    """Establish the planned start state in the live stage. Isaac-only for the stepping; the settle +
+    rest/heading verify logic is pure (``start_settle``) and CPU-tested.
 
-    ``_rigid_prim`` is a test seam (a SingleRigidPrim-like factory); production leaves it None and
-    uses Isaac's SingleRigidPrim. Returns the StartState actually applied.
+    The settle is SIM-TIME and convergence-verified (``start_settle.converge_settle`` +
+    ``config['start_state_settle']``), NOT a fixed tick count -- ``settle_steps`` is accepted for
+    backward compatibility only and is ignored. ``_rigid_prim`` is a test seam (a SingleRigidPrim-like
+    factory); production leaves it None and uses Isaac's SingleRigidPrim. Returns the StartState applied.
     """
+    del settle_steps  # legacy tick-count arg; the settle is now sim-time + convergence-verified
     start_at = config.get('start_at')
     plan = plan_start_state(scenario, start_at, stages=config.get('stages'), config=config)
 
@@ -847,21 +939,60 @@ def apply_start_state(assembly, config, scenario, *, settle_steps=30, _rigid_pri
         except Exception:
             pass
         print(f'START_PHASE_SHORTCUT transfer observe pose applied to {applied}', flush=True)
-    # Let the carton settle onto the cart deck and the contact solver quiesce before the mission
-    # ticks, so the downstream phases start from a stationary, resting payload.
-    for _ in range(int(settle_steps)):
-        assembly.world.step(render=False)
+    # Settle in SIM TIME until the synthesized bodies actually stop moving, NOT for a fixed tick count
+    # (sim-couple-shortcut-settle-dt-v1): a fixed count is a different amount of sim time at each physics
+    # step and is unrelated to whether the payload has come to rest, so a coarser step or a faster pacing
+    # profile silently changed the settle (coldwin25c/25d froze the couple-start cart mid-wobble on the
+    # portal_floor_box flat-floor box at a tipped, mis-headed pose -> blocked_no_route). The step is read
+    # from the LIVE world; the convergence window + verify tolerances are all in sim seconds.
+    from .start_settle import resolve_settle_params, converge_settle, resting_check, heading_check
+    params = resolve_settle_params(config)
+    if hasattr(assembly.world, 'get_physics_dt'):
+        dt = float(assembly.world.get_physics_dt())
+    else:                                   # pure test seam / no live World: resolve the config step
+        from .physics_step import resolve_dt
+        dt = float(resolve_dt(config))
+
+    cart_body = getattr(assembly, 'cart_body', None)
+    mobile = getattr(assembly, 'mobile', None)
+    track_cart = (not plan.couple_cart) and cart_body is not None
+    names = ('carton', 'cart') if track_cart else ('carton',)
+
+    def _sample():
+        cpose, cz, _, _ = _measure(carton)
+        out = {'carton': (cpose.x, cpose.y, cz, cpose.yaw)}
+        if track_cart:
+            kpose, kz, _, _ = _measure(cart_body)
+            out['cart'] = (kpose.x, kpose.y, kz, kpose.yaw)
+        return out
+
+    # Couple start (cart UNCOUPLED): hold the base + cart at their authored dock seat THROUGH the settle
+    # so the portal_floor_box flat-floor box (drop_subfloor removes the Ground_exterior sub-floor) cannot
+    # tip or slide the free train before the couple reads the dock -- reproducing the stable towstaging3
+    # seat at any floor/step. Released below before the mission drives; begin('couple') re-pins the cart.
+    held = False
+    cart_spawn_z = None
+    if (not plan.couple_cart) and cart_body is not None:
+        cart_spawn_z = _measure(cart_body)[1]
+    if (not plan.couple_cart) and params['hold_during_settle'] and mobile is not None:
+        if hasattr(mobile, 'engage_base_full_brake'):
+            mobile.engage_base_full_brake()
+        if hasattr(mobile, 'hold_cart_pin'):
+            mobile.hold_cart_pin()
+        held = True
+
     coupling = None
     if plan.couple_cart:
         # transfer start: the couple/outbound/park stages are skipped, so the cart must already be
         # physically coupled behind the robot (both spawned parked+aligned at the shelf by the
-        # variant scenario). Author the real hitch through the SAME mobile.attach contract the couple
-        # stage uses (fresh, stopped, aligned observation), then assert the latch is healthy -- a
-        # silent uncoupled cart would let the arm's transfer reaction shove it.
-        assembly.mobile.park()
-        for _ in range(int(settle_steps)):
+        # variant scenario). Settle the carton onto the cart (arm held) in sim time, author the real
+        # hitch through the SAME mobile.attach contract the couple stage uses (fresh, stopped, aligned
+        # observation), then assert the latch is healthy -- a silent uncoupled cart would let the arm's
+        # transfer reaction shove it.
+        def _held_step():
             assembly.hold()
             assembly.world.step(render=False)
+        settle = converge_settle(step=_held_step, sample=_sample, dt=dt, params=params, names=names)
         dock = _dock_observation(assembly)
         pre = assembly.mobile.coupling_state(dock)
         if pre['joint_present']:
@@ -871,9 +1002,8 @@ def apply_start_state(assembly, config, scenario, *, settle_steps=30, _rigid_pri
             raise RuntimeError('shortcut: synthetic cart coupling is not healthy '
                                f"(residual {coupling.get('hitch_error_m')} m); check the variant "
                                'scenario cart_body_pose vs robot_base_pose hitch alignment')
-        for _ in range(int(settle_steps)):
-            assembly.hold()
-            assembly.world.step(render=False)
+        settle_after = converge_settle(step=_held_step, sample=_sample, dt=dt, params=params, names=names)
+        settle = {'place': settle, 'post_attach': settle_after}
         # The settle loops above held the arm via assembly.hold(), which LATCHES
         # command_gate.faulted=True (hold() is otherwise a terminal e-stop and is never reset on its
         # own). The mission that now runs MUST drive the arm (the executor/cuMotion transfer), so re-arm
@@ -882,12 +1012,129 @@ def apply_start_state(assembly, config, scenario, *, settle_steps=30, _rigid_pri
         # reference-vs-frozen-arm divergence, misread as a clock/self-collision fault). Only the
         # transfer-start shortcut holds the arm (couple start leaves command_gate untouched).
         assembly.command_gate.resume()
+    else:
+        settle = converge_settle(step=lambda: assembly.world.step(render=False),
+                                 sample=_sample, dt=dt, params=params, names=names)
+        # Verify the synthesized cart has come to REST on supported floor at the configured dock BEFORE
+        # releasing the stage, so a mis-seated train is named (and refused) here instead of towing into a
+        # no-route. Needs a measurable cart body; skipped on a minimal test seam (no cart_body).
+        if cart_body is not None:
+            kpose, kz, klin, kang = _measure(cart_body)
+            roll_deg, pitch_deg = _roll_pitch_deg(cart_body)
+            measured = dict(z=kz, roll_rad=math.radians(roll_deg), pitch_rad=math.radians(pitch_deg),
+                            lin_speed=float((klin[0] ** 2 + klin[1] ** 2 + klin[2] ** 2) ** 0.5),
+                            ang_speed=float((kang[0] ** 2 + kang[1] ** 2 + kang[2] ** 2) ** 0.5))
+            expected_z = cart_spawn_z if cart_spawn_z is not None else kz
+            ok, reason = resting_check(measured, {'z': expected_z}, params)
+            if not ok:
+                raise RuntimeError(reason)
+            configured_yaw = float(scenario['initial_staging']['cart_body_pose'][2])
+            ok, residual, reason = heading_check(kpose.yaw, configured_yaw, params['heading_tol_rad'])
+            if not ok:
+                raise RuntimeError(reason)
+            print(f'START_STATE_VERIFY cart resting z={kz:.4f} tilt=({roll_deg:.2f},{pitch_deg:.2f})deg '
+                  f'heading={math.degrees(kpose.yaw):.1f}deg vs dock {math.degrees(configured_yaw):.1f}deg '
+                  f'(residual {math.degrees(residual):.1f}deg) -- OK', flush=True)
+        if held:
+            # Drop the settle holds so the couple nav can drive from the seated pose; begin('couple')
+            # re-pins the cart (hold_cart_through_couple). command() also releases the base full-brake.
+            if hasattr(mobile, 'release_cart_brake'):
+                mobile.release_cart_brake(force=True)
+            if hasattr(mobile, 'release_base_full_brake'):
+                mobile.release_base_full_brake()
+
     print(f'START_PHASE_SHORTCUT applied start_at={plan.start_at} skipped={list(plan.skipped)} '
           f'carton_pos={tuple(round(v, 4) for v in plan.carton_position)} '
           f'carton_quat_wxyz={tuple(round(v, 4) for v in plan.carton_orientation_wxyz)} '
-          f'coupled={None if coupling is None else coupling.get("healthy")}',
+          f'coupled={None if coupling is None else coupling.get("healthy")} '
+          f'settle={_settle_brief(settle)} dt={dt:.5f} held_at_seat={held}',
           flush=True)
     return plan
+
+
+def _measure(body):
+    """Isaac body measurement (Pose2, z, linear, angular) -- a thin wrapper so the shortcut's settle/
+    verify can read any SingleRigidPrim-like body. Imported lazily (CPU-safe: no isaacsim import)."""
+    from .isaac_port import body_measurement
+    return body_measurement(body)
+
+
+def _roll_pitch_deg(body):
+    from .isaac_port import body_roll_pitch_deg
+    return body_roll_pitch_deg(body)
+
+
+def _settle_brief(settle):
+    """Compact settle report for the console line (handles the single and coupled {place,post_attach})."""
+    def one(s):
+        return f"converged={s['converged']} sim={s['elapsed_s']:.2f}s steps={s['steps']}"
+    if isinstance(settle, dict) and 'place' in settle:
+        return f"place[{one(settle['place'])}] post_attach[{one(settle['post_attach'])}]"
+    return one(settle)
+
+
+def verify_dock_seat(assembly, config, scenario):
+    """Cold-run twin of the couple-shortcut rest/heading verify (sim-couple-shortcut-settle-dt-v1).
+
+    A COLD run (no ``start_at``) with a dock-aligned assembly spawn (:func:`dock_align_scenario`) must
+    begin from a cart that is RESTING at the configured dock HEADING -- otherwise the robot couples to a
+    cart facing the wrong way and the outbound tow lane is never acquired (coldwin25e: the cart spawned
+    EAST while the lane is authored SOUTH). This holds the cart at its authored dock seat through a
+    SIM-TIME settle (so the portal_floor_box floor cannot tip it), verifies it is resting at the
+    configured dock heading, then releases the hold so the mission's collect runs normally. Named
+    ``START_STATE_UNSUPPORTED`` / ``START_STATE_SETTLE_MISMATCH`` on failure (refuses to drive). No-op
+    (returns None) when no cart body is present. Isaac-only stepping; the verdict logic is pure.
+    """
+    cart_body = getattr(assembly, 'cart_body', None)
+    if cart_body is None:
+        return None
+    from .start_settle import resolve_settle_params, converge_settle, resting_check, heading_check
+    params = resolve_settle_params(config)
+    if hasattr(assembly.world, 'get_physics_dt'):
+        dt = float(assembly.world.get_physics_dt())
+    else:
+        from .physics_step import resolve_dt
+        dt = float(resolve_dt(config))
+    mobile = getattr(assembly, 'mobile', None)
+    spawn_z = _measure(cart_body)[1]
+    held = False
+    if params['hold_during_settle'] and mobile is not None:
+        if hasattr(mobile, 'engage_base_full_brake'):
+            mobile.engage_base_full_brake()
+        if hasattr(mobile, 'hold_cart_pin'):
+            mobile.hold_cart_pin()
+        held = True
+
+    def _sample():
+        kpose, kz, _, _ = _measure(cart_body)
+        return {'cart': (kpose.x, kpose.y, kz, kpose.yaw)}
+
+    settle = converge_settle(step=lambda: assembly.world.step(render=False),
+                             sample=_sample, dt=dt, params=params, names=('cart',))
+    kpose, kz, klin, kang = _measure(cart_body)
+    roll_deg, pitch_deg = _roll_pitch_deg(cart_body)
+    measured = dict(z=kz, roll_rad=math.radians(roll_deg), pitch_rad=math.radians(pitch_deg),
+                    lin_speed=float((klin[0] ** 2 + klin[1] ** 2 + klin[2] ** 2) ** 0.5),
+                    ang_speed=float((kang[0] ** 2 + kang[1] ** 2 + kang[2] ** 2) ** 0.5))
+    try:
+        ok, reason = resting_check(measured, {'z': spawn_z}, params)
+        if not ok:
+            raise RuntimeError(reason)
+        configured_yaw = float(scenario['initial_staging']['cart_body_pose'][2])
+        ok, residual, reason = heading_check(kpose.yaw, configured_yaw, params['heading_tol_rad'])
+        if not ok:
+            raise RuntimeError(reason)
+    finally:
+        if held:
+            if hasattr(mobile, 'release_cart_brake'):
+                mobile.release_cart_brake(force=True)
+            if hasattr(mobile, 'release_base_full_brake'):
+                mobile.release_base_full_brake()
+    print(f'START_STATE_VERIFY (cold dock seat) cart resting z={kz:.4f} '
+          f'tilt=({roll_deg:.2f},{pitch_deg:.2f})deg heading={math.degrees(kpose.yaw):.1f}deg vs dock '
+          f'{math.degrees(configured_yaw):.1f}deg (residual {math.degrees(residual):.1f}deg) '
+          f'settle={_settle_brief(settle)} -- OK', flush=True)
+    return {'settle': settle, 'heading_residual_rad': residual, 'cart_z': kz}
 
 
 def _dock_observation(assembly, *, age=0.0):
