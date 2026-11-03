@@ -317,3 +317,85 @@ class HomeLegNavigation(unittest.TestCase):
         self.assertEqual((r['status'], r['reason'], r['leg']), ('succeeded', 'arrived_stopped', 1), r)
         self.assertLess(math.dist(r['pose'][:2], poses['home'][:2]), 0.15)
         self.assertLess(r['t'], 120.0)                # well inside the return stage budget
+
+
+class CartBoxesYaw(unittest.TestCase):
+    """``tail_nav.cart_boxes`` at an arbitrary parked yaw (sim-cart-boxes-yaw-v1). PR 271 re-heads the
+    rollwagen parking spot SOUTH on the portal axis (``cart_parking`` yaw = +pi/2), so the helper must no
+    longer refuse a non-axis-aligned pose; it stays byte-identical inside the old near-axis band."""
+
+    CX, CY = -3.875, 16.3
+
+    @staticmethod
+    def _true_footprint_corners(cx, cy, cyaw):
+        """The physically-correct parked cart: the canonical part boxes rigidly ROTATED about the centre.
+        Every corner must fall inside the union of the returned (conservative, axis-aligned) boxes."""
+        from twin.restock.tail_nav import _cart_local_boxes
+        c, s = math.cos(cyaw), math.sin(cyaw)
+        pts = []
+        for lx0, ly0, _z0, lx1, ly1, _z1, _path in _cart_local_boxes():
+            for lx in (lx0, lx1):
+                for ly in (ly0, ly1):
+                    pts.append((cx + c * lx - s * ly, cy + s * lx + c * ly))
+        return pts
+
+    @staticmethod
+    def _union_contains(boxes, pts, eps=1e-9):
+        return all(any(b[0] - eps <= px <= b[3] + eps and b[1] - eps <= py <= b[4] + eps for b in boxes)
+                   for px, py in pts)
+
+    def test_byte_identical_inside_the_near_axis_band(self):
+        """Within the old tolerance (|sin(cyaw)| <= 0.2, yaw ~ 0 or ~ pi) the result is exactly the historical
+        axis-aligned approximation -- every old near-axis call is unchanged to the bit."""
+        from twin.restock.tail_nav import cart_boxes, _cart_boxes_axis_aligned
+        for yaw in (0.0, 0.1, -0.1, 0.2, -0.2, math.pi, math.pi - 0.1, math.pi + 0.1):
+            self.assertLessEqual(abs(math.sin(yaw)), 0.2 + 1e-12, yaw)
+            self.assertEqual(cart_boxes(self.CX, self.CY, yaw),
+                             _cart_boxes_axis_aligned(self.CX, self.CY, yaw), f'yaw={yaw}')
+
+    def test_south_headed_pose_no_longer_refuses(self):
+        """The PR 271 south-headed parking pose (yaw = +pi/2) raised ``cart_boxes approximates a
+        near-axis-aligned parked cart only`` before this change; it now returns the full box set."""
+        from twin.restock.tail_nav import cart_boxes
+        boxes = cart_boxes(self.CX, self.CY, math.pi / 2)
+        self.assertEqual(len(boxes), len(cart_boxes(self.CX, self.CY, 0.0)))     # same parts, 13 boxes
+        self.assertTrue(all(len(b) == 7 and b[0] <= b[3] and b[1] <= b[4] for b in boxes))
+
+    def test_contains_true_rotated_footprint_at_cardinal_and_oblique_yaws(self):
+        """yaw = 0, pi/2, pi, -pi/2 and an oblique yaw: the returned boxes CONTAIN the true rotated cart
+        footprint (conservative), the property the uncoupled home-leg raycaster relies on."""
+        from twin.restock.tail_nav import cart_boxes
+        for yaw in (0.0, math.pi / 2, math.pi, -math.pi / 2, 0.6):
+            boxes = cart_boxes(self.CX, self.CY, yaw)
+            self.assertTrue(self._union_contains(boxes, self._true_footprint_corners(self.CX, self.CY, yaw)),
+                            f'footprint not contained at yaw={yaw}')
+
+    def test_rotated_boxes_never_smaller_than_the_axis_aligned_parts(self):
+        """Rotating a part's rectangle and taking its axis-aligned bounds never SHRINKS it: each box's xy
+        area at an off-axis yaw is >= the canonical part area (the 'never smaller than today' guarantee)."""
+        from twin.restock.tail_nav import _cart_boxes_rotated, _cart_local_boxes
+        local = _cart_local_boxes()
+        for yaw in (math.pi / 2, -math.pi / 2, 0.6, 2.4):
+            rotated = _cart_boxes_rotated(self.CX, self.CY, yaw)
+            self.assertEqual([b[6] for b in rotated], [b[6] for b in local])     # same parts, same order
+            for rb, lb in zip(rotated, local):
+                area_rot = (rb[3] - rb[0]) * (rb[4] - rb[1])
+                area_loc = (lb[3] - lb[0]) * (lb[4] - lb[1])
+                self.assertGreaterEqual(area_rot + 1e-12, area_loc, f'{rb[6]} shrank at yaw={yaw}')
+
+    def test_home_leg_boots_from_south_headed_parking_pose(self):
+        """End to end: ``simulate_home_leg`` (which calls ``cart_boxes`` for the parked obstacle) runs from
+        the dock-align fragment's south-headed ``cart_parking`` instead of raising at setup -- the preflight
+        refusal the integration lane hit assembling coldwin20. We assert only that the drive executes and
+        the parked cart is placed as a live obstacle (routing success is the lane's concern, not this gate)."""
+        from twin.restock.tail_nav import simulate_home_leg, cart_boxes, HITCH_TO_CART_M
+        fragment = json.loads((Path(__file__).resolve().parents[3] / 'docs' / 'examples'
+                               / 'tow-lanes-mission-fragment.json').read_text())
+        parking = fragment['mission_poses']['cart_parking']
+        self.assertAlmostEqual(parking[2], math.pi / 2)                           # PR 271 south-headed yaw
+        cart = (parking[0] - HITCH_TO_CART_M * math.cos(parking[2]),
+                parking[1] - HITCH_TO_CART_M * math.sin(parking[2]), parking[2])
+        self.assertEqual(len(cart_boxes(*cart)), 13)                              # no raise at the parked pose
+        r = simulate_home_leg(FIXTURE['config'], FIXTURE['scenario'], FIXTURE['environment'],
+                              camera_config=FIXTURE['camera_config'], start=parking, max_s=5.0)
+        self.assertIn('status', r)                                                # the leg ran; cart_boxes did not refuse
