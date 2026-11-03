@@ -27,6 +27,7 @@ from .transfer_carry import weld_attach as _weld_attach
 from .transfer_mode import LIVE_POSE, transfer_mode
 from . import ground_truth_collect as gtc
 from .types import ProductProfile
+from ..restock.physics_step import freshness_scale_from_env
 
 STATIONS = ('source', 'shelf')
 # Mission action -> arm station whose ROI/calibration the sensors use.
@@ -825,7 +826,11 @@ class CollectTargetBridge:
             if self._calls % 10 == 1:
                 print(f'TRANSFER_CAPTURE shelf_error={type(exc).__name__}:{exc}', flush=True)
             return None
-        if slot is None or not (-0.02 <= now - slot.stamp <= .5):
+        # sim-physics-step-collision-band-v1: the GT slot freshness lead/window (0.02 s lead, 0.5 s
+        # budget) are per-FRAME, rebased onto the running physics step (factor 1.0 at 1/60 =>
+        # byte-identical) so a coarser step does not false-reject a one-frame-ahead / cadence-fresh stamp.
+        _fs = freshness_scale_from_env()
+        if slot is None or not (-0.02 * _fs <= now - slot.stamp <= .5 * _fs):
             if self._calls % 10 == 1:
                 print(f'TRANSFER_CAPTURE slot={slot is not None} fresh?', flush=True)
             return None
@@ -979,7 +984,11 @@ class CollectTargetBridge:
                 print(f'COLLECT_CAPTURE calls={self._calls} target=None parked={self.motion.parked()}', flush=True)
             return self._survival_packet(now)        # fm410: source occluded -> arm-feedback packet if attached
         parked = bool(self.motion.parked())
-        fresh = -0.02 <= now - target.stamp <= .5
+        # sim-physics-step-collision-band-v1: per-FRAME GT target freshness lead/window rebased onto the
+        # running physics step (factor 1.0 at 1/60 => byte-identical). This is the ground-truth collect
+        # target gate -- a coarser step must not false-reject a cadence-fresh target.
+        _fs = freshness_scale_from_env()
+        fresh = -0.02 * _fs <= now - target.stamp <= .5 * _fs
         if not parked or not fresh:
             print(f'COLLECT_CAPTURE calls={self._calls} sku={target.sku} REJECT parked={parked} '
                   f'fresh={fresh} now={now:.3f} stamp={target.stamp:.3f}', flush=True)

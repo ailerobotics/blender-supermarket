@@ -480,8 +480,14 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # to tick()/advance(), and IsaacPort.advance asserts world.get_physics_dt()==dt, so a mis-thread
     # fails the boot loudly. rendering_dt tracks physics_dt (the render decision is the port's render
     # flag, not Isaac's own render cadence).
-    from .physics_step import resolve_dt as _resolve_physics_dt, describe as _describe_physics_dt
+    from .physics_step import (resolve_dt as _resolve_physics_dt, describe as _describe_physics_dt,
+                               export_physics_dt as _export_physics_dt)
     _physics_dt=_resolve_physics_dt(config)
+    # sim-physics-step-collision-band-v1: publish the resolved step into RESTOCK_PHYSICS_DT so this
+    # (mission) process's per-frame sensor-freshness windows rebase onto the running step (frame-count
+    # budget held constant across dt; factor exactly 1.0 => byte-identical at 1/60). Exported BEFORE the
+    # first world.step so every later freshness read (isaac_sensors / restock_camera) sees it.
+    _export_physics_dt(_physics_dt)
     print(_describe_physics_dt(_physics_dt),flush=True)
     world=World(physics_dt=_physics_dt,rendering_dt=_physics_dt,stage_units_in_meters=1.,physics_prim_path=scenes[0])
     # World's PhysicsContext re-applies Isaac defaults at construction

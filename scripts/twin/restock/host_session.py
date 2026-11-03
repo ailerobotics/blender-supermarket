@@ -58,6 +58,13 @@ class HostSession:
         scripts=Path(__file__).resolve().parents[2]
         environment['PYTHONPATH']=str(scripts)+os.pathsep+environment.get('PYTHONPATH','')
         environment['ROS_LOG_DIR']=str(self.output/'ros-logs')
+        # sim-physics-step-collision-band-v1: the host env is ISOLATED from the launcher (built fresh
+        # from the ROS setup scripts), so export the mission's resolved physics step into it explicitly.
+        # The out-of-Isaac host children (controller, station-host incorporation ack, trajectory host)
+        # rebase their per-frame freshness windows (collision/ESDF age, feedback age, render lead) onto
+        # it. Absent/1/60 => factor 1.0 => byte-identical.
+        from .physics_step import resolve_dt as _resolve_physics_dt, export_physics_dt as _export_physics_dt
+        _export_physics_dt(_resolve_physics_dt(config), environment)
         host_config=json.loads(Path(config['host_config']).read_text())
         commands={
             'trajectory':[str(python),'-m','twin.restock.trajectory_host','--urdf',host_config['urdf']],

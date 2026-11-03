@@ -43,9 +43,17 @@ recorded grasp-descent / dock-closing speeds and states the values used).
 from __future__ import annotations
 
 import math
+import os
 
 # Legacy / default step. Returned verbatim when the key is absent, so the boot path is byte-identical.
 DEFAULT_DT = 1.0 / 60.0
+
+# Env the launcher/host-session export with the RESOLVED physics step (seconds) so every process in
+# the mission -- the Isaac/mission process AND the out-of-Isaac host children (controller, station-host
+# incorporation ack, trajectory host) -- can rebase its per-frame freshness windows onto the running
+# step without re-reading the runtime config. Absent => DEFAULT_DT => every freshness window is its
+# legacy sim-seconds value (scale factor exactly 1.0 => byte-identical).
+PHYSICS_DT_ENV = 'RESTOCK_PHYSICS_DT'
 
 # Bounds on the configurable step. Finer than 1/240 buys nothing and coarser than 1/15 is past any
 # plausible contact tolerance for this rig; a value outside refuses the boot rather than running it.
@@ -148,6 +156,70 @@ def describe(dt):
     """One boot-log line naming the step (so a raised step is visible at boot)."""
     return (f'PHYSICS_STEP dt={dt:.6g}s hz={1.0/dt:.3g} '
             f'{"(legacy 1/60)" if is_default(dt) else "(RAISED from 1/60 -- sim-realtime-factor-v1)"}')
+
+
+def freshness_scale(dt):
+    """Multiplier that rebases a per-FRAME freshness window expressed in sim-seconds-at-1/60 onto a
+    run at physics step ``dt``. PURE. Exactly ``1.0`` at ``DEFAULT_DT`` (so a default run is
+    byte-identical).
+
+    Why a per-frame freshness window must scale with the step (sim-realtime-factor-v1 /
+    sim-physics-step-collision-band-v1). The mission's sensor-freshness bands -- the collision/ESDF
+    incorporation age (``collision_dt``), the arm-feedback age, and the one-to-few-step delivery-order
+    "render lead" -- bound how STALE (or marginally future) a relayed stamp may be before the
+    controller refuses to move the arm. Their binding constraint in this rig is NOT a sim-time safety
+    margin (the collect/transfer scene is PARKED/static, so an older packet is strictly consistent --
+    see controller.max_age fm476); it is the ESDF/feedback PRODUCTION CADENCE. nvblox integrates
+    RENDERED depth frames, and ``rendering_dt`` tracks ``physics_dt`` (physics_setup.assemble), so one
+    rendered frame spans exactly ``dt`` sim-seconds. The real physical quantity each band encodes is a
+    FRAME-COUNT budget -- "tolerate up to N un-refreshed frames of staleness" -- and the sim-seconds
+    band is ``N * dt``. A coarser step stretches every frame's sim-time footprint, so a fixed
+    sim-seconds band silently SHRINKS the frame budget and false-trips a healthy-but-coarser pipeline
+    (the rtfcollect failure: ``collision_dt=1.5278`` over a 1.5 s band = the SAME ~55-frame staleness
+    that is 0.92 s and well inside the band at 1/60). Scaling the sim-seconds band by ``dt / (1/60)``
+    holds the frame budget constant across the step -- it is NOT a widening: the frame-count margin is
+    identical, only re-expressed in the running clock. ``dt`` is bounded [MIN_DT, MAX_DT] so the factor
+    is bounded [0.25, 4.0]."""
+    d = float(dt)
+    if not math.isfinite(d) or d <= 0:
+        return 1.0
+    return d / DEFAULT_DT
+
+
+def dt_from_env(environ=None):
+    """The resolved physics step (seconds) a process should scale its freshness windows by, read from
+    the ``RESTOCK_PHYSICS_DT`` env the launcher/host-session export. Absent/malformed/out-of-range =>
+    ``DEFAULT_DT`` (factor 1.0 => byte-identical), never raises -- a freshness read must not crash a
+    mission tick on a bad env."""
+    env = os.environ if environ is None else environ
+    raw = env.get(PHYSICS_DT_ENV)
+    if raw is None:
+        return DEFAULT_DT
+    try:
+        return _as_dt(float(raw), PHYSICS_DT_ENV)
+    except (TypeError, ValueError):
+        return DEFAULT_DT
+
+
+def freshness_scale_from_env(environ=None):
+    """``freshness_scale(dt_from_env())`` -- the per-frame freshness multiplier for THIS process. 1.0
+    when ``RESTOCK_PHYSICS_DT`` is absent/default => byte-identical."""
+    return freshness_scale(dt_from_env(environ))
+
+
+def scale_freshness_window(base_s, dt):
+    """A sim-seconds freshness window ``base_s`` (its value AT 1/60) rebased onto step ``dt``. PURE.
+    ``base_s`` unchanged at ``DEFAULT_DT``."""
+    return float(base_s) * freshness_scale(dt)
+
+
+def export_physics_dt(dt, environ=None):
+    """Publish the resolved step into ``RESTOCK_PHYSICS_DT`` so host children + later reads rebase
+    their freshness windows. Writes the exact ``repr`` of DEFAULT_DT's float at the default step, so a
+    default run's env value round-trips to factor 1.0."""
+    env = os.environ if environ is None else environ
+    env[PHYSICS_DT_ENV] = repr(float(dt))
+    return env[PHYSICS_DT_ENV]
 
 
 def summary_fields(config):

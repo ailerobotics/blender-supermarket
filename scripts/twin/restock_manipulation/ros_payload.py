@@ -9,6 +9,7 @@ import time
 import numpy as np
 
 from ..restock.pace_watchdog import is_dead as pace_is_dead
+from ..restock.physics_step import freshness_scale_from_env
 from .ros_adapter import frozen_sim_wall_backstop
 
 # fm366: payload grasp/detach ack WALL timeout. ros_host passes config['payload_ack_wall_s'] (sim 15);
@@ -242,8 +243,14 @@ class RosPayloadSync:
         # start_at=transfer -- past the 1.5 s max_age); remove it so the gate measures true age. 0.0 on
         # every cold run => byte-identical.
         offset = 0.0 if s is None else float(getattr(s, 'clock_offset', 0.0))
+        # sim-physics-step-collision-band-v1: the render lead (a one-to-few-PHYSICS-STEP delivery-order
+        # lead) is per-frame, so rebase it onto the running step -- at a coarser step one step spans more
+        # sim time and a legitimately one-step-ahead stamp would be mis-rejected as future (0.02 s < one
+        # 1/36 frame 0.0278 s). c.max_age is the controller's (already step-rebased) staleness window.
+        # Factor exactly 1.0 at 1/60 => byte-identical.
+        render_lead = RENDER_LEAD_S * freshness_scale_from_env()
         if (s is None or c is None or s.contact != held
-                or not -RENDER_LEAD_S <= now-s.feedback_time-offset <= c.max_age):
+                or not -render_lead <= now-s.feedback_time-offset <= c.max_age):
             return _diag('precondition')
         if not self.scene.service_is_ready():
             return _diag('scene_service')
@@ -280,7 +287,7 @@ class RosPayloadSync:
                     print('PAYLOAD_SYNC_DIAG gate=tf_lookup_raise exc=%r now=%.4f' % (exc, now), flush=True)
                 return False
             stamp = transform.header.stamp.sec+transform.header.stamp.nanosec*1e-9
-            if not -RENDER_LEAD_S <= now-stamp <= c.max_age:
+            if not -render_lead <= now-stamp <= c.max_age:
                 return _diag('tf_fresh now_minus_stamp=%.4f stamp=%.4f' % (now-stamp, stamp))
             xyz, quat = transform.transform.translation, transform.transform.rotation
             centre = (*c.source_pose[:2],c.source_pose[2]-profile.dimensions[2]/2,*c.source_pose[3:])

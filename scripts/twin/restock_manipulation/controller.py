@@ -4,6 +4,7 @@ import math
 import os
 import time
 from ..restock_camera.freshness import require_fresh
+from ..restock.physics_step import freshness_scale_from_env
 
 from . import esdf_boot_gate
 from . import ground_truth_collect as gtc
@@ -165,7 +166,20 @@ class TransferController:
         # never mask a base-moving / feedback / pre-grasp fault; pre-grasp stays zero-tolerance. The
         # capture's hold-last-good (isaac_factory) already blocks the -1 mirror gap; this covers a genuine
         # brief re-incorporation lag. 0 s => off => byte-identical.
-        self.collision_stale_tol_s = _float_env_bounded('RESTOCK_COLLISION_STALE_TOL_S', 0.8, 0.0, 5.0)
+        # sim-physics-step-collision-band-v1: per-FRAME sensor-freshness windows (the collision/ESDF
+        # age max_age, the one-to-few-step render_lead, and this held-collision pause tolerance) encode a
+        # FRAME-COUNT budget -- "tolerate up to N un-refreshed frames of ESDF/feedback staleness" -- and
+        # the sim-seconds value is N*dt. nvblox integrates rendered frames and rendering_dt tracks
+        # physics_dt, so one frame = dt sim-seconds; at a RAISED step the same frame-count staleness
+        # spans more sim time (rtfcollect: a ~55-frame warming gap = collision_dt 1.5278 s at 1/36, which
+        # is 0.92 s and inside the 1.5 s band at 1/60). Rebase each window onto the running step so the
+        # FRAME budget is held constant (NOT a widening -- identical frame margin, re-expressed on the
+        # running clock; the collect/transfer scene is parked/static so an older packet is strictly
+        # consistent, see max_age fm476). Factor is exactly 1.0 at 1/60 => byte-identical. The step is
+        # read from RESTOCK_PHYSICS_DT (exported by the launcher; see twin.restock.physics_step).
+        self._freshness_scale = freshness_scale_from_env()
+        self.collision_stale_tol_s = (_float_env_bounded('RESTOCK_COLLISION_STALE_TOL_S', 0.8, 0.0, 5.0)
+                                      * self._freshness_scale)
         # fm327 belt-and-braces wrist_1 cap for the task-space LIFT carry move (None = off).
         self.carry_wrist1_cap = None if carry_wrist1_cap is None else float(carry_wrist1_cap)
         # fm403: route the loaded LIFT to a FIXED joint-space clear-region carry shape via
@@ -477,7 +491,9 @@ class TransferController:
         # SAFE here: the transfer (and collect) scene is PARKED/static, so a slightly older packet is
         # strictly consistent. Unset => the 0.5 s default (byte-identical real-rig).
         self.cart_location = cart_location
-        self.max_age = _float_env_bounded('RESTOCK_SENSOR_MAX_AGE_S', max_age, 0.1, 5.0)
+        # The env value is the window AT 1/60; _freshness_scale rebases it onto the running step
+        # (sim-physics-step-collision-band-v1; factor 1.0 at 1/60 => byte-identical).
+        self.max_age = _float_env_bounded('RESTOCK_SENSOR_MAX_AGE_S', max_age, 0.1, 5.0) * self._freshness_scale
         # fm423 (b) / run-321 cold collect: the relayed host stamps (collision_time from
         # station/status, feedback_time from /joint_states) ride a DIFFERENT clock relay than the
         # controller's node `now`, so under render pacing a freshly-incorporated stamp can arrive
@@ -491,7 +507,10 @@ class TransferController:
         # render_lead seconds in the future is fresh (strictly MORE current data -- safe); a genuinely
         # STALE stamp (age > max_age) is still rejected, and a wildly-future stamp (> render_lead) still
         # trips. Default 0.2 s matches trajectory_host's relayed-stamp-vs-node-clock race.
-        self.render_lead = _float_env_bounded('RESTOCK_FRESH_RENDER_LEAD_S', 0.2, 0.0, 0.5)
+        # Rebased onto the running step too: the render lead is a one-to-few-PHYSICS-STEP delivery-order
+        # lead, so at a coarser step one step spans more sim time and a legitimately one-step-ahead stamp
+        # would otherwise be mis-flagged future (sim-physics-step-collision-band-v1; 1.0 at 1/60).
+        self.render_lead = _float_env_bounded('RESTOCK_FRESH_RENDER_LEAD_S', 0.2, 0.0, 0.5) * self._freshness_scale
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
         self.held = False
