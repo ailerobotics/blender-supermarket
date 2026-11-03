@@ -106,7 +106,8 @@ class TransferController:
                  collect_ground_truth: bool = False, grasp_press_timeout_s: float = 0.0,
                  release_detach_timeout_s: float = 0.0, transfer_preplace_reach_guard=None,
                  transfer_pick_wrist_guard: bool = False,
-                 esdf_boot_ack_grace_s: float = 0.0):
+                 esdf_boot_ack_grace_s: float = 0.0,
+                 carton_level=None, fk_urdf=None):
         self.steady_clock=steady_clock
         # collect-gt (demo, opt-in, default off): GROUND-TRUTH COLLECT. Accept the collect SOURCE observation
         # labelled 'ground_truth' (the controlled carton asset's simulated pose, served Isaac-side when the
@@ -272,6 +273,16 @@ class TransferController:
             raise ValueError('esdf_boot_ack_grace_s must be a finite, non-negative number of sim seconds')
         self.esdf_boot_ack_grace_s = float(esdf_boot_ack_grace_s)
         self._esdf_boot_gate = esdf_boot_gate.EsdfBootGate(self.esdf_boot_ack_grace_s)
+        # sim-carton-level-carry-v1: keep the welded carton PARALLEL TO THE GROUND through every carried
+        # move (captain's rule; coldwin16 swung it ~150 deg off its weld attitude during the fold). A
+        # resolved carton_level.LevelConfig (or None => off => byte-identical) plus the FK URDF path lets
+        # the carried fold goals be LEVELED (level_goals) and a carried carton that leaves level by more
+        # than the bound be NAMED (CARTON_TILT) and FAILED (trip) rather than silently shown. The carton
+        # rests level on the shelf at the weld, so its up-axis is captured from the first carried pose.
+        self._carton_level = carton_level           # carton_level.LevelConfig | None
+        self._fk_urdf = fk_urdf                      # URDF path for the Isaac-free FK, or None
+        self._fk_robot = None                        # lazily parsed Robot (first carried step)
+        self._carton_up_in_tool = None               # the level carton up-axis in the tool frame, captured at the weld
         # fm427 (A1) (run-323 cold lift): the fm419(a) COLLISION_STALE_PAUSE holds the post-attach lift on
         # a genuinely-stale collision stamp (run-323: collision_dt 0.52->0.65 s, the benign weld/ESDF
         # re-incorporation lag) by returning EMPTY controls -- a SILENT hold. Under render pacing that
@@ -774,6 +785,85 @@ class TransferController:
         # Never drop a held object on failure. Recovery is an explicit new decision.
         return self._result(({'kind': 'stop'}, {'kind': 'gripper', 'enabled': self.held}))
 
+    # ------------------------------------------------- sim-carton-level-carry-v1
+    # The carried phases where a WELDED carton must stay parallel to the ground. 'retreat'/'release'
+    # are post-set-down (gripper opening / empty), so they are NOT level-constrained.
+    _CARRIED_PHASES = ('lift', 'tuck', 'pan', 'transit', 'preplace', 'place')
+
+    def _fk_model(self):
+        """The Isaac-free FK Robot for the carton-level constraint (parsed once). None when no URDF
+        was provided (=> the constraint is inert)."""
+        if self._fk_robot is None and self._fk_urdf:
+            from twin.urdf_probe import parse_urdf
+            self._fk_robot = parse_urdf(self._fk_urdf)
+        return self._fk_robot
+
+    def _capture_level_up(self, measured):
+        """At the first carried pose (carton just welded, still at the level shelf attitude), capture
+        the carton's up-axis in the tool frame so later poses can be leveled / checked against it.
+        Idempotent; a no-op without a config, FK model, or a 6-vector measured pose."""
+        if (self._carton_level is None or self._carton_up_in_tool is not None
+                or len(measured) != 6 or not all(math.isfinite(x) for x in measured)):
+            return
+        robot = self._fk_model()
+        if robot is None:
+            return
+        from twin.restock_manipulation import carton_level as cl
+        R = cl.tool_rotation(robot, list(measured), self._carton_level.tool_link)
+        self._carton_up_in_tool = cl.carton_up_in_tool(R)
+
+    def _level_carried_goal(self, goal, measured):
+        """A carried joint goal with its wrist cluster re-solved so the welded carton stays LEVEL (a
+        level-orientation waypoint), bounded to the clear carry wrist region (carry_wrist1_cap /
+        carry_wrist2_min) so the existing self-collision shapes are respected. Off / no FK / no
+        captured up-axis => ``goal`` unchanged (byte-identical). A pose with no level solution in the
+        clear region raises ValueError -> the caller fails honestly rather than carrying a tilted
+        carton."""
+        if (self._carton_level is None or not self._carton_level.level_goals
+                or len(goal) != 6):
+            return goal
+        robot = self._fk_model()
+        if robot is None:
+            return goal
+        self._capture_level_up(measured)
+        if self._carton_up_in_tool is None:
+            return goal
+        from twin.restock_manipulation import carton_level as cl
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+        big = 2 * math.pi
+        limits = {}
+        if self.carry_wrist1_cap is not None:
+            limits['ur_wrist_1_joint'] = (-big, float(self.carry_wrist1_cap))
+        if self.carry_wrist2_min is not None:
+            limits['ur_wrist_2_joint'] = (float(self.carry_wrist2_min), big)
+        try:
+            leveled = cl.level_config(robot, list(goal), self._carton_up_in_tool,
+                                      joints=self._carton_level.joints,
+                                      tool_link=self._carton_level.tool_link,
+                                      limits=limits or None)
+        except ValueError as exc:
+            # No level solution for this pose within the clear wrist region. Do NOT crash and do NOT
+            # silently carry it tilted: proceed with the original goal; the CARTON_TILT trip then names
+            # and fails the move on the next step (keep trip enabled with level_goals).
+            print('CARTON_LEVEL_UNSOLVED phase=%s: %s (proceeding unleveled; CARTON_TILT trip owns it)'
+                  % (self.phase, exc), flush=True)
+            return goal
+        return tuple(float(leveled[j]) for j in ARM_JOINTS)
+
+    def _carton_tilt_trip(self, measured):
+        """CARTON_TILT trip message when the welded carton (this carried pose) leaves level by more
+        than the bound, else None. No-op when off / trip disabled / no FK / up-axis not yet captured."""
+        if self._carton_level is None or not self._carton_level.trip:
+            return None
+        robot = self._fk_model()
+        if robot is None or self._carton_up_in_tool is None:
+            return None
+        from twin.restock_manipulation import carton_level as cl
+        roll, pitch, _ = cl.carried_rpy(robot, list(measured), self._carton_up_in_tool,
+                                        self._carton_level.tool_link)
+        out = cl.tilt_trip(roll, pitch, self._carton_level.bound_deg)
+        return out[0] if out else None
+
     def _raised_move_exc(self, exc, *, staged):
         """fm371/fm372: a collect move's poll() RAISED. Close the whole "a move raise kills the mission"
         family: route EVERY non-collision, non-joint-limit raise -- plan-exhaust (RuntimeError), a
@@ -910,6 +1000,19 @@ class TransferController:
                   'source=sensors.collision_time packet mirror; collision_dt invariant now owns freshness)'
                   % (self.phase, now, sensors.collision_time), flush=True)
         collision_fresh = self._fresh(sensors.collision_time, now)
+        # sim-carton-level-carry-v1: CARTON_TILT trip. While the carton is WELDED and in a carried
+        # phase, capture its level up-axis once (the grasp pose rests level on the shelf) and fail
+        # the move by name if the measured carton leaves level by more than the bound -- never carry
+        # a visibly tilted carton silently. Off (carton_level None) / no FK / non-6 pose => inert =>
+        # byte-identical. Checked before motion streams so a tilt stops the arm, not the video.
+        if (self._carton_level is not None and self.held and self.phase in self._CARRIED_PHASES
+                and len(sensors.joint_positions) == 6
+                and all(math.isfinite(x) for x in sensors.joint_positions)):
+            self._capture_level_up(sensors.joint_positions)
+            _tilt = self._carton_tilt_trip(sensors.joint_positions)
+            if _tilt:
+                print(_tilt, flush=True)
+                return self._fail(_tilt)
         # fm430 (2a) fallback: ride the post-attach LIFT (to the fixed clear-region carry_lift_shape, which
         # does NOT depend on the live collision world) THROUGH a brief ESDF-re-incorporation staleness for
         # a bounded WALL grace -- proceed (treat collision as fresh for this pre-validated move), then FAIL
@@ -1315,7 +1418,10 @@ class TransferController:
                 # into the shape settles a little short on joint0 only, so relax THIS move's terminal gate
                 # (the subsequent tuck/transit re-anchor). Absent carry_lift_shape => legacy task-space lift.
                 if self.phase == 'lift' and self.carry_lift_shape is not None:
-                    self.motion.begin_joint_goal(self.carry_lift_shape, s.joint_positions,
+                    # sim-carton-level-carry-v1: level the lifted carry shape so the carton rises
+                    # parallel to the ground (within the clear wrist caps). Off => shape unchanged.
+                    _lift_goal = self._level_carried_goal(self.carry_lift_shape, s.joint_positions)
+                    self.motion.begin_joint_goal(_lift_goal, s.joint_positions,
                                                  slow=True, goal_tol=0.2)
                     self.issued = True
                     return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
@@ -1568,6 +1674,11 @@ class TransferController:
             # apply (tuck/pan carry the held carton; retreat_tuck is empty-handed).
             goal = ((self.cart_pan_joint0,) + tuple(self.cart_tuck_shape) if self.phase == 'pan'
                     else (s.joint_positions[0],) + tuple(self.cart_tuck_shape))
+            # sim-carton-level-carry-v1: level the carried fold (tuck/pan) so the carton stays
+            # parallel to the ground through the swing; retreat_tuck is empty-handed (untouched).
+            # Off => goal unchanged (byte-identical).
+            if self.phase in ('tuck', 'pan'):
+                goal = self._level_carried_goal(goal, s.joint_positions)
             if not self.issued:
                 if s.valid_until_steady is not None:
                     require_fresh(s.valid_until_steady, self.steady_clock)
