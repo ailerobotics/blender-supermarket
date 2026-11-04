@@ -98,6 +98,10 @@ KEY_CONSUMER = {
     'navigation': RUNTIME,
     'collect_observe_force_render_ticks': RUNTIME,   # fm452: COLD force-render window; isaac_bundle reads it
     'cage_collision': RUNTIME,   # sim-only carton-vs-cage contact filter; physics_setup -> scene.build reads it
+    # sim-collect-retreat-collider-v3: defer re-enabling the tool-side gripper colliders past the empty
+    # retreat (DEFAULT ON). isaac_factory.parse_manipulation_config reads it (RUNTIME); env
+    # RESTOCK_DEFER_TOOL_COLLISION is the alias. Registered so a run can --require it (assert ON).
+    'defer_tool_collision': RUNTIME,
     'sim_speed': RUNTIME,        # sim-video-speedup-v1 speed profile; isaac_bundle/isaac_port + bt view read it
     # sim-robust-cart-place-descent-v1: bounded base-settle tolerance for the loaded collect place;
     # isaac_bundle builds the RuntimeAdapter with it (orchestrate process), NOT ros_host.
