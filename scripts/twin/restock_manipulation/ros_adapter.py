@@ -19,6 +19,9 @@ from ..restock.pace_watchdog import is_dead as pace_is_dead
 from ..restock.pace_watchdog import frozen_sim_wall_backstop as _frozen_sim_wall_backstop
 
 from .cad_tool import ARM_JOINTS
+# sim-preplace-accel-limit-reject-v1: the shared cubic-Hermite acceleration gate + uniform time
+# reparameterisation applied to every arm plan before submission (pure numpy/math, no ROS/Isaac).
+from . import traj_limits
 
 JOINTS = ARM_JOINTS
 
@@ -39,6 +42,12 @@ def sim_execute_budget(duration, scale=None):
     dispatch to form the node-clock execution deadline. Pure + importable so the scale is CPU-testable
     without a ROS node (the inline _poll() dispatch cannot be reached on CPU)."""
     return (duration + EXECUTE_SETTLE_MARGIN_S) * (MOVE_SIM_DEADLINE_SCALE if scale is None else scale)
+# Hard upper bound on a single submitted trajectory's own sim duration (seconds). A plan longer than
+# this is refused as 'trajectory exceeds bounded execution budget'; the pre-submission acceleration
+# retiming (sim-preplace-accel-limit-reject-v1) also refuses a plan whose required uniform time-stretch
+# would push its duration past this bound (it is too aggressive to meet the executor's interpolated-
+# acceleration ceiling within the budget), naming the worst joint.
+EXEC_DURATION_BUDGET_S = 110.0
 # Bounded re-plan of the SAME goal on a MoveIt plan rejection. MoveIt's FCL ValidateSolution is
 # ground truth and cuMotion is stochastic, so re-planning draws a fresh seed; a few retries turn the
 # seed-variant base/plate collision (INVALID_MOTION_PLAN, run-129/134 ~half of seeds) into a
@@ -467,7 +476,8 @@ class RosMotionPort:
                  group='ur_manipulator', tcp='gripper_pad_tcp', namespace='/restock_sim',
                  pipeline='isaac_ros_cumotion', timeout=MOVE_WALL_TIMEOUT_S, velocity_scale=.04, pose_goal=False,
                  stow_config=None, max_velocity_scale=.05, plan_wall_cap_s=PLAN_TOTAL_WALL_CAP_S,
-                 live_arm_state=None, settle_vel=SETTLE_VEL_DEFAULT, settle_wait_s=SETTLE_WAIT_S):
+                 live_arm_state=None, settle_vel=SETTLE_VEL_DEFAULT, settle_wait_s=SETTLE_WAIT_S,
+                 exec_max_speed=traj_limits.DEFAULT_EXEC_MAX_SPEED):
         require_sim_domain()
         # fm357 structural fix: live_arm_state() -> ({joint: pos}, {joint: vel}, fresh:bool) | None gives
         # the latest measured arm state; when present, each arm execute SETTLES the arm (<= settle_vel)
@@ -521,6 +531,17 @@ class RosMotionPort:
         self.pipeline, self.limits = pipeline, joint_limits
         self.timeout = env_wins('RESTOCK_MOVE_WALL_TIMEOUT_S', timeout, MOVE_WALL_TIMEOUT_S)
         self.velocity_scale=velocity_scale
+        # sim-preplace-accel-limit-reject-v1: the simulation FollowJointTrajectory executor's
+        # interpolated-acceleration ceiling (rad/s^2). EVERY plan this port submits (the cuMotion+TOTG
+        # joint/pose plans AND the explicit collision-off waypoint paths) is uniformly retimed against
+        # THIS ceiling before dispatch, so a plan the executor would reject ('interpolated acceleration
+        # limit violation' -> HOST_FAULT_ESTOP phase=preplace) is instead slowed to fit at plan time, or
+        # refused by name before any arm command. exec_max_speed defaults to the executor's own
+        # DEFAULT_EXEC_MAX_SPEED (the host launches trajectory_host with no --max-speed override), and the
+        # ratio is shared, so the gate matches the executor it protects.
+        if not (math.isfinite(exec_max_speed) and exec_max_speed > 0):
+            raise ValueError('exec_max_speed must be finite and positive')
+        self._exec_max_accel = float(exec_max_speed) * traj_limits.MAX_ACCEL_PER_SPEED
         # pose_goal=True plans to the cartesian TCP pose with a MoveGroup pose-goal (cuMotion does
         # collision-aware IK against its own XRDF model) instead of KDL GetPositionIK -> c-space
         # target. The KDL/SRDF path returned configs cuMotion's XRDF flagged as self-collision
@@ -975,6 +996,55 @@ class RosMotionPort:
         self._plan_goal = None           # nothing to re-plan: an explicit waypoint path
         self._begin_execute_trajectory(self._waypoints_goal(wps))
 
+    def _retime_plan_for_exec_limits(self, trajectory):
+        """sim-preplace-accel-limit-reject-v1: time-parameterise a plan against the simulation executor's
+        cubic-Hermite acceleration ceiling BEFORE submission -- the SAME gate for the cuMotion+TOTG joint/
+        pose plans (the carton_level-OFF pre-place path) AND the explicit collision-off waypoint paths
+        (the leveled begin_joint_path / the straight line).
+
+        ``trajectory`` is a ``moveit_msgs/RobotTrajectory``. Reads its ``joint_trajectory`` points
+        (positions + velocities + time_from_start), computes the worst per-segment interpolated
+        acceleration (``traj_limits``, identical to ``trajectory_host.Plan``), and when it exceeds the
+        executor ceiling, UNIFORMLY stretches the timing in place (time_from_start *= s, velocities /= s;
+        positions untouched) so every segment is within the limit. A plan already within the limit is
+        left byte-identical (s == 1). A plan whose required stretch would push the duration past
+        EXEC_DURATION_BUDGET_S raises ``traj_limits.PlanLimitError`` ('plan exceeds acceleration limit:
+        <joint> <value> > <limit>'), which the caller surfaces as a NAMED plan-time refusal -- before any
+        arm command -- instead of letting the executor reject the goal (a host fault / lost heartbeat).
+
+        A plan missing per-waypoint velocities (not the cuMotion/TOTG or explicit paths, which always
+        carry six) is left unchanged -- the executor's own validation owns it. Returns the (possibly
+        retimed) same ``trajectory`` object."""
+        import numpy as np
+        jt = trajectory.joint_trajectory
+        pts = list(jt.points)
+        if len(pts) < 2:
+            return trajectory
+        if any(len(p.velocities) != 6 for p in pts):
+            return trajectory   # no explicit per-waypoint velocities -> cannot retime; executor owns it
+        times = np.array([p.time_from_start.sec + p.time_from_start.nanosec * 1e-9 for p in pts], float)
+        Q = np.array([list(p.positions) for p in pts], float)
+        V = np.array([list(p.velocities) for p in pts], float)
+        new_times, new_V, scale, peak_before, peak_after = traj_limits.retime_to_accel_limit(
+            times, Q, V, max_acceleration=self._exec_max_accel,
+            budget_s=EXEC_DURATION_BUDGET_S, joint_names=list(jt.joint_names))
+        if scale == 1.0:
+            return trajectory   # already within the executor ceiling -> byte-identical
+        for i, p in enumerate(pts):
+            t = float(new_times[i])
+            sec = int(t)
+            nanosec = int(round((t - sec) * 1e9))
+            if nanosec >= 1_000_000_000:
+                sec += 1
+                nanosec -= 1_000_000_000
+            p.time_from_start.sec = sec
+            p.time_from_start.nanosec = nanosec
+            p.velocities = [float(v) for v in new_V[i]]
+        print('PLAN_RETIME_FOR_EXEC scale=%.3f peak_accel %.3f->%.3f (limit %.3f) npoints=%d dur=%.2f->%.2f'
+              % (scale, peak_before, peak_after, self._exec_max_accel, len(pts),
+                 float(times[-1]), float(new_times[-1])), flush=True)
+        return trajectory
+
     def _begin_execute_trajectory(self, trajectory):
         """Dispatch a prebuilt collision-off ``RobotTrajectory`` straight through the host executor
         (shared by the 2-point straight line and the multi-waypoint leveled path). Validates the plan,
@@ -984,6 +1054,11 @@ class RosMotionPort:
         goal = ExecuteTrajectory.Goal()
         goal.trajectory = trajectory
         validate_trajectory(goal.trajectory.joint_trajectory, self.start, self.limits)
+        # sim-preplace-accel-limit-reject-v1: SAME pre-submission acceleration gate as the cuMotion path
+        # (a no-op for the explicit paths, which are sized well under the ceiling, but keeps one gate for
+        # every submitted plan). A refusal here raises PlanLimitError (a ValueError), surfaced by the
+        # caller's begin handling.
+        goal.trajectory = self._retime_plan_for_exec_limits(goal.trajectory)
         end = goal.trajectory.joint_trajectory.points[-1].time_from_start
         duration = end.sec + end.nanosec * 1e-9
         self.deadline_clock = self._sim_now
@@ -2126,9 +2201,21 @@ class RosMotionPort:
                         % (cap, w2min, POSE_GUARD_REPLAN_MAX))
                 print('POSE_WRIST_GUARD accept term=%s (wrist_1<=%.2f, wrist_2>=%.2f) replans=%d'
                       % ([round(v, 3) for v in term_q], cap, w2min, self._pose_guard_replans), flush=True)
+            # sim-preplace-accel-limit-reject-v1: time-parameterise the cuMotion+TOTG plan against the
+            # executor's cubic-Hermite acceleration ceiling BEFORE dispatch -- the carton_level-OFF
+            # pre-place path is TOTG-timed against MoveIt's joint limits, not this ceiling, so it can be
+            # submitted right at / over it and REJECTED at execution (warmacc4: HOST_FAULT_ESTOP
+            # phase=preplace, moveit_err=-4). A plan over the ceiling is uniformly slowed to fit here; a
+            # plan too aggressive to fit within the execution budget is refused BY NAME before any arm
+            # command, instead of the executor's goal rejection becoming a lost heartbeat.
+            try:
+                trajectory = self._retime_plan_for_exec_limits(trajectory)
+            except traj_limits.PlanLimitError as exc:
+                self._exec_abort_reason = str(exc)
+                raise RuntimeError(str(exc))
             end=trajectory.joint_trajectory.points[-1].time_from_start
             duration=end.sec+end.nanosec*1e-9
-            if duration>110.:
+            if duration>EXEC_DURATION_BUDGET_S:
                 raise ValueError('trajectory exceeds bounded execution budget')
             # Execution is simulator-paced, so bound it on the NODE/SIM clock: the trajectory's own
             # sim duration plus a settle margin. A wall bound here false-failed a healthy grasp whose

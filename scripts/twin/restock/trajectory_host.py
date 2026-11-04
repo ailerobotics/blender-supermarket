@@ -16,6 +16,7 @@ import numpy as np
 from twin.restock.physics_step import freshness_scale_from_env
 from twin.restock_manipulation.cad_tool import ARM_JOINTS, inspect_tool
 from twin.restock_manipulation.ros_adapter import require_sim_domain, validate_trajectory
+from twin.restock_manipulation.traj_limits import DEFAULT_EXEC_MAX_SPEED, MAX_ACCEL_PER_SPEED
 
 # Measured-feedback staleness watchdog bounds. The primary bound is NODE/SIM time (use_sim_time),
 # so it does not false-trip under render pacing; the wall bound is only a frozen-sim backstop and is
@@ -626,7 +627,7 @@ def main():
     # against. This is the SIMULATION-only FollowJointTrajectory executor, so its default IS the sim
     # value (0.3); it must match the planner/command gate the sim mission uses (ros_host arm_max_speed,
     # ArmCommandGate) so a legitimately planned faster grasp is not rejected as a speed violation.
-    parser.add_argument('--max-speed',type=float,default=.3)
+    parser.add_argument('--max-speed',type=float,default=DEFAULT_EXEC_MAX_SPEED)
     args=parser.parse_args()
     require_sim_domain()
     if not math.isfinite(args.max_speed) or args.max_speed<=0:
@@ -634,8 +635,10 @@ def main():
     max_speed=args.max_speed
     # Scale the interpolated-acceleration ceiling with the speed profile (preserve the conservative
     # 0.5/0.15 rad/s^2-per-rad/s ratio): a faster plan reaches proportionally higher segment
-    # accelerations, so a fixed 0.5 cap would reject a legitimately planned faster grasp.
-    max_acceleration=max_speed*(.5/.15)
+    # accelerations, so a fixed 0.5 cap would reject a legitimately planned faster grasp. The ratio +
+    # default profile are shared (traj_limits) with the mission-side pre-submission retiming gate so
+    # the executor and the gate compute the IDENTICAL ceiling (sim-preplace-accel-limit-reject-v1).
+    max_acceleration=max_speed*MAX_ACCEL_PER_SPEED
     limits=inspect_tool(args.urdf).arm_limits
     import rclpy
     from rclpy.action import ActionServer, GoalResponse, CancelResponse

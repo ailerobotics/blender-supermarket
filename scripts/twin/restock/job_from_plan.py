@@ -37,6 +37,38 @@ class PlanError(ValueError):
     """The plan export is malformed or does not map onto the planogram."""
 
 
+class ApprovalError(PlanError):
+    """The plan carries no approved store-vision missions record (``--require-approval``)."""
+
+
+def require_approved(plan: dict) -> dict:
+    """Refuse a plan that is not an approved store-vision missions record.
+
+    The working default is *pre-approved*: the mission run is pre-approved and
+    this gate is not consulted (see ``run_mobile_restock.py --require-approval``,
+    default off). When the smart approval variant is enabled, a plan is accepted
+    only when its ``provenance.approval`` block records an explicit ``approved``
+    state from the store-vision ``missions`` gate; anything else refuses with a
+    named reason, never a guessed job.
+
+    Returns the plan's approval block (for provenance) on success.
+    """
+    provenance = plan.get("provenance")
+    approval = provenance.get("approval") if isinstance(provenance, dict) else None
+    if not isinstance(approval, dict):
+        raise ApprovalError(
+            "plan carries no provenance.approval block; --require-approval needs an "
+            "approved store-vision missions record (export with an approving policy)"
+        )
+    state = approval.get("state")
+    if state != "approved":
+        raise ApprovalError(
+            f"plan approval state is {state!r}, not 'approved'; --require-approval "
+            "refuses a job lacking an approved missions record"
+        )
+    return approval
+
+
 def load_plan(path) -> dict:
     """Read and shape-check a job-plan export JSON."""
     data = json.loads(Path(path).read_text())
@@ -129,11 +161,17 @@ def resolve_job(plan: dict, planogram_path, *, job_id: str | None = None) -> tup
     except (TypeError, ValueError) as exc:
         raise PlanError(f"plan does not form a valid mission job: {exc}") from exc
 
+    approval = provenance.get("approval") if isinstance(provenance.get("approval"), dict) else {}
     meta = {
         "resolved_slot_id": resolved_slot,
         "plan_slot_id": plan["destination"]["slot_id"],
         "source_bin": source_bin,
         "priority": plan.get("priority"),
+        # Surfaced for the dry-run transcript: which store-vision planner chose the
+        # job, its distinguishing signal, and the approval state the job carries.
+        "planner": provenance.get("planner"),
+        "planner_signal": provenance.get("planner_signal"),
+        "approval_state": approval.get("state"),
         "provenance": provenance,
         "store_config": plan.get("store_config"),
     }
