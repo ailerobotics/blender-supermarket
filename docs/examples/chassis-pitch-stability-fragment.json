@@ -1,0 +1,38 @@
+{
+  "_comment": "sim-chassis-pitch-stability-v1: the bounded GPU proof + integration recipe for the chassis pitch-stability fix. NAMED CAUSE of the coldwin33-37 collect set-down CARTON_TILT +2.06 (identical five runs): the two-drive-wheel base (wheels on the lateral axle at x=0) with BOTH passive casters recessed caster_lift_m=0.03 ABOVE the drive-wheel plane balances on the drive axle with ZERO pitch stiffness. It free-pitches +-atan(0.03/0.38)=+-4.51 deg until a caster touches down; the arm posture (the UR10's own ~56 kg out at reach, NOT the 0.45 kg carton) decides which end stop. BASE_ATT (isaac_port, ~1 Hz) measured coldwin37 at pitch -1.2 at rest, -4.1 through the carry (120-184 s), a one-second flip to +4.9 at the pre-place extend (185-186 s), then a rock-back 4.8 -> 4.1 -> 3.5 -> 2.8 -> 2.3 over the set-down descent (197-201 s) and the trip at 2.06 (coldwin34 4.73->2.08, coldwin36 4.72->2.26, coldwin35 2.36->-0.32; coldwin33 flung the chassis). The welded carton is rigid to the arm and the arm to the chassis, so after a LEVEL descent was planned the carton pitches by exactly the chassis rock-back: that IS the 2.06. No arm-side pre-tilt (PR 311/318/326/327) can cancel a base rotation that happens AFTER the plan. FIX = give the chassis real pitch stiffness. All keys/fields here are opt-in; absent => byte-identical.",
+
+  "_shipped": "PRIMARY = compliant caster suspension (a sprung prismatic caster-fork joint keeping both casters in LIGHT ground contact). CPU-proven: sprung chassis pitch 0.26 deg at the worst-case 241 N.m arm moment (<= 0.5 deg bound), drive-wheel share 0.90 (strictly dominates the stuck pre-PR-207 rig 0.61, just below the caster_lift 0.03 rig 0.95, so the coupled-tow traction is kept). FALLBACK (also shipped, opt-in) = a sim-only station pitch hold that locks chassis pitch/roll while braked at a manipulation station, labelled like CAGE_COLLISION. Ship the suspension; use the station hold only if the GPU bench shows the suspension misses the bound.",
+
+  "_integration_lane_steps": [
+    "1. Regenerate the mobile assets with the suspension spec (offline, NO GPU; needs a pxr venv for the cart USD): python3 scripts/build_mobile_assets.py --source-urdf <shelfbot_gripper_isaac.urdf> --output-dir ~/datasets/twin-robot-in-store-boot-v1/mobile-suspension --package-root <ros_share> --package-root ~/workspaces/shelfbot_newgripper --config <(cat the 'mobile_spec_override' block below). This inserts the sprung prismatic front/rear caster-lift joints into mobile_ur10.urdf and bakes caster_suspension + the spring params into mobile_manifest.json; measure_transport still proves the home COM support margin on CPU.",
+    "2. Copy the mission RUNTIME config to your own dir and point its 'mobile_manifest' at that new mobile_manifest.json. Do NOT hand-edit the integration lane's ~/datasets configs. caster_lift_m is 0 under the suspension (mutually exclusive, enforced by MobileSpec); the spring is the stiffness, the preload holds contact.",
+    "3. (RECOMMENDED) also set the top-level RUNTIME 'portal_floor_box': true -- with the suspension the casters are in CONTACT (not airborne), so the front-left caster over the Backroom_floor cooked diagonal is no longer ruled out by caster lift; the box drive floor removes that internal diagonal (portal_throat.assess reports this).",
+    "4. config_preflight: run scripts/twin/restock_manipulation/config_preflight.py --host-config <host.json> --runtime-config <runtime.json> --mobile-manifest <your mobile_manifest.json>. It REFUSES an unsprung see-saw rig (free pitch travel > 2.0 - 0.5 deg) unless the suspension spec or chassis_station_pitch_hold is active.",
+    "5. Run the bounded collect-only proof: run_mobile_restock.py ... --stop-after collect, serialized through /tmp/aile-gpu.lock, HEAVY_MB=2500 if whispr holds VRAM, renice +10, never --force.",
+    "6. Grade it: python3 scripts/check_chassis_pitch.py --manifest <your mobile_manifest.json> --urdf <run>/mobile-import.urdf --base-att-log <run>.console.log. PASS iff the collect BASE_ATT pitch excursion <= 0.5 deg AND no CARTON_TILT trip. If the GPU sprung pitch misses the bound (e.g. the preload target sign is inverted -- a caster that RETRACTS up instead of seating: flip caster_preload_n's effect by GPU-verifying configure_caster_suspension's target sign), fall back to the station hold (step 7).",
+    "7. FALLBACK ONLY if step 6 fails: drop the suspension spec (plain caster_lift_m=0.03 assets) and set the RUNTIME key 'chassis_station_pitch_hold': true. The station parking brake then locks chassis pitch/roll while braked at the collect station (sim-only, released with the brake)."
+  ],
+
+  "mobile_spec_override": {
+    "_note": "the --config JSON for scripts/build_mobile_assets.py (MobileSpec keyword overrides). These five fields are the whole suspension spec; everything else stays the mission default. k=3e5 N/m bounds the worst-case 241 N.m arm moment to 0.26 deg even after one caster lifts off (single-caster stiffness k*d^2); preload 120 N is LIGHT (keeps drive-wheel share 0.90, near the caster_lift 0.03 rig's 0.95) yet guarantees at-rest contact; travel 0.02 m >> the ~2 mm working deflection.",
+    "caster_suspension": true,
+    "caster_lift_m": 0.0,
+    "caster_spring_n_per_m": 300000.0,
+    "caster_damping_n_s_per_m": 2000.0,
+    "caster_preload_n": 120.0,
+    "caster_travel_m": 0.02
+  },
+
+  "runtime_config_keys": {
+    "_note": "merge into the mission RUNTIME config (mission-runtime-*.json, read by the Isaac side: isaac_bundle / isaac_port / physics_setup). HOST/RUNTIME split matters -- chassis_station_pitch_hold is RUNTIME (physics_setup.assemble reads it); the suspension itself is NOT a batch key, it is a MobileSpec field in the mobile_manifest (step 1).",
+    "mobile_manifest": "~/datasets/twin-robot-in-store-boot-v1/mobile-suspension/mobile_manifest.json",
+    "portal_floor_box": true,
+    "chassis_station_pitch_hold": false
+  },
+
+  "_acceptance": "collect-stage BASE_ATT pitch excursion <= 0.5 deg across lift+carry+preplace+set-down AND no CARTON_TILT trip. The per-phase BASE_ATT_SEGMENT summary lines (new, like CARTON_SEGMENT_TILT) name any residual rock immediately.",
+
+  "_cpu_proof": "python3 scripts/check_chassis_pitch.py --manifest <manifest> --urdf <urdf>  (design proof: free travel, worst-case moment, sprung pitch, traction margin). Pinned by scripts/twin/tests/test_chassis_pitch.py and the extended test_tow_traction / test_mobile / test_mobile_assets / test_portal_throat_clear / test_config_preflight suites.",
+
+  "_out_of_scope": "the 2.0 deg carton-level bound + 0.15 s grace, carton dimensions, place targets, arm-side compensation, the tow lanes -- all unchanged."
+}

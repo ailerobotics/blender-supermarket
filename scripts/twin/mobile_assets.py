@@ -97,12 +97,29 @@ def build_mobile_urdf(source, output, spec=MobileSpec()):
                (0, sign*spec.wheel_track/2, spec.wheel_radius-spec.base_z), 'continuous', '0 1 0')
     # Two trailing passive caster assemblies support pitch without skid-steer fiction.
     for label, x in [('front', spec.length/2-0.12), ('rear', -spec.length/2+0.12)]:
+        swivel_parent, swivel_origin = 'base_link', (x, 0, 0.145-spec.base_z)
+        if spec.caster_suspension:
+            # sim-chassis-pitch-stability-v1: insert a SPRUNG PRISMATIC caster-fork joint (vertical Z)
+            # between base_link and the swivel, giving the chassis real pitch stiffness. The prismatic
+            # rest (q=0) places the caster wheel bottom at the floor (caster_lift_m is forced to 0 when
+            # the suspension is on), and physics_setup authors the PhysX linear drive (stiffness +
+            # preload holding light ground contact). Absent => this whole branch is skipped and the URDF
+            # is byte-identical to the legacy rigid caster.
+            _link(root, f'{label}_caster_suspender', 0.2, (0.05, 0.07, 0.04))
+            lift_joint = _joint(root, f'{label}_caster_lift', 'base_link', f'{label}_caster_suspender',
+                                (x, 0, 0.145-spec.base_z), 'prismatic', '0 0 1')
+            limit = lift_joint.find('limit')
+            limit.set('lower', str(-spec.caster_travel_m))
+            limit.set('upper', str(spec.caster_travel_m))
+            limit.set('effort', '2000')   # the sprung drive carries the caster ground reaction (hundreds of N)
+            swivel_parent, swivel_origin = f'{label}_caster_suspender', (0, 0, 0)
         _link(root, f'{label}_caster_fork', 0.3, (0.035, 0.07, 0.02))
-        _joint(root, f'{label}_caster_swivel', 'base_link', f'{label}_caster_fork',
-               (x, 0, 0.145-spec.base_z), 'continuous')
+        _joint(root, f'{label}_caster_swivel', swivel_parent, f'{label}_caster_fork',
+               swivel_origin, 'continuous')
         _link(root, f'{label}_caster_wheel', 0.5, radius=0.065, length=0.035)
         # Raise the caster wheel by spec.caster_lift_m so its ground contact sits that far ABOVE the
-        # drive-wheel plane (0.0 => co-planar, legacy). The fork never touches ground either way.
+        # drive-wheel plane (0.0 => co-planar, legacy; also 0 under the suspension). The fork never
+        # touches ground either way.
         _joint(root, f'{label}_caster_roll', f'{label}_caster_fork', f'{label}_caster_wheel',
                (-0.025, 0, -0.08 + spec.caster_lift_m), 'continuous', '0 1 0')
     # Drawbar: back edge -.50 to hitch -.62, below the deck.

@@ -310,6 +310,13 @@ class IsaacPort:
         self._welded_stop_reason=None
         # Last controller phase seen by gate() (phase-aware base brake selection).
         self._phase=None
+        # sim-chassis-pitch-stability-v1: per-arm-phase BASE_ATT excursion accumulator (like
+        # CARTON_SEGMENT_TILT). Tracks the chassis roll/pitch min/max over each (action, phase)
+        # segment and flushes a BASE_ATT_SEGMENT summary line when the segment changes, so a chassis
+        # pitch ROCK (the coldwin33-37 see-saw: -4.1 carry -> +4.9 preplace -> rock-back to +2.06 at the
+        # set-down) is NAMED per phase at once instead of only inferable from the ~1 Hz BASE_ATT trace.
+        self._batt_seg=None          # the (action, phase) key currently accumulating
+        self._batt_stats=None        # dict(pmin,pmax,rmin,rmax,n,t0)
         # Stage-time value corresponding to mission t=0: world.current_time - now, refreshed every
         # advance so mission_time() recovers the dt-accumulated packet clock (tick*dt) from Isaac's
         # stage time. begin_action('verify') begins the InventoryVerifier on THIS clock -- the same
@@ -460,6 +467,35 @@ class IsaacPort:
         The controlled stop keys on this: a fault while welded must never cut the drive / release the
         base brake (sim-host-fault-controlled-stop-v1)."""
         return bool(self._carton_welded)
+
+    def _accumulate_base_attitude(self, roll_deg, pitch_deg, now):
+        """sim-chassis-pitch-stability-v1: fold one chassis roll/pitch sample into the current
+        (action, phase) BASE_ATT segment, flushing a BASE_ATT_SEGMENT summary when the segment key
+        changes. Called every tick with the per-tick attitude so the full excursion is captured (not
+        just the ~1 Hz trace)."""
+        key=(self.current_action, self._phase)
+        if key != self._batt_seg:
+            self._flush_base_attitude_segment()
+            self._batt_seg=key
+            self._batt_stats=dict(pmin=pitch_deg, pmax=pitch_deg, rmin=roll_deg, rmax=roll_deg,
+                                  n=0, t0=now)
+        s=self._batt_stats
+        s['pmin']=min(s['pmin'], pitch_deg); s['pmax']=max(s['pmax'], pitch_deg)
+        s['rmin']=min(s['rmin'], roll_deg); s['rmax']=max(s['rmax'], roll_deg)
+        s['n']+=1; s['t1']=now
+
+    def _flush_base_attitude_segment(self):
+        """Emit the BASE_ATT_SEGMENT summary for the segment just ended (if it saw any samples)."""
+        s=self._batt_stats
+        if not s or s['n']==0:
+            return
+        action, phase = self._batt_seg if self._batt_seg else (None, None)
+        print('BASE_ATT_SEGMENT action=%s phase=%s pitch[min=%.3f max=%.3f excursion=%.3f] '
+              'roll[min=%.3f max=%.3f excursion=%.3f] samples=%d dt=%.1fs (chassis attitude; a large '
+              'pitch excursion is a see-saw rock -- the carton pitches with it)'
+              % (action, phase, s['pmin'], s['pmax'], s['pmax']-s['pmin'],
+                 s['rmin'], s['rmax'], s['rmax']-s['rmin'], s['n'],
+                 s.get('t1', s['t0'])-s['t0']), flush=True)
 
     def base_attitude(self):
         """The chassis attitude (roll_deg, pitch_deg, z_m) in world frame -- the quantity the collect
@@ -685,9 +721,13 @@ class IsaacPort:
                   f'braked={getattr(self.mobile,"_braked",None)} now={now:.2f}',flush=True)
         # fm437: log the base chassis attitude (roll/pitch) ~1 Hz in every action, so the caster-lift
         # static tilt is measured live (a level chassis reads ~0; the 5 mm lift predicts ~0.75 deg pitch).
+        # sim-chassis-pitch-stability-v1: fold EVERY tick's attitude into the per-phase excursion
+        # accumulator (BASE_ATT_SEGMENT) so a see-saw rock is named per arm phase, then throttle the raw
+        # BASE_ATT trace to ~1 Hz as before.
+        broll,bpitch=body_roll_pitch_deg(self.robot_body)
+        self._accumulate_base_attitude(broll,bpitch,now)
         if now-getattr(self,'_last_batt_log',-1.)>=1.0:
             self._last_batt_log=now
-            broll,bpitch=body_roll_pitch_deg(self.robot_body)
             print(f'BASE_ATT roll_deg={broll:.3f} pitch_deg={bpitch:.3f} z_m={rz:.4f} '
                   f'action={self.current_action} now={now:.2f}',flush=True)
         self._mark('measure')
