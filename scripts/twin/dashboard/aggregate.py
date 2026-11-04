@@ -240,14 +240,23 @@ def normalise_upstream(upstream: dict | None) -> dict:
 def build_state(*, upstream: dict | None, upstream_ok: bool,
                 run_name: str | None, mission: dict | None,
                 store: dict | None, behaviour_tree: dict | None,
-                triggers: list | None, upstream_base: str) -> dict:
+                triggers: list | None, upstream_base: str,
+                media: dict | None = None,
+                approval_required: bool | None = None) -> dict:
     """Merge the live pulse, the resolved run, store state, BT view and triggers.
 
     The single read-only JSON the page (and any phone app) consumes.
+
+    ``media`` overrides the default ``latest_frame``/``report`` links (used by the
+    static run-directory panel, whose media sits beside ``fleet.json`` and so is
+    linked *relative*, not back at the upstream watch page). ``approval_required``,
+    when not ``None``, records whether the trigger queue runs the smart phone
+    approval step (``--approval-trigger``); absent it is omitted for byte-identical
+    v1 output.
     """
     up = normalise_upstream(upstream)
     timeline = stage_timeline(mission, up["trace"].get("action"))
-    return {
+    state = {
         "schema": "fm-fleet-dashboard.v1",
         "generated_at": utcnow_iso(),
         "upstream": {"ok": bool(upstream_ok), "base": upstream_base},
@@ -267,8 +276,11 @@ def build_state(*, upstream: dict | None, upstream_ok: bool,
         "behaviour_tree": behaviour_tree,
         "store": store,
         "triggers": triggers or [],
-        "media": {
+        "media": media if media is not None else {
             "latest_frame": f"{upstream_base}/latest.jpg",
             "report": f"{upstream_base}/report",
         },
     }
+    if approval_required is not None:
+        state["approval_required"] = bool(approval_required)
+    return state

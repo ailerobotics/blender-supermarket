@@ -8,10 +8,11 @@ Run (dodging the box's ROS pytest plugins)::
       python3 -m pytest scripts/twin/tests/test_fleet_dashboard.py -q
 """
 import json
+import os
 
 import pytest
 
-from twin.dashboard import aggregate, server, store_state, triggers
+from twin.dashboard import aggregate, server, snapshot, store_state, triggers
 
 
 # ---------------------------------------------------------------- stage timeline
@@ -372,3 +373,208 @@ def test_default_bind_is_loopback_and_free_port():
     assert server.DEFAULT_HOST == "127.0.0.1"
     assert server.DEFAULT_PORT >= 8794
     assert server.DEFAULT_PORT not in (8787, 8790, 8791, 8793)
+
+
+# ---------------------------------------------------------------- static run-dir panel
+
+def _replay_run(root, name="run-5"):
+    """A saved run directory: mission.json + nav-trace tail + bt snapshot + a frame."""
+    d = root / name
+    (d / "mission-frames").mkdir(parents=True)
+    (d / "mission.json").write_text(json.dumps(_mission(
+        [{"state": "reserved"}, {"state": "collect"}, {"state": "couple"}],
+        state="failed", reason="transfer jam", physics_verified=False)))
+    # two trace lines; the panel reads the last well-formed one
+    (d / "nav-trace.jsonl").write_text(
+        '{"tick": 1, "t": 0.1, "action": "collect", "coupled": false, "parked": true}\n'
+        '{"tick": 42, "t": 9.9, "action": "transfer", "coupled": true, "parked": true,'
+        ' "x": -2.0, "y": 15.2, "lin": 0.0}\n')
+    (d / "bt_snapshot.json").write_text(json.dumps(_bt_snapshot()))
+    (d / "mission-frames" / "000042.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (d / "walkthrough.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    return d
+
+
+def test_pulse_from_run_dir_reads_tail_and_counts(tmp_path):
+    run = _replay_run(tmp_path)
+    pulse = snapshot.pulse_from_run_dir(str(run))
+    assert pulse["run"] == "run-5"
+    assert pulse["frames"] == 1
+    assert pulse["alive"] is False                      # honest: unknown from files
+    assert pulse["trace"]["action"] == "transfer"       # last well-formed line
+    assert pulse["trace"]["tick"] == 42
+    assert pulse["mission"]["state"] == "failed"
+
+
+def test_pulse_tolerates_empty_or_missing(tmp_path):
+    (tmp_path / "empty").mkdir()
+    pulse = snapshot.pulse_from_run_dir(str(tmp_path / "empty"))
+    assert pulse["frames"] == 0
+    assert pulse["trace"]["action"] is None
+    assert pulse["mission"]["state"] is None
+
+
+def test_build_run_snapshot_relative_media_and_timeline(tmp_path):
+    _replay_run(tmp_path)
+    snap = snapshot.build_run_snapshot(str(tmp_path))     # newest run, no media base
+    assert snap["schema"] == "fm-fleet-dashboard.v1"
+    assert snap["mission"]["run"] == "run-5"
+    assert snap["mission"]["timeline"]["verdict"] == "failed"
+    # the live-trace action overrides the inferred stage: transfer is active→failed
+    by = {s["stage"]: s["status"] for s in snap["mission"]["timeline"]["steps"]}
+    assert by["transfer"] == "failed"
+    # media is run-relative (served over the static mount), not an upstream URL
+    assert snap["media"]["latest_frame"] == os.path.join("mission-frames", "000042.png")
+    assert snap["media"]["walkthrough"] == "walkthrough.mp4"
+    # bt auto-discovered; its full-view link is relative to the run dir
+    assert snap["behaviour_tree"]["tick"] == 49
+    assert snap["behaviour_tree"]["view_url"] == "bt_view.html"
+
+
+def test_build_run_snapshot_media_base_links_absolute(tmp_path):
+    _replay_run(tmp_path)
+    snap = snapshot.build_run_snapshot(str(tmp_path), media_base="http://host:8787")
+    assert snap["media"]["latest_frame"] == "http://host:8787/latest.jpg"
+    assert snap["behaviour_tree"]["view_url"] == "http://host:8787/bt_view.html"
+
+
+def test_build_run_snapshot_none_when_empty(tmp_path):
+    assert snapshot.build_run_snapshot(str(tmp_path / "missing")) is None
+
+
+def test_render_static_site_writes_pair(tmp_path):
+    _replay_run(tmp_path)
+    out = tmp_path / "run-5"
+    snap = snapshot.generate(str(tmp_path), str(out), "run-5")
+    assert snap is not None
+    assert (out / "fleet.json").exists()
+    assert (out / "fleet.html").exists()
+    # the static page polls fleet.json relative to itself (no live endpoint)
+    html = (out / "fleet.html").read_text()
+    assert "fetch('fleet.json" in html
+    assert "/status.json" not in html
+    reloaded = json.loads((out / "fleet.json").read_text())
+    assert reloaded["mission"]["run"] == "run-5"
+
+
+def test_generate_none_run_writes_nothing(tmp_path):
+    out = tmp_path / "out"
+    assert snapshot.generate(str(tmp_path / "empty"), str(out), None) is None
+    assert not out.exists()
+
+
+# ---------------------------------------------------------------- approval variant
+
+def test_enqueue_approval_lands_pending(tmp_path):
+    d = str(tmp_path / "reqs")
+    rec = triggers.enqueue_trigger(d, {"sku": "S1", "quantity": 2, "shelf": "G3_back_s2",
+                                       "source": "backstock_00"}, approval_required=True)
+    assert rec["status"] == "pending_approval"
+    assert rec["approval"]["state"] == "pending"
+    # plain queue path is unchanged (default off)
+    plain = triggers.enqueue_trigger(d, {"sku": "S2", "quantity": 1})
+    assert plain["status"] == "queued"
+    assert "approval" not in plain
+
+
+def test_decide_approve_emits_job_plan(tmp_path):
+    d = str(tmp_path / "reqs")
+    rec = triggers.enqueue_trigger(d, {"sku": "juice", "quantity": 1,
+                                       "shelf": "G3_back_s2", "source": "backstock_00"},
+                                   approval_required=True)
+    decided = triggers.decide_trigger(d, rec["id"], approve=True, by="phone")
+    assert decided["status"] == "approved"
+    assert decided["approval"]["state"] == "approved"
+    assert decided["approval"]["by"] == "phone"
+    # an approved request is written as a job-plan the lane-1 --job-from feed honours
+    plan_path = os.path.join(d, "approved", rec["id"] + ".json")
+    plan = json.loads(open(plan_path).read())
+    assert plan["schema"] == triggers.JOB_PLAN_SCHEMA
+    assert plan["sku"] == "juice"
+    assert plan["source"]["location"] == "backstock_00"
+    assert plan["destination"]["slot_id"] == "G3_back_s2"
+    assert plan["provenance"]["approval"]["state"] == "approved"
+
+
+def test_decide_reject_no_plan(tmp_path):
+    d = str(tmp_path / "reqs")
+    rec = triggers.enqueue_trigger(d, {"sku": "S", "quantity": 1}, approval_required=True)
+    decided = triggers.decide_trigger(d, rec["id"], approve=False, by="phone")
+    assert decided["status"] == "rejected"
+    assert not os.path.exists(os.path.join(d, "approved"))
+
+
+def test_decide_rejects_unknown_or_wrong_state(tmp_path):
+    d = str(tmp_path / "reqs")
+    with pytest.raises(triggers.TriggerError):
+        triggers.decide_trigger(d, "nope", approve=True)
+    plain = triggers.enqueue_trigger(d, {"sku": "S", "quantity": 1})  # queued, not pending
+    with pytest.raises(triggers.TriggerError):
+        triggers.decide_trigger(d, plain["id"], approve=True)
+
+
+def test_build_state_approval_flag_omitted_by_default():
+    base = dict(upstream=None, upstream_ok=False, run_name="r", mission=None,
+                store=None, behaviour_tree=None, triggers=[], upstream_base="http://h:8787")
+    assert "approval_required" not in aggregate.build_state(**base)           # v1 byte-identical
+    assert aggregate.build_state(**base, approval_required=True)["approval_required"] is True
+
+
+def test_compute_status_surfaces_approval(tmp_path, monkeypatch):
+    _write_run(tmp_path, "run-1", _mission([{"state": "collect"}]))
+    monkeypatch.setattr(server, "fetch_upstream", lambda base, timeout: (None, False))
+    cfg = server.Config(run_root=str(tmp_path), upstream_base="http://x:8787",
+                        trigger_enabled=True, approval_required=True,
+                        requests_dir=str(tmp_path / "reqs"))
+    assert server.compute_status(cfg)["approval_required"] is True
+
+
+def test_server_trigger_approve_roundtrip(tmp_path, monkeypatch):
+    """End-to-end over the real handler: POST /trigger → /approve, and read back."""
+    import threading
+    import urllib.request
+
+    _write_run(tmp_path, "run-1", _mission([{"state": "collect"}]))
+    monkeypatch.setattr(server, "fetch_upstream", lambda base, timeout: (None, False))
+    cfg = server.Config(host="127.0.0.1", port=0, run_root=str(tmp_path),
+                        upstream_base="http://x:8787", trigger_enabled=True,
+                        approval_required=True, requests_dir=str(tmp_path / "reqs"))
+    httpd = server.make_server(cfg)
+    threading.Thread(target=httpd.handle_request, daemon=True).start()  # /trigger
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def post(route, body):
+        req = urllib.request.Request(base + route, data=json.dumps(body).encode(),
+                                     headers={"content-type": "application/json"},
+                                     method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read().decode())
+
+    code, rec = post("/trigger", {"sku": "juice", "quantity": 1, "shelf": "G3_back_s2"})
+    assert code == 201 and rec["status"] == "pending_approval"
+
+    threading.Thread(target=httpd.handle_request, daemon=True).start()  # /approve
+    code, decided = post("/approve", {"id": rec["id"], "by": "tester"})
+    assert code == 200 and decided["status"] == "approved"
+    httpd.server_close()
+    assert os.path.exists(os.path.join(str(tmp_path / "reqs"), "approved", rec["id"] + ".json"))
+
+
+def test_server_rejects_approve_without_approval_mode(tmp_path, monkeypatch):
+    import threading
+    import urllib.error
+    import urllib.request
+
+    monkeypatch.setattr(server, "fetch_upstream", lambda base, timeout: (None, False))
+    cfg = server.Config(host="127.0.0.1", port=0, run_root=str(tmp_path),
+                        trigger_enabled=True, approval_required=False,
+                        requests_dir=str(tmp_path / "reqs"))
+    httpd = server.make_server(cfg)
+    threading.Thread(target=httpd.handle_request, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    req = urllib.request.Request(base + "/approve", data=b"{}",
+                                 headers={"content-type": "application/json"}, method="POST")
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        urllib.request.urlopen(req, timeout=5)
+    assert ei.value.code == 403
+    httpd.server_close()
