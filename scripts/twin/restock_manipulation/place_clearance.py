@@ -46,6 +46,43 @@ DEFAULT_MARGIN_M = 0.030
 # rule; every other Rollwagen body (posts, side/back bars, drawbar) must stay clear.
 SUPPORT_BODIES = ('deck', 'shelf')
 
+# --- sim-cart-support-select-v1: the LIVE collider set the sim actually touches --------------------
+# ``twin.restock.cage_collision`` filters CARTON-vs-CAGE contacts (the four corner posts + the side/back
+# wall bars) when ``cage_collision: 'filtered'`` is active -- the live CAGE_COLLISION console line reads
+# ``kept=['deck', 'shelf', 'drawbar']``. So the CARTON (the handling unit) collides ONLY with those kept
+# bodies; it passes THROUGH the cage bars in the sim. The gripper PAD, however, is a ROBOT link
+# (``suction_cups``) -- NOT the handling unit -- so the pad still collides with EVERY Rollwagen body,
+# posts and bars included (coldwin39: the pad sat flush on post_2). An honest clearance sweep must
+# therefore count the carton points only against the kept bodies and the pad points against all bodies,
+# minus the support prim the carton lands on. The old lumped sweep counted the carton box against the
+# cage bars too (its ``-93 mm`` reading vs the upper side bar ``side_0_horizontal_6``) -- a body the sim
+# does not collide the carton with, so a phantom strike.
+CAGE_PREFIXES = ('post_', 'side_', 'back_')
+KEPT_BODIES = ('deck', 'shelf', 'drawbar')
+
+
+def is_cage_body(name):
+    """True if ``name`` is a Rollwagen CAGE collider (post / side-wall / back-wall bar) that
+    ``cage_collision`` filters out of CARTON contacts. The carton passes through it in the sim; only the
+    gripper pad (a robot link) still collides with it."""
+    return str(name).startswith(CAGE_PREFIXES)
+
+
+def honest_collider_parts(name, support):
+    """Which welded-geometry parts the SIM actually collides with Rollwagen body ``name`` (given the
+    carton rests on ``support``). Returns a subset of ``('carton', 'pad')``:
+
+      * the ``support`` body -> ``()`` (the surface the carton lands on; a ~0 gap is the goal, never a strike),
+      * a CAGE body (post / side / back bar) -> ``('pad',)`` (carton filtered; only the pad collides),
+      * any other KEPT body (the non-support deck/shelf, drawbar) -> ``('carton', 'pad')``.
+
+    Pure/CPU -- the single source of truth the honest sweeps and the refuse gate share."""
+    if name == support:
+        return ()
+    if is_cage_body(name):
+        return ('pad',)
+    return ('carton', 'pad')
+
 # Carton (handling unit) dimensions (m) -- the scenario single source of truth handling_unit.dimensions_m.
 CARTON_DIMS_M = (0.45, 0.30, 0.18)
 
@@ -176,13 +213,18 @@ class GripperCartonGeometry:
                    tuple(tuple(float(v) for v in r) for r in pad_R),
                    tuple(float(v) for v in pad_bs))
 
+    def carton_surface_points(self, step=0.01):
+        """Surface sample points (N x 3) of the CARTON box alone, in the CARTON frame."""
+        return _box_surface_points(np.asarray(self.carton_dims, float) / 2.0, step)
+
+    def pad_surface_points(self, step=0.01):
+        """Surface sample points (N x 3) of the gripper PAD alone (oriented + offset), in the CARTON frame."""
+        pad_local = _box_surface_points(np.asarray(self.pad_size, float) / 2.0, step)
+        return pad_local @ np.asarray(self.pad_R, float).T + np.asarray(self.pad_center, float)
+
     def surface_points(self, step=0.01):
         """Surface sample points (N x 3) of the carton AND the pad, in the CARTON frame."""
-        half = np.asarray(self.carton_dims, float) / 2.0
-        carton = _box_surface_points(half, step)
-        pad_local = _box_surface_points(np.asarray(self.pad_size, float) / 2.0, step)
-        pad = pad_local @ np.asarray(self.pad_R, float).T + np.asarray(self.pad_center, float)
-        return np.vstack([carton, pad])
+        return np.vstack([self.carton_surface_points(step), self.pad_surface_points(step)])
 
 
 def _quat_R(x, y, z, w):
@@ -219,20 +261,54 @@ def place_descent_poses(load_center_xy, support_z, yaw_cart_rel, *, carton_h, st
 
 # --------------------------------------------------------------------- the sweep
 
-def _gaps_at(T_carton_cart, geom, bodies):
-    """``{body: min signed gap (m)}`` between the gripper+carton at ``T_carton_cart`` and every cart body."""
-    pts = geom.surface_points() @ np.asarray(T_carton_cart, float)[:3, :3].T + np.asarray(T_carton_cart, float)[:3, 3]
-    return {name: float(_box_aabb_sdf(pts, lo, hi).min()) for name, (lo, hi) in bodies.items()}
+def _honest_gaps_from_points(carton_pts, pad_pts, bodies, honest_support):
+    """``{body: min signed gap}`` counting ONLY the geometry the sim collides with each body
+    (:func:`honest_collider_parts`): the carton points against the kept bodies, the pad points against
+    every body, the ``honest_support`` body dropped. ``carton_pts``/``pad_pts`` are world/cart-frame
+    (already posed) N x 3 arrays."""
+    out = {}
+    for name, (lo, hi) in bodies.items():
+        parts = honest_collider_parts(name, honest_support)
+        if not parts:
+            continue
+        gaps = []
+        if 'carton' in parts:
+            gaps.append(_box_aabb_sdf(carton_pts, lo, hi).min())
+        if 'pad' in parts:
+            gaps.append(_box_aabb_sdf(pad_pts, lo, hi).min())
+        out[name] = float(min(gaps))
+    return out
 
 
-def sweep_clearance(carton_poses, geom, bodies):
+def _gaps_at(T_carton_cart, geom, bodies, honest_support=None):
+    """``{body: min signed gap (m)}`` between the gripper+carton at ``T_carton_cart`` and every cart body.
+
+    ``honest_support`` None => the legacy LUMPED sweep (carton + pad points vs every body alike -- the
+    full-body visual check). A body name => the HONEST sweep (sim-cart-support-select-v1): the carton is
+    filtered vs the cage, so the carton points count only vs the kept bodies and the pad points vs all,
+    with the support prim dropped (see :func:`honest_collider_parts`)."""
+    R = np.asarray(T_carton_cart, float)[:3, :3]
+    t = np.asarray(T_carton_cart, float)[:3, 3]
+    if honest_support is None:
+        pts = geom.surface_points() @ R.T + t
+        return {name: float(_box_aabb_sdf(pts, lo, hi).min()) for name, (lo, hi) in bodies.items()}
+    cpts = geom.carton_surface_points() @ R.T + t
+    ppts = geom.pad_surface_points() @ R.T + t
+    return _honest_gaps_from_points(cpts, ppts, bodies, honest_support)
+
+
+def sweep_clearance(carton_poses, geom, bodies, *, honest_support=None):
     """Sweep the gripper+carton (``geom``) along ``carton_poses`` (list of 4x4 cart-frame carton poses)
     against ``bodies`` (``{name: (lo, hi)}`` from :func:`rollwagen_collider_boxes`).
 
     Returns ``(per_waypoint, per_body_min)``: ``per_waypoint`` is a list of ``{body: gap}`` dicts (the
     minimum gap per body at each waypoint), ``per_body_min`` is ``{body: min over all waypoints}`` -- the
-    minimum gap per body over the whole path (the quantity the refuse gate reads)."""
-    per_waypoint = [_gaps_at(T, geom, bodies) for T in carton_poses]
+    minimum gap per body over the whole path (the quantity the refuse gate reads).
+
+    ``honest_support`` None => the legacy full-body sweep (byte-identical). A body name (the support the
+    carton lands on) => the HONEST sweep that counts exactly the live collider set (carton vs kept bodies,
+    pad vs all, support dropped) -- sim-cart-support-select-v1."""
+    per_waypoint = [_gaps_at(T, geom, bodies, honest_support=honest_support) for T in carton_poses]
     per_body_min = {}
     for g in per_waypoint:
         for name, v in g.items():
@@ -340,22 +416,30 @@ def _executed_config(robot, config, gravity_comp, *, tool_link='ur_tool0', root=
 
 
 def sweep_executed(configs, robot, geom, bodies, T_base_cart, *, gravity_comp=None,
-                   tool_link='ur_tool0', root='ur_base_link', cal_offset_m=0.0):
+                   tool_link='ur_tool0', root='ur_base_link', cal_offset_m=0.0, honest_support=None):
     """Droop-aware sweep: for each COMMANDED arm ``config`` apply the loaded ``gravity_comp`` droop, FK the
     gripper pad + carton to the EXECUTED pose, transform into the cart frame, and sweep against every
     Rollwagen ``bodies`` AABB. Returns ``(per_waypoint, per_body_min)`` like :func:`sweep_clearance`.
 
     ``cal_offset_m`` is subtracted from every gap (the SEAL-anchored geometry calibration, so a measured
     flush contact reads ~0). ``gravity_comp`` None => the EXECUTED == commanded (the FK level sweep, still
-    the real IK pose rather than the idealised box). Pure/CPU (needs the URDF FK)."""
+    the real IK pose rather than the idealised box). ``honest_support`` None => the legacy full-body sweep
+    (byte-identical); a body name => the HONEST sweep (carton vs the kept bodies, pad vs all, support
+    dropped -- sim-cart-support-select-v1). Pure/CPU (needs the URDF FK)."""
     bodies_base = _bodies_in_base(bodies, T_base_cart)
     per_waypoint = []
     for cfg in configs:
         execq = _executed_config(robot, cfg, gravity_comp, tool_link=tool_link, root=root)
         Cb = _carton_in_base(robot, execq, geom, root=root)
-        pts = geom.surface_points() @ Cb[:3, :3].T + Cb[:3, 3]
-        per_waypoint.append({name: float(_box_aabb_sdf(pts, lo, hi).min()) - float(cal_offset_m)
-                             for name, (lo, hi) in bodies_base.items()})
+        if honest_support is None:
+            pts = geom.surface_points() @ Cb[:3, :3].T + Cb[:3, 3]
+            gaps = {name: float(_box_aabb_sdf(pts, lo, hi).min())
+                    for name, (lo, hi) in bodies_base.items()}
+        else:
+            cpts = geom.carton_surface_points() @ Cb[:3, :3].T + Cb[:3, 3]
+            ppts = geom.pad_surface_points() @ Cb[:3, :3].T + Cb[:3, 3]
+            gaps = _honest_gaps_from_points(cpts, ppts, bodies_base, honest_support)
+        per_waypoint.append({name: v - float(cal_offset_m) for name, v in gaps.items()})
     per_body_min = {}
     for g in per_waypoint:
         for name, v in g.items():

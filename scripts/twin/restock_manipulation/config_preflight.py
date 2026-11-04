@@ -374,6 +374,37 @@ def check_support_height(runtime_cfg, scenario_cfg, *, resolved_top_z, tol_m=0.0
     return cart_support.height_consistency_problems(resolved_top_z, heights, tol_m=tol_m)
 
 
+def check_support_selection(runtime_cfg, *, stock_supports=None):
+    """sim-cart-support-select-v1: validate the RUNTIME ``cart_placement.support_prim`` selector resolves
+    against the composed cart's ``stock_supports`` so a mis-set selector (bad index, unknown prim/name)
+    fails pre-flight, not at a GPU boot. ``stock_supports`` defaults to the names ``author_cart`` exposes
+    (``/Rollwagen/chassis/deck``, ``/Rollwagen/chassis/shelf``) -- a pure in-memory authoring, no Isaac.
+    No-op ([]) when the selector is absent (legacy deck default). Returns problems ([] == ok)."""
+    cp = (runtime_cfg or {}).get('cart_placement') or {}
+    if not isinstance(cp, dict) or 'support_prim' not in cp:
+        return []
+    from twin.restock_manipulation import cart_support
+    supports = list(stock_supports) if stock_supports else None
+    if supports is None:
+        try:
+            from pxr import Usd
+            from twin.mobile import MobileSpec
+            from twin.mobile_assets import author_cart
+            stage = Usd.Stage.CreateInMemory()
+            supports = list(author_cart(stage, spec=MobileSpec())['stock_supports'])
+        except Exception as exc:                 # usd-core absent: validate shape only, not membership
+            return ([] if isinstance(cp.get('support_prim'), (int, str))
+                    and not isinstance(cp.get('support_prim'), bool)
+                    else [f"cart_placement.support_prim={cp.get('support_prim')!r} must be a prim path, "
+                          f"a prim name, or an index (usd-core absent: {type(exc).__name__})"])
+    try:
+        resolved = cart_support.resolve_support_prim(supports, cp.get('support_prim'))
+    except ValueError as exc:
+        return [f'cart_placement.support_prim invalid: {exc}']
+    print(f'CONFIG_PREFLIGHT: cart_placement.support_prim={cp.get("support_prim")!r} -> {resolved}')
+    return []
+
+
 def _load(path):
     with open(path) as stream:
         return json.load(stream)
@@ -418,6 +449,9 @@ def main(argv=None):
     # sim-place-descent-residual-v1: resolve the HOST carton_level block (incl. the place-clearance keys)
     # so a malformed value or the gate-without-remedy combination fails pre-flight, not a GPU boot.
     problems += check_carton_level(host_cfg)
+    # sim-cart-support-select-v1: a mis-set place-support selector (bad index / unknown prim) must fail
+    # here, not silently at the GPU boot (always, not just --require'd).
+    problems += check_support_selection(runtime_cfg)
     # sim-collect-press-regression-v1: carton-dim drift between the HOST profile and the scenario single
     # source silently over-reaches the side-grasp pick standoff (coldwin32). Only when --scenario is given.
     if args.scenario:
