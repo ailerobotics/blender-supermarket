@@ -1,0 +1,47 @@
+{
+  "urdf": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/coldwin31/mobile-import.urdf",
+  "stiffness_nm_per_rad": 2850.0,
+  "carton_mass_kg": 0.45,
+  "bound_deg": 2.0,
+  "grace_s": 0.15,
+  "geometries": {
+    "south": {
+      "place_tcp_base": [
+        1.043,
+        0.055,
+        0.435
+      ],
+      "shoulder_lift_torque_Nm": 58.15,
+      "setdown_shoulder_lift_swing_rad": 0.544,
+      "current_command_tilt_deg": 0.0,
+      "current_executed_pitch_deg": 2.033,
+      "current_executed_tilt_deg": 2.041,
+      "compensated_command_tilt_deg": 2.049,
+      "compensated_executed_pitch_deg": 0.001,
+      "compensated_executed_tilt_deg": 0.001,
+      "descent_executed_max_deg": 1.165,
+      "standoff_executed_tilt_deg": 1.169,
+      "setdown_clear_wrist": true,
+      "pass": true
+    },
+    "east": {
+      "place_tcp_base": [
+        0.97,
+        0.131,
+        0.442
+      ],
+      "shoulder_lift_torque_Nm": 49.2,
+      "setdown_shoulder_lift_swing_rad": 0.436,
+      "current_command_tilt_deg": 0.0,
+      "current_executed_pitch_deg": 1.859,
+      "current_executed_tilt_deg": 1.86,
+      "compensated_command_tilt_deg": 1.865,
+      "compensated_executed_pitch_deg": 0.0,
+      "compensated_executed_tilt_deg": 0.0,
+      "descent_executed_max_deg": 1.165,
+      "standoff_executed_tilt_deg": 1.169,
+      "setdown_clear_wrist": true,
+      "pass": true
+    }
+  }
+}

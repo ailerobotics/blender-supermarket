@@ -519,3 +519,113 @@ def run_place_descent(urdf_path, *, bound_deg=cl.DEFAULT_TILT_BOUND_DEG,
         ungentled_duration=_descent_duration(dmax, ungentled_speed, ungentled_accel),
         gentled_duration=_descent_duration(dmax, gentled_speed, gentled_accel),
         commanded_series=cmd, ungentled_series=exe_u, gentled_series=exe_g)
+
+
+# -------------------------------------------- SOUTH-DOCK loaded-droop place (sim-carton-level-southdock-v1)
+# The REAL collect place-on-cart geometry at the PR-307 SOUTH dock (coldwin31) and the pre-307 EAST cart
+# (collectlevel4), reconstructed from each run's host-stack: the grasp fixes the carton up-axis at the weld;
+# the raw fixed-shape standoff is collect_place_preplace_shape; the sensed place TCP is the deck+approach
+# pose the REPOSITION_REREGISTER logged (``place=(...)`` in ur_base_link, the frame the level place IK reaches).
+SOUTHDOCK_GRASP = (1.1994, -1.2682, 2.0862, -0.8177, 1.2002, 0.0)
+SOUTHDOCK_RAW_STANDOFF = (0.093, -1.91, 2.014, -0.103, 1.664, 0.0)
+# place TCP in ur_base_link (REPOSITION_REREGISTER place=...): coldwin31 south dock, collectlevel4 east cart.
+SOUTHDOCK_PLACE_TCP = (1.043, 0.055, 0.435)
+EASTCART_PLACE_TCP = (0.97, 0.131, 0.442)
+
+
+def _southdock_limits():
+    big = 2 * math.pi
+    return {'ur_wrist_1_joint': (-big, 0.65), 'ur_wrist_2_joint': (0.0, big),
+            'ur_elbow_joint': (0.1, math.pi)}
+
+
+@dataclass
+class DroopPlaceResult:
+    """Loaded gravity-droop place proof for ONE deck geometry (sim-carton-level-southdock-v1): the
+    geometrically-level set-down command (current) DROOPS off level under the welded far-extended arm's
+    gravity torque (reproducing coldwin31's +2.07 deg at the south dock / collectlevel4's sub-bound 1.86 at
+    the east cart), while the gravity-FEEDFORWARD-compensated command lands the EXECUTED carton level."""
+    name: str
+    place_tcp: tuple
+    shoulder_lift_torque: float       # gravity torque at the set-down (N*m) -- the dominant droop driver
+    setdown_slift_swing: float        # the heavy-joint swing the (current) descent needs from the standoff
+    current_cmd_tilt: float           # commanded (geometric) set-down tilt -- level by construction
+    current_exec_pitch: float         # EXECUTED pitch under the droop model (the GPU trip quantity)
+    current_exec_tilt: float
+    comp_cmd_tilt: float              # compensated command is intentionally PRE-TILTED (not geometric level)
+    comp_exec_pitch: float            # EXECUTED pitch after compensation -- level
+    comp_exec_tilt: float
+    descent_exec_max: float           # max |roll|,|pitch| over the compensated descent (standoff->setdown)
+    standoff_exec_tilt: float         # executed tilt at the descent START (uncompensated standoff, pre-existing)
+    setdown_clear: bool
+
+    def passes(self, bound_deg, margin_deg=1.0):
+        """The SET-DOWN (the coldwin31 trip site -- the far-extended loaded dwell) executes level within the
+        brief's <=1 deg margin; the whole descent stays under the real bound. The descent START is the
+        unchanged preplace standoff, whose (pre-existing, already-passing) droop caps the descent max."""
+        return (self.comp_exec_pitch <= margin_deg and self.comp_exec_tilt <= margin_deg
+                and self.descent_exec_max <= bound_deg and self.setdown_clear
+                and self.comp_exec_tilt < self.current_exec_tilt)
+
+
+def run_southdock_place(urdf_path, *, geometry='south', stiffness=cl.DEFAULT_DROOP_STIFFNESS,
+                        carton_mass=0.45, standoff_above_m=0.09, tool_link='gripper_pad_tcp',
+                        grasp=SOUTHDOCK_GRASP):
+    """CPU proof of the loaded gravity-droop place on the REAL mission kinematics + the REAL fixed-shape
+    standoff + the measured top-down grasp up-axis, for the PR-307 south dock (``geometry='south'``) or the
+    pre-307 east cart (``'east'``). Shows (1) the geometrically-level set-down command droops the welded
+    carton off level under the far-extended arm's gravity torque (the quasi-static mechanism, speed-
+    independent), and (2) the gravity-FEEDFORWARD-compensated level place IK (``carton_level.
+    gravity_compensation``) lands the EXECUTED carton level and keeps the whole descent under the bound.
+    Returns a DroopPlaceResult. Pure/CPU."""
+    place = SOUTHDOCK_PLACE_TCP if geometry == 'south' else EASTCART_PLACE_TCP
+    robot = parse_urdf(urdf_path)
+    u = cl.carton_up_in_tool(cl.tool_rotation(robot, list(grasp), tool_link))
+    limits = _southdock_limits()
+    gc = cl.GravityCompensation(stiffness=stiffness, carton_mass=carton_mass, tool_link=tool_link).validate()
+    # The fixed-shape standoff, leveled (preserve its TCP) -- the descent START + the IK seed.
+    seed = [cl.level_preserve_tcp(robot, list(SOUTHDOCK_RAW_STANDOFF), u, tool_link=tool_link,
+                                  limits=limits)[j] for j in ARM_JOINTS]
+    tgt = np.asarray(place, float)
+    # CURRENT: geometric level set-down at the sensed place; droops under load.
+    cur = [cl.level_place_ik(robot, tgt, u, seed, tool_link=tool_link, limits=limits)[j] for j in ARM_JOINTS]
+    # COMPENSATED: solve the COMMANDED config whose EXECUTED (drooped) pose is level at the sensed place.
+    comp = [cl.level_place_ik(robot, tgt, u, seed, tool_link=tool_link, limits=limits,
+                              gravity_comp=gc)[j] for j in ARM_JOINTS]
+
+    def exec_rpy(q):
+        dq = gc.droop(robot, dict(zip(ARM_JOINTS, q)), tool_link=tool_link)
+        return cl.carried_rpy(robot, [q[i] + dq[ARM_JOINTS[i]] for i in range(6)], u, tool_link)
+
+    cur_cmd = cl.carried_rpy(robot, cur, u, tool_link)
+    cur_exe = exec_rpy(cur)
+    comp_cmd = cl.carried_rpy(robot, comp, u, tool_link)
+    comp_exe = exec_rpy(comp)
+    # compensated descent: standoff (seed) -> compensated set-down, executed attitude throughout
+    dmax = 0.0
+    for i in range(41):
+        a = i / 40.0
+        q = [(1 - a) * seed[k] + a * comp[k] for k in range(6)]
+        r, p, _ = exec_rpy(q)
+        dmax = max(dmax, abs(r), abs(p))
+    tau = cl.arm_gravity_torques(robot, cur, carton_mass=carton_mass, tool_link=tool_link)
+    return DroopPlaceResult(
+        name=geometry, place_tcp=tuple(place),
+        shoulder_lift_torque=tau['ur_shoulder_lift_joint'],
+        setdown_slift_swing=cur[1] - seed[1],
+        current_cmd_tilt=cur_cmd[2], current_exec_pitch=abs(cur_exe[1]), current_exec_tilt=cur_exe[2],
+        comp_cmd_tilt=comp_cmd[2], comp_exec_pitch=abs(comp_exe[1]), comp_exec_tilt=comp_exe[2],
+        descent_exec_max=dmax, standoff_exec_tilt=exec_rpy(seed)[2],
+        setdown_clear=cl._in_clear_wrist(dict(zip(ARM_JOINTS, comp))))
+
+
+def southdock_table(results, bound_deg=cl.DEFAULT_TILT_BOUND_DEG):
+    rows = [('geometry', 'place_x', 'slift_torque', 'cur_cmd', 'cur_exec_pitch',
+             'comp_cmd', 'comp_exec_pitch', 'descent_exec', 'verdict')]
+    for r in results:
+        rows.append((r.name, f'{r.place_tcp[0]:.3f}', f'{r.shoulder_lift_torque:.1f}',
+                     f'{r.current_cmd_tilt:.2f}', f'{r.current_exec_pitch:.2f}',
+                     f'{r.comp_cmd_tilt:.2f}', f'{r.comp_exec_pitch:.2f}', f'{r.descent_exec_max:.2f}',
+                     'PASS' if r.passes(bound_deg) else 'FAIL'))
+    w = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    return '\n'.join('  '.join(c.ljust(w[i]) for i, c in enumerate(row)) for row in rows)

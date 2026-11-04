@@ -879,6 +879,7 @@ class TransferController:
 
     def _transition(self, phase):
         self._note_recovery_pause()   # sim-robust-phase-timeout-during-recovery-v1: report before reset
+        leaving = self.phase   # sim-carton-level-southdock-v1: the phase we are LEAVING (before reassignment)
         self.phase, self.elapsed, self.issued = phase, 0.0, False
         self._staged_retries = 0   # fm358: fresh retry budget per phase
         self._move_deadline_retries = 0   # fm367: fresh deadline-retry budget per phase
@@ -893,12 +894,18 @@ class TransferController:
         # phase we are LEAVING, so a bench-vs-GPU gap is visible by name in the log (the gap that cost the
         # collectlevel3 diagnosis). Only when carton_level is on and we measured an executed sample this
         # phase; the planned peak defaults to (unknown) for a phase whose move stashed none.
-        if self._carton_level is not None and self.phase in self._carton_seg_exec:
-            er, ep = self._carton_seg_exec.pop(self.phase)
-            pr, pp = self._carton_seg_planned.pop(self.phase, (None, None))
+        # sim-carton-level-southdock-v1: this keyed off ``self.phase`` AFTER it was reassigned to the NEW
+        # phase above, so the exec sample stashed under the DEPARTING phase never matched -> the line never
+        # emitted (absent from every CARTON run incl. coldwin31). Key it off ``leaving`` and ALSO surface it
+        # to the orchestrator console (evidence) so the next GPU run records planned-vs-executed per segment.
+        if self._carton_level is not None and leaving in self._carton_seg_exec:
+            er, ep = self._carton_seg_exec.pop(leaving)
+            pr, pp = self._carton_seg_planned.pop(leaving, (None, None))
             planned = ('planned_max roll=%.2f pitch=%.2f' % (pr, pp)) if pr is not None else 'planned_max=unknown'
-            print('CARTON_SEGMENT_TILT phase=%s executed_max roll=%.2f pitch=%.2f | %s deg (bound %.2f)'
-                  % (self.phase, er, ep, planned, self._carton_level.bound_deg), flush=True)
+            line = ('CARTON_SEGMENT_TILT phase=%s executed_max roll=%.2f pitch=%.2f | %s deg (bound %.2f)'
+                    % (leaving, er, ep, planned, self._carton_level.bound_deg))
+            print(line, flush=True)
+            self.evidence.append({'carton_segment_tilt': line})
         if phase == 'contact':
             self._contact_progress_wall = self.steady_clock()   # fm425: start the WALL no-progress budget
 
@@ -1185,11 +1192,19 @@ class TransferController:
         from twin.restock_manipulation import carton_level as cl
         limits = self._place_level_limits() or None
         tcp_link = self._place_fk_link(robot, goal)
+        # sim-carton-level-southdock-v1: loaded gravity-droop feedforward. When carton_level.gravity_compensation
+        # is set, the level place/preplace IK solves for the COMMANDED config whose EXECUTED (drooped) pose is
+        # level, so the physical welded carton lands parallel to the ground at the far-extended south-dock place
+        # (coldwin31). Applied to BOTH the preplace standoff (``target_pos`` None, preserve its EXECUTED TCP)
+        # AND the set-down (``target_pos`` given) so the whole carried descent -- compensated standoff to
+        # compensated set-down -- executes level throughout, covering pre-place + place + release. None => the
+        # geometric level solve (byte-identical).
+        gc = getattr(self._carton_level, 'gravity_compensation', None)
         if target_pos is None:
             return cl.level_preserve_tcp(robot, goal, self._carton_up_in_tool,
-                                         tool_link=tcp_link, limits=limits)
+                                         tool_link=tcp_link, limits=limits, gravity_comp=gc)
         return cl.level_place_ik(robot, target_pos, self._carton_up_in_tool, goal,
-                                 tool_link=tcp_link, limits=limits)
+                                 tool_link=tcp_link, limits=limits, gravity_comp=gc)
 
     def _collect_retreat_liftoff_goal(self, measured):
         """sim-collect-retreat-abort-v2 / sim-collect-retreat-collider-v3: the collect deck-place
@@ -1954,9 +1969,15 @@ class TransferController:
                             # under the bound -- bound and grace UNCHANGED. The planned peak is stashed for the
                             # per-segment CARTON_SEGMENT_TILT report (planned vs executed) at the phase exit.
                             from twin.restock_manipulation import carton_level as cl
-                            planned = cl.predict_path_tilt(
+                            # sim-carton-level-southdock-v1: predict the EXECUTED carton attitude -- when
+                            # gravity_compensation is on, `setdown` is a COMMANDED config pre-tilted against
+                            # the loaded droop, so the GEOMETRIC replay would read the pre-tilt (~2 deg) and
+                            # falsely reject a plan whose physical welded carton actually lands level. The
+                            # droop-aware replay predicts what the GPU carton (and the CARTON_TILT trip) sees.
+                            gc = getattr(self._carton_level, 'gravity_compensation', None)
+                            planned = cl.predict_path_tilt_executed(
                                 robot, [list(s.joint_positions), list(setdown)], self._carton_up_in_tool,
-                                tool_link=self._carton_level.tool_link)
+                                tool_link=self._carton_level.tool_link, gravity_comp=gc)
                             self._carton_seg_planned['place'] = (planned[0], planned[1])
                             worst_planned = max(planned[0], planned[1])
                             if worst_planned > self._carton_level.bound_deg:
