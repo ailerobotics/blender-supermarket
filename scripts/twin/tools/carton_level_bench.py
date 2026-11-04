@@ -411,3 +411,111 @@ def table(results, bound_deg=cl.DEFAULT_TILT_BOUND_DEG):
 
 def all_pass(results, bound_deg=cl.DEFAULT_TILT_BOUND_DEG):
     return bool(results) and all(r.passes(bound_deg) for r in results)
+
+
+# -------------------------------------- place-on-cart SET-DOWN descent (sim-carton-level-preplace-v2)
+# The REAL collectlevel3 collect place-on-cart descent, reconstructed from the saved run's host-stack
+# TRAJ_HOST_PLAN (the npoints=2 goal_pos_tol=0.120 plan at host-stack.log L15978, converted from MoveIt
+# alphabetical [elbow, slift, span, w1, w2, w3] order to ARM order). The grasp fixes the carton up-axis
+# at the weld (the lift-path start, ARM order). The descent is the ONE carried segment still driven as a
+# SINGLE 2-point straight-line begin_joint_goal (every other carried move is a leveled waypoint path).
+PLACE_DESCENT_GRASP = (1.1994, -1.2682, 2.0862, -0.8177, 1.2002, 0.0)
+PLACE_DESCENT_STANDOFF = (0.093, -1.91, 2.014, -0.103, 1.664, 0.0)
+PLACE_DESCENT_SETDOWN = (-0.0218, -1.4813, 1.7927, -0.3113, 1.6079, 0.0001)
+
+# Representative per-joint first-order tracking-lag time constants (s), ARM order. The welded carton's
+# attitude is the arm's attitude, and this descent keeps it level by a LARGE OPPOSING swing of the pitch
+# chain (shoulder_lift +24.6 deg while elbow -12.7 and wrist_1 -11.9 deg, netting a constant level sum).
+# A uniform lag leaves that sum level (the carton stays level); the tilt comes from the DIFFERENTIAL lag
+# of a heavy shoulder/elbow against the light wrist. tau_shoulder_lift was CALIBRATED (bisection) so this
+# model reproduces the collectlevel3 executed peak (2.22 deg pitch) on the ungentled 0.08 rad/s descent;
+# elbow is half the shoulder, the wrists an order lighter. This is a REPRESENTATIVE execution model (the
+# run does not log per-tick joints) whose ONE free parameter is pinned to the one observed GPU data point;
+# the integration lane confirms the residual in-sim via the new CARTON_SEGMENT_TILT log.
+DEFAULT_PLACE_LAG = (0.30, 0.7115, 0.35575, 0.05, 0.05, 0.05)
+
+
+def _descent_duration(dmax, speed, accel):
+    """The rest-to-rest 2-point duration ros_adapter._straight_line_goal sizes for a move of max joint
+    delta ``dmax`` under peak-speed ``speed`` / peak-accel ``accel`` ceilings (identical formula)."""
+    return max(2.0, 1.5 * dmax / speed, math.sqrt(6 * dmax / accel))
+
+
+def _smoothstep(x):
+    x = min(1.0, max(0.0, x))
+    return 3 * x * x - 2 * x * x * x
+
+
+def tracking_series(robot, start, goal, u, *, speed, accel, tau, tool_link='ur_tool0', dt=0.004):
+    """Replay the EXECUTED carton attitude of a straight-line 2-point joint descent under a per-joint
+    first-order tracking lag. The COMMANDED path is the rest-to-rest smoothstep start->goal (all joints
+    share one normalised profile, so the command stays on the straight joint line -- i.e. level); the
+    MEASURED joints follow it through an independent first-order lag per joint (``tau``), so a heavy joint
+    drifts off the level-cancelling sum. Returns ``(commanded_series, executed_series)`` as lists of
+    ``(t, roll, pitch, tilt)``. Pure/CPU; ``tau`` is ARM order."""
+    start = np.asarray(start, float)
+    goal = np.asarray(goal, float)
+    tau = np.asarray(tau, float)
+    D = goal - start
+    dmax = float(np.max(np.abs(D))) if D.size else 0.0
+    T = _descent_duration(dmax, speed, accel)
+    n = int(T / dt) + 1
+    qm = start.copy()
+    cmd_series, exe_series = [], []
+    for k in range(n):
+        t = k * dt
+        qc = start + D * _smoothstep(t / T)
+        qm = qm + (qc - qm) * (dt / np.maximum(tau, 1e-6))
+        cr, cp, ct = cl.carried_rpy(robot, qc.tolist(), u, tool_link)
+        er, ep, et = cl.carried_rpy(robot, qm.tolist(), u, tool_link)
+        cmd_series.append((t, cr, cp, ct))
+        exe_series.append((t, er, ep, et))
+    return cmd_series, exe_series
+
+
+@dataclass
+class PlaceDescentResult:
+    """The place-on-cart SET-DOWN descent proof (sim-carton-level-preplace-v2): the COMMANDED straight
+    joint line is level, the UNGENTLED executed path (tracking lag) tilts ~2.22 deg (reproducing the
+    collectlevel3 CARTON_TILT), the GENTLED (time-parameterised slower) executed path stays under 1 deg."""
+    commanded_max_pitch: float
+    commanded_max_tilt: float
+    ungentled_speed: float
+    ungentled_max_pitch: float
+    gentled_speed: float
+    gentled_max_pitch: float
+    ungentled_duration: float
+    gentled_duration: float
+    commanded_series: list = field(default_factory=list)
+    ungentled_series: list = field(default_factory=list)
+    gentled_series: list = field(default_factory=list)
+
+
+def run_place_descent(urdf_path, *, bound_deg=cl.DEFAULT_TILT_BOUND_DEG,
+                      grasp=PLACE_DESCENT_GRASP, standoff=PLACE_DESCENT_STANDOFF,
+                      setdown=PLACE_DESCENT_SETDOWN, tau=DEFAULT_PLACE_LAG,
+                      ungentled_speed=0.08, ungentled_accel=0.15,
+                      gentled_speed=0.02, gentled_accel=0.04, tool_link='ur_tool0'):
+    """Replay the REAL collectlevel3 place-on-cart SET-DOWN descent on the REAL mission kinematics +
+    measured grasp up-axis. Proves (1) the COMMANDED single-2-point straight joint line standoff->setdown
+    is LEVEL (so the trip is NOT a planned-pose tilt and NOT the pre-place segment PR 298 covered), and
+    (2) the EXECUTED path under the representative differential tracking lag reproduces the ~2.22 deg
+    CARTON_TILT at the standard 0.08 rad/s but stays under the bound when the SAME level path is
+    time-parameterised slower (carton_level.place_descent_speed). Returns a PlaceDescentResult."""
+    robot = parse_urdf(urdf_path)
+    u = cl.carton_up_in_tool(cl.tool_rotation(robot, list(grasp), tool_link))
+    cmd, exe_u = tracking_series(robot, standoff, setdown, u, speed=ungentled_speed,
+                                 accel=ungentled_accel, tau=tau, tool_link=tool_link)
+    _, exe_g = tracking_series(robot, standoff, setdown, u, speed=gentled_speed,
+                               accel=gentled_accel, tau=tau, tool_link=tool_link)
+    dmax = max(abs(b - a) for a, b in zip(standoff, setdown))
+    return PlaceDescentResult(
+        commanded_max_pitch=max(abs(r[2]) for r in cmd),
+        commanded_max_tilt=max(r[3] for r in cmd),
+        ungentled_speed=ungentled_speed,
+        ungentled_max_pitch=max(abs(r[2]) for r in exe_u),
+        gentled_speed=gentled_speed,
+        gentled_max_pitch=max(abs(r[2]) for r in exe_g),
+        ungentled_duration=_descent_duration(dmax, ungentled_speed, ungentled_accel),
+        gentled_duration=_descent_duration(dmax, gentled_speed, gentled_accel),
+        commanded_series=cmd, ungentled_series=exe_u, gentled_series=exe_g)
