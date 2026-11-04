@@ -110,30 +110,36 @@ def _controller_bands(physics_dt_value, env=None):
 
 
 def test_controller_band_byte_identical_at_default():
-    # env unset AND env explicitly 1/60 both reproduce the legacy defaults (0.5 / 0.2 / 0.8).
+    # sim-collision-dt-render-lead-floor-v1: the stale CEILING (max_age) and the held-collision
+    # tolerance stay byte-identical at the default step (0.5 / 0.8). The future-lead FLOOR is now DERIVED
+    # as (delivery lead 0.2 + ESDF window 0.5) => 0.7, not the bare 0.2 delivery lead (coldwin30's -0.5333
+    # trip). env unset AND env explicitly 1/60 both reproduce it.
     for dt in (None, DEFAULT_DT):
         max_age, lead, tol = _controller_bands(dt)
         assert max_age == pytest.approx(0.5)
-        assert lead == pytest.approx(0.2)
+        assert lead == pytest.approx(0.7)
         assert tol == pytest.approx(0.8)
 
 
 def test_controller_band_scales_at_raised_step():
+    # The whole derived floor (delivery + ESDF window) scales with the step, like max_age and tol.
     max_age, lead, tol = _controller_bands(RAISED_DT)
     assert max_age == pytest.approx(0.5 * RATIO)
-    assert lead == pytest.approx(0.2 * RATIO)
+    assert lead == pytest.approx(0.7 * RATIO)
     assert tol == pytest.approx(0.8 * RATIO)
 
 
 def test_controller_band_scales_the_integration_env_value():
     # The rtfcollect config set RESTOCK_SENSOR_MAX_AGE_S=1.5 / RESTOCK_FRESH_RENDER_LEAD_S=0.5 (the band
-    # [-0.5, 1.5] in the trip). Those env values are the window AT 1/60; the step rebases them.
+    # [-0.5, 1.5] in the trip). Those env values are the window AT 1/60; the step rebases them. The DELIVERY
+    # term keeps its env (0.5), so the derived floor is (0.5 + 0.5) = 1.0 at 1/60 (the env still raises the
+    # floor; it is simply no longer NEEDED -- the default 0.2 already derives to 0.7).
     env = {'RESTOCK_SENSOR_MAX_AGE_S': '1.5', 'RESTOCK_FRESH_RENDER_LEAD_S': '0.5'}
     max_age, lead, _ = _controller_bands(DEFAULT_DT, env)
-    assert max_age == pytest.approx(1.5) and lead == pytest.approx(0.5)   # byte-identical at 1/60
+    assert max_age == pytest.approx(1.5) and lead == pytest.approx(1.0)   # ceiling byte-identical at 1/60
     max_age, lead, _ = _controller_bands(RAISED_DT, env)
     assert max_age == pytest.approx(2.5)        # 1.5 * 5/3 -- the band that would have held the trip
-    assert lead == pytest.approx(0.5 * RATIO)
+    assert lead == pytest.approx(1.0 * RATIO)
 
 
 # --------------------------------------------------------------------------- rtfcollect REPLAY

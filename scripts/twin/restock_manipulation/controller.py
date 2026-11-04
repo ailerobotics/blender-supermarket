@@ -4,7 +4,8 @@ import math
 import os
 import time
 from ..restock_camera.freshness import require_fresh
-from ..restock.physics_step import freshness_scale_from_env
+from ..restock.physics_step import (COLLISION_RELAY_LEAD_S, collision_band_floor, dt_from_env,
+                                     freshness_scale_from_env)
 
 from . import esdf_boot_gate
 from . import ground_truth_collect as gtc
@@ -565,7 +566,22 @@ class TransferController:
         # Rebased onto the running step too: the render lead is a one-to-few-PHYSICS-STEP delivery-order
         # lead, so at a coarser step one step spans more sim time and a legitimately one-step-ahead stamp
         # would otherwise be mis-flagged future (sim-physics-step-collision-band-v1; 1.0 at 1/60).
-        self.render_lead = _float_env_bounded('RESTOCK_FRESH_RENDER_LEAD_S', 0.2, 0.0, 0.5) * self._freshness_scale
+        # sim-collision-dt-render-lead-floor-v1: the band FLOOR (-render_lead -- how far a FUTURE-leading
+        # stamp may be and still be fresh) is DERIVED, not a hand-set env constant. The mirrored collision
+        # stamp (collision_time) is nvblox's ESDF integration time, which rides the Isaac RENDER clock;
+        # under heavy live_pose render pacing that clock runs AHEAD of the host packet clock read as `now`,
+        # so a FRESH collision stamp legitimately leads `now`. coldwin30 tripped collect preplace with
+        # collision_dt=-0.5333 against a -0.5 floor (the collision world led `now` by 0.53 s -- FRESHER,
+        # not stale), and the integration lane had to bump RESTOCK_FRESH_RENDER_LEAD_S to 0.7 by hand to
+        # clear it (coldwin31). The floor is now (delivery lead + ESDF incorporation window), step-scaled
+        # = 0.7 s at the default step, so the env override is unnecessary. The delivery term keeps its env
+        # (default 0.2); the +COLLISION_RELAY_LEAD_S (0.5) ESDF term is what generalises PR 288's step-aware
+        # rule to the default step (where the pure scaling was a no-op). The positive (stale) CEILING
+        # (max_age) and the trip name are UNCHANGED -- only the future side gains headroom (strictly MORE
+        # current data -- safe; see _fresh / the fm423 render-lead rationale above). Logged once at host
+        # start via freshness_band_summary() so every run dir records the band in force (never silent).
+        self._render_lead_delivery = _float_env_bounded('RESTOCK_FRESH_RENDER_LEAD_S', 0.2, 0.0, 0.5)
+        self.render_lead = collision_band_floor(self._render_lead_delivery, dt_from_env())
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
         self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
@@ -743,6 +759,21 @@ class TransferController:
 
     def _fresh(self, stamp, now):
         return math.isfinite(stamp) and -self.render_lead <= now - stamp <= self.max_age
+
+    def freshness_band_summary(self):
+        """One greppable line describing the collision/feedback freshness band in force this run, logged
+        once at host start (sim-collision-dt-render-lead-floor-v1) so every run dir records the DERIVED
+        band and its widening is never silent. The floor is the derived future-lead headroom
+        (delivery render lead + the step-scaled ESDF incorporation window); the ceiling is the unchanged
+        stale max_age."""
+        scale = self._freshness_scale
+        return ('COLLISION_FRESHNESS_BAND floor=%.4f ceiling=%.4f '
+                '(render_lead=%.4f = delivery %.4f + esdf_window %.4f, freshness_scale=%.3f '
+                'physics_dt=%.6g) -- sim-collision-dt-render-lead-floor-v1 (derived; env '
+                'RESTOCK_FRESH_RENDER_LEAD_S override unnecessary)'
+                % (-self.render_lead, self.max_age, self.render_lead,
+                   self._render_lead_delivery * scale, COLLISION_RELAY_LEAD_S * scale,
+                   scale, dt_from_env()))
 
     def _provenance(self, item, now):
         allowed = ('sensor', 'test_fixture') if self.fixture_mode else ('sensor',)

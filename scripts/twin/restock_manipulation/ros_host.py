@@ -354,6 +354,11 @@ def main():
         # sim-robust-esdf-boot-gate-v1: boot ESDF-ack grace (sim s); 0.0 => gate off (byte-identical).
         'esdf_boot_ack_grace_s': controller.esdf_boot_ack_grace_s,
     }), flush=True)
+    # sim-collision-dt-render-lead-floor-v1: log the DERIVED collision/feedback freshness band once at
+    # host start, so every run dir's host-stack.log records the floor/ceiling in force (the future-lead
+    # floor widening -- coldwin30's -0.5333 trip -- is never silent). The floor is derived from the
+    # delivery render lead + the step-scaled ESDF incorporation window; the stale ceiling is unchanged.
+    print(controller.freshness_band_summary(), flush=True)
     try:
         rclpy.spin(node)
     finally:
