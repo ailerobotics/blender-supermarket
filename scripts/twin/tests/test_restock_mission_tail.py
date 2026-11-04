@@ -167,6 +167,21 @@ class ConfigChecks(unittest.TestCase):
         tail.check_config(_config(verify_ground_truth={'enabled': True}), FIXTURE['scenario'], rep)
         self.assertEqual([n for v, n, _ in rep.rows if v == 'FAIL'], [])
 
+    def test_cart_side_bay_config_accepts_home_empty_return(self):
+        # sim-cart-side-bay-v1: the side bay leaves the cart parked off-axis and returns the base HOME
+        # EMPTY, so uncouple_on_return MUST be false (the legacy uncouple-at-parking check would false-fail
+        # that). check_config must instead pass config_side_bay_return_home_empty and NOT emit the legacy row.
+        poses = copy.deepcopy(FIXTURE['config']['mission_poses'])
+        poses['cart_side_bay'] = [-4.3, 6.95, -1.5707963267948966]
+        config = _config(verify_ground_truth={'enabled': True}, shelf_staging=True,
+                         cart_side_bay=True, uncouple_on_return=False, mission_poses=poses)
+        rep = tail.Report(io.StringIO())
+        tail.check_config(config, FIXTURE['scenario'], rep)
+        rows = _rows(rep, 'config_')
+        self.assertEqual([n for v, n, _ in rep.rows if v == 'FAIL'], [])
+        self.assertEqual(rows['config_side_bay_return_home_empty'][0], 'PASS')
+        self.assertNotIn('config_uncouple_at_parking_enabled', rows)
+
 
 @unittest.skipUnless(HAVE_PT, 'py_trees not installed (BT pythonpath)')
 class TailDryRun(unittest.TestCase):

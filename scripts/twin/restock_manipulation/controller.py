@@ -2035,7 +2035,10 @@ class TransferController:
                                 robot, list(s.joint_positions), target_pos, list(seed),
                                 self._carton_up_in_tool, gc, bound_deg=self._carton_level.bound_deg,
                                 tool_link=tcp_link, limits=limits,
-                                waypoints=self._carton_level.path_waypoints)
+                                waypoints=self._carton_level.path_waypoints,
+                                approach_from_above=self._carton_level.place_from_above,
+                                above_clearance_m=self._carton_level.place_above_clearance_m,
+                                depth_bias_m=self._carton_level.place_depth_bias_m)
                             self._carton_seg_planned['place'] = (plan.max_roll, plan.max_pitch)
                             self._carton_seg_planned['release'] = (plan.max_roll, plan.max_pitch)
                             reject = plan.reject(self._carton_level.bound_deg)
@@ -2045,10 +2048,14 @@ class TransferController:
                             print('CARTON_LEVEL_PLACE_DESCENT phase=place n=%d predicted_max roll=%.2f '
                                   'pitch=%.2f deg (<= bound %.2f) -- per-point wrist-compensated level '
                                   'set-down at speed=%.3f accel=%.3f rad/s (extension-following droop-cancel '
-                                  'so the loaded-carton execution stays level throughout the insert)'
+                                  'so the loaded-carton execution stays level throughout the insert); '
+                                  'approach=%s (above_clearance=%.3f m, depth_bias=%.3f m)'
                                   % (plan.waypoints_n, plan.max_roll, plan.max_pitch,
                                      self._carton_level.bound_deg, self._carton_level.place_descent_speed,
-                                     self._carton_level.place_descent_accel), flush=True)
+                                     self._carton_level.place_descent_accel,
+                                     'from_above' if self._carton_level.place_from_above else 'straight_line',
+                                     self._carton_level.place_above_clearance_m,
+                                     self._carton_level.place_depth_bias_m), flush=True)
                             self.motion.begin_joint_path(list(plan.waypoints), list(s.joint_positions),
                                                          slow=True, goal_tol=0.12,
                                                          speed=self._carton_level.place_descent_speed,

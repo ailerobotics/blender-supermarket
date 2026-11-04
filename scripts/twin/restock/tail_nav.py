@@ -501,10 +501,17 @@ def check_home_leg(config, scenario, environment, rep, *, camera_config=None):
             'lidar_legacy_wiring_rotates_returns',
             legacy_span=legacy, note='legacy sensor_to_base=(x,y,z) rotates every return 0.15 rad; the fix '
                                      '(yaw 0) is the default -- drop "lidar_sensor_yaw_fix": false to use it')
-    configured = simulate_home_leg(config, scenario, environment, camera_config=camera_config)
+    # sim-cart-side-bay-v1: the side-bay return is a SINGLE uncoupled leg from the service area
+    # (shelf_approach, where the base finished the transfer) straight HOME -- the cart stays parked in
+    # the bay, so there is no cart_parking tow and no cart_parking_backaway. The legacy uncouple-at-parking
+    # return keeps its default start=cart_parking -> [backaway] -> home.
+    poses = config.get('mission_poses', {})
+    side_bay = bool(config.get('cart_side_bay')) and 'cart_side_bay' in poses
+    leg_kw = ({'start': poses.get('shelf_approach'), 'backaway': None} if side_bay else {})
+    configured = simulate_home_leg(config, scenario, environment, camera_config=camera_config, **leg_kw)
     rep.check(configured['status'] == 'succeeded', 'home_leg_configured_home_reached', **configured)
     other = simulate_home_leg(config, scenario, environment, camera_config=camera_config,
-                              lidar_yaw_fix=not configured['lidar_yaw_fix'])
+                              lidar_yaw_fix=not configured['lidar_yaw_fix'], **leg_kw)
     rep.add('INFO', 'home_leg_other_lidar_wiring', **other)
     return configured
 
