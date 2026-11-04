@@ -13,14 +13,17 @@
     "7. FALLBACK ONLY if step 6 fails: drop the suspension spec (plain caster_lift_m=0.03 assets) and set the RUNTIME key 'chassis_station_pitch_hold': true. The station parking brake then locks chassis pitch/roll while braked at the collect station (sim-only, released with the brake)."
   ],
 
+  "_coldwin38_UPDATE": "GPU run coldwin38 (first boot of this suspension) FAILED in the first 4 s of collect, BEFORE any arm motion: BASE_ATT pitch -7.4..+12.2 deg bounce, z 0.239, then a trajectory_host stale-feedback e-stop -- NOT a see-saw. Root cause: the sprung-caster drive was DYNAMICALLY UNSTABLE at the 1/60 s solver step. The original caster_suspender_mass_kg was 0.2 kg, so k*dt^2/m_sprung ~= 3e5*(1/60)^2/1.0 ~= 83, far above the ~40 the arm's own stiff drives (k<=1e6 on ~7 kg links) run stably on the same solver, so the stiff drive exploded at world.reset. FIX (this spec): caster_suspender_mass_kg raised to 4.0 kg (a physically plausible caster+fork+spring assembly) -> k*dt^2/m_sprung ~= 17.4, inside the stable band, with k unchanged so the 0.26 deg steady pitch bound is preserved. MobileSpec now REFUSES a solver-unstable (k, mass, dt) combination at build time. GPU re-confirmation is the integration lane's next run; in parallel the station-pitch-hold fallback (chassis_station_pitch_hold) was validated.",
+
   "mobile_spec_override": {
-    "_note": "the --config JSON for scripts/build_mobile_assets.py (MobileSpec keyword overrides). These five fields are the whole suspension spec; everything else stays the mission default. k=3e5 N/m bounds the worst-case 241 N.m arm moment to 0.26 deg even after one caster lifts off (single-caster stiffness k*d^2); preload 120 N is LIGHT (keeps drive-wheel share 0.90, near the caster_lift 0.03 rig's 0.95) yet guarantees at-rest contact; travel 0.02 m >> the ~2 mm working deflection.",
+    "_note": "the --config JSON for scripts/build_mobile_assets.py (MobileSpec keyword overrides). k=3e5 N/m bounds the worst-case 241 N.m arm moment to 0.26 deg even after one caster lifts off; preload 120 N is LIGHT (keeps drive-wheel share ~0.90 from the preload; the 4 kg sprung mass adds ~8 kg total on the casters, so the real share is ~0.87 -- still well above the stuck rig 0.61); travel 0.02 m >> the ~2 mm working deflection. caster_suspender_mass_kg=4.0 is the coldwin38 stability fix (0.2 kg exploded the drive); min stable mass at k=3e5/dt=1/60 is ~2.0 kg (twin.traction.min_suspender_mass_kg).",
     "caster_suspension": true,
     "caster_lift_m": 0.0,
     "caster_spring_n_per_m": 300000.0,
     "caster_damping_n_s_per_m": 2000.0,
     "caster_preload_n": 120.0,
-    "caster_travel_m": 0.02
+    "caster_travel_m": 0.02,
+    "caster_suspender_mass_kg": 4.0
   },
 
   "runtime_config_keys": {
