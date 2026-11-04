@@ -141,7 +141,20 @@ class RouteAlertsRunner:
         return build_staff_tasks(events, self._task_store, now=now, generator=self._task_gen)
 
     def latest_detections(self):
-        """The most recent map-frame dynobs detections (for a pull-based nav provider)."""
+        """Map-frame obstruction detections for the dynobs nav layer to pull.
+
+        The WORKING DEFAULT (``mode="findings"``) returns an EMPTY list: the robot is
+        a pure sensor and never changes where it drives, so the dynobs layer is fed
+        nothing and the navigation route is byte-identical. The SMART variant
+        (``mode="act"``, ``--route-alerts=act``) returns the confirmed obstruction
+        footprints, which raise the route cost ONLY through the costmap layer the
+        ``sim-restock-dynobs-v1`` lane owns. Spill/strays findings are never returned
+        here even in ``act`` -- only an obstruction footprint is a base passability
+        hazard. The findings themselves (events + tasks + the evidence log) are
+        published in BOTH modes; only this nav seam is gated.
+        """
+        if not self.config.acts:
+            return []
         return list(self._latest_detections)
 
     def _write(self, now, result: RouteAlertsResult):
@@ -149,10 +162,15 @@ class RouteAlertsRunner:
             return
         rec = {
             "t": now,
+            "mode": self.config.mode,
             "events": [e.to_dict() for e in result.events],
             "robot_events": [e.to_dict() for e in result.robot_events],
             "detections": [{"position": list(d.position), "radius": d.radius, "source": d.source}
                            for d in result.detections],
+            # What navigation actually receives this tick: the detections only in
+            # ``act`` mode, empty in the findings-only working default.
+            "fed_to_nav": [{"position": list(d.position), "radius": d.radius, "source": d.source}
+                           for d in self.latest_detections()],
             "tasks": [t.to_dict() for t in result.tasks],
             "passability": result.passability,
             "disabled_reason": result.disabled_reason,

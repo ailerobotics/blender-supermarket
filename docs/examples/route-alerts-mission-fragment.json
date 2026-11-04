@@ -1,0 +1,34 @@
+{
+  "__doc__": "Integration hand-off fragment for sim-route-alerts-v2. MERGE the route_alerts block into a mission runtime-config (e.g. mission-runtime-cc.json) to turn the robot into a mobile store sensor on the drive. Default-off when absent (byte-identical). Two delivered modes via route_alerts.mode (or the launcher --route-alerts / --route-alerts=act): 'findings' (the WORKING DEFAULT) is sensor-only -- it publishes robot.route_alert.* events + staff tasks + the evidence log next to mission.json, but navigation is byte-identical (latest_detections() returns []). 'act' (the SMART variant) additionally feeds a confirmed OBSTRUCTION footprint into the EXISTING dynobs costmap layer to raise the route cost -- so 'act' REQUIRES the navigation block below (nav_mode sensor + navigation.dynamic_obstacles, the layer sim-restock-dynobs-v1 owns); isaac_bundle wires route_alerts.latest_detections() as the single detection_source and refuses to share it with navigation.dynamic_obstacle_source (composing the humans feed + route-alerts feed is a follow-up). GDPR: live people-masking needs config.agents_factory wired to the humans lane's detections, else the hook refuses to analyse (no un-masked detector over people). The spill/obstruction classical paths are CPU; set a detector's gpu:true only for its open-vocab refine (shares the mission GPU). No GPU run was done from this lane -- see data/sim-route-alerts-v2/report.md for the CPU evidence this fragment reproduces live.",
+  "route_alerts": {
+    "mode": "findings",
+    "spill": {"enabled": true, "gpu": false},
+    "obstruction": {"enabled": true, "gpu": false},
+    "strays": {"enabled": false, "gpu": true},
+    "staff_tasks": true,
+    "cadence": 1,
+    "camera": "route",
+    "__floors_note__": "PLACEHOLDER identity homography. The camera lane (sim-restock-camera-v2) supplies the real route-camera image->floor homography from the mount extrinsics + floor plane (see scripts/run_route_alerts_smoke.py:image_to_floor_homography and twin.route_alerts.recorded.floor_calibration).",
+    "floors": {
+      "route": {
+        "image_to_floor": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        "zone_id": "aisle"
+      }
+    },
+    "aisles": {
+      "outbound-aisle": {"x0": -5, "y0": 14, "x1": 5, "y1": 17, "axis": "x", "min_width_m": 0.9}
+    },
+    "obstruction_source": "route_obstruction",
+    "footprint_pad_m": 0.0
+  },
+  "__act_mode_note__": "For --route-alerts=act (route_alerts.mode='act'), ALSO merge this navigation block so the obstruction feed has the dynobs layer to raise cost through. nav_mode must be 'sensor'. Do NOT also set navigation.dynamic_obstacle_source in act mode -- the single detection_source is taken by route-alerts.",
+  "navigation": {
+    "dynamic_obstacles": {
+      "moving_speed": 0.2,
+      "prediction_horizon": 2.0,
+      "confirm_frames": 2,
+      "drop_after": 0.8
+    },
+    "blocked_timeout": 30.0
+  }
+}

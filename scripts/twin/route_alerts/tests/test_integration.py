@@ -104,5 +104,49 @@ class RouteAlertsIntegrationTests(unittest.TestCase):
         self.assertEqual(dets, [])
 
 
+@unittest.skipUnless(_HAVE_SV, "store-vision + numpy required")
+class RouteAlertsModeSplitTests(unittest.TestCase):
+    """The two delivered modes over the same store-vision frames (findings vs act)."""
+
+    def _run(self, mode):
+        from twin.route_alerts import RouteAlertsRunner, RouteFrame
+
+        scene = default_scenes()[0]
+        frames, agents_by_seq = scene.render()
+        itf = scene.image_to_floor()
+        cfg = {
+            "spill": {"enabled": False},
+            "obstruction": {"enabled": True, "tuning": _TUNE},
+            "floors": {scene.camera_id: {"image_to_floor": itf.tolist(), "zone_id": "aisle"}},
+            "obstruction_source": "route_obstruction", "mode": mode,
+        }
+        runner = RouteAlertsRunner(cfg, robot_id="shelfbot")
+        events, result_dets, fed = [], [], []
+        for i, fr in enumerate(frames):
+            rf = RouteFrame(camera_id=fr.camera_id, seq=i, rgb=fr.rgb, depth=fr.depth,
+                            capture_time=fr.capture_time, zone_id="aisle",
+                            agents=agents_by_seq.get(i, []))
+            r = runner.observe([rf], now=fr.capture_time)
+            events += [e.type for e in r.events]
+            if r.detections:
+                result_dets = r.detections
+            fed = runner.latest_detections()
+        return runner, events, result_dets, fed
+
+    def test_findings_detects_but_feeds_nav_nothing(self):
+        runner, events, result_dets, fed = self._run("findings")
+        self.assertIsNone(runner.disabled_reason)
+        self.assertTrue(any(t.startswith("obstruction.") for t in events))  # still a finding
+        self.assertTrue(result_dets)        # the detection is computed (recorded for evidence)
+        self.assertEqual(fed, [])           # ... but navigation receives nothing
+
+    def test_act_feeds_the_obstruction_to_nav(self):
+        runner, events, result_dets, fed = self._run("act")
+        self.assertIsNone(runner.disabled_reason)
+        self.assertTrue(result_dets)
+        self.assertTrue(fed)                # act exposes the obstruction to the dynobs layer
+        self.assertTrue(all(d.source == "route_obstruction" for d in fed))
+
+
 if __name__ == "__main__":
     unittest.main()
