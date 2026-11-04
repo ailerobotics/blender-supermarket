@@ -204,6 +204,47 @@ def check_flow_consistency(host_cfg, runtime_cfg):
     return []
 
 
+def check_carton_dims(host_cfg, scenario_cfg, *, tol_m=1e-3):
+    """sim-collect-press-regression-v1: refuse a host carton-profile dimension that disagrees with the
+    scenario single source of truth (``handling_unit.dimensions_m``, PR 268), before any GPU boot.
+
+    The HOST controller derives the side-grasp PICK pose from ``profile.dimensions`` --
+    ``wall_policy.WallCartonPolicy``/``shelfbot ... geometry.wall_grip`` stands the pad off the carton
+    CENTRE by ``dimensions[wall-axis]/2 + contact_margin``. So a host dimension LARGER than the real
+    stage carton places the pad that overshoot OUTSIDE the true face, and the capped contact over-press
+    (``contact_overpress_cap_m``) can never close the remainder: the grasp fails
+    'contact not reached within capped over-press travel'. coldwin32 regressed exactly this way -- the
+    HOST config drifted to 0.6/0.4/0.16 (odd backstock wall uses dims[1]=0.40 vs the scenario 0.30 => a
+    0.05 m over-reach, minus the 0.02 m over-press cap => ~0.03 m short, measured gap 34.96 mm on the
+    GPU) while the scenario single source stayed 0.45/0.30/0.18. The two values drifted apart silently
+    in separate files; name the mismatch here so the drift class cannot reach a GPU boot again.
+
+    No-op (``[]``) when the scenario or its ``handling_unit`` dims are absent (``--scenario`` not passed),
+    so existing preflight invocations are unchanged. Compares per-SKU when the scenario names one."""
+    hu = (scenario_cfg or {}).get('handling_unit') or {}
+    want = hu.get('dimensions_m') or hu.get('dimensions')
+    if not want:
+        return []
+    sku = hu.get('sku')
+    problems = []
+    for prof in (host_cfg.get('profiles') or []):
+        if sku is not None and prof.get('sku') != sku:
+            continue
+        dims = prof.get('dimensions')
+        if dims is None:
+            continue
+        if len(dims) != len(want) or any(
+                abs(float(a) - float(b)) > tol_m for a, b in zip(dims, want)):
+            problems.append(
+                f"carton-dim DRIFT: HOST profile {prof.get('sku')!r} dimensions {list(dims)} != "
+                f"scenario handling_unit.dimensions_m {list(want)} (the PR 268 single source). The HOST "
+                f"side-grasp pick standoff derives from the host dims, so a larger host dimension "
+                f"over-reaches the pad and the capped over-press cannot reach contact "
+                f"('contact not reached within capped over-press travel'; coldwin32). Restore the host "
+                f"profile dimensions in ros_host_config.json to the scenario values.")
+    return problems
+
+
 def _load(path):
     with open(path) as stream:
         return json.load(stream)
@@ -217,6 +258,9 @@ def main(argv=None):
                         help='mission-runtime-*.json (read by the Isaac side)')
     parser.add_argument('--require', default='',
                         help='comma-separated batch keys this run needs ACTIVE')
+    parser.add_argument('--scenario', default=None,
+                        help='mission-scenario.json: when given, refuse a host carton-profile dimension '
+                             'that disagrees with handling_unit.dimensions_m (the PR 268 single source)')
     args = parser.parse_args(argv)
     declared = [k.strip() for k in args.require.split(',') if k.strip()]
     # fm402: always assert the cap/limit baseline, even if a run forgets to --require it -- a missing
@@ -228,6 +272,10 @@ def main(argv=None):
     # sim-service-carry-drive-to-shelf-v1: cross-layer flow consistency (always, not just --require'd
     # keys) so a shelf_staging/transfer_service_carry split cannot reach a GPU boot.
     problems += check_flow_consistency(host_cfg, runtime_cfg)
+    # sim-collect-press-regression-v1: carton-dim drift between the HOST profile and the scenario single
+    # source silently over-reaches the side-grasp pick standoff (coldwin32). Only when --scenario is given.
+    if args.scenario:
+        problems += check_carton_dims(host_cfg, _load(args.scenario))
     # Echo the effective placement so the log proves what the preflight saw.
     for key in required:
         consumer = KEY_CONSUMER.get(key, '?')
