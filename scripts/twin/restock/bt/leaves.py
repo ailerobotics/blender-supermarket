@@ -23,6 +23,7 @@ from py_trees.common import Status
 from .events import (Event, RECOVERY_FOR, RECOVERY_SPECS, STAGE_FAILURE_TYPES,
                      classify_stage_failure)
 from .stage_phases import milestone as _milestone
+from .. import controlled_stop
 
 RUNNING, SUCCESS, FAILURE = Status.RUNNING, Status.SUCCESS, Status.FAILURE
 
@@ -371,6 +372,22 @@ class StageRetry(py_trees.decorators.Decorator):
         self.run = run
         self.max_retries = max(0, int(max_retries))
         self.retries = 0
+        # sim-host-fault-controlled-stop-v1: the FIRST real trip of this stage, preserved so an abort
+        # names it (CARTON_TILT 2.06) over a later downstream symptom (arm command heartbeat lost).
+        self._first_trip = None
+
+    def _retry_gate(self):
+        """sim-host-fault-controlled-stop-v1: a refusal reason from the adapter (welded controlled
+        stop active, or base attitude out of the sane band) that forbids a re-begin, else None. Guarded
+        so a non-adapter fixture / sequential-mission runtime is byte-identical (no gate => retry)."""
+        adapter = getattr(self.run.ctx.mission, 'adapter', None)
+        gate = getattr(adapter, 'manip_retry_gate', None)
+        if gate is None or self.run.action not in ('collect', 'transfer'):
+            return None
+        try:
+            return gate()
+        except Exception:  # noqa: BLE001 -- a gate error must never crash the tree
+            return None
 
     def update(self):
         status = self.decorated.status
@@ -378,9 +395,12 @@ class StageRetry(py_trees.decorators.Decorator):
         if status != FAILURE or run.fail_reason is None:
             return status
         reason = run.fail_reason
+        if self._first_trip is None:
+            self._first_trip = reason
         etype = classify_stage_failure(run.action, reason)
         run.ctx.emit_stage_failure(Event(etype, {'reason': reason, 'stage': run.action}))
-        if etype in STAGE_FAILURE_TYPES and self.retries < self.max_retries:
+        refusal = self._retry_gate()
+        if refusal is None and etype in STAGE_FAILURE_TYPES and self.retries < self.max_retries:
             self.retries += 1
             recovery = RECOVERY_FOR.get(etype)
             if recovery:
@@ -391,10 +411,13 @@ class StageRetry(py_trees.decorators.Decorator):
             self.decorated.stop(Status.INVALID)      # re-enter the phase sequence from step 0
             self.feedback_message = f'recover {etype} ({self.retries}/{self.max_retries})'
             return RUNNING
-        run.ctx.log(etype, {'reason': reason}, action='abort')
+        # Abort: a re-begin was refused (controlled stop / out-of-band base), the failure is
+        # non-recoverable, or retries are exhausted. Name the FIRST trip over a downstream symptom.
+        terminal = controlled_stop.prefer_first_trip(self._first_trip, reason)
+        run.ctx.log(etype, {'reason': terminal, 'refusal': refusal}, action='abort')
         if not run.ctx.mission.terminal:
-            run.ctx.mission.fail(reason)
-        self.feedback_message = f'FAILED {reason}'
+            run.ctx.mission.fail(terminal)
+        self.feedback_message = f'FAILED {terminal}'
         return FAILURE
 
 
