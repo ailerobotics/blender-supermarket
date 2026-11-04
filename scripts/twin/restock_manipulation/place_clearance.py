@@ -257,6 +257,113 @@ def clearance_reject(per_body_min, *, margin=DEFAULT_MARGIN_M, support=SUPPORT_B
             % (PLACE_CLEARANCE_REJECTED, named, margin * 1000.0))
 
 
+# ----------------------------------------- droop-aware EXECUTED-pose sweep (sim-place-descent-residual-v2)
+# The v1 sweep above poses the carton as an IDEALISED level box at the configured load-centre. coldwin41
+# proved that is the WRONG quantity: the above-place IK actually drifts the welded carton ~93 mm toward the
+# +x mouth (cart (0.273,-0.047) vs the intended (0.18,0)), swinging the gripper pad into post_2 at ~2 mm
+# while the level sweep read 89 mm clear. These functions evaluate the EXECUTED pose instead -- the carton
+# pose the arm FK (plus the loaded gravity droop) actually holds -- so the gate refuses the real
+# post-strike, not an idealised clearance.
+#
+# HONESTY / calibration: the CPU pad model (PAD_* + the author_cart post AABBs) reads coldwin39's measured
+# FLUSH contact on post_2 as ~84 mm clear -- an ~84 mm offset between the CPU geometry and the sim colliders.
+# So ``base_from_cart_anchor`` pins the base<-cart transform on a config whose carton sits at a KNOWN cart
+# load-centre, and the absolute gap is read relative to that anchor; the RELIABLE discriminators are the
+# carton LOAD-CENTRE DRIFT (``load_center_in_cart``, FK, branch-exact) and the droop TILT
+# (carton_level.droop_induced_rpy, validated to coldwin39's measured 2.02 deg). The drooped sweep's role is
+# to NAME which body the real (drifted) pose strikes, not to certify a sub-cm absolute gap.
+
+def _carton_in_base(robot, config, geom, *, root='ur_base_link'):
+    """4x4 pose of the carton frame in ``root`` at arm ``config``, derived from the ``suction_cups`` link FK
+    and the baked pad-in-carton rotation/offset (so ``geom.surface_points`` -- carton frame -- transform
+    consistently). Pure/CPU (needs the URDF FK)."""
+    from twin.urdf_probe import link_world_transforms
+    from twin.restock_manipulation.cad_tool import ARM_JOINTS
+    cfg = {k: float(v) for k, v in (config.items() if isinstance(config, dict)
+                                    else zip(ARM_JOINTS, config))}
+    wl = link_world_transforms(robot, cfg, root=root)
+    Ts = np.asarray(wl['suction_cups'], float)
+    R = Ts[:3, :3] @ np.asarray(geom.pad_R, float).T
+    t = Ts[:3, 3] - R @ np.asarray(geom.pad_center, float)
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3] = t
+    return T
+
+
+def _carton_in_cart_level(load_center_xy, support_z, yaw_cart_rel, carton_h, z_above=0.0):
+    """4x4 pose of a LEVEL carton in the cart frame (the known-anchor pose). Mirrors ``carton_pose_cart``."""
+    return carton_pose_cart(load_center_xy, support_z, yaw_cart_rel, carton_h=carton_h, z_above=z_above)
+
+
+def base_from_cart_anchor(robot, anchor_config, geom, *, load_center_xy, support_z, yaw_cart_rel,
+                          carton_h=CARTON_DIMS_M[2], root='ur_base_link'):
+    """The base<-cart 4x4 transform, anchored on an ``anchor_config`` whose welded carton is KNOWN to sit
+    level at cart ``(load_center_xy, support_z)`` with yaw ``yaw_cart_rel`` (e.g. the coldwin39 collect
+    place-end config, carton at (0.18, 0)). ``T_base_cart = carton_in_base(anchor) @ inv(carton_in_cart)``.
+    Pure/CPU."""
+    Cb = _carton_in_base(robot, anchor_config, geom, root=root)
+    Cc = _carton_in_cart_level(load_center_xy, support_z, yaw_cart_rel, carton_h)
+    return Cb @ np.linalg.inv(Cc)
+
+
+def load_center_in_cart(robot, config, geom, T_base_cart, *, root='ur_base_link'):
+    """The carton's actual load-centre (cart-frame x, y) at arm ``config`` -- the branch-exact DRIFT
+    detector. The idealised sweep assumes the configured load-centre; this reports where the IK solution
+    REALLY puts the carton (coldwin41: drifts ~93 mm toward the +x mouth). Pure/CPU."""
+    Cc = np.linalg.inv(np.asarray(T_base_cart, float)) @ _carton_in_base(robot, config, geom, root=root)
+    return float(Cc[0, 3]), float(Cc[1, 3])
+
+
+def _bodies_in_base(bodies, T_base_cart):
+    """Transform the cart-frame body AABBs into the base frame (axis-aligned re-bound over the 8 corners)."""
+    T = np.asarray(T_base_cart, float)
+    out = {}
+    for name, (lo, hi) in bodies.items():
+        lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+        corners = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
+        wc = (T[:3, :3] @ corners.T).T + T[:3, 3]
+        out[name] = (wc.min(0), wc.max(0))
+    return out
+
+
+def _executed_config(robot, config, gravity_comp, *, tool_link='ur_tool0', root='ur_base_link'):
+    """``config + gravity_comp.droop(config)`` (ARM-order dict) -- the pose the loaded arm settles at.
+    ``gravity_comp`` None => the commanded config verbatim (the level sweep)."""
+    from twin.restock_manipulation.cad_tool import ARM_JOINTS
+    cfg = {k: float(v) for k, v in (config.items() if isinstance(config, dict)
+                                    else zip(ARM_JOINTS, config))}
+    if gravity_comp is None:
+        return cfg
+    dq = gravity_comp.droop(robot, cfg, tool_link=tool_link, root=root)
+    return {j: cfg[j] + dq.get(j, 0.0) for j in cfg}
+
+
+def sweep_executed(configs, robot, geom, bodies, T_base_cart, *, gravity_comp=None,
+                   tool_link='ur_tool0', root='ur_base_link', cal_offset_m=0.0):
+    """Droop-aware sweep: for each COMMANDED arm ``config`` apply the loaded ``gravity_comp`` droop, FK the
+    gripper pad + carton to the EXECUTED pose, transform into the cart frame, and sweep against every
+    Rollwagen ``bodies`` AABB. Returns ``(per_waypoint, per_body_min)`` like :func:`sweep_clearance`.
+
+    ``cal_offset_m`` is subtracted from every gap (the SEAL-anchored geometry calibration, so a measured
+    flush contact reads ~0). ``gravity_comp`` None => the EXECUTED == commanded (the FK level sweep, still
+    the real IK pose rather than the idealised box). Pure/CPU (needs the URDF FK)."""
+    bodies_base = _bodies_in_base(bodies, T_base_cart)
+    per_waypoint = []
+    for cfg in configs:
+        execq = _executed_config(robot, cfg, gravity_comp, tool_link=tool_link, root=root)
+        Cb = _carton_in_base(robot, execq, geom, root=root)
+        pts = geom.surface_points() @ Cb[:3, :3].T + Cb[:3, 3]
+        per_waypoint.append({name: float(_box_aabb_sdf(pts, lo, hi).min()) - float(cal_offset_m)
+                             for name, (lo, hi) in bodies_base.items()})
+    per_body_min = {}
+    for g in per_waypoint:
+        for name, v in g.items():
+            if name not in per_body_min or v < per_body_min[name]:
+                per_body_min[name] = v
+    return per_waypoint, per_body_min
+
+
 def clearance_summary(per_body_min, *, support=SUPPORT_BODIES, worst_n=4):
     """A one-line :data:`PLACE_CLEARANCE` log: the ``worst_n`` tightest NON-support body gaps + the
     support-body gaps, for the log evidence the GPU run and the lane read."""

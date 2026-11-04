@@ -1241,6 +1241,26 @@ class TransferController:
             gc = cl.GravityCompensation(tool_link=self._carton_level.tool_link).validate()
         return gc
 
+    def _closed_loop_correct_descent(self, robot, waypoints, gc, tcp_link):
+        """sim-place-descent-residual-v2 (brief part 3): the opt-in, bounded, sim-only CLOSED-LOOP
+        carton-level BACKSTOP applied to the planned collect place-descent waypoints. When
+        ``carton_level.closed_loop_level`` is on, a ``CartonLevelServo`` reads the PREDICTED executed
+        attitude (the loaded droop on each commanded waypoint) and adds a bounded wrist correction
+        (+-``closed_loop_authority_deg``, rate-limited) so the executed carton stays level even if the droop
+        model leaves a residual -- it never substitutes for the geometric clearance (the least-extended
+        approach keeps the pad off the posts). Returns the corrected waypoint list (ARM-order 6-vectors), or
+        ``waypoints`` unchanged when the backstop is off (byte-identical). Pure/CPU."""
+        from twin.restock_manipulation import carton_level as cl
+        clc = cl.ClosedLoopConfig.from_level(self._carton_level)
+        if clc is None or self._carton_up_in_tool is None:
+            return waypoints, None
+        clc = cl.ClosedLoopConfig(authority_deg=clc.authority_deg, rate_deg_per_s=clc.rate_deg_per_s,
+                                  gain=clc.gain, joints=clc.joints, tool_link=tcp_link)
+        servo = cl.CartonLevelServo(robot, self._carton_up_in_tool, clc)
+        corrected = servo.correct_path([list(w) for w in waypoints], gc)
+        peak = max((abs(v) for v in servo.accumulated.values()), default=0.0)
+        return corrected, math.degrees(peak)
+
     def _solve_level_place(self, robot, goal, target_pos):
         """The level-place IK in the port's reach frame. ``target_pos`` None => preserve the goal's own TCP
         (the standoff); a 3-vector => reach that sensed set-down position while level. Raises ValueError
@@ -2093,6 +2113,25 @@ class TransferController:
                             if reject is not None:
                                 print(reject, flush=True)
                                 return self._fail(reject)
+                            # sim-place-descent-residual-v2 (part 3): opt-in, bounded, sim-only CLOSED-LOOP
+                            # carton-level backstop on the planned descent. Off => waypoints unchanged
+                            # (byte-identical). It only bends the wrist within the authority to hold the
+                            # EXECUTED carton level under a residual droop-model error; the least-extended
+                            # approach (part 2) still owns the geometric pad-vs-post clearance.
+                            waypoints = list(plan.waypoints)
+                            waypoints, cl_peak = self._closed_loop_correct_descent(robot, waypoints, gc,
+                                                                                   tcp_link)
+                            if cl_peak is not None:
+                                mr, mp, _ = cl.predict_path_tilt_executed(
+                                    robot, waypoints, self._carton_up_in_tool, tool_link=tcp_link,
+                                    gravity_comp=gc)
+                                self._carton_seg_planned['place'] = (mr, mp)
+                                self._carton_seg_planned['release'] = (mr, mp)
+                                print('CARTON_LEVEL_CLOSED_LOOP phase=place engaged (sim-only backstop): '
+                                      'wrist correction peak=%.2f deg (authority %.2f), corrected predicted '
+                                      'executed max roll=%.2f pitch=%.2f deg (<= bound %.2f)'
+                                      % (cl_peak, self._carton_level.closed_loop_authority_deg, mr, mp,
+                                         self._carton_level.bound_deg), flush=True)
                             print('CARTON_LEVEL_PLACE_DESCENT phase=place n=%d predicted_max roll=%.2f '
                                   'pitch=%.2f deg (<= bound %.2f) -- per-point wrist-compensated level '
                                   'set-down at speed=%.3f accel=%.3f rad/s (extension-following droop-cancel '
@@ -2104,7 +2143,7 @@ class TransferController:
                                      'from_above' if self._carton_level.place_from_above else 'straight_line',
                                      self._carton_level.place_above_clearance_m,
                                      self._carton_level.place_depth_bias_m), flush=True)
-                            self.motion.begin_joint_path(list(plan.waypoints), list(s.joint_positions),
+                            self.motion.begin_joint_path(list(waypoints), list(s.joint_positions),
                                                          slow=True, goal_tol=0.12,
                                                          speed=self._carton_level.place_descent_speed,
                                                          accel=self._carton_level.place_descent_accel)

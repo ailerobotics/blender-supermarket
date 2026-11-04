@@ -1,0 +1,46 @@
+{
+  "_comment": "sim-place-descent-residual-v2: the COHERENT collect set-down fix, replacing the v1 preplace_above_place remedy (which REGRESSED coldwin41 to 4.94 deg). Grounded in the integration worker's measured cw39/cw41 joint PATHS. FINDINGS: (1) the droop model K=2850 is CORRECT -- it reproduces coldwin39's measured set-down EXECUTED pitch 2.02 deg at the real place reach 1.086 m (model 2.16). (2) coldwin41's 4.94 = droop (1.94) + a POST-EDGE PIVOT: preplace_above_place's IK DRIFTED the carton ~93 mm toward the +x mouth (cart 0.273 vs the intended 0.18) so the welded pad struck post_2 at a 27 deg edge. (3) the v1 LEVEL sweep's '89 mm clear' was the WRONG quantity -- it modelled an idealised carton box at (0.18,0), a pose the arm never holds. (4) the open-loop wrist feedforward (PR318/326) was empirically INEFFECTIVE (executed ~= uncompensated droop). THE FIX, three coupled parts: (a) a DROOP-AWARE sweep that evaluates the EXECUTED FK pose; (b) the LEAST-EXTENDED approach -- reduce reach (base closer + place load-centre toward the robot) so the VALIDATED droop drops under the bound, carton held over the load-centre (no mouth drift); (c) a bounded sim-only CLOSED-LOOP wrist backstop for the residual. The 2.0 deg bound, 0.15 s grace, droop stiffness K=2850, carton dims and tow lanes are UNCHANGED. ALL new behaviour is opt-in / default-off => byte-identical off.",
+
+  "carton_level": {
+    "_file": "HOST config scripts/twin/restock_manipulation/ros_host_config.json (resolved by ros_host.py -> carton_level.resolve_level_config -> TransferController). Shown as the coldwin42 production carton_level block.",
+    "gravity_compensation": {"stiffness_nm_per_rad": 2850, "carton_mass_kg": 0.45},
+    "_gravity_comp_note": "UNCHANGED K=2850 -- validated: reproduces coldwin39's measured 2.02 deg executed droop at reach 1.086 m.",
+
+    "place_from_above": true,
+    "place_above_clearance_m": 0.08,
+    "place_depth_bias_m": 0.05,
+
+    "preplace_above_place": false,
+    "_preplace_above_place_note": "OFF (was the v1 remedy). sim-place-descent-residual-v2 found it REGRESSES the set-down: its above-place IK drifts the carton ~93 mm toward the +x mouth -> post_2 edge pivot -> coldwin41 4.94 deg. config_preflight.check_carton_level REFUSES the boot if this is left ON.",
+
+    "place_clearance_drooped": true,
+    "_place_clearance_drooped_note": "HOST, carton_level block. The DROOP-AWARE clearance gate (part 1): evaluates the EXECUTED (drooped, FK) gripper pad + carton pose against every Rollwagen body, not the idealised level box. Needs the FK model + gravity_compensation. See place_clearance.sweep_executed + scripts/check_place_select.py.",
+    "place_clearance_margin_m": 0.030,
+
+    "closed_loop_level": true,
+    "_closed_loop_level_note": "HOST, carton_level block. The bounded, SIM-ONLY, opt-in CLOSED-LOOP carton-level backstop (part 3): a wrist servo reads the predicted executed attitude on the planned place descent and adds a bounded (+-closed_loop_authority_deg, rate-limited) wrist correction so the executed carton stays level under a residual droop-model error. It NEVER substitutes for the geometric clearance (the least-extended approach keeps the pad off the posts). Labelled sim-only like CAGE_COLLISION. Proven offline (CartonLevelServo.replay): coldwin39 2.16 -> 0.85 deg, coldwin41 droop 1.94 -> 1.07 deg, correction capped at the 3 deg authority. HONESTY: the open-loop feedforward it backs up was ineffective in sim; this closed-loop is the opt-in attempt and the GPU run tests it physically -- byte-identical off, so no downside to arming it.",
+    "closed_loop_authority_deg": 3.0,
+    "closed_loop_rate_deg_per_s": 30.0,
+    "closed_loop_gain": 0.6
+  },
+
+  "_external_run_config_levers": {
+    "_comment": "The LEAST-EXTENDED approach (part 2) -- reduce reach so the VALIDATED droop drops under the bound. These are EXTERNAL mission-runtime keys (NOT in the repo HOST config); the integration lane sets them, respecting the deck support plane / cart balance rule and the base-footprint / station-approach / CAGE_COLLISION constraints. scripts/check_place_select.py computes them.",
+    "cart_placement.load_center_body_xy": "[0.33, 0.0]  (was [0.18, 0.0]) -- place +0.15 m DEEPER from the +x mouth (toward the robot). Moves the carton away from the mouth posts AND reduces reach. MUST stay inside the deck support plane + the cart balance rule; if the balance rule caps it shallower, take a smaller dx and a larger base move.",
+    "place_approach": "[-4.6, 14.92, 1.5708]  (y 14.82 -> 14.92, +0.10 m toward the cart at y~15.97) -- parks the base closer so the arm reaches the deck with less extension. MUST clear the base+cart footprint / drawbar at the closer park (nav-check on the integration side).",
+    "_effect": "load_center_dx +0.15 m + base_closer +0.10 m -> place reach 1.086 -> 0.839 m, predicted droop 2.16 -> 1.50 deg (validated model), carton drift 10.7 mm (held over the load-centre). The closed-loop backstop then pulls the 1.50 under 1.0 deg. If the nav footprint forbids the base move, a larger load_center_dx or the closed-loop alone (which pulls the full 2.16 -> 0.85 offline) is the fallback."
+  },
+
+  "_expected": {
+    "droop_model_fit": {"cw39_place_reach_m": 1.086, "cw39_model_tilt_deg": 2.16, "cw39_measured_exec_deg": 2.02, "residual_deg": 0.14, "cw41_model_droop_deg": 1.94, "cw41_measured_deg": 4.94, "cw41_extra_is_post_edge_pivot_deg": 3.0},
+    "least_extended_pick": {"load_center_dx_m": 0.15, "base_closer_m": 0.10, "reach_m": 0.839, "predicted_droop_deg": 1.50, "carton_drift_mm": 10.7},
+    "closed_loop_backstop": {"cw39_no_servo_deg": 2.16, "cw39_with_servo_deg": 0.85, "authority_deg": 3.0},
+    "_pad_gap_caveat": "The CPU pad/post geometry reads coldwin39's measured FLUSH post_2 contact as ~84 mm clear (an ~84 mm CPU-vs-sim offset), so the drooped sweep's ABSOLUTE per-body gap is SEAL-anchored and used to NAME the struck body + the mouth drift, not to certify a sub-cm gap. The GPU SEAL_DIAG is the real pad-clearance check."
+  },
+
+  "_acceptance": "coldwin42 collect set-down completes with CARTON_TILT peak <= 1.5 deg and NO SEAL_DIAG contact (min_gap_mm 0.0 / pad_vs_surface_deg 0.0) on ANY non-deck Rollwagen body (post_*, side_*, back_*, drawbar) before PLACE_ON_DECK. The log shows NO PREPLACE_ABOVE_PLACE line (it is OFF), CARTON_LEVEL_CLOSED_LOOP engaged with a bounded wrist correction, and CARTON_LEVEL_PLACE_DESCENT at the reduced reach. The carton still welds and the carry stays level through lift/tuck/transit/preplace (unchanged).",
+
+  "_cpu_proof": "PYTHONPATH=scripts python3 scripts/check_place_select.py --json out.json (exit 0: a feasible least-extended pick). Tests: scripts/twin/tests/test_place_descent_residual_v2.py (droop fit, drooped-sweep clip reproduction, least-extended selection, plan-gate honesty, closed-loop bounded+converging) + test_place_clearance.py (config_preflight v2).",
+
+  "_requires": "The HOST block must already carry collect_place_preplace_shape, carry_wrist1_cap / carry_wrist2_min, collect_place_straight_line + place_from_above, and the gravity_compensation sub-block (K=2850). config_preflight.check_carton_level validates the v2 sub-keys (resolve + refuse preplace_above_place ON + the level-gate-without-remedy case)."
+}

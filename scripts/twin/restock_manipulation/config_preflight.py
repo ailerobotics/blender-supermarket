@@ -214,12 +214,14 @@ def check_flow_consistency(host_cfg, runtime_cfg):
 
 
 def check_carton_level(host_cfg):
-    """sim-place-descent-residual-v1: resolve the HOST ``carton_level`` block so a malformed value (incl.
-    the place-clearance keys ``preplace_above_place`` / ``preplace_standoff_m`` / ``place_clearance_check``
-    / ``place_clearance_margin_m``, read from ros_host_config.json) FAILS the pre-flight loudly instead of
-    at a GPU boot. Also flags the one incoherent combination -- the clearance GATE armed with no remedy --
-    as a WARNING-level refusal so a run can't arm the check and still ship the over-mouth standoff. No-op
-    ([]) when ``carton_level`` is absent/off (byte-identical)."""
+    """sim-place-descent-residual-v1/-v2: resolve the HOST ``carton_level`` block so a malformed value
+    (incl. the place-clearance keys ``preplace_above_place`` / ``preplace_standoff_m`` /
+    ``place_clearance_check`` / ``place_clearance_margin_m`` and the v2 keys ``place_clearance_drooped`` /
+    ``closed_loop_level`` / ``closed_loop_authority_deg`` / ``closed_loop_rate_deg_per_s`` /
+    ``closed_loop_gain``, read from ros_host_config.json) FAILS the pre-flight loudly instead of at a GPU
+    boot. Also flags incoherent combinations -- the LEVEL clearance gate armed with no remedy, and the v1
+    ``preplace_above_place`` remedy left ON (sim-place-descent-residual-v2 found it regresses the set-down)
+    -- as refusals. No-op ([]) when ``carton_level`` is absent/off (byte-identical)."""
     from twin.restock_manipulation import carton_level as cl
     spec = (host_cfg or {}).get('carton_level')
     try:
@@ -228,12 +230,28 @@ def check_carton_level(host_cfg):
         return [f"carton_level (HOST ros_host_config.json): malformed -- {exc}"]
     if resolved is None:
         return []
-    if resolved.place_clearance_check and not resolved.preplace_above_place:
-        return [("carton_level place-clearance GATE armed (place_clearance_check) but the REMEDY is OFF "
-                 "(preplace_above_place): the fixed over-mouth collect preplace standoff would still jam "
-                 "the gripper pad on post_2 (coldwin39 CONTACT pivot). Set 'preplace_above_place': true in "
-                 "the HOST carton_level block (ros_host_config.json) alongside 'place_clearance_check'.")]
-    return []
+    problems = []
+    # sim-place-descent-residual-v2: coldwin41 proved the v1 remedy preplace_above_place REGRESSES the
+    # set-down (its IK drifts the carton ~93 mm toward the +x mouth -> post_2 edge pivot -> 4.94 deg). The
+    # v2 coherent fix is the LEAST-EXTENDED approach (external place load-centre + base pose) + the
+    # closed-loop backstop (closed_loop_level) + the DROOP-AWARE gate (place_clearance_drooped), with
+    # preplace_above_place OFF. So the v1 LEVEL gate's gate-without-remedy refusal only applies when the
+    # v2 droop-aware gate is NOT the one in use.
+    if resolved.place_clearance_check and not resolved.place_clearance_drooped \
+            and not resolved.preplace_above_place:
+        problems.append(
+            "carton_level place-clearance LEVEL gate armed (place_clearance_check) but no remedy is on: "
+            "either set 'place_clearance_drooped': true (the v2 droop-aware gate, used with the "
+            "least-extended approach + 'closed_loop_level') or, for the v1 path, 'preplace_above_place': "
+            "true. The idealised level sweep alone (place_clearance_check) describes a pose the arm never "
+            "holds (coldwin41).")
+    if resolved.preplace_above_place:
+        problems.append(
+            "carton_level 'preplace_above_place' is ON: sim-place-descent-residual-v2 found this v1 remedy "
+            "REGRESSES the collect set-down -- its above-place IK drifts the welded carton ~93 mm toward "
+            "the +x mouth so the pad strikes post_2 at an edge (coldwin41 CARTON_TILT 4.94 deg). Turn it "
+            "OFF and use the least-extended approach + 'closed_loop_level' + 'place_clearance_drooped'.")
+    return problems
 
 
 def check_carton_dims(host_cfg, scenario_cfg, *, tol_m=1e-3):
