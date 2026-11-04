@@ -215,6 +215,21 @@ class LevelConfig:
     # identical); ``level_path: false`` restores the single leveled-endpoint goal.
     level_path: bool = True
     path_waypoints: int = 12
+    # sim-carton-level-preplace-v2: GENTLED peak joint speed / accel (rad/s, rad/s^2) for the LOADED
+    # collect-deck level PLACE set-down (the straight-line descent from the leveled standoff to the
+    # full-DOF leveled set-down). The descent's COMMANDED straight joint line is already LEVEL (CPU-
+    # reconstructed <0.05 deg), but at the standard 0.08 rad/s the welded carton's DIFFERENTIAL joint
+    # tracking during the heavy shoulder/elbow set-down reached ~2.2 deg off level mid-descent
+    # (collectlevel3: CARTON_TILT at phase=place, sustained 0.167 s > the 0.15 s grace). This is an
+    # EXECUTION transient of the loaded set-down (not a planned-pose tilt and not the pre-place segment
+    # PR 298 covered), so the lever is to TIME-PARAMETERISE the same level path slower: a representative
+    # differential-lag tracking model calibrated to reproduce the 2.2 deg at 0.08 rad/s predicts ~0.7 deg
+    # at 0.02 rad/s (data/sim-carton-level-preplace-v2). Lower ceilings are strictly more conservative
+    # for every host check; the bound and grace are UNCHANGED. Scoped to the collect-deck level place
+    # descent (controller), so every other move is byte-identical. The integration lane tunes these from
+    # the new per-segment CARTON_SEGMENT_TILT log if the in-sim residual differs from the model.
+    place_descent_speed: float = 0.02
+    place_descent_accel: float = 0.04
     # sim-carton-tilt-transient-debounce-v1: SUSTAINED-tilt grace (sim-seconds AT 1/60). The trip FAILS
     # only when the measured tilt exceeds the bound CONTINUOUSLY for this long; a shorter spike logs
     # CARTON_TILT_TRANSIENT and proceeds. 0 => legacy immediate trip. The controller rebases this onto
@@ -228,6 +243,10 @@ class LevelConfig:
             raise ValueError('carton_level.tilt_grace_s must be a finite non-negative number of seconds')
         if not (isinstance(self.path_waypoints, int) and self.path_waypoints >= 2):
             raise ValueError('carton_level.path_waypoints must be an integer >= 2')
+        for nm, v in (('place_descent_speed', self.place_descent_speed),
+                      ('place_descent_accel', self.place_descent_accel)):
+            if not (math.isfinite(v) and v > 0):
+                raise ValueError(f'carton_level.{nm} must be a finite positive number')
         from twin.restock_manipulation.cad_tool import ARM_JOINTS
         bad = [j for j in self.joints if j not in ARM_JOINTS]
         if bad or not self.joints:
@@ -239,8 +258,8 @@ def resolve_level_config(spec):
     """Normalise a ``carton_level`` config value into a ``LevelConfig`` or ``None`` (off =>
     byte-identical). Accepts absent/None/False/'0'/'off' => None; True/'on'/{} => defaults; a
     mapping with optional ``bound_deg``, ``tilt_grace_s``, ``level_goals``, ``trip``, ``level_weld``,
-    ``level_place``, ``level_path``, ``path_waypoints``, ``joints``, ``tool_link``. Raises on a malformed
-    value so a typo fails loudly at boot."""
+    ``level_place``, ``level_path``, ``path_waypoints``, ``place_descent_speed``, ``place_descent_accel``,
+    ``joints``, ``tool_link``. Raises on a malformed value so a typo fails loudly at boot."""
     if spec is None or spec is False:
         return None
     if isinstance(spec, str):
@@ -261,6 +280,9 @@ def resolve_level_config(spec):
         kw['tilt_grace_s'] = float(spec['tilt_grace_s'])
     if 'path_waypoints' in spec and spec['path_waypoints'] is not None:
         kw['path_waypoints'] = int(spec['path_waypoints'])
+    for fnum in ('place_descent_speed', 'place_descent_accel'):
+        if fnum in spec and spec[fnum] is not None:
+            kw[fnum] = float(spec[fnum])
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])

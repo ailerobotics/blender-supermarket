@@ -74,14 +74,18 @@ class FixtureMotion:
         self.exec_abort_reason = None
         return r
 
-    def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None, straight_line=False):
+    def begin_joint_goal(self, goal, measured, slow=False, goal_tol=None, straight_line=False,
+                         speed=None, accel=None):
         self.stows.append((goal,measured,slow))
         # sim-robust-collect-stow-branch-v1: record every begin_joint_goal with its collision-off
         # straight-line flag + goal (the collect deck RETREAT backs the empty gripper off the
         # self-colliding place fold to the fixed clear shape via a straight-line JOINT smoothstep).
+        # sim-carton-level-preplace-v2: record the optional gentled speed/accel ceilings (the loaded
+        # level place set-down time-parameterises itself slower via these).
         self.joint_goals = getattr(self, 'joint_goals', [])
         self.joint_goals.append(dict(goal=tuple(goal), measured=tuple(measured), slow=slow,
-                                     goal_tol=goal_tol, straight_line=bool(straight_line)))
+                                     goal_tol=goal_tol, straight_line=bool(straight_line),
+                                     speed=speed, accel=accel))
 
     def begin_joint_path(self, waypoints, measured, slow=False, goal_tol=None):
         # sim-carry-level-lift-v1: a leveled multi-waypoint carried move (lift / tuck / pan). Recorded
