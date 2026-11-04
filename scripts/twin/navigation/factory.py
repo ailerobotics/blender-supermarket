@@ -159,6 +159,17 @@ def _controller_kwargs(nav):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError('navigation.arrival_xy_hysteresis_m must be a number of metres')
         kwargs['arrival_xy_hysteresis'] = float(value)
+    # sim-collect-arrival-heading-v1: SIM-clock budget (seconds) after which a base that is XY-near the
+    # goal but cannot null the final heading NAMES itself (ARRIVAL_HEADING_STALL -> 'arrival_heading_stall'
+    # leg fail) instead of running out the stage timeout. Default on in core.Controller (20 s); set 0/false
+    # here to restore the legacy run-to-goal_timeout behaviour. See core.Controller.
+    if 'arrival_heading_stall_s' in nav:
+        value = nav['arrival_heading_stall_s']
+        if value is False or value is None:
+            value = 0.0
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError('navigation.arrival_heading_stall_s must be a number of seconds, 0, or false')
+        kwargs['arrival_heading_stall_s'] = float(value)
     # Production never accepts fixtures: the knob is intentionally not exposed.
     if nav.get('allow_test_fixtures'):
         raise ValueError('allow_test_fixtures is forbidden in a production bundle')
@@ -346,6 +357,9 @@ def nav_factory(*, app, assembly, plan, config, output, _nav2_adapter=None):
                                        coupled_breakaway_attempts=int(nav.get('coupled_breakaway_attempts', 3)),
                                        coupled_breakaway_rock=_strict_bool(nav, 'coupled_breakaway_rock'),
                                        coupled_breakaway_launch_mps=float(nav.get('coupled_breakaway_launch_mps', 0.30)),
+                                       coupled_from_rest_launch=_strict_bool(nav, 'coupled_from_rest_launch'),
+                                       coupled_launch_distance_m=float(nav.get('coupled_launch_distance_m', 1.0)),
+                                       coupled_launch_mps=float(nav.get('coupled_launch_mps', 0.35)),
                                        lane_acquire_timeout_s=float(nav.get('tow_lane_acquire_timeout_s', 0.0)),
                                        tow_lane_goal_stop=bool(nav.get('tow_lane_goal_stop', False)),
                                        coupled_heading_hold=_strict_bool(nav, 'coupled_heading_hold'),

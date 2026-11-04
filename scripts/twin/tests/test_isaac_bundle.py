@@ -86,15 +86,33 @@ class PlanBundleTests(unittest.TestCase):
         self.assertEqual(p.poses['place_approach_stage'], (-4.5, 16.0, 0.0))
         self.assertNotIn('place_approach_stage', plan_bundle(MANIFEST, SCENARIO, base_config()).poses)
 
-    def test_derive_place_approach_stage_translates_east_at_pick_heading(self):
-        # The staging pose sits at place_approach's x but the pick pose's lateral line + heading, so leg 1
-        # is a straight translate out of the cart's north gap before the turn onto the mouth.
+    def test_derive_place_approach_stage_is_spin_free_lead_in(self):
+        # sim-collect-arrival-heading-v1: the staging waypoint sits lead_in metres BEHIND place_approach
+        # along its OWN heading, so the FINAL leg (stage -> place_approach) is a straight drive whose
+        # direction equals place_approach[2] -- the base arrives already aligned, no in-place spin.
         pickup = (-5.73, 16.0, 0.0)
+        # EAST-facing cart (heading pi): the lead-in sits EAST of the standoff; the final leg drives west.
         place_approach = isaac_bundle.derive_place_approach((-5.73, 15.25), 0.0, 1.15)
-        stage = isaac_bundle.derive_place_approach_stage(place_approach, pickup)
-        self.assertAlmostEqual(stage[0], place_approach[0], places=6)  # place_approach's standoff x
-        self.assertAlmostEqual(stage[1], 16.0, places=6)               # pick pose's y (clear of the cart)
-        self.assertAlmostEqual(stage[2], 0.0, places=6)                # pick heading (straight translate)
+        stage = isaac_bundle.derive_place_approach_stage(place_approach, pickup, lead_in=0.6)
+        final_bearing = math.atan2(place_approach[1] - stage[1], place_approach[0] - stage[0])
+        # final leg direction == place_approach heading (within wrap) => arrives aligned
+        self.assertAlmostEqual(math.cos(final_bearing), math.cos(place_approach[2]), places=6)
+        self.assertAlmostEqual(math.sin(final_bearing), math.sin(place_approach[2]), places=6)
+        self.assertAlmostEqual(math.hypot(place_approach[0] - stage[0],
+                                          place_approach[1] - stage[1]), 0.6, places=6)
+
+    def test_derive_place_approach_stage_south_cart_faces_deck(self):
+        # sim-collect-arrival-heading-v1: the PR 304 south-facing dock. The standoff faces +pi/2 (north,
+        # into the cart mouth); the lead-in is SOUTH of it, so the final leg drives NORTH and the base
+        # arrives facing the deck -- never the stale pi heading that stalled coldwin29.
+        pickup = (-5.73, 16.0, 0.0)
+        deck = (-4.6, 15.92)
+        pa = isaac_bundle.derive_place_approach(deck, -math.pi / 2, 1.0)
+        self.assertAlmostEqual(pa[2], math.pi / 2, places=6)           # faces the deck (north)
+        stage = isaac_bundle.derive_place_approach_stage(pa, pickup, lead_in=0.6)
+        self.assertLess(stage[1], pa[1])                               # lead-in is SOUTH of the standoff
+        final_bearing = math.atan2(pa[1] - stage[1], pa[0] - stage[0])
+        self.assertAlmostEqual(final_bearing, math.pi / 2, places=6)   # drives north into the standoff
 
     def test_derive_place_approach_from_mission_cart(self):
         # Mission cart /Rollwagen at (-5.73,15.25) yaw 0, open +x face; proven standoff ~1.23 m east.
