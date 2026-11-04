@@ -53,6 +53,44 @@ def support_top_z_world(aabb_min_z, aabb_max_z):
     return max(lo, hi)
 
 
+def resolve_support_prim(stock_supports, selector=None):
+    """sim-cart-support-select-v1: resolve WHICH Rollwagen support the collect carton is placed on,
+    from the cart asset's ``stock_supports`` list (``twin.mobile_assets.author_cart`` returns
+    ``[/Rollwagen/chassis/deck, /Rollwagen/chassis/shelf]``) and a RUNTIME ``selector``.
+
+    ``selector`` (``cart_placement.support_prim``) is one of:
+      * ``None``  -> ``stock_supports[0]`` (the DECK) -- the historical hardcode, so an absent key is
+        byte-identical with the legacy ``RESTOCK_PLACE_ON_DECK`` path.
+      * an ``int`` -> ``stock_supports[index]`` (0 = deck, 1 = shelf).
+      * a ``str`` -> a full prim path present in ``stock_supports``, OR a bare prim name
+        (``'deck'``/``'shelf'``) matched against each entry's basename.
+
+    Fail closed: an out-of-range index, an unknown path/name or an empty ``stock_supports`` raises
+    ``ValueError`` so a mis-set selector never silently falls back to the wrong surface. Pure/CPU."""
+    supports = list(stock_supports or [])
+    if not supports:
+        raise ValueError('cart asset exposes no stock_supports; cannot resolve a place support prim')
+    if selector is None:
+        return supports[0]
+    if isinstance(selector, bool):            # guard: bool is an int subclass, never a valid index
+        raise ValueError(f'cart_placement.support_prim must be an index or prim path, not {selector!r}')
+    if isinstance(selector, int):
+        if not -len(supports) <= selector < len(supports):
+            raise ValueError(
+                f'cart_placement.support_prim index {selector} out of range for '
+                f'{len(supports)} stock_supports ({supports})')
+        return supports[selector]
+    sel = str(selector).strip()
+    if sel in supports:
+        return sel
+    by_name = [p for p in supports if p.rsplit('/', 1)[-1] == sel]
+    if len(by_name) == 1:
+        return by_name[0]
+    raise ValueError(
+        f'cart_placement.support_prim={selector!r} matches no stock_support; '
+        f'known supports (path or basename): {supports}')
+
+
 def resting_carton_center_z(support_top_z, carton_height):
     """The carton CENTRE z when it rests flat on a support whose top face is at
     ``support_top_z``: ``support_top_z + carton_height / 2``. Pure/CPU."""
@@ -92,6 +130,6 @@ def height_consistency_problems(resolved_top_z, heights, *, tol_m=0.010):
             problems.append(
                 f"{label}={value} disagrees with the resolved support prim top "
                 f"{top:.4f} m (gap {abs(v - top) * 1000:.0f} mm > {tol_m * 1000:.0f} mm tol). "
-                f"The collect place surface is the Rollwagen DECK; set this height to the "
-                f"resolved deck top so no stale shelf constant (0.9325) can feed the descent.")
+                f"Set this height to the resolved place-support prim top (the selected Rollwagen "
+                f"support, deck or shelf) so no stale constant (e.g. the legacy 0.9325) can feed the descent.")
     return problems
