@@ -491,6 +491,8 @@ class ArticulatedController(Controller):
                  coupled_breakaway_window_s=2.0, coupled_breakaway_pulse_s=0.5,
                  coupled_breakaway_attempts=3,
                  coupled_breakaway_rock=False, coupled_breakaway_launch_mps=0.30,
+                 coupled_from_rest_launch=False, coupled_launch_distance_m=1.0,
+                 coupled_launch_mps=0.35,
                  lane_acquire_timeout_s=0.0, tow_lane_goal_stop=False,
                  coupled_heading_hold=False, heading_hold_bound_deg=1.0,
                  heading_hold_creep_mps=0.14, heading_hold_straight_kappa=0.08,
@@ -618,6 +620,42 @@ class ArticulatedController(Controller):
             if self.coupled_breakaway_launch<self.coupled_breakaway_speed:
                 raise ValueError('coupled_breakaway_launch_mps must be >= coupled_breakaway_speed_mps '
                                  '(the launch surge is an ELEVATED break-away speed)')
+        # fm-sim-dock-lane-tow-regression (navigation.coupled_from_rest_launch, default off => byte-identical):
+        # a PROACTIVE from-rest launch over the first metre of a coupled authored-lane tow. The PR 293
+        # dock-frame straight-REVERSE couple seats the base with its trailing casters pointing the wrong way
+        # for a forward tow; on the first forward command they must swivel ~180 deg into trail. coldwinint1
+        # (pass) carried enough initial momentum that the front caster stayed near 0 deg and it towed on;
+        # coldwinint2 (304 lane) and coldwinint3 (SAME proven portal-axis lane as int1) both launched, crept
+        # ~0.5 m, then the follower's speed schedule collapsed to a creep/coast and left the front caster
+        # COCKED at ~10-14 deg -- its scrub arc then tripped gate_velocity's measured_turn_radius coast (int3:
+        # 15 trips) / sat under the heading-hold creep (int2), so the base pinned from rest and the 0.18-0.30
+        # m/s break-away rock was too weak/late to straighten the cocked caster -> coupled_no_progress (1 pass
+        # in 3, lane-INDEPENDENT -- NOT the lane curve). The fix reuses the proven _breakaway_cmd committed-
+        # forward override (which already bypasses the measured_turn_radius coast, braking along the COMMANDED
+        # curvature) but fires it IMMEDIATELY at tow start for coupled_launch_distance_m of travel at
+        # coupled_launch_mps, so the base drives through the caster-swivel-in transient with momentum before
+        # any throttle can collapse the command. One-shot per goal (disarms past the distance; never re-arms),
+        # FORWARD-only (the coupled v>=0 interlock stands), and the gate's obstacle/coverage/rollout safety is
+        # unchanged. Heading-hold is skipped while it owns the command (_breakaway_cmd set), so the two never
+        # fight. Needs coupled_progress_recovery (shares the _breakaway_cmd plumbing; fail loud, not a no-op).
+        self.coupled_from_rest_launch=bool(coupled_from_rest_launch)
+        for _nm,_v,_hi in (('coupled_launch_distance_m',coupled_launch_distance_m,5.0),
+                           ('coupled_launch_mps',coupled_launch_mps,1.0)):
+            if not (isinstance(_v,(int,float)) and not isinstance(_v,bool)
+                    and math.isfinite(_v) and 0.0<float(_v)<=_hi):
+                raise ValueError('%s must be a finite number in (0, %s]' % (_nm,_hi))
+        self.coupled_launch_distance_m=float(coupled_launch_distance_m)
+        self.coupled_launch_mps=float(coupled_launch_mps)
+        if self.coupled_from_rest_launch:
+            if not self.coupled_progress_recovery:
+                raise ValueError('coupled_from_rest_launch requires coupled_progress_recovery '
+                                 '(it shares the break-away _breakaway_cmd override; without it it is a no-op)')
+            if self.coupled_launch_mps<self.coupled_breakaway_speed:
+                raise ValueError('coupled_launch_mps must be >= coupled_breakaway_speed_mps '
+                                 '(the from-rest launch is at least a break-away surge)')
+        self.from_rest_launches=0          # ticks the proactive from-rest launch owned the command
+        self._launch_anchor=None           # (x, y) where the from-rest launch armed (first coupled-lane tick)
+        self._launch_done=False            # True once the first metre is cleared (one-shot per goal)
         # fm-sim-robust-outbound-throat-yaw-align (navigation.coupled_heading_hold, default off =>
         # byte-identical): keep the coupled base ALIGNED to the lane axis during the slow from-rest creep so
         # the base+cart envelope never enters the sales_backroom_portal throat (x~=-3.875) yawed and wedges on
@@ -657,6 +695,13 @@ class ArticulatedController(Controller):
         self.heading_hold_creep=float(heading_hold_creep_mps)
         self.heading_hold_straight_kappa=float(heading_hold_straight_kappa)
         self.heading_holds=0                               # ticks the heading hold overrode the follower
+        # fm-sim-dock-lane-tow-regression: TOW_NO_PROGRESS cause attribution. Record the last tick the
+        # straight-branch heading hold OVERRODE the follower (and the angle error / authored tangent it saw)
+        # so a coupled_no_progress fault can NAME whether a guard veto of the authored curve pinned the tow
+        # (heading hold fired inside the stuck window) vs a bare from-rest contact pin (it did not).
+        self._hh_last_fire_now=None
+        self._hh_last_ae=0.0
+        self._hh_last_ref_yaw=None
         # fm-sim-robust-heading-hold-bound (navigation.heading_hold_prethroat_m, default 0.0 => the new
         # robust path is OFF and the legacy one-sided hold above is byte-identical): the PR 253 hold had
         # THREE gaps the coldwin17 wedge exposed (CPU-reproduced in data/sim-robust-heading-hold-bound-v1):
@@ -957,6 +1002,11 @@ class ArticulatedController(Controller):
         self._breakaway_turn=False
         self._acquire_fail_s=0.0                           # fresh goal -> fresh lane-acquire window
         self._acquire_fail_pose=None
+        self._hh_last_fire_now=None                        # fresh goal -> fresh heading-hold cause attribution
+        self._hh_last_ae=0.0
+        self._hh_last_ref_yaw=None
+        self._launch_anchor=None                           # fresh goal -> fresh from-rest launch window
+        self._launch_done=False
         self.goal_articulation=self.spec.max_articulation if goal_articulation is None else goal_articulation
         # Resolve the authored tow lane for this COUPLED goal (if any). Uncoupled drives never use a
         # lane. Pose acquirability + live-obstacle swept validation are checked when the route is built.
@@ -1363,6 +1413,32 @@ class ArticulatedController(Controller):
             if reason:return Result(reason=reason)
         return Result(v,w,reason='tracking')
 
+    def _tow_no_progress_diag(self,now,state):
+        """fm-sim-dock-lane-tow-regression: name the cause of an imminent coupled_no_progress fault.
+        Discriminate a heading-hold VETO of the authored curve (the hold overrode the follower inside the
+        current stuck window) from a bare from-rest contact pin (it did not), so a no-progress tow reports
+        its real mechanism EARLY instead of the opaque `coupled_no_progress`. Pure string builder, no state
+        change; safe to call at either fault site."""
+        win_start=self._prog_anchor[0] if self._prog_anchor is not None else None
+        hh_in_window=(self._hh_last_fire_now is not None and win_start is not None
+                      and self._hh_last_fire_now>=win_start)
+        mtr=getattr(self,'_mtr_window',0.0)
+        if hh_in_window:
+            # the straight-branch heading hold overrode the follower in this stuck window: a guard veto of
+            # the authored heading (compounded the pin on the off-axis dock lane, coldwinint2)
+            cause='heading_hold_veto_of_authored_heading'
+        elif mtr>0.3:
+            # measured_turn_radius coasts dominated the window: the scrub arc of a caster left cocked by the
+            # collapsed from-rest launch read as over-rotation and coasted the tow to rest (coldwinint3)
+            cause='from_rest_caster_scrub_measured_turn_coast'
+        else:
+            cause='from_rest_contact_pin'
+        ref=('%.2f'%math.degrees(self._hh_last_ref_yaw)) if self._hh_last_ref_yaw is not None else 'n/a'
+        return ('TOW_NO_PROGRESS at=(%.3f,%.3f) base_yaw=%.2f stuck=%.2fs cause=%s heading_holds=%d '
+                'last_ae_deg=%.2f lane_tangent_deg=%s mtr_coast_s=%.2f from_rest_launches=%d active_lane=%s'
+                % (state.x,state.y,math.degrees(state.yaw),self._prog_stuck_s,cause,self.heading_holds,
+                   math.degrees(self._hh_last_ae),ref,mtr,self.from_rest_launches,self._active_lane))
+
     def step(self,dt,odometry,observations,*,now=None):
         if self.require_temporal_map and (observations is None or observations.temporal_map is None):
             return Result(reason='missing_navigation_map')
@@ -1584,6 +1660,7 @@ class ArticulatedController(Controller):
                         self._recovery_attempt+=1
                         if self._recovery_attempt>=self.coupled_breakaway_attempts:
                             self.terminal=Result(status='failed',reason='coupled_no_progress')
+                            print(self._tow_no_progress_diag(now,state), flush=True)
                             print('NAV_BREAKAWAY exhausted attempts=%d -> coupled_no_progress'
                                   % self._recovery_attempt, flush=True)
                             return self.terminal
@@ -1618,8 +1695,32 @@ class ArticulatedController(Controller):
             else:
                 if self._prog_stuck_s>=self.coupled_progress_fault_s:
                     self.terminal=Result(status='failed',reason='coupled_no_progress')
+                    print(self._tow_no_progress_diag(now,state), flush=True)
                     return self.terminal
                 self._force_progress_creep=self._prog_stuck_s>=self.coupled_progress_escape_s
+        # fm-sim-dock-lane-tow-regression: the PROACTIVE from-rest launch (see __init__). Fire the proven
+        # committed-forward _breakaway_cmd override IMMEDIATELY at tow start, for the first
+        # coupled_launch_distance_m of travel, so the base carries momentum through the caster-swivel-in
+        # transient (the PR 293 reverse couple leaves the trailing casters mis-pointed) BEFORE the follower's
+        # speed schedule / heading hold / measured_turn_radius coast can collapse the command to a creep that
+        # leaves a caster cocked and pins the tow. One-shot per goal; only while the reactive recovery has not
+        # already claimed _breakaway_cmd. Owning the command here (set before `_hh`) keeps the heading hold
+        # skipped during the launch so the two never fight.
+        if (self.coupled_from_rest_launch and self._active_lane is not None
+                and not self._launch_done and self._breakaway_cmd is None):
+            if self._launch_anchor is None:
+                self._launch_anchor=(state.x,state.y)
+            travelled=math.hypot(state.x-self._launch_anchor[0],state.y-self._launch_anchor[1])
+            if travelled<self.coupled_launch_distance_m:
+                self._breakaway_cmd=min(self.max_speed,max(self.coupled_launch_mps,self.coupled_breakaway_speed))
+                self._breakaway_turn=False      # follow the authored route curvature (gate bounds w to +-wmax)
+                self.from_rest_launches+=1
+                if self.from_rest_launches==1 or self.from_rest_launches%30==0:
+                    print('NAV_FROM_REST_LAUNCH n=%d at=(%.3f,%.3f) travelled=%.2f/%.2f m speed=%.3f'
+                          % (self.from_rest_launches,state.x,state.y,travelled,
+                             self.coupled_launch_distance_m,self._breakaway_cmd),flush=True)
+            else:
+                self._launch_done=True          # first metre cleared with momentum; hand back to the follower
         # fm-sim-robust-outbound-throat-yaw-align: the pre-throat heading hold. On a STRAIGHT authored
         # segment, once the base has drifted more than `heading_hold_bound` to the CCW (throat-lip / wedge)
         # side of the lane goal (travel) heading, OVERRIDE the follower command: hold a fixed modest forward
@@ -1698,15 +1799,30 @@ class ArticulatedController(Controller):
             else:
                 self._align_anchor=None                        # aligned, or out of the pre-throat window
         elif (_hh and abs(self.route.curvatures[j])<=self.heading_hold_straight_kappa
-                and wrap(state.yaw-self.goal[2])>self.heading_hold_bound):
-            ae=wrap(state.yaw-self.goal[2])
+                and wrap(state.yaw-ref_yaw)>self.heading_hold_bound):
+            # fm-sim-dock-lane-tow-regression: the reference heading is the LOCAL AUTHORED LANE TANGENT
+            # (ref_yaw, the projected centreline heading at the base), NOT the fixed goal (travel-axis)
+            # heading `self.goal[2]`. Keying off the goal heading VETOED a legitimate authored gentle
+            # curve: on the reach-feasible off-portal-axis couple dock (x=-4.6) the outbound lane's first
+            # near-straight segment (|curv|<=straight_kappa) legitimately points a few degrees CCW of the
+            # due-south goal heading to shift x toward the portal (-4.6 -> -4.3), so the hold read that
+            # curve-tracking yaw as throat-lip drift, forced the base dead-straight-south off the lane, and
+            # the slow creep pinned it from rest (coldwinint2 coupled_no_progress). The guard's bound now
+            # FOLLOWS the authored lane curvature: it fires only when the base drifts CCW of the lane's own
+            # heading there, so a genuine wedge drift on a straight run-up still triggers it (ref_yaw ==
+            # goal heading on a straight-to-goal segment => byte-identical to the on-axis portal lane) while
+            # a legitimate authored curve is no longer vetoed.
+            ae=wrap(state.yaw-ref_yaw)
             v=min(self.max_speed,self.heading_hold_creep)
-            curvature=-1.0/self.footprint.min_turn_radius     # saturate CW toward the lane axis (reduce ae)
+            curvature=-1.0/self.footprint.min_turn_radius     # saturate CW toward the authored lane tangent (reduce ae)
             self.heading_holds+=1
+            self._hh_last_fire_now=now
+            self._hh_last_ae=ae
+            self._hh_last_ref_yaw=ref_yaw
             if self.heading_holds==1 or self.heading_holds%30==0:
-                print('NAV_HEADING_HOLD n=%d at=(%.3f,%.3f) base_yaw=%.2f ae=%.2f deg bound=%.2f creep=%.3f'
+                print('NAV_HEADING_HOLD n=%d at=(%.3f,%.3f) base_yaw=%.2f ae=%.2f deg bound=%.2f creep=%.3f ref_yaw=%.2f'
                       % (self.heading_holds,state.x,state.y,math.degrees(state.yaw),math.degrees(ae),
-                         math.degrees(self.heading_hold_bound),v),flush=True)
+                         math.degrees(self.heading_hold_bound),v,math.degrees(ref_yaw)),flush=True)
         result=self.gate_velocity(now,odom,obs,v,v*curvature)
         if result.reason!='tracking':
             # A transient measured-curvature trip (the base is momentarily under commanded
