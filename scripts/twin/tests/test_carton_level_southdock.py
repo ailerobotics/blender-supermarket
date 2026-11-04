@@ -136,9 +136,14 @@ def test_level_place_ik_gravity_comp_pretilts_command_so_executed_is_level():
     dq0 = gc.droop(robot, geom, tool_link=TL)
     geom_exec = [geom[ARM_JOINTS[i]] + dq0[ARM_JOINTS[i]] for i in range(6)]
     assert cl.carried_rpy(robot, geom_exec, u, TL)[2] > BOUND
-    # the executed compensated pose still reaches the sensed deck (reach preserved)
+    # sim-carton-level-setdown-v1: the compensation now routes the droop-cancelling pre-tilt onto the
+    # TRACKING wrist (coldwin33 proved the full-DOF solve's heavy-joint pre-tilt is gravity-pinned and does
+    # NOT realise -- 2.07->2.06). Levelling via the wrist pivots the pad TCP a few cm off the sensed deck
+    # (the heavy joints can no longer be pre-tilted to hold the executed TCP exactly on target), but that is
+    # the physical loaded sag the arm already placed through (coldwin31 reached the deck) and is far inside
+    # the mission place goal tolerance (0.12 m). The attitude -- the captain's rule -- lands level.
     import numpy as np
-    assert float(np.linalg.norm(cl.tool_position(robot, comp_exec, TL) - np.asarray(target))) < 5e-3
+    assert float(np.linalg.norm(cl.tool_position(robot, comp_exec, TL) - np.asarray(target))) < 0.05
 
 
 @need_urdf

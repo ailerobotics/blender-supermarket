@@ -901,9 +901,15 @@ class TransferController:
         if self._carton_level is not None and leaving in self._carton_seg_exec:
             er, ep = self._carton_seg_exec.pop(leaving)
             pr, pp = self._carton_seg_planned.pop(leaving, (None, None))
+            # sim-carton-level-setdown-v1: lead with the compact planned=<deg> executed=<deg> worst-|roll|/
+            # |pitch| the integration worker asked for (so the carried descent -- set-down and release
+            # included -- is log-tunable without a trip), then the roll/pitch breakdown + bound. 'planned'
+            # is the pre-dispatch predicted peak; 'executed' the measured max this phase.
+            planned_deg = ('%.2f' % max(pr, pp)) if pr is not None else 'unknown'
             planned = ('planned_max roll=%.2f pitch=%.2f' % (pr, pp)) if pr is not None else 'planned_max=unknown'
-            line = ('CARTON_SEGMENT_TILT phase=%s executed_max roll=%.2f pitch=%.2f | %s deg (bound %.2f)'
-                    % (leaving, er, ep, planned, self._carton_level.bound_deg))
+            line = ('CARTON_SEGMENT_TILT phase=%s planned=%s executed=%.2f | executed_max roll=%.2f pitch=%.2f'
+                    ' | %s deg (bound %.2f)'
+                    % (leaving, planned_deg, max(er, ep), er, ep, planned, self._carton_level.bound_deg))
             print(line, flush=True)
             self.evidence.append({'carton_segment_tilt': line})
         if phase == 'contact':
@@ -1303,6 +1309,22 @@ class TransferController:
         self._carton_seg_exec[self.phase] = (max(er, abs(roll)), max(ep, abs(pitch)))
         return self._tilt_debounce.observe(now, roll, pitch)
 
+    def _carton_seg_sample(self, phase, measured):
+        """sim-carton-level-setdown-v1: stash-only executed-tilt sample for a NON-trip carried phase
+        (release): measure the welded carton's |roll|,|pitch| from the FK of ``measured`` and accumulate the
+        max under ``phase`` for the CARTON_SEGMENT_TILT report at the phase exit. Never trips / fails the
+        move (the gripper is opening). Inert (no-op) when carton_level, the FK model, or the up-axis is off."""
+        if self._carton_level is None:
+            return
+        robot = self._fk_model()
+        if robot is None or self._carton_up_in_tool is None:
+            return
+        from twin.restock_manipulation import carton_level as cl
+        roll, pitch, _ = cl.carried_rpy(robot, list(measured), self._carton_up_in_tool,
+                                        self._carton_level.tool_link)
+        er, ep = self._carton_seg_exec.get(phase, (0.0, 0.0))
+        self._carton_seg_exec[phase] = (max(er, abs(roll)), max(ep, abs(pitch)))
+
     def _raised_move_exc(self, exc, *, staged):
         """fm371/fm372: a collect move's poll() RAISED. Close the whole "a move raise kills the mission"
         family: route EVERY non-collision, non-joint-limit raise -- plan-exhaust (RuntimeError), a
@@ -1460,6 +1482,16 @@ class TransferController:
                 if _verdict.trip is not None:
                     print(_verdict.trip, flush=True)
                     return self._fail(_verdict.trip)
+        # sim-carton-level-setdown-v1: RELEASE is post-set-down (gripper opening before the weld detaches)
+        # so it is NOT a trip-constrained carried phase, but the welded carton is still held at the set-down
+        # pose, so SAMPLE its executed tilt (no trip) and stash it under 'release' -- _transition then emits
+        # the CARTON_SEGMENT_TILT phase=release line, giving the integration worker the release attitude the
+        # brief asked for (the full carried descent -- set-down AND release -- reported without a trip).
+        # Stash-only (never fails the move); inert when carton_level / the FK model / the up-axis is off.
+        elif (self._carton_level is not None and self.held and self.phase == 'release'
+              and len(sensors.joint_positions) == 6
+              and all(math.isfinite(x) for x in sensors.joint_positions)):
+            self._carton_seg_sample('release', sensors.joint_positions)
         # fm430 (2a) fallback: ride the post-attach LIFT (to the fixed clear-region carry_lift_shape, which
         # does NOT depend on the live collision world) THROUGH a brief ESDF-re-incorporation staleness for
         # a bounded WALL grace -- proceed (treat collision as fresh for this pre-validated move), then FAIL
@@ -1992,6 +2024,10 @@ class TransferController:
                                 robot, [list(s.joint_positions), list(setdown)], self._carton_up_in_tool,
                                 tool_link=self._carton_level.tool_link, gravity_comp=gc)
                             self._carton_seg_planned['place'] = (planned[0], planned[1])
+                            # sim-carton-level-setdown-v1: release holds this same set-down pose while the
+                            # gripper opens, so its predicted level is the set-down's -- carry it so the
+                            # CARTON_SEGMENT_TILT phase=release line reports planned vs executed too.
+                            self._carton_seg_planned['release'] = (planned[0], planned[1])
                             worst_planned = max(planned[0], planned[1])
                             if worst_planned > self._carton_level.bound_deg:
                                 return self._fail(
