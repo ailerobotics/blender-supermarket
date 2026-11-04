@@ -1,0 +1,23 @@
+{
+  "_comment": "sim-warm-reset-cart-reseat-v1: NO new config keys. The fix is in code -- the warm re-seed (warm_reset_provider.reseat) now RESTORES the cart, the carton and the base to the configured start pose BEFORE the PR 297 settle+verify, instead of inheriting wherever attempt 1's host e-stop left the train. The warm two-run collect-only acceptance uses the SAME runtime keys as sim-warm-reset-stage-clean-v1 (warm_reset + the in-repo default hooks); merge them into the integration lane's mission-runtime JSON (those configs live outside this repo). RUNTIME keys only -- a HOST/ENV placement is silently inactive.",
+
+  "warm_reset": "twin.restock.warm_reset_provider:build",
+  "_warm_reset": "Unchanged provider resolution. isaac_bundle.create calls build(...) ONCE after the bundle is assembled + the cold start-state is applied and PR 297-verified; build() now also CAPTURES the cold-start resting Z of the cart + base and the full backstock-carton pose, so the between-runs reseat can restore the train to the configured pose.",
+
+  "_warm_reset_hooks_default": "OMIT warm_reset_hooks to use the in-repo default twin.restock.warm_reset_hooks:build (unchanged by this lane).",
+
+  "couple_dock_align": true,
+  "_couple_dock_align": "The dock-aligned cold flow this lane fixes the WARM re-seed of: dock_align_scenario rewrites initial_staging.cart_body_pose to the configured 304 dock heading (-90 deg) and the cold start runs verify_dock_seat. The warm reseat now restores the cart to THAT same initial_staging.cart_body_pose (+ the base to initial_staging.robot_base_pose, + the carton to its captured spawn) before re-running verify_dock_seat.",
+
+  "start_at": "collect",
+  "stop_after": "collect",
+  "_bench": "Stage-isolated bench keys so the acceptance is a fast collect-only loop; also settable via --start-at collect --stop-after collect.",
+
+  "_acceptance": "Two consecutive collect-only missions on ONE warm session, where attempt 1 fails with a host emergency stop that nudges the cart (the warmacc4 scenario):  run_mobile_restock.py --runtime-config <mission.json with these keys> --output <out> --consecutive-runs 2 --start-at collect --stop-after collect --host-stack  (add --heavy-threshold-mb 2500 for the always-on whispr; add RESTOCK_COLLECT_GROUND_TRUTH=1 if the source decode is not yet green).",
+
+  "_expect_pass": "Attempt 2 WARM re-seats, NOT cold_boot. Between runs the console shows, in order: WARM_RESET step=reset_stage_and_reseed begin -> WARM_RESEAT restored to configured start pose: cart[moved ... yaw 9.1deg -> -90.0deg] base[...] carton[...] -> START_STATE_VERIFY (cold dock seat) cart resting ... heading=-90.0deg vs dock -90.0deg (residual 0.x deg) -- OK -> relaunch_host/verify ok -> WARM_RESET sequence complete. warm-session.json run 1 shows warm.reused=true. There is NO 'WARM_RESET ... REFUSED: reseat: START_STATE_SETTLE_MISMATCH ... -99.1 deg ... decision=cold_boot' line (the warmacc4 failure). REPORT the warm relaunch time (warm-session.json sequence.wall_seconds) as the hand-off number -- a stage re-seat + preflight (seconds-to-tens-of-seconds), not the ~215 s cold boot. No warm relaunch time has ever been measured before; THIS run is the first measurement.",
+
+  "_expect_fail_is_still_loud": "If the train genuinely cannot be restored (a body with no settable handle, or a read-back still off the target), the reseat refuses by name -- WARM_RESEAT_UNRESTORED (cart/carton) or START_STATE_BASE_UNRESTORED (base) -- and the SAME 'WARM_RESET ... REFUSED: reseat: ...' + 'decision=cold_boot' path cold-boots attempt 2 with the reason. The 5 deg PR 297 heading tolerance is unchanged; the verify is still the gate on whether the restored train actually came to rest at the dock.",
+
+  "_out_of_scope": "The pre-place trajectory rejection that caused attempt 1's e-stop (separate lane), the set-down level (separate lane), navigation and towing. This acceptance stops after collect."
+}
