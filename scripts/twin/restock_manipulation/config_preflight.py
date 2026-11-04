@@ -111,6 +111,15 @@ KEY_CONSUMER = {
     # sim-cart-side-bay-v1: park the cart in an OFF-AXIS side bay (extends shelf_staging); isaac_bundle
     # builds the RuntimeAdapter with it (RUNTIME). Pair `cart_side_bay: true` with `shelf_staging: true`.
     'cart_side_bay': RUNTIME,
+    # sim-service-place-target-v1: the TRANSFER place target + its slot id + the mission poses are
+    # read orchestrate-side (isaac_bundle / restock_camera.sensing / ground_truth_verify => RUNTIME).
+    # resolve_transfer_place_target reads them to select the endcap in the shelf_staging flow and to
+    # fail loud on a mis-filed (unreachable) target -- the coldwinint1 backroom-bay trap.
+    'transfer_ground_truth': RUNTIME,
+    'transfer_shelf_location': RUNTIME,
+    'mission_poses': RUNTIME,
+    'verify_ground_truth': RUNTIME,    # ground_truth_verify.from_config (orchestrate side); the verify
+                                       # bay is kept consistent with the resolved place target
 }
 
 # fm402: cap/limit keys the controller reads OPTIONALLY (config.get with a silent default). These are
