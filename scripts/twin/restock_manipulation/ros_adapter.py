@@ -842,20 +842,32 @@ class RosMotionPort:
             out.append(v2)
         return out
 
-    def _straight_line_goal(self, q):
+    def _straight_line_goal(self, q, speed=0.08, accel=0.15):
         """A seeded rest-to-rest 2-point joint trajectory from the measured start to ``q`` for the host
         executor. A single cubic-Hermite segment with zero endpoint velocities is a smoothstep (no
         overshoot, so positions stay within [start, q] and thus within limits); the duration is sized so
         the segment's peak speed/accel stay well under the host's conservative interpolation ceilings,
         making it pass both validate_trajectory and the trajectory_host Plan checks regardless of the
-        mission's --max-speed profile."""
+        mission's --max-speed profile.
+
+        ``speed``/``accel`` (rad/s, rad/s^2) are the peak-speed / peak-accel ceilings the duration is
+        sized to. They default to the standard 0.08 / 0.15 (byte-identical to the pre-parameter move); a
+        caller may pass GENTLER ceilings to slow a dynamically-sensitive move -- the loaded collect-deck
+        level PLACE set-down (sim-carton-level-preplace-v2): its COMMANDED straight joint line is already
+        level, but at the standard speed the welded carton's differential joint-tracking during the heavy
+        shoulder/elbow set-down reaches ~2.2 deg off level (collectlevel3 CARTON_TILT at phase=place);
+        a lower ceiling time-parameterises the same (level) path slower so the executed tilt stays under
+        the bound. Lower ceilings are strictly more conservative, so the plan still passes every host
+        check. Never raises the ceiling above the standard 0.08 / 0.15."""
         from moveit_msgs.msg import RobotTrajectory
         from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
         from builtin_interfaces.msg import Duration
+        speed = min(float(speed), 0.08)
+        accel = min(float(accel), 0.15)
         dmax = max((abs(b - a) for a, b in zip(self.start, q)), default=0.0)
-        # Rest-to-rest cubic peaks: speed = 1.5*dmax/T, accel = 6*dmax/T^2. Target <=0.08 rad/s and
-        # <=0.15 rad/s^2 (under both the sim 0.3/1.0 and real-rig 0.15/0.5 host ceilings); floor 2 s.
-        T = max(2.0, 1.5 * dmax / 0.08, math.sqrt(6 * dmax / 0.15))
+        # Rest-to-rest cubic peaks: speed = 1.5*dmax/T, accel = 6*dmax/T^2. Target <=``speed`` rad/s and
+        # <=``accel`` rad/s^2 (under both the sim 0.3/1.0 and real-rig 0.15/0.5 host ceilings); floor 2 s.
+        T = max(2.0, 1.5 * dmax / speed, math.sqrt(6 * dmax / accel))
         sec = int(T)
         nanosec = int(round((T - sec) * 1e9))
         if nanosec >= 1_000_000_000:
@@ -983,7 +995,7 @@ class RosMotionPort:
             self._settle_wait_start = self._sim_now()
             self.state = 'await_settle'
 
-    def _begin_straight_line_execute(self, q):
+    def _begin_straight_line_execute(self, q, speed=0.08, accel=0.15):
         """Dispatch a collision-OFF 2-point rest-to-rest smoothstep from the measured start to the
         explicit joint config ``q`` straight through the host executor -- no cuMotion plan, so a
         self-colliding start/endpoint is never rejected. Shared by the straight-line pose descent
@@ -995,7 +1007,7 @@ class RosMotionPort:
         live arm state is wired); the caller returns its own status. Execution is sim-paced, exactly like
         the cuMotion plan path: the sim budget (duration + settle margin) is MOVE_SIM_DEADLINE_SCALE-scaled
         inside the shared dispatch helper."""
-        self._begin_execute_trajectory(self._straight_line_goal(q))
+        self._begin_execute_trajectory(self._straight_line_goal(q, speed, accel))
 
     def _arm_plan_deadline(self):
         """sim-robust-plan-deadline-pacing-v1: arm the PLANNING-phase (ik / plan_accept / plan_result)
@@ -1152,7 +1164,7 @@ class RosMotionPort:
         self.future, self.state = future, state
 
     def begin_joint_goal(self, goal_joints, measured_joints, slow=False, goal_tol=None,
-                         straight_line=False):
+                         straight_line=False, speed=None, accel=None):
         """Collision-planned arm stow; never an unchecked joint command.
 
         ``straight_line=True`` (sim-robust-collect-stow-branch-v1): dispatch the move as the collision-OFF
@@ -1220,8 +1232,16 @@ class RosMotionPort:
             self.generation+=1
             self.handle=None
             self._plan_goal=None
-            self._begin_straight_line_execute(tuple(float(v) for v in goal_joints))
+            # sim-carton-level-preplace-v2: optional GENTLER peak-speed/accel ceilings for a
+            # dynamically-sensitive straight-line move (the loaded collect-deck level PLACE set-down).
+            # None => the standard 0.08 / 0.15 ceilings (byte-identical to every other straight-line move).
+            self._begin_straight_line_execute(
+                tuple(float(v) for v in goal_joints),
+                speed=0.08 if speed is None else float(speed),
+                accel=0.15 if accel is None else float(accel))
             return
+        if speed is not None or accel is not None:
+            raise ValueError('speed/accel ceilings apply only to a straight_line joint goal')
         goal=MoveGroup.Goal()
         req=goal.request
         req.group_name=self.group
