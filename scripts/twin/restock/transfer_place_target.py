@@ -143,11 +143,16 @@ def resolve_transfer_place_target(config, scenario, *, max_reach_m=None) -> Tran
 
     endcap_reach = _reach_from(service, endcap, carton_half=carton_half)
     if endcap_reach > max_reach:
+        # sim-service-carry-drive-to-shelf-v1: name the trip 'unreachable place target: <dist> m >
+        # <reach> m' and raise it HERE, at PLAN TIME (boot, orchestrate side) BEFORE any GPU boot or
+        # arm command -- not as a mid-transfer 'unreachable or undersized target' emergency stop or an
+        # 'observe' phase timeout. Move shelf_approach toward the endcap (never raise the reach bound).
         raise TransferPlaceTargetError(
-            f'shelf_staging endcap place target {tuple(round(v, 3) for v in endcap)} is '
-            f'{endcap_reach:.3f} m from the service pose {tuple(round(v, 3) for v in service[:2])} '
-            f'arm base -- beyond the {max_reach:.2f} m UR10 reach; the service leg cannot place '
-            f'there. Check scenario.initial_staging.target_surface_pose_world vs shelf_approach.')
+            f'unreachable place target: {endcap_reach:.3f} m > {max_reach:.2f} m -- the shelf_staging '
+            f'endcap place {tuple(round(v, 3) for v in endcap)} is {endcap_reach:.3f} m from the '
+            f'service pose {tuple(round(v, 3) for v in service[:2])} arm base, past the {max_reach:.2f} m '
+            f'UR10 reach; the service leg cannot place there. Move shelf_approach closer to the endcap '
+            f'(never the reach bound), or check scenario.initial_staging.target_surface_pose_world.')
 
     # Loud guard against the coldwinint1 mis-file: a configured target the service leg could NEVER
     # reach (the fm461 BACKROOM bay) must not silently drive the base 9.7 m away. Name it.

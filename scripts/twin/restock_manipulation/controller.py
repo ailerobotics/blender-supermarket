@@ -1636,8 +1636,21 @@ class TransferController:
                 return self._result()
             if not target.clear:
                 return self._fail('occupied target')
-            if (not self._pose_ok(target.pose)
-                    or not axis_fits(target.free_dimensions, self.profile.dimensions)):
+            # The size-fit (axis_fits) is frame-independent, so gate it now regardless of flow.
+            if not axis_fits(target.free_dimensions, self.profile.dimensions):
+                return self._fail('unreachable or undersized target')
+            # sim-service-carry-drive-to-shelf-v1: when the base repositions BEFORE placing (the fm390
+            # collect place-on-cart AND the shelf-staging live_pose TRANSFER service leg), the PLACE
+            # target is reached only AFTER the base drives to its service pose (place_approach /
+            # shelf_approach) -- it is NOT reachable from the current PICK/park pose. Gating its reach
+            # here would _fail('unreachable or undersized target') -> motion.stop() -> emergency stop
+            # BEFORE the pick, so the arm never folds to TRANSIT and the runtime carry-drive leg (which
+            # fires on the observed TRANSIT, restock/runtime._step transfer carry leg) never runs --
+            # transferobs1: the endcap place sits 2.5 m from the side-bay park, > the 1.3 m UR10 reach.
+            # The place reach IS validated at PLAN TIME (resolve_transfer_place_target, from the service
+            # pose, before any arm command) and again post-drive in _reregister_place, so defer it here;
+            # place-side poses are likewise excluded from gate_poses below (the pick-side still gates now).
+            if not self._repositions_before_place() and not self._pose_ok(target.pose):
                 return self._fail('unreachable or undersized target')
             if s.contact:
                 return self._fail('unexpected pre-existing gripper contact')
