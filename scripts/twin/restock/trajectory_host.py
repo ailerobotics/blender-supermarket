@@ -195,18 +195,29 @@ GOAL_MISS_FAR_RAD = 0.03            # a single joint this far past tol is a gros
 GOAL_MISS_FROZEN_VEL = 0.05         # the blocked joint has settled against the block (rad/s)
 _GOAL_MISS_GENERIC = 'measured goal tolerance not reached'
 
-# sim-collect-retreat-fault-v1: the signature of the collect deck-place EMPTY-RETREAT jam. The retreat is a
-# collision-OFF straight-line joint smoothstep from the folded place pose to the clear preplace/stow standoff;
-# cuMotion and the smoothstep are blind to a SIM contact (the carton-weld release RE-ENABLES the carton + the
-# tool-side gripper colliders -- cube/surface_plates/suction_cups -- which are on the cuMotion self-collision
-# IGNORE list, so a re-enabled gripper collider grazing the arm/cart at the folded place pose is never
-# modelled). The arm then PINS: one or more PROXIMAL joints (shoulder_pan/lift/elbow) stall far short of goal
-# while the distal WRIST joints run at velocity SATURATION about their already-reached targets -- the whole-
-# wrist-cluster oscillation of runs 254-258 reborn. rtfcollect2-fail1 (host-stack.log): shoulder_lift stuck
-# 0.438 rad short (goal -1.91, meas -1.472), elbow 0.264 short, while wrist_1/2/3 ran at ~3.13 rad/s for the
-# full 30 s settle window. classify_goal_miss stays GENERIC here (several joints past tol, none frozen), so
-# the fault surfaced only as the generic "pose not bounded within settle window" -- naming the oscillation,
-# not its cause. This classifier names the real cause; it NEVER loosens a tolerance (diagnosis only).
+# sim-collect-retreat-fault-v1 / sim-collect-retreat-collider-v3: the signature of the collect deck-place
+# EMPTY-RETREAT jam. The retreat is a collision-OFF straight-line joint smoothstep (lift-off then fold) from
+# the folded place pose to the clear preplace/stow standoff; cuMotion and the smoothstep are blind to a SIM
+# contact at the folded place pose. The arm then PINS: one or more PROXIMAL joints (shoulder_pan/lift/elbow)
+# stall far short of goal while the distal WRIST joints run at velocity SATURATION about their already-reached
+# targets -- the whole-wrist-cluster oscillation of runs 254-258 reborn.
+#
+# The possible unmodelled contacts at that pose (NONE of which cuMotion or the smoothstep model) are:
+#   * the ROLLWAGEN CART CAGE -- arm/gripper-vs-cage is NOT collision-filtered (only carton-vs-cage is), so a
+#     gripper/wrist link grazing a cage post is a live hard contact. A base-yaw (shoulder_pan) swing in the
+#     lift-off is the classic driver: it rakes the gripper cluster ~0.12-0.19 m sideways into the front cage
+#     post (collectlevel4-fail1: goal pan +0.187 rad, pan pinned 0.204 short; fixed by locking pan in the
+#     lift-off, see controller._collect_retreat_liftoff_goal);
+#   * the RE-ENABLED CARTON -- the weld release re-enables the carton collider so the placed carton rests on
+#     the deck; a secondary near-contact (it is light and would be shoved, not pin a 400 N*m drive);
+#   * a re-enabled TOOL-SIDE gripper collider (cube/surface_plates/suction_cups) IF the tool-collider deferral
+#     is off -- the original sim-collect-retreat-fault-v1 trip. With RESTOCK_DEFER_TOOL_COLLISION / the
+#     defer_tool_collision config (now DEFAULT ON) those stay OFF through the retreat, so they are NOT the pin.
+# rtfcollect2-fail1 (host-stack.log): shoulder_lift stuck 0.438 rad short (goal -1.91, meas -1.472), elbow
+# 0.264 short, wrist_1/2/3 at ~3.13 rad/s for the full 30 s settle window. classify_goal_miss stays GENERIC
+# here (several joints past tol, none frozen), so the fault surfaced only as the generic "pose not bounded
+# within settle window" -- naming the oscillation, not its cause. This classifier names the real cause
+# WITHOUT asserting one specific collider; it NEVER loosens a tolerance (diagnosis only).
 CONTACT_PIN_SAT_VEL = 2.5           # a wrist running this fast at a tight pose is velocity saturation, not tracking
 CONTACT_PIN_STALL_RAD = 0.15        # a proximal joint this far short (>> pos_tol) is pinned, not settle/track noise
 CONTACT_PIN_WRIST_IDX = (3, 4, 5)   # ur_wrist_1/2/3 in ARM_JOINTS order
@@ -243,10 +254,14 @@ def classify_contact_pin(per_joint_err, per_joint_vel, pos_tol, *, joint_names=A
         stalled_s = ', '.join('%s %+.3f rad' % (_nm(i), err[i]) for i in stalled)
         sat_s = ', '.join('%s %.2f rad/s' % (_nm(i), vel[i]) for i in saturated)
         return ('collect retreat pinned by an unmodelled contact: proximal joint(s) stalled short of goal '
-                '[%s] (worst %s %.4f rad) while wrist(s) run at velocity saturation [%s] -- the collision-OFF '
-                'straight-line retreat drove a re-enabled gripper collider (carton-weld release; cuMotion '
-                'self-collision ignore list) into the arm/cart at the folded place pose; not a tracking-bound '
-                'failure and not gravity sag' % (stalled_s, _nm(worst), abs(err[worst]), sat_s))
+                '[%s] (worst %s %.4f rad) while wrist(s) run at velocity saturation [%s] -- a collision-OFF '
+                'straight-line retreat move drove an arm/gripper link into an unmodelled SIM contact at the '
+                'folded place pose (the rollwagen cart cage and/or the re-enabled carton; arm/gripper-vs-cage '
+                'is NOT collision-filtered and these self-pairs are on the cuMotion ignore list, so neither '
+                'the planner nor the smoothstep models them); a base-yaw (shoulder_pan) swing in the lift-off '
+                'is the usual driver -- it rakes the gripper laterally into the front cage post, and a '
+                'straight-up lift with pan held avoids it -- not a tracking-bound failure and not gravity sag'
+                % (stalled_s, _nm(worst), abs(err[worst]), sat_s))
     except Exception:
         return None
 

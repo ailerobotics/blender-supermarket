@@ -43,7 +43,7 @@
   "verify_ground_truth": {
     "enabled": true,
     "bay": {"center_xy": [-3.05, 4.826], "size_xy": [0.68, 0.48], "top_z": 0.73},
-    "_note": "the post-place verification bay, centred ON the endcap place target so place + verify agree. Absent `bay` => the resolver injects this same endcap bay at boot (ground_truth_verify.from_config would otherwise read scenario.transfer_bay = the legacy BACKROOM bay and false-fail the verify after an endcap place)."
+    "_note": "sim-verify-region-endcap-v1: the post-place verification bay, centred ON the endcap place target so place + verify agree. twin.restock.transfer_place_target.resolve_verify_region now treats this as a function of shelf_staging too: absent `bay` => it INJECTS this same endcap bay at boot (ground_truth_verify.from_config would otherwise read scenario.transfer_bay = the legacy BACKROOM bay and false-fail the verify after an endcap place); a `bay` still centred on the BACKROOM (the fm461 [-2.0, 16.424]) now REFUSES the boot by name (VerifyRegionError) instead of checking the wrong surface -- the verify sibling of the transfer_ground_truth.target gate. This endcap bay is within the 0.5 m consistency tolerance of the place target, so it is kept as authored."
   },
 
   "_HOST_keys": "merge into restock_manipulation/ros_host_config.json",

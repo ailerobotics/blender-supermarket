@@ -185,6 +185,45 @@ def collision_groups_to_toggle(groups):
     raise ValueError('groups must be one of both|carton|tool')
 
 
+DEFER_TOOL_COLLISION_ENV = 'RESTOCK_DEFER_TOOL_COLLISION'
+_DEFER_OFF = ('0', 'false', 'off', 'no')
+_DEFER_ON = ('1', 'true', 'on', 'yes')
+
+
+def defer_tool_collision_enabled(config=None, environ=None):
+    """The effective tool-collider deferral setting for the mission gripper (pure/CPU-testable).
+
+    sim-collect-retreat-fault-v1 found that re-enabling the TOOL-SIDE gripper colliders
+    (cube/surface_plates/suction_cups) at the carton-weld RELEASE re-establishes the cuMotion-ignore-list
+    tool-vs-arm/cart contact that the collision-OFF straight-line retreat cannot model, pinning the arm
+    (rtfcollect2). Deferring that re-enable past the empty retreat (restored on the next grasp close) is
+    the proven-safe behaviour, so sim-collect-retreat-collider-v3 makes it a first-class config property
+    and the DEFAULT.
+
+    Resolution order (first that is set wins): the runtime-config key ``defer_tool_collision`` (a bool, or
+    an on/off string), else the ENV ``RESTOCK_DEFER_TOOL_COLLISION`` (kept as an alias so existing
+    orchestrators keep working), else DEFAULT TRUE. An explicit ``false`` at either layer turns it off
+    (e.g. to reproduce the pre-fix re-enable-at-release behaviour)."""
+    if config is not None and 'defer_tool_collision' in (config or {}):
+        val = (config or {})['defer_tool_collision']
+        if isinstance(val, bool):
+            return val
+        s = str(val).strip().lower()
+        if s in _DEFER_OFF:
+            return False
+        if s in _DEFER_ON:
+            return True
+        raise ValueError('defer_tool_collision must be a bool or one of on/off/true/false/1/0/yes/no, '
+                         'got %r' % (val,))
+    env = os.environ if environ is None else environ
+    raw = str(env.get(DEFER_TOOL_COLLISION_ENV, '')).strip().lower()
+    if raw == '':
+        return True                       # DEFAULT ON (sim-collect-retreat-collider-v3)
+    if raw in _DEFER_OFF:
+        return False
+    return True                           # any other non-empty value => on
+
+
 def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
                            max_gap=SIM_MAX_GRIP_DISTANCE, force_limit=30.,
                            clearance_offset=None, retry_interval=1e6, stroke_limit=None):
@@ -346,7 +385,8 @@ def author_native_gripper(stage, *, tool, tool0_path, body_path, gripper_path,
 
 class NativePanelContact:
     """Native contact/latch feedback only; zero fallback welds or object poses."""
-    def __init__(self, stage, gripper_path, *, diagnostic=None, sim_attach_fallback=False):
+    def __init__(self, stage, gripper_path, *, diagnostic=None, sim_attach_fallback=False,
+                 defer_tool_collision=None):
         import isaacsim.robot.surface_gripper._surface_gripper as surface_gripper
         self.stage, self.path = stage, gripper_path
         # Labelled sim attach-fallback, default OFF (see SIM_ATTACH_CONTACT_MM). _fallback_body holds the
@@ -355,18 +395,20 @@ class NativePanelContact:
         self._fallback_body = None
         self._open_streak = 0   # fm395 (B): consecutive Open-status readings, for the weld-release debounce
         self._fallback_joint = None
-        # sim-collect-retreat-fault-v1 (env RESTOCK_DEFER_TOOL_COLLISION, DEFAULT OFF => byte-identical):
-        # defer re-enabling the TOOL-SIDE gripper colliders (cube/surface_plates/suction_cups) past the empty
-        # retreat. At the carton-weld release they are normally re-enabled TOGETHER with the carton colliders,
-        # but the empty retreat happens right after, from the folded place pose, so re-enabling them there
-        # re-establishes the cuMotion-ignore-list contact (tool-vs-arm / gripper-in-cart) that the collision-
-        # OFF straight-line retreat cannot model -- pinning the arm (rtfcollect2). With this on, release re-
-        # enables the CARTON colliders only (so the placed carton still rests/contacts the deck); the tool-side
-        # colliders stay OFF through the retreat and are restored on the NEXT grasp close (gripper then in free
-        # space at the source carton, not folded in the cart). The tool geometry is on the planner self-
-        # collision ignore list, so keeping it collision-inert during a planned arm move changes no planned path.
-        self._defer_tool_collision = os.environ.get('RESTOCK_DEFER_TOOL_COLLISION', '').lower() \
-            not in ('', '0', 'false', 'off', 'no')
+        # sim-collect-retreat-fault-v1 / sim-collect-retreat-collider-v3 (config key defer_tool_collision,
+        # env RESTOCK_DEFER_TOOL_COLLISION alias, DEFAULT ON): defer re-enabling the TOOL-SIDE gripper
+        # colliders (cube/surface_plates/suction_cups) past the empty retreat. At the carton-weld release they
+        # were historically re-enabled TOGETHER with the carton colliders, but the empty retreat happens right
+        # after, from the folded place pose, so re-enabling them there re-establishes the cuMotion-ignore-list
+        # contact (tool-vs-arm / gripper-in-cart) that the collision-OFF straight-line retreat cannot model --
+        # pinning the arm (rtfcollect2). With this on, release re-enables the CARTON colliders only (so the
+        # placed carton still rests/contacts the deck); the tool-side colliders stay OFF through the retreat and
+        # are restored on the NEXT grasp close (gripper then in free space at the source carton, not folded in
+        # the cart). The tool geometry is on the planner self-collision ignore list, so keeping it collision-
+        # inert during a planned arm move changes no planned path. Now DEFAULT ON because it is the proven-safe
+        # behaviour; pass defer_tool_collision=False (or config/env) to reproduce the pre-fix re-enable.
+        self._defer_tool_collision = (bool(defer_tool_collision) if defer_tool_collision is not None
+                                      else defer_tool_collision_enabled())
         self._tool_collision_deferred = False   # True while a release left the tool-side colliders disabled
         self.api = surface_gripper.acquire_surface_gripper_interface()
         self.api.set_write_to_usd(True)

@@ -169,6 +169,88 @@ def resolve_transfer_place_target(config, scenario, *, max_reach_m=None) -> Tran
         reach_m=endcap_reach, source='shelf_staging_endcap', overridden=overridden)
 
 
+# sim-verify-region-endcap-v1: the injected / configured ground-truth VERIFY bay centre must sit
+# within this of the resolved place target under shelf_staging. Farther means the verify stage still
+# frames a DIFFERENT surface (the legacy backroom bay, ~9.7 m from the sales-floor endcap) and would
+# false-fail after the service leg placed at the endcap. Half a metre comfortably spans an endcap-sized
+# support while catching the backroom mis-file -- the verify sibling of the place-target reach guard.
+DEFAULT_VERIFY_CENTER_TOL_M = 0.5
+
+
+class VerifyRegionError(TransferPlaceTargetError):
+    """Loud, NAMED failure: the configured post-place VERIFY ground-truth region disagrees with the
+    resolved place target under shelf_staging -- it still frames the backroom bay, so the verify stage
+    would check the wrong surface after the service leg placed at the endcap. Raised at boot (orchestrate
+    side) BEFORE the GPU run, the verify sibling of :class:`TransferPlaceTargetError` (coldwinint1)."""
+
+
+@dataclass(frozen=True)
+class VerifyRegion:
+    flow: str                              # 'shelf_staging' | 'legacy'
+    bay: Optional[dict]                    # {center_xy, size_xy, top_z} to WRITE into verify_ground_truth,
+                                           # or None to leave the config's verify region exactly as authored
+    source: str                            # 'shelf_staging_endcap' | 'configured' | 'unchanged'
+    center_offset_m: Optional[float]       # distance from the configured verify centre to the place target
+    overridden: bool                       # True when the resolver injected the endcap bay over a bay-less /
+                                           # scenario.transfer_bay default
+
+
+def _verify_block(config):
+    """``(enabled, block)`` for ``verify_ground_truth`` -- a bool or dict, like ground_truth_verify."""
+    block = config.get('verify_ground_truth') if isinstance(config, dict) else None
+    if isinstance(block, bool):
+        return block, {}
+    if isinstance(block, dict):
+        return bool(block.get('enabled')), block
+    return False, {}
+
+
+def resolve_verify_region(config, scenario, place_target, *,
+                          center_tol_m=DEFAULT_VERIFY_CENTER_TOL_M) -> VerifyRegion:
+    """Resolve the post-place VERIFY ground-truth region as ONE explicit function of the shelf-staging
+    flow switch -- the verify sibling of :func:`resolve_transfer_place_target`.
+
+    shelf_staging ON (verify enabled, a resolved place target)
+        -> the verify bay must FRAME the place target (the sales-floor endcap). A configured
+           ``verify_ground_truth.bay`` centred farther than ``center_tol_m`` from it (the legacy
+           backroom bay) is REFUSED by name (:class:`VerifyRegionError`). A bay-less block gets the
+           endcap bay injected -- otherwise ``ground_truth_verify.from_config`` reads
+           ``scenario.transfer_bay`` (the backroom) and false-fails the verify after an endcap place.
+    shelf_staging OFF / verify disabled / no resolved place target
+        -> ``bay=None`` so the config's verify region is left EXACTLY as authored => byte-identical.
+    """
+    enabled, block = _verify_block(config)
+    if (not shelf_staging_flow_active(config) or not enabled
+            or place_target is None or place_target.target_xyz is None):
+        flow = 'shelf_staging' if shelf_staging_flow_active(config) else 'legacy'
+        return VerifyRegion(flow=flow, bay=None, source='unchanged',
+                            center_offset_m=None, overridden=False)
+
+    endcap = place_target.target_xyz
+    configured_bay = block.get('bay') if isinstance(block.get('bay'), dict) else None
+    center = configured_bay.get('center_xy') if configured_bay else None
+    if center and len(center) >= 2:
+        offset = math.dist((float(center[0]), float(center[1])), (endcap[0], endcap[1]))
+        if offset > center_tol_m:
+            raise VerifyRegionError(
+                f'shelf_staging is ON but verify_ground_truth.bay is centred at '
+                f'{tuple(round(float(v), 3) for v in center[:2])} -- {offset:.3f} m from the '
+                f'service-leg place target (the sales-floor endcap '
+                f'{tuple(round(v, 3) for v in endcap[:2])}, farther than the {center_tol_m:.2f} m '
+                f'tolerance). The verify stage would check the wrong surface (the legacy backroom bay) '
+                f'after an endcap place; centre verify_ground_truth.bay on the endcap place target '
+                f'(scenario.initial_staging.target_surface_pose_world).')
+        # A configured bay already consistent with the endcap -- keep the lane's authored sizing.
+        return VerifyRegion(flow='shelf_staging', bay=None, source='configured',
+                            center_offset_m=offset, overridden=False)
+
+    # No explicit (consistent) bay: inject the endcap-centred bay so from_config does not fall back to
+    # scenario.transfer_bay (the backroom). Place and verify then agree by construction.
+    bay = verify_bay_for_place_target(endcap, scenario)
+    return VerifyRegion(flow='shelf_staging', bay=bay, source='shelf_staging_endcap',
+                        center_offset_m=0.0, overridden=True)
+
+
 def verify_bay_for_place_target(place_target_xyz, scenario, *, fallback_size_xy=(0.7, 0.5)):
     """The ground-truth VERIFY bay centred ON the resolved place target, so the place and its
     post-place verification agree BY CONSTRUCTION in the shelf_staging flow.

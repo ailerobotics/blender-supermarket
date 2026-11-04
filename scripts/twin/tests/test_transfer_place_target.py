@@ -19,8 +19,9 @@ SCRIPTS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SCRIPTS))
 
 from twin.restock.transfer_place_target import (
-    ARM_BASE_Z, DEFAULT_MAX_REACH_M, TransferPlaceTarget, TransferPlaceTargetError,
-    resolve_transfer_place_target, shelf_staging_flow_active, verify_bay_for_place_target)
+    ARM_BASE_Z, DEFAULT_MAX_REACH_M, DEFAULT_VERIFY_CENTER_TOL_M, TransferPlaceTarget,
+    TransferPlaceTargetError, VerifyRegion, VerifyRegionError, resolve_transfer_place_target,
+    resolve_verify_region, shelf_staging_flow_active, verify_bay_for_place_target)
 
 # Real geometry (scripts/restock_scenario.json + the proven flow, docs/restock_navigation.md).
 ENDCAP = [-3.05, 4.826, 0.73, 0.0]          # scenario.initial_staging.target_surface_pose_world
@@ -174,6 +175,82 @@ def test_verify_bay_is_not_the_backroom_after_an_endcap_place():
     assert math.dist(bay['center_xy'], [-2.0, 16.42]) > 9.0
 
 
+# ---- sim-verify-region-endcap-v1: the VERIFY region is gated through the same resolver family ---
+
+def _place(cfg, scenario=None):
+    return resolve_transfer_place_target(cfg, scenario if scenario is not None else _scenario())
+
+
+def test_verify_region_legacy_flow_is_left_unchanged():
+    # legacy: no injection, no gate -> byte-identical verify region.
+    cfg = _config(shelf_staging=False, gt_target=BACKROOM_BAY)
+    cfg['verify_ground_truth'] = {'enabled': True}
+    region = resolve_verify_region(cfg, _scenario(), _place(cfg))
+    assert isinstance(region, VerifyRegion)
+    assert region.flow == 'legacy'
+    assert region.bay is None and region.source == 'unchanged'
+
+
+def test_verify_region_disabled_block_is_left_unchanged():
+    cfg = _config(shelf_staging=True)
+    cfg['verify_ground_truth'] = {'enabled': False, 'bay': {'center_xy': list(BACKROOM_BAY[:2])}}
+    region = resolve_verify_region(cfg, _scenario(), _place(cfg))
+    assert region.bay is None and region.source == 'unchanged'   # off => never touched / never gated
+
+
+def test_verify_region_shelf_staging_injects_the_endcap_bay_when_bay_less():
+    cfg = _config(shelf_staging=True)
+    cfg['verify_ground_truth'] = {'enabled': True}               # no bay override
+    region = resolve_verify_region(cfg, _scenario(), _place(cfg))
+    assert region.flow == 'shelf_staging' and region.source == 'shelf_staging_endcap'
+    assert region.overridden is True
+    assert region.bay is not None
+    assert region.bay['center_xy'] == pytest.approx(ENDCAP[:2])
+    assert region.bay['top_z'] == pytest.approx(ENDCAP[2])
+    assert math.dist(region.bay['center_xy'], BACKROOM_BAY[:2]) > 9.0
+
+
+def test_verify_region_shelf_staging_rejects_a_backroom_bay_by_name():
+    # the EXACT verify-side coldwinint trap: shelf_staging on, verify bay still the backroom.
+    cfg = _config(shelf_staging=True)
+    cfg['verify_ground_truth'] = {'enabled': True,
+                                  'bay': {'center_xy': list(BACKROOM_BAY[:2]),
+                                          'size_xy': [0.7, 0.5], 'top_z': 0.73}}
+    with pytest.raises(VerifyRegionError) as exc:
+        resolve_verify_region(cfg, _scenario(), _place(cfg))
+    msg = str(exc.value)
+    assert 'shelf_staging' in msg and 'endcap' in msg
+    assert 'verify_ground_truth.bay' in msg
+
+
+def test_verify_region_error_is_a_transfer_place_target_error():
+    # so the boot gate can catch the whole resolver family with one except.
+    assert issubclass(VerifyRegionError, TransferPlaceTargetError)
+
+
+def test_verify_region_keeps_an_endcap_consistent_configured_bay():
+    # a bay already centred on the endcap is kept as authored (lane sizing preserved), never overwritten.
+    cfg = _config(shelf_staging=True)
+    cfg['verify_ground_truth'] = {'enabled': True,
+                                  'bay': {'center_xy': ENDCAP[:2], 'size_xy': [0.68, 0.48], 'top_z': 0.73}}
+    region = resolve_verify_region(cfg, _scenario(), _place(cfg))
+    assert region.source == 'configured' and region.bay is None   # left as-is
+    assert region.overridden is False
+    assert region.center_offset_m == pytest.approx(0.0, abs=1e-9)
+
+
+def test_verify_region_tolerance_boundary():
+    # a bay just inside the tolerance is accepted; just outside is refused.
+    cfg = _config(shelf_staging=True)
+    inside = [ENDCAP[0] + DEFAULT_VERIFY_CENTER_TOL_M - 0.01, ENDCAP[1]]
+    cfg['verify_ground_truth'] = {'enabled': True, 'bay': {'center_xy': inside, 'top_z': 0.73}}
+    assert resolve_verify_region(cfg, _scenario(), _place(cfg)).source == 'configured'
+    outside = [ENDCAP[0] + DEFAULT_VERIFY_CENTER_TOL_M + 0.01, ENDCAP[1]]
+    cfg['verify_ground_truth'] = {'enabled': True, 'bay': {'center_xy': outside, 'top_z': 0.73}}
+    with pytest.raises(VerifyRegionError):
+        resolve_verify_region(cfg, _scenario(), _place(cfg))
+
+
 # ---- against the real committed scenario + the merged fragment --------------------------------
 
 def test_real_scenario_and_merged_fragment_resolve_to_the_endcap():
@@ -190,3 +267,8 @@ def test_real_scenario_and_merged_fragment_resolve_to_the_endcap():
     assert r.flow == 'shelf_staging'
     assert r.target_xyz == pytest.approx(tuple(endcap))
     assert r.reach_m <= DEFAULT_MAX_REACH_M
+    # the merged fragment's verify bay is endcap-consistent -> accepted (never refused, never re-injected).
+    region = resolve_verify_region(cfg, scenario, r)
+    assert region.flow == 'shelf_staging'
+    assert region.source == 'configured' and region.bay is None
+    assert region.center_offset_m <= DEFAULT_VERIFY_CENTER_TOL_M

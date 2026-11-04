@@ -602,8 +602,8 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     from twin.navigation.sensors import IsaacRangeSensor
     from .verification import InventoryVerifier
     from .sensing_sources import build_sensing_sources
-    from .transfer_place_target import (resolve_transfer_place_target, shelf_staging_flow_active,
-                                        verify_bay_for_place_target)
+    from .transfer_place_target import (resolve_transfer_place_target, resolve_verify_region,
+                                        shelf_staging_flow_active)
 
     # sim-service-place-target-v1: resolve the TRANSFER place target as ONE explicit function of the
     # shelf-staging flow switch, BEFORE any orchestrate-side consumer reads it (the camera-lane
@@ -628,18 +628,24 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
         if _place_target.location:
             _resolved_gt.setdefault('location', _place_target.location)
         config['transfer_ground_truth'] = _resolved_gt
-        # Keep the post-place VERIFY bay consistent with the place: ground_truth_verify.from_config
-        # otherwise reads scenario.transfer_bay (the legacy BACKROOM bay), so the verify stage would
-        # check the backroom after the service leg placed at the endcap. Centre the bay ON the
-        # resolved endcap unless the lane set an explicit bay override. Gated on the same flow switch.
+    # sim-verify-region-endcap-v1: resolve + GATE the post-place VERIFY ground-truth region through the
+    # SAME resolver family (one explicit function of shelf_staging). ground_truth_verify.from_config
+    # otherwise reads scenario.transfer_bay (the legacy BACKROOM bay), so after the service leg places at
+    # the sales-floor endcap the verify stage would check the backroom and false-fail. resolve_verify_region
+    # REFUSES by name (VerifyRegionError) a configured verify bay that still frames the backroom, and injects
+    # the endcap-centred bay when the block carries none. Self-gated on shelf_staging (independent of the
+    # transfer_ground_truth enable, so a camera-transfer + ground-truth-verify run is covered too); legacy /
+    # verify-off => bay=None => the verify region is left exactly as authored (byte-identical).
+    _verify_region = resolve_verify_region(config, scenario, _place_target)
+    print('TRANSFER_VERIFY_REGION flow=%s source=%s overridden=%s center_offset_m=%s'
+          % (_verify_region.flow, _verify_region.source, _verify_region.overridden,
+             _verify_region.center_offset_m), flush=True)
+    if _verify_region.bay is not None:
         _vg = config.get('verify_ground_truth')
-        _vg_enabled = bool(_vg.get('enabled') if isinstance(_vg, dict) else _vg)
-        if _vg_enabled:
-            _vg_block = dict(_vg) if isinstance(_vg, dict) else {'enabled': True}
-            if not _vg_block.get('bay'):
-                _vg_block['bay'] = verify_bay_for_place_target(_place_target.target_xyz, scenario)
-                config['verify_ground_truth'] = _vg_block
-                print('TRANSFER_VERIFY_BAY centred on endcap: %s' % _vg_block['bay'], flush=True)
+        _vg_block = dict(_vg) if isinstance(_vg, dict) else {'enabled': True}
+        _vg_block['bay'] = _verify_region.bay
+        config['verify_ground_truth'] = _vg_block
+        print('TRANSFER_VERIFY_BAY centred on endcap: %s' % _vg_block['bay'], flush=True)
 
     nav_factory = _resolve_factory(config, 'nav_factory')
     manip_factory = _resolve_factory(config, 'manip_factory')
