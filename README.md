@@ -1,5 +1,9 @@
 # Blender Supermarket — a generated store and a robot that restocks it
 
+> **View-only. All rights reserved. No permission to use. See [LICENSE](LICENSE).**
+> This repository is published solely so the development of the project can be followed and
+> understood. No licence to use, run, copy, modify or redistribute the code is granted.
+
 This repository builds a **photo-real supermarket entirely from data** and then runs a
 **mobile manipulation robot through a full restocking mission inside it, in NVIDIA Isaac
 Sim**. A procedurally generated Blender store (26 × 22 m, ~26 000 objects, 93 branded
@@ -233,7 +237,9 @@ blender-supermarket/
 ├── assets/textures/                 Poly Haven PBR maps + world HDRI (externally linked)
 ├── renders/ · report_assets/ · report.html   Rendered stills, thumbnails, portable report
 ├── RUNBOOK.md                       Every command (build, render, export, mission, benches)
-└── AGENTS.md                        Project build/architecture/sharp-edge notes
+├── AGENTS.md                        Project build/architecture/sharp-edge notes
+├── LICENSE                          Proprietary source-available view-only licence
+└── THIRD_PARTY_NOTICES.md           Third-party dependency + bundled-asset licence ledger
 ```
 
 Key design docs under `docs/`:
@@ -347,13 +353,25 @@ is accepted only in tests; production rejects it.
 
 ## Licence & attribution
 
-- **Repository licence: the owner's choice (not yet recorded in this repo).** No top-level
-  `LICENSE` file is committed. The bundled native ROS package
-  `native/restock_mapper_evidence/` declares **Apache-2.0**. Add a repo-wide `LICENSE` reflecting
-  the intended choice before publishing.
-- **Third-party components** carry their own licences: NVIDIA Isaac Sim / Isaac ROS / cuMotion
-  (NVIDIA licences), cuRobo (Apache-2.0), ROS 2 Jazzy & Nav2 (Apache-2.0), Blender (GPL),
-  py_trees (BSD), and the base scene's PBR materials + HDRI from **Poly Haven** (CC0).
+- **Repository licence: proprietary, source-available, view-only — see [`LICENSE`](LICENSE).**
+  The repository is published only so its development can be followed. No licence to use, run,
+  copy, modify, distribute, or train ML models on the code is granted. All rights reserved
+  (© 2026 Aile Robotics and Manish Saini).
+- **First-party code with a permissive SPDX header.** Two first-party components carry an
+  **Apache-2.0** declaration that predates this view-only publication and is *more permissive*
+  than the repository licence: the native ROS package `native/restock_mapper_evidence/`
+  (`<license>Apache-2.0</license>` in its `package.xml`) and the vendored human-safety core
+  `scripts/twin/humans/perception/` (`SPDX-License-Identifier: Apache-2.0`, copied byte-for-byte
+  from Aile's `ur10-setup`). Both are Aile's own code; the owner may reconcile these headers with
+  the view-only licence before the public flip.
+- **Third-party components are *referenced, not vendored*** and keep their own licences: NVIDIA
+  Isaac Sim / Isaac ROS / cuMotion (NVIDIA licences), cuRobo (Apache-2.0), ROS 2 Jazzy & Nav2
+  (Apache-2.0), **Blender** (GPL — used as an external tool to generate content; its Python API
+  is not shipped and the generated output is not a derivative of Blender), and py_trees (BSD).
+- **Bundled assets:** the base scene's PBR materials (`floor_tiles_08`, `white_plaster_02`) and
+  world HDRI (`wide_street_01`) are from **Poly Haven** and are **CC0** (public domain) — free to
+  redistribute. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the full dependency and
+  asset ledger.
 - **Attribution:** developed by Aile Robotics. Brand names on the modelled products are
   fictional; the store, products and prices are synthetic.
 
