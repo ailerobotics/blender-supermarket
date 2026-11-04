@@ -584,6 +584,7 @@ class RosMotionPort:
         self.plan = ActionClient(node, MoveGroup, namespace + '/move_action')
         self.execute = ActionClient(node, ExecuteTrajectory, namespace + '/execute_trajectory')
         self.state, self.handle, self.future = 'idle', None, None
+        self._cancel_requested = False   # sim-place-release-serialization-v1: a deliberate cancel in progress
         self.generation = 0
         # fm367: True when the move that just returned 'failed' did so on a SIM-clock move/settle
         # deadline miss (a render-pacing transient, safe to re-attempt) rather than a collision/plan
@@ -734,6 +735,7 @@ class RosMotionPort:
         # preplace stays on the pan branch (small joint move, cart-cage clearance preserved).
         self._near_start = bool(near_start)
         self._last_fault_sim_deadline = False   # fm367: fresh deadline-fault signal per move
+        self._cancel_requested = False     # sim-place-release-serialization-v1: fresh (no stale cancel) per move
         self._replan_attempts = 0          # fresh-seed re-plan budget for this move (see REPLAN_MAX)
         self._server_crash_retries = 0     # move_group-respawn re-send budget (see MOVE_GROUP_CRASH_RETRY_MAX)
         self._plan_accept_crash_retries = 0   # sim-robust-collect-stow-stall-v1: sim-planning-deadline re-sends
@@ -1299,6 +1301,7 @@ class RosMotionPort:
         # 'planning failed (exhausted within wall cap)' the instant it entered planning
         # (PLAN_WALL_DIAG elapsed=49.6 s on a plan that had just started).
         self._last_fault_sim_deadline=False   # fm367: fresh deadline-fault signal per move
+        self._cancel_requested=False   # sim-place-release-serialization-v1: fresh (no stale cancel) per move
         self._replan_attempts=0
         self._server_crash_retries=0
         self._plan_accept_crash_retries=0   # sim-robust-collect-stow-stall-v1: sim-planning-deadline re-sends
@@ -2316,6 +2319,69 @@ class RosMotionPort:
         self._reattach_failed = False         # sim-robust-movegroup-double-death-v1 (gap 1)
         self._movegroup_death_seen = False    # sim-robust-phase-timeout-during-recovery-v1: fresh per op
         self._mg_server_was_ready = None
+
+    def cancel(self):
+        """sim-place-release-serialization-v1: DELIBERATELY cancel the in-flight move for a PHASE TRANSITION
+        (the contact-triggered weld release at the collect set-down), NOT a fault. Unlike stop(), fires NO
+        global /manipulation/stop -- that latches PERMANENTLY in the Isaac host (check_health -> 'host
+        emergency stop') and would kill the run; unlike a deadline/crash it is an intended, controller-driven
+        stop. Request the action cancel (the arm stops driving and the simulator holds its last commanded
+        pose -- the cancel is the stop), and record it so cancel_outcome() can report the terminal result.
+        The controller then polls cancel_outcome() within a bounded sim-time grace and mutates the planning
+        scene (the release detach) only once a TERMINAL (not-in-flight) outcome is in hand -- never racing a
+        live plan/execute (the coldwin43 _PLAN_IN_FLIGHT_STATES invariant). Idempotent per cancel request."""
+        self._cancel_requested = True
+        if self.handle is not None:
+            try:
+                self.handle.cancel_goal_async()
+            except Exception:   # noqa: BLE001 -- a handle that cannot be cancelled is already terminating
+                pass
+
+    def cancel_outcome(self):
+        """sim-place-release-serialization-v1: the terminal outcome of a cancel() in progress, WITHOUT ever
+        firing the global emergency stop. Returns one of:
+          None          -- still settling (the execute result has not arrived): the move is still in flight,
+                            keep waiting (the controller bounds the wait); never mutate the scene yet.
+          'succeeded'   -- the goal SUCCEEDED before the cancel took effect (reached the place goal).
+          'cancelled'   -- the goal terminated CANCELED/ABORTED (the normal cancel outcome).
+          'error'       -- the result future raised (a broken terminal): the controller reports and does NOT
+                            detach blindly.
+        On ANY terminal outcome it moves the state OUT of _PLAN_IN_FLIGHT_STATES (so the pending detach's
+        guard passes) and invalidates any late action callback (generation bump) -- a clean move teardown
+        that never e-stops. Reads only the already-resolved result future; no ROS spin / GPU here."""
+        if not getattr(self, '_cancel_requested', False):
+            return None
+        state = getattr(self, 'state', 'idle')
+        if state in ('idle', 'succeeded', 'failed'):
+            # Already terminal (the move ended on its own before/at the cancel) -> settled.
+            return self._finish_cancel('succeeded' if state == 'succeeded' else 'cancelled')
+        if state != 'execute_result':
+            # A non-execute in-flight state (planning / accept / await_settle) is not a descent pressing the
+            # carton; the cancel request has halted dispatch -> treat as settled (cancelled) now.
+            return self._finish_cancel('cancelled')
+        f = self.future
+        if f is None:
+            return self._finish_cancel('cancelled')
+        if not f.done():
+            return None                 # the execute goal has not reached a terminal result yet -> wait
+        try:
+            status = f.result().status
+        except Exception:               # noqa: BLE001 -- a raised result future is a broken terminal
+            return self._finish_cancel('error')
+        if status == 4:                 # GoalStatus.STATUS_SUCCEEDED -- completed before the cancel landed
+            return self._finish_cancel('succeeded')
+        return self._finish_cancel('cancelled')   # CANCELED(5)/ABORTED(6)/other terminal
+
+    def _finish_cancel(self, outcome):
+        """sim-place-release-serialization-v1: drive the port to a TERMINAL, not-in-flight state after a
+        cancel, invalidating any late callback (generation bump) -- like ack_failed_result()/_fail_hold()'s
+        teardown but for a deliberate cancel, and never firing the global emergency stop."""
+        self.generation += 1            # invalidate any late action callback from the cancelled goal
+        self.state = 'succeeded' if outcome == 'succeeded' else 'failed'   # terminal, NOT in-flight
+        self.handle = None
+        self.future = None
+        self._cancel_requested = False
+        return outcome
 
     def update_payload(self, held, profile):
         # Must update BOTH MoveIt and cuMotion collision attachment, not PhysX
