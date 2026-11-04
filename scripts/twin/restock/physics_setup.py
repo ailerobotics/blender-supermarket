@@ -150,6 +150,53 @@ def configure_wheel_traction(stage, articulation_root, coeff):
     return bound
 
 
+def configure_caster_suspension(stage, articulation_root, spec):
+    """sim-chassis-pitch-stability-v1: author the PhysX LINEAR drive on each sprung prismatic caster-fork
+    joint (``front_caster_lift`` / ``rear_caster_lift``) so the chassis gains real pitch stiffness.
+
+    No-op (returns ``None``) unless ``spec.caster_suspension`` is set -- so a run without the suspension
+    spec field is byte-identical. The drive is a FORCE-type position drive exactly like the wheel drives:
+
+      * stiffness = ``spec.caster_spring_n_per_m`` (the spring k, N/m),
+      * damping   = ``spec.caster_damping_n_s_per_m`` (ring suppression),
+      * maxForce  = a high ceiling (the sprung caster carries the ground reaction, hundreds of N),
+      * targetPosition = ``-preload/k`` m -- commanding the fork DOWN into the floor by the preload
+        deflection so the spring holds both casters in LIGHT ground contact at rest (the sign puts the
+        ground reaction UP = ``preload``; prismatic axis is +Z/up, child = the suspender, so a NEGATIVE
+        target extends the caster down. GPU-verify the sign on first boot: a caster that RETRACTS up
+        instead of seating is the inverted convention -- flip the target sign).
+
+    The spring stiffness is what bounds the pitch (``2 k d^2`` both-loaded, ``k d^2`` single); the preload
+    only guarantees at-rest contact and sets the drive-wheel share (traction). Pure USD authoring; no
+    stepping. Returns the authored joint paths + the drive values for the assembly evidence."""
+    from pxr import Usd, UsdPhysics, Sdf
+    if not getattr(spec, 'caster_suspension', False):
+        return None
+    k = float(spec.caster_spring_n_per_m)
+    preload = float(spec.caster_preload_n)
+    damping = float(spec.caster_damping_n_s_per_m)
+    target_m = -preload / k if k > 0 else 0.0
+    articulation = stage.GetPrimAtPath(articulation_root)
+    root = articulation.GetParent() if articulation else None
+    if not root or not root.IsValid() or root.IsPseudoRoot():
+        root = articulation
+    authored = []
+    for p in (Usd.PrimRange(root) if root else []):
+        if p.GetName() in ('front_caster_lift', 'rear_caster_lift'):
+            drive = UsdPhysics.DriveAPI.Apply(p, 'linear')
+            drive.CreateTypeAttr('force')
+            drive.CreateStiffnessAttr(k)
+            drive.CreateDampingAttr(damping)
+            drive.CreateMaxForceAttr(2000.0)
+            drive.CreateTargetPositionAttr(target_m)
+            drive.CreateTargetVelocityAttr(0.0)
+            authored.append(str(p.GetPath()))
+    if len(authored) != 2:
+        raise ValueError(f'expected two sprung caster-lift joints, authored {len(authored)}')
+    return dict(joints=authored, spring_n_per_m=k, damping_n_s_per_m=damping,
+                preload_n=preload, target_position_m=round(target_m, 6), max_force_n=2000.0)
+
+
 def configure_scene_physics(stage, scene_path):
     """Enable PhysX resting-contact stabilization on the composed scene.
 
@@ -458,9 +505,19 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # ['wheel_drive'] = {'max_force': N, 'damping': D}; absent => the class defaults (80 N, 100),
     # byte-identical. Efficacy is a GPU sweep (run-326).
     _wd = config.get('wheel_drive') or {}
+    # sim-chassis-pitch-stability-v1 FALLBACK: opt-in sim-only station pitch hold (RUNTIME key
+    # chassis_station_pitch_hold, default off => byte-identical). When on, the chassis parking brake
+    # also locks pitch/roll at a manipulation station so an unsprung see-saw chassis cannot rock the
+    # welded carton off level. The PREFERRED source fix is the compliant caster suspension above.
+    _station_pitch_hold=bool(config.get('chassis_station_pitch_hold'))
     controller=MobileController(stage,paths['base_link'],cart_path,
         [paths['left_wheel_joint'],paths['right_wheel_joint']],spec=spec,
-        drive_max_force=_wd.get('max_force'), drive_damping=_wd.get('damping'))
+        drive_max_force=_wd.get('max_force'), drive_damping=_wd.get('damping'),
+        station_pitch_hold=_station_pitch_hold)
+    if _station_pitch_hold:
+        print('CHASSIS_STATION_PITCH_HOLD enabled (sim-only workaround, like CAGE_COLLISION): the '
+              'station parking brake locks chassis pitch/roll while braked, released with the brake',
+              flush=True)
     # fm433: confirm the wheel-drive tune actually reached the joints at runtime (run-326 applied it -- the
     # mission.usda carried maxForce/damping -- but it left no log, so 'applied vs not' could not be read
     # from the console; the tune turned out ineffective for the base's intrinsic under-tracking, which is a
@@ -512,6 +569,18 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
                 _ndt += 1
         scene_physics['arm_drive_type'] = 'force'
         print(f'ARM_DRIVE_TYPE force authored on {_ndt} arm joint drives (pre-reset)', flush=True)
+    # sim-chassis-pitch-stability-v1: author the sprung caster suspension's PhysX linear drives BEFORE
+    # world.reset() so PhysX parses the force-mode spring. No-op unless spec.caster_suspension is set
+    # (then the URDF has no caster_lift joints and this finds nothing) => byte-identical when absent.
+    caster_suspension=configure_caster_suspension(stage,paths['articulation'],spec)
+    if caster_suspension is not None:
+        scene_physics['caster_suspension']=caster_suspension
+        print('CASTER_SUSPENSION enabled spring=%.0f N/m damping=%.0f preload=%.0f N target=%.5f m '
+              'joints=%d (compliant sprung casters give the chassis pitch stiffness; off => rigid '
+              'caster_lift_m recess, byte-identical)'
+              % (caster_suspension['spring_n_per_m'],caster_suspension['damping_n_s_per_m'],
+                 caster_suspension['preload_n'],caster_suspension['target_position_m'],
+                 len(caster_suspension['joints'])),flush=True)
     robot=world.scene.add(SingleArticulation(prim_path=paths['articulation'],name='restock_robot'))
     robot_body=world.scene.add(SingleRigidPrim(prim_path=paths['base_link'],name='restock_base'))
     cart_body=world.scene.add(SingleRigidPrim(prim_path=cart_path,name='restock_cart'))
