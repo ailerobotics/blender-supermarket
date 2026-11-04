@@ -138,11 +138,19 @@ _RUNTIME_SAFE_IGNORE = frozenset({'_launch_environment', 'output', 'stages', 'st
                                   'start_staging', 'stop_after'})
 
 
+# Sentinel for ``decide_reset(stage_state=...)`` meaning "the stage census is DEFERRED to a post-reset
+# re-check" -- used by the reset-then-census ordering (:func:`plan_and_run_reset` with a ``census``
+# callback), where the stage cannot be judged until AFTER the reset has run and cleaned it. The pre-reset
+# gate then reports ``stage_clean`` as a pass-pending (so a HOST-key / VRAM doubt still cold-boots without
+# touching the stage), and the authoritative ``stage_clean`` verdict comes from the post-reset census.
+STAGE_CHECK_DEFERRED = object()
+
+
 def decide_reset(
     prev_config: dict,
     next_config: dict,
     *,
-    stage_state: Optional[StageState] = None,
+    stage_state=None,
     vram_used_mib: Optional[float] = None,
     post_boot_baseline_mib: Optional[float] = None,
     vram_tol_mib: float = DEFAULT_VRAM_TOL_MIB,
@@ -168,7 +176,9 @@ def decide_reset(
     checks.append(Check('config_host_stable', not changed,
                         '' if not changed else 'HOST/boot-fixed keys changed: ' + ', '.join(changed)))
 
-    if stage_state is None:
+    if stage_state is STAGE_CHECK_DEFERRED:
+        checks.append(Check('stage_clean', True, 'deferred to post-reset census'))
+    elif stage_state is None:
         checks.append(Check('stage_clean', False, 'no stage census supplied (cannot prove the stage is clean)'))
     else:
         leaked, missing = stage_state.leaked(), stage_state.missing()
@@ -305,6 +315,7 @@ def plan_and_run_reset(
     steps: Sequence[SequenceStep],
     *,
     stage_state: Optional[StageState] = None,
+    census: Optional[Callable] = None,
     vram_used_mib: Optional[float] = None,
     post_boot_baseline_mib: Optional[float] = None,
     vram_tol_mib: float = DEFAULT_VRAM_TOL_MIB,
@@ -315,15 +326,68 @@ def plan_and_run_reset(
     """Gate then (only if the gate passes) run the warm-reset sequence. Returns a
     :class:`WarmOutcome` whose ``reused`` is True ONLY when the decision allowed reuse AND every
     reset step completed. On any cold-boot decision the sequence is NOT run (no stage is touched);
-    on any step refusal ``reused`` is False with the step named. Never raises for a refusal."""
-    decision = decide_reset(
-        prev_config, next_config, stage_state=stage_state,
+    on any step refusal ``reused`` is False with the step named. Never raises for a refusal.
+
+    Two orderings, chosen by whether ``census`` is supplied:
+
+    * ``census=None`` (legacy): the supplied ``stage_state`` is the PRE-reset census and gates the whole
+      decision up front; the sequence runs only if it (and the config/VRAM gates) pass. Byte-identical to
+      before.
+
+    * ``census=<callable>`` (reset-then-census): the reset must itself LEAVE the stage clean, so the stage
+      census is read AFTER the reset, not before. The non-stage gates (HOST/boot-fixed config stability,
+      VRAM returned, caller doubts) run FIRST -- a failure there cold-boots WITHOUT touching the stage.
+      Otherwise the reset sequence runs (it releases the leaked brakes/weld + restores the torn-down
+      cameras), then ``census()`` is read and the ``stage_clean`` gate is applied to that POST-reset state.
+      A stage still dirty after the reset -- or a refused reset step, or a census that itself fails -- is a
+      cold boot with the SAME named ``WARM_RESET decision=cold_boot`` line. This is the ordering the
+      consecutive-run launcher uses so ``reset_host_state``'s stage cleanup runs before the census judges
+      it (sim-warm-reset-stage-clean-v1)."""
+    if census is None:
+        decision = decide_reset(
+            prev_config, next_config, stage_state=stage_state,
+            vram_used_mib=vram_used_mib, post_boot_baseline_mib=post_boot_baseline_mib,
+            vram_tol_mib=vram_tol_mib, extra_doubts=extra_doubts)
+        if not decision.reuse:
+            if on_log is not None:
+                on_log('WARM_RESET decision=cold_boot ' + decision.reason)
+            return WarmOutcome(reused=False, reason=decision.reason, decision=decision)
+        seq = run_reset_sequence(steps, clock=clock, on_log=on_log)
+        return WarmOutcome(reused=seq.ok, reason=(decision.reason if seq.ok else seq.reason),
+                           decision=decision, sequence=seq)
+
+    # Reset-then-census ordering. Phase 1: the non-stage gates, with the stage check DEFERRED so a
+    # HOST/boot-fixed or VRAM doubt still cold-boots without running the reset (never touch the stage
+    # when we already know we cannot reuse the session).
+    pre = decide_reset(
+        prev_config, next_config, stage_state=STAGE_CHECK_DEFERRED,
         vram_used_mib=vram_used_mib, post_boot_baseline_mib=post_boot_baseline_mib,
         vram_tol_mib=vram_tol_mib, extra_doubts=extra_doubts)
-    if not decision.reuse:
+    if not pre.reuse:
         if on_log is not None:
-            on_log('WARM_RESET decision=cold_boot ' + decision.reason)
-        return WarmOutcome(reused=False, reason=decision.reason, decision=decision)
+            on_log('WARM_RESET decision=cold_boot ' + pre.reason)
+        return WarmOutcome(reused=False, reason=pre.reason, decision=pre)
+
+    # Phase 2: run the reset (it must leave the stage clean). A refusal is a cold boot, step named.
     seq = run_reset_sequence(steps, clock=clock, on_log=on_log)
-    return WarmOutcome(reused=seq.ok, reason=(decision.reason if seq.ok else seq.reason),
-                       decision=decision, sequence=seq)
+    if not seq.ok:
+        if on_log is not None:
+            on_log('WARM_RESET decision=cold_boot ' + seq.reason)
+        # The pre-gate passed but the reset refused: the final decision IS the sequence refusal.
+        return WarmOutcome(reused=False, reason=seq.reason, decision=pre, sequence=seq)
+
+    # Phase 3: read the POST-reset census and apply the authoritative stage_clean gate (re-checking the
+    # config/VRAM gates too; a failed census is itself a dirty-stage doubt).
+    try:
+        post_stage = census()
+    except Exception as exc:  # noqa: BLE001 -- a failed census is a doubt, not a crash
+        post_stage = StageState(dirty=True, note=f'post-reset census failed: {exc}')
+    post = decide_reset(
+        prev_config, next_config, stage_state=post_stage,
+        vram_used_mib=vram_used_mib, post_boot_baseline_mib=post_boot_baseline_mib,
+        vram_tol_mib=vram_tol_mib, extra_doubts=extra_doubts)
+    if not post.reuse:
+        if on_log is not None:
+            on_log('WARM_RESET decision=cold_boot ' + post.reason)
+        return WarmOutcome(reused=False, reason=post.reason, decision=post, sequence=seq)
+    return WarmOutcome(reused=True, reason=post.reason, decision=post, sequence=seq)

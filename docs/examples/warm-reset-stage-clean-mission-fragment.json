@@ -1,0 +1,20 @@
+{
+  "_comment": "sim-warm-reset-stage-clean-v1: NO new config keys. The fix is in code (reset_host_state now releases the leaked brakes/weld at their owners and restores the torn-down station cameras BEFORE the between-runs census, and the census excludes the volatile Isaac RTX render-target subtree). The warm two-run collect-only acceptance uses the SAME runtime keys as sim-warm-reset-hooks-v1 (warm_reset + the in-repo default hooks); merge them into the integration lane's mission-runtime JSON (those configs live outside this repo). RUNTIME keys only -- a HOST/ENV placement is silently inactive.",
+
+  "warm_reset": "twin.restock.warm_reset_provider:build",
+  "_warm_reset": "The production provider (unchanged resolution). isaac_bundle.create calls build(...) ONCE after the bundle is assembled and wires the WarmResetProvider onto bundle.warm_reset + its stage_census onto bundle.warm_stage_state.",
+
+  "_warm_reset_hooks_default": "OMIT warm_reset_hooks to use the in-repo default twin.restock.warm_reset_hooks:build. reset_host_state now runs FIVE ordered sub-steps: release_sim_attachments (the OWNERS release /CartParkingBrake, /MobileGraspBrake, /MobileBrake and the <gripper>/sim_attach_fallback weld, clearing their engaged flags too), restore_sensing (CameraRig.recreate_destroyed re-authors any station camera the stage-scoped/VRAM teardown destroyed), then arm_to_start, clear_manipulation, rearm_heartbeats. A failed step still prints the named WARM_RESET_HOOK_FALLBACK line and cold-boots with the reason.",
+
+  "start_at": "collect",
+  "stop_after": "collect",
+  "_bench": "Stage-isolated bench keys so the acceptance is a fast collect-only loop; also settable via --start-at collect --stop-after collect.",
+
+  "_acceptance": "Two consecutive collect-only missions on ONE warm session (reusing the ~215 s boot):  run_mobile_restock.py --runtime-config <mission.json with these keys> --output <out> --consecutive-runs 2 --start-at collect --stop-after collect --host-stack  (add --heavy-threshold-mb 2500 for the always-on whispr; add RESTOCK_COLLECT_GROUND_TRUTH=1 if the source decode is not yet green).",
+
+  "_expect_pass": "Attempt 2 WARM re-seats, NOT cold_boot. The console between runs shows, in order: WARM_RESET step=reset_stage_and_reseed begin -> WARM_RESET_HOOK step=release_sim_attachments ok (applied=[release_cart_brake, release_base_full_brake, release_brake, release_sim_attach]) -> WARM_RESET_HOOK step=restore_sensing ok (restored=[<shelf/source camera ids>]) -> arm_to_start/clear_manipulation/rearm_heartbeats ok -> WARM_RESET step=preflight_verify ok -> WARM_RESET sequence complete. The warm-session.json record for run 1 then shows warm.reused=true and warm.decision.checks all ok (config_host_stable, stage_clean, vram_returned, no_extra_doubt). There is NO 'WARM_RESET decision=cold_boot ... leaked prims ... missing prims ...' line (the warmtwo1 failure). REPORT the warm relaunch time (warm-session.json sequence.wall_seconds) as the hand-off number -- it should be a stage re-seat + preflight (seconds-to-tens-of-seconds), not a ~215 s boot.",
+
+  "_expect_fail_is_still_loud": "If the reset genuinely cannot clean the stage (a torn-down non-camera prim nothing restores, or a refused reset step), the SAME named 'WARM_RESET decision=cold_boot cold boot: ...' line still fires and the loop cold-boots attempt 2 with the reason -- the census is never loosened to tolerate a leaked physics joint.",
+
+  "_out_of_scope": "The carton-level re-solve, the drive-to-shelf leg and the collision-freshness band are separate lanes; this acceptance stops after collect."
+}

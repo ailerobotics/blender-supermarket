@@ -28,6 +28,8 @@ def _ops(calls, *, fail=None, faulted_after=False, app_running=True):
         return fn
     return wrh.HostOps(
         warm_safe_halt=_step('warm_safe_halt'),
+        release_sim_attachments=_step('release_sim_attachments'),
+        restore_sensing=_step('restore_sensing'),
         arm_to_start=_step('arm_to_start'),
         clear_manipulation=_step('clear_manipulation'),
         rearm_heartbeats=_step('rearm_heartbeats'),
@@ -124,10 +126,13 @@ def _parts(*, gate=None, manip=None, hold_arm=True, via_transport=False, with_bu
 def test_reset_host_state_runs_every_step_in_order():
     calls = []
     assert _hooks(calls).reset_host_state(attempt=2, now=2.0) is True
-    assert calls == list(wrh.RESET_STEP_NAMES) == ['arm_to_start', 'clear_manipulation', 'rearm_heartbeats']
+    assert calls == list(wrh.RESET_STEP_NAMES) == [
+        'release_sim_attachments', 'restore_sensing',
+        'arm_to_start', 'clear_manipulation', 'rearm_heartbeats']
 
 
-@pytest.mark.parametrize('bad', ['arm_to_start', 'clear_manipulation', 'rearm_heartbeats'])
+@pytest.mark.parametrize('bad', ['release_sim_attachments', 'restore_sensing',
+                                 'arm_to_start', 'clear_manipulation', 'rearm_heartbeats'])
 def test_reset_host_state_stops_at_first_refusal_and_names_the_step(bad, capsys):
     calls = []
     with pytest.raises(wrp.WarmResetRefused) as ei:
