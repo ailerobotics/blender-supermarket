@@ -186,6 +186,44 @@ def freshness_scale(dt):
     return d / DEFAULT_DT
 
 
+# sim-collision-dt-render-lead-floor-v1: the collision/ESDF incorporation RELAY-LEAD window (seconds at
+# 1/60). The mirrored collision stamp the controller reads (``collision_time``) is nvblox's ESDF
+# integration time, which rides the Isaac RENDER clock; under heavy live_pose render pacing that clock
+# runs AHEAD of the host packet clock the controller reads as ``now``, so a perfectly FRESH collision
+# stamp legitimately LEADS ``now`` (is marginally future). coldwin30 tripped the collect preplace with
+# ``collision_dt=-0.5333`` against a hand-set -0.5 floor -- the collision world led ``now`` by 0.53 s,
+# which is FRESHER, not stale. The lead is bounded by one incorporation window on top of the
+# one-to-few-step delivery render lead, and like every other freshness window it is a per-FRAME budget
+# (nvblox integrates rendered frames; ``rendering_dt`` tracks ``physics_dt``), so it scales with the
+# step via ``freshness_scale``. 0.5 s matches the nvblox incorporation freshness window
+# (``restock_host.incorporation_ack._esdf_fresh_window_s`` / ``isaac_sensors`` ``esdf_fresh_window``).
+COLLISION_RELAY_LEAD_S = 0.5
+
+
+def collision_band_floor(render_lead_base_s, dt):
+    """Magnitude (>= 0 seconds) of the controller collision/feedback freshness-band FLOOR: how far a
+    stamp may LEAD ``now`` (be future) and still count as fresh. PURE.
+
+    DERIVED (sim-collision-dt-render-lead-floor-v1) from the configured delivery render lead plus the
+    step-scaled ESDF incorporation window, so the heavy-live_pose relay lead (measured ~0.53 s at the
+    default step, coldwin30) sits inside the band WITHOUT a hand-set ``RESTOCK_FRESH_RENDER_LEAD_S``
+    override::
+
+        floor = (render_lead_base_s + COLLISION_RELAY_LEAD_S) * freshness_scale(dt)
+
+    At the DEFAULT step (1/60) and the default delivery lead (0.2 s) this is 0.7 s -- exactly the value
+    the integration lane had to bump the env to for coldwin31. It GENERALISES PR 288's step-aware rule
+    (``freshness_scale``) to the default step: the incorporation-window term contributes 0.5 s even at
+    1/60, where the pure ``base * freshness_scale`` scaling was a no-op and left the floor at the bare
+    delivery lead. Only this (future-lead) floor gains headroom; the POSITIVE (stale) ceiling -- the
+    safety side -- is unchanged, so a genuinely stale stamp still trips. A non-finite/negative base is
+    treated as 0."""
+    base = float(render_lead_base_s)
+    if not math.isfinite(base) or base < 0:
+        base = 0.0
+    return (base + COLLISION_RELAY_LEAD_S) * freshness_scale(dt)
+
+
 def dt_from_env(environ=None):
     """The resolved physics step (seconds) a process should scale its freshness windows by, read from
     the ``RESTOCK_PHYSICS_DT`` env the launcher/host-session export. Absent/malformed/out-of-range =>
