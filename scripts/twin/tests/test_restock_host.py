@@ -847,7 +847,12 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     # to shelf_approach (paired with runtime shelf_staging; the config_preflight
                                     # flow-consistency gate refuses a split). Inert for every non-live_pose
                                     # transfer (collect/legacy): _repositions_before_place needs live_pose too.
-                                    'transfer_service_carry'})
+                                    'transfer_service_carry',
+                                    # sim-collect-press-regression-v1: carton_level kept enabled alongside
+                                    # transfer_service_carry (the place-leveling / CARTON_TILT guard that keeps
+                                    # the box parallel to the ground); it was dropped when the key was replaced
+                                    # by transfer_service_carry and is restored here.
+                                    'carton_level'})
         self.assertEqual(len(cfg['collect_place_preplace_shape']), 6)   # full 6-joint upright preplace shape
         self.assertLessEqual(cfg['collect_place_preplace_shape'][3], 0.65)  # wrist_1 at/below the stop
         self.assertIsInstance(cfg['collect_place_wrist_guard'], bool)

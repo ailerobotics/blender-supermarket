@@ -64,6 +64,63 @@ BOOT_FIXED_KEYS = (
 DEFAULT_VRAM_TOL_MIB = 400.0
 
 
+# ---- post-reset sim-clock residual tolerance (the warm-reset clock guard) --------------------------
+#
+# ``world.reset()`` is expected to drop the sim clock back to ~0, and the warm-reset ``reset_stage``
+# step gates on that: a reset that silently NO-OP'd leaves the FULL mission clock (tens of seconds) and
+# must refuse the reuse. But a HEALTHY ``world.reset()`` does NOT leave the clock at exactly 0 -- Isaac's
+# own reset advances it by a small, fixed number of physics steps. ``World.reset()`` ->
+# ``SimulationContext.reset(soft=False)`` does ``stop()`` then ``play()``: the STOP timeline event zeros
+# the clock (``_timeline_timer_callback_fn``: ``self._current_time = 0``), then the post-reset
+# ``app.update()`` tick(s) Isaac issues inside ``stop()``/``play()`` re-advance it one physics step each
+# via ``_physics_timer_callback_fn`` (``self._current_time += step_size``). The first GPU warm two-run
+# (warmacc3) measured this residual at EXACTLY two configured steps -- ``current_time=0.03333333507`` at
+# the configured 1/60 s step (``PHYSICS_STEP dt=0.0166667s hz=60``), i.e. ``2 x physics_dt`` -- so the
+# original ``> 1e-6`` guard rejected every normal post-reset residual and the provider cold-booted every
+# warm attempt.
+#
+# The tolerance is therefore ``ISAAC_RESET_SETTLE_TICKS`` CONFIGURED physics steps: it is derived from
+# the run's configured step (``physics_step.resolve_dt``), never a hand time-constant, so it scales with
+# the step (1/30, 1/36, ...). Because a failed/no-op reset leaves hundreds of steps of residual, this
+# tight dt-derived bound still refuses a real failure with the same named line. ``ISAAC_RESET_SETTLE_TICKS``
+# is a named count reflecting Isaac's deterministic reset (stop+play) tick behaviour measured on warmacc3;
+# a residual beyond it fails CLOSED to a cold boot, so if a future Isaac/Fabric revision ever settles in
+# more than two steps the only cost is a (safe) cold-boot fallback -- bump this count then.
+#
+# NOTE ON THE BRIEF: the task brief modelled this residual as "one physics step at a 1/30 s step". The run
+# evidence (warmacc3 console + Isaac ``simulation_context.py``) shows the configured step is 1/60 and the
+# residual is TWO such steps (two ``_physics_timer_callback_fn`` ticks), which is why the tolerance is two
+# configured steps -- tolerating only one would keep refusing warmacc3's normal residual and every warm
+# reuse would still cold-boot. See ``data/sim-warm-reset-clock-guard-v1/report.md``.
+ISAAC_RESET_SETTLE_TICKS = 2
+
+# Absolute float slack on the boundary (the recorded residual is ``2/60 + ~1.7e-9`` from float
+# accumulation, so the <= boundary needs a hair of slack; far tighter than one physics step).
+CLOCK_RESIDUAL_EPS_S = 1e-6
+
+
+def clock_reset_residual_detail(current_time, physics_dt):
+    """Judge the sim clock AFTER ``world.reset()`` in the warm-reset ``reset_stage`` step.
+
+    Returns ``None`` when the clock reset acceptably (residual within ``ISAAC_RESET_SETTLE_TICKS``
+    configured physics steps -- Isaac's own post-reset settle), or a refusal DETAIL string (leading
+    with the historical ``world.reset() did not reset the sim clock (current_time=...)`` line) when the
+    residual is larger, meaning the reset did not actually take. ``current_time`` ``None`` (the live
+    handle exposes no clock) returns ``None`` -- this gate is not applicable, the other census/verify
+    gates still run. ``physics_dt`` is the run's CONFIGURED step in seconds (``resolve_dt``), so the
+    bound is dt-derived, not a hand constant."""
+    if current_time is None:
+        return None
+    cur = float(current_time)
+    dt = float(physics_dt)
+    tol = ISAAC_RESET_SETTLE_TICKS * dt + CLOCK_RESIDUAL_EPS_S
+    if cur > tol:
+        return (f'world.reset() did not reset the sim clock (current_time={current_time}; '
+                f'residual {cur:g}s exceeds the tolerated post-reset settle of '
+                f'{ISAAC_RESET_SETTLE_TICKS} x physics_dt {dt:g}s = {tol:g}s)')
+    return None
+
+
 @dataclass(frozen=True)
 class StageState:
     """A cheap post-teardown snapshot of the live stage the integration lane produces (prim census).

@@ -204,6 +204,11 @@ def _build_production_ops(*, app, assembly, parts, plan, config, output, scenari
     load); each returned op touches the live stage only when the provider actually runs."""
     adapter = parts.get('adapter') if isinstance(parts, dict) else None
 
+    # The run's CONFIGURED physics step, used to size the post-reset clock-residual tolerance in
+    # reset_stage (derived from the step, never a hand constant). Absent/default => exactly 1/60.
+    from .physics_step import resolve_dt as _resolve_physics_dt
+    physics_dt = _resolve_physics_dt(config)
+
     def list_prims():
         # Traverse the live USD stage once and return every prim path. Between-runs only (cheap enough);
         # the diff vs the baseline is what names a leak. Falls back to the stage's direct children if a
@@ -243,9 +248,15 @@ def _build_production_ops(*, app, assembly, parts, plan, config, output, scenari
         if world is None or not hasattr(world, 'reset'):
             raise WarmResetRefused('no live World handle to reset physics / sim clock')
         world.reset()
+        # Isaac's world.reset() (stop+play) re-advances the clock by a small fixed number of physics
+        # steps -- warmacc3 measured exactly two 1/60 steps (current_time=0.0333). Tolerate up to
+        # ISAAC_RESET_SETTLE_TICKS CONFIGURED steps (resolved from config, not a hand constant); a larger
+        # residual means the reset did not take and still refuses with the same named line. (The old
+        # `> 1e-6` guard rejected every normal residual, so every warm attempt cold-booted.)
         cur = getattr(world, 'current_time', None)
-        if cur is not None and float(cur) > 1e-6:
-            raise WarmResetRefused(f'world.reset() did not reset the sim clock (current_time={cur})')
+        detail = ws.clock_reset_residual_detail(cur, physics_dt)
+        if detail is not None:
+            raise WarmResetRefused(detail)
 
     def reseat(*, attempt, now):
         # Re-establish + verify the next run's start precondition. apply_start_state / verify_dock_seat
