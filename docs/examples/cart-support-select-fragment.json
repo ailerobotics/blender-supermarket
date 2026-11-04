@@ -1,0 +1,64 @@
+{
+  "_comment": "sim-cart-support-select-v1: WHERE on the Rollwagen the collect carton can be placed. ROOT CAUSE (proven on CPU from the author_cart geometry + the coldwin43-46 logs, NOT assumed): the DECK (/Rollwagen/chassis/deck) is UNPLACEABLE FROM ABOVE -- its own UPPER SHELF (/Rollwagen/chassis/shelf) sits directly over it and is a KEPT collider the carton cannot pass through, so a vertical descent to the deck drives the carton -12 mm INTO the shelf mid-descent (coldwin46: CARTON_TILT -2.08 at carton-centre z 0.58, well above the deck). The UPPER SHELF is open from above: a vertical cw43-style descent clears the mouth posts by >= 177 mm and every kept collider by >= 30 mm. So the fix is to SELECT the shelf as the place support, release at the true shelf TOP, and place at the xy with the largest footprint margin. The 2.0 deg tilt bound, 0.15 s grace, carton dims, the collider filter and tow lanes are UNCHANGED. The set-down tilt (PR333 contact release), release serialization (PR334) and one-height resolution (PR335) stay SOLVED -- this lane only picks the surface + xy.",
+
+  "_measured_geometry_cart_body_frame": {
+    "_comment": "From twin.mobile_assets.author_cart (the cart authored at origin; the same bodies twin.restock.cage_collision enumerates). All z in the CART BODY frame. The live mission cart sits ~+0.0315 m higher, so the WORLD shelf top is ~0.9712 (coldwin45 mission.usda) -- that is the value to pass as --support-top-z-world; the body-frame numbers below are the honest, composition-independent geometry the CPU proof uses.",
+    "deck_top_face": 0.225,
+    "shelf_slab": {"x": [-0.380, 0.380], "y": [-0.320, 0.320], "top_face": 0.9325, "bottom_face": 0.9075},
+    "mouth_posts_post_2_post_3_inner_face_x": 0.3675,
+    "legacy_constant_0p9325": "the cart-body shelf TOP face (0.9325); in WORLD it is ~0.9315 = the shelf BOTTOM. Either way it is NOT the deck and must not feed a deck descent.",
+    "carton_footprint_at_yaw_minus_half_pi": "0.45 (local x) -> cart-y extent (half 0.225); 0.30 (local y) -> cart-x extent (half 0.15)"
+  },
+
+  "_chosen_placement": {
+    "support": "/Rollwagen/chassis/shelf (stock_supports index 1)",
+    "load_center_body_xy": [0.135, 0.0],
+    "_why_this_xy": "Shelf footprint supports the carton with >= 30 mm margin for load_x in [-0.20, 0.20], load_y in [-0.065, 0.065]. The LARGEST combined margin is y-limited at 95 mm and holds for any load_x in [-0.135, 0.135]; 0.135 is the SHALLOWEST point in that band -> the least arm extension (reach ~1.13 m < UR10 1.3 m), the least loaded droop, and the widest post clearance. load_y = 0 maximises the (binding) y-edge margin.",
+    "_honest_clearance_at_this_xy": "mouth posts (pad vs post_2/post_3) clear ~185 mm; every kept collider (deck/drawbar) and every cage bar clears by >> 30 mm; closest cage bar to the resting carton box is side_0_horizontal_6 at +89 mm.",
+    "_camera_check": "The RESTING carton box (cart x[-0.015,0.285] y[+-0.225] z[0.933,1.113]) intersects NO cage bar in 3D (closest +89 mm), so there is NO visible cage-bar-through-carton intersection from the overhead mission camera. No xy adjustment needed."
+  },
+
+  "_cw44_cw45_fall_explained": "cw44 (xy 0.33) OVERHANGS: its front face sits at cart-x 0.48, 100 mm PAST the shelf +x edge (0.38) -> unsupported -> tips off. cw45 (xy 0.18) is supported in-plane (50 mm front margin) but fell on HEIGHT: it was released at the legacy constant, which lands the carton bottom BELOW the shelf top face (in/under the slab) rather than resting ON it. The fix sets the release height to the resolved shelf TOP so the carton rests on it.",
+
+  "env": {
+    "RESTOCK_PLACE_ON_DECK": "1",
+    "RESTOCK_COLLECT_GROUND_TRUTH": "1",
+    "RESTOCK_VERIFY_PLACE": "1",
+    "_note": "RESTOCK_PLACE_ON_DECK=1 is the (historically named) switch that makes the factory RESOLVE the live support prim; it is NO LONGER deck-specific -- the SUPPORT is chosen by cart_placement.support_prim below. Keep RESTOCK_COLLECT_GROUND_TRUTH=1 (labelled GT collect) and RESTOCK_VERIFY_PLACE=1 (threads the live carton centre into the contact-release + verify_place gates)."
+  },
+
+  "runtime_config": {
+    "_file": "mission-runtime-*.json (EXTERNAL to the repo; the integration lane owns it).",
+    "cart_placement": {
+      "location": "rollwagen",
+      "support_prim": "shelf",
+      "load_center_body_xy": [0.135, 0.0],
+      "support_z_world": 0.9712,
+      "free_dimensions": [0.65, 0.45, 0.30],
+      "_note": "support_prim: 'shelf' (or 1, or '/Rollwagen/chassis/shelf') selects the UPPER SHELF; ABSENT => stock_supports[0] = deck (byte-identical with the legacy hardcode). support_z_world 0.9712 is the resolved live shelf TOP face world z -- ADVISORY (the runtime resolver overrides the GT place target from the live shelf prim) but config_preflight refuses it if it disagrees with the resolved top by >10 mm, so set it to whatever the orchestrator passes as --support-top-z-world. load_center_body_xy 0.135 is the chosen xy; free_dimensions unchanged."
+    }
+  },
+
+  "scenario_config": {
+    "_file": "mission-scenario.json initial_staging (EXTERNAL). cart_support_z_world is ALSO the COLLECT_GROUND_TRUTH place_slot support_z_world (ground_truth_collect.warm_slot reads it); cart_load_center_body_xy is the GT place slot xy.",
+    "initial_staging": {
+      "cart_support_z_world": 0.9712,
+      "cart_load_center_body_xy": [0.135, 0.0],
+      "_note": "Set cart_load_center_body_xy to the chosen [0.135, 0.0] so the GT place slot, the arm place point and verify_place all use the SAME xy. Set cart_support_z_world to the resolved shelf top 0.9712 (the resolver overrides the slot height, but this clears the config_preflight four-height gate and keeps the warm-shortcut staging consistent). Keep unit_yaws_world.cart (= -pi/2 relative) unchanged."
+    }
+  },
+
+  "host_config": {
+    "_file": "scripts/twin/restock_manipulation/ros_host_config.json",
+    "_note": "UNCHANGED by this lane. Keep the coldwin43/46 carton_level block (place_contact_release true, place_contact_gap_m 0.012, closed_loop_sensor true, the v2 keys, K=2850, station hold, release serialization). The surface + xy fix is entirely on the capture (place-target) side."
+  },
+
+  "config_preflight": {
+    "_invocation": "python3 scripts/twin/restock_manipulation/config_preflight.py --host-config <host> --runtime-config <runtime> --scenario <scenario> --mobile-manifest <manifest> --require <...> --place-on-deck --support-top-z-world 0.9712",
+    "_note": "The orchestrator computes 0.9712 = the SELECTED support prim (shelf) top-face world z from the composed cart asset and passes it as --support-top-z-world. The preflight (a) validates cart_placement.support_prim resolves against the cart's stock_supports (check_support_selection, always on) and (b) with --place-on-deck refuses the run if runtime cart_placement.support_z_world or scenario initial_staging.cart_support_z_world disagrees with 0.9712 by >10 mm. (--place-on-deck is the historically named 'check place heights' switch; it is support-agnostic -- the resolved top is whatever --support-top-z-world says.)"
+  },
+
+  "_acceptance_coldwin47": "RELEASE at TRUE shelf contact: PLACE_CONTACT_RELEASE fires with the carton BOTTOM within place_contact_gap_m (0.012 m) of the MEASURED shelf top (~0.9712 world), the console shows COLLECT_PLACE_SUPPORT_Z resolving the shelf top (prim=/Rollwagen/chassis/shelf) and PLACE_SUPPORT_SELECT selector=shelf; verify_place PASSES ('carton resting', xy within tol, bottom_gap ~0); NO collider contact before release (the honest sweep clears every kept body + the pad vs the mouth posts by >= 30 mm at the cw43 vertical approach); CARTON_TILT peak <= 1.5 deg (set-down tilt solved); and the run ADVANCES PAST COLLECT. The shelf target is within UR10 reach (~1.13 m < 1.3 m from ur_base_link).",
+
+  "_cpu_proof": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=scripts python3 -m pytest scripts/twin/tests/test_restock_cart_support_select.py (selector + preflight; honest collider classification; honest sweep: cw43 at the shelf reads CLEAR, cw46 at the deck STRIKES the upper shelf, the old -93 mm side-bar is a pad-only non-collider for the carton; footprint rule + chosen xy; cw44 overhang + cw45 height; verify_place on the shelf top)."
+}

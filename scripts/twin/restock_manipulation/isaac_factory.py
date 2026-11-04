@@ -279,7 +279,17 @@ def _parse_cart_placement(entry):
         raise ValueError(f'cart_placement needs location/load_center_body_xy/support_z_world/free_dimensions: {exc}')
     if not isinstance(location, str) or not location or len(lc) != 2 or len(fd) != 3:
         raise ValueError('cart_placement location (str), load_center_body_xy (2), free_dimensions (3)')
-    return {'location': location, 'load_center_body_xy': lc, 'support_z_world': sz, 'free_dimensions': fd}
+    out = {'location': location, 'load_center_body_xy': lc, 'support_z_world': sz, 'free_dimensions': fd}
+    # sim-cart-support-select-v1: optional selector for WHICH Rollwagen support the carton is placed on
+    # (deck or upper shelf). Absent => the historical deck hardcode (stock_supports[0]). A prim path,
+    # a bare prim name ('deck'/'shelf') or an index into the cart's stock_supports; validated against the
+    # composed cart at build (cart_support.resolve_support_prim) so a mis-set value fails loudly.
+    sp = entry.get('support_prim')
+    if sp is not None:
+        if isinstance(sp, bool) or not isinstance(sp, (int, str)):
+            raise ValueError('cart_placement.support_prim must be a prim path, a prim name, or an index')
+        out['support_prim'] = sp
+    return out
 
 
 class _ArticulationParked:
@@ -788,9 +798,9 @@ class CollectTargetBridge:
         if top_z is not None:
             slot = cart_support.override_slot_support_z(self.gt_place_slot, top_z)
             if not self._support_z_logged:
-                print('COLLECT_PLACE_SUPPORT_Z resolved deck top=%.4f world (prim=%s) overriding legacy '
-                      'slot support_z_world=%s -- collect places on the DECK, not the shelf; the descent, '
-                      'contact-release and verify_place all use this one height'
+                print('COLLECT_PLACE_SUPPORT_Z resolved support top=%.4f world (prim=%s) overriding legacy '
+                      'slot support_z_world=%s -- the collect place targets this selected Rollwagen support '
+                      '(deck or upper shelf); the descent, contact-release and verify_place all use this one height'
                       % (top_z, self.cart_support_path,
                          self.gt_place_slot.get('support_z_world')), flush=True)
                 self._support_z_logged = True
@@ -1209,10 +1219,19 @@ def _build_runtime(*, app, assembly, params, output):
         # hand-pinned path. Asserted at boot so a mis-set env is visible (host/runtime-split lesson).
         import os
         if os.environ.get('RESTOCK_PLACE_ON_DECK', '0') != '0':
+            # sim-cart-support-select-v1: resolve WHICH support the carton is placed on from the RUNTIME
+            # cart_placement.support_prim selector (absent => stock_supports[0] = deck, byte-identical with
+            # the historical hardcode). The deck is UNPLACEABLE FROM ABOVE -- its own upper shelf blocks the
+            # vertical descent (coldwin46: carton -12 mm into /Rollwagen/chassis/shelf mid-descent) -- so a
+            # collect place-on-cart from above must select the SHELF ('support_prim': 'shelf' / index 1).
+            from twin.restock_manipulation import cart_support
             supports = cart_asset.get('stock_supports') or []
-            cart_support_path = supports[0] if supports else None
-        print('PLACE_ON_DECK env=%s support_prim=%s (None => legacy support_z_world=%s) VERIFY_PLACE=%s'
-              % (os.environ.get('RESTOCK_PLACE_ON_DECK', '0'), cart_support_path,
+            cart_support_path = cart_support.resolve_support_prim(
+                supports, params.cart_placement.get('support_prim'))
+        print('PLACE_SUPPORT_SELECT env=%s selector=%s support_prim=%s (None selector => stock_supports[0]=deck; '
+              'legacy support_z_world=%s) VERIFY_PLACE=%s'
+              % (os.environ.get('RESTOCK_PLACE_ON_DECK', '0'),
+                 params.cart_placement.get('support_prim'), cart_support_path,
                  params.cart_placement.get('support_z_world'), bool(verify_place)), flush=True)
     collect_bridge = CollectTargetBridge(
         stage=stage, arm_camera=camera, arm_camera_path=camera_path,
