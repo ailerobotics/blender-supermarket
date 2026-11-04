@@ -1190,6 +1190,20 @@ class TransferController:
             pass
         return self._carton_level.tool_link
 
+    def _place_gravity_compensation(self):
+        """sim-carton-level-place-descent-v1: the loaded gravity-droop FEEDFORWARD the collect-deck level
+        place DESCENT + RELEASE use. Returns ``carton_level.gravity_compensation`` when the host config set
+        one; otherwise a DEFAULT ``GravityCompensation`` so the far-extended loaded set-down gets the
+        extension-following wrist droop-cancel even under a plain ``carton_level: true`` host config (NO host
+        change needed -- coldwin34 ran ``carton_level: true`` => gravity_compensation None => the geometric
+        set-down drooped +2.06 deg). Scoped to the place descent: every OTHER carried phase reads gc only
+        through ``_solve_level_place`` (``getattr(..., None)``) and stays byte-identical."""
+        from twin.restock_manipulation import carton_level as cl
+        gc = getattr(self._carton_level, 'gravity_compensation', None)
+        if gc is None:
+            gc = cl.GravityCompensation(tool_link=self._carton_level.tool_link).validate()
+        return gc
+
     def _solve_level_place(self, robot, goal, target_pos):
         """The level-place IK in the port's reach frame. ``target_pos`` None => preserve the goal's own TCP
         (the standoff); a 3-vector => reach that sensed set-down position while level. Raises ValueError
@@ -1994,55 +2008,48 @@ class TransferController:
                         and self.collect_place_preplace_shape is not None and 'place' in self.poses):
                     robot = self._fk_model()
                     if robot is not None:
-                        from twin.restock_manipulation.cad_tool import ARM_JOINTS
                         seed = self._level_place_goal(self.collect_place_preplace_shape, s.joint_positions)
                         target_pos = tuple(float(c) for c in self.poses['place'][:3])
                         try:
-                            lev = self._solve_level_place(robot, list(seed), target_pos)
-                            setdown = tuple(float(lev[j]) for j in ARM_JOINTS)
-                            # sim-carton-level-preplace-v2: the set-down is driven as ONE collision-off
-                            # straight-line (begin(straight_line=True)) because a collision-aware plan to the
-                            # deck config is rejected as an attached-carton self-collision (collect4). Its
-                            # COMMANDED straight joint line is already LEVEL (both endpoints leveled; the
-                            # interior stays <~0.1 deg -- replayed below and CPU-proven), so the collectlevel3
-                            # phase=place CARTON_TILT (2.22 deg, sustained 0.167 s) is NOT a planned-pose tilt
-                            # but an EXECUTION transient of the loaded set-down: at 0.08 rad/s the welded
-                            # carton's differential joint tracking during the heavy shoulder/elbow descent
-                            # leaves level. (a) belt-and-suspenders: replay the COMMANDED path and refuse by
-                            # name if it would itself tilt; (b) the lever: TIME-PARAMETERISE the same level
-                            # path slower (carton_level.place_descent_speed/accel) so the executed tilt stays
-                            # under the bound -- bound and grace UNCHANGED. The planned peak is stashed for the
-                            # per-segment CARTON_SEGMENT_TILT report (planned vs executed) at the phase exit.
+                            # sim-carton-level-place-descent-v1: PER-POINT wrist-compensated level set-down.
+                            # coldwin34 ran carton_level:true => gravity_compensation None, so the place
+                            # descent solved a GEOMETRIC-level set-down with NO droop pre-tilt and the welded
+                            # far-extended arm drooped +2.06 deg at the set-down dwell (CARTON_TILT phase=place,
+                            # sustained 0.150 s). Even with a gravity_compensation configured, the prior fix
+                            # routed the wrist droop-cancel only to the single ENDPOINT of a 2-point straight
+                            # line, so it did not FOLLOW THE EXTENSION through the insert. Here the descent is
+                            # a per-point leveled waypoint path: the TCP target is interpolated standoff->deck
+                            # and EVERY waypoint is solved reach+level+wrist-droop-cancel against its own loaded
+                            # droop, driven as ONE collision-off begin_joint_path (the deck set-down fold is a
+                            # conservative attached-carton self-collision, collect4). gc defaults ON for this
+                            # segment (no host change), and is time-parameterised slower
+                            # (place_descent_speed/accel) so the loaded execution stays level. The predicted
+                            # EXECUTED (droop-aware) peak is stashed for the per-segment CARTON_SEGMENT_TILT
+                            # report (place AND the post-set-down release, which holds this pose) and refuses
+                            # by name before any motion if it would exceed the bound. Bound + grace UNCHANGED.
                             from twin.restock_manipulation import carton_level as cl
-                            # sim-carton-level-southdock-v1: predict the EXECUTED carton attitude -- when
-                            # gravity_compensation is on, `setdown` is a COMMANDED config pre-tilted against
-                            # the loaded droop, so the GEOMETRIC replay would read the pre-tilt (~2 deg) and
-                            # falsely reject a plan whose physical welded carton actually lands level. The
-                            # droop-aware replay predicts what the GPU carton (and the CARTON_TILT trip) sees.
-                            gc = getattr(self._carton_level, 'gravity_compensation', None)
-                            planned = cl.predict_path_tilt_executed(
-                                robot, [list(s.joint_positions), list(setdown)], self._carton_up_in_tool,
-                                tool_link=self._carton_level.tool_link, gravity_comp=gc)
-                            self._carton_seg_planned['place'] = (planned[0], planned[1])
-                            # sim-carton-level-setdown-v1: release holds this same set-down pose while the
-                            # gripper opens, so its predicted level is the set-down's -- carry it so the
-                            # CARTON_SEGMENT_TILT phase=release line reports planned vs executed too.
-                            self._carton_seg_planned['release'] = (planned[0], planned[1])
-                            worst_planned = max(planned[0], planned[1])
-                            if worst_planned > self._carton_level.bound_deg:
-                                return self._fail(
-                                    '%s carried set-down would tilt the carton off level: predicted peak '
-                                    'roll=%.2f pitch=%.2f deg over the commanded straight-line place descent '
-                                    'exceeds bound %.2f deg -- refusing to execute a visibly tilted set-down'
-                                    % (cl.CARTON_LEVEL_PLAN_REJECTED, planned[0], planned[1],
-                                       self._carton_level.bound_deg))
-                            print('CARTON_LEVEL_PLACE_DESCENT phase=place predicted_max roll=%.2f pitch=%.2f '
-                                  'deg (<= bound %.2f) -- gentled level set-down at speed=%.3f accel=%.3f '
-                                  'rad/s (time-parameterised so the loaded-carton execution stays level)'
-                                  % (planned[0], planned[1], self._carton_level.bound_deg,
-                                     self._carton_level.place_descent_speed,
+                            gc = self._place_gravity_compensation()
+                            limits = self._place_level_limits() or None
+                            tcp_link = self._place_fk_link(robot, list(seed))
+                            plan = cl.plan_compensated_place_descent(
+                                robot, list(s.joint_positions), target_pos, list(seed),
+                                self._carton_up_in_tool, gc, bound_deg=self._carton_level.bound_deg,
+                                tool_link=tcp_link, limits=limits,
+                                waypoints=self._carton_level.path_waypoints)
+                            self._carton_seg_planned['place'] = (plan.max_roll, plan.max_pitch)
+                            self._carton_seg_planned['release'] = (plan.max_roll, plan.max_pitch)
+                            reject = plan.reject(self._carton_level.bound_deg)
+                            if reject is not None:
+                                print(reject, flush=True)
+                                return self._fail(reject)
+                            print('CARTON_LEVEL_PLACE_DESCENT phase=place n=%d predicted_max roll=%.2f '
+                                  'pitch=%.2f deg (<= bound %.2f) -- per-point wrist-compensated level '
+                                  'set-down at speed=%.3f accel=%.3f rad/s (extension-following droop-cancel '
+                                  'so the loaded-carton execution stays level throughout the insert)'
+                                  % (plan.waypoints_n, plan.max_roll, plan.max_pitch,
+                                     self._carton_level.bound_deg, self._carton_level.place_descent_speed,
                                      self._carton_level.place_descent_accel), flush=True)
-                            self.motion.begin_joint_goal(setdown, s.joint_positions, straight_line=True,
+                            self.motion.begin_joint_path(list(plan.waypoints), list(s.joint_positions),
                                                          slow=True, goal_tol=0.12,
                                                          speed=self._carton_level.place_descent_speed,
                                                          accel=self._carton_level.place_descent_accel)

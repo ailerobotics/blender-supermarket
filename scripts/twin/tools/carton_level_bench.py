@@ -724,3 +724,100 @@ def setdown_tworegime_table(results, bound_deg=cl.DEFAULT_TILT_BOUND_DEG, margin
                      f'{r.wrist_reach_err_mm:.0f}', 'PASS' if r.passes(margin_deg) else 'FAIL'))
     w = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     return '\n'.join('  '.join(c.ljust(w[i]) for i, c in enumerate(row)) for row in rows)
+
+
+# ---------------------------------------- PER-POINT place descent (sim-carton-level-place-descent-v1)
+# coldwin34 ran carton_level:true => gravity_compensation None, so the collect-deck place descent commanded a
+# GEOMETRIC-level set-down with NO droop pre-tilt, and the far-extended loaded arm drooped +2.06 deg at the
+# set-down dwell (CARTON_TILT phase=place, sustained 0.150 s). Even with a gravity_compensation configured,
+# the prior fix routed the wrist droop-cancel only to the single ENDPOINT of a 2-point straight line. This
+# bench proves plan_compensated_place_descent -- the PER-POINT path that solves EVERY waypoint
+# reach+level+wrist-droop-cancel against ITS OWN loaded droop -- lands EVERY compensated waypoint (incl. the
+# DEEPEST set-down) level under the honest TWO-REGIME executed model (heavy pinned, wrist tracks).
+
+
+@dataclass
+class PlaceDescentPerPointResult:
+    """PER-POINT place descent proof for ONE deck geometry (sim-carton-level-place-descent-v1): the
+    BEFORE (uncompensated geometric-level set-down -> ~2 deg droop, the coldwin34 trip) and the AFTER
+    (per-point wrist-compensated path -> every compensated waypoint, incl. the deepest set-down, level
+    under the two-regime executed model)."""
+    name: str
+    place_tcp: tuple
+    uncomp_setdown_pitch: float       # geometric-level set-down, two-regime executed (reproduce ~2.0 trip)
+    deepest_exec_pitch: float         # per-point compensated DEEPEST (set-down) two-regime executed pitch
+    max_compensated_exec_pitch: float # max two-regime executed |pitch| over the COMPENSATED waypoints (wp1..)
+    standoff_exec_pitch: float        # the inherited (measured) standoff droop at wp0 (pre-existing, < bound)
+    n_waypoints: int
+    all_waypoints_clear: bool
+
+    def passes(self, margin_deg=1.0):
+        """The per-point fix lands the DEEPEST set-down AND every compensated waypoint level within the
+        brief's <= 1 deg margin, strictly better than the uncompensated ~2 deg droop it reproduces, in the
+        clear wrist region."""
+        return (self.deepest_exec_pitch <= margin_deg
+                and self.max_compensated_exec_pitch <= margin_deg
+                and self.uncomp_setdown_pitch > 1.5
+                and self.deepest_exec_pitch < self.uncomp_setdown_pitch
+                and self.all_waypoints_clear)
+
+
+def run_place_descent_per_point(urdf_path, *, geometry='south', stiffness=cl.DEFAULT_DROOP_STIFFNESS,
+                                carton_mass=0.45, tool_link='gripper_pad_tcp', grasp=SOUTHDOCK_GRASP,
+                                waypoints=12):
+    """Prove the PER-POINT wrist-compensated place descent (sim-carton-level-place-descent-v1) under the
+    honest TWO-REGIME executed model (heavy shoulder_lift/elbow PINNED at geometric_level + sag, wrist
+    TRACKS its command), on the REAL mission kinematics + the REAL fixed-shape standoff + the measured
+    top-down grasp up-axis, for the PR-307 south dock or the pre-307 east cart.
+
+    BEFORE: the geometric-level set-down command (gc OFF) droops ~2 deg (the coldwin34 +2.06 trip). AFTER:
+    ``carton_level.plan_compensated_place_descent`` solves EVERY waypoint reach+level+wrist-droop-cancel
+    against ITS OWN loaded droop; because the wrist FF leaves the heavy joints at their geometric value
+    (coldwin33: the heavy pre-tilt is gravity-pinned), the two-regime executed of each compensated
+    waypoint -- including the DEEPEST set-down -- is level. Returns a PlaceDescentPerPointResult. Pure/CPU."""
+    import numpy as np
+    place = SOUTHDOCK_PLACE_TCP if geometry == 'south' else EASTCART_PLACE_TCP
+    robot = parse_urdf(urdf_path)
+    u = cl.carton_up_in_tool(cl.tool_rotation(robot, list(grasp), tool_link))
+    limits = _southdock_limits()
+    gc = cl.GravityCompensation(stiffness=stiffness, carton_mass=carton_mass, tool_link=tool_link).validate()
+    seed = [cl.level_preserve_tcp(robot, list(SOUTHDOCK_RAW_STANDOFF), u, tool_link=tool_link,
+                                  limits=limits)[j] for j in ARM_JOINTS]
+    tgt = np.asarray(place, float)
+
+    def two_regime_exec_pitch(cmd):
+        # The wrist FF leaves the HEAVY pitch joints at their geometric value, so they settle at cmd+sag
+        # regardless of a fine pre-tilt; the wrist tracks cmd. (geom_heavy == cmd_heavy for a wrist-routed
+        # correction, so sag(cmd) == sag(geom) on the heavy joints -- the coldwin33 two-regime model.)
+        sag = gc.droop(robot, dict(zip(ARM_JOINTS, cmd)), tool_link=tool_link)
+        exe = [cmd[i] + (sag[ARM_JOINTS[i]] if ARM_JOINTS[i] in _HEAVY_PITCH_JOINTS else 0.0)
+               for i in range(6)]
+        return abs(cl.carried_rpy(robot, exe, u, tool_link)[1])
+
+    # BEFORE: geometric-level set-down (gc OFF), two-regime executed -- reproduces the coldwin34 ~2 deg trip.
+    geom_end = [cl.level_place_ik(robot, tgt, u, seed, tool_link=tool_link, limits=limits)[j]
+                for j in ARM_JOINTS]
+    uncomp = two_regime_exec_pitch(geom_end)
+    # AFTER: the per-point wrist-compensated descent. wp0 is the (uncompensated) measured standoff.
+    plan = cl.plan_compensated_place_descent(robot, seed, tgt, seed, u, gc, tool_link=tool_link,
+                                             limits=limits, waypoints=waypoints)
+    wps = [list(w) for w in plan.waypoints]
+    comp_pitches = [two_regime_exec_pitch(w) for w in wps[1:]]      # the COMPENSATED waypoints (not wp0)
+    all_clear = all(cl._in_clear_wrist(dict(zip(ARM_JOINTS, w))) for w in wps[1:])
+    return PlaceDescentPerPointResult(
+        name=geometry, place_tcp=tuple(place), uncomp_setdown_pitch=uncomp,
+        deepest_exec_pitch=comp_pitches[-1], max_compensated_exec_pitch=max(comp_pitches),
+        standoff_exec_pitch=two_regime_exec_pitch(wps[0]), n_waypoints=plan.waypoints_n,
+        all_waypoints_clear=all_clear)
+
+
+def place_descent_per_point_table(results, margin_deg=1.0):
+    rows = [('geometry', 'place_x', 'BEFORE uncomp_setdown', 'AFTER deepest', 'AFTER max_comp',
+             'standoff(wp0)', 'n', 'verdict')]
+    for r in results:
+        rows.append((r.name, f'{r.place_tcp[0]:.3f}', f'{r.uncomp_setdown_pitch:.2f}',
+                     f'{r.deepest_exec_pitch:.2f}', f'{r.max_compensated_exec_pitch:.2f}',
+                     f'{r.standoff_exec_pitch:.2f}', str(r.n_waypoints),
+                     'PASS' if r.passes(margin_deg) else 'FAIL'))
+    w = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    return '\n'.join('  '.join(c.ljust(w[i]) for i, c in enumerate(row)) for row in rows)

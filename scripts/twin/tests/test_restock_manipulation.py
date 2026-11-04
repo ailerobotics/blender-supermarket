@@ -87,13 +87,16 @@ class FixtureMotion:
                                      goal_tol=goal_tol, straight_line=bool(straight_line),
                                      speed=speed, accel=accel))
 
-    def begin_joint_path(self, waypoints, measured, slow=False, goal_tol=None):
+    def begin_joint_path(self, waypoints, measured, slow=False, goal_tol=None, speed=0.08, accel=0.15):
         # sim-carry-level-lift-v1: a leveled multi-waypoint carried move (lift / tuck / pan). Recorded
         # for assertions; counts as one dispatched move (the real port drives all waypoints as one
         # ExecuteTrajectory). Also mirror it into joint_goals so existing dispatch assertions still see it.
+        # sim-carton-level-place-descent-v1: record the per-segment gentled speed/accel ceilings (the
+        # loaded collect-deck level place descent time-parameterises its waypoint path slower via these).
         self.joint_paths = getattr(self, 'joint_paths', [])
         self.joint_paths.append(dict(waypoints=[tuple(w) for w in waypoints],
-                                     measured=tuple(measured), slow=slow, goal_tol=goal_tol))
+                                     measured=tuple(measured), slow=slow, goal_tol=goal_tol,
+                                     speed=speed, accel=accel))
         self.stows.append((tuple(waypoints[-1]), tuple(measured), slow))
 
     def stop(self):
@@ -115,11 +118,11 @@ def make_controller(operation='transfer', fixture_mode=True, **kwargs):
     return controller, motion
 
 
-def packet(c, t=1., **kwargs):
+def packet(c, t=1., target_pose=(.5, .2, .1, 0., 0., 0., 1.), **kwargs):
     observation = Observation(f'source-{t}', 'test_fixture', t, 'sku-box', c.source,
                               (.4, 0., .2, 0., 0., 0., 1.), .99)
     target = Target(f'target-{t}', 'test_fixture', t, c.destination,
-                    (.5, .2, .1, 0., 0., 0., 1.), True, (.3, .3, .4))
+                    tuple(target_pose), True, (.3, .3, .4))
     import time
     values = dict(simulation_time=t, observations=(observation,), target=target,
                   parked=True, contact=c.held, feedback_time=t, collision_time=t,
@@ -940,11 +943,15 @@ def _collect_place_controller(straight_line):
                            collect_place_straight_line=straight_line)
 
 
-def _drive_collect_place(c, m):
+def _drive_collect_place(c, m, target_pose=(.5, .2, .1, 0., 0., 0., 1.), carry_joints=None):
     """Drive the collect reposition place to verify (as test_reposition_full_place_path_reaches_verify),
     returning {phase_that_issued_a_begin()_pose-move: straight_line_flag}, the ordered phase sequence, and
     {phase_that_issued_a_begin_joint_goal: {goal, straight_line}} (the fixed-shape preplace, the staged
-    tuck/pan/retreat_tuck/stow folds, and the collect deck straight-line RETREAT escape)."""
+    tuck/pan/retreat_tuck/stow folds, and the collect deck straight-line RETREAT escape). ``target_pose``
+    overrides the sensed deck pose -- the default synthetic (.5,.2,.1) is near-singular for the loaded
+    level-place IK, so a carton_level drive passes a realistic deck TCP (sim-carton-level-place-descent-v1).
+    ``carry_joints`` supplies realistic measured joints through the carried phases (the carton-level up-axis
+    capture + the per-point level place IK need a real arm config, not the kinematic fixture's zeros)."""
     by_phase, jg_by_phase, seq, n, k, t0 = {}, {}, [], 0, 0, 1.0
     for i in range(140):
         if c.phase == 'verify':
@@ -957,8 +964,10 @@ def _drive_collect_place(c, m):
         if c.phase == 'release' and c.issued:
             contact = False
         extra = {'joint_positions': _SL_STOW} if c.phase == 'stow' else {}
+        if carry_joints is not None and c.phase in c._CARRIED_PHASES:
+            extra = {'joint_positions': tuple(carry_joints)}
         phase_before = c.phase
-        r = c.step(.1, packet(c, t0 + i * .1, contact=contact, **extra))
+        r = c.step(.1, packet(c, t0 + i * .1, contact=contact, target_pose=target_pose, **extra))
         assert r.status != 'failed', (phase_before, r.reason)
         if len(m.moves) > n:                                 # a begin() pose-move was issued this step
             by_phase[phase_before] = m.straight_lines[-1]

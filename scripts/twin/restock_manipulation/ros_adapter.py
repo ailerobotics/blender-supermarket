@@ -909,7 +909,7 @@ class RosMotionPort:
         rt.joint_trajectory = jt
         return rt
 
-    def _waypoints_goal(self, waypoints):
+    def _waypoints_goal(self, waypoints, speed=0.08, accel=0.15):
         """A collision-OFF multi-waypoint joint trajectory through ``waypoints`` (each a 6-vector in
         JOINTS order, the first == measured start) for the host executor (sim-carry-level-lift-v1).
 
@@ -917,8 +917,16 @@ class RosMotionPort:
         smoothstep that visits exactly the straight joint segment q[i]->q[i+1] -- the carton attitude the
         leveled-waypoint planner replayed is therefore the attitude the executor drives. Segment durations
         are sized so the rest-to-rest cubic's peak speed/accel stay under the conservative host ceilings
-        (same 0.08 rad/s / 0.15 rad/s^2 targets as the 2-point straight line), making the plan pass
-        validate_trajectory and the trajectory_host Plan checks regardless of the --max-speed profile."""
+        (default 0.08 rad/s / 0.15 rad/s^2 targets, as the 2-point straight line), making the plan pass
+        validate_trajectory and the trajectory_host Plan checks regardless of the --max-speed profile.
+
+        sim-carton-level-place-descent-v1: ``speed``/``accel`` gentle the per-segment peak-speed/accel
+        ceilings (rad/s, rad/s^2) so the LOADED collect-deck level place descent can be time-parameterised
+        slower (the same gentling the 2-point straight line carried in ``begin_joint_goal(speed=,accel=)``),
+        keeping the welded carton's execution-lag under the bound. The defaults reproduce the lift/preplace
+        leveled-waypoint sizing byte-identically; both are clamped to the conservative ceilings."""
+        speed = min(float(speed), 0.08)
+        accel = min(float(accel), 0.15)
         from moveit_msgs.msg import RobotTrajectory
         from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
         from builtin_interfaces.msg import Duration
@@ -934,7 +942,7 @@ class RosMotionPort:
                 dmax = max((abs(b - a) for a, b in zip(pts[i - 1], q)), default=0.0)
                 # Rest-to-rest cubic peaks: speed = 1.5*dmax/T, accel = 6*dmax/T^2. Floor 1.0 s so a
                 # many-waypoint carry does not stack to an excessive total while each segment stays gentle.
-                seg = max(1.0, 1.5 * dmax / 0.08, math.sqrt(6 * dmax / 0.15))
+                seg = max(1.0, 1.5 * dmax / speed, math.sqrt(6 * dmax / accel))
                 t += seg
             sec = int(t)
             nanosec = int(round((t - sec) * 1e9))
@@ -947,14 +955,18 @@ class RosMotionPort:
         rt.joint_trajectory = jt
         return rt
 
-    def begin_joint_path(self, waypoints, measured_joints, slow=False, goal_tol=None):
+    def begin_joint_path(self, waypoints, measured_joints, slow=False, goal_tol=None,
+                         speed=0.08, accel=0.15):
         """Drive a carried LEVELED WAYPOINT PATH as ONE collision-OFF multi-waypoint smoothstep trajectory
         through the host executor (sim-carry-level-lift-v1). ``waypoints`` is the list of 6-joint configs
         (JOINTS order; first == ``measured_joints``) the carton-level planner produced so the carried
         carton stays parallel to the ground THROUGHOUT the move, not only at its endpoints. Like
         begin_joint_goal(straight_line=True) the planner is not consulted (the waypoints are the explicit
         path), so no cuMotion plan is issued; unlike it, the path has >2 points. ``slow`` is accepted for
-        interface parity (the per-segment sizing already gentles the carried fold). Rejects a malformed
+        interface parity (the per-segment sizing already gentles the carried fold). ``speed``/``accel``
+        (rad/s, rad/s^2) gentle the per-segment peak ceilings -- the sim-carton-level-place-descent-v1
+        collect-deck level place descent passes the gentled place_descent_speed/accel so the LOADED set-down
+        executes level; the defaults reproduce the lift/preplace sizing byte-identically. Rejects a malformed
         path, an out-of-limits waypoint, or a first waypoint that does not match the measured start."""
         if self.state not in ('idle', 'succeeded', 'failed'):
             raise RuntimeError('motion already active')
@@ -994,7 +1006,7 @@ class RosMotionPort:
         self.generation += 1
         self.handle = None
         self._plan_goal = None           # nothing to re-plan: an explicit waypoint path
-        self._begin_execute_trajectory(self._waypoints_goal(wps))
+        self._begin_execute_trajectory(self._waypoints_goal(wps, speed=speed, accel=accel))
 
     def _retime_plan_for_exec_limits(self, trajectory):
         """sim-preplace-accel-limit-reject-v1: time-parameterise a plan against the simulation executor's
