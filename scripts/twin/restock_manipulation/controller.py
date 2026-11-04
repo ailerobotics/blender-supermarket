@@ -38,6 +38,11 @@ MOVE_DEADLINE_RETRY_MAX = 2
 # It is the belt-and-braces terminator for a pathological probe-stuck-True, so a hung recovery still ends
 # by name here instead of pausing forever. Env RESTOCK_RECOVERY_PAUSE_CAP_S overrides; 0 disables.
 RECOVERY_PAUSE_CAP_S = 300.0
+# sim-collect-retreat-collider-v3: the collect deck-place empty-retreat lift-off is driven with
+# ur_shoulder_pan LOCKED at the seed, so a straight-up raise never swings the gripper into the cart
+# cage. This tolerance only guards against a future liftoff_goal change silently returning a
+# pan-swinging branch (the lock itself holds pan to the seed); a few mrad of DLS residual is fine.
+COLLECT_RETREAT_LIFTOFF_PAN_TOL = 0.02   # rad
 # fm387: which collect phases issue an arm MOVE (and so can suffer a goal-tolerance/track-miss the
 # host-stack WATCHDOG surfaces -- ros_adapter failed_result_pending / drain -- OUTSIDE poll(), where
 # fm372's in-poll retry never saw it). Staged moves (begin_joint_goal) use the staged budget; the rest
@@ -1156,30 +1161,57 @@ class TransferController:
                                  tool_link=tcp_link, limits=limits)
 
     def _collect_retreat_liftoff_goal(self, measured):
-        """sim-collect-retreat-abort-v2: the collect deck-place empty-retreat LIFT-OFF config -- raise the
-        TCP straight up by ``collect_retreat_liftoff_dz`` (world +Z) preserving the tool orientation,
-        seeded from the measured release config so it stays on the current self-clear IK branch. Bounded
-        to the clear carry wrist region so the lift-off cannot drive a wrist into the ur_wrist_2-vs-forearm
-        stop. Returns a 6-tuple (ARM order) or None when no FK model / no straight-up solution exists (the
-        caller then folds directly, the prior behaviour -- never a regression)."""
+        """sim-collect-retreat-abort-v2 / sim-collect-retreat-collider-v3: the collect deck-place
+        empty-retreat LIFT-OFF config -- raise the TCP straight up by ``collect_retreat_liftoff_dz``
+        (world +Z) preserving the tool orientation, seeded from the measured release config so it stays
+        on the current self-clear IK branch. Bounded to the clear carry wrist region so the lift-off
+        cannot drive a wrist into the ur_wrist_2-vs-forearm stop. Returns a 6-tuple (ARM order) or None
+        when no FK model / no straight-up solution exists (the caller then folds directly, the prior
+        behaviour -- never a regression).
+
+        sim-collect-retreat-collider-v3 (collectlevel4-fail1): the lift-off is driven with
+        ur_shoulder_pan LOCKED at the measured seed. The full-DOF DLS raise is ill-conditioned at the
+        folded place pose (near a wrist singularity), so a seed perturbation below the host log's 4-dp
+        rounding let it converge onto a redundant branch that ALSO raised the TCP ~0.15 m but did it by
+        swinging shoulder_pan ~+0.164 rad (and tilting the tool ~0.27 rad, past liftoff_goal's own
+        ori_tol -- i.e. a branch the CURRENT free solve rejects for the logged seed yet the run reached).
+        That base-yaw swing rakes the whole wrist/gripper cluster ~+0.12-0.19 m sideways in base +Y,
+        driving the gripper suction-panel collider into the rollwagen front-LEFT cage post (arm/gripper-
+        vs-cage is NOT collision-filtered -- only carton-vs-cage is), which pins the saturated pan drive
+        ~0.204 rad short while the distal wrists velocity-saturate -- the recorded contact-pin fingerprint.
+        A straight-up lift needs NO base-yaw rotation; locking pan removes that redundant DOF so the raise
+        is the deterministic elbow+wrist branch (FK-proven: pan-locked still reaches the full dz straight
+        up with ~1 mm horizontal drift and keeps the gripper >=~0.09 m from the post). shoulder_lift is
+        deliberately NOT locked (locking it too makes the raise unreachable at any dz)."""
         robot = self._fk_model()
         if robot is None or len(measured) != 6 or not all(math.isfinite(x) for x in measured):
             return None
         from twin.restock_manipulation.collect_retreat import liftoff_goal
         from twin.restock_manipulation.cad_tool import ARM_JOINTS
         big = 2 * math.pi
-        limits = {}
+        seed = dict(zip(ARM_JOINTS, [float(v) for v in measured]))
+        # Lock the base yaw at the seed so the straight-up lift-off cannot swing the cluster into the
+        # cart cage (sim-collect-retreat-collider-v3). A straight +Z raise needs no shoulder_pan motion.
+        pan_seed = seed['ur_shoulder_pan_joint']
+        limits = {'ur_shoulder_pan_joint': (pan_seed, pan_seed)}
         if self.carry_wrist1_cap is not None:
             limits['ur_wrist_1_joint'] = (-big, float(self.carry_wrist1_cap))
         if self.carry_wrist2_min is not None:
             limits['ur_wrist_2_joint'] = (float(self.carry_wrist2_min), big)
         try:
-            sol = liftoff_goal(robot, dict(zip(ARM_JOINTS, [float(v) for v in measured])),
-                               dz=self.collect_retreat_liftoff_dz, tcp_link=self._place_tcp_link,
-                               limits=limits or None)
+            sol = liftoff_goal(robot, seed, dz=self.collect_retreat_liftoff_dz,
+                               tcp_link=self._place_tcp_link, limits=limits or None)
         except ValueError as exc:
             print('COLLECT_RETREAT_LIFTOFF_UNSOLVED: %s (folding straight to the preplace shape)' % exc,
                   flush=True)
+            return None
+        # Belt-and-suspenders: never issue a lift-off that swings the base yaw into the cage, even if a
+        # future liftoff_goal change were to relax the pan lock. A straight-up lift keeps pan at the seed.
+        if abs(float(sol['ur_shoulder_pan_joint']) - pan_seed) > COLLECT_RETREAT_LIFTOFF_PAN_TOL:
+            print('COLLECT_RETREAT_LIFTOFF_UNSOLVED: lift-off would swing ur_shoulder_pan %.4f rad off '
+                  'the seed (> %.4f) -- rejecting the cage-raking branch, folding straight to the '
+                  'preplace shape' % (float(sol['ur_shoulder_pan_joint']) - pan_seed,
+                                      COLLECT_RETREAT_LIFTOFF_PAN_TOL), flush=True)
             return None
         return tuple(float(sol[j]) for j in ARM_JOINTS)
 
