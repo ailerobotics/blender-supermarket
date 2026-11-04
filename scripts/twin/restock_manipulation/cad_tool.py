@@ -588,6 +588,15 @@ class NativePanelContact:
         print('SIM_ATTACH_FALLBACK carry collision %s on %d collider(s) (%s) body=%s'
               % ('ENABLED' if enabled else 'DISABLED', len(targets), label, body_path), flush=True)
 
+    def release_sim_attach(self):
+        """Release the labelled sim attach-fallback weld (``<gripper>/sim_attach_fallback`` FixedJoint)
+        and restore the welded body's colliders. The PUBLIC between-runs cleanup the warm-session reset
+        (``warm_reset_hooks.reset_host_state``) calls so a failed attempt's weld -- left behind because the
+        failure never reached the normal suction-off release -- does not leak into the next warm attempt.
+        Idempotent (no-op when nothing is welded); the owner of the weld owns its removal, delegating to
+        the same :meth:`_release_fallback` the suction-off path uses."""
+        self._release_fallback()
+
     def _release_fallback(self):
         if getattr(self, '_fallback_joint', None) is not None:
             body = getattr(self, '_fallback_body', None)

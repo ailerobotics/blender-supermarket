@@ -692,13 +692,19 @@ def run(args, manifest, scenario):
                         consecutive, '%.0f' % _post_boot_vram if _post_boot_vram is not None else 'unavailable'),
                         flush=True)
                     def _between(prev_summary, index):
-                        stage_state = None
+                        # sim-warm-reset-stage-clean-v1: read the stage census AFTER the reset, not
+                        # before. The reset (warm_reset_hooks.reset_host_state) releases the leaked
+                        # brakes/weld + restores the torn-down station cameras, so censusing the stage
+                        # BEFORE it ran judged the dirty post-run stage and cold-booted every warm
+                        # attempt before the reset could clean it (warmtwo1). Pass the census as a
+                        # callback so plan_and_run_reset runs the non-stage gates, then the reset, then
+                        # judges stage_clean on the POST-reset census.
                         census = getattr(bundle, 'warm_stage_state', None)
-                        if callable(census):
-                            try:
-                                stage_state = census()
-                            except Exception as exc:  # a failed census is a doubt, not a crash
-                                stage_state = _ws.StageState(dirty=True, note=f'stage census failed: {exc}')
+                        def _census():
+                            if callable(census):
+                                return census()
+                            return _ws.StageState(dirty=True,
+                                                  note='no warm_stage_state census provider wired')
                         reset = getattr(bundle, 'warm_reset', None)
                         if callable(reset):
                             def _reset_step():
@@ -717,7 +723,7 @@ def run(args, manifest, scenario):
                         steps = [_ws.SequenceStep('reset_stage_and_reseed', _reset_step),
                                  _ws.SequenceStep('preflight_verify', _verify_step)]
                         return _ws.plan_and_run_reset(
-                            config, config, steps, stage_state=stage_state,
+                            config, config, steps, census=_census,
                             vram_used_mib=_read_used_vram_mib(),
                             post_boot_baseline_mib=_post_boot_vram,
                             on_log=lambda m: print(m, flush=True))

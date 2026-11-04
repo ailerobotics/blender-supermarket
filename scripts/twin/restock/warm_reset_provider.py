@@ -71,6 +71,29 @@ class WarmResetRefused(RuntimeError):
     """A reset step refused the warm reuse (=> cold-boot fallback). Its message names the step."""
 
 
+# Isaac-managed RTX render-target prims. A sensing camera's render product lives under this namespace
+# (``/Render/OmniverseKit/HydraTextures/Replicator_<NN>/...``); Isaac allocates it when the camera starts
+# rendering and the fm380/fm381 teardown destroys it to free VRAM, picking a fresh ``Replicator_<NN>``
+# index when it is RE-created. So these prims are (a) volatile across a run's own teardown and (b)
+# re-created ON DEMAND the instant the owning camera's render product is re-initialized -- which the warm
+# reset does (``warm_reset_hooks.reset_host_state`` -> ``CameraRig.recreate_destroyed``). Matching their
+# exact paths against the post-boot baseline is therefore both brittle (the index churns) and redundant
+# (the STABLE ``/World/restock_camera_*/Camera`` prim they hang off IS matched and restored). Per the
+# captain's rule a render prim may be excluded from the census ONLY when it is re-created on demand by the
+# next attempt and that is proven -- which is exactly this subtree; the restock-camera prims are NOT
+# excluded (a torn-down camera is a real ``missing`` the reset must restore). The exclusion is scoped
+# tightly to this RTX render-target namespace so a leaked WORLD prim still fails the census.
+_VOLATILE_RENDER_PREFIX = '/Render/OmniverseKit/HydraTextures/'
+
+
+def _census_prims(paths):
+    """The set of prim paths the warm stage census compares, with the volatile Isaac RTX render-target
+    subtree (:data:`_VOLATILE_RENDER_PREFIX`) excluded (re-created on demand; see the constant). Applied
+    to BOTH the post-boot baseline and the live present set so the exclusion cannot itself create a
+    spurious leak/missing."""
+    return frozenset(str(p) for p in paths if not str(p).startswith(_VOLATILE_RENDER_PREFIX))
+
+
 # The ordered reset steps. Stable names so the record / dry-run report and the tests key off them.
 STEP_NAMES = ('stop_runtime', 'reset_stage', 'reseat', 'relaunch_host', 'verify')
 
@@ -117,7 +140,7 @@ class WarmResetProvider:
         ``stage_clean`` gate consumes. A census that itself fails is reported as a DIRTY stage (a doubt
         => cold boot), never swallowed."""
         try:
-            present = frozenset(str(p) for p in self.ops.list_prims())
+            present = _census_prims(self.ops.list_prims())
         except Exception as exc:  # noqa: BLE001 -- a failed census is a doubt, not a crash
             return ws.StageState(dirty=True, note=f'prim census failed: {exc}')
         return ws.StageState(present_prims=present, expected_prims=self.baseline_prims)
@@ -282,7 +305,7 @@ def build(*, app, assembly, parts, plan, config, output, scenario=None, _ops=Non
         app=app, assembly=assembly, parts=parts, plan=plan, config=config, output=output,
         scenario=scenario, hooks=hooks)
     try:
-        baseline = frozenset(str(p) for p in ops.list_prims())
+        baseline = _census_prims(ops.list_prims())
     except Exception as exc:  # noqa: BLE001
         raise WarmResetRefused(f'cannot snapshot the post-boot prim baseline: {exc}') from exc
     return WarmResetProvider(ops=ops, baseline_prims=baseline)
