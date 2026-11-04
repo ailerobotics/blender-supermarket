@@ -606,6 +606,24 @@ class TransferController:
         # issued (place_contact_release on + a measured placed_pose). None => the gate is inert (off / no
         # measured carton pose) and the legacy place->level-gate->release owns the set-down.
         self._place_contact_release_z = None
+        # sim-place-release-serialization-v1: the contact-triggered weld release must be a proper PHASE
+        # transition, not a scene mutation issued mid place-execute (coldwin43: the detach ran while the
+        # place ExecuteTrajectory was still in flight -> 'planning-scene mutation issued while a plan/execute
+        # is in flight (state=execute_result)' -> HOST_FAULT_ESTOP at phase=release). When the gate fires it
+        # CANCELS the in-flight place move (the cancel is the stop -- the arm never keeps pressing the welded
+        # carton into the deck, which is what produced the 2.0 deg set-down tilt in coldwin39-42), the release
+        # phase WAITS for the cancel's terminal (settled, not-in-flight) result, and only THEN detaches. These
+        # flags drive that sub-state; inert (never set) unless the contact-release gate fires => byte-identical.
+        self._release_cancel_pending = False   # a contact-release cancel+settle is owed before the detach
+        self._release_cancel_issued = False    # the cancel() request has been sent to the motion port
+        self._release_cancel_sim_start = None  # sim time the cancel was requested (bounds the settle wait)
+        # The bounded SIM-clock budget for the place-cancel to reach a terminal result before the release
+        # detach (report + fail BY NAME, never detach blindly into an in-flight planning scene). Internal
+        # (env-tunable), clamped under the per-phase timeout; NO HOST/RUNTIME config key (config_preflight
+        # unchanged). A cancel settles in ~1 controller tick (coldwin43 release cadence ~0.017 s/tick), so
+        # this is a safety backstop, not a primary terminator.
+        self.release_cancel_timeout_s = _float_env_bounded(
+            'RESTOCK_RELEASE_CANCEL_SETTLE_S', min(2.0, float(phase_timeout)), 0.1, float(phase_timeout))
         # sim-robust-phase-timeout-during-recovery-v1: credit the per-phase timeout clock for the sim time
         # spent while the motion adapter is inside a NAMED move_group crash recovery (respawn hold /
         # post-respawn re-attach / an observed move_group death still being recovered -- motion.
@@ -761,6 +779,10 @@ class TransferController:
         self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
         self.verify_ids = set()
         self.release_time = None
+        # sim-place-release-serialization-v1: fresh contact-release cancel sub-state per op (see __init__).
+        self._release_cancel_pending = False
+        self._release_cancel_issued = False
+        self._release_cancel_sim_start = None
 
     def _fresh(self, stamp, now):
         return math.isfinite(stamp) and -self.render_lead <= now - stamp <= self.max_age
@@ -1561,6 +1583,14 @@ class TransferController:
         # continuing the press. Fires BEFORE the carried-phase CARTON_TILT trip below, so the executed-joint
         # deflection never builds and the trip never sustains; the carton settles flat on the deck under
         # gravity. Scoped to the collect deck place; inert (threshold None) when off / no measured carton pose.
+        # sim-place-release-serialization-v1: the place EXECUTE is STILL IN FLIGHT when this gate fires mid-
+        # descent (coldwin43). The detach is a planning-scene mutation and must NEVER be issued while the
+        # adapter is in a plan/execute state (the _PLAN_IN_FLIGHT_STATES invariant -- coldwin43 tripped it:
+        # the release detach ran at state=execute_result -> HOST_FAULT_ESTOP). So make the release a PROPER
+        # phase transition: CANCEL the in-flight place move now (the cancel is the stop -- the arm must not
+        # keep pressing the carton into the deck), then the release phase waits for the cancel's terminal
+        # result and detaches only from the settled, not-in-flight state. The cancel fires NO global emergency
+        # stop (which would latch permanently in the Isaac host); it is an intended phase transition.
         if (self._carton_level is not None and self._carton_level.place_contact_release and self.held
                 and self.phase == 'place' and self._place_contact_release_z is not None
                 and self._collect_deck_place()
@@ -1569,15 +1599,22 @@ class TransferController:
                 and float(sensors.placed_pose[2]) <= self._place_contact_release_z):
             from twin.restock_manipulation import carton_level as cl
             print('%s phase=place now=%.3f carton_z=%.4f (<= release_z %.4f): the welded carton reached the '
-                  'cart deck -- releasing the weld at contact (gripper-open + detach) instead of pressing it '
-                  'into the deck; the carton settles flat under gravity and the CARTON_TILT trip, which only '
-                  'grades the carried carton, is pre-empted'
+                  'cart deck -- releasing the weld at contact (cancel the in-flight place execute, then '
+                  'gripper-open + detach from the settled pose) instead of pressing it into the deck; the '
+                  'carton settles flat under gravity and the CARTON_TILT trip, which only grades the carried '
+                  'carton, is pre-empted the instant we leave the place phase'
                   % (cl.PLACE_CONTACT_RELEASE, now, float(sensors.placed_pose[2]),
                      self._place_contact_release_z), flush=True)
             self.evidence.append({'place_contact_release': {'carton_z': float(sensors.placed_pose[2]),
                                                             'release_z': float(self._place_contact_release_z),
                                                             'sim_time': float(now)}})
             self._place_contact_release_z = None   # one-shot
+            # Owe a cancel+settle before the release detach (the release phase drives it). Record the sim
+            # time to bound the settle wait. _transition resets issued/elapsed; the release handler sees
+            # _release_cancel_pending and serializes cancel -> wait-terminal -> detach.
+            self._release_cancel_pending = True
+            self._release_cancel_issued = False
+            self._release_cancel_sim_start = now
             self._transition('release')
             return self._result()
         # sim-carton-level-carry-v1: CARTON_TILT trip. While the carton is WELDED and in a carried
@@ -2594,6 +2631,54 @@ class TransferController:
                     return self._fail('grasp did not confirm a held carton within the retry budget')
             return self._result()
         if self.phase == 'release':
+            # sim-place-release-serialization-v1: a CONTACT-TRIGGERED release arrived MID place-execute (the
+            # place ExecuteTrajectory is still in flight). Serialize the release as a proper phase transition:
+            # (1) cancel the in-flight place move -- the cancel is the stop, so the arm never keeps pressing;
+            # (2) WAIT (bounded) for the cancel's terminal, settled result; (3) only THEN detach (the planning-
+            # scene mutation), from the not-in-flight state. coldwin43 skipped (1)+(2) and detached straight
+            # into state=execute_result -> 'planning-scene mutation issued while a plan/execute is in flight'.
+            # Inert (never pending) on the normal place->release path, where the place move already polled to
+            # 'succeeded' (terminal) before the transition => byte-identical.
+            if self._release_cancel_pending:
+                cancel = getattr(self.motion, 'cancel', None)
+                outcome_fn = getattr(self.motion, 'cancel_outcome', None)
+                if not callable(cancel) or not callable(outcome_fn):
+                    # A motion port without the cancel protocol cannot serialize a mid-flight contact release;
+                    # fail BY NAME rather than risk the detach-in-flight invariant (never silently detach).
+                    return self._fail('contact-release needs a cancellable motion port '
+                                      '(cancel/cancel_outcome) to serialize the release detach')
+                if not self._release_cancel_issued:
+                    cancel()   # request the cancel; the arm holds its last commanded pose. NO emergency stop.
+                    self._release_cancel_issued = True
+                    print('PLACE_CONTACT_RELEASE_CANCEL phase=release now=%.3f: cancelling the in-flight place '
+                          'execute (the cancel is the stop -- the arm stops pressing the welded carton into '
+                          'the deck) before the release detach; waiting for the terminal result' % now,
+                          flush=True)
+                    return self._result()
+                outcome = outcome_fn()
+                if outcome is None:
+                    # Still settling: the place execute has not reached a terminal result yet. Wait a bounded
+                    # SIM-clock budget, then FAIL BY NAME -- never detach blindly into an in-flight scene.
+                    if now - self._release_cancel_sim_start > self.release_cancel_timeout_s:
+                        return self._fail('contact-release place-cancel did not reach a terminal result '
+                                          'within %.2fs sim of the cancel -- not detaching into an in-flight '
+                                          'planning scene' % self.release_cancel_timeout_s)
+                    return self._result()
+                if outcome == 'error':
+                    # The place execute terminated with a broken result: report, do not detach blindly.
+                    return self._fail('contact-release place-cancel terminated with an error -- not '
+                                      'detaching into a broken motion terminal')
+                # Terminal: 'cancelled' (the normal cancel outcome) or 'succeeded' (the place completed before
+                # the cancel landed). Either is a settled, stopped arm NOT in flight -> proceed to the gripper-
+                # open + detach from the settled pose. The adapter has moved its state out of the in-flight
+                # set, so the detach's _PLAN_IN_FLIGHT_STATES guard now passes.
+                print('PLACE_CONTACT_RELEASE_SETTLED phase=release now=%.3f outcome=%s (place execute '
+                      'terminal, arm settled) -> gripper-open + detach from the settled pose'
+                      % (now, outcome), flush=True)
+                self.evidence.append({'place_contact_release_settled':
+                                      {'outcome': outcome, 'sim_time': float(now)}})
+                self._release_cancel_pending = False
+                # fall through to the gripper-open + detach below (same tick; issued is still False)
             if not self.issued:
                 if s.valid_until_steady is not None:
                     require_fresh(s.valid_until_steady,self.steady_clock)
