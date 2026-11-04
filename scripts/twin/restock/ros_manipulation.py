@@ -37,6 +37,9 @@ class RosManipulationRuntime:
         self.sensing_bridge = sensing_bridge
         self.last_sensor_time = -1.
         self.latest = Result('running','idle')
+        # sim-carton-level-southdock-v1: carton-level per-segment diagnostic lines already relayed to the
+        # orchestrator console (dedup so each CARTON_SEGMENT_TILT prints once, not every poll).
+        self._carton_seg_seen = set()
         # fm400: set True by the Isaac adapter at place_approach arrival; stamped onto the published
         # sensor packet so the HOST controller's TRANSIT gate (a separate process) resumes to preplace.
         self._base_repositioned = False
@@ -260,6 +263,17 @@ class RosManipulationRuntime:
                 self.latest = Result('failed' if status == 'rejected' else status,
                     reply.get('phase','host'),reply.get('reason',''),controls=(),
                     evidence=tuple(reply.get('evidence',())))
+                # sim-carton-level-southdock-v1: relay the controller's per-segment carton-level diagnostic
+                # (planned-vs-executed tilt) from the host reply evidence to the ORCHESTRATOR console. The
+                # controller prints CARTON_SEGMENT_TILT inside the host subprocess (host-stack.log); this
+                # surfaces the same line, once each, in orch-console.log so the next cold run records the
+                # diagnostic built for exactly this trip (absent from coldwin31). No-op when carton_level off.
+                for ev in self.latest.evidence:
+                    if isinstance(ev, dict) and 'carton_segment_tilt' in ev:
+                        line = str(ev['carton_segment_tilt'])
+                        if line not in self._carton_seg_seen:
+                            self._carton_seg_seen.add(line)
+                            print(line, flush=True)
                 if self.latest.status == 'failed':
                     # fm474: name the HOST failure reason on the console. The reply reason is otherwise
                     # only on the manip status topic (echo unreliable) and is overwritten in mission.json

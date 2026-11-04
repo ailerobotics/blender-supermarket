@@ -235,6 +235,15 @@ class LevelConfig:
     # CARTON_TILT_TRANSIENT and proceeds. 0 => legacy immediate trip. The controller rebases this onto
     # the running physics step (freshness_scale) so it is a constant FRAME-COUNT budget.
     tilt_grace_s: float = DEFAULT_TILT_GRACE_S
+    # sim-carton-level-southdock-v1: loaded gravity-droop FEEDFORWARD for the level place IK. At the PR-307
+    # south-dock place the sensed deck sits far enough forward that the welded far-extended arm's quasi-static
+    # gravity droop pitched the carton +2.07 deg even with a geometrically-level command and PR 302's 0.02
+    # rad/s gentling (coldwin31, phase=place) -- a torque/stiffness effect, not velocity lag, so going slower
+    # cannot fix it. When set, the collect-deck level place/preplace IK solves for the COMMANDED config whose
+    # EXECUTED (drooped) pose is level, so the physical carton lands parallel to the ground. A
+    # ``GravityCompensation`` or None (off => byte-identical; the geometric level solve + the CARTON_TILT trip
+    # own it). The bound and grace are UNCHANGED.
+    gravity_compensation: object = None
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -251,6 +260,10 @@ class LevelConfig:
         bad = [j for j in self.joints if j not in ARM_JOINTS]
         if bad or not self.joints:
             raise ValueError(f'carton_level.joints must be a non-empty subset of ARM_JOINTS; bad={bad}')
+        if self.gravity_compensation is not None:
+            if not isinstance(self.gravity_compensation, GravityCompensation):
+                raise ValueError('carton_level.gravity_compensation must resolve to a GravityCompensation')
+            self.gravity_compensation.validate()
         return self
 
 
@@ -290,6 +303,10 @@ def resolve_level_config(spec):
         kw['joints'] = tuple(str(j) for j in spec['joints'])
     if spec.get('tool_link'):
         kw['tool_link'] = str(spec['tool_link'])
+    # sim-carton-level-southdock-v1: loaded gravity-droop feedforward for the level place IK (off => None).
+    if spec.get('gravity_compensation') is not None:
+        kw['gravity_compensation'] = resolve_gravity_compensation(
+            spec['gravity_compensation'], tool_link=kw.get('tool_link', LevelConfig.tool_link))
     return LevelConfig(**kw).validate()
 
 
@@ -447,13 +464,35 @@ def predict_path_tilt(robot, waypoints, up_in_tool, *, tool_link='ur_tool0', roo
     executor's max tilt (the smoothstep only reparameterises time, not the joint-value path). ``interior``
     samples per segment catches a tilt that the leveled ENDPOINTS hide but the interpolation passes through
     (the wrist-branch transition). Pure/CPU."""
+    return predict_path_tilt_executed(robot, waypoints, up_in_tool, tool_link=tool_link, root=root,
+                                      interior=interior, gravity_comp=None)
+
+
+def predict_path_tilt_executed(robot, waypoints, up_in_tool, *, tool_link='ur_tool0',
+                               root='ur_base_link', interior=8, gravity_comp=None):
+    """``predict_path_tilt`` with the loaded gravity droop applied (sim-carton-level-southdock-v1).
+
+    When ``gravity_comp`` is a ``GravityCompensation`` each sampled COMMANDED config ``q`` is evaluated at
+    its EXECUTED pose ``q + gravity_comp.droop(q)`` -- so the prediction is the carton attitude the PHYSICAL
+    welded carton will actually reach (the quantity the GPU CARTON_TILT trip and the captain's "parallel to
+    the ground" rule both read), NOT the geometric attitude of the pre-tilted command. ``None`` => the
+    geometric replay (identical to ``predict_path_tilt``). Pure/CPU."""
+    from twin.restock_manipulation.cad_tool import ARM_JOINTS
     pts = [list(w) for w in waypoints]
+
+    def executed(q):
+        if gravity_comp is None:
+            return q
+        cfg = dict(zip(ARM_JOINTS, q))
+        dq = gravity_comp.droop(robot, cfg, tool_link=tool_link, root=root)
+        return [q[i] + dq.get(ARM_JOINTS[i], 0.0) for i in range(6)]
+
     mr = mp = mt = 0.0
     for i in range(len(pts) - 1):
         for k in range(interior + 1):
             a = k / float(interior)
             q = [(1 - a) * pts[i][j] + a * pts[i + 1][j] for j in range(6)]
-            roll, pitch, tilt = carried_rpy(robot, q, up_in_tool, tool_link, root)
+            roll, pitch, tilt = carried_rpy(robot, executed(q), up_in_tool, tool_link, root)
             mr = max(mr, abs(roll)); mp = max(mp, abs(pitch)); mt = max(mt, tilt)
     return mr, mp, mt
 
@@ -572,6 +611,130 @@ def _select_level_path(robot, start_config, gvec, up_in_tool, *, bound_deg, join
     return min(tried, key=lambda p: max(p.max_roll, p.max_pitch))
 
 
+# ------------------------------------------- loaded gravity-droop model (sim-carton-level-southdock-v1)
+# Default EFFECTIVE droop stiffness (N*m/rad). The welded carton's attitude is the arm's attitude; at a
+# FAR-EXTENDED, LOADED place pose the heavy shoulder/elbow pitch chain carries a large gravity torque that
+# the finite servo cannot fully reject, so the physical (executed) joints droop BELOW the commanded level
+# config and the carton pitches off level EVEN THOUGH the commanded config is geometrically level. This is
+# a QUASI-STATIC effect (set by torque/stiffness, NOT joint speed), which is why time-parameterising the
+# descent slower (PR 302's place_descent_speed) could not save the bigger south-dock place: at 0.02 rad/s
+# the welded carton still pitched +2.07 deg (coldwin31, phase=place) -- the SAME droop the 0.08 rad/s
+# collectlevel3 saw (2.22 deg). 2850 N*m/rad is the ONE free parameter, pinned by matching the coldwin31
+# executed peak (model: south place TCP shoulder_lift gravity torque 58 N*m -> pitch 2.03 deg ~ the observed
+# 2.07; east cart 49 N*m -> 1.86 deg, which collectlevel4 saw as a sub-grace transient and PASSED). The
+# integration lane re-pins it from the new per-segment CARTON_SEGMENT_TILT log if the in-sim residual differs.
+DEFAULT_DROOP_STIFFNESS = 2850.0
+# The UR pitch-chain links whose gravity torque drives the carton droop, in ARM order with the serial-chain
+# child link each arm joint carries downstream. Masses/COMs are read from the real mission URDF.
+_ARM_CHAIN_LINKS = ('ur_shoulder_link', 'ur_upper_arm_link', 'ur_forearm_link',
+                    'ur_wrist_1_link', 'ur_wrist_2_link', 'ur_wrist_3_link')
+_GRAVITY = np.array([0.0, 0.0, -9.81])
+
+
+def arm_gravity_torques(robot, config, *, carton_mass=0.0, tool_link='ur_tool0', root='ur_base_link'):
+    """Static gravity torque (N*m) on each of the six arm revolute joints at ``config`` (dict or ARM
+    6-vector), from the real URDF link masses/COMs plus an optional welded ``carton_mass`` lumped at
+    ``tool_link``. Pure/CPU. Returns a dict joint_name -> torque. The sign convention is the torque the
+    joint must RESIST (so a positive value droops the joint toward negative under finite stiffness)."""
+    from twin.urdf_probe import link_world_transforms
+    from twin.restock_manipulation.cad_tool import ARM_JOINTS
+    cfg = _as_joint_map(config)
+    jmap = {j.name: j for j in robot.joints}
+    links = robot.links
+    world = link_world_transforms(robot, cfg, root=root)
+    masses, coms = {}, {}
+    for name, link in links.items():
+        inert = getattr(link, 'inertial', None)
+        if inert is not None and inert.mass and name in world:
+            T = np.asarray(world[name], float)
+            masses[name] = float(inert.mass)
+            coms[name] = T[:3, :3] @ np.asarray(inert.origin_xyz, float) + T[:3, 3]
+    extra = []
+    if carton_mass and tool_link in world:
+        extra.append((float(carton_mass), np.asarray(world[tool_link], float)[:3, 3]))
+    out = {}
+    for idx, jn in enumerate(ARM_JOINTS):
+        joint = jmap.get(jn)
+        if joint is None or joint.child not in world:
+            out[jn] = 0.0
+            continue
+        Tc = np.asarray(world[joint.child], float)
+        origin = Tc[:3, 3]
+        axis = Tc[:3, :3] @ np.asarray(joint.axis, float)
+        torque = 0.0
+        for ln in _ARM_CHAIN_LINKS[idx:]:
+            if ln in masses:
+                torque += float(np.dot(axis, np.cross(coms[ln] - origin, masses[ln] * _GRAVITY)))
+        for m, p in extra:
+            torque += float(np.dot(axis, np.cross(p - origin, m * _GRAVITY)))
+        out[jn] = torque
+    return out
+
+
+@dataclass(frozen=True)
+class GravityCompensation:
+    """Resolved loaded gravity-droop feedforward settings (sim-carton-level-southdock-v1). Off => None.
+
+    ``stiffness`` is the effective droop stiffness (N*m/rad); ``carton_mass`` the welded handling-unit mass
+    lumped at the tool for the torque; ``max_pretilt_rad`` clamps each joint's commanded pre-tilt so a
+    mis-calibrated stiffness can never command a large attitude offset (the droop is < 0.04 rad, so a small
+    clamp is ample headroom). ``droop(robot, cfg)`` is the per-joint EXECUTED-minus-COMMANDED position offset
+    the finite servo leaves under gravity: delta_q = -torque/stiffness (clamped), ARM-order dict."""
+    stiffness: float = DEFAULT_DROOP_STIFFNESS
+    carton_mass: float = 0.45
+    max_pretilt_rad: float = 0.12
+    tool_link: str = 'ur_tool0'
+
+    def validate(self):
+        if not (math.isfinite(self.stiffness) and self.stiffness > 0):
+            raise ValueError('gravity_compensation.stiffness must be a finite positive N*m/rad')
+        if not (math.isfinite(self.carton_mass) and self.carton_mass >= 0):
+            raise ValueError('gravity_compensation.carton_mass must be a finite non-negative kg')
+        if not (math.isfinite(self.max_pretilt_rad) and self.max_pretilt_rad > 0):
+            raise ValueError('gravity_compensation.max_pretilt_rad must be a finite positive rad')
+        return self
+
+    def droop(self, robot, config, *, tool_link=None, root='ur_base_link'):
+        """ARM-order dict of EXECUTED-minus-COMMANDED joint offsets under the loaded gravity torque at
+        ``config``. A joint that must resist a positive torque droops negative: delta_q = -tau/stiffness,
+        clamped to +/- max_pretilt_rad."""
+        tl = tool_link or self.tool_link
+        tau = arm_gravity_torques(robot, config, carton_mass=self.carton_mass, tool_link=tl, root=root)
+        lim = float(self.max_pretilt_rad)
+        return {j: max(-lim, min(lim, -tau[j] / self.stiffness)) for j in tau}
+
+
+def resolve_gravity_compensation(spec, *, tool_link='ur_tool0'):
+    """Normalise a ``gravity_compensation`` value into a ``GravityCompensation`` or ``None`` (off =>
+    byte-identical). Accepts absent/None/False/'0'/'off' => None; True/'on'/{} => defaults; a mapping with
+    optional ``stiffness`` (or ``stiffness_nm_per_rad``), ``carton_mass`` (or ``carton_mass_kg``),
+    ``max_pretilt_rad``. Raises on a malformed value so a typo fails loudly at boot."""
+    if spec is None or spec is False:
+        return None
+    if isinstance(spec, str):
+        v = spec.strip().lower()
+        if v in ('', '0', 'off', 'false', 'none'):
+            return None
+        if v in ('1', 'on', 'true'):
+            return GravityCompensation(tool_link=tool_link).validate()
+        raise ValueError(f'gravity_compensation: unknown value {spec!r}')
+    if spec is True:
+        return GravityCompensation(tool_link=tool_link).validate()
+    if not isinstance(spec, dict):
+        raise ValueError('gravity_compensation must be a bool, string, or mapping')
+    kw = {'tool_link': tool_link}
+    for key, aliases in (('stiffness', ('stiffness', 'stiffness_nm_per_rad')),
+                         ('carton_mass', ('carton_mass', 'carton_mass_kg')),
+                         ('max_pretilt_rad', ('max_pretilt_rad',))):
+        for a in aliases:
+            if a in spec and spec[a] is not None:
+                kw[key] = float(spec[a])
+                break
+    if spec.get('tool_link'):
+        kw['tool_link'] = str(spec['tool_link'])
+    return GravityCompensation(**kw).validate()
+
+
 # ----------------------------------------------------- level-place IK (reach + level)
 
 # Seeds (ABSOLUTE wrist targets) the level-place IK restarts from. For a TOP-DOWN grasp the carton's
@@ -584,7 +747,7 @@ _W3_SEED_GRID = tuple(np.linspace(-math.pi, math.pi, 9))
 
 def level_place_ik(robot, target_pos, up_in_tool, seed_config, *, joints=None,
                    tool_link='ur_tool0', root='ur_base_link', limits=None, max_iter=200,
-                   pos_tol=1e-3, tilt_tol_deg=0.05, w_ori=1.0):
+                   pos_tol=1e-3, tilt_tol_deg=0.05, w_ori=1.0, gravity_comp=None):
     """Re-plan a carried place pose that is BOTH at ``target_pos`` (tool origin in ``root``) AND level
     (carton up-axis world +Z) -- the fix PR 287 flagged as a follow-up: wrist-ONLY leveling of a
     reach-authored place shape holds the attitude but shifts the TCP ~0.2-0.5 m and loses the deck
@@ -596,7 +759,14 @@ def level_place_ik(robot, target_pos, up_in_tool, seed_config, *, joints=None,
     a joint map (ARM order). Prefers a solution that is level, reaches, is in ``limits``, in the clear
     carry wrist region, and nearest the seed. Raises ValueError when no in-limits pose reaches both
     within tolerance (genuinely unreachable-while-level -- the caller fails honestly / the CARTON_TILT
-    trip owns it)."""
+    trip owns it).
+
+    sim-carton-level-southdock-v1: when ``gravity_comp`` is a ``GravityCompensation`` the IK solves for the
+    COMMANDED config whose EXECUTED (loaded-droop) pose reaches the target AND is level -- the residual
+    (position + attitude) is evaluated at ``cfgmap + gravity_comp.droop(cfgmap)``, so the returned config
+    is pre-tilted against the expected gravity droop and the physical welded carton lands level at the
+    far-extended place pose (coldwin31). The joint-limit / clear-wrist feasibility is still checked on the
+    COMMANDED config (the pre-tilt is < 0.04 rad). ``None`` => the geometric level solve (byte-identical)."""
     from twin.restock_manipulation.cad_tool import ARM_JOINTS
     cfg = _as_joint_map(seed_config)
     adj = list(joints) if joints is not None else list(ARM_JOINTS)
@@ -607,8 +777,16 @@ def level_place_ik(robot, target_pos, up_in_tool, seed_config, *, joints=None,
     tgt = np.asarray(target_pos, float)[:3]
     idx = [ARM_JOINTS.index(j) for j in adj]
 
+    def _executed(cfgmap):
+        """The physically-executed config under the loaded gravity droop (commanded + droop), or the
+        commanded config verbatim when no compensation is requested."""
+        if gravity_comp is None:
+            return cfgmap
+        dq = gravity_comp.droop(robot, cfgmap, tool_link=tool_link, root=root)
+        return {j: cfgmap[j] + dq.get(j, 0.0) for j in cfgmap}
+
     def state(cfgmap):
-        T = tool_transform(robot, cfgmap, tool_link, root)
+        T = tool_transform(robot, _executed(cfgmap), tool_link, root)
         return T[:3, 3], T[:3, :3] @ u
 
     def residual(cfgmap):
