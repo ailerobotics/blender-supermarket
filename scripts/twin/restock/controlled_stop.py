@@ -39,7 +39,12 @@ DOWNSTREAM_SYMPTOMS = ('arm command heartbeat lost', 'StationAckStreamStalled',
                        'controller_not_ready')
 
 # Substrings that mark a reason as a REAL first trip worth preserving over a later downstream symptom.
-TRIP_MARKERS = ('carton_tilt', 'carton off level', 'host emergency stop', 'host fault')
+# sim-preplace-accel-limit-reject-v1: a controller goal rejection (moveit_err=-4 class: the executor
+# aborted the ExecuteTrajectory) and a plan-time acceleration refusal are both REAL first trips -- they
+# must survive over the 'arm command heartbeat lost' the controlled stop's deliberate arm hold produces
+# (the heartbeat is left alive by suppress_heartbeat, so the terminal reason must name the real cause).
+TRIP_MARKERS = ('carton_tilt', 'carton off level', 'host emergency stop', 'host fault',
+                'plan exceeds acceleration limit', 'arm controller aborted trajectory')
 
 # Sane base-attitude band for a collect re-begin, as absolute tolerances around the robot's NOMINAL
 # (level-chassis) pose. The nominal pitch is NOT zero on this rig: the caster-lift static tilt reads
