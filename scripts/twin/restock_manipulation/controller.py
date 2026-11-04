@@ -601,6 +601,11 @@ class TransferController:
         self._place_verify_xy_tol = _float_env('RESTOCK_PLACE_VERIFY_XY_TOL', 0.25)
         self._place_verify_z_tol = _float_env('RESTOCK_PLACE_VERIFY_Z_TOL', 0.12)
         self._place_offdeck_frames = 0
+        # sim-place-descent-residual-v3: the live carton-centre z (ur_base_link) at which the
+        # contact-triggered weld release fires during the collect set-down, latched when the place descent is
+        # issued (place_contact_release on + a measured placed_pose). None => the gate is inert (off / no
+        # measured carton pose) and the legacy place->level-gate->release owns the set-down.
+        self._place_contact_release_z = None
         # sim-robust-phase-timeout-during-recovery-v1: credit the per-phase timeout clock for the sim time
         # spent while the motion adapter is inside a NAMED move_group crash recovery (respawn hold /
         # post-respawn re-attach / an observed move_group death still being recovered -- motion.
@@ -1241,7 +1246,7 @@ class TransferController:
             gc = cl.GravityCompensation(tool_link=self._carton_level.tool_link).validate()
         return gc
 
-    def _closed_loop_correct_descent(self, robot, waypoints, gc, tcp_link):
+    def _closed_loop_correct_descent(self, robot, waypoints, gc, tcp_link, measured_start=None):
         """sim-place-descent-residual-v2 (brief part 3): the opt-in, bounded, sim-only CLOSED-LOOP
         carton-level BACKSTOP applied to the planned collect place-descent waypoints. When
         ``carton_level.closed_loop_level`` is on, a ``CartonLevelServo`` reads the PREDICTED executed
@@ -1257,7 +1262,21 @@ class TransferController:
         clc = cl.ClosedLoopConfig(authority_deg=clc.authority_deg, rate_deg_per_s=clc.rate_deg_per_s,
                                   gain=clc.gain, joints=clc.joints, tool_link=tcp_link)
         servo = cl.CartonLevelServo(robot, self._carton_up_in_tool, clc)
-        corrected = servo.correct_path([list(w) for w in waypoints], gc)
+        wps = [list(w) for w in waypoints]
+        # sim-place-descent-residual-v3 (part 3): when closed_loop_sensor is on and a live measured start
+        # config is available, anchor the correction on the MEASURED carton attitude (the quantity the
+        # grader reads) so the servo accounts for a real start offset the droop model misses; else the v2
+        # model-only correction (byte-identical).
+        use_sensor = (getattr(self._carton_level, 'closed_loop_sensor', False)
+                      and measured_start is not None and len(measured_start) == 6
+                      and all(math.isfinite(x) for x in measured_start))
+        if use_sensor:
+            corrected = servo.correct_path_sensor_anchored(wps, gc, list(measured_start))
+            print('CARTON_LEVEL_CLOSED_LOOP_SENSOR phase=place engaged: correction anchored on the measured '
+                  'carton attitude (FK of the live measured joints), authority %.2f deg'
+                  % clc.authority_deg, flush=True)
+        else:
+            corrected = servo.correct_path(wps, gc)
         peak = max((abs(v) for v in servo.accumulated.values()), default=0.0)
         return corrected, math.degrees(peak)
 
@@ -1532,6 +1551,35 @@ class TransferController:
                   'source=sensors.collision_time packet mirror; collision_dt invariant now owns freshness)'
                   % (self.phase, now, sensors.collision_time), flush=True)
         collision_fresh = self._fresh(sensors.collision_time, now)
+        # sim-place-descent-residual-v3: CONTACT-TRIGGERED weld release. The reach-independent ~2.0 deg
+        # collect set-down residual is the arm PRESSING the leveled welded carton onto the cart deck -- the
+        # CARTON_TILT grader reads FK of the EXECUTED joints, which deflect as the position-controlled arm
+        # drives into the rigid deck reaction (no FK model sees the contact; that is why it is reach-
+        # independent and model-blind). The fix is to NOT press: watch the welded carton descend (its measured
+        # centre z) and, the instant it reaches within place_contact_gap_m of the planned set-down height
+        # (deck contact), RELEASE the weld (transition to the release phase: gripper-open + detach) instead of
+        # continuing the press. Fires BEFORE the carried-phase CARTON_TILT trip below, so the executed-joint
+        # deflection never builds and the trip never sustains; the carton settles flat on the deck under
+        # gravity. Scoped to the collect deck place; inert (threshold None) when off / no measured carton pose.
+        if (self._carton_level is not None and self._carton_level.place_contact_release and self.held
+                and self.phase == 'place' and self._place_contact_release_z is not None
+                and self._collect_deck_place()
+                and sensors.placed_pose is not None and len(sensors.placed_pose) >= 3
+                and math.isfinite(float(sensors.placed_pose[2]))
+                and float(sensors.placed_pose[2]) <= self._place_contact_release_z):
+            from twin.restock_manipulation import carton_level as cl
+            print('%s phase=place now=%.3f carton_z=%.4f (<= release_z %.4f): the welded carton reached the '
+                  'cart deck -- releasing the weld at contact (gripper-open + detach) instead of pressing it '
+                  'into the deck; the carton settles flat under gravity and the CARTON_TILT trip, which only '
+                  'grades the carried carton, is pre-empted'
+                  % (cl.PLACE_CONTACT_RELEASE, now, float(sensors.placed_pose[2]),
+                     self._place_contact_release_z), flush=True)
+            self.evidence.append({'place_contact_release': {'carton_z': float(sensors.placed_pose[2]),
+                                                            'release_z': float(self._place_contact_release_z),
+                                                            'sim_time': float(now)}})
+            self._place_contact_release_z = None   # one-shot
+            self._transition('release')
+            return self._result()
         # sim-carton-level-carry-v1: CARTON_TILT trip. While the carton is WELDED and in a carried
         # phase, capture its level up-axis once (the grasp pose rests level on the shelf) and fail
         # the move by name if the measured carton leaves level by more than the bound -- never carry
@@ -2119,8 +2167,35 @@ class TransferController:
                             # EXECUTED carton level under a residual droop-model error; the least-extended
                             # approach (part 2) still owns the geometric pad-vs-post clearance.
                             waypoints = list(plan.waypoints)
-                            waypoints, cl_peak = self._closed_loop_correct_descent(robot, waypoints, gc,
-                                                                                   tcp_link)
+                            waypoints, cl_peak = self._closed_loop_correct_descent(
+                                robot, waypoints, gc, tcp_link, measured_start=s.joint_positions)
+                            # sim-place-descent-residual-v3: latch the contact-triggered weld-release
+                            # threshold for this set-down. The welded carton descends from the standoff by the
+                            # planned TCP drop; when its live measured centre z (placed_pose) reaches within
+                            # place_contact_gap_m of the set-down height it has met the deck -> release the weld
+                            # (step() gate below) instead of pressing the leveled carton into the cart deck
+                            # (the reach-independent 2.0 deg residual). Inert (None) when the gate is off or no
+                            # measured carton pose is available -> the legacy place->level-gate->release path.
+                            self._place_contact_release_z = None
+                            if (self._carton_level.place_contact_release
+                                    and s.placed_pose is not None and len(s.placed_pose) >= 3
+                                    and math.isfinite(float(s.placed_pose[2]))):
+                                try:
+                                    from twin.restock_manipulation import carton_level as _cl3
+                                    drop = _cl3.place_descent_drop_m(robot, waypoints, tool_link=tcp_link)
+                                    self._place_contact_release_z = _cl3.place_contact_release_z(
+                                        float(s.placed_pose[2]), drop, self._carton_level.place_contact_gap_m)
+                                    print('PLACE_CONTACT_RELEASE_ARM phase=place start_carton_z=%.4f '
+                                          'descent_drop=%.4f gap=%.4f -> release at carton_z<=%.4f '
+                                          '(release the weld at deck contact instead of pressing the welded '
+                                          'carton into the deck)'
+                                          % (float(s.placed_pose[2]), drop,
+                                             self._carton_level.place_contact_gap_m,
+                                             self._place_contact_release_z), flush=True)
+                                except (ValueError, KeyError) as exc:
+                                    print('PLACE_CONTACT_RELEASE_ARM disabled: %s (legacy level-gate release '
+                                          'owns the set-down)' % exc, flush=True)
+                                    self._place_contact_release_z = None
                             if cl_peak is not None:
                                 mr, mp, _ = cl.predict_path_tilt_executed(
                                     robot, waypoints, self._carton_up_in_tool, tool_link=tcp_link,

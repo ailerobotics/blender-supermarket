@@ -214,12 +214,15 @@ def check_flow_consistency(host_cfg, runtime_cfg):
 
 
 def check_carton_level(host_cfg):
-    """sim-place-descent-residual-v1/-v2: resolve the HOST ``carton_level`` block so a malformed value
+    """sim-place-descent-residual-v1/-v2/-v3: resolve the HOST ``carton_level`` block so a malformed value
     (incl. the place-clearance keys ``preplace_above_place`` / ``preplace_standoff_m`` /
-    ``place_clearance_check`` / ``place_clearance_margin_m`` and the v2 keys ``place_clearance_drooped`` /
+    ``place_clearance_check`` / ``place_clearance_margin_m``, the v2 keys ``place_clearance_drooped`` /
     ``closed_loop_level`` / ``closed_loop_authority_deg`` / ``closed_loop_rate_deg_per_s`` /
-    ``closed_loop_gain``, read from ros_host_config.json) FAILS the pre-flight loudly instead of at a GPU
-    boot. Also flags incoherent combinations -- the LEVEL clearance gate armed with no remedy, and the v1
+    ``closed_loop_gain``, and the v3 keys ``place_contact_release`` / ``place_contact_gap_m`` /
+    ``closed_loop_sensor``, read from ros_host_config.json) FAILS the pre-flight loudly instead of at a GPU
+    boot. ``resolve_level_config``/``LevelConfig.validate`` enforce the ranges and the
+    ``closed_loop_sensor`` -> ``closed_loop_level`` dependency; a violation surfaces here as a malformed
+    refusal. Also flags incoherent combinations -- the LEVEL clearance gate armed with no remedy, and the v1
     ``preplace_above_place`` remedy left ON (sim-place-descent-residual-v2 found it regresses the set-down)
     -- as refusals. No-op ([]) when ``carton_level`` is absent/off (byte-identical)."""
     from twin.restock_manipulation import carton_level as cl
