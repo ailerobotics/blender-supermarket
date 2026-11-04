@@ -244,6 +244,35 @@ class LevelConfig:
     # ``GravityCompensation`` or None (off => byte-identical; the geometric level solve + the CARTON_TILT trip
     # own it). The bound and grace are UNCHANGED.
     gravity_compensation: object = None
+    # sim-setdown-shelf-contact-v1: APPROACH-FROM-ABOVE for the collect place-on-cart set-down. The legacy
+    # place descent interpolates the TCP on a SINGLE straight line from the pre-place standoff (which the
+    # fixed collect_place_preplace_shape parks OUT IN FRONT of the cart, the held carton overhanging the
+    # rollwagen's +x open "mouth" edge) down+in to the support load-centre. That diagonal drags the carton
+    # ACROSS the shelf's front-top (mouth) edge while the carton bottom is already BELOW the shelf top, so
+    # the carton's bottom-front rides the /Rollwagen/chassis/shelf edge and pivots off level (coldwin33/34/35:
+    # CARTON_TILT +2.06 deg, a CONTACT pivot -- d(executed)/d(commanded) ~ 0, so NOT droop). With this on, the
+    # set-down is routed as an L-path through the CLEAR opening above the support: first move horizontally (at
+    # the standoff height, which clears the shelf top) to DIRECTLY ABOVE the load-centre, then descend
+    # VERTICALLY onto the support -- so the carton stays clear of the shelf top/edge until it is laterally
+    # inside the shelf footprint, then lands FLAT (face-on-surface, not edge). ``place_above_clearance_m`` is
+    # the minimum carton-above-support height of the horizontal-leg via-point. The per-waypoint reach + level +
+    # droop-cancel IK is unchanged (still runs at every waypoint of BOTH legs), so the descent stays level and
+    # the CARTON_TILT reject gate still owns an un-levelable path. Default OFF => the single straight line =>
+    # byte-identical; scoped to the collect-deck level place descent only.
+    place_from_above: bool = False
+    place_above_clearance_m: float = 0.08
+    # sim-setdown-shelf-contact-v1: DEPTH bias (m) for the from-above set-down. The side-grip suction panel
+    # hangs ~37 mm BELOW the carton's bottom face and sits on the carton's +x (mouth) side, so at the
+    # config load-centre the panel STRADDLES the shelf's +x (mouth) edge (CPU-reconstructed pad cart-x
+    # [0.255, 0.415] vs the shelf edge at +0.38): descending, the panel's inboard half lands on the shelf
+    # top while its outboard half is over the open mouth -> an ASYMMETRIC edge contact that pivots the
+    # carton even on a vertical descent. This shifts the set-down target DEEPER into the cart (along the
+    # horizontal approach direction, away from the mouth) by this much, so the whole panel lands flat on the
+    # support surface, clear of the mouth edge. Config-independent (uses the descent's own geometry, not the
+    # cart frame). Only applied when ``place_from_above`` is on; 0 => no shift. The carton has ample room to
+    # go deeper (shelf back at cart-x -0.38, carton back at -0.003). An alternative is to shift the external
+    # load-centre instead (see the PR hand-off); this code bias makes the fix self-contained.
+    place_depth_bias_m: float = 0.0
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -256,6 +285,10 @@ class LevelConfig:
                       ('place_descent_accel', self.place_descent_accel)):
             if not (math.isfinite(v) and v > 0):
                 raise ValueError(f'carton_level.{nm} must be a finite positive number')
+        if not (math.isfinite(self.place_above_clearance_m) and self.place_above_clearance_m >= 0):
+            raise ValueError('carton_level.place_above_clearance_m must be a finite non-negative number')
+        if not (math.isfinite(self.place_depth_bias_m) and self.place_depth_bias_m >= 0):
+            raise ValueError('carton_level.place_depth_bias_m must be a finite non-negative number')
         from twin.restock_manipulation.cad_tool import ARM_JOINTS
         bad = [j for j in self.joints if j not in ARM_JOINTS]
         if bad or not self.joints:
@@ -271,8 +304,9 @@ def resolve_level_config(spec):
     """Normalise a ``carton_level`` config value into a ``LevelConfig`` or ``None`` (off =>
     byte-identical). Accepts absent/None/False/'0'/'off' => None; True/'on'/{} => defaults; a
     mapping with optional ``bound_deg``, ``tilt_grace_s``, ``level_goals``, ``trip``, ``level_weld``,
-    ``level_place``, ``level_path``, ``path_waypoints``, ``place_descent_speed``, ``place_descent_accel``,
-    ``joints``, ``tool_link``. Raises on a malformed value so a typo fails loudly at boot."""
+    ``level_place``, ``level_path``, ``place_from_above``, ``path_waypoints``, ``place_descent_speed``,
+    ``place_descent_accel``, ``place_above_clearance_m``, ``place_depth_bias_m``, ``joints``, ``tool_link``.
+    Raises on a malformed value so a typo fails loudly at boot."""
     if spec is None or spec is False:
         return None
     if isinstance(spec, str):
@@ -293,10 +327,11 @@ def resolve_level_config(spec):
         kw['tilt_grace_s'] = float(spec['tilt_grace_s'])
     if 'path_waypoints' in spec and spec['path_waypoints'] is not None:
         kw['path_waypoints'] = int(spec['path_waypoints'])
-    for fnum in ('place_descent_speed', 'place_descent_accel'):
+    for fnum in ('place_descent_speed', 'place_descent_accel', 'place_above_clearance_m',
+                 'place_depth_bias_m'):
         if fnum in spec and spec[fnum] is not None:
             kw[fnum] = float(spec[fnum])
-    for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path'):
+    for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     if spec.get('joints'):
@@ -611,9 +646,51 @@ def _select_level_path(robot, start_config, gvec, up_in_tool, *, bound_deg, join
     return min(tried, key=lambda p: max(p.max_roll, p.max_pitch))
 
 
+def _descent_tcp_targets(start_tcp, tgt, n, *, approach_from_above=False, above_clearance_m=0.08,
+                         depth_bias_m=0.0):
+    """The sequence of ``n`` TCP targets (3-vectors) from ``start_tcp`` to ``tgt`` for the set-down.
+
+    Default (``approach_from_above`` False): a single straight line start->tgt (byte-identical to the
+    legacy ``tgt_i = (1-a)*start_tcp + a*tgt``). With ``approach_from_above``: an L-path through the clear
+    opening ABOVE the support -- first a (near-)horizontal leg at the standoff height to DIRECTLY ABOVE the
+    load-centre (``via`` xy = ``tgt`` xy, z = max(start_tcp z, tgt z + clearance)), then a VERTICAL leg down
+    to ``tgt`` -- so the carton stays clear of the shelf top/edge until it is laterally inside the footprint,
+    then descends straight down and lands flat. Arc-length parameterised so the point density is uniform
+    along the two legs. ``depth_bias_m`` shifts the (biased) target DEEPER along the horizontal approach
+    direction ``unit(tgt_xy - start_tcp_xy)`` (away from the mouth) so the overhanging gripper panel lands
+    clear of the mouth edge. Pure/CPU."""
+    start_tcp = np.asarray(start_tcp, float)[:3]
+    tgt = np.asarray(tgt, float)[:3]
+    if not approach_from_above:
+        return [((1.0 - i / float(n)) * start_tcp + (i / float(n)) * tgt) for i in range(1, n + 1)]
+    if depth_bias_m:
+        horiz = np.array([tgt[0] - start_tcp[0], tgt[1] - start_tcp[1], 0.0])
+        hn = float(np.linalg.norm(horiz))
+        if hn > 1e-9:
+            tgt = tgt + (horiz / hn) * float(depth_bias_m)
+    via = np.array([tgt[0], tgt[1], max(float(start_tcp[2]), float(tgt[2]) + float(above_clearance_m))])
+    l1 = float(np.linalg.norm(via - start_tcp))
+    l2 = float(np.linalg.norm(tgt - via))
+    total = l1 + l2
+    out = []
+    for i in range(1, n + 1):
+        if total <= 1e-9:
+            out.append(tgt.copy()); continue
+        s = (i / float(n)) * total
+        if s <= l1 and l1 > 1e-9:
+            out.append(start_tcp + (via - start_tcp) * (s / l1))
+        elif l2 > 1e-9:
+            out.append(via + (tgt - via) * ((s - l1) / l2))
+        else:
+            out.append(via.copy())
+    out[-1] = tgt.copy()   # pin the endpoint exactly on the support target
+    return out
+
+
 def plan_compensated_place_descent(robot, start_config, target_pos, seed_goal, up_in_tool, gc, *,
                                    bound_deg=DEFAULT_TILT_BOUND_DEG, joints=None, tool_link='ur_tool0',
-                                   root='ur_base_link', limits=None, waypoints=8, interior=8):
+                                   root='ur_base_link', limits=None, waypoints=8, interior=8,
+                                   approach_from_above=False, above_clearance_m=0.08, depth_bias_m=0.0):
     """Plan the loaded place-on-cart SET-DOWN descent as a PER-POINT wrist-compensated leveled path
     (sim-carton-level-place-descent-v1).
 
@@ -627,9 +704,14 @@ def plan_compensated_place_descent(robot, start_config, target_pos, seed_goal, u
     pitches off level as the arm extends into the deepest pose (coldwin34 +2.06 deg at the set-down
     dwell -- the trip site).
 
-    Here the TCP target is interpolated linearly from the standoff TCP to ``target_pos`` and EVERY
-    waypoint is solved reach+level+wrist-droop-cancel against ITS OWN loaded droop, so the executed
-    welded carton stays parallel to the ground at every interpolated point, not only the endpoint. The
+    Here the TCP target is interpolated from the standoff TCP to ``target_pos`` and EVERY waypoint is
+    solved reach+level+wrist-droop-cancel against ITS OWN loaded droop, so the executed welded carton
+    stays parallel to the ground at every interpolated point, not only the endpoint. With
+    ``approach_from_above`` (sim-setdown-shelf-contact-v1) the TCP target follows an L-path -- horizontal
+    to directly above the support load-centre, then vertical down -- instead of the single diagonal
+    straight line, so the carton descends through the CLEAR opening above the support and lands flat
+    rather than dragging its bottom-front across the rollwagen shelf's mouth edge (the coldwin33/34/35
+    +2.06 deg CONTACT pivot). ``above_clearance_m`` sets the via-point height above the support. The
     first waypoint is pinned to ``start_config`` verbatim (``begin_joint_path`` requires the path to
     start exactly where the arm is, and the standoff's own small executed droop is reported honestly);
     ``seed_goal`` seeds the first reach+level IK and each solve seeds the next for a continuous branch.
@@ -649,9 +731,9 @@ def plan_compensated_place_descent(robot, start_config, target_pos, seed_goal, u
     n = max(2, int(waypoints))
     vecs = [list(svec)]
     seed = _as_joint_map(seed_goal)
-    for i in range(1, n + 1):
-        a = i / float(n)
-        tgt_i = (1.0 - a) * start_tcp + a * tgt
+    tcp_targets = _descent_tcp_targets(start_tcp, tgt, n, approach_from_above=approach_from_above,
+                                       above_clearance_m=above_clearance_m, depth_bias_m=depth_bias_m)
+    for tgt_i in tcp_targets:
         sol = level_place_ik(robot, tgt_i, up_in_tool, seed, joints=joints, tool_link=tool_link,
                              root=root, limits=limits, gravity_comp=gc)
         vecs.append(_as_vec(sol))
