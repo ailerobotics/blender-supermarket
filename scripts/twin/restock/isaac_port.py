@@ -392,6 +392,21 @@ class IsaacPort:
             self.mobile.release_brake()
             self.mobile.engage_base_full_brake()
             return
+        if getattr(self.mobile, 'station_pitch_hold', False):
+            # sim-chassis-pitch-stability-v1 coldwin39 fix: when the station pitch hold is on, LATCH one
+            # rotation-lock-at-target brake for the WHOLE arm phase instead of swapping yaw-lock<->full
+            # brake every phase transition (the ~2000 brake engage/release cycles coldwin39 logged).
+            # engage_station_hold is idempotent while latched, and the brake leaves TRANSLATION free so
+            # the weld-loop relief (run-208/209) is preserved; pitch/roll are held at the target attitude
+            # (not the instantaneous end stop coldwin39 latched). Released only when the base leaves the
+            # arm phase to drive.
+            if in_arm_phase:
+                self.mobile.release_base_full_brake()
+                self.mobile.engage_station_hold()
+            else:
+                self.mobile.release_station_hold()
+                self.mobile.release_base_full_brake()
+            return
         if not in_arm_phase:
             self.mobile.release_base_full_brake()
             self.mobile.release_brake()

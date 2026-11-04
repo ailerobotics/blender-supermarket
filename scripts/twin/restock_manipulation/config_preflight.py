@@ -103,6 +103,10 @@ KEY_CONSUMER = {
     # byte-identical. The preferred source fix (compliant caster suspension) is a MobileSpec field in the
     # mobile manifest, NOT a batch config key.
     'chassis_station_pitch_hold': RUNTIME,
+    # coldwin39 fix: the station-hold target attitude (degrees); physics_setup.assemble reads them
+    # (RUNTIME). Absent => default rig rest pitch -1.17 / roll 0 (not the instantaneous end stop).
+    'chassis_station_pitch_hold_pitch_deg': RUNTIME,
+    'chassis_station_pitch_hold_roll_deg': RUNTIME,
     # sim-collect-retreat-collider-v3: defer re-enabling the tool-side gripper colliders past the empty
     # retreat (DEFAULT ON). isaac_factory.parse_manipulation_config reads it (RUNTIME); env
     # RESTOCK_DEFER_TOOL_COLLISION is the alias. Registered so a run can --require it (assert ON).
