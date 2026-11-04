@@ -840,8 +840,8 @@ Blender. Evidence basis is labelled honestly on every slot verdict:
 out-of-band labelled shelf view, e.g. a store-vision `realogram` export).
 
 ```bash
-# default: a finished run's mission.json, verdict for the job's destination slot
-python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json
+# default: a finished run DIR -> report + shelf-observation.json next to mission.json
+python3 scripts/run_smart_verify.py --run-dir "$RUN"
 
 # bookkeeping basis + residual reset jobs in the sim-smart-job-feed-v1 shape
 python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json \
@@ -849,7 +849,7 @@ python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json \
   --out "$RUN"/smart-verify.json --job-feed-out "$RUN"/reset-jobs.json
 
 # advisory cross-check through store-vision's read-only planoreset.verify
-python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json --storevision
+python3 scripts/run_smart_verify.py --run-dir "$RUN" --storevision
 ```
 
 Residual reset jobs are emitted in the `sim-smart-job-feed-v1` `--job-from`
@@ -862,17 +862,52 @@ read-only; it degrades to `{"available": false, "reason": ...}` when store-visio
 stays authoritative. Run it inside store-vision's own venv for full
 `planoreset.deviation` event emission.
 
+**sim-smart-verify-v2 — the post-transfer shelf observation + the realogram path.**
+With a run directory the step also exports the **post-transfer shelf observation**
+`shelf-observation.json`: the resolved verify region (the bay the shelf-staging
+resolver pinned — read from the verify evidence `tolerances`/`ground_truth_check`)
+plus the **saved verify frames** (the `mission-frames` whose `simulation_time`
+brackets the verify instant; in ground-truth verify mode these are the walkthrough
+chase camera, labelled `walkthrough_chase_camera`, NOT a shelf sensor). That
+observation is what `--storevision-realogram` runs through store-vision's
+`realogram.diff.diff_bay` → `planoreset.verify.verify_from_realogram` →
+`deviation_events` inside the store-vision `.venv` (a read-only subprocess, since the
+realogram model needs pydantic); it degrades cleanly when the venv is absent.
+
+`--mode` picks the variant (working default vs smart; the mission gate is never
+changed either way):
+
+```bash
+# report (default): additional report only, exit 0
+python3 scripts/run_smart_verify.py --run-dir "$RUN" --source-bin backstock_00
+
+# strict (SMART): also write reset-jobs.job-plan.json in lane-1 job_plan/v1 shape,
+# so the NEXT mission can run them via run_mobile_restock.py --job-from (closed loop)
+python3 scripts/run_smart_verify.py --run-dir "$RUN" --source-bin backstock_00 \
+  --mode strict --storevision --storevision-realogram
+
+# block (SMART): strict + exit non-zero when non-compliant (smart-verify's OWN gate;
+# it NEVER un-commits the mission verify stage, which already committed the stock)
+python3 scripts/run_smart_verify.py --run-dir "$RUN" --source-bin backstock_00 --mode block
+```
+
 The same report is produced automatically at the end of a guarded mission run
-behind `run_mobile_restock.py --smart-verify` (writes `smart-verify.json` +
-`reset-jobs.json` into the run output; `--smart-verify-storevision` adds the
-cross-check, `--smart-verify-policy` picks the quantity policy). Absent
+behind `run_mobile_restock.py --smart-verify[=report|strict|block]` (writes
+`smart-verify.json` + `shelf-observation.json` + `reset-jobs.json`, and in
+`strict`/`block` also `reset-jobs.job-plan.json`, into the run output;
+`--smart-verify-storevision` adds the in-process cross-check,
+`--smart-verify-realogram` adds the venv realogram path, `--smart-verify-policy`
+picks the quantity policy). `block` records `smart_verify.blocked` in mission.json
+when non-compliant but leaves `state` exactly as the mission set it. Absent
 `--smart-verify` the run is byte-identical. CPU tests:
 
 ```bash
-cd scripts && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest twin/tests/test_smart_verify.py -q
+cd scripts && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
+  twin/tests/test_smart_verify.py twin/tests/test_smart_verify_v2.py -q
 ```
 
-Write-up: [data/sim-smart-verify-v1/report.md](data/sim-smart-verify-v1/report.md).
+Write-ups: [data/sim-smart-verify-v1/report.md](data/sim-smart-verify-v1/report.md),
+[data/sim-smart-verify-v2/report.md](data/sim-smart-verify-v2/report.md).
 
 ## 13. Mobile restock manipulation (CPU)
 

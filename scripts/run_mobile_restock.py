@@ -242,47 +242,93 @@ def _maybe_smart_verify(args, scenario, summary):
 
     Pure CPU post-processing that runs AFTER the mission and its mission.json are
     written. It consumes the just-finished run's artifacts (mission.json + the
-    committed inventory DB + the planogram) and writes ``smart-verify.json`` (full
-    verdict) and ``reset-jobs.json`` (residual jobs in the sim-smart-job-feed-v1
-    ``--job-from`` shape) into the run output. It NEVER changes the mission's
-    stock-commit gate or ``summary``; wrapped so it can never fail the run. Absent
-    ``--smart-verify`` this function is not called, so a mission run is byte-identical.
+    committed inventory DB + the planogram + the saved verify frames) and writes:
+
+    * ``smart-verify.json`` -- the full verdict + the post-transfer shelf observation,
+    * ``shelf-observation.json`` -- the exported realogram (resolved verify region +
+      saved verify frames) the store-vision cross-check consumes,
+    * ``reset-jobs.json`` -- residual jobs in the legacy job-feed shape,
+    * ``reset-jobs.job-plan.json`` (``strict``/``block`` only) -- the consumable residual
+      jobs in lane-1's ``storevision.restock.job_plan/v1`` shape, so the NEXT mission can
+      run them via ``--job-from`` (the closed loop).
+
+    It NEVER changes the mission's stock-commit gate or ``summary['state']``; wrapped so
+    it can never fail the run. ``block`` mode records ``summary['smart_verify']['blocked']``
+    when the slot is non-compliant -- a smart-verify-OWN signal that STILL does not
+    un-commit the mission verify gate. Absent ``--smart-verify`` this function is not
+    called, so a mission run is byte-identical.
 
     ``summary`` already carries ``events`` (set just before mission.json is written),
     so the verify evidence is read from it directly rather than re-reading the file.
     """
+    import datetime as _dt
     from twin.restock import smart_verify as sv
+    from twin.restock import shelf_realogram as sr
+    mode = getattr(args, 'smart_verify', None) or 'report'
     try:
         evidence = sv.mission_verify_evidence(summary)
         if evidence is None:
-            summary['smart_verify'] = {'ran': False,
+            summary['smart_verify'] = {'ran': False, 'mode': mode,
                                        'reason': 'mission verify did not succeed; nothing to check'}
             return
         slot_id = evidence.get('location') or scenario['job']['shelf_id']
         plan_path = Path(__file__).resolve().parent / 'planogram.json'
         plan = sv.load_planogram(plan_path)
+        source_bin = scenario['job'].get('source_bin')
         # Bookkeeping basis: the committed DB counts at the slot after the verified
         # transfer -- the fullest cheap realogram, labelled honestly as a belief.
         stock = sv.load_stock(args.output / 'inventory.sqlite')
         report = sv.report_from_mission(
             mission=summary, plan=plan, slot_id=slot_id, stock=stock,
-            source_bin=scenario['job'].get('source_bin'),
+            source_bin=source_bin,
             quantity_policy=getattr(args, 'smart_verify_policy', 'at_least'),
             mission_json_path=str(args.output / 'mission.json'))
         out = report.to_dict()
+        out['mode'] = mode
+
+        # v2: the post-transfer shelf observation (resolved verify region + verify frames).
+        realogram = sr.build_shelf_realogram(
+            summary, evidence, slot_id, run_dir=args.output)
+        out['shelf_observation'] = realogram.to_dict()
+
         if getattr(args, 'smart_verify_storevision', False):
             from twin.restock import smart_verify_storevision as svx
             out['storevision_crosscheck'] = svx.cross_check(report)
+        if getattr(args, 'smart_verify_realogram', False):
+            from twin.restock import smart_verify_storevision as svx
+            expectation = sv.planogram_slot_index(plan).get(slot_id)
+            out['storevision_realogram'] = svx.cross_check_realogram(realogram, expectation)
+
+        generated_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        store_config = (scenario.get('store_config') if isinstance(scenario, dict) else None)
+        consumable, advisory = sv.residual_job_plans(
+            report, store_config=store_config, generated_at=generated_at)
+        out['residual_job_plans'] = {'consumable': consumable, 'advisory': advisory}
+
         (args.output / 'smart-verify.json').write_text(
             json.dumps(out, indent=2, allow_nan=False) + '\n')
+        (args.output / 'shelf-observation.json').write_text(
+            json.dumps(realogram.to_dict(), indent=2, allow_nan=False) + '\n')
         (args.output / 'reset-jobs.json').write_text(
             json.dumps([j.to_job_feed() for j in report.residual_jobs], indent=2,
                        allow_nan=False) + '\n')
-        summary['smart_verify'] = {'ran': True, 'compliant': out['compliant'],
-                                   'evidence_basis': out['evidence_basis'],
-                                   'residual_jobs': len(out['residual_jobs'])}
+        if mode in ('strict', 'block'):
+            (args.output / 'reset-jobs.job-plan.json').write_text(
+                json.dumps(consumable, indent=2, allow_nan=False) + '\n')
+
+        summary['smart_verify'] = {
+            'ran': True, 'mode': mode, 'compliant': out['compliant'],
+            'evidence_basis': out['evidence_basis'],
+            'region_source': realogram.region.source,
+            'frames_basis': realogram.frames_basis,
+            'residual_jobs': len(out['residual_jobs']),
+            'residual_job_plans_consumable': len(consumable)}
+        if mode == 'block' and not out['compliant']:
+            # smart-verify's OWN gate signal; the mission verify stage already committed
+            # stock and summary['state'] is left exactly as the mission set it.
+            summary['smart_verify']['blocked'] = True
     except Exception as exc:
-        summary['smart_verify'] = {'ran': False, 'error': str(exc)}
+        summary['smart_verify'] = {'ran': False, 'mode': mode, 'error': str(exc)}
 
 
 def _planogram_path(args):
@@ -879,17 +925,29 @@ def main():
     parser.add_argument('--nvidia-runtime', type=Path, help='task-local NVIDIA runtime root for --host-stack')
     parser.add_argument('--host-stack-warmup', type=float, default=180.0,
                         help='seconds to let the planner stack + mapper advertise before booting Isaac')
-    parser.add_argument('--smart-verify', action='store_true',
+    parser.add_argument('--smart-verify', nargs='?', const='report', default=None,
+                        choices=('report', 'strict', 'block'),
                         help='after a mission, also write an ADDITIONAL planogram/realogram '
-                             'compliance report (smart-verify.json) + residual reset jobs '
-                             '(reset-jobs.json). CPU-only, never gates the mission; absent this '
-                             'flag the run is byte-identical.')
+                             'compliance report (smart-verify.json), the post-transfer shelf '
+                             'observation (shelf-observation.json: resolved verify region + saved '
+                             'verify frames) and residual reset jobs (reset-jobs.json). CPU-only. '
+                             'report (default working variant, never gates the mission) | strict '
+                             '(SMART: also writes reset-jobs.job-plan.json in lane-1 job_plan/v1 '
+                             'shape for the next mission --job-from; still not a blocker) | block '
+                             '(SMART: strict + records smart_verify.blocked when non-compliant; '
+                             'STILL never un-commits the mission verify gate). Absent -> '
+                             'byte-identical run.')
     parser.add_argument('--smart-verify-policy', choices=('at_least', 'exact', 'identity'),
                         default='at_least',
                         help='how --smart-verify judges slot quantity vs the planogram (default: at_least)')
     parser.add_argument('--smart-verify-storevision', action='store_true',
                         help='have --smart-verify also cross-check through store-vision '
-                             'planoreset.verify (advisory; degrades if store-vision is absent)')
+                             'planoreset.verify_from_compliance (in-process, advisory; degrades '
+                             'if store-vision is absent)')
+    parser.add_argument('--smart-verify-realogram', action='store_true',
+                        help='have --smart-verify also run the store-vision realogram->planoreset '
+                             'pipeline in the store-vision .venv subprocess (advisory; needs the '
+                             'sv venv, degrades cleanly)')
     parser.add_argument('--transport-probe', type=int, default=0,
                         help='focused masked-depth transport probe: drive the arm bridge for N '
                              'frames at the staging pose instead of running the mission')

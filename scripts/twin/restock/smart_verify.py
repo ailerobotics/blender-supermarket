@@ -100,6 +100,29 @@ class ResetJob:
             'provenance': dict(self.provenance),
         }
 
+    def to_job_plan(self, *, store_config=None, generated_at=None):
+        """A residual job in the lane-1 ``storevision.restock.job_plan/v1`` contract.
+
+        This is the shape ``job_from_plan.load_plan`` / ``run_mobile_restock.py
+        --job-from`` consume, so a ``restock`` residual can seed the NEXT mission
+        (the closed loop; store-vision ``restockloop`` is the analogue). Only a
+        ``restock`` residual maps onto the mission job -- the restock mission has no
+        ``remove`` action -- so callers should route ``remove`` residuals as advisory
+        (see :func:`residual_job_plans`). ``kind`` is preserved in ``provenance`` so a
+        consumer can still see what the residual was.
+        """
+        return {
+            'schema': 'storevision.restock.job_plan/v1',
+            'generated_at': generated_at,
+            'store_config': store_config,
+            'sku': self.sku,
+            'quantity': self.quantity,
+            'source': {'location': self.source_bin},
+            'destination': {'shelf_id': self.shelf_id, 'slot_id': self.shelf_id},
+            'priority': self.priority,
+            'provenance': dict(self.provenance, planner='sim-smart-verify-v2', kind=self.kind),
+        }
+
 
 @dataclass(frozen=True)
 class SlotVerdict:
@@ -337,6 +360,27 @@ def reset_jobs_for(verdict, *, source_bin=None, priority=50, job_id_prefix='rese
                             'evidence_basis': verdict.evidence_basis,
                             'job_id_hint': f'{job_id_prefix}-{verdict.slot_id}-{d.sku}'}))
     return jobs
+
+
+def residual_job_plans(report, *, store_config=None, generated_at=None,
+                       include_removes=False):
+    """Residual jobs as lane-1 ``job_plan/v1`` dicts, consumable by ``--job-from``.
+
+    Returns ``(consumable, advisory)``: ``consumable`` are the ``restock`` residuals
+    the next mission can actually execute via ``run_mobile_restock.py --job-from``;
+    ``advisory`` are ``remove`` residuals (no mission action exists for them) unless
+    ``include_removes`` forces them into the consumable list. A residual job missing a
+    ``source_bin`` is advisory-only (``--job-from`` needs a source location).
+    """
+    consumable, advisory = [], []
+    for j in report.residual_jobs:
+        plan = j.to_job_plan(store_config=store_config, generated_at=generated_at)
+        runnable = j.kind == 'restock' and j.source_bin is not None
+        if runnable or (include_removes and j.source_bin is not None):
+            consumable.append(plan)
+        else:
+            advisory.append(plan)
+    return consumable, advisory
 
 
 def build_report(*, job_id, plan, observations, source_bin=None,
