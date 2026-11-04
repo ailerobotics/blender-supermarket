@@ -73,6 +73,13 @@ class MobileController:
         # callers (command(), the isaac_port per-tick action logic) no-op while held.
         self._cart_hold = False
         self._base_full_braked = False
+        # Controlled welded-stop latch (sim-host-fault-controlled-stop-v1): while set, command()
+        # refuses to release the base brake or spin the wheels. A host fault left a carton WELDED to
+        # the extended arm (possibly interpenetrating the cart deck), so cutting the drive / releasing
+        # the brake would let PhysX resolve the penetration by flinging the base (coldwin33). Latched by
+        # the controlled stop (isaac_port.enter_welded_controlled_stop); cleared only once the carton is
+        # supported or clear of the deck. SIM-only; no-op on every normal drive (latch stays False).
+        self._welded_hold = False
 
     DRIVE_DAMPING = 100.0
     DRIVE_MAX_FORCE = 80.0
@@ -249,7 +256,22 @@ class MobileController:
             drive.GetTargetVelocityAttr().Set(0.0)
         return (0.0, 0.0)
 
+    def latch_welded_hold(self):
+        """Engage the controlled welded-stop latch (sim-host-fault-controlled-stop-v1): command()
+        refuses to release the base brake or drive while set, so a re-begin cannot unpin a welded,
+        interpenetrating arm. Idempotent."""
+        self._welded_hold = True
+
+    def release_welded_hold(self):
+        """Clear the controlled welded-stop latch once the carton is supported or clear of the deck."""
+        self._welded_hold = False
+
     def command(self, v, omega, observation, *, transport_ready=False):
+        if getattr(self, '_welded_hold', False):
+            # Controlled welded-stop: keep the base PLANTED. Return a zero-velocity park WITHOUT
+            # releasing any brake, so a drive command issued by a re-begin cannot unpin a welded,
+            # interpenetrating arm (the coldwin33 fling). Cleared by release_welded_hold().
+            return self.park()
         self.release_brake()  # resuming driving: drop the sim parking brake before any base motion
         self.release_base_full_brake()  # and the pre-weld full base pin
         self.release_cart_brake()  # cart pin -> free to couple/tow (NO-OP while couple cart-hold latched)

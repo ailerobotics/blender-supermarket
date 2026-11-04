@@ -16,6 +16,7 @@ from .mission import Result
 from .native_transport import remap_arm_fault_reason
 from .staged_start import SettleHold
 from . import pace_watchdog
+from . import controlled_stop
 
 # Safety cap on the parked collision-map warm-up (RuntimeAdapter 'warm' phase): the warm-up
 # normally exits as soon as the station reports a fresh collision_time (a few ticks once nvblox
@@ -604,6 +605,14 @@ class RuntimeAdapter:
         self._nav_stuck_pose = None       # base pose at that progress mark
         self.action = None
         self.last_packet_id = None
+        # sim-host-fault-controlled-stop-v1: the controlled-stop state. ``_welded_controlled_stop`` is
+        # latched when a manipulation failure strikes while a carton is welded (the base + weld owners
+        # then keep the base planted and the arm held). ``_first_trip_reason`` preserves the FIRST real
+        # trip (CARTON_TILT) so the terminal mission reason names it, not the downstream heartbeat loss.
+        # ``_attitude_band`` is the sane chassis band, captured once from the nominal (level) boot pose.
+        self._welded_controlled_stop = False
+        self._first_trip_reason = None
+        self._attitude_band = None
         # SIM-ONLY scripted transfer fallback (RESTOCK_TRANSFER_MODE=scripted): a
         # twin.restock.scripted_transfer.ScriptedTransfer attached by the Isaac bundle. None (default)
         # => the transfer stage warms + dispatches the host manipulation job exactly as before.
@@ -616,6 +625,17 @@ class RuntimeAdapter:
             self._cart_left_parked = False
             self._cart_pinned_for_uncouple = False
         self.mobile.park()
+        # sim-host-fault-controlled-stop-v1: capture the sane chassis-attitude band ONCE, from the
+        # nominal (level) boot pose, and log it. Subsequent collect re-begins are refused outside it
+        # (a flipped / launched base from a prior fling). Guarded: no port.base_attitude => no band =>
+        # the gate is inert (byte-identical).
+        if self._attitude_band is None and hasattr(self.port, 'base_attitude'):
+            try:
+                roll, pitch, z = self.port.base_attitude()
+                self._attitude_band = controlled_stop.AttitudeBand.from_nominal(roll, pitch, z)
+                print('CONTROLLED_STOP_BAND nominal %s' % self._attitude_band.describe(), flush=True)
+            except Exception:  # noqa: BLE001 -- a band capture failure must never break stage start
+                self._attitude_band = None
         if hasattr(self.port,'begin_action'):
             self.port.begin_action(action,job)
         self.action, self.job = action, job
@@ -865,6 +885,46 @@ class RuntimeAdapter:
         on-axis staging behaviour, byte-identical. See data/sim-cart-side-bay-v1/report.md."""
         return (self.cart_side_bay and 'cart_side_bay' in self.poses
                 and self._shelf_staging_active())
+
+    def _note_manip_failure(self, reason):
+        """sim-host-fault-controlled-stop-v1: record a manipulation failure. Preserve the FIRST real
+        trip (so the terminal reason names CARTON_TILT, not a later downstream symptom), and -- when a
+        carton is still WELDED -- enter the controlled stop at the base + weld owners so the base stays
+        planted and the arm held (never slack while the welded carton may interpenetrate the deck).
+        A failure with nothing welded leaves everything untouched (byte-identical)."""
+        welded = bool(self.port.carton_welded()) if hasattr(self.port, 'carton_welded') else False
+        if self._first_trip_reason is None and (welded or controlled_stop.is_trip_reason(reason)):
+            self._first_trip_reason = reason
+        if welded and not self._welded_controlled_stop:
+            self._welded_controlled_stop = True
+            if hasattr(self.port, 'enter_welded_controlled_stop'):
+                self.port.enter_welded_controlled_stop(reason)
+
+    def first_trip_reason(self):
+        """The preserved first real trip (CARTON_TILT ...), or None."""
+        return self._first_trip_reason
+
+    def manip_retry_gate(self):
+        """sim-host-fault-controlled-stop-v1: ``None`` if a manipulation-stage (collect / transfer)
+        re-begin is allowed, else a refusal reason. Refuse while a welded controlled stop is active
+        (the base must not drive a welded, possibly-interpenetrating arm -- the coldwin33 fling), or
+        when the measured chassis attitude is outside the sane band derived from the robot's nominal
+        pose (a base flipped / launched by a prior fling). No band captured / no port attitude =>
+        inert (byte-identical)."""
+        if self._welded_controlled_stop:
+            return ('collect re-begin refused: welded controlled stop active '
+                    '(carton still held; base must stay planted until the carton is cleared)')
+        band = self._attitude_band
+        if band is None or not hasattr(self.port, 'base_attitude'):
+            return None
+        try:
+            roll, pitch, z = self.port.base_attitude()
+        except Exception:  # noqa: BLE001 -- a read failure must not silently allow a re-begin
+            return 'collect re-begin refused: base attitude unreadable'
+        if not controlled_stop.attitude_ok(roll, pitch, z, band):
+            return ('collect re-begin refused: base attitude out of sane band ('
+                    + controlled_stop.attitude_detail(roll, pitch, z, band) + ')')
+        return None
 
     def stop(self):
         errors = []
@@ -1593,7 +1653,12 @@ class RuntimeAdapter:
                 # fault (controller_not_ready / the tracking-envelope trip) so the stage reason names the
                 # real cause. No gate fault / an unrelated reason => r.reason unchanged (byte-identical).
                 gate_reason = self.port.arm_fault_reason() if hasattr(self.port, 'arm_fault_reason') else None
-                return Result('failed', reason=remap_arm_fault_reason(r.reason, gate_reason))
+                reason = remap_arm_fault_reason(r.reason, gate_reason)
+                # sim-host-fault-controlled-stop-v1: a manipulation failure while a carton is welded is
+                # a host fault with the arm possibly extended + interpenetrating. Enter the controlled
+                # stop (keep the base planted + arm held + weld kept) and preserve this first trip.
+                self._note_manip_failure(reason)
+                return Result('failed', reason=reason)
             return Result(r.status, reason=r.reason)
         if self.action == 'verify':
             evidence = p.verification

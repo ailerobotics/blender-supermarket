@@ -300,6 +300,14 @@ class IsaacPort:
         # base brake switches from the pre-weld FULL lock to the yaw-lock-only loop relief. Reset when
         # the mission leaves the arm phase (a fresh grasp starts under the full lock). See advance().
         self._carton_welded=False
+        # Controlled welded-stop latch (sim-host-fault-controlled-stop-v1): set by
+        # enter_welded_controlled_stop() when a host fault strikes while a carton is welded. While set,
+        # advance() keeps the chassis FULLY braked regardless of phase/action and re-holds the arm
+        # energised, and mobile.command() refuses to drive (mobile._welded_hold) -- so a collect
+        # re-begin cannot unpin a welded, interpenetrating arm (the coldwin33 fling). Default off =>
+        # every normal tick is byte-identical.
+        self._welded_stop=False
+        self._welded_stop_reason=None
         # Last controller phase seen by gate() (phase-aware base brake selection).
         self._phase=None
         # Stage-time value corresponding to mission t=0: world.current_time - now, refreshed every
@@ -369,6 +377,14 @@ class IsaacPort:
             past the gate (run-232 pre-weld press 15.5 mm; run-233 preplace swing 16.4 mm). Safe: no
             over-constrained loop in these phases.
         Idempotent engage/release; the two base brakes are mutually exclusive."""
+        if getattr(self, '_welded_stop', False):
+            # sim-host-fault-controlled-stop-v1: a host fault struck while a carton is welded. Keep the
+            # chassis FULLY pinned regardless of phase/action -- never the yaw-lock loop-relief brake
+            # (which leaves translation free) and never released -- so a re-begin drive cannot unpin a
+            # welded, interpenetrating arm. The base must stay planted until the carton is cleared.
+            self.mobile.release_brake()
+            self.mobile.engage_base_full_brake()
+            return
         if not in_arm_phase:
             self.mobile.release_base_full_brake()
             self.mobile.release_brake()
@@ -438,6 +454,45 @@ class IsaacPort:
         symptom in the stage result (native_transport.remap_arm_fault_reason)."""
         gate = getattr(self.native_transport, 'command_gate', None) if self.native_transport is not None else None
         return getattr(gate, 'fault_reason', None) if gate is not None else None
+
+    def carton_welded(self):
+        """True while a carton is welded to the arm (sim attach-fallback weld or a native grip).
+        The controlled stop keys on this: a fault while welded must never cut the drive / release the
+        base brake (sim-host-fault-controlled-stop-v1)."""
+        return bool(self._carton_welded)
+
+    def base_attitude(self):
+        """The chassis attitude (roll_deg, pitch_deg, z_m) in world frame -- the quantity the collect
+        retry gate checks against the sane band. A level chassis reads ~(0, -1.2, 0.24) on this rig
+        (the caster-lift static tilt); the coldwin33 fling reached roll 138, pitch 47, z 2.11."""
+        roll_deg, pitch_deg = body_roll_pitch_deg(self.robot_body)
+        _, z_m, _, _ = body_measurement(self.robot_body)
+        return roll_deg, pitch_deg, z_m
+
+    def enter_welded_controlled_stop(self, reason=''):
+        """Enter the controlled stop on a host fault while a carton is welded
+        (sim-host-fault-controlled-stop-v1): keep the base brake engaged, hold the arm at its current
+        joint targets with the drive still energised, and keep the weld -- never go slack while the
+        welded carton may interpenetrate the deck. Idempotent; latches until the carton is cleared."""
+        if self._welded_stop:
+            return
+        self._welded_stop = True
+        self._welded_stop_reason = reason
+        # Keep the base PLANTED: swap the yaw-lock loop-relief brake (translation free) for the FULL
+        # fixed brake, and latch mobile.command() against releasing it / driving.
+        if hasattr(self.mobile, 'latch_welded_hold'):
+            self.mobile.latch_welded_hold()
+        self.mobile.release_brake()
+        self.mobile.engage_base_full_brake()
+        # Hold the arm at its measured joints with the configured drive (energised position hold, not
+        # slack). The host has stopped streaming, so tell the heartbeat watchdog this hold is DELIBERATE
+        # (it still holds the arm, but must not raise 'arm command heartbeat lost' over the true trip).
+        gate = getattr(self, 'command_gate', None)
+        if gate is not None:
+            gate.suppress_heartbeat = True
+        self.hold_arm()
+        print('WELDED_CONTROLLED_STOP engaged: base full-braked, arm held energised, weld kept '
+              '(reason=%r)' % (reason,), flush=True)
 
     def _trace_probe(self):
         speed = getattr(self, '_speed', None)
@@ -530,6 +585,11 @@ class IsaacPort:
         # command() releases both before any base drive; release here the moment the mission leaves the
         # arm phase (couple/tow/park).
         self._apply_base_brake(self.current_action in SENSING_ACTIONS, self._carton_welded, self._phase)
+        if self._welded_stop:
+            # sim-host-fault-controlled-stop-v1: keep the arm held energised at its joint targets every
+            # tick of the controlled stop (idempotent), so it never goes slack while the welded carton
+            # may still interpenetrate the deck.
+            self.hold_arm()
         # Cart parking brake (firstmate 287): pin the UNCOUPLED cart to the world while the robot
         # loads a carton onto it during collect, so the placement contact cannot roll it (run-228:
         # cart rolled 15.6 mm > the 15 mm gate). Released the moment collect ends (couple needs the

@@ -138,6 +138,13 @@ class ArmCommandGate:
         self._wd_now_wall=time.monotonic()
         self.started=False
         self.faulted=False
+        # Controlled welded-stop (sim-host-fault-controlled-stop-v1): when the controlled stop holds
+        # the arm DELIBERATELY (a host fault left a carton welded), the host stops streaming commands,
+        # so the heartbeat watchdog would otherwise fire 'arm command heartbeat lost' and overwrite the
+        # true first trip (CARTON_TILT). While suppressed the watchdog still HOLDS the arm energised but
+        # does not RAISE -- the intentional hold is not a controller death. Set by the port on entering
+        # the controlled stop; default False => every normal op is byte-identical.
+        self.suppress_heartbeat=False
         # The NAMED cause of the latched fault (controller_not_ready / the tracking-envelope trip / the
         # heartbeat loss), set at each raise site. This gate runs in the Isaac/mission process and gates
         # the HOST's streamed arm commands, so when it holds the arm the HOST manipulation process
@@ -331,7 +338,8 @@ class ArmCommandGate:
                                      sim_budget=ARM_HEARTBEAT_SIM_BACKSTOP_S,
                                      wall_backstop=ARM_HEARTBEAT_WALL_BACKSTOP_S, mode='either'):
                 self.hold()
-                raise RuntimeError('arm command heartbeat lost')
+                if not self.suppress_heartbeat:
+                    raise RuntimeError('arm command heartbeat lost')
         if self.faulted:
             self.hold()
 
