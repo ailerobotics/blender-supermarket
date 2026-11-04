@@ -1,0 +1,19 @@
+{
+  "_comment": "fm/sim-dock-lane-tow-regression-v1 -- the PROACTIVE from-rest launch for the coupled authored-lane outbound tow. MERGE this navigation block into the mission runtime-config's `navigation` (it already carries coupled_progress_recovery + the break-away keys, e.g. docs/examples/outbound-heading-hold-mission-fragment.json). Default off => absent => byte-identical legacy follower. Addresses the intermittent coupled_no_progress on the first forward tow after the PR 293 dock-frame straight-REVERSE couple (coldwinint2 on the 304 side-bay dock AND coldwinint3 on the proven portal-axis lane both stalled; coldwinint1 passed -- 1 in 3), which is NOT lane-specific: the reverse couple leaves the trailing casters mis-pointed, and if the follower's speed schedule collapses within the first ~0.5 m the front caster is left COCKED ~10-14 deg, whose scrub arc trips gate_velocity.measured_turn_radius (coasts to rest) or sits under the heading-hold creep, pinning the tow from rest. The 0.18-0.30 m/s reactive break-away rock is too weak/late to straighten a cocked caster.",
+  "navigation": {
+    "coupled_from_rest_launch": true,
+    "coupled_launch_distance_m": 1.0,
+    "coupled_launch_mps": 0.35,
+
+    "coupled_progress_recovery": true,
+    "coupled_progress_escape": true,
+    "coupled_breakaway_speed_mps": 0.18
+  },
+  "_key_notes": {
+    "coupled_from_rest_launch": "Master switch (default off => byte-identical). When on, the coupled authored-lane follower commands the proven committed-forward _breakaway_cmd override IMMEDIATELY at tow start, for the first coupled_launch_distance_m of travel, so the base carries momentum THROUGH the caster-swivel-in transient before any throttle (speed schedule / heading hold / measured_turn_radius coast) can collapse the command. The override brakes along the COMMANDED curvature, so the cocked-caster scrub arc no longer coasts the tow to rest. One-shot per goal (disarms past the distance, never re-arms); FORWARD-only (the coupled v>=0 interlock stands); gate obstacle/coverage/rollout safety unchanged. Requires coupled_progress_recovery (shares the _breakaway_cmd plumbing; raises if absent).",
+    "coupled_launch_distance_m": "Metres of travel the from-rest launch owns before handing back to the follower. ~1.0 m covers the measured caster-swivel-in distance (int1's organic recovery happened within the first metre). Must be > 0.",
+    "coupled_launch_mps": "The committed launch speed (clamped to navigation.max_speed at the gate). Must be >= coupled_breakaway_speed_mps -- the from-rest launch is at least a break-away surge. 0.35 requests the full speed cap on the default 0.25 m/s base."
+  },
+  "_gpu_acceptance_note": "Bounded GPU acceptance = a start_at=couple side-bay run on the 304 dock (couple, from-rest launch, gentle curve, straight through the doorway, park at the side bay). Grade the resulting nav-trace with scripts/check_tow_traction.py --gpu-run <run-dir> (GPU_RUN PASS = reached_goal=True, longest_pin_s < escape_s, no single-tick stop). Set coupled_from_rest_launch:false to reproduce a pre-fix stall. The front-caster-cock evidence is data/sim-dock-lane-tow-regression-v1/mechanism-caster-cock.png.",
+  "_scope_note": "Opt-in everywhere; never commands reverse; does not touch the lane geometry, the lead-in, the monitor thresholds, the heading hold, fine-dock, or friction/mass/caster_lift. Complementary traction config (caster_lift_m, wheel_drive.max_force) stays the integration lane's to tune."
+}
