@@ -209,6 +209,39 @@ def _build_production_ops(*, app, assembly, parts, plan, config, output, scenari
     from .physics_step import resolve_dt as _resolve_physics_dt
     physics_dt = _resolve_physics_dt(config)
 
+    # sim-warm-reset-cart-reseat-v1: CAPTURE the cold-start resting Z of the cart + base and the full
+    # carton pose NOW (build time runs right after the cold start-state is applied and PR 297-verified,
+    # before any mission tick), so the between-runs re-seed can RESTORE the train to the configured start
+    # pose rather than inherit wherever attempt 1's host e-stop nudged it. The cart/base CONFIGURED planar
+    # pose comes from scenario['initial_staging'] (the same source the cold build spawns from); only the
+    # resting Z and the backstock carton (composed from the planogram, no initial_staging field) are
+    # captured. Best-effort + guarded: a handle-less assembly (a minimal test seam) captures nothing and
+    # the reseat restore no-ops, strictly no worse than the legacy world.reset()-only behaviour.
+    from . import warm_reseat as _wr
+    _cart_body = getattr(assembly, 'cart_body', None)
+    _robot = getattr(assembly, 'robot', None)            # SingleArticulation: set its ROOT world pose
+    _reseat_capture = {'cart_rest_z': None, 'base_rest_z': None,
+                       'carton_body': None, 'carton_pose': None}
+    try:
+        if _cart_body is not None and hasattr(_cart_body, 'get_world_pose'):
+            _reseat_capture['cart_rest_z'] = _wr.read_pose(_cart_body)[0][2]
+        if _robot is not None and hasattr(_robot, 'get_world_pose'):
+            _reseat_capture['base_rest_z'] = _wr.read_pose(_robot)[0][2]
+    except Exception as exc:  # noqa: BLE001 -- a capture that cannot read is simply not restored later
+        print(f'WARM_RESEAT capture skipped (cart/base pose unreadable: {exc})', flush=True)
+    # The backstock carton: a transient rigid-prim handle on the stock path (NOT scene.add'd, so the
+    # cold attempt's physics footprint is unchanged). Only for the non-start_at paths -- a start_at run's
+    # carton is re-spawned by apply_start_state at the planned pose, so the reseat must not touch it.
+    if not config.get('start_at'):
+        try:
+            stock_path = assembly.evidence['composition']['stock']
+            from isaacsim.core.prims import SingleRigidPrim
+            carton = SingleRigidPrim(prim_path=stock_path, name='warm_reseat_carton')
+            _reseat_capture['carton_body'] = carton
+            _reseat_capture['carton_pose'] = _wr.read_pose(carton)
+        except Exception as exc:  # noqa: BLE001 -- no stock handle (minimal seam) => carton not restored
+            print(f'WARM_RESEAT carton capture skipped ({exc})', flush=True)
+
     def list_prims():
         # Traverse the live USD stage once and return every prim path. Between-runs only (cheap enough);
         # the diff vs the baseline is what names a leak. Falls back to the stage's direct children if a
@@ -258,11 +291,39 @@ def _build_production_ops(*, app, assembly, parts, plan, config, output, scenari
         if detail is not None:
             raise WarmResetRefused(detail)
 
+    def _restore_start_state():
+        # sim-warm-reset-cart-reseat-v1: BEFORE the settle + PR 297 verify, RESTORE the cart, the carton
+        # and the base to the CONFIGURED start pose (not wherever attempt 1's host e-stop left them). The
+        # cart/base configured planar pose is scenario['initial_staging'] (the dock heading for a dock-
+        # aligned run); the resting Z + the carton pose were captured at the cold build. Each restore is
+        # read-back verified and a body that cannot be restored is refused LOUDLY (WARM_RESEAT_UNRESTORED
+        # / START_STATE_BASE_UNRESTORED) so the loop cold-boots with the reason named. world.reset() alone
+        # does NOT restore the maximal-coordinate cart body reliably (warmacc4: it stayed at -99.1 deg).
+        targets = []
+        cart_xy_yaw = _wr.configured_planar(scenario or {}, 'cart_body_pose')
+        if _cart_body is not None and cart_xy_yaw is not None and _reseat_capture['cart_rest_z'] is not None:
+            targets.append(_wr.planar_target(_cart_body, cart_xy_yaw,
+                                             rest_z=_reseat_capture['cart_rest_z'], name='cart'))
+        base_xy_yaw = _wr.configured_planar(scenario or {}, 'robot_base_pose')
+        if _robot is not None and base_xy_yaw is not None and _reseat_capture['base_rest_z'] is not None:
+            # Base policy = RESTORE (set_world_pose un-flips an attitude flip + repositions) then read-back
+            # verify; refuse by name only when it cannot be confirmed. See warm_reseat module docstring.
+            targets.append(_wr.planar_target(_robot, base_xy_yaw,
+                                             rest_z=_reseat_capture['base_rest_z'], name='base'))
+        if _reseat_capture['carton_body'] is not None and _reseat_capture['carton_pose'] is not None:
+            targets.append(_wr.captured_target(_reseat_capture['carton_body'],
+                                               _reseat_capture['carton_pose'], name='carton'))
+        if not targets:
+            return
+        records = _wr.restore_targets(targets)
+        print('WARM_RESEAT restored to configured start pose: ' + _wr.brief(records), flush=True)
+
     def reseat(*, attempt, now):
         # Re-establish + verify the next run's start precondition. apply_start_state / verify_dock_seat
         # run PR 297's sim-time settle + rest/heading verify and RAISE on a mis-seated train, which is
         # exactly the refuse-to-release gate we want. world.reset() above returned the start-state carton
         # to its add-time pose, so clear the stale scene registration before apply_start_state re-adds it.
+        _restore_start_state()
         if config.get('start_at'):
             world = getattr(assembly, 'world', None)
             scene = getattr(world, 'scene', None)
