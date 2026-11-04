@@ -343,6 +343,37 @@ def check_pitch_stability(mobile_spec, host_cfg, runtime_cfg, *,
     return []
 
 
+def check_support_height(runtime_cfg, scenario_cfg, *, resolved_top_z, tol_m=0.010):
+    """sim-place-support-z-consistency-v1: for a collect-on-DECK run, refuse any configured place
+    support height that disagrees with the resolved deck prim top by more than ``tol_m`` (10 mm).
+
+    The cold ground-truth collect places the carton on the Rollwagen DECK
+    (``/Rollwagen/chassis/deck``, top face ~0.2565 world). The place height is carried in two config
+    layers that must agree with that prim top:
+      * RUNTIME ``cart_placement.support_z_world`` (the legacy deck-interior constant path), and
+      * SCENARIO ``initial_staging.cart_support_z_world`` -- which is ALSO the COLLECT_GROUND_TRUTH
+        ``place_slot`` support_z_world (``ground_truth_collect.warm_slot`` reads this same field).
+
+    Both historically carried the legacy SHELF constant 0.9325 (~0.68 m above the deck); the runtime
+    resolver now overrides the GT slot onto the live deck top, but a stale shelf number left in either
+    config could still feed a non-deck path. Name the drift here -- before a GPU boot -- so no stale
+    height can feed the collect descent again. ``resolved_top_z`` is the deck prim's resolved top-face
+    world z (the orchestrator computes it from the composed cart asset and passes ``--support-top-z-world``).
+    No-op ([]) when neither config carries a support height (nothing to check)."""
+    from twin.restock_manipulation import cart_support
+    heights = {}
+    cp = (runtime_cfg or {}).get('cart_placement') or {}
+    if isinstance(cp, dict) and 'support_z_world' in cp:
+        heights['runtime cart_placement.support_z_world'] = cp.get('support_z_world')
+    st = (scenario_cfg or {}).get('initial_staging') or {}
+    if isinstance(st, dict) and 'cart_support_z_world' in st:
+        heights['scenario initial_staging.cart_support_z_world '
+                '(= the COLLECT_GROUND_TRUTH place_slot support_z_world)'] = st.get('cart_support_z_world')
+    if not heights:
+        return []
+    return cart_support.height_consistency_problems(resolved_top_z, heights, tol_m=tol_m)
+
+
 def _load(path):
     with open(path) as stream:
         return json.load(stream)
@@ -363,6 +394,16 @@ def main(argv=None):
                         help='mobile-manifest.json: when given, refuse a chassis whose free pitch travel '
                              'exceeds the carton bound minus margin unless a chassis stabiliser is active '
                              '(sim-chassis-pitch-stability-v1)')
+    parser.add_argument('--place-on-deck', action='store_true',
+                        help='sim-place-support-z-consistency-v1: this is a collect-on-DECK run '
+                             '(RESTOCK_PLACE_ON_DECK=1). With --support-top-z-world, refuse a configured '
+                             'place support height (runtime cart_placement.support_z_world / scenario '
+                             'initial_staging.cart_support_z_world = the GT place_slot) that disagrees with '
+                             'the resolved deck prim top by more than 10 mm, so no stale shelf constant '
+                             '(0.9325) can feed the collect descent.')
+    parser.add_argument('--support-top-z-world', type=float, default=None,
+                        help='sim-place-support-z-consistency-v1: the resolved support prim '
+                             '(/Rollwagen/chassis/deck) TOP-face world z. Required with --place-on-deck.')
     args = parser.parse_args(argv)
     declared = [k.strip() for k in args.require.split(',') if k.strip()]
     # fm402: always assert the cap/limit baseline, even if a run forgets to --require it -- a missing
@@ -385,6 +426,16 @@ def main(argv=None):
     if args.mobile_manifest:
         problems += check_pitch_stability((_load(args.mobile_manifest) or {}).get('spec') or {},
                                           host_cfg, runtime_cfg)
+    # sim-place-support-z-consistency-v1: a collect-on-deck run must carry place heights that agree with
+    # the resolved deck prim top (no stale shelf constant lurking in scenario / runtime / GT heights).
+    if args.place_on_deck:
+        if args.support_top_z_world is None:
+            problems.append('--place-on-deck requires --support-top-z-world <deck top-face world z> so the '
+                            'preflight can refuse a stale place height (sim-place-support-z-consistency-v1).')
+        else:
+            scenario_cfg = _load(args.scenario) if args.scenario else {}
+            problems += check_support_height(runtime_cfg, scenario_cfg,
+                                             resolved_top_z=args.support_top_z_world)
     # Echo the effective placement so the log proves what the preflight saw.
     for key in required:
         consumer = KEY_CONSUMER.get(key, '?')

@@ -1,0 +1,57 @@
+{
+  "_comment": "sim-place-support-z-consistency-v1: the fix for the coldwin44/45 'carton not resting on deck' fall (verify_place xy=1.17-1.20, bottom_gap=-0.76 to -0.78; final carton z ~-0.22). ROOT CAUSE (CONFIRMED on CPU from coldwin43/45 logs + coldwin45 mission.usda geometry, NOT assumed): the cold GROUND-TRUTH collect aimed the PLACE at the warm-shortcut SHELF slot (support_z_world 0.9325 world = the Rollwagen UPPER shelf) instead of the intended DECK (/Rollwagen/chassis/deck). The place TARGET, the planned set-down and therefore the contact-triggered weld-release threshold (place_descent_drop_m over the target) all sat ~0.68 m ABOVE the real deck top, so PLACE_CONTACT_RELEASE fired in mid-air and the carton fell. Moving the place-point xy (0.33->0.18) changed nothing (<2 cm) because xy was never the cause -- the HEIGHT was. The set-down tilt (PR333 contact release) and the release serialization (PR334) stay SOLVED; this lane fixes only the support HEIGHT. The 2.0 deg bound, 0.15 s grace, carton dims and tow lanes are UNCHANGED.",
+
+  "_measured_heights_world_z": {
+    "_comment": "From coldwin45 mission.usda, cart at the station; ur_base_link world z 0.4999 (robot root 0.24 + ur_base_link local 0.2599). The deck/shelf are USD Cubes (size 1, scaled); the TOP face is centre + half the z-scale.",
+    "deck_prim_origin_center": 0.2315,
+    "deck_TOP_face": 0.2565,
+    "shelf_center": 0.9515,
+    "shelf_TOP_face": 0.964,
+    "legacy_constant_0p9325": 0.9325,
+    "ur_base_link_world_z": 0.4999,
+    "carton_height_m": 0.18,
+    "_the_023_vs_052_vs_09325_table": "0.23 = deck prim ORIGIN (top face is 0.2565). 0.9325 = legacy SHELF constant. 0.52 = carton-CENTRE z in ur_base_link where the legacy shelf set-down released it = 0.9325 - 0.4999 + 0.09 = 0.5226 (the integration worker's 'released at ~0.52'); its carton BOTTOM there is 0.9325 world, 0.676 m above the deck top and within a carton height of the SHELF top 0.964. So the surface the carton pressed at ~0.52 in coldwin39-42 is the Rollwagen UPPER SHELF, never the 0.2565 deck."
+  },
+
+  "_the_code_fix_no_new_config_key": {
+    "_comment": "THE PRIMARY FIX is in CODE, not a config key: CollectTargetBridge._gt_place_target (scripts/twin/restock_manipulation/isaac_factory.py) now resolves the support prim's (/Rollwagen/chassis/deck, from cart_support_path = stock_supports[0], set when RESTOCK_PLACE_ON_DECK=1) live TOP-face world z and OVERRIDES the GT place slot's support_z_world with it (cart_support.override_slot_support_z). So the place TARGET, the descent set-down waypoint (poses['place']), the contact-release threshold and verify_place's target_surface ALL share ONE height -- the live deck top. No support prim (legacy env off) => the slot stands => byte-identical. Logged ONCE as COLLECT_PLACE_SUPPORT_Z.",
+    "_quarantine": "The legacy 0.9325 can no longer feed the collect descent: when cart_support_path is set the resolver overrides it. place_select.py's support_z=0.9325 default is OFFLINE-tool-only (scripts/check_place_select.py) and does not feed the runtime descent."
+  },
+
+  "env": {
+    "RESTOCK_PLACE_ON_DECK": "1",
+    "RESTOCK_COLLECT_GROUND_TRUTH": "1",
+    "RESTOCK_VERIFY_PLACE": "1",
+    "_note": "Unchanged from coldwin45 -- all three were already set. RESTOCK_PLACE_ON_DECK=1 is what wires cart_support_path to the deck prim so the resolver fires; RESTOCK_VERIFY_PLACE=1 threads sensors.placed_pose (the live carton centre) so both the contact-release and verify_place gates read the carton."
+  },
+
+  "runtime_config": {
+    "_file": "mission-runtime-*.json (EXTERNAL to the repo; the integration lane owns it). Clean up the advisory place height so no stale shelf number lurks and config_preflight passes.",
+    "cart_placement": {
+      "support_z_world": 0.2565,
+      "_note": "Change from the legacy 0.9325 to the resolved deck TOP face 0.2565. For collect-on-deck this value is now ADVISORY (the runtime resolver overrides the GT place target from the live deck prim), but config_preflight --place-on-deck refuses it if it still disagrees with the resolved deck top by >10 mm, so set it to the deck top. load_center_body_xy stays [0.18, 0.0] (proven on-deck, cw39) and free_dimensions unchanged."
+    }
+  },
+
+  "scenario_config": {
+    "_file": "mission-scenario.json initial_staging (EXTERNAL). This field is ALSO the COLLECT_GROUND_TRUTH place_slot support_z_world (ground_truth_collect.warm_slot reads it).",
+    "initial_staging": {
+      "cart_support_z_world": 0.2565,
+      "_note": "Change from 0.9325 to the deck TOP face 0.2565 for the COLD collect-on-deck run (there is no warm shortcut staging the carton on the shelf in a cold run, so this field only feeds the GT place slot, which the resolver overrides anyway). Setting it to the deck top clears the config_preflight --place-on-deck four-height gate. cart_load_center_body_xy stays [0.18, 0.0]."
+    }
+  },
+
+  "host_config": {
+    "_file": "scripts/twin/restock_manipulation/ros_host_config.json",
+    "_note": "UNCHANGED by this lane. Keep the coldwin43/45 carton_level block exactly (place_contact_release true, place_contact_gap_m 0.012, closed_loop_sensor true, the v2 keys, K=2850, station hold, release serialization). The support-HEIGHT fix is entirely on the capture (place-target) side; the set-down tilt + release fixes are untouched."
+  },
+
+  "config_preflight": {
+    "_invocation": "python3 scripts/twin/restock_manipulation/config_preflight.py --host-config <host> --runtime-config <runtime> --scenario <scenario> --mobile-manifest <manifest> --require <...> --place-on-deck --support-top-z-world 0.2565",
+    "_note": "ADD --place-on-deck --support-top-z-world 0.2565 for this collect-on-deck run (the orchestrator computes 0.2565 = the deck prim top-face world z from the composed cart asset). The gate refuses the run if runtime cart_placement.support_z_world or scenario initial_staging.cart_support_z_world (= the GT place_slot) disagrees with 0.2565 by >10 mm -- so a stale 0.9325 can never feed the descent again. Without --place-on-deck the gate is a no-op (byte-identical)."
+  },
+
+  "_acceptance_coldwin46": "PLACE_CONTACT_RELEASE fires with the carton BOTTOM within place_contact_gap_m (0.012 m) of the MEASURED deck top (~0.2565 world), NOT 0.68 m above it; the console shows COLLECT_PLACE_SUPPORT_Z resolving the deck top and retargeting the slot off 0.9325; verify_place PASSES ('carton resting on deck', xy within tol, bottom_gap ~0); CARTON_TILT peak <= 1.5 deg (set-down tilt still solved); and the run ADVANCES PAST COLLECT. The deck target is within UR10 reach (~1.14 m < 1.3 m from ur_base_link).",
+
+  "_cpu_proof": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=scripts python3 -m pytest scripts/twin/tests/test_place_support_z.py (the measured-height truth table; cart_support pure helpers; the slot-pose retarget; the coldwin45 replay -- old shelf target releases 0.68 m above the deck, deck target releases at true contact; the FK descent-to-contact 'full descent not a fixed 15 mm'; verify_place on the resolved deck height; config_preflight four-height gate agree/disagree + main integration + byte-identical-when-off)."
+}

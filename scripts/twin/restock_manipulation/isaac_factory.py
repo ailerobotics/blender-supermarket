@@ -434,6 +434,10 @@ class CollectTargetBridge:
         self.cart_support_path = cart_support_path
         self._deck_local = None
         self._deck_extent = None
+        # sim-place-support-z-consistency-v1: log the resolved deck top ONCE per run (the collect place
+        # support single source of truth), so the console proves the GT place slot was retargeted off the
+        # legacy shelf constant onto the live /Rollwagen/chassis/deck top.
+        self._support_z_logged = False
         # fm389 physical PLACE verification (opt-in via RESTOCK_VERIFY_PLACE): measure the carton's live
         # world pose (the fixed handling-unit prim) and thread its centre onto the host packet so the
         # collect `verify` phase can REFUSE an empty-gripper 'success' when the carton is not resting on
@@ -634,6 +638,36 @@ class CollectTargetBridge:
         ub_yaw = math.atan2(float(Tub[1, 0]), float(Tub[0, 0]))
         return (float(p[0]), float(p[1]), float(p[2])), float(cyaw - ub_yaw)
 
+    def _support_top_z_world(self):
+        """sim-place-support-z-consistency-v1: the configured support prim's
+        (``cart_support_path`` = ``/Rollwagen/chassis/deck``) TOP-face WORLD z at the cart's LIVE pose --
+        the single source of truth for the collect PLACE height. The deck is a thin slab, so the top face
+        is the max z of its world AABB. Reuses/populates the same ``self._deck_local`` cart-local cache as
+        the deck-interior placement path (so one BBox traversal serves both and they can never disagree).
+        Returns None when no support prim is configured, or the prim / cart / stage is absent (the caller
+        falls back to the slot's own support_z_world => byte-identical with the legacy path)."""
+        if self.cart_support_path is None or self.stage is None or not self.cart_root:
+            return None
+        import numpy as np
+        from pxr import Usd, UsdGeom
+        from twin.restock_manipulation import cart_support
+        cart_prim = self.stage.GetPrimAtPath(self.cart_root)
+        deck_prim = self.stage.GetPrimAtPath(self.cart_support_path)
+        if not cart_prim or not deck_prim:
+            return None
+        cache = UsdGeom.XformCache()
+        Tc = np.asarray(cache.GetLocalToWorldTransform(cart_prim)).T
+        if self._deck_local is None:
+            bbox = UsdGeom.BBoxCache(Usd.TimeCode.Default(),
+                                     [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+            rng = bbox.ComputeWorldBound(deck_prim).ComputeAlignedRange()
+            mn, mx = rng.GetMin(), rng.GetMax()
+            wc = np.array([(mn[0] + mx[0]) / 2.0, (mn[1] + mx[1]) / 2.0, float(mx[2]), 1.0])
+            self._deck_local = np.linalg.inv(Tc) @ wc            # rigid in the cart frame
+            self._deck_extent = (float(mx[0] - mn[0]), float(mx[1] - mn[1]))
+        w = Tc @ self._deck_local
+        return cart_support.support_top_z_world(float(w[2]), float(w[2]))
+
     def _carton_center_station(self):
         """The carton CENTRE in ur_base_link from the live handling-unit prim (controlled-asset ground
         truth, for the PLACE physics gate only). None when disabled / the prim is absent. Caches the
@@ -739,8 +773,29 @@ class CollectTargetBridge:
         if not cart_prim or not base:
             return None
         cache = UsdGeom.XformCache()
+        # sim-place-support-z-consistency-v1: the SINGLE source of truth for the collect place height.
+        # The warm-shortcut slot carries the legacy SHELF support_z_world (0.9325 world); for a cold
+        # collect-on-deck run (RESTOCK_PLACE_ON_DECK => cart_support_path set) that is ~0.68 m above the
+        # intended DECK, so the planned set-down + the contact-triggered weld release fired in mid-air and
+        # the carton fell (coldwin44/45). Retarget the slot height onto the live deck prim's top face so
+        # the place TARGET, the descent set-down, the release threshold (place_descent_drop_m over this
+        # target) AND verify_place (target_surface = this pose) all share the deck top. The slot's
+        # load_center xy + yaw_cart_rel are unchanged. No support prim (legacy env) => the slot stands =>
+        # byte-identical.
+        from twin.restock_manipulation import cart_support
+        slot = self.gt_place_slot
+        top_z = self._support_top_z_world()
+        if top_z is not None:
+            slot = cart_support.override_slot_support_z(self.gt_place_slot, top_z)
+            if not self._support_z_logged:
+                print('COLLECT_PLACE_SUPPORT_Z resolved deck top=%.4f world (prim=%s) overriding legacy '
+                      'slot support_z_world=%s -- collect places on the DECK, not the shelf; the descent, '
+                      'contact-release and verify_place all use this one height'
+                      % (top_z, self.cart_support_path,
+                         self.gt_place_slot.get('support_z_world')), flush=True)
+                self._support_z_logged = True
         pose = gtc.slot_pose(np.asarray(cache.GetLocalToWorldTransform(cart_prim)).T,
-                             np.asarray(cache.GetLocalToWorldTransform(base)).T, self.gt_place_slot)
+                             np.asarray(cache.GetLocalToWorldTransform(base)).T, slot)
         return Target(observation_id=f'cart:{cp["location"]}:{now:.3f}', source='sensor',
                       simulation_time=float(now), location=cp['location'],
                       pose=tuple(self._map_pose_to_base(pose)), clear=True,
