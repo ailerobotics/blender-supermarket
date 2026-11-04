@@ -399,7 +399,9 @@ def test_future_lead_collision_stamp_is_fresh_no_pause_fm423():
     # held the lift indefinitely and starved the 90 s arm-command heartbeat ('arm command heartbeat lost').
     import contextlib, io
     c, m = make_controller('collect')
-    assert c.render_lead == 0.2                 # default lead matches trajectory_host's relay race
+    # sim-collision-dt-render-lead-floor-v1: the default future-lead floor is now DERIVED to 0.7
+    # (delivery 0.2 + ESDF window 0.5), covering the heavy live_pose relay lead without an env bump.
+    assert c.render_lead == pytest.approx(0.7)
     t = run_to(c, 'lift'); assert c.held
     m.outcome = 'running'
     c.step(.1, packet(c, t, contact=True))      # issue the lift
@@ -422,13 +424,20 @@ def test_future_feedback_stamp_within_render_lead_is_fresh_fm423():
 
 
 def test_wildly_future_collision_stamp_still_trips_fm423():
-    # A stamp beyond render_lead in the future is a real clock anomaly: it must TRIP honestly (never a
-    # pause -- a persistent future lead must not hold the arm forever).
+    # A stamp beyond the (derived) render_lead floor in the future is a real clock anomaly: it must TRIP
+    # honestly (never a pause -- a persistent future lead must not hold the arm forever).
+    # sim-collision-dt-render-lead-floor-v1: the default floor is now 0.7 (delivery 0.2 + ESDF window
+    # 0.5), so a 0.53 s live_pose relay lead (coldwin30) is fresh; only a lead BEYOND 0.7 is anomalous.
     c, m = make_controller('collect')
+    assert c.render_lead == pytest.approx(0.7)
     t = run_to(c, 'lift'); assert c.held
     m.outcome = 'running'
     c.step(.1, packet(c, t, contact=True))
-    r = c.step(.1, packet(c, t + .1, contact=True, collision_time=(t + .1) + 0.5))   # 0.5 s future >> lead
+    # 0.53 s future (coldwin30's measured relay lead) is now WITHIN the derived floor -> fresh, not a trip.
+    r = c.step(.1, packet(c, t + .1, contact=True, collision_time=(t + .1) + 0.53))
+    assert r.status == 'running', r.reason
+    # 1.0 s future is still beyond the derived floor -> a genuine anomaly that TRIPS honestly.
+    r = c.step(.1, packet(c, t + .2, contact=True, collision_time=(t + .2) + 1.0))
     assert r.status == 'failed' and 'collision_dt=' in r.reason, r.reason
 
 
