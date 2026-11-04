@@ -187,6 +187,50 @@ class CasterSuspension:
             raise ValueError('suspension travel_m must be positive')
 
 
+# sim-chassis-pitch-stability-v1 (coldwin38 FAIL): the sprung caster mass below the spring, used for the
+# numerical-stability ratio. The suspender link + its fork + wheel all translate with the prismatic DOF.
+CASTER_FORK_WHEEL_MASS_KG = 0.8   # fork 0.3 + wheel 0.5 (mobile_assets.build_mobile_urdf)
+# The PhysX solver tolerates a joint-drive stiffness-to-sprung-mass-per-step ratio only up to ~O(40) on
+# this rig: the arm's own stiff position drives run at k*dt^2/m ~= 1e6*(1/60)^2/7 ~= 40 STABLY on the same
+# 1/60 s solver, while coldwin38's sprung caster at k*dt^2/m ~= 3e5*(1/60)^2/1.0 ~= 83 EXPLODED at reset
+# (BASE_ATT -7.4..+12.2 deg bounce before any arm motion). The ceiling is set conservatively BELOW the
+# observed-unstable 83, with margin under the arm's stable ~40. A raised physics_dt relaxes it (the ratio
+# scales dt^2); the mission default dt is 1/60.
+SUSPENSION_STABILITY_RATIO_MAX = 30.0
+MISSION_PHYSICS_DT_S = 1.0 / 60.0
+
+
+def suspension_sprung_mass_kg(suspender_mass_kg):
+    """Effective sprung mass on the prismatic caster-lift DOF: the suspender link + the fork + wheel that
+    translate with it."""
+    if not (suspender_mass_kg > 0 and math.isfinite(suspender_mass_kg)):
+        raise ValueError('caster suspender mass must be positive')
+    return suspender_mass_kg + CASTER_FORK_WHEEL_MASS_KG
+
+
+def suspension_solver_stability_ratio(spring_n_per_m, suspender_mass_kg, dt_s=MISSION_PHYSICS_DT_S):
+    """``k * dt^2 / m_sprung`` -- the explicit-ish joint-drive stability number at the solver step. Above
+    ~``SUSPENSION_STABILITY_RATIO_MAX`` the sprung caster drive is numerically unstable at reset (the
+    coldwin38 bounce). Calibrated to GPU: the arm's stiff drives run ~40 stable, the shipped caster ran
+    ~83 unstable."""
+    if not (spring_n_per_m > 0 and dt_s > 0 and math.isfinite(spring_n_per_m) and math.isfinite(dt_s)):
+        raise ValueError('spring and dt must be positive finite')
+    return spring_n_per_m * dt_s * dt_s / suspension_sprung_mass_kg(suspender_mass_kg)
+
+
+def suspension_solver_stable(spring_n_per_m, suspender_mass_kg, dt_s=MISSION_PHYSICS_DT_S,
+                             ratio_max=SUSPENSION_STABILITY_RATIO_MAX):
+    """True iff the sprung caster drive is within the solver-stable ratio band at ``dt_s``."""
+    return suspension_solver_stability_ratio(spring_n_per_m, suspender_mass_kg, dt_s) <= ratio_max
+
+
+def min_suspender_mass_kg(spring_n_per_m, dt_s=MISSION_PHYSICS_DT_S,
+                          ratio_max=SUSPENSION_STABILITY_RATIO_MAX):
+    """The least suspender-link mass (kg) that keeps ``spring_n_per_m`` solver-stable at ``dt_s`` (so a
+    spec can be auto-sized rather than guessed)."""
+    return max(0.0, spring_n_per_m * dt_s * dt_s / ratio_max - CASTER_FORK_WHEEL_MASS_KG)
+
+
 def sprung_chassis_pitch_deg(moment_nm, suspension: CasterSuspension, caster_spacing):
     """Quasi-static chassis pitch (degrees) under an arm pitch ``moment_nm`` about the drive axle for a
     compliant caster suspension, from a BILINEAR spring model (two casters at +-``caster_spacing`` from

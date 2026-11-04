@@ -13,19 +13,32 @@
     "7. FALLBACK ONLY if step 6 fails: drop the suspension spec (plain caster_lift_m=0.03 assets) and set the RUNTIME key 'chassis_station_pitch_hold': true. The station parking brake then locks chassis pitch/roll while braked at the collect station (sim-only, released with the brake)."
   ],
 
+  "_coldwin38_UPDATE": "GPU run coldwin38 (first boot of this suspension) FAILED in the first 4 s of collect, BEFORE any arm motion: BASE_ATT pitch -7.4..+12.2 deg bounce, z 0.239, then a trajectory_host stale-feedback e-stop -- NOT a see-saw. Root cause: the sprung-caster drive was DYNAMICALLY UNSTABLE at the 1/60 s solver step. The original caster_suspender_mass_kg was 0.2 kg, so k*dt^2/m_sprung ~= 3e5*(1/60)^2/1.0 ~= 83, far above the ~40 the arm's own stiff drives (k<=1e6 on ~7 kg links) run stably on the same solver, so the stiff drive exploded at world.reset. FIX (this spec): caster_suspender_mass_kg raised to 4.0 kg (a physically plausible caster+fork+spring assembly) -> k*dt^2/m_sprung ~= 17.4, inside the stable band, with k unchanged so the 0.26 deg steady pitch bound is preserved. MobileSpec now REFUSES a solver-unstable (k, mass, dt) combination at build time. GPU re-confirmation is the integration lane's next run; in parallel the station-pitch-hold fallback (chassis_station_pitch_hold) was validated.",
+
   "mobile_spec_override": {
-    "_note": "the --config JSON for scripts/build_mobile_assets.py (MobileSpec keyword overrides). These five fields are the whole suspension spec; everything else stays the mission default. k=3e5 N/m bounds the worst-case 241 N.m arm moment to 0.26 deg even after one caster lifts off (single-caster stiffness k*d^2); preload 120 N is LIGHT (keeps drive-wheel share 0.90, near the caster_lift 0.03 rig's 0.95) yet guarantees at-rest contact; travel 0.02 m >> the ~2 mm working deflection.",
+    "_note": "the --config JSON for scripts/build_mobile_assets.py (MobileSpec keyword overrides). k=3e5 N/m bounds the worst-case 241 N.m arm moment to 0.26 deg even after one caster lifts off; preload 120 N is LIGHT (keeps drive-wheel share ~0.90 from the preload; the 4 kg sprung mass adds ~8 kg total on the casters, so the real share is ~0.87 -- still well above the stuck rig 0.61); travel 0.02 m >> the ~2 mm working deflection. caster_suspender_mass_kg=4.0 is the coldwin38 stability fix (0.2 kg exploded the drive); min stable mass at k=3e5/dt=1/60 is ~2.0 kg (twin.traction.min_suspender_mass_kg).",
     "caster_suspension": true,
     "caster_lift_m": 0.0,
     "caster_spring_n_per_m": 300000.0,
     "caster_damping_n_s_per_m": 2000.0,
     "caster_preload_n": 120.0,
-    "caster_travel_m": 0.02
+    "caster_travel_m": 0.02,
+    "caster_suspender_mass_kg": 4.0
+  },
+
+  "_SHIPPED_FIX_station_hold": "GPU UPDATE (coldwin38 + cwsusp1): the compliant caster suspension FAILED twice on reset/settle dynamics (coldwin38 exploded at k*dt^2/m~=83; cwsusp1 with the 4 kg mass no longer diverges but still takes a violent spawn transient and settles COCKED at roll -11 / pitch +6 deg, not level). Suspension is OFF the critical path. The SHIPPED fix is the sim-only STATION PITCH HOLD, hardened: coldwin39 showed the hold removes the rock (excursion 0.00-0.05 deg) but latched the instantaneous -4.25 deg end stop (carton 2.04 deg) and cycled the brake ~2000x. The follow-up locks pitch/roll to a CONFIGURABLE TARGET (default rig rest -1.17 deg, or world-level 0) with the current yaw, and LATCHES one rotation-lock brake for the whole arm phase (translation free -> weld-loop relief kept; no cycling). To ship the station hold: use the PLAIN caster_lift_m=0.03 assets (NOT the suspension) and set the station_hold runtime keys below.",
+
+  "station_hold_runtime_keys": {
+    "_note": "the SHIPPED path. Merge into the mission RUNTIME config (physics_setup.assemble reads them). Pair with the plain lift-0.03 mobile_manifest (NOT the suspension). HOST/RUNTIME: all three are RUNTIME.",
+    "mobile_manifest": "~/datasets/twin-robot-in-store-boot-v1/mobile-casterlift030/mobile_manifest.json",
+    "chassis_station_pitch_hold": true,
+    "chassis_station_pitch_hold_pitch_deg": -1.17,
+    "chassis_station_pitch_hold_roll_deg": 0.0
   },
 
   "runtime_config_keys": {
-    "_note": "merge into the mission RUNTIME config (mission-runtime-*.json, read by the Isaac side: isaac_bundle / isaac_port / physics_setup). HOST/RUNTIME split matters -- chassis_station_pitch_hold is RUNTIME (physics_setup.assemble reads it); the suspension itself is NOT a batch key, it is a MobileSpec field in the mobile_manifest (step 1).",
-    "mobile_manifest": "~/datasets/twin-robot-in-store-boot-v1/mobile-suspension/mobile_manifest.json",
+    "_note": "the SUSPENSION path (NOT viable on GPU as of cwsusp1 -- kept for the documented retry only; see _SHIPPED_FIX_station_hold). HOST/RUNTIME split: chassis_station_pitch_hold* are RUNTIME; the suspension is a MobileSpec field in the mobile_manifest (step 1), not a batch key.",
+    "mobile_manifest": "~/datasets/twin-robot-in-store-boot-v1/mobile-suspension-v2/mobile_manifest.json",
     "portal_floor_box": true,
     "chassis_station_pitch_hold": false
   },

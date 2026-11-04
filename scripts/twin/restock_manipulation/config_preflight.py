@@ -103,6 +103,10 @@ KEY_CONSUMER = {
     # byte-identical. The preferred source fix (compliant caster suspension) is a MobileSpec field in the
     # mobile manifest, NOT a batch config key.
     'chassis_station_pitch_hold': RUNTIME,
+    # coldwin39 fix: the station-hold target attitude (degrees); physics_setup.assemble reads them
+    # (RUNTIME). Absent => default rig rest pitch -1.17 / roll 0 (not the instantaneous end stop).
+    'chassis_station_pitch_hold_pitch_deg': RUNTIME,
+    'chassis_station_pitch_hold_roll_deg': RUNTIME,
     # sim-collect-retreat-collider-v3: defer re-enabling the tool-side gripper colliders past the empty
     # retreat (DEFAULT ON). isaac_factory.parse_manipulation_config reads it (RUNTIME); env
     # RESTOCK_DEFER_TOOL_COLLISION is the alias. Registered so a run can --require it (assert ON).
@@ -206,6 +210,29 @@ def check_flow_consistency(host_cfg, runtime_cfg):
                  "('unreachable or undersized target' -> emergency stop; transferobs1). Set "
                  "'transfer_service_carry': true in the HOST config (ros_host_config.json) alongside "
                  "the runtime 'shelf_staging': true.")]
+    return []
+
+
+def check_carton_level(host_cfg):
+    """sim-place-descent-residual-v1: resolve the HOST ``carton_level`` block so a malformed value (incl.
+    the place-clearance keys ``preplace_above_place`` / ``preplace_standoff_m`` / ``place_clearance_check``
+    / ``place_clearance_margin_m``, read from ros_host_config.json) FAILS the pre-flight loudly instead of
+    at a GPU boot. Also flags the one incoherent combination -- the clearance GATE armed with no remedy --
+    as a WARNING-level refusal so a run can't arm the check and still ship the over-mouth standoff. No-op
+    ([]) when ``carton_level`` is absent/off (byte-identical)."""
+    from twin.restock_manipulation import carton_level as cl
+    spec = (host_cfg or {}).get('carton_level')
+    try:
+        resolved = cl.resolve_level_config(spec)
+    except ValueError as exc:
+        return [f"carton_level (HOST ros_host_config.json): malformed -- {exc}"]
+    if resolved is None:
+        return []
+    if resolved.place_clearance_check and not resolved.preplace_above_place:
+        return [("carton_level place-clearance GATE armed (place_clearance_check) but the REMEDY is OFF "
+                 "(preplace_above_place): the fixed over-mouth collect preplace standoff would still jam "
+                 "the gripper pad on post_2 (coldwin39 CONTACT pivot). Set 'preplace_above_place': true in "
+                 "the HOST carton_level block (ros_host_config.json) alongside 'place_clearance_check'.")]
     return []
 
 
@@ -326,6 +353,9 @@ def main(argv=None):
     # sim-service-carry-drive-to-shelf-v1: cross-layer flow consistency (always, not just --require'd
     # keys) so a shelf_staging/transfer_service_carry split cannot reach a GPU boot.
     problems += check_flow_consistency(host_cfg, runtime_cfg)
+    # sim-place-descent-residual-v1: resolve the HOST carton_level block (incl. the place-clearance keys)
+    # so a malformed value or the gate-without-remedy combination fails pre-flight, not a GPU boot.
+    problems += check_carton_level(host_cfg)
     # sim-collect-press-regression-v1: carton-dim drift between the HOST profile and the scenario single
     # source silently over-reaches the side-grasp pick standoff (coldwin32). Only when --scenario is given.
     if args.scenario:

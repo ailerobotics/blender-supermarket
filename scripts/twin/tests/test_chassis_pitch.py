@@ -17,12 +17,15 @@ from twin.mobile_assets import build_mobile_urdf
 from twin.urdf_probe import parse_urdf, find_roots, link_world_transforms
 from twin.traction import (free_pitch_travel_deg, caster_spacing_m, CasterSuspension,
                            sprung_chassis_pitch_deg, suspension_meets_pitch_bound,
-                           suspension_drive_wheel_share, static_traction_budget)
+                           suspension_drive_wheel_share, static_traction_budget,
+                           suspension_solver_stability_ratio, suspension_solver_stable,
+                           min_suspender_mass_kg, SUSPENSION_STABILITY_RATIO_MAX)
 from twin.restock_manipulation.config_preflight import check_pitch_stability
 
 WORST_CASE_MOMENT_NM = 250.0   # UR10 own mass out at reach + 0.45 kg carton (FK sweep measured 241)
 RECOMMENDED = CasterSuspension(spring_n_per_m=3.0e5, preload_n=120.0,
                                damping_n_s_per_m=2000.0, travel_m=0.02)
+SUSPENDER_MASS_KG = 4.0        # coldwin38 fix: a solver-stable sprung caster mass (was 0.2 kg)
 
 
 # ---- (1) the unsprung see-saw geometry ----------------------------------------------------------
@@ -106,6 +109,38 @@ def test_budget_without_preload_is_byte_identical():
     assert a['drive_wheel_share'] == pytest.approx(0.95)
 
 
+# ---- (3b) coldwin38: the sprung-caster DYNAMIC solver-stability ratio -------------------------------
+
+def test_shipped_light_suspender_is_solver_unstable():
+    # coldwin38 FAIL reproduction: k=3e5 on the original 0.2 kg suspender (m_sprung ~1.0) gives
+    # k*dt^2/m ~= 83 -- far above the stable ceiling and the arm's GPU-stable ~40 -- so the drive
+    # exploded at reset (BASE_ATT -7.4..+12.2 deg before any arm motion).
+    ratio = suspension_solver_stability_ratio(3.0e5, 0.2)
+    assert ratio == pytest.approx(83.3, abs=1.0)
+    assert ratio > SUSPENSION_STABILITY_RATIO_MAX
+    assert not suspension_solver_stable(3.0e5, 0.2)
+
+
+def test_corrected_heavier_suspender_is_solver_stable():
+    # The fix: keep k=3e5 (so the steady pitch bound 0.26 deg is preserved) but raise the sprung mass
+    # into the solver-stable band.
+    ratio = suspension_solver_stability_ratio(3.0e5, SUSPENDER_MASS_KG)
+    assert ratio <= SUSPENSION_STABILITY_RATIO_MAX
+    assert suspension_solver_stable(3.0e5, SUSPENDER_MASS_KG)
+    # the pitch bound is untouched by the mass (stiffness unchanged).
+    assert abs(sprung_chassis_pitch_deg(WORST_CASE_MOMENT_NM, RECOMMENDED, caster_spacing_m())) <= 0.5
+
+
+def test_min_suspender_mass_sizes_the_fix():
+    # the sizing helper returns the least suspender mass that is stable at k, and that mass IS stable.
+    m = min_suspender_mass_kg(3.0e5)
+    assert m == pytest.approx(1.98, abs=0.05)
+    assert suspension_solver_stable(3.0e5, m + 1e-6)
+    # a raised physics_dt relaxes the ratio (dt^2), so a lighter mass becomes stable at a coarser step.
+    assert suspension_solver_stability_ratio(3.0e5, 1.0, dt_s=1/120.) < \
+           suspension_solver_stability_ratio(3.0e5, 1.0, dt_s=1/60.)
+
+
 # ---- (4) the opt-in MobileSpec field + byte-identical-when-absent asset authoring ----------------
 
 def _source(tmp_path):
@@ -126,22 +161,41 @@ def _source(tmp_path):
     return p
 
 
+def _susp_spec(**kw):
+    base = dict(caster_suspension=True, caster_spring_n_per_m=3e5, caster_preload_n=120.0,
+                caster_damping_n_s_per_m=2000.0, caster_travel_m=0.02,
+                caster_suspender_mass_kg=SUSPENDER_MASS_KG)
+    base.update(kw)
+    return MobileSpec(**base)
+
+
 def test_spec_suspension_opt_in_and_mutually_exclusive_with_lift():
-    s = MobileSpec(caster_suspension=True, caster_spring_n_per_m=3e5, caster_preload_n=120.0,
-                   caster_damping_n_s_per_m=2000.0, caster_travel_m=0.02)
-    assert s.caster_suspension and s.caster_lift_m == 0.0
+    s = _susp_spec()
+    assert s.caster_suspension and s.caster_lift_m == 0.0 and s.caster_suspender_mass_kg == SUSPENDER_MASS_KG
     # a sprung caster cannot also be recessed.
     with pytest.raises(ValueError):
-        MobileSpec(caster_suspension=True, caster_spring_n_per_m=3e5, caster_travel_m=0.02,
-                   caster_lift_m=0.02)
+        _susp_spec(caster_lift_m=0.02)
     # enabling needs a positive spring + stroke.
     with pytest.raises(ValueError):
         MobileSpec(caster_suspension=True)
+    # enabling needs a positive sprung mass (coldwin38: a too-light mass is refused).
+    with pytest.raises(ValueError):
+        MobileSpec(caster_suspension=True, caster_spring_n_per_m=3e5, caster_travel_m=0.02)
     # suspension params set while off is a config slip, refused.
     with pytest.raises(ValueError):
         MobileSpec(caster_spring_n_per_m=3e5)
+    with pytest.raises(ValueError):
+        MobileSpec(caster_suspender_mass_kg=4.0)
     # the default spec never carries the suspension (byte-identical legacy).
     assert MobileSpec().caster_suspension is False
+
+
+def test_spec_refuses_solver_unstable_suspension():
+    # coldwin38 guard: the shipped-FAIL light sprung mass (0.2 kg) at k=3e5 is refused by MobileSpec.
+    with pytest.raises(ValueError, match='solver-UNSTABLE'):
+        _susp_spec(caster_suspender_mass_kg=0.2)
+    # a sufficiently heavy sprung mass is accepted.
+    assert _susp_spec(caster_suspender_mass_kg=4.0).caster_suspender_mass_kg == 4.0
 
 
 def test_suspension_off_urdf_is_byte_identical(tmp_path):
@@ -157,8 +211,7 @@ def test_suspension_off_urdf_is_byte_identical(tmp_path):
 
 def test_suspension_on_inserts_sprung_prismatic(tmp_path):
     src = _source(tmp_path)
-    spec = MobileSpec(caster_suspension=True, caster_spring_n_per_m=3e5, caster_preload_n=120.0,
-                      caster_damping_n_s_per_m=2000.0, caster_travel_m=0.02)
+    spec = _susp_spec()
     out = tmp_path / 'on.urdf'
     build_mobile_urdf(src, out, spec)
     robot = parse_urdf(out)
@@ -180,6 +233,30 @@ def test_suspension_on_inserts_sprung_prismatic(tmp_path):
     t = link_world_transforms(robot, {})
     drive_bottom = t['left_wheel'][2, 3] - spec.wheel_radius
     assert (t['front_caster_wheel'][2, 3] - 0.065) == pytest.approx(drive_bottom, abs=1e-6)
+
+
+# ---- (4b) coldwin39: station-hold TARGET-attitude quaternion math (pure) -------------------------
+
+def _rpy_from_quat(w, x, y, z):
+    roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
+    pitch = math.asin(max(-1.0, min(1.0, 2 * (w * y - z * x))))
+    yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+    return roll, pitch, yaw
+
+
+def test_station_hold_target_quaternion_roundtrips():
+    from twin.mobile_runtime import _quat_from_rpy
+    # the station hold builds the lock anchor from (target_roll, target_pitch, CURRENT yaw); the quat it
+    # builds must decode back to exactly those angles (so the brake holds the chassis at the target, not
+    # the instantaneous attitude coldwin39 latched).
+    for roll, pitch, yaw in [(0.0, math.radians(-1.17), 0.7), (0.0, 0.0, -2.1),
+                             (math.radians(2), math.radians(-4.25), 1.9)]:
+        w, x, y, z = _quat_from_rpy(roll, pitch, yaw)
+        assert math.isclose(math.hypot(math.hypot(w, x), math.hypot(y, z)), 1.0, abs_tol=1e-9)
+        r, p, yw = _rpy_from_quat(w, x, y, z)
+        assert r == pytest.approx(roll, abs=1e-9)
+        assert p == pytest.approx(pitch, abs=1e-9)
+        assert yw == pytest.approx(yaw, abs=1e-9)
 
 
 # ---- (5) the config_preflight pitch-stability guard ---------------------------------------------

@@ -273,6 +273,24 @@ class LevelConfig:
     # go deeper (shelf back at cart-x -0.38, carton back at -0.003). An alternative is to shift the external
     # load-centre instead (see the PR hand-off); this code bias makes the fix self-contained.
     place_depth_bias_m: float = 0.0
+    # sim-place-descent-residual-v1: the collect set-down CONTACT-PIVOT fix. coldwin31..40 tripped
+    # CARTON_TILT +2.02..+2.07 deg at the collect set-down, UNCHANGED across three droop-compensation
+    # generations (d(exec)/d(cmd) ~ 0) -- a GEOMETRIC pivot, not droop: the gripper suction pad (a ROBOT
+    # link, NOT the carton, so the ``cage_collision: filtered`` carton-vs-cage filter does not cover it)
+    # jams flush on ``/Rollwagen/chassis/post_2`` at the fixed ``collect_place_preplace_shape`` standoff,
+    # which parks the held carton OVERHANGING the +x mouth (coldwin39 cart (0.243, -0.185): pad gap 0.1 mm
+    # to post_2; the PLACE target (0.18, 0) itself clears post_2 by 90 mm). ``preplace_above_place`` is the
+    # REMEDY: re-target the collect preplace standoff to DIRECTLY ABOVE the place load-centre (raised by
+    # ``preplace_standoff_m``) instead of the over-the-mouth fixed shape, so the from_above vertical descent
+    # keeps the pad clear of the front posts (CPU-proven >= 89 mm). ``place_clearance_check`` arms the
+    # ``place_clearance`` CPU sweep as a GATE (log ``PLACE_CLEARANCE`` + refuse by name if any NON-support
+    # Rollwagen body is within ``place_clearance_margin_m``), so a geometry that would strike a post fails
+    # fast and named instead of the opaque CARTON_TILT pivot. All default OFF => byte-identical. The bound,
+    # grace, droop stiffness and tow lanes are UNCHANGED; the from_above descent is KEPT.
+    preplace_above_place: bool = False
+    preplace_standoff_m: float = 0.12
+    place_clearance_check: bool = False
+    place_clearance_margin_m: float = 0.030
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -289,6 +307,10 @@ class LevelConfig:
             raise ValueError('carton_level.place_above_clearance_m must be a finite non-negative number')
         if not (math.isfinite(self.place_depth_bias_m) and self.place_depth_bias_m >= 0):
             raise ValueError('carton_level.place_depth_bias_m must be a finite non-negative number')
+        if not (math.isfinite(self.preplace_standoff_m) and self.preplace_standoff_m > 0):
+            raise ValueError('carton_level.preplace_standoff_m must be a finite positive number of metres')
+        if not (math.isfinite(self.place_clearance_margin_m) and self.place_clearance_margin_m >= 0):
+            raise ValueError('carton_level.place_clearance_margin_m must be a finite non-negative number')
         from twin.restock_manipulation.cad_tool import ARM_JOINTS
         bad = [j for j in self.joints if j not in ARM_JOINTS]
         if bad or not self.joints:
@@ -305,7 +327,8 @@ def resolve_level_config(spec):
     byte-identical). Accepts absent/None/False/'0'/'off' => None; True/'on'/{} => defaults; a
     mapping with optional ``bound_deg``, ``tilt_grace_s``, ``level_goals``, ``trip``, ``level_weld``,
     ``level_place``, ``level_path``, ``place_from_above``, ``path_waypoints``, ``place_descent_speed``,
-    ``place_descent_accel``, ``place_above_clearance_m``, ``place_depth_bias_m``, ``joints``, ``tool_link``.
+    ``place_descent_accel``, ``place_above_clearance_m``, ``place_depth_bias_m``, ``preplace_above_place``,
+    ``preplace_standoff_m``, ``place_clearance_check``, ``place_clearance_margin_m``, ``joints``, ``tool_link``.
     Raises on a malformed value so a typo fails loudly at boot."""
     if spec is None or spec is False:
         return None
@@ -328,10 +351,11 @@ def resolve_level_config(spec):
     if 'path_waypoints' in spec and spec['path_waypoints'] is not None:
         kw['path_waypoints'] = int(spec['path_waypoints'])
     for fnum in ('place_descent_speed', 'place_descent_accel', 'place_above_clearance_m',
-                 'place_depth_bias_m'):
+                 'place_depth_bias_m', 'preplace_standoff_m', 'place_clearance_margin_m'):
         if fnum in spec and spec[fnum] is not None:
             kw[fnum] = float(spec[fnum])
-    for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above'):
+    for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above',
+                 'preplace_above_place', 'place_clearance_check'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     if spec.get('joints'):

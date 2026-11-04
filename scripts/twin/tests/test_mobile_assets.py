@@ -307,6 +307,68 @@ def test_station_pitch_hold_locks_roll_and_pitch(stage):
     assert not stage.GetPrimAtPath(c.BRAKE_PATH)
 
 
+def test_station_hold_anchors_at_target_not_instantaneous_attitude(stage):
+    # coldwin39 fix: the hold must anchor the lock at the configurable TARGET attitude (rest pitch/roll +
+    # CURRENT yaw), NOT the instantaneous attitude the chassis drifted to (coldwin39 latched -4.25 deg ->
+    # carton 2.04 deg). Place the chassis at a DRIFTED pitch and check the brake anchors at the target.
+    import math
+    from pxr import UsdGeom, UsdPhysics, Gf
+    from twin.mobile_runtime import MobileController, _quat_from_rpy, _quat_to_yaw
+    author_cart(stage)
+    robot = UsdGeom.Xform.Define(stage, '/Robot/base_link')
+    UsdPhysics.RigidBodyAPI.Apply(robot.GetPrim())
+    drift_yaw = 0.5
+    w, x, y, z = _quat_from_rpy(0.0, math.radians(-4.25), drift_yaw)   # drifted end-stop pitch -4.25
+    robot.AddOrientOp().Set(Gf.Quatf(w, Gf.Vec3f(x, y, z)))
+    wheels = ['/Robot/l', '/Robot/r']
+    for p in wheels:
+        UsdPhysics.RevoluteJoint.Define(stage, p)
+    c = MobileController(stage, str(robot.GetPath()), '/Rollwagen/chassis', wheels,
+                         wheel_angle_reader=lambda: [0.0, 0.0], station_pitch_hold=True,
+                         station_hold_roll_deg=0.0, station_hold_pitch_deg=-1.17)
+    c.engage_brake()
+    rot0 = UsdPhysics.Joint(stage.GetPrimAtPath(c.BRAKE_PATH)).GetLocalRot0Attr().Get()
+    r, p, yw = _rpy_from_quat(rot0.GetReal(), *[float(v) for v in rot0.GetImaginary()])
+    assert math.degrees(p) == pytest.approx(-1.17, abs=1e-2)   # TARGET pitch, not the -4.25 drift
+    assert math.degrees(r) == pytest.approx(0.0, abs=1e-2)
+    assert yw == pytest.approx(drift_yaw, abs=1e-3)            # current yaw preserved
+
+
+def _rpy_from_quat(w, x, y, z):
+    import math
+    roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
+    pitch = math.asin(max(-1.0, min(1.0, 2 * (w * y - z * x))))
+    yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+    return roll, pitch, yaw
+
+
+def test_station_hold_latches_and_does_not_cycle_on_parked_ticks(stage):
+    # coldwin39 fix: the hold latches -- a parked (v=0) tick keeps the brake (no release+re-engage), so it
+    # does not cycle ~2000x; only a genuine drive releases it.
+    from pxr import UsdGeom, UsdPhysics
+    from twin.mobile import DockObservation, Pose2
+    from twin.mobile_runtime import MobileController
+    author_cart(stage)
+    robot = UsdGeom.Xform.Define(stage, '/Robot/base_link').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(robot)
+    wheels = ['/Robot/l', '/Robot/r']
+    for p in wheels:
+        UsdPhysics.RevoluteJoint.Define(stage, p)
+    c = MobileController(stage, str(robot.GetPath()), '/Rollwagen/chassis', wheels,
+                         wheel_angle_reader=lambda: [0.0, 0.0], station_pitch_hold=True)
+    c.engage_station_hold()
+    assert c._station_hold_latched and stage.GetPrimAtPath(c.BRAKE_PATH)
+    obs = DockObservation(Pose2(0, 0, 0), Pose2(-1.27, 0, 0), .28, .28, 0, 0, 0, 0)
+    # a PARKED command keeps the latched hold (brake prim survives) -- no cycle.
+    c.command(0.0, 0.0, obs, transport_ready=True)
+    assert c._station_hold_latched and stage.GetPrimAtPath(c.BRAKE_PATH)
+    c.engage_station_hold()  # idempotent re-engage while latched -- still one brake, no churn
+    assert stage.GetPrimAtPath(c.BRAKE_PATH)
+    # a genuine DRIVE command releases the hold and clears the latch.
+    c.command(0.16, 0.0, obs, transport_ready=True)
+    assert not c._station_hold_latched and not stage.GetPrimAtPath(c.BRAKE_PATH)
+
+
 def test_cart_parking_brake_pins_cart_and_releases(stage):
     # Cart parking brake (firstmate 287): engage_cart_brake fixes the UNCOUPLED cart to the world at
     # its CURRENT pose so a placed carton cannot roll it; a FULL FixedJoint is safe (the cart is not

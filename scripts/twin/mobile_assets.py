@@ -105,7 +105,9 @@ def build_mobile_urdf(source, output, spec=MobileSpec()):
             # the suspension is on), and physics_setup authors the PhysX linear drive (stiffness +
             # preload holding light ground contact). Absent => this whole branch is skipped and the URDF
             # is byte-identical to the legacy rigid caster.
-            _link(root, f'{label}_caster_suspender', 0.2, (0.05, 0.07, 0.04))
+            # coldwin38 FIX: the sprung-caster mass is spec-driven (the old 0.2 kg exploded the stiff
+            # drive at reset); MobileSpec enforces it sits in the solver-stable band.
+            _link(root, f'{label}_caster_suspender', spec.caster_suspender_mass_kg, (0.05, 0.07, 0.04))
             lift_joint = _joint(root, f'{label}_caster_lift', 'base_link', f'{label}_caster_suspender',
                                 (x, 0, 0.145-spec.base_z), 'prismatic', '0 0 1')
             limit = lift_joint.find('limit')
