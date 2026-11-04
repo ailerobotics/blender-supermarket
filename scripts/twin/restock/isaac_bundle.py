@@ -602,6 +602,44 @@ def _build_isaac_runtime(*, app, assembly, plan, config, output, scenario, manif
     from twin.navigation.sensors import IsaacRangeSensor
     from .verification import InventoryVerifier
     from .sensing_sources import build_sensing_sources
+    from .transfer_place_target import (resolve_transfer_place_target, shelf_staging_flow_active,
+                                        verify_bay_for_place_target)
+
+    # sim-service-place-target-v1: resolve the TRANSFER place target as ONE explicit function of the
+    # shelf-staging flow switch, BEFORE any orchestrate-side consumer reads it (the camera-lane
+    # shelf_target_provider, the ground-truth place verification, the scripted-transfer target all
+    # read config['transfer_ground_truth']['target'] flat). coldwinint1 drove the re-sequenced
+    # sales-floor run to the fm461 BACKROOM bay because that flat key ignored shelf_staging. With the
+    # flow on, the service leg services the sales-floor ENDCAP (the proven shelf place target); the
+    # resolver FAILS LOUD (named TransferPlaceTargetError) if the resolved -- or a mis-filed configured
+    # -- place is farther than the base can drive-to-service-pose and reach. Legacy flow: unchanged.
+    _place_target = resolve_transfer_place_target(config, scenario)
+    print('TRANSFER_PLACE_TARGET flow=%s source=%s location=%s target=%s reach_m=%s overridden=%s'
+          % (_place_target.flow, _place_target.source, _place_target.location,
+             _place_target.target_xyz, _place_target.reach_m, _place_target.overridden), flush=True)
+    _gt_block = config.get('transfer_ground_truth')
+    _gt_enabled = bool(_gt_block.get('enabled') if isinstance(_gt_block, dict) else _gt_block)
+    if (shelf_staging_flow_active(config) and _gt_enabled
+            and _place_target.target_xyz is not None):
+        # The flat ground-truth target feeds every orchestrate-side consumer; inject the resolved
+        # endcap so the place provider + the place verification all aim at the sales-floor endcap.
+        _resolved_gt = dict(_gt_block) if isinstance(_gt_block, dict) else {'enabled': True}
+        _resolved_gt['target'] = [float(v) for v in _place_target.target_xyz]
+        if _place_target.location:
+            _resolved_gt.setdefault('location', _place_target.location)
+        config['transfer_ground_truth'] = _resolved_gt
+        # Keep the post-place VERIFY bay consistent with the place: ground_truth_verify.from_config
+        # otherwise reads scenario.transfer_bay (the legacy BACKROOM bay), so the verify stage would
+        # check the backroom after the service leg placed at the endcap. Centre the bay ON the
+        # resolved endcap unless the lane set an explicit bay override. Gated on the same flow switch.
+        _vg = config.get('verify_ground_truth')
+        _vg_enabled = bool(_vg.get('enabled') if isinstance(_vg, dict) else _vg)
+        if _vg_enabled:
+            _vg_block = dict(_vg) if isinstance(_vg, dict) else {'enabled': True}
+            if not _vg_block.get('bay'):
+                _vg_block['bay'] = verify_bay_for_place_target(_place_target.target_xyz, scenario)
+                config['verify_ground_truth'] = _vg_block
+                print('TRANSFER_VERIFY_BAY centred on endcap: %s' % _vg_block['bay'], flush=True)
 
     nav_factory = _resolve_factory(config, 'nav_factory')
     manip_factory = _resolve_factory(config, 'manip_factory')
