@@ -34,7 +34,9 @@ import numpy as np
 from twin import urdf_probe as up
 from twin.traction import (free_pitch_travel_deg, caster_spacing_m, CasterSuspension,
                            sprung_chassis_pitch_deg, suspension_drive_wheel_share,
-                           static_traction_budget)
+                           static_traction_budget, suspension_solver_stability_ratio,
+                           suspension_solver_stable, SUSPENSION_STABILITY_RATIO_MAX,
+                           min_suspender_mass_kg)
 
 ARM_JOINTS = ['ur_shoulder_pan_joint', 'ur_shoulder_lift_joint', 'ur_elbow_joint',
               'ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_joint']
@@ -112,7 +114,20 @@ def design_proof(manifest_path, urdf_path, bound_deg=0.5):
         dominates = rec['margin'] > stuck['margin'] and share > stuck['drive_wheel_share']
         print(f'      suspension strictly DOMINATES stuck: {dominates}; '
               f'margin vs caster_lift 0.03 = {rec["margin"] - lift03["margin"]:+.2f}')
-        ok = pitch <= bound_deg and dominates
+        # (c) coldwin38: the DYNAMIC solver-stability ratio the first GPU run exposed.
+        susp_mass = float(spec.get('caster_suspender_mass_kg', 0.0))
+        if susp_mass > 0:
+            ratio = suspension_solver_stability_ratio(susp.spring_n_per_m, susp_mass)
+            stable = suspension_solver_stable(susp.spring_n_per_m, susp_mass)
+            print(f'  (c) solver stability k*dt^2/m_sprung = {ratio:.1f} '
+                  f'({"PASS" if stable else "FAIL"} <= {SUSPENSION_STABILITY_RATIO_MAX}; '
+                  f'coldwin38 exploded at ~83 with a 0.2 kg sprung mass; '
+                  f'min stable suspender mass = {min_suspender_mass_kg(susp.spring_n_per_m):.2f} kg)')
+        else:
+            stable = False
+            print('  (c) solver stability: NO caster_suspender_mass_kg in spec -- coldwin38 FAIL mode '
+                  '(a 0.2 kg sprung mass explodes the stiff drive at reset). Set caster_suspender_mass_kg.')
+        ok = pitch <= bound_deg and dominates and stable
         print(f'\nDESIGN VERDICT: {"PASS" if ok else "FAIL"}')
         return 0 if ok else 1
     print('\n(no compliant suspension in this spec -- unsprung rig; see the free pitch travel above)')

@@ -43,6 +43,11 @@ class MobileSpec:
     caster_damping_n_s_per_m: float = 0.0
     caster_preload_n: float = 0.0
     caster_travel_m: float = 0.0
+    # sim-chassis-pitch-stability-v1 coldwin38 FIX: the sprung caster-link mass. The original 0.2 kg made
+    # the stiff drive (k*dt^2/m ~= 83) EXPLODE at reset before any arm motion; the drive must sit in the
+    # solver-stable band (see twin.traction.suspension_solver_stable). A physically plausible caster+fork+
+    # spring assembly is ~3-5 kg. Required positive when caster_suspension is on.
+    caster_suspender_mass_kg: float = 0.0
     max_speed: float = 0.35
     max_yaw_rate: float = 0.35
     max_wheel_speed: float = 4.0
@@ -60,7 +65,8 @@ class MobileSpec:
 
     # Fields that may be zero/negative/bool and so are skipped by the generic positivity sweep.
     _NONPOSITIVE_OK = ('hitch_x', 'caster_lift_m', 'caster_suspension', 'caster_spring_n_per_m',
-                       'caster_damping_n_s_per_m', 'caster_preload_n', 'caster_travel_m')
+                       'caster_damping_n_s_per_m', 'caster_preload_n', 'caster_travel_m',
+                       'caster_suspender_mass_kg')
 
     def __post_init__(self):
         for key, value in asdict(self).items():
@@ -74,12 +80,24 @@ class MobileSpec:
         if self.caster_suspension:
             if not (self.caster_spring_n_per_m > 0 and self.caster_travel_m > 0):
                 raise ValueError('caster_suspension requires positive caster_spring_n_per_m and caster_travel_m')
+            if not self.caster_suspender_mass_kg > 0:
+                raise ValueError('caster_suspension requires positive caster_suspender_mass_kg (coldwin38: '
+                                 'a too-light sprung mass makes the stiff drive explode at reset)')
             if self.caster_preload_n < 0 or self.caster_damping_n_s_per_m < 0:
                 raise ValueError('caster_preload_n and caster_damping_n_s_per_m must be non-negative')
             if self.caster_lift_m != 0.0:
                 raise ValueError('caster_suspension is mutually exclusive with caster_lift_m; set caster_lift_m=0')
-        elif (self.caster_spring_n_per_m or self.caster_preload_n
-              or self.caster_damping_n_s_per_m or self.caster_travel_m):
+            # coldwin38 FIX: refuse a sprung caster whose stiffness/mass/step ratio is numerically
+            # unstable at the mission solver step (the ~83 that exploded the chassis at reset).
+            from .traction import suspension_solver_stable, suspension_solver_stability_ratio
+            if not suspension_solver_stable(self.caster_spring_n_per_m, self.caster_suspender_mass_kg):
+                raise ValueError(
+                    'caster suspension is solver-UNSTABLE at dt=1/60: k*dt^2/m_sprung='
+                    f'{suspension_solver_stability_ratio(self.caster_spring_n_per_m, self.caster_suspender_mass_kg):.1f}'
+                    ' exceeds the stable ceiling (coldwin38 exploded at ~83). Raise caster_suspender_mass_kg '
+                    'or lower caster_spring_n_per_m (twin.traction.min_suspender_mass_kg sizes it).')
+        elif (self.caster_spring_n_per_m or self.caster_preload_n or self.caster_damping_n_s_per_m
+              or self.caster_travel_m or self.caster_suspender_mass_kg):
             raise ValueError('caster suspension params set but caster_suspension is False')
         if self.width + self.wheel_width > self.wheel_track:
             raise ValueError('drive wheels intersect chassis; increase track or reduce width')
