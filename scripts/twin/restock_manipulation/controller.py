@@ -319,6 +319,14 @@ class TransferController:
         # that stays over the bound for the whole grace window trips. Built lazily on the first carried
         # tick (needs the resolved bound + the physics-step-scaled grace). None when carton_level is off.
         self._tilt_debounce = None
+        # sim-carton-level-preplace-v2: per-carried-segment PLANNED-vs-EXECUTED max carton tilt, so a
+        # bench-vs-GPU gap (collectlevel3: bench predicted ~0 at the place set-down, GPU executed 2.22)
+        # is NAMED in the log next run instead of inferred. ``_carton_seg_exec[phase]`` accumulates the
+        # measured (executed) max |roll|,|pitch| each carried tick; ``_carton_seg_planned[phase]`` is the
+        # planned peak stashed when the move is issued (the leveled-path predict, or the straight-line
+        # place-descent commanded-path replay). Logged as CARTON_SEGMENT_TILT at each carried phase exit.
+        self._carton_seg_exec = {}
+        self._carton_seg_planned = {}
         # fm427 (A1) (run-323 cold lift): the fm419(a) COLLISION_STALE_PAUSE holds the post-attach lift on
         # a genuinely-stale collision stamp (run-323: collision_dt 0.52->0.65 s, the benign weld/ESDF
         # re-incorporation lag) by returning EMPTY controls -- a SILENT hold. Under render pacing that
@@ -845,6 +853,16 @@ class TransferController:
         # never charged against the next. No-op when the debounce was never built (carton_level off).
         if self._tilt_debounce is not None:
             self._tilt_debounce.reset()
+        # sim-carton-level-preplace-v2: report the PLANNED-vs-EXECUTED max carton tilt for the carried
+        # phase we are LEAVING, so a bench-vs-GPU gap is visible by name in the log (the gap that cost the
+        # collectlevel3 diagnosis). Only when carton_level is on and we measured an executed sample this
+        # phase; the planned peak defaults to (unknown) for a phase whose move stashed none.
+        if self._carton_level is not None and self.phase in self._carton_seg_exec:
+            er, ep = self._carton_seg_exec.pop(self.phase)
+            pr, pp = self._carton_seg_planned.pop(self.phase, (None, None))
+            planned = ('planned_max roll=%.2f pitch=%.2f' % (pr, pp)) if pr is not None else 'planned_max=unknown'
+            print('CARTON_SEGMENT_TILT phase=%s executed_max roll=%.2f pitch=%.2f | %s deg (bound %.2f)'
+                  % (self.phase, er, ep, planned, self._carton_level.bound_deg), flush=True)
         if phase == 'contact':
             self._contact_progress_wall = self.steady_clock()   # fm425: start the WALL no-progress budget
 
@@ -991,6 +1009,7 @@ class TransferController:
                   '(<= bound %.2f) -- leveled waypoint carry'
                   % (self.phase, plan.waypoints_n, plan.max_roll, plan.max_pitch, plan.max_tilt,
                      self._carton_level.bound_deg), flush=True)
+            self._carton_seg_planned[self.phase] = (plan.max_roll, plan.max_pitch)  # for CARTON_SEGMENT_TILT
             self.motion.begin_joint_path(list(plan.waypoints), measured, slow=slow, goal_tol=goal_tol)
             self.issued = True
             return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
@@ -1058,6 +1077,7 @@ class TransferController:
                   '(<= bound %.2f) -- leveled approach to standoff'
                   % (self.phase, plan.waypoints_n, plan.max_roll, plan.max_pitch, plan.max_tilt,
                      self._carton_level.bound_deg), flush=True)
+            self._carton_seg_planned[self.phase] = (plan.max_roll, plan.max_pitch)  # for CARTON_SEGMENT_TILT
             self.motion.begin_joint_path(list(plan.waypoints), measured, slow=slow, goal_tol=goal_tol)
             self.issued = True
             return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
@@ -1199,6 +1219,10 @@ class TransferController:
                 grace_s=self._carton_level.tilt_grace_s * self._freshness_scale)
         roll, pitch, _ = cl.carried_rpy(robot, list(measured), self._carton_up_in_tool,
                                         self._carton_level.tool_link)
+        # sim-carton-level-preplace-v2: accumulate the EXECUTED max |roll|,|pitch| for this carried
+        # phase (reported vs the planned peak at the phase exit). Cheap (reuses this tick's FK read).
+        er, ep = self._carton_seg_exec.get(self.phase, (0.0, 0.0))
+        self._carton_seg_exec[self.phase] = (max(er, abs(roll)), max(ep, abs(pitch)))
         return self._tilt_debounce.observe(now, roll, pitch)
 
     def _raised_move_exc(self, exc, *, staged):
@@ -1853,8 +1877,42 @@ class TransferController:
                         try:
                             lev = self._solve_level_place(robot, list(seed), target_pos)
                             setdown = tuple(float(lev[j]) for j in ARM_JOINTS)
+                            # sim-carton-level-preplace-v2: the set-down is driven as ONE collision-off
+                            # straight-line (begin(straight_line=True)) because a collision-aware plan to the
+                            # deck config is rejected as an attached-carton self-collision (collect4). Its
+                            # COMMANDED straight joint line is already LEVEL (both endpoints leveled; the
+                            # interior stays <~0.1 deg -- replayed below and CPU-proven), so the collectlevel3
+                            # phase=place CARTON_TILT (2.22 deg, sustained 0.167 s) is NOT a planned-pose tilt
+                            # but an EXECUTION transient of the loaded set-down: at 0.08 rad/s the welded
+                            # carton's differential joint tracking during the heavy shoulder/elbow descent
+                            # leaves level. (a) belt-and-suspenders: replay the COMMANDED path and refuse by
+                            # name if it would itself tilt; (b) the lever: TIME-PARAMETERISE the same level
+                            # path slower (carton_level.place_descent_speed/accel) so the executed tilt stays
+                            # under the bound -- bound and grace UNCHANGED. The planned peak is stashed for the
+                            # per-segment CARTON_SEGMENT_TILT report (planned vs executed) at the phase exit.
+                            from twin.restock_manipulation import carton_level as cl
+                            planned = cl.predict_path_tilt(
+                                robot, [list(s.joint_positions), list(setdown)], self._carton_up_in_tool,
+                                tool_link=self._carton_level.tool_link)
+                            self._carton_seg_planned['place'] = (planned[0], planned[1])
+                            worst_planned = max(planned[0], planned[1])
+                            if worst_planned > self._carton_level.bound_deg:
+                                return self._fail(
+                                    '%s carried set-down would tilt the carton off level: predicted peak '
+                                    'roll=%.2f pitch=%.2f deg over the commanded straight-line place descent '
+                                    'exceeds bound %.2f deg -- refusing to execute a visibly tilted set-down'
+                                    % (cl.CARTON_LEVEL_PLAN_REJECTED, planned[0], planned[1],
+                                       self._carton_level.bound_deg))
+                            print('CARTON_LEVEL_PLACE_DESCENT phase=place predicted_max roll=%.2f pitch=%.2f '
+                                  'deg (<= bound %.2f) -- gentled level set-down at speed=%.3f accel=%.3f '
+                                  'rad/s (time-parameterised so the loaded-carton execution stays level)'
+                                  % (planned[0], planned[1], self._carton_level.bound_deg,
+                                     self._carton_level.place_descent_speed,
+                                     self._carton_level.place_descent_accel), flush=True)
                             self.motion.begin_joint_goal(setdown, s.joint_positions, straight_line=True,
-                                                         slow=True, goal_tol=0.12)
+                                                         slow=True, goal_tol=0.12,
+                                                         speed=self._carton_level.place_descent_speed,
+                                                         accel=self._carton_level.place_descent_accel)
                             self.issued = True
                             return self._result(({'kind': 'move', 'pose': self.poses['place']},))
                         except ValueError as exc:
