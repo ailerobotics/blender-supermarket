@@ -382,12 +382,17 @@ def run(args, manifest, scenario):
     if getattr(args, 'render_preset', None):
         _apply_render_preset(config, args.render_preset)
     # Opt-in mobile store-sensor (twin.route_alerts); default off => byte-identical run.
-    # --route-alerts enables the defaults; --route-alerts-config PATH loads a tuned
-    # section (floors/aisles/detector prefs). Either injects config['route_alerts'].
+    # --route-alerts[=act] injects the working-default (findings) or smart (act) config;
+    # --route-alerts-config PATH loads a tuned section (floors/aisles/detector prefs/mode).
+    # A bare --route-alerts=act beside --route-alerts-config promotes that section to act.
+    ra_mode = getattr(args, 'route_alerts', None)
     if getattr(args, 'route_alerts_config', None):
-        config['route_alerts'] = json.loads(args.route_alerts_config.read_text())
-    elif getattr(args, 'route_alerts', False):
-        config['route_alerts'] = True
+        section = json.loads(args.route_alerts_config.read_text())
+        if ra_mode == 'act' and isinstance(section, dict):
+            section['mode'] = 'act'
+        config['route_alerts'] = section
+    elif ra_mode is not None:
+        config['route_alerts'] = True if ra_mode == 'findings' else ra_mode
     readiness=check_runtime_inputs(config)
     if not readiness['files_ready']:
         raise ValueError('runtime inputs unresolved: '+', '.join(readiness['unresolved_inputs']))
@@ -908,11 +913,16 @@ def main():
     parser.add_argument('--dry-run-job', action='store_true',
                         help='resolve --job-from, print the mapped mission job + planogram validation, '
                              'and exit without booting the simulator')
-    parser.add_argument('--route-alerts', action='store_true',
+    parser.add_argument('--route-alerts', nargs='?', const='findings',
+                        choices=['findings', 'act'], default=None,
                         help='opt-in mobile store sensor: run the read-only store-vision spill / '
-                             'obstruction detectors over the drive camera while navigating, publish '
-                             'robot.route_alert.* events + staff tasks, and expose obstruction '
-                             'detections for the dynobs costmap layer. Default off (byte-identical).')
+                             'obstruction detectors over the drive camera while navigating and '
+                             'publish robot.route_alert.* events + staff tasks. Bare --route-alerts '
+                             '(= the WORKING DEFAULT "findings") is sensor-only: findings never '
+                             'change where the robot drives. --route-alerts=act is the smart variant: '
+                             'a confirmed obstruction footprint also raises the route cost, ONLY '
+                             'through the dynobs costmap layer (needs navigation.dynamic_obstacles + '
+                             'nav_mode sensor). Default off (byte-identical).')
     parser.add_argument('--route-alerts-config', type=Path,
                         help='JSON route_alerts section (floors/aisles/detector prefs) to inject '
                              'instead of the --route-alerts defaults')

@@ -28,6 +28,9 @@ from .config import DetectorPref, RouteAlertsConfig
 from .costmap import obstructions_to_detections
 from .events import build_staff_tasks, to_robot_events
 from .frames import RouteFrame
+from .nav_source import source_from_hook
+from .recorded import (RecordedFrameRef, iter_recorded_frames, load_frame_index,
+                       seed_obstruction, seed_spill)
 from .runner import RouteAlertsResult, RouteAlertsRunner
 
 __all__ = [
@@ -39,4 +42,10 @@ __all__ = [
     "obstructions_to_detections",
     "to_robot_events",
     "build_staff_tasks",
+    "source_from_hook",
+    "RecordedFrameRef",
+    "iter_recorded_frames",
+    "load_frame_index",
+    "seed_obstruction",
+    "seed_spill",
 ]

@@ -14,6 +14,24 @@ Everything here is **opt-in and default off**: with no `route_alerts` config sec
 mission imports nothing from this package and runs byte-identically. See
 `scripts/twin/route_alerts/` and RUNBOOK §19.
 
+## Two modes — the working default and the smart variant
+
+`route_alerts.mode` (launcher `--route-alerts[=act]`) picks between the two delivered
+behaviours. **One version with the working default is kept**; the smart behaviour is
+opt-in on top:
+
+| Mode | Flag | What the robot does | Navigation |
+|---|---|---|---|
+| **`findings`** (default) | `--route-alerts` | Pure **sensor**: publishes `robot.route_alert.*` events + staff tasks + the evidence log. Findings never change where the robot drives. | **byte-identical** — `latest_detections()` returns `[]`, the dynobs layer is fed nothing. |
+| **`act`** (smart) | `--route-alerts=act` | Everything `findings` does, **plus** a confirmed **obstruction** footprint is exposed so it raises the route cost. | fed **only** through the dynobs costmap layer (`navigation.dynamic_obstacles`, nav_mode `sensor`); needs no new layer or gate. |
+
+Only an `obstruction` footprint ever moves the robot (it is the one finding that is a
+base passability hazard); `spill`/`strays` never feed navigation even in `act`. The
+findings themselves are published in **both** modes — only the navigation seam is gated.
+This is the captain's "keep one version with working defaults, then move to the smart one
+if the working default is acting stupid": run `findings` for a sensor-only baseline, flip
+to `act` when the costmap coupling is wanted.
+
 ## Pipeline
 
 ```
@@ -44,7 +62,7 @@ CPU path is used where no GPU path exists, **stated per detector**:
 | Detector | CPU path (default) | GPU path (opt-in `gpu: true`) | Feeds nav? |
 |---|---|---|---|
 | **spill** | classical OpenCV floor-hazard pipeline (people-masked). | store-vision OWLv2 + SAM 2 open-vocab refine (`store-vision[spill]`, torch/transformers) — sharpens class + extent; shares the GPU with the mission. | no |
-| **obstruction** | classical depth-protrusion + clean-floor change (people-masked). This path **also** produces the passability layer + footprints that feed navigation, so CPU is both sufficient and preferred (no GPU contention). | OWLv2 open-vocab object classifier — **label quality only**; geometry/footprints unchanged. | **yes** (dynobs) |
+| **obstruction** | classical depth-protrusion + clean-floor change (people-masked). This path **also** produces the passability layer + footprints that feed navigation, so CPU is both sufficient and preferred (no GPU contention). | OWLv2 open-vocab object classifier — **label quality only**; geometry/footprints unchanged. | **yes, in `act` mode** (dynobs) |
 | **strays / coldchain** | *none* — semantic: needs SKU-per-slot recognition. | store-vision products recognizer (OWLv2 / SigLIP, GPU) → `SlotObservation`s → `StrayDetector`. Off unless a `slot_observation_provider` + detector are wired. | no |
 
 `chiller-door`: store-vision today has **no dedicated per-frame "open chiller door"
@@ -69,7 +87,17 @@ is `twin.navigation.dynamic.Detection(position, radius, source)`:
 `RouteAlertsRunner.latest_detections()` exposes the current map-frame detections for the
 navigation runtime (dynobs-owned) to pass into `SensorNavigation.step(detections=…)`,
 which **unions** their predicted occupancy into the sensed observation (add-only: a route
-alert can turn a stop into motion, never the reverse).
+alert can turn a stop into motion, never the reverse). **The method is gated by
+`mode`**: it returns `[]` in the working-default `findings` mode (nav byte-identical) and
+the obstruction footprints only in `act` mode.
+
+The live seam: `twin.route_alerts.nav_source.source_from_hook(hook)` turns the mission
+hook into the `source(now) -> [Detection]` the dynobs layer pulls each navigate tick. In
+`act` mode `isaac_bundle.create` wires it as the navigation `detection_source` — the SAME
+seam the scenario / humans feed (`navigation.dynamic_obstacle_source`) uses, so the two
+cannot both own it at once (composing them is a follow-up). `act` therefore requires
+nav_mode `sensor` and `navigation.dynamic_obstacles` set (the dynobs layer); the bundle
+refuses honestly otherwise rather than silently doing nothing.
 
 ## GDPR-by-design — people-masked, no biometrics
 
@@ -101,6 +129,7 @@ mapping base-frame footprints into the map frame is done with the robot pose.
     "spill":       { "enabled": true, "gpu": false },
     "obstruction": { "enabled": true, "gpu": false },
     "strays":      { "enabled": false, "gpu": true },   // needs a products recognizer
+    "mode": "findings",           // "findings" (default, sensor-only) | "act" (feeds dynobs)
     "cadence": 1,                 // run every Nth offered frame
     "staff_tasks": true,
     "camera": "route",            // the drive camera id the floors calibration is keyed by
@@ -112,16 +141,39 @@ mapping base-frame footprints into the map frame is done with the robot pose.
 }
 ```
 
-Launcher: `--route-alerts` (defaults) or `--route-alerts-config PATH` (a tuned section).
-Live people-masking additionally needs `config["agents_factory"]` wired to the humans
-lane's detections.
+Launcher: `--route-alerts` (the working default, `findings`), `--route-alerts=act` (the
+smart variant), or `--route-alerts-config PATH` (a tuned section; a bare `--route-alerts=act`
+beside it promotes that section to `act`). Live people-masking additionally needs
+`config["agents_factory"]` wired to the humans lane's detections. For `act` the mission
+must also run nav_mode `sensor` with `navigation.dynamic_obstacles` set (the dynobs layer).
+
+## Recorded-frames bridge (replay a saved run, CPU, no simulator)
+
+`twin.route_alerts.recorded` drives the identical runner over a **saved run's** recorded
+camera frames instead of a live port: `load_frame_index` / `iter_recorded_frames` read
+`<run>/mission-frames/frames.json` + the PNGs and yield `(rgb, simulation_time, seq)`
+stamped with the run's **real** mission timestamps. This is the primary CPU evidence path
+(no GPU session). The recorded `mission-frames` are the cinematic chase-camera RGB (no
+depth, uncalibrated), so an *evidence replay* seeds the hazards — `seed_spill` composites
+a blob onto the real pixels, `seed_obstruction` supplies a synthetic depth protrusion, and
+`floor_calibration` a synthetic image→floor homography — while the detectors, the
+event/task publishing, the mode gate and the dynobs layer are the identical production
+code. A faithful mobile floor-facing RGB-D camera is the integration lane's follow-up (see
+the v1 report's option A).
 
 ## Tests and evidence
 
 * CPU tests: `scripts/twin/route_alerts/tests/` (pure-logic tests run anywhere; the
   integration tests need store-vision — run under its venv). RUNBOOK §19.
-* CPU evidence: `scripts/run_route_alerts_evidence.py` — seeds a spill + obstruction (+ a
-  moving shopper) into store-vision synthetic aisle frames, drives the **real** runner
-  (detect: spill + obstruction + aisle-blocked + robot events + staff tasks + people
-  masked), then drives the **real** coupled controller through the **real** dynobs layer
-  so it stops for and re-routes around the obstruction the detector found. Self-asserting.
+* CPU evidence (recorded frames, the primary v2 path):
+  `scripts/run_route_alerts_recorded.py --run <saved run> --out <dir>` — seeds a spill +
+  obstruction into a saved run's recorded frames and drives the runner in **both** modes,
+  asserting detection with the run's real timestamps, that `findings` feeds navigation
+  nothing (byte-identical) and that `act` feeds the obstruction into the dynobs layer and
+  raises its cost. Self-asserting; run under the store-vision venv.
+* CPU evidence (synthetic aisle): `scripts/run_route_alerts_evidence.py` — seeds a spill +
+  obstruction (+ a moving shopper) into store-vision synthetic aisle frames, drives the
+  **real** runner (detect: spill + obstruction + aisle-blocked + robot events + staff tasks
+  + people masked), then drives the **real** coupled controller through the **real** dynobs
+  layer so it stops for and re-routes around the obstruction the detector found.
+* Live in-Isaac smoke: `scripts/run_route_alerts_smoke.py` (v1).

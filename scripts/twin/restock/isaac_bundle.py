@@ -388,6 +388,33 @@ def _build_detection_source(*, app, assembly, plan, config, output):
     return builder(app=app, assembly=assembly, plan=plan, config=config, output=output)
 
 
+def _wire_route_alerts_act(navigation, route_alerts):
+    """Wire the smart `act`-mode obstruction feed into the existing dynobs seam.
+
+    No-op (byte-identical) unless the route-alerts hook is in `act` mode. When it is,
+    the hook's `latest_detections()` becomes the navigation `detection_source` -- the
+    SAME per-tick seam the scenario/humans feed uses -- so the obstruction raises the
+    route cost ONLY through the `DynamicObstacleLayer` the `sim-restock-dynobs-v1` lane
+    owns. Refuses honestly (rather than silently no-op) when the seam is unavailable.
+    """
+    if not getattr(route_alerts, 'acts', False):
+        return
+    if not getattr(navigation, 'sensor_navigation', False):
+        raise ValueError('--route-alerts=act requires nav_mode "sensor" (the dynobs '
+                         'costmap layer the obstruction feed rides); the nav2 route '
+                         'takes obstacles through its own ROS costmap')
+    if getattr(navigation, 'detection_source', None) is not None:
+        raise ValueError('--route-alerts=act cannot share the single dynobs '
+                         'detection_source with navigation.dynamic_obstacle_source; '
+                         'composing the two feeds is a follow-up (see the PR)')
+    if getattr(navigation.controller, 'dynamic_layer', None) is None:
+        raise ValueError('--route-alerts=act needs the dynobs costmap layer: set '
+                         'navigation.dynamic_obstacles (the layer sim-restock-dynobs-v1 '
+                         'owns) so the obstruction feed has somewhere to raise cost')
+    from twin.route_alerts.nav_source import source_from_hook
+    navigation.detection_source = source_from_hook(route_alerts)
+
+
 def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=None):
     """Assemble the production mission bundle inside the guarded SimulationApp.
 
@@ -462,6 +489,12 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
         frame_builder = recording_camera_frame_builder(config, agents_provider=agents_provider)
         route_alerts = build_from_config(config, output_dir=output, frame_builder=frame_builder,
                                          robot_id=config.get('route_alerts_robot_id', 'shelfbot'))
+        # Smart `act` mode (`--route-alerts=act`): feed the obstruction footprints the
+        # hook sees on the route into navigation THROUGH the existing moving-obstacle
+        # costmap layer the `sim-restock-dynobs-v1` lane owns (never a parallel layer).
+        # The findings-only working default leaves `acts` False and this is a no-op, so
+        # navigation is byte-identical.
+        _wire_route_alerts_act(navigation, route_alerts)
 
     # Opt-in final fine-docking servo (twin.restock.fine_dock). Built ONLY when the config
     # carries a `fine_dock` block; absent => None and the couple stage attaches directly
