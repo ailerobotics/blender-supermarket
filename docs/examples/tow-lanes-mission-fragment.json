@@ -1,19 +1,20 @@
 {
   "_comment": "Opt-in authored tow lanes + staging/parking poses for the COUPLED restock drives. Merge the 'navigation.tow_lanes'/'navigation.directional_zone' keys into the mission runtime-config's navigation block, the 'mission_poses' entries into mission_poses, and set the top-level 'shelf_staging': true to enable the sim-shelf-staging-v1 sales-floor re-sequence (the integration/bt-driver lane wires the uncouple/service steps on those poses). Absent => coupled drives free-plan exactly as before (byte-identical) and the braking gate uses the direction-aware zone by default. Poses are map-frame [x, y, yaw] in metres/radians; yaw PI = facing -x (west), 0 = facing +x (east), -PI/2 = facing -y (south), +PI/2 = facing +y (north). Waypoints are the authored centreline the expanded trajectory must pass through (asserted at build time). goal_articulation is the lane's achievable terminal cart articulation and governs arrival when the lane is active.",
+  "_collect_dock_reach_note": "sim-collect-dock-reach-v1 (AUTHORITATIVE, supersedes the on-axis -3.875 dock coordinates in the historical _shelf_staging_note / _couple_seat_dockalign_note below). The couple dock + cart spawn moved from the on-axis (-3.875, 15.77, -PI/2) -- which sat ~1.9 m from the fixed collect pose (-5.73, 16, 0), past the ~1.3 m arm place-reach gate, so coldwin26 failed the collect place 'unreachable or undersized target' -- to the REACHABLE south dock [-4.6, 16.0, -PI/2]: the cart DECK place target is 1.155 m from the collect pose (reach margin 0.145 m), the cart clears the backstock Support corridor by 0.46 m and the robot footprint by 0.29 m, and the OUTBOUND couples there (seat [-4.6, 14.73, -PI/2]) and tows with a GENTLE curve in the OPEN BACKROOM (peak 11.4 deg at y~14.6, away from the door) onto the x=-4.3 axis, crossing the doorway ALIGNED (cart ~0.4 deg, 0.54 m west / 1.38 m east clearance) after a 3.74 m straight lead-in. One dock source = the lane's couple_dock, shared by cold (couple_dock_align), shortcut (start_at=couple) and side-bay configs. CPU proof: scripts/check_collect_dock_reach.py + data/sim-collect-dock-reach-v1/report.md. The on-axis staging goal moved with the dock to [-4.3, 8.0, -PI/2] (aligned with the crossing).",
   "shelf_staging": true,
   "mission_poses": {
     "couple_approach": [
-      -3.875,
-      13.0,
+      -4.6,
+      13.2,
       -1.5707963267948966
     ],
     "couple_standoff": [
-      -3.875,
-      14.1,
+      -4.6,
+      14.33,
       -1.5707963267948966
     ],
     "shelf_staging": [
-      -3.875,
+      -4.3,
       8.0,
       -1.5707963267948966
     ],
@@ -34,29 +35,34 @@
       {
         "name": "outbound_dock_to_staging",
         "start": [
-          -3.875,
-          14.5,
+          -4.6,
+          14.73,
           -1.5707963267948966
         ],
         "start_cart_yaw": -1.5707963267948966,
         "goal": [
-          -3.875,
+          -4.3,
           8.0,
           -1.5707963267948966
         ],
         "goal_articulation": 0.2,
         "start_tol_cart_yaw": 0.35,
         "couple_dock": [
-          -3.875,
-          15.77,
+          -4.6,
+          16.0,
           -1.5707963267948966
         ],
         "couple_dock_articulation": 0.0,
         "lead_in_max_m": 1.0,
         "waypoints": [
           [
-            -3.875,
-            11.125,
+            -4.3,
+            12.0,
+            -1.5707963267948966
+          ],
+          [
+            -4.3,
+            9.9,
             -1.5707963267948966
           ]
         ],
@@ -76,8 +82,8 @@
   },
   "_shelf_staging_note": "sim-shelf-staging-v1 (captain follow-up to sim-dock-align-v1): the ONE remaining coupled rotation was on the sales floor -- the externally-fixed west-facing endcap service pose shelf_approach [-3.05, 6.0, PI] is 0.825 m EAST of the portal axis, so delivering the COUPLED cart there needed a ~46 deg in-aisle turn, and on the outbound that turn began just south of the wall so the cart's TAIL exited the doorway angled up to ~40 deg. FIX (re-sequence, NOT re-author the endcap): tow the rollwagen STRAIGHT down the portal axis (x=-3.875) to the NEW shelf_staging pose [-3.875, 8.0, -PI/2] -- a single straight southbound pull, coupled articulation 0.0 deg EVERYWHERE, cart crosses the doorway (y=11.125) dead-centre at 0.0 deg -- then BRAKE + RELEASE the cart there (reusing the uncouple mechanic) and drive the robot ALONE (uncoupled) to shelf_approach to service the endcap. The sharp turn to the endcap is now done by the FREE base (uncoupled, no cart to swing), so the WHOLE-LANE coupled max drops from ~46 deg to 0.0 deg and the cart-in-doorway angle from ~40 deg to 0.0 deg. MEASURED (CPU, twin.mobile train envelope, 798-obstacle static map, data/sim-shelf-staging-v1/): outbound_dock_to_staging whole-lane + backroom + cart-in-doorway max = 0.0 deg; the parked rollwagen sits on the portal axis at centre [-3.875, 9.27] (cart body y[8.6, 9.69]), fully south of the doorway and north of the y=6 service aisle, clear of the wall fixtures (y>=10.25). The uncoupled robot-only service path staging->endcap clears the static map (0.20 m) and the parked cart (forward departure); scripts/check_shelf_staging_nav.py is the CPU proof.",
   "_uncoupled_service_note": "The service leg is UNCOUPLED, so it carries NO tow lane (tow lanes are coupled-only). The free base plans staging [-3.875, 8.0, -PI/2] -> shelf_approach [-3.05, 6.0, PI] (a short SE drive, forward departure from the just-released cart), serviced by the store's existing westbound pull-through poses [[-1.525, 6.0, PI], [-7.0, 6.0, PI]] (store_environment.first_cycle.pull_through_robot_poses). CPU proof: scripts/check_shelf_staging_nav.py (base-rectangle vs the static map + the parked-cart AABB).",
-  "_dock_align_note": "sim-dock-align-v1 (PR 271, KEPT): the couple dock is headed SOUTH on the portal axis [-3.875, 14.5, -PI/2] with the cart staged aligned behind it (start_cart_yaw -PI/2), so the train couples aligned and drives STRAIGHT south -- backroom articulation 0.0 deg, crossing the wall opening (y=11.125, sim-portal-widen-v1 / PR 266: 2.6 m clear) dead-centre with 0.586 m clearance per side. sim-shelf-staging-v1 keeps that dock + portal geometry unchanged and only moves the outbound GOAL from the endcap to the portal-axis staging pose, so the straight backroom + doorway passage the dock-align lane proved is unchanged.",
-  "_couple_handoff_note": "STATION geometry the integration lane wires (external mission runtime-config mission_poses): keep the couple APPROACH a SEPARATE navigation step ending in a straight reverse (captain-approved). Recommended south-facing couple poses on the portal axis -- robot faces south, cart staged NORTH of it facing south: couple_standoff [-3.875, 14.1, -PI/2], couple_approach [-3.875, 13.0, -PI/2]; the fine-dock insert reverses NORTH onto the drawbar. Post-couple the robot sits at the outbound lane start [-3.875, 14.5, -PI/2] with the cart centre at [-3.875, 15.77]. Stage the cart (initial_staging cart_body_pose + unit_yaws_world.cart) at that pose facing south. Tune couple poses against the measured pinned cart with couple_cart_relative (docs/examples/couple-approach-mission-fragment.json).",
+  "_dock_align_note": "sim-dock-align-v1 (PR 271) + sim-collect-dock-reach-v1 (dock moved to be arm-reachable): the couple dock is headed SOUTH at the REACHABLE cart pose [-4.6, 16.0, -PI/2] (deck place target 1.155 m from the fixed collect pose, inside the ~1.3 m reach gate the on-axis -3.875,15.77 dock overran at coldwin26). The train couples there (seat [-4.6, 14.73, -PI/2]) and tows with a GENTLE curve in the OPEN BACKROOM (peak 11.4 deg at y~14.6, away from the door) onto the x=-4.3 axis, crossing the wall opening (y=11.125, PR 266: 2.6 m clear) ALIGNED (cart ~0.4 deg, 0.54 m west / 1.38 m east clearance) after a 3.74 m straight lead-in.",
+  "_couple_handoff_note": "STATION geometry the integration lane wires (external mission runtime-config mission_poses): keep the couple APPROACH a SEPARATE navigation step ending in a straight reverse (captain-approved). Recommended south-facing couple poses at the REACHABLE dock (sim-collect-dock-reach-v1) -- robot faces south, cart staged NORTH of it facing south: couple_standoff [-4.6, 14.33, -PI/2], couple_approach [-4.6, 13.2, -PI/2]; the fine-dock insert reverses NORTH onto the drawbar. Post-couple the robot sits at the outbound lane start [-4.6, 14.73, -PI/2] with the cart centre at [-4.6, 16.0]. Stage the cart (initial_staging cart_body_pose + unit_yaws_world.cart) at that pose facing south. Tune couple poses against the measured pinned cart with couple_cart_relative (docs/examples/couple-approach-mission-fragment.json).",
   "_couple_seat_dockalign_note": "sim-outbound-lane-start-dockalign-v1 (item 4 of data/sim-followups-harvest-s1): coldwin23-2 (start_at=couple --stop-after outbound) proved the no-rotation claim (1.96 deg max over 1459 coupled rows) but then FAILED lane_not_acquired_timeout -- its couple drive seated the base at the LEGACY EAST couple pose (goal [-4.46, 16.0, 0], seat ~[-4.45, 15.28, 0], facing east) while this lane's start is the dock-align SOUTH seat [-3.875, 14.5, -PI/2] (a ~0.97 m + 1.6 rad frame mismatch the follower cannot and must not bridge). TWO repo-side guards now make the couple seat FOLLOW the configured dock: (1) the lane DECLARES its couple_dock (the staged cart pose [-3.875, 15.77, -PI/2]); TowLane.expand() derives the post-couple robot seat from it (lanes.couple_seat_from_cart, the inverse of the couple hitch) and REFUSES to build if the lane start does not match that seat within start_tol_xy/start_tol_yaw -- so a legacy dock paired with a re-authored lane fails at build, not at the GPU run. (2) lead_in_max_m 1.0 lets the outbound follower synthesise a bounded, swept-validated coupled merge onto the centreline when the real crosstrack couple lands the base a little (<= ~1 m) off the exact seat but ALIGNED (reuses sim-robust-outbound-lane-start-v1). The dock-align SOUTH couple poses are in mission_poses above (couple_approach [-3.875, 13.0, -PI/2], couple_standoff [-3.875, 14.1, -PI/2]); the fine-dock reverses NORTH onto the drawbar and the robot ends at the lane start [-3.875, 14.5, -PI/2]. CPU proof: scripts/check_tow_lanes.py (check_couple_seat_acquire, both the south and the legacy east dock) + tests/test_navigation_lanes.py; before/after seat-vs-lane-start plot in data/sim-outbound-lane-start-dockalign-v1/.",
   "_return_handoff_note": "RETURN is integration-owned (sim-shelf-staging-v1 scope was the OUTBOUND re-sequence -- the captain's door-rotation complaint). The rollwagen is parked (uncoupled) at shelf_staging on the portal axis; a pure-nav check (scripts/check_shelf_staging_nav.py) shows the free base CANNOT thread the single 2.6 m doorway past the on-axis parked cart to drive home empty, and a coupled re-couple+tow-home from the portal-axis staging does not expand (the cart cannot reorient in the ~5 m sales-floor corridor south of the wall -- confirmed CPU). So the integration must choose the return: (a) RE-COUPLE at the staging and tow the cart home via the sales-floor aisle reorientation the dock-align return proved feasible FROM THE ENDCAP (45.6 deg, aisle pull-through) -- i.e. re-couple, drive the coupled train to the endcap aisle to reorient, then straight north through the doorway (cart crosses aligned); OR (b) leave the cart parked and treat it as a known-static (removed from the final-leg costmap, the existing docking-distance pattern) + GPU-validate the empty return clearance. The runtime reuses the existing couple/uncouple mechanics for either; this lane set does not author a coupled return tow (it would not build-expand from the staging).",
   "_gpu_handoff_note": "For a GPU proof the integration lane should set the top-level scene-build key portal_floor_box=true (flat drive-floor box collider) and keep the coupled_heading_hold / heading_hold_prethroat_m / heading_hold_launch_m keys from docs/examples/throat-momentum-launch-mission-fragment.json (the from-rest dock pin, unchanged by this geometry change). Also set the top-level shelf_staging=true and provide the mission_poses.shelf_staging pose (above). The robot MUST CARRY the carton in the gripper through the uncoupled service leg (the cart no longer accompanies it to the endcap) -- a MANIPULATION change the integration owns ('do not change manipulation' kept this out of scope here); RESTOCK_TRANSFER_MODE=live_pose currently picks the carton OFF the cart at the service pose, which is incompatible with the cart parked at the staging. ACCEPTANCE (couple + outbound): the coupled train couples south-aligned on the portal axis and tows STRAIGHT to shelf_staging (<=10 deg coupled articulation EVERYWHERE, cart crosses the doorway aligned <=3 deg, >=0.5 m clearance each side), uncouples there, and the free base drives to shelf_approach; the transfer still succeeds from the uncoupled service pose with the carton carried. nav_towing_check validates the straight staging tow; the solo service drive is the uncoupled base path.",

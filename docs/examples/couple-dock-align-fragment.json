@@ -1,5 +1,5 @@
 {
-  "_comment": "sim-couple-shortcut-settle-dt-v1 -- dock-align the assembly cart/robot spawn to the configured couple dock, so the coupled train faces the outbound lane heading. The ONE dock source is the active outbound tow lane: its explicit `couple_dock`, else DERIVED from its `start` + `start_cart_yaw` (the side-bay lane below carries only those, SOUTH). The derived south dock equals the hand-authored towstaging3 couple_dock (-3.875, 15.77, -90deg). Without this the cart spawns at the legacy EAST scenario yaw, the couple seats an east-facing train, and the SOUTH side-bay lane is never acquired (coldwin25e).",
+  "_comment": "sim-couple-shortcut-settle-dt-v1 (dock moved by sim-collect-dock-reach-v1) -- dock-align the assembly cart/robot spawn to the configured couple dock, so the coupled train faces the outbound lane heading. The ONE dock source is the active outbound tow lane: its explicit `couple_dock`, else DERIVED from its `start` + `start_cart_yaw` (the side-bay lane below carries only those, SOUTH). The derived south dock equals the sim-collect-dock-reach-v1 couple_dock (-4.6, 16.0, -90deg): the REACHABLE south dock (cart deck place target 1.155 m from the fixed collect pose -5.73,16, inside the ~1.3 m reach gate coldwin26 overran at the on-axis -3.875,15.77 dock). Without this the cart spawns at the legacy EAST scenario yaw, the couple seats an east-facing train, and the SOUTH side-bay lane is never acquired (coldwin25e).",
 
   "_start_at_couple_shortcut": "A start_at=couple bench dock-aligns AUTOMATICALLY from this lane (no flag needed): couple_start_poses/staged_scenario resolve the dock from start+start_cart_yaw. apply_start_state then holds the train at the seat through a sim-time settle and verifies the cart rests at the dock heading (START_STATE_UNSUPPORTED / START_STATE_SETTLE_MISMATCH).",
 
@@ -21,10 +21,11 @@
     "tow_lanes": [
       {
         "name": "outbound_dock_to_side_bay",
-        "start": [-3.875, 14.5, -1.5707963267948966],
+        "start": [-4.6, 14.73, -1.5707963267948966],
         "start_cart_yaw": -1.5707963267948966,
         "goal": [-4.3, 6.95, -1.5707963267948966],
-        "_or_explicit_dock": "couple_dock may be set explicitly instead of deriving from start+start_cart_yaw"
+        "couple_dock": [-4.6, 16.0, -1.5707963267948966],
+        "_or_explicit_dock": "couple_dock set explicitly (sim-collect-dock-reach-v1); it also equals the seat (-4.6,14.73,S) derived from start+start_cart_yaw"
       }
     ]
   }
