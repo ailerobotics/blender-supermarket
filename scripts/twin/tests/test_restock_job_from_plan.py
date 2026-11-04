@@ -16,9 +16,11 @@ sys.path.insert(0, str(SCRIPTS))
 from twin.restock.inventory import Job
 from twin.restock.job_from_plan import (
     SCHEMA,
+    ApprovalError,
     PlanError,
     apply_to_scenario,
     load_plan,
+    require_approved,
     resolve_job,
     slot_candidates,
 )
@@ -89,6 +91,53 @@ class ResolveJob(unittest.TestCase):
             resolve_job(_plan(quantity=0), PLANOGRAM)
 
 
+class ResolveMetaSurfacesPlannerAndApproval(unittest.TestCase):
+    """meta carries planner / planner_signal / approval_state for the dry-run transcript."""
+
+    def test_default_restock_meta(self):
+        _job, meta = resolve_job(
+            _plan(provenance={"mission_id": "restock-one", "planner": "storevision.restock",
+                              "approval": {"state": "approved"}}), PLANOGRAM)
+        self.assertEqual(meta["planner"], "storevision.restock")
+        self.assertIsNone(meta["planner_signal"])
+        self.assertEqual(meta["approval_state"], "approved")
+
+    def test_forecast_variant_signal_surfaced(self):
+        prov = {"mission_id": "m", "planner": "storevision.forecast",
+                "planner_signal": {"time_to_empty_s": 11250.0, "confidence": 1.0},
+                "approval": {"state": "approved"}}
+        _job, meta = resolve_job(_plan(provenance=prov), PLANOGRAM)
+        self.assertEqual(meta["planner"], "storevision.forecast")
+        self.assertEqual(meta["planner_signal"]["time_to_empty_s"], 11250.0)
+
+
+class ApprovalGate(unittest.TestCase):
+    """--require-approval smart variant; default pre-approved never consults it."""
+
+    def test_approved_plan_passes(self):
+        plan = _plan(provenance={"approval": {"state": "approved", "required": False}})
+        self.assertEqual(require_approved(plan)["state"], "approved")
+
+    def test_unapproved_state_refused_by_name(self):
+        plan = _plan(provenance={"approval": {"state": "planned", "required": True}})
+        with self.assertRaises(ApprovalError):
+            require_approved(plan)
+
+    def test_missing_approval_block_refused(self):
+        with self.assertRaises(ApprovalError):
+            require_approved(_plan(provenance={"mission_id": "m"}))
+
+    def test_missing_provenance_refused(self):
+        bad = _plan()
+        bad.pop("provenance", None)
+        with self.assertRaises(ApprovalError):
+            require_approved(bad)
+
+    def test_approval_error_is_a_plan_error(self):
+        # Launcher catches PlanError to report honest refusals cleanly (exit 2).
+        self.assertTrue(issubclass(ApprovalError, PlanError))
+
+
 class LoadPlan(unittest.TestCase):
     def _write(self, obj):
         f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
@@ -148,10 +197,38 @@ class LauncherWiring(unittest.TestCase):
     def test_present_job_from_resolves_example(self):
         import types
         scenario = json.loads(SCENARIO.read_text())
-        args = types.SimpleNamespace(job_from=str(EXAMPLE), job_id=None, planogram=None)
+        args = types.SimpleNamespace(job_from=str(EXAMPLE), job_id=None, planogram=None,
+                                     require_approval=False)
         out, job, meta = self.r._resolve_job_override(args, scenario)
         self.assertEqual(job.shelf_id, "G3_back_s2")
         self.assertEqual(out["job"], scenario["job"])
+
+    def test_require_approval_default_off_accepts_unapproved(self):
+        # Working default: pre-approved, gate not consulted even for an unapproved plan.
+        import tempfile
+        import types
+        plan = load_plan(EXAMPLE)
+        plan["provenance"]["approval"] = {"state": "planned", "required": True}
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(plan, f); f.close()
+        scenario = json.loads(SCENARIO.read_text())
+        args = types.SimpleNamespace(job_from=f.name, job_id=None, planogram=None,
+                                     require_approval=False)
+        _out, job, _meta = self.r._resolve_job_override(args, scenario)
+        self.assertEqual(job.shelf_id, "G3_back_s2")
+
+    def test_require_approval_refuses_unapproved(self):
+        import tempfile
+        import types
+        plan = load_plan(EXAMPLE)
+        plan["provenance"]["approval"] = {"state": "planned", "required": True}
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(plan, f); f.close()
+        scenario = json.loads(SCENARIO.read_text())
+        args = types.SimpleNamespace(job_from=f.name, job_id=None, planogram=None,
+                                     require_approval=True)
+        with self.assertRaises(ApprovalError):
+            self.r._resolve_job_override(args, scenario)
 
 
 class CommittedExample(unittest.TestCase):
