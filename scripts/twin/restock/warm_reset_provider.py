@@ -50,8 +50,14 @@ resolved from an optional ``config['warm_reset_hooks'] = "module:function"`` fac
 ``fn(app=, assembly=, parts=, plan=, config=, output=)`` and returning an object/mapping with any of
 ``stop_runtime`` / ``relaunch_host`` / ``reset_host_state`` / ``verify`` (each a zero-/kw-arg callable
 that raises to refuse). ``relaunch_host`` is satisfied by EITHER a ``relaunch_host`` or a
-``reset_host_state`` hook; with neither wired the provider refuses that step and the loop cold-boots the
-next run with the reason named -- strictly safer than today's no-provider single attempt.
+``reset_host_state`` hook. When ``config['warm_reset_hooks']`` is ABSENT the in-repo production factory
+:data:`DEFAULT_HOOKS` (``twin.restock.warm_reset_hooks:build``) is used, which supplies a
+``reset_host_state`` (an IN-PLACE reset of the live host-side state -- re-arm the arm command gate, clear
+the manipulation between-op latches, re-arm the heartbeats -- without an OS-process relaunch or an Isaac
+close) plus a warm-safe ``stop_runtime`` and a ``verify``, so a warm reset works with no hand-written
+stub. A custom factory that supplies NEITHER a ``relaunch_host`` nor a ``reset_host_state`` hook still
+refuses that step and the loop cold-boots the next run with the reason named -- strictly safer than
+reusing a host still carrying the previous run's state.
 """
 from __future__ import annotations
 
@@ -67,6 +73,13 @@ class WarmResetRefused(RuntimeError):
 
 # The ordered reset steps. Stable names so the record / dry-run report and the tests key off them.
 STEP_NAMES = ('stop_runtime', 'reset_stage', 'reseat', 'relaunch_host', 'verify')
+
+# The in-repo production host-lifecycle hooks factory, used when ``config['warm_reset_hooks']`` is absent.
+# PR 299 shipped the provider with NO in-repo factory, so the integration worktree -- which cannot
+# hand-write one -- cold-booted every warm attempt. ``twin.restock.warm_reset_hooks:build`` is that
+# factory (an IN-PLACE reset of the live host-side state satisfying the ``relaunch_host`` step without an
+# OS-process relaunch or an Isaac close); naming the key points at a different lane-owned factory instead.
+DEFAULT_HOOKS = 'twin.restock.warm_reset_hooks:build'
 
 
 @dataclass
@@ -139,13 +152,14 @@ class WarmResetProvider:
 # --------------------------------------------------------------------------- lane-hook resolution
 
 def _resolve_hooks(config, *, app, assembly, parts, plan, output):
-    """Resolve the optional integration-lane lifecycle hooks named by ``config['warm_reset_hooks']``
-    (a ``module:function`` factory). Returns a mapping of the hooks it supplied (any of
-    ``stop_runtime`` / ``relaunch_host`` / ``reset_host_state`` / ``verify``), or ``{}`` when the key
-    is absent. A malformed key is refused (never silently ignored)."""
+    """Resolve the host-lifecycle hooks named by ``config['warm_reset_hooks']`` (a ``module:function``
+    factory). Returns a mapping of the hooks it supplied (any of ``stop_runtime`` / ``relaunch_host`` /
+    ``reset_host_state`` / ``verify``). When the key is absent the in-repo production default
+    :data:`DEFAULT_HOOKS` is used, so a warm reset works with no hand-written stub; name the key only to
+    point at a different lane-owned factory. A malformed key is refused (never silently ignored)."""
     ref = config.get('warm_reset_hooks') if isinstance(config, dict) else None
     if ref is None:
-        return {}
+        ref = DEFAULT_HOOKS
     if not isinstance(ref, str) or ':' not in ref:
         raise ValueError('config.warm_reset_hooks must name a lane-owned builder as "module:function"')
     import importlib
