@@ -190,19 +190,35 @@ class ThroatClearance:
     caster_on_diagonal_perp_m: float
     caster_airborne_m: float             # caster wheel bottom clearance above the floor top (z=0)
     verdict: str
+    # sim-chassis-pitch-stability-v1: with the compliant caster suspension the casters are held in LIGHT
+    # ground CONTACT (not airborne), so the original "caster over a diagonal is airborne" leg of the
+    # disproof no longer holds -- the floor-diagonal ghost edge under a now-loaded caster must instead be
+    # removed by authoring the flat drive floor as a BOX collider (portal_floor_box). These flags make the
+    # change explicit rather than silently flipping the verdict. Default (False, False) == legacy.
+    suspension_active: bool = False
+    portal_floor_box: bool = False
 
     @property
     def collider_free(self) -> bool:
-        """The full disproof: corridor clear AND the load path is off every floor edge AND the one
-        caster over a diagonal is airborne."""
+        """The full disproof. Legacy (rigid recessed caster): corridor clear AND load path off every
+        floor edge AND the one caster over a diagonal is AIRBORNE. With the compliant suspension the
+        caster is in light CONTACT, so the airborne leg is replaced by requiring the box drive floor
+        (portal_floor_box), which has no internal cooked diagonal for the loaded caster to catch on."""
+        if self.suspension_active:
+            return (self.corridor_clear and self.load_path_off_diagonal and self.portal_floor_box)
         return (self.corridor_clear and self.load_path_off_diagonal
                 and self.caster_airborne_m > 0.0)
 
 
 def assess(obstacles: Sequence[dict], spec: MobileSpec = MobileSpec(),
            pin: Tuple[float, float] = PIN_BASE_XY, z_band=DRIVE_BAND_Z,
-           margin: float = 0.05) -> ThroatClearance:
-    """Full CPU assessment of the throat for the coupled from-rest crossing."""
+           margin: float = 0.05, portal_floor_box: bool = False) -> ThroatClearance:
+    """Full CPU assessment of the throat for the coupled from-rest crossing.
+
+    ``portal_floor_box`` (sim-chassis-pitch-stability-v1): when the compliant caster suspension is active
+    (``spec.caster_suspension``) the casters are in light contact rather than airborne, so the floor
+    diagonal under the loaded front-left caster must be removed by the box drive floor; pass the run's
+    ``portal_floor_box`` setting so the verdict can require it instead of the (now false) airborne leg."""
     samples = corner_samples(spec, pin)
     intr = segment_intrusions(obstacles, spec, samples=samples, z_band=z_band, margin=margin)
     near = nearest_obstacle(obstacles, pin, z_band)
@@ -226,17 +242,32 @@ def assess(obstacles: Sequence[dict], spec: MobileSpec = MobileSpec(),
     airborne = caster_wheel_bottom_z(spec)
     corridor_clear = not intr
     load_off = dmin >= DRIVE_DIAGONAL_MIN_M
+    suspension = bool(getattr(spec, 'caster_suspension', False))
 
-    if corridor_clear and load_off and airborne > 0.0:
-        verdict = ('throat collider-clear: no static collider in the swept corridor; load-bearing '
-                   'drive wheels >= %.2f m off every floor diagonal; caster over a diagonal is '
-                   '%.3f m airborne -> the fixed-x pin is NOT geometry (hitch kinematics + '
-                   'from-rest drive authority)' % (dmin, airborne))
-    elif not corridor_clear:
+    if not corridor_clear:
         verdict = 'THROAT BLOCKED: static collider(s) intrude the swept corridor: %r' % (intr,)
     elif not load_off:
         verdict = ('a drive wheel is only %.3f m from a cooked floor diagonal (< %.2f) -- the '
                    'floor-edge mechanism is NOT ruled out' % (dmin, DRIVE_DIAGONAL_MIN_M))
+    elif suspension:
+        # Casters in light contact (not airborne): the airborne leg no longer applies; the loaded
+        # front-left caster over the cooked diagonal needs the box drive floor to be ruled out.
+        if portal_floor_box:
+            verdict = ('throat collider-clear WITH compliant caster suspension: corridor clear; '
+                       'load-bearing drive wheels >= %.2f m off every floor diagonal; the casters are '
+                       'in light CONTACT (not airborne) but the box drive floor (portal_floor_box) has '
+                       'no internal cooked diagonal for the loaded caster to catch on -> the fixed-x '
+                       'pin remains hitch kinematics + from-rest drive authority, not geometry' % dmin)
+        else:
+            verdict = ('caster suspension active -> the casters are in CONTACT (not airborne), so the '
+                       'cooked floor diagonal under the front-left caster is NOT ruled out. Enable the '
+                       'box drive floor (portal_floor_box) to remove the internal diagonal, OR rely on '
+                       'the light preload keeping that caster force small; GPU-verify the throat tow')
+    elif airborne > 0.0:
+        verdict = ('throat collider-clear: no static collider in the swept corridor; load-bearing '
+                   'drive wheels >= %.2f m off every floor diagonal; caster over a diagonal is '
+                   '%.3f m airborne -> the fixed-x pin is NOT geometry (hitch kinematics + '
+                   'from-rest drive authority)' % (dmin, airborne))
     else:
         verdict = 'caster over a diagonal is not airborne (%.3f m) -- floor-edge via caster possible' % airborne
 
@@ -251,4 +282,6 @@ def assess(obstacles: Sequence[dict], spec: MobileSpec = MobileSpec(),
         caster_on_diagonal_perp_m=round(best_perp, 3),
         caster_airborne_m=round(airborne, 3),
         verdict=verdict,
+        suspension_active=suspension,
+        portal_floor_box=bool(portal_floor_box),
     )

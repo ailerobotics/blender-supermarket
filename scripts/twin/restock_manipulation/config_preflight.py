@@ -98,6 +98,11 @@ KEY_CONSUMER = {
     'navigation': RUNTIME,
     'collect_observe_force_render_ticks': RUNTIME,   # fm452: COLD force-render window; isaac_bundle reads it
     'cage_collision': RUNTIME,   # sim-only carton-vs-cage contact filter; physics_setup -> scene.build reads it
+    # sim-chassis-pitch-stability-v1 FALLBACK: sim-only station pitch hold. physics_setup.assemble reads it
+    # (RUNTIME) to build the MobileController with the pitch/roll-locking station brake. Default off =>
+    # byte-identical. The preferred source fix (compliant caster suspension) is a MobileSpec field in the
+    # mobile manifest, NOT a batch config key.
+    'chassis_station_pitch_hold': RUNTIME,
     # sim-collect-retreat-collider-v3: defer re-enabling the tool-side gripper colliders past the empty
     # retreat (DEFAULT ON). isaac_factory.parse_manipulation_config reads it (RUNTIME); env
     # RESTOCK_DEFER_TOOL_COLLISION is the alias. Registered so a run can --require it (assert ON).
@@ -245,6 +250,51 @@ def check_carton_dims(host_cfg, scenario_cfg, *, tol_m=1e-3):
     return problems
 
 
+#: sim-chassis-pitch-stability-v1. The carton-level bound is captain-fixed at 2.0 deg; a rig whose
+#: UNSPRUNG free pitch travel exceeds (bound - margin) can rock the welded carton off level with no arm
+#: fault (coldwin33-37: caster_lift 0.03 -> +-4.5 deg see-saw -> trip at 2.06). Refuse such a rig unless a
+#: chassis stabiliser (compliant suspension or the sim-only station pitch hold) is active.
+CARTON_TILT_BOUND_DEG = 2.0
+PITCH_TRAVEL_MARGIN_DEG = 0.5
+#: config keys that assert a station pitch-hold stabiliser is active (either layer).
+STATION_PITCH_HOLD_KEYS = ('chassis_station_pitch_hold',)
+
+
+def check_pitch_stability(mobile_spec, host_cfg, runtime_cfg, *,
+                          bound_deg=CARTON_TILT_BOUND_DEG, margin_deg=PITCH_TRAVEL_MARGIN_DEG):
+    """Refuse a chassis whose predicted free pitch travel exceeds ``bound_deg - margin_deg`` unless a
+    chassis stabiliser is active (sim-chassis-pitch-stability-v1).
+
+    ``mobile_spec``: the ``spec`` dict from the mobile manifest (``caster_lift_m``, ``length``,
+    ``caster_suspension`` ...). The free pitch travel is ``atan(caster_lift_m / caster_spacing)`` where
+    ``caster_spacing = length/2 - 0.12`` (matching ``mobile_assets``). A stabiliser is active when the
+    spec enables the compliant suspension (``caster_suspension``) OR either config layer sets a station
+    pitch-hold key. Returns a list of problems ([] == safe or stabilised). No-op ([]) when no mobile
+    spec is supplied (existing preflight invocations are unchanged)."""
+    from twin.traction import free_pitch_travel_deg, caster_spacing_m
+    if not mobile_spec:
+        return []
+    length = float(mobile_spec.get('length', 1.0))
+    lift = float(mobile_spec.get('caster_lift_m', 0.0))
+    spacing = caster_spacing_m(length)
+    travel = free_pitch_travel_deg(lift, spacing)
+    threshold = bound_deg - margin_deg
+    suspension = bool(mobile_spec.get('caster_suspension'))
+    station_hold = any(bool((host_cfg or {}).get(k)) or bool((runtime_cfg or {}).get(k))
+                       for k in STATION_PITCH_HOLD_KEYS)
+    stabilised = suspension or station_hold
+    if travel > threshold and not stabilised:
+        return [
+            f"chassis PITCH-STABILITY: free pitch travel {travel:.2f} deg (caster_lift_m={lift} m, "
+            f"caster_spacing={spacing:.2f} m) exceeds the carton bound {bound_deg:.1f} deg minus "
+            f"{margin_deg:.1f} deg margin ({threshold:.2f} deg), and NO chassis stabiliser is active. "
+            f"An unsprung chassis is a see-saw that rocks the welded carton off level with no arm fault "
+            f"(coldwin33-37 CARTON_TILT +2.06). Enable the compliant caster suspension "
+            f"(spec caster_suspension + caster_spring_n_per_m/caster_preload_n) or the sim-only station "
+            f"pitch hold (chassis_station_pitch_hold)."]
+    return []
+
+
 def _load(path):
     with open(path) as stream:
         return json.load(stream)
@@ -261,6 +311,10 @@ def main(argv=None):
     parser.add_argument('--scenario', default=None,
                         help='mission-scenario.json: when given, refuse a host carton-profile dimension '
                              'that disagrees with handling_unit.dimensions_m (the PR 268 single source)')
+    parser.add_argument('--mobile-manifest', default=None,
+                        help='mobile-manifest.json: when given, refuse a chassis whose free pitch travel '
+                             'exceeds the carton bound minus margin unless a chassis stabiliser is active '
+                             '(sim-chassis-pitch-stability-v1)')
     args = parser.parse_args(argv)
     declared = [k.strip() for k in args.require.split(',') if k.strip()]
     # fm402: always assert the cap/limit baseline, even if a run forgets to --require it -- a missing
@@ -276,6 +330,10 @@ def main(argv=None):
     # source silently over-reaches the side-grasp pick standoff (coldwin32). Only when --scenario is given.
     if args.scenario:
         problems += check_carton_dims(host_cfg, _load(args.scenario))
+    # sim-chassis-pitch-stability-v1: refuse an unsprung see-saw chassis unless a stabiliser is active.
+    if args.mobile_manifest:
+        problems += check_pitch_stability((_load(args.mobile_manifest) or {}).get('spec') or {},
+                                          host_cfg, runtime_cfg)
     # Echo the effective placement so the log proves what the preflight saw.
     for key in required:
         consumer = KEY_CONSUMER.get(key, '?')

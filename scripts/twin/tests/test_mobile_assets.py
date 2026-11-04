@@ -283,6 +283,30 @@ def test_sim_parking_brake_locks_chassis_and_releases(stage):
     assert not c._braked and not stage.GetPrimAtPath(c.BRAKE_PATH)
 
 
+def test_station_pitch_hold_locks_roll_and_pitch(stage):
+    # sim-chassis-pitch-stability-v1 FALLBACK: with station_pitch_hold on, engage_brake locks rotX/rotY
+    # (pitch/roll) in ADDITION to yaw so an unsprung see-saw chassis cannot rock the welded carton off
+    # level at a manipulation station. Default off (byte-identical) leaves pitch/roll FREE.
+    from pxr import UsdGeom, UsdPhysics
+    from twin.mobile_runtime import MobileController
+    author_cart(stage)
+    robot = UsdGeom.Xform.Define(stage, '/Robot/base_link').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(robot)
+    wheels = ['/Robot/l', '/Robot/r']
+    for p in wheels:
+        UsdPhysics.RevoluteJoint.Define(stage, p)
+    c = MobileController(stage, str(robot.GetPath()), '/Rollwagen/chassis', wheels,
+                         wheel_angle_reader=lambda: [0.0, 0.0], station_pitch_hold=True)
+    c.engage_brake()
+    brake = UsdPhysics.Joint(stage.GetPrimAtPath(c.BRAKE_PATH))
+    for axis in ('rotX', 'rotY', 'rotZ'):   # all three rotations locked (low>high)
+        lim = UsdPhysics.LimitAPI.Get(brake.GetPrim(), axis)
+        assert lim and lim.GetLowAttr().Get() > lim.GetHighAttr().Get()
+    assert not UsdPhysics.LimitAPI.Get(brake.GetPrim(), 'transX').GetLowAttr()   # translation stays free
+    c.release_brake()
+    assert not stage.GetPrimAtPath(c.BRAKE_PATH)
+
+
 def test_cart_parking_brake_pins_cart_and_releases(stage):
     # Cart parking brake (firstmate 287): engage_cart_brake fixes the UNCOUPLED cart to the world at
     # its CURRENT pose so a placed carton cannot roll it; a FULL FixedJoint is safe (the cart is not

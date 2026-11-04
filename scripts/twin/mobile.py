@@ -27,6 +27,22 @@ class MobileSpec:
     # become the deterministic primary weight-bearing contacts (a real caster-stabilised diff-drive
     # keeps casters lightly loaded). 0.0 => all four contacts co-planar (legacy, byte-identical).
     caster_lift_m: float = 0.0
+    # sim-chassis-pitch-stability-v1: opt-in COMPLIANT CASTER SUSPENSION. Absent/off => the URDF +
+    # assets are byte-identical (the casters stay the rigid caster_lift_m recess). When
+    # ``caster_suspension`` is True, mobile_assets inserts a sprung prismatic caster-fork joint per
+    # caster and physics_setup authors its PhysX linear drive (stiffness ``caster_spring_n_per_m``,
+    # damping ``caster_damping_n_s_per_m``, preload ``caster_preload_n`` holding both casters in light
+    # ground contact, stroke ``caster_travel_m``). This gives the chassis real PITCH STIFFNESS so the
+    # welded carton stays level at the collect set-down (the coldwin33-37 see-saw), while a LIGHT
+    # preload keeps most of the weight on the drive wheels so the coupled tow keeps its traction. The
+    # suspension is mutually exclusive with caster_lift_m (a sprung caster is not also recessed); set
+    # caster_lift_m=0 when enabling it. Design: twin.traction (free_pitch_travel_deg, CasterSuspension,
+    # sprung_chassis_pitch_deg, suspension_drive_wheel_share), proof scripts/check_chassis_pitch.py.
+    caster_suspension: bool = False
+    caster_spring_n_per_m: float = 0.0
+    caster_damping_n_s_per_m: float = 0.0
+    caster_preload_n: float = 0.0
+    caster_travel_m: float = 0.0
     max_speed: float = 0.35
     max_yaw_rate: float = 0.35
     max_wheel_speed: float = 4.0
@@ -42,12 +58,29 @@ class MobileSpec:
     cart_hitch_x: float = 0.65
     max_articulation: float = math.radians(65)
 
+    # Fields that may be zero/negative/bool and so are skipped by the generic positivity sweep.
+    _NONPOSITIVE_OK = ('hitch_x', 'caster_lift_m', 'caster_suspension', 'caster_spring_n_per_m',
+                       'caster_damping_n_s_per_m', 'caster_preload_n', 'caster_travel_m')
+
     def __post_init__(self):
         for key, value in asdict(self).items():
-            if not math.isfinite(value) or (key not in ('hitch_x', 'caster_lift_m') and value <= 0):
+            if not math.isfinite(value) or (key not in self._NONPOSITIVE_OK and value <= 0):
                 raise ValueError(f'invalid {key}: {value}')
         if not 0.0 <= self.caster_lift_m <= 0.03:
             raise ValueError(f'caster_lift_m must be in [0, 0.03] m: {self.caster_lift_m}')
+        # sim-chassis-pitch-stability-v1: when the compliant suspension is enabled, require a positive
+        # spring, a finite non-negative preload/damping and a positive stroke, and reject the
+        # geometrically contradictory combination of a sprung caster that is ALSO recessed.
+        if self.caster_suspension:
+            if not (self.caster_spring_n_per_m > 0 and self.caster_travel_m > 0):
+                raise ValueError('caster_suspension requires positive caster_spring_n_per_m and caster_travel_m')
+            if self.caster_preload_n < 0 or self.caster_damping_n_s_per_m < 0:
+                raise ValueError('caster_preload_n and caster_damping_n_s_per_m must be non-negative')
+            if self.caster_lift_m != 0.0:
+                raise ValueError('caster_suspension is mutually exclusive with caster_lift_m; set caster_lift_m=0')
+        elif (self.caster_spring_n_per_m or self.caster_preload_n
+              or self.caster_damping_n_s_per_m or self.caster_travel_m):
+            raise ValueError('caster suspension params set but caster_suspension is False')
         if self.width + self.wheel_width > self.wheel_track:
             raise ValueError('drive wheels intersect chassis; increase track or reduce width')
         if self.length < 0.5 or self.cart_length < 0.4 or self.cart_width < 0.3 or self.cart_height < 1.0:

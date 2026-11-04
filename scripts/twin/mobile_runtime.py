@@ -13,7 +13,7 @@ from .mobile_assets import author_hitch
 class MobileController:
     def __init__(self, stage, robot_body, cart_body, wheel_joint_paths,
                  spec=MobileSpec(), hitch_path='/MobileHitch', wheel_angle_reader=None,
-                 drive_max_force=None, drive_damping=None):
+                 drive_max_force=None, drive_damping=None, station_pitch_hold=False):
         from pxr import UsdPhysics
         if len(wheel_joint_paths) != 2 or len(set(wheel_joint_paths)) != 2:
             raise ValueError('left and right wheel joint paths required, in that order')
@@ -64,6 +64,12 @@ class MobileController:
         # helps; base-link rigid-body damping is a PhysX mid-sim no-op and a higher-maxForce
         # velocity brake is counterproductive -- data/surface-gripper-latch-v1 / Follow-up 4.)
         self.wheel_angle_reader = wheel_angle_reader
+        # sim-chassis-pitch-stability-v1 FALLBACK (sim-only, opt-in, default OFF => byte-identical): when
+        # set, engage_brake ALSO locks the chassis pitch/roll (rotX/rotY), not just yaw, so a free-pitch
+        # see-saw chassis cannot rock the welded carton off level at a manipulation station (coldwin33-37).
+        # Released with the brake exactly like the yaw lock. Labelled like CAGE_COLLISION; the compliant
+        # caster suspension is the preferred source fix, this is the belt-and-suspenders station hold.
+        self.station_pitch_hold = bool(station_pitch_hold)
         self._held = False
         self._braked = False
         self._cart_braked = False
@@ -149,11 +155,20 @@ class MobileController:
         joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
         joint.CreateLocalRot1Attr(Gf.Quatf(1.0))
         # Lock ONLY rotZ (yaw): low>high == locked. transX/Y/Z and rotX/Y get no limit == free.
-        lock = UsdPhysics.LimitAPI.Apply(joint.GetPrim(), 'rotZ')
-        lock.CreateLowAttr(1.0)
-        lock.CreateHighAttr(-1.0)
+        axes = ['rotZ']
+        # sim-chassis-pitch-stability-v1 station pitch hold (opt-in): also lock rotX/rotY so a free-pitch
+        # see-saw chassis cannot rock the welded carton off level during manipulation. SIM-only.
+        if self.station_pitch_hold:
+            axes += ['rotX', 'rotY']
+        for axis in axes:
+            lock = UsdPhysics.LimitAPI.Apply(joint.GetPrim(), axis)
+            lock.CreateLowAttr(1.0)
+            lock.CreateHighAttr(-1.0)
         self._braked = True
-        print('MOBILE_BRAKE engaged (yaw-lock D6) at chassis pose', flush=True)
+        print('MOBILE_BRAKE engaged (%s D6) at chassis pose%s'
+              % ('full-rotation-lock' if self.station_pitch_hold else 'yaw-lock',
+                 ' [CHASSIS_STATION_PITCH_HOLD sim-only workaround]' if self.station_pitch_hold else ''),
+              flush=True)
 
     def release_brake(self):
         """Release the sim parking brake so the base can drive (couple/tow/park)."""
