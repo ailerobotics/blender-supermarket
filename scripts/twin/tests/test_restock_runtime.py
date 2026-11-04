@@ -245,6 +245,89 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(nav_goals, [(0, 0, 0), (-4.5, 15.25, 3.14159)])  # pickup then place_approach
         self.assertIn('rewarm', phases)                        # re-warmed at place_approach
 
+    def test_side_bay_transfer_carries_the_carton_to_shelf_approach(self):
+        # sim-service-carry-drive-to-shelf-v1 nav-trace regression: in the shelf-staging/side-bay flow the
+        # transfer is the SERVICE LEG. When the pick folds to TRANSIT the adapter must DRIVE the base from
+        # the side-bay park to shelf_approach (carton carried) BEFORE placing -- the leg that transferobs1
+        # skipped (base pinned at the side-bay park for all 1458 transfer rows). Assert the base trace during
+        # the carry STARTS at the side-bay park, ENDS at shelf_approach (start != end), the carry nav leg
+        # targets shelf_approach, and the full service leg (carry -> place -> drive back) succeeds.
+        import math
+        side_bay = (-4.35, 6.99, -1.5708)
+        shelf_approach = (-3.05, 6.0, -1.5708)
+        shelf_staging = (-3.875, 8.0, -1.5708)
+        base = {'pose': side_bay}
+        goal = {'g': side_bay}
+        nav_goals, ticks = [], [0]
+
+        def nav_start(g, coupled, **kw):
+            goal['g'] = tuple(g)
+            nav_goals.append(tuple(round(float(v), 3) for v in g))
+
+        def nav_step(dt, p):
+            gx, gy, gyaw = goal['g']
+            bx, by, _ = base['pose']
+            step = 0.5
+            nx = bx + max(-step, min(gx - bx, step))
+            ny = by + max(-step, min(gy - by, step))
+            base['pose'] = (nx, ny, gyaw)
+            arrived = math.dist((nx, ny), (gx, gy)) < 1e-6
+            return NS(status='succeeded' if arrived else 'running', linear=0.1, angular=0., reason='')
+
+        nav = NS(start=nav_start, step=nav_step, cancel=lambda: None)
+
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'f-{ticks[0]}', simulation_time=ticks[0] * .1,
+                           parked=True, odometry=NS(pose=base['pose']))
+        port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+
+        class M:   # separate-process host controller stub: folds to TRANSIT, then places once repositioned
+            cart_location = 'rollwagen'
+            def __init__(s): s.base_repositioned = False; s.started = []
+            def start(s, a, j): s.started.append(a)
+            def warm(s, dt, p): return True
+            def pause_station(s, t, *, suspend_only=False): pass
+            def set_base_repositioned(s): s.base_repositioned = True
+            def step(s, dt, p):
+                if not s.base_repositioned:
+                    return NS(status='running', reason='', controls=(), phase='transit')
+                return NS(status='succeeded', reason='', controls=(), phase='place',
+                          evidence=({'source': 'test_fixture', 'sku': 'milk', 'location': 'shelf',
+                                     'quantity': 1, 'observation_id': 'o', 'simulation_time': .1},))
+        manip = M()
+        poses = {'home': [0, 0, 0], 'pickup': [0, 0, 0], 'cart_dock': [0, 0, 0],
+                 'shelf_staging': list(shelf_staging), 'cart_side_bay': list(side_bay),
+                 'shelf_approach': list(shelf_approach)}
+        adapter = RuntimeAdapter(nav, self.mobile, manip, port, poses, fixture_mode=True,
+                                 shelf_staging=True, cart_side_bay=True)
+        self.assertTrue(adapter._shelf_staging_active() and adapter._cart_side_bay_active())
+        adapter.start('transfer', self.job)   # job shelf_id='shelf' (setUp)
+
+        carry_trace, place_base, r = [], None, None
+        for _ in range(40):
+            r = adapter._step(.1)
+            if adapter.phase == 'navigate' and adapter._transfer_leg == 'carry':
+                carry_trace.append(base['pose'][:2])
+            if adapter._transfer_carried and place_base is None:
+                place_base = base['pose'][:2]   # base pose the instant the carry arrived (= the place pose)
+            if r.status in ('succeeded', 'failed'):
+                break
+
+        self.assertEqual(r.status, 'succeeded', r.reason)
+        self.assertEqual(manip.started, ['transfer'])            # the pick is dispatched exactly once
+        # the carry nav leg drove to shelf_approach, then the empty base drove back to the staging pose
+        self.assertEqual(nav_goals, [(-3.05, 6.0, -1.571), (-3.875, 8.0, -1.571)])
+        self.assertTrue(carry_trace, 'the carry leg never executed (base never carried the carton)')
+        # the carry base trace STARTS at the side-bay park and MOVES (start != end of the recorded carry)
+        self.assertEqual(carry_trace[0], side_bay[:2])
+        self.assertNotEqual(carry_trace[0], carry_trace[-1])
+        # the base ARRIVES at shelf_approach to place (the transfer base start differs from its place end)
+        self.assertIsNotNone(place_base)
+        self.assertLess(math.dist(place_base, shelf_approach[:2]), 1e-6)
+        self.assertNotEqual(place_base, side_bay[:2])
+        self.assertTrue(adapter._transfer_carried)
+
     def test_reposition_handshake_end_to_end_across_host_boundary_fm400(self):
         # fm400 end-to-end replay of the whole reposition handshake at the adapter level, modelling the
         # host round-trip: station STOP at drive-start -> base drives -> arrival -> set_base_repositioned

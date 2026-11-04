@@ -1,0 +1,35 @@
+{
+  "_comment": "sim-service-carry-drive-to-shelf-v1 (captain option 1): make the side-bay TRANSFER actually DRIVE the picked carton from the side-bay park to the endcap `shelf_approach` service pose BEFORE placing -- the service-drive leg transferobs1 skipped (base pinned at the side-bay park (-4.348, 6.989) for all 1458 transfer rows; 'host emergency stop (host fault: unreachable or undersized target)'). This fragment is a THIN overlay on the TWO existing side-bay fragments -- merge docs/examples/cart-side-bay-mission-fragment.json (the NAV half: outbound tow + off-axis bay park + return-home-empty) AND docs/examples/service-leg-carry-mission-fragment.json (the service leg: pick@bay -> carry -> place@endcap -> drive back, the RUNTIME/HOST/ENV keys). The ONE thing transferobs1 was missing is the HOST key below; it is now the committed repo default and enforced by config_preflight, so the fix lands even if the host_config block is not re-merged.",
+
+  "_root_cause": "transferobs1 HOST_EFFECTIVE_CONFIG had transfer_service_carry=false while the RUNTIME had shelf_staging/cart_side_bay on -- a cross-config-layer SPLIT. The arm therefore never folded to TRANSIT (controller._repositions_before_place needs the HOST transfer_service_carry AND a live_pose transfer), so the runtime carry-drive leg (which fires on the observed TRANSIT) never ran, and the controller gated the endcap place reach from the side-bay park at observe -> _fail('unreachable or undersized target') -> emergency stop.",
+
+  "_HOST_keys": "merge into restock_manipulation/ros_host_config.json (NOW the committed repo default -- shown here so the pairing is explicit)",
+  "host_config": {
+    "transfer_service_carry": true,
+    "carton_level": true,
+    "_transfer_service_carry_note": "sim-service-carry-drive-to-shelf-v1: REQUIRED for the side-bay/shelf-staging service leg. It gives a live_pose TRANSFER the TRANSIT carry-hold (lift->tuck->TRANSIT->[base carry-drive to shelf_approach]->preplace->place). WITHOUT it the live_pose transfer goes tuck->preplace and the controller tries to place the endcap from the side-bay park (2.545 m, > the 1.30 m UR10 reach) -> 'unreachable or undersized target' emergency stop (transferobs1). It is now the committed repo default (ros_host_config.json); config_preflight.check_flow_consistency REFUSES the boot at plan time if runtime shelf_staging is on while this is off, so the split cannot recur silently. Blast radius: live_pose transfers only (collect/legacy/non-live-pose transfers are byte-identical -- _repositions_before_place also needs _live_pose_transfer()).",
+    "_carton_level_note": "sim-carton-level-carry-v1: keep the carton parallel to the ground (2 deg CARTON_TILT bound) through the whole carry -- the captain's standing rule. Untouched by this change."
+  },
+
+  "_RUNTIME_keys": "from cart-side-bay-mission-fragment.json + service-leg-carry-mission-fragment.json -- shown here only to name the endcap service pose the base drives to",
+  "mission_poses": {
+    "shelf_approach": [-3.05, 6.0, 3.141592653589793],
+    "_shelf_approach_note": "the endcap SERVICE pose the base drives to while carrying the carton level (yaw PI = facing the west endcap). Reach to the endcap place (-3.05, 4.826, 0.73) is 1.217 m <= the 1.30 m UR10 reach (scripts/check_service_carry_drive.py). shelf_approach is NOT moved; the reach bound is NOT moved. If a different endcap is ever configured beyond reach from here, resolve_transfer_place_target now FAILS LOUD at boot: 'unreachable place target: <dist> m > <reach> m' (move shelf_approach closer, never the reach bound)."
+  },
+
+  "_ENV_vars": "export in BOTH processes (from service-leg-carry-mission-fragment.json)",
+  "env": {
+    "RESTOCK_TRANSFER_MODE": "live_pose",
+    "RESTOCK_TRANSFER_CARRY": "wrist_guard"
+  },
+
+  "_bt_node_order": "The behaviour tree now runs the side-bay transfer as separate position-first steps (scripts/check_service_carry_drive.py / twin.restock.bt.diagram with cart_side_bay=true): OUTBOUND = tow->side bay -> brake cart -> UNCOUPLE@side bay; TRANSFER = perceive carton -> transfer-pick@staging (off the cart, LEVEL) -> carry->endcap (NAVIGATE, base carries the carton level) -> perceive slot -> place@endcap -> verify placed -> drive->staging. The carry is its OWN navigation node, BEFORE place@endcap.",
+
+  "_gpu_handoff_note": "Keep every sim-shelf-staging / sim-portal-widen GPU key unchanged (portal_floor_box=true, coupled_heading_hold / heading_hold_prethroat_m / heading_hold_launch_m from throat-momentum-launch-mission-fragment.json; the couple-approach station geometry from tow-lanes-mission-fragment.json). Do NOT re-introduce the fm461 BACKROOM bay into transfer_ground_truth.target / verify_ground_truth.bay with shelf_staging on -- resolve_transfer_place_target / resolve_verify_region refuse it by name (coldwinint1).",
+
+  "_acceptance_coldwin24": "start_at=couple + stop_after=transfer. EXPECT: (1) couple south-aligned on the portal axis; (2) OUTBOUND tows STRAIGHT to the side bay, uncouples the cart there, base parked uncoupled beside the cart; (3) PARK; (4) TRANSFER SERVICE LEG: pick the carton off the parked cart at the side bay (live_pose, LEVEL), the BASE DRIVES to shelf_approach (-3.05, 6.0) carrying the carton LEVEL (nav-trace base x,y leaves (-4.35, 6.99) and reaches (-3.05, 6.0); no CARTON_TILT trip), PLACE it at the endcap slot (G3_back_s2), then drive the EMPTY base back to the staging pose. ACCEPTANCE: park, uncouple, pick, DRIVE TO shelf_approach LEVEL, place at endcap -- NO 'unreachable or undersized target', NO 'phase timeout: observe'.",
+
+  "_cpu_proofs": "scripts/check_service_carry_drive.py (BT node order + reach check + transferobs1 observe-gate replay + config-preflight) -- RESULT PASS; scripts/twin/tests/test_restock_runtime.py::...test_side_bay_transfer_carries_the_carton_to_shelf_approach (nav-trace regression: base start != place end, ends at shelf_approach); test_restock_transfer_live_pose.py (observe deferral on/off); test_transfer_place_target.py (the named plan-time trip); test_config_preflight.py (the flow-consistency gate). data/sim-service-carry-drive-to-shelf-v1/report.md.",
+
+  "_out_of_scope": "The collect carton-level re-solve is a separate live lane (sim-carton-level-southdock-v1). The cart's turn home (coupled tow-home) remains the open captain decision (see cart-side-bay-mission-fragment.json)."
+}

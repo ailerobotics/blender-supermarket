@@ -138,7 +138,10 @@ def test_unreachable_endcap_fails_loudly():
     far = [-3.05, 1.0, 0.73, 0.0]    # > 1.3 m south of the service pose
     with pytest.raises(TransferPlaceTargetError) as exc:
         resolve_transfer_place_target(_config(shelf_staging=True), _scenario(endcap=far))
-    assert 'beyond' in str(exc.value) and 'reach' in str(exc.value)
+    # sim-service-carry-drive-to-shelf-v1: the plan-time trip is named 'unreachable place target:
+    # <dist> m > <reach> m' (fired at boot, before any arm command).
+    msg = str(exc.value)
+    assert msg.startswith('unreachable place target:') and ' m > ' in msg and 'reach' in msg
 
 
 # ---- missing-input guards (named, not a bare KeyError) ----------------------------------------

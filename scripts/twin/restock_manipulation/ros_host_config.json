@@ -90,5 +90,6 @@
   "moveit_mesh_uris": false,
   "transfer_pick_wrist_guard": true,
   "esdf_boot_ack_grace_s": 15.0,
-  "transfer_preplace_reach_guard": true
+  "transfer_preplace_reach_guard": true,
+  "transfer_service_carry": true
 }

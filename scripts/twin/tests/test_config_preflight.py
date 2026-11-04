@@ -102,5 +102,41 @@ class MainCliTests(unittest.TestCase):
         self.assertIn('carry_wrist1_cap', host_cfg)
 
 
+class FlowConsistencyTests(unittest.TestCase):
+    # sim-service-carry-drive-to-shelf-v1: the cross-LAYER shelf_staging/transfer_service_carry split.
+
+    def test_split_shelf_staging_on_carry_off_is_refused(self):
+        # transferobs1: runtime shelf_staging ON, host transfer_service_carry OFF/absent => the service
+        # carry silently does nothing (arm never folds to TRANSIT, base never carries) and the controller
+        # emergency-stops on the far endcap reach. Named + refused at plan time.
+        problems = cp.check_flow_consistency({}, {'shelf_staging': True})
+        self.assertEqual(len(problems), 1)
+        self.assertIn('SPLIT', problems[0])
+        self.assertIn('transfer_service_carry', problems[0])
+        self.assertIn('shelf_approach', problems[0])
+
+    def test_both_on_passes(self):
+        self.assertEqual(
+            cp.check_flow_consistency({'transfer_service_carry': True}, {'shelf_staging': True}), [])
+
+    def test_both_off_passes(self):
+        self.assertEqual(cp.check_flow_consistency({}, {}), [])
+
+    def test_carry_on_without_staging_is_not_refused(self):
+        # One-directional on purpose: carry ON + staging OFF is inert / bounded (TRANSIT phase-times-out
+        # by name), and refusing it would false-block every non-staging run that shares the repo HOST
+        # config now that transfer_service_carry defaults true there (collect-only, legacy transfer).
+        self.assertEqual(
+            cp.check_flow_consistency({'transfer_service_carry': True}, {'shelf_staging': False}), [])
+
+    def test_committed_host_config_pairs_with_shelf_staging(self):
+        # The repo host default has transfer_service_carry ON, so a shelf_staging runtime pairs cleanly.
+        here = os.path.dirname(__file__)
+        host_cfg = json.load(open(os.path.join(
+            here, '..', 'restock_manipulation', 'ros_host_config.json')))
+        self.assertTrue(host_cfg.get('transfer_service_carry'))
+        self.assertEqual(cp.check_flow_consistency(host_cfg, {'shelf_staging': True}), [])
+
+
 if __name__ == '__main__':
     unittest.main()
