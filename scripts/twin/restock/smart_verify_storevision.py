@@ -21,7 +21,9 @@ Design constraints:
 """
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +32,13 @@ from typing import Optional
 # Default location of the sibling store-vision checkout (overridable). This module
 # never writes there; it only adds ``src`` to sys.path to import the package.
 DEFAULT_STOREVISION_SRC = '/home/manishsaini/firstmate/projects/store-vision/src'
+
+# The store-vision ``.venv`` python (pydantic + store-vision installed). The realogram
+# MODEL pulls pydantic, which the plain CPU test python lacks, so the realogram cross-
+# check runs in this interpreter as a READ-ONLY subprocess. Overridable.
+DEFAULT_STOREVISION_VENV_PYTHON = '/home/manishsaini/firstmate/projects/store-vision/.venv/bin/python'
+
+_REALOGRAM_DRIVER = str(Path(__file__).resolve().parent / '_storevision_realogram_driver.py')
 
 # smart-verify diff kind -> a store-vision-style compliance status. Statuses in
 # planoreset.verify._LABEL_STATUSES route to a label_error task; the rest route to
@@ -150,3 +159,89 @@ def cross_check(report, *, storevision_src=None, now=0.0):
     except Exception as exc:  # pragma: no cover - needs a partial store-vision env
         out['deviation_events_note'] = f'deviation_events unavailable: {type(exc).__name__}: {exc}'
     return out
+
+
+def _dominant(units):
+    """SKU with the most units in a ``{sku: units}`` map (ties by name), or None."""
+    if not units:
+        return None
+    return sorted(units.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+
+def _venv_python(venv_python=None):
+    """Resolve the store-vision venv python, or None if not an executable file."""
+    py = venv_python or os.environ.get('STOREVISION_VENV_PYTHON') or DEFAULT_STOREVISION_VENV_PYTHON
+    return py if (py and Path(py).is_file() and os.access(py, os.X_OK)) else None
+
+
+def cross_check_realogram(realogram, expectation, *, venv_python=None,
+                          storevision_src=None, min_overlap=0.25, timeout=60):
+    """Run the post-transfer realogram through store-vision realogram->planoreset.
+
+    Builds a store-vision ``BayRealogram`` (observed) + core ``Shelf`` (the planogram
+    target) from a :class:`shelf_realogram.ShelfRealogram` and its
+    :class:`smart_verify.SlotExpectation`, then runs ``realogram.diff.diff_bay`` ->
+    ``planoreset.verify.verify_from_realogram`` -> ``deviation_events`` inside the
+    store-vision ``.venv`` as a READ-ONLY subprocess (the realogram model needs
+    pydantic the CPU test python lacks).
+
+    Returns a JSON-safe dict: ``{'available': True, 'source', 'compliant', 'diff',
+    'verifications', 'deviation_events'}`` on success, else ``{'available': False,
+    'reason': ...}``. Never raises, never mutates store-vision, never changes the
+    mission gate -- advisory only, alongside the built-in :mod:`smart_verify` diff.
+
+    One shared SKU per slot is modelled (dominant observed vs dominant expected); the
+    mission restocks a single SKU per slot, so the facing/sku deviation is exact for
+    that case. A genuine multi-SKU shelf needs a full store-vision ``realogram`` scan,
+    which this lane does not capture (the mission verify stage sees only the landed
+    unit).
+    """
+    py = _venv_python(venv_python)
+    if py is None:
+        return {'available': False,
+                'reason': 'store-vision venv python not found (set $STOREVISION_VENV_PYTHON)'}
+    if not Path(_REALOGRAM_DRIVER).is_file():  # pragma: no cover - driver ships with the module
+        return {'available': False, 'reason': f'realogram driver missing: {_REALOGRAM_DRIVER}'}
+
+    region = realogram.region
+    store_region = region.store_region()
+    level_z = region.top_z
+    exp_units = dict(getattr(expectation, 'expected', {}) or {})
+    obs_units = dict(realogram.observed)
+    req = {
+        'bay_id': realogram.bay_id,
+        'store_region': store_region,
+        'level_z': level_z,
+        'min_overlap': min_overlap,
+        'planogram_slots': [{
+            'id': realogram.slot_id,
+            'expected_sku': _dominant(exp_units),
+            'facings': int(sum(exp_units.values())),
+            'store_region': store_region,
+            'level_z': level_z,
+        }],
+        'observed_slots': [{
+            'id': realogram.slot_id,
+            'deck_index': realogram.deck_index or 0,
+            'sku': _dominant(obs_units),
+            'facings': int(sum(obs_units.values())),
+            'store_region': store_region,
+            'level_z': level_z,
+            'confidence': realogram.confidence or 0.0,
+        }],
+        'storevision_src': storevision_src or os.environ.get('STOREVISION_SRC') or DEFAULT_STOREVISION_SRC,
+    }
+    try:
+        proc = subprocess.run(
+            [py, '-I', _REALOGRAM_DRIVER], input=json.dumps(req),
+            capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {'available': False, 'reason': f'subprocess failed: {type(exc).__name__}: {exc}'}
+    if proc.returncode != 0:
+        return {'available': False,
+                'reason': f'driver exit {proc.returncode}: {(proc.stderr or "").strip()[:300]}'}
+    try:
+        return json.loads(proc.stdout)
+    except ValueError as exc:
+        return {'available': False,
+                'reason': f'driver output not JSON: {exc}; stdout={proc.stdout[:200]!r}'}

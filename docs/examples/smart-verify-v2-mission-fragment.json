@@ -1,0 +1,20 @@
+{
+  "__doc__": "sim-smart-verify-v2 integration-lane hand-off. smart-verify v2 is a CLI option on run_mobile_restock.py, NOT a runtime-config block, so there is nothing to merge into the mission JSON -- it is byte-identical when the flag is absent. The integration lane adds the flags below to its existing mission launch. After the mission (and its mission.json) are written, a pure-CPU post-step reads the run's own artifacts (mission.json verify evidence + inventory.sqlite + the saved mission-frames + scripts/planogram.json) and writes the files under `writes` into the run output. It NEVER changes the mission's stock-commit gate or summary['state']; `block` only records summary['smart_verify']['blocked']=true when non-compliant (a smart-verify-OWN signal; the mission verify stage already committed the stock). The post-transfer shelf observation is the resolved verify region (the bay the shelf-staging resolver pinned, read from the verify evidence tolerances/ground_truth_check) plus the saved verify frames (the mission-frames whose simulation_time brackets the verify instant; in ground-truth verify mode these are the walkthrough chase camera, labelled walkthrough_chase_camera, NOT a dedicated shelf sensor). --smart-verify-realogram runs that observation through store-vision's realogram.diff.diff_bay -> planoreset.verify.verify_from_realogram -> deviation_events inside the store-vision .venv as a READ-ONLY subprocess (degrades cleanly when the venv is absent). The closed loop: in strict/block, reset-jobs.job-plan.json is written in lane-1's storevision.restock.job_plan/v1 shape, so the NEXT mission runs the residual via `run_mobile_restock.py --job-from <run>/reset-jobs.job-plan.json` (one object per file; split the array if >1). CPU-proved only; no GPU run from the authoring lane.",
+  "cli_flags": {
+    "working_default": ["--smart-verify"],
+    "working_default_alias": ["--smart-verify=report"],
+    "smart_strict_closed_loop": ["--smart-verify=strict", "--smart-verify-storevision", "--smart-verify-realogram"],
+    "smart_block_own_gate": ["--smart-verify=block"],
+    "quantity_policy": ["--smart-verify-policy", "at_least|exact|identity"]
+  },
+  "example_launch": "python3 scripts/run_mobile_restock.py --manifest <manifest> --scenario <scenario> --runtime-config <mission-runtime.json> --output <run> --execute --smart-verify=strict --smart-verify-storevision --smart-verify-realogram",
+  "writes": {
+    "always": ["smart-verify.json", "shelf-observation.json", "reset-jobs.json"],
+    "strict_and_block": ["reset-jobs.job-plan.json"]
+  },
+  "env_overrides": {
+    "STOREVISION_SRC": "/home/manishsaini/firstmate/projects/store-vision/src",
+    "STOREVISION_VENV_PYTHON": "/home/manishsaini/firstmate/projects/store-vision/.venv/bin/python"
+  },
+  "closed_loop_next_mission": "reset-jobs.job-plan.json is a JSON ARRAY of job_plan/v1 residuals (the residual list); run_mobile_restock.py --job-from consumes ONE job object, so extract an element first, e.g.: python3 -c \"import json,sys;json.dump(json.load(open(sys.argv[1]))[0],open(sys.argv[2],'w'))\" <run>/reset-jobs.job-plan.json <run>/next-job.json && python3 scripts/run_mobile_restock.py --manifest <manifest> --scenario <scenario> --runtime-config <mission-runtime.json> --output <run2> --execute --job-from <run>/next-job.json"
+}

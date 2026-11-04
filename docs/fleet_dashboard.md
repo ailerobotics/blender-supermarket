@@ -2,12 +2,27 @@
 
 A phone-first, read-only panel that merges the **live Isaac restocking mission** with
 **store-vision store state** into one view over the tailnet. It is strictly additive:
-the dashboard is a standalone CPU server that the mission never imports or launches, so
-a mission run is **byte-identical** whether or not the dashboard is up. No GPU.
+the dashboard the mission never imports or launches, so a mission run is
+**byte-identical** whether or not the dashboard is up. No GPU.
 
-- Module: `scripts/twin/dashboard/` (pure aggregation in `aggregate.py`, I/O in `server.py`).
-- Launcher + dry-run: `scripts/run_fleet_dashboard.py` (RUNBOOK §17).
-- Tests: `scripts/twin/tests/test_fleet_dashboard.py` (no network, no GPU, no simulator).
+It comes in **two shapes**, same aggregation, same page:
+
+- **Live server** — a standalone CPU HTTP server (`:8794`) that fetches the watch page's
+  `status.json` and recomputes the view on every request. Richer (live frame proxy, the
+  opt-in approval POST path), needs a running process.
+- **Static panel** — a zero-process `fleet.html` + `fleet.json` pair rendered *into a run
+  directory* and served with nothing more than `python3 -m http.server` over that
+  directory (the same pattern the firstmate watch page uses). The page polls `./fleet.json`
+  relative to itself and links all media (newest frame, `walkthrough.mp4`, `bt_view.html`)
+  **relative** to the run dir, so the whole panel serves over one static mount with no
+  extra routes. This is the shape the watch page (`:8787`) can carry — see
+  *Serving from the watch page* below.
+
+- Module: `scripts/twin/dashboard/` (pure aggregation in `aggregate.py`; live I/O in
+  `server.py`; the static generator in `snapshot.py` + its page in `page_static.py`).
+- Launcher / dry-run / static render: `scripts/run_fleet_dashboard.py` (RUNBOOK §17).
+- Tests: `scripts/twin/tests/test_fleet_dashboard.py` (no network, no GPU, no simulator;
+  the static tests replay a saved run directory).
 
 ## What it shows
 
@@ -36,6 +51,31 @@ it consumes that page's `status.json` for the live pulse and links its media bac
 **reads** the mission run directories for per-run detail. It binds to the tailnet IP
 `<DASHBOARD_HOST>` on a **free** port (default `8794`; `8787/8790/8791/8793` are taken) so it
 coexists with the watch page. All media links point at the upstream base.
+
+## Serving from the watch page (static panel)
+
+The captain watches the mission from a phone via the firstmate watch page
+(`http://<DASHBOARD_HOST>:8787`, `data/isaac-watch/serve.py`), which already serves per-run
+media. The static panel is built to drop straight into that world:
+
+```
+# render the pair into the newest (or --run) run directory, re-rendering every 3 s
+PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py \
+    --static-out ~/datasets/twin-robot-in-store-boot-v1/mission/<run> --watch 3 &
+```
+
+Then make it reachable one of two ways (both named for firstmate in this lane's report):
+
+1. **`python3 -m http.server` over the run dir** (no watch-page change):
+   `python3 -m http.server 8794 --bind <DASHBOARD_HOST> -d <run_dir>` → `…:8794/fleet.html`.
+   Media resolves because the frame, `walkthrough.mp4` and `bt_view.html` are in that dir.
+2. **A `/fleet` route on the watch page** (firstmate adds two lines to `serve.py`): serve
+   `<newest_run>/fleet.html` at `/fleet` and `<newest_run>/fleet.json` at `/fleet.json`, and
+   link it from the page. The exact route + the sidecar command are in
+   `data/sim-fleet-dashboard-v2/report.md`.
+
+`--media-base <url>` instead points the frame/report links back at the watch page
+(`<url>/latest.jpg`, `<url>/report`) when the panel is *not* served from the run dir.
 
 ## Store-state export contract
 
@@ -115,6 +155,28 @@ Request body: `sku` (required, non-empty), `quantity` (required, positive int), 
 optional `source`, `shelf`, `priority` (int), `note`, `provenance`. Bad input is refused
 with `400` and no file is written.
 
+### Smart approval variant (`--approval-trigger`, default off)
+
+The **working default** is the firstmate-decided pre-approved sim: no trigger at all (the
+panel is read-only) or the plain monitored queue above (`--enable-trigger`). The **smart
+variant** adds the phone approval step the captain's intent calls for, kept as a *separate
+opt-in* so the working default is never replaced silently:
+
+- With `--approval-trigger` (requires `--enable-trigger`), a `POST /trigger` request lands
+  as `pending_approval` (carrying an `approval` block) and does **nothing** on its own.
+- A phone `POST /approve` / `POST /reject` with `{"id": "<trigger id>"}` records the decision
+  (`approval.state`, `by`, `at`). On approve the request is also written as a
+  `storevision.restock.job_plan/v1` proposal under `<requests-dir>/approved/<id>.json`.
+- That proposal is exactly what the **rank-1 demand feed honours**: an operator (or firstmate)
+  runs `run_mobile_restock.py --job-from <approved/…json>`, and `twin.restock.job_from_plan`
+  re-validates the SKU + destination slot against `scripts/planogram.json`, refusing an
+  unknown slot or SKU (honest failure — the dashboard proposes, it never actuates). The
+  proposal carries the request's `source`/`shelf`; pose/xyz remain store-vision's to fill.
+
+This keeps the single source of truth honest: the approval queue is a *monitored proposal
+queue*, never a robot actuator, and the mission job feed stays the only thing that turns an
+approved SKU into a run.
+
 ### Owner decision surfaced
 
 **Should the phone approval gate sit in the sim loop?** Per the firstmate-decided default
@@ -130,10 +192,15 @@ lines, not implemented here.
 |-------|--------|---------|
 | `/` | GET | phone-first HTML page (self-contained, no external assets) |
 | `/status.json` | GET | aggregated mission + store + triggers view (`schema: fm-fleet-dashboard.v1`) |
-| `/config.json` | GET | `{trigger_enabled}` (the page shows the form only when true) |
+| `/config.json` | GET | `{trigger_enabled, approval_required}` (drives the page's form + buttons) |
 | `/triggers.json` | GET | stored trigger requests, newest first |
 | `/healthz` | GET | `ok` |
 | `/trigger` | POST | enqueue a restock request (only when `--enable-trigger`; else `403`) |
+| `/approve` | POST | approve a `pending_approval` request by `{id}` (only when `--approval-trigger`) |
+| `/reject` | POST | reject a `pending_approval` request by `{id}` (only when `--approval-trigger`) |
+
+The static panel serves no endpoints — it is the `fleet.html` + `fleet.json` pair over a
+static mount, read-only (no POST), so the approval path is live-server only.
 
 The upstream `status.json` fetch has a short timeout and **degrades gracefully**
 (`upstream.ok=false`, pulse falls back to the newest run directory) when the watch page is

@@ -868,8 +868,8 @@ Blender. Evidence basis is labelled honestly on every slot verdict:
 out-of-band labelled shelf view, e.g. a store-vision `realogram` export).
 
 ```bash
-# default: a finished run's mission.json, verdict for the job's destination slot
-python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json
+# default: a finished run DIR -> report + shelf-observation.json next to mission.json
+python3 scripts/run_smart_verify.py --run-dir "$RUN"
 
 # bookkeeping basis + residual reset jobs in the sim-smart-job-feed-v1 shape
 python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json \
@@ -877,7 +877,7 @@ python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json \
   --out "$RUN"/smart-verify.json --job-feed-out "$RUN"/reset-jobs.json
 
 # advisory cross-check through store-vision's read-only planoreset.verify
-python3 scripts/run_smart_verify.py --mission "$RUN"/mission.json --storevision
+python3 scripts/run_smart_verify.py --run-dir "$RUN" --storevision
 ```
 
 Residual reset jobs are emitted in the `sim-smart-job-feed-v1` `--job-from`
@@ -890,17 +890,52 @@ read-only; it degrades to `{"available": false, "reason": ...}` when store-visio
 stays authoritative. Run it inside store-vision's own venv for full
 `planoreset.deviation` event emission.
 
+**sim-smart-verify-v2 — the post-transfer shelf observation + the realogram path.**
+With a run directory the step also exports the **post-transfer shelf observation**
+`shelf-observation.json`: the resolved verify region (the bay the shelf-staging
+resolver pinned — read from the verify evidence `tolerances`/`ground_truth_check`)
+plus the **saved verify frames** (the `mission-frames` whose `simulation_time`
+brackets the verify instant; in ground-truth verify mode these are the walkthrough
+chase camera, labelled `walkthrough_chase_camera`, NOT a shelf sensor). That
+observation is what `--storevision-realogram` runs through store-vision's
+`realogram.diff.diff_bay` → `planoreset.verify.verify_from_realogram` →
+`deviation_events` inside the store-vision `.venv` (a read-only subprocess, since the
+realogram model needs pydantic); it degrades cleanly when the venv is absent.
+
+`--mode` picks the variant (working default vs smart; the mission gate is never
+changed either way):
+
+```bash
+# report (default): additional report only, exit 0
+python3 scripts/run_smart_verify.py --run-dir "$RUN" --source-bin backstock_00
+
+# strict (SMART): also write reset-jobs.job-plan.json in lane-1 job_plan/v1 shape,
+# so the NEXT mission can run them via run_mobile_restock.py --job-from (closed loop)
+python3 scripts/run_smart_verify.py --run-dir "$RUN" --source-bin backstock_00 \
+  --mode strict --storevision --storevision-realogram
+
+# block (SMART): strict + exit non-zero when non-compliant (smart-verify's OWN gate;
+# it NEVER un-commits the mission verify stage, which already committed the stock)
+python3 scripts/run_smart_verify.py --run-dir "$RUN" --source-bin backstock_00 --mode block
+```
+
 The same report is produced automatically at the end of a guarded mission run
-behind `run_mobile_restock.py --smart-verify` (writes `smart-verify.json` +
-`reset-jobs.json` into the run output; `--smart-verify-storevision` adds the
-cross-check, `--smart-verify-policy` picks the quantity policy). Absent
+behind `run_mobile_restock.py --smart-verify[=report|strict|block]` (writes
+`smart-verify.json` + `shelf-observation.json` + `reset-jobs.json`, and in
+`strict`/`block` also `reset-jobs.job-plan.json`, into the run output;
+`--smart-verify-storevision` adds the in-process cross-check,
+`--smart-verify-realogram` adds the venv realogram path, `--smart-verify-policy`
+picks the quantity policy). `block` records `smart_verify.blocked` in mission.json
+when non-compliant but leaves `state` exactly as the mission set it. Absent
 `--smart-verify` the run is byte-identical. CPU tests:
 
 ```bash
-cd scripts && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest twin/tests/test_smart_verify.py -q
+cd scripts && PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
+  twin/tests/test_smart_verify.py twin/tests/test_smart_verify_v2.py -q
 ```
 
-Write-up: [data/sim-smart-verify-v1/report.md](data/sim-smart-verify-v1/report.md).
+Write-ups: [data/sim-smart-verify-v1/report.md](data/sim-smart-verify-v1/report.md),
+[data/sim-smart-verify-v2/report.md](data/sim-smart-verify-v2/report.md).
 
 ## 13. Mobile restock manipulation (CPU)
 
@@ -1283,8 +1318,10 @@ The bench holds the GPU lock + 4 GiB RAM watchdog inside Python and bounds its o
 ## 17. Fleet dashboard — watch the mission + store (CPU, read-only, opt-in)
 
 A phone-first, read-only panel that merges the live Isaac restocking mission with
-store-vision store state. Standalone CPU server; never imported or launched by the
-mission, so a mission run is byte-identical whether or not it is up. No GPU. Design +
+store-vision store state. Two shapes, both CPU and never imported or launched by the
+mission (a run is byte-identical whether or not it is up): a standalone live server, or a
+zero-process **static panel** rendered into a run directory and served with
+`python3 -m http.server` (reachable from the watch page the same way). No GPU. Design +
 contract: [docs/fleet_dashboard.md](docs/fleet_dashboard.md).
 
 Print the aggregated status once and exit (the dry-run transcript):
@@ -1312,6 +1349,34 @@ the mission run directories (`--run-root`, default
 `~/datasets/twin-robot-in-store-boot-v1/mission`); it never writes a run,
 never boots Isaac, and degrades gracefully when the upstream is down. `--enable-trigger`
 requires `--requests-dir`; without it `POST /trigger` returns `403`.
+
+**Static run-directory panel (no process; the `python3 -m http.server` pattern).** For a
+panel the firstmate watch page (`:8787`) can serve the same way it serves runs — with no
+extra Python process — render a self-contained `fleet.html` + `fleet.json` pair into a run
+directory and serve that directory statically:
+```
+# render into the newest run dir (relative media: frame, walkthrough.mp4, bt_view.html)
+PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py \
+    --static-out ~/datasets/twin-robot-in-store-boot-v1/mission/<run> --watch 3 &
+python3 -m http.server 8794 --bind <DASHBOARD_HOST> \
+    -d ~/datasets/twin-robot-in-store-boot-v1/mission/<run>    # then open /fleet.html
+```
+`--static-out DIR` writes the pair and exits (`--watch SECONDS` re-renders to keep a live
+mount fresh); `--run <name>` picks a run (default newest); `--media-base URL` points the
+frame/report links at the watch page instead of run-relative files. The route to add to the
+watch page is in `data/sim-fleet-dashboard-v2/report.md`.
+
+**Smart approval variant (`--approval-trigger`, default off).** The working default is the
+pre-approved sim (no trigger). The smart variant makes a phone request land
+`pending_approval`; `POST /approve` (or `/reject`) with `{"id": "..."}` records the decision
+and writes the approved request as a `storevision.restock.job_plan/v1` proposal under
+`<requests-dir>/approved/`, which the lane-1 feed honours via
+`run_mobile_restock.py --job-from <approved/…json>` (it re-validates SKU + slot against the
+planogram and refuses an unknown one):
+```
+PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py \
+    --enable-trigger --approval-trigger --requests-dir /tmp/fleet-dashboard-requests
+```
 
 CPU tests (no GPU; `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` dodges the box's ROS pytest plugins):
 ```

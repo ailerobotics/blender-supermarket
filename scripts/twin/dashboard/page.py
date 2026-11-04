@@ -86,7 +86,7 @@ font-size:14px;width:100%;margin:4px 0}
 
 <script>
 function esc(s){return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
-let TRIG_ENABLED=false;
+let TRIG_ENABLED=false, APPROVAL=false;
 async function tick(){
   let s;
   try{s=await (await fetch('/status.json?'+Date.now())).json();}catch(e){
@@ -162,11 +162,19 @@ async function tick(){
 
   const tr=s.triggers||[];
   document.getElementById('triggers').innerHTML = tr.length
-    ? `<table><tr><th>when</th><th>sku</th><th>qty</th><th>status</th></tr>`+
+    ? `<table><tr><th>when</th><th>sku</th><th>qty</th><th>status</th>${APPROVAL?'<th></th>':''}</tr>`+
       tr.slice(0,10).map(r=>`<tr><td>${esc((r.created_at||'').slice(11,19))}</td>`+
-      `<td>${esc((r.request||{}).sku)}</td><td>${(r.request||{}).quantity}</td><td>${esc(r.status)}</td></tr>`).join('')+`</table>`
+      `<td>${esc((r.request||{}).sku)}</td><td>${(r.request||{}).quantity}</td><td>${esc(r.status)}</td>`+
+      (APPROVAL?`<td>${r.status==='pending_approval'
+        ?`<button onclick="decide('approve','${esc(r.id)}')">approve</button> `+
+          `<button onclick="decide('reject','${esc(r.id)}')">reject</button>`
+        :''}</td>`:'')+`</tr>`).join('')+`</table>`
     : '<span class=muted>None.</span>';
   if(TRIG_ENABLED) document.getElementById('trigbox').style.display='block';
+}
+async function decide(kind,id){
+  try{await fetch('/'+kind,{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({id:id,by:'dashboard-phone'})});tick();}catch(e){}
 }
 async function sendTrigger(){
   const body={sku:document.getElementById('t_sku').value,
@@ -177,6 +185,6 @@ async function sendTrigger(){
     const j=await r.json(); msg.innerHTML = r.ok ? 'queued '+esc(j.id) : '<span class=err>'+esc(j.error||'rejected')+'</span>';
     tick();}catch(e){msg.innerHTML='<span class=err>network error</span>';}
 }
-async function init(){try{const c=await (await fetch('/config.json')).json();TRIG_ENABLED=!!c.trigger_enabled;}catch(e){}tick();setInterval(tick,3000);}
+async function init(){try{const c=await (await fetch('/config.json')).json();TRIG_ENABLED=!!c.trigger_enabled;APPROVAL=!!c.approval_required;}catch(e){}tick();setInterval(tick,3000);}
 init();
 </script></body></html>"""

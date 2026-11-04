@@ -46,6 +46,7 @@ class Config:
     bt_path: str | None = None
     requests_dir: str | None = None
     trigger_enabled: bool = False
+    approval_required: bool = False
     upstream_timeout: float = 2.0
 
 
@@ -98,6 +99,7 @@ def compute_status(cfg: Config) -> dict:
         run_name=resolved_run, mission=mission,
         store=store, behaviour_tree=bt, triggers=trig,
         upstream_base=upstream_base,
+        approval_required=cfg.approval_required or None,
     )
 
 
@@ -126,7 +128,8 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/status.json":
             self._send(200, compute_status(self.cfg))
         elif path == "/config.json":
-            self._send(200, {"trigger_enabled": self.cfg.trigger_enabled})
+            self._send(200, {"trigger_enabled": self.cfg.trigger_enabled,
+                             "approval_required": self.cfg.approval_required})
         elif path == "/triggers.json":
             self._send(200, triggers.list_triggers(self.cfg.requests_dir) if self.cfg.requests_dir else [])
         elif path == "/healthz":
@@ -134,26 +137,52 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, {"error": "not found"})
 
+    def _read_json_body(self) -> dict | None:
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            return json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+        except (ValueError, OSError):
+            return None
+
     def do_POST(self):
         path = self.path.split("?", 1)[0]
-        if path != "/trigger":
+        if path not in ("/trigger", "/approve", "/reject"):
             self._send(404, {"error": "not found"})
             return
         if not self.cfg.trigger_enabled or not self.cfg.requests_dir:
             self._send(403, {"error": "trigger path disabled (start with --enable-trigger)"})
             return
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
-        except (ValueError, OSError):
+        payload = self._read_json_body()
+        if payload is None:
             self._send(400, {"error": "invalid JSON body"})
             return
+        if path == "/trigger":
+            try:
+                rec = triggers.enqueue_trigger(
+                    self.cfg.requests_dir, payload,
+                    approval_required=self.cfg.approval_required)
+            except triggers.TriggerError as exc:
+                self._send(400, {"error": str(exc)})
+                return
+            self._send(201, rec)
+            return
+        # /approve or /reject — the smart --approval-trigger phone step
+        if not self.cfg.approval_required:
+            self._send(403, {"error": "approval disabled (start with --approval-trigger)"})
+            return
+        trigger_id = payload.get("id") if isinstance(payload, dict) else None
+        if not isinstance(trigger_id, str) or not trigger_id:
+            self._send(400, {"error": "'id' is required"})
+            return
+        by = payload.get("by") if isinstance(payload.get("by"), str) else "phone"
         try:
-            rec = triggers.enqueue_trigger(self.cfg.requests_dir, payload)
+            rec = triggers.decide_trigger(
+                self.cfg.requests_dir, trigger_id,
+                approve=(path == "/approve"), by=by)
         except triggers.TriggerError as exc:
             self._send(400, {"error": str(exc)})
             return
-        self._send(201, rec)
+        self._send(200, rec)
 
 
 def make_server(cfg: Config) -> ThreadingHTTPServer:
