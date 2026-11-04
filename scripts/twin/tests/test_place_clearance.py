@@ -174,17 +174,28 @@ def test_config_rejects_bad(bad):
 
 # --------------------------------------------------------------- config_preflight
 
-def test_preflight_passes_clean_block():
+def test_preflight_passes_v2_clean_block():
+    # sim-place-descent-residual-v2 production block: the droop-aware gate + closed-loop backstop, with the
+    # regressing v1 preplace_above_place OFF.
     from twin.restock_manipulation import config_preflight as cp
-    host = {'carton_level': {'preplace_above_place': True, 'place_clearance_check': True}}
+    host = {'carton_level': {'place_clearance_drooped': True, 'closed_loop_level': True,
+                             'gravity_compensation': {'stiffness_nm_per_rad': 2850}}}
     assert cp.check_carton_level(host) == []
 
 
-def test_preflight_catches_gate_without_remedy():
+def test_preflight_refuses_preplace_above_place_on():
+    # sim-place-descent-residual-v2: the v1 remedy regresses the set-down, so it is refused.
     from twin.restock_manipulation import config_preflight as cp
-    host = {'carton_level': {'place_clearance_check': True}}   # gate armed, remedy off
+    host = {'carton_level': {'preplace_above_place': True, 'place_clearance_check': True}}
     problems = cp.check_carton_level(host)
-    assert problems and 'preplace_above_place' in problems[0]
+    assert problems and any('preplace_above_place' in p and 'REGRESSES' in p for p in problems)
+
+
+def test_preflight_catches_level_gate_without_remedy():
+    from twin.restock_manipulation import config_preflight as cp
+    host = {'carton_level': {'place_clearance_check': True}}   # level gate armed, no remedy
+    problems = cp.check_carton_level(host)
+    assert problems and 'no remedy' in problems[0]
 
 
 def test_preflight_catches_malformed_block():
