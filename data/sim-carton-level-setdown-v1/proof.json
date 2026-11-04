@@ -1,0 +1,83 @@
+{
+  "urdf": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/coldwin31/mobile-import.urdf",
+  "stiffness_nm_per_rad": 2850.0,
+  "carton_mass_kg": 0.45,
+  "bound_deg": 2.0,
+  "grace_s": 0.15,
+  "margin_deg": 1.0,
+  "coldwin33_per_segment": [
+    {
+      "phase": "lift",
+      "planned_deg": 1.41,
+      "executed_deg": 1.43
+    },
+    {
+      "phase": "tuck",
+      "planned_deg": 0.01,
+      "executed_deg": 0.01
+    },
+    {
+      "phase": "transit",
+      "planned_deg": null,
+      "executed_deg": 0.01
+    },
+    {
+      "phase": "preplace",
+      "planned_deg": 1.21,
+      "executed_deg": 1.21
+    },
+    {
+      "phase": "place(set-down)",
+      "planned_deg": 0.07,
+      "executed_deg": 2.06
+    }
+  ],
+  "setdown_torque_south": {
+    "ur_shoulder_pan_joint": 0.0,
+    "ur_shoulder_lift_joint": 58.148,
+    "ur_elbow_joint": 41.191,
+    "ur_wrist_1_joint": 2.196,
+    "ur_wrist_2_joint": -0.0,
+    "ur_wrist_3_joint": 0.004
+  },
+  "setdown_droop_south_rad": {
+    "ur_shoulder_pan_joint": -0.0,
+    "ur_shoulder_lift_joint": -0.0204,
+    "ur_elbow_joint": -0.01445,
+    "ur_wrist_1_joint": -0.00077,
+    "ur_wrist_2_joint": 0.0,
+    "ur_wrist_3_joint": -0.0
+  },
+  "two_regime": {
+    "south": {
+      "place_tcp_base": [
+        1.043,
+        0.055,
+        0.435
+      ],
+      "uncomp_exec_pitch_deg": 1.989,
+      "heavy_routed_exec_pitch_deg": 1.945,
+      "wrist_routed_exec_pitch_deg": 0.0,
+      "wrist_routed_exec_tilt_deg": 0.0,
+      "wrist_pretilt_joint": "ur_wrist_1_joint",
+      "wrist_reach_err_mm": 22.7,
+      "wrist_clear": true,
+      "pass": true
+    },
+    "east": {
+      "place_tcp_base": [
+        0.97,
+        0.131,
+        0.442
+      ],
+      "uncomp_exec_pitch_deg": 1.815,
+      "heavy_routed_exec_pitch_deg": 1.771,
+      "wrist_routed_exec_pitch_deg": 0.0,
+      "wrist_routed_exec_tilt_deg": 0.0,
+      "wrist_pretilt_joint": "ur_wrist_1_joint",
+      "wrist_reach_err_mm": 19.0,
+      "wrist_clear": true,
+      "pass": true
+    }
+  }
+}
