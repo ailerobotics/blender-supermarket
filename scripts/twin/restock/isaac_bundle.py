@@ -194,16 +194,33 @@ def derive_place_approach(cart_xy, cart_yaw, standoff, *,
     return (deck[0] + mx * standoff, deck[1] + my * standoff, math.atan2(-my, -mx))
 
 
-def derive_place_approach_stage(place_approach, pickup):
-    """fm390 nav proof #2: the staging waypoint the base drives to BEFORE place_approach.
+def derive_place_approach_stage(place_approach, pickup, lead_in=0.6):
+    """sim-collect-arrival-heading-v1: the staging waypoint the base drives to BEFORE place_approach, a
+    SHORT STRAIGHT LEAD-IN so place_approach's final heading comes from the DRIVE, not an in-place spin.
 
-    A DIRECT diagonal drive from the pick pose to place_approach clips the parked cart -- the base must
-    translate out along the mouth axis (clear of the cart, keeping the pick-pose heading) BEFORE turning
-    to face the mouth (``scripts/check_place_approach_nav.py``). The staging pose sits at place_approach's
-    standoff distance (its x) but on the pick pose's lateral line, at the pick heading, so leg 1 is a
-    straight translate that never swings a corner into the cart; leg 2 then turns + closes onto the mouth.
+    The captain's rule -- "arrive already facing the deck: a short lead-in so the final heading comes from
+    the drive, not from a spin." A standoff goal whose heading is far from the direction the base travels
+    on the last leg cannot be reached: the arrival test needs xy AND yaw within tolerance at once, and the
+    in-place rotation to null the heading drifts a differential base laterally (~2.8 cm/rad) off the xy
+    circle, so the drive branch pulls it back and the heading limit-cycles forever (coldwin29: the collect
+    place_approach, left at the pre-304 EAST-cart heading pi while the 304 dock faces the cart's SOUTH
+    mouth, seated ~-pi/2 against the pi goal and never latched -> collect ran out its 300 s stage timeout).
+
+    So the lead-in sits exactly ``lead_in`` metres BEHIND place_approach along its OWN heading: the final
+    leg is then a straight drive whose direction equals place_approach[2], and the base arrives already
+    aligned (no spin). The staging waypoint itself is reached at the pickup->stage bearing, so leg 1 is
+    also spin-free. Works for any cart orientation (the heading is taken from place_approach, which
+    ``derive_place_approach`` faces at the mouth), so a south-facing dock gets a lead-in south of the
+    standoff that drives the base north, facing the deck, exactly as authored.
     """
-    return (place_approach[0], pickup[1], pickup[2])
+    px, py, pyaw = place_approach
+    sx = px - lead_in * math.cos(pyaw)
+    sy = py - lead_in * math.sin(pyaw)
+    # Leg 1 (pickup -> stage) is itself spin-free when the staging heading is the drive-in bearing; when
+    # the stage coincides with the pickup (degenerate), keep the pickup heading.
+    dx, dy = sx - pickup[0], sy - pickup[1]
+    stage_yaw = math.atan2(dy, dx) if math.hypot(dx, dy) > 1e-6 else pickup[2]
+    return (sx, sy, stage_yaw)
 
 
 def plan_bundle(manifest, scenario, config):

@@ -350,7 +350,8 @@ class Controller:
     def __init__(self, grid, footprint, *, max_speed=0.25, max_angular=0.35,
                  brake_acceleration=0.4, stale_after=0.3, blocked_timeout=8.0,
                  goal_timeout=180.0, allow_test_fixtures=False, docking=None,
-                 directional_zone=True, arrival_xy_hysteresis=0.0):
+                 directional_zone=True, arrival_xy_hysteresis=0.0,
+                 arrival_heading_stall_s=20.0):
         self.grid, self.footprint = grid, footprint
         self.max_speed, self.max_angular = max_speed, max_angular
         self.brake_acceleration, self.stale_after = brake_acceleration, stale_after
@@ -413,6 +414,27 @@ class Controller:
         self.arrival_xy_hysteresis = float(arrival_xy_hysteresis)
         self._xy_latched = False
         self.strict_xy_arrival = False   # set per-leg by start(); grasp-critical tolerance-aware arrival
+        # sim-collect-arrival-heading-v1: NAME a non-converging final-heading arrival instead of silently
+        # running out the stage timeout. The base can reach the goal XY (or sit one hysteresis band off it)
+        # yet never null the final yaw because the goal heading is far from the heading the drive can reach
+        # there -- the in-place rotation (a diff base pivots ~2.8 cm/rad) drifts XY past the latch band, the
+        # drive branch pulls it back, and the heading limit-cycles forever (coldwin29: the collect
+        # place_approach reposition seated ~-pi/2 against a pi goal, yaw_err frozen ~1.43 rad for ~180 s,
+        # nav 'tracking' every tick, collect's 300 s stage timeout the only thing that ever fired). When the
+        # base is XY-near the goal but the heading error exceeds tolerance AND stops improving for this many
+        # SIM seconds, fail the leg with the named reason 'arrival_heading_stall' (a diag line precedes it).
+        # The budget is measured only while NEAR the goal with NO heading progress, so a slow-but-converging
+        # rotation never trips it; a healthy arrival latches 'arrived_stopped' in a few sim seconds, long
+        # before the budget, so healthy runs are byte-identical apart from no new output. 0.0/None => off
+        # (legacy: the stall runs to goal_timeout). SIM-clocked (uses the step's `now`), never wall.
+        if arrival_heading_stall_s in (None, 0, 0.0):
+            self.arrival_heading_stall_s = 0.0
+        elif not (math.isfinite(arrival_heading_stall_s) and arrival_heading_stall_s > 0):
+            raise ValueError('arrival_heading_stall_s must be positive, 0, or None')
+        else:
+            self.arrival_heading_stall_s = float(arrival_heading_stall_s)
+        self._heading_stall_best = None    # best (smallest) |yaw_err| seen while armed, radians
+        self._heading_stall_since = None   # sim time of the last meaningful heading improvement
 
     def start(self, goal, coupled, *, arrival_xy_tol=None, arrival_yaw_tol=None, static_drive=False,
               carry_drive=False, strict_xy_arrival=False):
@@ -430,6 +452,8 @@ class Controller:
         # No-op when the hysteresis latch is off (the bare xy <= arrival_xy_tol test is already strict).
         self.strict_xy_arrival = bool(strict_xy_arrival)
         self._xy_latched = False
+        self._heading_stall_best = None
+        self._heading_stall_since = None
         if len(goal) != 3 or not all(math.isfinite(v) for v in goal):
             raise ValueError('goal must be finite map [x,y,yaw]')
         if arrival_xy_tol is not None and (not math.isfinite(arrival_xy_tol) or arrival_xy_tol <= 0):
@@ -612,6 +636,35 @@ class Controller:
                 in_xy = in_xy and xy <= self.arrival_xy_tol
         else:
             in_xy = xy <= self.arrival_xy_tol
+        # sim-collect-arrival-heading-v1: name a non-converging final-heading arrival (see __init__). Armed
+        # only while the base is XY-near the goal yet the heading error exceeds tolerance; the budget is
+        # charged only against ticks with NO meaningful heading improvement, so a slow-but-converging
+        # rotation resets it and never trips. On expiry: one named diag line + a terminal
+        # 'arrival_heading_stall' fail (the mission then names the stage failure by this, not a 300 s
+        # stage-timeout). Off (arrival_heading_stall_s == 0) => legacy behaviour, byte-identical.
+        if self.arrival_heading_stall_s > 0.0:
+            yaw_err = abs(wrap(self.goal[2]-pose[2]))
+            near = xy <= self.arrival_xy_tol + max(self.arrival_xy_hysteresis, 0.05)
+            if near and yaw_err > self.arrival_yaw_tol:
+                if self._heading_stall_best is None or yaw_err <= self._heading_stall_best - 0.05:
+                    # arm, or a meaningful (>=0.05 rad) improvement -- the rotation is still converging
+                    self._heading_stall_best = yaw_err
+                    self._heading_stall_since = now
+                elif (self._heading_stall_since is not None
+                      and now-self._heading_stall_since >= self.arrival_heading_stall_s):
+                    g0 = self.gate_velocity(now,odometry,obs,0.0,0.0)
+                    print('ARRIVAL_HEADING_STALL yaw_err=%.4f yaw_tol=%.3f xy=%.4f xy_tol=%.3f in_xy=%s '
+                          'gate=%r lin=%.4f ang=%.4f stalled_s=%.1f pose=%s goal=%s'
+                          % (yaw_err, self.arrival_yaw_tol, xy, self.arrival_xy_tol, in_xy, g0.reason,
+                             odometry.linear, odometry.angular, now-self._heading_stall_since,
+                             tuple(round(c,3) for c in pose), tuple(round(c,3) for c in self.goal)),
+                          flush=True)
+                    self.terminal = Result(status='failed',reason='arrival_heading_stall')
+                    return self.terminal
+            else:
+                # left the near-goal band, or heading within tol -- a genuine re-navigation, not a stall
+                self._heading_stall_best = None
+                self._heading_stall_since = None
         if in_xy:
             error = wrap(self.goal[2]-pose[2])
             if abs(error) <= self.arrival_yaw_tol:
