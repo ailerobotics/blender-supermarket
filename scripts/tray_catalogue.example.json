@@ -1,0 +1,12 @@
+{
+  "schema": "storevision.restock.product_catalogue/v1",
+  "axis_order": [0, 1, 2],
+  "producer": "blender-supermarket/scripts/integrations/export_tray_catalogue.py",
+  "catalogue_type": "storevision.restock.ProductInfo",
+  "note": "Example store-vision tray-catalogue export for --catalogue. dims_mm is (L,W,H) mm in store-vision's ProductInfo order; axis_order maps it to the mission grasp frame (x,y,z). juice_orange matches the scenario carton (0.45x0.30x0.18 m); the others widen the in-scope SKU set.",
+  "units": [
+    {"sku": "juice_orange", "dims_mm": [450.0, 300.0, 180.0], "weight_kg": 0.45, "tray_packed": true, "source": "storevision.restock.ProductInfo"},
+    {"sku": "cereal_big",   "dims_mm": [600.0, 400.0, 300.0], "weight_kg": 1.2,  "tray_packed": true, "source": "storevision.restock.ProductInfo"},
+    {"sku": "wide_tray",    "dims_mm": [700.0, 300.0, 160.0], "weight_kg": 0.9,  "tray_packed": true, "source": "storevision.restock.ProductInfo"}
+  ]
+}
