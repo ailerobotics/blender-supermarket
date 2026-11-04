@@ -213,6 +213,29 @@ def check_flow_consistency(host_cfg, runtime_cfg):
     return []
 
 
+def check_carton_level(host_cfg):
+    """sim-place-descent-residual-v1: resolve the HOST ``carton_level`` block so a malformed value (incl.
+    the place-clearance keys ``preplace_above_place`` / ``preplace_standoff_m`` / ``place_clearance_check``
+    / ``place_clearance_margin_m``, read from ros_host_config.json) FAILS the pre-flight loudly instead of
+    at a GPU boot. Also flags the one incoherent combination -- the clearance GATE armed with no remedy --
+    as a WARNING-level refusal so a run can't arm the check and still ship the over-mouth standoff. No-op
+    ([]) when ``carton_level`` is absent/off (byte-identical)."""
+    from twin.restock_manipulation import carton_level as cl
+    spec = (host_cfg or {}).get('carton_level')
+    try:
+        resolved = cl.resolve_level_config(spec)
+    except ValueError as exc:
+        return [f"carton_level (HOST ros_host_config.json): malformed -- {exc}"]
+    if resolved is None:
+        return []
+    if resolved.place_clearance_check and not resolved.preplace_above_place:
+        return [("carton_level place-clearance GATE armed (place_clearance_check) but the REMEDY is OFF "
+                 "(preplace_above_place): the fixed over-mouth collect preplace standoff would still jam "
+                 "the gripper pad on post_2 (coldwin39 CONTACT pivot). Set 'preplace_above_place': true in "
+                 "the HOST carton_level block (ros_host_config.json) alongside 'place_clearance_check'.")]
+    return []
+
+
 def check_carton_dims(host_cfg, scenario_cfg, *, tol_m=1e-3):
     """sim-collect-press-regression-v1: refuse a host carton-profile dimension that disagrees with the
     scenario single source of truth (``handling_unit.dimensions_m``, PR 268), before any GPU boot.
@@ -330,6 +353,9 @@ def main(argv=None):
     # sim-service-carry-drive-to-shelf-v1: cross-layer flow consistency (always, not just --require'd
     # keys) so a shelf_staging/transfer_service_carry split cannot reach a GPU boot.
     problems += check_flow_consistency(host_cfg, runtime_cfg)
+    # sim-place-descent-residual-v1: resolve the HOST carton_level block (incl. the place-clearance keys)
+    # so a malformed value or the gate-without-remedy combination fails pre-flight, not a GPU boot.
+    problems += check_carton_level(host_cfg)
     # sim-collect-press-regression-v1: carton-dim drift between the HOST profile and the scenario single
     # source silently over-reaches the side-grasp pick standoff (coldwin32). Only when --scenario is given.
     if args.scenario:
