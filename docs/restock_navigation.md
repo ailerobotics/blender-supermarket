@@ -702,15 +702,21 @@ The sequence (each leg its own position-first behaviour-tree step — `bt/stage_
 
 | leg | body | coupling | measured (CPU, real planner, 798-obstacle map) |
 |---|---|---|---|
-| **tow→side bay** (`outbound_dock_to_side_bay`) | tow the COUPLED train straight down the portal axis (dead-centre doorway crossing) then tuck WEST into the bay | coupled | **whole-lane articulation 14.4°** (< the 15° target); cart crosses the doorway throat at **5.4°** (aligned, PR 266 kept); cart parks centre `[-4.14, 8.2]` off the axis |
+| **tow→side bay** (`outbound_dock_to_side_bay`) | couple at the REACHABLE south dock `[-4.6, 16.0, -π/2]` (sim-collect-dock-reach-v1), tow the COUPLED train with a GENTLE curve in the OPEN BACKROOM onto the x=-4.3 axis, cross the doorway aligned, then tuck into the bay | coupled | **whole-lane articulation 11.4°** (< the 15° target, peak at y≈14.6 away from the door); cart crosses the doorway throat at **0.4°** (aligned, 0.54 m west / 1.38 m east clearance, PR 266 kept); cart parks centre `[-4.3, 8.22]` |
 | **brake cart / uncouple** | pin + release the cart at the bay (reuse the uncouple mechanic) | coupled → uncoupled | — |
 | **robot-only service** (`TRANSFER_STAGING_PLAN`, re-targeted to the bay) | the free base picks the carton off the parked cart, carries it to the endcap, places it, drives back to the bay | uncoupled | PR 276 service leg, re-targeted to the bay park |
 | **drive→home (empty)** | with the cart parked OFF the axis, the free base threads the FREED doorway home; the cart stays parked (uncoupled) in the bay | uncoupled | grid A\* home now **routes** (the exact case that was NO PATH with the on-axis staging cart at `[-3.875, 9.27]`) |
 
 **Straight-reverse re-couple** is proven feasible (`check_cart_side_bay` `recouple_straight_reverse_clears`):
-the free base reverses straight along the parked cart's drawbar axis (`~[-4.45, 6.97]`, heading ~−104°)
-onto the hitch; the fine-dock servo (`fine_dock.standoff_from_cart`) seats it on the MEASURED cart axis
-at GPU time, so the exact angled park is tolerated.
+the free base reverses straight along the parked cart's drawbar axis (`~[-4.3, 6.95]`, heading ~−90°,
+south-aligned from the reachable-dock lane) onto the hitch; the fine-dock servo
+(`fine_dock.standoff_from_cart`) seats it on the MEASURED cart axis at GPU time, so an angled park is
+tolerated.
+
+**The collect dock itself** is proven to serve BOTH the collect place reach (deck target 1.155 m from the
+fixed collect pose, inside the ~1.3 m arm gate coldwin26 overran at the old on-axis dock) AND the gentle
+south outbound, by `scripts/check_collect_dock_reach.py` (`COLLECT_DOCK_REACH PASS`); numbers + the
+before/after reach-envelope plot in `data/sim-collect-dock-reach-v1/report.md`.
 
 **The coupled tow-home (cart retrieved to the backroom) is a named, config-selectable follow-up**, not the
 baseline. A single doorway + a forward-only rear-hitch drawbar forces a **conserved ~180° cart
