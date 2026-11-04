@@ -1,0 +1,38 @@
+{
+  "__doc__": "Integration-lane hand-off for the demand-driven mission job (lane sim-smart-job-feed-v2, Lane 1). The mission job is normally hardcoded in the scenario; --job-from substitutes an APPROVED store-vision restock plan, validated against scripts/planogram.json + the scenario single source (unknown SKU/slot refuses with a named reason, exit 2). Opt-in + default-off: absent --job-from the run is byte-identical. This file documents the producer -> consumer command sequence; it is NOT a runtime-config (--job-from is a CLI flag, no config key). See RUNBOOK sec 11a. No GPU is run from the job-feed lane; the integration lane runs the mission.",
+  "working_defaults": {
+    "planner": "restock (storevision.restock MissionPlanner)",
+    "approval": "pre-approved (the sim run is pre-approved; the gate is NOT consulted)"
+  },
+  "smart_variants": {
+    "planner": "--planner forecast | freshorder (opt-in; records provenance.planner_signal, keeps the resolved (sku, slot); forecast => task_kind stockout_forecast; freshorder => demand-driven order_cases, job quantity stays 1)",
+    "approval": "run_mobile_restock.py --require-approval (opt-in; refuses a plan whose provenance.approval.state != 'approved')"
+  },
+  "step_1_produce_export_store_vision_readonly": {
+    "comment": "Run with store-vision's own venv; reads store-vision READ-ONLY, actuates nothing, commits nothing there. Pick the planner (default restock). Firstmate default approval policy: auto_approve (gate off).",
+    "command": [
+      "\"$STORE_VISION/.venv/bin/python\" scripts/integrations/export_restock_job.py",
+      "--store-vision-src \"$STORE_VISION/src\"",
+      "--config \"$STORE_VISION/configs/demo-freshmart.yaml\"",
+      "--sku juice_orange --slot G3_back_s2 --source-bin backstock_00",
+      "--planner restock --approval-policy auto_approve",
+      "--out /tmp/restock_job.json"
+    ]
+  },
+  "step_2_dry_run_resolved_job_no_gpu": {
+    "comment": "Resolve + print the mapped mission job + planogram validation without booting the simulator. Add --require-approval to enforce the approved missions record.",
+    "command": [
+      "PYTHONPATH=scripts python3 scripts/run_mobile_restock.py",
+      "--manifest \"$ENVIRONMENT_MANIFEST\" --scenario \"$RUNTIME_SCENARIO\"",
+      "--job-from /tmp/restock_job.json --dry-run-job"
+    ]
+  },
+  "step_3_live_mission_integration_lane_only": {
+    "comment": "The integration lane (sole GPU user, /tmp/aile-gpu.lock) adds --job-from to its normal --execute command. The fixed source/shelf camera targets follow the resolved job; the mission verify stage remains the stock-commit source of truth.",
+    "command": [
+      "bash scripts/run_mobile_restock.sh --manifest \"$ENVIRONMENT_MANIFEST\"",
+      "--scenario \"$RUNTIME_SCENARIO\" --execute",
+      "--job-from /tmp/restock_job.json [--require-approval]"
+    ]
+  }
+}

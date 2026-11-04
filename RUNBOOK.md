@@ -695,6 +695,34 @@ scenario guard accepts the identical substitution and the fixed source/shelf cam
 targets follow the resolved job. The mission `verify` stage remains the stock-commit
 source of truth. CPU tests: `test_restock_job_from_plan.py`.
 
+**Planner variants (producer, `--planner`).** Working **default** = `restock`
+(store-vision's `MissionPlanner`). Two smart variants consult an extra landed
+store-vision module READ-ONLY and record its distinguishing signal in
+`provenance.planner_signal`, without changing the `v1` schema or the resolved
+`(sku, slot)`:
+
+- `--planner forecast` — `storevision.forecast` gives a probabilistic time-to-empty;
+  the task is marked `stockout_forecast` and the signal carries `time_to_empty_s` +
+  `confidence`. Quantity is unchanged (forecast drives *when/urgency*, not *how much*).
+- `--planner freshorder` — `storevision.freshorder` proposes the demand-driven order
+  quantity (service-level order-up-to with a perishability waste cap); it is recorded
+  in `planner_signal.order_cases`. The job quantity stays **1** (the mission restocks
+  one sealed handling unit per trip; `validate()` enforces `quantity == 1`), so the
+  full recommendation rides in provenance for batching / the next trip.
+
+Demo inputs for the smart planners (`--current-fill`, `--demand-per-hour`,
+`--on-hand-units`, `--shelf-life-days`, `--case-pack`, `--lead-time-days`,
+`--recent-waste-rate`, `--now`) are stand-ins; the mission's own sensing owns the
+real signal. The default `restock` planner ignores them.
+
+**Approval variant (consumer, `--require-approval`).** Working **default** =
+pre-approved: the sim run is pre-approved and the gate is not consulted. The smart
+variant `run_mobile_restock.py --job-from … --require-approval` refuses a plan whose
+`provenance.approval.state` is not `"approved"` with a named reason (honest refusal,
+exit 2), never a guessed job. The producer already refuses to *emit* an unapproved
+plan unless `--approver` approves a held mission; `--require-approval` enforces that
+record at consume time too.
+
 The host arm executor runs in ROS host Python after sourcing the task-owned
 overlay. Launch only with the authorized domain-88 simulator session. It consumes
 planned trajectories, publishes stamped joint-drive targets, and checks measured

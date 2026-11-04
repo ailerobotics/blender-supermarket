@@ -299,8 +299,14 @@ def _resolve_job_override(args, scenario):
     """
     if not getattr(args, 'job_from', None):
         return scenario, None, None
-    from twin.restock.job_from_plan import apply_to_scenario, load_plan, resolve_job
+    from twin.restock.job_from_plan import (
+        apply_to_scenario, load_plan, require_approved, resolve_job)
     plan = load_plan(args.job_from)
+    # Approval gate. Working default: pre-approved (the sim run is pre-approved,
+    # human-approval gate off) -- this check is skipped. Smart variant
+    # (--require-approval): refuse a plan lacking an approved missions record.
+    if getattr(args, 'require_approval', False):
+        require_approved(plan)
     job, meta = resolve_job(plan, _planogram_path(args), job_id=getattr(args, 'job_id', None))
     return apply_to_scenario(scenario, job), job, meta
 
@@ -905,6 +911,10 @@ def main():
     parser.add_argument('--job-id', help='override the mission job_id resolved from the plan provenance')
     parser.add_argument('--planogram', type=Path,
                         help='planogram.json used to validate --job-from (default: scripts/planogram.json)')
+    parser.add_argument('--require-approval', action='store_true',
+                        help='opt-in smart approval variant: refuse a --job-from plan that lacks an '
+                             'approved store-vision missions record (provenance.approval.state == '
+                             '"approved"). Working default off => the sim run is pre-approved.')
     parser.add_argument('--dry-run-job', action='store_true',
                         help='resolve --job-from, print the mapped mission job + planogram validation, '
                              'and exit without booting the simulator')
@@ -919,6 +929,8 @@ def main():
     args = parser.parse_args()
     if args.dry_run_job and not args.job_from:
         parser.error('--dry-run-job requires --job-from')
+    if args.require_approval and not args.job_from:
+        parser.error('--require-approval requires --job-from')
     try:
         report, manifest, scenario = check(args)
     except Exception as exc:
