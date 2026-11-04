@@ -1255,8 +1255,10 @@ The bench holds the GPU lock + 4 GiB RAM watchdog inside Python and bounds its o
 ## 17. Fleet dashboard — watch the mission + store (CPU, read-only, opt-in)
 
 A phone-first, read-only panel that merges the live Isaac restocking mission with
-store-vision store state. Standalone CPU server; never imported or launched by the
-mission, so a mission run is byte-identical whether or not it is up. No GPU. Design +
+store-vision store state. Two shapes, both CPU and never imported or launched by the
+mission (a run is byte-identical whether or not it is up): a standalone live server, or a
+zero-process **static panel** rendered into a run directory and served with
+`python3 -m http.server` (reachable from the watch page the same way). No GPU. Design +
 contract: [docs/fleet_dashboard.md](docs/fleet_dashboard.md).
 
 Print the aggregated status once and exit (the dry-run transcript):
@@ -1284,6 +1286,34 @@ the mission run directories (`--run-root`, default
 `~/datasets/twin-robot-in-store-boot-v1/mission`); it never writes a run,
 never boots Isaac, and degrades gracefully when the upstream is down. `--enable-trigger`
 requires `--requests-dir`; without it `POST /trigger` returns `403`.
+
+**Static run-directory panel (no process; the `python3 -m http.server` pattern).** For a
+panel the firstmate watch page (`:8787`) can serve the same way it serves runs — with no
+extra Python process — render a self-contained `fleet.html` + `fleet.json` pair into a run
+directory and serve that directory statically:
+```
+# render into the newest run dir (relative media: frame, walkthrough.mp4, bt_view.html)
+PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py \
+    --static-out ~/datasets/twin-robot-in-store-boot-v1/mission/<run> --watch 3 &
+python3 -m http.server 8794 --bind <DASHBOARD_HOST> \
+    -d ~/datasets/twin-robot-in-store-boot-v1/mission/<run>    # then open /fleet.html
+```
+`--static-out DIR` writes the pair and exits (`--watch SECONDS` re-renders to keep a live
+mount fresh); `--run <name>` picks a run (default newest); `--media-base URL` points the
+frame/report links at the watch page instead of run-relative files. The route to add to the
+watch page is in `data/sim-fleet-dashboard-v2/report.md`.
+
+**Smart approval variant (`--approval-trigger`, default off).** The working default is the
+pre-approved sim (no trigger). The smart variant makes a phone request land
+`pending_approval`; `POST /approve` (or `/reject`) with `{"id": "..."}` records the decision
+and writes the approved request as a `storevision.restock.job_plan/v1` proposal under
+`<requests-dir>/approved/`, which the lane-1 feed honours via
+`run_mobile_restock.py --job-from <approved/…json>` (it re-validates SKU + slot against the
+planogram and refuses an unknown one):
+```
+PYTHONPATH=scripts python3 scripts/run_fleet_dashboard.py \
+    --enable-trigger --approval-trigger --requests-dir /tmp/fleet-dashboard-requests
+```
 
 CPU tests (no GPU; `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` dodges the box's ROS pytest plugins):
 ```

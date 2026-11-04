@@ -16,7 +16,12 @@ import os
 import uuid
 from typing import Any
 
-VALID_STATUSES = ("queued", "accepted", "rejected", "done")
+VALID_STATUSES = ("queued", "pending_approval", "approved", "accepted", "rejected", "done")
+
+# The job-plan contract the rank-1 demand-feed consumer (`twin.restock.job_from_plan`)
+# reads via ``run_mobile_restock.py --job-from``. The approval variant emits an
+# approved request in this shape so the mission job feed *honours* a phone approval.
+JOB_PLAN_SCHEMA = "storevision.restock.job_plan/v1"
 
 
 class TriggerError(ValueError):
@@ -57,24 +62,107 @@ def validate_request(payload: Any) -> dict:
     return clean
 
 
-def enqueue_trigger(requests_dir: str, payload: Any) -> dict:
-    """Validate + persist a trigger request. Returns the stored record."""
-    clean = validate_request(payload)
+def _atomic_write(requests_dir: str, fname: str, rec: dict) -> str:
     os.makedirs(requests_dir, exist_ok=True)
-    now = _utcnow_iso()
-    rec = {
-        "id": uuid.uuid4().hex[:12],
-        "created_at": now,
-        "status": "queued",
-        "request": clean,
-    }
-    ts = now.replace(":", "").replace("-", "")
-    fname = f"{ts}-{rec['id']}.json"
     tmp = os.path.join(requests_dir, "." + fname + ".tmp")
     final = os.path.join(requests_dir, fname)
     with open(tmp, "w") as fh:
         json.dump(rec, fh, indent=2)
     os.replace(tmp, final)  # atomic publish
+    return final
+
+
+def enqueue_trigger(requests_dir: str, payload: Any,
+                    *, approval_required: bool = False) -> dict:
+    """Validate + persist a trigger request. Returns the stored record.
+
+    ``approval_required`` is the smart ``--approval-trigger`` variant: the request
+    lands as ``pending_approval`` (carrying an ``approval`` block) instead of
+    ``queued`` and does nothing until a phone ``approve``/``reject`` decision. The
+    working default (``approval_required=False``) is the plain monitored queue.
+    """
+    clean = validate_request(payload)
+    now = _utcnow_iso()
+    rec = {
+        "id": uuid.uuid4().hex[:12],
+        "created_at": now,
+        "status": "pending_approval" if approval_required else "queued",
+        "request": clean,
+    }
+    if approval_required:
+        rec["approval"] = {"state": "pending", "required": True, "by": None, "at": None}
+    ts = now.replace(":", "").replace("-", "")
+    _atomic_write(requests_dir, f"{ts}-{rec['id']}.json", rec)
+    return rec
+
+
+def _record_path(requests_dir: str, trigger_id: str) -> str | None:
+    try:
+        names = [n for n in os.listdir(requests_dir)
+                 if n.endswith(".json") and not n.startswith(".")]
+    except OSError:
+        return None
+    for n in names:
+        if n.endswith(f"-{trigger_id}.json") or n == f"{trigger_id}.json":
+            return os.path.join(requests_dir, n)
+    return None
+
+
+def _as_job_plan(rec: dict) -> dict:
+    """Project an approved request into the ``job_from_plan`` contract (honest shape).
+
+    The source cell / destination slot come from the request; the mission job feed
+    (`--job-from`) re-validates both against ``scripts/planogram.json`` and refuses an
+    unknown slot or SKU, so this is a *proposal* carrying the approval, never a silent
+    actuation. Pose/xyz are store-vision's to fill at plan time and are left absent.
+    """
+    req = rec.get("request", {})
+    return {
+        "schema": JOB_PLAN_SCHEMA,
+        "generated_at": rec.get("created_at"),
+        "sku": req.get("sku"),
+        "quantity": req.get("quantity"),
+        "source": {"location": req.get("source")},
+        "destination": {"slot_id": req.get("shelf")},
+        "priority": req.get("priority", 0),
+        "provenance": {
+            "planner": "fleet-dashboard.approval-trigger",
+            "task_id": rec.get("id"),
+            "approval": dict(rec.get("approval", {})),
+        },
+    }
+
+
+def decide_trigger(requests_dir: str, trigger_id: str, *, approve: bool,
+                   by: str = "phone") -> dict:
+    """Apply a phone approve/reject decision to a ``pending_approval`` request.
+
+    On approve, also writes the approved request as a job-plan proposal under
+    ``<requests_dir>/approved/`` in the ``job_from_plan`` contract, so an operator or
+    the rank-1 feed can honour it with ``run_mobile_restock.py --job-from``. Raises
+    :class:`TriggerError` for an unknown id or a request not awaiting approval.
+    """
+    path = _record_path(requests_dir, trigger_id)
+    if path is None:
+        raise TriggerError(f"no such request {trigger_id!r}")
+    try:
+        with open(path, "r") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise TriggerError(f"request {trigger_id!r} unreadable") from exc
+    if rec.get("status") != "pending_approval":
+        raise TriggerError(
+            f"request {trigger_id!r} is {rec.get('status')!r}, not awaiting approval")
+    now = _utcnow_iso()
+    rec["status"] = "approved" if approve else "rejected"
+    rec["approval"] = {
+        "state": "approved" if approve else "rejected",
+        "required": True, "by": by, "at": now,
+    }
+    _atomic_write(requests_dir, os.path.basename(path), rec)
+    if approve:
+        _atomic_write(os.path.join(requests_dir, "approved"),
+                      f"{rec['id']}.json", _as_job_plan(rec))
     return rec
 
 
