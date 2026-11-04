@@ -385,6 +385,64 @@ def test_live_pose_transfer_with_service_carry_folds_into_transit_and_holds(poli
     assert seq[seq.index('tuck') + 1] == 'transit'   # the carry fold holds in TRANSIT, not straight to preplace
 
 
+# -- sim-service-carry-drive-to-shelf-v1: the observe gate must DEFER the far place reach when the base -
+#    repositions, so the pick/TRANSIT run and the runtime can drive the carton to shelf_approach. ------
+
+def _far_endcap_target(t=1.0):
+    # The sales-floor endcap in the ARM-BASE frame from the side-bay PARK (transferobs1): ~2.5 m out,
+    # far past the 1.3 m UR10 reach. free_dimensions >= the carton, so ONLY the reach gate is at issue.
+    return Target(f'shelf:{t}', 'ground_truth', t, 'G3_back_s2', (2.5, 0.0, 0.1, 0., 0., 0., 1.),
+                  True, (0.7, 0.5, 0.5))
+
+
+def _drive_to_transit(c, source, stow, ticks=80):
+    cart_centre = (*source.pose[:2], source.pose[2] - PROFILE.dimensions[2] / 2.0)
+    phases, r = [], None
+    for i in range(ticks):
+        t = 1.0 + 0.1 * i
+        if c.phase in ('succeeded', 'failed', 'transit'):
+            break
+        phases.append(c.phase)
+        contact = c.held or (c.phase == 'grasp' and c.issued)
+        lifted = c.held and c.phase not in ('grasp',)
+        placed = (*cart_centre[:2], cart_centre[2] + 0.05) if lifted else cart_centre
+        src = Observation(f'cart:{t}', 'sensor', t, 'juice_orange', 'rollwagen', source.pose, 1.0)
+        r = c.step(0.1, Sensors(t, (src,), _far_endcap_target(t), True, contact, t, t,
+                                stow if c.phase == 'stow' else (0.,) * 6, (), t,
+                                time.monotonic() + 100., (*placed, 0., 0., 0., 1.)))
+    phases.append(c.phase)
+    return phases, r
+
+
+def test_service_carry_defers_far_place_reach_at_observe_and_reaches_transit(policy, monkeypatch, capsys):
+    # The FIX: with the service carry on, an endcap place 2.5 m from the park (unreachable from HERE)
+    # must NOT fail 'unreachable or undersized target' at observe -- the place is reached only AFTER the
+    # base drives to shelf_approach. The pick runs and the arm folds to TRANSIT (where the runtime
+    # carry-drive leg takes over). The place reach is validated at plan time + post-drive, not here.
+    monkeypatch.setenv(tm.ENV, 'live_pose')
+    monkeypatch.setenv(tc.ENV, 'wrist_guard')
+    c, _, stow = service_carry_host_controller(policy)
+    phases, r = _drive_to_transit(c, live_source(), stow)
+    assert c.phase == 'transit' and r.status == 'running', (c.phase, r.reason)
+    assert 'unreachable or undersized target' not in (r.reason or '')
+    assert 'approach' in phases   # it advanced PAST observe into the pick reach (deferred the far place)
+    assert 'REACH_ENVELOPE_FAIL' not in capsys.readouterr().out   # pick-side gated, place-side deferred
+
+
+def test_without_service_carry_far_place_still_fails_at_observe_transferobs1(policy, monkeypatch):
+    # Byte-identical guard: WITHOUT the service carry (no base reposition), the same far endcap place
+    # still fails fast at observe with the named reach reason -- the transferobs1 emergency-stop path,
+    # preserved for every non-repositioning transfer so a truly unreachable single-pose place is caught.
+    monkeypatch.setenv(tm.ENV, 'live_pose')
+    monkeypatch.setenv(tc.ENV, 'wrist_guard')
+    c, _, stow = host_controller(policy)   # no transfer_service_carry
+    assert not c._repositions_before_place()
+    phases, r = _drive_to_transit(c, live_source(), stow)
+    assert r.status == 'failed' and r.reason == 'unreachable or undersized target'
+    # it failed IN observe, before any pick reach work (only observe + the terminal 'failed' seen)
+    assert set(phases) <= {'observe', 'failed'} and 'approach' not in phases
+
+
 # -- live_pose requires the wrist_guard: fail fast, never silently run the jam-prone place -------------
 
 def test_live_pose_transfer_without_wrist_guard_fails_fast_with_a_named_reason(policy, monkeypatch, capsys):

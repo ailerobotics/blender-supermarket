@@ -174,6 +174,36 @@ def check_activation(host_cfg, runtime_cfg, required):
     return problems
 
 
+def check_flow_consistency(host_cfg, runtime_cfg):
+    """sim-service-carry-drive-to-shelf-v1: the shelf-staging service leg needs BOTH halves together,
+    across the two config layers, or it silently does nothing.
+
+    The RUNTIME ``shelf_staging`` re-sequence (isaac_bundle -> RuntimeAdapter) is what DRIVES the base
+    carry to ``shelf_approach``, but it only fires once the arm has folded to TRANSIT -- and the arm
+    only folds to TRANSIT when the HOST ``transfer_service_carry`` is on (controller
+    ``_repositions_before_place``). With ``shelf_staging`` on but ``transfer_service_carry`` off
+    (transferobs1: the HOST config left the key absent -> default False), the live_pose transfer goes
+    tuck -> preplace, the base NEVER carries the carton, and the controller gates the endcap place
+    reach from the side-bay PARK pose at observe -> 'unreachable or undersized target' -> emergency
+    stop. That is a cross-LAYER split, invisible to :func:`check_activation` (both keys are in the
+    right FILE; one is just false), so name it here and REFUSE at plan time, before any GPU boot.
+
+    One-directional on purpose: ``shelf_staging`` ON requires ``transfer_service_carry`` ON. A
+    ``transfer_service_carry`` left on with ``shelf_staging`` off does not drive a base carry and, for
+    a live_pose transfer with no runtime drive, fails BOUNDED (the TRANSIT phase times out by name) --
+    it is not the silent skip, and refusing it would false-block every non-staging run that shares the
+    repo HOST config (collect-only, legacy transfer)."""
+    if bool(runtime_cfg.get('shelf_staging')) and not bool(host_cfg.get('transfer_service_carry')):
+        return [("shelf-staging service leg SPLIT across config layers: runtime 'shelf_staging' is ON "
+                 "but host 'transfer_service_carry' is OFF. The live_pose transfer will not fold to "
+                 "TRANSIT, so the base never carries the carton to shelf_approach and the controller "
+                 "gates the endcap place reach from the side-bay park pose at observe "
+                 "('unreachable or undersized target' -> emergency stop; transferobs1). Set "
+                 "'transfer_service_carry': true in the HOST config (ros_host_config.json) alongside "
+                 "the runtime 'shelf_staging': true.")]
+    return []
+
+
 def _load(path):
     with open(path) as stream:
         return json.load(stream)
@@ -195,6 +225,9 @@ def main(argv=None):
     host_cfg = _load(args.host_config)
     runtime_cfg = _load(args.runtime_config)
     problems = check_activation(host_cfg, runtime_cfg, required)
+    # sim-service-carry-drive-to-shelf-v1: cross-layer flow consistency (always, not just --require'd
+    # keys) so a shelf_staging/transfer_service_carry split cannot reach a GPU boot.
+    problems += check_flow_consistency(host_cfg, runtime_cfg)
     # Echo the effective placement so the log proves what the preflight saw.
     for key in required:
         consumer = KEY_CONSUMER.get(key, '?')

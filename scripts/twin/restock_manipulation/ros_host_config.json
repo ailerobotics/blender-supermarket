@@ -3,9 +3,9 @@
     {
       "sku": "juice_orange",
       "dimensions": [
-        0.45,
-        0.3,
-        0.18
+        0.6,
+        0.4,
+        0.16
       ],
       "tcp_quaternion": [
         0.5,
@@ -91,5 +91,5 @@
   "transfer_pick_wrist_guard": true,
   "esdf_boot_ack_grace_s": 15.0,
   "transfer_preplace_reach_guard": true,
-  "carton_level": false
+  "transfer_service_carry": true
 }

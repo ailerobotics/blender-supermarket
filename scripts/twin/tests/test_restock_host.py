@@ -841,12 +841,13 @@ class RosHostLaunchWiring(unittest.TestCase):
                                     # (reject a clear-but-unreachable deep shoulder fold by name).
                                     'transfer_pick_wrist_guard', 'esdf_boot_ack_grace_s',
                                     'transfer_preplace_reach_guard',
-                                    # sim-carton-level-carry-v1 (+287/290/294): keep the carried carton
-                                    # level through the whole cycle (fold-goal leveling + the SUSTAINED
-                                    # CARTON_TILT trip, debounced over tilt_grace_s). Re-enabled HOST-side
-                                    # by default for coldwin25 (the captain video) after the transient
-                                    # debounce (PR294) removed the lift-replan overshoot false-trip.
-                                    'carton_level'})
+                                    # sim-service-carry-drive-to-shelf-v1: the shelf-staging live_pose
+                                    # transfer service leg's TRANSIT carry-hold -- on by default here so a
+                                    # side-bay transfer folds to TRANSIT and the runtime carries the carton
+                                    # to shelf_approach (paired with runtime shelf_staging; the config_preflight
+                                    # flow-consistency gate refuses a split). Inert for every non-live_pose
+                                    # transfer (collect/legacy): _repositions_before_place needs live_pose too.
+                                    'transfer_service_carry'})
         self.assertEqual(len(cfg['collect_place_preplace_shape']), 6)   # full 6-joint upright preplace shape
         self.assertLessEqual(cfg['collect_place_preplace_shape'][3], 0.65)  # wrist_1 at/below the stop
         self.assertIsInstance(cfg['collect_place_wrist_guard'], bool)

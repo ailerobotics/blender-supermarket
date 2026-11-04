@@ -1,0 +1,50 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "bt_node_order",
+      "ok": true,
+      "detail": "uncouple@side-bay in outbound=True; transfer has carry->endcap NAVIGATE node (idx 2) BEFORE place@endcap (idx 4)"
+    },
+    {
+      "name": "endcap_reachable_from_shelf_approach",
+      "ok": true,
+      "detail": "1.217 m <= 1.30 m from shelf_approach (-3.05, 6.0) (shelf_approach stays put; reach bound untouched)"
+    },
+    {
+      "name": "endcap_unreachable_from_side_bay",
+      "ok": true,
+      "detail": "2.545 m > 1.30 m from the side-bay park (-4.35, 6.99) (the observe-gate distance that tripped transferobs1)"
+    },
+    {
+      "name": "plan_time_resolver_accepts_reachable_endcap",
+      "ok": true,
+      "detail": "flow=shelf_staging target=(-3.05, 4.826, 0.73) reach=1.217 m"
+    },
+    {
+      "name": "plan_time_trip_names_unreachable",
+      "ok": true,
+      "detail": "raised: unreachable place target: 2.025 m > 1.30 m -- the shelf_staging endcap place (-3.05, 4.0, 0.73) is 2.025 m from the service pose (-3.05, 6.0) arm base, past the 1.30 m UR10 reach; the service leg cannot place there. Move shelf_approach closer to the endcap (never the reach bound), or check scenario.initial_staging.target_surface_pose_world."
+    },
+    {
+      "name": "service_carry_defers_far_place",
+      "ok": true,
+      "detail": "service carry ON: observe proceeds past the far endcap (phase=release, no 'unreachable or undersized target' emergency stop)"
+    },
+    {
+      "name": "no_service_carry_still_fails_fast",
+      "ok": true,
+      "detail": "service carry OFF: observe fails fast 'unreachable or undersized target' (byte-identical transferobs1)"
+    },
+    {
+      "name": "preflight_refuses_split",
+      "ok": true,
+      "detail": "runtime shelf_staging ON + host transfer_service_carry OFF is refused at plan time"
+    },
+    {
+      "name": "preflight_passes_paired",
+      "ok": true,
+      "detail": "paired config passes; the committed repo host default has transfer_service_carry=true"
+    }
+  ]
+}
