@@ -27,6 +27,12 @@ from twin.tools import carton_level_bench as bench
 URDF = '/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/collectlevel3/mobile-import.urdf'
 need_urdf = pytest.mark.skipif(not os.path.exists(URDF), reason='mission URDF not present')
 
+# sim-carton-level-place-descent-v1: the coldwin34 run (the complete side-bay cold cycle with PR 318 active
+# that tripped CARTON_TILT roll -0.13 pitch +2.06 at sim 202.95, phase=place -- carton_level:true =>
+# gravity_compensation None, so the set-down commanded a geometric-level config with NO droop pre-tilt).
+CW34_URDF = '/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/coldwin34/mobile-import.urdf'
+need_cw34 = pytest.mark.skipif(not os.path.exists(CW34_URDF), reason='coldwin34 URDF not present')
+
 
 # ------------------------------------------------------------------ config (no URDF)
 
@@ -102,8 +108,10 @@ def test_required_speed_ceiling_monotone():
 
 @need_urdf
 def test_place_descent_passes_gentled_ceilings_to_motion():
-    """The collect-deck level place descent dispatches as a straight-line begin_joint_goal carrying the
-    gentled place_descent_speed/accel; carton_level OFF leaves it byte-identical (no speed/accel)."""
+    """sim-carton-level-place-descent-v1: the collect-deck level place descent dispatches as a PER-POINT
+    wrist-compensated collision-off begin_joint_path (>2 waypoints) carrying the gentled
+    place_descent_speed/accel; carton_level OFF leaves it byte-identical (a begin() pose straight-line,
+    no joint path -- test_place_descent_off_is_byte_identical)."""
     from twin.tests import test_restock_manipulation as T
     # level_path OFF so the preplace uses the single leveled goal (the leveled-waypoint preplace hits a
     # pre-existing fixture-URDF inversion unrelated to this change); the place descent is independent.
@@ -115,11 +123,73 @@ def test_place_descent_passes_gentled_ceilings_to_motion():
         carton_level=cl.resolve_level_config({'trip': False, 'level_path': False}), fk_urdf=URDF,
         carry_wrist1_cap=0.65, carry_wrist2_min=0.0)[0]
     m = c.motion
-    _by_phase, _seq, jg_by_phase = T._drive_collect_place(c, m)
-    place = jg_by_phase['place']
-    assert place['straight_line'] is True
-    assert place['speed'] == pytest.approx(0.02)
+    # a realistic sensed deck TCP + realistic carried joints (the synthetic (.5,.2,.1) + the fixture's zero
+    # joints are near-singular for the loaded level-place IK; the real mission supplies both).
+    _by_phase, _seq, _jg = T._drive_collect_place(
+        c, m, target_pose=(.9, .05, .35, 0., 0., 0., 1.), carry_joints=T._SL_PREPLACE_SHAPE)
+    paths = getattr(m, 'joint_paths', [])
+    assert paths, 'the level place descent must dispatch a begin_joint_path'
+    place = paths[-1]
+    assert len(place['waypoints']) > 2                       # per-point, not a 2-point endpoint-only line
+    assert place['speed'] == pytest.approx(0.02)             # gentled place_descent ceilings
     assert place['accel'] == pytest.approx(0.04)
+    assert place['waypoints'][0] == place['measured']        # the path starts exactly where the arm is
+
+
+# ------------------------------------------ per-point wrist-compensated descent (place-descent-v1)
+
+@need_cw34
+def test_per_point_descent_reproduces_coldwin34_and_lands_level_both_docks():
+    """sim-carton-level-place-descent-v1: on coldwin34's REAL kinematics, the UNCOMPENSATED geometric-level
+    set-down droops ~2 deg under the two-regime model (reproducing the +2.06 CARTON_TILT), while the
+    PER-POINT wrist-compensated descent lands the DEEPEST set-down -- and every compensated waypoint -- level
+    (<= 1 deg) at BOTH the south dock and the east cart. Bound + grace untouched."""
+    from twin.tools import carton_level_bench as bench
+    for geom in ('south', 'east'):
+        r = bench.run_place_descent_per_point(CW34_URDF, geometry=geom)
+        # BEFORE: the uncompensated set-down reproduces the ~2 deg trip regime (coldwin34 +2.06) ...
+        assert r.uncomp_setdown_pitch > 1.5, (geom, r.uncomp_setdown_pitch)
+        # ... AFTER: the per-point fix lands the DEEPEST (most-extended) set-down level within the margin ...
+        assert r.deepest_exec_pitch <= 1.0, (geom, r.deepest_exec_pitch)
+        assert r.deepest_exec_pitch < 0.1, (geom, r.deepest_exec_pitch)       # in fact ~0
+        # ... and EVERY compensated waypoint along the insert stays level (not only the endpoint) ...
+        assert r.max_compensated_exec_pitch <= 1.0, (geom, r.max_compensated_exec_pitch)
+        # ... strictly better than the uncompensated droop, every waypoint in the clear carry wrist region.
+        assert r.deepest_exec_pitch < r.uncomp_setdown_pitch
+        assert r.all_waypoints_clear
+        assert r.passes(1.0)
+    # the deeper south dock needs (and the compensation absorbs) more droop than the nearer east cart.
+    south = bench.run_place_descent_per_point(CW34_URDF, geometry='south')
+    east = bench.run_place_descent_per_point(CW34_URDF, geometry='east')
+    assert south.uncomp_setdown_pitch > east.uncomp_setdown_pitch
+
+
+@need_cw34
+def test_per_point_descent_is_extension_following():
+    """Each waypoint's wrist pre-rotation is solved against ITS OWN loaded droop (the sag is tau/K and tau
+    grows with reach), so the commanded wrist GROWS monotonically into the deepest set-down -- a per-pose
+    solve, not one endpoint pre-tilt interpolated. The COMMANDED pitch rises with extension while the
+    two-regime EXECUTED stays ~0 throughout."""
+    import numpy as np
+    from twin.urdf_probe import parse_urdf
+    from twin.restock_manipulation.cad_tool import ARM_JOINTS
+    robot = parse_urdf(CW34_URDF)
+    tl = 'gripper_pad_tcp'
+    u = cl.carton_up_in_tool(cl.tool_rotation(robot, [1.3208, -1.2763, 2.0895, -0.8131, 1.2988, 0.0], tl))
+    big = 2 * math.pi
+    limits = {'ur_wrist_1_joint': (-big, 0.65), 'ur_wrist_2_joint': (0.0, big),
+              'ur_elbow_joint': (0.1, math.pi)}
+    seed = [cl.level_preserve_tcp(robot, [0.093, -1.91, 2.014, -0.103, 1.664, 0.0], u,
+                                  tool_link=tl, limits=limits)[j] for j in ARM_JOINTS]
+    gc = cl.GravityCompensation(tool_link=tl)
+    plan = cl.plan_compensated_place_descent(robot, seed, np.array((1.042, 0.063, 0.436)), seed, u, gc,
+                                             tool_link=tl, limits=limits, waypoints=10)
+    # the commanded (pre-tilted) carton pitch on the COMPENSATED waypoints rises toward the deepest set-down
+    cmd_pitch = [abs(cl.carried_rpy(robot, list(w), u, tl)[1]) for w in plan.waypoints[1:]]
+    assert cmd_pitch[-1] > cmd_pitch[0] + 0.3            # extension-following: more pre-tilt deeper in
+    assert cmd_pitch[-1] > 1.5                            # the deepest command is pre-tilted ~2 deg ...
+    # ... yet the droop-aware predicted executed stays under the bound across the whole insert.
+    assert max(plan.max_roll, plan.max_pitch) < cl.DEFAULT_TILT_BOUND_DEG
 
 
 def test_place_descent_off_is_byte_identical():

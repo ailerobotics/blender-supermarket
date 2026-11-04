@@ -44,6 +44,7 @@ class _DisabledHook:
 
     def __init__(self, reason):
         self.disabled_reason = reason
+        self.acts = False
 
     def on_navigate(self, port, packet, now):
         return None
@@ -72,6 +73,19 @@ class RouteAlertsMissionHook:
     @property
     def disabled_reason(self):
         return self._disabled_reason or getattr(self._runner, "disabled_reason", None)
+
+    @property
+    def acts(self) -> bool:
+        """True when the runner is in the smart ``act`` mode (feeds the dynobs layer).
+
+        The bundle wires :meth:`latest_detections` into the existing dynobs costmap
+        seam ONLY when this is True; in the findings-only working default it is False
+        and navigation is left byte-identical.
+        """
+        try:
+            return bool(self._runner.config.acts)
+        except Exception:  # pragma: no cover - defensive
+            return False
 
     def on_navigate(self, port, packet, now):
         """Called each driving tick. Returns the tick's route-alerts result or None."""

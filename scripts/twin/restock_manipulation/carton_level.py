@@ -611,6 +611,57 @@ def _select_level_path(robot, start_config, gvec, up_in_tool, *, bound_deg, join
     return min(tried, key=lambda p: max(p.max_roll, p.max_pitch))
 
 
+def plan_compensated_place_descent(robot, start_config, target_pos, seed_goal, up_in_tool, gc, *,
+                                   bound_deg=DEFAULT_TILT_BOUND_DEG, joints=None, tool_link='ur_tool0',
+                                   root='ur_base_link', limits=None, waypoints=8, interior=8):
+    """Plan the loaded place-on-cart SET-DOWN descent as a PER-POINT wrist-compensated leveled path
+    (sim-carton-level-place-descent-v1).
+
+    The place descent lowers the WELDED carton from the (measured) leveled standoff ``start_config``
+    down onto the sensed deck at ``target_pos`` (tool origin in ``root``). The far-extended loaded arm
+    droops under gravity, and PR 318's wrist droop-cancel (``GravityCompensation.wrist_feedforward`` via
+    ``level_place_ik(gravity_comp=gc)``) cancels it -- but the place descent applied it only at the
+    single ENDPOINT of a 2-point straight-line ``begin_joint_goal`` (and only when a gravity_compensation
+    was configured, which the default ``carton_level: true`` host config is NOT). Routed only to the
+    endpoint, the pre-rotation does not FOLLOW THE EXTENSION through the insert, so the welded carton
+    pitches off level as the arm extends into the deepest pose (coldwin34 +2.06 deg at the set-down
+    dwell -- the trip site).
+
+    Here the TCP target is interpolated linearly from the standoff TCP to ``target_pos`` and EVERY
+    waypoint is solved reach+level+wrist-droop-cancel against ITS OWN loaded droop, so the executed
+    welded carton stays parallel to the ground at every interpolated point, not only the endpoint. The
+    first waypoint is pinned to ``start_config`` verbatim (``begin_joint_path`` requires the path to
+    start exactly where the arm is, and the standoff's own small executed droop is reported honestly);
+    ``seed_goal`` seeds the first reach+level IK and each solve seeds the next for a continuous branch.
+    ``gc`` must be a ``GravityCompensation`` (the caller supplies a default when the config omits one).
+
+    Returns a ``LevelPathPlan`` whose ``max_*`` are the PREDICTED EXECUTED extremes under ``gc`` (the
+    droop-aware replay -- what the GPU carton and the CARTON_TILT trip read, NOT the pre-tilted
+    command's geometric attitude). Raises ValueError when a waypoint has no in-``limits`` reach+level
+    solution (the caller falls back to the unleveled straight place / the CARTON_TILT trip owns it).
+    Pure/CPU."""
+    if gc is None:
+        raise ValueError('plan_compensated_place_descent requires a GravityCompensation')
+    start = _as_joint_map(start_config)
+    svec = _as_vec(start)
+    start_tcp = tool_position(robot, start, tool_link, root)
+    tgt = np.asarray(target_pos, float)[:3]
+    n = max(2, int(waypoints))
+    vecs = [list(svec)]
+    seed = _as_joint_map(seed_goal)
+    for i in range(1, n + 1):
+        a = i / float(n)
+        tgt_i = (1.0 - a) * start_tcp + a * tgt
+        sol = level_place_ik(robot, tgt_i, up_in_tool, seed, joints=joints, tool_link=tool_link,
+                             root=root, limits=limits, gravity_comp=gc)
+        vecs.append(_as_vec(sol))
+        seed = sol
+    mr, mp, mt = predict_path_tilt_executed(robot, vecs, up_in_tool, tool_link=tool_link, root=root,
+                                            interior=interior, gravity_comp=gc)
+    return LevelPathPlan(waypoints=tuple(tuple(v) for v in vecs), max_roll=mr, max_pitch=mp,
+                         max_tilt=mt, waypoints_n=n)
+
+
 # ------------------------------------------- loaded gravity-droop model (sim-carton-level-southdock-v1)
 # Default EFFECTIVE droop stiffness (N*m/rad). The welded carton's attitude is the arm's attitude; at a
 # FAR-EXTENDED, LOADED place pose the heavy shoulder/elbow pitch chain carries a large gravity torque that

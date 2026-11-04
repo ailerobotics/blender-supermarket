@@ -65,6 +65,31 @@ class RouteAlertsConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             RouteAlertsConfig(footprint_pad_m=-1.0)
 
+    def test_mode_default_is_findings(self):
+        c = RouteAlertsConfig()
+        self.assertEqual(c.mode, "findings")
+        self.assertFalse(c.acts)
+
+    def test_mode_act(self):
+        c = RouteAlertsConfig(mode="act")
+        self.assertTrue(c.acts)
+
+    def test_mode_invalid_rejected(self):
+        with self.assertRaises(ValueError):
+            RouteAlertsConfig(mode="swerve")
+
+    def test_from_obj_mode_shorthands(self):
+        self.assertEqual(RouteAlertsConfig.from_obj("findings").mode, "findings")
+        self.assertEqual(RouteAlertsConfig.from_obj(True).mode, "findings")
+        self.assertEqual(RouteAlertsConfig.from_obj("act").mode, "act")
+        self.assertTrue(RouteAlertsConfig.from_obj("act").acts)
+
+    def test_from_obj_dict_mode(self):
+        self.assertTrue(RouteAlertsConfig.from_obj({"mode": "act"}).acts)
+        self.assertFalse(RouteAlertsConfig.from_obj({"mode": "findings"}).acts)
+        with self.assertRaises(ValueError):
+            RouteAlertsConfig.from_obj({"mode": "nope"})
+
 
 if __name__ == "__main__":
     unittest.main()

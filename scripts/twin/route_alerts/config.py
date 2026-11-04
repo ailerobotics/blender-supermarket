@@ -80,6 +80,22 @@ class RouteAlertsConfig:
       still emits per-object footprints + ``obstruction.detected`` events.
     * ``obstruction_source`` / ``footprint_pad_m`` -- the ``source`` tag and extra
       plan-view padding (m) for the dynobs ``Detection`` objects fed to navigation.
+    * ``mode`` -- the two delivered defaults (captain's "working default" vs "smart"):
+
+        - ``"findings"`` (the WORKING DEFAULT) -- the robot is a pure sensor. It
+          publishes ``robot.route_alert.*`` events + staff tasks + the evidence log,
+          but :meth:`RouteAlertsRunner.latest_detections` returns an EMPTY list, so
+          the navigation dynobs layer is fed nothing and the drive is byte-identical
+          to a run with no route alerts. Findings never change where the robot drives.
+        - ``"act"`` (the SMART variant, ``--route-alerts=act``) -- in addition to the
+          findings, a confirmed obstruction footprint is exposed through
+          :meth:`latest_detections`, so it raises the cost of the route ONLY through
+          the moving-obstacle costmap layer the ``sim-restock-dynobs-v1`` lane owns
+          (no parallel layer). ``spill``/``strays`` findings never move the robot even
+          in ``act`` -- only an ``obstruction`` footprint does (it is the one finding
+          that is a physical passability hazard for the base).
+
+      The default is ``"findings"`` so the smart behaviour is opt-in on top of opt-in.
     * ``store_name`` -- cosmetic label for the synthetic store config.
     """
 
@@ -92,7 +108,11 @@ class RouteAlertsConfig:
     aisles: dict = field(default_factory=dict)
     obstruction_source: str = "route_obstruction"
     footprint_pad_m: float = 0.0
+    mode: str = "findings"
     store_name: str = "route-alerts"
+
+    #: the two delivered modes (captain: keep one version with the working default).
+    MODES = ("findings", "act")
 
     def __post_init__(self) -> None:
         if type(self.cadence) is not int or self.cadence < 1:
@@ -101,6 +121,14 @@ class RouteAlertsConfig:
             raise ValueError("footprint_pad_m must be >= 0")
         if not isinstance(self.floors, dict) or not isinstance(self.aisles, dict):
             raise ValueError("floors/aisles must be objects")
+        if self.mode not in self.MODES:
+            raise ValueError(
+                f"route-alerts mode must be one of {self.MODES}, got {self.mode!r}")
+
+    @property
+    def acts(self) -> bool:
+        """True when a confirmed obstruction should feed the dynobs costmap layer."""
+        return self.mode == "act"
 
     @property
     def any_enabled(self) -> bool:
@@ -108,9 +136,17 @@ class RouteAlertsConfig:
 
     @classmethod
     def from_obj(cls, obj) -> "RouteAlertsConfig":
-        """Build from a mission config value (``True`` => defaults, or a dict)."""
-        if obj is True:
+        """Build from a mission config value.
+
+        ``True`` or ``"findings"`` => the working-default (findings-only) config;
+        ``"act"`` => the smart variant; a dict => a tuned section (which may carry
+        its own ``mode``). The ``--route-alerts[=act]`` launcher flag injects the
+        matching value.
+        """
+        if obj is True or obj == "findings":
             return cls()
+        if obj == "act":
+            return cls(mode="act")
         if obj in (None, False):
             raise ValueError("route-alerts config absent")
         if isinstance(obj, RouteAlertsConfig):
@@ -129,5 +165,6 @@ class RouteAlertsConfig:
             aisles=dict(obj.get("aisles", base.aisles)),
             obstruction_source=str(obj.get("obstruction_source", base.obstruction_source)),
             footprint_pad_m=float(obj.get("footprint_pad_m", base.footprint_pad_m)),
+            mode=str(obj.get("mode", base.mode)),
             store_name=str(obj.get("store_name", base.store_name)),
         )
