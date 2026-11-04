@@ -415,6 +415,15 @@ def run(args, manifest, scenario):
     fit_verdict=None
     if getattr(args, 'fit_preflight', False):
         from twin.restock.fit_preflight import preflight_from_config
+        # Opt-in smart variant: --catalogue points the preflight at a store-vision
+        # tray-catalogue export (read-only) that widens the in-scope SKUs. Merge it
+        # into the fit_preflight config block so the CLI flag and a runtime-config
+        # block agree on one source; absent => the scenario carton working default.
+        if getattr(args, 'catalogue', None):
+            fp = config.get('fit_preflight')
+            fp = dict(fp) if isinstance(fp, dict) else {}
+            fp['catalogue_export'] = str(args.catalogue)
+            config['fit_preflight'] = fp
         fit_verdict=preflight_from_config(scenario, config)
         print('FIT_PREFLIGHT '+json.dumps(fit_verdict.event() if fit_verdict else
                                           {'fit': 'disabled', 'reason': 'no fit_preflight config'}),
@@ -904,6 +913,13 @@ def main():
                              'slot (measured free space in runtime-config["fit_preflight"]) BEFORE '
                              'sending the robot, instead of failing opaquely at place. Default off; '
                              'absent => byte-identical run. See twin.restock.fit_preflight.')
+    parser.add_argument('--catalogue', type=Path,
+                        help='opt-in smart variant (requires --fit-preflight): a store-vision '
+                             'tray-catalogue export (storevision.restock.product_catalogue/v1, '
+                             'produced read-only by scripts/integrations/export_tray_catalogue.py) '
+                             'that widens the in-scope handling units beyond the scenario carton to '
+                             'every tray SKU store-vision knows. Absent => the scenario unit is the '
+                             'working default (byte-identical).')
     parser.add_argument('--job-from', type=Path,
                         help='opt-in: a store-vision job-plan export (storevision.restock.job_plan/v1) '
                              'whose approved restock item replaces the scenario job, validated against '
@@ -931,6 +947,8 @@ def main():
         parser.error('--dry-run-job requires --job-from')
     if args.require_approval and not args.job_from:
         parser.error('--require-approval requires --job-from')
+    if getattr(args, 'catalogue', None) and not args.fit_preflight:
+        parser.error('--catalogue requires --fit-preflight')
     try:
         report, manifest, scenario = check(args)
     except Exception as exc:

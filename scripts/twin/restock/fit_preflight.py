@@ -26,8 +26,10 @@ silent identity).
 """
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from twin.restock_manipulation.fit import PLACEMENT_MARGIN_M, axis_fits
 
@@ -37,12 +39,30 @@ MIN_CONFIDENCE = 0.5
 
 _AXIS_LABELS = ('x', 'y', 'z')
 
+# Schema of a store-vision tray-catalogue export (the opt-in smart variant). It mirrors
+# store-vision's AGPL-free ``storevision.restock.providers.ProductInfo`` per-SKU record
+# (``dims_mm`` = (L, W, H) millimetres, ``weight_kg``, ``tray_packed``). The producer that
+# reads store-vision read-only lives at ``scripts/integrations/export_tray_catalogue.py``;
+# this module only CONSUMES the exported JSON and imports no store-vision code.
+CATALOGUE_SCHEMA = 'storevision.restock.product_catalogue/v1'
+
+
+class CatalogueError(ValueError):
+    """The tray-catalogue export is malformed or carries an unsupported schema."""
+
 
 @dataclass(frozen=True)
 class HandlingUnit:
-    """A sealed handling unit's grasp-frame footprint (arm-base x, y, z) in metres."""
+    """A sealed handling unit's grasp-frame footprint (arm-base x, y, z) in metres.
+
+    ``source`` records where the geometry came from so the verdict is honest about
+    which SKU-geometry source won: ``'scenario'`` (the working default), a
+    ``'catalogue:<...>'`` store-vision tray-catalogue export (the opt-in variant),
+    or ``'config_units'`` (a hand-set override).
+    """
     sku: str
     dimensions_m: tuple[float, float, float]
+    source: str = 'scenario'
 
 
 @dataclass(frozen=True)
@@ -74,6 +94,8 @@ class FitVerdict:
     free_dimensions_m: tuple[float, float, float] | None = None
     slot_id: str | None = None
     source: str = ''
+    unit_sku: str | None = None
+    unit_source: str = 'scenario'
 
     def __bool__(self) -> bool:  # allow `if verdict:` -> only a positive fit
         return self.status == 'ok'
@@ -102,6 +124,8 @@ class FitVerdict:
             'margin_m': self.margin_m,
             'slot_id': self.slot_id,
             'source': self.source,
+            'unit_sku': self.unit_sku,
+            'unit_source': self.unit_source,
             'dimensions_m': list(self.dimensions_m) if self.dimensions_m else None,
             'free_dimensions_m': list(self.free_dimensions_m) if self.free_dimensions_m else None,
             'low_confidence': self.low_confidence,
@@ -119,7 +143,8 @@ def evaluate_fit(unit: HandlingUnit, free: SlotFreeSpace | None, *,
     measurement then refuses an occupied/blocked slot or an axis undersize, else ok.
     """
     dims = tuple(unit.dimensions_m)
-    base = dict(dimensions_m=dims, margin_m=margin)
+    base = dict(dimensions_m=dims, margin_m=margin,
+                unit_sku=unit.sku, unit_source=unit.source)
     if free is None:
         return FitVerdict('unknown', ('no measured free-space record for slot',),
                           source='absent', **base)
@@ -150,24 +175,100 @@ def evaluate_fit(unit: HandlingUnit, free: SlotFreeSpace | None, *,
 
 
 def handling_unit_from_scenario(scenario: dict, *, sku: str | None = None,
-                                units: dict | None = None) -> HandlingUnit:
+                                units: dict | None = None,
+                                catalogue: dict | None = None) -> HandlingUnit:
     """Build the in-scope :class:`HandlingUnit` from a mission scenario.
 
-    Tray SKUs in scope default to the scenario's own ``handling_unit``; ``units``
-    (a ``{sku: (x, y, z)}`` map) extends/overrides that set, keeping the catalogue
-    configurable. ``sku`` selects which unit to preflight (default: the job's SKU).
+    Tray SKUs in scope follow a fixed precedence (later overrides earlier), so the
+    working default is never replaced silently:
+
+      1. ``scenario['handling_unit']`` -- the WORKING DEFAULT (the scenario is the
+         single source of the mission's own unit, e.g. the 0.45x0.30x0.18 m carton).
+      2. ``catalogue`` -- the OPT-IN SMART VARIANT: a ``{sku: HandlingUnit}`` map
+         loaded from a store-vision tray-catalogue export (:func:`load_catalogue`),
+         so every tray SKU store-vision knows is in scope. It overrides the scenario
+         geometry for a shared SKU (the store-vision record is the richer source).
+      3. ``units`` -- a hand-set ``{sku: (x, y, z)}`` config override, the most
+         explicit, so it wins last.
+
+    ``sku`` selects which unit to preflight (default: the job's SKU). The returned
+    unit carries ``source`` so the verdict is honest about which source supplied it.
     """
-    catalogue = {k: tuple(float(x) for x in v) for k, v in (units or {}).items()}
+    in_scope: dict[str, tuple[tuple[float, float, float], str]] = {}
     hu = scenario.get('handling_unit') or {}
     if hu.get('sku') and 'dimensions_m' in hu:
-        catalogue.setdefault(hu['sku'], tuple(float(x) for x in hu['dimensions_m']))
+        in_scope[str(hu['sku'])] = (tuple(float(x) for x in hu['dimensions_m']), 'scenario')
+    for s, cu in (catalogue or {}).items():
+        in_scope[str(s)] = (tuple(float(x) for x in cu.dimensions_m), cu.source)
+    for s, dims in (units or {}).items():
+        in_scope[str(s)] = (tuple(float(x) for x in dims), 'config_units')
     target = sku or (scenario.get('job') or {}).get('sku') or hu.get('sku')
-    if target not in catalogue:
-        raise ValueError(f'no handling-unit geometry in scope for sku {target!r}')
-    dims = catalogue[target]
+    if target not in in_scope:
+        raise ValueError(f'no handling-unit geometry in scope for sku {target!r} '
+                         f'(in scope: {sorted(in_scope)})')
+    dims, source = in_scope[target]
     if len(dims) != 3 or not all(math.isfinite(d) and d > 0 for d in dims):
         raise ValueError(f'handling-unit dimensions must be 3 positive metres: {dims}')
-    return HandlingUnit(sku=str(target), dimensions_m=dims)
+    return HandlingUnit(sku=str(target), dimensions_m=dims, source=source)
+
+
+def load_catalogue(spec) -> dict:
+    """Load a store-vision tray-catalogue export into a ``{sku: HandlingUnit}`` map.
+
+    ``spec`` is either a path to the export JSON or the already-loaded document. The
+    export is the :data:`CATALOGUE_SCHEMA` shape produced by
+    ``scripts/integrations/export_tray_catalogue.py`` (store-vision read-only)::
+
+        {"schema": "storevision.restock.product_catalogue/v1",
+         "axis_order": [0, 1, 2],                       # optional, default identity
+         "units": [{"sku": "juice_orange", "dims_mm": [450, 300, 180],
+                    "weight_kg": 0.45, "tray_packed": true, "source": "..."}, ...]}
+
+    ``dims_mm`` is store-vision's ``ProductInfo.dims_mm`` = (L, W, H) millimetres. The
+    mission compares in the arm-base grasp frame (x, y, z); ``axis_order`` maps the
+    catalogue (L, W, H) onto (x, y, z) -- a permutation of (0, 1, 2) where comparison
+    axis i takes catalogue dimension ``axis_order[i]``. The producer emits the units
+    in the mission's grasp-frame order, so the default is identity; a non-identity
+    order is explicit and validated, never a silent re-labelling. Returns ``{}`` for
+    an absent spec.
+    """
+    if spec is None:
+        return {}
+    if isinstance(spec, (str, Path)):
+        try:
+            doc = json.loads(Path(spec).read_text())
+        except (OSError, ValueError) as exc:
+            raise CatalogueError(f'cannot read tray catalogue export {spec!r}: {exc}') from exc
+    elif isinstance(spec, dict):
+        doc = spec
+    else:
+        raise CatalogueError(f'tray catalogue spec must be a path or dict, not {type(spec).__name__}')
+    schema = doc.get('schema')
+    if schema != CATALOGUE_SCHEMA:
+        raise CatalogueError(
+            f'unsupported tray catalogue schema {schema!r} (expected {CATALOGUE_SCHEMA!r})')
+    order = tuple(int(i) for i in doc.get('axis_order', (0, 1, 2)))
+    if sorted(order) != [0, 1, 2]:
+        raise CatalogueError(f'axis_order must be a permutation of (0,1,2): {doc.get("axis_order")}')
+    units = doc.get('units')
+    if not isinstance(units, list):
+        raise CatalogueError("tray catalogue 'units' must be a list of per-SKU records")
+    out: dict[str, HandlingUnit] = {}
+    for rec in units:
+        try:
+            sku = str(rec['sku'])
+            dims_mm = [float(x) for x in rec['dims_mm']]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CatalogueError(f'tray catalogue unit missing sku/dims_mm: {exc}') from exc
+        if len(dims_mm) != 3:
+            raise CatalogueError(
+                f'tray catalogue unit {sku!r} dims_mm must be 3 axes (L,W,H mm): {dims_mm}')
+        dims_m = tuple(dims_mm[order[i]] / 1000.0 for i in range(3))
+        if not all(math.isfinite(d) and d > 0 for d in dims_m):
+            raise CatalogueError(f'tray catalogue unit {sku!r} dims must be positive metres: {dims_m}')
+        src = str(rec.get('source', 'storevision_catalogue'))
+        out[sku] = HandlingUnit(sku=sku, dimensions_m=dims_m, source=f'catalogue:{src}')
+    return out
 
 
 def free_space_from_depth_capture(free_dimensions_m, *, clear: bool = True,
@@ -255,8 +356,6 @@ def load_free_space(spec: dict | None) -> SlotFreeSpace | None:
             measured=bool(spec.get('measured', True)), slot_id=spec.get('slot_id'),
             source=str(spec.get('source', 'mission_depth_capture')))
     if 'twin3d_export' in spec:
-        import json
-        from pathlib import Path
         doc = json.loads(Path(spec['twin3d_export']).read_text())
         slot_id = spec.get('slot_id')
         record = _twin3d_slot(doc, slot_id) if slot_id else doc
@@ -276,7 +375,12 @@ def preflight_from_config(scenario: dict, config: dict | None) -> FitVerdict | N
     if not spec:
         return None
     spec = spec if isinstance(spec, dict) else {}
-    unit = handling_unit_from_scenario(scenario, sku=spec.get('sku'), units=spec.get('units'))
+    # Opt-in smart variant: a store-vision tray-catalogue export (path via
+    # 'catalogue_export', or an inline document via 'catalogue') widens the in-scope
+    # SKU set beyond the scenario's own unit. Absent => scenario default only.
+    catalogue = load_catalogue(spec.get('catalogue_export') or spec.get('catalogue'))
+    unit = handling_unit_from_scenario(scenario, sku=spec.get('sku'),
+                                       units=spec.get('units'), catalogue=catalogue)
     free = load_free_space(spec)
     return evaluate_fit(unit, free, margin=float(spec.get('margin_m', PLACEMENT_MARGIN_M)),
                         min_confidence=float(spec.get('min_confidence', MIN_CONFIDENCE)))
