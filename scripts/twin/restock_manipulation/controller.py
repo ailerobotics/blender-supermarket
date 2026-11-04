@@ -1175,6 +1175,43 @@ class TransferController:
             return goal
         return tuple(float(leveled[j]) for j in ARM_JOINTS)
 
+    def _preplace_above_place_goal(self, measured):
+        """sim-place-descent-residual-v1: the collect preplace standoff re-targeted DIRECTLY ABOVE the
+        place load-centre (raised by ``preplace_standoff_m``), so the welded gripper pad clears the
+        rollwagen front posts instead of jamming ``post_2`` at the over-the-mouth fixed
+        ``collect_place_preplace_shape`` (coldwin39's CONTACT pivot: pad 0.1 mm from post_2 at the standoff
+        dwell, while the PLACE target itself clears post_2 by 90 mm). A full-DOF reach+level IK
+        (``level_place_ik``) to ``place TCP + (0, 0, preplace_standoff_m)`` -- the base is gravity-level so
+        arm +Z is world/cart +Z -- seeded from ``collect_place_preplace_shape`` to stay on the validated
+        clear branch, with the loaded droop-cancel. Returns an ARM-order 6-tuple, or ``None`` to fall back
+        to the fixed-shape preplace (off / no FK / no captured up-axis / no place pose / IK refuses)."""
+        if (self._carton_level is None or not self._carton_level.preplace_above_place
+                or 'place' not in self.poses or self.collect_place_preplace_shape is None):
+            return None
+        robot = self._fk_model()
+        if robot is None:
+            return None
+        self._capture_level_up(measured)
+        if self._carton_up_in_tool is None:
+            return None
+        from twin.restock_manipulation import carton_level as cl
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+        place = self.poses['place']
+        standoff = (float(place[0]), float(place[1]),
+                    float(place[2]) + float(self._carton_level.preplace_standoff_m))
+        try:
+            gc = self._place_gravity_compensation()
+            limits = self._place_level_limits() or None
+            tcp_link = self._place_fk_link(robot, list(self.collect_place_preplace_shape))
+            sol = cl.level_place_ik(robot, standoff, self._carton_up_in_tool,
+                                    list(self.collect_place_preplace_shape), tool_link=tcp_link,
+                                    limits=limits, gravity_comp=gc)
+        except ValueError as exc:
+            print('PREPLACE_ABOVE_PLACE_UNSOLVED: %s (falling back to the fixed preplace shape)'
+                  % exc, flush=True)
+            return None
+        return tuple(float(sol[j]) for j in ARM_JOINTS)
+
     def _place_fk_link(self, robot, goal):
         """The FK link the place reach targets: the motion port's IK tcp (gripper_pad_tcp) when present in
         the FK URDF, else the carton_level attitude tool_link. Its rotation equals ur_tool0's (rigid
@@ -1919,8 +1956,19 @@ class TransferController:
                     # without moving the origin, keeping the shape's reach-validated TCP and self-collision
                     # branch. Off / level_place off => the shape is unchanged (byte-identical); if no clear
                     # level solution exists it proceeds unleveled and the CARTON_TILT trip owns it.
-                    preplace_goal = self._level_place_goal(self.collect_place_preplace_shape,
-                                                           s.joint_positions)
+                    # sim-place-descent-residual-v1: re-target the preplace standoff DIRECTLY ABOVE the
+                    # place load-centre so the overhanging gripper pad clears the rollwagen front posts
+                    # instead of jamming post_2 at the over-the-mouth fixed shape (coldwin39's CONTACT
+                    # pivot). Off / no solution => the fixed shape (byte-identical).
+                    preplace_shape = self.collect_place_preplace_shape
+                    above = self._preplace_above_place_goal(s.joint_positions)
+                    if above is not None:
+                        preplace_shape = above
+                        print('PREPLACE_ABOVE_PLACE engaged: standoff re-targeted directly above the '
+                              'place load-centre +%.3f m so the welded pad clears the rollwagen front '
+                              'posts (sim-place-descent-residual-v1)'
+                              % self._carton_level.preplace_standoff_m, flush=True)
+                    preplace_goal = self._level_place_goal(preplace_shape, s.joint_positions)
                     # sim-carton-level-preplace-v1: drive the carry/tuck -> standoff APPROACH as a LEVELED
                     # WAYPOINT PATH, not a single begin_joint_goal. PR 290 leveled the standoff ENDPOINT and
                     # PR 296 the lift/carry, but the joint-space interpolation INTO the standoff still passed

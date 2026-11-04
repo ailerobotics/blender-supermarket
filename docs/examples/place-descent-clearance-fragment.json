@@ -1,0 +1,34 @@
+{
+  "_comment": "sim-place-descent-residual-v1: fix the collect set-down CARTON_TILT +2.0x deg CONTACT PIVOT. coldwin31..40 all tripped CARTON_TILT pitch +2.02..+2.07 deg at the collect set-down, UNCHANGED across three droop-compensation generations (PR 311 heavy / PR 318 wrist / PR 326 per-point) -- d(executed)/d(commanded) ~ 0, a GEOMETRIC pivot, not droop. coldwin39's SEAL_DIAG: the gripper suction pad sits FLUSH on /Rollwagen/chassis/post_2 (min_gap_mm 0.0, pad_vs_surface_deg 0.0) through the whole set-down/dwell while the welded carton is levered to 2.02. The pad is a ROBOT link (suction_cups), NOT the carton, so cage_collision:filtered (which filters carton-vs-cage) does NOT cover it. The trip is at the FIXED collect_place_preplace_shape standoff dwell, which parks the held carton OVERHANGING the +x mouth (coldwin39 reconstruction: cart (0.243,-0.185) -> pad 0.1 mm from post_2). The PLACE target (0.18,0) itself clears post_2 by ~90 mm, so the fix moves the STANDOFF, not the place target. Merge these keys INTO the existing HOST carton_level block (the block scripts/twin/restock_manipulation/ros_host.py resolves via carton_level.resolve_level_config); the file is scripts/twin/restock_manipulation/ros_host_config.json. ALL default off => byte-identical. The carton-level bound (2.0 deg), grace (0.15 s), droop stiffness (K=2850) and tow lanes are UNCHANGED; the place_from_above descent is KEPT.",
+
+  "carton_level": {
+    "_file": "HOST config scripts/twin/restock_manipulation/ros_host_config.json (resolved by ros_host.py -> carton_level.resolve_level_config -> TransferController). Shown as the FULL coldwin41 production carton_level block: the UNCHANGED coldwin39 keys (gravity_compensation K=2850, place_from_above) plus the four NEW place-clearance keys.",
+    "gravity_compensation": {"stiffness_nm_per_rad": 2850, "carton_mass_kg": 0.45},
+    "place_from_above": true,
+    "place_above_clearance_m": 0.08,
+    "place_depth_bias_m": 0.0,
+
+    "preplace_above_place": true,
+    "_preplace_above_place_note": "THE REMEDY (HOST, carton_level block). Re-targets the collect preplace standoff to DIRECTLY ABOVE the place load-centre (place TCP + (0,0,preplace_standoff_m); the base is gravity-level so arm +Z = world/cart +Z) via a full-DOF reach+level IK (carton_level.level_place_ik) seeded from collect_place_preplace_shape, with the K=2850 droop-cancel. So the overhanging pad parks CLEAR of the front posts (not over the +x mouth) and the place_from_above vertical descent comes straight down clear. Controller: TransferController._preplace_above_place_goal; logs PREPLACE_ABOVE_PLACE engaged. If the IK refuses (PREPLACE_ABOVE_PLACE_UNSOLVED) it falls back to the fixed collect_place_preplace_shape (byte-identical). Requires collect_place_preplace_shape present (the seed) and 'place' in the controller poses (the GT place slot).",
+    "preplace_standoff_m": 0.12,
+    "_preplace_standoff_m_note": "HOST, carton_level block. Standoff height (m) above the support the re-targeted preplace parks the carton at, directly above the place load-centre. 0.12 m matches the from_above via-point clearance budget. Must be > 0.",
+
+    "place_clearance_check": true,
+    "_place_clearance_check_note": "HOST, carton_level block. Arms the CPU clearance sweep (scripts/twin/restock_manipulation/place_clearance.py) as a pre-flight GATE: config_preflight.check_carton_level refuses the boot if place_clearance_check is armed while preplace_above_place is OFF (gate-without-remedy). Validate the geometry itself with scripts/check_place_clearance.py (below).",
+    "place_clearance_margin_m": 0.030,
+    "_place_clearance_margin_m_note": "HOST, carton_level block. Minimum gap (m) the swept gripper+carton must keep from every NON-support Rollwagen body (posts, side/back bars, drawbar) until the carton is flat on the support (deck/shelf). Default 30 mm."
+  },
+
+  "_expected_per_body_gaps": {
+    "_comment": "scripts/check_place_clearance.py --plan-gate (CPU, usd-core + the mobile URDF). OLD (fixed over-mouth standoff) vs NEW (preplace_above_place standoff + vertical descent), minimum gap per Rollwagen body over the path. Negative = penetration/contact.",
+    "old_over_mouth_standoff": {"post_2_mm": -9.9, "side_0_vertical_7_mm": -2.2, "verdict": "REFUSED (post_2 within/inside the 30 mm margin -- the coldwin39 pivot)"},
+    "new_above_place_descent": {"min_non_support_mm": 89.0, "post_2_mm": "> 80", "support_shelf": "touches at set-down (allowed)", "verdict": "CLEAR (every non-support body >= 30 mm)"},
+    "plan_gate_K2850": {"predicted_peak_pitch_deg": 0.04, "bound_deg": 2.0, "verdict": "PASS (droop model UNCHANGED at K=2850)"}
+  },
+
+  "_acceptance": "coldwin41 (the integration lane's GPU run on this fragment): the collect set-down completes with CARTON_TILT peak <= 1.5 deg and NO SEAL_DIAG contact (min_gap_mm 0.0 / pad_vs_surface_deg 0.0) on ANY non-deck Rollwagen body (post_*, side_*, back_*, drawbar) before PLACE_ON_DECK reports the deck/support. The log shows PREPLACE_ABOVE_PLACE engaged and the preplace dwell holds the pad clear of post_2 (no CARTON_TILT at the standoff). The carton still welds and the carry stays level through lift/tuck/transit/preplace (unchanged).",
+
+  "_cpu_proof": "PYTHONPATH=scripts python3 scripts/check_place_clearance.py --plan-gate  (exit 0: OLD refused, NEW clear, plan gate passes). Tests: scripts/twin/tests/test_place_clearance.py.",
+
+  "_requires": "The HOST block must already carry collect_place_preplace_shape (the IK seed), carry_wrist1_cap / carry_wrist2_min (the clear-wrist limits used by the level IK), collect_place_straight_line + place_from_above (the vertical insert), and the gravity_compensation sub-block (K=2850). config_preflight knows carton_level as a HOST key; the place-clearance sub-keys are validated by config_preflight.check_carton_level (resolve + gate-without-remedy)."
+}
