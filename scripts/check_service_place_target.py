@@ -29,8 +29,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # scripts/ -> twin.*
 from twin.restock.transfer_place_target import (
-    DEFAULT_MAX_REACH_M, TransferPlaceTargetError, resolve_transfer_place_target,
-    verify_bay_for_place_target)
+    DEFAULT_MAX_REACH_M, DEFAULT_VERIFY_CENTER_TOL_M, TransferPlaceTargetError, VerifyRegionError,
+    resolve_transfer_place_target, resolve_verify_region, verify_bay_for_place_target)
 from twin.restock_manipulation import config_preflight as cp
 
 BACKROOM_BAY = [-2.0, 16.424, 0.73]   # the fm461 demo-fallback target coldwinint1 wrongly used
@@ -122,6 +122,41 @@ def main():
             bay['center_xy'] == [round(endcap[0], 6), round(endcap[1], 6)] or
             math.dist(bay['center_xy'], endcap[:2]) < 1e-6,
             bay=bay, dist_to_backroom_m=round(math.dist(bay['center_xy'], BACKROOM_BAY[:2]), 2))
+
+    # (4a) VERIFY REGION GATE -- the merged fragment's verify_ground_truth bay is accepted (endcap-
+    # consistent, never re-injected); a backroom verify bay under shelf_staging REFUSES by name.
+    region = resolve_verify_region(runtime_cfg, scenario, staged)
+    _record(report, 'verify_region_merged_fragment_consistent',
+            region.flow == 'shelf_staging' and region.center_offset_m is not None
+            and region.center_offset_m <= DEFAULT_VERIFY_CENTER_TOL_M,
+            source=region.source, center_offset_m=round(region.center_offset_m, 4)
+            if region.center_offset_m is not None else None,
+            overridden=region.overridden)
+
+    bad_verify = dict(runtime_cfg)
+    bad_verify['verify_ground_truth'] = {'enabled': True,
+                                         'bay': {'center_xy': BACKROOM_BAY[:2],
+                                                 'size_xy': [0.7, 0.5], 'top_z': 0.73}}
+    vraised = None
+    try:
+        resolve_verify_region(bad_verify, scenario, staged)
+    except VerifyRegionError as exc:
+        vraised = str(exc)
+    _record(report, 'backroom_verify_region_refused_by_name',
+            vraised is not None and 'shelf_staging' in vraised and 'endcap' in vraised
+            and 'verify_ground_truth.bay' in vraised,
+            raised=vraised)
+
+    # (4b) legacy byte-identical -- the verify region is untouched when shelf_staging is off.
+    legacy_verify_cfg = dict(legacy_cfg)
+    legacy_verify_cfg['verify_ground_truth'] = {'enabled': True,
+                                                'bay': {'center_xy': BACKROOM_BAY[:2], 'top_z': 0.73}}
+    legacy_region = resolve_verify_region(legacy_verify_cfg, scenario,
+                                          resolve_transfer_place_target(legacy_verify_cfg, scenario))
+    _record(report, 'legacy_verify_region_unchanged',
+            legacy_region.flow == 'legacy' and legacy_region.bay is None
+            and legacy_region.source == 'unchanged',
+            source=legacy_region.source)
 
     # (5) CONFIG-PREFLIGHT -- the merged fragment's batch keys load from the right config file.
     required = ['shelf_staging', 'cart_side_bay', 'carry_drive_profile', 'transfer_service_carry',
