@@ -510,14 +510,20 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # also locks pitch/roll at a manipulation station so an unsprung see-saw chassis cannot rock the
     # welded carton off level. The PREFERRED source fix is the compliant caster suspension above.
     _station_pitch_hold=bool(config.get('chassis_station_pitch_hold'))
+    # coldwin39 fix: the hold locks pitch/roll to a CONFIGURABLE TARGET (default rig rest pitch -1.17 deg,
+    # roll 0), NOT the instantaneous attitude it drifted to. Set both 0 for world-level.
+    _station_hold_pitch=float(config.get('chassis_station_pitch_hold_pitch_deg',-1.17))
+    _station_hold_roll=float(config.get('chassis_station_pitch_hold_roll_deg',0.0))
     controller=MobileController(stage,paths['base_link'],cart_path,
         [paths['left_wheel_joint'],paths['right_wheel_joint']],spec=spec,
         drive_max_force=_wd.get('max_force'), drive_damping=_wd.get('damping'),
-        station_pitch_hold=_station_pitch_hold)
+        station_pitch_hold=_station_pitch_hold,
+        station_hold_roll_deg=_station_hold_roll, station_hold_pitch_deg=_station_hold_pitch)
     if _station_pitch_hold:
         print('CHASSIS_STATION_PITCH_HOLD enabled (sim-only workaround, like CAGE_COLLISION): the '
-              'station parking brake locks chassis pitch/roll while braked, released with the brake',
-              flush=True)
+              'station brake LATCHES a rotation-lock at the TARGET attitude (roll=%.2f pitch=%.2f deg, '
+              'not the instantaneous end stop), translation free (weld-loop relief), no brake cycling'
+              % (_station_hold_roll,_station_hold_pitch), flush=True)
     # fm433: confirm the wheel-drive tune actually reached the joints at runtime (run-326 applied it -- the
     # mission.usda carried maxForce/damping -- but it left no log, so 'applied vs not' could not be read
     # from the console; the tune turned out ineffective for the base's intrinsic under-tracking, which is a

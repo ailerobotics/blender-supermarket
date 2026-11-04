@@ -235,6 +235,30 @@ def test_suspension_on_inserts_sprung_prismatic(tmp_path):
     assert (t['front_caster_wheel'][2, 3] - 0.065) == pytest.approx(drive_bottom, abs=1e-6)
 
 
+# ---- (4b) coldwin39: station-hold TARGET-attitude quaternion math (pure) -------------------------
+
+def _rpy_from_quat(w, x, y, z):
+    roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
+    pitch = math.asin(max(-1.0, min(1.0, 2 * (w * y - z * x))))
+    yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+    return roll, pitch, yaw
+
+
+def test_station_hold_target_quaternion_roundtrips():
+    from twin.mobile_runtime import _quat_from_rpy
+    # the station hold builds the lock anchor from (target_roll, target_pitch, CURRENT yaw); the quat it
+    # builds must decode back to exactly those angles (so the brake holds the chassis at the target, not
+    # the instantaneous attitude coldwin39 latched).
+    for roll, pitch, yaw in [(0.0, math.radians(-1.17), 0.7), (0.0, 0.0, -2.1),
+                             (math.radians(2), math.radians(-4.25), 1.9)]:
+        w, x, y, z = _quat_from_rpy(roll, pitch, yaw)
+        assert math.isclose(math.hypot(math.hypot(w, x), math.hypot(y, z)), 1.0, abs_tol=1e-9)
+        r, p, yw = _rpy_from_quat(w, x, y, z)
+        assert r == pytest.approx(roll, abs=1e-9)
+        assert p == pytest.approx(pitch, abs=1e-9)
+        assert yw == pytest.approx(yaw, abs=1e-9)
+
+
 # ---- (5) the config_preflight pitch-stability guard ---------------------------------------------
 
 def test_preflight_refuses_unsprung_seesaw_rig():

@@ -10,10 +10,30 @@ from .mobile import Coupler, MobileSpec, wheel_targets, wrap
 from .mobile_assets import author_hitch
 
 
+def _quat_to_yaw(q):
+    """Yaw (rad) from a pxr Gf quaternion (w + xyz), matching isaac_port.body_roll_pitch_deg's ZYX
+    convention: yaw = atan2(2(wz+xy), 1-2(yy+zz))."""
+    w = float(q.GetReal()); x, y, z = (float(v) for v in q.GetImaginary())
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _quat_from_rpy(roll, pitch, yaw):
+    """(w, x, y, z) for a ZYX (yaw*pitch*roll) euler attitude -- the inverse of the roll/pitch/yaw
+    extraction body_roll_pitch_deg / _quat_to_yaw use. Pure; CPU-testable."""
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    return (cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy)
+
+
 class MobileController:
     def __init__(self, stage, robot_body, cart_body, wheel_joint_paths,
                  spec=MobileSpec(), hitch_path='/MobileHitch', wheel_angle_reader=None,
-                 drive_max_force=None, drive_damping=None, station_pitch_hold=False):
+                 drive_max_force=None, drive_damping=None, station_pitch_hold=False,
+                 station_hold_roll_deg=0.0, station_hold_pitch_deg=-1.17):
         from pxr import UsdPhysics
         if len(wheel_joint_paths) != 2 or len(set(wheel_joint_paths)) != 2:
             raise ValueError('left and right wheel joint paths required, in that order')
@@ -70,6 +90,16 @@ class MobileController:
         # Released with the brake exactly like the yaw lock. Labelled like CAGE_COLLISION; the compliant
         # caster suspension is the preferred source fix, this is the belt-and-suspenders station hold.
         self.station_pitch_hold = bool(station_pitch_hold)
+        # coldwin39 fix: the station hold locks pitch/roll to this CONFIGURABLE TARGET attitude (degrees),
+        # NOT the chassis's instantaneous attitude. coldwin39 latched the instantaneous -4.25 deg end stop
+        # the base had drifted to during grasp, so the carton set down 2.02-2.04 deg (over the 2.0 bound).
+        # Default is the rig REST pitch (~-1.17 deg, the attitude the arm's set-down was planned around);
+        # roll 0. Set both 0 for world-level.
+        self.station_hold_roll_deg = float(station_hold_roll_deg)
+        self.station_hold_pitch_deg = float(station_hold_pitch_deg)
+        # coldwin39 fix: latch the station hold so it is NOT released+re-engaged every tick/phase (the
+        # ~2000 brake cycles coldwin39 logged). While latched, command() keeps the hold on a parked tick.
+        self._station_hold_latched = False
         self._held = False
         self._braked = False
         self._cart_braked = False
@@ -148,30 +178,57 @@ class MobileController:
             return
         world = UsdGeom.XformCache().GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.robot_body))
         t, q = world.ExtractTranslation(), world.ExtractRotationQuat()
+        anchor_quat = q
+        # sim-chassis-pitch-stability-v1 station pitch hold (opt-in): also lock rotX/rotY so a free-pitch
+        # see-saw chassis cannot rock the welded carton off level during manipulation. SIM-only.
+        # coldwin39 FIX: anchor the lock at the CONFIGURABLE TARGET attitude (rest pitch/roll + CURRENT
+        # yaw), NOT the instantaneous attitude -- so the hold does not latch whatever end stop the base
+        # drifted to (coldwin39 latched -4.25 deg -> carton 2.04 deg). The joint then holds the chassis
+        # AT the target pitch/roll (a bounded correction from the current attitude).
+        if self.station_pitch_hold:
+            cur_yaw = _quat_to_yaw(q)
+            w2, x2, y2, z2 = _quat_from_rpy(math.radians(self.station_hold_roll_deg),
+                                            math.radians(self.station_hold_pitch_deg), cur_yaw)
+            anchor_quat = Gf.Quatd(w2, Gf.Vec3d(x2, y2, z2))
         joint = UsdPhysics.Joint.Define(self.stage, self.BRAKE_PATH)     # generic D6
         joint.CreateBody1Rel().SetTargets([self.robot_body])            # body0 empty == world anchor
         joint.CreateLocalPos0Attr(Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])))
-        joint.CreateLocalRot0Attr(Gf.Quatf(float(q.GetReal()), Gf.Vec3f(*[float(v) for v in q.GetImaginary()])))
+        joint.CreateLocalRot0Attr(Gf.Quatf(float(anchor_quat.GetReal()),
+                                           Gf.Vec3f(*[float(v) for v in anchor_quat.GetImaginary()])))
         joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
         joint.CreateLocalRot1Attr(Gf.Quatf(1.0))
         # Lock ONLY rotZ (yaw): low>high == locked. transX/Y/Z and rotX/Y get no limit == free.
         axes = ['rotZ']
-        # sim-chassis-pitch-stability-v1 station pitch hold (opt-in): also lock rotX/rotY so a free-pitch
-        # see-saw chassis cannot rock the welded carton off level during manipulation. SIM-only.
         if self.station_pitch_hold:
-            axes += ['rotX', 'rotY']
+            axes += ['rotX', 'rotY']       # also lock roll/pitch (held at the target attitude above)
         for axis in axes:
             lock = UsdPhysics.LimitAPI.Apply(joint.GetPrim(), axis)
             lock.CreateLowAttr(1.0)
             lock.CreateHighAttr(-1.0)
         self._braked = True
         print('MOBILE_BRAKE engaged (%s D6) at chassis pose%s'
-              % ('full-rotation-lock' if self.station_pitch_hold else 'yaw-lock',
+              % ('full-rotation-lock@target(roll=%.2f,pitch=%.2f)deg'
+                 % (self.station_hold_roll_deg, self.station_hold_pitch_deg)
+                 if self.station_pitch_hold else 'yaw-lock',
                  ' [CHASSIS_STATION_PITCH_HOLD sim-only workaround]' if self.station_pitch_hold else ''),
               flush=True)
 
+    def engage_station_hold(self):
+        """coldwin39 fix: engage the pitch/roll-at-target station hold and LATCH it, so the brake is held
+        across the whole arm phase instead of cycling engage/release every tick (~2000x in coldwin39).
+        engage_brake is idempotent, so repeated calls while latched are a no-op. Translation stays free
+        (weld-loop relief preserved); only roll/pitch/yaw are locked, pitch/roll at the target attitude."""
+        self.engage_brake()
+        self._station_hold_latched = True
+
+    def release_station_hold(self):
+        """Clear the station-hold latch and release the brake (the base is leaving the arm phase to drive)."""
+        self._station_hold_latched = False
+        self.release_brake()
+
     def release_brake(self):
         """Release the sim parking brake so the base can drive (couple/tow/park)."""
+        self._station_hold_latched = False   # the brake is gone; keep the latch flag consistent
         if self._braked:
             self.stage.RemovePrim(self.BRAKE_PATH)
             self._braked = False
@@ -286,6 +343,11 @@ class MobileController:
             # Controlled welded-stop: keep the base PLANTED. Return a zero-velocity park WITHOUT
             # releasing any brake, so a drive command issued by a re-begin cannot unpin a welded,
             # interpenetrating arm (the coldwin33 fling). Cleared by release_welded_hold().
+            return self.park()
+        if getattr(self, '_station_hold_latched', False) and not (v or omega):
+            # coldwin39 fix: a parked (v=omega=0) tick while the station hold is latched must NOT release
+            # the brake -- releasing + re-engaging every parked control tick is the ~2000x cycle coldwin39
+            # logged. Keep the hold; a genuine drive command (v or omega != 0) falls through to release.
             return self.park()
         self.release_brake()  # resuming driving: drop the sim parking brake before any base motion
         self.release_base_full_brake()  # and the pre-weld full base pin
