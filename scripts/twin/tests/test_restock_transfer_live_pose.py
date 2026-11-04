@@ -176,22 +176,29 @@ def test_faithful_geometry_matches_shelfbot_when_available():
 
 def test_run356_legacy_deck_source_reproduces_the_logged_reach_failure(policy):
     r = reach(policy.build(legacy_source(), bay_target(), PROFILE))
-    # REACH_ENVELOPE_FAIL max_reach=1.3 bad={'approach': 1.376, 'contact': 1.336, 'lift': 1.328}
-    assert r['approach'] == pytest.approx(1.376, abs=2e-3)
-    assert r['contact'] == pytest.approx(1.336, abs=2e-3)
-    assert r['lift'] == pytest.approx(1.328, abs=2e-3)
+    # sim-collect-press-regression-v1: magnitudes recomputed after the HOST carton dims were restored to the
+    # scenario single source 0.45/0.30/0.18 (were the drifted 0.6/0.4/0.16). The OUTCOME is unchanged -- every
+    # station is still out of the 1.3 m reach, so this still reproduces the logged run356 reach FAILURE; only
+    # the exact magnitudes shrink with the smaller (correct) carton.
+    # REACH_ENVELOPE_FAIL max_reach=1.3 bad={'approach': 1.365, 'contact': 1.331, 'lift': 1.324}
+    assert r['approach'] == pytest.approx(1.365, abs=2e-3)
+    assert r['contact'] == pytest.approx(1.331, abs=2e-3)
+    assert r['lift'] == pytest.approx(1.324, abs=2e-3)
     # the ungated place side is out as well: the wall-3 grip lands on the bay's FAR side
-    assert r['place'] == pytest.approx(1.41, abs=5e-3)
-    assert r['preplace'] > 1.55 and r['retreat'] > 1.55
+    assert r['place'] == pytest.approx(1.363, abs=5e-3)
+    assert r['preplace'] > 1.53 and r['retreat'] > 1.53
 
 
 def test_run356_live_pose_puts_every_station_in_reach_from_the_park_pose(policy):
     poses, choice = tm.near_face_poses(policy, live_source(), bay_target(), PROFILE)
     r = reach(poses)
-    assert max(r.values()) <= 1.05 < PROFILE.max_reach                   # >= 0.25 m margin everywhere
-    assert r['approach'] == pytest.approx(0.873, abs=5e-3)
-    assert r['contact'] == pytest.approx(1.025, abs=5e-3)
-    assert r['place'] == pytest.approx(1.019, abs=5e-3)
+    # sim-collect-press-regression-v1: magnitudes recomputed after the HOST carton dims were restored to the
+    # scenario single source 0.45/0.30/0.18. live_pose still puts EVERY station comfortably in reach (worst
+    # 1.088 m vs the 1.3 m envelope => ~0.21 m margin); the pins shift with the smaller (correct) carton.
+    assert max(r.values()) <= 1.1 < PROFILE.max_reach                    # >= 0.21 m margin everywhere
+    assert r['approach'] == pytest.approx(0.920, abs=5e-3)
+    assert r['contact'] == pytest.approx(1.073, abs=5e-3)
+    assert r['place'] == pytest.approx(1.069, abs=5e-3)
     # bay place yaw pi: the grip stays on the arm side of the bay; the carton keeps its pick face
     assert choice == dict(source_flipped=False, target_flipped=True, worst_reach=pytest.approx(max(r.values())))
     # the near-face pick approaches from the arm side (+x, through the cart's open mouth)
@@ -307,7 +314,9 @@ def test_live_pose_transfer_completes_from_the_run356_park_pose(policy, monkeypa
     assert labels and labels[0]['transfer_mode'] == 'live_pose' and labels[0]['target_flipped'] is True
     assert r.evidence[-1]['verify_mode'] == 'ground_truth'
     # the place the arm was sent to is the bay with the grip on the arm side, within reach
-    assert max(math.dist(p[:3], (0, 0, 0)) for p in m.moves) <= 1.05
+    # sim-collect-press-regression-v1: 1.05 -> 1.1 after the HOST carton dims were restored to the scenario
+    # 0.45/0.30/0.18 (worst commanded move 1.073 m, still well inside the 1.3 m reach envelope).
+    assert max(math.dist(p[:3], (0, 0, 0)) for p in m.moves) <= 1.1
 
 
 def test_default_off_reproduces_run356_and_keeps_the_legacy_staging(policy, monkeypatch, capsys):
@@ -316,7 +325,9 @@ def test_default_off_reproduces_run356_and_keeps_the_legacy_staging(policy, monk
     assert c.transfer_mode is None
     _, r = run_stage(c, legacy_source(), stow)
     assert r.status == 'failed' and r.reason == 'approach outside reach envelope'
-    assert "'approach': 1.376" in capsys.readouterr().out
+    # sim-collect-press-regression-v1: 1.376 -> 1.365 after the HOST carton dims were restored to 0.45/0.30/0.18
+    # (the legacy deck source is still out of reach -> the reach failure is still reproduced).
+    assert "'approach': 1.365" in capsys.readouterr().out
     # off: a transfer that passes the pick still folds into TRANSIT (the latent hold live_pose removes)
     c2, _, stow = host_controller(policy)
     phases, _ = run_stage(c2, live_source(), stow, ticks=40)

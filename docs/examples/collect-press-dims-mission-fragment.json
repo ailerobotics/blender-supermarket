@@ -1,0 +1,21 @@
+{
+  "_comment": "sim-collect-press-regression-v1. Fixes the coldwin32 collect-press stall ('contact not reached within capped over-press travel', gripper ~35 mm from the carton at the pre-weld grasp press). ROOT CAUSE (bisect-confirmed on CPU; see data/sim-collect-press-regression-v1/): the HOST carton-profile dimension in ros_host_config.json drifted from the scenario single source 0.45/0.30/0.18 (handling_unit.dimensions_m, PR 268) to 0.6/0.4/0.16. The HOST side-grasp PICK standoff derives from those dims (wall_policy.WallCartonPolicy -> shelfbot geometry.wall_grip: the pad stands off dims[wall-axis]/2 + contact_margin from the carton CENTRE). The backstock_00 source is an ODD wall (3), so the standoff uses dims[1]: 0.40 vs the real 0.30 => the pad over-reaches 0.05 m past the true face; the capped 0.02 m over-press leaves ~0.03 m, so contact is never made (GPU measured gap 34.96 mm on warmacc3, which had gravity_compensation REMOVED and failed identically -- PR 311 is FALSIFIED as the cause). NOT PR 311 gravity_compensation (absent from every config and structurally post-weld only), NOT ARM_GRAVITY_FF (byte-identical in the welding coldwin31), NOT PR 312/313 (do not touch the collect pick pose).",
+  "_fix_committed_in_repo": "scripts/twin/restock_manipulation/ros_host_config.json: juice_orange dimensions restored to [0.45, 0.3, 0.18] (the scenario single source); carton_level=true RE-ADDED alongside transfer_service_carry=true (both kept). This alone lands the next cold collect press on contact, welds, and -- with carton_level on -- keeps the box parallel to the ground through pre-place/place/release. The 0.02 m contact_overpress_cap_m, the contact threshold and the 2.0 deg carton-level bound are UNCHANGED.",
+  "ros_host_config_profile_juice_orange": {
+    "sku": "juice_orange",
+    "dimensions": [0.45, 0.3, 0.18],
+    "_dims_note": "MUST equal the scenario handling_unit.dimensions_m. config_preflight --scenario now refuses a mismatch (see below) so this drift class cannot reach a GPU boot again."
+  },
+  "carton_level_for_acceptance": {
+    "_comment": "For the bounded GPU acceptance (parallel-to-ground place), enable gravity_compensation on top of the committed carton_level=true, exactly as the PR 311 fragment specifies. The committed config keeps carton_level=true (bool) so the CARTON_TILT guard + leveling run; the integration lane merges the gravity_compensation sub-block for the place-level fix.",
+    "carton_level": {
+      "gravity_compensation": {
+        "stiffness_nm_per_rad": 2850,
+        "carton_mass_kg": 0.45
+      }
+    }
+  },
+  "_config_preflight_wiring": "Add --scenario \"$M/mission-scenario.json\" to the config_preflight.py invocation in the orchestrate script (the integration-lane-owned orchestrate-*.sh). With it, config_preflight.check_carton_dims refuses the GPU boot (exit 2) when any HOST profile dimension disagrees with the scenario handling_unit.dimensions_m -- naming the drift at plan time instead of burning a ~35-min GPU run on a silent carton-dim mismatch (the coldwin32 class). Backward-compatible: absent --scenario is a no-op. Example: python3 config_preflight.py --host-config <repo>/scripts/twin/restock_manipulation/ros_host_config.json --runtime-config $M/mission-runtime-<run>.json --scenario $M/mission-scenario.json --require ...",
+  "_bounded_gpu_acceptance": "Cold collect-only (RESTOCK_COLLECT_GROUND_TRUTH=1 as the lane runs it) at the PR-307 geometry, under /tmp/aile-gpu.lock via scripts/run_mobile_restock.py, with the committed ros_host_config.json (dims 0.45/0.3/0.18) AND carton_level.gravity_compensation merged. Expected PASS: the grasp press REACHES CONTACT (SIM_ATTACH_DIAG gap -> <= the weld threshold) and WELDS -- no 'contact not reached within capped over-press travel'; then level lift, pre-place, place, release with NO CARTON_TILT (box parallel to the ground). If the config_preflight --scenario guard is wired, it must print CONFIG_PREFLIGHT PASS (the dims now match).",
+  "_out_of_scope": "Navigation, towing and transfer are out of scope (per the task). The place-level gravity_compensation tuning is owned by PR 311's fragment; this fragment only restores the dims + re-adds carton_level and wires the drift guard."
+}

@@ -1,0 +1,46 @@
+{
+  "reproduction": {
+    "wall": 3,
+    "wall_axis_index": 1,
+    "standoff_centre_to_pad_m": {
+      "scenario": 0.15275,
+      "drifted": 0.20275
+    },
+    "overreach_m": 0.05,
+    "overpress_cap_m": 0.02,
+    "predicted_residual_gap_m": 0.03,
+    "predicted_residual_gap_mm": 30.0,
+    "gpu_measured_gap_mm": {
+      "coldwin32": 35.0,
+      "warmacc3": 34.96
+    },
+    "note": "a pure contact-descent raycast origin sits a few mm behind the pad face, so the measured gap reads a few mm above the pure-standoff residual -- the predicted ~30 mm bounds and explains the measured ~35 mm"
+  },
+  "bisect": [
+    {
+      "hypothesis": "PR 311 carton_level.gravity_compensation applied during the pre-weld press",
+      "verdict": "FALSIFIED",
+      "evidence": "gravity_compensation is absent from EVERY config file in the dataset and from both run logs; it is consumed only by level_place_ik/level_preserve_tcp, which the controller reaches only post-weld (gated on _carton_up_in_tool, captured at the first carried pose). warmacc3 removed it and the press failed identically (gap 34.96 mm). The side-grasp standoff below is independent of it."
+    },
+    {
+      "hypothesis": "ARM_GRAVITY_FF (legacy drive FF) raised the arm ~35 mm",
+      "verdict": "FALSIFIED",
+      "evidence": "ARM_GRAVITY_FF held=False ff=[0,33.09,-78.78,-13.66,0,0] is BYTE-IDENTICAL in the welding coldwin31 and the failing coldwin32; it is -G at the commanded pose (sign -1), so it cancels gravity at the command, it does not offset it."
+    },
+    {
+      "hypothesis": "PR 312 observe-gate reordering touched the collect pick path",
+      "verdict": "FALSIFIED",
+      "evidence": "the reordering only DEFERS the place-target reach gate when _repositions_before_place(); for collect that value is reposition_before_place (True) in BOTH runs -- transfer_service_carry only changes it for a live_pose TRANSFER (_live_pose_transfer() is False during collect). It changes no pose."
+    },
+    {
+      "hypothesis": "PR 313 warm-reset stage clean released a brake / weld on the cold run",
+      "verdict": "FALSIFIED",
+      "evidence": "the reset path runs only between warm runs; coldwin32 is a COLD first attempt (no reset). No reset/stage-clean line in its log."
+    },
+    {
+      "hypothesis": "HOST carton-profile dimension drift 0.45/0.30/0.18 -> 0.6/0.4/0.16",
+      "verdict": "CONFIRMED (named cause)",
+      "evidence": "git diff 55dde7c..HEAD -- ros_host_config.json shows dimensions 0.45,0.3,0.18 -> 0.6,0.4,0.16; the HOST side-grasp standoff = dims[odd-wall=1]/2 + margin, so the pad over-reaches 50.0 mm; the 20 mm over-press cap leaves 30.0 mm, matching the GPU 34.96 mm. Scenario single source (handling_unit.dimensions_m) stayed 0.45/0.30/0.18."
+    }
+  ]
+}
