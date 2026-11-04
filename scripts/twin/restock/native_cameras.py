@@ -309,6 +309,8 @@ class CameraRig:
         self.stage,self.cameras,self.optical_paths=stage,{},{}
         self.render_scale=render_scale
         self.camera_render_scales=dict(camera_render_scales)
+        self.frequency=frequency
+        self.parent_paths=dict(parent_paths)
         self.specs={}
         for spec in specs:
             name,k,matrix,solids=camera_spec(spec)
@@ -361,6 +363,53 @@ class CameraRig:
         camera=cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.optical_paths[name]))
         base=cache.GetLocalToWorldTransform(self.stage.GetPrimAtPath(base_path))
         return rigid(np.asarray(camera*base.GetInverse()).T)
+
+    def recreate_destroyed(self, *, stage=None, _init=None):
+        """Re-author any sensing camera whose render product was torn down mid-run by
+        :func:`destroy_camera_render_product` (the fm380/fm381 stage-scoped / VRAM teardown destroys the
+        RTX render product and RemovePrim's the camera's ``<root>/Camera`` prim + its render-product prim
+        -- so the next read raises :class:`CameraRenderProductReleased`). That teardown leaves the mount
+        root (``<root>``) and its collision cubes, so this re-``Define``s only the ``Camera`` child prim
+        and re-initializes its render product, replacing the released :class:`RenderedCamera`. Returns the
+        list of camera ids restored.
+
+        This is the OWNER of the restock cameras owning their restoration: the warm-session reset calls it
+        between runs so a run that freed the shelf/source cameras does not leave the next warm attempt
+        reading an expired prim (the restock-camera half of the warm stage census ``missing prims``). The
+        volatile ``/Render/OmniverseKit/HydraTextures/*`` render-target prims those cameras own are
+        Isaac-managed and re-created on demand when the render product re-initializes, so the warm census
+        excludes them (see ``warm_reset_provider``); the stable ``Camera`` prim restored here is matched.
+
+        ``_init`` is a test seam (defaults to :func:`initialize_camera`); a CPU test injects a fake that
+        returns a stub so the prim-authoring is provable with a fake stage and no Isaac import. A camera
+        whose mount root the teardown unexpectedly removed is NOT silently re-mounted -- it is left for the
+        post-reset census to flag (cold boot), never faked."""
+        from pxr import Gf, UsdGeom
+        stage = stage or self.stage
+        init = _init or initialize_camera
+        restored = []
+        for name in list(self.cameras):
+            root = self.optical_paths[name]
+            camera_path = root + '/Camera'
+            existing = self.cameras.get(name)
+            released = bool(getattr(existing, '_render_product_released', False))
+            if not released and stage.GetPrimAtPath(camera_path):
+                continue  # still live -- nothing was torn down for this camera
+            if not stage.GetPrimAtPath(root):
+                print('WARM_RESET_HOOK restore_cameras: mount root %s absent for %r; '
+                      'leaving it for the census to flag' % (root, name), flush=True)
+                continue
+            _n, k, _m, _s = camera_spec(self.specs[name])
+            prim = UsdGeom.Camera.Define(stage, camera_path)
+            # USD camera looks -Z, +Y up -- the same optical prim transform the rig authors at build.
+            prim.AddTransformOp().Set(Gf.Matrix4d(1,0,0,0,0,-1,0,0,0,0,-1,0,0,0,0,1))
+            scale = self.camera_render_scales.get(name, self.render_scale)
+            resolution = None if scale == 1.0 else (max(2,int(k.width*scale)//2*2),
+                                                    max(2,int(k.height*scale)//2*2))
+            self.cameras[name] = init(camera_path, k, name='restock_'+name,
+                                      frequency=self.frequency, resolution=resolution)
+            restored.append(name)
+        return restored
 
 
 class CameraRosStream:

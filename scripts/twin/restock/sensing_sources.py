@@ -88,6 +88,11 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
     cameras = rig['cameras']
     base_from_camera = rig['base_from_camera']       # callable(camera_id) -> 4x4
     recording_camera = rig['recording_camera']
+    # Warm-session reset: re-author any station camera a run's stage-scoped / VRAM teardown destroyed
+    # (native_cameras.destroy_camera_render_product RemovePrim's the camera prim + render product), so a
+    # warm re-seat does not leave the next attempt reading an expired prim. None on a rig builder that
+    # does not expose it (older seam / fake); the hook then skips the restore by name.
+    restore_cameras = rig.get('restore_cameras')
 
     # No co-launched live mapper by default: clearance is conservatively absent, so sensing
     # fails closed rather than fabricating free space. A real mapper clearance callback may
@@ -148,6 +153,9 @@ def build_sensing_sources(*, assembly, scenario, manifest, manip_runtime, pose_b
     return {
         'cameras': cameras,
         'stage_scoped_teardown': stage_scoped_teardown,
+        # Re-create destroyed station cameras for a warm re-seat (warm_reset_hooks.reset_host_state);
+        # None when the rig builder does not expose a restore (the hook skips it by name).
+        'restore_cameras': restore_cameras,
         # Mast masked-depth publisher (nvblox camera_1), or None when mast depth is off. The port
         # publishes it on the sensing cadence via its masked_depth hook (isaac_bundle wires it).
         'mast_depth': mast_depth_bridge,
@@ -412,7 +420,8 @@ def _real_rig(*, assembly, design, render_scale=1.0, camera_render_scales=None, 
         author_camera_lamps(assembly.stage, design, parent_paths=parent_paths, tuning=tuning)
     return {'cameras': rig.cameras,
             'base_from_camera': lambda camera_id: rig.base_from_camera(camera_id, base_root),
-            'recording_camera': recording_camera}
+            'recording_camera': recording_camera,
+            'restore_cameras': lambda: rig.recreate_destroyed(stage=assembly.stage)}
 
 
 def author_mission_markers(stage, design, parent_paths, *, support_names=('source', 'cart', 'shelf'),
