@@ -1,0 +1,37 @@
+{
+  "_comment": "sim-place-descent-residual-v3: the fix for the REACH-INDEPENDENT ~2.0 deg collect set-down residual that coldwin42 (v2, 2.00 deg, 0.017 s over grace) could not clear. PART-1 CHARACTERISATION (coldwin42-deck.txt + the cw39/cw42 anchors, CPU-reproduced in test_place_descent_residual_v3.py): the carton is LEVEL through lift/tuck/transit/preplace and steps to ~2.0 deg ONLY at the set-down, with NO pad/post SEAL contact (hit_bodies=[]); the step is REACH-INDEPENDENT (cw42 2.00 @ reach 0.839 m == cw39 2.02 @ 1.086 m, |delta| 0.02) while the gravity-droop model is reach-DEPENDENT (2.16 @ 1.086 vs ~1.50 @ 0.839) and the closed loop corrects to 0.26 -- a +1.74 model/reality gap. That is the signature of the arm PRESSING the leveled welded carton onto the cart deck: the CARTON_TILT grader reads FK of the EXECUTED joints, which deflect ~2 deg as the position-controlled arm drives into the rigid deck reaction (no FK model sees a contact). PART-2 (source): the AUTHORED cart deck is PARALLEL to the floor (scripts/check_cart_deck_level.py: deck tilt 0.0 deg, 4 casters at equal height) -- the coldwin42-deck.txt 0.88 deg was an END-of-run SNAPSHOT with the cart knocked by the controlled stop, not the rest attitude -- so no static deck tilt explains the 2.0; the operative fix is to NOT press: the CONTACT-TRIGGERED weld release. PART-3: the SENSOR-fed closed loop removes the v2 model blindness (shipped opt-in). The 2.0 deg bound, 0.15 s grace, carton dims, droop stiffness K=2850, station hold, droop-aware clearance, least-extended reach and tow lanes are ALL UNCHANGED. Every new behaviour is opt-in / default-off => byte-identical off.",
+
+  "carton_level": {
+    "_file": "HOST config scripts/twin/restock_manipulation/ros_host_config.json (resolved by ros_host.py -> carton_level.resolve_level_config -> TransferController). Shown as the coldwin43 carton_level block (the v2 keys KEPT + the v3 additions).",
+
+    "gravity_compensation": {"stiffness_nm_per_rad": 2850, "carton_mass_kg": 0.45},
+    "place_from_above": true,
+    "place_above_clearance_m": 0.08,
+    "place_depth_bias_m": 0.05,
+    "place_clearance_drooped": true,
+    "place_clearance_margin_m": 0.030,
+    "closed_loop_level": true,
+    "closed_loop_authority_deg": 3.0,
+    "closed_loop_rate_deg_per_s": 30.0,
+    "closed_loop_gain": 0.6,
+    "_v2_note": "ALL v2 keys above are KEPT (droop-aware clearance, closed-loop backstop, from-above descent) -- v3 adds the contact release + the sensor anchor on top; nothing v2 that worked is removed.",
+
+    "place_contact_release": true,
+    "place_contact_gap_m": 0.012,
+    "_place_contact_release_note": "HOST, carton_level block. THE PRIMARY FIX. During the collect deck set-down the controller watches the welded carton descend (its measured centre z, sensors.placed_pose, needs RESTOCK_VERIFY_PLACE/verify_place on) and, the instant it reaches within place_contact_gap_m of the planned set-down height (deck contact), RELEASES the weld (transition to the release phase: gripper-open + detach) instead of continuing to press. The carton is never driven into the deck, so the executed-joint deflection never builds; it settles flat under gravity. The release fires AT contact, inside the 0.15 s grace, and the release phase is NOT a CARTON_TILT-graded carried phase, so the trip is structurally pre-empted. Scoped to _collect_deck_place(); INERT when placed_pose is unavailable (real rig) -> the legacy place->level-gate->release owns it. Logs PLACE_CONTACT_RELEASE_ARM (threshold latched at the descent issue) and PLACE_CONTACT_RELEASE (fired at contact).",
+
+    "closed_loop_sensor": true,
+    "_closed_loop_sensor_note": "HOST, carton_level block. PART 3 (always-ship). The v2 closed loop feeds the servo the MODEL-predicted executed attitude (commanded + droop model), blind to the true executed attitude (it corrected to 0.26 while the sim read 2.00). With this on, the pre-dispatch correction is ANCHORED on the MEASURED carton attitude (FK of the live measured joints at the descent start -- the exact quantity the CARTON_TILT grader reads), so a real start offset the droop model misses is folded into the correction. Same +-closed_loop_authority_deg / rate limit. Requires closed_loop_level. It does NOT fix a rigid-contact conform (that is the contact-release's job) -- it removes model blindness and is cheap. Proven bounded + converging on a measured descent (CartonLevelServo.replay_measured): a measured 2.0 deg contact tilt driven to ~1.0 deg, correction capped at 3.0 deg. Logs CARTON_LEVEL_CLOSED_LOOP_SENSOR."
+  },
+
+  "_runtime_unchanged": {
+    "_comment": "The v2 LEAST-EXTENDED mission-runtime levers (cart_placement.load_center_body_xy, place_approach) are KEPT at the coldwin42 values (they removed the pad-vs-post contact and the from-above geometry). v3 does NOT change the reach -- part 1 proved the residual is reach-INDEPENDENT, so reducing reach further would not help; the contact release is what clears it.",
+    "verify_place": "REQUIRED on (env RESTOCK_VERIFY_PLACE=1 or the runtime verify_place flag) so sensors.placed_pose carries the live welded-carton centre the contact-release gate reads. Absent => the gate is inert and the set-down falls back to the legacy level-gate->release (which still trips at 2.0) -- so coldwin43 MUST run with placed_pose on."
+  },
+
+  "_acceptance": "coldwin43 collect set-down COMPLETES: the log shows PLACE_CONTACT_RELEASE_ARM (threshold latched) then PLACE_CONTACT_RELEASE at deck contact, the release phase detaches the weld (release_detach_timeout_s), and the run advances past collect -- with CARTON_TILT peak <= 1.5 deg (the carried carton never pressed into the deck), NO non-deck SEAL contact (hit_bodies=[] on post_*/side_*/back_*/drawbar) before PLACE_ON_DECK, the deck attitude logged (BASE_ATT / the deck-level proof), and the carton left resting on the cart deck. CARTON_LEVEL_CLOSED_LOOP_SENSOR engaged (bounded). The carry stays level through lift/tuck/transit/preplace (unchanged).",
+
+  "_cpu_proof": "PYTHONPATH=scripts python3 -m pytest scripts/twin/tests/test_place_descent_residual_v3.py (config resolve/preflight; part-1 reach-independence vs droop reach-dependence + the step-at-contact signature; the contact-release threshold + the release-phase-not-a-trip-phase property; the controller gate fires at contact / inert off; the sensor servo bounded+converging). Deck-level proof: PYTHONPATH=scripts <usd-venv>/python scripts/check_cart_deck_level.py (exit 0: deck within 0.3 deg of level). Both default-off keys => byte-identical when absent.",
+
+  "_requires": "The HOST block must already carry the v2 keys (gravity_compensation K=2850, place_from_above, place_clearance_drooped, closed_loop_level) plus collect_place_preplace_shape, collect_place_straight_line, collect_place_wrist_guard, carry_wrist1_cap / carry_wrist2_min, release_detach_timeout_s (so the contact-triggered release detaches fast by name). config_preflight.check_carton_level validates the v3 sub-keys (resolve + the closed_loop_sensor -> closed_loop_level dependency)."
+}

@@ -158,6 +158,35 @@ def tool_position(robot, config, tool_link='ur_tool0', root='ur_base_link'):
     return tool_transform(robot, config, tool_link, root)[:3, 3].copy()
 
 
+# The log token the controller prints when the welded carton reaches the cart deck during the collect
+# set-down and the contact-triggered weld release fires (sim-place-descent-residual-v3).
+PLACE_CONTACT_RELEASE = 'PLACE_CONTACT_RELEASE'
+
+
+def place_descent_drop_m(robot, waypoints, *, tool_link='ur_tool0', root='ur_base_link'):
+    """The vertical TCP drop (m, world +Z) of a planned place descent -- the height the welded carton
+    centre falls from the leveled standoff (``waypoints[0]``) to the set-down (``waypoints[-1]``). Both
+    descent legs are leveled, so the weld offset is constant and the carton-centre z tracks the tool z with
+    a fixed offset: the carton falls by exactly this TCP drop. Pure/CPU. Returns max(0, z0 - z1)."""
+    if waypoints is None or len(waypoints) < 2:
+        raise ValueError('place_descent_drop_m needs at least two waypoints (standoff + set-down)')
+    z0 = float(tool_position(robot, list(waypoints[0]), tool_link, root)[2])
+    z1 = float(tool_position(robot, list(waypoints[-1]), tool_link, root)[2])
+    return max(0.0, z0 - z1)
+
+
+def place_contact_release_z(start_carton_z, drop_m, gap_m):
+    """The measured carton-centre z (ur_base_link) at which the contact-triggered weld release should fire:
+    ``start_carton_z - drop_m + gap_m``. ``start_carton_z`` is the live carton centre z when the place
+    descent is issued (carton at the standoff), ``drop_m`` the planned descent drop (:func:`place_descent_drop_m`),
+    ``gap_m`` the carton-bottom-to-deck gap at which to release (a few mm above hard contact). The carton has
+    descended to within ``gap_m`` of its set-down pose -- i.e. its bottom is ~``gap_m`` above the deck -- when
+    its live centre z has fallen to this value. Pure/CPU; the caller fires once ``live_z <= this``."""
+    if not all(math.isfinite(v) for v in (start_carton_z, drop_m, gap_m)):
+        raise ValueError('place_contact_release_z needs finite start_carton_z, drop_m, gap_m')
+    return float(start_carton_z) - float(drop_m) + float(gap_m)
+
+
 def _as_joint_map(config):
     """Accept either a {joint_name: rad} map or a 6-vector in ARM_JOINTS order."""
     from twin.restock_manipulation.cad_tool import ARM_JOINTS
@@ -316,6 +345,36 @@ class LevelConfig:
     closed_loop_authority_deg: float = 3.0
     closed_loop_rate_deg_per_s: float = 30.0
     closed_loop_gain: float = 0.6
+    # sim-place-descent-residual-v3: the CONTACT-TRIGGERED weld release -- the primary fix for the
+    # REACH-INDEPENDENT ~2.0 deg collect set-down residual. Characterisation (part 1, coldwin42-deck.txt +
+    # the cw39/cw42 anchors): the carried carton is LEVEL through lift/tuck/transit/preplace and steps to
+    # ~2.0 deg ONLY at the set-down, with NO pad/post SEAL contact; the step is REACH-INDEPENDENT
+    # (cw42 2.00 @ reach 0.839 m == cw39 2.02 @ 1.086 m) and MODEL-BLIND (the droop model predicts
+    # reach-DEPENDENT 1.50 vs 2.16 and the closed loop corrects to 0.26). That is the signature of the arm
+    # PRESSING the leveled welded carton onto the cart deck: the CARTON_TILT grader reads FK of the EXECUTED
+    # joints, which deflect ~2 deg as the position-controlled arm drives into the rigid deck reaction (no FK
+    # model sees a contact). No arm control can level a carton pressed into a non-level/rigid plane -- the
+    # only fix is to NOT press it. With ``place_contact_release`` on, the controller watches the welded
+    # carton descend (its measured centre z, ``sensors.placed_pose``) and, the instant it reaches within
+    # ``place_contact_gap_m`` of the planned set-down height (deck contact), RELEASES the weld (transition to
+    # the release phase: gripper-open + detach) instead of continuing to press. The carton is then never
+    # driven into the deck, so the executed-joint deflection never builds and the carton settles flat under
+    # gravity. The release happens AT contact, inside the 0.15 s grace, so the CARTON_TILT trip (which only
+    # grades the WELDED/carried carton) never sustains. Scoped to the collect deck place (``_collect_deck_place``);
+    # INERT when ``sensors.placed_pose`` is unavailable (verify_place off / real rig) -> the legacy place->level
+    # gate->release owns it. Default OFF => byte-identical.
+    place_contact_release: bool = False
+    place_contact_gap_m: float = 0.012
+    # sim-place-descent-residual-v3 (part 3, always-ship): the SENSOR-based closed loop. The v2 closed loop
+    # feeds the servo the MODEL-predicted executed attitude (commanded + droop model), so it is blind to the
+    # true executed attitude (it corrected to 0.26 while the sim read 2.00). With ``closed_loop_sensor`` on,
+    # the pre-dispatch correction is ANCHORED on the MEASURED carton attitude (FK of the live measured joints
+    # at the descent start -- the exact quantity the CARTON_TILT grader reads), so a real starting offset the
+    # droop model misses is folded into the correction. Same bounded authority / rate limit. This does NOT
+    # fix the contact-conform residual (a servo cannot win against a rigid contact -- that is the
+    # contact-release's job); it removes the model blindness about the executed attitude and is cheap, so it
+    # ships opt-in. Requires ``closed_loop_level``; default OFF => byte-identical.
+    closed_loop_sensor: bool = False
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -342,6 +401,11 @@ class LevelConfig:
             raise ValueError('carton_level.closed_loop_rate_deg_per_s must be a finite positive deg/s')
         if not (math.isfinite(self.closed_loop_gain) and 0 < self.closed_loop_gain <= 2.0):
             raise ValueError('carton_level.closed_loop_gain must be a finite number in (0, 2]')
+        if not (math.isfinite(self.place_contact_gap_m) and self.place_contact_gap_m > 0):
+            raise ValueError('carton_level.place_contact_gap_m must be a finite positive number of metres')
+        if self.closed_loop_sensor and not self.closed_loop_level:
+            raise ValueError('carton_level.closed_loop_sensor requires closed_loop_level to be on '
+                             '(the sensor anchor refines the closed-loop correction)')
         from twin.restock_manipulation.cad_tool import ARM_JOINTS
         bad = [j for j in self.joints if j not in ARM_JOINTS]
         if bad or not self.joints:
@@ -361,7 +425,7 @@ def resolve_level_config(spec):
     ``place_descent_accel``, ``place_above_clearance_m``, ``place_depth_bias_m``, ``preplace_above_place``,
     ``preplace_standoff_m``, ``place_clearance_check``, ``place_clearance_margin_m``, ``place_clearance_drooped``,
     ``closed_loop_level``, ``closed_loop_authority_deg``, ``closed_loop_rate_deg_per_s``, ``closed_loop_gain``,
-    ``joints``, ``tool_link``.
+    ``place_contact_release``, ``place_contact_gap_m``, ``closed_loop_sensor``, ``joints``, ``tool_link``.
     Raises on a malformed value so a typo fails loudly at boot."""
     if spec is None or spec is False:
         return None
@@ -385,12 +449,13 @@ def resolve_level_config(spec):
         kw['path_waypoints'] = int(spec['path_waypoints'])
     for fnum in ('place_descent_speed', 'place_descent_accel', 'place_above_clearance_m',
                  'place_depth_bias_m', 'preplace_standoff_m', 'place_clearance_margin_m',
-                 'closed_loop_authority_deg', 'closed_loop_rate_deg_per_s', 'closed_loop_gain'):
+                 'closed_loop_authority_deg', 'closed_loop_rate_deg_per_s', 'closed_loop_gain',
+                 'place_contact_gap_m'):
         if fnum in spec and spec[fnum] is not None:
             kw[fnum] = float(spec[fnum])
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above',
                  'preplace_above_place', 'place_clearance_check', 'place_clearance_drooped',
-                 'closed_loop_level'):
+                 'closed_loop_level', 'place_contact_release', 'closed_loop_sensor'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     if spec.get('joints'):
@@ -1413,6 +1478,97 @@ class CartonLevelServo:
                 cmd_c[j] = cmd[j] + v
             out.append([cmd_c[j] for j in ARM_JOINTS])
         return out
+
+    def correct_path_sensor_anchored(self, commanded_path, gravity_comp, measured_start, *,
+                                     dt=1.0 / 60.0, tool_link=None, root=None):
+        """sim-place-descent-residual-v3 (part 3): the SENSOR-ANCHORED closed-loop correction. Identical to
+        :meth:`correct_path`, but the per-waypoint executed-attitude ESTIMATE the servo reads is shifted by
+        the MEASURED-minus-model up-axis residual at the descent start -- the live FK-of-measured-joints
+        attitude (``measured_start``, ARM-order 6-vector or dict, the exact quantity the CARTON_TILT grader
+        reads) minus the droop model's prediction for the same config. So a real starting tilt the droop
+        model misses is folded into every executed estimate, and the bounded wrist correction accounts for
+        it. Falls back to the plain model ``correct_path`` when ``measured_start`` is unusable (None / wrong
+        length). The authority / rate bounds are unchanged (the shift only moves the target the servo nulls).
+        Pure/CPU."""
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+        tl = tool_link or self.cfg.tool_link
+        rt = root or self.root
+        if measured_start is None:
+            return self.correct_path(commanded_path, gravity_comp, dt=dt, tool_link=tl, root=rt)
+        try:
+            meas = _as_joint_map(measured_start)
+        except (ValueError, TypeError):
+            return self.correct_path(commanded_path, gravity_comp, dt=dt, tool_link=tl, root=rt)
+        # measured carton up-axis vs the model's predicted executed up-axis at the SAME start config.
+        meas_up = carried_up_world(self.robot, meas, self.up, tl, rt)
+        dq_s = gravity_comp.droop(self.robot, meas, tool_link=tl, root=rt)
+        model_start = {j: meas.get(j, 0.0) + dq_s.get(j, 0.0) for j in meas}
+        model_up = carried_up_world(self.robot, model_start, self.up, tl, rt)
+        # residual rotation (small-angle) measured relative to model, applied additively to each estimate.
+        mr, mp, _ = up_axis_rpy(meas_up)
+        kr, kp, _ = up_axis_rpy(model_up)
+        d_roll, d_pitch = mr - kr, mp - kp
+        self.reset()
+        out = []
+        for vec in commanded_path:
+            cmd = dict(zip(ARM_JOINTS, [float(v) for v in vec]))
+            dq0 = gravity_comp.droop(self.robot, cmd, tool_link=tl, root=rt)
+            ex0 = {j: cmd[j] + dq0.get(j, 0.0) for j in cmd}
+            # step the servo against the SENSOR-anchored attitude (model executed + the measured residual).
+            corr = self._step_with_bias(ex0, dt, d_roll, d_pitch)
+            cmd_c = dict(cmd)
+            for j, v in corr.items():
+                cmd_c[j] = cmd[j] + v
+            out.append([cmd_c[j] for j in ARM_JOINTS])
+        return out
+
+    def _step_with_bias(self, measured, dt, bias_roll_deg, bias_pitch_deg):
+        """:meth:`step`, but the carton roll/pitch error the servo nulls is shifted by a fixed measured-vs-model
+        bias (deg). Used by the sensor-anchored correction so the model estimate carries the real start offset."""
+        cmd = _as_joint_map(measured)
+        roll, pitch, _ = self._carton_rpy(cmd)
+        roll += float(bias_roll_deg)
+        pitch += float(bias_pitch_deg)
+        err = np.array([math.radians(roll), math.radians(pitch)])
+        adj = [j for j in self.joints if j in cmd]
+        if not adj or float(np.linalg.norm(err)) < 1e-9:
+            return {j: self._accum.get(j, 0.0) for j in adj}
+        step_fd = 1e-4
+        J = np.zeros((2, len(adj)))
+        for k, j in enumerate(adj):
+            m2 = dict(cmd); m2[j] = cmd[j] + step_fd
+            r2, p2, _ = self._carton_rpy(m2)
+            J[:, k] = (np.array([math.radians(r2 + bias_roll_deg),
+                                 math.radians(p2 + bias_pitch_deg)]) - err) / step_fd
+        dq = -self.cfg.gain * np.linalg.solve(J.T @ J + 1e-6 * np.eye(len(adj)), J.T @ err)
+        auth = math.radians(self.cfg.authority_deg)
+        rate = math.radians(self.cfg.rate_deg_per_s) * max(0.0, float(dt))
+        for k, j in enumerate(adj):
+            target = self._accum.get(j, 0.0) + float(dq[k])
+            delta = max(-rate, min(rate, target - self._accum.get(j, 0.0)))
+            self._accum[j] = max(-auth, min(auth, self._accum.get(j, 0.0) + delta))
+        return {j: self._accum.get(j, 0.0) for j in adj}
+
+    def replay_measured(self, executed_configs, *, dt=1.0 / 60.0, tool_link=None, root=None):
+        """OFFLINE proof (part 3, SENSOR feed): step a sequence of MEASURED/EXECUTED arm configs
+        (``executed_configs`` = list of ARM-order 6-vectors -- real joint-encoder feedback, NOT a model) through
+        the servo and return ``(measured_rpy, servoed_rpy)`` per step: the carton (roll, pitch, tilt) the grader
+        would read with NO servo vs. with the bounded wrist correction the servo commands from reading that same
+        measured attitude. Proves the sensor-fed loop drives the EXECUTED carton tilt DOWN (toward level) within
+        the authority and that the correction stays bounded. Pure/CPU."""
+        tl = tool_link or self.cfg.tool_link
+        rt = root or self.root
+        self.reset()
+        measured_rpy, servoed_rpy = [], []
+        for vec in executed_configs:
+            ex = _as_joint_map(vec)
+            measured_rpy.append(carried_rpy(self.robot, ex, self.up, tl, rt))
+            corr = self.step(ex, dt)
+            servoed = dict(ex)
+            for j, v in corr.items():
+                servoed[j] = ex.get(j, 0.0) + v
+            servoed_rpy.append(carried_rpy(self.robot, servoed, self.up, tl, rt))
+        return measured_rpy, servoed_rpy
 
     def replay(self, commanded_path, gravity_comp, *, dt=1.0 / 60.0, tool_link=None, root=None):
         """OFFLINE proof: step a recorded/planned place descent (``commanded_path`` = list of ARM-order
