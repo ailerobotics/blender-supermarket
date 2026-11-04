@@ -676,14 +676,25 @@ class GravityCompensation:
     """Resolved loaded gravity-droop feedforward settings (sim-carton-level-southdock-v1). Off => None.
 
     ``stiffness`` is the effective droop stiffness (N*m/rad); ``carton_mass`` the welded handling-unit mass
-    lumped at the tool for the torque; ``max_pretilt_rad`` clamps each joint's commanded pre-tilt so a
-    mis-calibrated stiffness can never command a large attitude offset (the droop is < 0.04 rad, so a small
+    lumped at the tool for the torque; ``max_pretilt_rad`` clamps each joint's modelled droop so a
+    mis-calibrated stiffness can never model a large attitude offset (the droop is < 0.04 rad, so a small
     clamp is ample headroom). ``droop(robot, cfg)`` is the per-joint EXECUTED-minus-COMMANDED position offset
-    the finite servo leaves under gravity: delta_q = -torque/stiffness (clamped), ARM-order dict."""
+    the finite servo leaves under gravity: delta_q = -torque/stiffness (clamped), ARM-order dict.
+
+    ``correct_joints`` (sim-carton-level-setdown-v1) is the joint set the droop-cancelling pre-tilt is
+    placed ON -- the faithfully-TRACKING joints. coldwin33 proved the original full-DOF pre-tilt is wrong:
+    the level place IK spread the pre-tilt onto the HEAVY shoulder_lift/elbow pitch joints (shoulder_lift
+    +0.020 rad, elbow +0.015 rad), but at the far-extended loaded set-down those joints are gravity-pinned
+    -- the GPU moved the executed carton by only 0.01 deg for a +2.04 deg command pre-tilt (set-down
+    2.07->2.06), i.e. d(executed)/d(command) ~ 0 on the heavy joints. The wrist, which carries ~2 N*m, DOES
+    track its command faithfully (coldwin33 lift/tuck/preplace executed matched the geometric plan within
+    0.02 deg). So the droop-cancellation must be realised through the WRIST (the correct_joints), not the
+    heavy joints that sag back regardless of the fine setpoint. Default = the wrist cluster."""
     stiffness: float = DEFAULT_DROOP_STIFFNESS
     carton_mass: float = 0.45
     max_pretilt_rad: float = 0.12
     tool_link: str = 'ur_tool0'
+    correct_joints: tuple = DEFAULT_LEVEL_JOINTS
 
     def validate(self):
         if not (math.isfinite(self.stiffness) and self.stiffness > 0):
@@ -692,16 +703,48 @@ class GravityCompensation:
             raise ValueError('gravity_compensation.carton_mass must be a finite non-negative kg')
         if not (math.isfinite(self.max_pretilt_rad) and self.max_pretilt_rad > 0):
             raise ValueError('gravity_compensation.max_pretilt_rad must be a finite positive rad')
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS
+        bad = [j for j in self.correct_joints if j not in ARM_JOINTS]
+        if bad or not self.correct_joints:
+            raise ValueError(f'gravity_compensation.correct_joints must be a non-empty subset of ARM_JOINTS; bad={bad}')
         return self
 
     def droop(self, robot, config, *, tool_link=None, root='ur_base_link'):
         """ARM-order dict of EXECUTED-minus-COMMANDED joint offsets under the loaded gravity torque at
         ``config``. A joint that must resist a positive torque droops negative: delta_q = -tau/stiffness,
-        clamped to +/- max_pretilt_rad."""
+        clamped to +/- max_pretilt_rad. This is the SAG the wrist feedforward must cancel (its magnitude
+        still sizes the correction; it is NOT pre-commanded onto the heavy joints -- see ``wrist_feedforward``)."""
         tl = tool_link or self.tool_link
         tau = arm_gravity_torques(robot, config, carton_mass=self.carton_mass, tool_link=tl, root=root)
         lim = float(self.max_pretilt_rad)
         return {j: max(-lim, min(lim, -tau[j] / self.stiffness)) for j in tau}
+
+    def wrist_feedforward(self, robot, command, up_in_tool, *, tool_link=None, root='ur_base_link',
+                          limits=None, accept_deg=None):
+        """sim-carton-level-setdown-v1: realise the droop-cancellation on the TRACKING ``correct_joints``.
+
+        Given a geometrically-level COMMAND (reach + level, e.g. the output of the gc-free ``level_place_ik``),
+        predict the loaded joint SAG (``droop``), form the config the heavy joints will actually SETTLE at
+        (``command + sag``), then re-solve ONLY the ``correct_joints`` (the wrist) so the carton is level AT
+        THAT SETTLED config. The returned command keeps every non-correct joint at its geometric value (the
+        heavy joints sag from there -- a disturbance the fine setpoint cannot null, coldwin33) and pre-rotates
+        the wrist to counter the sag-induced carton pitch. Because the wrist tracks its command faithfully, the
+        physical welded carton lands level. The correction follows the extension automatically: the sag is
+        ``tau(command)/stiffness`` and ``tau`` grows with reach, so a deeper set-down gets a larger wrist
+        pre-rotation (the per-waypoint gravity-torque solve the lane asked for). Returns an ARM-order joint map.
+        Raises ValueError (via ``level_config``) only when no in-``limits`` wrist solution levels the sag -- the
+        caller then falls through / the CARTON_TILT trip owns it (never a silent tilt)."""
+        tl = tool_link or self.tool_link
+        cmd = _as_joint_map(command)
+        sag = self.droop(robot, cmd, tool_link=tl, root=root)
+        settled = {j: cmd[j] + sag.get(j, 0.0) for j in cmd}
+        wrist_sol = level_config(robot, settled, up_in_tool, joints=self.correct_joints, tool_link=tl,
+                                 root=root, limits=limits, accept_deg=accept_deg)
+        out = dict(cmd)
+        for j in self.correct_joints:
+            if j in wrist_sol:
+                out[j] = wrist_sol[j]
+        return out
 
 
 def resolve_gravity_compensation(spec, *, tool_link='ur_tool0'):
@@ -732,6 +775,9 @@ def resolve_gravity_compensation(spec, *, tool_link='ur_tool0'):
                 break
     if spec.get('tool_link'):
         kw['tool_link'] = str(spec['tool_link'])
+    # sim-carton-level-setdown-v1: the tracking joint set the droop-cancel pre-tilt is placed on (default wrist).
+    if spec.get('correct_joints'):
+        kw['correct_joints'] = tuple(str(j) for j in spec['correct_joints'])
     return GravityCompensation(**kw).validate()
 
 
@@ -761,13 +807,22 @@ def level_place_ik(robot, target_pos, up_in_tool, seed_config, *, joints=None,
     within tolerance (genuinely unreachable-while-level -- the caller fails honestly / the CARTON_TILT
     trip owns it).
 
-    sim-carton-level-southdock-v1: when ``gravity_comp`` is a ``GravityCompensation`` the IK solves for the
-    COMMANDED config whose EXECUTED (loaded-droop) pose reaches the target AND is level -- the residual
-    (position + attitude) is evaluated at ``cfgmap + gravity_comp.droop(cfgmap)``, so the returned config
-    is pre-tilted against the expected gravity droop and the physical welded carton lands level at the
-    far-extended place pose (coldwin31). The joint-limit / clear-wrist feasibility is still checked on the
-    COMMANDED config (the pre-tilt is < 0.04 rad). ``None`` => the geometric level solve (byte-identical)."""
+    sim-carton-level-setdown-v1: when ``gravity_comp`` is a ``GravityCompensation`` the pose is first solved
+    GEOMETRICALLY (reach + level, no droop), then the droop-cancelling pre-tilt is routed onto the TRACKING
+    ``gravity_comp.correct_joints`` (the wrist) by ``GravityCompensation.wrist_feedforward``. This corrects
+    the sim-carton-level-southdock-v1 original, which let the full-DOF solve spread the pre-tilt onto the
+    HEAVY shoulder_lift/elbow pitch joints: coldwin33 showed those are gravity-pinned at the far-extended
+    loaded set-down (the GPU moved the executed carton 0.01 deg for a +2.04 deg command pre-tilt, 2.07->2.06),
+    so the wrist -- which tracks faithfully -- must carry the correction. The wrist pre-rotation follows the
+    extension (the sag is ``tau/stiffness`` and ``tau`` grows with reach). ``None`` => the geometric level
+    solve (byte-identical)."""
     from twin.restock_manipulation.cad_tool import ARM_JOINTS
+    if gravity_comp is not None:
+        geom = level_place_ik(robot, target_pos, up_in_tool, seed_config, joints=joints,
+                              tool_link=tool_link, root=root, limits=limits, max_iter=max_iter,
+                              pos_tol=pos_tol, tilt_tol_deg=tilt_tol_deg, w_ori=w_ori, gravity_comp=None)
+        return gravity_comp.wrist_feedforward(robot, geom, up_in_tool, tool_link=tool_link, root=root,
+                                              limits=limits, accept_deg=DEFAULT_TILT_BOUND_DEG)
     cfg = _as_joint_map(seed_config)
     adj = list(joints) if joints is not None else list(ARM_JOINTS)
     adj = [j for j in adj if j in cfg]

@@ -629,3 +629,98 @@ def southdock_table(results, bound_deg=cl.DEFAULT_TILT_BOUND_DEG):
                      'PASS' if r.passes(bound_deg) else 'FAIL'))
     w = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     return '\n'.join('  '.join(c.ljust(w[i]) for i, c in enumerate(row)) for row in rows)
+
+
+# ---------------------------------------- TWO-REGIME executed model (sim-carton-level-setdown-v1)
+# The sim-carton-level-southdock-v1 "executed = command + droop(command)" model is CIRCULAR for the
+# compensated command: level_place_ik solves the command so command+droop is level, and the predictor
+# then evaluates command+droop -> always ~0. It therefore cannot express WHY coldwin33 still tripped at
+# 2.06 deg with gravity_compensation on. The honest model, calibrated to BOTH GPU points (coldwin31 2.07
+# UNCOMPENSATED and coldwin33 2.06 PR311-COMPENSATED), is TWO-REGIME:
+#   * HEAVY pitch joints (shoulder_lift, elbow) are gravity-PINNED at the far-extended loaded set-down --
+#     they SETTLE at geometric_level - tau/K regardless of a sub-degree command pre-tilt (coldwin33: the
+#     executed carton moved 0.01 deg for a +2.04 deg heavy pre-tilt, d(exec)/d(cmd) ~ 0);
+#   * the WRIST (and pan) TRACK their command faithfully (coldwin33 lift/tuck/preplace executed matched the
+#     geometric plan within 0.02 deg -- the servo holds the light joints at setpoint).
+# Under this model, a pre-tilt placed on the HEAVY joints (PR311's full-DOF solve) does NOT realise -> the
+# carton stays ~2 deg off level (reproducing 2.06); a pre-tilt placed on the WRIST (the fix) DOES realise
+# -> level. K=2850 still sizes the sag the wrist must cancel.
+_HEAVY_PITCH_JOINTS = ('ur_shoulder_lift_joint', 'ur_elbow_joint')
+
+
+@dataclass
+class SetdownTwoRegimeResult:
+    """Two-regime executed set-down for ONE geometry: the UNCOMPENSATED geometric command, the PR311-style
+    HEAVY-routed pre-tilt (reproduces the coldwin33 trip), and the sim-carton-level-setdown-v1 WRIST-routed
+    feedforward (the fix). ``*_exec_pitch`` are the EXECUTED |pitch| under the two-regime model."""
+    name: str
+    place_tcp: tuple
+    uncomp_exec_pitch: float          # geometric-level command -> executed (the pre-comp droop)
+    heavy_exec_pitch: float           # PR311 heavy-routed pre-tilt -> executed (still off level: the bug)
+    wrist_exec_pitch: float           # the fix: wrist-routed pre-tilt -> executed (level)
+    wrist_exec_tilt: float
+    wrist_reach_err_mm: float         # executed set-down reach vs the sensed deck (place goal_tol 120 mm)
+    wrist_pretilt_joint: str          # which joint carries the wrist fix's pre-tilt
+    wrist_clear: bool
+
+    def passes(self, margin_deg=1.0, reach_tol_m=0.12):
+        """The fix lands the EXECUTED set-down level within the brief's <= 1 deg margin, strictly better than
+        BOTH the uncompensated droop AND the PR311 heavy-routed command, within the place reach tolerance,
+        in the clear wrist region."""
+        return (self.wrist_exec_tilt <= margin_deg and self.wrist_exec_pitch <= margin_deg
+                and self.wrist_exec_pitch < self.uncomp_exec_pitch
+                and self.wrist_exec_pitch < self.heavy_exec_pitch
+                and self.wrist_reach_err_mm <= reach_tol_m * 1000.0 and self.wrist_clear)
+
+
+def run_setdown_tworegime(urdf_path, *, geometry='south', stiffness=cl.DEFAULT_DROOP_STIFFNESS,
+                          carton_mass=0.45, tool_link='gripper_pad_tcp', grasp=SOUTHDOCK_GRASP):
+    """CPU proof under the TWO-REGIME executed model (sim-carton-level-setdown-v1): the set-down executed
+    pitch for the UNCOMPENSATED command (reproduces coldwin31/collectlevel4), the PR311 HEAVY-routed pre-tilt
+    (reproduces coldwin33's residual 2.06 -- the pre-tilt on the gravity-pinned joints does not realise), and
+    the WRIST-routed feedforward (the fix -> level). Pure/CPU. Returns a SetdownTwoRegimeResult."""
+    import numpy as np
+    place = SOUTHDOCK_PLACE_TCP if geometry == 'south' else EASTCART_PLACE_TCP
+    robot = parse_urdf(urdf_path)
+    u = cl.carton_up_in_tool(cl.tool_rotation(robot, list(grasp), tool_link))
+    limits = _southdock_limits()
+    gc = cl.GravityCompensation(stiffness=stiffness, carton_mass=carton_mass, tool_link=tool_link).validate()
+    seed = [cl.level_preserve_tcp(robot, list(SOUTHDOCK_RAW_STANDOFF), u, tool_link=tool_link,
+                                  limits=limits)[j] for j in ARM_JOINTS]
+    tgt = np.asarray(place, float)
+    geom = [cl.level_place_ik(robot, tgt, u, seed, tool_link=tool_link, limits=limits)[j] for j in ARM_JOINTS]
+    wrist = [cl.level_place_ik(robot, tgt, u, seed, tool_link=tool_link, limits=limits,
+                               gravity_comp=gc)[j] for j in ARM_JOINTS]
+    # PR311-style heavy-routed pre-tilt: pre-command every joint by -droop (= +tau/K), which lands the
+    # correction on the HEAVY pitch joints (the full-DOF solve's minimum-norm choice, coldwin33).
+    sag_geom = gc.droop(robot, dict(zip(ARM_JOINTS, geom)), tool_link=tool_link)
+    heavy = [geom[i] - sag_geom[ARM_JOINTS[i]] for i in range(6)]
+
+    def executed_two_regime(cmd):
+        return [(geom[i] + sag_geom[ARM_JOINTS[i]]) if ARM_JOINTS[i] in _HEAVY_PITCH_JOINTS else cmd[i]
+                for i in range(6)]
+
+    def pitch(cmd):
+        return abs(cl.carried_rpy(robot, executed_two_regime(cmd), u, tool_link)[1])
+    wrist_exec = cl.carried_rpy(robot, executed_two_regime(wrist), u, tool_link)
+    reach_mm = 1000.0 * float(np.linalg.norm(cl.tool_position(robot, executed_two_regime(wrist), tool_link) - tgt))
+    dj = {ARM_JOINTS[i]: wrist[i] - geom[i] for i in range(6)}
+    pre_joint = max(dj, key=lambda j: abs(dj[j]))
+    return SetdownTwoRegimeResult(
+        name=geometry, place_tcp=tuple(place),
+        uncomp_exec_pitch=pitch(geom), heavy_exec_pitch=pitch(heavy),
+        wrist_exec_pitch=abs(wrist_exec[1]), wrist_exec_tilt=wrist_exec[2],
+        wrist_reach_err_mm=reach_mm, wrist_pretilt_joint=pre_joint,
+        wrist_clear=cl._in_clear_wrist(dict(zip(ARM_JOINTS, wrist))))
+
+
+def setdown_tworegime_table(results, bound_deg=cl.DEFAULT_TILT_BOUND_DEG, margin_deg=1.0):
+    rows = [('geometry', 'place_x', 'uncomp_exec', 'heavy_exec(PR311)', 'wrist_exec(fix)',
+             'fix_pretilt_joint', 'reach_mm', 'verdict')]
+    for r in results:
+        rows.append((r.name, f'{r.place_tcp[0]:.3f}', f'{r.uncomp_exec_pitch:.2f}',
+                     f'{r.heavy_exec_pitch:.2f}', f'{r.wrist_exec_pitch:.2f}',
+                     r.wrist_pretilt_joint.replace('ur_', '').replace('_joint', ''),
+                     f'{r.wrist_reach_err_mm:.0f}', 'PASS' if r.passes(margin_deg) else 'FAIL'))
+    w = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    return '\n'.join('  '.join(c.ljust(w[i]) for i, c in enumerate(row)) for row in rows)
