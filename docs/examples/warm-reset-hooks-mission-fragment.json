@@ -1,0 +1,14 @@
+{
+  "_comment": "sim-warm-reset-hooks-v1: the in-repo production host-lifecycle hooks are now the DEFAULT, so the warm two-run collect-only acceptance needs NO hand-written stub and NO warm_reset_hooks key. Merge the keys below into the integration lane's mission-runtime JSON (the mission run configs live outside this repo). These are RUNTIME keys (read by isaac_bundle.create / warm_reset_provider on the Isaac/runtime side) -- NOT HOST (restock_manipulation.config_preflight) keys and NOT ENV vars; a HOST/ENV placement is silently inactive. Absent warm_reset the run is byte-identical.",
+
+  "warm_reset": "twin.restock.warm_reset_provider:build",
+  "_warm_reset": "The production provider. isaac_bundle.create resolves it, calls build(...) ONCE after the bundle is assembled, and wires the returned WarmResetProvider onto bundle.warm_reset + its stage_census onto bundle.warm_stage_state.",
+
+  "_warm_reset_hooks_default": "OMIT warm_reset_hooks to use the in-repo production default twin.restock.warm_reset_hooks:build. It supplies: stop_runtime() (a WARM-SAFE halt -- park base, cancel nav, hold arm -- that does NOT tear down the station-level masked-depth publisher / control relay the next run reuses, unlike the provider's default adapter.stop()); reset_host_state(attempt=, now=) (the relaunch_host-satisfying step: re-arm the arm command gate [ArmCommandGate.resume -> clear a latched hold/fault + reset the heartbeat clock], clear the manipulation between-op latches [motion crash budget], re-arm the heartbeats -- all WITHOUT closing Isaac); and verify(now=) (Kit running + arm gate un-faulted). A failed step prints a named WARM_RESET_HOOK_FALLBACK console line and refuses, so the provider cold-boots with the reason -- never a silent half-reset. Set warm_reset_hooks only to point at a different lane-owned factory (e.g. one that relaunches the out-of-process move_group / nvblox stack).",
+
+  "start_at": "collect",
+  "stop_after": "collect",
+  "_bench": "Stage-isolated bench keys (PR 284/297) so the warm acceptance is a fast collect-only loop; also settable via --start-at collect --stop-after collect.",
+
+  "_acceptance": "Two consecutive collect-only missions on ONE warm session (reusing the ~215 s boot), the between-run reset driven by the in-repo hooks:  run_mobile_restock.py --runtime-config <mission.json with these keys> --output <out> --consecutive-runs 2 --start-at collect --stop-after collect --host-stack  (add --heavy-threshold-mb 2500 for the always-on whispr; add RESTOCK_COLLECT_GROUND_TRUTH=1 if the source decode is not yet green). Expect: ONE boot, run-1 then WARM_RESET_HOOK step=arm_to_start/clear_manipulation/rearm_heartbeats ok lines, then run-2 on the same session. A reset failure prints WARM_RESET_HOOK_FALLBACK and the loop cold-boots run-2 with the reason."
+}
