@@ -1,0 +1,54 @@
+{
+  "_comment": "sim-place-release-on-contact-v1: the CONTACT-GATED place-descent weld release -- the last manipulation blocker before the complete restock cycle. coldwin68 was the furthest run ever (pick sealed, carried pre-place converged with the PR359 wrist hold, base locked for the loaded descent) but the set-down NEVER RELEASED: the PR359 pre-place hold-firm (shoulder_lift/elbow/wrist_1/wrist_2/wrist_3 firmed to kp1e6/eff2000 DURING preplace -- coldwin68 console L21257) held the welded carton rigid into a ~1.46 deg roll, so its edge jammed on cage post /Rollwagen/chassis/post_2 at the DESCENT START (carton_z frozen at 0.6257, 0.075 m ABOVE the computed z-release threshold 0.5624; SEAL_DIAG min_gap_mm=0.0 hit_bodies=[/Rollwagen/chassis/post_2]). The fixed carton_z gate (PR 334, place_contact_release) therefore NEVER fired and the stiff place drive (PHASE_DRIVE place kp1e6/eff2000, L31730 -- IDENTICAL to the clean coldwin64 L33223) pressed the blocked carton to 757 N*m, PAST the 600 N*m station full-brake guard (STATION_FULL_BRAKE_ABORT at 665.9 -> WELDED_CONTROLLED_STOP), three StageRetry cycles, then a 180 s sensor-stream backstop killed the run. coldwin64 ran the SAME config/support, descended the full 0.0747 m and the z gate released cleanly (STATION_FULL_BRAKE_EFFORT peak 125.8, SEAL_DIAG hit_bodies=[]). DIAGNOSIS: the place drive gains are NOT the differentiator (both runs are kp1e6/eff2000 at place); the ONLY difference is the PR359 preplace hold-firm, which altered the settle into the 1.46 deg roll -> post jam, and the z-ONLY release gate let the stiff drive press a carton that could never reach the z threshold. THE FIX: (1) restore the SOFT carried profile for the place descent (hold-firm is already scoped to preplace -- it is reset on leaving preplace -- so add 'place' to carried_soft_phases to bound the press to eff400 < 600 even if a jam recurs); (2) RELEASE the weld the instant the support is ACTUALLY touched (arm effort over the pre-contact hold baseline | descent STALL | the legacy carton_z threshold, whichever first), GATED on the touched body being the SUPPORT; a flush contact on a NON-support body (the cage post) is an OBSTRUCTION -> PLACE_OBSTRUCTED + a bounded lateral re-approach, never a press/drop. Every new behaviour is opt-in / default-off => byte-identical off.",
+
+  "carton_level": {
+    "_file": "HOST config scripts/twin/restock_manipulation/ros_host_config.json (resolved by ros_host.py -> carton_level.resolve_level_config -> TransferController). Shown as the coldwin68 carton_level block (the PR 334 v3 keys KEPT + the place-release-on-contact additions).",
+
+    "gravity_compensation": {"stiffness_nm_per_rad": 2850, "carton_mass_kg": 0.45},
+    "place_from_above": true,
+    "place_above_clearance_m": 0.08,
+    "place_depth_bias_m": 0.05,
+    "place_clearance_drooped": true,
+    "place_clearance_margin_m": 0.030,
+    "closed_loop_level": true,
+    "closed_loop_sensor": true,
+    "place_contact_release": true,
+    "place_contact_gap_m": 0.012,
+    "_kept_note": "ALL the PR 334 v3 keys above are KEPT. place_contact_release stays on because place_release_on_contact REUSES its arming (the carton_z fallback threshold is computed from the same place_contact_gap_m). When place_release_on_contact is on, the contact-gated gate OWNS the release and the legacy fixed-z gate is disabled (no double-fire).",
+
+    "place_release_on_contact": true,
+    "_place_release_on_contact_note": "HOST, carton_level block. THE PRIMARY FIX. During the collect deck set-down the controller's place_release.PlaceReleaseGate releases the weld the instant the support is ACTUALLY touched -- whichever of (A) the max arm joint effort rising >= place_release_effort_margin_nm over its pre-contact HOLD baseline (the running min of the observed effort) for place_release_effort_consecutive consecutive ticks, (B) the carton centre z (sensors.placed_pose) failing to make place_release_stall_m of downward progress for place_release_stall_ticks ticks, or (C) the legacy carton_z threshold -- fires FIRST, so the press never reaches the 600 N*m guard. The release reuses the PR 334 cancel->wait-terminal->detach serialization. GATED on the touched body: a SEAL_DIAG hit-prim path containing a place_support_tokens substring (shelf/deck) is the support surface; a flush (<= place_obstruction_gap_mm) contact on ANY OTHER body is an OBSTRUCTION. Logs PLACE_RELEASE_TICK (per-tick carton_z + effort + hit prim + action/trigger heartbeat), PLACE_CONTACT_RELEASE trigger=effort|stall|contact|z, and PLACE_OBSTRUCTED prim=.... Scoped to _collect_deck_place(); INERT when sensors.placed_pose is unavailable (verify_place off / real rig) -> the legacy place->level-gate->release owns it.",
+
+    "place_release_effort_margin_nm": 100.0,
+    "place_release_effort_consecutive": 3,
+    "place_release_stall_m": 0.001,
+    "place_release_stall_ticks": 5,
+    "place_release_contact_gap_mm": null,
+    "_contact_trigger_note": "place_release_contact_gap_mm null => the standalone seal-gap contact trigger is OFF (the effort/stall/z triggers are sufficient and need no gripper-status relay). Set it to a positive mm (e.g. 2.0) to also release when the SUPPORT is measured flush under the pad.",
+
+    "place_support_tokens": ["shelf", "deck"],
+    "place_obstruction_gap_mm": 2.0,
+    "_obstruction_note": "A descending carton whose pad raycast hits a body NOT matching place_support_tokens, flush within place_obstruction_gap_mm (coldwin68: /Rollwagen/chassis/post_2 at 0.0 mm), is an OBSTRUCTION. The tokens avoid relaying the runtime-resolved support prim path; the selected support is /Rollwagen/chassis/shelf (contains 'shelf'), the cage posts are post_* (no token) -> obstruction. Add 'drawbar'/'rail' to the EXCLUDE set only by leaving them OUT of place_support_tokens (any non-token body is already an obstruction).",
+
+    "place_reapproach_max": 1,
+    "place_reapproach_shift_m": 0.03,
+    "_reapproach_note": "On PLACE_OBSTRUCTED the controller does up to place_reapproach_max BOUNDED lateral re-approaches -- shift the set-down target place_reapproach_shift_m laterally (base +x, along the cart width, alternating direction) and re-descend via the pre-place standoff -- then FAIL BY NAME. place_reapproach_max 0 => fail fast on the first obstruction (no re-approach). 1 recommended for coldwin69 (one shift off the post). NOTE: the re-approach's GPU efficacy (whether the shifted descent clears the post) is UNPROVEN on CPU; if coldwin69 jams again, drop to 0 and rely on the soft-place + obstruction fail-by-name while the preplace hold-firm / set-down roll is addressed upstream."
+  },
+
+  "phase_drive": {
+    "_file": "HOST ros_host_config.json phase_drive block (restock/physics_setup resolve_stiff_phases). coldwin68 kept 'place' in the default STIFF set (kp1e6/eff2000), so a jammed carton presses to eff2000. Adding 'place' to carried_soft_phases restores the SOFT carried profile (kp3e5/eff400) for the set-down descent, bounding any residual press to ~400 N*m (< the 600 N*m guard) AND letting the arm comply. Hold-firm is ALREADY scoped to the preplace legs (HoldFirmOnArrival.reset on leaving preplace), so this needs NO code change -- it is the 'soft place descent' half of the fix.",
+    "carried_soft_phases": ["place"],
+    "_carried_soft_phases_note": "coldwin64 placed cleanly at only 125.8 N*m, far under the soft eff400 ceiling, so a soft place descent holds the 0.45 kg carton fine; the 'gravity-resisting place keeps STIFF' default is not needed at this load. Keep the preplace / pan phases STIFF (unchanged). The hold_firm_on_arrival block (PR359) stays as-is -- it is reset on leaving preplace and the place PHASE_DRIVE re-applies the soft profile to every joint, so no firmed wrist carries into the descent."
+  },
+
+  "_runtime": {
+    "verify_place": "REQUIRED on (env RESTOCK_VERIFY_PLACE=1 or the runtime verify_place flag) so sensors.placed_pose carries the live welded-carton centre the stall + z triggers read. Absent => those triggers are inert (the effort + obstruction triggers still fire from the relayed arm_effort_max / seal_hit_prims).",
+    "contact_status_feedback": "RESTOCK_CONTACT_STATUS_FEEDBACK=1 (already on for coldwin65+). With it on, the host-facing /sensors packet now ALSO carries arm_effort_max (max abs arm joint effort, N*m -- the effort trigger) and seal_hit_prims (the SEAL_DIAG hit-body prim paths -- the obstruction gate). Off => those fields stay None and the gate falls back to the carton_z stall + z triggers."
+  },
+
+  "_acceptance": "coldwin69 collect set-down COMPLETES: the log shows PLACE_CONTACT_RELEASE_ARM (threshold latched), then on a clean descent PLACE_CONTACT_RELEASE trigger=stall|z|effort at support contact, the release phase detaches the weld (release_detach_timeout_s), the carton settles on the shelf within the 2.0 deg bound (CARTON_TILT peak <= 2.0, never loosened), verify_place proceeds, and the run advances past collect. The STATION_FULL_BRAKE_EFFORT peak STAYS BELOW 600 N*m (no STATION_FULL_BRAKE_ABORT / WELDED_CONTROLLED_STOP). If the carton jams on a cage post again, the log shows PLACE_OBSTRUCTED prim=/Rollwagen/chassis/post_* then a bounded re-approach (or a named fail), NEVER a press to 757 N*m.",
+
+  "_cpu_proof": "PYTHONPATH=scripts python3 -m pytest scripts/twin/tests/test_place_release_on_contact_v1.py (each release trigger effort/stall/contact/z; the obstruction gate; byte-identical-off config default; config resolve + validation; the controller _place_obstructed bounded-re-approach-then-fail; REPLAY regressions from the coldwin68 post-jam effort 665->757 trace -- key on obstructs/releases before the 600 guard, key off presses past it -- and the coldwin64 clean descent -> trigger=z). All default-off keys => byte-identical when absent.",
+
+  "_out_of_scope": "The pick, the preplace, the transfer place, the watchdogs, the perception lanes, and the 2.0 deg bound are UNCHANGED. The same gate would apply to the live_pose transfer place (also a from-above set-down) -- a follow-up; this PR scopes it to _collect_deck_place(). The cuMotion cart-post world-obstacle path (PR 350 cart_world_obstacle.py) and the perceived-clearance insert gate (PR 351 collision_gate.py) are the heavier obstruction-avoidance mechanisms; this ships the cheap raycast obstruction check tonight."
+}

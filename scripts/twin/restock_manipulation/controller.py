@@ -747,6 +747,25 @@ class TransferController:
         # issued (place_contact_release on + a measured placed_pose). None => the gate is inert (off / no
         # measured carton pose) and the legacy place->level-gate->release owns the set-down.
         self._place_contact_release_z = None
+        # sim-place-release-on-contact-v1: the contact-GATED place-descent release decider + its per-descent
+        # bounded-lateral-re-approach budget. Constructed only when carton_level.place_release_on_contact is
+        # on; None => the legacy fixed-z place_contact_release gate above owns the set-down => byte-identical.
+        # The gate is reset (and its z fallback armed) when the place descent is issued (_arm block below).
+        self._place_release_gate = None
+        self._place_reapproach_count = 0
+        self._place_release_log_sim = None     # last PLACE_RELEASE_TICK heartbeat time (throttle)
+        if (self._carton_level is not None
+                and getattr(self._carton_level, 'place_release_on_contact', False)):
+            from twin.restock_manipulation.place_release import PlaceReleaseGate
+            cl = self._carton_level
+            self._place_release_gate = PlaceReleaseGate(
+                effort_margin_nm=cl.place_release_effort_margin_nm,
+                effort_consecutive=cl.place_release_effort_consecutive,
+                stall_eps_m=cl.place_release_stall_m, stall_ticks=cl.place_release_stall_ticks,
+                contact_gap_mm=(None if cl.place_release_contact_gap_mm is None
+                                else float(cl.place_release_contact_gap_mm)),
+                support_tokens=cl.place_support_tokens,
+                obstruction_gap_mm=cl.place_obstruction_gap_mm)
         # sim-place-preplace-above-support-v1: which above-place lane re-targeted the collect preplace
         # standoff ('support' | 'place') and its carton-bottom clearance above the resolved support top,
         # set when _preplace_above_place_goal engages (for the engaged-standoff log).
@@ -1090,6 +1109,43 @@ class TransferController:
         return (self.collect_place_straight_line
                 and getattr(self, 'operation', None) == 'collect'
                 and not self.cart_cage_place)
+
+    def _place_obstructed(self, now, decision):
+        """sim-place-release-on-contact-v1: the descending carton met a NON-support body (a cage post, not
+        the shelf/deck). NEVER press (would jam / drop the carton against the post) and never release there.
+        Do up to ``place_reapproach_max`` BOUNDED lateral re-approaches -- shift the set-down target
+        ``place_reapproach_shift_m`` laterally (base +x, along the cart width, away from the side post) and
+        re-descend via the pre-place standoff -- then FAIL BY NAME. Returns a terminal/ hold Result."""
+        cl = self._carton_level
+        prim = decision.hit_prim or 'unknown'
+        self._place_reapproach_count += 1
+        shift = float(getattr(cl, 'place_reapproach_shift_m', 0.0) or 0.0)
+        can_shift = ('place' in self.poses and self.poses['place'] is not None
+                     and len(self.poses['place']) >= 3 and shift > 0)
+        if self._place_reapproach_count <= int(getattr(cl, 'place_reapproach_max', 0)) and can_shift:
+            pose = list(self.poses['place'])
+            # Alternate the lateral nudge direction (+x, -x, ...) across re-approaches so a second attempt
+            # does not re-seat on the same post.
+            direction = 1.0 if self._place_reapproach_count % 2 == 1 else -1.0
+            pose[0] = float(pose[0]) + direction * shift
+            self.poses['place'] = tuple(pose)
+            print('PLACE_OBSTRUCTED prim=%s phase=place now=%.3f: %s -- bounded lateral re-approach '
+                  '%d/%d (shift base_x %+0.3f m, re-descend via the pre-place standoff)'
+                  % (prim, now, decision.reason, self._place_reapproach_count,
+                     int(getattr(cl, 'place_reapproach_max', 0)), direction * shift), flush=True)
+            self.evidence.append({'place_obstructed': {'prim': prim, 'reapproach': self._place_reapproach_count,
+                                                       'shift_x': direction * shift, 'sim_time': float(now)}})
+            if self._place_release_gate is not None:
+                self._place_release_gate.reset()
+                self._place_release_log_sim = None
+            self._place_contact_release_z = None
+            self._transition('preplace')
+            return self._result()
+        return self._fail(
+            'PLACE_OBSTRUCTED prim=%s: the descending carton met a non-support body (not %s) -- not pressing '
+            '(would jam/drop against it) and the lateral re-approach budget (%d) is exhausted; %s'
+            % (prim, list(getattr(cl, 'place_support_tokens', ('shelf', 'deck'))),
+               int(getattr(cl, 'place_reapproach_max', 0)), decision.reason))
 
     def in_loaded_place_descent(self):
         """sim-place-descent-watchdog-suspend-v1: True while the loaded place descent is IN FLIGHT -- the
@@ -2176,6 +2232,58 @@ class TransferController:
                   'source=sensors.collision_time packet mirror; collision_dt invariant now owns freshness)'
                   % (self.phase, now, sensors.collision_time), flush=True)
         collision_fresh = self._fresh(sensors.collision_time, now)
+        # sim-place-release-on-contact-v1: the CONTACT-GATED place-descent weld release (supersedes the fixed
+        # carton_z gate below when on). coldwin68's carton jammed on cage post /Rollwagen/chassis/post_2 at the
+        # descent START (carton_z frozen 0.075 m above the fixed z threshold), so the z gate never fired and the
+        # stiff place drive pressed to 757 N*m past the 600 N*m guard. The gate releases the weld the instant
+        # the support is ACTUALLY touched (effort over the pre-contact hold baseline | descent stall | the z
+        # threshold, whichever first), GATED on the touched body being the support: a flush contact on a
+        # NON-support body (a cage post) is an OBSTRUCTION -- do not press/release; log PLACE_OBSTRUCTED and
+        # either do a bounded lateral re-approach or fail by name. Reuses the PR 334 cancel->wait-terminal->
+        # detach release serialization (shared with the legacy gate below). Scoped to the collect deck place.
+        _prg = self._place_release_gate
+        if (_prg is not None and self.held and self.phase == 'place' and self._collect_deck_place()):
+            _pz = (float(sensors.placed_pose[2])
+                   if (sensors.placed_pose is not None and len(sensors.placed_pose) >= 3
+                       and math.isfinite(float(sensors.placed_pose[2]))) else None)
+            _dec = _prg.observe(now=now, carton_z=_pz, commanded_down=True,
+                                arm_effort_max=sensors.arm_effort_max, seal_gap_mm=sensors.seal_gap_mm,
+                                seal_hit_prims=sensors.seal_hit_prims)
+            # Per-tick place carton_z + contact-prim heartbeat (throttled ~0.5 sim-s; every non-press tick).
+            if (_dec.action != 'press' or self._place_release_log_sim is None
+                    or now - self._place_release_log_sim >= 0.5):
+                self._place_release_log_sim = now
+                print('PLACE_RELEASE_TICK phase=place now=%.3f carton_z=%s effort=%s baseline=%s stall=%d '
+                      'gap_mm=%s hit=%s action=%s trigger=%s'
+                      % (now, 'n/a' if _pz is None else '%.4f' % _pz,
+                         'n/a' if _dec.effort is None else '%.1f' % _dec.effort,
+                         'n/a' if _dec.baseline is None else '%.1f' % _dec.baseline, _dec.stall_count,
+                         'n/a' if sensors.seal_gap_mm is None else '%.2f' % float(sensors.seal_gap_mm),
+                         ','.join(sensors.seal_hit_prims) if sensors.seal_hit_prims else '-',
+                         _dec.action, _dec.trigger or '-'), flush=True)
+            if _dec.action == 'obstructed':
+                _res = self._place_obstructed(now, _dec)
+                if _res is not None:
+                    return _res
+            elif _dec.action == 'release':
+                from twin.restock_manipulation import carton_level as cl
+                print('%s phase=place now=%.3f trigger=%s carton_z=%s: the descending welded carton touched '
+                      'the SUPPORT -- releasing the weld at contact (cancel the in-flight place execute, then '
+                      'gripper-open + detach from the settled pose) instead of pressing it; %s'
+                      % (cl.PLACE_CONTACT_RELEASE, now, _dec.trigger,
+                         'n/a' if _pz is None else '%.4f' % _pz, _dec.reason), flush=True)
+                self.evidence.append({'place_contact_release': {
+                    'trigger': _dec.trigger, 'carton_z': _pz, 'effort': _dec.effort,
+                    'baseline': _dec.baseline, 'release_z': self._place_contact_release_z,
+                    'sim_time': float(now)}})
+                self._place_contact_release_z = None
+                self._release_cancel_pending = True
+                self._release_cancel_issued = False
+                self._release_cancel_sim_start = now
+                self._transition('release')
+                return self._result()
+            # action == 'press': keep descending (fall through -- the legacy z gate below is disabled when
+            # place_release_on_contact is on, so no double-fire).
         # sim-place-descent-residual-v3: CONTACT-TRIGGERED weld release. The reach-independent ~2.0 deg
         # collect set-down residual is the arm PRESSING the leveled welded carton onto the cart deck -- the
         # CARTON_TILT grader reads FK of the EXECUTED joints, which deflect as the position-controlled arm
@@ -2194,7 +2302,9 @@ class TransferController:
         # keep pressing the carton into the deck), then the release phase waits for the cancel's terminal
         # result and detaches only from the settled, not-in-flight state. The cancel fires NO global emergency
         # stop (which would latch permanently in the Isaac host); it is an intended phase transition.
-        if (self._carton_level is not None and self._carton_level.place_contact_release and self.held
+        if (self._carton_level is not None and self._carton_level.place_contact_release
+                and not getattr(self._carton_level, 'place_release_on_contact', False)
+                and self.held
                 and self.phase == 'place' and self._place_contact_release_z is not None
                 and self._collect_deck_place()
                 and sensors.placed_pose is not None and len(sensors.placed_pose) >= 3
@@ -2939,9 +3049,14 @@ class TransferController:
                             # (step() gate below) instead of pressing the leveled carton into the cart deck
                             # (the reach-independent 2.0 deg residual). Inert (None) when the gate is off or no
                             # measured carton pose is available -> the legacy place->level-gate->release path.
+                            # sim-place-release-on-contact-v1: the z fallback is armed for EITHER the legacy
+                            # fixed-z gate (place_contact_release) OR the contact-gated gate
+                            # (place_release_on_contact, which keeps carton_z as its fallback trigger).
                             self._place_contact_release_z = None
-                            if (self._carton_level.place_contact_release
-                                    and s.placed_pose is not None and len(s.placed_pose) >= 3
+                            self._place_reapproach_count = 0
+                            _want_release_z = (self._carton_level.place_contact_release
+                                               or getattr(self._carton_level, 'place_release_on_contact', False))
+                            if (_want_release_z and s.placed_pose is not None and len(s.placed_pose) >= 3
                                     and math.isfinite(float(s.placed_pose[2]))):
                                 try:
                                     from twin.restock_manipulation import carton_level as _cl3
@@ -2959,6 +3074,11 @@ class TransferController:
                                     print('PLACE_CONTACT_RELEASE_ARM disabled: %s (legacy level-gate release '
                                           'owns the set-down)' % exc, flush=True)
                                     self._place_contact_release_z = None
+                            # Arm the contact-gated gate with the freshly computed z fallback (which may be
+                            # None -- the descent-independent triggers still fire).
+                            if self._place_release_gate is not None:
+                                self._place_release_gate.reset(release_z=self._place_contact_release_z)
+                                self._place_release_log_sim = None
                             if cl_peak is not None:
                                 mr, mp, _ = cl.predict_path_tilt_executed(
                                     robot, waypoints, self._carton_up_in_tool, tool_link=tcp_link,

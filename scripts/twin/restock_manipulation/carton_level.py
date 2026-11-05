@@ -633,6 +633,33 @@ class LevelConfig:
     # ``'seeded'``, engaged only on the collect preplace world-level lane). Default OFF => ``anchor='auto'`` =>
     # byte-identical. The 2.0 deg bound / 0.15 s grace / carton dims / standoff choice are UNCHANGED.
     preplace_seeded_interior: bool = False
+    # sim-place-release-on-contact-v1: the CONTACT-GATED place-descent weld release (the primary fix for the
+    # coldwin68 press-to-757-N*m hang; supersedes the fixed carton_z gate above when on). coldwin68's pre-place
+    # hold-firm held the welded carton rigid into a ~1.46 deg roll so its edge met cage post
+    # /Rollwagen/chassis/post_2 at the DESCENT START (carton_z frozen at 0.6257, 0.075 m above the computed
+    # ``release_z`` 0.5624), so the fixed ``place_contact_release`` z gate never fired and the stiff eff2000
+    # place drive pressed the blocked carton past the 600 N*m station full-brake guard. With
+    # ``place_release_on_contact`` on, ``place_release.PlaceReleaseGate`` releases the weld the instant the
+    # support is ACTUALLY touched -- whichever of (arm effort rising ``place_release_effort_margin_nm`` over its
+    # pre-contact hold baseline for ``place_release_effort_consecutive`` ticks, the descent STALLING
+    # ``place_release_stall_m`` for ``place_release_stall_ticks`` ticks, or the legacy carton_z threshold) fires
+    # FIRST -- so the press never reaches the guard. The release is GATED on the touched body being the selected
+    # SUPPORT: a hit-prim path containing a ``place_support_tokens`` substring (shelf/deck) is the support
+    # surface; a flush (<= ``place_obstruction_gap_mm``) contact on ANY OTHER body is an OBSTRUCTION -- the
+    # controller does NOT press/release but logs ``PLACE_OBSTRUCTED prim=...`` and either does up to
+    # ``place_reapproach_max`` bounded lateral re-approaches (shifting the set-down ``place_reapproach_shift_m``)
+    # or fails by name. Reuses the PR 334 cancel->wait-terminal->detach release serialization. Scoped to the
+    # collect deck place (``_collect_deck_place``). Default OFF => byte-identical (the legacy z gate owns it).
+    place_release_on_contact: bool = False
+    place_release_effort_margin_nm: float = 100.0
+    place_release_effort_consecutive: int = 3
+    place_release_stall_m: float = 0.001
+    place_release_stall_ticks: int = 5
+    place_release_contact_gap_mm: object = None   # None => the seal-gap contact trigger is off
+    place_support_tokens: tuple = ('shelf', 'deck')
+    place_obstruction_gap_mm: float = 2.0
+    place_reapproach_max: int = 0                 # 0 => fail fast by name on obstruction (no re-approach)
+    place_reapproach_shift_m: float = 0.03
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -670,6 +697,31 @@ class LevelConfig:
         if self.closed_loop_sensor and not self.closed_loop_level:
             raise ValueError('carton_level.closed_loop_sensor requires closed_loop_level to be on '
                              '(the sensor anchor refines the closed-loop correction)')
+        # sim-place-release-on-contact-v1
+        for nm, v in (('place_release_effort_margin_nm', self.place_release_effort_margin_nm),
+                      ('place_release_stall_m', self.place_release_stall_m),
+                      ('place_obstruction_gap_mm', self.place_obstruction_gap_mm),
+                      ('place_reapproach_shift_m', self.place_reapproach_shift_m)):
+            if not (math.isfinite(float(v)) and float(v) > 0):
+                raise ValueError(f'carton_level.{nm} must be a finite positive number')
+        for nm, v in (('place_release_effort_consecutive', self.place_release_effort_consecutive),
+                      ('place_release_stall_ticks', self.place_release_stall_ticks)):
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ValueError(f'carton_level.{nm} must be a positive integer')
+        if isinstance(self.place_reapproach_max, bool) or not isinstance(self.place_reapproach_max, int) \
+                or self.place_reapproach_max < 0:
+            raise ValueError('carton_level.place_reapproach_max must be a non-negative integer '
+                             '(0 => fail by name on obstruction with no re-approach)')
+        if self.place_release_contact_gap_mm is not None and not (
+                math.isfinite(float(self.place_release_contact_gap_mm))
+                and float(self.place_release_contact_gap_mm) > 0):
+            raise ValueError('carton_level.place_release_contact_gap_mm must be None or a finite positive '
+                             'number of millimetres (the support-contact seal-gap release trigger)')
+        if (isinstance(self.place_support_tokens, str) or not hasattr(self.place_support_tokens, '__iter__')
+                or not tuple(self.place_support_tokens)
+                or not all(isinstance(t, str) and t for t in self.place_support_tokens)):
+            raise ValueError('carton_level.place_support_tokens must be a non-empty list of non-empty '
+                             'substrings identifying the support surface in a hit-prim path (e.g. shelf, deck)')
         # sim-preplace-level-gate-v1
         if not (math.isfinite(self.preplace_gate_bound_deg)
                 and 0 < self.preplace_gate_bound_deg <= self.bound_deg):
@@ -758,9 +810,26 @@ def resolve_level_config(spec):
                  'preplace_above_place', 'place_clearance_check', 'place_clearance_drooped',
                  'closed_loop_level', 'place_contact_release', 'closed_loop_sensor',
                  'preplace_above_support', 'preplace_level_gate', 'preplace_reaction_branch',
-                 'preplace_seeded_interior'):
+                 'preplace_seeded_interior', 'place_release_on_contact'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
+    # sim-place-release-on-contact-v1
+    for fnum in ('place_release_effort_margin_nm', 'place_release_stall_m', 'place_obstruction_gap_mm',
+                 'place_reapproach_shift_m'):
+        if spec.get(fnum) is not None:
+            kw[fnum] = float(spec[fnum])
+    for fint in ('place_release_effort_consecutive', 'place_release_stall_ticks', 'place_reapproach_max'):
+        if spec.get(fint) is not None:
+            kw[fint] = int(spec[fint])
+    if spec.get('place_release_contact_gap_mm') is not None:
+        kw['place_release_contact_gap_mm'] = float(spec['place_release_contact_gap_mm'])
+    if 'place_support_tokens' in spec and spec['place_support_tokens'] is not None:
+        _pst = spec['place_support_tokens']
+        # Pass the value through (even a malformed one) so validate() rejects a string / empty / non-list
+        # by name, instead of silently splitting a string into characters or ignoring an empty list.
+        kw['place_support_tokens'] = (_pst if isinstance(_pst, str)
+                                      else tuple(str(t) for t in _pst) if hasattr(_pst, '__iter__')
+                                      else _pst)
     # sim-place-preplace-above-support-v1: nullable clearance (None => place_above_clearance_m).
     if spec.get('preplace_support_clearance_m') is not None:
         kw['preplace_support_clearance_m'] = float(spec['preplace_support_clearance_m'])
