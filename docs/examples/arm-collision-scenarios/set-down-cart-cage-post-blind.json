@@ -1,0 +1,26 @@
+{
+  "id": "set-down-cart-cage-post-blind",
+  "arm_leg": "set_down",
+  "expected_behavior": "avoid",
+  "margin_m": 0.03,
+  "description": "A rollwagen cage post beside the deck set-down. The ENTIRE cart is outside the arm ESDF grid today (y_min -0.08; scout \u00a73.3) so the planner is structurally blind -> the CAGE pair-filter + collision-OFF straight-line inserts exist exactly because of this. Closed by adding the cart as a cuMotion world CollisionObject (zero VRAM, captain section-9 decision).",
+  "obstacles": [
+    {
+      "name": "cage_post",
+      "kind": "box",
+      "center": [
+        0.6524,
+        -0.5951,
+        0.4758
+      ],
+      "size": [
+        0.05,
+        0.05,
+        0.45
+      ],
+      "observed": false,
+      "at_goal": false
+    }
+  ],
+  "notes": "observed flips True when the cart is added as a world obstacle."
+}

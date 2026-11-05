@@ -1,0 +1,26 @@
+{
+  "id": "set-down-tool-on-deck-at-goal-blind",
+  "arm_leg": "set_down",
+  "expected_behavior": "refuse",
+  "margin_m": 0.03,
+  "description": "A tool left on the cart deck AT the place target. A perceiving stack refuses before motion (the goal itself is blocked, no detour exists). Unobserved today (cart outside the grid) -> the arm would set the carton down onto the tool. Closed by the cart world obstacle + an ESDF gate on the straight-line place insert (scout \u00a73.3, G5).",
+  "obstacles": [
+    {
+      "name": "deck_tool",
+      "kind": "box",
+      "center": [
+        0.6657,
+        -0.6534,
+        0.4112
+      ],
+      "size": [
+        0.1,
+        0.1,
+        0.06
+      ],
+      "observed": false,
+      "at_goal": true
+    }
+  ],
+  "notes": "observed flips True when the cart world obstacle + straight-line-insert ESDF gate land."
+}

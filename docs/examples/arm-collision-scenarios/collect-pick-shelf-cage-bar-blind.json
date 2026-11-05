@@ -1,0 +1,26 @@
+{
+  "id": "collect-pick-shelf-cage-bar-blind",
+  "arm_leg": "collect_pick",
+  "expected_behavior": "avoid",
+  "margin_m": 0.03,
+  "description": "A thin source-shelf cage bar beside the grasp, NOT framed by the narrow wrist near field (unobserved == free today). A correct perceiving stack detours; the current stack is blind to it -> the measured BEFORE gap. Closed by the MAST depth feed (scout \u00a73.1) which frames the collect context.",
+  "obstacles": [
+    {
+      "name": "cage_bar",
+      "kind": "box",
+      "center": [
+        0.1117,
+        0.6813,
+        0.1806
+      ],
+      "size": [
+        0.04,
+        0.3,
+        0.04
+      ],
+      "observed": false,
+      "at_goal": false
+    }
+  ],
+  "notes": "observed flips True when the mast depth feed (camera_1) is enabled at collect."
+}

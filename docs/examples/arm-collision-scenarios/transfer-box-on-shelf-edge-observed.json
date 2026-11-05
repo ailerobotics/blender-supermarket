@@ -1,0 +1,26 @@
+{
+  "id": "transfer-box-on-shelf-edge-observed",
+  "arm_leg": "transfer",
+  "expected_behavior": "avoid",
+  "margin_m": 0.03,
+  "description": "A box on the store-shelf slot edge, framed by the wrist square-on before grasp (scout \u00a73.4, the ESDF is reliable where the wrist has a clean line of sight). The approach cuMotion pose goal already plans against this ESDF -> detour.",
+  "obstacles": [
+    {
+      "name": "shelf_box",
+      "kind": "box",
+      "center": [
+        0.0806,
+        0.6558,
+        0.2792
+      ],
+      "size": [
+        0.15,
+        0.15,
+        0.15
+      ],
+      "observed": true,
+      "at_goal": false
+    }
+  ],
+  "notes": "observed=True today (wrist pre-grasp view feeds camera_0 ESDF)."
+}

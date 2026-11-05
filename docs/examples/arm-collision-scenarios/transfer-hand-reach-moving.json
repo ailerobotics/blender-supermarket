@@ -1,0 +1,33 @@
+{
+  "id": "transfer-hand-reach-moving",
+  "arm_leg": "transfer",
+  "expected_behavior": "slow_stop_resume",
+  "margin_m": 0.03,
+  "duration_s": 3.0,
+  "time_step_s": 0.2,
+  "description": "A hand reaches into the store-shelf slot while the arm approaches (pre-grasp, wrist frames the slot -> observed). The human gate slows/stops the base + pauses the arm, resuming on clear. Shows the STOP works where the current stack already perceives.",
+  "obstacles": [
+    {
+      "name": "hand",
+      "kind": "sphere",
+      "center": [
+        0.0806,
+        0.6558,
+        0.4092
+      ],
+      "radius": 0.08,
+      "observed": true,
+      "motion": {
+        "kind": "linear",
+        "velocity": [
+          0.0,
+          0.0,
+          -0.3
+        ],
+        "start_t": 0.0,
+        "class": "hand"
+      }
+    }
+  ],
+  "notes": "observed=True today (wrist pre-grasp view). S5: STOP-not-contact on the moving set."
+}

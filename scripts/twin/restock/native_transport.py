@@ -177,6 +177,13 @@ class ArmCommandGate:
         self._drive_log_last=float('-inf')
         self._drive_log_dt=0.1
         self._drive_gains_logged=False
+        # sim-arm-reactive-replan-v1 (P1): reversible human-safety pause. While paused the gate HOLDS the
+        # measured joints and ignores host commands (no tracking/heartbeat fault) -- a NON-latching freeze
+        # the reactive layer releases with set_paused(False), unlike hold()/faulted (a terminal e-stop).
+        # Default unpaused => never entered unless the reactive layer drives it => byte-identical.
+        self._paused=False
+        self._pause_target=None
+        self._pause_prev_suppress=False
 
     def log_effective_gains(self):
         """Log the EFFECTIVE PhysX arm drive gains per joint ONCE (sim-preplace-wrist-continuity-v1). No-op
@@ -245,9 +252,42 @@ class ArmCommandGate:
         self._reset_first_cmd_ramp()
         self.apply(self.measured(),np.zeros(6),self.indices)
 
+    def set_paused(self, paused):
+        """sim-arm-reactive-replan-v1 (P1): reversible human-safety pause of the streamed arm commands.
+
+        While paused the gate HOLDS the measured joints at zero velocity and DROPS the incoming host
+        command (ignores tracking divergence), and the heartbeat watchdog is suppressed -- a NON-latching
+        freeze the reactive human authority (ReactiveArmSupervisor) drives True on STOP/BACKSTOP and False
+        on release. Distinct from hold()/faulted (a TERMINAL e-stop). The reactive layer pairs the pause
+        with an e-stop-free goal cancel, so there is no live host trajectory to diverge from while paused;
+        on release the gate re-seats a clean first-command ramp from the held pose (like resume()). Never
+        called unless the reactive layer is wired => byte-identical."""
+        paused=bool(paused)
+        if paused==self._paused:
+            return
+        self._paused=paused
+        if paused:
+            self._pause_target=self.measured()
+            self._pause_prev_suppress=self.suppress_heartbeat
+            self.suppress_heartbeat=True
+            self.apply(self._pause_target,np.zeros(6),self.indices)
+        else:
+            self._pause_target=None
+            self.suppress_heartbeat=self._pause_prev_suppress
+            # Re-seat a clean start so the next (re-planned) host command ramps from the held pose.
+            self.last_stamp=-1.
+            self.started=False
+            self._reset_first_cmd_ramp()
+
     def command(self, *, names, positions, velocities, efforts, stamp, now):
         if self.faulted:
             self.hold()
+            return
+        if self._paused:
+            # Reversible human-safety freeze: hold the measured joints, ignore the host command and its
+            # tracking divergence. Released by set_paused(False). Never latches faulted.
+            self.apply(self._pause_target if self._pause_target is not None else self.measured(),
+                       np.zeros(6),self.indices)
             return
         if self._contact_hold:
             # Temporary contact-settle freeze: hold the measured joints, ignore the host's continued
@@ -358,6 +398,11 @@ class ArmCommandGate:
             raise
 
     def watchdog(self, now):
+        # sim-arm-reactive-replan-v1 (P1): while deliberately paused (human STOP), the host trajectory is
+        # cancelled so no command stamps advance -- that is intended, not a dead executor. Skip the
+        # heartbeat check entirely (the pause holds the arm itself); it re-arms on set_paused(False).
+        if self._paused:
+            return
         # Arm-command heartbeat, pace-aware (sim-robust-watchdogs). PRIMARY is the SIM clock: the host
         # trajectory executor is alive iff its command stamps keep advancing, so when it dies the
         # greatest-received stamp (_host_now) freezes while Isaac keeps stepping and (now - _host_now)

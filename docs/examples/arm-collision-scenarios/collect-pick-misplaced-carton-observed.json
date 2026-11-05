@@ -1,0 +1,26 @@
+{
+  "id": "collect-pick-misplaced-carton-observed",
+  "arm_leg": "collect_pick",
+  "expected_behavior": "avoid",
+  "margin_m": 0.03,
+  "description": "A misplaced carton on the source-shelf edge, framed by the wrist square-on before grasp (observed today). A perceived-clearance gate re-plans a detour keeping margin. Where the wrist already sees, collision-aware works on the current stack.",
+  "obstacles": [
+    {
+      "name": "misplaced_carton",
+      "kind": "box",
+      "center": [
+        0.0185,
+        0.7031,
+        0.32
+      ],
+      "size": [
+        0.18,
+        0.18,
+        0.18
+      ],
+      "observed": true,
+      "at_goal": false
+    }
+  ],
+  "notes": "observed=True today (wrist pre-grasp view). Baseline (no gate) does not avoid."
+}

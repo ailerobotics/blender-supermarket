@@ -183,6 +183,26 @@ def main():
                   '-> phase_timeout=%.1f s (was hard-coded 120 s)'
                   % (plan_s, l1, l2, float(config.get('preplace_budget_margin_s', 90.0)), phase_timeout),
                   flush=True)
+    # sim-rgbd-arm-collision-aware-v1: perceived-clearance collision gate (opt-in HOST key
+    # perception_collision_gate). Wrap the motion port so EVERY arm leg (pick approach, lift,
+    # tuck, pre-place, place descent, withdraw, every transfer leg -- they all flow through
+    # begin/begin_joint_goal/begin_joint_path) is queried against the live nvblox ESDF (the SAME
+    # get_esdf_and_gradient map cuMotion plans against) for the swept gripper + welded-carton
+    # volume BEFORE dispatch; a leg whose perceived clearance is below the margin is refused/held
+    # by name (PERCEIVED_CLEARANCE / PERCEIVED_CLEARANCE_<ACTION>). Absent/disabled => the raw
+    # RosMotionPort unchanged (byte-identical; the complete-cycle runs are untouched). The wrapper
+    # reads the live phase/held/carton from the controller built just below via a late-bound box.
+    from .gated_motion import build_gated_motion_port
+    _gate_ctrl = {}
+    motion = build_gated_motion_port(
+        motion, config=config, tool=tool, urdf_path=args.urdf, node=node,
+        get_phase=lambda: getattr(_gate_ctrl.get('c'), 'phase', 'idle'),
+        get_held=lambda: bool(getattr(_gate_ctrl.get('c'), 'held', False)),
+        get_carton_dims=lambda: (tuple(_gate_ctrl['c'].profile.dimensions)
+                                 if _gate_ctrl.get('c') is not None
+                                 and getattr(_gate_ctrl['c'], 'profile', None) is not None
+                                 else None),
+        steady_clock=lambda: node.get_clock().now().nanoseconds * 1e-9)
     controller = TransferController(motion,profiles,frame=tool.base_frame,
         phase_timeout=phase_timeout,pose_policy=_policy,
         transport_joints=transport_joints,
@@ -304,9 +324,53 @@ def main():
         # {bound_deg, level_goals, trip, joints} / bool; absent/false => None => byte-identical. The FK
         # URDF is the arm the host already loaded (args.urdf).
         carton_level=carton_level.resolve_level_config(config.get('carton_level')),
+        # sim-pick-contact-seal-fallback-v1 (coldwin63 pick never sealed): opt-in pick-contact guards. The
+        # enable-reissue defeats the last-value /manipulation/status relay overwrite that dropped cw63's
+        # one-shot close command; the suction-enabled guard fails fast / re-sends instead of pressing the
+        # full 20 mm cap with the plugin never enabled; the seal-diag accept treats a dwell-stable flush
+        # geometric seal as contact. All absent/false => byte-identical. See the handoff fragment.
+        contact_reissue_suction_each_tick=bool(config.get('contact_reissue_suction_each_tick', False)),
+        contact_require_suction_enabled=bool(config.get('contact_require_suction_enabled', False)),
+        contact_reissue_close_once=bool(config.get('contact_reissue_close_once', False)),
+        contact_accept_seal_diag=bool(config.get('contact_accept_seal_diag', False)),
+        contact_seal_diag_dwell_ticks=int(config.get('contact_seal_diag_dwell_ticks', 5)),
+        contact_seal_diag_max_gap_mm=float(config.get('contact_seal_diag_max_gap_mm', 0.5)),
+        contact_seal_diag_max_angle_deg=float(config.get('contact_seal_diag_max_angle_deg', 1.0)),
         fk_urdf=args.urdf,
+        # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority over the
+        # free-space arm legs (ported humangate fed by the vendored scripts/twin/humans evaluator; the
+        # e-stop-free motion.cancel preempt + a reversible ArmCommandGate pause). Absent/False => the
+        # supervisor is never constructed => byte-identical. The detection provider + pause sink are wired
+        # Isaac-side at boot (controller.set_human_detection_provider / set_arm_pause_sink) when enabled.
+        reactive_arm_human=bool(config.get('reactive_arm_human', False)),
+        reactive_arm_config=(config.get('reactive_arm') if isinstance(config.get('reactive_arm'), dict)
+                             else None),
+        # sim-arm-reactive-replan-v1 (PR-B): opt-in execution-time corridor-watch re-plan. While a
+        # free-space leg EXECUTES, re-query the live ESDF along the REMAINING swept corridor; a NEW
+        # obstacle below margin preempts (e-stop-free cancel) + re-plans the remaining leg (bounded;
+        # HOLD when it cannot route clear). Consumes the sibling perceived-clearance seam (requires
+        # perception_collision_gate on for the ESDF source). Absent/False => inert => byte-identical.
+        reactive_arm_replan=bool(config.get('reactive_arm_replan', False)),
+        reactive_arm_replan_config=((config.get('reactive_arm') or {}).get('replan')
+                                    if isinstance(config.get('reactive_arm'), dict) else None),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
+    # Late-bind the live controller into the perceived-clearance gate's phase/held/carton reads.
+    _gate_ctrl['c'] = controller
+    # sim-arm-reactive-replan-v1 (PR-B): wire the execution-time corridor watch to the sibling's
+    # perceived-clearance ESDF source (the wrapped GatedMotionPort). Inert unless BOTH
+    # reactive_arm_replan and perception_collision_gate are on (the watch needs the live ESDF).
+    if bool(config.get('reactive_arm_replan', False)):
+        from . import reactive_arm as _ra
+        _esdf_src, _corridor_fn = _ra.build_corridor_fn(motion)
+        if _esdf_src is not None:
+            controller.set_arm_clearance_source(esdf_source=_esdf_src, corridor_fn=_corridor_fn)
+            print('REACTIVE_REPLAN wired to the perceived-clearance ESDF source (execution-time '
+                  'corridor watch active on the free-space legs)', flush=True)
+        else:
+            print('REACTIVE_REPLAN enabled but perception_collision_gate is OFF: the corridor watch '
+                  'has no live ESDF source and stays inert -- enable perception_collision_gate',
+                  flush=True)
     # collect-gt: the ground-truth collect switch is the shared RESTOCK_COLLECT_GROUND_TRUTH env (inherited from
     # the run env); log the host's view at boot so an Isaac/host activation split is visible immediately.
     print('COLLECT_GROUND_TRUTH host enabled=%s' % controller.collect_ground_truth, flush=True)
@@ -367,7 +431,20 @@ def main():
     # published as world CollisionObjects or cuMotion plans the carton straight through them (run-249/
     # 250). Each spec is {id, boxes:[{size,center,rpy?}]} in the ur_base_link frame; CPU-proven clear of
     # the arm's stow + grasp-start configs by twin.restock_host.world_obstacles before any GPU run.
+    # sim-rgbd-arm-collision-aware-v1 (evidence-gated shortcut retirement): where the perceived
+    # nvblox ESDF demonstrably covers a body the eye-in-hand camera DOES now map (a cart post /
+    # shelf / deck the wrist+mast feeds see), the static CollisionObject for it can be withheld and
+    # the perceived obstacle relied on instead. This is opt-in per-id and operator-asserted WITH GPU
+    # coverage evidence: list the covered ids under world_obstacles_perceived.covered_ids. Absent =>
+    # every static obstacle is published exactly as before (byte-identical). The ground-truth TARGET
+    # is a separate decision and stays; only the perceived-vs-static OBSTACLE source changes here.
+    _perceived_covered = set((config.get('world_obstacles_perceived') or {}).get('covered_ids', []))
     for spec in config.get('world_obstacles', []):
+        if spec['id'] in _perceived_covered:
+            print('WORLD_OBSTACLE_PERCEIVED_SKIP id=%s (perceived nvblox ESDF covers this body; '
+                  'static CollisionObject withheld -- requires perception_collision_gate enabled '
+                  'and GPU coverage evidence)' % spec['id'], flush=True)
+            continue
         boxes = [(b['size'], b['center'], b.get('rpy', (0.0, 0.0, 0.0))) for b in spec['boxes']]
         payload.add_world_obstacle(spec['id'], boxes)
     # fm351 activation assertion: log the HOST's EFFECTIVE place/cage config as actually loaded, so a

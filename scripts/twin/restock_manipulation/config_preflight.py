@@ -74,6 +74,16 @@ KEY_CONSUMER = {
     'carry_wrist2_min': HOST,     # fm403: wrist_2 lower-bound guard on task-space carry moves
     'contact_overpress_cap_m': HOST,
     'contact_overpress_step_m': HOST,
+    # sim-pick-contact-seal-fallback-v1 (coldwin63 pick never sealed): opt-in pick-contact guards, all read
+    # by ros_host.py -> TransferController (HOST). Default off => byte-identical; registered so a key filed
+    # in the RUNTIME config is refused (the run-277 slip) instead of silently never activating.
+    'contact_reissue_suction_each_tick': HOST,   # re-publish the gripper enable each press tick (relay-overwrite fix)
+    'contact_require_suction_enabled': HOST,      # fail-fast / re-send if the plugin never enabled at the first over-press step
+    'contact_reissue_close_once': HOST,           # sub-option of require_suction_enabled: re-send close once before failing
+    'contact_accept_seal_diag': HOST,             # accept a dwell-stable flush geometric SEAL_DIAG as contact
+    'contact_seal_diag_dwell_ticks': HOST,        # consecutive ticks the seal must hold (default 5)
+    'contact_seal_diag_max_gap_mm': HOST,         # seal gap bound for the accept (default 0.5 mm)
+    'contact_seal_diag_max_angle_deg': HOST,      # pad-vs-face angle bound for the accept (default 1.0 deg)
     'arm_max_speed': HOST,
     'plan_wall_cap_s': HOST,
     'grasp_track_m': HOST,        # fm410: lift-probe carton-tracking physics confirm threshold (m)
@@ -85,6 +95,16 @@ KEY_CONSUMER = {
     # robot_description is the file verbatim (byte-identical, the historical empty-geometry path).
     'moveit_mesh_uris': HOST,
     'esdf_boot_ack_grace_s': HOST,  # sim-robust-esdf-boot-gate-v1: SIM-clock boot grace for the first valid ESDF ack
+    # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority over the free-space
+    # arm legs (ros_host -> TransferController). reactive_arm_human toggles it; reactive_arm is the optional
+    # tuning dict (gate dwell/fractions, backstop params, replannable_phases). Absent/False => byte-identical.
+    'reactive_arm_human': HOST,
+    'reactive_arm': HOST,
+    # sim-arm-reactive-replan-v1 (PR-B): execution-time corridor-watch re-plan (ros_host ->
+    # TransferController). reactive_arm_replan (bool) toggles it; the optional tuning lives under
+    # reactive_arm['replan'] (margin_m, max_replans, min_replan_interval_s, samples, max_snapshot_age_s).
+    # Requires the sibling perception_collision_gate on for the ESDF source. Absent/False => byte-identical.
+    'reactive_arm_replan': HOST,
     'carton_level': HOST,  # sim-carton-level-carry-v1: level the carried carton (fold goals) + CARTON_TILT trip; HOST (the controller drives the arm)
     # sim-preplace-per-joint-gains-v1: preplace frozen-joint convergence guard + wrist-first sequencing
     # fallback (ros_host -> TransferController). Both opt-in, default off => byte-identical.
