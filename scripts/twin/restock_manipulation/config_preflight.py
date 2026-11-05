@@ -20,6 +20,14 @@ The two mission config files and their consumers:
 
 To register a NEW batch key, add it to `KEY_CONSUMER` with the side that reads it. The
 orchestrator declares the keys a given run requires via `--require`.
+
+A key can also be mis-placed WITHIN a file, not just between files: the Isaac factory reads
+the collect placement from the NESTED block `config['manipulation']['cart_placement']`, and
+a TOP-LEVEL `config['cart_placement']` is silently ignored (coldwin42-47: five GPU runs on a
+block the sim never read, while the pre-flight validated that same ignored block). So the
+gate and the factory resolve the placement through ONE shared accessor (`config_access`), and
+`check_cart_placement_source` refuses a stale top-level duplicate -- see
+sim-preflight-nested-cart-placement-v1.
 """
 from __future__ import annotations
 
@@ -350,7 +358,8 @@ def check_support_height(runtime_cfg, scenario_cfg, *, resolved_top_z, tol_m=0.0
     The cold ground-truth collect places the carton on the Rollwagen DECK
     (``/Rollwagen/chassis/deck``, top face ~0.2565 world). The place height is carried in two config
     layers that must agree with that prim top:
-      * RUNTIME ``cart_placement.support_z_world`` (the legacy deck-interior constant path), and
+      * RUNTIME ``manipulation.cart_placement.support_z_world`` (the NESTED block the factory reads,
+        via ``config_access``; the legacy deck-interior constant path), and
       * SCENARIO ``initial_staging.cart_support_z_world`` -- which is ALSO the COLLECT_GROUND_TRUTH
         ``place_slot`` support_z_world (``ground_truth_collect.warm_slot`` reads this same field).
 
@@ -360,11 +369,13 @@ def check_support_height(runtime_cfg, scenario_cfg, *, resolved_top_z, tol_m=0.0
     height can feed the collect descent again. ``resolved_top_z`` is the deck prim's resolved top-face
     world z (the orchestrator computes it from the composed cart asset and passes ``--support-top-z-world``).
     No-op ([]) when neither config carries a support height (nothing to check)."""
-    from twin.restock_manipulation import cart_support
+    from twin.restock_manipulation import cart_support, config_access
     heights = {}
-    cp = (runtime_cfg or {}).get('cart_placement') or {}
+    # Read the SAME nested block the Isaac factory reads (config['manipulation']['cart_placement']),
+    # never the ignored top-level block -- see check_cart_placement_source / config_access.
+    cp = config_access.cart_placement_block(runtime_cfg) or {}
     if isinstance(cp, dict) and 'support_z_world' in cp:
-        heights['runtime cart_placement.support_z_world'] = cp.get('support_z_world')
+        heights['runtime manipulation.cart_placement.support_z_world'] = cp.get('support_z_world')
     st = (scenario_cfg or {}).get('initial_staging') or {}
     if isinstance(st, dict) and 'cart_support_z_world' in st:
         heights['scenario initial_staging.cart_support_z_world '
@@ -374,16 +385,54 @@ def check_support_height(runtime_cfg, scenario_cfg, *, resolved_top_z, tol_m=0.0
     return cart_support.height_consistency_problems(resolved_top_z, heights, tol_m=tol_m)
 
 
+def check_cart_placement_source(runtime_cfg):
+    """sim-preflight-nested-cart-placement-v1: refuse a STALE top-level ``cart_placement`` duplicate.
+
+    The Isaac factory reads the collect placement from the NESTED block
+    ``config['manipulation']['cart_placement']`` (via ``config_access``); a TOP-LEVEL
+    ``config['cart_placement']`` is IGNORED. coldwin42-47 edited the top-level block, so the
+    factory kept using the stale nested block (coldwin47: ``PLACE_SUPPORT_SELECT selector=None``,
+    placed on the deck though the shelf was configured) and five GPU runs ran on settings the sim
+    never read -- and the pre-flight passed because it too validated the top-level block.
+
+    Refuse when a top-level ``cart_placement`` is present AND does not match the nested block the
+    factory reads (a divergent or orphan duplicate). An IDENTICAL top-level duplicate is harmless
+    (the factory reads the nested block, which equals it) and passes -- byte-identical. The message
+    names BOTH blocks: the one that is IGNORED and the one that is READ. No-op ([]) when there is no
+    top-level ``cart_placement`` (the correct, nested-only shape)."""
+    from twin.restock_manipulation import config_access
+    top = config_access.top_level_cart_placement(runtime_cfg)
+    if top is None:
+        return []
+    nested = config_access.cart_placement_block(runtime_cfg)
+    if nested == top:
+        return []                                    # harmless identical duplicate (coldwin48)
+    nested_state = ('ABSENT' if nested is None else f'STALE/DIFFERENT -> {nested!r}')
+    return [
+        f"cart_placement MIS-PLACED across blocks: a top-level 'cart_placement' "
+        f"({top!r}) is present in the RUNTIME config, but the Isaac factory "
+        f"(isaac_factory.parse_manipulation_config) reads '{config_access.CART_PLACEMENT_SOURCE}' "
+        f"-- the NESTED block, which is {nested_state}. The top-level block is IGNORED "
+        f"(coldwin42-47: five GPU runs on settings the sim never read; coldwin47 logged "
+        f"'PLACE_SUPPORT_SELECT selector=None support_z 0.9325' and placed on the deck though the "
+        f"shelf was configured). Move the placement into '{config_access.CART_PLACEMENT_SOURCE}' "
+        f"(or make the two blocks identical)."]
+
+
 def check_support_selection(runtime_cfg, *, stock_supports=None):
     """sim-cart-support-select-v1: validate the RUNTIME ``cart_placement.support_prim`` selector resolves
     against the composed cart's ``stock_supports`` so a mis-set selector (bad index, unknown prim/name)
     fails pre-flight, not at a GPU boot. ``stock_supports`` defaults to the names ``author_cart`` exposes
     (``/Rollwagen/chassis/deck``, ``/Rollwagen/chassis/shelf``) -- a pure in-memory authoring, no Isaac.
-    No-op ([]) when the selector is absent (legacy deck default). Returns problems ([] == ok)."""
-    cp = (runtime_cfg or {}).get('cart_placement') or {}
+    No-op ([]) when the selector is absent (legacy deck default). Returns problems ([] == ok).
+
+    Reads the SAME nested block the Isaac factory reads (``config['manipulation']['cart_placement']``
+    via ``config_access``), never the ignored top-level block, so the gate validates the selector the
+    factory actually uses (sim-preflight-nested-cart-placement-v1)."""
+    from twin.restock_manipulation import cart_support, config_access
+    cp = config_access.cart_placement_block(runtime_cfg) or {}
     if not isinstance(cp, dict) or 'support_prim' not in cp:
         return []
-    from twin.restock_manipulation import cart_support
     supports = list(stock_supports) if stock_supports else None
     if supports is None:
         try:
@@ -449,8 +498,12 @@ def main(argv=None):
     # sim-place-descent-residual-v1: resolve the HOST carton_level block (incl. the place-clearance keys)
     # so a malformed value or the gate-without-remedy combination fails pre-flight, not a GPU boot.
     problems += check_carton_level(host_cfg)
+    # sim-preflight-nested-cart-placement-v1: refuse a stale top-level cart_placement duplicate (the
+    # coldwin42-47 slip -- the factory reads manipulation.cart_placement, the top-level is ignored).
+    problems += check_cart_placement_source(runtime_cfg)
     # sim-cart-support-select-v1: a mis-set place-support selector (bad index / unknown prim) must fail
-    # here, not silently at the GPU boot (always, not just --require'd).
+    # here, not silently at the GPU boot (always, not just --require'd). Reads the nested block (the one
+    # the factory reads) via config_access.
     problems += check_support_selection(runtime_cfg)
     # sim-collect-press-regression-v1: carton-dim drift between the HOST profile and the scenario single
     # source silently over-reaches the side-grasp pick standoff (coldwin32). Only when --scenario is given.

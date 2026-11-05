@@ -201,15 +201,16 @@ def test_verify_place_passes_on_the_resolved_deck_height_and_fails_on_the_shelf_
 # --------------------------------------------------------------- config_preflight four-height gate
 
 def test_check_support_height_agree_and_disagree():
-    runtime_ok = {'cart_placement': {'support_z_world': 0.2565}}
+    # The preflight reads the NESTED block the factory reads (config['manipulation']['cart_placement']).
+    runtime_ok = {'manipulation': {'cart_placement': {'support_z_world': 0.2565}}}
     scenario_ok = {'initial_staging': {'cart_support_z_world': 0.2560}}
     assert cp.check_support_height(runtime_ok, scenario_ok, resolved_top_z=DECK_TOP_WORLD) == []
     # the legacy shelf constant in either layer is refused
-    runtime_bad = {'cart_placement': {'support_z_world': LEGACY_SHELF_CONST}}
+    runtime_bad = {'manipulation': {'cart_placement': {'support_z_world': LEGACY_SHELF_CONST}}}
     scenario_bad = {'initial_staging': {'cart_support_z_world': LEGACY_SHELF_CONST}}
     probs = cp.check_support_height(runtime_bad, scenario_bad, resolved_top_z=DECK_TOP_WORLD)
     assert len(probs) == 2
-    assert any('runtime cart_placement.support_z_world' in p for p in probs)
+    assert any('runtime manipulation.cart_placement.support_z_world' in p for p in probs)
     assert any('place_slot' in p for p in probs)
     # neither layer carries a height -> nothing to check
     assert cp.check_support_height({}, {}, resolved_top_z=DECK_TOP_WORLD) == []
@@ -231,12 +232,13 @@ def _baseline_host():
 def test_preflight_main_refuses_stale_shelf_height_and_passes_on_deck(tmp_path):
     host = _write(tmp_path, 'host.json', _baseline_host())
     # a deck-height config passes; the stale shelf constant is refused.
-    rt_ok = _write(tmp_path, 'rt_ok.json', {'cart_placement': {'support_z_world': 0.2565}})
+    rt_ok = _write(tmp_path, 'rt_ok.json', {'manipulation': {'cart_placement': {'support_z_world': 0.2565}}})
     sc_ok = _write(tmp_path, 'sc_ok.json', {'initial_staging': {'cart_support_z_world': 0.2560}})
     assert cp.main(['--host-config', host, '--runtime-config', rt_ok, '--scenario', sc_ok,
                     '--place-on-deck', '--support-top-z-world', str(DECK_TOP_WORLD)]) == 0
 
-    rt_bad = _write(tmp_path, 'rt_bad.json', {'cart_placement': {'support_z_world': LEGACY_SHELF_CONST}})
+    rt_bad = _write(tmp_path, 'rt_bad.json',
+                    {'manipulation': {'cart_placement': {'support_z_world': LEGACY_SHELF_CONST}}})
     sc_bad = _write(tmp_path, 'sc_bad.json', {'initial_staging': {'cart_support_z_world': LEGACY_SHELF_CONST}})
     assert cp.main(['--host-config', host, '--runtime-config', rt_bad, '--scenario', sc_bad,
                     '--place-on-deck', '--support-top-z-world', str(DECK_TOP_WORLD)]) == 2
@@ -249,5 +251,6 @@ def test_preflight_byte_identical_without_place_on_deck(tmp_path):
     """Existing invocations (no --place-on-deck) never run the support-height gate, even with a stale
     shelf height in the config -- the new gate is strictly opt-in."""
     host = _write(tmp_path, 'host.json', _baseline_host())
-    rt_bad = _write(tmp_path, 'rt_bad.json', {'cart_placement': {'support_z_world': LEGACY_SHELF_CONST}})
+    rt_bad = _write(tmp_path, 'rt_bad.json',
+                    {'manipulation': {'cart_placement': {'support_z_world': LEGACY_SHELF_CONST}}})
     assert cp.main(['--host-config', host, '--runtime-config', rt_bad]) == 0
