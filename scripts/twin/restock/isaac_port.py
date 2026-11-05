@@ -16,6 +16,8 @@ from twin.urdf_probe import parse_urdf, link_world_transforms, geometry_world_po
 from twin.restock_manipulation.isaac_sensors import sensing_render_required
 from .runtime import Packet
 from .collect_capture_gate import release_after_lift
+from . import station_full_brake
+from .station_full_brake import LOADED_PLACE_PHASES as _LOADED_PLACE_PHASES
 
 # Stages whose work consumes freshly rendered pixels (inventory perception, the
 # manipulation camera->nvblox depth, the final inventory verification). Only these
@@ -265,6 +267,16 @@ class IsaacPort:
         self._sensing_suspended=False
         self.robot_body,self.cart_body=robot_body,cart_body
         self.mobile,self.range_sensor=mobile,range_sensor
+        # sim-station-full-brake-place-v1 weld-loop effort guard: active only when the loaded-place full
+        # brake AND a positive effort limit are configured on the mobile controller. None => the monitor
+        # is a no-op (byte-identical). Watches the max arm joint effort during the locked place window and
+        # aborts to a HOLD (base stays full-braked, arm held -- never a brake release / shove) on a spike.
+        _fb_limit=getattr(mobile,'station_place_full_brake_effort_limit',None)
+        self._full_brake_guard=(
+            station_full_brake.EffortGuard(_fb_limit)
+            if getattr(mobile,'station_place_full_brake',False) is True
+            and isinstance(_fb_limit,(int,float)) and not isinstance(_fb_limit,bool) and _fb_limit>0
+            else None)
         self.transport,self.contact=transport,contact
         self.hold_arm,self.verification=hold_arm,verification
         # ArmCommandGate for the labelled sim attach-fallback's stationary weld (firstmate run-209):
@@ -401,9 +413,25 @@ class IsaacPort:
             # (not the instantaneous end stop coldwin39 latched). Released only when the base leaves the
             # arm phase to drive.
             if in_arm_phase:
-                self.mobile.release_base_full_brake()
-                self.mobile.engage_station_hold()
+                if (getattr(self.mobile, 'station_place_full_brake', False)
+                        and getattr(self, 'current_action', None) == 'collect'
+                        and phase in _LOADED_PLACE_PHASES):
+                    # sim-station-full-brake-place-v1: the LOADED collect place descent onto the cart
+                    # support recoils the translation-free base (coldwin49: 0.08-0.18 m south, past the
+                    # 0.080 m settle guard). FULL-lock translation + rotation from the moment the arm
+                    # leaves the pre-place standoff (place) through detach + withdraw (release/retreat),
+                    # ON TOP of the pitch/roll target hold, then return to the rotation-only hold at
+                    # stow/verify. One engage at place start, one release at withdraw (idempotent while
+                    # locked) -- no cycling. The weld-loop fight is bounded by the contact-triggered
+                    # release + the effort guard (_station_full_brake_monitor).
+                    self.mobile.release_base_full_brake()
+                    self.mobile.engage_station_full_lock()
+                else:
+                    self.mobile.release_station_full_lock()
+                    self.mobile.release_base_full_brake()
+                    self.mobile.engage_station_hold()
             else:
+                self.mobile.release_station_full_lock()
                 self.mobile.release_station_hold()
                 self.mobile.release_base_full_brake()
             return
@@ -416,6 +444,55 @@ class IsaacPort:
         else:
             self.mobile.release_brake()
             self.mobile.engage_base_full_brake()
+
+    def _read_arm_effort(self):
+        """Best-effort max absolute measured arm joint effort (N·m) from the Isaac articulation, or None
+        when the reading is unavailable. SIM-only; never raises (a read failure => None => the guard
+        cannot judge this tick and keeps placing)."""
+        robot = getattr(self, 'robot', None)
+        getter = getattr(robot, 'get_measured_joint_efforts', None)
+        if getter is None:
+            return None
+        try:
+            efforts = getter()
+        except Exception:  # noqa: BLE001 -- a sensor read must never crash the tick
+            return None
+        # Restrict to the arm DOFs when their indices are known (the base wheels carry the drive/brake
+        # torque, not the weld-loop fight); otherwise fold the whole reading.
+        if self._arm_joints and getattr(robot, 'dof_names', None):
+            names = list(robot.dof_names)
+            idx = [names.index(j) for j in self._arm_joints if j in names]
+            if idx:
+                try:
+                    return station_full_brake.max_abs_effort([efforts[i] for i in idx])
+                except (IndexError, TypeError):
+                    pass
+        return station_full_brake.max_abs_effort(efforts)
+
+    def _station_full_brake_monitor(self):
+        """sim-station-full-brake-place-v1 weld-loop safety. During the full-brake locked place window
+        (collect + place/release/retreat) fold the max arm joint effort into the effort guard; on a
+        latched spike ABORT to a HOLD -- keep the base full-braked and hold the arm (the controlled-stop
+        path), never release the lock (which would let the welded loop shove the base). No-op when the
+        guard is unconfigured. Logs STATION_FULL_BRAKE_EFFORT periodically + STATION_FULL_BRAKE_ABORT on
+        the trip."""
+        guard = getattr(self, '_full_brake_guard', None)
+        if guard is None:
+            return
+        in_window = (getattr(self.mobile, 'station_place_full_brake', False)
+                     and self.current_action == 'collect'
+                     and self._phase in _LOADED_PLACE_PHASES)
+        effort = self._read_arm_effort() if in_window else None
+        decision = guard.observe(effort, in_window)
+        if in_window and (self.tick % 30 == 0 or decision == 'abort'):
+            print('STATION_FULL_BRAKE_EFFORT max=%s limit=%.1f peak=%.1f phase=%s'
+                  % ('n/a' if effort is None else '%.1f' % effort,
+                     guard.limit, guard.peak, self._phase), flush=True)
+        if decision == 'abort' and not getattr(self, '_welded_stop', False):
+            print('STATION_FULL_BRAKE_ABORT %s -- HOLDING (base stays full-braked, arm held; not a shove)'
+                  % guard.reason, flush=True)
+            if hasattr(self, 'enter_welded_controlled_stop'):
+                self.enter_welded_controlled_stop(guard.reason)
 
     def gate(self, phase):
         """Drive the opt-in sensing execution gate from the live manipulation controller phase.
@@ -636,6 +713,10 @@ class IsaacPort:
         # command() releases both before any base drive; release here the moment the mission leaves the
         # arm phase (couple/tow/park).
         self._apply_base_brake(self.current_action in SENSING_ACTIONS, self._carton_welded, self._phase)
+        # sim-station-full-brake-place-v1 weld-loop safety: with the base fully locked, watch the arm
+        # joint effort through the locked place window and HOLD (not shove) on a spike. No-op when the
+        # guard is unconfigured (byte-identical).
+        self._station_full_brake_monitor()
         if self._welded_stop:
             # sim-host-fault-controlled-stop-v1: keep the arm held energised at its joint targets every
             # tick of the controlled stop (idempotent), so it never goes slack while the welded carton

@@ -369,6 +369,86 @@ def test_station_hold_latches_and_does_not_cycle_on_parked_ticks(stage):
     assert not c._station_hold_latched and not stage.GetPrimAtPath(c.BRAKE_PATH)
 
 
+def _full_brake_controller(stage):
+    from pxr import UsdGeom, UsdPhysics
+    from twin.mobile_runtime import MobileController
+    author_cart(stage)
+    robot = UsdGeom.Xform.Define(stage, '/Robot/base_link').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(robot)
+    wheels = ['/Robot/l', '/Robot/r']
+    for p in wheels:
+        UsdPhysics.RevoluteJoint.Define(stage, p)
+    return MobileController(stage, str(robot.GetPath()), '/Rollwagen/chassis', wheels,
+                            wheel_angle_reader=lambda: [0.0, 0.0], station_pitch_hold=True,
+                            station_place_full_brake=True,
+                            station_place_full_brake_effort_limit=300.0,
+                            station_hold_roll_deg=0.0, station_hold_pitch_deg=-1.17)
+
+
+def test_station_full_lock_locks_all_six_axes_at_target(stage):
+    # sim-station-full-brake-place-v1: the loaded-place full lock locks BOTH translation (transX/Y/Z) AND
+    # rotation (rotX/Y/Z), with rotation anchored at the pitch/roll TARGET -- so the welded from-above
+    # descent reaction cannot shove the (otherwise translation-free) base (coldwin49).
+    from pxr import UsdPhysics
+    c = _full_brake_controller(stage)
+    c.engage_station_full_lock()
+    assert c._station_full_locked and stage.GetPrimAtPath(c.STATION_FULL_BRAKE_PATH)
+    brake = UsdPhysics.Joint(stage.GetPrimAtPath(c.STATION_FULL_BRAKE_PATH))
+    for axis in ('transX', 'transY', 'transZ', 'rotX', 'rotY', 'rotZ'):   # all six locked (low>high)
+        lim = UsdPhysics.LimitAPI.Get(brake.GetPrim(), axis)
+        assert lim and lim.GetLowAttr().Get() > lim.GetHighAttr().Get(), axis
+    # rotation anchored at the TARGET pitch (-1.17), not the instantaneous drift.
+    rot0 = brake.GetLocalRot0Attr().Get()
+    r, p, _ = _rpy_from_quat(rot0.GetReal(), *[float(v) for v in rot0.GetImaginary()])
+    assert math.degrees(p) == pytest.approx(-1.17, abs=1e-2)
+    assert math.degrees(r) == pytest.approx(0.0, abs=1e-2)
+
+
+def test_station_full_lock_mutually_exclusive_with_rotation_only_hold(stage):
+    # engaging the full lock removes the rotation-only D6 (one base D6 at a time); releasing it removes
+    # the full-lock prim, so the port can re-engage the rotation-only hold for the withdraw hand-back.
+    c = _full_brake_controller(stage)
+    c.engage_station_hold()
+    assert stage.GetPrimAtPath(c.BRAKE_PATH)
+    c.engage_station_full_lock()
+    assert not stage.GetPrimAtPath(c.BRAKE_PATH)              # rotation-only brake dropped
+    assert stage.GetPrimAtPath(c.STATION_FULL_BRAKE_PATH)
+    c.engage_station_full_lock()                             # idempotent while locked -- no churn
+    assert stage.GetPrimAtPath(c.STATION_FULL_BRAKE_PATH)
+    c.release_station_full_lock()
+    assert not stage.GetPrimAtPath(c.STATION_FULL_BRAKE_PATH) and not c._station_full_locked
+
+
+def test_station_full_lock_released_by_a_drive_command(stage):
+    # a parked tick keeps the full lock (no cycling); a genuine drive releases it before any base motion.
+    from twin.mobile import DockObservation, Pose2
+    c = _full_brake_controller(stage)
+    c.engage_station_full_lock()
+    obs = DockObservation(Pose2(0, 0, 0), Pose2(-1.27, 0, 0), .28, .28, 0, 0, 0, 0)
+    c.command(0.0, 0.0, obs, transport_ready=True)           # parked: keep the full lock
+    assert c._station_full_locked and stage.GetPrimAtPath(c.STATION_FULL_BRAKE_PATH)
+    c.command(0.16, 0.0, obs, transport_ready=True)          # drive: drop it
+    assert not c._station_full_locked and not stage.GetPrimAtPath(c.STATION_FULL_BRAKE_PATH)
+
+
+def test_station_full_brake_effort_limit_validated():
+    from twin.mobile_runtime import MobileController
+    pytest.importorskip('pxr')
+    from pxr import Usd, UsdGeom, UsdPhysics
+    s = Usd.Stage.CreateInMemory()
+    UsdGeom.SetStageUpAxis(s, 'Z'); UsdGeom.SetStageMetersPerUnit(s, 1)
+    robot = UsdGeom.Xform.Define(s, '/Robot/base_link').GetPrim()
+    UsdPhysics.RigidBodyAPI.Apply(robot)
+    author_cart(s)
+    wheels = ['/Robot/l', '/Robot/r']
+    for p in wheels:
+        UsdPhysics.RevoluteJoint.Define(s, p)
+    with pytest.raises(ValueError):
+        MobileController(s, str(robot.GetPath()), '/Rollwagen/chassis', wheels,
+                         wheel_angle_reader=lambda: [0.0, 0.0],
+                         station_place_full_brake=True, station_place_full_brake_effort_limit=-1.0)
+
+
 def test_cart_parking_brake_pins_cart_and_releases(stage):
     # Cart parking brake (firstmate 287): engage_cart_brake fixes the UNCOUPLED cart to the world at
     # its CURRENT pose so a placed carton cannot roll it; a FULL FixedJoint is safe (the cart is not
