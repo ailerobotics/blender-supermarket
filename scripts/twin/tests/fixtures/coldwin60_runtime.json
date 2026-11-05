@@ -1,0 +1,473 @@
+{
+ "store_usd": "/home/manishsaini/datasets/sim-store-realism-v3-portal26/supermarket.usdc",
+ "mobile_manifest": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mobile-casterlift030/mobile_manifest.json",
+ "scenario": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/mission-scenario.json",
+ "host_config": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/host-cad/host.json",
+ "srdf": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/host-cad/mobile.srdf",
+ "xrdf": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/host-cad/mobile.xrdf",
+ "camera_config": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/camera-config-bay.json",
+ "ffmpeg": "/home/manishsaini/miniforge3/envs/env_isaaclab/lib/python3.11/site-packages/imageio_ffmpeg/binaries/ffmpeg-linux-x86_64-v7.0.2",
+ "host_python": "/usr/bin/python3",
+ "host_setup_files": [
+  "/home/manishsaini/datasets/sim-restock-host-v2/nav-plugin/runtime-env.sh"
+ ],
+ "shelfbot_root": "/home/manishsaini/workspaces/shelfbot_newgripper",
+ "pose_bridge_root": "/home/manishsaini/workspaces/tray_perception",
+ "ros_overlay": "/home/manishsaini/datasets/sim-restock-host-v2/runtime-closure/overlay/jazzy",
+ "package_roots": [
+  "/opt/ros/jazzy/share",
+  "/home/manishsaini/workspaces/shelfbot_newgripper"
+ ],
+ "nav_factory": "twin.navigation.factory:nav_factory",
+ "manip_factory": "twin.restock_manipulation.isaac_factory:create",
+ "sensing_factory": "twin.restock_camera.sensing:build_sensing",
+ "mission_poses": {
+  "pickup": [
+   -5.73,
+   16,
+   0
+  ],
+  "cart_dock": [
+   -4.46,
+   15.25,
+   0
+  ],
+  "shelf_approach": [
+   -3.05,
+   6.0,
+   3.141592653589793
+  ],
+  "home": [
+   -3.9,
+   14.0,
+   3.141592653589793
+  ],
+  "couple_approach": [
+   -4.46,
+   16.0,
+   0.0
+  ],
+  "couple_standoff": [
+   -4.06,
+   15.25,
+   0.0
+  ],
+  "place_approach": [
+   -4.6,
+   14.92,
+   1.5707963267948966
+  ],
+  "place_approach_stage": [
+   -4.6,
+   14.22,
+   -1.0052
+  ],
+  "cart_parking": [
+   -3.875,
+   16.3,
+   1.5707963267948966
+  ],
+  "cart_parking_backaway": [
+   -0.6,
+   13.8,
+   3.141592653589793
+  ],
+  "shelf_staging": [
+   -3.875,
+   8.0,
+   -1.5707963267948966
+  ],
+  "cart_side_bay": [
+   -4.3,
+   6.95,
+   -1.5707963267948966
+  ]
+ },
+ "goal_articulation": {
+  "outbound": 0.9,
+  "return": 0.2
+ },
+ "nav_mode": "reference",
+ "navigation": {
+  "environment_path": "/home/manishsaini/datasets/sim-store-realism-v2/environment.json",
+  "scenario_path": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/mission/mission-scenario.json",
+  "docking": {
+   "goal": [
+    -4.46,
+    15.25,
+    0.0
+   ],
+   "speed": 0.08,
+   "approach_distance": 1.5,
+   "goal_tolerance": 1.1
+  },
+  "planner_timeout_s": 120.0,
+  "directional_zone": true,
+  "tow_lanes": [
+   {
+    "name": "outbound_dock_to_side_bay",
+    "start": [
+     -4.6,
+     14.73,
+     -1.5707963267948966
+    ],
+    "start_cart_yaw": -1.5707963267948966,
+    "goal": [
+     -4.3,
+     6.95,
+     -1.5707963267948966
+    ],
+    "goal_articulation": 0.35,
+    "start_tol_cart_yaw": 0.35,
+    "couple_dock": [
+     -4.6,
+     16.0,
+     -1.5707963267948966
+    ],
+    "couple_dock_articulation": 0.0,
+    "lead_in_max_m": 1.0,
+    "waypoints": [
+     [
+      -4.3,
+      12.0,
+      -1.5707963267948966
+     ],
+     [
+      -4.3,
+      9.9,
+      -1.5707963267948966
+     ]
+    ],
+    "route_through_waypoints": true
+   }
+  ],
+  "tow_lane_static_tol_m": 0.12,
+  "tow_lane_reacquire_along_route": true,
+  "tow_lane_coast_refusals": true,
+  "tow_lane_trust_unknown": true,
+  "tow_lane_track_tol_m": 0.35,
+  "arrival_xy_hysteresis_m": 0.03,
+  "coupled_creep_escape": true,
+  "tow_lane_cart_yaw_rebase": true,
+  "tow_lane_cart_yaw_tol": 0.3,
+  "tow_lane_track_envelope": true,
+  "lidar_sensor_yaw_fix": true,
+  "coupled_progress_escape": true,
+  "coupled_progress_min_m": 0.05,
+  "coupled_progress_escape_s": 3.0,
+  "coupled_progress_fault_s": 8.0,
+  "coupled_creep_floor_mps": 0.03,
+  "coupled_progress_recovery": true,
+  "coupled_breakaway_speed_mps": 0.18,
+  "coupled_breakaway_window_s": 2.0,
+  "coupled_breakaway_pulse_s": 0.5,
+  "coupled_breakaway_attempts": 3,
+  "tow_lane_acquire_timeout_s": 8.0,
+  "tow_lane_goal_stop": true,
+  "coupled_breakaway_rock": true,
+  "coupled_breakaway_launch_mps": 0.3,
+  "coupled_heading_hold": true,
+  "heading_hold_bound_deg": 1.0,
+  "heading_hold_creep_mps": 0.14,
+  "heading_hold_straight_kappa": 0.08,
+  "tow_lane_trust_static": true,
+  "tow_lane_curve_speed_floor": 0.55,
+  "measured_turn_fault_s": 20.0,
+  "coupled_from_rest_launch": true,
+  "coupled_launch_distance_m": 1.0,
+  "coupled_launch_mps": 0.35
+ },
+ "manipulation": {
+  "shelfbot_root": "/home/manishsaini/workspaces/shelfbot_newgripper",
+  "profiles": [
+   {
+    "sku": "juice_orange",
+    "dimensions": [
+     0.6,
+     0.4,
+     0.16
+    ],
+    "tcp_quaternion": [
+     0.5,
+     0.5,
+     0.5,
+     0.5
+    ],
+    "tcp_surface_offset": 0.0025,
+    "grasp_mode": "side",
+    "max_reach": 1.3,
+    "approach": 0.12,
+    "mass_kg": 0.45
+   }
+  ],
+  "stations": {
+   "source": {
+    "slots": [
+     {
+      "id": "source"
+     }
+    ],
+    "base_from_camera": [
+     [
+      1,
+      0,
+      0,
+      0
+     ],
+     [
+      0,
+      1,
+      0,
+      0
+     ],
+     [
+      0,
+      0,
+      1,
+      0
+     ],
+     [
+      0,
+      0,
+      0,
+      1
+     ]
+    ]
+   },
+   "shelf": {
+    "slots": [
+     {
+      "id": "shelf"
+     }
+    ],
+    "base_from_camera": [
+     [
+      1,
+      0,
+      0,
+      0
+     ],
+     [
+      0,
+      1,
+      0,
+      0
+     ],
+     [
+      0,
+      0,
+      1,
+      0
+     ],
+     [
+      0,
+      0,
+      0,
+      1
+     ]
+    ]
+   }
+  },
+  "cart_placement": {
+   "location": "rollwagen",
+   "support_prim": "shelf",
+   "load_center_body_xy": [
+    0.135,
+    0.0
+   ],
+   "support_z_world": 0.9707,
+   "free_dimensions": [
+    0.65,
+    0.45,
+    0.3
+   ]
+  },
+  "arm_camera_reaim": {
+   "origin": [
+    0.46,
+    0.0,
+    0.09
+   ],
+   "aim_targets": [
+    [
+     0.0,
+     1.101,
+     0.261
+    ]
+   ]
+  }
+ },
+ "recording_fps": 30,
+ "render_scale": 0.375,
+ "stages": [
+  "collect",
+  "couple",
+  "outbound",
+  "park",
+  "transfer",
+  "verify",
+  "return"
+ ],
+ "transport_radius_m": 0.65,
+ "record_stride": 6,
+ "masked_depth": {
+  "enabled": true,
+  "runtime_env": "/home/manishsaini/datasets/sim-restock-host-v2/nav-plugin/runtime-env.sh",
+  "python": "python3",
+  "frame_id": "restock_camera_arm",
+  "domain": 88,
+  "max_restarts": 20,
+  "restart_connect_timeout_s": 20.0,
+  "send_buffer_bytes": 8388608,
+  "send_timeout_s": 10.0,
+  "economy": {
+   "resolution_scale": 0.5,
+   "publish_interval_s": 0.1
+  }
+ },
+ "commissioning_dir": "/home/manishsaini/datasets/twin-robot-in-store-boot-v1/commissioning/cc-coldwin60/baselines",
+ "commissioning_required_locations": [
+  "backstock_00",
+  "rollwagen"
+ ],
+ "collect_source_location": "backstock_00",
+ "wheel_friction": 1.0,
+ "sensing_stride": 6,
+ "arm_max_speed": 0.75,
+ "arm_tracking_tol": 1.5,
+ "arm_stiffness_gain": 8.0,
+ "sensing_execution_gate": true,
+ "arm_gravity_ff": true,
+ "arm_stiffness_abs": 300000.0,
+ "arm_damping_abs": 8000.0,
+ "arm_max_effort": 400.0,
+ "base_stationary_dxy_m": 0.025,
+ "base_stationary_dyaw_rad": 0.025,
+ "transfer_shelf_location": "G3_back_s2",
+ "gripper_force_limit": 200.0,
+ "sim_attach_fallback": true,
+ "arm_command_freshness_s": 2.5,
+ "station_heartbeat_s": 30.0,
+ "stage_timeout_s": 300.0,
+ "phase_drive": {
+  "soft": {
+   "kp": 300000.0,
+   "kd": 8000.0,
+   "eff": 400.0
+  },
+  "stiff": {
+   "kp": 1000000.0,
+   "kd": 10000.0,
+   "eff": 2000.0
+  },
+  "carried_soft_phases": [
+   "preplace"
+  ],
+  "carried_joint_profile": {
+   "preplace": {
+    "ur_shoulder_pan_joint": {
+     "kp": 1000000.0,
+     "kd": 10000.0,
+     "eff": 2000.0
+    }
+   }
+  }
+ },
+ "carry_self_radius_m": 0.85,
+ "couple_static_drive": true,
+ "hold_cart_through_couple": true,
+ "fine_dock": {
+  "creep_speed": 0.035,
+  "creep_yaw_rate": 0.25,
+  "gain_lin": 2.0,
+  "gain_yaw": 1.0,
+  "hitch_tol_m": 0.02,
+  "yaw_tol_rad": 0.069813,
+  "settle_speed": 0.01,
+  "time_cap_s": 30.0,
+  "approach_mode": "crosstrack",
+  "ct_gain_approach": 2.0,
+  "ct_gain_cross": 8.0,
+  "ct_gain_yaw": 1.5,
+  "ct_align_hold_m": 3.0,
+  "ct_min_creep": 0.015,
+  "progress_cap": true,
+  "progress_patience_s": 12.0,
+  "progress_min_improve_m": 0.002,
+  "progress_max_time_cap_s": 120.0
+ },
+ "bt": true,
+ "uncouple_on_return": false,
+ "_bt_note": "fm420: bt driver (PR#153) + nav-lanes (PR#154). uncouple_on_return tows the cart to mission_poses.cart_parking, brakes it, releases the coupling and drives home empty (no cart_parking_backaway -> drives straight home, runtime handles its absence). navigation.tow_lanes are the authored coupled centrelines; goal_articulation.outbound raised 0.2->0.9 to match the lane-achievable ~0.8 rad pull-through-shelf arrival (fm420: a tighter arrival is not kinematically plannable).",
+ "carry_reposition_drive": true,
+ "collect_keep_source_render": true,
+ "transfer_ground_truth": {
+  "enabled": true,
+  "location": "G3_back_s2",
+  "target": [
+   -3.05,
+   4.826,
+   0.73
+  ],
+  "free_dimensions": [
+   0.7,
+   0.5,
+   0.5
+  ],
+  "_note": "sales-floor endcap place (shelf_staging flow, PR303); was backroom bay",
+  "ground_truth_pick": false
+ },
+ "light_intensity_scale": 1.0,
+ "verify_ground_truth": {
+  "enabled": true
+ },
+ "stop_after": null,
+ "wheel_drive": {
+  "max_force": 200.0,
+  "damping": 100.0
+ },
+ "visuals": true,
+ "collect_place_base_settle_m": 0.08,
+ "collect_observe_force_render_ticks": 30,
+ "cage_collision": "filtered",
+ "mast_depth": {
+  "enabled": false
+ },
+ "couple_cart_relative": {
+  "standoff_offset_m": 0.4,
+  "capture_cross_m": 0.11,
+  "capture_yaw_rad": 0.1,
+  "max_reapproach": 3,
+  "arrival_xy_tol": 0.05,
+  "arrival_yaw_tol": 0.08,
+  "dock_frame_approach": true
+ },
+ "vram_headroom": {
+  "enabled": true,
+  "floor_mib": 800,
+  "card_mib": 12288,
+  "sample_period_s": 0.2,
+  "shed_order": [
+   "capture_rate",
+   "arm_feed_economy",
+   "secondary_cameras"
+  ]
+ },
+ "hold_base_on_reposition_block": true,
+ "shelf_staging": true,
+ "carry_drive_profile": {
+  "max_speed": 0.12,
+  "max_angular": 0.2,
+  "max_accel": 0.15,
+  "max_angular_accel": 0.4
+ },
+ "transfer_service_carry": true,
+ "cart_side_bay": true,
+ "recouple_standoff_m": 0.5,
+ "couple_dock_align": true,
+ "chassis_station_pitch_hold": true,
+ "chassis_station_pitch_hold_pitch_deg": -1.17,
+ "chassis_station_pitch_hold_roll_deg": 0.0,
+ "station_place_full_brake": true,
+ "station_place_full_brake_effort_limit": 600.0
+}

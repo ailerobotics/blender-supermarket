@@ -1,0 +1,131 @@
+{
+ "profiles": [
+  {
+   "sku": "juice_orange",
+   "dimensions": [
+    0.45,
+    0.3,
+    0.18
+   ],
+   "tcp_quaternion": [
+    0.5,
+    0.5,
+    0.5,
+    0.5
+   ],
+   "tcp_surface_offset": 0.00275,
+   "approach": 0.18,
+   "max_reach": 1.3,
+   "mass_kg": 0.45,
+   "grasp_mode": "side"
+  }
+ ],
+ "walls": {
+  "backstock_00": 3,
+  "rollwagen": 3,
+  "G3_back_s2": 3
+ },
+ "pose_goal": true,
+ "contact_straight_line": true,
+ "contact_overpress_step_m": 0.003,
+ "contact_overpress_cap_m": 0.02,
+ "arm_max_speed": 0.3,
+ "startup_grace_seconds": 60.0,
+ "sim_cart_place_policy": false,
+ "reposition_before_place": true,
+ "payload_ack_wall_s": 15.0,
+ "staged_cart_swing": true,
+ "cart_pan_joint0": -1.822,
+ "cart_tuck_shape": [
+  -2.27,
+  1.0,
+  0.65,
+  0.8,
+  -1.2545
+ ],
+ "plan_wall_cap_s": 60.0,
+ "base_collision_object": false,
+ "cart_cage_place": false,
+ "cage_axis": [
+  1.0,
+  0.0,
+  0.0
+ ],
+ "cage_mouth_standoff": 0.55,
+ "cage_insert_gap": 0.03,
+ "cage_preplace_shape": [
+  -3.702,
+  -3.486,
+  1.425,
+  -1.081,
+  0.561,
+  0.0
+ ],
+ "carry_wrist1_cap": 0.65,
+ "carry_lift_shape": [
+  1.2675,
+  -2.27,
+  1.0,
+  0.65,
+  0.8,
+  -1.2545
+ ],
+ "carry_wrist2_min": 0.0,
+ "grasp_track_m": 0.03,
+ "require_collect_source_evidence": true,
+ "transfer_ground_truth": true,
+ "collect_place_preplace_shape": [
+  0.093,
+  -1.91,
+  2.014,
+  -0.103,
+  1.664,
+  0.0
+ ],
+ "collect_place_wrist_guard": true,
+ "release_detach_timeout_s": 8.0,
+ "collect_place_straight_line": true,
+ "collect_retreat_liftoff": true,
+ "collect_retreat_liftoff_dz": 0.15,
+ "moveit_mesh_uris": false,
+ "transfer_pick_wrist_guard": true,
+ "esdf_boot_ack_grace_s": 15.0,
+ "transfer_preplace_reach_guard": true,
+ "transfer_service_carry": true,
+ "carton_level": {
+  "gravity_compensation": {
+   "stiffness_nm_per_rad": 2850,
+   "carton_mass_kg": 0.45
+  },
+  "place_from_above": true,
+  "place_above_clearance_m": 0.08,
+  "place_depth_bias_m": 0.05,
+  "place_clearance_drooped": true,
+  "place_clearance_margin_m": 0.03,
+  "closed_loop_level": true,
+  "closed_loop_authority_deg": 3.0,
+  "closed_loop_rate_deg_per_s": 30.0,
+  "closed_loop_gain": 0.6,
+  "place_contact_release": true,
+  "place_contact_gap_m": 0.012,
+  "closed_loop_sensor": true,
+  "preplace_above_support": true,
+  "preplace_support_clearance_m": 0.08,
+  "preplace_level_gate": true,
+  "preplace_gate_bound_deg": 1.0,
+  "preplace_max_segment_rad": 0.08,
+  "preplace_approach_speed": 0.05,
+  "preplace_approach_accel": 0.05,
+  "preplace_reaction_branch": true,
+  "preplace_max_wrist_step_rad": 0.15,
+  "preplace_soft_effort_nm": 56.0,
+  "preplace_branch_select_budget_s": 40.0
+ },
+ "preplace_convergence_stall_s": 30.0,
+ "preplace_wrist_first": true,
+ "station_pitch_hold": true,
+ "station_hold_pitch_deg": -1.17,
+ "station_hold_roll_deg": 0.0,
+ "preplace_budget_margin_s": 130.0,
+ "status_heartbeat_interval_s": 0.5
+}
