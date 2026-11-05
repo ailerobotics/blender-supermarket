@@ -83,6 +83,13 @@ DEFAULT_LEVEL_JOINTS = ('ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_join
 # level branch moves each wrist well under 0.15 rad per waypoint, so 0.15 passes a healthy approach and
 # refuses a branch jump before motion.
 DEFAULT_MAX_WRIST_STEP_RAD = 0.15
+# sim-preplace-approach-seeded-v1: bounds on the seeded interior solve's LOCAL densification. A segment that
+# cannot meet both the step clamp and the level gate is bisected; ``_SEEDED_MAX_DEPTH`` caps the bisection
+# depth per base segment (2^6 = 64 sub-steps is far finer than any real level-manifold feature) and
+# ``_SEEDED_MAX_WAYPOINTS`` caps the total waypoint count so a genuine branch gap refuses promptly (named)
+# instead of densifying unboundedly. Both are generous safety nets, never reached on a healthy approach.
+_SEEDED_MAX_DEPTH = 6
+_SEEDED_MAX_WAYPOINTS = 600
 WORLD_UP = np.array([0.0, 0.0, 1.0])
 
 
@@ -607,6 +614,25 @@ class LevelConfig:
     # executor past the Isaac 5 sim-s HOST_STATUS_WATCHDOG (coldwin59). Default 2.0 s (>20x the measured
     # cost, a fraction of the 5 s watchdog). Measured on time.perf_counter (a CPU/wall budget, NOT sim).
     preplace_branch_select_budget_s: float = 2.0
+    # sim-preplace-approach-seeded-v1: BRANCH-SEEDED interior solve for the WORLD-level pre-place approach
+    # (the primary coldwin62 fix). The legacy ``plan_level_world_approach`` levels every interior waypoint's
+    # wrist cluster INDEPENDENTLY (``continuous_level_solve`` ranks the min-travel branch, but the free
+    # Gauss-Newton descent from the position geometry can still fall into a FAR level basin), so the
+    # per-waypoint wrist_2 dips onto a different (lower) level branch at the interior and snaps back near the
+    # standoff -- coldwin62: carry-side w2 ~0.03 -> DIP ~0.19 (wp4) -> JUMP 0.62 (wp5, +0.433 rad) -> standoff
+    # 0.66, refused by the continuity guard before any motion (14th run to die here; the base lock / contact
+    # release / placement check have never run). PR 348's ``anchor='auto'`` only chooses between two
+    # ENDPOINT-anchored plans; the INTERIOR leveler still picks branches independently, so the dip survives.
+    # With ``preplace_seeded_interior`` on, the approach interior is solved SEEDED from the start->standoff
+    # wrist interpolation (the standoff branch family) and warm-continuous from the previous waypoint, with
+    # the per-waypoint wrist step CLAMPED to ``preplace_max_wrist_step_rad`` and the executed tilt held within
+    # ``preplace_gate_bound_deg``; a segment that cannot meet both is DENSIFIED LOCALLY (bisected) before the
+    # plan is refused, and only a genuine branch gap no densification bridges is CARTON_LEVEL_PLAN_REJECTED by
+    # name. So wrist_2 sweeps MONOTONICALLY carry->standoff with every step <= the continuity threshold and the
+    # guard accepts. Scoped to the geometric WORLD-level approach (``plan_level_world_approach`` anchor
+    # ``'seeded'``, engaged only on the collect preplace world-level lane). Default OFF => ``anchor='auto'`` =>
+    # byte-identical. The 2.0 deg bound / 0.15 s grace / carton dims / standoff choice are UNCHANGED.
+    preplace_seeded_interior: bool = False
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -731,7 +757,8 @@ def resolve_level_config(spec):
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above',
                  'preplace_above_place', 'place_clearance_check', 'place_clearance_drooped',
                  'closed_loop_level', 'place_contact_release', 'closed_loop_sensor',
-                 'preplace_above_support', 'preplace_level_gate', 'preplace_reaction_branch'):
+                 'preplace_above_support', 'preplace_level_gate', 'preplace_reaction_branch',
+                 'preplace_seeded_interior'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     # sim-place-preplace-above-support-v1: nullable clearance (None => place_above_clearance_m).
@@ -1462,7 +1489,8 @@ def plan_level_world_approach(robot, start_config, leveled_goal, up_in_tool, *, 
                               tool_link='ur_tool0', root='ur_base_link', limits=None,
                               bound_deg=DEFAULT_TILT_BOUND_DEG, max_segment_rad=0.25, interior=8,
                               level_joints=DEFAULT_LEVEL_JOINTS, base_R=None,
-                              max_wrist_step_rad=DEFAULT_MAX_WRIST_STEP_RAD, anchor='start', fast=False):
+                              max_wrist_step_rad=DEFAULT_MAX_WRIST_STEP_RAD, anchor='start', fast=False,
+                              level_accept_deg=None):
     """Plan the carried pre-place APPROACH from ``start_config`` to an ALREADY-LEVELED standoff
     ``leveled_goal`` as a GEOMETRIC, DENSIFIED, WORLD-level waypoint path (sim-preplace-leg2-level-v1).
 
@@ -1507,7 +1535,23 @@ def plan_level_world_approach(robot, start_config, leveled_goal, up_in_tool, *, 
     genuinely DIFFERENT wrist branches (a discrete gap no densification bridges), neither anchor removes the
     jump -- it only MOVES which waypoint crosses it. The real remedy there is to choose a standoff branch
     reachable from the carry pose (the reaction-natural standoff is meant to be exactly that); the reject
-    message now names the before/after joints so the next run captures which joint and how far."""
+    message now names the before/after joints so the next run captures which joint and how far.
+
+    sim-preplace-approach-seeded-v1 -- ``anchor='seeded'`` is the coldwin62 fix for the INTERIOR (not just the
+    endpoints). ``'start'`` / ``'goal'`` / ``'auto'`` re-solve each interior waypoint's wrist cluster by a
+    FREE level descent (``continuous_level_solve``) which, even min-travel-ranked, can fall into a FAR level
+    basin -- so wrist_2 DIPS onto a lower branch at the interior and snaps back near the standoff (coldwin62:
+    ~0.03 -> 0.19 -> 0.62 -> 0.66, a 0.433 rad jump refused before motion). ``'seeded'`` instead seeds each
+    interior waypoint's wrist solve from the START->STANDOFF wrist INTERPOLATION (the standoff branch family)
+    and warm-continuous from the previous waypoint, CLAMPS the per-waypoint wrist step to ``max_wrist_step_rad``
+    and holds the executed tilt within ``level_accept_deg`` (the gate bound; ``None`` => ``bound_deg``), and
+    DENSIFIES LOCALLY (bisects a base segment, up to ``_SEEDED_MAX_DEPTH`` / ``_SEEDED_MAX_WAYPOINTS``) when a
+    segment cannot meet both -- so wrist_2 sweeps MONOTONICALLY carry->standoff with every step <= the
+    continuity threshold. Only a genuine branch gap no densification bridges leaves a step > the clamp on the
+    returned plan, which the caller's ``reject_wrist_step`` names and refuses. The first waypoint is pinned to
+    ``start_config`` and the last to ``leveled_goal`` exactly; the waypoint count is variable (it grows with
+    local densification). Scoped to the collect preplace world-level lane; ``'auto'`` stays the default so
+    every other caller is byte-identical."""
     start = _as_joint_map(start_config)
     svec = _as_vec(start)
     goal_map = _as_joint_map(leveled_goal)
@@ -1541,13 +1585,73 @@ def plan_level_world_approach(robot, start_config, leveled_goal, up_in_tool, *, 
                 ms, wp = step, i
         return sols, ms, wp
 
+    def _solve_seeded():
+        """sim-preplace-approach-seeded-v1: branch-seeded interior solve with local densification.
+
+        Each interior waypoint's wrist cluster is solved by a level descent SEEDED from the START->STANDOFF
+        wrist interpolation (so the solution lands on the standoff branch family, not a far level basin),
+        warm-continuous from the previous accepted waypoint. A waypoint is accepted only when its per-joint
+        wrist step from the previous accepted waypoint is <= ``max_wrist_step_rad`` AND its executed tilt is
+        within the level acceptance; otherwise the span to it is bisected (local densification) and retried.
+        The start and goal are pinned verbatim. Returns the accepted list of joint maps (variable length)."""
+        clamp = float(max_wrist_step_rad)
+        level_tol = float(bound_deg if level_accept_deg is None else level_accept_deg)
+        u = _unit(up_in_tool)
+        order = _ARM_ORDER()
+
+        def _interp_full(t):
+            # pan/lift/elbow AND the wrist cluster interpolated: the interpolated wrists seed the level
+            # descent onto the standoff branch family (wrist_2 ramps start->standoff monotonically).
+            return {j: (1 - t) * svec[k] + t * gvec[k] for k, j in enumerate(order)}
+
+        def _solve_at(t):
+            sol, tilt = _level_descend(robot, u, adj, _interp_full(t), tool_link=tool_link, root=root,
+                                       limits=limits, base_R=base_R, max_iter=80, tol_deg=0.05, fast=fast)
+            return sol, tilt
+
+        sols = [dict(start)]
+        # Pending target fractions (ascending), goal last. A failed segment inserts its midpoint ahead.
+        pending = [i / float(n) for i in range(1, n)] + [1.0]
+        prev, prevt = dict(start), 0.0
+        while pending:
+            t = pending[0]
+            is_goal = abs(t - 1.0) < 1e-12
+            if is_goal:
+                sol, tilt = dict(goal_map), 0.0   # goal pinned verbatim (already the executed-level standoff)
+            else:
+                sol, tilt = _solve_at(t)
+            step = max((abs(sol[j] - prev[j]) for j in adj), default=0.0)
+            level_ok = is_goal or tilt <= level_tol
+            if level_ok and step <= clamp + 1e-9:
+                sols.append(sol); prev, prevt = sol, t; pending.pop(0)
+                continue
+            # Need to densify this span. Give up (accept the offending step, so the caller refuses by name)
+            # only when the span is already finer than the depth cap or the total waypoint budget is spent.
+            span = t - prevt
+            min_span = 1.0 / (float(n) * float(2 ** _SEEDED_MAX_DEPTH))
+            if span <= min_span or len(sols) >= _SEEDED_MAX_WAYPOINTS:
+                sols.append(sol); prev, prevt = sol, t; pending.pop(0)
+                continue
+            pending.insert(0, prevt + 0.5 * span)
+        return sols
+
     def _build(direction):
-        sols, ms, wp = _solve(direction)
-        vecs = [_as_vec(sols[i]) for i in range(n + 1)]
+        if direction == 'seeded':
+            sols = _solve_seeded()
+        else:
+            sols, _ms, _wp = _solve(direction)
+        vecs = [_as_vec(s) for s in sols]
+        order = _ARM_ORDER()
+        adj_idx = [order.index(j) for j in adj]
+        ms, wp = 0.0, 0
+        for i in range(1, len(vecs)):
+            step = max((abs(vecs[i][k] - vecs[i - 1][k]) for k in adj_idx), default=0.0)
+            if step > ms:
+                ms, wp = step, i
         mr, mp, mt = predict_path_tilt_executed(robot, vecs, up_in_tool, tool_link=tool_link, root=root,
                                                 interior=interior, gravity_comp=None, base_R=base_R)
         return LevelPathPlan(waypoints=tuple(tuple(v) for v in vecs), max_roll=mr, max_pitch=mp,
-                             max_tilt=mt, waypoints_n=n, max_wrist_step=ms, worst_step_wp=wp)
+                             max_tilt=mt, waypoints_n=len(vecs) - 1, max_wrist_step=ms, worst_step_wp=wp)
 
     if anchor != 'auto':
         return _build(anchor)

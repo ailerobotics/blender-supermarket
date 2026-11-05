@@ -33,6 +33,7 @@
         "carton_level": {
             "preplace_level_gate": true,
             "preplace_reaction_branch": true,
+            "preplace_seeded_interior": true,
             "preplace_max_wrist_step_rad": 0.15,
             "preplace_soft_effort_nm": 56.0,
             "preplace_max_segment_rad": 0.08,
@@ -49,6 +50,7 @@
                 "carton_mass_kg": 0.45
             },
             "_new_keys_note": "NEW this lane: preplace_reaction_branch (true => select the min-|wrist_2| settling standoff branch -- the coldwin57 fix), preplace_max_wrist_step_rad (0.15 => the per-waypoint wrist-step continuity guard), preplace_soft_effort_nm (56 => the URDF wrist effort ceiling, for the margin report). Default off => byte-identical: preplace_reaction_branch absent/false uses the prior single level_place_ik standoff (w2~1.63, the branch that diverged). All other keys are KEPT from coldwin57.",
+            "_seeded_interior_note": "sim-preplace-approach-seeded-v1 (coldwin63, the coldwin62 fix): preplace_seeded_interior:true routes plan_level_world_approach through anchor='seeded' -- each interior approach waypoint's wrist cluster is solved SEEDED from the start->standoff wrist interpolation (the standoff branch family), warm-continuous from the previous waypoint, with the per-waypoint wrist step CLAMPED to preplace_max_wrist_step_rad (0.15) and the executed tilt held within preplace_gate_bound_deg (1.0), densifying a span locally before refusing. coldwin62 died here (14th run): the legacy anchor='auto' leveled each interior INDEPENDENTLY so wrist_2 dipped ~0.03 -> 0.19 (wp4) -> JUMPED 0.62 (wp5, +0.433 rad) -> 0.66 and CARTON_LEVEL_PLAN_REJECTED refused it. With seeded on, wrist_2 sweeps MONOTONICALLY start->standoff (CPU: 0.034 -> 0.661, max per-waypoint step 0.149 rad <= 0.15, predicted interior tilt 0.17 deg, plan built in ~0.04 s) and the guard ACCEPTS it. Requires preplace_level_gate (config_preflight refuses seeded-on + gate-off as silently inert). Default off => anchor='auto' => byte-identical. The 2.0 deg bound / 0.15 s grace / carton dims / standoff choice are UNCHANGED.",
             "_frame_note": "Under the station hold the preplace standoff + approach are solved GEOMETRICALLY in WORLD (gravity_comp is NOT used at the preplace -- the coldwin56 phantom); gravity_compensation stays for the PLACE descent (base frame, unchanged)."
         }
     },
@@ -72,6 +74,14 @@
         "carton_level": "CARTON_TICK world tilt peak <= 1.5 deg over both legs; no CARTON_TILT trip. DRIVE_GAINS records the effective wrist drive gains (settles the units question).",
         "place": "the full D6 lock engages at place start (base drift <= 0.02 m), the weld releases at true shelf contact (PLACE_CONTACT_RELEASE), verify_place passes, and the run ADVANCES PAST collect.",
         "a_b_note": "To reproduce the coldwin57 failure set preplace_reaction_branch:false (the prior w2~1.63 standoff); RESTOCK_DRIVE_TICK=1 then captures the executed wrist_2 relaxing away from the held 1.63 (the single-source split) and the EXEC_ABORT in the console."
+    },
+    "acceptance_coldwin63": {
+        "_lane": "sim-preplace-approach-seeded-v1 -- coldwin63 = coldwin62 + preplace_seeded_interior:true (above). The captain's rule UNCHANGED: the box stays parallel to the ground, 2.0 deg bound / 0.15 s grace, NEVER loosened.",
+        "approach_accepted": "CARTON_LEVEL_PREPLACE_GATE logs max_wrist_step <= 0.15 rad for the carried approach (CPU 0.149 on the coldwin62 inputs) and NO CARTON_LEVEL_PLAN_REJECTED -- the interior wrist_2 sweeps monotonically start->standoff (no ~0.19 dip / 0.433 jump); the run ADVANCES past the preplace (the base lock / contact release / placement check finally run, for the first time in 14 runs).",
+        "both_legs_converge": "Both legs converge within the derived phase budget (no 'phase timeout: preplace'); 0 HOST_STATUS_WATCHDOG (the seeded plan builds in ~0.04 s CPU, far under the 2 s / 5 s watchdog budgets).",
+        "carton_level": "CARTON_TICK world tilt peak <= 1.5 deg over both legs; no CARTON_TILT trip.",
+        "place": "the full D6 base lock engages at place start (base drift <= 0.02 m), the weld releases at true shelf contact (PLACE_CONTACT_RELEASE), verify_place passes, and the run ADVANCES PAST collect.",
+        "a_b_note": "To reproduce the coldwin62 interior branch dip set preplace_seeded_interior:false (anchor='auto'): the console then shows CARTON_LEVEL_PLAN_REJECTED with wp4 wrist_2~0.19, wp5 wrist_2~0.62 (+0.433 rad) and the HOST_FAULT_ESTOP at phase=preplace."
     },
     "reconciliation_with_worker_forensics": "coldwin57-onset.txt inferred a 'stray drive target' from a live per-waypoint re-solve. The CPU trace shows no such second writer exists in code -- the installed plan is the single source (drive target == monitor ref, proven sample-by-sample). Firstmate accepted this: the relaxation is the Isaac soft-wrist drive physically failing to hold the near-null high branch. The fix is the same either way -- command the branch the drive reaches (min-|wrist_2|) -- and the DRIVE_TICK/DRIVE_GAINS logs make the drive behaviour observable at coldwin58 so the physics (and any wrist-drive units/application mismatch) can be settled from the console."
 }
