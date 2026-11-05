@@ -8,6 +8,7 @@ back +0.479 and FROZE 0.558 rad short -> 'phase timeout: preplace'. cw50-52 (STI
 but swung the carton 3-8 deg. The pan HOLD and the carton SWING want opposite gains; the fix is a PER-JOINT
 override (shoulder_pan stiff, wrists soft). These tests are CPU-only (no Isaac/ROS/GPU).
 """
+import json
 import os
 import time
 
@@ -146,51 +147,84 @@ def test_keys_registered_in_consumer_map():
 
 
 # ---------------------------------------------------------------------- 3) convergence guard (pure)
+# sim-preplace-convergence-guard-fix-v1: the guard measures per-joint convergence of the DRIVEN joint, not
+# each joint's error to the FINAL goal. These replay the two real runs the fix must separate: coldwin54
+# (the PR342 false trip -- a sequential path's not-yet-moved joint) and coldwin53 (the real pan freeze).
 
-def test_convergence_guard_names_frozen_pan():
-    # Replay the cw53 freeze: pan frozen 0.558 rad off, wrist_2 ~at goal, time advances -> fire naming pan.
-    g = ConvergenceGuard(ARM_JOINTS, stall_s=20.0)
-    standoff = [-0.079, -1.558, 1.586, 0.0, 1.640, 0.0]
-    g.arm(standoff)
-    frozen = [0.479, -1.558, 1.586, 0.0, 1.631, 0.0]
-    fired = None
-    for now in np.arange(227.0, 260.0, 1.0):
-        fired = g.observe(float(now), frozen)
+_FIXDIR = os.path.join(os.path.dirname(__file__), 'fixtures')
+
+
+def _load_replay(name):
+    with open(os.path.join(_FIXDIR, 'preplace_convergence_%s.json' % name)) as f:
+        return json.load(f)
+
+
+def test_convergence_guard_coldwin54_replay_no_false_trip_on_idle_joint():
+    # coldwin54 CARTON_TICK replay (128->158 s, the real pan leg): shoulder_pan descends cleanly while
+    # wrist_2 is IDLE at its carry value 1.63 rad from its eventual goal (its sweep leg has not begun). The
+    # PR342 guard false-tripped here naming wrist_2; the fixed guard must stay silent for the whole leg.
+    d = _load_replay('coldwin54')
+    g = ConvergenceGuard(ARM_JOINTS, stall_s=30.0)
+    g.arm(d['preplace_standoff_goal'])
+    for t in d['ticks']:
+        assert g.observe(t['now'], t['q']) is None, 'false trip at now=%s' % t['now']
+
+
+def test_convergence_guard_coldwin53_replay_names_frozen_pan_within_window():
+    # coldwin53 CARTON_TICK replay (128->247 s): shoulder_pan descends to the standoff (err ~0.06), then the
+    # wrist_2 sweep drives it BACK to +0.48 and it freezes 0.56 rad short. The guard must catch the retreat
+    # WITHIN the stall window and name shoulder_pan (not wrist_2, which converges).
+    d = _load_replay('coldwin53')
+    g = ConvergenceGuard(ARM_JOINTS, stall_s=30.0)
+    g.arm(d['preplace_standoff_goal'])
+    fired = fired_t = None
+    for t in d['ticks']:
+        fired = g.observe(t['now'], t['q'])
         if fired:
+            fired_t = t['now']
             break
-    assert fired is not None
-    assert fired.joint == PAN and abs(fired.error - 0.558) < 1e-3
+    assert fired is not None, 'never caught the pan freeze'
+    assert fired.joint == PAN
+    assert fired_t < d['ticks'][-1]['now']                  # caught before the series/120 s timeout ends
+    assert fired.error > 0.3 and fired.best_error < 0.1     # driven near goal, then retreated far
     assert 'PHASE_CONVERGENCE' in fired.message and 'shoulder_pan' in fired.message
+    assert ('commanded=%.4f' % fired.commanded) in fired.message
+    assert ('executed=%.4f' % fired.executed) in fired.message
 
 
-def test_convergence_guard_silent_while_converging_and_when_off():
-    standoff = [-0.079, -1.558, 1.586, 0.0, 1.640, 0.0]
+def test_convergence_guard_idle_joint_never_trips():
+    # A joint held at its carry value (never moving -- its leg has not started), far from the final goal,
+    # must NOT trip while another joint converges, no matter how long it sits.
+    goal = [0.0, 0.0, 0.0, 0.0, 1.64, 0.0]
     g = ConvergenceGuard(ARM_JOINTS, stall_s=20.0)
-    g.arm(standoff)
-    for now in np.arange(0.0, 60.0, 1.0):
-        f = min(1.0, now / 50.0)
-        q = [0.479 * (1 - f) + (-0.079) * f, -1.558, 1.586, 0.0, 1.64 * f, 0.0]
-        assert g.observe(float(now), q) is None       # converging never fires
-    off = ConvergenceGuard(ARM_JOINTS, stall_s=0.0)   # disabled
-    off.arm(standoff)
-    assert not off.enabled
-    for now in np.arange(0.0, 200.0, 1.0):
-        assert off.observe(float(now), [0.479, -1.558, 1.586, 0.0, 1.631, 0.0]) is None
+    g.arm(goal)
+    for now in np.arange(0.0, 80.0, 1.0):
+        f = min(1.0, now / 20.0)
+        pan = 1.2 * (1 - f)                                 # pan descends to its goal 0 and holds
+        q = [pan, 0.0, 0.0, 0.0, 0.002, 0.0]               # wrist_2 idle at carry 0.002 (goal 1.64)
+        assert g.observe(float(now), q) is None
 
 
 def test_convergence_guard_rearms_on_improvement_and_disarm():
     g = ConvergenceGuard(ARM_JOINTS, stall_s=10.0)
-    standoff = [0.0] * 6
-    g.arm(standoff)
-    # drift to 0.5, hold 8 s (no fire), then improve (rearm), then hold again
-    assert g.observe(0.0, [0.5] + [0.0] * 5) is None
-    assert g.observe(8.0, [0.5] + [0.0] * 5) is None           # 8 < 10 stall
-    assert g.observe(9.0, [0.3] + [0.0] * 5) is None           # improved -> rearm
-    assert g.observe(18.0, [0.3] + [0.0] * 5) is None          # only 9 s since rearm
-    fired = g.observe(20.0, [0.3] + [0.0] * 5)                 # 11 s since rearm -> fire
-    assert fired is not None and fired.joint == PAN
+    g.arm([0.0] * 6)
+    assert g.observe(0.0, [0.8] + [0.0] * 5) is None           # first observe captures the start pose
+    assert g.observe(1.0, [0.4] + [0.0] * 5) is None           # pan DRIVEN (moved > engage) + improving
+    assert g.observe(9.0, [0.4] + [0.0] * 5) is None           # 8 s since best < 10 stall
+    assert g.observe(10.0, [0.25] + [0.0] * 5) is None         # improved -> rearm
+    assert g.observe(19.0, [0.25] + [0.0] * 5) is None         # only 9 s since rearm
+    fired = g.observe(21.0, [0.25] + [0.0] * 5)                # 11 s since rearm -> fire
+    assert fired is not None and fired.joint == PAN and abs(fired.error - 0.25) < 1e-6
     g.disarm()
-    assert g.observe(40.0, [0.3] + [0.0] * 5) is None
+    assert g.observe(40.0, [0.25] + [0.0] * 5) is None
+
+
+def test_convergence_guard_off_key_is_inert():
+    off = ConvergenceGuard(ARM_JOINTS, stall_s=0.0)            # preplace_convergence_stall_s=0 => disabled
+    off.arm([-0.079, -1.558, 1.586, 0.0, 1.640, 0.0])
+    assert not off.enabled
+    for now in np.arange(0.0, 200.0, 5.0):
+        assert off.observe(float(now), [0.6, -1.558, 1.586, 0.0, 1.631, 0.0]) is None
 
 
 # ------------------------------------------------------------------- 4) wrist-first sequencing (pure)
@@ -298,39 +332,44 @@ def test_controller_convergence_guard_fails_frozen_preplace_by_name():
     c = TransferController(_RunningMotion(), {'sku-box': PROFILE}, fixture_mode=True,
                            preplace_convergence_stall_s=15.0)
     c.start('collect', JOB)
-    # Inject the frozen preplace directly (the dispatch path to a real preplace needs the full collect-
-    # deck-place setup; the guard wiring in step() is what we exercise here).
+    # Inject the preplace directly (the full dispatch path needs the collect-deck-place setup; the guard
+    # wiring in step() is what we exercise here). Pre-drive the guard to the cw53 pattern -- pan DRIVEN to
+    # the standoff (engages + converges) then RETREATS -- so the ONE step() below fires at the convergence
+    # block (which returns before the dispatch), exactly as a real frozen preplace would.
     c.phase = 'preplace'
     c.issued = True                                   # skip the move-issue branch
     c.held = True
     c.elapsed = 0.0
     c.last_time = None
     standoff = [-0.079, -1.558, 1.586, 0.0, 1.640, 0.0]
-    frozen = [0.479, -1.558, 1.586, 0.0, 1.631, 0.0]  # pan frozen 0.558 off, wrist_2 ~at goal
-    c._preplace_convergence.arm(standoff)
-    # Pre-seed the stall window so the guard fires on the first step -- at the convergence block in step(),
-    # before the dispatch (which needs the full observe-phase state the injected preplace skips).
-    c._preplace_convergence._best = 0.558
-    c._preplace_convergence._best_t = 0.0
-    result = c.step(1.0, _preplace_packet(100.0, frozen))
+    carry = [1.267, -1.558, 1.586, 0.0, 1.640, 0.0]   # pan at carry (rest already at goal)
+    frozen = [0.5, -1.558, 1.586, 0.0, 1.631, 0.0]    # pan retreats ~0.58 and holds
+    g = c._preplace_convergence
+    g.arm(standoff)
+    assert g.observe(100.0, carry) is None            # capture start
+    assert g.observe(101.0, standoff) is None         # pan driven to goal (engaged + converged)
+    assert g.observe(110.0, frozen) is None           # retreat, but only 9 s < 15 s window
+    result = c.step(1.0, _preplace_packet(117.0, frozen))   # 16 s since the best -> fires in step()
     assert result.status == 'failed'
     assert 'PHASE_CONVERGENCE' in result.reason and 'shoulder_pan' in result.reason
     assert any('phase_convergence' in e for e in c.evidence)
 
 
-def test_controller_off_is_byte_identical_no_convergence():
+def test_controller_off_is_inert_even_on_frozen_preplace():
     # stall_s=0 (default) => guard disabled => the step() convergence block is a no-op (the coarse phase
-    # timeout owns a frozen preplace, as before the lane).
+    # timeout owns a frozen preplace, as before the lane). Replaces the old scalar-internal pre-seed test.
     c = TransferController(_RunningMotion(), {'sku-box': PROFILE}, fixture_mode=True)
     c.start('collect', JOB)
     assert not c._preplace_convergence.enabled
     assert c.preplace_convergence_stall_s == 0.0
-    # even pre-seeded + armed, a disabled guard never fires on a frozen joint
     c.phase = 'preplace'
-    c._preplace_convergence.arm([-0.079, -1.558, 1.586, 0.0, 1.640, 0.0])
-    c._preplace_convergence._best = 0.558
-    c._preplace_convergence._best_t = 0.0
-    assert c._preplace_convergence.observe(100.0, [0.479, -1.558, 1.586, 0.0, 1.631, 0.0]) is None
+    g = c._preplace_convergence
+    g.arm([-0.079, -1.558, 1.586, 0.0, 1.640, 0.0])
+    carry = [1.267, -1.558, 1.586, 0.0, 1.640, 0.0]
+    frozen = [0.5, -1.558, 1.586, 0.0, 1.631, 0.0]
+    assert g.observe(100.0, carry) is None
+    for now in np.arange(101.0, 260.0, 5.0):           # well past any window -> a disabled guard never fires
+        assert g.observe(float(now), frozen) is None
 
 
 def test_controller_stores_wrist_first_flag():
