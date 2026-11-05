@@ -1271,12 +1271,16 @@ class TransferController:
                 # droop pre-tilt (the coldwin56 phantom). This is the leg-2 fix: the wrists track a
                 # continuously world-level orientation as shoulder_pan sweeps on its tilted cone, instead of
                 # holding the leg-1 goal (which rose 1.64 -> 2.02 across the pan descent).
+                # sim-preplace-approach-seeded-v1: the branch-seeded interior solve (coldwin62 fix) when
+                # opted in, else the PR 348 endpoint-anchored 'auto' (byte-identical default).
+                seeded = getattr(cl_cfg, 'preplace_seeded_interior', False)
                 plan = cl.plan_level_world_approach(
                     robot, list(measured), list(leveled_goal), up_level,
                     tool_link=tcp_link, limits=limits, bound_deg=cl_cfg.bound_deg,
                     max_segment_rad=cl_cfg.preplace_max_segment_rad, level_joints=cl_cfg.joints,
                     base_R=base_R, max_wrist_step_rad=cl_cfg.preplace_max_wrist_step_rad,
-                    anchor='auto', fast=True)
+                    anchor='seeded' if seeded else 'auto', fast=True,
+                    level_accept_deg=cl_cfg.preplace_gate_bound_deg if seeded else None)
             else:
                 plan = cl.plan_compensated_approach(
                     robot, list(measured), list(leveled_goal), self._carton_up_in_tool, gc,
