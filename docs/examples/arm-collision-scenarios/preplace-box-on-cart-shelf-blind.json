@@ -1,0 +1,26 @@
+{
+  "id": "preplace-box-on-cart-shelf-blind",
+  "arm_leg": "preplace_approach",
+  "expected_behavior": "avoid",
+  "margin_m": 0.03,
+  "description": "A box on the cart upper shelf beside the pre-place approach. Cart outside the ESDF grid -> blind today. Closed by the cart world obstacle.",
+  "obstacles": [
+    {
+      "name": "cart_shelf_box",
+      "kind": "box",
+      "center": [
+        0.6761,
+        -0.5539,
+        0.5412
+      ],
+      "size": [
+        0.14,
+        0.14,
+        0.14
+      ],
+      "observed": false,
+      "at_goal": false
+    }
+  ],
+  "notes": "observed flips True when the cart is added as a world obstacle."
+}

@@ -1,0 +1,83 @@
+{
+  "_comment": "Hand-off for the arm collision-avoidance evaluation bench (sim-arm-collision-bench-v1). Keys, scenario list, thresholds and the before/after numbers. The bench is opt-in and byte-identical off for the mission (it is not imported or launched by any mission path). See scripts/twin/tools/README.md.",
+
+  "cpu_mode": {
+    "entry": "scripts/run_arm_collision_bench.py",
+    "default": true,
+    "needs": "numpy + usd-core (optional, for gpu-side authoring tests); no Isaac/ROS/GPU",
+    "args": {
+      "--scenarios": "dir of scenario JSON (default docs/examples/arm-collision-scenarios)",
+      "--gate": "baseline | reference | module:function (a sibling lane's real gate)",
+      "--observe-all": "model full perception coverage (the AFTER-coverage column)",
+      "--out": "write report.md + results.csv + summary.json",
+      "--thresholds": "JSON thresholds (else per-scenario margin defaults)",
+      "--urdf / --curobo": "override the mission URDF / curobo collision-sphere yml"
+    },
+    "exit_code": "0 iff every scenario passed its thresholds (CI / pre-send gate)"
+  },
+
+  "gpu_mode": {
+    "entry": "scripts/run_arm_collision_bench_gpu.py",
+    "extends": "scripts/run_arm_carry_bench.py (boot Isaac once, author obstacles into the stage, read live AABB clearance + PhysX contact)",
+    "same_schema_as": "cpu_mode (results.csv columns identical)",
+    "bounded": "<= 20 min, gpu_budget-gated, canonical GPU lock, never --force; integration lane (coldwin*) has priority",
+    "command": "renice +10 -p $$ >/dev/null; flock -w 5 /tmp/aile-gpu.lock env_isaaclab/bin/python scripts/run_arm_collision_bench_gpu.py --runtime-config <mission-runtime.json> --scenarios docs/examples/arm-collision-scenarios --legs collect_pick --heavy-threshold-mb 2500 --no-gpu-lock --out <scratch>/gpu-collect",
+    "vram_scout_s7": "collect/carry/set-down ~2.9 GB free (mast +0.45, dynamic layer +1.1 both fit); live_pose transfer 26 MiB free -> bench nothing extra there"
+  },
+
+  "gates": {
+    "baseline": "the current stack: no perceived-ESDF gate on these arm legs -> never acts (BEFORE)",
+    "reference": "a transparent collision-aware reference instrument (people routed to the human-gate STOP, cart as a known world obstacle); reacts only to what it PERCEIVES",
+    "module:function": "a sibling lane's real gate; signature (scenario, list[FrameClearance]) -> GateVerdict(behavior, n_replans, extra_cycle_time_s, reason)"
+  },
+
+  "scenario_schema": {
+    "id": "str",
+    "arm_leg": "collect_pick | carry | preplace_approach | set_down | withdraw | transfer",
+    "expected_behavior": "avoid | preempt_replan | slow_stop_resume | refuse | clear | none",
+    "margin_m": "clearance margin (default 0.030)",
+    "voxel_m": "mock ESDF voxel size (default 0.01 = the mission arm ESDF; the real cell runs 0.02)",
+    "obstacles": [
+      {
+        "name": "str (suffix drives nothing; use at_goal flag)",
+        "kind": "box | sphere",
+        "center": "[x,y,z] in ur_base_link",
+        "size": "[sx,sy,sz] box full extents",
+        "radius": "sphere radius",
+        "observed": "bool - false models the current stack's ESDF blindness (unobserved == free; the body still physically exists for the GPU contact probe)",
+        "at_goal": "bool - obstacle sits ON the leg's reach target (refuse vs avoid)",
+        "motion": {"kind": "static | linear", "velocity": "[vx,vy,vz] m/s", "start_t": "s", "class": "static | person | hand | carton | box | tool | cage"}
+      }
+    ],
+    "cycle_time_nominal_s": "optional; else per-leg default",
+    "duration_s / time_step_s": "scripted-motion horizon + sampling"
+  },
+
+  "thresholds": {
+    "no_contact": true,
+    "min_true_clearance_m": null,
+    "_min_true_clearance_note": "null -> use each scenario's margin_m",
+    "cycle_time_overhead_frac": 0.5,
+    "require_verdict_match": true
+  },
+
+  "scenarios": [
+    {"id": "collect-pick-misplaced-carton-observed", "leg": "collect_pick", "expect": "avoid", "observed": true, "note": "wrist pre-grasp view; collision-aware already works"},
+    {"id": "collect-pick-shelf-cage-bar-blind", "leg": "collect_pick", "expect": "avoid", "observed": false, "closed_by": "mast depth feed at collect"},
+    {"id": "set-down-cart-cage-post-blind", "leg": "set_down", "expect": "avoid", "observed": false, "closed_by": "cart as a cuMotion world obstacle"},
+    {"id": "set-down-tool-on-deck-at-goal-blind", "leg": "set_down", "expect": "refuse", "observed": false, "closed_by": "cart world obstacle + straight-line-insert ESDF gate"},
+    {"id": "transfer-box-on-shelf-edge-observed", "leg": "transfer", "expect": "avoid", "observed": true, "note": "wrist pre-grasp ESDF"},
+    {"id": "preplace-box-on-cart-shelf-blind", "leg": "preplace_approach", "expect": "avoid", "observed": false, "closed_by": "cart world obstacle"},
+    {"id": "carry-person-crosses-moving", "leg": "carry", "expect": "slow_stop_resume", "observed": false, "closed_by": "mast feed + humangate preempt (lane 2)"},
+    {"id": "transfer-hand-reach-moving", "leg": "transfer", "expect": "slow_stop_resume", "observed": true, "note": "human gate STOP where the wrist perceives"}
+  ],
+
+  "before_after_numbers": {
+    "_source": "CPU mock-ESDF, 8 scenarios, margin 30 mm, this branch (fm/sim-arm-collision-bench-v1)",
+    "baseline_current_stack": {"passed": "0/8", "verdict_match": "0%", "nominal_collisions": 8, "executed_collisions": 8},
+    "reference_current_coverage": {"passed": "3/8", "verdict_match": "38%", "executed_collisions": 5, "note": "works on the 3 wrist-framed cases; 5 blind spots = the measured gap"},
+    "reference_after_coverage_observe_all": {"passed": "8/8", "verdict_match": "100%", "executed_collisions": 0, "note": "S5: no contact static, STOP-not-contact moving, once the stack SEES the obstacles"},
+    "after_sibling_gate": "PENDING - plug --gate <sibling module:function> once the cart-world-obstacle / insert-gate / humangate-preempt PRs merge on fm/twin-robot-in-store-boot-v1",
+    "gpu": "PENDING - bounded collect-only run (command above) when the lock is free after the integration lane"
+  }
+}
