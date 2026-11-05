@@ -70,6 +70,18 @@ DEFAULT_TILT_GRACE_S = 0.15
 # The arm joints (ARM order) a level-orientation waypoint is allowed to re-solve. The wrist
 # cluster sets the tool attitude; pan/lift/elbow carry the position the carry plan chose.
 DEFAULT_LEVEL_JOINTS = ('ur_wrist_1_joint', 'ur_wrist_2_joint', 'ur_wrist_3_joint')
+# Default per-waypoint wrist-step continuity threshold (rad) for the densified pre-place approach
+# (sim-preplace-wrist-continuity-v1). Each leg-2 waypoint re-solves the wrist cluster for level-in-world;
+# the re-solve must be BRANCH-CONTINUOUS -- the per-joint wrist step from the previous waypoint must stay
+# at or below this. coldwin57 reached 97 % of the approach at 0.00 deg world tilt, then the per-waypoint
+# level solve jumped the commanded wrist_2 from ~1.63 to ~0.404 rad (a 1.3 rad step between consecutive
+# waypoints to a FAR but also-level branch) because ``level_config`` ranked the lowest-tilt branch with no
+# travel penalty; the soft wrist (eff 400, speed cap 0.05 rad/s) could not follow the step, so the
+# trajectory host tripped its tracking guard (TRAJ_HOST_TRACK_MISS worst_j=4 ref 1.63 vs meas 0.33). At the
+# active densification (``preplace_max_segment_rad`` default 0.25 rad per position step) a continuous
+# level branch moves each wrist well under 0.15 rad per waypoint, so 0.15 passes a healthy approach and
+# refuses a branch jump before motion.
+DEFAULT_MAX_WRIST_STEP_RAD = 0.15
 WORLD_UP = np.array([0.0, 0.0, 1.0])
 
 
@@ -455,6 +467,31 @@ class LevelConfig:
     preplace_max_segment_rad: float = 0.25
     preplace_approach_speed: float = 0.05
     preplace_approach_accel: float = 0.1
+    # sim-preplace-wrist-continuity-v1: BRANCH-CONTINUITY threshold (rad) for the WORLD-level pre-place
+    # approach wrist re-solve. Each densified approach waypoint re-solves the wrist cluster for
+    # level-in-world; the solve is seeded from the PREVIOUS waypoint's solution and chooses, among the level
+    # branches, the one with the SMALLEST per-joint wrist travel -- never a lower-tilt FAR branch. A planned
+    # per-waypoint wrist step above this is a branch jump the soft wrist cannot track (coldwin57), so the
+    # plan is CARTON_LEVEL_PLAN_REJECTED before motion with the offending waypoint and step. Scoped to the
+    # geometric WORLD-level approach (``plan_level_world_approach``), so every other move is byte-identical.
+    preplace_max_wrist_step_rad: float = DEFAULT_MAX_WRIST_STEP_RAD
+    # sim-preplace-wrist-continuity-v1: the REACTION-NATURAL STANDOFF BRANCH selector (the primary coldwin57
+    # fix). coldwin57's leg-2 COMMAND held wrist_2 continuously at the HIGH level branch (1.63), but the soft
+    # wrist_2 drive DIVERGED monotonically DOWN to the LOW branch (~0.33-0.40) under the pan descent and the
+    # executor faulted on the executed-vs-commanded divergence (both branches are world-level, so the carton
+    # stayed level -- the fault is purely the wrist_2 drive divergence). With ``preplace_reaction_branch`` on,
+    # the collect pre-place standoff is chosen as the reach+level branch with the MINIMUM |wrist_2|
+    # (``select_reaction_natural_standoff``) -- the bottom of the equivalent-orientation family the drive
+    # drifts toward (== the observed settling point, a smaller leg-1 sweep from carry than the 1.63 branch) --
+    # so leg 1 drives to THAT branch and leg 2 holds it with no divergence. HONEST: the gravity/geometry
+    # holding torque is ~0.5-1.0 N*m on EVERY branch, far below the soft-wrist URDF effort limit (56 N*m), so no
+    # branch saturates and torque does NOT select the settling branch (minimum torque would pick the UPHILL
+    # wrist_2~2.79 branch); the torque is reported only for the margin + the honest model comparison. Scoped
+    # to the geometric WORLD-level standoff (``preplace_level_gate`` + held chassis attitude); default OFF =>
+    # byte-identical (the prior single ``level_place_ik`` standoff is used). ``preplace_soft_effort_nm`` is
+    # the soft-wrist effort limit used only to REPORT the margin (never relaxed, never used to stiffen).
+    preplace_reaction_branch: bool = False
+    preplace_soft_effort_nm: float = 56.0
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -504,6 +541,13 @@ class LevelConfig:
                       ('preplace_approach_accel', self.preplace_approach_accel)):
             if not (math.isfinite(v) and v > 0):
                 raise ValueError(f'carton_level.{nm} must be a finite positive number')
+        if not (math.isfinite(self.preplace_max_wrist_step_rad) and self.preplace_max_wrist_step_rad > 0):
+            raise ValueError('carton_level.preplace_max_wrist_step_rad must be a finite positive number of '
+                             'radians (the per-waypoint wrist-step continuity threshold for the world-level '
+                             'pre-place approach)')
+        if not (math.isfinite(self.preplace_soft_effort_nm) and self.preplace_soft_effort_nm > 0):
+            raise ValueError('carton_level.preplace_soft_effort_nm must be a finite positive N*m (the '
+                             'soft-wrist effort limit used to report the holding-torque margin)')
         from twin.restock_manipulation.cad_tool import ARM_JOINTS
         bad = [j for j in self.joints if j not in ARM_JOINTS]
         if bad or not self.joints:
@@ -561,13 +605,14 @@ def resolve_level_config(spec):
                  'place_depth_bias_m', 'preplace_standoff_m', 'place_clearance_margin_m',
                  'closed_loop_authority_deg', 'closed_loop_rate_deg_per_s', 'closed_loop_gain',
                  'place_contact_gap_m', 'preplace_gate_bound_deg', 'preplace_max_segment_rad',
-                 'preplace_approach_speed', 'preplace_approach_accel'):
+                 'preplace_approach_speed', 'preplace_approach_accel', 'preplace_max_wrist_step_rad',
+                 'preplace_soft_effort_nm'):
         if fnum in spec and spec[fnum] is not None:
             kw[fnum] = float(spec[fnum])
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above',
                  'preplace_above_place', 'place_clearance_check', 'place_clearance_drooped',
                  'closed_loop_level', 'place_contact_release', 'closed_loop_sensor',
-                 'preplace_above_support', 'preplace_level_gate'):
+                 'preplace_above_support', 'preplace_level_gate', 'preplace_reaction_branch'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     # sim-place-preplace-above-support-v1: nullable clearance (None => place_above_clearance_m).
@@ -781,12 +826,17 @@ class LevelPathPlan:
       over the waypoints AND their straight-segment interiors), so the caller can reject a plan whose
       executed path would leave level before any motion streams.
     * ``waypoints_n`` -- the segment count actually chosen (the lowest-tilt candidate).
+    * ``max_wrist_step`` -- the largest per-joint wrist step between consecutive waypoints of the planned
+      approach (sim-preplace-wrist-continuity-v1); ``worst_step_wp`` is the 1-based waypoint index where it
+      occurs. Default 0.0 for plans that do not track it (e.g. the droop-compensated lift/descent paths).
     """
     waypoints: tuple
     max_roll: float
     max_pitch: float
     max_tilt: float
     waypoints_n: int
+    max_wrist_step: float = 0.0
+    worst_step_wp: int = 0
 
     def reject(self, bound_deg):
         """The CARTON_LEVEL_PLAN_REJECTED message when the predicted executed path exceeds ``bound_deg``
@@ -799,6 +849,19 @@ class LevelPathPlan:
                 f'peak roll={self.max_roll:.2f} pitch={self.max_pitch:.2f} deg over the '
                 f'{self.waypoints_n}-waypoint leveled path exceeds bound {float(bound_deg):.2f} deg '
                 f'-- refusing to execute a visibly tilted carry')
+
+    def reject_wrist_step(self, max_step_rad):
+        """The CARTON_LEVEL_PLAN_REJECTED message when the planned approach has a per-waypoint wrist step
+        above ``max_step_rad`` (sim-preplace-wrist-continuity-v1), else ``None``. A branch jump the soft
+        wrist cannot track (coldwin57's class) is refused before motion rather than streamed into a
+        tracking fault. Cheap safety: the branch-continuous re-solve already avoids a jump, so this only
+        ever fires if a genuinely discontinuous level branch is the sole option at a waypoint."""
+        if self.max_wrist_step <= float(max_step_rad):
+            return None
+        return (f'{CARTON_LEVEL_PLAN_REJECTED} carried approach has a {self.max_wrist_step:.3f} rad wrist '
+                f'step at waypoint {self.worst_step_wp}/{self.waypoints_n} (continuity threshold '
+                f'{float(max_step_rad):.3f} rad) -- a branch jump the soft wrist cannot track; refusing '
+                f'before motion rather than streaming it into a TRAJ_HOST tracking fault')
 
 
 def plan_level_path(robot, start_config, goal_config, up_in_tool, *, bound_deg=DEFAULT_TILT_BOUND_DEG,
@@ -1092,10 +1155,140 @@ def plan_compensated_approach(robot, start_config, leveled_goal, up_in_tool, gc,
                          max_tilt=mt, waypoints_n=n)
 
 
+def level_branches(robot, config, up_in_tool, *, joints=DEFAULT_LEVEL_JOINTS, tool_link='ur_tool0',
+                   root='ur_base_link', limits=None, accept_deg=DEFAULT_TILT_BOUND_DEG, base_R=None,
+                   tol_deg=0.05, max_iter=80):
+    """Enumerate the DISTINCT level-orientation wrist branches for ``config`` (sim-preplace-wrist-continuity-v1).
+
+    Same multi-start Gauss-Newton descent as :func:`level_config`, but instead of returning the single best
+    branch this collects EVERY distinct in-``limits`` solution whose tilt is within ``accept_deg`` (deduped by
+    the rounded re-solved joint values). Returns a list of ``(cfgmap, tilt_deg)``. The caller ranks them (by
+    continuity to a previous waypoint, by holding torque, ...). Pure/CPU."""
+    cfg = _as_joint_map(config)
+    adj = [j for j in joints if j in cfg]
+    if not adj:
+        raise ValueError('no adjustable joints present in the config')
+    u = _unit(up_in_tool)
+    accept = float(accept_deg)
+    seeds = [{}]
+    for a in _W1_SEED_GRID:
+        seeds.append({adj[0]: a})
+    if len(adj) > 1:
+        for a in _W1_SEED_GRID[::2]:
+            for b in _W2_SEED_GRID:
+                seeds.append({adj[0]: a, adj[1]: b})
+    out = []
+    seen = set()
+    for seed in seeds:
+        start = dict(cfg)
+        start.update(seed)
+        sol, t = _level_descend(robot, u, adj, start, tool_link=tool_link, root=root, limits=limits,
+                                base_R=base_R, max_iter=max_iter, tol_deg=tol_deg)
+        if t <= accept:
+            key = tuple(round(float(sol[j]), 3) for j in adj)
+            if key not in seen:
+                seen.add(key)
+                out.append((sol, t))
+    return out
+
+
+def _level_descend(robot, u, adj, start, *, tool_link='ur_tool0', root='ur_base_link', limits=None,
+                   base_R=None, max_iter=80, tol_deg=0.05):
+    """One multi-start Gauss-Newton descent of a single seed to a level-orientation config, shared by
+    :func:`level_branches` and :func:`continuous_level_solve`. ``u`` is the unit carton up-axis in the tool
+    frame, ``adj`` the adjustable (wrist) joints. Returns ``(cfgmap, tilt_deg)``. The math is IDENTICAL to the
+    descent inside :func:`level_config` (3-D orientation residual, step-bounded, clamped to ``limits``)."""
+    def up_world(cfgmap):
+        return _apply_base(base_R, tool_rotation(robot, cfgmap, tool_link, root) @ u)
+
+    def tilt_deg(cfgmap):
+        uw = up_world(cfgmap)
+        return math.degrees(math.acos(max(-1.0, min(1.0, float(uw[2])))))
+
+    def clamp(cfgmap):
+        if limits:
+            for j in adj:
+                if j in limits:
+                    lo, hi = limits[j]
+                    cfgmap[j] = min(max(cfgmap[j], lo), hi)
+        return cfgmap
+
+    m = clamp(dict(start))
+    step_fd = 1e-4
+    for _ in range(int(max_iter)):
+        if tilt_deg(m) <= tol_deg:
+            break
+        r0 = up_world(m) - WORLD_UP
+        J = np.zeros((3, len(adj)))
+        for k, j in enumerate(adj):
+            m2 = dict(m)
+            m2[j] = m[j] + step_fd
+            J[:, k] = (up_world(m2) - WORLD_UP - r0) / step_fd
+        dq = -np.linalg.solve(J.T @ J + 1e-6 * np.eye(len(adj)), J.T @ r0)
+        mx = float(np.max(np.abs(dq))) if dq.size else 0.0
+        if mx > 0.3:
+            dq *= 0.3 / mx
+        for k, j in enumerate(adj):
+            m[j] = m[j] + float(dq[k])
+        clamp(m)
+    return m, tilt_deg(m)
+
+
+def continuous_level_solve(robot, base_config, up_in_tool, prev_wrists, *, joints=DEFAULT_LEVEL_JOINTS,
+                           tool_link='ur_tool0', root='ur_base_link', limits=None,
+                           accept_deg=DEFAULT_TILT_BOUND_DEG, base_R=None, tol_deg=0.05, max_iter=80):
+    """BRANCH-CONTINUOUS level-orientation solve (sim-preplace-wrist-continuity-v1).
+
+    Enumerate the level wrist branches for ``base_config`` (multi-start, like :func:`level_config`) and return
+    the accepted (tilt <= ``accept_deg``) branch with the SMALLEST per-joint wrist travel from ``prev_wrists``
+    (the previous waypoint's solution), NOT the lowest-tilt branch. ``level_config`` ranks by lowest tilt then
+    nearest the GOAL, which let coldwin57's leg-2 re-solve prefer a FAR but slightly-more-level branch over the
+    near one -- the class of jump this refuses. Returns ``(sol_map, tilt_deg, max_wrist_step)`` where
+    ``max_wrist_step = max_j |sol[j] - prev_wrists[j]|`` over the re-solved joints. Raises ValueError when no
+    in-``limits`` level branch exists within ``accept_deg``. The caller enforces the per-waypoint step
+    threshold (a jump still returns the min-travel branch + its step, so the caller can refuse by name).
+    Pure/CPU."""
+    cfg = _as_joint_map(base_config)
+    adj = [j for j in joints if j in cfg]
+    if not adj:
+        raise ValueError('no adjustable joints present in the config')
+    u = _unit(up_in_tool)
+    accept = float(accept_deg)
+    prev = {j: float(prev_wrists[j]) for j in adj if j in prev_wrists}
+    # Seed from the previous waypoint FIRST (so a continuous branch is enumerated even if the grid misses
+    # it), then the wrist_1 circle sweep x wrist_2 fallbacks (so a near-branch local minimum cannot hide an
+    # existing level branch -- but the RANKING is min-travel, not min-tilt).
+    seeds = []
+    if prev:
+        seeds.append(dict(prev))
+    seeds.append({})
+    for a in _W1_SEED_GRID:
+        seeds.append({adj[0]: a})
+    if len(adj) > 1:
+        for a in _W1_SEED_GRID[::2]:
+            for b in _W2_SEED_GRID:
+                seeds.append({adj[0]: a, adj[1]: b})
+    best = None   # (max_step, cfgmap, tilt)
+    for seed in seeds:
+        start = dict(cfg)
+        start.update(seed)
+        sol, t = _level_descend(robot, u, adj, start, tool_link=tool_link, root=root, limits=limits,
+                                base_R=base_R, max_iter=max_iter, tol_deg=tol_deg)
+        if t <= accept:
+            step = max((abs(sol[j] - prev[j]) for j in adj if j in prev), default=0.0)
+            if best is None or step < best[0]:
+                best = (step, sol, t)
+    if best is None:
+        raise ValueError('no level-orientation branch for this carried pose within '
+                         f'{accept:.2f} deg (joints {adj})')
+    return best[1], best[2], best[0]
+
+
 def plan_level_world_approach(robot, start_config, leveled_goal, up_in_tool, *, joints=None,
                               tool_link='ur_tool0', root='ur_base_link', limits=None,
                               bound_deg=DEFAULT_TILT_BOUND_DEG, max_segment_rad=0.25, interior=8,
-                              level_joints=DEFAULT_LEVEL_JOINTS, base_R=None):
+                              level_joints=DEFAULT_LEVEL_JOINTS, base_R=None,
+                              max_wrist_step_rad=DEFAULT_MAX_WRIST_STEP_RAD):
     """Plan the carried pre-place APPROACH from ``start_config`` to an ALREADY-LEVELED standoff
     ``leveled_goal`` as a GEOMETRIC, DENSIFIED, WORLD-level waypoint path (sim-preplace-leg2-level-v1).
 
@@ -1103,35 +1296,55 @@ def plan_level_world_approach(robot, start_config, leveled_goal, up_in_tool, *, 
     feed-forward is a PHANTOM at the preplace (the GPU executed joints matched the commanded within
     0.003 rad -> the modelled ~0.016 rad shoulder/elbow sag never materialised), so the gc path pre-tilted
     the standoff wrist_1 by ~+0.031 rad and left the welded carton ~1.8-2.0 deg off. Here each densified
-    interior waypoint is GEOMETRICALLY re-levelled (``level_config``) in the WORLD frame (``base_R`` folds in
-    the held chassis attitude so the carton tracks level in world as the shoulder_pan sweeps on its tilted
-    cone), with NO droop pre-tilt. The first waypoint is pinned to ``start_config`` verbatim
-    (``begin_joint_path`` requires it) and the last to ``leveled_goal`` (the already-world-level standoff).
-    Returns a ``LevelPathPlan`` whose ``max_*`` are the predicted WORLD-frame extremes (what the captain's
-    "parallel to the ground" rule reads). Raises ValueError only when an interior waypoint has no in-``limits``
-    world-level solution. Pure/CPU."""
+    interior waypoint is GEOMETRICALLY re-levelled in the WORLD frame (``base_R`` folds in the held chassis
+    attitude so the carton tracks level in world as the shoulder_pan sweeps on its tilted cone), with NO droop
+    pre-tilt.
+
+    sim-preplace-wrist-continuity-v1: the per-waypoint re-solve is BRANCH-CONTINUOUS
+    (:func:`continuous_level_solve`): each waypoint's wrist solve is seeded from the previous waypoint and,
+    among the level branches, the one with the SMALLEST per-joint wrist travel is chosen -- never a lower-tilt
+    FAR branch. The largest per-waypoint wrist step (and its waypoint index) is recorded on the returned plan
+    (``max_wrist_step`` / ``worst_step_wp``) so the caller's gate can refuse a plan with a branch jump (the
+    soft wrist cannot track one) before motion. A jump is NOT refused here (the plan is still returned so the
+    caller reports it by name); only a genuinely un-levelable waypoint raises ValueError.
+
+    The first waypoint is pinned to ``start_config`` verbatim (``begin_joint_path`` requires it) and the last
+    to ``leveled_goal`` (the already-world-level standoff); the final pin's step from the last interior
+    waypoint is included in ``max_wrist_step``. Returns a ``LevelPathPlan`` whose ``max_*`` are the predicted
+    WORLD-frame extremes. Pure/CPU."""
     start = _as_joint_map(start_config)
     svec = _as_vec(start)
-    gvec = _as_vec(_as_joint_map(leveled_goal))
+    goal_map = _as_joint_map(leveled_goal)
+    gvec = _as_vec(goal_map)
+    adj = [j for j in level_joints if j in start]
     n = densify_count(svec, gvec, max_segment_rad)
     vecs = [list(svec)]
-    seed = None
+    prev = dict(start)
+    max_step = 0.0
+    worst_wp = 0
     for i in range(1, n + 1):
         a = i / float(n)
         base = {j: (1 - a) * svec[k] + a * gvec[k] for k, j in enumerate(_ARM_ORDER())}
-        if seed is not None:
-            for j in level_joints:
-                if j in base and j in seed:
-                    base[j] = seed[j]
-        glev = level_config(robot, base, up_in_tool, joints=level_joints, tool_link=tool_link,
-                            root=root, limits=limits, accept_deg=bound_deg, base_R=base_R)
-        vecs.append(_as_vec(glev))
-        seed = glev
-    vecs[-1] = list(gvec)   # pin the world-level standoff verbatim
+        if i == n:
+            # pin the world-level standoff verbatim; it defines the terminal branch. Still measure the step
+            # from the previous (continuous) waypoint so a jump into the pinned goal is reported/refused too.
+            sol = dict(goal_map)
+            step = max((abs(sol[j] - prev[j]) for j in adj), default=0.0)
+        else:
+            for j in adj:
+                base[j] = prev[j]   # seed the wrists from the previous leveled waypoint (continuity)
+            sol, _tilt, step = continuous_level_solve(
+                robot, base, up_in_tool, prev, joints=level_joints, tool_link=tool_link, root=root,
+                limits=limits, accept_deg=bound_deg, base_R=base_R)
+        if step > max_step:
+            max_step = step
+            worst_wp = i
+        vecs.append(_as_vec(sol))
+        prev = sol
     mr, mp, mt = predict_path_tilt_executed(robot, vecs, up_in_tool, tool_link=tool_link, root=root,
                                             interior=interior, gravity_comp=None, base_R=base_R)
     return LevelPathPlan(waypoints=tuple(tuple(v) for v in vecs), max_roll=mr, max_pitch=mp,
-                         max_tilt=mt, waypoints_n=n)
+                         max_tilt=mt, waypoints_n=n, max_wrist_step=max_step, worst_step_wp=worst_wp)
 
 
 def _ARM_ORDER():
@@ -1986,3 +2199,144 @@ class CartonLevelServo:
             ex1 = {j: cmd_c[j] + dq1.get(j, 0.0) for j in cmd_c}
             with_servo.append(carried_rpy(self.robot, ex1, self.up, tl, rt))
         return no_servo, with_servo
+
+
+# ---------------- reaction-natural standoff branch selector (sim-preplace-wrist-continuity-v1)
+
+def wrist_hold_torque_peak(robot, waypoints, soft_joints, *, carton_mass=0.45, tool_link='ur_tool0',
+                           root='ur_base_link'):
+    """Peak static-gravity holding torque (N*m) on the soft wrist ``soft_joints`` over a leg's ``waypoints``
+    (ARM-order 6-vectors). Returns ``(peak_abs_nm, peak_joint, per_joint_peak_nm)``. Uses the geometry+mass
+    model :func:`arm_gravity_torques` (the REAL URDF link masses/COMs + the welded carton), NOT the phantom
+    droop stiffness -- the "gravity/reaction torque model (geometry and masses, not the phantom K)" the lane
+    asked for. Pure/CPU."""
+    soft = list(soft_joints)
+    per = {j: 0.0 for j in soft}
+    for wp in waypoints:
+        tau = arm_gravity_torques(robot, list(wp), carton_mass=carton_mass, tool_link=tool_link, root=root)
+        for j in soft:
+            per[j] = max(per[j], abs(float(tau.get(j, 0.0))))
+    pj = max(per, key=per.get) if per else None
+    return (per[pj] if pj is not None else 0.0), pj, per
+
+
+def enumerate_level_place_branches(robot, target_pos, up_in_tool, seed_config, *, joints=None,
+                                   tool_link='ur_tool0', root='ur_base_link', limits=None, base_R=None):
+    """Enumerate the DISTINCT reach+level standoff branches at ``target_pos`` (sim-preplace-wrist-continuity-v1).
+
+    Runs :func:`level_place_ik` (geometric, world frame, no droop) from several wrist_2 seeds spanning the
+    allowed range, so BOTH the high-wrist_2 (~1.63) and low-wrist_2 (~0.4) equivalent-orientation branches
+    are found, deduped by the rounded wrist_2 (the branch discriminant for a top-grasped level carton).
+    Returns a list of ARM-order joint maps (each reaches ``target_pos`` AND is level). Pure/CPU."""
+    cfg = _as_joint_map(seed_config)
+    w2 = 'ur_wrist_2_joint'
+    seeds = [dict(cfg)]
+    if w2 in cfg:
+        lo, hi = 0.0, math.pi
+        if limits and w2 in limits:
+            lo = max(lo, float(limits[w2][0]))
+            hi = min(hi, float(limits[w2][1]))
+        if hi > lo:
+            for v in np.linspace(lo, hi, 7):
+                s = dict(cfg)
+                s[w2] = float(v)
+                seeds.append(s)
+    out = []
+    seen = set()
+    for s in seeds:
+        try:
+            sol = level_place_ik(robot, target_pos, up_in_tool, s, joints=joints, tool_link=tool_link,
+                                 root=root, limits=limits, gravity_comp=None, base_R=base_R)
+        except ValueError:
+            continue
+        key = round(_wrap(float(sol.get(w2, 0.0))), 2)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(sol)
+    return out
+
+
+def select_reaction_natural_standoff(robot, target_pos, up_in_tool, seed_config, carry_config, *,
+                                     joints=None, level_joints=DEFAULT_LEVEL_JOINTS, soft_joints=None,
+                                     tool_link='ur_tool0', root='ur_base_link', limits=None, base_R=None,
+                                     carton_mass=0.45, max_segment_rad=0.25, bound_deg=DEFAULT_TILT_BOUND_DEG,
+                                     effort_limit=56.0):
+    """Choose the pre-place standoff wrist BRANCH the soft wrist_2 drive naturally SETTLES on -- the
+    reaction-natural branch (sim-preplace-wrist-continuity-v1, the primary coldwin57 fix).
+
+    coldwin57's leg-2 COMMAND held wrist_2 continuously at the HIGH level branch (1.63), but the soft wrist_2
+    drive DIVERGED monotonically DOWN to the LOW branch (~0.33-0.40) under the pan descent, and the executor
+    faulted on the executed-vs-commanded divergence (TRAJ_HOST_TRACK_MISS worst_j=4, 1.3 rad). Both branches
+    are world-level, so the carton stayed level (peak 0.29 deg) -- the only failure is the wrist_2 drive
+    divergence. The fix is to COMMAND the branch the drive naturally holds: among the distinct reach+level
+    standoff branches (:func:`enumerate_level_place_branches`, all world-level and in the clear wrist region),
+    pick the one with the MINIMUM |wrist_2| -- the bottom of the equivalent-orientation family the drive
+    drifts toward, with the least remaining down-drift room (most stable) -- so leg 1 drives to it and leg 2
+    holds it with no divergence (chosen wrist_2 ~0.32 == the observed settling point, and a smaller leg-1
+    wrist sweep from the carry pose than the 1.63 branch).
+
+    The gravity/geometry holding-torque model (:func:`wrist_hold_torque_peak`, the REAL URDF masses, NOT the
+    phantom K) is computed and REPORTED per branch, but it is NOT the selector: measured on the coldwin57
+    URDF the peak soft-wrist holding torque is ~0.5-1.0 N*m on EVERY branch -- all far below ``effort_limit``
+    (56 N*m URDF), so no branch saturates and the torque does not predict the drift; worse, the minimum-torque
+    branch (wrist_2 ~2.79, peak ~0.15 N*m) is the FARTHEST from the carry pose and UPHILL from where the drive
+    drifts, so minimising torque would pick the wrong branch. The honest discriminator is the observed
+    settling DIRECTION (the drive drifts toward low wrist_2), hence the min-|wrist_2| rule; the torque is
+    reported only so the lane sees the margin and the model's inapplicability.
+
+    Returns ``(standoff_map, report)`` where ``report`` is a dict with ``branches`` (per-branch
+    ``{wrist_2, peak_torque_nm, peak_joint, per_joint_nm, peak_tilt_deg, leg1_wrist_sweep_rad, chosen}``,
+    sorted by |wrist_2|), ``chosen_wrist_2``, ``chosen_peak_torque_nm``, ``chosen_peak_joint``,
+    ``chosen_margin_nm`` (effort_limit - peak), ``min_torque_wrist_2`` (the branch minimum-torque WOULD pick,
+    for the honest comparison), and ``effort_limit_nm``. Raises ValueError when no reach+level branch yields a
+    valid leg-2 sweep (the caller falls back to the single ``level_place_ik`` standoff). Pure/CPU."""
+    soft = tuple(soft_joints) if soft_joints is not None else tuple(level_joints)
+    carry = _as_joint_map(carry_config)
+    carry_pan = float(carry['ur_shoulder_pan_joint'])
+    carry_w2 = float(carry.get('ur_wrist_2_joint', 0.0))
+    branches = enumerate_level_place_branches(robot, target_pos, up_in_tool, seed_config, joints=joints,
+                                              tool_link=tool_link, root=root, limits=limits, base_R=base_R)
+    if not branches:
+        raise ValueError('no reach+level standoff branch at target %s'
+                         % list(np.round(np.asarray(target_pos, float)[:3], 4)))
+    scored = []
+    for std in branches:
+        # leg-2 start = this standoff with pan at the carry pan, wrists re-leveled in world at the carry pan
+        # (the leg-1 end), then replay leg 2 (pan -> standoff pan) ON this branch via the continuous solve.
+        start = dict(std)
+        start['ur_shoulder_pan_joint'] = carry_pan
+        try:
+            start = level_config(robot, start, up_in_tool, joints=level_joints, tool_link=tool_link,
+                                 root=root, limits=limits, accept_deg=bound_deg, base_R=base_R)
+            plan = plan_level_world_approach(robot, start, std, up_in_tool, level_joints=level_joints,
+                                             tool_link=tool_link, root=root, limits=limits,
+                                             bound_deg=bound_deg, max_segment_rad=max_segment_rad,
+                                             base_R=base_R)
+        except ValueError:
+            continue
+        peak, pj, per = wrist_hold_torque_peak(robot, plan.waypoints, soft, carton_mass=carton_mass,
+                                               tool_link=tool_link, root=root)
+        w2 = float(std.get('ur_wrist_2_joint', 0.0))
+        scored.append({'std': std, 'wrist_2': w2, 'abs_w2': abs(_wrap(w2)),
+                       'peak_torque_nm': peak, 'peak_joint': pj, 'per_joint_nm': per,
+                       'peak_tilt_deg': plan.max_tilt,
+                       'leg1_wrist_sweep_rad': abs(_wrap(w2 - carry_w2))})
+    if not scored:
+        raise ValueError('no reach+level standoff branch produced a valid leg-2 sweep')
+    # Primary: the settling branch (minimum |wrist_2|); tie-break by holding torque then leg-1 sweep.
+    scored.sort(key=lambda s: (round(s['abs_w2'], 3), s['peak_torque_nm'], s['leg1_wrist_sweep_rad']))
+    chosen = scored[0]
+    min_torque = min(scored, key=lambda s: s['peak_torque_nm'])
+    report = {'branches': [], 'chosen_wrist_2': chosen['wrist_2'],
+              'chosen_peak_torque_nm': chosen['peak_torque_nm'], 'chosen_peak_joint': chosen['peak_joint'],
+              'chosen_margin_nm': float(effort_limit) - chosen['peak_torque_nm'],
+              'min_torque_wrist_2': min_torque['wrist_2'], 'effort_limit_nm': float(effort_limit)}
+    for s in scored:
+        report['branches'].append({'wrist_2': s['wrist_2'], 'peak_torque_nm': s['peak_torque_nm'],
+                                   'peak_joint': s['peak_joint'],
+                                   'per_joint_nm': {j: float(s['per_joint_nm'].get(j, 0.0)) for j in soft},
+                                   'peak_tilt_deg': s['peak_tilt_deg'],
+                                   'leg1_wrist_sweep_rad': s['leg1_wrist_sweep_rad'],
+                                   'chosen': s is chosen})
+    return dict(chosen['std']), report

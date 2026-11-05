@@ -100,6 +100,29 @@ def set_arm_drive_gains(robot, arm_joints, kp, kd, eff):
     arm_ctrl.set_max_efforts(np.full(len(idx), float(eff)), joint_indices=idx)
 
 
+def read_arm_drive_gains(robot, arm_joints):
+    """Read back the EFFECTIVE per-joint position-drive gains PhysX reports AFTER set (not the values the
+    repo requested) -- the readback the lane asked for (sim-preplace-wrist-continuity-v1): a kp 3e5 drive
+    that cannot hold a near-null wrist under <1 N*m gravity smells like a units/application mismatch on the
+    wrists, so logging what PhysX actually carries lets a GPU run settle it. Returns an ordered dict
+    joint_name -> {'kp': stiffness (force/rad), 'kd': damping, 'max_force': effort ceiling}. The same
+    ``articulation_controller.get_gains``/``get_max_efforts`` path :func:`set_arm_drive_gains` writes."""
+    arm_ctrl = robot.get_articulation_controller()
+    kps, kds = arm_ctrl.get_gains()
+    kps = np.asarray(kps, float)
+    kds = np.asarray(kds, float)
+    try:
+        effs = np.asarray(arm_ctrl.get_max_efforts(), float)
+    except Exception:
+        effs = None
+    out = {}
+    for n in arm_joints:
+        i = int(robot.get_dof_index(n))
+        out[n] = {'kp': float(kps[i]), 'kd': float(kds[i]),
+                  'max_force': (float(effs[i]) if effs is not None and i < len(effs) else float('nan'))}
+    return out
+
+
 def _validate_gain_block(g, where):
     """Coerce a {kp,kd,eff} block to floats, raising ValueError (with ``where`` named) on a missing key
     or a non-finite / negative value. kd may be 0; kp and eff must be positive. Pure/CPU."""

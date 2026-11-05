@@ -165,6 +165,36 @@ class ArmCommandGate:
         self._ramp_count=0
         self._ramp_best=float('inf')
         self._ramp_stall=0
+        # sim-preplace-wrist-continuity-v1: opt-in DRIVE_TICK observability. When the port turns this on
+        # (carried phases, RESTOCK_DRIVE_TICK), ``command`` logs the APPLIED drive-target q vs the measured
+        # (executed) q per joint, throttled to ~10 Hz on the host clock, plus the EFFECTIVE PhysX drive
+        # gains per arm joint ONCE per enable. This settles coldwin57's open question on coldwin58: the
+        # installed plan is the single source (drive target == the streamed command), so DRIVE_TICK shows
+        # whether the executed wrist_2 relaxes AWAY from the held target (physics) and whether the near-null
+        # wrist drive carries the stiffness/effort the repo set (a units/application mismatch would show
+        # here). Default off => no extra console output => byte-identical.
+        self.log_drive=False
+        self._drive_log_last=float('-inf')
+        self._drive_log_dt=0.1
+        self._drive_gains_logged=False
+
+    def log_effective_gains(self):
+        """Log the EFFECTIVE PhysX arm drive gains per joint ONCE (sim-preplace-wrist-continuity-v1). No-op
+        unless ``log_drive`` is on and not already logged this enable. Best-effort (never raises into the
+        command path)."""
+        if not self.log_drive or self._drive_gains_logged:
+            return
+        try:
+            from .physics_setup import read_arm_drive_gains
+            g=read_arm_drive_gains(self.robot, ARM_JOINTS)
+            desc=' '.join('%s[kp=%.3g kd=%.3g max_force=%.3g]'
+                          %(n.replace('ur_','').replace('_joint',''),g[n]['kp'],g[n]['kd'],g[n]['max_force'])
+                          for n in ARM_JOINTS)
+            print('DRIVE_GAINS effective (PhysX readback; kp=force/rad, kd=force*s/rad, max_force=effort ceiling) '
+                  +desc, flush=True)
+        except Exception as exc:
+            print(f'DRIVE_GAINS unavailable: {exc}', flush=True)
+        self._drive_gains_logged=True
 
     def _reset_first_cmd_ramp(self):
         self._ramp_count=0
@@ -307,6 +337,18 @@ class ArmCommandGate:
                 raise ValueError('arm target exceeds limits or tracking envelope')
             # Within the envelope: a normal command (and the convergence of any first-command ramp).
             self.apply(q,v,self.indices)
+            # sim-preplace-wrist-continuity-v1: DRIVE_TICK -- the APPLIED drive target (q, the single-source
+            # streamed command) vs the measured/executed per joint, ~10 Hz. A split between the held target
+            # and a drifting executed is then VISIBLE in the console (coldwin57's wrist_2 relaxation).
+            if self.log_drive:
+                self.log_effective_gains()
+                t=stamp if math.isfinite(stamp) else now
+                if not (t-self._drive_log_last < self._drive_log_dt):
+                    self._drive_log_last=t
+                    per=' '.join('%s[cmd=%.4f exec=%.4f d=%+.4f]'
+                                 %(n.replace('ur_','').replace('_joint',''),float(q[i]),float(measured[i]),
+                                   float(q[i]-measured[i])) for i,n in enumerate(ARM_JOINTS))
+                    print('DRIVE_TICK now=%.3f | %s'%(float(now) if math.isfinite(now) else -1.0,per),flush=True)
             self.last_stamp=stamp
             self.last_receive=time.monotonic()
             self.started=True
