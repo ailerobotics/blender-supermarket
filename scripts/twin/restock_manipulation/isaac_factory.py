@@ -425,7 +425,7 @@ class CollectTargetBridge:
     def __init__(self, *, stage, arm_camera, arm_camera_path, base_path, profiles,
                  motion, contact, joints, source_location, cart_placement=None, cart_root=None,
                  mobile_base_path=None, cart_support_path=None, verify_place=False,
-                 gt_place_slot=None):
+                 gt_place_slot=None, efforts=None):
         self.stage, self.arm_camera, self.arm_camera_path = stage, arm_camera, arm_camera_path
         self.base_path, self.profiles = base_path, profiles
         # The arm executes relative to the MOBILE chassis (base_link), which carries the dock yaw
@@ -434,6 +434,12 @@ class CollectTargetBridge:
         # pose, NOT ur_base_link. base_path (arm base) stays for the eye-in-hand ROI reproject.
         self.mobile_base_path = mobile_base_path or base_path
         self.motion, self.contact, self.joints = motion, contact, joints
+        # sim-place-release-on-contact-v1: optional max-abs arm-joint-effort reader (N*m). When present and
+        # CONTACT_STATUS_FEEDBACK is on, every host-facing /sensors packet carries arm_effort_max so the
+        # host place-release gate can RELEASE the weld on an effort rise over the pre-contact hold baseline
+        # before the press reaches the 600 N*m station full-brake guard. None (fixture / not wired) => the
+        # field stays its None default => the gate falls back to the carton_z stall + z triggers.
+        self.efforts = efforts
         self.source_location = source_location
         # Collect destination: place the carton onto the robot's own staged (not-yet-coupled) cart.
         # The placement Target POSE is derived at capture from the cart asset's MEASURED staged pose
@@ -508,7 +514,17 @@ class CollectTargetBridge:
         defaults => byte-identical) when RESTOCK_CONTACT_STATUS_FEEDBACK is off or the probe yields nothing."""
         if not self.contact_status_feedback:
             return {}
-        return _contact_feedback_kwargs(self.contact, now)
+        kwargs = _contact_feedback_kwargs(self.contact, now)
+        # sim-place-release-on-contact-v1: add the max arm joint effort for the host place-release gate.
+        if self.efforts is not None:
+            try:
+                eff = self.efforts()
+            except Exception:
+                eff = None
+            if eff is not None:
+                kwargs = dict(kwargs)
+                kwargs['arm_effort_max'] = float(eff)
+        return kwargs
 
     def set_shelf_target_provider(self, provider):
         self.shelf_provider = provider
@@ -1280,7 +1296,8 @@ def _build_runtime(*, app, assembly, params, output):
         source_location=params.collect_source_location,
         cart_placement=params.cart_placement, cart_root=cart_root,
         cart_support_path=cart_support_path, verify_place=bool(verify_place),
-        gt_place_slot=params.gt_place_slot)
+        gt_place_slot=params.gt_place_slot,
+        efforts=feedback.arm_effort_max)   # sim-place-release-on-contact-v1: relay the max arm joint effort
     # collect-gt: name the workaround at boot so a wrongly-set switch is visible before the first stage.
     print('COLLECT_GROUND_TRUTH enabled=%s place_slot=%s (%s=1: collect pick from the simulated carton '
           'asset pose, labelled ground_truth; place at the warm-shortcut slot; default off)'

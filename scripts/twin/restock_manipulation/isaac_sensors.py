@@ -35,6 +35,16 @@ def _contact_feedback_kwargs(contact, now=None):
                       seal_pad_angle_deg=angle, seal_hit_target=bool(hit))
         if now is not None:
             kwargs['gripper_status_time'] = float(now)
+        # sim-place-release-on-contact-v1: carry the hit-body prim IDENTITY so the host place-release
+        # OBSTRUCTION gate can tell a flush support (shelf/deck) contact from a cage post. Best-effort
+        # from the SAME last SEAL_DIAG probe (no extra raycast); absent probe => None => byte-identical.
+        try:
+            from .cad_tool import hit_prims_from_probe
+            prims = hit_prims_from_probe(getattr(contact, 'last_probe', None))
+            if prims is not None:
+                kwargs['seal_hit_prims'] = prims
+        except Exception:
+            pass
         return kwargs
     except Exception:
         return {}

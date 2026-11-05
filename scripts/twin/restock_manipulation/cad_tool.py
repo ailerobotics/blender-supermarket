@@ -185,6 +185,24 @@ def seal_feedback_from_probe(probe):
     return (bool(gripper_enabled), gap, angle, bool(hit_present))
 
 
+def hit_prims_from_probe(probe):
+    """sim-place-release-on-contact-v1: the DISTINCT hit-body prim paths under the pad from a SEAL_DIAG
+    probe dict (``raycast`` holds ``[hit_prim_path, gap_mm]`` per seal), as a tuple preserving first-seen
+    order, or None when the probe has no hits / is malformed. The place-release OBSTRUCTION gate needs the
+    body IDENTITY (shelf/deck vs a cage ``post_*``), which ``seal_feedback_from_probe``'s ``hit_present``
+    bool drops. Pure; never raises."""
+    if not isinstance(probe, dict):
+        return None
+    hits = probe.get('raycast') or []
+    out = []
+    for h in hits:
+        if h and h[0]:
+            p = str(h[0])
+            if p not in out:
+                out.append(p)
+    return tuple(out) if out else None
+
+
 #: fm320: the tool-side gripper geometry that collides with the forearm/upper_arm/wrist as the carry fold
 #: closes (42.7 kN tool-vs-arm contact) -- all on the cuMotion self-collision ignore list, so disabled while
 #: welded. sim-collect-retreat-fault-v1 also defers re-enabling exactly this set past the empty retreat.

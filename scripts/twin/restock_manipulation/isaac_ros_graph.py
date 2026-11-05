@@ -44,6 +44,24 @@ class IsaacMeasuredFeedback:
             raise ValueError('invalid measured arm encoders')
         return tuple(joints)
 
+    def arm_effort_max(self):
+        """sim-place-release-on-contact-v1: the max ABSOLUTE measured arm joint effort (N*m), or None when
+        the reading is unavailable/garbled. The same quantity the Isaac-side station full-brake EffortGuard
+        reads; relayed on the host /sensors packet so the controller's place-release gate can release the
+        weld on an effort rise over the pre-contact hold baseline. Best-effort; never raises."""
+        getter = getattr(self.robot, 'get_measured_joint_efforts', None)
+        if getter is None:
+            return None
+        try:
+            import numpy as np
+            efforts = np.asarray(getter(), float)
+            vals = np.abs(efforts[self.indices])
+            if vals.size == 0 or not np.isfinite(vals).all():
+                return None
+            return float(vals.max())
+        except Exception:
+            return None
+
     def parked(self):
         import numpy as np
         linear = np.asarray(self.robot.get_linear_velocity(),float)
