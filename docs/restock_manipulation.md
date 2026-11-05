@@ -400,6 +400,40 @@ The 2.0° carton bound is untouched (firming a held joint does not move it, so t
 unchanged). Recommended ON values + acceptance: `docs/examples/preplace-wrist2-hold-fragment.json`; CPU
 proof (incl. the real cw66 wrist_2 replay): `scripts/twin/tests/test_preplace_wrist2_hold_v1.py`.
 
+## Contact-gated place-descent release (sim-place-release-on-contact-v1)
+
+The collect deck set-down releases the weld the instant the support is **actually touched**, not at a
+fixed carton-z only. coldwin68 (the furthest run) jammed the carried carton's ~1.46° roll edge on cage
+post `/Rollwagen/chassis/post_2` at the descent **start** (carton_z frozen 0.075 m above the computed
+z threshold), so the PR 334 fixed-z gate never fired and the stiff place drive pressed to **757 N·m** past
+the 600 N·m station full-brake guard; coldwin64, same config, descended fully and released cleanly at
+125.8 N·m. The place drive gains are identical in both runs — the differentiator is the PR 359 pre-place
+hold-firm, which altered the settle into the roll that fouled the post.
+
+The fix (HOST `carton_level.place_release_on_contact`, opt-in, default off ⇒ byte-identical; the legacy
+`place_contact_release` z gate is disabled when it is on, so no double-fire). `place_release.PlaceReleaseGate`
+releases on whichever fires first:
+
+- **effort** — the max arm joint effort (`sensors.arm_effort_max`) rising `place_release_effort_margin_nm`
+  (default 100) over its pre-contact hold baseline for `place_release_effort_consecutive` ticks, so the
+  press never reaches the guard;
+- **stall** — the carton centre z (`sensors.placed_pose`) making no `place_release_stall_m` downward
+  progress for `place_release_stall_ticks` ticks;
+- **contact** — a measured seal gap ≤ `place_release_contact_gap_mm` (off by default) on a support body;
+- **z** — the legacy carton-z threshold (fallback).
+
+Every release is **gated on the touched body being the support**: a hit-prim path containing a
+`place_support_tokens` substring (`shelf`/`deck`) is the support surface; a flush (≤
+`place_obstruction_gap_mm`) contact on any other body (a cage `post_*`) is an **obstruction** — the
+controller logs `PLACE_OBSTRUCTED prim=…` and does up to `place_reapproach_max` bounded lateral
+re-approaches (shift the set-down `place_reapproach_shift_m`, re-descend via the standoff) before failing
+by name, never a press or a drop against the post. The soft carried drive is restored for the descent via
+`phase_drive.carried_soft_phases: ["place"]` (hold-firm is already preplace-scoped), bounding any residual
+press to eff400 < the guard. The per-tick `PLACE_RELEASE_TICK` logs carton_z / effort / hit prim /
+trigger. The 2.0° bound is untouched. Recommended ON values + acceptance:
+`docs/examples/place-release-on-contact-fragment.json`; CPU proof (each trigger, the obstruction gate, the
+coldwin68/coldwin64 replays): `scripts/twin/tests/test_place_release_on_contact_v1.py`.
+
 ## Reuse inventory and external work
 
 Read-only sources inspected:

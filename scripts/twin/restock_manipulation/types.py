@@ -102,6 +102,17 @@ class Sensors:
     # authoritative status' (log CONTACT_STATUS_STALE, never abort on staleness alone). Default None =>
     # byte-identical (the feedback relay is opt-in; see contact_status_feedback).
     gripper_status_time: float | None = None
+    # sim-place-release-on-contact-v1 (opt-in; place-descent contact-gated weld release). The two measured
+    # signals the controller's PlaceReleaseGate needs that the packet did not carry: the max absolute arm
+    # joint effort (N*m) -- the SAME quantity the Isaac-side station full-brake EffortGuard reads -- so the
+    # host can RELEASE the weld on an effort rise over the pre-contact hold baseline BEFORE the press reaches
+    # the 600 N*m guard; and the SEAL_DIAG hit-body prim paths, so a flush contact on a NON-support body (a
+    # cage post, coldwin68 /Rollwagen/chassis/post_2) is named an OBSTRUCTION instead of a release. Populated
+    # by the Isaac driver (CollectTargetBridge) only when the relay is on; default None => the gate falls back
+    # to the descent-independent signals it already has (placed_pose stall + the legacy z threshold) =>
+    # byte-identical. Carried across the asdict -> JSON -> Sensors(**data) ROS boundary like the fields above.
+    arm_effort_max: float | None = None
+    seal_hit_prims: tuple[str, ...] | None = None
     # Driver must reject stale/absent joint/contact/odom data before making a packet.
 
 
