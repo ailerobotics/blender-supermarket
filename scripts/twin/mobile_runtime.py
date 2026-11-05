@@ -34,7 +34,8 @@ class MobileController:
                  spec=MobileSpec(), hitch_path='/MobileHitch', wheel_angle_reader=None,
                  drive_max_force=None, drive_damping=None, station_pitch_hold=False,
                  station_hold_roll_deg=0.0, station_hold_pitch_deg=-1.17,
-                 station_place_full_brake=False, station_place_full_brake_effort_limit=None):
+                 station_place_full_brake=False, station_place_full_brake_effort_limit=None,
+                 station_full_brake_engage_phase=None):
         from pxr import UsdPhysics
         if len(wheel_joint_paths) != 2 or len(set(wheel_joint_paths)) != 2:
             raise ValueError('left and right wheel joint paths required, in that order')
@@ -107,6 +108,14 @@ class MobileController:
         # Requires station_pitch_hold (the lock reuses its target attitude); the port only engages the
         # full lock inside the station_pitch_hold brake branch.
         self.station_place_full_brake = bool(station_place_full_brake)
+        # sim-station-lock-from-preplace-v1 (opt-in, default 'place' => byte-identical): WHEN the full D6
+        # lock engages relative to the carried pre-place ('place' = today, at the descent; 'preplace' = at
+        # the start of leg 1; 'hold_firm' = the moment a carried joint is firmed). The port
+        # (isaac_port._apply_base_brake) owns the phase->engage decision (station_full_brake.full_lock_window);
+        # this is carried here only so the port can read it off the controller like station_place_full_brake.
+        # Resolved/validated (raises on an unknown value) so a bad key fails loudly at construction.
+        from .restock import station_full_brake as _sfb
+        self.station_full_brake_engage_phase = _sfb.resolve_engage_phase(station_full_brake_engage_phase)
         lim = station_place_full_brake_effort_limit
         if lim is not None:
             lim = float(lim)
@@ -253,9 +262,12 @@ class MobileController:
 
     STATION_FULL_BRAKE_PATH = '/MobileStationFullBrake'
 
-    def engage_station_full_lock(self):
+    def engage_station_full_lock(self, from_phase=None):
         """sim-station-full-brake-place-v1: FULL D6 lock (translation + rotation) of the chassis for the
         LOADED collect place descent onto the cart support.
+
+        ``from_phase`` (sim-station-lock-from-preplace-v1) names the controller phase the lock engaged at,
+        for the one-line log; the port passes it so an engage from pre-place is visible in the console.
 
         Locks transX/Y/Z AND rotX/Y/Z. Rotation is anchored at the pitch/roll TARGET attitude
         (``station_hold_pitch_deg`` / ``station_hold_roll_deg`` + the CURRENT yaw) -- the same target the
@@ -290,8 +302,9 @@ class MobileController:
             lock.CreateHighAttr(-1.0)
         self._station_full_locked = True
         print('MOBILE_BRAKE engaged (full-D6 lock transX,transY,transZ,rotX,rotY,rotZ @target'
-              '(roll=%.2f,pitch=%.2f)deg) [STATION_PLACE_FULL_BRAKE loaded-place descent]'
-              % (self.station_hold_roll_deg, self.station_hold_pitch_deg), flush=True)
+              '(roll=%.2f,pitch=%.2f)deg%s) [STATION_PLACE_FULL_BRAKE loaded-place descent]'
+              % (self.station_hold_roll_deg, self.station_hold_pitch_deg,
+                 '' if from_phase is None else ' from phase=%s' % from_phase), flush=True)
 
     def release_station_full_lock(self):
         """Release the loaded-place full D6 lock (the base returns to the rotation-only station hold)."""

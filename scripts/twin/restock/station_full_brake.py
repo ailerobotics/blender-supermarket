@@ -27,9 +27,71 @@ import math
 #: station (``action == 'collect'``), and returns to the rotation-only hold at ``stow`` / ``verify``.
 LOADED_PLACE_PHASES = frozenset({'place', 'release', 'retreat'})
 
+# sim-station-lock-from-preplace-v1: the opt-in RUNTIME key ``station_full_brake_engage_phase`` chooses
+# WHEN the full D6 lock engages relative to the carried pre-place. coldwin68/69 parked at the same spot as
+# the no-shove reference (coldwin64) but, with the firm wrist hold now stopping the wrist giving way, the
+# carried pre-place's SECOND leg (shoulder_pan sweep) drove its reaction into the base -- and during
+# pre-place only the base ROTATION is held (``engage_brake``), the full six-axis lock engages only once the
+# place descent begins. So the base was shoved ~0.33 m sideways DURING the pre-place and the carton came
+# down ~0.5 m off its cart-relative target onto a cage post. The base must be FULLY locked before the
+# firm-held carried pre-place starts, so the carton lands where it is aimed.
+#   * 'place'      (default == today): engage at the descent (``LOADED_PLACE_PHASES``), pre-place rotation-
+#                  only. Byte-identical to the behaviour before this key.
+#   * 'preplace':  engage at the START of the carried pre-place (before leg 1), so both legs run under the
+#                  full lock. The carton is airborne through pre-place, so the weld-loop concern (which is
+#                  why ``place`` left translation free) does not apply until contact at ``place``.
+#   * 'hold_firm': engage the moment ANY carried pre-place joint is firmed (the ``sim-preplace-wrist2-hold``
+#                  hold-firm-on-arrival event, end of leg 1) -- the base is locked exactly when a joint has
+#                  arrived and before the leg-2 sweep that shoves the base. Requires the preplace hold-firm
+#                  config (``phase_drive.hold_firm_on_arrival.enabled``); config_preflight refuses it
+#                  otherwise (else the value would silently fall back to ``place``).
+# One engage, one release, no cycling: the lock engages once at the chosen trigger and holds through
+# place/release/retreat, then returns to the rotation-only hold at stow/verify exactly as before.
+ENGAGE_PHASE_PLACE = 'place'
+ENGAGE_PHASE_PREPLACE = 'preplace'
+ENGAGE_PHASE_HOLD_FIRM = 'hold_firm'
+ENGAGE_PHASES = (ENGAGE_PHASE_PLACE, ENGAGE_PHASE_PREPLACE, ENGAGE_PHASE_HOLD_FIRM)
+DEFAULT_ENGAGE_PHASE = ENGAGE_PHASE_PLACE
+
+
+def resolve_engage_phase(value):
+    """Normalise/validate ``station_full_brake_engage_phase``. None/'' => the default 'place' (today's
+    behaviour). Raises ValueError on an unknown value so a misconfiguration fails loudly at boot."""
+    if value is None or value == '':
+        return DEFAULT_ENGAGE_PHASE
+    v = str(value).strip().lower()
+    if v not in ENGAGE_PHASES:
+        raise ValueError('station_full_brake_engage_phase must be one of %r; got %r'
+                         % (list(ENGAGE_PHASES), value))
+    return v
+
+
+def full_lock_window(action, phase, engage_phase, *, hold_firm_fired=False):
+    """Pure: whether the loaded-place full base lock should be engaged this tick.
+
+    Always locked once the descent has begun (``phase in LOADED_PLACE_PHASES``) at the collect station --
+    today's window, unchanged. The ``engage_phase`` key only EXTENDS the window BACKWARD into pre-place:
+      * 'preplace'  => locked for the whole ``preplace`` phase (both legs).
+      * 'hold_firm' => locked during ``preplace`` once ``hold_firm_fired`` (a carried joint has arrived and
+                       been firmed), i.e. from the end of leg 1.
+      * 'place'     => pre-place is NOT locked (rotation-only hold), engage at the descent.
+    No-op (False) outside the collect station. Pure/CPU; no Isaac/USD dependency."""
+    if action != 'collect':
+        return False
+    if phase in LOADED_PLACE_PHASES:
+        return True
+    if phase == ENGAGE_PHASE_PREPLACE:
+        ep = engage_phase or DEFAULT_ENGAGE_PHASE
+        if ep == ENGAGE_PHASE_PREPLACE:
+            return True
+        if ep == ENGAGE_PHASE_HOLD_FIRM:
+            return bool(hold_firm_fired)
+    return False
+
 
 def in_loaded_place_window(action, phase):
-    """True when ``(action, phase)`` is the LOADED collect place window the full lock covers."""
+    """True when ``(action, phase)`` is the LOADED collect place window the full lock covers (the descent
+    window; the ``station_full_brake_engage_phase`` pre-place extension is in :func:`full_lock_window`)."""
     return action == 'collect' and phase in LOADED_PLACE_PHASES
 
 

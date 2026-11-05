@@ -400,6 +400,28 @@ The 2.0° carton bound is untouched (firming a held joint does not move it, so t
 unchanged). Recommended ON values + acceptance: `docs/examples/preplace-wrist2-hold-fragment.json`; CPU
 proof (incl. the real cw66 wrist_2 replay): `scripts/twin/tests/test_preplace_wrist2_hold_v1.py`.
 
+### Lock the base from pre-place, not the descent (sim-station-lock-from-preplace-v1)
+
+Firming the held wrist (above) removed the give-way but **re-routed** leg 2's shoulder_pan-sweep reaction:
+instead of being absorbed by the soft wrist it now drives through the stiff arm **into the base**.
+coldwin68/69 parked at the same spot as the no-shove reference coldwin64 but, during the firm-held carried
+pre-place, their base was shoved ~0.33 m sideways (`BASE_YAW_TICK` `base_dxy` over sim t ~191–227), so the
+carton came down ~0.5 m off its cart-relative target onto a cage post. The cause is timing: during pre-place
+only the base **rotation** is held (`CHASSIS_STATION_PITCH_HOLD` leaves translation free); the
+`station_place_full_brake` full six-axis lock engaged only once the place **descent** began (phase `place`).
+
+The opt-in RUNTIME key **`station_full_brake_engage_phase`** (default `"place"` ⇒ byte-identical) moves that
+engage earlier: `"preplace"` locks the base at the **start** of the carried pre-place (before leg 1, so both
+legs run under the full lock), and `"hold_firm"` locks it the moment any carried joint is firmed (the
+`PREPLACE_HOLD_FIRM` event, end of leg 1 — requires `phase_drive.hold_firm_on_arrival.enabled`). One engage
+at the chosen trigger, one release at withdraw — no cycling. Extending the lock backward is weld-loop-safe:
+the carton is airborne through pre-place, so no loop closes until contact at `place`, and the effort guard's
+window follows the same predicate (`station_full_brake.full_lock_window`). Requires `station_place_full_brake`
++ `chassis_station_pitch_hold`; `config_preflight.check_station_full_brake` enforces that and refuses an
+unknown value or `"hold_firm"` without the hold-firm config. The 2.0° carton bound is untouched. Recommended
+trigger (`preplace`) + acceptance: `docs/examples/station-lock-from-preplace-fragment.json`; CPU proof:
+`scripts/twin/tests/test_station_full_brake.py`.
+
 ## Contact-gated place-descent release (sim-place-release-on-contact-v1)
 
 The collect deck set-down releases the weld the instant the support is **actually touched**, not at a

@@ -298,6 +298,12 @@ class IsaacPort:
             if getattr(mobile,'station_place_full_brake',False) is True
             and isinstance(_fb_limit,(int,float)) and not isinstance(_fb_limit,bool) and _fb_limit>0
             else None)
+        # sim-station-lock-from-preplace-v1: WHEN the full lock engages relative to the carried pre-place.
+        # Resolved off the controller (physics_setup set it, validated); 'place' => today's behaviour =>
+        # byte-identical. 'hold_firm' arms off _hold_firm_fired (see _apply_hold_firm).
+        self._full_brake_engage_phase=station_full_brake.resolve_engage_phase(
+            getattr(mobile,'station_full_brake_engage_phase',None))
+        self._hold_firm_fired=False
         self.transport,self.contact=transport,contact
         self.hold_arm,self.verification=hold_arm,verification
         # ArmCommandGate for the labelled sim attach-fallback's stationary weld (firstmate run-209):
@@ -434,19 +440,25 @@ class IsaacPort:
             # (not the instantaneous end stop coldwin39 latched). Released only when the base leaves the
             # arm phase to drive.
             if in_arm_phase:
+                # sim-station-full-brake-place-v1 + sim-station-lock-from-preplace-v1: the LOADED collect
+                # place descent onto the cart support recoils the translation-free base (coldwin49:
+                # 0.08-0.18 m south, past the 0.080 m settle guard), and the firm-held carried PRE-PLACE's
+                # leg-2 shoulder sweep shoves it ~0.33 m sideways (coldwin68/69) because pre-place is held
+                # rotation-only. FULL-lock translation + rotation over the window chosen by
+                # station_full_brake_engage_phase (default 'place' == today: the descent; 'preplace'/
+                # 'hold_firm' extend it backward so the base is pinned BEFORE the pre-place shove), ON TOP of
+                # the pitch/roll target hold, through detach + withdraw (release/retreat), then return to the
+                # rotation-only hold at stow/verify. One engage at the chosen trigger, one release at
+                # withdraw (idempotent while locked) -- no cycling. The weld-loop fight is bounded by the
+                # contact-triggered release + the effort guard (_station_full_brake_monitor).
                 if (getattr(self.mobile, 'station_place_full_brake', False)
                         and getattr(self, 'current_action', None) == 'collect'
-                        and phase in _LOADED_PLACE_PHASES):
-                    # sim-station-full-brake-place-v1: the LOADED collect place descent onto the cart
-                    # support recoils the translation-free base (coldwin49: 0.08-0.18 m south, past the
-                    # 0.080 m settle guard). FULL-lock translation + rotation from the moment the arm
-                    # leaves the pre-place standoff (place) through detach + withdraw (release/retreat),
-                    # ON TOP of the pitch/roll target hold, then return to the rotation-only hold at
-                    # stow/verify. One engage at place start, one release at withdraw (idempotent while
-                    # locked) -- no cycling. The weld-loop fight is bounded by the contact-triggered
-                    # release + the effort guard (_station_full_brake_monitor).
+                        and station_full_brake.full_lock_window(
+                            self.current_action, phase,
+                            getattr(self, '_full_brake_engage_phase', station_full_brake.DEFAULT_ENGAGE_PHASE),
+                            hold_firm_fired=getattr(self, '_hold_firm_fired', False))):
                     self.mobile.release_base_full_brake()
-                    self.mobile.engage_station_full_lock()
+                    self.mobile.engage_station_full_lock(from_phase=phase)
                 else:
                     self.mobile.release_station_full_lock()
                     self.mobile.release_base_full_brake()
@@ -500,9 +512,15 @@ class IsaacPort:
         guard = getattr(self, '_full_brake_guard', None)
         if guard is None:
             return
+        # sim-station-lock-from-preplace-v1: the effort guard watches the WHOLE locked window, so when the
+        # lock engages at pre-place the STATION_FULL_BRAKE_EFFORT logging + abort guard cover it too (the
+        # carton is airborne through pre-place, so no weld-loop effort is expected there, but the window
+        # must match the engage window). Semantics (limit / consecutive / abort-to-hold) are unchanged.
         in_window = (getattr(self.mobile, 'station_place_full_brake', False)
-                     and self.current_action == 'collect'
-                     and self._phase in _LOADED_PLACE_PHASES)
+                     and station_full_brake.full_lock_window(
+                         self.current_action, self._phase,
+                         getattr(self, '_full_brake_engage_phase', station_full_brake.DEFAULT_ENGAGE_PHASE),
+                         hold_firm_fired=getattr(self, '_hold_firm_fired', False)))
         effort = self._read_arm_effort() if in_window else None
         decision = guard.observe(effort, in_window)
         if in_window and (self.tick % 30 == 0 or decision == 'abort'):
@@ -586,11 +604,16 @@ class IsaacPort:
         if phase != 'preplace':
             if self._hold_firm_phase == 'preplace':
                 self._hold_firm.reset()
+                # sim-station-lock-from-preplace-v1: leaving pre-place clears the hold-firm arming latch
+                # (place/release/retreat lock via LOADED_PLACE_PHASES regardless; a later collect op
+                # re-arms on its own pre-place). The full lock engaged for 'place'/'preplace' stays on.
+                self._hold_firm_fired = False
             self._hold_firm_phase = phase
             return
         if self._hold_firm_phase != 'preplace':
             self._hold_firm.reset()
             self._hold_firm_phase = 'preplace'
+            self._hold_firm_fired = False   # fresh pre-place: re-arm the hold_firm full-lock trigger
         gate = getattr(self, 'command_gate', None) or (
             getattr(self.native_transport, 'command_gate', None) if self.native_transport is not None else None)
         if gate is None:
@@ -605,6 +628,10 @@ class IsaacPort:
         newly = self._hold_firm.observe(cmd, measured)
         if not newly:
             return
+        # sim-station-lock-from-preplace-v1: a carried pre-place joint has arrived and been firmed (end of
+        # leg 1). Arm the 'hold_firm' full-lock trigger so _apply_base_brake FULL-locks the base this tick,
+        # before the leg-2 shoulder sweep shoves it (coldwin68/69). No-op for the 'place'/'preplace' values.
+        self._hold_firm_fired = True
         from .physics_setup import set_arm_drive_gains_per_joint
         firm = self._hold_firm_cfg['firm']
         try:
