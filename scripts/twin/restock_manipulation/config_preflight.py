@@ -90,6 +90,15 @@ KEY_CONSUMER = {
     # fallback (ros_host -> TransferController). Both opt-in, default off => byte-identical.
     'preplace_convergence_stall_s': HOST,
     'preplace_wrist_first': HOST,
+    # sim-preplace-leg2-level-v1: the held chassis attitude mirror (HOST keys for the carton-level FK so it
+    # levels/measures the preplace in the WORLD frame) + the plan-derived phase budget + its margin.
+    # station_pitch_hold/_pitch_deg/_roll_deg MIRROR the RUNTIME chassis_station_pitch_hold_* keys; absent =>
+    # the base frame + the 120 s phase timeout (byte-identical).
+    'station_pitch_hold': HOST,
+    'station_hold_pitch_deg': HOST,
+    'station_hold_roll_deg': HOST,
+    'phase_timeout_s': HOST,
+    'preplace_budget_margin_s': HOST,
     # --- RUNTIME config (isaac_bundle / isaac_port / physics_setup) ---
     'phase_drive': RUNTIME,
     'arm_stiffness_abs': RUNTIME,
@@ -508,6 +517,77 @@ def check_preplace_convergence_keys(host_cfg):
     return problems
 
 
+def check_preplace_phase_budget(host_cfg):
+    """sim-preplace-leg2-level-v1 (part 2): validate the held-chassis mirror keys + the plan-derived preplace
+    phase budget, and REPORT the computed budget (PREPLACE_PHASE_BUDGET).
+
+    When ``preplace_wrist_first`` is on the two-leg sequence needs ~150 s -- over the legacy 120 s -- so the
+    phase timeout is derived from the planned leg durations at the active caps + ``preplace_budget_margin_s``
+    (:func:`carton_level.preplace_phase_budget`). This reports the computed budget and REFUSES when an explicit
+    ``phase_timeout_s`` is set BELOW the planned preplace duration (a plan that would time out). It also
+    validates ``station_pitch_hold`` / ``station_hold_pitch_deg`` / ``station_hold_roll_deg`` (the HOST mirror
+    of the RUNTIME chassis_station_pitch_hold_* keys used by the world-frame leveling). No-op ([]) when
+    wrist-first is off AND no station-hold keys are set (byte-identical)."""
+    from twin.restock_manipulation import carton_level
+    hc = host_cfg or {}
+    problems = []
+    sph = hc.get('station_pitch_hold')
+    if sph is not None and not isinstance(sph, bool):
+        problems.append('station_pitch_hold must be a boolean (mirrors the RUNTIME chassis_station_pitch_hold); got %r.' % (sph,))
+    for nm in ('station_hold_pitch_deg', 'station_hold_roll_deg'):
+        v = hc.get(nm)
+        if v is not None:
+            try:
+                fv = float(v)
+                if not math.isfinite(fv):
+                    raise ValueError
+            except (TypeError, ValueError):
+                problems.append('%s must be a finite number of degrees (mirrors the RUNTIME '
+                                'chassis_station_pitch_hold value); got %r.' % (nm, v))
+    margin = hc.get('preplace_budget_margin_s')
+    if margin is not None:
+        try:
+            if not (math.isfinite(float(margin)) and float(margin) >= 0):
+                raise ValueError
+        except (TypeError, ValueError):
+            problems.append('preplace_budget_margin_s must be a finite non-negative number of seconds; got %r.' % (margin,))
+    explicit = hc.get('phase_timeout_s')
+    if explicit is not None:
+        try:
+            if not (math.isfinite(float(explicit)) and float(explicit) > 0):
+                raise ValueError
+        except (TypeError, ValueError):
+            problems.append('phase_timeout_s must be a finite positive number of seconds; got %r.' % (explicit,))
+            explicit = None
+    if not bool(hc.get('preplace_wrist_first', False)):
+        return problems
+    carry = hc.get('carry_lift_shape'); standoff = hc.get('collect_place_preplace_shape')
+    lc = None
+    try:
+        lc = carton_level.resolve_level_config(hc.get('carton_level'))
+    except ValueError as exc:
+        problems.append('carton_level does not resolve for the preplace budget: %s' % exc)
+    if lc is not None and carry is not None and standoff is not None:
+        try:
+            m = float(margin) if margin is not None else 90.0
+            budget, plan_s, l1, l2 = carton_level.preplace_phase_budget(
+                carry, standoff, speed=lc.preplace_approach_speed, accel=lc.preplace_approach_accel,
+                max_segment_rad=lc.preplace_max_segment_rad, margin_s=m)
+            eff = float(explicit) if explicit is not None else budget
+            print('CONFIG_PREFLIGHT: PREPLACE_PHASE_BUDGET wrist_first plan=%.1f s '
+                  '(leg1=%.1f leg2=%.1f) margin=%.1f -> derived budget=%.1f s; effective phase_timeout=%.1f s'
+                  % (plan_s, l1, l2, m, budget, eff))
+            if eff < plan_s:
+                problems.append('phase_timeout_s=%.1f is BELOW the planned wrist-first preplace duration '
+                                '%.1f s (leg1=%.1f + leg2=%.1f) -- the preplace would time out before leg 2 '
+                                'finishes. Raise it to >= plan + margin (derived budget %.1f s) or omit it to '
+                                'use the derived budget.' % (eff, plan_s, l1, l2, budget))
+        except (ValueError, TypeError) as exc:
+            problems.append('could not derive the wrist-first preplace budget from carry_lift_shape / '
+                            'collect_place_preplace_shape: %s' % exc)
+    return problems
+
+
 def check_station_full_brake(runtime_cfg):
     """sim-station-full-brake-place-v1: validate the opt-in loaded-place full base brake.
 
@@ -787,6 +867,9 @@ def main(argv=None):
     problems += check_phase_drive_carried_joint_profile(runtime_cfg)
     # sim-preplace-per-joint-gains-v1: validate the opt-in HOST preplace convergence/sequencing keys.
     problems += check_preplace_convergence_keys(host_cfg)
+    # sim-preplace-leg2-level-v1: validate the held-chassis mirror keys + REPORT the plan-derived preplace
+    # phase budget; refuse an explicit phase_timeout_s below the planned preplace duration.
+    problems += check_preplace_phase_budget(host_cfg)
     # sim-chassis-pitch-stability-v1: refuse an unsprung see-saw chassis unless a stabiliser is active.
     if args.mobile_manifest:
         problems += check_pitch_stability((_load(args.mobile_manifest) or {}).get('spec') or {},

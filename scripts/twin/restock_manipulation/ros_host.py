@@ -161,8 +161,29 @@ def main():
     staged = (bool(config.get('staged_cart_swing', False)) and _policy is not None
               and (bool(config.get('sim_cart_place_policy'))
                    or bool(config.get('reposition_before_place'))))
+    # sim-preplace-leg2-level-v1 (part 2): the phase timeout. The two-leg wrist-first preplace legitimately
+    # needs ~150 s at the caps -- over the legacy hard-coded 120 s (coldwin56 timed out at 58 % of leg 2).
+    # When wrist-first is on, derive the budget from the planned leg durations at the active caps + a
+    # configurable margin (HOST key ``preplace_budget_margin_s``), floored at the historical 120 s so a short
+    # plan never shrinks it; an explicit HOST ``phase_timeout_s`` overrides. Non-wrist-first keeps 120 s
+    # exactly (byte-identical). The computed budget is logged (PREPLACE_PHASE_BUDGET) and config_preflight
+    # reports it + refuses a plan that exceeds it.
+    phase_timeout = float(config.get('phase_timeout_s', 120.0))
+    if bool(config.get('preplace_wrist_first', False)) and 'phase_timeout_s' not in config:
+        _lc = carton_level.resolve_level_config(config.get('carton_level'))
+        _carry = config.get('carry_lift_shape'); _standoff = config.get('collect_place_preplace_shape')
+        if _lc is not None and _carry is not None and _standoff is not None:
+            budget, plan_s, l1, l2 = carton_level.preplace_phase_budget(
+                _carry, _standoff, speed=_lc.preplace_approach_speed, accel=_lc.preplace_approach_accel,
+                max_segment_rad=_lc.preplace_max_segment_rad,
+                margin_s=float(config.get('preplace_budget_margin_s', 90.0)))
+            phase_timeout = budget
+            print('PREPLACE_PHASE_BUDGET wrist_first plan=%.1f s (leg1=%.1f leg2=%.1f) + margin=%.1f '
+                  '-> phase_timeout=%.1f s (was hard-coded 120 s)'
+                  % (plan_s, l1, l2, float(config.get('preplace_budget_margin_s', 90.0)), phase_timeout),
+                  flush=True)
     controller = TransferController(motion,profiles,frame=tool.base_frame,
-        phase_timeout=120.,pose_policy=_policy,
+        phase_timeout=phase_timeout,pose_policy=_policy,
         transport_joints=transport_joints,
         contact_straight_line=bool(config.get('contact_straight_line', False)),
         contact_overpress_step_m=float(config.get('contact_overpress_step_m', 0.0)),
@@ -266,6 +287,16 @@ def main():
         # phase_drive.carried_joint_profile; these are the HOST-side guard + fallback.)
         preplace_convergence_stall_s=float(config.get('preplace_convergence_stall_s', 0.0)),
         preplace_wrist_first=bool(config.get('preplace_wrist_first', False)),
+        # sim-preplace-leg2-level-v1: the held chassis attitude during the collect place. The station
+        # parking brake pins the base off level (the RUNTIME chassis_station_pitch_hold_pitch_deg /
+        # _roll_deg; coldwin56 pitch -1.17), so ur_base_link +Z is off world +Z and the shoulder_pan YAW
+        # axis is off vertical -- the carried carton then sweeps a cone as pan descends and the WORLD tilt
+        # is not pan-invariant (leg 2 rose 1.64 -> 2.02). These HOST keys MIRROR the runtime values so the
+        # carton-level FK levels / measures the preplace in the WORLD frame. Absent/false => None => the
+        # base frame (byte-identical). They must match the runtime keys (named in the handoff fragment).
+        station_pitch_hold=bool(config.get('station_pitch_hold', False)),
+        station_hold_roll_deg=float(config.get('station_hold_roll_deg', 0.0)),
+        station_hold_pitch_deg=float(config.get('station_hold_pitch_deg', 0.0)),
         # sim-carton-level-carry-v1: keep the welded carton parallel to the ground through every carried
         # move (level the fold goals within the clear wrist caps) and NAME + FAIL a carried carton that
         # leaves level by more than the bound (CARTON_TILT) rather than carry it visibly tilted. A mapping
