@@ -29,13 +29,43 @@ from .scene import build, label_stock
 _PHASE_DRIVE_STIFF_PHASES = ('pan', 'preplace', 'place')
 
 
+def resolve_stiff_phases(phase_drive_cfg):
+    """sim-preplace-sweep-tilt-v1: the phases that run the STIFF drive profile, honouring an opt-in
+    ``phase_drive['carried_soft_phases']`` list that FORCES the named phases back onto the SOFT profile.
+
+    The STIFF gains (kp 1e6 / eff 2000) track the loaded extend/rotate+place, but on the carried
+    PREPLACE approach to the high above-support standoff they drive the arm hard through the 1.64 rad
+    wrist_2 sweep and the stiff position-control OVERSHOOTS, swinging the 0.45 kg welded carton to a
+    3-8 deg dynamic tilt (coldwin50/51/52 tripped CARTON_TILT; the SOFT-profile carried lift/tuck/
+    transit stayed <=1.44 deg). Listing ``'preplace'`` here keeps the carried approach on the damped
+    SOFT profile while the free-arm pan and the gravity-resisting place DESCENT keep STIFF. Absent /
+    empty => the default ``_PHASE_DRIVE_STIFF_PHASES`` => byte-identical. A phase not in the default
+    stiff set is a no-op (it is already soft). Returns a frozenset."""
+    stiff = set(_PHASE_DRIVE_STIFF_PHASES)
+    if phase_drive_cfg:
+        soft_override = phase_drive_cfg.get('carried_soft_phases')
+        if soft_override:
+            if isinstance(soft_override, str) or not hasattr(soft_override, '__iter__'):
+                raise ValueError('phase_drive.carried_soft_phases must be a list of phase names')
+            bad = [p for p in soft_override if p not in _PHASE_DRIVE_STIFF_PHASES]
+            if bad:
+                raise ValueError(
+                    'phase_drive.carried_soft_phases may only force-soft a phase that is otherwise '
+                    'STIFF %s; unknown/non-stiff %s' % (list(_PHASE_DRIVE_STIFF_PHASES), bad))
+            stiff -= set(soft_override)
+    return frozenset(stiff)
+
+
 def phase_drive_gains(phase, phase_drive_cfg):
     """Pure selector: the arm drive gains to apply when ENTERING ``phase``, or None (not configured /
     no change). Stiff for the loaded extend/rotate+place (pan/preplace/place); soft for every other
-    phase (the tuck fold, and the empty-handed post-release retreat/stow)."""
+    phase (the tuck fold, and the empty-handed post-release retreat/stow). An opt-in
+    ``carried_soft_phases`` list (see :func:`resolve_stiff_phases`) forces named carried phases back to
+    SOFT (sim-preplace-sweep-tilt-v1 preplace swing fix); absent => byte-identical."""
     if not phase_drive_cfg:
         return None
-    g = phase_drive_cfg.get('stiff' if phase in _PHASE_DRIVE_STIFF_PHASES else 'soft')
+    stiff_phases = resolve_stiff_phases(phase_drive_cfg)
+    g = phase_drive_cfg.get('stiff' if phase in stiff_phases else 'soft')
     if not g:
         return None
     return {'kp': float(g['kp']), 'kd': float(g['kd']), 'eff': float(g['eff'])}
