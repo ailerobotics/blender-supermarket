@@ -7,7 +7,7 @@
   "ur_wrist_2_joint",
   "ur_wrist_3_joint"
  ],
- "note": "Commanded preplace approach trajectories (TRAJ_HOST_PLAN) from the cw50/51/52 collect runs; the executed CARTON_TILT trip peaks; phase_drive gains. Lane sim-preplace-sweep-tilt-v1.",
+ "note": "Commanded preplace approach trajectories (TRAJ_HOST_PLAN) from the cw50/51/52 collect runs; the executed CARTON_TILT trip peaks; phase_drive gains. Lane sim-preplace-sweep-tilt-v1. sim-preplace-per-joint-gains-v1 adds the coldwin53 soft-all freeze observation, the chosen per-joint drive profile (stiffen shoulder_pan, keep the wrists soft), and the standoff goal for the six-joint pan-hold / tilt-Jacobian analysis.",
  "phase_drive": {
   "soft": {
    "kp": 300000.0,
@@ -412,5 +412,52 @@
     "gate_pred": 0.64
    }
   }
+ },
+ "coldwin53": {
+  "config": "coldwin52 + phase_drive.carried_soft_phases=[preplace] (preplace SOFT all joints)",
+  "standoff": [
+   -0.079,
+   -1.558,
+   1.586,
+   0.0,
+   1.64,
+   0.0
+  ],
+  "carry": [
+   1.2675,
+   -2.27,
+   1.0,
+   0.65,
+   0.002,
+   0.619
+  ],
+  "pan_goal": -0.079,
+  "pan_reached": -0.009,
+  "pan_frozen": 0.479,
+  "pan_drift_rad": 0.558,
+  "wrist2_sweep_rad": 1.64,
+  "sweep_now_s": [
+   187.3,
+   247.7
+  ],
+  "tilt_peak_deg": 1.83,
+  "tilt_final_deg": 1.69,
+  "reason": "phase timeout: preplace",
+  "drift_window_s": 30.0
+ },
+ "chosen_per_joint": {
+  "carried_soft_phases": [
+   "preplace"
+  ],
+  "carried_joint_profile": {
+   "preplace": {
+    "ur_shoulder_pan_joint": {
+     "kp": 1000000.0,
+     "kd": 10000.0,
+     "eff": 2000.0
+    }
+   }
+  },
+  "pan_effort_chosen": 2000.0
  }
 }

@@ -116,6 +116,7 @@ class TransferController:
                  transfer_pick_wrist_guard: bool = False,
                  transfer_service_carry: bool = False,
                  esdf_boot_ack_grace_s: float = 0.0,
+                 preplace_convergence_stall_s: float = 0.0, preplace_wrist_first: bool = False,
                  carton_level=None, fk_urdf=None, place_tcp_link='gripper_pad_tcp'):
         self.steady_clock=steady_clock
         # sim-carton-level-place-on-cart-v1: the FK link the collect place-on-cart reach targets -- the
@@ -590,6 +591,17 @@ class TransferController:
         self.render_lead = collision_band_floor(self._render_lead_delivery, dt_from_env())
         self.phase_timeout, self.fixture_mode = phase_timeout, fixture_mode
         self.phase = 'idle'
+        # sim-preplace-per-joint-gains-v1: carried-preplace convergence guard + wrist-first sequencing.
+        # The guard names a frozen joint (goal error not shrinking for N sim-s) as PHASE_CONVERGENCE instead
+        # of the opaque 120 s phase timeout (coldwin53: shoulder_pan froze 0.56 rad short). The wrist-first
+        # sequence is the fallback that sweeps the wrists at the low-reaction tucked pose before the hold
+        # joints move. Both opt-in (stall 0 / flag False => inert => byte-identical).
+        self.preplace_wrist_first = bool(preplace_wrist_first)
+        self._preplace_wristed = False   # wrist-first sub-stage flag (mirrors _retreat_lifted)
+        from twin.restock_manipulation.convergence_guard import ConvergenceGuard
+        from twin.restock_manipulation.cad_tool import ARM_JOINTS as _ARM_JOINTS
+        self._preplace_convergence = ConvergenceGuard(_ARM_JOINTS, stall_s=float(preplace_convergence_stall_s))
+        self.preplace_convergence_stall_s = float(preplace_convergence_stall_s)
         self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
         self.held = False
         self._staged_retries = 0   # fm358: bounded retry of a failed staged cart-swing move
@@ -924,6 +936,11 @@ class TransferController:
         self.phase, self.elapsed, self.issued = phase, 0.0, False
         self._staged_retries = 0   # fm358: fresh retry budget per phase
         self._move_deadline_retries = 0   # fm367: fresh deadline-retry budget per phase
+        # sim-preplace-per-joint-gains-v1: disarm the preplace convergence guard + reset the wrist-first
+        # sub-stage when leaving preplace, so a stall window is never charged across a phase boundary.
+        if phase != 'preplace':
+            self._preplace_convergence.disarm()
+            self._preplace_wristed = False
         self._recovery_credit_s = 0.0          # sim-robust-phase-timeout-during-recovery-v1: fresh per phase
         self._recovery_pause_logged = False
         # sim-carton-tilt-transient-debounce-v1: a phase boundary is a settled, level moment (the move
@@ -1771,6 +1788,23 @@ class TransferController:
                 if _verdict.trip is not None:
                     print(_verdict.trip, flush=True)
                     return self._fail(_verdict.trip)
+        # sim-preplace-per-joint-gains-v1: frozen-joint convergence guard. During preplace, watch the per-
+        # joint error to the issued standoff goal; if the worst joint's error stops shrinking for the sim-
+        # second stall window while still un-converged, NAME it (which joint, how far off) as
+        # PHASE_CONVERGENCE and fail fast -- instead of running the opaque 120 s phase timeout (coldwin53:
+        # shoulder_pan froze 0.56 rad short while wrist_2 swept). Inert when stall_s<=0 / no goal armed /
+        # the move is converging => byte-identical.
+        if (self.phase == 'preplace' and self._preplace_convergence.enabled
+                and len(sensors.joint_positions) == 6
+                and all(math.isfinite(x) for x in sensors.joint_positions)):
+            _stall = self._preplace_convergence.observe(now, sensors.joint_positions)
+            if _stall is not None:
+                print(_stall.message, flush=True)
+                self.evidence.append({'phase_convergence': {'joint': _stall.joint, 'error': _stall.error,
+                                                             'best_error': _stall.best_error,
+                                                             'stalled_s': _stall.stalled_s,
+                                                             'sim_time': float(now)}})
+                return self._fail(_stall.message)
         # sim-carton-level-setdown-v1: RELEASE is post-set-down (gripper opening before the weld detaches)
         # so it is NOT a trip-constrained carried phase, but the welded carton is still held at the set-down
         # pose, so SAMPLE its executed tilt (no trip) and stash it under 'release' -- _transition then emits
@@ -2215,6 +2249,26 @@ class TransferController:
                               % (mode.upper(), clr,
                                  'preplace-above-support-v1' if mode == 'support'
                                  else 'descent-residual-v1'), flush=True)
+                    # sim-preplace-per-joint-gains-v1 (fallback, deliverable 3): WRIST-FIRST sequencing. When
+                    # on, the FIRST preplace leg drives every joint EXCEPT shoulder_pan to the standoff (the
+                    # 1.64 rad wrist_2 sweep + leveling moves happen while pan is HELD at its carry value),
+                    # then the SECOND leg moves pan to the standoff with the wrists already set -- so the
+                    # wrist-sweep reaction and the pan travel are decoupled in time (remove the fight rather
+                    # than out-author it). The carton stays level via the SAME leveled approach below; only
+                    # the GOAL of this leg changes. Off => the single standoff approach (byte-identical).
+                    if self.preplace_wrist_first and not self._preplace_wristed:
+                        from twin.restock_manipulation.preplace_sequence import wrist_first_subgoals
+                        preplace_shape, _ = wrist_first_subgoals(s.joint_positions, preplace_shape)
+                        print('PREPLACE_WRIST_FIRST leg 1: driving the wrists + leveling cluster to the '
+                              'standoff while shoulder_pan holds at carry (sim-preplace-per-joint-gains-v1)',
+                              flush=True)
+                    # sim-preplace-per-joint-gains-v1: ARM the frozen-joint convergence guard against THIS
+                    # leg's goal so a non-converging preplace (coldwin53: shoulder_pan froze 0.56 rad short) is
+                    # named PHASE_CONVERGENCE in seconds instead of the opaque 120 s timeout. The small wrist
+                    # leveling applied below is well under the guard's tol, so arming on the leg's shape is
+                    # exact enough to catch a half-radian freeze. Inert when stall_s<=0.
+                    if self._preplace_convergence.enabled:
+                        self._preplace_convergence.arm(preplace_shape)
                     # sim-preplace-level-gate-v1: when the preplace gate is on AND the standoff was re-targeted
                     # above the support (``above``), the standoff is ALREADY executed-level (solve_level_standoff
                     # min-executed branch); drive the carried APPROACH to it as a DROOP-COMPENSATED, DENSIFIED,
@@ -2579,6 +2633,16 @@ class TransferController:
                     self.issued = False
                     print('COLLECT_RETREAT_LIFTOFF done (gripper raised clear of the carton/shelf/cage) '
                           '-> fold to clear preplace shape', flush=True)
+                    return self._result()
+                # sim-preplace-per-joint-gains-v1: the WRIST-FIRST sub-move just completed (wrists at the
+                # standoff, hold joints still tucked). Do NOT advance to place yet -- re-issue the SAME
+                # preplace phase, which now (self._preplace_wristed) drives every joint to the standoff with
+                # the wrists already set. Scoped to the collect deck place with wrist-first on.
+                if (self.phase == 'preplace' and self.preplace_wrist_first and not self._preplace_wristed):
+                    self._preplace_wristed = True
+                    self.issued = False
+                    print('PREPLACE_WRIST_FIRST done (wrists at standoff) -> move hold joints to standoff',
+                          flush=True)
                     return self._result()
                 # Contact-feedback descent (firstmate run-202): the step settled. If the seal has NOT
                 # latched and the capped travel is not exhausted, step the contact pose a bit further

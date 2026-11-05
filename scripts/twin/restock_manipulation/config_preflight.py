@@ -86,6 +86,10 @@ KEY_CONSUMER = {
     'moveit_mesh_uris': HOST,
     'esdf_boot_ack_grace_s': HOST,  # sim-robust-esdf-boot-gate-v1: SIM-clock boot grace for the first valid ESDF ack
     'carton_level': HOST,  # sim-carton-level-carry-v1: level the carried carton (fold goals) + CARTON_TILT trip; HOST (the controller drives the arm)
+    # sim-preplace-per-joint-gains-v1: preplace frozen-joint convergence guard + wrist-first sequencing
+    # fallback (ros_host -> TransferController). Both opt-in, default off => byte-identical.
+    'preplace_convergence_stall_s': HOST,
+    'preplace_wrist_first': HOST,
     # --- RUNTIME config (isaac_bundle / isaac_port / physics_setup) ---
     'phase_drive': RUNTIME,
     'arm_stiffness_abs': RUNTIME,
@@ -407,6 +411,103 @@ def check_phase_drive_carried_soft(runtime_cfg):
     return problems
 
 
+def check_phase_drive_carried_joint_profile(runtime_cfg):
+    """sim-preplace-per-joint-gains-v1: validate the opt-in ``phase_drive.carried_joint_profile`` per-joint
+    drive override.
+
+    The carried PREPLACE approach runs SOFT (``carried_soft_phases`` kills the stiff-drive carton swing),
+    but under the soft eff 400 ceiling shoulder_pan cannot HOLD its goal against the 1.64 rad wrist_2 sweep
+    reaction (coldwin53 drifted it 0.56 rad -> phase timeout). The per-joint override force-stiffens the
+    HOLD joints (shoulder_pan, and optionally shoulder_lift / elbow) while the tilt-injecting WRISTS stay
+    soft. This refuses, before any GPU boot:
+      * a non-mapping value, an unknown phase (not a default STIFF phase), or an unknown arm joint name;
+      * a malformed / non-positive gain block;
+      * a WRIST override on a carried-SOFT phase that would RE-STIFFEN the wrist above the soft eff ceiling
+        (that reintroduces the swing the soft profile was chosen to kill -- the brief's explicit guard).
+    No-op ([]) when the override is absent (byte-identical)."""
+    rc = runtime_cfg or {}
+    pd = rc.get('phase_drive')
+    if not isinstance(pd, dict):
+        return []
+    prof = pd.get('carried_joint_profile')
+    if not prof:
+        return []
+    from twin.restock.physics_setup import (_PHASE_DRIVE_STIFF_PHASES, _WRIST_JOINT_NAMES,
+                                            resolve_joint_overrides, resolve_stiff_phases)
+    problems = []
+    if not isinstance(prof, dict):
+        return ['phase_drive.carried_joint_profile must be a mapping {phase: {joint_name: {kp,kd,eff}}}; '
+                'got %r.' % (prof,)]
+    soft_eff = None
+    if isinstance(pd.get('soft'), dict):
+        try:
+            soft_eff = float(pd['soft']['eff'])
+        except (KeyError, TypeError, ValueError):
+            soft_eff = None
+    carried_soft = set()
+    try:
+        carried_soft = set(_PHASE_DRIVE_STIFF_PHASES) - set(resolve_stiff_phases(pd))
+    except ValueError:
+        pass  # a bad carried_soft_phases is reported by check_phase_drive_carried_soft
+    for phase in prof:
+        if phase not in _PHASE_DRIVE_STIFF_PHASES:
+            problems.append('phase_drive.carried_joint_profile has unknown phase %r; it may only override a '
+                            'default STIFF phase %s.' % (phase, list(_PHASE_DRIVE_STIFF_PHASES)))
+            continue
+        try:
+            overrides = resolve_joint_overrides(phase, pd)
+        except ValueError as exc:
+            problems.append(str(exc))
+            continue
+        # The swing guard: on a phase forced SOFT (carried_soft_phases), a wrist override must keep the
+        # wrist at or below the soft effort ceiling, or the swing the soft profile killed returns.
+        if phase in carried_soft and soft_eff is not None:
+            for jn in _WRIST_JOINT_NAMES:
+                g = overrides.get(jn)
+                if g is not None and g['eff'] > soft_eff + 1e-9:
+                    problems.append(
+                        'phase_drive.carried_joint_profile[%r][%r] raises the wrist effort to %g N*m above '
+                        'the soft ceiling %g N*m: a carried-soft phase must keep the tilt-injecting wrists '
+                        'SOFT (re-stiffening a wrist reintroduces the carton swing the soft profile kills). '
+                        'Stiffen shoulder_pan (and optionally shoulder_lift / elbow), not the wrists.'
+                        % (phase, jn, g['eff'], soft_eff))
+    return problems
+
+
+def check_preplace_convergence_keys(host_cfg):
+    """sim-preplace-per-joint-gains-v1: validate the opt-in HOST preplace convergence guard + sequencing
+    fallback keys (read by ros_host -> TransferController).
+
+      * ``preplace_convergence_stall_s`` (SIM seconds): a frozen-joint convergence guard that FAILS the
+        preplace by name (PHASE_CONVERGENCE) when the goal error stops shrinking, instead of running the
+        coarse 120 s phase timeout. Must be a finite non-negative number (0 => off). It is a TIGHTER bound
+        than the phase timeout, so a value >= 120 is a no-op-with-a-warning-shape -> refuse it as a slip.
+      * ``preplace_wrist_first`` (bool): sequence the carried preplace so the wrists sweep first (at the
+        low-reaction tucked pose) and the HOLD joints move with the wrists already set. Must be a bool.
+    No-op ([]) when both are absent (byte-identical)."""
+    hc = host_cfg or {}
+    problems = []
+    stall = hc.get('preplace_convergence_stall_s')
+    if stall is not None:
+        try:
+            v = float(stall)
+        except (TypeError, ValueError):
+            problems.append('preplace_convergence_stall_s must be a number (SIM seconds; 0 => off); got %r.'
+                            % (stall,))
+        else:
+            if not math.isfinite(v) or v < 0:
+                problems.append('preplace_convergence_stall_s must be a finite non-negative number '
+                                '(SIM seconds; 0 => off); got %r.' % (stall,))
+            elif v >= 120.0:
+                problems.append('preplace_convergence_stall_s=%g is >= the 120 s phase timeout, so it would '
+                                'never fire before the coarse timeout it is meant to pre-empt. Use a tighter '
+                                'sim-second bound (e.g. 25-40 s).' % (v,))
+    wf = hc.get('preplace_wrist_first')
+    if wf is not None and not isinstance(wf, bool):
+        problems.append('preplace_wrist_first must be a boolean; got %r.' % (wf,))
+    return problems
+
+
 def check_station_full_brake(runtime_cfg):
     """sim-station-full-brake-place-v1: validate the opt-in loaded-place full base brake.
 
@@ -680,6 +781,12 @@ def main(argv=None):
     # sim-preplace-sweep-tilt-v1: validate the opt-in phase_drive.carried_soft_phases override (run the
     # carried preplace approach on the SOFT profile). Always on (not --require'd); no-op when absent.
     problems += check_phase_drive_carried_soft(runtime_cfg)
+    # sim-preplace-per-joint-gains-v1: validate the opt-in phase_drive.carried_joint_profile per-joint drive
+    # override (stiffen shoulder_pan so it holds against the wrist sweep; keep the tilt-injecting wrists
+    # soft). Always on (not --require'd); no-op when absent.
+    problems += check_phase_drive_carried_joint_profile(runtime_cfg)
+    # sim-preplace-per-joint-gains-v1: validate the opt-in HOST preplace convergence/sequencing keys.
+    problems += check_preplace_convergence_keys(host_cfg)
     # sim-chassis-pitch-stability-v1: refuse an unsprung see-saw chassis unless a stabiliser is active.
     if args.mobile_manifest:
         problems += check_pitch_stability((_load(args.mobile_manifest) or {}).get('spec') or {},
