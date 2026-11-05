@@ -29,13 +29,16 @@
 
   "runtime_config": {
     "_file": "mission-runtime-*.json (EXTERNAL to the repo; the integration lane owns it).",
-    "cart_placement": {
-      "location": "rollwagen",
-      "support_prim": "shelf",
-      "load_center_body_xy": [0.135, 0.0],
-      "support_z_world": 0.9712,
-      "free_dimensions": [0.65, 0.45, 0.30],
-      "_note": "support_prim: 'shelf' (or 1, or '/Rollwagen/chassis/shelf') selects the UPPER SHELF; ABSENT => stock_supports[0] = deck (byte-identical with the legacy hardcode). support_z_world 0.9712 is the resolved live shelf TOP face world z -- ADVISORY (the runtime resolver overrides the GT place target from the live shelf prim) but config_preflight refuses it if it disagrees with the resolved top by >10 mm, so set it to whatever the orchestrator passes as --support-top-z-world. load_center_body_xy 0.135 is the chosen xy; free_dimensions unchanged."
+    "_block_path": "sim-preflight-nested-cart-placement-v1: the Isaac factory (isaac_factory.parse_manipulation_config) reads cart_placement ONLY from the NESTED block config['manipulation']['cart_placement']. A TOP-LEVEL config['cart_placement'] is IGNORED -- coldwin42-47 edited the top-level block, so support_prim/support_z_world/load_center never reached the factory (coldwin47: 'PLACE_SUPPORT_SELECT selector=None support_z 0.9325', placed on the deck though the shelf was configured) and FIVE GPU runs ran on settings the sim never read. Put the block UNDER 'manipulation' as shown below. config_preflight.check_cart_placement_source now REFUSES a stale top-level duplicate that disagrees with the nested block (the message names BOTH blocks); an identical top-level duplicate is tolerated (coldwin48). The factory also logs CART_PLACEMENT_SOURCE block=manipulation.cart_placement at boot so a run log proves the source.",
+    "manipulation": {
+      "cart_placement": {
+        "location": "rollwagen",
+        "support_prim": "shelf",
+        "load_center_body_xy": [0.135, 0.0],
+        "support_z_world": 0.9712,
+        "free_dimensions": [0.65, 0.45, 0.30],
+        "_note": "support_prim: 'shelf' (or 1, or '/Rollwagen/chassis/shelf') selects the UPPER SHELF; ABSENT => stock_supports[0] = deck (byte-identical with the legacy hardcode). support_z_world 0.9712 is the resolved live shelf TOP face world z -- ADVISORY (the runtime resolver overrides the GT place target from the live shelf prim) but config_preflight refuses it if it disagrees with the resolved top by >10 mm, so set it to whatever the orchestrator passes as --support-top-z-world. load_center_body_xy 0.135 is the chosen xy; free_dimensions unchanged. This block MUST be nested here under 'manipulation', NOT at the runtime-config top level."
+      }
     }
   },
 
@@ -55,7 +58,7 @@
 
   "config_preflight": {
     "_invocation": "python3 scripts/twin/restock_manipulation/config_preflight.py --host-config <host> --runtime-config <runtime> --scenario <scenario> --mobile-manifest <manifest> --require <...> --place-on-deck --support-top-z-world 0.9712",
-    "_note": "The orchestrator computes 0.9712 = the SELECTED support prim (shelf) top-face world z from the composed cart asset and passes it as --support-top-z-world. The preflight (a) validates cart_placement.support_prim resolves against the cart's stock_supports (check_support_selection, always on) and (b) with --place-on-deck refuses the run if runtime cart_placement.support_z_world or scenario initial_staging.cart_support_z_world disagrees with 0.9712 by >10 mm. (--place-on-deck is the historically named 'check place heights' switch; it is support-agnostic -- the resolved top is whatever --support-top-z-world says.)"
+    "_note": "The orchestrator computes 0.9712 = the SELECTED support prim (shelf) top-face world z from the composed cart asset and passes it as --support-top-z-world. The preflight (a) refuses a stale top-level cart_placement duplicate that disagrees with the nested manipulation.cart_placement the factory reads (check_cart_placement_source, always on -- sim-preflight-nested-cart-placement-v1); (b) validates manipulation.cart_placement.support_prim resolves against the cart's stock_supports (check_support_selection, always on, now reading the NESTED block); and (c) with --place-on-deck refuses the run if runtime manipulation.cart_placement.support_z_world or scenario initial_staging.cart_support_z_world disagrees with 0.9712 by >10 mm. All three read the SAME nested block the factory reads (via config_access), so the gate and the sim can never disagree on the source of a key. (--place-on-deck is the historically named 'check place heights' switch; it is support-agnostic -- the resolved top is whatever --support-top-z-world says.)"
   },
 
   "_acceptance_coldwin47": "RELEASE at TRUE shelf contact: PLACE_CONTACT_RELEASE fires with the carton BOTTOM within place_contact_gap_m (0.012 m) of the MEASURED shelf top (~0.9712 world), the console shows COLLECT_PLACE_SUPPORT_Z resolving the shelf top (prim=/Rollwagen/chassis/shelf) and PLACE_SUPPORT_SELECT selector=shelf; verify_place PASSES ('carton resting', xy within tol, bottom_gap ~0); NO collider contact before release (the honest sweep clears every kept body + the pad vs the mouth posts by >= 30 mm at the cw43 vertical approach); CARTON_TILT peak <= 1.5 deg (set-down tilt solved); and the run ADVANCES PAST COLLECT. The shelf target is within UR10 reach (~1.13 m < 1.3 m from ur_base_link).",

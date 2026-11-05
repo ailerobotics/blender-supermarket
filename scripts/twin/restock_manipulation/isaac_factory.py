@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from .transfer_carry import weld_attach as _weld_attach
 from .cad_tool import defer_tool_collision_enabled as _defer_tool_collision
 from .transfer_mode import LIVE_POSE, transfer_mode
+from . import config_access
 from . import ground_truth_collect as gtc
 from .types import ProductProfile
 from ..restock.physics_step import freshness_scale_from_env
@@ -222,7 +223,11 @@ def parse_manipulation_config(config, job_sku):
     collect_source_location = config.get('collect_source_location', '')
     if collect_source_location and not isinstance(collect_source_location, str):
         raise ValueError('collect_source_location must be a mission-location string')
-    cart_placement = _parse_cart_placement(mcfg.get('cart_placement'))
+    # Resolve the cart placement through the SHARED accessor (config_access), the ONE source of truth
+    # config_preflight validates against -- so the gate and the factory can never disagree on which block
+    # a key is read from (sim-preflight-nested-cart-placement-v1). This is config['manipulation']['cart_placement'];
+    # a TOP-LEVEL config['cart_placement'] is ignored (coldwin42-47).
+    cart_placement = _parse_cart_placement(config_access.cart_placement_block(config))
     arm_camera_reaim = _parse_arm_camera_reaim(mcfg.get('arm_camera_reaim'))
     return ManipConfig(profiles=profiles, stations=stations, shelfbot_root=shelfbot_root,
                        walls=walls, voxel_dims=tuple(float(v) for v in vd), voxel_size=float(vs),
@@ -1210,6 +1215,14 @@ def _build_runtime(*, app, assembly, params, output):
     import os
     verify_place = params.cart_placement and os.environ.get('RESTOCK_VERIFY_PLACE', '0') != '0'
     if params.cart_placement:
+        # Name the block path the values were resolved FROM, so a run log proves the source (and a
+        # top-level config['cart_placement'] slip is visible). sim-preflight-nested-cart-placement-v1.
+        print('CART_PLACEMENT_SOURCE block=%s location=%s support_prim=%s support_z_world=%s '
+              'load_center_body_xy=%s (the factory reads this nested block; a top-level cart_placement '
+              'is ignored)'
+              % (config_access.CART_PLACEMENT_SOURCE, params.cart_placement.get('location'),
+                 params.cart_placement.get('support_prim'), params.cart_placement.get('support_z_world'),
+                 params.cart_placement.get('load_center_body_xy')), flush=True)
         cart_asset = assembly.evidence['composition']['assets']['cart']
         cart_root = cart_asset['root']
         # fm389: aim the collect placement at the DECK INTERIOR, derived from the live support prim, not
