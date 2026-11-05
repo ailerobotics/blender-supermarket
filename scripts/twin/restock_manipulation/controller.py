@@ -120,6 +120,7 @@ class TransferController:
                  transfer_service_carry: bool = False,
                  esdf_boot_ack_grace_s: float = 0.0,
                  preplace_convergence_stall_s: float = 0.0, preplace_wrist_first: bool = False,
+                 preplace_drift_recapture_rad: float = 0.0, preplace_drift_recapture_max: int = 0,
                  carton_level=None, fk_urdf=None, place_tcp_link='gripper_pad_tcp',
                  station_pitch_hold: bool = False, station_hold_roll_deg: float = 0.0,
                  station_hold_pitch_deg: float = 0.0,
@@ -709,8 +710,21 @@ class TransferController:
                                                            self.station_hold_pitch_deg)
         from twin.restock_manipulation.convergence_guard import ConvergenceGuard
         from twin.restock_manipulation.cad_tool import ARM_JOINTS as _ARM_JOINTS
-        self._preplace_convergence = ConvergenceGuard(_ARM_JOINTS, stall_s=float(preplace_convergence_stall_s))
+        # sim-preplace-wrist2-hold-v1: opt-in DRIFT RE-CAPTURE on the convergence guard. When a driven
+        # preplace joint drifts off its closest approach by more than preplace_drift_recapture_rad (and
+        # budget remains), the guard emits a non-terminal DriftRecapture: the controller re-issues the
+        # armed preplace goal (re-driving the back-driven joint) and logs PREPLACE_DRIFT_RECAPTURE once,
+        # instead of waiting out the 30 s stall and faulting (cw66: the leg-2 shoulder_pan sweep back-drove
+        # the arrived-but-soft wrist_2 to a -0.32 limit cycle; the static hold is trivial, so a re-issue
+        # after the pan settles holds). Both <= 0 => inert => byte-identical.
+        self.preplace_drift_recapture_rad = float(preplace_drift_recapture_rad)
+        self.preplace_drift_recapture_max = int(preplace_drift_recapture_max)
+        self._preplace_convergence = ConvergenceGuard(
+            _ARM_JOINTS, stall_s=float(preplace_convergence_stall_s),
+            recapture_rad=self.preplace_drift_recapture_rad,
+            recapture_max=self.preplace_drift_recapture_max)
         self.preplace_convergence_stall_s = float(preplace_convergence_stall_s)
+        self._preplace_recapture_logged = False   # PREPLACE_DRIFT_RECAPTURE is logged once per preplace
         self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
         self.held = False
         self._staged_retries = 0   # fm358: bounded retry of a failed staged cart-swing move
@@ -1172,6 +1186,7 @@ class TransferController:
         if phase != 'preplace':
             self._preplace_convergence.disarm()
             self._preplace_wristed = False
+            self._preplace_recapture_logged = False   # sim-preplace-wrist2-hold-v1: fresh log per preplace
         self._recovery_credit_s = 0.0          # sim-robust-phase-timeout-during-recovery-v1: fresh per phase
         self._recovery_pause_logged = False
         # sim-carton-tilt-transient-debounce-v1: a phase boundary is a settled, level moment (the move
@@ -1937,6 +1952,39 @@ class TransferController:
         out = cl.tilt_trip(roll, pitch, self._carton_level.bound_deg)
         return out[0] if out else None
 
+    def _handle_preplace_convergence(self, now, sensors):
+        """sim-preplace-wrist2-hold-v1 / sim-preplace-per-joint-gains-v1: observe the carried-preplace
+        convergence guard and act on its verdict. Returns ``(handled, result)``: ``handled`` True means
+        ``step`` returns ``result`` (a drift re-capture re-issue, or a terminal PHASE_CONVERGENCE fail);
+        False means continue. A :class:`DriftRecapture` re-issues the armed preplace goal to re-drive a
+        back-driven joint (logged ONCE per preplace via ``_preplace_recapture_logged``) instead of faulting;
+        a :class:`ConvergenceStall` fails by name as before. Pre-conditions (phase/finite joints/enabled)
+        are checked by the caller."""
+        from twin.restock_manipulation.convergence_guard import DriftRecapture
+        verdict = self._preplace_convergence.observe(now, sensors.joint_positions)
+        if isinstance(verdict, DriftRecapture):
+            goal = self._preplace_convergence.goal
+            if goal is None:
+                return False, None
+            if not self._preplace_recapture_logged:
+                self._preplace_recapture_logged = True
+                print(verdict.message, flush=True)
+            self.evidence.append({'phase_drift_recapture': {
+                'joint': verdict.joint, 'from': verdict.from_pos, 'to': verdict.to_pos,
+                'error': verdict.error, 'best_error': verdict.best_error,
+                'count': verdict.count, 'limit': verdict.limit, 'sim_time': float(now)}})
+            self.motion.begin_joint_goal(tuple(goal), sensors.joint_positions, slow=True, goal_tol=0.2)
+            self.issued = True
+            return True, self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
+        if verdict is not None:
+            print(verdict.message, flush=True)
+            self.evidence.append({'phase_convergence': {'joint': verdict.joint, 'error': verdict.error,
+                                                        'best_error': verdict.best_error,
+                                                        'stalled_s': verdict.stalled_s,
+                                                        'sim_time': float(now)}})
+            return True, self._fail(verdict.message)
+        return False, None
+
     def _carton_tilt_observe(self, now, measured):
         """sim-carton-tilt-transient-debounce-v1: the DEBOUNCED carried-tilt decision for this tick.
 
@@ -2203,14 +2251,9 @@ class TransferController:
         if (self.phase == 'preplace' and self._preplace_convergence.enabled
                 and len(sensors.joint_positions) == 6
                 and all(math.isfinite(x) for x in sensors.joint_positions)):
-            _stall = self._preplace_convergence.observe(now, sensors.joint_positions)
-            if _stall is not None:
-                print(_stall.message, flush=True)
-                self.evidence.append({'phase_convergence': {'joint': _stall.joint, 'error': _stall.error,
-                                                             'best_error': _stall.best_error,
-                                                             'stalled_s': _stall.stalled_s,
-                                                             'sim_time': float(now)}})
-                return self._fail(_stall.message)
+            _handled, _res = self._handle_preplace_convergence(now, sensors)
+            if _handled:
+                return _res
         # sim-carton-level-setdown-v1: RELEASE is post-set-down (gripper opening before the weld detaches)
         # so it is NOT a trip-constrained carried phase, but the welded carton is still held at the set-down
         # pose, so SAMPLE its executed tilt (no trip) and stash it under 'release' -- _transition then emits

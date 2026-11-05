@@ -173,6 +173,74 @@ def resolve_joint_overrides(phase, phase_drive_cfg):
     return out
 
 
+def resolve_hold_firm(phase_drive_cfg):
+    """sim-preplace-wrist2-hold-v1: resolve the opt-in ``phase_drive.hold_firm_on_arrival`` block, or None
+    (absent / enabled false => off => byte-identical).
+
+    Once a carried-preplace joint has ARRIVED at its settled commanded target it is swing-SAFE to stiffen
+    (it is no longer moving, so firming it cannot reintroduce the carton swing the soft profile kills), so
+    the Isaac port switches that joint's PhysX drive to a FIRM hold profile -- then a later leg's reaction
+    cannot back-drive it (cw66: the leg-2 shoulder_pan sweep back-drove the arrived-but-soft wrist_2). The
+    block:
+      * ``enabled`` (bool, default False): off => None.
+      * ``tol_rad`` (default 0.05): |command - measured| at or below which a joint is "arrived".
+      * ``settle_eps_rad`` (default 0.01): max per-tick command motion that still counts as settled.
+      * ``dwell_ticks`` (int, default 3): settled-and-arrived ticks before a joint latches firm.
+      * ``firm`` ({kp,kd,eff}): the firm hold gains; defaults to the carried_joint_profile preplace
+        shoulder_pan override (the proven firm hold) when present, else REQUIRED.
+      * ``joints`` (list): which joints may be firmed; defaults to every arm joint except shoulder_pan
+        (already firm via the carried_joint_profile).
+    Raises ValueError on a malformed block (unknown joint, bad gain, no resolvable firm block). Pure/CPU."""
+    if not phase_drive_cfg:
+        return None
+    hf = phase_drive_cfg.get('hold_firm_on_arrival')
+    if not hf:
+        return None
+    if not isinstance(hf, dict):
+        raise ValueError('phase_drive.hold_firm_on_arrival must be a mapping {enabled,tol_rad,...}')
+    if not bool(hf.get('enabled', False)):
+        return None
+    def _num(key, default, positive=True):
+        v = hf.get(key, default)
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            raise ValueError('phase_drive.hold_firm_on_arrival.%s must be a number; got %r' % (key, v))
+        if not math.isfinite(fv) or (positive and fv <= 0) or (not positive and fv < 0):
+            raise ValueError('phase_drive.hold_firm_on_arrival.%s must be a finite %s number; got %r'
+                             % (key, 'positive' if positive else 'non-negative', v))
+        return fv
+    tol = _num('tol_rad', 0.05)
+    settle_eps = _num('settle_eps_rad', 0.01)
+    dwell = hf.get('dwell_ticks', 3)
+    if isinstance(dwell, bool) or not isinstance(dwell, int) or dwell < 1:
+        raise ValueError('phase_drive.hold_firm_on_arrival.dwell_ticks must be a positive integer; got %r'
+                         % (dwell,))
+    firm = hf.get('firm')
+    if firm is None:
+        prof = phase_drive_cfg.get('carried_joint_profile') or {}
+        pre = prof.get('preplace') if isinstance(prof, dict) else None
+        firm = (pre or {}).get('ur_shoulder_pan_joint') if isinstance(pre, dict) else None
+        if firm is None:
+            raise ValueError('phase_drive.hold_firm_on_arrival needs a firm gain block: set '
+                             'hold_firm_on_arrival.firm {kp,kd,eff}, or a carried_joint_profile.preplace '
+                             'ur_shoulder_pan_joint override to reuse as the firm hold.')
+    firm = _validate_gain_block(firm, 'phase_drive.hold_firm_on_arrival.firm')
+    joints = hf.get('joints')
+    if joints is None:
+        joints = tuple(n for n in _ARM_JOINT_NAMES if n != 'ur_shoulder_pan_joint')
+    else:
+        if isinstance(joints, str) or not hasattr(joints, '__iter__'):
+            raise ValueError('phase_drive.hold_firm_on_arrival.joints must be a list of arm joint names')
+        joints = tuple(joints)
+        bad = [j for j in joints if j not in _ARM_JOINT_NAMES]
+        if bad:
+            raise ValueError('phase_drive.hold_firm_on_arrival.joints has unknown arm joint(s) %s; expected '
+                             'from %s' % (bad, list(_ARM_JOINT_NAMES)))
+    return {'enabled': True, 'tol_rad': tol, 'settle_eps_rad': settle_eps, 'dwell_ticks': int(dwell),
+            'firm': firm, 'joints': joints}
+
+
 def phase_drive_plan(phase, phase_drive_cfg, arm_joints):
     """The full per-joint gain plan to apply ENTERING ``phase``: ``{joint_name: {kp,kd,eff}}`` for each of
     ``arm_joints``, or None (no change -- the uniform selector returned None). The base is the uniform

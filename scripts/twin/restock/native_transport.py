@@ -177,6 +177,11 @@ class ArmCommandGate:
         self._drive_log_last=float('-inf')
         self._drive_log_dt=0.1
         self._drive_gains_logged=False
+        # sim-preplace-wrist2-hold-v1: the last APPLIED drive-target q per arm joint (ARM_JOINTS order), for
+        # the port's hold-firm-on-arrival decider to read (which joints have arrived at their settled command
+        # and can be switched to the firm hold drive). None until the first command is applied. Observe-only;
+        # the decider never writes it. Default unused => byte-identical.
+        self._last_cmd_q=None
         # sim-arm-reactive-replan-v1 (P1): reversible human-safety pause. While paused the gate HOLDS the
         # measured joints and ignores host commands (no tracking/heartbeat fault) -- a NON-latching freeze
         # the reactive layer releases with set_paused(False), unlike hold()/faulted (a terminal e-stop).
@@ -377,6 +382,7 @@ class ArmCommandGate:
                 raise ValueError('arm target exceeds limits or tracking envelope')
             # Within the envelope: a normal command (and the convergence of any first-command ramp).
             self.apply(q,v,self.indices)
+            self._last_cmd_q=q   # sim-preplace-wrist2-hold-v1: the streamed drive target (ARM_JOINTS order)
             # sim-preplace-wrist-continuity-v1: DRIVE_TICK -- the APPLIED drive target (q, the single-source
             # streamed command) vs the measured/executed per joint, ~10 Hz. A split between the held target
             # and a drifting executed is then VISIBLE in the console (coldwin57's wrist_2 relaxation).
