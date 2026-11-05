@@ -1,0 +1,51 @@
+{
+  "_comment": "sim-preplace-sweep-tilt-v1: run the carried collect PRE-PLACE approach on the SOFT arm drive profile so the welded carton stays parallel to the ground (2.0 deg bound / 0.15 s grace, NEVER loosened) through the 1.64 rad wrist_2 sweep up to the above-support standoff. ROOT CAUSE (coldwin50/51/52, CARTON_TILT 7.64/3.28/8.44 deg at preplace, base rock-steady, PR 339 full-D6 lock never reached): the preplace phase UNIQUELY runs the STIFF drive profile (physics_setup._PHASE_DRIVE_STIFF_PHASES = pan/preplace/place; kp 1e6 / eff 2000) while the carried lift/tuck/transit run SOFT (kp 3e5 / eff 400) and track tightly (<=1.44 deg). The stiff high-authority drive propagates a multi-body / finite-solver RING into the 0.45 kg welded carton during the sweep, swinging it 3-8 deg; this is DYNAMIC (ruled out: commanded path ~1.7 deg, quasi-static droop flat <1.5 deg, trajectory speed -- executed ANTI-correlated with commanded velocity, leveller <=0.18 deg). Config tuning (densify/speed/accel) was EXHAUSTED by cw50/51/52. The fix is default-OFF (byte-identical) and keeps the PR 340 gate + caps.",
+
+  "_mechanism": {
+    "1_carried_soft_preplace": "physics_setup.resolve_stiff_phases / phase_drive_gains honour phase_drive['carried_soft_phases']: a list of phases force-routed back to the SOFT profile even though they are in the default stiff set. ['preplace'] drops preplace from stiff while keeping the free-arm 'pan' and the gravity-resisting place DESCENT 'place' STIFF (soft cannot HOLD the loaded place extend -- run-274). On the SOFT profile the carried preplace tracks like lift/tuck/transit did (executed ~= the gate's droop-compensated prediction, <1.0 deg; CPU proof scripts/twin/tools/preplace_drive_bench.py: reduced per-joint tracking <0.006 deg; drive contrast: stiff is zeta x0.68, eff x5, dt*wn 214 vs 117 -- the harder/higher-authority regime the ring lives in).",
+    "2_per_tick_logging": "controller._carton_tilt_observe logs CARTON_TICK phase=.. roll/pitch/tilt + the EXECUTED joint positions at ~10 Hz SIM time for carried phases, and the gate verdict line (CARTON_LEVEL_PREPLACE_GATE) states it is COMMANDED+droop only and BLIND to the drive-dynamics overshoot -- so a coldwin53 trip is diagnosable from the console (the per-tick executed feedback the characterisation lacked). The CARTON_SEGMENT_TILT phase=preplace exit line fires once preplace completes.",
+    "3_gate_and_caps_kept": "the PR 340 preplace_level_gate, preplace_gate_bound_deg, preplace_max_segment_rad, preplace_approach_speed/accel and the droop compensation are UNCHANGED. The bound (2.0), grace (0.15 s), carton dims and tow lanes are UNCHANGED.",
+    "_secondary_not_shipped": "the brief's secondary (shrink the 1.64 rad wrist_2 sweep by reseeding the standoff) is GEOMETRICALLY INFEASIBLE -- the above-support standoff orientation forces wrist_2 ~1.63 for every level+reach branch (CPU-pinned by test_preplace_sweep_tilt.test_secondary_wrist_sweep_is_geometrically_forced). The drive-profile primary is the fix."
+  },
+
+  "env": {
+    "RESTOCK_PLACE_ON_DECK": "1",
+    "RESTOCK_COLLECT_GROUND_TRUTH": "1",
+    "RESTOCK_VERIFY_PLACE": "1",
+    "_note": "UNCHANGED from coldwin52. No new env switch -- the fix is the RUNTIME phase_drive sub-key below."
+  },
+
+  "runtime_config": {
+    "_file": "mission-runtime-*.json (EXTERNAL to the repo; the integration lane owns it). The ONLY new key this lane adds is phase_drive.carried_soft_phases; everything else is the coldwin52 block UNCHANGED (PR 338 preplace_above_support, PR 339 station full brake + chassis_station_pitch_hold_*, PR 340 gate -- all kept).",
+    "phase_drive": {
+      "soft": {"kp": 300000.0, "kd": 8000.0, "eff": 400.0},
+      "stiff": {"kp": 1000000.0, "kd": 10000.0, "eff": 2000.0},
+      "carried_soft_phases": ["preplace"],
+      "_carried_soft_phases_note": "NEW, OPTIONAL (default absent => stiff set = pan/preplace/place => byte-identical). A list of phases force-routed to the SOFT profile; may only name phases in the default STIFF set (config_preflight.check_phase_drive_carried_soft refuses a typo / a non-stiff phase / a missing soft block). ['preplace'] runs the carried preplace approach SOFT; place stays STIFF for the gravity-resisting descent. RUNTIME key (isaac_port/physics_setup), NOT a HOST carton_level key -- a carton_level entry here would silently never activate (the host-vs-runtime split)."
+    },
+    "manipulation": {
+      "cart_placement": {
+        "location": "rollwagen",
+        "support_prim": "shelf",
+        "load_center_body_xy": [0.135, 0.0],
+        "support_z_world": 0.9712,
+        "_note": "UNCHANGED from coldwin52: the UPPER shelf (resolved top ~0.9707 world)."
+      }
+    }
+  },
+
+  "host_config": {
+    "_file": "scripts/twin/restock_manipulation/ros_host_config.json (resolved by ros_host.py). UNCHANGED from coldwin52 -- the carton_level block (preplace_level_gate + the PR 340 preplace_* keys, preplace_above_support, place_contact_release, gravity_compensation K=2850, closed_loop_sensor) is KEPT verbatim. This lane adds NO host key.",
+    "_carton_level_kept": "preplace_level_gate true, preplace_gate_bound_deg 1.0, preplace_max_segment_rad 0.08, preplace_approach_speed 0.05, preplace_approach_accel 0.05, preplace_above_support true, place_contact_release true, gravity_compensation {stiffness_nm_per_rad 2850, carton_mass_kg 0.45} -- the coldwin52 values."
+  },
+
+  "acceptance_coldwin53": {
+    "_how": "relaunch the coldwin52 config with the one new RUNTIME key phase_drive.carried_soft_phases=['preplace']; config_preflight PASS (incl. check_phase_drive_carried_soft).",
+    "CARTON_SEGMENT_TILT_preplace_executed_deg": "<= 1.5 (soft profile tracks the droop-compensated commanded path)",
+    "no_CARTON_TILT_trip_on_approach": "the carried preplace approach does NOT sustain over 2.0 deg for the 0.15 s grace",
+    "full_D6_lock_engages_at_place_start": "PR 339 validated: base drift <= 0.02 m over the loaded place descent",
+    "release_at_true_shelf_contact": "PLACE_CONTACT_RELEASE fires at the resolved support top, carton rests on the shelf",
+    "verify_place_pass": "post-place verification passes; the run advances past collect",
+    "watch": "the new CARTON_TICK ~10 Hz log -- confirm the preplace executed tilt stays <2.0 and that shoulder_pan does NOT stall behind the reference (the run-273 soft-track risk the stiff profile originally guarded)."
+  }
+}

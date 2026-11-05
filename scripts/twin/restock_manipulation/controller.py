@@ -333,6 +333,12 @@ class TransferController:
         # place-descent commanded-path replay). Logged as CARTON_SEGMENT_TILT at each carried phase exit.
         self._carton_seg_exec = {}
         self._carton_seg_planned = {}
+        # sim-preplace-sweep-tilt-v1: per-tick CARTON_TICK diagnostic for the carried phases (the welded
+        # carton attitude the CARTON_TILT grader reads + the EXECUTED joint positions), throttled to
+        # ~10 Hz of SIM time. coldwin50/51/52 tripped CARTON_TILT at the preplace sweep with NO per-tick
+        # carton-attitude / executed-joint feedback logged, so the dynamic-swing mechanism had to be
+        # inferred; this makes the next GPU run (coldwin53) diagnosable directly. None => never logged yet.
+        self._carton_tick_log_t = None
         # fm427 (A1) (run-323 cold lift): the fm419(a) COLLISION_STALE_PAUSE holds the post-attach lift on
         # a genuinely-stale collision stamp (run-323: collision_dt 0.52->0.65 s, the benign weld/ESDF
         # re-incorporation lag) by returning EMPTY controls -- a SILENT hold. Under render pacing that
@@ -1229,9 +1235,17 @@ class TransferController:
         worst = max(plan.max_roll, plan.max_pitch)
         gate = cl_cfg.preplace_gate_bound_deg
         self._carton_seg_planned['preplace'] = (plan.max_roll, plan.max_pitch)  # for CARTON_SEGMENT_TILT
+        # sim-preplace-sweep-tilt-v1: the gate predicts tilt from the COMMANDED path + the quasi-static
+        # droop model only. It is BLIND to the arm's closed-loop DRIVE DYNAMICS -- the stiff position
+        # profile (kp 1e6 / eff 2000) overshoots the welded load through the 1.64 rad wrist_2 sweep and
+        # swung the carton to 3-8 deg in coldwin50/51/52 while this line predicted <1 deg. The fix is the
+        # SOFT carried-preplace profile (phase_drive.carried_soft_phases) + the wrist-sweep reduction, NOT
+        # a tighter prediction; the honest caveat is stated here and the per-tick CARTON_TICK log + the
+        # CARTON_SEGMENT_TILT phase=preplace exit line carry the EXECUTED truth.
         print('CARTON_LEVEL_PREPLACE_GATE n=%d predicted_executed max roll=%.2f pitch=%.2f tilt=%.2f deg '
               '(target %.2f %s, bound %.2f) peak_joint_speed=%.3f rad/s peak_accel=%.3f rad/s^2%s -- '
-              'droop-compensated densified carried approach to the executed-level standoff'
+              'droop-compensated densified carried approach to the executed-level standoff; '
+              'COMMANDED+droop only, BLIND to drive-dynamics overshoot (see CARTON_TICK / CARTON_SEGMENT_TILT)'
               % (plan.waypoints_n, plan.max_roll, plan.max_pitch, plan.max_tilt, gate,
                  'within target' if worst <= gate else 'over target (sub-bound, dynamics cap + closed loop own it)',
                  cl_cfg.bound_deg, pk_v, pk_a,
@@ -1523,12 +1537,21 @@ class TransferController:
             self._tilt_debounce = cl.TiltDebounce(
                 bound_deg=self._carton_level.bound_deg,
                 grace_s=self._carton_level.tilt_grace_s * self._freshness_scale)
-        roll, pitch, _ = cl.carried_rpy(robot, list(measured), self._carton_up_in_tool,
-                                        self._carton_level.tool_link)
+        roll, pitch, tilt = cl.carried_rpy(robot, list(measured), self._carton_up_in_tool,
+                                           self._carton_level.tool_link)
         # sim-carton-level-preplace-v2: accumulate the EXECUTED max |roll|,|pitch| for this carried
         # phase (reported vs the planned peak at the phase exit). Cheap (reuses this tick's FK read).
         er, ep = self._carton_seg_exec.get(self.phase, (0.0, 0.0))
         self._carton_seg_exec[self.phase] = (max(er, abs(roll)), max(ep, abs(pitch)))
+        # sim-preplace-sweep-tilt-v1: per-tick carried-phase diagnostic at ~10 Hz SIM time. Logs the
+        # welded carton attitude (the grader quantity) AND the executed joint positions, so a coldwin53
+        # trip is diagnosable from the console directly (the dynamic-swing characterisation had to
+        # reconstruct this from the commanded trajectory because it was never logged).
+        if self._carton_tick_log_t is None or (now - self._carton_tick_log_t) >= 0.1:
+            self._carton_tick_log_t = now
+            joints = ' '.join('%.4f' % float(v) for v in measured)
+            print('CARTON_TICK phase=%s now=%.3f roll=%.2f pitch=%.2f tilt=%.2f deg | q=[%s]'
+                  % (self.phase, now, roll, pitch, tilt, joints), flush=True)
         return self._tilt_debounce.observe(now, roll, pitch)
 
     def _carton_seg_sample(self, phase, measured):
