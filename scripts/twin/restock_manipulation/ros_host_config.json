@@ -123,6 +123,8 @@
   "preplace_seeded_interior": true
  },
  "preplace_convergence_stall_s": 30.0,
+ "preplace_drift_recapture_rad": 0.05,
+ "preplace_drift_recapture_max": 3,
  "preplace_wrist_first": true,
  "station_pitch_hold": true,
  "station_hold_pitch_deg": -1.17,
