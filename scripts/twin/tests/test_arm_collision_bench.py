@@ -243,6 +243,29 @@ def test_ingest_trial_maps_to_schema(scenarios):
     assert set(ok.as_row()) == set(b.run_scenario(s, b.ArmModel.load(), b.reference_gate).as_row())
 
 
+# --------------------------------------------------------------------------- real merged gate adapter
+
+def test_perception_gate_adapter_blocks_static_defers_human(arm, scenarios):
+    # the AFTER adapter drives the MERGED PerceptionCollisionGate (PR #351). It is a dispatch BLOCKER:
+    # it refuses the static intrusions (strike prevented) and defers human-class obstacles to the
+    # human gate (proceeds). Skips if the merged gate modules are not on this branch.
+    pytest.importorskip('twin.restock_manipulation.collision_gate')
+    from twin.tools.arm_collision_perception_gate import perception_gate
+    static_blocked = human_deferred = 0
+    for s0 in scenarios:
+        s = b.with_full_coverage(s0)
+        r = b.run_scenario(s, arm, perception_gate)
+        human = any(o.motion.obstacle_class in ('person', 'hand') for o in s.obstacles)
+        if human:
+            # the perceived gate has no person in its ESDF -> it proceeds (human gate owns the STOP)
+            assert r.gate_behavior == 'clear'
+            human_deferred += 1
+        elif r.gate_behavior == 'refuse':
+            static_blocked += 1
+    assert static_blocked >= 4  # the perceived gate blocks the static intrusions in its scope
+    assert human_deferred == 2  # both moving person/hand deferred to the human gate
+
+
 def test_thresholds_cycle_time_bound_fails_over_budget(arm):
     # a gate that burns more cycle time than the bound fails the cycle-time threshold.
     def slow_gate(scenario, frames):

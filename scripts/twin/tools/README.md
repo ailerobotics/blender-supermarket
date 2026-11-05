@@ -111,6 +111,38 @@ obstacle; the straight-line-insert ESDF gate). With those (`--observe-all`), the
 the right call on **all 8** with **zero executed contacts** (S5: no contact on the static set,
 STOP-not-contact on the moving set).
 
+### AFTER numbers (CPU, merged features on `fm/twin-robot-in-store-boot-v1`)
+
+With PR #350 (cart as a cuMotion world obstacle) and PR #351 (perceived-clearance gate + phase-shared
+mast) merged:
+
+| Gate (full coverage, 30 mm) | Result |
+|---|---|
+| `reference` `--observe-all` | **8/8** verdict-match, **0** executed contacts — the target behaviour |
+| real merged `PerceptionCollisionGate` | **5/6 static intrusions refused before motion** (strike prevented) |
+
+```bash
+# the real merged gate (PR #351) via the published module:function hook
+PYTHONPATH=scripts python3 scripts/run_arm_collision_bench.py \
+    --gate twin.tools.arm_collision_perception_gate:perception_gate --observe-all \
+    --out <scratch>/after-real-gate
+```
+
+The merged gate is a **dispatch BLOCKER** — it `refuse`s/`hold`s before motion; it does not itself
+`avoid` (re-plan a detour) or `slow_stop_resume` (those are the `sim-arm-reactive-replan` lane, built
+on its hook points, not yet merged). So a `refuse` here is the real gate *preventing the strike*, which
+is what the AFTER "no contact" number measures. Scope, honestly:
+
+- **5/6 static** intrusions are refused by the perceived gate. The 6th (set-down cart cage post) is
+  cart geometry → handled by the merged **cart world obstacle** (PR #350, cuMotion); the perceived gate
+  defers it by design (`README_perception.md`, "Set-down + the gate").
+- Both **moving person/hand** scenarios are the **human gate's** scope — people are never segmented
+  into the arm ESDF; the human gate owns the STOP. The perceived gate correctly proceeds.
+
+The `twin.tools.arm_collision_perception_gate:perception_gate` adapter uses the sibling lane's own
+published hooks verbatim (`collision_gate.PerceptionCollisionGate` + `esdf_source.AnalyticBoxEsdfSource`
++ `tools.replay_collect_gate.replay_gate`).
+
 ### Bounded GPU proof (deliverable 4 — follow-up)
 
 The live boot is bounded (≤ 20 min), gated by the canonical GPU lock + `gpu_budget` + the Blender

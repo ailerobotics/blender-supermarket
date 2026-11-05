@@ -73,11 +73,21 @@
   ],
 
   "before_after_numbers": {
-    "_source": "CPU mock-ESDF, 8 scenarios, margin 30 mm, this branch (fm/sim-arm-collision-bench-v1)",
-    "baseline_current_stack": {"passed": "0/8", "verdict_match": "0%", "nominal_collisions": 8, "executed_collisions": 8},
-    "reference_current_coverage": {"passed": "3/8", "verdict_match": "38%", "executed_collisions": 5, "note": "works on the 3 wrist-framed cases; 5 blind spots = the measured gap"},
-    "reference_after_coverage_observe_all": {"passed": "8/8", "verdict_match": "100%", "executed_collisions": 0, "note": "S5: no contact static, STOP-not-contact moving, once the stack SEES the obstacles"},
-    "after_sibling_gate": "PENDING - plug --gate <sibling module:function> once the cart-world-obstacle / insert-gate / humangate-preempt PRs merge on fm/twin-robot-in-store-boot-v1",
-    "gpu": "PENDING - bounded collect-only run (command above) when the lock is free after the integration lane"
+    "_source": "CPU mock-ESDF, 8 scenarios, margin 30 mm",
+    "BEFORE_current_stack": {
+      "_branch": "pre-merge (PR #352 baseline)",
+      "baseline_raw": {"passed": "0/8", "verdict_match": "0%", "nominal_collisions": 8, "executed_collisions": 8, "note": "the current stack has NO arm-collision gate"},
+      "reference_current_coverage": {"passed": "3/8", "verdict_match": "38%", "executed_collisions": 5, "note": "collision-aware already works on the 3 wrist-framed cases; the 5 blind spots are the measured gap"}
+    },
+    "AFTER_merged_features": {
+      "_branch": "fm/twin-robot-in-store-boot-v1 with PR #350 (cart world obstacle) + PR #351 (perceived-clearance gate + mast), 30 mm",
+      "reference_full_coverage_observe_all": {"passed": "8/8", "verdict_match": "100%", "executed_collisions": 0, "note": "the TARGET behaviour (incl. avoid/stop semantics) once the stack SEES the obstacles; S5 holds"},
+      "real_merged_perception_gate": {
+        "_gate": "twin.tools.arm_collision_perception_gate:perception_gate (drives the merged collision_gate.PerceptionCollisionGate)",
+        "static_blocked_before_motion": "5/6",
+        "note": "the merged gate is a dispatch BLOCKER: it refuses 5/6 static intrusions (strike prevented before motion). The 6th (set-down cart cage post) is cart geometry -> handled by the merged CART WORLD OBSTACLE (PR #350, cuMotion), which the perceived gate defers to by design (README_perception 'Set-down + the gate'). The 2 moving person/hand scenarios are the HUMAN GATE's scope (people are never segmented into the arm ESDF; the human gate owns the STOP). avoid/stop (richer than refuse) is the sim-arm-reactive-replan lane, built on these hook points, not yet merged."
+      }
+    },
+    "gpu": "PENDING - bounded collect-only run (command above) when the lock is free after the integration lane (coldwin64 + the perception lane session have priority); never --force"
   }
 }
