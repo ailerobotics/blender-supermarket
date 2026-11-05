@@ -28,6 +28,8 @@ from .cad_tool import defer_tool_collision_enabled as _defer_tool_collision
 from .transfer_mode import LIVE_POSE, transfer_mode
 from . import config_access
 from . import ground_truth_collect as gtc
+from . import contact_status_feedback as csf
+from .isaac_sensors import _contact_feedback_kwargs
 from .types import ProductProfile
 from ..restock.physics_step import freshness_scale_from_env
 
@@ -488,6 +490,25 @@ class CollectTargetBridge:
         # Ground-truth collect places there instead of the deck so cold and warm runs hand the transfer
         # the same carton pose. Empty => the existing _cart_target placement.
         self.gt_place_slot = dict(gt_place_slot or {})
+        # sim-gripper-status-relay-v1 (coldwin65): opt-in (RESTOCK_CONTACT_STATUS_FEEDBACK=1, default off =>
+        # byte-identical). When on, every host-facing /sensors packet this bridge builds carries the gripper
+        # contact-feedback (gripper_enabled / seal_gap_mm / seal_pad_angle_deg / seal_hit_target) + a
+        # gripper_status_time stamp, read best-effort from the NativePanelContact probe (the same source as
+        # the SEAL_DIAG log). Without it the fields stayed at their inert defaults for EVERY packet, so the
+        # host's contact_require_suction_enabled guard read a starved enabled=False and e-stopped a sealing
+        # pick (coldwin65). PR 356 populated these only in the non-host-facing isaac_sensors.capture.
+        self.contact_status_feedback = csf.enabled()
+        if self.contact_status_feedback:
+            print('CONTACT_STATUS_FEEDBACK on: host-facing /sensors carries gripper_enabled/seal_* + '
+                  'gripper_status_time every tick (%s=1)' % csf.ENV, flush=True)
+
+    def _contact_status_kwargs(self, now):
+        """sim-gripper-status-relay-v1: the gripper contact-feedback kwargs for the host-facing /sensors
+        packet, read from the NativePanelContact probe with a sim-clock sample time. Empty dict (=> Sensors
+        defaults => byte-identical) when RESTOCK_CONTACT_STATUS_FEEDBACK is off or the probe yields nothing."""
+        if not self.contact_status_feedback:
+            return {}
+        return _contact_feedback_kwargs(self.contact, now)
 
     def set_shelf_target_provider(self, provider):
         self.shelf_provider = provider
@@ -873,7 +894,8 @@ class CollectTargetBridge:
         # fm488: GT collect has no camera framing the pick either; carry now+window so the collect grasp's
         # gripper command is not refused 'missing acquisition deadline' (the cold collect-only failure).
         return Sensors(now, observations, cart_target, parked, bool(self.contact.read()), now,
-                       self._collision_time(), joints, (), float(now), now + 300.0, placed_pose)
+                       self._collision_time(), joints, (), float(now), now + 300.0, placed_pose,
+                       **self._contact_status_kwargs(now))
 
     def _capture_transfer(self, now):
         """Transfer sensing: the carton on the cart (derived cart pose, controlled asset) as the
@@ -977,7 +999,8 @@ class CollectTargetBridge:
         # has no camera framing the pick to stamp this (the rendered camera path sets now+300), so stamp it
         # here; the controller checks it on the sim clock and a 300 s budget never expires mid-grasp.
         return Sensors(now, (obs,), tgt, parked, bool(self.contact.read()), now,
-                       self._collision_time(), joints, (), float(now), now + 300.0, placed_pose)
+                       self._collision_time(), joints, (), float(now), now + 300.0, placed_pose,
+                       **self._contact_status_kwargs(now))
 
     def _collision_time(self):
         # fm415: hold last-good collision_time so a -1 mirror-gap tick at the weld never reaches the
@@ -1029,7 +1052,8 @@ class CollectTargetBridge:
             print(f'COLLECT_SURVIVE calls={self._calls} source-occluded, carton attached + parked -> '
                   f'arm-feedback packet (contact={bool(self.contact.read())})', flush=True)
         return Sensors(now, (), None, parked, bool(self.contact.read()), now,
-                       self._collision_time(), joints, (), float(now), None, placed_pose)
+                       self._collision_time(), joints, (), float(now), None, placed_pose,
+                       **self._contact_status_kwargs(now))
 
     def capture(self, now, source, destination):
         from twin.restock_manipulation.types import Sensors, Observation
@@ -1109,7 +1133,8 @@ class CollectTargetBridge:
                        self._collision_time(), joints, (), float(target.stamp),
                        target.valid_until_steady, placed_pose,
                        # fm449: carry the source's clean-this-tick verdict to the host collect gate.
-                       collect_source_clean=bool(getattr(target, 'clean', False)))
+                       collect_source_clean=bool(getattr(target, 'clean', False)),
+                       **self._contact_status_kwargs(now))
 
 
 def _build_runtime(*, app, assembly, params, output):

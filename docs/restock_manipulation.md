@@ -258,6 +258,23 @@ driving the same latch path the plugin flag drives. The guards read new opt-in `
 `docs/examples/pick-contact-seal-fallback-fragment.json`. CPU tests:
 `tests/test_pick_contact_seal_fallback.py`.
 
+**Gripper-status feedback to the host** (sim-gripper-status-relay-v1, coldwin65). The guards above read
+the **host-facing** `/sensors` packet, but those feedback fields were only ever populated in
+`isaac_sensors.Sensors.capture` — **not** in `isaac_factory.CollectTargetBridge`
+(`_capture_ground_truth_collect`/`capture`/`_capture_transfer`/`_survival_packet`), which is what the live
+mission publishes. So the host saw the **all-default** feedback (`enabled=False`, `gap=None`, `hit=False`)
+on every tick regardless of the true Isaac state, and `contact_require_suction_enabled` e-stopped coldwin65's
+pick while the plugin was actually `Closing`/`Closed` with the gap closing (coldwin64 sealed the identical
+pick only because nothing read that starved view). **Not** the last-value `/manipulation/status` relay: the
+enable landed, and `/sensors` has no heartbeat/last-value drop. Fix: the opt-in env
+`RESTOCK_CONTACT_STATUS_FEEDBACK=1` (`contact_status_feedback.py`) makes the `CollectTargetBridge` capture
+paths carry the gripper feedback + a `gripper_status_time` stamp every tick (off ⇒ byte-identical); and
+`contact_require_suction_enabled` now reads an **authoritative** status — it aborts only on a **fresh**
+not-enabled, and on an **absent** status logs `CONTACT_STATUS_STALE` and continues the bounded over-press
+(never aborts on staleness alone; optional extra bound `contact_status_max_age_s`). A genuine lost-enable
+(cw63's fresh `Open`) still fails fast. Recommended ON values for the next complete run:
+`docs/examples/gripper-status-relay-fragment.json`. CPU tests: `tests/test_gripper_status_relay.py`.
+
 **Collision-stale pause keep-alive + wall budget** (`RESTOCK_COLLISION_PAUSE_WALL_S`, opt-in, default
 `0` = off ⇒ the legacy empty-control pause, byte-identical): the fm419(a) `COLLISION_STALE_PAUSE` holds
 the post-attach lift while the (held) carton's collision stamp is briefly stale — the benign weld/ESDF
@@ -353,6 +370,35 @@ contact/suction implementation; collision attachment must never teleport an obje
 `emergency_stop()` immediately holds the task-owned simulated arm, in addition to
 ROS action cancellation. A late action acceptance after cancellation is canceled.
 Use a mutually exclusive callback group for controller state and sensor callbacks.
+
+## Carried pre-place wrist hold (sim-preplace-wrist2-hold-v1)
+
+The carried pre-place runs on the soft drive (the swing fix) with shoulder_pan force-stiffened
+(`phase_drive.carried_joint_profile`) so it holds its goal through the 1.64 rad wrist_2 sweep. A
+remaining failure is the wrist **give-way**: a wrist that has already reached its target (e.g. wrist_2
+at 0.6678 after leg 1) can be **back-driven off it** by leg 2's shoulder_pan sweep while still on the
+soft hold (cw66 collapsed wrist_2 to a -0.3264 limit cycle; cw64 ran the same trajectory and recovered
+— a coin toss). The static hold is trivial (gravity on wrist_2 ≈ 0.045 N·m); the give-way is purely the
+**dynamic** pan-sweep reaction on the soft **held** wrist.
+
+Two opt-in, default-off (byte-identical) mechanisms remove the coin toss:
+
+- **Hold-firm-on-arrival** (RUNTIME `phase_drive.hold_firm_on_arrival`, `preplace_hold.HoldFirmOnArrival`
+  + `isaac_port`): once a carried-pre-place joint arrives at its *settled* commanded target it is
+  swing-safe to stiffen (it is no longer moving), so its PhysX drive is switched to the firm hold profile
+  and it logs `PREPLACE_HOLD_FIRM`. An arrived wrist then cannot be back-driven. shoulder_pan is excluded
+  by default (already firm). This is the **prevention**.
+- **Drift re-capture** (HOST `preplace_drift_recapture_rad` / `preplace_drift_recapture_max` on
+  `convergence_guard.ConvergenceGuard`): if a driven joint still drifts off its closest approach by more
+  than the bound, the guard emits a non-terminal `DriftRecapture`; the controller re-issues the armed
+  pre-place goal (re-driving the joint, which holds once the disturbing leg settles) and logs
+  `PREPLACE_DRIFT_RECAPTURE` once, instead of faulting at the 30 s stall. Bounded per joint — a joint that
+  keeps re-drifting still falls through to the terminal `PHASE_CONVERGENCE` fail-by-name. This is the
+  **backstop**.
+
+The 2.0° carton bound is untouched (firming a held joint does not move it, so the predicted tilt is
+unchanged). Recommended ON values + acceptance: `docs/examples/preplace-wrist2-hold-fragment.json`; CPU
+proof (incl. the real cw66 wrist_2 replay): `scripts/twin/tests/test_preplace_wrist2_hold_v1.py`.
 
 ## Reuse inventory and external work
 

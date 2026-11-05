@@ -164,6 +164,45 @@ active trips by name on the SIM leg. State-level guards: `test_restock_host.py` 
 the release one-shot), `test_restock_station.py` (`StationClient.pause` sends `pause` + frees the client),
 `test_restock_runtime.py` (couple-start pause wiring).
 
+## coldwin64 place-descent e-stop: phase-scoped suspension of the two sensor-stream watchdogs
+
+coldwin64 passed the whole run up to and including the loaded set-down (seeded pre-place converged at
+1.09 deg, the full six-axis base lock held at peak 125.8/600, the carton was placed and released at true
+shelf contact), then was stopped by a watchdog, not by the manipulation. Under `sensing_stride 8` plus a
+2nd full-resolution render for `live_pose`, the station/source decode `/sensors` stream legitimately
+stalls across the slow loaded place descent — sim gaps well above the 1.0 s `SENSOR_WATCHDOG_S` per-frame
+bound while the sim is healthy. Two sibling watchdogs both watch that stalling stream and both tripped:
+
+1. **`RosTransferBridge._watchdog` per-frame `/sensors` SIM bound** — `HOST_FAULT_ESTOP phase=place reason=
+   'sensor stream watchdog expired'` (coldwin64 host-stack.log line 32267, ~sim 268 s).
+2. **The parked collect station's liveness watchdog** (`incorporation_ack.py`) — the host fault cascaded
+   into `STATION_ESTOP_PUBLISH site=tick reason='parked heartbeat lost: sim gap 30.02 s'` (line 33892),
+   a latched global `/manipulation/stop`, and an endless collect retry loop.
+
+The fix (sim-robust-place-descent-watchdog-suspend-v1) suspends **only** that one window, keeping both
+watchdogs tight everywhere else:
+
+- **HOST key `place_descent_sensor_watchdog_suspend`** (`ros_host.py` → `RosTransferBridge`): while
+  `controller.in_loaded_place_descent()` (phase `place`, carton held) the per-frame SIM bound is suspended
+  (its anchor is kept fresh so it cannot trip and the resume sees no stale gap); `last_packet_wall` is
+  **never** touched, so the 180 s `SENSOR_STREAM_WALL_BACKSTOP_S` stays armed and a genuinely frozen sim is
+  still caught inside the window. Logs `SENSOR_WATCHDOG_SUSPENDED phase=place reason=loaded_descent …` on
+  entry and `SENSOR_WATCHDOG_REARMED …` on release / phase exit. Never suspended outside the window.
+- **RUNTIME key `collect_place_station_pause`** (`isaac_bundle.py` → `RuntimeAdapter`): when the collect op
+  enters the loaded place descent, `pause_station(suspend_only=True)` pauses the parked collect station the
+  same way the between-ops couple tow does (host state `paused`, not faulted → no global stop). One-shot per
+  collect; the next op (couple) re-prepares a fresh epoch. Logs `COLLECT_PLACE_STATION_PAUSE …`.
+
+Both default off ⇒ byte-identical, and both are registered in `config_preflight.KEY_CONSUMER` (HOST and
+RUNTIME respectively) so a key filed in the wrong config file is refused before the GPU boot. They REPLACE
+the coldwin65 env-widen stopgap (`RESTOCK_SENSOR_WATCHDOG_S` / `RESTOCK_STATION_SIM_GAP_S`), which loosens
+the watchdogs for the whole run. Recommended ON values + bounded-GPU proof:
+[`docs/examples/place-descent-watchdog-suspend-fragment.json`](examples/place-descent-watchdog-suspend-fragment.json).
+CPU proof: `test_ros_adapter_watchdog.py` (`PlaceDescentSensorWatchdogSuspend` — suspend over the window,
+the frozen-sim WALL backstop still tripping while suspended, key-off still tripping, re-arm on exit),
+`test_restock_runtime.py` (`test_collect_place_pauses_the_parked_station_once_when_enabled` /
+`_off_never_suspend_pauses`), `test_config_preflight.py` (both keys registered + mis-placement refused).
+
 ## Timer table
 
 Legend — **clock**: `SIM` (node/sim clock, pace-safe), `WALL` (monotonic), `SIM+WALL` (sim primary +
@@ -180,8 +219,9 @@ earlier), `converted` (this lane), `wall-backstop` (kept wall by design — boun
 | inline total-cap in `_poll` plan_result | same budget at the re-plan fail-fast | **SIM**+WALL | **converted** (now calls `planning_wall_exceeded()`) |
 | `PLAN_SIM_DEADLINE_S` (env, default 30) | per-dispatch ik/plan_accept/plan_result deadline (`_arm_plan_deadline`) | SIM | sim-clocked (PR 228) |
 | `sim_execute_budget` / `EXECUTE_SETTLE_MARGIN_S` / `MOVE_SIM_DEADLINE_SCALE` | per-trajectory execution deadline | SIM | sim-clocked |
-| `SENSOR_WATCHDOG_S` (env, default 1) | per-frame /sensors freshness | SIM | sim-clocked; paired with the wall backstop below |
-| `SENSOR_STREAM_WALL_BACKSTOP_S` (env, default 30) | /sensors frozen-sim backstop | WALL (backstop) | wall-backstop (frozen sim can't advance the SIM per-frame bound) |
+| `SENSOR_WATCHDOG_S` (env, default 1) | per-frame /sensors freshness | SIM | sim-clocked; paired with the wall backstop below. **Phase-scoped suspend** over the loaded place descent — see note below |
+| `SENSOR_STREAM_WALL_BACKSTOP_S` (env, default 30) | /sensors frozen-sim backstop | WALL (backstop) | wall-backstop (frozen sim can't advance the SIM per-frame bound); **stays armed even while the per-frame bound is place-descent-suspended** |
+| `place_descent_sensor_watchdog_suspend` (HOST key, default off) | suspend the per-frame `SENSOR_WATCHDOG_S` bound ONLY while `controller.in_loaded_place_descent()` (phase `place`, carton held) | SIM (suspend) | sim-robust-place-descent-watchdog-suspend-v1 — see note below |
 | `STARTUP_GRACE_SIM_S` (env `RESTOCK_STARTUP_GRACE_SIM_S`, default 5) | first-frame "no initial sensor frame" grace | **SIM**+WALL | **converted**; `startup_grace_wall_backstop_s` derived generous |
 | `STARTUP_GRACE_S` (env `RESTOCK_STARTUP_GRACE_S`, default 5) | wall floor feeding the startup backstop (kept for back-compat) | WALL (backstop) | **converted** (role → backstop floor) |
 | `MOVE_WALL_TIMEOUT_S` / `self.timeout` (env, default 25) | legacy per-dispatch wall deadline; now used only to hold the deadline AHEAD during a respawn wait | WALL | sim-clocked for active waits (superseded by `PLAN_SIM_DEADLINE_S`); residual use bounded by `RESPAWN_WAIT_CAP_S` |

@@ -40,10 +40,15 @@ SIM_NOW = 1000.0  # fixed fake node-clock reading (seconds)
 def _bridge(*, phase='observe', first_frame=False, job_age=None, job_sim_age=None,
             packet_wall_age=0.1, sim_gap=0.0, wall_backstop=30.0,
             startup_grace_sim=5.0, startup_grace_wall_backstop=250.0,
-            transit_pause_wall=1200.0, transit_start_age=None):
+            transit_pause_wall=1200.0, transit_start_age=None,
+            suspend_place_descent_watchdog=False, held=False):
     b = RosTransferBridge.__new__(RosTransferBridge)
     b.watchdog_seconds = 1.0
     b.startup_grace_seconds = 5.0
+    # sim-place-descent-watchdog-suspend-v1: phase-scoped per-frame SIM-bound suspension over the loaded
+    # place descent (off by default => byte-identical).
+    b.suspend_place_descent_watchdog = suspend_place_descent_watchdog
+    b._place_watchdog_suspended = False
     # sim-robust-host-timers-audit-fix-v1: SIM-primary startup grace + generous frozen-sim wall backstop.
     b.startup_grace_sim_seconds = startup_grace_sim
     b.startup_grace_wall_backstop_s = startup_grace_wall_backstop
@@ -65,7 +70,8 @@ def _bridge(*, phase='observe', first_frame=False, job_age=None, job_sim_age=Non
     emitted = []
     b._emit = lambda result: emitted.append(result)
     b.controller = NS(phase=phase, _fail=lambda reason: NS(reason=reason, controls=()),
-                      retry_or_fail_move=lambda reason: NS(reason=reason, controls=()))
+                      retry_or_fail_move=lambda reason: NS(reason=reason, controls=()),
+                      in_loaded_place_descent=lambda: phase == 'place' and bool(held))
     return b, emitted
 
 
@@ -235,6 +241,67 @@ class TransitSensingPause(unittest.TestCase):
         b._watchdog()
         self.assertIsNone(b._transit_pause_start_wall)      # cleared so the next transit starts fresh
         self.assertEqual(emitted, [])
+
+
+class PlaceDescentSensorWatchdogSuspend(unittest.TestCase):
+    # sim-place-descent-watchdog-suspend-v1 (coldwin64): during the loaded place descent (collect set-down /
+    # live_pose transfer place) the /sensors stream legitimately stalls under the full-six-axis base lock +
+    # deep render pacing, so the per-frame SIM bound would false-trip 'sensor stream watchdog expired'.
+    # Opt-in: suspend ONLY the SIM bound over that window; keep the WALL backstop armed so a frozen sim is
+    # still caught. Re-armed on release / phase exit. Key off => the legacy behaviour (byte-identical).
+    def test_sim_stall_in_loaded_place_descent_does_not_trip_when_enabled(self):
+        # The exact coldwin64 trip: a 30 s SIM gap in phase=place with the carton held. Suspended => no fail.
+        b, emitted = _bridge(phase='place', held=True, first_frame=True, sim_gap=30.0,
+                             packet_wall_age=0.1, suspend_place_descent_watchdog=True)
+        b._watchdog()
+        self.assertEqual(emitted, [])
+        self.assertTrue(b._place_watchdog_suspended)
+        # anchor refreshed to 'now' so the resume after the window is clean
+        self.assertIsNotNone(b.last_packet_sim)
+        self.assertLessEqual(SIM_NOW - b.last_packet_sim, 1e-6)
+
+    def test_same_sim_stall_trips_when_key_off(self):
+        # Key off (default): the IDENTICAL place-phase SIM gap still trips -> proves the known coldwin64
+        # fault with the key off (byte-identical legacy behaviour).
+        b, emitted = _bridge(phase='place', held=True, first_frame=True, sim_gap=30.0,
+                             packet_wall_age=0.1, suspend_place_descent_watchdog=False)
+        b._watchdog()
+        self.assertEqual([e.reason for e in emitted], ['sensor stream watchdog expired'])
+
+    def test_wall_backstop_still_fires_while_suspended(self):
+        # A genuinely FROZEN sim inside the window (no frame ever arrives): the SIM bound is suspended but
+        # the 180 s wall backstop must still hard-stop it (last_packet_wall is never touched by the suspend).
+        b, emitted = _bridge(phase='place', held=True, first_frame=True, sim_gap=30.0,
+                             packet_wall_age=181.0, wall_backstop=180.0,
+                             suspend_place_descent_watchdog=True)
+        b._watchdog()
+        self.assertEqual(len(emitted), 1)
+        self.assertTrue(emitted[0].reason.startswith('sensor stream wall backstop expired'), emitted[0].reason)
+        self.assertIn('gap=181.0s > 180.0s', emitted[0].reason)
+
+    def test_not_suspended_outside_the_window_even_when_enabled(self):
+        # Enabled but NOT in the loaded descent (phase=place but carton NOT held -> in_loaded_place_descent
+        # False): the SIM bound is live and still trips. Suspension never applies outside the window.
+        b, emitted = _bridge(phase='place', held=False, first_frame=True, sim_gap=2.0,
+                             packet_wall_age=0.1, suspend_place_descent_watchdog=True)
+        b._watchdog()
+        self.assertEqual([e.reason for e in emitted], ['sensor stream watchdog expired'])
+        self.assertFalse(b._place_watchdog_suspended)
+
+    def test_rearms_on_leaving_the_window(self):
+        # Suspend on a held place tick, then leave the window (release): the latch clears so a following
+        # non-place tick measures the SIM bound normally (and would trip a real stall there).
+        b, emitted = _bridge(phase='place', held=True, first_frame=True, sim_gap=30.0,
+                             packet_wall_age=0.1, suspend_place_descent_watchdog=True)
+        b._watchdog()
+        self.assertTrue(b._place_watchdog_suspended)
+        # now in 'release' (held carton released / phase exit): rearm, and a fresh small gap does not trip
+        b.controller.phase = 'release'
+        b.controller.in_loaded_place_descent = lambda: False
+        b.last_packet_sim = SIM_NOW - 0.05
+        b._watchdog()
+        self.assertEqual(emitted, [])
+        self.assertFalse(b._place_watchdog_suspended)
 
 
 if __name__ == '__main__':

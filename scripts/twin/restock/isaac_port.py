@@ -252,6 +252,26 @@ class IsaacPort:
         self._collect_observe_forced=0
         self._arm_joints=tuple(arm_joints) if arm_joints else None
         self._last_drive_gains=None
+        # sim-preplace-wrist2-hold-v1: HOLD-FIRM-ON-ARRIVAL. Once a carried-preplace joint arrives at its
+        # settled commanded target it is swing-SAFE to stiffen (no longer moving), so switch its PhysX drive
+        # to the firm hold profile -- then a later leg's reaction cannot back-drive it (cw66: the leg-2
+        # shoulder_pan sweep back-drove the arrived-but-soft wrist_2 to a -0.32 limit cycle). The DECISION is
+        # the pure HoldFirmOnArrival (reads the gate's streamed command vs measured); this applies the firm
+        # gains on the robot it already holds, scoped to preplace. Off / no config => None => byte-identical.
+        self._hold_firm_cfg=None
+        self._hold_firm=None
+        self._hold_firm_phase=None
+        if self._phase_drive is not None and self._arm_joints:
+            from .physics_setup import resolve_hold_firm
+            self._hold_firm_cfg=resolve_hold_firm(self._phase_drive)
+            if self._hold_firm_cfg is not None:
+                from twin.restock_manipulation.preplace_hold import HoldFirmOnArrival
+                from twin.restock_manipulation.cad_tool import ARM_JOINTS as _HF_ARM
+                self._hold_firm=HoldFirmOnArrival(
+                    _HF_ARM, tol_rad=self._hold_firm_cfg['tol_rad'],
+                    settle_eps_rad=self._hold_firm_cfg['settle_eps_rad'],
+                    dwell_ticks=self._hold_firm_cfg['dwell_ticks'], enabled=True,
+                    hold_joints=self._hold_firm_cfg['joints'])
         # Localization uncertainty pad added to the nav footprint radius. The real rig keeps the
         # conservative 0.05 m default; this port feeds IDEAL simulated rigid-body proprioception
         # (sensor_models['localization']), so a sim run may set it to the measured ~0 to avoid an
@@ -546,11 +566,56 @@ class IsaacPort:
                     set_arm_drive_gains(self.robot, self._arm_joints, g['kp'], g['kd'], g['eff'])
                     self._last_drive_gains=g
                     print(f'PHASE_DRIVE phase={phase} -> kp={g["kp"]:g} kd={g["kd"]:g} eff={g["eff"]:g}',flush=True)
+        # sim-preplace-wrist2-hold-v1: after the per-phase gains are set, firm any arrived preplace joint
+        # (see __init__). Runs AFTER the per-phase plan and does NOT touch self._last_drive_gains, so the
+        # next phase transition still re-applies the full per-phase plan and restores the soft wrist drive.
+        self._apply_hold_firm(phase)
         if self._set_render_suspended is None:
             return
         suspended=_render_suspended(phase, self.current_action, self._collect_keep_source_render)
         self._sensing_suspended=suspended
         self._set_render_suspended(suspended)
+
+    def _apply_hold_firm(self, phase):
+        """sim-preplace-wrist2-hold-v1: during preplace, latch each arrived joint to the firm hold drive.
+        Pure decision (HoldFirmOnArrival) + a per-joint gain set. Resets the latches on entering/leaving
+        preplace (the phase transition re-applies the full per-phase plan, restoring the soft wrist drive).
+        No-op when the config is off or no command has streamed yet => byte-identical."""
+        if self._hold_firm is None or self.robot is None:
+            return
+        if phase != 'preplace':
+            if self._hold_firm_phase == 'preplace':
+                self._hold_firm.reset()
+            self._hold_firm_phase = phase
+            return
+        if self._hold_firm_phase != 'preplace':
+            self._hold_firm.reset()
+            self._hold_firm_phase = 'preplace'
+        gate = getattr(self, 'command_gate', None) or (
+            getattr(self.native_transport, 'command_gate', None) if self.native_transport is not None else None)
+        if gate is None:
+            return
+        cmd = getattr(gate, '_last_cmd_q', None)
+        if cmd is None:
+            return
+        try:
+            measured = gate.measured()
+        except Exception:
+            return
+        newly = self._hold_firm.observe(cmd, measured)
+        if not newly:
+            return
+        from .physics_setup import set_arm_drive_gains_per_joint
+        firm = self._hold_firm_cfg['firm']
+        try:
+            set_arm_drive_gains_per_joint(self.robot, {j: dict(firm) for j in newly})
+        except Exception as exc:
+            print('PREPLACE_HOLD_FIRM apply failed: %s' % exc, flush=True)
+            return
+        print('PREPLACE_HOLD_FIRM joints=%s -> kp=%g eff=%g (arrived on the soft carried drive; firmed the '
+              'hold so a later leg cannot back-drive them)'
+              % (','.join(n.replace('ur_', '').replace('_joint', '') for n in newly),
+                 firm['kp'], firm['eff']), flush=True)
 
     def _frame_plan(self, upcoming_tick):
         """(sensing_tick, record_tick) for `upcoming_tick`: whether a sensing stage needs a

@@ -84,6 +84,7 @@ KEY_CONSUMER = {
     'contact_seal_diag_dwell_ticks': HOST,        # consecutive ticks the seal must hold (default 5)
     'contact_seal_diag_max_gap_mm': HOST,         # seal gap bound for the accept (default 0.5 mm)
     'contact_seal_diag_max_angle_deg': HOST,      # pad-vs-face angle bound for the accept (default 1.0 deg)
+    'contact_status_max_age_s': HOST,             # sim-gripper-status-relay-v1: optional extra staleness bound (sim s) on the gripper status the require_suction_enabled guard reads (0 => presence-only)
     'arm_max_speed': HOST,
     'plan_wall_cap_s': HOST,
     'grasp_track_m': HOST,        # fm410: lift-probe carton-tracking physics confirm threshold (m)
@@ -95,6 +96,11 @@ KEY_CONSUMER = {
     # robot_description is the file verbatim (byte-identical, the historical empty-geometry path).
     'moveit_mesh_uris': HOST,
     'esdf_boot_ack_grace_s': HOST,  # sim-robust-esdf-boot-gate-v1: SIM-clock boot grace for the first valid ESDF ack
+    # sim-place-descent-watchdog-suspend-v1: suspend the per-frame /sensors SIM watchdog ONLY during the
+    # loaded place descent (RosTransferBridge, read by ros_host -> the HOST manip process). The 180 s wall
+    # backstop stays armed throughout. Default off => byte-identical. Sibling of the RUNTIME
+    # collect_place_station_pause; registered so a key filed in the RUNTIME config is refused (run-277 slip).
+    'place_descent_sensor_watchdog_suspend': HOST,
     # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority over the free-space
     # arm legs (ros_host -> TransferController). reactive_arm_human toggles it; reactive_arm is the optional
     # tuning dict (gate dwell/fractions, backstop params, replannable_phases). Absent/False => byte-identical.
@@ -110,6 +116,10 @@ KEY_CONSUMER = {
     # fallback (ros_host -> TransferController). Both opt-in, default off => byte-identical.
     'preplace_convergence_stall_s': HOST,
     'preplace_wrist_first': HOST,
+    # sim-preplace-wrist2-hold-v1: drift re-capture on the convergence guard (re-issue a back-driven joint
+    # instead of faulting). Both opt-in, default 0 => off => byte-identical.
+    'preplace_drift_recapture_rad': HOST,
+    'preplace_drift_recapture_max': HOST,
     # sim-preplace-leg2-level-v1: the held chassis attitude mirror (HOST keys for the carton-level FK so it
     # levels/measures the preplace in the WORLD frame) + the plan-derived phase budget + its margin.
     # station_pitch_hold/_pitch_deg/_roll_deg MIRROR the RUNTIME chassis_station_pitch_hold_* keys; absent =>
@@ -157,6 +167,10 @@ KEY_CONSUMER = {
     # sim-robust-cart-place-descent-v1: bounded base-settle tolerance for the loaded collect place;
     # isaac_bundle builds the RuntimeAdapter with it (orchestrate process), NOT ros_host.
     'collect_place_base_settle_m': RUNTIME,
+    # sim-place-descent-watchdog-suspend-v1: PAUSE the parked collect station for the loaded place descent
+    # (isaac_bundle builds the RuntimeAdapter with it -- the orchestrate process, RUNTIME). Sibling of the
+    # HOST place_descent_sensor_watchdog_suspend. Default off => byte-identical.
+    'collect_place_station_pause': RUNTIME,
     # sim-station-full-brake-place-v1: FULL-lock the base (translation + rotation) over the loaded
     # collect place descent so the welded from-above reaction cannot shove the translation-free base
     # (coldwin49). physics_setup.assemble reads them (RUNTIME) to build the MobileController. Default off
@@ -515,6 +529,22 @@ def check_phase_drive_carried_joint_profile(runtime_cfg):
     return problems
 
 
+def check_phase_drive_hold_firm(runtime_cfg):
+    """sim-preplace-wrist2-hold-v1: validate the opt-in ``phase_drive.hold_firm_on_arrival`` block via the
+    single resolver (so a malformed block is refused before any GPU boot, with the same message the port
+    would raise). No-op ([]) when the block is absent or disabled (byte-identical)."""
+    rc = runtime_cfg or {}
+    pd = rc.get('phase_drive')
+    if not isinstance(pd, dict) or not pd.get('hold_firm_on_arrival'):
+        return []
+    from twin.restock.physics_setup import resolve_hold_firm
+    try:
+        resolve_hold_firm(pd)
+    except ValueError as exc:
+        return [str(exc)]
+    return []
+
+
 def check_preplace_convergence_keys(host_cfg):
     """sim-preplace-per-joint-gains-v1: validate the opt-in HOST preplace convergence guard + sequencing
     fallback keys (read by ros_host -> TransferController).
@@ -546,7 +576,40 @@ def check_preplace_convergence_keys(host_cfg):
     wf = hc.get('preplace_wrist_first')
     if wf is not None and not isinstance(wf, bool):
         problems.append('preplace_wrist_first must be a boolean; got %r.' % (wf,))
+    # sim-preplace-wrist2-hold-v1: the opt-in drift re-capture bound + budget. The bound (rad) must be a
+    # finite positive number and BELOW the terminal stall tol (0.05 rad default) -- a re-capture at or above
+    # the tol can never fire before the converged-rearm, so it would be a dead key; the budget must be a
+    # non-negative integer. Both default off (absent => byte-identical). Re-capture needs the guard armed.
+    rr = hc.get('preplace_drift_recapture_rad')
+    if rr is not None:
+        try:
+            rv = float(rr)
+        except (TypeError, ValueError):
+            problems.append('preplace_drift_recapture_rad must be a number (rad; 0 => off); got %r.' % (rr,))
+        else:
+            if not math.isfinite(rv) or rv < 0:
+                problems.append('preplace_drift_recapture_rad must be a finite non-negative number (rad; '
+                                '0 => off); got %r.' % (rr,))
+            elif 0 < rv < 0.01:
+                problems.append('preplace_drift_recapture_rad=%g is below the convergence improvement eps '
+                                '(0.01 rad), so normal tracking jitter would trigger a re-capture storm. Use '
+                                'a bound above the eps (e.g. 0.05 rad).' % (rv,))
+    rm = hc.get('preplace_drift_recapture_max')
+    if rm is not None:
+        if isinstance(rm, bool) or not isinstance(rm, int) or rm < 0:
+            problems.append('preplace_drift_recapture_max must be a non-negative integer (per-joint '
+                            're-capture budget; 0 => off); got %r.' % (rm,))
+    if ((rr is not None and _positive(rr)) or (rm is not None and _positive(rm))) and not _positive(stall):
+        problems.append('preplace_drift_recapture_rad / preplace_drift_recapture_max need the convergence '
+                        'guard armed (preplace_convergence_stall_s > 0); set it or the re-capture is inert.')
     return problems
+
+
+def _positive(v):
+    try:
+        return math.isfinite(float(v)) and float(v) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def check_preplace_phase_budget(host_cfg):
@@ -908,6 +971,9 @@ def main(argv=None):
     # override (stiffen shoulder_pan so it holds against the wrist sweep; keep the tilt-injecting wrists
     # soft). Always on (not --require'd); no-op when absent.
     problems += check_phase_drive_carried_joint_profile(runtime_cfg)
+    # sim-preplace-wrist2-hold-v1: validate the opt-in phase_drive.hold_firm_on_arrival block (firm an
+    # arrived preplace joint so a later leg cannot back-drive it). Always on; no-op when absent.
+    problems += check_phase_drive_hold_firm(runtime_cfg)
     # sim-preplace-per-joint-gains-v1: validate the opt-in HOST preplace convergence/sequencing keys.
     problems += check_preplace_convergence_keys(host_cfg)
     # sim-preplace-leg2-level-v1: validate the held-chassis mirror keys + REPORT the plan-derived preplace

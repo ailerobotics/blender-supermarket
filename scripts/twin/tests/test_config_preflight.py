@@ -48,6 +48,28 @@ class CheckActivationTests(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn('MIS-PLACED', problems[0])
 
+    def test_place_descent_watchdog_suspend_keys_registered_to_the_right_side(self):
+        # sim-place-descent-watchdog-suspend-v1: the HOST per-frame watchdog-suspend key and its RUNTIME
+        # station-pause sibling are read by different processes, so a slip into the wrong file must be
+        # refused (the run-277 class). Present in the correct file => pass.
+        self.assertEqual(cp.KEY_CONSUMER['place_descent_sensor_watchdog_suspend'], cp.HOST)
+        self.assertEqual(cp.KEY_CONSUMER['collect_place_station_pause'], cp.RUNTIME)
+        host = {'place_descent_sensor_watchdog_suspend': True}
+        runtime = {'collect_place_station_pause': True}
+        self.assertEqual(cp.check_activation(
+            host, runtime,
+            ['place_descent_sensor_watchdog_suspend', 'collect_place_station_pause']), [])
+
+    def test_place_descent_watchdog_suspend_keys_misplaced_are_refused(self):
+        # Swap the two files: each key is now in the config its consumer does NOT read.
+        host = {'collect_place_station_pause': True}
+        runtime = {'place_descent_sensor_watchdog_suspend': True}
+        problems = cp.check_activation(
+            host, runtime,
+            ['place_descent_sensor_watchdog_suspend', 'collect_place_station_pause'])
+        self.assertEqual(len(problems), 2)
+        self.assertTrue(all('MIS-PLACED' in p for p in problems))
+
 
 class MainCliTests(unittest.TestCase):
     def setUp(self):

@@ -308,6 +308,14 @@ def main():
         # phase_drive.carried_joint_profile; these are the HOST-side guard + fallback.)
         preplace_convergence_stall_s=float(config.get('preplace_convergence_stall_s', 0.0)),
         preplace_wrist_first=bool(config.get('preplace_wrist_first', False)),
+        # sim-preplace-wrist2-hold-v1: opt-in DRIFT RE-CAPTURE on the convergence guard. When a driven
+        # preplace joint drifts off its closest approach by more than preplace_drift_recapture_rad, the
+        # guard re-issues the goal (re-driving the back-driven wrist) up to preplace_drift_recapture_max
+        # times per joint and logs PREPLACE_DRIFT_RECAPTURE once, instead of running the stall to a fault
+        # (cw66: the leg-2 pan sweep back-drove the arrived-but-soft wrist_2). Both <= 0 => inert =>
+        # byte-identical. Needs preplace_convergence_stall_s > 0 (the guard must be armed).
+        preplace_drift_recapture_rad=float(config.get('preplace_drift_recapture_rad', 0.0)),
+        preplace_drift_recapture_max=int(config.get('preplace_drift_recapture_max', 0)),
         # sim-preplace-leg2-level-v1: the held chassis attitude during the collect place. The station
         # parking brake pins the base off level (the RUNTIME chassis_station_pitch_hold_pitch_deg /
         # _roll_deg; coldwin56 pitch -1.17), so ur_base_link +Z is off world +Z and the shoulder_pan YAW
@@ -336,6 +344,10 @@ def main():
         contact_seal_diag_dwell_ticks=int(config.get('contact_seal_diag_dwell_ticks', 5)),
         contact_seal_diag_max_gap_mm=float(config.get('contact_seal_diag_max_gap_mm', 0.5)),
         contact_seal_diag_max_angle_deg=float(config.get('contact_seal_diag_max_angle_deg', 1.0)),
+        # sim-gripper-status-relay-v1: optional extra staleness bound (sim s) on the gripper status the
+        # require_suction_enabled guard reads; 0 => presence-only. The relay that FILLS the status is the
+        # Isaac-side RESTOCK_CONTACT_STATUS_FEEDBACK env (see docs/examples/gripper-status-relay-fragment.json).
+        contact_status_max_age_s=float(config.get('contact_status_max_age_s', 0.0)),
         fk_urdf=args.urdf,
         # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority over the
         # free-space arm legs (ported humangate fed by the vendored scripts/twin/humans evaluator; the
@@ -380,7 +392,12 @@ def main():
     # via config; the runtime.py sim-clock stall guard (PR 86) still catches a job that genuinely
     # never produces a frame, so the generous wall grace cannot hide a real stall.
     bridge = RosTransferBridge(node,controller,
-        startup_grace_seconds=float(config.get('startup_grace_seconds', 5.0)))
+        startup_grace_seconds=float(config.get('startup_grace_seconds', 5.0)),
+        # sim-place-descent-watchdog-suspend-v1: suspend the per-frame /sensors SIM watchdog ONLY while the
+        # controller is in the loaded place descent (the station/source decode stream legitimately stalls
+        # under the full-six-axis base lock + deep render pacing -- coldwin64). The 180 s wall backstop
+        # stays armed throughout. Default off => byte-identical.
+        suspend_place_descent_watchdog=bool(config.get('place_descent_sensor_watchdog_suspend', False)))
     # sim-host-status-watchdog-v1: the payload ack waits (RosPayloadSync._wait) block the main host
     # executor, silencing the controller-driven /manipulation/status stream for the whole bounded wait
     # (the grasp/weld attach, the post-move_group-respawn carton reconcile, the release detach). Pulse a
@@ -496,6 +513,9 @@ def main():
         # (phase_drive.carried_joint_profile), logged Isaac-side as PHASE_DRIVE_JOINT.
         'preplace_convergence_stall_s': controller.preplace_convergence_stall_s,
         'preplace_wrist_first': controller.preplace_wrist_first,
+        # sim-preplace-wrist2-hold-v1: effective drift re-capture bound (rad) + per-joint budget (0 = off).
+        'preplace_drift_recapture_rad': controller.preplace_drift_recapture_rad,
+        'preplace_drift_recapture_max': controller.preplace_drift_recapture_max,
     }), flush=True)
     # sim-collision-dt-render-lead-floor-v1: log the DERIVED collision/feedback freshness band once at
     # host start, so every run dir's host-stack.log records the floor/ceiling in force (the future-lead
