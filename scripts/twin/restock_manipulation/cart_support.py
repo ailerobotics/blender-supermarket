@@ -111,6 +111,58 @@ def override_slot_support_z(slot, support_z_world):
     return out
 
 
+#: sim-place-preplace-above-support-v1. A conservative world-z ceiling for the collect pre-place standoff
+#: carton bottom. The UR10 pedestal sits at ur_base_link world z ~0.50 and its vertical reach is ~1.3 m, so
+#: a standoff carton bottom beyond ~1.5 m world is outside the arm's reach for the far-forward place pose.
+#: The exact reachability is owned by the controller's level_place_ik (it raises -> falls back); this is the
+#: cheap pre-flight envelope that refuses an absurd clearance before a GPU boot.
+MAX_PLACE_STANDOFF_BOTTOM_Z_WORLD = 1.50
+
+
+def place_descent_from_support(resolved_top_z, clearance_m):
+    """The collect from-above place standoff carton-bottom world z and the descent length, when the
+    pre-place standoff is derived from the RESOLVED support top (sim-place-preplace-above-support-v1).
+
+    The standoff parks the carried carton bottom at ``resolved_top_z + clearance_m``; the from-above
+    descent then lowers it straight down to the support top, so the descent length is exactly
+    ``clearance_m``. Returns ``(standoff_bottom_z, descent_m)``. Pure/CPU. Raises on non-finite input."""
+    top = float(resolved_top_z)
+    clr = float(clearance_m)
+    if not (math.isfinite(top) and math.isfinite(clr)):
+        raise ValueError('place_descent_from_support needs finite resolved_top_z and clearance_m')
+    standoff_bottom = top + clr
+    return standoff_bottom, standoff_bottom - top
+
+
+def place_descent_problems(resolved_top_z, clearance_m, *,
+                           max_standoff_bottom_z=MAX_PLACE_STANDOFF_BOTTOM_Z_WORLD):
+    """Problems ([] == a usable from-above collect place descent) for ``config_preflight``
+    (sim-place-preplace-above-support-v1).
+
+    Given the resolved support top and the pre-place carton-bottom clearance, refuse:
+      * a NON-POSITIVE descent (``clearance_m <= 0``) -- exactly coldwin48's failure, where the standoff
+        sat at/below the support top so ``place_descent_drop_m`` read 0.0 and the contact-triggered weld
+        release fired in mid-air; and
+      * a standoff above the arm's reach (``standoff_bottom`` beyond ``max_standoff_bottom_z`` world).
+    Pure/CPU. The message names the computed standoff height and descent length so the log proves them."""
+    standoff_bottom, descent = place_descent_from_support(resolved_top_z, clearance_m)
+    problems = []
+    if descent <= 0:
+        problems.append(
+            f"collect place descent NON-POSITIVE: standoff carton bottom {standoff_bottom:.4f} m is at/below "
+            f"the resolved support top {float(resolved_top_z):.4f} m (descent {descent:.4f} m <= 0). The "
+            f"from-above contact-triggered weld release would fire in mid-air at the support top and the "
+            f"carton would fall (coldwin48). Set a positive preplace_support_clearance_m / "
+            f"place_above_clearance_m.")
+    if standoff_bottom > float(max_standoff_bottom_z):
+        problems.append(
+            f"collect place standoff ABOVE REACH: standoff carton bottom {standoff_bottom:.4f} m world "
+            f"(support top {float(resolved_top_z):.4f} + clearance {float(clearance_m):.4f}) exceeds the "
+            f"arm's reach ceiling {float(max_standoff_bottom_z):.2f} m. Lower the clearance or the selected "
+            f"support.")
+    return problems
+
+
 def height_consistency_problems(resolved_top_z, heights, *, tol_m=0.010):
     """Problems ([] == consistent) for ``config_preflight``: every named height in
     ``heights`` ({label: value|None}) must agree with the resolved support prim top

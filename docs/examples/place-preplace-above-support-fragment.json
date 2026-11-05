@@ -1,0 +1,64 @@
+{
+  "_comment": "sim-place-preplace-above-support-v1: derive the collect PRE-PLACE standoff from the RESOLVED support top so the from-above descent onto the SELECTED support (the Rollwagen UPPER shelf) is POSITIVE. ROOT CAUSE (coldwin48, CPU-reproduced in test_place_preplace_above_support_v1.py): PR 336 selected the shelf (COLLECT_PLACE_SUPPORT_Z resolved support top 0.9707 world, PLACE_SUPPORT_SELECT selector=shelf) and the one-height resolution (PR 335), the contact release (PR 333), the release serialization (PR 334) and the station hold all worked -- but the collect PRE-PLACE standoff was still the DECK-tuned fixed collect_place_preplace_shape. That shape parks the carried carton bottom at 0.937 world, 34 mm BELOW the shelf top 0.9707, so the place target (0.957,0.064,0.538 ur_base) sat ABOVE the fixed standoff (gripper_pad_tcp z 0.528 ur_base): place_descent_drop_m read 0.0 (PLACE_CONTACT_RELEASE_ARM phase=place start_carton_z=0.5271 descent_drop=0.0000), the contact-triggered weld release fired IMMEDIATELY in mid-air below the shelf, and the carton fell beside it (verify_place: 'carton not resting on deck', xy 1.212 bottom_gap -0.809). FIX: when preplace_above_support is on, the collect preplace standoff is re-targeted DIRECTLY ABOVE the place load-centre so the carton bottom sits at the resolved support top + the clearance; the standoff pose is solved by the SAME reach+level IK (level_place_ik) + droop model (K=2850) as the deck above-place path, seeded from the fixed shape, and fed to place_from_above. So the descent length is the clearance (~0.08 m) and the release fires at the true support top. The 2.0 deg bound, 0.15 s grace, carton dims, droop stiffness, station hold, release serialization and tow lanes are ALL UNCHANGED. Off (default) => the fixed shape is used unchanged (byte-identical).",
+
+  "_distinct_from_preplace_above_place": "preplace_above_support is a NEW HOST carton_level flag, DISTINCT from the deck v1 remedy preplace_above_place (which config_preflight.check_carton_level REFUSES because its above-place IK drifted the carton ~93 mm toward the cage MOUTH posts -> post_2 edge pivot, coldwin41). The higher, OPEN upper shelf has no front posts over it, so the same 'raise the standoff above the support' operation is safe here. The controller shares one method (_preplace_above_place_goal) for both lanes and prefers the support-aware clearance when both are on.",
+
+  "env": {
+    "RESTOCK_PLACE_ON_DECK": "1",
+    "RESTOCK_COLLECT_GROUND_TRUTH": "1",
+    "RESTOCK_VERIFY_PLACE": "1",
+    "_note": "UNCHANGED from the PR 336 shelf-select run. RESTOCK_PLACE_ON_DECK=1 is the (historically named) switch that makes the factory RESOLVE the live support prim (support-agnostic -- the SUPPORT is chosen by cart_placement.support_prim). RESTOCK_VERIFY_PLACE=1 threads the live carton centre (sensors.placed_pose) into the contact-release + verify_place gates (the contact release is INERT without it)."
+  },
+
+  "host_config": {
+    "_file": "scripts/twin/restock_manipulation/ros_host_config.json (resolved by ros_host.py -> carton_level.resolve_level_config -> TransferController). THE ONLY new keys this lane adds are the two under carton_level below; everything else is the coldwin48 block, UNCHANGED.",
+    "carton_level": {
+      "preplace_above_support": true,
+      "preplace_support_clearance_m": 0.08,
+      "_preplace_above_support_note": "NEW. ON => the collect preplace standoff is re-targeted directly above the place load-centre so the carried carton BOTTOM sits at the resolved support top + the clearance, and place_from_above descends straight down onto the support. The standoff pose is solved by level_place_ik (reach + level + K=2850 droop-cancel), seeded from collect_place_preplace_shape to stay on the validated clear branch; if the IK refuses the far standoff it logs PREPLACE_ABOVE_SUPPORT_UNSOLVED and falls back to the fixed shape (which the preflight has already refused for a non-deck support, so a GPU run never reaches that silently). OFF (default) => the fixed shape is used unchanged (byte-identical).",
+      "_preplace_support_clearance_m_note": "NEW, OPTIONAL. The carton-bottom clearance above the resolved support top for the standoff (and therefore the descent length). OMIT it to default to place_above_clearance_m (0.08), so the standoff height and the from-above descent's own above_clearance_m match -> one clean vertical descent of exactly this length. Must be a finite positive metre value.",
+
+      "place_from_above": true,
+      "place_above_clearance_m": 0.08,
+      "_from_above_note": "REQUIRED on. With the standoff now ABOVE the support by the clearance, the from-above L-path is a clean vertical descent (its horizontal via-leg is at the standoff height, which equals support_top + clearance, so there is no up-then-down bow). place_above_clearance_m is BOTH the via height AND the default standoff clearance.",
+      "place_contact_release": true,
+      "place_contact_gap_m": 0.012,
+      "closed_loop_level": true,
+      "closed_loop_sensor": true,
+      "gravity_compensation": {"stiffness_nm_per_rad": 2850, "carton_mass_kg": 0.45},
+      "place_clearance_drooped": true,
+      "place_clearance_margin_m": 0.030,
+      "_kept_note": "ALL the coldwin43/46/48 carton_level keys are KEPT verbatim (contact release + gap, sensor closed loop, droop K=2850, droop-aware clearance, from-above). This lane only adds preplace_above_support (+ the optional clearance) so the descent the contact release watches is POSITIVE. With a positive descent the PLACE_CONTACT_RELEASE_ARM DESCENT_DROP is ~0.08 (was 0.0000) and the release fires at the true shelf top instead of in mid-air."
+    },
+    "_other_host_keys_unchanged": "collect_place_preplace_shape (the IK seed + the no-support-selected fallback), collect_place_straight_line, collect_place_wrist_guard, carry_wrist1_cap / carry_wrist2_min, release_detach_timeout_s -- all UNCHANGED from coldwin48."
+  },
+
+  "runtime_config": {
+    "_file": "mission-runtime-*.json (EXTERNAL to the repo; the integration lane owns it). UNCHANGED from the PR 336 shelf-select run.",
+    "_block_path": "The Isaac factory reads cart_placement ONLY from the NESTED block config['manipulation']['cart_placement'] (a top-level block is IGNORED; config_preflight.check_cart_placement_source refuses a divergent top-level duplicate).",
+    "manipulation": {
+      "cart_placement": {
+        "location": "rollwagen",
+        "support_prim": "shelf",
+        "load_center_body_xy": [0.135, 0.0],
+        "support_z_world": 0.9712,
+        "free_dimensions": [0.65, 0.45, 0.30],
+        "_note": "support_prim: 'shelf' selects the UPPER SHELF (resolved top ~0.9707 world). This is what TRIGGERS the preflight's preplace-standoff coherence check: a non-deck support here REQUIRES the HOST preplace_above_support above (else refused -- the coldwin48 config). load_center_body_xy 0.135 is the PR 336 chosen xy (the standoff is placed directly above it)."
+      }
+    }
+  },
+
+  "config_preflight": {
+    "_invocation": "python3 scripts/twin/restock_manipulation/config_preflight.py --host-config <host> --runtime-config <runtime> --scenario <scenario> --mobile-manifest <manifest> --require <...> --place-on-deck --support-top-z-world 0.9707",
+    "_check_place_preplace_standoff": "sim-place-preplace-above-support-v1 (ALWAYS on, not just --require'd). Reads the NESTED cart_placement.support_prim (config_access). When a NON-deck support is selected but HOST carton_level.preplace_above_support is OFF, it REFUSES with the coldwin48 explanation (the deck-tuned fixed standoff gives a non-positive descent -> mid-air release). When preplace_above_support is ON and --support-top-z-world is given, it computes and logs 'CONFIG_PREFLIGHT: collect place preplace-above-support -> support <prim> top=<z> m, clearance=<c> m => standoff carton bottom=<b> m, descent length=<d> m' and REFUSES a non-positive descent (clearance <= 0) or a standoff above the arm's reach ceiling (1.50 m world). The deck default / no support_prim => no refusal (byte-identical).",
+    "_support_top_note": "--support-top-z-world is the SELECTED support prim (shelf) top-face world z the orchestrator computes from the composed cart asset (~0.9707). The same value feeds the PR 335 four-height consistency gate (check_support_height) under --place-on-deck."
+  },
+
+  "scenario_config": {
+    "_file": "mission-scenario.json initial_staging (EXTERNAL). UNCHANGED from PR 336: cart_support_z_world 0.9712, cart_load_center_body_xy [0.135, 0.0]."
+  },
+
+  "_acceptance_coldwin49": "PLACE_CONTACT_RELEASE_ARM phase=place logs descent_drop > 0 (~0.08, NOT 0.0000); PREPLACE_ABOVE_SUPPORT engaged logs the re-targeted standoff; PLACE_CONTACT_RELEASE fires with the carton BOTTOM within place_contact_gap_m (0.012 m) of the MEASURED shelf top (~0.9707 world) -- at TRUE shelf contact, not in mid-air; verify_place PASSES ('carton resting', xy within tol, bottom_gap ~0); CARTON_TILT peak <= 1.5 deg; and the run ADVANCES PAST COLLECT. The shelf standoff is within UR10 reach (standoff carton bottom ~1.05 m world < the 1.50 m ceiling; reach_xy ~0.96 m < 1.3 m).",
+
+  "_cpu_proof": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=scripts python3 -m pytest scripts/twin/tests/test_place_preplace_above_support_v1.py (config resolve/validate + the clearance default/override; the pure cart_support descent helpers incl. non-positive + above-reach refusals; the preflight coherence -- shelf+off REFUSED with the coldwin48 message, shelf+on PASSES, deck/no-prim byte-identical, absurd clearance REFUSED above-reach; and the coldwin48 controller replay -- the fixed deck-tuned standoff gives descent_drop ~0.0, the fix re-targets the standoff ABOVE the shelf for a POSITIVE descent, level and on the clear branch). Default-off => byte-identical when absent (the whole test suite stays green except the one documented pre-existing preplace fixture-URDF inversion failure)."
+}

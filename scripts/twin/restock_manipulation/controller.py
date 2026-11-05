@@ -606,6 +606,11 @@ class TransferController:
         # issued (place_contact_release on + a measured placed_pose). None => the gate is inert (off / no
         # measured carton pose) and the legacy place->level-gate->release owns the set-down.
         self._place_contact_release_z = None
+        # sim-place-preplace-above-support-v1: which above-place lane re-targeted the collect preplace
+        # standoff ('support' | 'place') and its carton-bottom clearance above the resolved support top,
+        # set when _preplace_above_place_goal engages (for the engaged-standoff log).
+        self._preplace_above_mode = None
+        self._preplace_above_clearance = None
         # sim-place-release-serialization-v1: the contact-triggered weld release must be a proper PHASE
         # transition, not a scene mutation issued mid place-execute (coldwin43: the detach ran while the
         # place ExecuteTrajectory was still in flight -> 'planning-scene mutation issued while a plan/execute
@@ -1203,17 +1208,33 @@ class TransferController:
         return tuple(float(leveled[j]) for j in ARM_JOINTS)
 
     def _preplace_above_place_goal(self, measured):
-        """sim-place-descent-residual-v1: the collect preplace standoff re-targeted DIRECTLY ABOVE the
-        place load-centre (raised by ``preplace_standoff_m``), so the welded gripper pad clears the
-        rollwagen front posts instead of jamming ``post_2`` at the over-the-mouth fixed
-        ``collect_place_preplace_shape`` (coldwin39's CONTACT pivot: pad 0.1 mm from post_2 at the standoff
-        dwell, while the PLACE target itself clears post_2 by 90 mm). A full-DOF reach+level IK
-        (``level_place_ik``) to ``place TCP + (0, 0, preplace_standoff_m)`` -- the base is gravity-level so
-        arm +Z is world/cart +Z -- seeded from ``collect_place_preplace_shape`` to stay on the validated
-        clear branch, with the loaded droop-cancel. Returns an ARM-order 6-tuple, or ``None`` to fall back
-        to the fixed-shape preplace (off / no FK / no captured up-axis / no place pose / IK refuses)."""
-        if (self._carton_level is None or not self._carton_level.preplace_above_place
-                or 'place' not in self.poses or self.collect_place_preplace_shape is None):
+        """The collect preplace standoff re-targeted DIRECTLY ABOVE the place load-centre, so the
+        from-above vertical descent onto the support is POSITIVE and the welded gripper pad clears the
+        obstacles the fixed ``collect_place_preplace_shape`` does not. Two independent lanes share this
+        one mechanism (prefers the support-aware lane when both are on):
+
+          * sim-place-preplace-above-support-v1 (``preplace_above_support``): raise the standoff so the
+            carried carton BOTTOM sits at the resolved support top + ``preplace_support_clearance()``
+            (default ``place_above_clearance_m``). coldwin48 selected the UPPER shelf but the DECK-tuned
+            fixed shape parked the carton 34 mm BELOW the shelf top -- ``place_descent_drop_m`` read 0.0,
+            so the contact-release fired in mid-air and the carton fell. Raising the standoff by the
+            clearance makes the descent length the clearance and fires the release at the true support top.
+          * sim-place-descent-residual-v1 (``preplace_above_place``, the DECK v1 remedy the preflight now
+            refuses): raise the standoff by ``preplace_standoff_m`` to clear the cage mouth posts
+            (coldwin39's post_2 CONTACT pivot).
+
+        A full-DOF reach+level IK (``level_place_ik``) to ``place TCP + (0, 0, clearance)`` -- the base is
+        gravity-level so arm +Z is world/cart +Z -- seeded from ``collect_place_preplace_shape`` to stay on
+        the validated clear branch, with the loaded droop-cancel. Returns an ARM-order 6-tuple, or ``None``
+        to fall back to the fixed-shape preplace (off / no FK / no captured up-axis / no place pose / IK
+        refuses -- byte-identical when both flags are off)."""
+        cl_cfg = self._carton_level
+        if (cl_cfg is None or 'place' not in self.poses
+                or self.collect_place_preplace_shape is None):
+            return None
+        above_support = bool(getattr(cl_cfg, 'preplace_above_support', False))
+        above_place = bool(cl_cfg.preplace_above_place)
+        if not (above_support or above_place):
             return None
         robot = self._fk_model()
         if robot is None:
@@ -1224,8 +1245,10 @@ class TransferController:
         from twin.restock_manipulation import carton_level as cl
         from twin.restock_manipulation.cad_tool import ARM_JOINTS
         place = self.poses['place']
-        standoff = (float(place[0]), float(place[1]),
-                    float(place[2]) + float(self._carton_level.preplace_standoff_m))
+        # Prefer the support-aware clearance (the SHELF-correct standoff); else the legacy deck raise.
+        clearance = (cl_cfg.preplace_support_clearance() if above_support
+                     else float(cl_cfg.preplace_standoff_m))
+        standoff = (float(place[0]), float(place[1]), float(place[2]) + float(clearance))
         try:
             gc = self._place_gravity_compensation()
             limits = self._place_level_limits() or None
@@ -1234,9 +1257,11 @@ class TransferController:
                                     list(self.collect_place_preplace_shape), tool_link=tcp_link,
                                     limits=limits, gravity_comp=gc)
         except ValueError as exc:
-            print('PREPLACE_ABOVE_PLACE_UNSOLVED: %s (falling back to the fixed preplace shape)'
-                  % exc, flush=True)
+            print('PREPLACE_ABOVE_%s_UNSOLVED: %s (falling back to the fixed preplace shape)'
+                  % ('SUPPORT' if above_support else 'PLACE', exc), flush=True)
             return None
+        self._preplace_above_mode = 'support' if above_support else 'place'
+        self._preplace_above_clearance = float(clearance)
         return tuple(float(sol[j]) for j in ARM_JOINTS)
 
     def _place_fk_link(self, robot, goal):
@@ -2061,18 +2086,27 @@ class TransferController:
                     # without moving the origin, keeping the shape's reach-validated TCP and self-collision
                     # branch. Off / level_place off => the shape is unchanged (byte-identical); if no clear
                     # level solution exists it proceeds unleveled and the CARTON_TILT trip owns it.
-                    # sim-place-descent-residual-v1: re-target the preplace standoff DIRECTLY ABOVE the
-                    # place load-centre so the overhanging gripper pad clears the rollwagen front posts
-                    # instead of jamming post_2 at the over-the-mouth fixed shape (coldwin39's CONTACT
-                    # pivot). Off / no solution => the fixed shape (byte-identical).
+                    # sim-place-preplace-above-support-v1 / sim-place-descent-residual-v1: re-target the
+                    # preplace standoff DIRECTLY ABOVE the place load-centre. With preplace_above_support
+                    # (the shelf-correct lane) the standoff carton bottom sits at the resolved support top +
+                    # the clearance, so the from-above descent onto the SELECTED support is POSITIVE
+                    # (coldwin48's mid-air release otherwise); with the legacy preplace_above_place the raise
+                    # clears the deck cage mouth posts. Off / no solution => the fixed shape (byte-identical).
                     preplace_shape = self.collect_place_preplace_shape
                     above = self._preplace_above_place_goal(s.joint_positions)
                     if above is not None:
                         preplace_shape = above
-                        print('PREPLACE_ABOVE_PLACE engaged: standoff re-targeted directly above the '
-                              'place load-centre +%.3f m so the welded pad clears the rollwagen front '
-                              'posts (sim-place-descent-residual-v1)'
-                              % self._carton_level.preplace_standoff_m, flush=True)
+                        mode = getattr(self, '_preplace_above_mode', 'place')
+                        clr = getattr(self, '_preplace_above_clearance',
+                                      self._carton_level.preplace_standoff_m)
+                        print('PREPLACE_ABOVE_%s engaged: collect preplace standoff re-targeted directly '
+                              'above the place load-centre +%.3f m (carton bottom at the resolved support '
+                              'top + clearance) so the from-above descent onto the selected support is '
+                              'positive and the contact release fires at the true support top '
+                              '(sim-place-%s)'
+                              % (mode.upper(), clr,
+                                 'preplace-above-support-v1' if mode == 'support'
+                                 else 'descent-residual-v1'), flush=True)
                     preplace_goal = self._level_place_goal(preplace_shape, s.joint_positions)
                     # sim-carton-level-preplace-v1: drive the carry/tuck -> standoff APPROACH as a LEVELED
                     # WAYPOINT PATH, not a single begin_joint_goal. PR 290 leveled the standoff ENDPOINT and
