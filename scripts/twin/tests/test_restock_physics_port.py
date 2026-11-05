@@ -254,6 +254,11 @@ def test_base_brake_phase_aware_full_lock_vs_yaw_lock():
     # levered the base 16.4 mm); YAW-LOCK-ONLY only while a WELDED carton rests on a support
     # (grasp/place/release/contact), where a full lock would over-constrain the weld loop (run-208/209).
     class FakeMobile:
+        # station_pitch_hold / station_place_full_brake are explicit real attributes (False) so the
+        # getattr(...) feature-checks in _apply_base_brake resolve to the legacy (non-pitch-hold) branch
+        # this test pins -- not a truthy __getattr__ lambda (the sim-chassis-pitch-stability-v1 branch).
+        station_pitch_hold = False
+        station_place_full_brake = False
         def __init__(self):
             self.calls = []
         def __getattr__(self, name):
@@ -262,6 +267,8 @@ def test_base_brake_phase_aware_full_lock_vs_yaw_lock():
     def calls(in_arm_phase, welded, phase):
         port = IsaacPort.__new__(IsaacPort)
         port.mobile = FakeMobile()
+        port.current_action = 'collect'
+        port._phase = phase
         port._apply_base_brake(in_arm_phase, welded, phase)
         return port.mobile.calls
 

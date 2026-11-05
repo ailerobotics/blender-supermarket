@@ -33,7 +33,8 @@ class MobileController:
     def __init__(self, stage, robot_body, cart_body, wheel_joint_paths,
                  spec=MobileSpec(), hitch_path='/MobileHitch', wheel_angle_reader=None,
                  drive_max_force=None, drive_damping=None, station_pitch_hold=False,
-                 station_hold_roll_deg=0.0, station_hold_pitch_deg=-1.17):
+                 station_hold_roll_deg=0.0, station_hold_pitch_deg=-1.17,
+                 station_place_full_brake=False, station_place_full_brake_effort_limit=None):
         from pxr import UsdPhysics
         if len(wheel_joint_paths) != 2 or len(set(wheel_joint_paths)) != 2:
             raise ValueError('left and right wheel joint paths required, in that order')
@@ -97,6 +98,22 @@ class MobileController:
         # roll 0. Set both 0 for world-level.
         self.station_hold_roll_deg = float(station_hold_roll_deg)
         self.station_hold_pitch_deg = float(station_hold_pitch_deg)
+        # sim-station-full-brake-place-v1 (opt-in, default OFF => byte-identical): when set, the LOADED
+        # collect place descent onto the cart support FULL-locks the base (translation AND rotation) over
+        # the place window instead of the rotation-only station hold, so the welded from-above descent
+        # reaction cannot shove the translation-free base (coldwin49: 0.08-0.18 m south recoil -> the
+        # stationary guard aborted before the contact release fired). Anchored at the pitch/roll TARGET
+        # attitude (engage_station_full_lock), returning to the rotation-only hold at stow/withdraw.
+        # Requires station_pitch_hold (the lock reuses its target attitude); the port only engages the
+        # full lock inside the station_pitch_hold brake branch.
+        self.station_place_full_brake = bool(station_place_full_brake)
+        lim = station_place_full_brake_effort_limit
+        if lim is not None:
+            lim = float(lim)
+            if not (lim > 0 and math.isfinite(lim)):
+                raise ValueError('station_place_full_brake_effort_limit must be a positive finite N·m')
+        self.station_place_full_brake_effort_limit = lim
+        self._station_full_locked = False
         # coldwin39 fix: latch the station hold so it is NOT released+re-engaged every tick/phase (the
         # ~2000 brake cycles coldwin39 logged). While latched, command() keeps the hold on a parked tick.
         self._station_hold_latched = False
@@ -234,6 +251,55 @@ class MobileController:
             self._braked = False
             print('MOBILE_BRAKE released', flush=True)
 
+    STATION_FULL_BRAKE_PATH = '/MobileStationFullBrake'
+
+    def engage_station_full_lock(self):
+        """sim-station-full-brake-place-v1: FULL D6 lock (translation + rotation) of the chassis for the
+        LOADED collect place descent onto the cart support.
+
+        Locks transX/Y/Z AND rotX/Y/Z. Rotation is anchored at the pitch/roll TARGET attitude
+        (``station_hold_pitch_deg`` / ``station_hold_roll_deg`` + the CURRENT yaw) -- the same target the
+        rotation-only station hold (engage_brake) uses -- so the full lock sits ON TOP of that hold rather
+        than latching whatever attitude the chassis drifted to. Translation is locked at the current
+        chassis pose (the standoff pose the base holds just before the descent begins), closing off the
+        x/y recoil that the yaw-lock-only hold leaves free (coldwin49). Mutually exclusive with the
+        rotation-only brake (removes it first; one base D6). Idempotent while locked. Released back to the
+        rotation-only hold by :meth:`release_station_full_lock` once the carton is detached and the arm
+        has withdrawn. SIM-only; a real AMR holds station on its wheel brakes."""
+        from pxr import UsdPhysics, UsdGeom, Gf
+        if getattr(self, '_station_full_locked', False):
+            return
+        self.release_brake()   # drop the rotation-only D6 (a single base D6 is authored at a time)
+        world = UsdGeom.XformCache().GetLocalToWorldTransform(self.stage.GetPrimAtPath(self.robot_body))
+        t, q = world.ExtractTranslation(), world.ExtractRotationQuat()
+        cur_yaw = _quat_to_yaw(q)
+        w2, x2, y2, z2 = _quat_from_rpy(math.radians(self.station_hold_roll_deg),
+                                        math.radians(self.station_hold_pitch_deg), cur_yaw)
+        anchor_quat = Gf.Quatd(w2, Gf.Vec3d(x2, y2, z2))
+        joint = UsdPhysics.Joint.Define(self.stage, self.STATION_FULL_BRAKE_PATH)   # generic D6
+        joint.CreateBody1Rel().SetTargets([self.robot_body])            # body0 empty == world anchor
+        joint.CreateLocalPos0Attr(Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])))
+        joint.CreateLocalRot0Attr(Gf.Quatf(float(anchor_quat.GetReal()),
+                                           Gf.Vec3f(*[float(v) for v in anchor_quat.GetImaginary()])))
+        joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
+        joint.CreateLocalRot1Attr(Gf.Quatf(1.0))
+        # Lock ALL six axes: low>high == locked (same convention as engage_brake's yaw lock).
+        for axis in ('transX', 'transY', 'transZ', 'rotX', 'rotY', 'rotZ'):
+            lock = UsdPhysics.LimitAPI.Apply(joint.GetPrim(), axis)
+            lock.CreateLowAttr(1.0)
+            lock.CreateHighAttr(-1.0)
+        self._station_full_locked = True
+        print('MOBILE_BRAKE engaged (full-D6 lock transX,transY,transZ,rotX,rotY,rotZ @target'
+              '(roll=%.2f,pitch=%.2f)deg) [STATION_PLACE_FULL_BRAKE loaded-place descent]'
+              % (self.station_hold_roll_deg, self.station_hold_pitch_deg), flush=True)
+
+    def release_station_full_lock(self):
+        """Release the loaded-place full D6 lock (the base returns to the rotation-only station hold)."""
+        if getattr(self, '_station_full_locked', False):
+            self.stage.RemovePrim(self.STATION_FULL_BRAKE_PATH)
+            self._station_full_locked = False
+            print('MOBILE_BRAKE released (full-D6 lock)', flush=True)
+
     CART_BRAKE_PATH = '/CartParkingBrake'
 
     def engage_cart_brake(self):
@@ -344,12 +410,15 @@ class MobileController:
             # releasing any brake, so a drive command issued by a re-begin cannot unpin a welded,
             # interpenetrating arm (the coldwin33 fling). Cleared by release_welded_hold().
             return self.park()
-        if getattr(self, '_station_hold_latched', False) and not (v or omega):
+        if ((getattr(self, '_station_hold_latched', False)
+             or getattr(self, '_station_full_locked', False)) and not (v or omega)):
             # coldwin39 fix: a parked (v=omega=0) tick while the station hold is latched must NOT release
             # the brake -- releasing + re-engaging every parked control tick is the ~2000x cycle coldwin39
-            # logged. Keep the hold; a genuine drive command (v or omega != 0) falls through to release.
+            # logged. The sim-station-full-brake-place-v1 loaded-place full lock gets the same protection
+            # (a parked tick keeps it). A genuine drive command (v or omega != 0) falls through to release.
             return self.park()
         self.release_brake()  # resuming driving: drop the sim parking brake before any base motion
+        self.release_station_full_lock()  # and the loaded-place full D6 lock
         self.release_base_full_brake()  # and the pre-weld full base pin
         self.release_cart_brake()  # cart pin -> free to couple/tow (NO-OP while couple cart-hold latched)
         self.release()  # resuming driving: drop the stationary wheel-hold before commanding wheels

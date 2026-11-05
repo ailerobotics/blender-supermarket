@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 
 HOST = 'host'
@@ -123,6 +124,12 @@ KEY_CONSUMER = {
     # sim-robust-cart-place-descent-v1: bounded base-settle tolerance for the loaded collect place;
     # isaac_bundle builds the RuntimeAdapter with it (orchestrate process), NOT ros_host.
     'collect_place_base_settle_m': RUNTIME,
+    # sim-station-full-brake-place-v1: FULL-lock the base (translation + rotation) over the loaded
+    # collect place descent so the welded from-above reaction cannot shove the translation-free base
+    # (coldwin49). physics_setup.assemble reads them (RUNTIME) to build the MobileController. Default off
+    # => byte-identical. check_station_full_brake refuses the brake without chassis_station_pitch_hold.
+    'station_place_full_brake': RUNTIME,
+    'station_place_full_brake_effort_limit': RUNTIME,
     # sim-shelf-staging-v1 / sim-service-leg-carry-v1: the sales-floor re-sequence + solo carton-carry
     # service leg. isaac_bundle builds the RuntimeAdapter with these (RUNTIME). Pair `shelf_staging: true`
     # (runtime) with the HOST `transfer_service_carry: true` so the live_pose transfer produces the carry-
@@ -350,6 +357,38 @@ def check_pitch_stability(mobile_spec, host_cfg, runtime_cfg, *,
             f"(spec caster_suspension + caster_spring_n_per_m/caster_preload_n) or the sim-only station "
             f"pitch hold (chassis_station_pitch_hold)."]
     return []
+
+
+def check_station_full_brake(runtime_cfg):
+    """sim-station-full-brake-place-v1: validate the opt-in loaded-place full base brake.
+
+    The full D6 lock anchors its rotation at the station pitch/roll hold TARGET
+    (``chassis_station_pitch_hold_pitch_deg`` / ``_roll_deg``) and is layered on the rotation-only
+    station hold, so ``station_place_full_brake`` REQUIRES ``chassis_station_pitch_hold`` -- otherwise the
+    brake would have no target to anchor against (a key-in-the-wrong-place / split-config slip, like
+    run-277). Also refuse a non-positive / non-finite ``station_place_full_brake_effort_limit`` (the
+    weld-loop effort guard limit, N·m). No-op ([]) when the full brake is off (byte-identical)."""
+    rc = runtime_cfg or {}
+    if not rc.get('station_place_full_brake'):
+        return []
+    problems = []
+    if not rc.get('chassis_station_pitch_hold'):
+        problems.append(
+            'station_place_full_brake is set but chassis_station_pitch_hold is NOT: the loaded-place '
+            'full D6 base lock anchors its rotation at the pitch/roll hold TARGET and is layered on the '
+            'rotation-only station hold, so the station pitch hold must be active. Enable '
+            'chassis_station_pitch_hold (+ chassis_station_pitch_hold_pitch_deg / _roll_deg) in the same '
+            'RUNTIME config.')
+    lim = rc.get('station_place_full_brake_effort_limit')
+    if lim is not None:
+        try:
+            f = float(lim)
+        except (TypeError, ValueError):
+            f = None
+        if f is None or not (f > 0 and math.isfinite(f)):
+            problems.append('station_place_full_brake_effort_limit must be a positive finite N·m (the '
+                            'weld-loop effort guard limit); got %r.' % (lim,))
+    return problems
 
 
 def check_support_height(runtime_cfg, scenario_cfg, *, resolved_top_z, tol_m=0.010):
@@ -586,6 +625,10 @@ def main(argv=None):
     # source silently over-reaches the side-grasp pick standoff (coldwin32). Only when --scenario is given.
     if args.scenario:
         problems += check_carton_dims(host_cfg, _load(args.scenario))
+    # sim-station-full-brake-place-v1: the opt-in loaded-place full base brake requires the station
+    # pitch hold (it anchors at that target) + a positive effort-guard limit. Always on (not --require'd);
+    # no-op when the key is off.
+    problems += check_station_full_brake(runtime_cfg)
     # sim-chassis-pitch-stability-v1: refuse an unsprung see-saw chassis unless a stabiliser is active.
     if args.mobile_manifest:
         problems += check_pitch_stability((_load(args.mobile_manifest) or {}).get('spec') or {},
