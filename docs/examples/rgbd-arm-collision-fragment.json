@@ -1,0 +1,65 @@
+{
+  "_lane": "sim-rgbd-arm-collision-aware-v1 (PR-B: perceived-clearance gate + phase-shared mast feed)",
+  "_what": [
+    "Make every arm leg collision-aware against the RGB-D nvblox ESDF. A perceived-clearance gate",
+    "wraps the motion port (gated_motion.GatedMotionPort, installed in ros_host.py) and, before the",
+    "controller dispatches ANY leg (pick approach, lift, tuck, pre-place, place descent, withdraw,",
+    "every transfer leg -- including the collision-OFF straight-line KDL inserts cuMotion does not",
+    "check), queries the live get_esdf_and_gradient map for the swept gripper + welded-carton volume",
+    "and refuses/holds by name when the clearance is below a margin (PERCEIVED_CLEARANCE lines).",
+    "Opt-in behind the HOST key perception_collision_gate; absent/disabled => the raw port, byte-",
+    "identical (the complete-cycle video run carries NO new perception)."
+  ],
+  "host_config_keys": {
+    "perception_collision_gate": {
+      "enabled": true,
+      "margin_m": 0.03,
+      "mode": "refuse",
+      "unknown_action": "hold",
+      "samples": 6,
+      "unobserved_tol": 0.2,
+      "max_snapshot_age_s": 0.5,
+      "source": "nvblox",
+      "workspace_origin_m": [-1.0, -0.08, -0.35],
+      "workspace_size_m": [2.0, 1.7, 2.0],
+      "_phases_default": "approach, contact, lift, tuck, pan, transit, preplace, place, retreat",
+      "_mode": "warn = log only; hold/refuse = raise PERCEIVED_CLEARANCE_<ACTION>, controller fails the phase by name, mission StageRetry re-begins against a fresher map",
+      "_set-down_note": "the rollwagen is OUTSIDE the ESDF (handled by the cart world obstacle, PR-A). If the place/retreat legs read 'unobserved', either exclude them from `phases` or set unknown_action=warn -- the cart is collision-checked by the world obstacle, not the perceived ESDF."
+    },
+    "world_obstacles_perceived": {
+      "covered_ids": [],
+      "_note": "evidence-gated retirement (deliverable #4): list the static world_obstacle ids the perceived ESDF demonstrably covers (a camera-mapped body) to withhold their static CollisionObject. NOT for the cart (the ESDF cannot see it). Default [] => every static obstacle published (byte-identical)."
+    }
+  },
+  "runtime_config_keys": {
+    "masked_depth": {"enabled": true, "_role": "wrist camera_0, always live during arm phases"},
+    "mast_depth": {"enabled": true, "_role": "camera_1, phase-shared ON for collect/carry/set-down ONLY -- keep OFF for live_pose transfer (does not fit the transfer VRAM peak)"}
+  },
+  "feeds_per_phase": {
+    "observe/approach/contact/grasp/lift": ["wrist"],
+    "lift/tuck/pan/transit/preplace/place/retreat (collect/carry/set-down)": ["wrist", "mast"],
+    "live_pose transfer preplace/place/retreat": ["wrist"],
+    "nav (couple/outbound/return)": [],
+    "_source": "twin.restock.arm_feed_schedule.feeds_active_in_phase; the Isaac render-lifecycle (native_cameras.set_render_products_enabled / destroy_camera_render_product) consumes it"
+  },
+  "vram": {
+    "collect/carry/set-down": "wrist + mast fits: gpu_budget.check_collect_budget -> fits=True, ~1.0 GB free_after (collect base 8048 MiB; measured coldwin60-62 ~2.9 GB free, one wrist feed)",
+    "live_pose transfer": "wrist ONLY (transfer2 peak 11882 / 26 MiB free); mast does NOT fit (check_budget -> fits=False). gpu_budget refuses a mast-on transfer config pre-boot.",
+    "gate": "the perceived-clearance gate adds no VRAM (it queries the existing ESDF the planner already builds)"
+  },
+  "acceptance_stages": {
+    "S0": "cart world obstacle (PR-A): set-down plans around the cart with no CAGE filter, no straight-line insert",
+    "S1": "mast-live carry: the ESDF keeps integrating (collision_time advances) with the carton held",
+    "S2": "ESDF gate on inserts: a straight-line insert whose waypoints violate the live ESDF is refused by name (PERCEIVED_CLEARANCE_REFUSE) before motion",
+    "S3": "perceived collect (tomorrow): arm routes around a perceived cage post, no ground truth -- only after S0+S1+S2",
+    "_constraints": "box parallel to ground 2.0 deg / 0.15 s grace never loosened; nothing visually wrong on camera; gpu_budget fits=True; lock only when free; never --force"
+  },
+  "hook_points_for_sibling_lanes": {
+    "collision_gate.PerceptionCollisionGate.evaluate / evaluate_corridor": "per-leg verdict (GateVerdict.min_clearance / action / nearest_body) -- the bench (sim-arm-collision-bench-v1) scores collision-free rate, minimum clearance and refusals from it",
+    "collision_gate.swept_corridor_aabbs / GatedMotionPort.leg_corridor": "the swept gripper+carton AABB corridor for a leg -- the reactive-replan lane (sim-arm-reactive-replan-v1) watches it for a NEW obstacle entering between dispatch and completion; the bench plants against it",
+    "esdf_source.EsdfSource (NvbloxEsdfSource | AnalyticBoxEsdfSource | ReplayEsdfSource)": "the snapshot provider seam -- the bench swaps in a scripted static+moving-obstacle field (AnalyticBoxEsdfSource takes a boxes(now) callable = the dynamic-layer seam); the dynamic nvblox mapper feeds the same NvbloxEsdfSource",
+    "gated_motion.GatedMotionPort": "the motion-port wrapper -- the reactive lane subscribes a preempt/re-plan hook; execution-time preempt is THAT lane, this gate gates at dispatch",
+    "tools/replay_collect_gate.replay_gate(legs, source)": "CPU per-leg verdict replay over any leg list + any EsdfSource"
+  },
+  "cpu_proof": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_perception_collision_gate.py scripts/twin/tests/test_arm_feed_schedule.py scripts/twin/tests/test_replay_collect_gate.py -q"
+}
