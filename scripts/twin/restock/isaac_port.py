@@ -510,12 +510,30 @@ class IsaacPort:
         # current gains (phase_drive_gains returns soft for any non-stiff phase, so the drive can only
         # be soft or the configured stiff -- never undefined).
         if self._phase_drive is not None and self._arm_joints and self.robot is not None:
-            from .physics_setup import phase_drive_gains, set_arm_drive_gains
-            g=phase_drive_gains(phase, self._phase_drive)
-            if g is not None and g!=self._last_drive_gains:
-                set_arm_drive_gains(self.robot, self._arm_joints, g['kp'], g['kd'], g['eff'])
-                self._last_drive_gains=g
-                print(f'PHASE_DRIVE phase={phase} -> kp={g["kp"]:g} kd={g["kd"]:g} eff={g["eff"]:g}',flush=True)
+            from .physics_setup import (phase_drive_gains, set_arm_drive_gains,
+                                        resolve_joint_overrides, phase_drive_plan,
+                                        set_arm_drive_gains_per_joint)
+            # sim-preplace-per-joint-gains-v1: when a carried phase has a per-joint override
+            # (carried_joint_profile) apply the full per-joint PLAN (base uniform + named overrides); the
+            # carried PREPLACE stiffens shoulder_pan so it HOLDS against the wrist-sweep reaction while the
+            # wrists stay soft (keeping the swing fix). No override for this phase => the uniform path below
+            # (byte-identical). Change-detected on the plan so it re-sets once per transition.
+            overrides=resolve_joint_overrides(phase, self._phase_drive)
+            if overrides:
+                plan=phase_drive_plan(phase, self._phase_drive, self._arm_joints)
+                if plan is not None and plan!=self._last_drive_gains:
+                    set_arm_drive_gains_per_joint(self.robot, plan)
+                    self._last_drive_gains=plan
+                    desc=' '.join('%s[kp=%g eff=%g]'%(n.replace('ur_','').replace('_joint',''),
+                                                      plan[n]['kp'],plan[n]['eff'])
+                                  for n in self._arm_joints if n in plan)
+                    print(f'PHASE_DRIVE_JOINT phase={phase} -> {desc}',flush=True)
+            else:
+                g=phase_drive_gains(phase, self._phase_drive)
+                if g is not None and g!=self._last_drive_gains:
+                    set_arm_drive_gains(self.robot, self._arm_joints, g['kp'], g['kd'], g['eff'])
+                    self._last_drive_gains=g
+                    print(f'PHASE_DRIVE phase={phase} -> kp={g["kp"]:g} kd={g["kd"]:g} eff={g["eff"]:g}',flush=True)
         if self._set_render_suspended is None:
             return
         suspended=_render_suspended(phase, self.current_action, self._collect_keep_source_render)
