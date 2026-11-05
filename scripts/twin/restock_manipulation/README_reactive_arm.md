@@ -124,5 +124,62 @@ env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
   scripts/twin/tests/test_reactive_arm_replan.py -q
 ```
 
-Bounded GPU S4 (person + moving obstacle, preempt + re-plan + human SLOW→STOP→resume) is the
-integration-lane-owned run in `docs/examples/arm-reactive-replan-fragment.json` (PENDING).
+## Bounded GPU S4 proof (PENDING — integration-lane-owned)
+
+Bounded GPU S4 (person + moving obstacle, preempt + re-plan + human SLOW→STOP→resume). The full
+HOST-key fragment + acceptance text lives in `docs/examples/arm-reactive-replan-fragment.json`;
+the self-contained recipe is here so this file is the single hand-off.
+
+**HOST config** (merge into `restock_manipulation/ros_host_config.json`, read by `ros_host.py`;
+`config_preflight` registers them HOST):
+
+```json
+"reactive_arm_human": true,
+"reactive_arm_replan": true,
+"perception_collision_gate": { "margin_m": 0.05 },
+"reactive_arm": {
+  "clear_dwell_s": 2.0, "slow_speed_fraction": 0.1, "stop_speed_fraction": 0.0,
+  "state_max_age_s": 0.2, "heartbeat_timeout_s": 0.3, "backstop_deadline_s": 0.5,
+  "require_initial_dwell": false,
+  "backstop": { "startup_grace_s": 3.0, "state_heartbeat_timeout_s": 0.5, "gate_heartbeat_timeout_s": 0.5 },
+  "replan": { "margin_m": 0.05, "max_replans": 3, "min_replan_interval_s": 0.5, "samples": 6, "max_snapshot_age_s": 0.5 }
+}
+```
+
+`reactive_arm_replan` REQUIRES `perception_collision_gate` on (it supplies the live nvblox ESDF
+source + leg corridor via the sibling `GatedMotionPort`); with it off the corridor watch stays
+inert (`ros_host` logs `REACTIVE_REPLAN enabled but perception_collision_gate is OFF`). Also set
+`humans.enabled` with a scripted person crossing the arm's reach (`detection.source: ground_truth`
+for the bench) and the Isaac boot wiring (`set_human_detection_provider` / `set_arm_pause_sink` /
+`set_arm_clearance_source`, all named in the fragment `_isaac_wiring`).
+
+**Run** (GPU discipline: take `/tmp/aile-gpu.lock` only when the integration lane releases it,
+`HEAVY_MB=2500`, `renice +10`, ≤20 min, never `--force`, never touch `whispr`, do NOT edit the
+`~/datasets` runtime configs from a worker PR):
+
+```
+scripts/run_mobile_restock.py ...   # a collect carry leg, with the HOST keys above + humans.enabled
+```
+
+**Acceptance** — in ONE bounded run:
+1. **PR-B obstacle:** a person / sliding carton crosses the arm's REMAINING swept corridor on a
+   free-space carry leg → console shows `REACTIVE_ARM_PREEMPT action=REPLAN`, the arm cancels
+   (e-stop-free `motion.cancel()`, no `/manipulation/stop`), re-plans the remaining leg against the
+   current ESDF (routes around it) and COMPLETES without contact; bounded by `max_replans` then a
+   self-recovering HOLD.
+2. **PR-A person:** a person entering reach drives the gate CLEAR→SLOW→STOP → `REACTIVE_ARM_HOLD
+   action=SLOW` then `STOP`, the arm PAUSES (`set_paused True`), and after the person leaves THROUGH
+   the SLOW ring (tracked departure) + the clear dwell the arm RESUMES (`set_paused False`, re-plan
+   from the live pose).
+
+No global `/manipulation/stop` (no host e-stop) in either path. Record VRAM peak + re-plan latency.
+The box stays parallel to the ground (2.0° / 0.15 s, never loosened) throughout — the carton-level
+gate is unchanged and runs before this seam each tick.
+
+**CPU proof stands in until the S4 run:**
+
+```
+env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest \
+  scripts/twin/tests/test_reactive_arm_human.py \
+  scripts/twin/tests/test_reactive_arm_replan.py -q
+```
