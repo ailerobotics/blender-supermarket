@@ -336,6 +336,10 @@ def main():
         contact_seal_diag_dwell_ticks=int(config.get('contact_seal_diag_dwell_ticks', 5)),
         contact_seal_diag_max_gap_mm=float(config.get('contact_seal_diag_max_gap_mm', 0.5)),
         contact_seal_diag_max_angle_deg=float(config.get('contact_seal_diag_max_angle_deg', 1.0)),
+        # sim-gripper-status-relay-v1: optional extra staleness bound (sim s) on the gripper status the
+        # require_suction_enabled guard reads; 0 => presence-only. The relay that FILLS the status is the
+        # Isaac-side RESTOCK_CONTACT_STATUS_FEEDBACK env (see docs/examples/gripper-status-relay-fragment.json).
+        contact_status_max_age_s=float(config.get('contact_status_max_age_s', 0.0)),
         fk_urdf=args.urdf,
         # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority over the
         # free-space arm legs (ported humangate fed by the vendored scripts/twin/humans evaluator; the

@@ -258,6 +258,23 @@ driving the same latch path the plugin flag drives. The guards read new opt-in `
 `docs/examples/pick-contact-seal-fallback-fragment.json`. CPU tests:
 `tests/test_pick_contact_seal_fallback.py`.
 
+**Gripper-status feedback to the host** (sim-gripper-status-relay-v1, coldwin65). The guards above read
+the **host-facing** `/sensors` packet, but those feedback fields were only ever populated in
+`isaac_sensors.Sensors.capture` — **not** in `isaac_factory.CollectTargetBridge`
+(`_capture_ground_truth_collect`/`capture`/`_capture_transfer`/`_survival_packet`), which is what the live
+mission publishes. So the host saw the **all-default** feedback (`enabled=False`, `gap=None`, `hit=False`)
+on every tick regardless of the true Isaac state, and `contact_require_suction_enabled` e-stopped coldwin65's
+pick while the plugin was actually `Closing`/`Closed` with the gap closing (coldwin64 sealed the identical
+pick only because nothing read that starved view). **Not** the last-value `/manipulation/status` relay: the
+enable landed, and `/sensors` has no heartbeat/last-value drop. Fix: the opt-in env
+`RESTOCK_CONTACT_STATUS_FEEDBACK=1` (`contact_status_feedback.py`) makes the `CollectTargetBridge` capture
+paths carry the gripper feedback + a `gripper_status_time` stamp every tick (off ⇒ byte-identical); and
+`contact_require_suction_enabled` now reads an **authoritative** status — it aborts only on a **fresh**
+not-enabled, and on an **absent** status logs `CONTACT_STATUS_STALE` and continues the bounded over-press
+(never aborts on staleness alone; optional extra bound `contact_status_max_age_s`). A genuine lost-enable
+(cw63's fresh `Open`) still fails fast. Recommended ON values for the next complete run:
+`docs/examples/gripper-status-relay-fragment.json`. CPU tests: `tests/test_gripper_status_relay.py`.
+
 **Collision-stale pause keep-alive + wall budget** (`RESTOCK_COLLISION_PAUSE_WALL_S`, opt-in, default
 `0` = off ⇒ the legacy empty-control pause, byte-identical): the fm419(a) `COLLISION_STALE_PAUSE` holds
 the post-attach lift while the (held) carton's collision stamp is briefly stale — the benign weld/ESDF

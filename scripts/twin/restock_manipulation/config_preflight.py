@@ -84,6 +84,7 @@ KEY_CONSUMER = {
     'contact_seal_diag_dwell_ticks': HOST,        # consecutive ticks the seal must hold (default 5)
     'contact_seal_diag_max_gap_mm': HOST,         # seal gap bound for the accept (default 0.5 mm)
     'contact_seal_diag_max_angle_deg': HOST,      # pad-vs-face angle bound for the accept (default 1.0 deg)
+    'contact_status_max_age_s': HOST,             # sim-gripper-status-relay-v1: optional extra staleness bound (sim s) on the gripper status the require_suction_enabled guard reads (0 => presence-only)
     'arm_max_speed': HOST,
     'plan_wall_cap_s': HOST,
     'grasp_track_m': HOST,        # fm410: lift-probe carton-tracking physics confirm threshold (m)

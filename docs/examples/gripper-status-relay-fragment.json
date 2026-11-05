@@ -1,0 +1,33 @@
+{
+  "_comment": "sim-gripper-status-relay-v1 handoff (coldwin65 -> coldwin66). Recommended ON values for the next COMPLETE restock run: the gripper contact-feedback now reaches the host every tick, so the PR 356 pick-contact guard can go back ON and read the TRUTH instead of a starved snapshot. Two places: (1) an Isaac-side ENV switch that fills the host-facing /sensors packet with the gripper status, and (2) the HOST-config block read by scripts/twin/restock_manipulation/ros_host.py -> TransferController. All opt-in; absent/off => byte-identical. config_preflight registers the host key as HOST (a RUNTIME misfile is REFUSED).",
+
+  "_root_cause_coldwin65": "coldwin65 was e-stopped at the collect pick by the new CONTACT_SUCTION_NOT_ENABLED guard although suction WAS enabled and the pad gap was closing cleanly toward the weld (SEAL_DIAG: status Closing/Closed, enabled=True, min_gap_mm 9.25 -> 4.87 mm; coldwin64 sealed the identical pick). WHY the guard aborted: PR 356 added the gripper contact-feedback fields (gripper_enabled / seal_gap_mm / seal_pad_angle_deg / seal_hit_target) to the Sensors packet and populated them in scripts/twin/restock_manipulation/isaac_sensors.py Sensors.capture -- but the LIVE mission's host-facing /sensors come from scripts/twin/restock_manipulation/isaac_factory.py CollectTargetBridge (_capture_ground_truth_collect:875, capture:1108, _capture_transfer:979, _survival_packet:1031), which NEVER populated them. So EVERY /sensors packet the host received carried the all-default feedback (enabled=False, gap=None, hit=False) regardless of the true Isaac state, and the host guard read the default False -> HOST_FAULT_ESTOP (coldwin65/host-stack.log:3203, reason 'gap_mm=None pad_deg=None hit_target=False enabled=False'). The two SEAL_DIAG instances are both Isaac-side (96d0 = the IsaacPort/command instance where command() runs, enabled=True; 5c90 = the build_sensing read instance, commanded flag False but the SHARED plugin status Closing/Closed) -- neither is a host mirror; the host saw NO gripper status at all (the CONTACT_SUCTION lines show gripper_enabled was never True on the host). The last-value /manipulation/status relay PR 356 blamed is NOT implicated here: the enable landed (reissue-each-tick on; SEAL_DIAG command:close enabled=True throughout), and /sensors has no heartbeat / last-value drop -- the fields were simply never set.",
+
+  "_env_switch": "RESTOCK_CONTACT_STATUS_FEEDBACK=1",
+  "_env_switch_note": "ITEM-2 fix, the one to turn on for coldwin66. Set this in the orchestrate run env so it propagates to the Isaac mission process (like RESTOCK_STARTUP_GRACE_S / RESTOCK_COLLECT_GROUND_TRUTH). It makes CollectTargetBridge add the gripper contact-feedback (gripper_enabled/seal_gap_mm/seal_pad_angle_deg/seal_hit_target) + a gripper_status_time stamp to EVERY host-facing /sensors packet, read best-effort from the NativePanelContact probe (the same source as the SEAL_DIAG log). Unset/0 => no fields added => the /sensors packet and the whole run are byte-identical. Reader: scripts/twin/restock_manipulation/contact_status_feedback.py.",
+
+  "contact_reissue_suction_each_tick": true,
+  "_contact_reissue_suction_each_tick_note": "PR 356 ITEM-2. Re-publish the gripper enable every press tick so the last-value /manipulation/status relay always carries a fresh control. Keep ON (it is why the Isaac side was enabled=True in coldwin65).",
+
+  "contact_require_suction_enabled": true,
+  "_contact_require_suction_enabled_note": "GUARD 3a, back ON now that the feedback is trustworthy. With RESTOCK_CONTACT_STATUS_FEEDBACK=1 this reads an AUTHORITATIVE Isaac gripper status: it aborts CONTACT_SUCTION_NOT_ENABLED ONLY on a FRESH not-enabled report (the genuine cw63 lost-enable). When NO fresh status reaches the host (gripper_status_time absent/too old) it logs CONTACT_STATUS_STALE and CONTINUES the bounded over-press -- it never aborts on staleness alone (the coldwin65 false abort). Needs the env switch above to see the status; without it the guard is now inert-safe (stale) rather than false-tripping.",
+
+  "contact_reissue_close_once": true,
+  "_contact_reissue_close_once_note": "Sub-option of require_suction_enabled: on the FIRST fresh-not-enabled boundary re-send the close once, then a second miss fails. Keep ON as belt-and-braces.",
+
+  "contact_accept_seal_diag": true,
+  "_contact_accept_seal_diag_note": "GUARD 3b, back ON. Now that the real seal_gap_mm/seal_pad_angle_deg/seal_hit_target reach the host (they were gap=None/hit=False in coldwin65), a dwell-stable flush geometric seal with suction enabled is accepted as contact (drives the same contact termination + gated SIM_ATTACH_FALLBACK).",
+
+  "contact_seal_diag_dwell_ticks": 5,
+  "contact_seal_diag_max_gap_mm": 0.5,
+  "contact_seal_diag_max_angle_deg": 1.0,
+
+  "contact_status_max_age_s": 0.0,
+  "_contact_status_max_age_s_note": "OPTIONAL extra staleness bound (sim seconds) on the gripper status the guard 3a reads. 0 => presence-only (a packet carrying a gripper_status_time is authoritative; one without it is 'no status'). Set >0 to also treat a present-but-older-than-bound status as stale (defensive; the host-facing capture stamps the status with the packet's own clock, so the within-packet age is ~0 and the bound rarely bites). Registered HOST in config_preflight.",
+
+  "_expected_pass_coldwin66": "The collect pick's host view shows gripper_enabled=True with a closing seal_gap_mm during the over-press (never gap=None/enabled=False while the Isaac SEAL_DIAG is Closing/Closed). The press proceeds to the seal + weld and collect reports SUCCEEDED. If the plugin genuinely cannot seal, the run fails fast with a NAMED reason (CONTACT_SUCTION_NOT_ENABLED on a FRESH not-enabled, or the honest 'contact not reached within capped over-press travel' cap) -- never a false CONTACT_SUCTION_NOT_ENABLED on a starved snapshot, and never an opaque arm-command heartbeat loss.",
+
+  "_minimal_set": "If only ONE change is wanted: set RESTOCK_CONTACT_STATUS_FEEDBACK=1 (fills the status) and keep contact_require_suction_enabled ON. The stale-aware guard means a mis-set env no longer e-stops the pick -- it just reverts the guard to the historical over-press with a CONTACT_STATUS_STALE note.",
+
+  "_out_of_scope": "Nothing in preplace/place/transfer, the watchdogs, the perception lanes, gripper geometry or carton size was touched. This lane is purely the Isaac->host gripper-status FEEDBACK path on the live capture + the guard's authoritative-vs-stale reading."
+}
