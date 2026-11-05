@@ -150,7 +150,7 @@ class _MockMobile:
         self.yaw_lock = False
         self.events = []
 
-    def engage_station_full_lock(self):
+    def engage_station_full_lock(self, from_phase=None):
         if not self.full_lock:
             self.full_lock = True
             self.rotation_hold = False

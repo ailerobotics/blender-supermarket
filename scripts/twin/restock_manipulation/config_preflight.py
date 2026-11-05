@@ -177,6 +177,12 @@ KEY_CONSUMER = {
     # => byte-identical. check_station_full_brake refuses the brake without chassis_station_pitch_hold.
     'station_place_full_brake': RUNTIME,
     'station_place_full_brake_effort_limit': RUNTIME,
+    # sim-station-lock-from-preplace-v1: WHEN the full lock engages relative to the carried pre-place
+    # ('place' = today, at the descent; 'preplace' = at the start of leg 1; 'hold_firm' = the moment a
+    # carried joint is firmed). physics_setup.assemble reads it (RUNTIME) into the MobileController; the
+    # port (isaac_port) owns the phase->engage decision. Default 'place' => byte-identical.
+    # check_station_full_brake refuses it without station_place_full_brake / chassis_station_pitch_hold.
+    'station_full_brake_engage_phase': RUNTIME,
     # sim-shelf-staging-v1 / sim-service-leg-carry-v1: the sales-floor re-sequence + solo carton-carry
     # service leg. isaac_bundle builds the RuntimeAdapter with these (RUNTIME). Pair `shelf_staging: true`
     # (runtime) with the HOST `transfer_service_carry: true` so the live_pose transfer produces the carry-
@@ -702,9 +708,31 @@ def check_station_full_brake(runtime_cfg):
     station hold, so ``station_place_full_brake`` REQUIRES ``chassis_station_pitch_hold`` -- otherwise the
     brake would have no target to anchor against (a key-in-the-wrong-place / split-config slip, like
     run-277). Also refuse a non-positive / non-finite ``station_place_full_brake_effort_limit`` (the
-    weld-loop effort guard limit, N·m). No-op ([]) when the full brake is off (byte-identical)."""
+    weld-loop effort guard limit, N·m).
+
+    sim-station-lock-from-preplace-v1: also validate ``station_full_brake_engage_phase`` (WHEN the full
+    lock engages relative to the carried pre-place). It only has effect WITH the full brake, so a dangling
+    non-default key without the brake is refused; an unknown value is refused; and the ``hold_firm`` value
+    additionally REQUIRES ``phase_drive.hold_firm_on_arrival.enabled`` so its trigger actually fires.
+
+    No-op ([]) when the full brake is off and the engage key is absent / default 'place' (byte-identical)."""
+    from twin.restock import station_full_brake
     rc = runtime_cfg or {}
+    engage_phase_raw = rc.get('station_full_brake_engage_phase')
     if not rc.get('station_place_full_brake'):
+        # sim-station-lock-from-preplace-v1: the engage-phase key only does anything WITH the full brake;
+        # refuse a dangling one so the launch fails loudly rather than carrying a key that silently never
+        # activates (the run-277 split-config trap). An absent / default-'place' key is a no-op.
+        if engage_phase_raw not in (None, '', station_full_brake.DEFAULT_ENGAGE_PHASE):
+            try:
+                station_full_brake.resolve_engage_phase(engage_phase_raw)
+                detail = ''
+            except ValueError as exc:
+                detail = ' (also: %s)' % exc
+            return ['station_full_brake_engage_phase is set (%r) but station_place_full_brake is NOT: the '
+                    'engage-phase key selects WHEN the loaded-place full base lock engages and does nothing '
+                    'without the brake. Enable station_place_full_brake (+ chassis_station_pitch_hold) in '
+                    'the same RUNTIME config, or drop the key.%s' % (engage_phase_raw, detail)]
         return []
     problems = []
     if not rc.get('chassis_station_pitch_hold'):
@@ -723,6 +751,24 @@ def check_station_full_brake(runtime_cfg):
         if f is None or not (f > 0 and math.isfinite(f)):
             problems.append('station_place_full_brake_effort_limit must be a positive finite N·m (the '
                             'weld-loop effort guard limit); got %r.' % (lim,))
+    # sim-station-lock-from-preplace-v1: validate the engage-phase key (WHEN the full lock engages). An
+    # unknown value is refused; 'hold_firm' additionally requires the pre-place hold-firm config so the
+    # trigger actually fires (else it silently falls back to the descent-time 'place' engage).
+    engage_phase = None
+    try:
+        engage_phase = station_full_brake.resolve_engage_phase(engage_phase_raw)
+    except ValueError as exc:
+        problems.append(str(exc))
+    if engage_phase == station_full_brake.ENGAGE_PHASE_HOLD_FIRM:
+        pd = rc.get('phase_drive')
+        hf = pd.get('hold_firm_on_arrival') if isinstance(pd, dict) else None
+        if not (isinstance(hf, dict) and bool(hf.get('enabled', False))):
+            problems.append(
+                "station_full_brake_engage_phase='hold_firm' engages the full lock off the pre-place "
+                'hold-firm-on-arrival event, so it REQUIRES phase_drive.hold_firm_on_arrival.enabled=true '
+                '(the sim-preplace-wrist2-hold hold-firm config). Without it the trigger never fires and '
+                "the value silently falls back to 'place' (descent-time engage). Enable the hold-firm "
+                "config, or use 'preplace' to engage at the start of the pre-place instead.")
     return problems
 
 
