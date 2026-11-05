@@ -394,6 +394,33 @@ class LevelConfig:
     # contact-release's job); it removes the model blindness about the executed attitude and is cheap, so it
     # ships opt-in. Requires ``closed_loop_level``; default OFF => byte-identical.
     closed_loop_sensor: bool = False
+    # sim-preplace-level-gate-v1: the carried PRE-PLACE APPROACH carton-level GATE + a carried-carton
+    # DYNAMICS cap. coldwin50 tripped CARTON_TILT at the HIGH from-above preplace standoff (pitch +7.64 deg,
+    # base rock-steady). The integration-worker forensics (coldwin50-preplace.txt) pinned it: cw49 and cw50
+    # commanded the SAME standoff IK branch (every joint within 0.003 rad) and its STATIC droop-executed tilt
+    # is only ~1.6 deg -- the 7.64 is run-to-run DYNAMIC deflection during a coarse, FAST preplace sweep (a
+    # 9-point cuMotion move_group plan, pan -1.35 rad + wrist_2 +1.64 rad), which no static model sees. Two
+    # gaps caused it: (1) the carried APPROACH to the standoff levelled only the GEOMETRIC interior wrists
+    # (``interpolate_level``), so the EXECUTED (drooped) interior still pitched ~1.8 deg, and the approach plan
+    # gate replayed the GEOMETRIC path (``predict_path_tilt``, droop-blind) so it never saw it; (2) the move
+    # was a coarse fast sweep, so the welded carton deflected dynamically. ``preplace_level_gate`` (default
+    # OFF => byte-identical) closes both: the approach is planned as a DROOP-COMPENSATED, DENSIFIED leveled
+    # waypoint path (every interior waypoint wrist-droop-cancelled like the place descent, and split so each
+    # segment's max per-joint step is <= ``preplace_max_segment_rad`` -- the 132-point lesson, no coarse 9-pt
+    # sweeps), the predicted EXECUTED (droop-aware) tilt is gated to ``preplace_gate_bound_deg`` (the bound
+    # minus a margin) and the move is CARTON_LEVEL_PLAN_REJECTED before any motion if it exceeds the true
+    # ``bound_deg``, the carried approach is time-capped at ``preplace_approach_speed``/``preplace_approach_accel``
+    # (lower peak joint velocity => less dynamic deflection), and when ``closed_loop_level`` is also on the
+    # bounded sensor servo is extended to the approach. The standoff endpoint IK keeps the droop-cancel it
+    # already has (``level_place_ik(gravity_comp=...)`` -> executed-level), but now PREFERS the branch with the
+    # smallest predicted EXECUTED tilt + most clearance (``solve_level_standoff``). The 2.0 deg bound / 0.15 s
+    # grace / carton dims / droop stiffness / tow lanes are ALL UNCHANGED. Scoped to the collect preplace
+    # approach (``_preplace_above_place_goal`` engaged), so every other move is byte-identical.
+    preplace_level_gate: bool = False
+    preplace_gate_bound_deg: float = 1.0
+    preplace_max_segment_rad: float = 0.25
+    preplace_approach_speed: float = 0.05
+    preplace_approach_accel: float = 0.1
 
     def validate(self):
         if not (math.isfinite(self.bound_deg) and self.bound_deg > 0):
@@ -431,6 +458,18 @@ class LevelConfig:
         if self.closed_loop_sensor and not self.closed_loop_level:
             raise ValueError('carton_level.closed_loop_sensor requires closed_loop_level to be on '
                              '(the sensor anchor refines the closed-loop correction)')
+        # sim-preplace-level-gate-v1
+        if not (math.isfinite(self.preplace_gate_bound_deg)
+                and 0 < self.preplace_gate_bound_deg <= self.bound_deg):
+            raise ValueError('carton_level.preplace_gate_bound_deg must be a finite number of degrees in '
+                             '(0, bound_deg] (the preplace-approach executed-tilt target, the bound minus a margin)')
+        if not (math.isfinite(self.preplace_max_segment_rad) and self.preplace_max_segment_rad > 0):
+            raise ValueError('carton_level.preplace_max_segment_rad must be a finite positive number of radians '
+                             '(the max per-joint step per densified approach segment)')
+        for nm, v in (('preplace_approach_speed', self.preplace_approach_speed),
+                      ('preplace_approach_accel', self.preplace_approach_accel)):
+            if not (math.isfinite(v) and v > 0):
+                raise ValueError(f'carton_level.{nm} must be a finite positive number')
         from twin.restock_manipulation.cad_tool import ARM_JOINTS
         bad = [j for j in self.joints if j not in ARM_JOINTS]
         if bad or not self.joints:
@@ -460,7 +499,9 @@ def resolve_level_config(spec):
     ``preplace_standoff_m``, ``place_clearance_check``, ``place_clearance_margin_m``, ``place_clearance_drooped``,
     ``closed_loop_level``, ``closed_loop_authority_deg``, ``closed_loop_rate_deg_per_s``, ``closed_loop_gain``,
     ``place_contact_release``, ``place_contact_gap_m``, ``closed_loop_sensor``, ``preplace_above_support``,
-    ``preplace_support_clearance_m``, ``joints``, ``tool_link``.
+    ``preplace_support_clearance_m``, the sim-preplace-level-gate-v1 keys ``preplace_level_gate`` /
+    ``preplace_gate_bound_deg`` / ``preplace_max_segment_rad`` / ``preplace_approach_speed`` /
+    ``preplace_approach_accel``, ``joints``, ``tool_link``.
     Raises on a malformed value so a typo fails loudly at boot."""
     if spec is None or spec is False:
         return None
@@ -485,13 +526,14 @@ def resolve_level_config(spec):
     for fnum in ('place_descent_speed', 'place_descent_accel', 'place_above_clearance_m',
                  'place_depth_bias_m', 'preplace_standoff_m', 'place_clearance_margin_m',
                  'closed_loop_authority_deg', 'closed_loop_rate_deg_per_s', 'closed_loop_gain',
-                 'place_contact_gap_m'):
+                 'place_contact_gap_m', 'preplace_gate_bound_deg', 'preplace_max_segment_rad',
+                 'preplace_approach_speed', 'preplace_approach_accel'):
         if fnum in spec and spec[fnum] is not None:
             kw[fnum] = float(spec[fnum])
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above',
                  'preplace_above_place', 'place_clearance_check', 'place_clearance_drooped',
                  'closed_loop_level', 'place_contact_release', 'closed_loop_sensor',
-                 'preplace_above_support'):
+                 'preplace_above_support', 'preplace_level_gate'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
     # sim-place-preplace-above-support-v1: nullable clearance (None => place_above_clearance_m).
@@ -905,6 +947,203 @@ def plan_compensated_place_descent(robot, start_config, target_pos, seed_goal, u
                                             interior=interior, gravity_comp=gc)
     return LevelPathPlan(waypoints=tuple(tuple(v) for v in vecs), max_roll=mr, max_pitch=mp,
                          max_tilt=mt, waypoints_n=n)
+
+
+# ----------------------------------- carried pre-place APPROACH gate + dynamics (sim-preplace-level-gate-v1)
+
+def densify_count(start_config, goal_config, max_segment_rad):
+    """The FEWEST leveled-approach segments ``n`` (>= 2) whose straight joint interpolation keeps each
+    segment's max per-joint step ``|dq|`` at or below ``max_segment_rad`` -- the "no coarse 9-point sweeps"
+    densification (sim-preplace-level-gate-v1). A fast preplace sweep (e.g. pan -1.35 rad, wrist_2 +1.64 rad)
+    split into many short level segments both keeps the welded carton level THROUGHOUT (each short segment is
+    wrist-droop-cancelled) and lowers the executor's per-segment peak joint velocity/acceleration (less
+    dynamic deflection of the welded carton). Pure/CPU."""
+    s = _as_vec(_as_joint_map(start_config))
+    g = _as_vec(_as_joint_map(goal_config))
+    if not (math.isfinite(float(max_segment_rad)) and float(max_segment_rad) > 0):
+        raise ValueError('max_segment_rad must be a finite positive number of radians')
+    dmax = max((abs(g[i] - s[i]) for i in range(len(s))), default=0.0)
+    return max(2, int(math.ceil(dmax / float(max_segment_rad))))
+
+
+def plan_compensated_approach(robot, start_config, leveled_goal, up_in_tool, gc, *, joints=None,
+                              tool_link='ur_tool0', root='ur_base_link', limits=None,
+                              bound_deg=DEFAULT_TILT_BOUND_DEG, max_segment_rad=0.25, interior=8,
+                              level_joints=DEFAULT_LEVEL_JOINTS):
+    """Plan the carried PRE-PLACE APPROACH from ``start_config`` (the measured carry/tuck pose) to an
+    ALREADY-LEVELED standoff ``leveled_goal`` as a DROOP-COMPENSATED, DENSIFIED leveled waypoint path
+    (sim-preplace-level-gate-v1).
+
+    The counterpart of :func:`plan_level_path_to_goal` for the standoff approach, but it closes the two gaps
+    coldwin50 exposed:
+
+      * **droop-compensated interior** -- ``plan_level_path_to_goal`` levels the interior wrists only
+        GEOMETRICALLY (``interpolate_level`` -> ``level_config``), so the EXECUTED (drooped) interior still
+        pitches ~1.8 deg at the far-extended near-standoff configs, and its gate replays the GEOMETRIC path
+        (droop-blind). Here each interior waypoint is geometrically leveled THEN wrist-droop-cancelled against
+        its OWN loaded droop (``gc.wrist_feedforward``, exactly like the place descent), so the EXECUTED carton
+        stays parallel to the ground along the whole approach, not just the endpoints;
+      * **densified** -- the position joints interpolate over ``densify_count(start, goal, max_segment_rad)``
+        segments (the 132-point lesson), so the fast pan/wrist sweep is split into short level segments (lower
+        executor per-segment peak joint velocity + less dynamic deflection, and the leveled interior is sampled
+        finely).
+
+    The first waypoint is pinned to ``start_config`` verbatim (``begin_joint_path`` requires the path to start
+    exactly where the arm is, and any genuine start-pose droop is reported honestly) and the last to
+    ``leveled_goal`` (the executed-level standoff the caller already solved). ``gc`` must be a
+    ``GravityCompensation``. Returns a ``LevelPathPlan`` whose ``max_*`` are the PREDICTED EXECUTED (droop-aware)
+    extremes -- the quantity the caller gates against ``bound_deg`` (CARTON_LEVEL_PLAN_REJECTED). Raises
+    ValueError only when an interior waypoint has no in-``limits`` reach+level+droop-cancel solution (the caller
+    falls back / the CARTON_TILT trip owns it). Pure/CPU."""
+    if gc is None:
+        raise ValueError('plan_compensated_approach requires a GravityCompensation')
+    start = _as_joint_map(start_config)
+    svec = _as_vec(start)
+    gvec = _as_vec(_as_joint_map(leveled_goal))
+    n = densify_count(svec, gvec, max_segment_rad)
+    vecs = [list(svec)]
+    seed = None
+    for i in range(1, n + 1):
+        a = i / float(n)
+        base = {j: (1 - a) * svec[k] + a * gvec[k] for k, j in enumerate(_ARM_ORDER())}
+        if seed is not None:
+            # continuity: seed the level solve from the previous leveled waypoint's wrists
+            for j in level_joints:
+                if j in base and j in seed:
+                    base[j] = seed[j]
+        glev = level_config(robot, base, up_in_tool, joints=level_joints, tool_link=tool_link,
+                            root=root, limits=limits, accept_deg=bound_deg)
+        comp = gc.wrist_feedforward(robot, glev, up_in_tool, tool_link=tool_link, root=root,
+                                    limits=limits, accept_deg=bound_deg)
+        vecs.append(_as_vec(comp))
+        seed = comp
+    vecs[-1] = list(gvec)   # pin the executed-level standoff verbatim
+    mr, mp, mt = predict_path_tilt_executed(robot, vecs, up_in_tool, tool_link=tool_link, root=root,
+                                            interior=interior, gravity_comp=gc)
+    return LevelPathPlan(waypoints=tuple(tuple(v) for v in vecs), max_roll=mr, max_pitch=mp,
+                         max_tilt=mt, waypoints_n=n)
+
+
+def _ARM_ORDER():
+    from twin.restock_manipulation.cad_tool import ARM_JOINTS
+    return ARM_JOINTS
+
+
+def _waypoints_segment_times(waypoints, speed, accel):
+    """The per-segment durations the simulation executor (``ros_adapter._waypoints_goal``) assigns to a
+    rest-to-rest leveled waypoint path, mirrored VERBATIM so a CPU proof reads the real executed timing:
+    ``seg = max(1.0, 1.5*dmax/speed, sqrt(6*dmax/accel))`` with ``speed``/``accel`` clamped to the host
+    ceilings (0.08 rad/s, 0.15 rad/s^2). Pure/CPU."""
+    speed = min(float(speed), 0.08)
+    accel = min(float(accel), 0.15)
+    pts = [[float(v) for v in w] for w in waypoints]
+    out = []
+    for i in range(1, len(pts)):
+        dmax = max((abs(b - a) for a, b in zip(pts[i - 1], pts[i])), default=0.0)
+        out.append(max(1.0, 1.5 * dmax / speed, math.sqrt(6 * dmax / accel)) if dmax > 0 else 1.0)
+    return out
+
+
+def path_peak_joint_speed(waypoints, *, speed=0.05, accel=0.1):
+    """``(peak_joint_speed, peak_joint_accel)`` (rad/s, rad/s^2) the simulation executor drives a rest-to-rest
+    leveled ``waypoints`` path at, under the ``_waypoints_goal`` timing. For each segment the rest-to-rest
+    cubic peaks are ``speed=1.5*dmax/seg`` and ``accel=6*dmax/seg^2``; the maxima over the path are returned.
+    Densifying the path (smaller per-segment ``dmax``) and lowering the ``speed``/``accel`` caps both lower
+    these peaks -- the dynamics lever against the welded carton's run-to-run deflection. Pure/CPU."""
+    pts = [[float(v) for v in w] for w in waypoints]
+    if len(pts) < 2:
+        return 0.0, 0.0
+    times = _waypoints_segment_times(pts, speed, accel)
+    pk_v = pk_a = 0.0
+    for i, seg in enumerate(times):
+        dmax = max((abs(b - a) for a, b in zip(pts[i], pts[i + 1])), default=0.0)
+        if seg > 0 and dmax > 0:
+            pk_v = max(pk_v, 1.5 * dmax / seg)
+            pk_a = max(pk_a, 6.0 * dmax / (seg * seg))
+    return pk_v, pk_a
+
+
+def timed_path_peak_joint_speed(times, positions):
+    """``(peak_joint_speed, peak_joint_accel)`` of an EXTERNALLY-timed joint path (e.g. a recorded cuMotion
+    move_group preplace sweep): ``times`` (N,) seconds-from-start, ``positions`` (N, J). The per-segment
+    rest-to-rest cubic peaks for the step ``dq`` over duration ``d`` are ``1.5*|dq|/d`` and ``6*|dq|/d^2`` --
+    the same reconstruction the executor uses -- so a COARSE fast sweep (few points, big ``dq``, short ``d``)
+    reads a high peak and the densified + capped approach reads a low one. Pure/CPU (numpy-free)."""
+    t = [float(x) for x in times]
+    Q = [[float(v) for v in row] for row in positions]
+    pk_v = pk_a = 0.0
+    for i in range(len(t) - 1):
+        d = t[i + 1] - t[i]
+        if d <= 0:
+            continue
+        dmax = max((abs(b - a) for a, b in zip(Q[i], Q[i + 1])), default=0.0)
+        pk_v = max(pk_v, 1.5 * dmax / d)
+        pk_a = max(pk_a, 6.0 * dmax / (d * d))
+    return pk_v, pk_a
+
+
+def solve_level_standoff(robot, target_pos, up_in_tool, seed_config, gc, *, joints=None,
+                         tool_link='ur_tool0', root='ur_base_link', limits=None, accept_deg=0.3):
+    """Solve the collect pre-place STANDOFF so the welded carton's EXECUTED (drooped) pose is level AND
+    prefer the IK branch with the SMALLEST predicted executed tilt + the most clearance
+    (sim-preplace-level-gate-v1, brief part 1).
+
+    ``level_place_ik(gravity_comp=gc)`` already returns an executed-level standoff, but its internal ranking
+    prefers the clear-wrist branch NEAREST the seed, not the one whose EXECUTED tilt is smallest. Here the
+    wrist-flip / elbow branches are searched explicitly: each candidate is solved geometrically level + reach
+    (``level_place_ik(gravity_comp=None)`` from a wrist-flip/elbow seed) then droop-cancelled onto the wrist
+    (``gc.wrist_feedforward``), its predicted executed tilt (``droop_induced_rpy``) measured, and the branch
+    with the smallest executed tilt is returned (tie-break: in the clear carry wrist region, then nearest the
+    seed). Returns ``(solution_map, (roll, pitch, tilt))`` -- the ARM-order command and its predicted EXECUTED
+    attitude. Raises ValueError when no branch yields an in-``limits`` reach+level solution (the caller falls
+    back to the fixed shape). Pure/CPU."""
+    if gc is None:
+        raise ValueError('solve_level_standoff requires a GravityCompensation')
+    from twin.restock_manipulation.cad_tool import ARM_JOINTS
+    cfg = _as_joint_map(seed_config)
+    w1, w3 = 'ur_wrist_1_joint', 'ur_wrist_3_joint'
+    # Branch seeds: the seed itself FIRST (the nominal reach-validated branch), then the flange-roll
+    # (wrist_3) flip sweep x a small wrist_1 sweep -- the DOFs that select the attitude branch without moving
+    # the reach (level_place_ik re-solves the rest). The nominal seed is tried first and, when it is already
+    # comfortably executed-level (<= accept_deg) on a clear branch, returned immediately, so the common path
+    # is one IK; the extra branches only matter when a run's nominal branch droops more than accept_deg.
+    seeds = [{}]
+    if w3 in cfg:
+        for a in _W3_SEED_GRID[::2]:
+            seeds.append({w3: a})
+    if w3 in cfg and w1 in cfg:
+        for a in _W3_SEED_GRID[::4]:
+            for b in (-math.pi / 2, math.pi / 2):
+                seeds.append({w3: a, w1: cfg[w1] + b})
+    best = None   # (rank_key, cfgmap, rpy)
+    seen = set()
+    for seed in seeds:
+        start = dict(cfg)
+        start.update(seed)
+        try:
+            geom = level_place_ik(robot, target_pos, up_in_tool, start, joints=joints,
+                                  tool_link=tool_link, root=root, limits=limits, gravity_comp=None)
+        except ValueError:
+            continue
+        cmd = gc.wrist_feedforward(robot, geom, up_in_tool, tool_link=tool_link, root=root,
+                                   limits=limits, accept_deg=DEFAULT_TILT_BOUND_DEG)
+        cmdv = tuple(round(float(cmd[j]), 4) for j in ARM_JOINTS)
+        if cmdv in seen:
+            continue
+        seen.add(cmdv)
+        roll, pitch, tilt = droop_induced_rpy(robot, [cmd[j] for j in ARM_JOINTS], gc,
+                                              tool_link=tool_link, root=root, up_in_tool=up_in_tool)
+        worst = max(abs(roll), abs(pitch))
+        disp = sum((_wrap(cmd[j] - cfg.get(j, 0.0))) ** 2 for j in ARM_JOINTS)
+        key = (round(worst, 4), 0 if _in_clear_wrist(cmd) else 1, disp)
+        if best is None or key < best[0]:
+            best = (key, dict(cmd), (roll, pitch, tilt))
+        if worst <= float(accept_deg) and _in_clear_wrist(cmd):
+            break   # already comfortably executed-level on a clear branch -- stop searching (fast path)
+    if best is None:
+        raise ValueError('no executed-level standoff branch at target %s'
+                         % list(np.round(np.asarray(target_pos, float)[:3], 4)))
+    return best[1], best[2]
 
 
 # ------------------------------------------- loaded gravity-droop model (sim-carton-level-southdock-v1)

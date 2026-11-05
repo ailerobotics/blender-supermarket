@@ -1,0 +1,75 @@
+{
+  "_comment": "sim-preplace-level-gate-v1: GATE the carried pre-place APPROACH to the high from-above collect standoff on the predicted EXECUTED (droop) carton tilt, and CAP the carried-carton dynamics, so the welded carton stays parallel to the ground (2.0 deg bound, 0.15 s grace, NEVER loosened) through the preplace. ROOT CAUSE (coldwin50, CARTON_TILT roll +1.98 pitch +7.64 deg at preplace, base rock-steady, PR 339 full D6 lock never reached): the integration-worker forensics (coldwin50-preplace.txt) proved cw49 and cw50 commanded the SAME standoff IK branch (every joint within 0.003 rad) whose STATIC droop-executed tilt is only ~1.6 deg -- the 7.64 is run-to-run DYNAMIC deflection during a COARSE, FAST preplace sweep (a 9-point cuMotion move_group plan: pan -1.35 rad, wrist_2 +1.64 rad). Two static gaps enabled it: (1) the carried APPROACH to the standoff levelled only the GEOMETRIC interior wrists, so the EXECUTED (drooped) interior still pitched ~1.7 deg (CPU-confirmed 1.689), and the approach plan gate replayed the GEOMETRIC path (predict_path_tilt, droop-blind) so it never saw it; (2) the coarse fast sweep deflected dynamically. The fix closes BOTH and is default-OFF (byte-identical).",
+
+  "_mechanism": {
+    "1_level_standoff_solve": "carton_level.solve_level_standoff: the standoff IK is solved on the branch with the SMALLEST predicted EXECUTED (droop) tilt + the most clearance (level_place_ik(gravity_comp) already returns an executed-level standoff -- CPU 0.038 deg -- but ranks by nearest-seed, not executed tilt). Fast path: the nominal reach-validated branch is tried first and returned when already executed-level on a clear branch.",
+    "2_droop_compensated_densified_approach": "carton_level.plan_compensated_approach: the carry/tuck -> standoff approach is a leveled waypoint path whose EVERY interior waypoint is geometrically levelled THEN wrist-droop-cancelled against its OWN loaded droop (gc.wrist_feedforward), so the EXECUTED carton stays level THROUGHOUT (CPU: the geometric-interior approach executed 1.689 -> the compensated approach 0.043), and the path is DENSIFIED to densify_count(start, goal, preplace_max_segment_rad) segments (the 132-point lesson: no coarse 9-pt sweeps).",
+    "3_droop_aware_gate": "the move is gated on the predicted EXECUTED (droop-aware) tilt: a residual over preplace_gate_bound_deg (the bound minus a margin, 1.0 deg) is logged (the dynamics cap + closed loop own it), and a predicted executed over the TRUE bound_deg (2.0) is CARTON_LEVEL_PLAN_REJECTED before ANY motion (never a visibly-tilted carry).",
+    "4_dynamics_cap": "the carried approach is dispatched as begin_joint_path at preplace_approach_speed / preplace_approach_accel (lower peak joint velocity => less dynamic deflection). CPU velocity replay: a coarse 9-pt cuMotion-style sweep (arm_max_speed 0.3) peaks 0.45 rad/s / 4.9 rad/s^2; the densified capped approach peaks 0.05 rad/s / 0.035 rad/s^2. The gate line logs peak_joint_speed + peak_accel.",
+    "5_closed_loop_backstop": "when closed_loop_level is also on, the bounded MODEL closed-loop servo (CartonLevelServo.correct_path, NOT the sensor-anchored variant -- which would double-count the droop a pre-compensated path already cancelled) is extended to the approach interior as a residual backstop (authority closed_loop_authority_deg)."
+  },
+
+  "env": {
+    "RESTOCK_PLACE_ON_DECK": "1",
+    "RESTOCK_COLLECT_GROUND_TRUTH": "1",
+    "RESTOCK_VERIFY_PLACE": "1",
+    "_note": "UNCHANGED from coldwin49/coldwin50. The gate is scoped to the collect preplace approach; no new env switch."
+  },
+
+  "host_config": {
+    "_file": "scripts/twin/restock_manipulation/ros_host_config.json (resolved by ros_host.py -> carton_level.resolve_level_config -> TransferController). The ONLY new keys this lane adds are the five preplace_* keys under carton_level below; everything else is the coldwin50 block (PR 338 preplace_above_support + PR 339 station full brake), UNCHANGED.",
+    "carton_level": {
+      "preplace_level_gate": true,
+      "_preplace_level_gate_note": "NEW. ON => the collect preplace approach is the droop-compensated, densified, speed/accel-capped, gated path above. It ENGAGES only when the standoff is re-targeted above the support (preplace_above_support / preplace_above_place), so config_preflight.check_carton_level REFUSES preplace_level_gate ON with neither above-flag (silently-inert guard). OFF (default) => the single leveled-endpoint approach (sim-carton-level-preplace-v1), byte-identical.",
+      "preplace_gate_bound_deg": 1.0,
+      "_preplace_gate_bound_deg_note": "NEW, OPTIONAL (default 1.0 = bound 2.0 minus a 1.0 deg margin). The predicted-EXECUTED-tilt TARGET the compensated approach aims for; a sub-bound residual over it is logged (dynamics cap + closed loop own it), a predicted executed over the TRUE bound_deg (2.0) is refused before motion. Must be in (0, bound_deg].",
+      "preplace_max_segment_rad": 0.25,
+      "_preplace_max_segment_rad_note": "NEW, OPTIONAL (default 0.25). The max per-joint step per densified approach segment -- splits the fast pan/wrist sweep into short level segments. A tighter value => more waypoints => lower per-segment peak joint velocity.",
+      "preplace_approach_speed": 0.05,
+      "preplace_approach_accel": 0.1,
+      "_preplace_approach_speed_accel_note": "NEW, OPTIONAL (default 0.05 rad/s, 0.1 rad/s^2; clamped to the host ceilings 0.08 / 0.15). The carried approach joint speed/accel caps passed to begin_joint_path -- the dynamics lever against the welded carton's run-to-run deflection.",
+
+      "preplace_above_support": true,
+      "preplace_support_clearance_m": 0.08,
+      "place_from_above": true,
+      "place_above_clearance_m": 0.08,
+      "place_contact_release": true,
+      "place_contact_gap_m": 0.012,
+      "closed_loop_level": true,
+      "closed_loop_sensor": true,
+      "gravity_compensation": {"stiffness_nm_per_rad": 2850, "carton_mass_kg": 0.45},
+      "place_clearance_drooped": true,
+      "place_clearance_margin_m": 0.030,
+      "_kept_note": "ALL the coldwin49/coldwin50 carton_level keys are KEPT verbatim (preplace_above_support derives the standoff above the shelf; contact release + gap; droop K=2850; droop-aware clearance; from-above). This lane only adds the five preplace_* gate/dynamics keys. closed_loop_sensor stays for the PLACE descent; the preplace approach uses the MODEL closed loop (not the sensor anchor), decided internally."
+    },
+    "_other_host_keys_unchanged": "collect_place_preplace_shape (the IK seed + the no-support fallback), collect_place_straight_line, collect_place_wrist_guard, carry_wrist1_cap / carry_wrist2_min, release_detach_timeout_s -- all UNCHANGED from coldwin50. PR 339 RUNTIME keys (station_place_full_brake etc.) UNCHANGED."
+  },
+
+  "runtime_config": {
+    "_file": "mission-runtime-*.json (EXTERNAL to the repo; the integration lane owns it). UNCHANGED from coldwin50 -- incl. the PR 339 RUNTIME full-brake keys (station_place_full_brake, chassis_station_pitch_hold_*) that this lane does NOT touch.",
+    "manipulation": {
+      "cart_placement": {
+        "location": "rollwagen",
+        "support_prim": "shelf",
+        "load_center_body_xy": [0.135, 0.0],
+        "support_z_world": 0.9712,
+        "_note": "UNCHANGED from coldwin49/50: the UPPER shelf (resolved top ~0.9707 world)."
+      }
+    }
+  },
+
+  "config_preflight": {
+    "_check_carton_level": "resolve_level_config validates the five new keys (preplace_gate_bound_deg in (0, bound_deg]; the rest finite positive). NEW coherence refusal: preplace_level_gate ON with neither preplace_above_support nor preplace_above_place -> 'the gate engages only on the re-targeted above-support preplace standoff, so with neither it is silently inert'. Deck / no support_prim / gate OFF => no new refusal (byte-identical)."
+  },
+
+  "console_signatures_expected": [
+    "PREPLACE_ABOVE_SUPPORT engaged: collect preplace standoff re-targeted ... (the standoff solved on the min-executed-tilt branch)",
+    "CARTON_LEVEL_PREPLACE_GATE n=<N> predicted_executed max roll=<r> pitch=<p> tilt=<t> deg (target 1.00 within target, bound 2.00) peak_joint_speed=<v> rad/s peak_accel=<a> rad/s^2 [closed_loop_peak=<c> deg] -- droop-compensated densified carried approach to the executed-level standoff",
+    "CARTON_SEGMENT_TILT phase=preplace planned=<p> executed=<e> | ... (at the preplace->place transition, now with a planned value and a sub-bound executed)",
+    "NO 'CARTON_TILT carried carton off level' trip at phase=preplace"
+  ],
+
+  "_acceptance_coldwin51": "CARTON_SEGMENT_TILT phase=preplace executed <= 1.5 deg (the preplace sweep no longer reaches the 2.0 bound), with the peak joint velocity logged on the CARTON_LEVEL_PREPLACE_GATE line; NO CARTON_TILT trip at preplace; the run REACHES place, where the PR 339 full D6 lock engages at place start (STATION_FULL_BRAKE / base drift <= 0.02 m -- validated for the first time, the coldwin50 premise that it was never exercised); PLACE_CONTACT_RELEASE fires at TRUE shelf contact (carton bottom within place_contact_gap_m of the measured ~0.9707 world shelf top, descent_drop ~0.08 not 0.0); verify_place PASSES (carton resting, xy in tol, bottom_gap ~0); and the run ADVANCES PAST COLLECT. The 2.0 deg bound, 0.15 s grace, carton dims, droop stiffness, tow lanes and the brake are UNCHANGED.",
+
+  "_cpu_proof": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=scripts python3 -m pytest scripts/twin/tests/test_preplace_level_gate_v1.py -- config resolve/validate (the five keys, defaults, off byte-identical, the gate-bound<=bound rule); densify_count scaling; solve_level_standoff (executed-level + reach + clear branch); the cw50 gap reproduction (geometric-interior approach executed 1.689 > the 1.0 gate target; the droop-compensated densified approach 0.043 <= 1.0) and the dynamics velocity replay (coarse 9-pt cuMotion sweep peak 0.45/4.9 vs the capped densified 0.05/0.035); the CARTON_LEVEL_PLAN_REJECTED refusal path; config_preflight (gate-without-above refused, gate-with-above-support clean, off byte-identical, malformed refused); and the controller gated dispatch (one densified capped begin_joint_path, the planned preplace tilt stashed for CARTON_SEGMENT_TILT). Default-off => byte-identical (the full carton_level suite stays green except the one documented pre-existing preplace fixture-URDF inversion failure). The real cw49/cw50/cw51 numbers replay is scripts/twin/restock_manipulation (data/sim-preplace-level-gate-v1/)."
+}
