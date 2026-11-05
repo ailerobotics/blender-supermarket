@@ -5,6 +5,7 @@ They never replace localized navigation or rendered inventory observations.
 No method sets a body pose, joint position, payload parent or collision flag.
 """
 import math
+import os
 import time
 
 import numpy as np
@@ -504,6 +505,17 @@ class IsaacPort:
         and any unknown phase (fail safe). Called each tick BEFORE advance() with the last known
         phase; a one-tick lag is within the occlusion window the hold already tolerates."""
         self._phase=phase            # also drives the phase-aware base brake (see _apply_base_brake)
+        # sim-preplace-wrist-continuity-v1: enable DRIVE_TICK (applied drive target vs executed per joint +
+        # the effective PhysX gains) for the CARRIED phases when RESTOCK_DRIVE_TICK is set, so coldwin58's
+        # console records whether the executed wrist relaxes away from the held target and what stiffness/
+        # effort the wrist drive actually carries. Opt-in env => default off => byte-identical (no extra log).
+        gate=getattr(self,'command_gate',None) or (getattr(self.native_transport,'command_gate',None)
+                                                    if self.native_transport is not None else None)
+        if gate is not None and os.environ.get('RESTOCK_DRIVE_TICK') not in (None,'','0'):
+            carried=phase in ('lift','tuck','transit','preplace','place','retreat','release','stow')
+            if carried and not getattr(gate,'log_drive',False):
+                gate._drive_gains_logged=False   # re-log the effective gains once on each carried entry
+            gate.log_drive=carried
         # fm347/348 (1): switch the arm drive to STIFF for the loaded extend/rotate+place (pan/
         # preplace/place) and back to SOFT elsewhere, applied once per transition (no-op when the
         # selected gains are unchanged). Opt-in via config['phase_drive']; a stray phase keeps the

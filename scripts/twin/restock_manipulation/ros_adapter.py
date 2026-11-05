@@ -2258,6 +2258,11 @@ class RosMotionPort:
                 self._exec_abort_reason = (
                     'arm controller aborted trajectory (goal rejected or execution fault, moveit_err=%s; '
                     'see host-stack.log TRAJ_HOST_GOAL_REJECT/TRAJ_HOST_FAULT)' % (_code,))
+                # sim-preplace-wrist-continuity-v1: surface the executor abort to the CONSOLE too. The
+                # TRAJ_HOST_TRACK_MISS/TRAJ_HOST_FAULT detail lives ONLY in host-stack.log ([python3-5]);
+                # echoing the abort here puts the named cause in the mission console log ([python3-4]) so a
+                # coldwin* run's own console shows WHY the arm aborted without cross-referencing two files.
+                print('EXEC_ABORT %s' % self._exec_abort_reason, flush=True)
                 raise RuntimeError('execution failed')
             self.state = 'succeeded'
         if self.state == 'succeeded':
