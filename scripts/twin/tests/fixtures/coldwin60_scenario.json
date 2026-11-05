@@ -1,0 +1,108 @@
+{
+ "job": {
+  "job_id": "restock-one",
+  "sku": "juice_orange",
+  "quantity": 1,
+  "source_bin": "backstock_00",
+  "shelf_id": "G3_back_s2"
+ },
+ "inventory_unit": "sealed_handling_unit",
+ "dynamic_stock_ready": true,
+ "navigation_model": "articulated",
+ "initial_inventory": [
+  {
+   "location": "backstock_00",
+   "sku": "juice_orange",
+   "quantity": 1
+  }
+ ],
+ "return_pose": "robot_dock",
+ "limitations": [
+  "Side-contact candidate uses the same local carton wall; full arm/tool/payload swept clearance remains unverified.",
+  "Kinematic and contact validation pending; no runtime teleport is permitted.",
+  "Articulated route must include the added backroom staging support obstacle.",
+  "Articulated route and final cart configuration require validation against this exact scenario."
+ ],
+ "handling_unit": {
+  "sku": "juice_orange",
+  "description": "Representative sealed shallow handling unit; hidden contents are not counted",
+  "dimensions_m": [
+   0.45,
+   0.3,
+   0.18
+  ],
+  "mass_kg": 0.45,
+  "tcp_quaternion_xyzw": [
+   0.5,
+   0.5,
+   0.5,
+   0.5
+  ],
+  "tcp_surface_offset_m": 0.00275,
+  "approach_m": 0.12,
+  "max_reach_m": 1.3,
+  "grasp_mode": "side",
+  "local_wall": 3,
+  "lift_m": 0.03
+ },
+ "initial_staging": {
+  "frame": "map",
+  "support_center_xy": [
+   -5.73,
+   17.1
+  ],
+  "support_dimensions_m": [
+   0.68,
+   0.48,
+   0.6
+  ],
+  "unit_bottom_z": 0.6,
+  "robot_base_pose": [
+   -5.73,
+   16,
+   0
+  ],
+  "cart_body_pose": [
+   -5.73,
+   15.25,
+   0
+  ],
+  "cart_load_center_body_xy": [
+   0.135,
+   0.0
+  ],
+  "cart_support_z_world": 0.9707,
+  "target_surface_pose_world": [
+   -3.05,
+   4.826,
+   0.73,
+   0
+  ],
+  "target_initially_depleted": true,
+  "initial_conditions_only": true,
+  "shelf_robot_pose": [
+   -3.05,
+   6.0,
+   3.141592653589793
+  ],
+  "unit_yaws_world": {
+   "source": 3.141592653589793,
+   "cart": -1.5707963267948966,
+   "shelf": 0.0
+  }
+ },
+ "occlusion_window_s": 300.0,
+ "transfer_bay": {
+  "center_xy": [
+   -2.0,
+   16.42
+  ],
+  "dimensions_m": [
+   0.7,
+   0.5,
+   0.73
+  ],
+  "top_z": 0.73,
+  "_note": "fm459 backroom transfer bay: static support surface (top at z=0.73 = the shelf camera commissioned support z); the carton is placed here instead of the store shelf. Shelf station camera repositioned over it in camera-config-bay.json."
+ }
+}

@@ -1,0 +1,108 @@
+{
+  "_fragment": "post-collect-stage-readiness-fragment",
+  "_lane": "sim-post-collect-stage-readiness-v1",
+  "_summary": "Per-stage offline readiness of the POST-COLLECT mission stages (couple -> outbound tow -> park -> transfer -> verify -> return) under the FULL coldwin60 key set (PRs #328-#346). Every existing offline check for the later stages PASSES on the coldwin60 config EXCEPT the transfer/verify geometry drift (a standing config issue predating #328-#346, called out under coldwin61_actions). No code regression from #328-#346 breaks a later-stage offline check; the collect-scoped keys are correctly scoped (full base brake, carried-soft free-arm exclusion, phase-budget floor, idle heartbeat) or phase-shared-by-design and flagged (preplace/place drive profile, pitch hold, world-frame tilt).",
+  "_config_under_test": {
+    "runtime": "datasets/twin-robot-in-store-boot-v1/mission/mission-runtime-coldwin60.json (fixture: scripts/twin/tests/fixtures/coldwin60_runtime.json)",
+    "host": "slot2 scripts/twin/restock_manipulation/ros_host_config.json (fixture: scripts/twin/tests/fixtures/coldwin60_host.json)",
+    "scenario": "datasets/twin-robot-in-store-boot-v1/mission/mission-scenario.json (fixture: scripts/twin/tests/fixtures/coldwin60_scenario.json)",
+    "env": {
+      "RESTOCK_TRANSFER_MODE": "live_pose",
+      "RESTOCK_TRANSFER_CARRY": "wrist_guard,weld",
+      "RESTOCK_PLACE_ON_DECK": "1",
+      "RESTOCK_VERIFY_PLACE": "1"
+    }
+  },
+  "pinning_test": "scripts/twin/tests/test_post_collect_stage_readiness_v1.py (18 cases, CPU-only, loads the three coldwin60 fixtures)",
+  "stages": {
+    "couple": {
+      "keys_that_matter": ["navigation.couple_static_drive", "hold_cart_through_couple", "fine_dock.*", "couple_cart_relative.*", "couple_dock_align", "mission_poses.couple_approach/couple_standoff", "chassis_station_pitch_hold (brake must release before the couple drive)"],
+      "checks": {
+        "scripts/check_couple_nav.py": "PASS (reaches standoff from both start poses; coupled outbound routes cheaply)",
+        "test_restock_couple_approach.py + test_couple_speed.py": "PASS",
+        "test_post_collect_stage_readiness_v1::test_station_brake_releases_for_every_nav_stage": "PASS (all brakes released outside the arm phase)"
+      },
+      "regression_from_328_346": "none",
+      "verdict": "READY offline"
+    },
+    "outbound_tow": {
+      "keys_that_matter": ["navigation.tow_lanes (outbound_dock_to_side_bay)", "navigation.coupled_* (heading hold / breakaway / progress escape)", "wheel_drive.max_force=200", "mobile-casterlift030 (caster_lift 0.03)", "traction.py caster-suspension model (DORMANT: no suspension key in coldwin60)"],
+      "checks": {
+        "scripts/check_tow_lanes.py --lanes <coldwin60 runtime>": "PASS (outbound_dock_to_side_bay lane, all 22 sub-checks)",
+        "scripts/check_tow_traction.py": "PASS 14/14 (caster 0.03 / drive 200 dominates the stuck config)",
+        "scripts/check_portal_throat_clear.py": "PASS (throat collider-clear at caster_lift 0.03)",
+        "scripts/check_portal_floor_seam.py": "PASS",
+        "test_outbound_throat_launch.py + test_tow_traction.py": "PASS"
+      },
+      "regression_from_328_346": "none (the chassis-pitch PRs raised caster_lift/suspension but the coupled tow checks pass at coldwin60's caster 0.03 / drive 200; the new suspension model is off)",
+      "verdict": "READY offline"
+    },
+    "park": {
+      "keys_that_matter": ["station_place_full_brake (+ effort_limit) MUST be collect-scoped", "chassis_station_pitch_hold MUST release before/for the park drive"],
+      "checks": {
+        "test_station_full_brake.py::test_full_lock_only_at_collect_station": "PASS (transfer/other stations do not take the collect full lock)",
+        "test_post_collect_stage_readiness_v1::test_full_base_brake_window_is_collect_only": "PASS",
+        "test_post_collect_stage_readiness_v1::test_station_brake_releases_for_every_nav_stage": "PASS"
+      },
+      "regression_from_328_346": "none (full base brake gated on action=='collect' AND phase in {place,release,retreat}; releases for every non-arm tick)",
+      "verdict": "READY offline"
+    },
+    "transfer": {
+      "keys_that_matter": ["phase_drive.carried_soft_phases=['preplace'] + carried_joint_profile.preplace (PHASE-shared with the live_pose transfer preplace)", "phase_drive.stiff place (phase-shared)", "chassis_station_pitch_hold / station_pitch_hold (engages at the transfer arm phase; chassis pitch is location-independent)", "carton_level world-frame preplace measurement (phase=='preplace', applies to transfer preplace too)", "transfer_service_carry", "transfer_ground_truth"],
+      "checks": {
+        "scripts/check_mission_tail.py": "FAIL -- but ONLY on config_ground_truth_target_is_bay_top / tray_on_bay_* (the target/bay geometry drift below), NOT on any #328-#346 key",
+        "test_restock_transfer_live_pose.py / _carry / _preplace_reach / transfer_place_target.py": "PASS",
+        "test_post_collect_stage_readiness_v1::test_phase_drive_free_arm_phases_stay_uniform_soft": "PASS (no leak into lift/tuck/transit/release/retreat/stow)",
+        "test_post_collect_stage_readiness_v1::test_phase_drive_preplace_is_soft_except_pan_hold / _place_is_uniform_stiff": "PASS (pinned; phase-shared with transfer)",
+        "test_post_collect_stage_readiness_v1::test_transfer_arm_phase_takes_rotation_hold_not_full_lock": "PASS"
+      },
+      "regression_from_328_346": "none that breaks an offline check. FLAG (unvalidated, not a proven regression): the carried preplace drive profile (shoulder_pan stiff, wrists soft), the stiff place profile, the pitch hold and the world-frame preplace tilt are PHASE-keyed, so they also apply to the live_pose transfer preplace/place. No transfer-on-shelf run has ever executed with these keys, so their effect on the transfer place is unvalidated; the profile is plausibly consistent (keeps the carton level-in-world, resists the loaded-place sag). WATCH the transfer PREPLACE/PLACE on the first GPU run that clears collect.",
+      "verdict": "READY offline for the #328-#346 keys; BLOCKED by the target/bay drift (see coldwin61_actions)"
+    },
+    "verify": {
+      "keys_that_matter": ["verify_ground_truth.enabled", "scenario.transfer_bay (the vr1 ground-truth verifier reads this)", "transfer_ground_truth.target (where the carton is actually placed)"],
+      "checks": {
+        "scripts/check_mission_tail.py": "FAIL config_ground_truth_target_is_bay_top: target=[-3.05,4.826,0.73] vs bay_center=[-2.0,16.42] (error 11.64 m)",
+        "test_post_collect_stage_readiness_v1::test_transfer_target_vs_verify_bay_drift_is_flagged": "PASS (documents the drift; trips when coldwin61 aligns them)",
+        "test_post_collect_stage_readiness_v1::test_ground_truth_transfer_and_verify_wiring": "PASS (the ground-truth wiring resolves; only the geometry is inconsistent)"
+      },
+      "regression_from_328_346": "none (predates #328-#346; PR303 moved the transfer target to the sales-floor endcap, fm459 left scenario.transfer_bay at the backroom bay)",
+      "verdict": "BLOCKED by the target/bay drift -- the verify stage would check the wrong surface"
+    },
+    "return": {
+      "keys_that_matter": ["uncouple_on_return=false (tow home coupled)", "mission_poses.cart_parking/home", "navigation.tow_lane_cart_yaw_rebase (coupled return tracking)", "lidar_sensor_yaw_fix"],
+      "checks": {
+        "scripts/check_mission_tail.py home leg": "PASS (reaches home -3.9,14.0 with lidar_yaw_fix=true)",
+        "test_return_cartyaw_regression.py": "PASS (coupled return follower tracks the lagging cart yaw)"
+      },
+      "regression_from_328_346": "none",
+      "verdict": "READY offline"
+    }
+  },
+  "preflight": {
+    "command": "python3 -m twin.restock_manipulation.config_preflight --host-config <coldwin60 host> --runtime-config <coldwin60 runtime> --scenario <scenario> --mobile-manifest <casterlift030> --place-on-deck --support-top-z-world 0.9707",
+    "result": "PASS (exit 0). PREPLACE_PHASE_BUDGET derived=185.1 s (>=120 floor, raises only). Every always-on validator returns [] on the full config (check_activation, check_flow_consistency, check_carton_level, check_cart_placement_source, check_support_selection, check_station_full_brake, check_phase_drive_carried_soft, check_phase_drive_carried_joint_profile, check_preplace_phase_budget). No block refused or silently ignored."
+  },
+  "suspicions_audit": {
+    "station_brake_or_hold_outside_collect": "CLEAR -- full base brake gated on action=='collect' AND loaded-place phase; releases for every non-arm tick. Pitch hold engages for the transfer arm phase (location-independent chassis attitude), releases before driving.",
+    "carried_soft_or_per_joint_leak": "CLEAR for FREE-ARM phases (lift/tuck/transit/release/retreat/stow uniform soft, no override; the preflight refuses a carried_soft_phase naming a non-stiff phase). PHASE-SHARED into the transfer preplace/place by phase name -- flagged, not a proven regression.",
+    "world_frame_tilt_scope": "phase=='preplace' only (test_preplace_leg2_level_v1); applies to the transfer preplace too (consistent with the pitch hold). Flagged.",
+    "phase_budget_shortened": "CLEAR -- preplace_phase_budget = max(120, plan+margin); only RAISES the single global phase_timeout; no phase shortened.",
+    "heartbeat_alters_tow_dock_status": "CLEAR -- StatusHeartbeat silent while the arm controller is idle (the whole couple/outbound/park drive); liveness-only message, no controls, never clears active, never advances sensor anchors.",
+    "preflight_refuses_or_ignores_block": "CLEAR -- config_preflight PASS; every coldwin60 block validated and consumed."
+  },
+  "coldwin61_actions": [
+    {
+      "priority": "HIGH -- blocks the verify stage",
+      "what": "Align the transfer place target with the ground-truth verify bay.",
+      "where": "DATASET config (not a repo change): either (a) point scenario.transfer_bay (center_xy/dimensions_m/top_z) at the real sales-floor endcap the carton is placed on, or set runtime verify_ground_truth.bay to it; or (b) move runtime.transfer_ground_truth.target back onto scenario.transfer_bay.",
+      "why": "The carton is placed at transfer_ground_truth.target=[-3.05,4.826,0.73] (sales-floor endcap) but the vr1 ground-truth verifier checks scenario.transfer_bay center=[-2.0,16.42] (backroom bay), 11.64 m away -> verify can never confirm. check_mission_tail.py catches this today. NOT introduced by #328-#346.",
+      "verify_after": "scripts/check_mission_tail.py --runtime-config <rt> --scenario <sc> --environment <env> --camera-config <cam> prints MISSION_TAIL_DRYRUN PASS"
+    },
+    {
+      "priority": "WATCH -- not a config change, a GPU-run observation",
+      "what": "On the first GPU run that clears collect, watch the TRANSFER preplace/place.",
+      "why": "The carried-preplace drive profile (shoulder_pan stiff / wrists soft), the uniform-stiff place, the pitch hold and the world-frame preplace tilt are phase-keyed and therefore also shape the live_pose transfer place -- a geometry no run has exercised with these keys. If the transfer preplace swings or the place mis-levels, scope the carried phase_drive overrides + the station pitch hold to action=='collect' (keeps collect byte-identical). No change made now (no evidence of harm; the profile is plausibly consistent)."
+    }
+  ]
+}
