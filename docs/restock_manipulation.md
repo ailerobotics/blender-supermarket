@@ -238,6 +238,26 @@ progress (entering contact / a `CONTACT_STEP` advance) occurs for this many WALL
 heartbeat backstop — so a stuck contact ends the attempt legibly instead of burning the GPU wall cap.
 CPU tests: `tests/test_restock_manipulation.py`.
 
+**Pick-contact seal reliability + guards** (sim-pick-contact-seal-fallback-v1, HOST keys, all opt-in,
+default off ⇒ byte-identical). coldwin63's pick never sealed even though the controller DID issue the
+suction enable (`CONTACT_SUCTION enable`, host-stack.log): the gripper-enable control is a **one-shot**
+carried only on the `/manipulation/status` `controls` field, and the host→Isaac relay
+(`control_ipc.HostControlPublisher`) is **last-value** — a later heartbeat status overwrote it before
+`isaac_ros_graph.IsaacRosGraph.poll` read it, so `cad_tool.command(close)` never ran (plugin stayed
+`Open`), the gated `SIM_ATTACH_FALLBACK` stayed `skip=suction_off`, and the press hit the 20 mm cap
+(`contact not reached within capped over-press travel`). cw62/cw61 won the race; cw63 lost it. Three keys
+address it: `contact_reissue_suction_each_tick` re-publishes the enable every press tick so the relay
+always carries it (the direct fix — behaviour-preserving for sealed runs); `contact_require_suction_enabled`
+(+ `contact_reissue_close_once`) fails fast `CONTACT_SUCTION_NOT_ENABLED` / re-sends the close once at the
+first over-press step if the plugin never reported enabled, instead of pressing the full cap with no chance
+of a latch; `contact_accept_seal_diag` (+ `contact_seal_diag_dwell_ticks`/`_max_gap_mm`/`_max_angle_deg`)
+treats a dwell-stable flush geometric `SEAL_DIAG` on a body under the pad (with suction enabled) as contact,
+driving the same latch path the plugin flag drives. The guards read new opt-in `Sensors` feedback
+(`gripper_enabled`, `seal_gap_mm`, `seal_pad_angle_deg`, `seal_hit_target`) the driver populates from the
+`NativePanelContact` probe. Recommended ON values + the full reconstruction:
+`docs/examples/pick-contact-seal-fallback-fragment.json`. CPU tests:
+`tests/test_pick_contact_seal_fallback.py`.
+
 **Collision-stale pause keep-alive + wall budget** (`RESTOCK_COLLISION_PAUSE_WALL_S`, opt-in, default
 `0` = off ⇒ the legacy empty-control pause, byte-identical): the fm419(a) `COLLISION_STALE_PAUSE` holds
 the post-attach lift while the (held) carton's collision stamp is briefly stale — the benign weld/ESDF

@@ -14,6 +14,23 @@ import numpy as np
 
 from .perception import DepthPerception, load_pose_bridge
 from .types import Sensors
+
+
+def _contact_feedback_kwargs(contact):
+    """sim-pick-contact-seal-fallback-v1: the opt-in pick-contact feedback fields (gripper_enabled +
+    SEAL_DIAG geometry) for the Sensors packet, read best-effort from the NativePanelContact. Returns the
+    empty dict (=> Sensors defaults => byte-identical) on anything that lacks ``contact_feedback`` or
+    raises, so the fixture/in-process contact and a probe-less run are unaffected. The host controller only
+    reads these when an opt-in guard key is on."""
+    fb = getattr(contact, 'contact_feedback', None)
+    if not callable(fb):
+        return {}
+    try:
+        enabled, gap, angle, hit = fb()
+        return dict(gripper_enabled=bool(enabled), seal_gap_mm=gap,
+                    seal_pad_angle_deg=angle, seal_hit_target=bool(hit))
+    except Exception:
+        return {}
 from ..restock_camera.geometry import rigid
 from ..restock_camera.freshness import frame_deadline, require_fresh
 from ..restock.physics_step import freshness_scale_from_env
@@ -261,7 +278,8 @@ class IsaacCartonSensors:
                               for item in held['evidence'])
         return Sensors(now, held['observations'], held['target'], bool(motion.parked()),
                        contact_state, now, collision_time, joints,
-                       held['scanned'], held['scan_time'], valid_until)
+                       held['scanned'], held['scan_time'], valid_until,
+                       **_contact_feedback_kwargs(contact))
 
     def capture(self, now, source, destination, motion, contact):
         if self.execution_gate and self._render_suspended:
@@ -585,7 +603,8 @@ class IsaacCartonSensors:
                 parked=bool(context.parked and motion.parked()))
         return Sensors(now, tuple(observations), targets.get(destination),
                        motion.parked(), contact.read(), now, motion.collision_time,
-                       motion.joint_positions(), tuple(scanned), stamp, deadline)
+                       motion.joint_positions(), tuple(scanned), stamp, deadline,
+                       **_contact_feedback_kwargs(contact))
 
     def _known_foreground(self, slot, observations, depth, intr):
         mask = slot.support_view.mask(slot.support_view.geometry.intrinsics)

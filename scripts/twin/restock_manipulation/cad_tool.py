@@ -157,6 +157,34 @@ def _release_held_on_open(held, open_streak, release_ticks):
     return (not held) or open_streak >= release_ticks
 
 
+def seal_feedback_from_probe(probe):
+    """sim-pick-contact-seal-fallback-v1: pure extraction of the controller-facing pick-contact feedback
+    from a SEAL_DIAG probe dict (:meth:`NativePanelContact.probe`). Returns
+    ``(gripper_enabled, gap_mm, pad_angle_deg, hit_present)`` and NEVER raises -- any missing/garbled field
+    degrades to the safe default, so a driver that feeds it a partial probe gets a conservative feedback
+    the controller guards treat as 'no evidence' (never a spurious accept).
+
+    ``gripper_enabled`` keys on the PLUGIN status (``Closing``/``Closed`` => the close command landed), NOT
+    the commanded ``enabled`` flag -- cw63's lost close command left the commanded flag irrelevant while the
+    plugin stayed ``Open`` the whole press. ``hit_present`` is True when any seal raycast found an external
+    body under the pad (SEAL_DIAG ``hit_bodies`` non-empty); in the collect pick the only body under the pad
+    is the carton, so with suction enabled and a flush sub-mm gap it is the grasp target."""
+    if not isinstance(probe, dict):
+        return (False, None, None, False)
+    status = str(probe.get('status') or '')
+    gripper_enabled = (bool(status) and status != 'None' and not status.startswith('ERR')
+                       and 'Open' not in status)
+    gap = probe.get('min_gap_mm')
+    angle = probe.get('pad_vs_surface_deg')
+    if gap is not None and not (isinstance(gap, (int, float)) and math.isfinite(gap)):
+        gap = None
+    if angle is not None and not (isinstance(angle, (int, float)) and math.isfinite(angle)):
+        angle = None
+    hits = probe.get('raycast') or []
+    hit_present = any(h and h[0] for h in hits)
+    return (bool(gripper_enabled), gap, angle, bool(hit_present))
+
+
 #: fm320: the tool-side gripper geometry that collides with the forearm/upper_arm/wrist as the carry fold
 #: closes (42.7 kN tool-vs-arm contact) -- all on the cuMotion self-collision ignore list, so disabled while
 #: welded. sim-collect-retreat-fault-v1 also defers re-enabling exactly this set past the empty retreat.
@@ -449,6 +477,22 @@ class NativePanelContact:
             self._release_fallback()      # suction off releases any labelled sim weld
         if getattr(self, '_diag', False):
             self._emit('command:%s' % ('close' if self.enabled else 'open'), force=True)
+
+    def contact_feedback(self):
+        """sim-pick-contact-seal-fallback-v1: the controller-facing pick-contact feedback for the opt-in
+        guards, as ``(gripper_enabled, seal_gap_mm, seal_pad_angle_deg, seal_hit_target)``. Reads the last
+        SEAL_DIAG probe (already computed for logging on the sensing stride) -- no extra raycast -- falling
+        back to the live plugin status when no probe exists yet (``RESTOCK_SEAL_DIAG=0``). Best-effort and
+        NEVER raises: any failure returns the all-safe default so the driver stays byte-identical and the
+        guards simply see 'no evidence'."""
+        try:
+            probe = getattr(self, 'last_probe', None)
+            if isinstance(probe, dict):
+                return seal_feedback_from_probe(probe)
+            status = self.api.get_gripper_status(self.path)
+            return (status != self.open_status, None, None, False)
+        except Exception:
+            return (False, None, None, False)
 
     def sim_attach_contact_ready(self):
         """Labelled SIM attach-fallback DETECT step, DEFAULT OFF (see SIM_ATTACH_CONTACT_MM). Returns
