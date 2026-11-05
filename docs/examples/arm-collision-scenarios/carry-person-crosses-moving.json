@@ -1,0 +1,33 @@
+{
+  "id": "carry-person-crosses-moving",
+  "arm_leg": "carry",
+  "expected_behavior": "slow_stop_resume",
+  "margin_m": 0.03,
+  "duration_s": 3.0,
+  "time_step_s": 0.2,
+  "description": "A person walks through the +Y arm workspace during the carry fold. Per the captain section-9 decision a person is a generic dynamic volume and the HUMAN GATE owns the STOP (never ESDF segmentation). Unobserved today (carry is wrist-blind, mast off) -> the current stack does not stop -> the measured BEFORE gap. Closed by the mast feed (the only live carry feed) + humangate preempt (lane 2).",
+  "obstacles": [
+    {
+      "name": "person",
+      "kind": "sphere",
+      "center": [
+        -0.0224,
+        1.0118,
+        0.2039
+      ],
+      "radius": 0.2,
+      "observed": false,
+      "motion": {
+        "kind": "linear",
+        "velocity": [
+          0.0,
+          -0.3,
+          0.0
+        ],
+        "start_t": 0.0,
+        "class": "person"
+      }
+    }
+  ],
+  "notes": "observed flips True when the mast depth feed is enabled during carry. S5: STOP-not-contact."
+}
