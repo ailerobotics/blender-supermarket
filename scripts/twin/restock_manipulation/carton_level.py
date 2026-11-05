@@ -320,6 +320,25 @@ class LevelConfig:
     preplace_standoff_m: float = 0.12
     place_clearance_check: bool = False
     place_clearance_margin_m: float = 0.030
+    # sim-place-preplace-above-support-v1: derive the collect pre-place standoff from the RESOLVED support
+    # top so the from-above descent onto the SELECTED support is POSITIVE. coldwin48 selected the Rollwagen
+    # UPPER shelf (support top 0.9707 world) but the fixed, DECK-tuned ``collect_place_preplace_shape``
+    # parked the carried carton bottom 34 mm BELOW the shelf top (carton centre 1.027 world): the place
+    # target (0.957,0.064,0.538 ur_base) sat ABOVE the fixed standoff (TCP 0.528 ur_base), so
+    # ``place_descent_drop_m`` read 0.0, the contact-triggered weld release fired in mid-air below the shelf
+    # (PLACE_CONTACT_RELEASE_ARM DESCENT_DROP=0.0000) and the carton fell (verify_place: carton not resting,
+    # bottom_gap -0.809). With ``preplace_above_support`` on, the collect preplace standoff is re-targeted
+    # DIRECTLY ABOVE the place load-centre, raised so the carton bottom sits at support_top + the clearance;
+    # the standoff pose is solved by the SAME reach+level IK (``level_place_ik``) + droop model (K 2850) as
+    # the deck above-place path, seeded from the fixed shape, and fed to ``place_from_above`` -- so the
+    # descent length is the clearance and the release fires at the true support top. The clearance defaults
+    # to ``place_above_clearance_m`` (the from-above via clearance -- standoff height and the descent's own
+    # above-clearance then match); set ``preplace_support_clearance_m`` to override it. Default OFF => the
+    # fixed shape is used unchanged (byte-identical). Distinct from ``preplace_above_place`` (the DECK v1
+    # remedy the preflight REFUSES because its above-place IK drifted the carton into the cage mouth posts,
+    # coldwin41 -- a deck-only hazard the higher, open upper shelf does not have).
+    preplace_above_support: bool = False
+    preplace_support_clearance_m: object = None   # None => fall back to place_above_clearance_m
     # sim-place-descent-residual-v2: the DROOP-AWARE clearance gate. The v1 ``place_clearance_check`` sweeps
     # the carton as an IDEALISED level box at the configured load-centre -- the WRONG quantity (coldwin41:
     # the above-place IK actually drifts the carton ~93 mm toward the +x mouth, swinging the welded pad into
@@ -389,6 +408,12 @@ class LevelConfig:
                 raise ValueError(f'carton_level.{nm} must be a finite positive number')
         if not (math.isfinite(self.place_above_clearance_m) and self.place_above_clearance_m >= 0):
             raise ValueError('carton_level.place_above_clearance_m must be a finite non-negative number')
+        if self.preplace_support_clearance_m is not None and not (
+                math.isfinite(float(self.preplace_support_clearance_m))
+                and float(self.preplace_support_clearance_m) > 0):
+            raise ValueError('carton_level.preplace_support_clearance_m must be a finite positive '
+                             'number of metres (the collect pre-place carton-bottom clearance above the '
+                             'resolved support top), or omitted to default to place_above_clearance_m')
         if not (math.isfinite(self.place_depth_bias_m) and self.place_depth_bias_m >= 0):
             raise ValueError('carton_level.place_depth_bias_m must be a finite non-negative number')
         if not (math.isfinite(self.preplace_standoff_m) and self.preplace_standoff_m > 0):
@@ -416,6 +441,15 @@ class LevelConfig:
             self.gravity_compensation.validate()
         return self
 
+    def preplace_support_clearance(self):
+        """The effective collect pre-place carton-bottom clearance above the resolved support top
+        (sim-place-preplace-above-support-v1): ``preplace_support_clearance_m`` when set, else
+        ``place_above_clearance_m`` so the standoff height and the from-above descent's own
+        ``above_clearance_m`` match (one via height, one clean vertical descent of this length)."""
+        if self.preplace_support_clearance_m is not None:
+            return float(self.preplace_support_clearance_m)
+        return float(self.place_above_clearance_m)
+
 
 def resolve_level_config(spec):
     """Normalise a ``carton_level`` config value into a ``LevelConfig`` or ``None`` (off =>
@@ -425,7 +459,8 @@ def resolve_level_config(spec):
     ``place_descent_accel``, ``place_above_clearance_m``, ``place_depth_bias_m``, ``preplace_above_place``,
     ``preplace_standoff_m``, ``place_clearance_check``, ``place_clearance_margin_m``, ``place_clearance_drooped``,
     ``closed_loop_level``, ``closed_loop_authority_deg``, ``closed_loop_rate_deg_per_s``, ``closed_loop_gain``,
-    ``place_contact_release``, ``place_contact_gap_m``, ``closed_loop_sensor``, ``joints``, ``tool_link``.
+    ``place_contact_release``, ``place_contact_gap_m``, ``closed_loop_sensor``, ``preplace_above_support``,
+    ``preplace_support_clearance_m``, ``joints``, ``tool_link``.
     Raises on a malformed value so a typo fails loudly at boot."""
     if spec is None or spec is False:
         return None
@@ -455,9 +490,13 @@ def resolve_level_config(spec):
             kw[fnum] = float(spec[fnum])
     for flag in ('level_goals', 'trip', 'level_weld', 'level_place', 'level_path', 'place_from_above',
                  'preplace_above_place', 'place_clearance_check', 'place_clearance_drooped',
-                 'closed_loop_level', 'place_contact_release', 'closed_loop_sensor'):
+                 'closed_loop_level', 'place_contact_release', 'closed_loop_sensor',
+                 'preplace_above_support'):
         if flag in spec and spec[flag] is not None:
             kw[flag] = bool(spec[flag])
+    # sim-place-preplace-above-support-v1: nullable clearance (None => place_above_clearance_m).
+    if spec.get('preplace_support_clearance_m') is not None:
+        kw['preplace_support_clearance_m'] = float(spec['preplace_support_clearance_m'])
     if spec.get('joints'):
         kw['joints'] = tuple(str(j) for j in spec['joints'])
     if spec.get('tool_link'):

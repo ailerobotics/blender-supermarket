@@ -226,8 +226,9 @@ def check_carton_level(host_cfg):
     (incl. the place-clearance keys ``preplace_above_place`` / ``preplace_standoff_m`` /
     ``place_clearance_check`` / ``place_clearance_margin_m``, the v2 keys ``place_clearance_drooped`` /
     ``closed_loop_level`` / ``closed_loop_authority_deg`` / ``closed_loop_rate_deg_per_s`` /
-    ``closed_loop_gain``, and the v3 keys ``place_contact_release`` / ``place_contact_gap_m`` /
-    ``closed_loop_sensor``, read from ros_host_config.json) FAILS the pre-flight loudly instead of at a GPU
+    ``closed_loop_gain``, the v3 keys ``place_contact_release`` / ``place_contact_gap_m`` /
+    ``closed_loop_sensor``, and the sim-place-preplace-above-support-v1 keys ``preplace_above_support`` /
+    ``preplace_support_clearance_m``, read from ros_host_config.json) FAILS the pre-flight loudly instead of at a GPU
     boot. ``resolve_level_config``/``LevelConfig.validate`` enforce the ranges and the
     ``closed_loop_sensor`` -> ``closed_loop_level`` dependency; a violation surfaces here as a malformed
     refusal. Also flags incoherent combinations -- the LEVEL clearance gate armed with no remedy, and the v1
@@ -385,6 +386,76 @@ def check_support_height(runtime_cfg, scenario_cfg, *, resolved_top_z, tol_m=0.0
     return cart_support.height_consistency_problems(resolved_top_z, heights, tol_m=tol_m)
 
 
+def _resolve_stock_supports(stock_supports):
+    """The cart's stock_supports list (``[deck, shelf]``), from the given override or authored in-memory
+    (no Isaac). None when usd-core is absent so the caller can skip the membership check."""
+    if stock_supports:
+        return list(stock_supports)
+    try:
+        from pxr import Usd
+        from twin.mobile import MobileSpec
+        from twin.mobile_assets import author_cart
+        stage = Usd.Stage.CreateInMemory()
+        return list(author_cart(stage, spec=MobileSpec())['stock_supports'])
+    except Exception:                               # noqa: BLE001 -- usd-core absent; caller skips membership
+        return None
+
+
+def check_place_preplace_standoff(host_cfg, runtime_cfg, *, resolved_top_z=None, stock_supports=None):
+    """sim-place-preplace-above-support-v1: refuse the coldwin48 config -- a NON-deck place support selected
+    while the collect pre-place standoff is still the DECK-tuned fixed shape (no ``preplace_above_support``).
+
+    The RUNTIME selects the place support (``manipulation.cart_placement.support_prim``). When it is the
+    DECK default (absent / ``stock_supports[0]``) the fixed ``collect_place_preplace_shape`` is correct
+    (byte-identical). When it is a NON-deck support (the UPPER shelf), the deck-tuned fixed standoff parks
+    the carried carton bottom BELOW the higher support top, so ``place_descent_drop_m`` reads 0.0, the
+    contact-triggered weld release fires in mid-air and the carton falls (coldwin48: verify_place 'carton
+    not resting', bottom_gap -0.809). The HOST ``carton_level.preplace_above_support`` is the fix (derive
+    the standoff from the resolved support top + a clearance). Refuse the mismatch here, before a GPU boot.
+
+    When ``preplace_above_support`` IS on and ``resolved_top_z`` is given, also compute + report the
+    standoff carton-bottom height and the descent length and refuse a non-positive descent or an
+    above-reach standoff (``cart_support.place_descent_problems``). No-op ([]) when no support prim is
+    selected. Reads the NESTED cart_placement block the factory reads (``config_access``)."""
+    from twin.restock_manipulation import cart_support, config_access, carton_level as cl
+    cp = config_access.cart_placement_block(runtime_cfg) or {}
+    if not isinstance(cp, dict) or 'support_prim' not in cp:
+        return []                                    # deck default -> fixed shape is correct (byte-identical)
+    supports = _resolve_stock_supports(stock_supports)
+    if supports is None:
+        return []                                    # usd-core absent: check_support_selection owns the shape
+    try:
+        resolved = cart_support.resolve_support_prim(supports, cp.get('support_prim'))
+    except ValueError:
+        return []                                    # bad selector -> check_support_selection names it
+    if resolved == supports[0]:
+        return []                                    # the DECK default surface -> fixed shape is correct
+    # A NON-deck support (e.g. the UPPER shelf) is selected: the fixed deck-tuned standoff is wrong.
+    try:
+        lc = cl.resolve_level_config((host_cfg or {}).get('carton_level'))
+    except ValueError:
+        return []                                    # malformed -> check_carton_level names it
+    if lc is None or not getattr(lc, 'preplace_above_support', False):
+        return [
+            f"collect place standoff MIS-CONFIGURED for the selected support: RUNTIME "
+            f"cart_placement.support_prim={cp.get('support_prim')!r} selects {resolved} (a NON-deck "
+            f"support), but the HOST carton_level 'preplace_above_support' is OFF, so the DECK-tuned fixed "
+            f"collect_place_preplace_shape is used. That shape parks the carried carton BELOW the higher "
+            f"support top, so place_descent_drop_m reads 0.0 and the contact-triggered weld release fires "
+            f"in mid-air (coldwin48: verify_place 'carton not resting', bottom_gap -0.809). Set HOST "
+            f"carton_level 'preplace_above_support': true (ros_host_config.json) so the standoff is derived "
+            f"from the resolved support top + the clearance."]
+    # preplace_above_support ON: report + geometry-check the standoff when the resolved top is available.
+    if resolved_top_z is None:
+        return []
+    clearance = lc.preplace_support_clearance()
+    standoff_bottom, descent = cart_support.place_descent_from_support(resolved_top_z, clearance)
+    print('CONFIG_PREFLIGHT: collect place preplace-above-support -> support %s top=%.4f m, clearance=%.4f '
+          'm => standoff carton bottom=%.4f m, descent length=%.4f m'
+          % (resolved, float(resolved_top_z), float(clearance), standoff_bottom, descent))
+    return cart_support.place_descent_problems(resolved_top_z, clearance)
+
+
 def check_cart_placement_source(runtime_cfg):
     """sim-preflight-nested-cart-placement-v1: refuse a STALE top-level ``cart_placement`` duplicate.
 
@@ -505,6 +576,12 @@ def main(argv=None):
     # here, not silently at the GPU boot (always, not just --require'd). Reads the nested block (the one
     # the factory reads) via config_access.
     problems += check_support_selection(runtime_cfg)
+    # sim-place-preplace-above-support-v1: a NON-deck place support selected while the collect pre-place
+    # standoff is still the deck-tuned fixed shape (no preplace_above_support) reproduces coldwin48 (the
+    # from-above release fires in mid-air). With --support-top-z-world it also reports + checks the
+    # standoff/descent geometry. Always on (not just --require'd); reads the nested cart_placement block.
+    problems += check_place_preplace_standoff(host_cfg, runtime_cfg,
+                                              resolved_top_z=args.support_top_z_world)
     # sim-collect-press-regression-v1: carton-dim drift between the HOST profile and the scenario single
     # source silently over-reaches the side-grasp pick standoff (coldwin32). Only when --scenario is given.
     if args.scenario:
