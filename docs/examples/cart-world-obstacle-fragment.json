@@ -1,0 +1,55 @@
+{
+  "_lane": "sim-rgbd-arm-collision-aware-v1 (PR-A: cart as cuMotion world obstacle)",
+  "_what": [
+    "The rollwagen is rigidly coupled, so its pose is KNOWN after couple, yet the forward wrist",
+    "ESDF never covers it (measured grid y_min -0.08 m; cart at base y ~ -0.8 m). So the set-down",
+    "phase is structurally blind and today leans on the cage_collision pair-filter + collision-OFF",
+    "straight-line inserts. Publishing the cart's authored collider geometry as cuMotion world",
+    "CollisionObjects (the existing `world_obstacles` HOST key, today []) makes the arm + attached",
+    "carton plan around the real deck / cage uprights / drawbar with ZERO VRAM and no perception.",
+    "Opt-in and byte-identical off: nothing new is published unless `world_obstacles` carries these",
+    "specs. The ground-truth collect TARGET is a separate decision and stays."
+  ],
+  "_generate": [
+    "python3 -c \"import sys,json; sys.path.insert(0,'scripts');",
+    " from twin.restock_manipulation.cart_world_obstacle import rollwagen_world_obstacle_specs_from_usd;",
+    " print(json.dumps(rollwagen_world_obstacle_specs_from_usd((CART_X, CART_Y, CART_Z, CART_YAW), pad_m=0.01)))\"",
+    "where (CART_X, CART_Y, CART_Z, CART_YAW) is the coupled cart-body pose in ur_base_link (the known",
+    "hitch transform at the set-down park). rollwagen_world_obstacle_specs_from_usd needs pxr (usd-core);",
+    "offline/no-USD callers pass an explicit {name:(lo,hi)} collider dict to rollwagen_world_obstacle_specs.",
+    "The cage posts/side/back bars group under one `rollwagen_cage` obstacle; each horizontal support",
+    "(deck/shelf/drawbar) stays its own box so a place is checked against exactly the deck."
+  ],
+  "host_config_keys": {
+    "world_obstacles": [
+      {"id": "rollwagen_cage", "boxes": [
+        {"size": [0.07, 0.07, 0.60], "center": [0.377, -0.426, 0.51], "rpy": [0.0, 0.0, 0.3]},
+        "... one box per cage post / side bar (illustrative geometry; the real values come from the",
+        "authored cart colliders + the coupled pose) ..."
+      ]},
+      {"id": "rollwagen_deck", "boxes": [
+        {"size": [0.80, 0.60, 0.07], "center": [0.049, -0.780, 0.185], "rpy": [0.0, 0.0, 0.3]}
+      ]},
+      {"id": "rollwagen_drawbar", "boxes": ["... drawbar box ..."]},
+      {"id": "rollwagen_shelf", "boxes": ["... upper shelf box ..."]}
+    ],
+    "_note": "Publish these together with retiring the set-down crutches once S0 proves they cover the",
+    "_note2": "cart: drop `cage_collision: filtered`, `collect_place_straight_line`, `contact_straight_line`."
+  },
+  "cpu_proof": {
+    "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_cart_world_obstacle.py -q",
+    "asserts": [
+      "a deck-penetrating place has NEGATIVE world-obstacle clearance (cuMotion INVALID_INITIAL_CSPACE)",
+      "a standoff above the deck is clear",
+      "the cage posts group under rollwagen_cage; deck/shelf/drawbar stay separate",
+      "every emitted spec round-trips through the host loader world_obstacles.boxes_from_specs",
+      "the cart obstacles clear the arm at its rest config (dataset arm URDF/XRDF present)"
+    ]
+  },
+  "s0_gpu_acceptance": [
+    "A bounded (<=20 min) collect/set-down run with these world_obstacles published and NO cage_collision",
+    "filter and NO straight-line insert on the place: the set-down plans around the cart (cuMotion",
+    "succeeds), the carton sets down level (box-parallel bound 2.0 deg, 0.15 s grace, never loosened),",
+    "and nothing is visually wrong on camera. gpu_budget fits=True; lock only when free; never --force."
+  ]
+}
