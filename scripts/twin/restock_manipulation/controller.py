@@ -341,6 +341,10 @@ class TransferController:
         # (keyed by phase, for the CARTON_SEGMENT_TILT report), and the reaction-natural branch report.
         self._carton_seg_wrist_step = {}
         self._preplace_branch_report = None
+        # sim-preplace-branch-select-bounded-v1: set to a reason string by _preplace_above_place_goal when
+        # the reaction-branch standoff search exceeds its CPU time-box, so the preplace step REFUSES before
+        # motion (instead of starving the host /manipulation/status heartbeat past the Isaac watchdog).
+        self._preplace_branch_refuse = None
         # sim-preplace-sweep-tilt-v1: per-tick CARTON_TICK diagnostic for the carried phases (the welded
         # carton attitude the CARTON_TILT grader reads + the EXECUTED joint positions), throttled to
         # ~10 Hz of SIM time. coldwin50/51/52 tripped CARTON_TILT at the preplace sweep with NO per-tick
@@ -1406,6 +1410,9 @@ class TransferController:
         to fall back to the fixed-shape preplace (off / no FK / no captured up-axis / no place pose / IK
         refuses -- byte-identical when both flags are off)."""
         cl_cfg = self._carton_level
+        # sim-preplace-branch-select-bounded-v1: clear the time-box refusal flag for this phase entry; it
+        # is set below only if the reaction-branch search blows its budget (the caller then _fails).
+        self._preplace_branch_refuse = None
         if (cl_cfg is None or 'place' not in self.poses
                 or self.collect_place_preplace_shape is None):
             return None
@@ -1445,14 +1452,25 @@ class TransferController:
                     # |wrist_2| == the branch the soft wrist_2 drive settles toward), so leg 1 drives to it
                     # and leg 2 holds it with no executed divergence (coldwin57's wrist_2 1.63->0.33 fault).
                     try:
+                        # sim-preplace-branch-select-bounded-v1: the search is CHEAP (off the host hot
+                        # path: ~0.08 s vs the ~14 s inline cost that tripped coldwin59's watchdog) and
+                        # TIME-BOXED on the CPU clock -- a budget overrun raises BranchSelectBudgetExceeded
+                        # so the preplace REFUSES before motion (caught at the caller) rather than blocking
+                        # the /manipulation/status heartbeat. The chosen branch is byte-identical.
                         sol, self._preplace_branch_report = cl.select_reaction_natural_standoff(
                             robot, standoff, self._carton_up_in_tool_world,
                             list(self.collect_place_preplace_shape), list(measured), tool_link=tcp_link,
                             limits=limits, base_R=self._carton_base_R, level_joints=self._carton_level.joints,
                             max_segment_rad=self._carton_level.preplace_max_segment_rad,
                             bound_deg=self._carton_level.bound_deg,
-                            effort_limit=self._carton_level.preplace_soft_effort_nm)
+                            effort_limit=self._carton_level.preplace_soft_effort_nm,
+                            budget_s=self._carton_level.preplace_branch_select_budget_s)
                         sol = {j: float(sol[j]) for j in ARM_JOINTS}
+                    except cl.BranchSelectBudgetExceeded as _bud:
+                        # REFUSE before motion (do NOT silently degrade to level_place_ik): a search that
+                        # cannot finish in its budget would, if run inline, starve the heartbeat.
+                        self._preplace_branch_refuse = str(_bud)
+                        return None
                     except ValueError as _bexc:
                         print('PREPLACE_REACTION_BRANCH unsolved: %s (using the single world-level standoff)'
                               % _bexc, flush=True)
@@ -1474,11 +1492,18 @@ class TransferController:
                          self._preplace_standoff_exec_rpy[2]), flush=True)
                 rep = self._preplace_branch_report
                 if rep is not None:
+                    # sim-preplace-branch-select-bounded-v1: log the chosen branch AND the measured CPU
+                    # search time (once per preplace entry) so a console grep proves it stayed off the hot
+                    # path (select_seconds << the host 5 s status watchdog bound).
                     print('PREPLACE_REACTION_BRANCH chosen wrist_2=%.3f rad (settling branch, min |wrist_2|); '
+                          'select=%.3f s (budget %.1f s, %s path, off the host hot path -- coldwin59); '
                           'peak soft-wrist holding torque=%.3f N*m on %s -> margin %.1f N*m to the %.0f N*m '
                           'soft-wrist effort limit (NOT saturation -- torque is reported, not the selector; '
                           'min-torque would pick wrist_2=%.3f, the uphill branch). Branches: %s'
-                          % (rep['chosen_wrist_2'], rep['chosen_peak_torque_nm'], rep['chosen_peak_joint'],
+                          % (rep['chosen_wrist_2'], rep.get('select_seconds', float('nan')),
+                             self._carton_level.preplace_branch_select_budget_s,
+                             'full' if rep.get('full_plan') else 'cheap',
+                             rep['chosen_peak_torque_nm'], rep['chosen_peak_joint'],
                              rep['chosen_margin_nm'], rep['effort_limit_nm'], rep['min_torque_wrist_2'],
                              ', '.join('w2=%.2f(tau=%.2f,sweep=%.2f)%s'
                                        % (b['wrist_2'], b['peak_torque_nm'], b['leg1_wrist_sweep_rad'],
@@ -2374,6 +2399,14 @@ class TransferController:
                     # clears the deck cage mouth posts. Off / no solution => the fixed shape (byte-identical).
                     preplace_shape = self.collect_place_preplace_shape
                     above = self._preplace_above_place_goal(s.joint_positions)
+                    # sim-preplace-branch-select-bounded-v1: a reaction-branch search that blew its CPU
+                    # time-box REFUSES the preplace before motion with a named reason (never block the
+                    # host status heartbeat past the Isaac watchdog -- coldwin59).
+                    if self._preplace_branch_refuse is not None:
+                        reason = ('preplace reaction-branch selection refused: '
+                                  + self._preplace_branch_refuse)
+                        print('PREPLACE_REACTION_BRANCH_REFUSED %s' % reason, flush=True)
+                        return self._fail(reason)
                     if above is not None:
                         preplace_shape = above
                         mode = getattr(self, '_preplace_above_mode', 'place')
