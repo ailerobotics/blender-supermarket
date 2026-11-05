@@ -88,6 +88,10 @@ def run(args):
         stage = carry.IsaacCarryStage(assembly, lift, grasp, render=args.render, carton_dims=carton_dims,
                                       obstacle_prims={n: p for d in authored.values() for n, p in d.items()},
                                       arm_contacts=True)
+        # Authoring obstacle prims into the stage AFTER assemble() initialised the physics tensor view
+        # stales it (get_dof_stiffnesses fails); re-parse the full prim set once before the trials.
+        assembly.world.reset()
+        assembly.world.step(render=args.render)
         import twin.tools.arm_carry_bench as cbench
         # The mission's soft carry drive gains (run_arm_carry_bench REF_SOFT: stiffness, damping, max_effort).
         drive_gains = cbench.DriveGains(1.0e5, 2.0e3, 400.0)
@@ -97,20 +101,24 @@ def run(args):
             spec = cbench.TrialSpec(s.id, drive_gains, cbench.CarryProfile(
                 peak_speed=args.carry_speed, peak_accel=args.carry_accel))
             goals = [(f'wp{i}', list(w)) for i, w in enumerate(bench.build_trajectory(s))]
-            moves = carry._run_trial(stage, spec, goals, args.dt, args.max_sim_s)
-            min_gap = min((min(m.min_clearance_m.values()) for m in moves if m.min_clearance_m),
-                          default=float('inf'))
-            contact = any(m.contact_prims for m in moves)
-            measured = {
-                'min_true_clearance_m': float(min_gap),
-                'contact': bool(contact),
-                'gate_behavior': 'none',  # BEFORE: current stack has no perceived gate on this leg
-                'worst_obstacle': next((p.rsplit('/', 1)[-1] for m in moves for p in m.contact_prims), None),
-            }
-            r = scene.ingest_trial(s, measured, thresholds)
-            results.append(r)
-            print('ARMCOLLISION_BENCH scenario=%s min_gap_mm=%.1f contact=%s' % (
-                s.id, min_gap * 1e3, contact), flush=True)
+            try:
+                moves = carry._run_trial(stage, spec, goals, args.dt, args.max_sim_s)
+                min_gap = min((min(m.min_clearance_m.values()) for m in moves if m.min_clearance_m),
+                              default=float('inf'))
+                contact = any(m.contact_prims for m in moves)
+                measured = {
+                    'min_true_clearance_m': float(min_gap),
+                    'contact': bool(contact),
+                    'gate_behavior': 'none',  # BEFORE: current stack has no perceived gate on this leg
+                    'worst_obstacle': next((p.rsplit('/', 1)[-1] for m in moves for p in m.contact_prims), None),
+                }
+                print('ARMCOLLISION_BENCH scenario=%s min_gap_mm=%.1f contact=%s' % (
+                    s.id, min_gap * 1e3, contact), flush=True)
+            except Exception as exc:  # one bad trial must not lose the others' numbers
+                measured = {'min_true_clearance_m': float('nan'), 'contact': False,
+                            'gate_behavior': 'error', 'worst_obstacle': None}
+                print('ARMCOLLISION_BENCH scenario=%s ERROR %r' % (s.id, exc), flush=True)
+            results.append(scene.ingest_trial(s, measured, thresholds))
         app.close()
 
     summary = bench.summarise(results, 'gpu/baseline', thresholds)
