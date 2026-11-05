@@ -74,6 +74,16 @@ KEY_CONSUMER = {
     'carry_wrist2_min': HOST,     # fm403: wrist_2 lower-bound guard on task-space carry moves
     'contact_overpress_cap_m': HOST,
     'contact_overpress_step_m': HOST,
+    # sim-pick-contact-seal-fallback-v1 (coldwin63 pick never sealed): opt-in pick-contact guards, all read
+    # by ros_host.py -> TransferController (HOST). Default off => byte-identical; registered so a key filed
+    # in the RUNTIME config is refused (the run-277 slip) instead of silently never activating.
+    'contact_reissue_suction_each_tick': HOST,   # re-publish the gripper enable each press tick (relay-overwrite fix)
+    'contact_require_suction_enabled': HOST,      # fail-fast / re-send if the plugin never enabled at the first over-press step
+    'contact_reissue_close_once': HOST,           # sub-option of require_suction_enabled: re-send close once before failing
+    'contact_accept_seal_diag': HOST,             # accept a dwell-stable flush geometric SEAL_DIAG as contact
+    'contact_seal_diag_dwell_ticks': HOST,        # consecutive ticks the seal must hold (default 5)
+    'contact_seal_diag_max_gap_mm': HOST,         # seal gap bound for the accept (default 0.5 mm)
+    'contact_seal_diag_max_angle_deg': HOST,      # pad-vs-face angle bound for the accept (default 1.0 deg)
     'arm_max_speed': HOST,
     'plan_wall_cap_s': HOST,
     'grasp_track_m': HOST,        # fm410: lift-probe carton-tracking physics confirm threshold (m)

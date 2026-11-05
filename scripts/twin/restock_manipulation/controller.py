@@ -124,7 +124,14 @@ class TransferController:
                  station_pitch_hold: bool = False, station_hold_roll_deg: float = 0.0,
                  station_hold_pitch_deg: float = 0.0,
                  reactive_arm_human: bool = False, reactive_arm_config=None,
-                 reactive_arm_replan: bool = False, reactive_arm_replan_config=None):
+                 reactive_arm_replan: bool = False, reactive_arm_replan_config=None,
+                 contact_reissue_suction_each_tick: bool = False,
+                 contact_require_suction_enabled: bool = False,
+                 contact_reissue_close_once: bool = False,
+                 contact_accept_seal_diag: bool = False,
+                 contact_seal_diag_dwell_ticks: int = 5,
+                 contact_seal_diag_max_gap_mm: float = 0.5,
+                 contact_seal_diag_max_angle_deg: float = 1.0):
         self.steady_clock=steady_clock
         # sim-carton-level-place-on-cart-v1: the FK link the collect place-on-cart reach targets -- the
         # motion port's IK tcp ('gripper_pad_tcp'), NOT ur_tool0 (~0.27 m apart). The level place IK must
@@ -443,6 +450,25 @@ class TransferController:
                 raise ValueError('contact over-press step/cap must be finite and non-negative')
         self.contact_overpress_step_m = float(contact_overpress_step_m)
         self.contact_overpress_cap_m = float(contact_overpress_cap_m)
+        # sim-pick-contact-seal-fallback-v1 (coldwin63 pick never sealed): the opt-in contact guards. All
+        # default off => byte-identical. (1) reissue_suction_each_tick: re-publish the gripper-enable control
+        # on EVERY contact-press tick until the seal forms, so the one-shot enable can't be lost to the
+        # last-value /manipulation/status relay overwrite that dropped cw63's close command (control_ipc
+        # keeps only the latest status per topic; a later heartbeat overwrote the control-bearing one before
+        # IsaacRosGraph.poll read it). (2) require_suction_enabled: fail fast CONTACT_SUCTION_NOT_ENABLED at
+        # the first over-press step if the plugin never reported enabled (or, with reissue_close_once, re-send
+        # the close once then fail on a second miss) -- instead of pressing the whole 20 mm cap with no chance
+        # of a latch. (3) accept_seal_diag: when the geometric SEAL_DIAG shows the pad flush on a body under
+        # the pad for a dwell AND the plugin is enabled, treat it as contact (drives the same contact-
+        # termination + gated SIM_ATTACH_FALLBACK path the plugin latch drives). See docs/examples/
+        # pick-contact-seal-fallback-fragment.json.
+        self.contact_reissue_suction_each_tick = bool(contact_reissue_suction_each_tick)
+        self.contact_require_suction_enabled = bool(contact_require_suction_enabled)
+        self.contact_reissue_close_once = bool(contact_reissue_close_once)
+        self.contact_accept_seal_diag = bool(contact_accept_seal_diag)
+        self.contact_seal_diag_dwell_ticks = max(1, int(contact_seal_diag_dwell_ticks))
+        self.contact_seal_diag_max_gap_mm = float(contact_seal_diag_max_gap_mm)
+        self.contact_seal_diag_max_angle_deg = float(contact_seal_diag_max_angle_deg)
         if max_age <= 0 or phase_timeout <= 0:
             raise ValueError('timeouts must be positive')
         self.motion, self.profiles = motion, profiles
@@ -765,6 +791,48 @@ class TransferController:
         return (contact[0] + d[0] * step, contact[1] + d[1] * step, contact[2] + d[2] * step,
                 contact[3], contact[4], contact[5], contact[6])
 
+    def _seal_diag_tick_ok(self, s):
+        """sim-pick-contact-seal-fallback-v1 guard 3b (per-tick predicate): the geometric SEAL_DIAG shows
+        the pad flush on a body under the pad AND the plugin is enabled this tick. Pure; the dwell counter
+        is owned by the caller. False whenever the key is off or any field is unmeasured (no evidence)."""
+        if not self.contact_accept_seal_diag:
+            return False
+        if not s.gripper_enabled or not s.seal_hit_target:
+            return False
+        gap, ang = s.seal_gap_mm, s.seal_pad_angle_deg
+        if gap is None or ang is None:
+            return False
+        return (gap <= self.contact_seal_diag_max_gap_mm
+                and ang <= self.contact_seal_diag_max_angle_deg)
+
+    def _seal_diag_contact(self, s):
+        """Guard 3b accept decision: advance/track the dwell counter and return True once the seal has held
+        for ``contact_seal_diag_dwell_ticks`` consecutive ticks. Logs CONTACT_SOURCE_DISAGREE once per op the
+        first time the seal diagnostic accepts while the plugin latch (``s.contact``) still reads False."""
+        if self._seal_diag_tick_ok(s):
+            self._contact_seal_dwell += 1
+        else:
+            self._contact_seal_dwell = 0
+        accept = self._contact_seal_dwell >= self.contact_seal_diag_dwell_ticks
+        if accept and not s.contact and not self._contact_seal_disagree_logged:
+            self._contact_seal_disagree_logged = True
+            print('CONTACT_SOURCE_DISAGREE plugin=False seal_diag=True gap_mm=%s pad_deg=%s '
+                  'hit_target=%s enabled=%s dwell=%d/%d -- accepting the geometric seal as contact '
+                  '(gated SIM_ATTACH_FALLBACK forms the weld Isaac-side)'
+                  % (s.seal_gap_mm, s.seal_pad_angle_deg, s.seal_hit_target, s.gripper_enabled,
+                     self._contact_seal_dwell, self.contact_seal_diag_dwell_ticks), flush=True)
+        return accept
+
+    def _contact_reissue_controls(self, s):
+        """sim-pick-contact-seal-fallback-v1 (item 2): the gripper-enable control to re-publish THIS contact
+        tick so the one-shot enable cannot be lost to the last-value /manipulation/status relay. Returns the
+        re-emit control tuple while the key is on, suction has been enabled, and neither the plugin latch nor
+        the seal-diag accept has formed yet; else ``()`` (byte-identical when the key is off)."""
+        if (self.contact_reissue_suction_each_tick and self.phase == 'contact'
+                and self._contact_suction and not s.contact):
+            return ({'kind': 'gripper', 'enabled': True},)
+        return ()
+
     def _reregister_place(self, s, now):
         """fm390 PERCEIVE step. After the base has driven to place_approach in front of the rollwagen
         mouth, re-read the live deck target in the NEW arm-base frame and rebuild the place-side poses
@@ -902,6 +970,10 @@ class TransferController:
         self._contact_waits = 0         # bounded grace ticks awaiting a fresh acquisition deadline
         self._contact_step = 0.0        # cumulative contact-feedback over-press travel (m); see __init__
         self._contact_freeze = 0        # freeze-settle hold ticks at a contact step (see CONTACT_FREEZE_TICKS)
+        # sim-pick-contact-seal-fallback-v1 (coldwin63 pick): per-op state for the opt-in contact guards.
+        self._contact_seal_dwell = 0    # consecutive ticks the geometric seal diagnostic held (guard 3b)
+        self._contact_suction_miss = 0  # over-press-step boundaries reached with the plugin not enabled (guard 3a)
+        self._contact_seal_disagree_logged = False  # CONTACT_SOURCE_DISAGREE printed once per op
         self._contact_progress_wall = None  # fm425: wall time of the last contact-phase progress (per op)
         self._press_sim_start = None    # sim time the current unconfirmed pre-weld press began (see __init__)
         self._grasp_confirm = 0         # fm395: consecutive confirmed-attachment ticks in grasp
@@ -2948,6 +3020,13 @@ class TransferController:
                 print(f'CONTACT_SUCTION enable valid_until={s.valid_until_steady!r} '
                       f'waits={self._contact_waits} contact={s.contact}', flush=True)
                 return self._result(({'kind': 'gripper', 'enabled': True},))
+            # sim-pick-contact-seal-fallback-v1: once suction is enabled, evaluate guard 3b ONCE per contact
+            # tick (before polling the ongoing press, so the dwell counts ticks, not the sparse step
+            # boundaries). seal_accept behaves like the plugin latch below -- it drives the contact
+            # termination and the gated SIM_ATTACH_FALLBACK forms the weld Isaac-side. Inert (False) when the
+            # key is off or no seal evidence is present => byte-identical.
+            seal_accept = (self.phase == 'contact' and self._contact_suction and not s.contact
+                           and self._seal_diag_contact(s))
             try:
                 outcome = self.motion.poll()
             except Exception as exc:  # noqa: BLE001 -- fm372: route EVERY non-collision raise to retry
@@ -3014,7 +3093,7 @@ class TransferController:
                 # gives the plugin a stationary pad to latch (suction stays on). Hitting the cap without
                 # contact is a mission fault (the latch never formed); SEAL_DIAG has logged the gap.
                 if (self.phase == 'contact' and self.contact_straight_line
-                        and self.contact_overpress_step_m > 0 and not s.contact):
+                        and self.contact_overpress_step_m > 0 and not (s.contact or seal_accept)):
                     # Freeze-settle (firstmate run-203, stations verdict): the native plugin seals a
                     # STATIONARY pad every time, but the trajectory settle tolerance lets the link finish
                     # with non-zero velocity -- which does NOT seal. So when a step reaches its pose
@@ -3024,8 +3103,27 @@ class TransferController:
                     # latched after the settle do we step further toward the carton.
                     if self._contact_freeze < CONTACT_FREEZE_TICKS:
                         self._contact_freeze += 1
-                        return self._result()
+                        return self._result(self._contact_reissue_controls(s))
                     self._contact_freeze = 0
+                    # sim-pick-contact-seal-fallback-v1 guard 3a: the settle has elapsed and we are about to
+                    # press deeper. If the plugin never reported enabled (the cw63 lost-command case), do NOT
+                    # press on with no chance of a latch: fail fast by name, or (reissue_close_once) re-send
+                    # the close ONCE and hold for a second settle; a second miss fails. Inert when the key is
+                    # off => the historical over-press step (byte-identical).
+                    if self.contact_require_suction_enabled and not s.gripper_enabled:
+                        self._contact_suction_miss += 1
+                        diag = ('gap_mm=%s pad_deg=%s hit_target=%s enabled=%s step=%.1fmm'
+                                % (s.seal_gap_mm, s.seal_pad_angle_deg, s.seal_hit_target,
+                                   s.gripper_enabled, self._contact_step * 1000))
+                        if self.contact_reissue_close_once and self._contact_suction_miss == 1:
+                            print('CONTACT_SUCTION_REISSUE miss=1 re-sending the gripper close once (%s)'
+                                  % diag, flush=True)
+                            return self._result(({'kind': 'gripper', 'enabled': True},))
+                        return self._fail('CONTACT_SUCTION_NOT_ENABLED at over-press step %d (%s): the '
+                                          'gripper never reported enabled/closing -- the enable command did '
+                                          'not land (one-shot control lost to the last-value status relay); '
+                                          'refusing to press further into the carton'
+                                          % (self._contact_suction_miss, diag))
                     if self._contact_step + self.contact_overpress_step_m <= self.contact_overpress_cap_m + 1e-9:
                         self._contact_step += self.contact_overpress_step_m
                         self.issued = False
@@ -3075,9 +3173,15 @@ class TransferController:
             # and cannot reach the commanded free-space pose (run-132 GOAL_MISS, stalled ~3.8deg short).
             # Every free-space move (approach/lift/preplace/place/retreat) keeps its exact pose-settle:
             # only 'contact' emits this, and only once measured contact is present.
-            if self.phase == 'contact' and s.contact:
+            # sim-pick-contact-seal-fallback-v1: seal_accept (guard 3b) drives the SAME contact-termination
+            # as the plugin latch -- trajectory_host succeeds the goal holding the touch pose; the gated
+            # SIM_ATTACH_FALLBACK forms the weld Isaac-side (both require suction enabled). Off => seal_accept
+            # is always False => byte-identical.
+            if self.phase == 'contact' and (s.contact or seal_accept):
                 return self._result(({'kind': 'contact'},))
-            return self._result()
+            # sim-pick-contact-seal-fallback-v1 (item 2): re-publish the gripper-enable control on this
+            # running contact tick (opt-in) so the one-shot enable survives the last-value status relay.
+            return self._result(self._contact_reissue_controls(s))
         if self.staged_cart_swing and self.phase in ('tuck', 'pan', 'retreat_tuck'):
             # Joint-space body-clear via points (firstmate 292). TUCK/retreat_tuck fold to the compact
             # high STOW shape at the arm's CURRENT shoulder-pan (minimal joint0 motion); PAN rotates

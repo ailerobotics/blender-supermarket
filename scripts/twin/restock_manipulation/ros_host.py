@@ -324,6 +324,18 @@ def main():
         # {bound_deg, level_goals, trip, joints} / bool; absent/false => None => byte-identical. The FK
         # URDF is the arm the host already loaded (args.urdf).
         carton_level=carton_level.resolve_level_config(config.get('carton_level')),
+        # sim-pick-contact-seal-fallback-v1 (coldwin63 pick never sealed): opt-in pick-contact guards. The
+        # enable-reissue defeats the last-value /manipulation/status relay overwrite that dropped cw63's
+        # one-shot close command; the suction-enabled guard fails fast / re-sends instead of pressing the
+        # full 20 mm cap with the plugin never enabled; the seal-diag accept treats a dwell-stable flush
+        # geometric seal as contact. All absent/false => byte-identical. See the handoff fragment.
+        contact_reissue_suction_each_tick=bool(config.get('contact_reissue_suction_each_tick', False)),
+        contact_require_suction_enabled=bool(config.get('contact_require_suction_enabled', False)),
+        contact_reissue_close_once=bool(config.get('contact_reissue_close_once', False)),
+        contact_accept_seal_diag=bool(config.get('contact_accept_seal_diag', False)),
+        contact_seal_diag_dwell_ticks=int(config.get('contact_seal_diag_dwell_ticks', 5)),
+        contact_seal_diag_max_gap_mm=float(config.get('contact_seal_diag_max_gap_mm', 0.5)),
+        contact_seal_diag_max_angle_deg=float(config.get('contact_seal_diag_max_angle_deg', 1.0)),
         fk_urdf=args.urdf,
         # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority over the
         # free-space arm legs (ported humangate fed by the vendored scripts/twin/humans evaluator; the

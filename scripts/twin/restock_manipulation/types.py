@@ -83,6 +83,18 @@ class Sensors:
     # packet clock by a constant (1.55 s on start_at=transfer); the host packet-freshness check subtracts
     # it and the Isaac side moves collision_time into the packet clock. Default 0.0 => byte-identical.
     clock_offset: float = 0.0
+    # sim-pick-contact-seal-fallback-v1 (opt-in pick-contact guards; coldwin63): the surface-gripper
+    # contact feedback the controller lacks today. `contact` above is only the plugin LATCH (Closed + one
+    # object); these expose, additionally, whether the plugin actually ENABLED (its close command landed --
+    # cw63's lost command left it Open the whole press) and the geometric SEAL_DIAG the Isaac side already
+    # computes (pad->carton gap, pad-vs-face angle, a body under the pad). The driver populates them from
+    # the NativePanelContact probe; the host controller consumes them ONLY when a `contact_require_suction_
+    # enabled` / `contact_accept_seal_diag` HOST key is on, so the defaults below keep every run byte-
+    # identical. Carried across the asdict -> JSON -> Sensors(**data) ROS boundary like the fields above.
+    gripper_enabled: bool = False              # plugin status is Closing/Closed (the close command landed), not Open
+    seal_gap_mm: float | None = None           # SEAL_DIAG min_gap_mm: pad -> nearest external body (mm); None if unmeasured
+    seal_pad_angle_deg: float | None = None    # SEAL_DIAG pad_vs_surface_deg: pad-forward vs the hit face normal (deg)
+    seal_hit_target: bool = False              # a grippable body is under the pad (SEAL_DIAG hit_bodies non-empty)
     # Driver must reject stale/absent joint/contact/odom data before making a packet.
 
 
