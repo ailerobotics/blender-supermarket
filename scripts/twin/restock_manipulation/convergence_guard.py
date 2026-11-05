@@ -50,6 +50,25 @@ class ConvergenceStall:
     message: str
 
 
+@dataclass(frozen=True)
+class DriftRecapture:
+    """sim-preplace-wrist2-hold-v1: a NON-terminal drift re-capture signal. Emitted the first tick a
+    DRIVEN, un-converged preplace joint has drifted away from its closest approach by more than
+    ``recapture_rad`` while re-capture budget remains -- instead of waiting out the full stall window and
+    faulting. The controller re-issues the armed preplace goal (re-driving the back-driven joint toward its
+    target) and logs PREPLACE_DRIFT_RECAPTURE once. ``joint`` is the drifting joint, ``from_pos`` its
+    executed (drifted) position, ``to_pos`` its commanded goal, ``best_error`` the closest approach it had
+    reached, ``count``/``limit`` the re-capture used/budget for this joint."""
+    joint: str
+    from_pos: float
+    to_pos: float
+    best_error: float
+    error: float
+    count: int
+    limit: int
+    message: str
+
+
 class ConvergenceGuard:
     """Per-joint frozen-joint detector for the carried preplace. Construct with the arm joint NAMES, the
     stall window ``stall_s`` (SIM seconds; <= 0 => inert), the improvement epsilon ``eps_rad``, the
@@ -63,24 +82,42 @@ class ConvergenceGuard:
     once. :meth:`disarm` clears it when the phase leaves preplace (or the move re-issues)."""
 
     def __init__(self, joint_names: Sequence[str], *, stall_s: float, eps_rad: float = 0.01,
-                 tol_rad: float = 0.05, engage_rad: float = 0.1):
+                 tol_rad: float = 0.05, engage_rad: float = 0.1,
+                 recapture_rad: float = 0.0, recapture_max: int = 0):
         self.joint_names = tuple(joint_names)
         self.stall_s = float(stall_s)
         self.eps_rad = float(eps_rad)
         self.tol_rad = float(tol_rad)
         self.engage_rad = float(engage_rad)
+        # sim-preplace-wrist2-hold-v1: opt-in drift re-capture. recapture_rad (> 0) is the drift from the
+        # closest approach that triggers a re-issue; recapture_max (> 0) the per-joint re-capture budget.
+        # Both must be positive to arm re-capture; either <= 0 => inert (only the terminal stall path runs,
+        # byte-identical to sim-preplace-convergence-guard-fix-v1).
+        self.recapture_rad = float(recapture_rad)
+        self.recapture_max = int(recapture_max)
         self.disarm()
 
     @property
     def enabled(self) -> bool:
         return self.stall_s > 0
 
+    @property
+    def recapture_enabled(self) -> bool:
+        return self.enabled and self.recapture_rad > 0 and self.recapture_max > 0
+
+    @property
+    def goal(self) -> Optional[Tuple[float, ...]]:
+        """The armed 6-joint preplace goal (the controller re-issues this on a :class:`DriftRecapture`)."""
+        return self._goal
+
     def disarm(self) -> None:
         self._goal: Optional[Tuple[float, ...]] = None
         self._start: Optional[Tuple[float, ...]] = None
         self._best: Dict[int, float] = {}
         self._best_t: Dict[int, float] = {}
+        self._abs_best: Dict[int, float] = {}
         self._moved: Dict[int, bool] = {}
+        self._recaptures: Dict[int, int] = {}
         self._fired = False
 
     def arm(self, goal: Sequence[float]) -> None:
@@ -94,7 +131,9 @@ class ConvergenceGuard:
         self._start = None
         self._best = {}
         self._best_t = {}
+        self._abs_best = {}
         self._moved = {}
+        self._recaptures = {}
         self._fired = False
 
     @staticmethod
@@ -104,7 +143,13 @@ class ConvergenceGuard:
             return None
         return tuple(vals)
 
-    def observe(self, now: float, measured: Sequence[float]) -> Optional[ConvergenceStall]:
+    def observe(self, now: float, measured: Sequence[float]):
+        """Return the first non-None of:
+          * a :class:`DriftRecapture` (re-capture armed, a driven joint drifted > ``recapture_rad`` from its
+            closest approach and budget remains) -- the controller re-issues the goal, NOT terminal; or
+          * a :class:`ConvergenceStall` (a driven joint un-converged and not improving for the whole stall
+            window with no re-capture left) -- terminal; else None.
+        One-shot for the terminal stall (``_fired``); re-captures are per-joint budgeted and non-terminal."""
         if not self.enabled or self._fired or self._goal is None:
             return None
         if not math.isfinite(float(now)):
@@ -118,12 +163,16 @@ class ConvergenceGuard:
             self._start = m
             for i, (mi, gi) in enumerate(zip(m, self._goal)):
                 self._best[i] = abs(mi - gi)
+                self._abs_best[i] = abs(mi - gi)
                 self._best_t[i] = now
                 self._moved[i] = False
+                self._recaptures[i] = 0
             return None
 
-        worst_idx: Optional[int] = None
-        worst_err = -1.0
+        stall_idx: Optional[int] = None
+        stall_err = -1.0
+        recap_idx: Optional[int] = None
+        recap_err = -1.0
         for i, (mi, gi) in enumerate(zip(m, self._goal)):
             err = abs(mi - gi)
             # A joint that has moved beyond engage_rad from its armed start has been driven (its leg ran);
@@ -133,23 +182,53 @@ class ConvergenceGuard:
             # Converged / improving rearms the window (within tol is converged; any shrink past eps rearms).
             if err <= self.tol_rad or err < self._best[i] - self.eps_rad:
                 self._best[i] = min(self._best[i], err)
+                self._abs_best[i] = min(self._abs_best[i], err)
                 self._best_t[i] = now
                 continue
             # Un-converged and not improving: only a DRIVEN joint stalls (an idle one is not frozen).
             if not self._moved[i]:
                 continue
-            if now - self._best_t[i] >= self.stall_s and err > worst_err:
-                worst_err, worst_idx = err, i
+            # sim-preplace-wrist2-hold-v1: a driven joint that has drifted away from its closest approach by
+            # more than recapture_rad is RE-CAPTURED (re-issue the goal) before the stall window elapses, as
+            # long as its budget remains -- so a back-driven wrist is re-driven in a few sim-s instead of
+            # faulting at 30 s (cw66: the leg-2 pan sweep back-drove the arrived wrist_2). Prefer re-capture.
+            if (self.recapture_enabled and err > self._best[i] + self.recapture_rad
+                    and self._recaptures[i] < self.recapture_max):
+                if err > recap_err:
+                    recap_err, recap_idx = err, i
+                continue
+            if now - self._best_t[i] >= self.stall_s and err > stall_err:
+                stall_err, stall_idx = err, i
 
-        if worst_idx is None:
+        if recap_idx is not None:
+            i = recap_idx
+            self._recaptures[i] += 1
+            jn = self.joint_names[i]
+            cmd = float(self._goal[i])
+            ex = float(m[i])
+            err = abs(ex - cmd)
+            best = float(self._abs_best[i])
+            count, limit = self._recaptures[i], self.recapture_max
+            # Restart this joint's stall window from the drifted point so the re-issue has a fresh window to
+            # re-converge in; the closest approach (_abs_best) is preserved for any later terminal message.
+            self._best[i] = err
+            self._best_t[i] = now
+            msg = ('PREPLACE_DRIFT_RECAPTURE joint=%s from=%.4f to=%.4f (drifted %.4f rad from its closest '
+                   'approach %.4f; re-issuing the preplace goal, re-capture %d/%d) -- a driven preplace joint '
+                   'was back-driven off its target; re-driving it instead of waiting out the stall window.'
+                   % (jn, ex, cmd, err - best, best, count, limit))
+            return DriftRecapture(joint=jn, from_pos=ex, to_pos=cmd, best_error=best, error=err,
+                                  count=count, limit=limit, message=msg)
+
+        if stall_idx is None:
             return None
         self._fired = True
-        i = worst_idx
+        i = stall_idx
         jn = self.joint_names[i]
         cmd = float(self._goal[i])
         ex = float(m[i])
         err = abs(ex - cmd)
-        best = float(self._best[i])
+        best = float(self._abs_best[i])
         stalled = now - float(self._best_t[i])
         drift = err - best
         msg = ('PHASE_CONVERGENCE phase=preplace stalled joint=%s commanded=%.4f executed=%.4f error=%.4f '

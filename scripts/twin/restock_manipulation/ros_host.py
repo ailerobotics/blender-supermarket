@@ -308,6 +308,14 @@ def main():
         # phase_drive.carried_joint_profile; these are the HOST-side guard + fallback.)
         preplace_convergence_stall_s=float(config.get('preplace_convergence_stall_s', 0.0)),
         preplace_wrist_first=bool(config.get('preplace_wrist_first', False)),
+        # sim-preplace-wrist2-hold-v1: opt-in DRIFT RE-CAPTURE on the convergence guard. When a driven
+        # preplace joint drifts off its closest approach by more than preplace_drift_recapture_rad, the
+        # guard re-issues the goal (re-driving the back-driven wrist) up to preplace_drift_recapture_max
+        # times per joint and logs PREPLACE_DRIFT_RECAPTURE once, instead of running the stall to a fault
+        # (cw66: the leg-2 pan sweep back-drove the arrived-but-soft wrist_2). Both <= 0 => inert =>
+        # byte-identical. Needs preplace_convergence_stall_s > 0 (the guard must be armed).
+        preplace_drift_recapture_rad=float(config.get('preplace_drift_recapture_rad', 0.0)),
+        preplace_drift_recapture_max=int(config.get('preplace_drift_recapture_max', 0)),
         # sim-preplace-leg2-level-v1: the held chassis attitude during the collect place. The station
         # parking brake pins the base off level (the RUNTIME chassis_station_pitch_hold_pitch_deg /
         # _roll_deg; coldwin56 pitch -1.17), so ur_base_link +Z is off world +Z and the shoulder_pan YAW
@@ -505,6 +513,9 @@ def main():
         # (phase_drive.carried_joint_profile), logged Isaac-side as PHASE_DRIVE_JOINT.
         'preplace_convergence_stall_s': controller.preplace_convergence_stall_s,
         'preplace_wrist_first': controller.preplace_wrist_first,
+        # sim-preplace-wrist2-hold-v1: effective drift re-capture bound (rad) + per-joint budget (0 = off).
+        'preplace_drift_recapture_rad': controller.preplace_drift_recapture_rad,
+        'preplace_drift_recapture_max': controller.preplace_drift_recapture_max,
     }), flush=True)
     # sim-collision-dt-render-lead-floor-v1: log the DERIVED collision/feedback freshness band once at
     # host start, so every run dir's host-stack.log records the floor/ceiling in force (the future-lead
