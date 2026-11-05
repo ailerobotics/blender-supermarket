@@ -514,16 +514,31 @@ def assemble(*, app, config, scenario, output, diagnostic_prepare=None):
     # roll 0), NOT the instantaneous attitude it drifted to. Set both 0 for world-level.
     _station_hold_pitch=float(config.get('chassis_station_pitch_hold_pitch_deg',-1.17))
     _station_hold_roll=float(config.get('chassis_station_pitch_hold_roll_deg',0.0))
+    # sim-station-full-brake-place-v1 (opt-in RUNTIME, default off => byte-identical): FULL-lock the base
+    # (translation + rotation) over the LOADED collect place descent so the welded from-above descent
+    # reaction cannot shove the translation-free base (coldwin49). Requires the station pitch hold (the
+    # full lock reuses its target attitude; config_preflight.check_station_full_brake refuses it without).
+    _station_place_full_brake=bool(config.get('station_place_full_brake'))
+    _station_place_full_brake_effort_limit=config.get('station_place_full_brake_effort_limit')
     controller=MobileController(stage,paths['base_link'],cart_path,
         [paths['left_wheel_joint'],paths['right_wheel_joint']],spec=spec,
         drive_max_force=_wd.get('max_force'), drive_damping=_wd.get('damping'),
         station_pitch_hold=_station_pitch_hold,
-        station_hold_roll_deg=_station_hold_roll, station_hold_pitch_deg=_station_hold_pitch)
+        station_hold_roll_deg=_station_hold_roll, station_hold_pitch_deg=_station_hold_pitch,
+        station_place_full_brake=_station_place_full_brake,
+        station_place_full_brake_effort_limit=_station_place_full_brake_effort_limit)
     if _station_pitch_hold:
         print('CHASSIS_STATION_PITCH_HOLD enabled (sim-only workaround, like CAGE_COLLISION): the '
               'station brake LATCHES a rotation-lock at the TARGET attitude (roll=%.2f pitch=%.2f deg, '
               'not the instantaneous end stop), translation free (weld-loop relief), no brake cycling'
               % (_station_hold_roll,_station_hold_pitch), flush=True)
+    if _station_place_full_brake:
+        print('STATION_PLACE_FULL_BRAKE enabled (sim-only, sim-station-full-brake-place-v1): the LOADED '
+              'collect place descent FULL-locks the base (translation+rotation @target roll=%.2f pitch=%.2f '
+              'deg) over place->release->retreat, then returns to the rotation-only station hold; effort '
+              'guard limit=%s N·m'
+              % (_station_hold_roll,_station_hold_pitch,
+                 _station_place_full_brake_effort_limit), flush=True)
     # fm433: confirm the wheel-drive tune actually reached the joints at runtime (run-326 applied it -- the
     # mission.usda carried maxForce/damping -- but it left no log, so 'applied vs not' could not be read
     # from the console; the tune turned out ineffective for the base's intrinsic under-tracking, which is a
