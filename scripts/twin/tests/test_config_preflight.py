@@ -138,5 +138,38 @@ class FlowConsistencyTests(unittest.TestCase):
         self.assertEqual(cp.check_flow_consistency(host_cfg, {'shelf_staging': True}), [])
 
 
+class PhaseDriveCarriedSoftTests(unittest.TestCase):
+    # sim-preplace-sweep-tilt-v1: validate phase_drive.carried_soft_phases (run carried preplace SOFT).
+    SOFT = {'kp': 3e5, 'kd': 8e3, 'eff': 400.0}
+    STIFF = {'kp': 1e6, 'kd': 1e4, 'eff': 2000.0}
+
+    def _pd(self, **extra):
+        return {'soft': self.SOFT, 'stiff': self.STIFF, **extra}
+
+    def test_absent_override_is_noop(self):
+        self.assertEqual(cp.check_phase_drive_carried_soft({}), [])
+        self.assertEqual(cp.check_phase_drive_carried_soft({'phase_drive': self._pd()}), [])
+
+    def test_valid_override_passes(self):
+        self.assertEqual(
+            cp.check_phase_drive_carried_soft({'phase_drive': self._pd(carried_soft_phases=['preplace'])}),
+            [])
+
+    def test_non_stiff_phase_rejected(self):
+        problems = cp.check_phase_drive_carried_soft(
+            {'phase_drive': self._pd(carried_soft_phases=['lift'])})
+        self.assertTrue(problems and 'carried_soft_phases' in problems[0])
+
+    def test_non_list_rejected(self):
+        problems = cp.check_phase_drive_carried_soft(
+            {'phase_drive': self._pd(carried_soft_phases='preplace')})
+        self.assertTrue(problems)
+
+    def test_missing_soft_block_rejected(self):
+        problems = cp.check_phase_drive_carried_soft(
+            {'phase_drive': {'stiff': self.STIFF, 'carried_soft_phases': ['preplace']}})
+        self.assertTrue(any('no "soft"' in p for p in problems))
+
+
 if __name__ == '__main__':
     unittest.main()

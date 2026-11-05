@@ -2,11 +2,15 @@
 CPU-only (no Isaac): physics_setup imports cleanly; set_arm_drive_gains is exercised against a fake
 articulation sink so the mid-mission re-gain path is covered without a simulator."""
 import numpy as np
+import pytest
 
-from twin.restock.physics_setup import phase_drive_gains, set_arm_drive_gains
+from twin.restock.physics_setup import (phase_drive_gains, resolve_stiff_phases, set_arm_drive_gains,
+                                        _PHASE_DRIVE_STIFF_PHASES)
 
 PHASE_DRIVE = {'soft': {'kp': 3e5, 'kd': 8e3, 'eff': 400.0},
                'stiff': {'kp': 1e6, 'kd': 1e4, 'eff': 2000.0}}
+SOFT = {'kp': 3e5, 'kd': 8e3, 'eff': 400.0}
+STIFF = {'kp': 1e6, 'kd': 1e4, 'eff': 2000.0}
 
 
 def test_phase_drive_gains_stiff_for_loaded_extend_soft_otherwise():
@@ -16,6 +20,41 @@ def test_phase_drive_gains_stiff_for_loaded_extend_soft_otherwise():
         assert phase_drive_gains(p, PHASE_DRIVE) == {'kp': 1e6, 'kd': 1e4, 'eff': 2000.0}
     for p in ('tuck', 'lift', 'approach', 'retreat', 'retreat_tuck', 'stow', 'release'):
         assert phase_drive_gains(p, PHASE_DRIVE) == {'kp': 3e5, 'kd': 8e3, 'eff': 400.0}
+
+
+# ---------------------------------------------------- sim-preplace-sweep-tilt-v1: carried_soft_phases
+
+def test_resolve_stiff_phases_default_is_byte_identical():
+    assert resolve_stiff_phases(None) == frozenset(_PHASE_DRIVE_STIFF_PHASES)
+    assert resolve_stiff_phases(PHASE_DRIVE) == frozenset(_PHASE_DRIVE_STIFF_PHASES)
+    assert resolve_stiff_phases(dict(PHASE_DRIVE, carried_soft_phases=[])) == frozenset(_PHASE_DRIVE_STIFF_PHASES)
+
+
+def test_carried_soft_phases_forces_preplace_soft_keeps_place_stiff():
+    # The verdict fix: run the carried PREPLACE approach SOFT (it swings the welded carton under the
+    # stiff drive), but keep the gravity-resisting place DESCENT and the free-arm pan STIFF.
+    cfg = dict(PHASE_DRIVE, carried_soft_phases=['preplace'])
+    assert phase_drive_gains('preplace', cfg) == SOFT
+    assert phase_drive_gains('place', cfg) == STIFF
+    assert phase_drive_gains('pan', cfg) == STIFF
+    assert resolve_stiff_phases(cfg) == frozenset({'pan', 'place'})
+
+
+def test_carried_soft_phases_rejects_non_stiff_or_bad_value():
+    # a phase that is not one of the default STIFF phases is a typo, not a silent no-op
+    with pytest.raises(ValueError):
+        resolve_stiff_phases(dict(PHASE_DRIVE, carried_soft_phases=['lift']))
+    with pytest.raises(ValueError):
+        resolve_stiff_phases(dict(PHASE_DRIVE, carried_soft_phases='preplace'))  # must be a list
+
+
+def test_carried_soft_phases_off_is_byte_identical_everywhere():
+    # Absent/empty => every phase selects exactly what it did before the lane.
+    base = {p: phase_drive_gains(p, PHASE_DRIVE)
+            for p in ('pan', 'preplace', 'place', 'tuck', 'lift', 'transit', 'retreat')}
+    cfg = dict(PHASE_DRIVE)  # no carried_soft_phases
+    for p, g in base.items():
+        assert phase_drive_gains(p, cfg) == g
 
 
 def test_phase_drive_gains_absent_config_is_noop():

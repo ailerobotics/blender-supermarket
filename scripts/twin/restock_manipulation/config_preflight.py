@@ -372,6 +372,41 @@ def check_pitch_stability(mobile_spec, host_cfg, runtime_cfg, *,
     return []
 
 
+def check_phase_drive_carried_soft(runtime_cfg):
+    """sim-preplace-sweep-tilt-v1: validate the opt-in ``phase_drive.carried_soft_phases`` override.
+
+    The RUNTIME ``phase_drive`` block (isaac_port / physics_setup) selects a STIFF arm drive profile for
+    the loaded pan/preplace/place. On the carried PREPLACE approach the stiff profile swings the welded
+    carton off level (coldwin50/51/52, CARTON_TILT 3-8 deg); the fix force-routes named carried phases
+    back to the SOFT profile via ``phase_drive['carried_soft_phases']``. This refuses, before any GPU
+    boot: a non-list value; a listed phase that is not one of physics_setup's default STIFF phases
+    (``_PHASE_DRIVE_STIFF_PHASES`` -- forcing an already-soft phase soft is a typo, not a no-op worth
+    shipping); and a ``carried_soft_phases`` set while no ``soft`` gain block is present (the override
+    would select a missing profile). No-op ([]) when the override is absent (byte-identical)."""
+    rc = runtime_cfg or {}
+    pd = rc.get('phase_drive')
+    if not isinstance(pd, dict):
+        return []
+    soft_override = pd.get('carried_soft_phases')
+    if not soft_override:
+        return []
+    from twin.restock.physics_setup import _PHASE_DRIVE_STIFF_PHASES
+    problems = []
+    if isinstance(soft_override, str) or not isinstance(soft_override, (list, tuple)):
+        problems.append('phase_drive.carried_soft_phases must be a list of phase names (e.g. '
+                        '["preplace"]); got %r.' % (soft_override,))
+        return problems
+    bad = [p for p in soft_override if p not in _PHASE_DRIVE_STIFF_PHASES]
+    if bad:
+        problems.append('phase_drive.carried_soft_phases may only force-soft a phase that is otherwise '
+                        'STIFF %s; unknown/non-stiff %s (a typo would silently drop the override).'
+                        % (list(_PHASE_DRIVE_STIFF_PHASES), bad))
+    if not pd.get('soft'):
+        problems.append('phase_drive.carried_soft_phases is set but phase_drive has no "soft" gain '
+                        'block for the override to select.')
+    return problems
+
+
 def check_station_full_brake(runtime_cfg):
     """sim-station-full-brake-place-v1: validate the opt-in loaded-place full base brake.
 
@@ -642,6 +677,9 @@ def main(argv=None):
     # pitch hold (it anchors at that target) + a positive effort-guard limit. Always on (not --require'd);
     # no-op when the key is off.
     problems += check_station_full_brake(runtime_cfg)
+    # sim-preplace-sweep-tilt-v1: validate the opt-in phase_drive.carried_soft_phases override (run the
+    # carried preplace approach on the SOFT profile). Always on (not --require'd); no-op when absent.
+    problems += check_phase_drive_carried_soft(runtime_cfg)
     # sim-chassis-pitch-stability-v1: refuse an unsprung see-saw chassis unless a stabiliser is active.
     if args.mobile_manifest:
         problems += check_pitch_stability((_load(args.mobile_manifest) or {}).get('spec') or {},
