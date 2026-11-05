@@ -530,6 +530,12 @@ def create(app, manifest, scenario, config, output, *, _assemble=None, _runtime=
                              # braked base), so the place/release/stow sequence completes; a shove beyond
                              # the bound fails with a named reason. Absent => the strict guard (byte-identical).
                              collect_place_base_settle_m=config.get('collect_place_base_settle_m'),
+                             # sim-place-descent-watchdog-suspend-v1: PAUSE the parked collect station
+                             # (suspend_only -> host 'paused', not faulted) for the loaded collect place
+                             # descent, so its /sensors heartbeat loss under render pacing cannot latch a
+                             # global stop (coldwin64). Sibling of the HOST place_descent_sensor_watchdog_
+                             # suspend. Absent/False => byte-identical (no pause command sent).
+                             collect_place_station_pause=bool(config.get('collect_place_station_pause')),
                              # sim-collect-reposition-block-v1: on a blocked/stopped tick of the uncoupled
                              # mid-collect carry reposition, HOLD the base pinned instead of issuing a
                              # zero-velocity mobile.command (which releases the parking/full brake and let

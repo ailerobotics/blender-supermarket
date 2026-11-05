@@ -292,6 +292,7 @@ class RuntimeAdapter:
                  couple_cart_relative=None,
                  ground_truth_place_actions=(), staged_settle_s=0.0,
                  collect_place_base_settle_m=None,
+                 collect_place_station_pause=False,
                  hold_base_on_reposition_block=False,
                  shelf_staging=False, carry_drive_profile=None, cart_side_bay=False):
         self.nav, self.mobile, self.manip, self.port = navigation, mobile, manipulation, port
@@ -426,6 +427,15 @@ class RuntimeAdapter:
                     and math.isfinite(v) and 0 < v <= 0.3):
                 raise ValueError('collect_place_base_settle_m must be a finite value in (0, 0.3] m')
             self.collect_place_base_settle_m = float(v)
+        # sim-place-descent-watchdog-suspend-v1 (opt-in, default off => byte-identical): PAUSE the parked
+        # collect station (suspend_only -> host 'paused', NOT faulted; no global stop) for the loaded
+        # collect place descent, exactly as the between-ops couple tow does. During that slow full-six-axis-
+        # lock set-down the /sensors stream render-pacing starves the parked-station liveness watchdog too
+        # (coldwin64: 'parked heartbeat lost: sim gap 30.02 s' -> latched stop -> endless collect retry),
+        # so pausing it over the window keeps the alive-but-idle station from false-tripping. One-shot per
+        # collect; the next op (couple) re-prepares a fresh epoch. _collect_place_station_paused latches it.
+        self.collect_place_station_pause = bool(collect_place_station_pause)
+        self._collect_place_station_paused = False
         # Base (x, y) captured at the place_approach re-park (end of rewarm); the loaded-place base-settle
         # tolerance measures the excursion from it. None until the reposition place begins / after a re-begin.
         self._place_base_anchor = None
@@ -664,6 +674,7 @@ class RuntimeAdapter:
         self._collect_repositioned = False
         self._reposition_seq = []          # fm390 nav proof #2: staged drive to place_approach
         self._reposition_seq_i = 0
+        self._collect_place_station_paused = False   # sim-place-descent-watchdog-suspend-v1: one-shot per collect
         self._place_base_anchor = None     # re-armed at the place_approach re-park (sim-robust-cart-place-descent-v1)
         if action == 'couple':
             # sim-robust-station-pause-on-transfer-v1: the collect op is COMPLETE and the base is about to tow
@@ -1540,6 +1551,23 @@ class RuntimeAdapter:
             r = self.manip.step(dt, manip_packet)
             _profile_mark(self.port, 'manip')   # sim_speed TICK_PROFILE split; no-op unless profiling
             self._last_manip_phase = getattr(r, 'phase', None)  # feeds next tick's port.gate()
+            # sim-place-descent-watchdog-suspend-v1: the loaded collect place descent lowers the welded
+            # carton onto the deck under the full-six-axis base lock, and the /sensors render-pacing over
+            # that slow set-down starves the parked collect station's liveness watchdog (coldwin64: 'parked
+            # heartbeat lost: sim gap 30.02 s' -> latched global stop -> endless collect retry). Opt-in:
+            # PAUSE the parked station (suspend_only -> host 'paused', NOT faulted) for exactly this window,
+            # the same mechanism the between-ops couple tow uses. One-shot per collect (the next op re-
+            # prepares a fresh epoch); scoped to the reposition collect place so a non-place / non-collect
+            # tick never pauses it. Off => byte-identical (no pause command sent).
+            if (self.collect_place_station_pause and self.action == 'collect'
+                    and self._collect_repositioned and self._last_manip_phase == 'place'
+                    and not self._collect_place_station_paused
+                    and hasattr(self.manip, 'pause_station')):
+                self._collect_place_station_paused = True
+                print('COLLECT_PLACE_STATION_PAUSE suspending the parked collect station for the loaded '
+                      'place descent (its /sensors heartbeat legitimately stalls under render pacing)',
+                      flush=True)
+                self.manip.pause_station(self.time, suspend_only=True)
             # fm390: the arm has folded to the carry pose and is HOLDING in TRANSIT -- drive the base to
             # place_approach (carton carried) before it places onto the deck. Pause stepping the arm (do
             # not dispatch its controls); nav takes over. One-shot per collect; absent place_approach =>

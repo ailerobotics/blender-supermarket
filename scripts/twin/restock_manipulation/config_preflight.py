@@ -95,6 +95,11 @@ KEY_CONSUMER = {
     # robot_description is the file verbatim (byte-identical, the historical empty-geometry path).
     'moveit_mesh_uris': HOST,
     'esdf_boot_ack_grace_s': HOST,  # sim-robust-esdf-boot-gate-v1: SIM-clock boot grace for the first valid ESDF ack
+    # sim-place-descent-watchdog-suspend-v1: suspend the per-frame /sensors SIM watchdog ONLY during the
+    # loaded place descent (RosTransferBridge, read by ros_host -> the HOST manip process). The 180 s wall
+    # backstop stays armed throughout. Default off => byte-identical. Sibling of the RUNTIME
+    # collect_place_station_pause; registered so a key filed in the RUNTIME config is refused (run-277 slip).
+    'place_descent_sensor_watchdog_suspend': HOST,
     # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority over the free-space
     # arm legs (ros_host -> TransferController). reactive_arm_human toggles it; reactive_arm is the optional
     # tuning dict (gate dwell/fractions, backstop params, replannable_phases). Absent/False => byte-identical.
@@ -157,6 +162,10 @@ KEY_CONSUMER = {
     # sim-robust-cart-place-descent-v1: bounded base-settle tolerance for the loaded collect place;
     # isaac_bundle builds the RuntimeAdapter with it (orchestrate process), NOT ros_host.
     'collect_place_base_settle_m': RUNTIME,
+    # sim-place-descent-watchdog-suspend-v1: PAUSE the parked collect station for the loaded place descent
+    # (isaac_bundle builds the RuntimeAdapter with it -- the orchestrate process, RUNTIME). Sibling of the
+    # HOST place_descent_sensor_watchdog_suspend. Default off => byte-identical.
+    'collect_place_station_pause': RUNTIME,
     # sim-station-full-brake-place-v1: FULL-lock the base (translation + rotation) over the loaded
     # collect place descent so the welded from-above reaction cannot shove the translation-free base
     # (coldwin49). physics_setup.assemble reads them (RUNTIME) to build the MobileController. Default off

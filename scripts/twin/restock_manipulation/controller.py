@@ -1045,6 +1045,19 @@ class TransferController:
                 and getattr(self, 'operation', None) == 'collect'
                 and not self.cart_cage_place)
 
+    def in_loaded_place_descent(self):
+        """sim-place-descent-watchdog-suspend-v1: True while the loaded place descent is IN FLIGHT -- the
+        carton is WELDED/held and the controller is lowering it in the ``place`` phase (the collect
+        set-down onto the cart deck OR the live_pose transfer place onto the bay). This is the one window
+        where the station/source decode ``/sensors`` stream legitimately stalls under the full-six-axis
+        base lock + deep render pacing (sensing_stride 8 + a 2nd full-res live_pose render), so the SIM
+        clock advances many seconds between frames while the sim is healthy (coldwin64: HOST_FAULT_ESTOP
+        phase=place 'sensor stream watchdog expired' at sim gap >> 1 s). The per-frame ``/sensors`` SIM
+        watchdog may be suspended over exactly this window (the WALL backstop stays armed). False
+        everywhere else, so the suspension is never active outside the loaded descent -- re-armed on
+        release (``held`` goes False) or on leaving the ``place`` phase."""
+        return self.phase == 'place' and bool(self.held)
+
     def _place_wrist_guard(self):
         """The (wrist1_cap, wrist2_min) clear carry region a place-side KDL goal must satisfy, else the
         adapter re-seeds from the wrist-flipped twin (same TCP, clear branch). Active for:
