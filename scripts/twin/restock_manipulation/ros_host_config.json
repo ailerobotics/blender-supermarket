@@ -92,5 +92,6 @@
   "esdf_boot_ack_grace_s": 15.0,
   "transfer_preplace_reach_guard": true,
   "transfer_service_carry": true,
-  "carton_level": true
+  "carton_level": true,
+  "reactive_arm_human": false
 }

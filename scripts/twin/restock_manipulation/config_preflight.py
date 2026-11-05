@@ -85,6 +85,11 @@ KEY_CONSUMER = {
     # robot_description is the file verbatim (byte-identical, the historical empty-geometry path).
     'moveit_mesh_uris': HOST,
     'esdf_boot_ack_grace_s': HOST,  # sim-robust-esdf-boot-gate-v1: SIM-clock boot grace for the first valid ESDF ack
+    # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority over the free-space
+    # arm legs (ros_host -> TransferController). reactive_arm_human toggles it; reactive_arm is the optional
+    # tuning dict (gate dwell/fractions, backstop params, replannable_phases). Absent/False => byte-identical.
+    'reactive_arm_human': HOST,
+    'reactive_arm': HOST,
     'carton_level': HOST,  # sim-carton-level-carry-v1: level the carried carton (fold goals) + CARTON_TILT trip; HOST (the controller drives the arm)
     # sim-preplace-per-joint-gains-v1: preplace frozen-joint convergence guard + wrist-first sequencing
     # fallback (ros_host -> TransferController). Both opt-in, default off => byte-identical.
