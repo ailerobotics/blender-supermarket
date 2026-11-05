@@ -337,6 +337,10 @@ class TransferController:
         # place-descent commanded-path replay). Logged as CARTON_SEGMENT_TILT at each carried phase exit.
         self._carton_seg_exec = {}
         self._carton_seg_planned = {}
+        # sim-preplace-wrist-continuity-v1: the max per-waypoint wrist step of the planned preplace approach
+        # (keyed by phase, for the CARTON_SEGMENT_TILT report), and the reaction-natural branch report.
+        self._carton_seg_wrist_step = {}
+        self._preplace_branch_report = None
         # sim-preplace-sweep-tilt-v1: per-tick CARTON_TICK diagnostic for the carried phases (the welded
         # carton attitude the CARTON_TILT grader reads + the EXECUTED joint positions), throttled to
         # ~10 Hz of SIM time. coldwin50/51/52 tripped CARTON_TILT at the preplace sweep with NO per-tick
@@ -983,9 +987,16 @@ class TransferController:
             # is the pre-dispatch predicted peak; 'executed' the measured max this phase.
             planned_deg = ('%.2f' % max(pr, pp)) if pr is not None else 'unknown'
             planned = ('planned_max roll=%.2f pitch=%.2f' % (pr, pp)) if pr is not None else 'planned_max=unknown'
+            # sim-preplace-wrist-continuity-v1: surface the planned max per-waypoint wrist step for the
+            # preplace approach (the branch-continuity signal), so a near-jump is visible without a trip.
+            wstep = self._carton_seg_wrist_step.pop(leaving, None)
+            wstep_s = ('' if wstep is None
+                       else ' | max_wrist_step=%.3f rad (continuity <= %.3f)'
+                       % (wstep, self._carton_level.preplace_max_wrist_step_rad))
             line = ('CARTON_SEGMENT_TILT phase=%s planned=%s executed=%.2f | executed_max roll=%.2f pitch=%.2f'
-                    ' | %s deg (bound %.2f)'
-                    % (leaving, planned_deg, max(er, ep), er, ep, planned, self._carton_level.bound_deg))
+                    ' | %s deg (bound %.2f)%s'
+                    % (leaving, planned_deg, max(er, ep), er, ep, planned, self._carton_level.bound_deg,
+                       wstep_s))
             print(line, flush=True)
             self.evidence.append({'carton_segment_tilt': line})
         if phase == 'contact':
@@ -1255,7 +1266,7 @@ class TransferController:
                     robot, list(measured), list(leveled_goal), up_level,
                     tool_link=tcp_link, limits=limits, bound_deg=cl_cfg.bound_deg,
                     max_segment_rad=cl_cfg.preplace_max_segment_rad, level_joints=cl_cfg.joints,
-                    base_R=base_R)
+                    base_R=base_R, max_wrist_step_rad=cl_cfg.preplace_max_wrist_step_rad)
             else:
                 plan = cl.plan_compensated_approach(
                     robot, list(measured), list(leveled_goal), self._carton_up_in_tool, gc,
@@ -1293,11 +1304,19 @@ class TransferController:
         if reject is not None:
             print(reject, flush=True)
             return self._fail(reject)
+        # sim-preplace-wrist-continuity-v1: refuse a planned per-waypoint wrist BRANCH JUMP (the soft wrist
+        # cannot track one -- coldwin57's class) before motion rather than stream it into a TRAJ_HOST
+        # tracking fault. The branch-continuous re-solve already avoids a jump, so this is cheap safety.
+        step_reject = plan.reject_wrist_step(cl_cfg.preplace_max_wrist_step_rad)
+        if step_reject is not None:
+            print(step_reject, flush=True)
+            return self._fail(step_reject)
         pk_v, pk_a = cl.path_peak_joint_speed(waypoints, speed=cl_cfg.preplace_approach_speed,
                                               accel=cl_cfg.preplace_approach_accel)
         worst = max(plan.max_roll, plan.max_pitch)
         gate = cl_cfg.preplace_gate_bound_deg
         self._carton_seg_planned['preplace'] = (plan.max_roll, plan.max_pitch)  # for CARTON_SEGMENT_TILT
+        self._carton_seg_wrist_step['preplace'] = plan.max_wrist_step        # for CARTON_SEGMENT_TILT
         # sim-preplace-sweep-tilt-v1: the gate predicts tilt from the COMMANDED path + the quasi-static
         # droop model only. It is BLIND to the arm's closed-loop DRIVE DYNAMICS -- the stiff position
         # profile (kp 1e6 / eff 2000) overshoots the welded load through the 1.64 rad wrist_2 sweep and
@@ -1311,11 +1330,12 @@ class TransferController:
                       'droop-compensated densified carried approach to the executed-level standoff; '
                       'COMMANDED+droop only, BLIND to drive-dynamics overshoot')
         print('CARTON_LEVEL_PREPLACE_GATE n=%d predicted_executed max roll=%.2f pitch=%.2f tilt=%.2f deg '
-              '(target %.2f %s, bound %.2f) peak_joint_speed=%.3f rad/s peak_accel=%.3f rad/s^2%s -- %s '
+              '(target %.2f %s, bound %.2f) peak_joint_speed=%.3f rad/s peak_accel=%.3f rad/s^2 '
+              'max_wrist_step=%.3f rad (continuity <= %.3f)%s -- %s '
               '(see CARTON_TICK / CARTON_SEGMENT_TILT)'
               % (plan.waypoints_n, plan.max_roll, plan.max_pitch, plan.max_tilt, gate,
                  'within target' if worst <= gate else 'over target (sub-bound, dynamics cap + closed loop own it)',
-                 cl_cfg.bound_deg, pk_v, pk_a,
+                 cl_cfg.bound_deg, pk_v, pk_a, plan.max_wrist_step, cl_cfg.preplace_max_wrist_step_rad,
                  '' if cl_peak is None else ' closed_loop_peak=%.2f deg' % cl_peak, frame_desc), flush=True)
         self.motion.begin_joint_path(list(waypoints), list(measured), slow=True, goal_tol=0.2,
                                      speed=cl_cfg.preplace_approach_speed,
@@ -1419,9 +1439,30 @@ class TransferController:
                 # standoff wrist_1 ~+0.031 rad and left the carton ~1.8-2.0 deg off level. Solve the standoff
                 # GEOMETRICALLY (gravity_comp=None) in the WORLD frame (base_R + the world up-axis) so the
                 # welded carton is parallel to the GROUND, not to the tilted base. Predicted world rpy ~0.
-                sol = cl.level_place_ik(robot, standoff, self._carton_up_in_tool_world,
-                                        list(self.collect_place_preplace_shape), tool_link=tcp_link,
-                                        limits=limits, gravity_comp=None, base_R=self._carton_base_R)
+                self._preplace_branch_report = None
+                if getattr(cl_cfg, 'preplace_reaction_branch', False):
+                    # sim-preplace-wrist-continuity-v1: pick the REACTION-NATURAL standoff branch (minimum
+                    # |wrist_2| == the branch the soft wrist_2 drive settles toward), so leg 1 drives to it
+                    # and leg 2 holds it with no executed divergence (coldwin57's wrist_2 1.63->0.33 fault).
+                    try:
+                        sol, self._preplace_branch_report = cl.select_reaction_natural_standoff(
+                            robot, standoff, self._carton_up_in_tool_world,
+                            list(self.collect_place_preplace_shape), list(measured), tool_link=tcp_link,
+                            limits=limits, base_R=self._carton_base_R, level_joints=self._carton_level.joints,
+                            max_segment_rad=self._carton_level.preplace_max_segment_rad,
+                            bound_deg=self._carton_level.bound_deg,
+                            effort_limit=self._carton_level.preplace_soft_effort_nm)
+                        sol = {j: float(sol[j]) for j in ARM_JOINTS}
+                    except ValueError as _bexc:
+                        print('PREPLACE_REACTION_BRANCH unsolved: %s (using the single world-level standoff)'
+                              % _bexc, flush=True)
+                        sol = cl.level_place_ik(robot, standoff, self._carton_up_in_tool_world,
+                                                list(self.collect_place_preplace_shape), tool_link=tcp_link,
+                                                limits=limits, gravity_comp=None, base_R=self._carton_base_R)
+                else:
+                    sol = cl.level_place_ik(robot, standoff, self._carton_up_in_tool_world,
+                                            list(self.collect_place_preplace_shape), tool_link=tcp_link,
+                                            limits=limits, gravity_comp=None, base_R=self._carton_base_R)
                 self._preplace_standoff_exec_rpy = cl.carried_rpy(
                     robot, [float(sol[j]) for j in ARM_JOINTS], self._carton_up_in_tool_world,
                     tool_link=tcp_link, base_R=self._carton_base_R)
@@ -1431,6 +1472,18 @@ class TransferController:
                       % (self.station_hold_pitch_deg, self.station_hold_roll_deg,
                          self._preplace_standoff_exec_rpy[0], self._preplace_standoff_exec_rpy[1],
                          self._preplace_standoff_exec_rpy[2]), flush=True)
+                rep = self._preplace_branch_report
+                if rep is not None:
+                    print('PREPLACE_REACTION_BRANCH chosen wrist_2=%.3f rad (settling branch, min |wrist_2|); '
+                          'peak soft-wrist holding torque=%.3f N*m on %s -> margin %.1f N*m to the %.0f N*m '
+                          'soft-wrist effort limit (NOT saturation -- torque is reported, not the selector; '
+                          'min-torque would pick wrist_2=%.3f, the uphill branch). Branches: %s'
+                          % (rep['chosen_wrist_2'], rep['chosen_peak_torque_nm'], rep['chosen_peak_joint'],
+                             rep['chosen_margin_nm'], rep['effort_limit_nm'], rep['min_torque_wrist_2'],
+                             ', '.join('w2=%.2f(tau=%.2f,sweep=%.2f)%s'
+                                       % (b['wrist_2'], b['peak_torque_nm'], b['leg1_wrist_sweep_rad'],
+                                          '*' if b['chosen'] else '') for b in rep['branches'])),
+                      flush=True)
             elif getattr(cl_cfg, 'preplace_level_gate', False):
                 # sim-preplace-level-gate-v1 (level chassis / hold off): PREFER the standoff branch with the
                 # smallest predicted EXECUTED (droop) tilt + most clearance (byte-identical to the prior path).

@@ -1,0 +1,77 @@
+{
+    "_comment": "sim-preplace-wrist-continuity-v1: the collect pre-place LEG-2 wrist_2-divergence fix. Captain's rule UNCHANGED: the box stays parallel to the ground, 2.0 deg bound / 0.15 s grace, NEVER loosened. coldwin57 reached 97% of the leg-2 pan descent at 0.00 deg world tilt, then e-stopped on an ARM TRACKING FAULT. This lane commands the branch the soft wrist drive actually settles on, so plan == drive == monitor and there is no divergence. Scoped to the collect preplace under the station hold + preplace_level_gate; default-off everywhere (preplace_reaction_branch off => byte-identical, the prior single-standoff path).",
+    "_root_cause": {
+        "not_a_plan_jump": "coldwin57's leg-2 PLAN never jumped: TRAJ_HOST_PLAN HELD wrist_2 = 1.6301 across all 18 waypoints (w1 0.011->0.024, w3 -0.001->-0.022). So a 'reject a plan with a wrist step' guard changes nothing here (the plan has no step).",
+        "not_contact_not_second_writer": "No contact anywhere in the leg-2 window (SEAL_DIAG hit_bodies=[], no collision/PhysX lines; base_collision_object=false, world_obstacles=[], carton filtered). And NO second code writer: the whole execution path is single-source -- controller._issue_gated_preplace_approach -> ros_adapter.begin_joint_path -> _waypoints_goal (installs the waypoints VERBATIM) -> trajectory_host (pure executor+monitor, no IK/level/wrist re-solve) -> native_transport.ArmCommandGate.command/apply (writes the streamed position as the Isaac drive target). phase_drive sets GAINS only; the CartonLevelServo is clc=None on the geometric world-level lane. So the installed plan IS the drive target AND the monitor reference (proven sample-by-sample in test_installed_plan_equals_monitored_plan_sample_by_sample).",
+        "near_null_relaxation": "wrist_2 is a NEAR-NULL DOF for the carton attitude AND gravity: sweeping the EXECUTED wrist_2 from the commanded 1.63 down to 0.33 changes the world tilt only ~0.08 deg and the holding torque stays <0.02 N*m (CPU, coldwin57 URDF; the carton stayed world-level 0.29 the whole time). The soft wrist drive cannot distinguish/hold the HIGH equivalent-orientation branch (1.63) and the executed wrist_2 RELAXES to the LOW branch (~0.33). Both branches are world-level, so the carton never tilts -- but the trajectory host grades the executed wrist_2 against the plan's 1.63 and e-stops on the 1.3 rad divergence (TRAJ_HOST_TRACK_MISS worst_j=4). A kp 3e5 drive holding a <1 N*m-gravity joint should NOT relax; that it does is an Isaac soft-wrist drive behaviour (possibly a units/application mismatch on the wrists) -- the DRIVE_GAINS + DRIVE_TICK logs below let coldwin58 observe it directly.",
+        "cpu_numbers": "Peak soft-wrist holding torque across the leg-2 sweep (geometry+mass model, NOT the phantom K): HIGH branch (w2~1.63) ~0.97 N*m on wrist_1, LOW branch (w2~0.32) ~0.53 N*m -- BOTH far below the 56 N*m URDF wrist effort ceiling, so NEITHER saturates and the torque is NOT the selector (minimum torque would pick the UPHILL w2~2.79 branch). The honest discriminator is the observed settling DIRECTION (the drive drifts toward low wrist_2), i.e. the min-|wrist_2| branch."
+    },
+    "_mechanism": {
+        "1_reaction_natural_branch": "controller._preplace_above_place_goal (preplace_level_gate + station hold + preplace_reaction_branch): the standoff is chosen by carton_level.select_reaction_natural_standoff -- the reach+level branch with the MINIMUM |wrist_2| (~0.32), the bottom of the equivalent-orientation family the drive settles toward, with no lower level branch in the clear region to relax into. Leg 1 drives the wrists to THAT branch and leg 2 holds it, so plan == drive == monitor all target the branch the arm actually reaches. Logs PREPLACE_REACTION_BRANCH with the chosen wrist_2, its peak holding torque + margin to 56 N*m, and the (different) branch minimum-torque would have picked.",
+        "2_branch_continuity_guard": "carton_level.plan_level_world_approach now re-solves each leg-2 waypoint BRANCH-CONTINUOUSLY (continuous_level_solve: seed from the previous waypoint, pick the MINIMUM-travel level branch, never a lower-tilt FAR branch), records the max per-waypoint wrist step, and the gate refuses a plan whose step exceeds preplace_max_wrist_step_rad (CARTON_LEVEL_PLAN_REJECTED). Cheap safety -- coldwin57's plan was already continuous (max step ~0.016 rad), so this never fires on a healthy run; it stops a future branch jump before motion. Logged in CARTON_LEVEL_PREPLACE_GATE (max_wrist_step=...) and CARTON_SEGMENT_TILT.",
+        "3_drive_observability": "DRIVE_TICK (native_transport.ArmCommandGate, env RESTOCK_DRIVE_TICK=1, carried phases only, ~10 Hz): logs the APPLIED drive target q vs the executed q per joint so a plan-vs-executed split is VISIBLE in the console. DRIVE_GAINS logs the EFFECTIVE PhysX arm drive gains (kp/kd/max_force) once per carried entry -- if the wrist drive does not carry the kp 3e5 / effort the repo set, the units/application mismatch shows here. EXEC_ABORT echoes the executor abort reason (TRAJ_HOST_TRACK_MISS/FAULT, otherwise only in host-stack.log) into the mission console. All three are OBSERVABILITY only -- default off / no behaviour change.",
+        "4_effort_56": "The soft-wrist effort ceiling in the holding-torque margin report is the 56 N*m URDF <limit effort> (not the 400 N*m the repo set via set_max_efforts); whichever Isaac honours, it is >> the <1 N*m gravity, so the margin is huge and saturation is not the story."
+    },
+    "env": {
+        "RESTOCK_PLACE_ON_DECK": "1",
+        "RESTOCK_COLLECT_GROUND_TRUTH": "1",
+        "RESTOCK_VERIFY_PLACE": "1",
+        "RESTOCK_DRIVE_TICK": "1",
+        "_note": "UNCHANGED from coldwin57 except RESTOCK_DRIVE_TICK=1 (NEW, observability: DRIVE_TICK + DRIVE_GAINS for the carried phases). Omit it for a quiet console (byte-identical behaviour)."
+    },
+    "host_config": {
+        "_file": "scripts/twin/restock_manipulation/ros_host_config.json (resolved by ros_host.py -> TransferController). The integration lane OWNS the actual run config; the keys below are the EXACT set this lane adds on top of the coldwin57 block.",
+        "preplace_wrist_first": true,
+        "preplace_convergence_stall_s": 30.0,
+        "carry_lift_shape": [1.2675, -2.27, 1.0, 0.65, 0.8, -1.2545],
+        "collect_place_preplace_shape": [0.093, -1.91, 2.014, -0.103, 1.664, 0.0],
+        "station_pitch_hold": true,
+        "station_hold_pitch_deg": -1.17,
+        "station_hold_roll_deg": 0.0,
+        "preplace_budget_margin_s": 90.0,
+        "_kept_note": "preplace_wrist_first + the convergence guard + carry_lift_shape + collect_place_preplace_shape + the station-hold mirror + the budget margin are KEPT from coldwin57 (leg 1 is clean; the budget derivation is unchanged).",
+        "carton_level": {
+            "preplace_level_gate": true,
+            "preplace_reaction_branch": true,
+            "preplace_max_wrist_step_rad": 0.15,
+            "preplace_soft_effort_nm": 56.0,
+            "preplace_max_segment_rad": 0.08,
+            "preplace_approach_speed": 0.05,
+            "preplace_approach_accel": 0.05,
+            "preplace_above_support": true,
+            "preplace_support_clearance_m": 0.08,
+            "place_from_above": true,
+            "place_above_clearance_m": 0.08,
+            "place_contact_release": true,
+            "place_contact_gap_m": 0.012,
+            "gravity_compensation": {
+                "stiffness_nm_per_rad": 2850,
+                "carton_mass_kg": 0.45
+            },
+            "_new_keys_note": "NEW this lane: preplace_reaction_branch (true => select the min-|wrist_2| settling standoff branch -- the coldwin57 fix), preplace_max_wrist_step_rad (0.15 => the per-waypoint wrist-step continuity guard), preplace_soft_effort_nm (56 => the URDF wrist effort ceiling, for the margin report). Default off => byte-identical: preplace_reaction_branch absent/false uses the prior single level_place_ik standoff (w2~1.63, the branch that diverged). All other keys are KEPT from coldwin57.",
+            "_frame_note": "Under the station hold the preplace standoff + approach are solved GEOMETRICALLY in WORLD (gravity_comp is NOT used at the preplace -- the coldwin56 phantom); gravity_compensation stays for the PLACE descent (base frame, unchanged)."
+        }
+    },
+    "runtime_config": {
+        "_file": "mission-runtime-*.json (EXTERNAL to the repo; the integration lane owns it). UNCHANGED from coldwin57.",
+        "manipulation": {
+            "stations": {
+                "chassis_station_pitch_hold": true,
+                "chassis_station_pitch_hold_pitch_deg": -1.17,
+                "chassis_station_pitch_hold_roll_deg": 0.0,
+                "_note": "UNCHANGED. The HOST station_pitch_hold / station_hold_pitch_deg / station_hold_roll_deg keys MIRROR these."
+            },
+            "station_place_full_brake": true,
+            "_full_brake_note": "The PR 339 full D6 base lock (station_place_full_brake) stays on for the place -- unexercised in nine runs; coldwin58 is its first real engagement at place start."
+        }
+    },
+    "acceptance_coldwin58": {
+        "leg_convergence": "Both legs converge within the derived phase budget (CONFIG_PREFLIGHT PREPLACE_PHASE_BUDGET ~200 s; pan error <= 0.02 rad at each leg end); no 'phase timeout: preplace'.",
+        "wrist_continuity": "CARTON_LEVEL_PREPLACE_GATE logs max_wrist_step < 0.15 rad for both legs; PREPLACE_REACTION_BRANCH logs chosen wrist_2 ~0.32 (NOT 1.63) with a > 50 N*m margin to the 56 N*m ceiling; no CARTON_LEVEL_PLAN_REJECTED.",
+        "no_tracking_fault": "NO TRAJ_HOST_TRACK_MISS / EXEC_ABORT on the carried preplace (the commanded wrist_2 now tracks where the soft drive settles); DRIVE_TICK shows the executed wrist_2 tracking the commanded ~0.32 within the gate envelope.",
+        "carton_level": "CARTON_TICK world tilt peak <= 1.5 deg over both legs; no CARTON_TILT trip. DRIVE_GAINS records the effective wrist drive gains (settles the units question).",
+        "place": "the full D6 lock engages at place start (base drift <= 0.02 m), the weld releases at true shelf contact (PLACE_CONTACT_RELEASE), verify_place passes, and the run ADVANCES PAST collect.",
+        "a_b_note": "To reproduce the coldwin57 failure set preplace_reaction_branch:false (the prior w2~1.63 standoff); RESTOCK_DRIVE_TICK=1 then captures the executed wrist_2 relaxing away from the held 1.63 (the single-source split) and the EXEC_ABORT in the console."
+    },
+    "reconciliation_with_worker_forensics": "coldwin57-onset.txt inferred a 'stray drive target' from a live per-waypoint re-solve. The CPU trace shows no such second writer exists in code -- the installed plan is the single source (drive target == monitor ref, proven sample-by-sample). Firstmate accepted this: the relaxation is the Isaac soft-wrist drive physically failing to hold the near-null high branch. The fix is the same either way -- command the branch the drive reaches (min-|wrist_2|) -- and the DRIVE_TICK/DRIVE_GAINS logs make the drive behaviour observable at coldwin58 so the physics (and any wrist-drive units/application mismatch) can be settled from the console."
+}
