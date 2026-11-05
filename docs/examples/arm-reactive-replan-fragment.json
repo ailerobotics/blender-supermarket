@@ -1,0 +1,40 @@
+{
+  "_comment": "sim-arm-reactive-replan-v1 hand-off fragment. PR-A (this fragment) wires the ported humangate decision core onto the vendored scripts/twin/humans evaluator as the SINGLE human motion authority over the free-space arm legs (RUN/SLOW/STOP/BACKSTOP, fail-toward-stop). Opt-in HOST keys, byte-identical when absent/false. Merge the keys below into the mission HOST config (restock_manipulation/ros_host_config.json, read by ros_host.py -> TransferController; config_preflight registers both HOST). The Isaac side wires the detection provider + the arm-pause sink at boot behind humans.enabled (see _isaac_wiring). The integration lane holds the GPU and schedules bounded proof runs through /tmp/aile-gpu.lock, never forced, never touching whispr; do NOT edit the ~/datasets runtime configs from a worker PR. PR-B extends this fragment with the execution-time corridor-watch preempt + cuMotion re-plan against the merged perceived-clearance seams (esdf_source/collision_gate/gated_motion).",
+
+  "reactive_arm_human": true,
+  "_reactive_arm_human_note": "HOST bool. Enables the human-aware RUN/SLOW/STOP/BACKSTOP authority over the free-space re-plannable arm legs (approach/lift/retreat + staged tuck/pan/retreat_tuck/stow). Absent/false => the ReactiveArmSupervisor is never constructed and TransferController.step skips the seam => byte-identical. The nvblox map is NEVER the stop (scout sim-perception-architecture-s1 §4): this gate owns it; people are generic dynamic volumes for routing only (PR-B).",
+
+  "reactive_arm": {
+    "clear_dwell_s": 2.0,
+    "slow_speed_fraction": 0.1,
+    "stop_speed_fraction": 0.0,
+    "state_max_age_s": 0.2,
+    "heartbeat_timeout_s": 0.3,
+    "backstop_deadline_s": 0.5,
+    "require_initial_dwell": false,
+    "backstop": { "startup_grace_s": 3.0, "state_heartbeat_timeout_s": 0.5, "gate_heartbeat_timeout_s": 0.5 }
+  },
+  "_reactive_arm_note": "HOST dict (optional tuning; absent => conservative defaults). All SIM-clock (freshness-sim-clock-not-wall): state_max_age_s/heartbeat_timeout_s bound the safety frame's sim-age, which render pacing only makes more generous in wall time. clear_dwell_s = the self-observed healthy-CLEAR a RESUME needs (defence in depth over the camera dwell). require_initial_dwell=false (default) => a mission that has never been restricted runs from tick one (humans.reaction clean-start semantics); the dwell gates only release from a SLOW/STOP/BACKSTOP restriction. The 'backstop' sub-dict tunes the independent watcher (ArmBackstopParams). Fields map 1:1 to ArmGateConfig / ArmBackstopParams.",
+
+  "_keys_per_file": {
+    "arm_human_gate.py": "ArmHumanGate + ArmGateConfig + ArmSafetyFrame + frame_from_safety_state -- the ported humangate decision core (RUN/SLOW/STOP/BACKSTOP, fail-toward-stop, resume dwell, lost-close refusal, STOP->BACKSTOP fall-through).",
+    "arm_backstop.py": "ArmBackstopWatcher + ArmBackstopParams -- the ported independent cancel watcher (latches).",
+    "reactive_arm.py": "ReactiveArmSupervisor -- the single controller seam; e-stop-free motion.cancel()/cancel_outcome() preempt + ArmCommandGate.set_paused.",
+    "controller.py": "reactive_arm_human/reactive_arm kwargs; set_human_detection_provider()/set_arm_pause_sink(); the step() seam + the slow= OR at the in-scope issue sites; per-op reset in start().",
+    "native_transport.py": "ArmCommandGate.set_paused(bool) -- reversible, non-latching human-safety freeze (distinct from hold()/faulted); watchdog + command drop while paused.",
+    "ros_host.py / ros_host_config.json / config_preflight.py": "read + register the two HOST keys (byte-identical when off)."
+  },
+
+  "_isaac_wiring": "At boot, behind humans.enabled: controller.set_human_detection_provider(provider) where provider(now_wall)->humans.perception.messages.SafetyState|None (ground-truth or detector-fed), and controller.set_arm_pause_sink(arm_gate.set_paused). With no sink wired, the e-stop-free cancel-hold is the sole stop (still safe).",
+
+  "_gpu_proof_S4": {
+    "_status": "PENDING -- bounded GPU run, integration-lane-owned, after coldwin63 + the perception-lane session release /tmp/aile-gpu.lock. HEAVY_MB=2500, renice +10, <=20 min, never --force.",
+    "_command": "scripts/run_mobile_restock.py ... (collect carry leg) with the HOST keys above + humans.enabled and a scripted person crossing the arm's reach on the vendored humans path (detection.source ground_truth for the bench).",
+    "_acceptance": "A person entering reach drives the gate CLEAR->SLOW->STOP: the console shows REACTIVE_ARM_HOLD action=SLOW then action=STOP, the arm PAUSES (set_paused True; no motion streams, no CARTON_TILT since the welded carton holds its level pose), and after the person leaves THROUGH the SLOW ring (tracked departure) and the clear dwell completes the arm RESUMES (set_paused False, the leg re-plans from the live pose). No global /manipulation/stop (no host e-stop). Record VRAM peak. The box stays parallel to the ground (2.0 deg / 0.15 s, never loosened) throughout -- the carton-level gate is unchanged and runs before this seam each tick.",
+    "_measured_latencies": "TBD on the S4 run (gate decide latency; cancel->settle ticks; resume dwell). CPU bench numbers below stand in until then."
+  },
+
+  "_cpu_proof": "scripts/twin/tests/test_reactive_arm_human.py -- the ported gate scenarios, the ReactiveArmSupervisor driven by a scripted person distance (preempt + pause + resume), the REAL TransferController.step seam (blocks + pauses on a person, resumes on a clear dwell, byte-identical off), and ArmCommandGate.set_paused. Run: env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest scripts/twin/tests/test_reactive_arm_human.py -q",
+
+  "_activation_check": "config_preflight --require reactive_arm_human asserts it is present in the HOST config (not mis-filed into the runtime config -- the run-277 trap)."
+}

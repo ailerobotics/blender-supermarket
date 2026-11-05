@@ -9,6 +9,9 @@ from ..restock.physics_step import (COLLISION_RELAY_LEAD_S, collision_band_floor
 
 from . import esdf_boot_gate
 from . import ground_truth_collect as gtc
+from . import reactive_arm
+from .arm_backstop import ArmBackstopParams
+from .arm_human_gate import ArmGateConfig
 from .fit import axis_fits
 from .transfer_carry import (DEFAULT_WRIST1_CAP, DEFAULT_WRIST2_MIN, GUARDED_PHASES, WELD, WRIST_GUARD,
                              carry_flags, resolve_reach_guard)
@@ -119,7 +122,8 @@ class TransferController:
                  preplace_convergence_stall_s: float = 0.0, preplace_wrist_first: bool = False,
                  carton_level=None, fk_urdf=None, place_tcp_link='gripper_pad_tcp',
                  station_pitch_hold: bool = False, station_hold_roll_deg: float = 0.0,
-                 station_hold_pitch_deg: float = 0.0):
+                 station_hold_pitch_deg: float = 0.0,
+                 reactive_arm_human: bool = False, reactive_arm_config=None):
         self.steady_clock=steady_clock
         # sim-carton-level-place-on-cart-v1: the FK link the collect place-on-cart reach targets -- the
         # motion port's IK tcp ('gripper_pad_tcp'), NOT ur_tool0 (~0.27 m apart). The level place IK must
@@ -311,6 +315,27 @@ class TransferController:
             raise ValueError('esdf_boot_ack_grace_s must be a finite, non-negative number of sim seconds')
         self.esdf_boot_ack_grace_s = float(esdf_boot_ack_grace_s)
         self._esdf_boot_gate = esdf_boot_gate.EsdfBootGate(self.esdf_boot_ack_grace_s)
+        # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority for the
+        # free-space arm legs. The ported humangate decision core (arm_human_gate) is fed by the vendored
+        # scripts/twin/humans evaluator (an injected detection provider) and drives the e-stop-free preempt
+        # (motion.cancel) + a reversible ArmCommandGate pause (an injected sink). Off (reactive_arm_human
+        # False / not constructed) => the supervisor is None and step() skips it entirely => byte-identical.
+        self._reactive_arm_slow = False          # SLOW: OR'd into the in-scope issue sites' slow= flag
+        self._arm_pause_sink = None              # injected: ArmCommandGate.set_paused (reversible)
+        self._arm_detection_provider = None      # injected: now_wall -> vendored SafetyState | None
+        self._reactive_arm = None
+        if reactive_arm_human:
+            cfg = dict(reactive_arm_config or {})
+            gate_cfg = ArmGateConfig(**{k: cfg[k] for k in ArmGateConfig.__dataclass_fields__
+                                        if k in cfg}).validate()
+            bs_cfg = cfg.get('backstop') if isinstance(cfg.get('backstop'), dict) else {}
+            bs_params = ArmBackstopParams(**{k: bs_cfg[k] for k in ArmBackstopParams.__dataclass_fields__
+                                             if k in bs_cfg}).validate()
+            phases = cfg.get('replannable_phases')
+            self._reactive_arm = reactive_arm.ReactiveArmSupervisor(
+                gate_config=gate_cfg, backstop_params=bs_params,
+                replannable_phases=(frozenset(phases) if phases else None),
+                enable_backstop=bool(cfg.get('enable_backstop', True)))
         # sim-carton-level-carry-v1: keep the welded carton PARALLEL TO THE GROUND through every carried
         # move (captain's rule; coldwin16 swung it ~150 deg off its weld attitude during the fold). A
         # resolved carton_level.LevelConfig (or None => off => byte-identical) plus the FK URDF path lets
@@ -778,6 +803,28 @@ class TransferController:
         is set; left unset (default) the gate never arms => byte-identical."""
         self._collect_source_evidence = provider
 
+    def set_arm_pause_sink(self, sink):
+        """sim-arm-reactive-replan-v1 (P1): inject the reversible arm-command-gate pause.
+
+        ``sink(paused: bool)`` drives ``ArmCommandGate.set_paused`` (the mission wires it at boot). The
+        reactive human authority calls it edge-triggered on STOP/BACKSTOP (True) and release (False).
+        Inert unless the reactive layer is enabled (``reactive_arm_human``); no sink => the preempt/cancel
+        hold is the sole stop mechanism (still safe)."""
+        self._arm_pause_sink = sink
+        if self._reactive_arm is not None:
+            self._reactive_arm.set_pause_sink(sink)
+
+    def set_human_detection_provider(self, provider):
+        """sim-arm-reactive-replan-v1 (P1): inject the vendored human-safety evaluator.
+
+        ``provider(now_wall) -> humans.perception.messages.SafetyState | None`` returns the freshest
+        people judgement (CLEAR/SLOW/STOP + nearest distance), from the ground-truth or detector-fed
+        ``scripts/twin/humans`` path. None (no provider, or a None return) fails the gate toward STOP.
+        Inert unless the reactive layer is enabled => byte-identical."""
+        self._arm_detection_provider = provider
+        if self._reactive_arm is not None:
+            self._reactive_arm.set_detection_provider(provider)
+
     def start(self, operation: str, job: dict) -> None:
         if self.phase not in ('idle', 'succeeded', 'failed') or self.held:
             raise ValueError('transfer active or payload requires recovery')
@@ -833,6 +880,9 @@ class TransferController:
         self._recovery_pause_logged = False
         self._preplace_branch_cache = None  # sim-preplace-select-live-cost-v1: fresh per op
         self._esdf_boot_gate.reset()   # sim-robust-esdf-boot-gate-v1: re-arm the boot ESDF-ack gate per op
+        self._reactive_arm_slow = False   # sim-arm-reactive-replan-v1: fresh SLOW flag per op
+        if self._reactive_arm is not None:   # re-arm the human-aware reactive authority per op
+            self._reactive_arm.reset(0.0)
         self._retreat_lifted = False   # sim-collect-retreat-abort-v2: lift-off-then-fold sub-stage flag
         self.verify_ids = set()
         self.release_time = None
@@ -2157,6 +2207,37 @@ class TransferController:
                                       'arm-command heartbeat watchdog' % self.grasp_press_timeout_s)
             else:
                 self._press_sim_start = None
+        # sim-arm-reactive-replan-v1 (P1): human-aware RUN/SLOW/STOP/BACKSTOP authority over the free-space
+        # arm legs. Inert (None) unless reactive_arm_human is enabled => byte-identical. The supervisor keeps
+        # the ported humangate warm every tick, acts only in its re-plannable phases, and realises SLOW/STOP
+        # through the e-stop-free motion.cancel()/cancel_outcome() preempt + a reversible ArmCommandGate
+        # pause (an injected sink) -- never the global emergency stop. People are the gate's job; the nvblox
+        # map is never the stop (scout sim-perception-architecture-s1 §4). Both clocks are the SIM clock
+        # (freshness-sim-clock-not-wall): the safety frame's evidence age is bounded in sim seconds, which
+        # render pacing only makes more generous in wall time.
+        if self._reactive_arm is not None:
+            d = self._reactive_arm.supervise(
+                now=now, now_wall=now, phase=self.phase, motion=self.motion,
+                leg_running=self.issued)
+            self._reactive_arm_slow = bool(d.slow)
+            if d.reissue:
+                self.issued = False
+            if d.fail is not None:
+                return self._fail('reactive arm: ' + d.fail)
+            if d.block:
+                # Record one evidence entry per action transition (never per tick) + a throttled log.
+                if d.action != getattr(self, '_react_last_action', None):
+                    self._react_last_action = d.action
+                    self.evidence.append({'reactive_arm': {'action': d.action, 'reason': d.reason,
+                                                           'sim_time': float(now),
+                                                           'paused': self._reactive_arm.paused}})
+                self._react_hold_n = getattr(self, '_react_hold_n', 0) + 1
+                if self._react_hold_n % 20 == 1:
+                    print('REACTIVE_ARM_HOLD phase=%s action=%s now=%.3f %s'
+                          % (self.phase, d.action, now, d.reason), flush=True)
+                return self._result()
+            elif d.action != getattr(self, '_react_last_action', None):
+                self._react_last_action = d.action   # e.g. RUN resume / SLOW re-issue
         try:
             if sensors.valid_until_steady is not None:
                 require_fresh(sensors.valid_until_steady,self.steady_clock)
@@ -2795,7 +2876,8 @@ class TransferController:
                     extra['wrist_guard'] = pick_guard
                 self.motion.begin(target, s.joint_positions, straight_line=straight,
                                   joint_space=joint_space, wrist1_cap=carry_cap, wrist2_min=carry_w2min,
-                                  slow=place_move, goal_tol=(0.12 if place_move else None),
+                                  slow=(place_move or self._reactive_arm_slow),
+                                  goal_tol=(0.12 if place_move else None),
                                   near_start=place_move, **extra)
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': self.poses[self.phase]},))
@@ -2970,7 +3052,7 @@ class TransferController:
                 if self.phase in ('tuck', 'pan'):
                     return self._issue_level_carried_move(goal, s.joint_positions,
                                                           slow=True, goal_tol=None)
-                self.motion.begin_joint_goal(goal, s.joint_positions, slow=False)
+                self.motion.begin_joint_goal(goal, s.joint_positions, slow=self._reactive_arm_slow)
                 self.issued = True
                 return self._result(({'kind': 'move', 'pose': None, 'phase': self.phase},))
             try:
@@ -3156,7 +3238,8 @@ class TransferController:
             if not self.issued:
                 if s.valid_until_steady is not None:
                     require_fresh(s.valid_until_steady,self.steady_clock)
-                self.motion.begin_joint_goal(self.transport_joints,s.joint_positions)
+                self.motion.begin_joint_goal(self.transport_joints,s.joint_positions,
+                                             slow=self._reactive_arm_slow)
                 self.issued=True
                 return self._result()
             try:

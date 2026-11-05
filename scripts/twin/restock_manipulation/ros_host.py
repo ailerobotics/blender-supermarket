@@ -325,6 +325,14 @@ def main():
         # URDF is the arm the host already loaded (args.urdf).
         carton_level=carton_level.resolve_level_config(config.get('carton_level')),
         fk_urdf=args.urdf,
+        # sim-arm-reactive-replan-v1 (P1): opt-in human-aware RUN/SLOW/STOP/BACKSTOP authority over the
+        # free-space arm legs (ported humangate fed by the vendored scripts/twin/humans evaluator; the
+        # e-stop-free motion.cancel preempt + a reversible ArmCommandGate pause). Absent/False => the
+        # supervisor is never constructed => byte-identical. The detection provider + pause sink are wired
+        # Isaac-side at boot (controller.set_human_detection_provider / set_arm_pause_sink) when enabled.
+        reactive_arm_human=bool(config.get('reactive_arm_human', False)),
+        reactive_arm_config=(config.get('reactive_arm') if isinstance(config.get('reactive_arm'), dict)
+                             else None),
         steady_clock=lambda: node.get_clock().now().nanoseconds*1e-9)
     payload.controller = controller
     # Late-bind the live controller into the perceived-clearance gate's phase/held/carton reads.
