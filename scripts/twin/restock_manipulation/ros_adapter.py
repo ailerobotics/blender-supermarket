@@ -2449,7 +2449,7 @@ class RosTransferBridge:
       moving-arm protection is not weakened.
     """
     def __init__(self, node, controller, *, watchdog_seconds=1.0, startup_grace_seconds=5.0,
-                 wall_backstop_seconds=None):
+                 wall_backstop_seconds=None, suspend_place_descent_watchdog=False):
         # fm364/run-293: the host /sensors stream wall backstop is the THIRD wall gate the fm362 audit
         # missed (effective value is this ctor default, not the module constants it widened). run-293 did
         # the FULL collect manip incl retreat_tuck, then the held-sensing /sensors stream starved past the
@@ -2505,6 +2505,13 @@ class RosTransferBridge:
         self._transit_pause_start_wall = None
         self.first_frame = False
         self.job_start_wall = None
+        # sim-place-descent-watchdog-suspend-v1: opt-in (HOST key place_descent_sensor_watchdog_suspend).
+        # When on, the per-frame /sensors SIM bound is suspended ONLY while the controller is in the loaded
+        # place descent (in_loaded_place_descent); the WALL backstop stays armed throughout. Default off
+        # => byte-identical. _place_watchdog_suspended latches the window so SENSOR_WATCHDOG_SUSPENDED /
+        # _REARMED are each logged exactly once per entry/exit.
+        self.suspend_place_descent_watchdog = bool(suspend_place_descent_watchdog)
+        self._place_watchdog_suspended = False
         self.timer = node.create_timer(.1, self._watchdog,
                                       clock=Clock(clock_type=ClockType.STEADY_TIME))
 
@@ -2707,6 +2714,32 @@ class RosTransferBridge:
                     % (sim_gap, self.startup_grace_sim_seconds, wall_gap,
                        self.startup_grace_wall_backstop_s)))
             return
+        # sim-place-descent-watchdog-suspend-v1: PHASE-SCOPED suspension of the per-frame /sensors SIM
+        # bound during the loaded place descent (collect set-down / live_pose transfer place). The welded
+        # carton is lowered under the full-six-axis base lock while the station/source decode stream is
+        # render-paced, so the SIM clock advances many seconds between frames though the sim is healthy
+        # (coldwin64: HOST_FAULT_ESTOP phase=place 'sensor stream watchdog expired' at sim gap 30 s; the
+        # mission then cascaded into a parked-station heartbeat loss + a latched global stop). Opt-in
+        # (place_descent_sensor_watchdog_suspend); mirror of the transit sensing-pause but suspending ONLY
+        # the SIM bound: keep its anchor fresh so it cannot trip and so the resume sees no stale gap, and
+        # NEVER touch last_packet_wall -- the WALL backstop below still measures the true gap, so a
+        # genuinely frozen sim is still caught inside the window. Suspended on entry to the descent,
+        # re-armed the instant in_loaded_place_descent goes False (release / phase exit); never suspended
+        # outside the window. Off => byte-identical.
+        if self.suspend_place_descent_watchdog and self.controller.in_loaded_place_descent():
+            if not self._place_watchdog_suspended:
+                self._place_watchdog_suspended = True
+                print('SENSOR_WATCHDOG_SUSPENDED phase=%s reason=loaded_descent (per-frame /sensors sim '
+                      'bound suspended for the loaded place descent; %.0fs wall backstop still armed)'
+                      % (self.controller.phase, self.wall_backstop_seconds), flush=True)
+            # Keep ONLY the per-frame SIM anchor fresh (so the bound below cannot trip and the resume is
+            # clean); leave last_packet_wall untouched so the wall backstop keeps measuring the true gap.
+            if self.last_packet_sim is not None:
+                self.last_packet_sim = self.node.get_clock().now().nanoseconds * 1e-9
+        elif self._place_watchdog_suspended:
+            self._place_watchdog_suspended = False
+            print('SENSOR_WATCHDOG_REARMED phase=%s reason=place_descent_exit (per-frame /sensors sim '
+                  'bound re-armed)' % (self.controller.phase,), flush=True)
         # Per-frame bound in NODE-CLOCK (sim) time: on real hardware sim == wall so the 1 s
         # semantics are unchanged, and under a render-paced /clock it does not false-trip on the
         # 1.7-3.5 s wall gap between captures (the sim clock barely advances across a render tick).

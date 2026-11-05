@@ -685,6 +685,68 @@ class RuntimeTests(unittest.TestCase):
                 RuntimeAdapter(self.nav, self.mobile, self.manip, self.port, poses,
                                fixture_mode=True, collect_place_base_settle_m=bad)
 
+    # ---- sim-place-descent-watchdog-suspend-v1: PAUSE the parked collect station for the loaded place ----
+    def _collect_place_pause_adapter(self, *, collect_place_station_pause,
+                                     anchor=(-4.5, 15.25, 3.14159)):
+        """A collect adapter with a sensor-OWNING manip (so pause_station is observable), driven through the
+        fm390 reposition to execute(place). Returns (adapter, pauses): pauses records every pause_station as
+        (sim_time, suspend_only). The reposition drive-start always STOPs the station (suspend_only=False);
+        with the key on, entering the loaded place descent (phase=='place') PAUSEs it (suspend_only=True)."""
+        pauses = []
+        state = {'parked': True}
+        ticks = [0]
+        def advance(dt):
+            ticks[0] += 1
+            return replace(self.p, observation_id=f'frame-{ticks[0]}', simulation_time=ticks[0] * .1,
+                           parked=state['parked'], odometry=NS(pose=anchor))
+        nav = NS(start=lambda g, c, **k: None,
+                 step=lambda dt, p: NS(status='succeeded', linear=0., angular=0., reason=''),
+                 cancel=lambda: None)
+        port = NS(advance=advance, controls=lambda c: None, stop=lambda: None)
+
+        class Owned:                                    # sensor-owning: ManipulationBridge(owns_sensor_io)
+            cart_location = 'rollwagen'
+            def __init__(s): s.base_repositioned = False; s.steps = 0
+            def start(s, a, j): pass
+            def warm(s, t, parked=None): return True
+            def set_base_repositioned(s): s.base_repositioned = True
+            def pause_station(s, t, *, suspend_only=False): pauses.append((t, suspend_only))
+            def step(s, dt, t, parked=None):
+                s.steps += 1                            # HOLD in TRANSIT until repositioned, then place
+                return ManipResult('running', 'transit' if not s.base_repositioned else 'place')
+        bridge = ManipulationBridge(Owned(), owns_sensor_io=True)
+        poses = {k: [0, 0, 0] for k in ('home', 'pickup', 'cart_dock', 'shelf_approach')}
+        poses['place_approach'] = list(anchor)
+        adapter = RuntimeAdapter(nav, self.mobile, bridge, port, poses, fixture_mode=True,
+                                 collect_place_station_pause=collect_place_station_pause)
+        adapter.start('collect', self.job)
+        for _ in range(16):                             # navigate->warm->transit->reposition->rewarm->place
+            adapter._step(.1)
+            if adapter._collect_repositioned and adapter._last_manip_phase == 'place':
+                break
+        assert adapter._collect_repositioned and adapter._last_manip_phase == 'place'
+        return adapter, pauses
+
+    def test_collect_place_pauses_the_parked_station_once_when_enabled(self):
+        adapter, pauses = self._collect_place_pause_adapter(collect_place_station_pause=True)
+        # The reposition drive-start STOP (suspend_only=False) then the loaded-place PAUSE (suspend_only=True).
+        self.assertIn((adapter.time, True), pauses)
+        suspend_pauses = [p for p in pauses if p[1] is True]
+        self.assertEqual(len(suspend_pauses), 1)         # paused exactly once for the place window
+        self.assertTrue(adapter._collect_place_station_paused)
+        # One-shot: a further place tick does not pause again.
+        before = len(pauses)
+        adapter._step(.1)
+        self.assertEqual(len([p for p in pauses if p[1] is True]), 1)
+        self.assertGreaterEqual(len(pauses), before)
+
+    def test_collect_place_station_pause_off_never_suspend_pauses(self):
+        # Key off (default): the reposition STOP still fires, but the loaded place NEVER sends a
+        # suspend_only=True pause -> byte-identical station handling.
+        adapter, pauses = self._collect_place_pause_adapter(collect_place_station_pause=False)
+        self.assertEqual([p for p in pauses if p[1] is True], [])
+        self.assertFalse(adapter._collect_place_station_paused)
+
     # ---- sim-robust-place-descent-plan-v1: feed the tolerated verdict to the station parking gate ----
     # PR 211 relaxed the mission-level stationary guard (`not p.parked`) so the tolerated ~cm descent-
     # reaction shove no longer aborts 'base moved during stationary operation'. But the sensor-owning host

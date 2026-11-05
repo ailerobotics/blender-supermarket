@@ -380,7 +380,12 @@ def main():
     # via config; the runtime.py sim-clock stall guard (PR 86) still catches a job that genuinely
     # never produces a frame, so the generous wall grace cannot hide a real stall.
     bridge = RosTransferBridge(node,controller,
-        startup_grace_seconds=float(config.get('startup_grace_seconds', 5.0)))
+        startup_grace_seconds=float(config.get('startup_grace_seconds', 5.0)),
+        # sim-place-descent-watchdog-suspend-v1: suspend the per-frame /sensors SIM watchdog ONLY while the
+        # controller is in the loaded place descent (the station/source decode stream legitimately stalls
+        # under the full-six-axis base lock + deep render pacing -- coldwin64). The 180 s wall backstop
+        # stays armed throughout. Default off => byte-identical.
+        suspend_place_descent_watchdog=bool(config.get('place_descent_sensor_watchdog_suspend', False)))
     # sim-host-status-watchdog-v1: the payload ack waits (RosPayloadSync._wait) block the main host
     # executor, silencing the controller-driven /manipulation/status stream for the whole bounded wait
     # (the grasp/weld attach, the post-move_group-respawn carton reconcile, the release detach). Pulse a
