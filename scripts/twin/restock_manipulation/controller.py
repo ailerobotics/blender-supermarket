@@ -1788,12 +1788,13 @@ class TransferController:
                 if _verdict.trip is not None:
                     print(_verdict.trip, flush=True)
                     return self._fail(_verdict.trip)
-        # sim-preplace-per-joint-gains-v1: frozen-joint convergence guard. During preplace, watch the per-
-        # joint error to the issued standoff goal; if the worst joint's error stops shrinking for the sim-
-        # second stall window while still un-converged, NAME it (which joint, how far off) as
-        # PHASE_CONVERGENCE and fail fast -- instead of running the opaque 120 s phase timeout (coldwin53:
-        # shoulder_pan froze 0.56 rad short while wrist_2 swept). Inert when stall_s<=0 / no goal armed /
-        # the move is converging => byte-identical.
+        # sim-preplace-per-joint-gains-v1 (fixed sim-preplace-convergence-guard-fix-v1): frozen-joint
+        # convergence guard. During preplace, watch per-joint convergence of the issued standoff goal; if a
+        # DRIVEN joint (one that has moved from the armed start -- not an idle, not-yet-swept joint) stops
+        # converging (jams short or RETREATS) for the sim-second stall window while still un-converged, NAME
+        # it (joint + commanded/executed) as PHASE_CONVERGENCE and fail fast -- instead of running the opaque
+        # 120 s phase timeout (coldwin53: shoulder_pan was driven back 0.56 rad by the wrist_2 sweep). Inert
+        # when stall_s<=0 / no goal armed / the move is converging / a joint is idle => byte-identical.
         if (self.phase == 'preplace' and self._preplace_convergence.enabled
                 and len(sensors.joint_positions) == 6
                 and all(math.isfinite(x) for x in sensors.joint_positions)):
